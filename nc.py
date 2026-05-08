@@ -93,8 +93,17 @@ class NC(App):
         threading.Thread(target=fn, args=a, daemon=True).start()
 
     def _spawn(self, g, main=False):
-        ensure(g, main=main)
+        try:
+            ensure(g, main=main)
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or "").strip() or str(e)
+            self.call_from_thread(self.logw.write, f"[red]spawn {g} FAILED:[/] {err}")
+            return
+        except Exception as e:
+            self.call_from_thread(self.logw.write, f"[red]spawn {g} FAILED:[/] {e!r}")
+            return
         self._tail(g)
+        self.call_from_thread(self.logw.write, f"[green]{g} ready[/]")
         self.call_from_thread(self._status)
 
     def on_input_submitted(self, e: Input.Submitted):
