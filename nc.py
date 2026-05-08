@@ -37,6 +37,7 @@ def ensure(g, main=False):
             "--userns=keep-id",
             f"--network={NETWORK}",
             "-v",f"{v}:/workspace",
+            "-v",f"{HERE}/entrypoint.sh:/e.sh:ro",  # hot-reload entrypoint
             "-e","ANTHROPIC_API_KEY=proxied",
             "-e","HOME=/workspace",
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]

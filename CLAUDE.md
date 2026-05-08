@@ -191,6 +191,7 @@ The base64 + `\n` matches what `send()` writes. Faster, deterministic, and exerc
 ## Iterating
 
 - **Edits to `nc.py` / `proxy.py` are live in DooD mode.** `run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`), so changes are picked up on the next `make host-run` without rebuilding `clawson-host`. Only rebuild (`make host-build`) when changing `host.Dockerfile`, `Dockerfile`, or installed deps.
+- **Edits to `entrypoint.sh` are also live.** `nc.py` bind-mounts `entrypoint.sh` into each sidecar at `/e.sh:ro`. Edits are picked up on the next sidecar respawn (`/new <g>`, or `make clean && make host-run`). Image rebuild (`make build`) is only needed when changing `Dockerfile` itself or upgrading the `claude-code` npm package.
 - **Use `_bg(fn, *a)` for any subprocess-touching work in event handlers.** Anything that does `podman run`, opens a FIFO for write, or runs longer than ~50ms should not block the asyncio loop. Pattern: do the work in `_bg`, then `self.call_from_thread(self._status)` (or the relevant UI method) at the end to marshal back.
 - **For testing, prefer FIFO writes over the TUI.** The pty driver above is for verifying the TUI itself; for testing the proxy/sidecar/metrics path, write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic.
 - **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.
