@@ -1,11 +1,11 @@
-# nanoclaw
+# clawson
 
-Minimal isolated claude-code orchestrator. Container-per-group. TUI control plane in `nc_host`. Credential-injecting proxy. Per-group token metrics. ~300 SLOC across nc.py, proxy.py, two Dockerfiles, and an entrypoint shell loop.
+Minimal isolated claude-code orchestrator. Container-per-group. TUI control plane in `cs_host`. Credential-injecting proxy. Per-group token metrics. ~300 SLOC across nc.py, proxy.py, two Dockerfiles, and an entrypoint shell loop.
 
 ## What it does
 
 - Each "group" is a long-lived sidecar container running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the bind-mounted workspace.
-- `nc_host` runs the Textual TUI + a stdlib HTTP proxy that injects credentials and captures usage. Sidecars are siblings on `nc-net`, talk to the proxy via `http://nc_host:<port>` (one port per group, for attribution).
+- `cs_host` runs the Textual TUI + a stdlib HTTP proxy that injects credentials and captures usage. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
 - `main` group has `/peers` mounted RW (orchestrator pattern: can read+write any group's workspace). Other groups have no peers mount.
 
@@ -16,8 +16,8 @@ nc.py                TUI + sidecar lifecycle (textual)
 proxy.py             HTTP proxy, cred injection, metrics, multi-port watcher
 entrypoint.sh        sidecar FIFO read loop -> claude -p --continue
 Dockerfile           sidecar image (alpine + claude-code)
-host.Dockerfile      nc_host image (alpine + python+textual + podman + claude)
-run-host.sh          launch nc_host with socket + matching-path mounts
+host.Dockerfile      cs_host image (alpine + python+textual + podman + claude)
+run-host.sh          launch cs_host with socket + matching-path mounts
 Makefile             build / login / host-run / metrics / clean
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
@@ -29,9 +29,9 @@ proxy.log            proxy stdout when launched from TUI (gitignored)
 ## Build & run
 
 ```sh
-make host-build    # builds nanoclaw + nanoclaw-host images
+make host-build    # builds clawson + clawson-host images
 make login         # one-time OAuth into ./creds/.credentials.json
-make host-run      # launches nc_host container with the TUI
+make host-run      # launches cs_host container with the TUI
 
 # inside the TUI:
 #   any text   -> sends to current group
@@ -41,7 +41,7 @@ make host-run      # launches nc_host container with the TUI
 #   Ctrl+C     -> quit (kills proxy via atexit, stops sidecars via --rm)
 ```
 
-Bare-host mode (no `nc_host` containerization) needs `pip install --user textual` and:
+Bare-host mode (no `cs_host` containerization) needs `pip install --user textual` and:
 ```sh
 CRED_PATH=$(pwd)/creds/.credentials.json BIND=0.0.0.0 python3 nc.py
 ```
@@ -57,8 +57,8 @@ CRED_PATH=$(pwd)/creds/.credentials.json BIND=0.0.0.0 python3 nc.py
 - **Subprocess work runs in daemon threads, not on the event loop.** `ensure()` runs `podman run` (1-2s); `send()` blocks on `open(fifo, "w")` until the sidecar reader connects. Both block the asyncio loop if invoked from `on_mount` or an event handler. `_bg(fn, *a)` helper exists for this.
 - **`tail()` thread uses `app.call_from_thread(log.write, ...)`.** Direct `RichLog.write` from a non-main thread can deadlock against Textual's event loop lock. Also `bufsize=1` on `tail -F` so lines aren't held in Python pipe buffers.
 - **`Input` is explicitly focused in `on_mount`.** Textual auto-focuses the first focusable widget — that's `RichLog` (declared before `Input` in `compose()`), which silently consumes typed characters. Without the explicit focus call the TUI looks frozen.
-- **Matching-path bind mount in `run-host.sh`** (`-v "$HERE:$HERE"`). Sidecars are spawned by `nc_host` via the outer podman socket, but the outer daemon resolves `-v` paths against the *real host* filesystem. The project dir must be mounted at the same path inside `nc_host` so the strings nc.py constructs (`-v /home/<user>/git/metaopt/groups/main:/workspace`) resolve correctly.
-- **`creds/` is dedicated, not `~/.claude`.** Compromise of `nc_host` can only steal the nanoclaw token, not your personal claude session. Bind-mounted at `/root/.claude` inside `nc_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
+- **Matching-path bind mount in `run-host.sh`** (`-v "$HERE:$HERE"`). Sidecars are spawned by `cs_host` via the outer podman socket, but the outer daemon resolves `-v` paths against the *real host* filesystem. The project dir must be mounted at the same path inside `cs_host` so the strings nc.py constructs (`-v /home/<user>/git/metaopt/groups/main:/workspace`) resolve correctly.
+- **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the clawson token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
 - **`--security-opt label=disable` on every podman run.** Fedora SELinux policy denies container access to user-owned bind mounts unless this is set or `:Z` relabeling is used. We pick `label=disable` because the trust model already accepts that; `:Z` would relabel the user's home dir.
 
 ## Trust model
@@ -71,9 +71,9 @@ tier 1: HOST USER         you, run-host.sh, real podman daemon
    |
    | enforced by: dedicated creds dir, no ~/.claude mount
    v
-tier 2: nc_host           nc.py + proxy.py + claude-for-refresh
+tier 2: cs_host           nc.py + proxy.py + claude-for-refresh
                           (semi-trusted; vetted code + pinned deps)
-                          blast radius: nanoclaw OAuth token + workspaces
+                          blast radius: clawson OAuth token + workspaces
                           + 3 verbs of podman API (hardened by limited
                           mount allowlist, not by API restriction —
                           the socket is currently full DooD)
@@ -81,12 +81,12 @@ tier 2: nc_host           nc.py + proxy.py + claude-for-refresh
    | enforced by: workspace-only mounts, no creds in env, egress only
    |              via proxy DNS, sidecar -> sidecar networking unrestricted
    v
-tier 3: sidecars          nc_main, nc_<g>, ...
+tier 3: sidecars          cs_main, cs_<g>, ...
                           (untrusted; run claude on attacker-influenceable input)
                           have own /workspace + (main only) /peers RW
 ```
 
-The "we trust the host user" decision was deliberate. DooD socket equals host authority for `nc_host`; that's an accepted risk. If you ever want to drop tier 2 closer to tier 3, swap DooD for a 3-verb supervisor (sketch in earlier design discussion) or for rootless podman-in-podman.
+The "we trust the host user" decision was deliberate. DooD socket equals host authority for `cs_host`; that's an accepted risk. If you ever want to drop tier 2 closer to tier 3, swap DooD for a 3-verb supervisor (sketch in earlier design discussion) or for rootless podman-in-podman.
 
 ## TUI driver (for integration testing)
 
@@ -135,7 +135,7 @@ os.write(master, b"\r")            # Enter
 
 # Verify by reading the FIFO log file the sidecar wrote claude's output to
 wait_for(
-    lambda: "world" in (ROOT/"groups/main/.nc/log").read_text().lower(),
+    lambda: "world" in (ROOT/"groups/main/.cs/log").read_text().lower(),
     timeout=60, label="claude saw the message",
 )
 
@@ -168,7 +168,7 @@ Textual writes every received byte and resulting Key event to `./keys.log` (cwd 
 
 Once you've proven the TUI accepts input, future tests should mostly bypass it:
 ```sh
-{ printf 'msg' | base64 -w 0; printf '\n'; } > groups/main/.nc/in
+{ printf 'msg' | base64 -w 0; printf '\n'; } > groups/main/.cs/in
 ```
 The base64 + `\n` matches what `send()` writes. Faster, deterministic, and exercises the same downstream path. The TUI driver is for testing the *frontend* (focus, key handling, /commands); FIFO writes are for testing everything below.
 

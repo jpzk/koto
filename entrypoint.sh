@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-D=/workspace/.nc
+D=/workspace/.cs
 mkdir -p "$D"
 [ -p "$D/in" ] || mkfifo "$D/in"
 : > "$D/log"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nanoclaw proxy: injects host credentials, logs metrics, hides API key from containers."""
+"""clawson proxy: injects host credentials, logs metrics, hides API key from containers."""
 import http.server, urllib.request, urllib.error, json, os, pathlib, time, subprocess, threading
 
 HERE = pathlib.Path(__file__).parent
@@ -122,7 +122,7 @@ def _reload(bind):
 
 if __name__ == "__main__":
     bind = os.environ.get("BIND", "127.0.0.1")
-    print(f"nc-proxy bind={bind} -> {UPSTREAM}  metrics={METRICS}", flush=True)
+    print(f"clawson-proxy bind={bind} -> {UPSTREAM}  metrics={METRICS}", flush=True)
     last = 0
     while True:
         try:

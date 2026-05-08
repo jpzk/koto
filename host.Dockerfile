@@ -4,5 +4,5 @@ RUN apk add --no-cache podman nodejs npm \
  && pip install --no-cache-dir textual
 WORKDIR /app
 COPY nc.py proxy.py ./
-ENV BIND=0.0.0.0 NC_NETWORK=nc-net PROXY_HOST=nc_host
+ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host
 ENTRYPOINT ["python3","nc.py"]
