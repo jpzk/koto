@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """clawson TUI: thin client over the daemon's unix socket."""
 import json, os, pathlib, socket, subprocess, threading
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.widgets import Input, RichLog, Static
 
@@ -23,8 +24,13 @@ def tail(g, app, log):
     p.parent.mkdir(parents=True, exist_ok=True); p.touch()
     proc = subprocess.Popen(["tail","-F","-n","0",str(p)],
                             stdout=subprocess.PIPE, text=True, bufsize=1)
-    for line in proc.stdout:
-        app.call_from_thread(log.write, f"[{g}] {line.rstrip()}")
+    for raw in proc.stdout:
+        line = raw.rstrip("\n")
+        if line.startswith(">>> "):
+            text = f"\n[b cyan]>> {g}:[/] {escape(line[4:])}"
+        else:
+            text = escape(line)
+        app.call_from_thread(log.write, text)
 
 
 class TUI(App):
@@ -32,7 +38,7 @@ class TUI(App):
 
     def __init__(self):
         super().__init__()
-        self.cur = "main"; self.logw = RichLog(markup=True); self.tails = set()
+        self.cur = "main"; self.logw = RichLog(markup=True, wrap=True); self.tails = set()
 
     def compose(self) -> ComposeResult:
         yield Static("clawson", id="s"); yield self.logw
@@ -81,7 +87,6 @@ class TUI(App):
         elif v == "/ls":
             self._refresh()
         else:
-            self.logw.write(f"[dim]> {self.cur}: {v}[/]")
             self._bg(lambda g=self.cur, m=v: call("send", group=g, msg=m))
 
 
