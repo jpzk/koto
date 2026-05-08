@@ -38,6 +38,7 @@ def ensure(g, main=False):
             f"--network={NETWORK}",
             "-v",f"{v}:/workspace",
             "-v",f"{HERE}/entrypoint.sh:/e.sh:ro",
+            "-v",f"{HERE}/stream_filter.js:/stream_filter.js:ro",
             "-e","ANTHROPIC_API_KEY=proxied",
             "-e","HOME=/workspace",
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]
