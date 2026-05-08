@@ -1,6 +1,6 @@
 # clawson
 
-Minimal isolated claude-code orchestrator. Container-per-group. TUI control plane in `cs_host`. Credential-injecting proxy. Per-group token metrics. ~300 SLOC across nc.py, proxy.py, two Dockerfiles, and an entrypoint shell loop.
+Minimal isolated claude-code orchestrator. Container-per-group. TUI control plane in `cs_host`. Credential-injecting proxy. Per-group token metrics. ~325 SLOC across nc.py, proxy.py, two Dockerfiles, and an entrypoint shell loop.
 
 ## What it does
 
@@ -57,6 +57,7 @@ CRED_PATH=$(pwd)/creds/.credentials.json BIND=0.0.0.0 python3 nc.py
 - **Subprocess work runs in daemon threads, not on the event loop.** `ensure()` runs `podman run` (1-2s); `send()` blocks on `open(fifo, "w")` until the sidecar reader connects. Both block the asyncio loop if invoked from `on_mount` or an event handler. `_bg(fn, *a)` helper exists for this.
 - **`tail()` thread uses `app.call_from_thread(log.write, ...)`.** Direct `RichLog.write` from a non-main thread can deadlock against Textual's event loop lock. Also `bufsize=1` on `tail -F` so lines aren't held in Python pipe buffers.
 - **`Input` is explicitly focused in `on_mount`.** Textual auto-focuses the first focusable widget — that's `RichLog` (declared before `Input` in `compose()`), which silently consumes typed characters. Without the explicit focus call the TUI looks frozen.
+- **`_spawn()` reports outcome to the TUI.** Background-thread errors go to /dev/null by default, so `_spawn()` catches `CalledProcessError` and writes the stderr to `self.logw` in red. Successful spawn writes a green "[g] ready". Without these, "starting main..." would just sit there forever if podman fails.
 - **Matching-path bind mount in `run-host.sh`** (`-v "$HERE:$HERE"`). Sidecars are spawned by `cs_host` via the outer podman socket, but the outer daemon resolves `-v` paths against the *real host* filesystem. The project dir must be mounted at the same path inside `cs_host` so the strings nc.py constructs (`-v /home/<user>/git/metaopt/groups/main:/workspace`) resolve correctly.
 - **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the clawson token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
 - **`--security-opt label=disable` on every podman run.** Fedora SELinux policy denies container access to user-owned bind mounts unless this is set or `:Z` relabeling is used. We pick `label=disable` because the trust model already accepts that; `:Z` would relabel the user's home dir.
@@ -186,3 +187,10 @@ The base64 + `\n` matches what `send()` writes. Faster, deterministic, and exerc
 - For JS/TS work, use `bun`, not `npm`/`yarn`.
 - When adding a sidecar feature, audit its blast radius: can it read `/peers` (main only)? does it have outbound network beyond the proxy? does it run as root?
 - Stop containers with `make clean` between unrelated tests; ports persist in `groups.json` until you wipe it.
+
+## Iterating
+
+- **Edits to `nc.py` / `proxy.py` are live in DooD mode.** `run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`), so changes are picked up on the next `make host-run` without rebuilding `clawson-host`. Only rebuild (`make host-build`) when changing `host.Dockerfile`, `Dockerfile`, or installed deps.
+- **Use `_bg(fn, *a)` for any subprocess-touching work in event handlers.** Anything that does `podman run`, opens a FIFO for write, or runs longer than ~50ms should not block the asyncio loop. Pattern: do the work in `_bg`, then `self.call_from_thread(self._status)` (or the relevant UI method) at the end to marshal back.
+- **For testing, prefer FIFO writes over the TUI.** The pty driver above is for verifying the TUI itself; for testing the proxy/sidecar/metrics path, write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic.
+- **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.
