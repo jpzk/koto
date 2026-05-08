@@ -75,6 +75,7 @@ class NC(App):
         self._proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")],
                                        stdout=self._plog, stderr=subprocess.STDOUT)
         atexit.register(self._proxy.terminate)
+        self.query_one(Input).focus()  # ensure typed chars reach the input field
         self._status()
         self.logw.write("[dim]starting main...[/]")
         self._bg(self._spawn, "main", True)

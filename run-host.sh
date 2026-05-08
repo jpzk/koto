@@ -14,5 +14,6 @@ exec podman run --rm -it \
   -v "$HERE/creds:/root/.claude" \
   -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -e TERM="${TERM:-xterm-256color}" \
+  ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \
   -w "$HERE" \
   nanoclaw-host
