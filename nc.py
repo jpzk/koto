@@ -75,7 +75,9 @@ class NC(App):
         self._proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")],
                                        stdout=self._plog, stderr=subprocess.STDOUT)
         atexit.register(self._proxy.terminate)
-        ensure("main", main=True); self._tail("main"); self._status()
+        self._status()
+        self.logw.write("[dim]starting main...[/]")
+        self._bg(self._spawn, "main", True)
 
     def _status(self):
         groups = sorted(p.name for p in ROOT.iterdir() if p.is_dir())
@@ -90,8 +92,8 @@ class NC(App):
     def _bg(self, fn, *a):
         threading.Thread(target=fn, args=a, daemon=True).start()
 
-    def _spawn(self, g):
-        ensure(g)
+    def _spawn(self, g, main=False):
+        ensure(g, main=main)
         self._tail(g)
         self.call_from_thread(self._status)
 
