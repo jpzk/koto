@@ -50,11 +50,12 @@ def send(g, msg):
     with open(vol(g) / ".nc/in", "w") as f: f.write(b + "\n")
 
 
-def tail(g, log):
+def tail(g, app, log):
     p = vol(g) / ".nc/log"; p.parent.mkdir(parents=True, exist_ok=True); p.touch()
     proc = subprocess.Popen(["tail","-F","-n","0",str(p)],
-                            stdout=subprocess.PIPE, text=True)
-    for line in proc.stdout: log.write(f"[{g}] {line.rstrip()}")
+                            stdout=subprocess.PIPE, text=True, bufsize=1)
+    for line in proc.stdout:
+        app.call_from_thread(log.write, f"[{g}] {line.rstrip()}")
 
 
 class NC(App):
@@ -84,19 +85,28 @@ class NC(App):
     def _tail(self, g):
         if g in self.tails: return
         self.tails.add(g)
-        threading.Thread(target=tail, args=(g, self.logw), daemon=True).start()
+        threading.Thread(target=tail, args=(g, self, self.logw), daemon=True).start()
+
+    def _bg(self, fn, *a):
+        threading.Thread(target=fn, args=a, daemon=True).start()
+
+    def _spawn(self, g):
+        ensure(g)
+        self._tail(g)
+        self.call_from_thread(self._status)
 
     def on_input_submitted(self, e: Input.Submitted):
         v = e.value.strip(); e.input.value = ""
         if not v: return
         if v.startswith("/new "):
-            g = v.split(None, 1)[1]; ensure(g); self._tail(g); self._status()
+            self._bg(self._spawn, v.split(None, 1)[1])
         elif v.startswith("/sw "):
             self.cur = v.split(None, 1)[1]; self._status()
         elif v == "/ls":
             self._status()
         else:
-            send(self.cur, v); self.logw.write(f"[dim]> {self.cur}: {v}[/]")
+            self.logw.write(f"[dim]> {self.cur}: {v}[/]")
+            self._bg(send, self.cur, v)
 
 
 if __name__ == "__main__":
