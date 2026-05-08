@@ -1,29 +1,32 @@
 # clawson
 
-Minimal isolated claude-code orchestrator. Container-per-group. TUI control plane in `cs_host`. Credential-injecting proxy. Per-group token metrics. ~325 SLOC across nc.py, proxy.py, two Dockerfiles, and an entrypoint shell loop.
+Minimal isolated claude-code orchestrator. Container-per-group. **Daemon + TUI** split. Credential-injecting proxy. Per-group token metrics. ~370 SLOC.
 
 ## What it does
 
 - Each "group" is a long-lived sidecar container running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the bind-mounted workspace.
-- `cs_host` runs the Textual TUI + a stdlib HTTP proxy that injects credentials and captures usage. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
+- `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) and exposes a unix-socket API. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
+- **`tui.py` is a thin Textual client** that connects to the daemon socket. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. You can reattach anytime; multiple TUIs can connect concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
 - `main` group has `/peers` mounted RW (orchestrator pattern: can read+write any group's workspace). Other groups have no peers mount.
 
 ## Layout
 
 ```
-nc.py                TUI + sidecar lifecycle (textual)
+nc.py                daemon: orchestrator + proxy supervisor + unix socket API
+tui.py               thin Textual client (connects to socket, tails logs)
 proxy.py             HTTP proxy, cred injection, metrics, multi-port watcher
 entrypoint.sh        sidecar FIFO read loop -> claude -p --continue
 Dockerfile           sidecar image (alpine + claude-code)
 host.Dockerfile      cs_host image (alpine + python+textual + podman + claude)
-run-host.sh          launch cs_host with socket + matching-path mounts
-Makefile             build / login / host-run / metrics / clean
+run-host.sh          launch cs_host detached with socket + matching-path mounts
+Makefile             build / login / host-run / tui / stop / metrics / clean
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
+clawson.sock         daemon's unix socket — TUI/CLI talk to daemon over this (gitignored)
 metrics.jsonl        per-request metric line (gitignored)
-proxy.log            proxy stdout when launched from TUI (gitignored)
+proxy.log            proxy stdout when launched by daemon (gitignored)
 ```
 
 ## Build & run
@@ -31,20 +34,37 @@ proxy.log            proxy stdout when launched from TUI (gitignored)
 ```sh
 make host-build    # builds clawson + clawson-host images
 make login         # one-time OAuth into ./creds/.credentials.json
-make host-run      # launches cs_host container with the TUI
+make host-run      # starts cs_host detached (daemon + proxy + main group)
+make tui           # podman exec -it cs_host python3 tui.py — opens TUI
+                   # Ctrl+C exits TUI; daemon keeps running. Reattach with `make tui` again.
+make stop          # tear down cs_host + all sidecars
 
 # inside the TUI:
 #   any text   -> sends to current group
-#   /new <g>   -> spawn new group container
+#   /new <g>   -> spawn new group via daemon
 #   /sw  <g>   -> switch active group
-#   /ls        -> refresh status bar
-#   Ctrl+C     -> quit (kills proxy via atexit, stops sidecars via --rm)
+#   /ls        -> refresh status bar (re-reads daemon's list)
 ```
 
-Bare-host mode (no `cs_host` containerization) needs `pip install --user textual` and:
+**Bare-host mode** (no `cs_host` containerization) needs `pip install --user textual`:
 ```sh
+# terminal 1: daemon
 CRED_PATH=$(pwd)/creds/.credentials.json BIND=0.0.0.0 python3 nc.py
+# terminal 2: TUI
+python3 tui.py        # or: make tui-bare
 ```
+
+## Daemon protocol (line-delimited JSON over `clawson.sock`)
+
+```
+client -> daemon                              daemon -> client
+{"cmd":"spawn","group":"foo","main":false}   {"ok":true,"port":8788}
+{"cmd":"send","group":"foo","msg":"hi"}      {"ok":true}
+{"cmd":"list"}                                {"ok":true,"groups":{"foo":{"port":8788,"running":true}}}
+{"cmd":"stop","group":"foo"}                  {"ok":true}
+```
+
+Errors come back as `{"ok": false, "error": "..."}`. Each connection is one-shot: send a request, read one response, close. The TUI uses this; you can also drive the daemon from any other Python or `socat`/`nc` for ad-hoc testing.
 
 ## Non-obvious decisions (don't undo without reason)
 
@@ -190,7 +210,8 @@ The base64 + `\n` matches what `send()` writes. Faster, deterministic, and exerc
 
 ## Iterating
 
-- **Edits to `nc.py` / `proxy.py` are live in DooD mode.** `run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`), so changes are picked up on the next `make host-run` without rebuilding `clawson-host`. Only rebuild (`make host-build`) when changing `host.Dockerfile`, `Dockerfile`, or installed deps.
+- **Edits to `nc.py` / `tui.py` / `proxy.py` are live in DooD mode.** `run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`), so changes are picked up on the next `make host-run` (for daemon code) or `make tui` (for TUI code) without rebuilding `clawson-host`. Only rebuild (`make host-build`) when changing `host.Dockerfile`, `Dockerfile`, or installed deps.
+- **TUI iteration is now zero-disruption.** `tui.py` is just a client; quit and re-run `make tui` to pick up edits — the daemon, proxy, and all sidecars stay running. Compare to before the split, when restarting the TUI also restarted the proxy and lost any in-flight API streams.
 - **Edits to `entrypoint.sh` are also live.** `nc.py` bind-mounts `entrypoint.sh` into each sidecar at `/e.sh:ro`. Edits are picked up on the next sidecar respawn (`/new <g>`, or `make clean && make host-run`). Image rebuild (`make build`) is only needed when changing `Dockerfile` itself or upgrading the `claude-code` npm package.
 - **Use `_bg(fn, *a)` for any subprocess-touching work in event handlers.** Anything that does `podman run`, opens a FIFO for write, or runs longer than ~50ms should not block the asyncio loop. Pattern: do the work in `_bg`, then `self.call_from_thread(self._status)` (or the relevant UI method) at the end to marshal back.
 - **For testing, prefer FIFO writes over the TUI.** The pty driver above is for verifying the TUI itself; for testing the proxy/sidecar/metrics path, write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic.

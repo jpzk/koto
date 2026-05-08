@@ -3,5 +3,6 @@ groups/
 groups.json
 metrics.jsonl
 proxy.log
+clawson.sock
 __pycache__/
 *.pyc

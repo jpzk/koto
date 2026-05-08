@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""clawson: TUI control plane for isolated claude-code containers."""
-import atexit, base64, json, os, pathlib, subprocess, sys, threading
-from textual.app import App, ComposeResult
-from textual.widgets import Input, RichLog, Static
+"""clawson daemon: orchestrates sidecars + proxy, exposes unix socket API."""
+import atexit, base64, json, os, pathlib, signal, socket, subprocess, sys, threading
 
 HERE = pathlib.Path(__file__).parent.resolve()
 ROOT = HERE / "groups"
 GROUPS_FILE = HERE / "groups.json"
+SOCK_PATH = HERE / "clawson.sock"
 IMAGE = "clawson"
 PORT_BASE = int(os.environ.get("PROXY_PORT", "8787"))
-PROXY_HOST = os.environ.get("PROXY_HOST", "host.containers.internal")  # pasta default; "cs_host" inside DooD
+PROXY_HOST = os.environ.get("PROXY_HOST", "host.containers.internal")
 NETWORK = os.environ.get("NC_NETWORK", "pasta")
 
 
@@ -31,19 +30,21 @@ def ensure(g, main=False):
     port = alloc_port(g)
     name = f"cs_{g}"
     if subprocess.run(["podman","ps","-q","-f",f"name=^{name}$"],
-                      capture_output=True, text=True).stdout.strip(): return
+                      capture_output=True, text=True).stdout.strip():
+        return port
     args = ["podman","run","-d","--rm","--name",name,
             "--security-opt","label=disable",
             "--userns=keep-id",
             f"--network={NETWORK}",
             "-v",f"{v}:/workspace",
-            "-v",f"{HERE}/entrypoint.sh:/e.sh:ro",  # hot-reload entrypoint
+            "-v",f"{HERE}/entrypoint.sh:/e.sh:ro",
             "-e","ANTHROPIC_API_KEY=proxied",
             "-e","HOME=/workspace",
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]
     if main: args += ["-v", f"{ROOT}:/peers"]
     args.append(IMAGE)
     subprocess.run(args, check=True, capture_output=True, text=True)
+    return port
 
 
 def send(g, msg):
@@ -51,76 +52,61 @@ def send(g, msg):
     with open(vol(g) / ".cs/in", "w") as f: f.write(b + "\n")
 
 
-def tail(g, app, log):
-    p = vol(g) / ".cs/log"; p.parent.mkdir(parents=True, exist_ok=True); p.touch()
-    proc = subprocess.Popen(["tail","-F","-n","0",str(p)],
-                            stdout=subprocess.PIPE, text=True, bufsize=1)
-    for line in proc.stdout:
-        app.call_from_thread(log.write, f"[{g}] {line.rstrip()}")
+def list_groups():
+    out = {}
+    if GROUPS_FILE.exists():
+        for g, port in json.loads(GROUPS_FILE.read_text()).items():
+            r = subprocess.run(["podman","ps","-q","-f",f"name=^cs_{g}$"],
+                               capture_output=True, text=True)
+            out[g] = {"port": port, "running": bool(r.stdout.strip())}
+    return out
 
 
-class NC(App):
-    CSS = "Input{dock:bottom}RichLog{height:1fr}#s{height:1;background:$accent}"
+def stop(g):
+    subprocess.run(["podman","rm","-f",f"cs_{g}"], capture_output=True)
 
-    def __init__(self):
-        super().__init__()
-        self.cur = "main"; self.logw = RichLog(markup=True); self.tails = set()
 
-    def compose(self) -> ComposeResult:
-        yield Static("clawson", id="s"); yield self.logw
-        yield Input(placeholder="msg | /new <g> | /sw <g> | /ls")
+def _spawn(req): return {"ok": True, "port": ensure(req["group"], req.get("main", False))}
+def _send(req):  send(req["group"], req["msg"]); return {"ok": True}
+def _list(req):  return {"ok": True, "groups": list_groups()}
+def _stop(req):  stop(req["group"]); return {"ok": True}
 
-    def on_mount(self):
-        alloc_port("main")  # ensure groups.json exists before proxy starts
-        self._plog = open(HERE / "proxy.log", "ab", buffering=0)
-        self._proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")],
-                                       stdout=self._plog, stderr=subprocess.STDOUT)
-        atexit.register(self._proxy.terminate)
-        self.query_one(Input).focus()  # ensure typed chars reach the input field
-        self._status()
-        self.logw.write("[dim]starting main...[/]")
-        self._bg(self._spawn, "main", True)
+HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop}
 
-    def _status(self):
-        groups = sorted(p.name for p in ROOT.iterdir() if p.is_dir())
-        self.query_one("#s", Static).update(
-            f"[b]clawson[/]  cur=[cyan]{self.cur}[/]  groups={groups}")
 
-    def _tail(self, g):
-        if g in self.tails: return
-        self.tails.add(g)
-        threading.Thread(target=tail, args=(g, self, self.logw), daemon=True).start()
+def serve(client):
+    with client, client.makefile("rwb") as f:
+        for line in f:
+            try:
+                req = json.loads(line)
+                resp = HANDLERS[req["cmd"]](req)
+            except KeyError as e:
+                resp = {"ok": False, "error": f"bad cmd: {e}"}
+            except Exception as e:
+                resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            f.write((json.dumps(resp) + "\n").encode()); f.flush()
 
-    def _bg(self, fn, *a):
-        threading.Thread(target=fn, args=a, daemon=True).start()
 
-    def _spawn(self, g, main=False):
-        try:
-            ensure(g, main=main)
-        except subprocess.CalledProcessError as e:
-            err = (e.stderr or "").strip() or str(e)
-            self.call_from_thread(self.logw.write, f"[red]spawn {g} FAILED:[/] {err}")
-            return
-        except Exception as e:
-            self.call_from_thread(self.logw.write, f"[red]spawn {g} FAILED:[/] {e!r}")
-            return
-        self._tail(g)
-        self.call_from_thread(self.logw.write, f"[green]{g} ready[/]")
-        self.call_from_thread(self._status)
+def main():
+    ROOT.mkdir(parents=True, exist_ok=True)
+    alloc_port("main")
+    plog = open(HERE / "proxy.log", "ab", buffering=0)
+    proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")],
+                             stdout=plog, stderr=subprocess.STDOUT)
+    atexit.register(proxy.terminate)
+    ensure("main", main=True)
 
-    def on_input_submitted(self, e: Input.Submitted):
-        v = e.value.strip(); e.input.value = ""
-        if not v: return
-        if v.startswith("/new "):
-            self._bg(self._spawn, v.split(None, 1)[1])
-        elif v.startswith("/sw "):
-            self.cur = v.split(None, 1)[1]; self._status()
-        elif v == "/ls":
-            self._status()
-        else:
-            self.logw.write(f"[dim]> {self.cur}: {v}[/]")
-            self._bg(send, self.cur, v)
+    if SOCK_PATH.exists(): SOCK_PATH.unlink()
+    s = socket.socket(socket.AF_UNIX); s.bind(str(SOCK_PATH)); s.listen(8)
+    os.chmod(SOCK_PATH, 0o660)
+    print(f"clawsond ready  socket={SOCK_PATH}", flush=True)
+
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    while True:
+        try: c, _ = s.accept()
+        except (KeyboardInterrupt, OSError): break
+        threading.Thread(target=serve, args=(c,), daemon=True).start()
 
 
 if __name__ == "__main__":
-    NC().run()
+    main()
