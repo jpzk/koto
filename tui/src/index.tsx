@@ -1,11 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { render, Box, Text } from 'ink';
+import { render, Box, Text, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import * as net from 'node:net';
 
 const SOCK = process.env.SOCK_PATH || '/sock';
-const MAX_LINES = 200;
-const VISIBLE = 40;
+const MAX_LINES = 500;
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 type Groups = Record<string, { port: number; running: boolean }>;
 type LogLine = { kind: 'prompt' | 'response' | 'sys' | 'err'; group: string; text: string };
@@ -52,12 +52,26 @@ function subscribe(group: string, onEvent: (e: Event) => void, onErr: (msg: stri
 }
 
 const App = () => {
+  const { stdout } = useStdout();
+  const [size, setSize] = useState({ rows: stdout.rows, cols: stdout.columns });
   const [groups, setGroups] = useState<Groups>({});
   const [cur, setCur] = useState('main');
   const [lines, setLines] = useState<LogLine[]>([]);
   const [streamBuf, setStreamBuf] = useState<Record<string, string>>({});
   const [input, setInput] = useState('');
+  const [tick, setTick] = useState(0);
   const subsRef = useRef<Map<string, net.Socket>>(new Map());
+
+  useEffect(() => {
+    const onResize = () => setSize({ rows: stdout.rows, cols: stdout.columns });
+    stdout.on('resize', onResize);
+    return () => { stdout.off('resize', onResize); };
+  }, [stdout]);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 80);
+    return () => clearInterval(id);
+  }, []);
 
   const addLine = (l: LogLine) => setLines(ls => {
     const next = ls.concat(l);
@@ -112,7 +126,7 @@ const App = () => {
       const g = t.slice(5).trim();
       try {
         const r = await call('spawn', { group: g });
-        if (r.ok) addLine({ kind: 'sys', group: '', text: `${g} ready` });
+        if (r.ok) addLine({ kind: 'sys', group: '', text: `spawned ${g}` });
         else addLine({ kind: 'err', group: '', text: `spawn ${g}: ${r.error}` });
       } catch (e: any) {
         addLine({ kind: 'err', group: '', text: `spawn ${g}: ${e.message || e}` });
@@ -132,33 +146,67 @@ const App = () => {
     }
   };
 
-  const visible = lines.filter(l => !l.group || l.group === cur).slice(-VISIBLE);
+  // chrome: header (1) + bordered input (3) + hint (1) = 5 rows
+  const logRows = Math.max(1, size.rows - 5);
+  const all = lines.filter(l => !l.group || l.group === cur);
   const streaming = streamBuf[cur];
+  const reserveStream = streaming ? 1 : 0;
+  const visible = all.slice(-(logRows - reserveStream));
+  const spin = SPINNER[tick % SPINNER.length];
+  const groupNames = Object.keys(groups).sort();
 
   return (
-    <Box flexDirection="column">
-      <Box>
-        <Text backgroundColor="blue" bold> clawson </Text>
-        <Text>  cur=</Text><Text color="cyan">{cur}</Text>
-        <Text>  groups=[{Object.keys(groups).sort().join(', ')}]</Text>
+    <Box flexDirection="column" height={size.rows} width={size.cols}>
+      {/* header */}
+      <Box flexShrink={0} paddingX={1}>
+        <Text dimColor>clawson</Text>
+        <Text dimColor>  ·  </Text>
+        <Text color="cyan">{cur}</Text>
+        <Text dimColor>  ·  </Text>
+        <Text dimColor>{groupNames.map(g => g === cur ? `[${g}]` : g).join(' ')}</Text>
       </Box>
-      <Box flexDirection="column" marginTop={1}>
+
+      {/* log */}
+      <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
         {visible.map((l, i) => {
-          const color = l.kind === 'prompt' ? 'cyan'
-            : l.kind === 'err' ? 'red'
-            : l.kind === 'sys' ? 'green' : undefined;
-          return (
-            <Text key={i} color={color} bold={l.kind === 'prompt'}>
-              {l.kind === 'prompt' ? `>> ${l.group}: ` : ''}{l.text}
-            </Text>
-          );
+          const idx = all.length - visible.length + i;
+          if (l.kind === 'prompt') {
+            return (
+              <Box key={idx}>
+                <Text color="cyan" bold>›  </Text>
+                <Text>{l.text}</Text>
+              </Box>
+            );
+          }
+          if (l.kind === 'err') {
+            return <Text key={idx} color="red">  {l.text}</Text>;
+          }
+          if (l.kind === 'sys') {
+            return <Text key={idx} dimColor>  {l.text}</Text>;
+          }
+          return <Text key={idx}>  {l.text}</Text>;
         })}
-        {streaming ? <Text dimColor>{streaming}</Text> : null}
+        {streaming ? (
+          <Box>
+            <Text color="yellow">{spin}  </Text>
+            <Text>{streaming}</Text>
+          </Box>
+        ) : null}
       </Box>
-      <Box marginTop={1}>
-        <Text>› </Text>
+
+      {/* bordered input */}
+      <Box flexShrink={0} borderStyle="round" borderColor="gray">
+        <Box marginX={1}>
+          <Text color="cyan" bold>›</Text>
+        </Box>
         <TextInput value={input} onChange={setInput} onSubmit={onSubmit}
-          placeholder="msg | /new <g> | /sw <g> | /ls" />
+          placeholder="ask anything   (/new <g>  /sw <g>  /ls)" />
+      </Box>
+
+      {/* hint */}
+      <Box flexShrink={0} paddingX={2}>
+        <Text dimColor>{streaming ? 'streaming…' : 'enter to send'}</Text>
+        <Text dimColor>   ·   ctrl+c to exit</Text>
       </Box>
     </Box>
   );
