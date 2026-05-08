@@ -6,3 +6,4 @@ proxy.log
 clawson.sock
 __pycache__/
 *.pyc
+tui/node_modules/

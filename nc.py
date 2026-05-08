@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """clawson daemon: orchestrates sidecars + proxy, exposes unix socket API."""
-import atexit, base64, json, os, pathlib, signal, socket, subprocess, sys, threading
+import atexit, base64, json, os, pathlib, signal, socket, subprocess, sys, threading, time
 
 HERE = pathlib.Path(__file__).parent.resolve()
 ROOT = HERE / "groups"
@@ -67,6 +67,65 @@ def stop(g):
     subprocess.run(["podman","rm","-f",f"cs_{g}"], capture_output=True)
 
 
+# ---- streaming: tail group log files, fan out to subscribers --------------
+SUBS_LOCK = threading.Lock()
+SUBS = {}        # group -> set of file objects (writers) listening for events
+TAILS = set()    # groups whose tail thread is already running
+
+
+def _emit(g, event, **kw):
+    line = (json.dumps({"event": event, "group": g, **kw}) + "\n").encode()
+    with SUBS_LOCK: subs = list(SUBS.get(g, ()))
+    dead = []
+    for f in subs:
+        try: f.write(line); f.flush()
+        except Exception: dead.append(f)
+    if dead:
+        with SUBS_LOCK:
+            s = SUBS.get(g)
+            if s:
+                for f in dead: s.discard(f)
+        for f in dead:
+            try: f.close()
+            except Exception: pass
+
+
+def _tail_log(g):
+    p = vol(g) / ".cs/log"
+    p.parent.mkdir(parents=True, exist_ok=True); p.touch()
+    f = open(p, "r", encoding="utf-8", errors="replace"); f.seek(0, 2)
+    inode = p.stat().st_ino
+    buf = ""
+    while True:
+        try:
+            cur = p.stat().st_ino
+            if cur != inode:
+                f.close(); f = open(p, "r", encoding="utf-8", errors="replace")
+                inode = cur; buf = ""
+        except OSError:
+            time.sleep(0.1); continue
+        chunk = f.read()
+        if not chunk: time.sleep(0.05); continue
+        i = 0
+        while i < len(chunk):
+            j = chunk.find("\n", i)
+            if j == -1:
+                buf += chunk[i:]; break
+            buf += chunk[i:j]
+            if buf.startswith(">>> "): _emit(g, "prompt", msg=buf[4:])
+            else:                       _emit(g, "done", text=buf)
+            buf = ""; i = j + 1
+        if buf and not buf.startswith(">"):
+            _emit(g, "stream", text=buf)
+
+
+def _ensure_tail(g):
+    with SUBS_LOCK:
+        if g in TAILS: return
+        TAILS.add(g)
+    threading.Thread(target=_tail_log, args=(g,), daemon=True).start()
+
+
 def _spawn(req): return {"ok": True, "port": ensure(req["group"], req.get("main", False))}
 def _send(req):  send(req["group"], req["msg"]); return {"ok": True}
 def _list(req):  return {"ok": True, "groups": list_groups()}
@@ -76,16 +135,30 @@ HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop}
 
 
 def serve(client):
-    with client, client.makefile("rwb") as f:
+    f = client.makefile("rwb")
+    subscribed = False
+    try:
         for line in f:
             try:
                 req = json.loads(line)
-                resp = HANDLERS[req["cmd"]](req)
+                cmd = req["cmd"]
+                if cmd == "subscribe":
+                    g = req["group"]
+                    _ensure_tail(g)
+                    with SUBS_LOCK: SUBS.setdefault(g, set()).add(f)
+                    f.write((json.dumps({"ok": True, "subscribed": g}) + "\n").encode()); f.flush()
+                    subscribed = True
+                    return
+                resp = HANDLERS[cmd](req)
             except KeyError as e:
                 resp = {"ok": False, "error": f"bad cmd: {e}"}
             except Exception as e:
                 resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             f.write((json.dumps(resp) + "\n").encode()); f.flush()
+    finally:
+        if not subscribed:
+            try: client.close()
+            except Exception: pass
 
 
 def main():

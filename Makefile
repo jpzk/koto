@@ -1,24 +1,27 @@
-.PHONY: build host-build login host-run tui stop run tui-bare proxy metrics clean clean-creds
+.PHONY: build host-build tui-build login host-run tui stop run proxy metrics clean clean-creds
 build:
 	podman build -t clawson .
 host-build: build
 	podman build -t clawson-host -f host.Dockerfile .
+tui-build:
+	podman build -t clawson-tui -f tui.Dockerfile .
 login: host-build
 	@mkdir -p creds
 	podman run --rm -it --security-opt label=disable -v $(PWD)/creds:/root/.claude --entrypoint claude clawson-host auth login
 host-run: host-build
 	./run-host.sh
-tui:
-	podman exec -it cs_host python3 tui_watch.py
-tui-noreload:
-	podman exec -it cs_host python3 tui.py
+tui: tui-build
+	@test -S $(PWD)/clawson.sock || { echo "no clawson.sock — run \`make host-run\` first"; exit 1; }
+	podman run --rm -it \
+	  --network=none \
+	  --security-opt label=disable \
+	  -v $(PWD)/clawson.sock:/sock \
+	  clawson-tui
 stop:
 	-podman rm -f cs_host
 	podman ps -aq -f name=cs_ | xargs -r podman rm -f
 run:
 	python3 nc.py
-tui-bare:
-	python3 tui_watch.py
 proxy:
 	python3 proxy.py
 metrics:
