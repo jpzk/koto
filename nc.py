@@ -62,10 +62,10 @@ class NC(App):
 
     def __init__(self):
         super().__init__()
-        self.cur = "main"; self.log = RichLog(markup=True); self.tails = set()
+        self.cur = "main"; self.logw = RichLog(markup=True); self.tails = set()
 
     def compose(self) -> ComposeResult:
-        yield Static("nanoclaw", id="s"); yield self.log
+        yield Static("nanoclaw", id="s"); yield self.logw
         yield Input(placeholder="msg | /new <g> | /sw <g> | /ls")
 
     def on_mount(self):
@@ -82,7 +82,7 @@ class NC(App):
     def _tail(self, g):
         if g in self.tails: return
         self.tails.add(g)
-        threading.Thread(target=tail, args=(g, self.log), daemon=True).start()
+        threading.Thread(target=tail, args=(g, self.logw), daemon=True).start()
 
     def on_input_submitted(self, e: Input.Submitted):
         v = e.value.strip(); e.input.value = ""
@@ -94,7 +94,7 @@ class NC(App):
         elif v == "/ls":
             self._status()
         else:
-            send(self.cur, v); self.log.write(f"[dim]> {self.cur}: {v}[/]")
+            send(self.cur, v); self.logw.write(f"[dim]> {self.cur}: {v}[/]")
 
 
 if __name__ == "__main__":

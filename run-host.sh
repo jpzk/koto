@@ -10,7 +10,7 @@ exec podman run --rm -it \
   --name nc_host --network nc-net \
   --security-opt label=disable \
   -v "$SOCK:/run/podman/podman.sock" \
-  -v "$HERE/groups:$HERE/groups" \
+  -v "$HERE:$HERE" \
   -v "$HERE/creds:/root/.claude" \
   -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -e TERM="${TERM:-xterm-256color}" \
