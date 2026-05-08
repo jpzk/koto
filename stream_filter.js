@@ -1,19 +1,20 @@
 #!/usr/bin/env node
-// Filter claude's --output-format stream-json: emit each text_delta as a line.
-// Ignores housekeeping events (system/init, message_start, etc).
-// Result: incremental text chunks in stdout, one chunk per line, picked up
-// by the tail -F that the TUI's tail thread runs.
+// Filter claude's --output-format stream-json into raw streaming text.
+// Each text_delta is written verbatim to stdout the moment it arrives.
+// One trailing newline at message_stop so the TUI can distinguish turns.
+// fs.writeSync(1, ...) bypasses Node's stdout buffering; without it,
+// small writes coalesce and streaming visibility disappears.
+const fs = require('fs');
 const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   let ev;
   try { ev = JSON.parse(line); } catch { return; }
-  if (ev.type === 'stream_event' && ev.event && ev.event.type === 'content_block_delta') {
-    const d = ev.event.delta;
-    if (d && d.type === 'text_delta' && d.text) {
-      process.stdout.write(d.text + '\n');
-    }
-  } else if (ev.type === 'result' && ev.subtype && ev.subtype !== 'success') {
-    process.stderr.write(`[stream error: ${ev.subtype}] ${ev.error || ''}\n`);
+  if (ev.type !== 'stream_event' || !ev.event) return;
+  const e = ev.event;
+  if (e.type === 'content_block_delta' && e.delta && e.delta.type === 'text_delta' && e.delta.text) {
+    fs.writeSync(1, e.delta.text);
+  } else if (e.type === 'message_stop') {
+    fs.writeSync(1, '\n');
   }
 });
