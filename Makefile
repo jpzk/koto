@@ -9,6 +9,8 @@ login: host-build
 host-run: host-build
 	./run-host.sh
 tui:
+	podman exec -it cs_host python3 tui_watch.py
+tui-noreload:
 	podman exec -it cs_host python3 tui.py
 stop:
 	-podman rm -f cs_host
@@ -16,7 +18,7 @@ stop:
 run:
 	python3 nc.py
 tui-bare:
-	python3 tui.py
+	python3 tui_watch.py
 proxy:
 	python3 proxy.py
 metrics:
