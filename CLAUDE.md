@@ -113,7 +113,7 @@ The "we trust the host user" decision was deliberate. DooD socket equals host au
 
 ```
 tier 2.5: cs_tui          ink/react TUI on bun
-                          --network=none, no fs mounts except clawson.sock
+                          --network=none, fs: clawson.sock + tui/src:ro
                           can: send commands the daemon accepts, read stream events
                           cannot: reach proxy, sidecars, API, or read group workspaces
 ```
@@ -154,7 +154,7 @@ socat - UNIX-CONNECT:clawson.sock  # then type {"cmd":"list"}\n
 ## Iterating
 
 - **Edits to `nc.py` / `proxy.py` are live.** `run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`), so changes are picked up on the next `make host-run` without rebuilding `clawson-host`. Only rebuild (`make host-build`) when changing `host.Dockerfile`, `Dockerfile`, or installed deps.
-- **Edits to `tui/src/*` require an image rebuild.** `cs_tui` does not bind-mount the project dir (by design — `--network=none` + sock-only). Run `make tui` (which depends on `tui-build`) to rebuild and re-attach. Cycle is ~5–10s once deps are cached. If iterating heavily, run `bun run src/index.tsx` on the host with `SOCK_PATH=$(pwd)/clawson.sock` — same code path, no container.
+- **Edits to `tui/src/*` hot-reload inside `cs_tui`.** `make tui` bind-mounts `tui/src` read-only into `/app/src` and runs `bun --hot run src/index.tsx`; saving a `.tsx` file re-evaluates the module without restarting the container or dropping subscribe connections. The image still bakes a snapshot of `src/` for the case where the bind mount is absent. Trade-off: `cs_tui` now has one more bind mount than the strict "sock-only" design — still no network, no creds, no workspace access.
 - **Edits to `entrypoint.sh` are also live.** `nc.py` bind-mounts `entrypoint.sh` into each sidecar at `/e.sh:ro`. Edits are picked up on the next sidecar respawn (`/new <g>`, or `make clean && make host-run`). Image rebuild (`make build`) is only needed when changing `Dockerfile` itself or upgrading the `claude-code` npm package.
 - **For testing, prefer FIFO writes over the TUI.** Write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic, no UI in the way.
 - **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.

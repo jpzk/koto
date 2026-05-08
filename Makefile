@@ -16,6 +16,7 @@ tui: tui-build
 	  --network=none \
 	  --security-opt label=disable \
 	  -v $(PWD)/clawson.sock:/sock \
+	  -v $(PWD)/tui/src:/app/src:ro \
 	  clawson-tui
 stop:
 	-podman rm -f cs_host

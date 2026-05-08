@@ -8,4 +8,4 @@ COPY tui/bun.lock* ./
 RUN bun install --no-progress
 COPY tui/src ./src
 ENV SOCK_PATH=/sock
-ENTRYPOINT ["bun","run","src/index.tsx"]
+ENTRYPOINT ["bun","--hot","run","src/index.tsx"]
