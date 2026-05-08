@@ -42,7 +42,7 @@ def ensure(g, main=False):
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]
     if main: args += ["-v", f"{ROOT}:/peers"]
     args.append(IMAGE)
-    subprocess.run(args, check=True)
+    subprocess.run(args, check=True, capture_output=True, text=True)
 
 
 def send(g, msg):
@@ -70,7 +70,9 @@ class NC(App):
 
     def on_mount(self):
         alloc_port("main")  # ensure groups.json exists before proxy starts
-        self._proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")])
+        self._plog = open(HERE / "proxy.log", "ab", buffering=0)
+        self._proxy = subprocess.Popen([sys.executable, str(HERE / "proxy.py")],
+                                       stdout=self._plog, stderr=subprocess.STDOUT)
         atexit.register(self._proxy.terminate)
         ensure("main", main=True); self._tail("main"); self._status()
 
