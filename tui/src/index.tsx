@@ -9,6 +9,7 @@ import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight } from 'cli-highlight';
 import * as net from 'node:net';
+import { PLUGINS, PLUGIN_BY_NAME, type Plugin, type PluginCtx, type Event as PluginEvent } from './plugins';
 
 // `\`\`\`ansi`-fenced blocks: claude can emit them when it wants to write raw
 // ANSI escape codes that should pass through verbatim (e.g. colored diff
@@ -53,11 +54,31 @@ process.on('SIGTERM', () => process.exit(143));
 
 const SOCK = process.env.SOCK_PATH || '/sock';
 const MAX_LINES = 500;
+// Approximate model context window for the ctx% display. Most current
+// Claude models are 200k; Opus 4.7 in 1M-context mode would render at ~5x
+// less than its real headroom — acceptable as a default. Override with
+// CTX_WINDOW env var if your group runs a wider-context model.
+const CTX_WINDOW = parseInt(process.env.CTX_WINDOW || '200000', 10);
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 type Groups = Record<string, { port: number; running: boolean }>;
 type LogLine = { kind: 'prompt' | 'response' | 'sys' | 'err'; group: string; text: string; ts?: number };
 type Event = { event: 'prompt' | 'stream' | 'done'; group: string; msg?: string; text?: string; ts?: number; historical?: boolean };
+
+function humanTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+// Pick a foreground color for a 0..1 utilization value. Below 50% is calm
+// cyan, 50-80% is yellow (caution), >=80% is red (danger). Used for both
+// 5h and 7d budget segments and for context-size warning.
+function pctColor(frac: number): 'cyan' | 'yellow' | 'red' {
+  if (frac >= 0.80) return 'red';
+  if (frac >= 0.50) return 'yellow';
+  return 'cyan';
+}
 
 function fmtTime(ts: number | undefined): string {
   if (!ts) return '';
@@ -108,6 +129,81 @@ function subscribe(group: string, onEvent: (e: Event) => void, onErr: (msg: stri
   return c;
 }
 
+// Plugin runtime: builds an event queue + AbortController + the helper
+// closures listed in PluginCtx, then awaits plugin.run(ctx). Returns a
+// handle the App stores in activePluginRef so onEvent can push events
+// into the queue and Ctrl+C can abort.
+type PluginHandle = {
+  name: string;
+  abort: AbortController;
+  push: (ev: PluginEvent) => void;
+  done: Promise<void>;
+};
+
+function runPlugin(
+  plugin: Plugin,
+  args: string,
+  group: string,
+  helpers: {
+    log: (text: string, kind?: 'sys' | 'err', g?: string) => void;
+    callDaemon: (cmd: string, extra?: Record<string, unknown>) => Promise<any>;
+  },
+): PluginHandle {
+  const abort = new AbortController();
+  const buf: PluginEvent[] = [];
+  let waiter: ((ev: PluginEvent | null) => void) | null = null;
+
+  const push = (ev: PluginEvent) => {
+    if (ev.group !== group) return;
+    if (waiter) { const w = waiter; waiter = null; w(ev); }
+    else buf.push(ev);
+  };
+
+  const nextEvent = (timeoutMs: number): Promise<PluginEvent | null> =>
+    new Promise(resolve => {
+      if (abort.signal.aborted) return resolve(null);
+      if (buf.length > 0) return resolve(buf.shift()!);
+      let settled = false;
+      const finish = (v: PluginEvent | null) => { if (settled) return; settled = true; clearTimeout(t); abort.signal.removeEventListener('abort', onAbort); resolve(v); };
+      const onAbort = () => finish(null);
+      const t = setTimeout(() => finish(null), timeoutMs);
+      abort.signal.addEventListener('abort', onAbort);
+      waiter = (ev) => finish(ev);
+    });
+
+  const sleep = (ms: number): Promise<void> =>
+    new Promise(resolve => {
+      if (abort.signal.aborted) return resolve();
+      const t = setTimeout(() => { abort.signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+      const onAbort = () => { clearTimeout(t); resolve(); };
+      abort.signal.addEventListener('abort', onAbort);
+    });
+
+  const ctx: PluginCtx = {
+    group,
+    args,
+    signal: abort.signal,
+    call: helpers.callDaemon,
+    send: async (msg: string) => { await helpers.callDaemon('send', { group, msg }); },
+    metrics: async () => {
+      const r = await helpers.callDaemon('metrics', { group });
+      return r?.metric ?? null;
+    },
+    log: (text: string, kind: 'sys' | 'err' = 'sys') => helpers.log(text, kind, group),
+    nextEvent,
+    sleep,
+  };
+
+  const done = (async () => {
+    try { await plugin.run(ctx); }
+    catch (e: any) {
+      if (!abort.signal.aborted) helpers.log(`plugin /${plugin.name} crashed: ${e?.message || e}`, 'err', group);
+    }
+  })();
+
+  return { name: plugin.name, abort, push, done };
+}
+
 const App = () => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -122,6 +218,10 @@ const App = () => {
   const [connected, setConnected] = useState(true);
   const subsRef = useRef<Map<string, net.Socket>>(new Map());
   const reconnectingRef = useRef(false);
+  const activePluginRef = useRef<PluginHandle | null>(null);
+  const [pluginName, setPluginName] = useState<string | null>(null);
+  const [metric, setMetric] = useState<any>(null);             // cur-group metric (for ctx)
+  const [globalMetric, setGlobalMetric] = useState<any>(null); // newest across groups (for budget)
 
   useEffect(() => {
     const onResize = () => setSize({ rows: stdout.rows, cols: stdout.columns });
@@ -133,6 +233,26 @@ const App = () => {
     const id = setInterval(() => setTick(t => t + 1), 80);
     return () => clearInterval(id);
   }, []);
+
+  // Poll metrics every few seconds. The daemon returns BOTH the active
+  // group's latest metric (for context size) and the globally-newest
+  // metric across all groups (for the account-wide 5h/7d rate-limit,
+  // which is shared across groups and visible even when cur is stopped).
+  useEffect(() => {
+    if (!connected) return;
+    let alive = true;
+    const fetchMetric = async () => {
+      try {
+        const r = await call('metrics', { group: cur });
+        if (!alive || !r?.ok) return;
+        setMetric(r.metric ?? null);
+        setGlobalMetric(r.global_metric ?? null);
+      } catch {}
+    };
+    fetchMetric();
+    const id = setInterval(fetchMetric, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, [cur, connected]);
 
   const addLine = (l: LogLine) => setLines(ls => {
     const next = ls.concat(l);
@@ -158,6 +278,10 @@ const App = () => {
       setStreamBuf(b => { const { [ev.group]: _, ...rest } = b; return rest; });
       if (ev.text) addLine({ kind: 'response', group: ev.group, text: ev.text, ts });
     }
+    // Forward live events to the active plugin (if its group matches).
+    // historical=true events from history replay are not interesting to a
+    // newly-started plugin observing real-time activity.
+    if (!ev.historical) activePluginRef.current?.push(ev as PluginEvent);
   };
 
   const scheduleReconnect = () => {
@@ -249,6 +373,69 @@ const App = () => {
       refresh();
     } else if (t === '/ls') {
       refresh();
+    } else if (t === '/clear') {
+      // Wipe both claude's session and our log for the active group.
+      // Next message starts a fresh conversation.
+      try {
+        const r = await call('clear', { group: cur });
+        if (r.ok) {
+          // Drop any rendered lines for this group; daemon's tail thread
+          // will resume from byte 0 of the now-empty log on next write.
+          setLines(prev => prev.filter(l => l.group !== cur));
+          setStreamBuf(b => { const { [cur]: _, ...rest } = b; return rest; });
+          addLine({ kind: 'sys', group: cur, text: `cleared context for ${cur}` });
+        } else {
+          addLine({ kind: 'err', group: cur, text: `clear: ${r.error}` });
+        }
+      } catch (e: any) {
+        addLine({ kind: 'err', group: cur, text: `clear: ${e.message || e}` });
+      }
+    } else if (t === '/stop-plugin' || t.startsWith('/stop-plugin ')) {
+      // Hard-stop a running plugin by name. Name must match the active
+      // plugin — protects against killing the wrong thing if the user
+      // mistypes or comes back to the TUI after the plugin already ended.
+      const target = t.length > 12 ? t.slice(13).trim() : '';
+      const h = activePluginRef.current;
+      if (!target) {
+        addLine({ kind: 'err', group: cur, text: 'usage: /stop-plugin <name>' });
+      } else if (!h) {
+        addLine({ kind: 'sys', group: cur, text: 'no plugin running' });
+      } else if (h.name !== target) {
+        addLine({ kind: 'err', group: cur, text: `active plugin is /${h.name}, not /${target}` });
+      } else {
+        h.abort.abort();
+        addLine({ kind: 'sys', group: '', text: `stopped /${h.name}` });
+      }
+    } else if (t.startsWith('/') && !t.startsWith('/new ') && !t.startsWith('/sw ')
+               && t !== '/ls' && t !== '/clear'
+               && !t.startsWith('/stop-plugin') && t !== '/config' && !t.startsWith('/config ')) {
+      // Plugin dispatch — single-running slot.
+      const sp = t.indexOf(' ');
+      const name = (sp < 0 ? t.slice(1) : t.slice(1, sp));
+      const args = sp < 0 ? '' : t.slice(sp + 1);
+      const plugin = PLUGIN_BY_NAME[name];
+      if (!plugin) {
+        addLine({ kind: 'err', group: cur, text: `unknown command: /${name}` });
+        return;
+      }
+      if (activePluginRef.current) {
+        addLine({ kind: 'err', group: cur, text: `already running /${activePluginRef.current.name}` });
+        return;
+      }
+      const handle = runPlugin(plugin, args, cur, {
+        log: (text, kind = 'sys', g) => addLine({ kind, group: g ?? cur, text }),
+        callDaemon: (cmd, extra) => call(cmd, extra),
+      });
+      activePluginRef.current = handle;
+      setPluginName(plugin.name);
+      addLine({ kind: 'sys', group: cur, text: `started /${plugin.name}` });
+      handle.done.finally(() => {
+        if (activePluginRef.current === handle) {
+          activePluginRef.current = null;
+          setPluginName(null);
+          addLine({ kind: 'sys', group: cur, text: `/${plugin.name} finished` });
+        }
+      });
     } else if (t === '/config' || t.startsWith('/config ')) {
       // /config              → show current group's config
       // /config model=sonnet → set model for current group
@@ -350,7 +537,11 @@ const App = () => {
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
+      // Always exits TUI. To stop a running plugin without exiting, use
+      // /stop-plugin <name>. Ctrl+C still aborts any active plugin via
+      // process exit, so a runaway loop is never trapped.
       for (const s of subsRef.current.values()) s.end();
+      activePluginRef.current?.abort.abort();
       exit();
       setTimeout(() => process.exit(0), 50);
       return;
@@ -397,8 +588,47 @@ const App = () => {
         {/* right: stream/idle · message count */}
         <Box>
           <Text color="black">{''}</Text>
+          {(() => {
+            // ctx is per-group (the active conversation's last input size).
+            // budget is account-wide so it reads from globalMetric and shows
+            // even when cur is stopped or has never had an API call yet.
+            const cu  = metric?.usage ?? {};
+            const ctx = (Number(cu.input_tokens) || 0)
+                      + (Number(cu.cache_read_input_tokens) || 0)
+                      + (Number(cu.cache_creation_input_tokens) || 0);
+            const ctxFrac = CTX_WINDOW > 0 ? ctx / CTX_WINDOW : 0;
+            const grl = globalMetric?.ratelimit ?? {};
+            const f = (k: string): number | null => {
+              const v = grl[k]; if (v == null) return null;
+              const n = parseFloat(String(v)); return isNaN(n) ? null : n;
+            };
+            const u5h = f('anthropic-ratelimit-unified-5h-utilization');
+            const u7d = f('anthropic-ratelimit-unified-7d-utilization');
+            return (
+              <>
+                {ctx > 0 ? (
+                  <Text color={pctColor(ctxFrac)} backgroundColor="black" bold>
+                    {`  ctx ${(ctxFrac * 100).toFixed(0)}% `}
+                  </Text>
+                ) : null}
+                {u5h != null ? (
+                  <Text color={pctColor(u5h)} backgroundColor="black" bold>
+                    {`  5h ${(u5h * 100).toFixed(0)}% `}
+                  </Text>
+                ) : null}
+                {u7d != null ? (
+                  <Text color={pctColor(u7d)} backgroundColor="black" bold>
+                    {`  7d ${(u7d * 100).toFixed(0)}% `}
+                  </Text>
+                ) : null}
+              </>
+            );
+          })()}
           {!connected ? (
             <Text color="red" backgroundColor="black" bold>{`  reconnecting ${spin} `}</Text>
+          ) : null}
+          {pluginName ? (
+            <Text color="magenta" backgroundColor="black" bold>{`  ▶ /${pluginName} ${spin} `}</Text>
           ) : null}
           <Text color={streaming ? 'yellow' : 'gray'} backgroundColor="black">
             {streaming ? `   streaming ${spin} ` : '   idle '}
@@ -482,7 +712,7 @@ const App = () => {
           <Text color="cyan" bold></Text>
         </Box>
         <TextInput value={input} onChange={setInput} onSubmit={onSubmit}
-          placeholder="ask anything   (/new <g>  /sw <g>  /ls  /config model=…  effort=…)" />
+          placeholder="ask anything   (/new  /sw  /ls  /clear  /config  /burn <goal>  /stop-plugin <name>)" />
       </Box>
 
       {/* hint */}

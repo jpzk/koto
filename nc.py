@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """clawson daemon: orchestrates sidecars + proxy, exposes unix socket API."""
-import atexit, base64, datetime, json, os, pathlib, signal, socket, subprocess, sys, threading, time
+import atexit, base64, datetime, json, os, pathlib, shutil, signal, socket, subprocess, sys, threading, time
 
 HERE = pathlib.Path(__file__).parent.resolve()
 ROOT = HERE / "groups"
@@ -206,10 +206,14 @@ def _tail_log(g):
     pending_ts = None    # ts marker captured, applies to the next non-marker line
     while True:
         try:
-            cur = p.stat().st_ino
-            if cur != inode:
+            st = p.stat()
+            if st.st_ino != inode:
+                # File replaced (sidecar restart with truncate-and-recreate)
                 f.close(); f = open(p, "r", encoding="utf-8", errors="replace")
-                inode = cur; buf = ""; pending_ts = None
+                inode = st.st_ino; buf = ""; pending_ts = None
+            elif st.st_size < f.tell():
+                # File truncated in place (e.g. /clear via daemon)
+                f.seek(0); buf = ""; pending_ts = None
         except OSError:
             time.sleep(0.1); continue
         chunk = f.read()
@@ -308,8 +312,52 @@ def _list(req):  return {"ok": True, "groups": list_groups()}
 def _stop(req):  stop(req["group"]); return {"ok": True}
 def _hist(req):  return {"ok": True, "events": _read_history(req["group"])}
 
+
+def _clear(req):
+    """Wipe a group's conversation context: removes claude's session.jsonl
+    files (so the next `claude -p --continue` starts fresh) and truncates
+    .cs/log (so the TUI shows an empty history). Per-group prompt.md and
+    config.json are kept. Workspace files unrelated to .claude/ are kept."""
+    g = req["group"]
+    v = vol(g)
+    cdir = v / ".claude"
+    if cdir.exists():
+        try: shutil.rmtree(cdir, ignore_errors=True)
+        except Exception: pass
+    log = v / ".cs/log"
+    if log.exists():
+        try: log.write_text("")
+        except Exception: pass
+    return {"ok": True}
+
+
+def _latest_metric_any():
+    """Newest metric across all groups — rate-limit is account-wide so
+    the 5h/7d budget should be visible even when the active group is
+    stopped or has no calls of its own yet."""
+    if not METRICS_FILE.exists(): return None
+    try:
+        size = METRICS_FILE.stat().st_size
+        with open(METRICS_FILE, "rb") as f:
+            f.seek(max(0, size - 65536))
+            tail = f.read().decode("utf-8", errors="replace")
+        for line in reversed(tail.splitlines()):
+            try: return json.loads(line)
+            except Exception: continue
+    except Exception: return None
+    return None
+
+
+def _met(req):
+    g = req.get("group")
+    return {
+        "ok": True,
+        "metric":         _latest_metric(g) if g else None,   # per-group (ctx)
+        "global_metric":  _latest_metric_any(),               # account-wide (budget)
+    }
+
 HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop,
-            "history": _hist, "config": _config}
+            "history": _hist, "config": _config, "metrics": _met, "clear": _clear}
 
 
 def serve(client):
