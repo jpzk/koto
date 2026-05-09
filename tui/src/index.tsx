@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { render, Box, Text, useStdout } from 'ink';
+import { render, Box, Text, useStdout, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import * as net from 'node:net';
 
@@ -60,6 +60,7 @@ const App = () => {
   const [streamBuf, setStreamBuf] = useState<Record<string, string>>({});
   const [input, setInput] = useState('');
   const [tick, setTick] = useState(0);
+  const [scroll, setScroll] = useState(0); // lines above bottom; 0 = pinned to bottom
   const subsRef = useRef<Map<string, net.Socket>>(new Map());
 
   useEffect(() => {
@@ -151,7 +152,19 @@ const App = () => {
   const all = lines.filter(l => !l.group || l.group === cur);
   const streaming = streamBuf[cur];
   const reserveStream = streaming ? 1 : 0;
-  const visible = all.slice(-(logRows - reserveStream));
+  const window = Math.max(1, logRows - reserveStream);
+  const maxScroll = Math.max(0, all.length - window);
+  const clampedScroll = Math.min(scroll, maxScroll);
+  const end = all.length - clampedScroll;
+  const visible = all.slice(Math.max(0, end - window), end);
+  const showStream = clampedScroll === 0 && streaming;
+
+  useInput((_, key) => {
+    if (key.pageUp)         setScroll(s => Math.min(maxScroll, s + Math.floor(window / 2)));
+    else if (key.pageDown)  setScroll(s => Math.max(0, s - Math.floor(window / 2)));
+    else if (key.shift && key.upArrow)   setScroll(s => Math.min(maxScroll, s + 1));
+    else if (key.shift && key.downArrow) setScroll(s => Math.max(0, s - 1));
+  });
   const spin = SPINNER[tick % SPINNER.length];
   const groupNames = Object.keys(groups).sort();
 
@@ -186,7 +199,7 @@ const App = () => {
           }
           return <Text key={idx}>  {l.text}</Text>;
         })}
-        {streaming ? (
+        {showStream ? (
           <Box>
             <Text color="yellow">{spin}  </Text>
             <Text>{streaming}</Text>
@@ -206,6 +219,10 @@ const App = () => {
       {/* hint */}
       <Box flexShrink={0} paddingX={2}>
         <Text dimColor>{streaming ? 'streaming…' : 'enter to send'}</Text>
+        <Text dimColor>   ·   pgup/pgdn scroll</Text>
+        {clampedScroll > 0 ? (
+          <Text color="yellow">   ·   ↑{clampedScroll}/{maxScroll}</Text>
+        ) : null}
         <Text dimColor>   ·   ctrl+c to exit</Text>
       </Box>
     </Box>
