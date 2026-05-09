@@ -1,5 +1,5 @@
 FROM node:22-alpine
-RUN apk add --no-cache coreutils && npm i -g @anthropic-ai/claude-code
+RUN apk add --no-cache coreutils bash && npm i -g @anthropic-ai/claude-code
 WORKDIR /workspace
 COPY entrypoint.sh /e.sh
 USER node

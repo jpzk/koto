@@ -4,6 +4,7 @@ groups.json
 metrics.jsonl
 proxy.log
 clawson.sock
+run/
 __pycache__/
 *.pyc
 tui/node_modules/

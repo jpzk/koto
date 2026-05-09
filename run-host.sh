@@ -13,6 +13,7 @@ podman run -d --rm \
   -v "$SOCK:/run/podman/podman.sock" \
   -v "$HERE:$HERE" \
   -v "$HERE/creds:/root/.claude" \
+  -v /etc/localtime:/etc/localtime:ro \
   -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -e TERM="${TERM:-xterm-256color}" \
   ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \

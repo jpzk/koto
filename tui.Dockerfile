@@ -7,5 +7,6 @@ COPY tui/package.json tui/bunfig.toml tui/tsconfig.json ./
 COPY tui/bun.lock* ./
 RUN bun install --no-progress
 COPY tui/src ./src
-ENV SOCK_PATH=/sock
+ENV SOCK_PATH=/clawson-run/clawson.sock \
+    FORCE_COLOR=3
 ENTRYPOINT ["bun","--watch","run","src/index.tsx"]
