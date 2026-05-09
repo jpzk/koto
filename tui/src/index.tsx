@@ -1,7 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { render, Box, Text, useStdout, useInput } from 'ink';
+import { render, Box, Text, useStdout, useInput, useApp } from 'ink';
 import TextInput from 'ink-text-input';
 import * as net from 'node:net';
+
+process.on('SIGINT',  () => process.exit(130));
+process.on('SIGTERM', () => process.exit(143));
 
 const SOCK = process.env.SOCK_PATH || '/sock';
 const MAX_LINES = 500;
@@ -52,6 +55,7 @@ function subscribe(group: string, onEvent: (e: Event) => void, onErr: (msg: stri
 }
 
 const App = () => {
+  const { exit } = useApp();
   const { stdout } = useStdout();
   const [size, setSize] = useState({ rows: stdout.rows, cols: stdout.columns });
   const [groups, setGroups] = useState<Groups>({});
@@ -159,7 +163,13 @@ const App = () => {
   const visible = all.slice(Math.max(0, end - window), end);
   const showStream = clampedScroll === 0 && streaming;
 
-  useInput((_, key) => {
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      for (const s of subsRef.current.values()) s.end();
+      exit();
+      setTimeout(() => process.exit(0), 50);
+      return;
+    }
     if (key.pageUp)         setScroll(s => Math.min(maxScroll, s + Math.floor(window / 2)));
     else if (key.pageDown)  setScroll(s => Math.max(0, s - Math.floor(window / 2)));
     else if (key.shift && key.upArrow)   setScroll(s => Math.min(maxScroll, s + 1));
@@ -172,11 +182,14 @@ const App = () => {
     <Box flexDirection="column" height={size.rows} width={size.cols}>
       {/* header */}
       <Box flexShrink={0} paddingX={1}>
-        <Text dimColor>clawson</Text>
+        <Text dimColor> clawson</Text>
         <Text dimColor>  ·  </Text>
-        <Text color="cyan">{cur}</Text>
+        <Text color="cyan"> {cur}</Text>
         <Text dimColor>  ·  </Text>
-        <Text dimColor>{groupNames.map(g => g === cur ? `[${g}]` : g).join(' ')}</Text>
+        <Text dimColor>{groupNames.map(g => {
+          const dot = groups[g]?.running ? '' : '';
+          return g === cur ? ` ${dot} ${g}` : ` ${dot} ${g}`;
+        }).join('  ')}</Text>
       </Box>
 
       {/* log */}
@@ -186,7 +199,7 @@ const App = () => {
           if (l.kind === 'prompt') {
             return (
               <Box key={idx}>
-                <Text color="cyan" bold>›  </Text>
+                <Text color="cyan" bold>  </Text>
                 <Text>{l.text}</Text>
               </Box>
             );
@@ -210,7 +223,7 @@ const App = () => {
       {/* bordered input */}
       <Box flexShrink={0} borderStyle="round" borderColor="gray">
         <Box marginX={1}>
-          <Text color="cyan" bold>›</Text>
+          <Text color="cyan" bold></Text>
         </Box>
         <TextInput value={input} onChange={setInput} onSubmit={onSubmit}
           placeholder="ask anything   (/new <g>  /sw <g>  /ls)" />
@@ -218,12 +231,12 @@ const App = () => {
 
       {/* hint */}
       <Box flexShrink={0} paddingX={2}>
-        <Text dimColor>{streaming ? 'streaming…' : 'enter to send'}</Text>
-        <Text dimColor>   ·   pgup/pgdn scroll</Text>
+        <Text dimColor>{streaming ? ' streaming…' : ' enter to send'}</Text>
+        <Text dimColor>   ·    pgup/pgdn scroll</Text>
         {clampedScroll > 0 ? (
           <Text color="yellow">   ·   ↑{clampedScroll}/{maxScroll}</Text>
         ) : null}
-        <Text dimColor>   ·   ctrl+c to exit</Text>
+        <Text dimColor>   ·    ctrl+c to exit</Text>
       </Box>
     </Box>
   );

@@ -15,7 +15,9 @@ Minimal isolated claude-code orchestrator. Container-per-group. **Daemon + isola
 ```
 nc.py                daemon: orchestrator + proxy supervisor + unix socket API + log-tail fan-out
 proxy.py             HTTP proxy, cred injection, metrics, multi-port watcher
-entrypoint.sh        sidecar FIFO read loop -> claude -p --continue
+entrypoint.sh        sidecar FIFO read loop -> claude -p --bare --continue + system-prompt assembly
+prompts/             harness-controlled system prompts (global.md ro-mounted into every sidecar)
+groups/<g>/prompt.md per-group system prompt (lives in the workspace, sidecar-writable)
 Dockerfile           sidecar image (alpine + claude-code)
 host.Dockerfile      cs_host image (alpine + python + podman + claude)
 tui.Dockerfile       cs_tui image (bun + ink); runs with --network=none, sock-only
@@ -75,6 +77,8 @@ Errors come back as `{"ok": false, "error": "..."}`. Most connections are one-sh
 - **Proxy stdout redirected to file.** Proxy goes to `proxy.log` so it never corrupts a foreground TUI's escape sequences. `podman run` calls in `nc.py` use `capture_output=True` for the same reason.
 - **Streaming events come from a daemon-side log tailer, not from the TUI.** `nc.py` runs one `_tail_log(g)` thread per group with at least one subscriber; it parses lines (`>>> ` = prompt, otherwise = response) and fans out JSON event frames to all subscribers. Trade-off vs. the old approach: the daemon does more work, but `cs_tui` no longer needs filesystem access — it can run with `--network=none` and a single bind-mounted socket.
 - **`cs_tui` runs with `--network=none` and only `clawson.sock` mounted.** The TUI is JS/React with ~30 transitive deps; isolating it from the network and from the project filesystem keeps that supply-chain footprint bounded to "render frames + write to one socket". A compromised TUI cannot reach the proxy, the API, or other sidecars.
+- **`claude -p --bare` for sidecars.** `--bare` disables CLAUDE.md auto-discovery, hooks, plugin sync, auto-memory, background prefetch, and keychain reads. We want the harness to be the only source of context — no surprise pickup of files inside the workspace. Tools (bash/edit/read) and the default tool-describing system prompt remain. Combined with `--append-system-prompt` reading from `prompts/global.md` + `/workspace/prompt.md`, this gives us two-tier prompt control without claude code's discovery surface.
+- **Per-group prompts live inside the sidecar's writable workspace.** `groups/<g>/prompt.md` is read on every message via the existing workspace mount; the sidecar can rewrite it (only affecting its own future invocations). Accepted trade-off vs. moving per-group prompts to a host-only `prompts/<g>.md` and ro-mounting them — co-location with the workspace was the priority.
 - **TUI maintains one subscribe connection per group + ad-hoc one-shots for commands.** Subscribe is the only long-lived verb in the protocol; everything else is request/response/close. The `subscribe` handler in `serve()` returns early to skip the connection-close in the `finally` clause, transferring writer ownership to the `SUBS` registry.
 - **Matching-path bind mount in `run-host.sh`** (`-v "$HERE:$HERE"`). Sidecars are spawned by `cs_host` via the outer podman socket, but the outer daemon resolves `-v` paths against the *real host* filesystem. The project dir must be mounted at the same path inside `cs_host` so the strings nc.py constructs (`-v /home/<user>/git/metaopt/groups/main:/workspace`) resolve correctly.
 - **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the clawson token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.

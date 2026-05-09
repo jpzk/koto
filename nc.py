@@ -42,6 +42,8 @@ def ensure(g, main=False):
             "-e","ANTHROPIC_API_KEY=proxied",
             "-e","HOME=/workspace",
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]
+    if (HERE / "prompts/global.md").exists():
+        args += ["-v", f"{HERE}/prompts/global.md:/prompts/global.md:ro"]
     if main: args += ["-v", f"{ROOT}:/peers"]
     args.append(IMAGE)
     subprocess.run(args, check=True, capture_output=True, text=True)
