@@ -180,43 +180,88 @@ const App = () => {
 
   return (
     <Box flexDirection="column" height={size.rows} width={size.cols}>
-      {/* header */}
-      <Box flexShrink={0} paddingX={1}>
-        <Text dimColor> clawson</Text>
-        <Text dimColor>  ·  </Text>
-        <Text color="cyan"> {cur}</Text>
-        <Text dimColor>  ·  </Text>
-        <Text dimColor>{groupNames.map(g => {
-          const dot = groups[g]?.running ? '' : '';
-          return g === cur ? ` ${dot} ${g}` : ` ${dot} ${g}`;
-        }).join('  ')}</Text>
+      {/* airline-style status line (powerline + nerd-font glyphs) */}
+      <Box flexShrink={0} width={size.cols} justifyContent="space-between">
+        {/* left: app · group · others */}
+        <Box>
+          <Text color="black" backgroundColor="cyan" bold>{'  clawson '}</Text>
+          <Text color="cyan" backgroundColor="blue">{''}</Text>
+          <Text color="white" backgroundColor="blue" bold>
+            {'   '}{cur}{groups[cur]?.running ? ' ' : ' '}{' '}
+          </Text>
+          <Text color="blue" backgroundColor="black">{''}</Text>
+          <Text color="gray" backgroundColor="black">
+            {' '}{groupNames.filter(g => g !== cur).map(g =>
+              `${g}${groups[g]?.running ? '' : ''}`
+            ).join('  ') || '—'}{' '}
+          </Text>
+          <Text color="black">{''}</Text>
+        </Box>
+        {/* right: stream/idle · message count */}
+        <Box>
+          <Text color="black">{''}</Text>
+          <Text color={streaming ? 'yellow' : 'gray'} backgroundColor="black">
+            {streaming ? `   streaming ${spin} ` : '   idle '}
+          </Text>
+          <Text color="black" backgroundColor="cyan">{''}</Text>
+          <Text color="black" backgroundColor="cyan" bold>
+            {'   '}{lines.filter(l => l.group === cur).length}{'  '}
+          </Text>
+        </Box>
       </Box>
 
-      {/* log */}
+      {/* log — turns rendered as blocks, separated by blank rows */}
       <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
-        {visible.map((l, i) => {
+        {visible.flatMap((l, i) => {
           const idx = all.length - visible.length + i;
+          const prev = i > 0 ? visible[i - 1] : null;
+          const out: React.ReactNode[] = [];
+          // block boundary: insert a blank row before a turn change
+          if (prev && (
+            (l.kind === 'prompt' && prev.kind !== 'prompt') ||
+            (l.kind === 'response' && prev.kind !== 'response') ||
+            (l.kind !== prev.kind)
+          )) {
+            out.push(<Box key={`sep-${idx}`} height={1} />);
+          }
           if (l.kind === 'prompt') {
-            return (
+            out.push(
               <Box key={idx}>
-                <Text color="cyan" bold>  </Text>
+                <Text color="cyan" bold>›  </Text>
+                <Text color="cyan">{l.text}</Text>
+              </Box>
+            );
+          } else if (l.kind === 'err') {
+            out.push(
+              <Box key={idx}>
+                <Text color="red">▎  </Text>
+                <Text color="red">{l.text}</Text>
+              </Box>
+            );
+          } else if (l.kind === 'sys') {
+            out.push(<Text key={idx} dimColor>·  {l.text}</Text>);
+          } else {
+            // response — left bar makes consecutive lines read as one block
+            out.push(
+              <Box key={idx}>
+                <Text dimColor>▎  </Text>
                 <Text>{l.text}</Text>
               </Box>
             );
           }
-          if (l.kind === 'err') {
-            return <Text key={idx} color="red">  {l.text}</Text>;
-          }
-          if (l.kind === 'sys') {
-            return <Text key={idx} dimColor>  {l.text}</Text>;
-          }
-          return <Text key={idx}>  {l.text}</Text>;
+          return out;
         })}
         {showStream ? (
-          <Box>
-            <Text color="yellow">{spin}  </Text>
-            <Text>{streaming}</Text>
-          </Box>
+          <>
+            {/* always pad before in-progress block if log doesn't already end on one */}
+            {visible.length > 0 && visible[visible.length - 1]!.kind !== 'response' ? (
+              <Box height={1} />
+            ) : null}
+            <Box>
+              <Text color="yellow">{spin}  </Text>
+              <Text>{streaming}</Text>
+            </Box>
+          </>
         ) : null}
       </Box>
 
