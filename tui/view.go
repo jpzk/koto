@@ -135,9 +135,9 @@ func (m Model) View() string {
 	status := m.renderStatusBar(spin)
 	logRows := max(1, m.height-5)
 	treeW := m.treePaneW()
-	contentCols := max(20, m.width-treeW-12)
 
-	logArea, scrollbar, maxScroll := m.renderLog(logRows, contentCols, spin, treeW)
+	logArea := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
+	scrollbar := m.renderScrollbar(logRows)
 	var middle string
 	if treeW > 0 {
 		tree := m.renderTree(logRows)
@@ -147,7 +147,7 @@ func (m Model) View() string {
 	}
 
 	input := m.renderInput()
-	hint := m.renderHint(maxScroll)
+	hint := m.renderHint()
 
 	return lipgloss.JoinVertical(lipgloss.Left, status, middle, input, hint)
 }
@@ -348,142 +348,33 @@ func (m Model) treePaneW() int {
 	return 0
 }
 
-func (m Model) renderLog(logRows, contentCols int, spin string, treeW int) (string, string, int) {
-	streamCap := max(1, logRows/streamCapFrac)
-	// Live area: thinking (while in flight) or response stream. They never
-	// overlap — thinking_done fires before the response begins streaming.
-	liveText, liveTruncated, liveKind := "", false, ""
-	if t, ok := m.thinkingBuf[m.cur]; ok {
-		full := t
-		if tail := m.thinkingTail[m.cur]; tail != "" {
-			if full != "" {
-				full += "\n"
-			}
-			full += tail
-		}
-		liveText, liveTruncated = tailVisualRows(full, streamCap, contentCols)
-		liveKind = "thinking"
-	} else if s, ok := m.streamBuf[m.cur]; ok {
-		liveText, liveTruncated = tailVisualRows(s, streamCap, contentCols)
-		liveKind = "stream"
+// renderLiveLines formats the in-flight thinking/stream overlay for inclusion
+// in the viewport content. Called from model.buildLogContent.
+func renderLiveLines(liveText, liveKind string, tick int) []string {
+	if liveText == "" {
+		return nil
 	}
-	reserve := 0
-	if liveText != "" {
-		reserve = min(streamCap, visualRows(liveText, contentCols))
+	var head string
+	var bodyStyle lipgloss.Style
+	if liveKind == "thinking" {
+		head = lipgloss.NewStyle().Foreground(cMagenta).Render("🧠  ")
+		bodyStyle = lipgloss.NewStyle().Foreground(cGray).Italic(true)
+	} else {
+		spin := string(spinnerFrames[tick%len(spinnerFrames)])
+		head = lipgloss.NewStyle().Foreground(cYellow).Render(spin + "  ")
+		bodyStyle = lipgloss.NewStyle()
 	}
-	window := max(1, logRows-reserve)
-
-	blocks := m.allBlocks(contentCols)
-
-	// visibleAtZero & maxScroll
-	visibleAtZero := 0
-	cum := 0
-	for i := len(blocks) - 1; i >= 0; i-- {
-		b := blocks[i]
-		sep := 0
-		if visibleAtZero > 0 {
-			sep = 1
-		}
-		if cum+b.rows+sep > window {
-			break
-		}
-		visibleAtZero++
-		cum += b.rows + sep
-	}
-	maxScroll := max(0, len(blocks)-visibleAtZero)
-	clampedScroll := m.scroll
-	if clampedScroll > maxScroll {
-		clampedScroll = maxScroll
-	}
-
-	// Walk from end accumulating rows + 1-row separators.
-	visible := []renderedBlock{}
-	used := 0
-	for i := len(blocks) - 1 - clampedScroll; i >= 0; i-- {
-		b := blocks[i]
-		sep := 0
-		if len(visible) > 0 {
-			sep = 1
-		}
-		if used+b.rows+sep > window {
-			if len(visible) == 0 {
-				tail, _ := tailVisualRows(b.rendered, window, contentCols)
-				b.rendered = tail
-				b.rows = window
-				b.truncated = true
-				visible = append([]renderedBlock{b}, visible...)
-				used = window
-			}
-			break
-		}
-		visible = append([]renderedBlock{b}, visible...)
-		used += b.rows + sep
-	}
-
-	showLive := clampedScroll == 0 && liveText != ""
-
-	// Render visible blocks to lines.
-	out := []string{}
-	for i, b := range visible {
-		if i > 0 {
-			out = append(out, "")
-		}
-		out = append(out, renderBlockLines(b, contentCols)...)
-	}
-	if showLive {
-		if len(visible) > 0 && visible[len(visible)-1].kind != "response" {
-			out = append(out, "")
-		}
-		liveLines := []string{}
-		if liveTruncated {
-			liveLines = append(liveLines, lipgloss.NewStyle().Foreground(cGray).Render("… (truncated)"))
-		}
-		var head string
-		var bodyStyle lipgloss.Style
-		if liveKind == "thinking" {
-			head = lipgloss.NewStyle().Foreground(cMagenta).Render("🧠  ")
-			bodyStyle = lipgloss.NewStyle().Foreground(cGray).Italic(true)
+	indent := "   "
+	stLines := strings.Split(liveText, "\n")
+	out := make([]string, 0, len(stLines))
+	for i, ln := range stLines {
+		if i == 0 {
+			out = append(out, head+bodyStyle.Render(ln))
 		} else {
-			head = lipgloss.NewStyle().Foreground(cYellow).Render(spin + "  ")
-			bodyStyle = lipgloss.NewStyle()
+			out = append(out, indent+bodyStyle.Render(ln))
 		}
-		indent := "   "
-		stLines := strings.Split(liveText, "\n")
-		if len(stLines) > 0 {
-			liveLines = append(liveLines, head+bodyStyle.Render(stLines[0]))
-			for _, ln := range stLines[1:] {
-				liveLines = append(liveLines, indent+bodyStyle.Render(ln))
-			}
-		}
-		out = append(out, liveLines...)
 	}
-
-	// Pad / truncate to logRows.
-	for len(out) < logRows {
-		out = append(out, "")
-	}
-	if len(out) > logRows {
-		out = out[len(out)-logRows:]
-	}
-
-	// Terminal-wrap guard: visualRows assumes lines wrap at contentCols but
-	// the log box is wider, so a tool/prompt logical line that exceeds
-	// contentCols stays one logical line yet renders as 2+ visual rows in
-	// the terminal. Without this trim, JoinVertical(status, middle, …)
-	// exceeds m.height and the alt-screen scrolls the status bar off the
-	// top. tailVisualRows keeps the bottom logRows visual rows — the chat
-	// flow already favors recent content, so trimming from the top is fine.
-	logBoxContent := max(1, m.width-treeW-2) // -1 for box border-ish, -1 for PaddingLeft
-	logCol := strings.Join(out, "\n")
-	logCol, _ = tailVisualRows(logCol, logRows, logBoxContent)
-	logBox := lipgloss.NewStyle().
-		Width(m.width - treeW - 1).
-		Height(logRows).
-		PaddingLeft(1).
-		Render(logCol)
-
-	scrollbar := m.renderScrollbar(logRows, maxScroll, clampedScroll, len(visible), len(blocks))
-	return logBox, scrollbar, maxScroll
+	return out
 }
 
 func renderBlockLines(b renderedBlock, contentCols int) []string {
@@ -565,17 +456,19 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 	return out
 }
 
-func (m Model) renderScrollbar(rows, maxScroll, scroll, visN, totalN int) string {
+func (m Model) renderScrollbar(rows int) string {
 	cells := make([]string, rows)
-	if maxScroll <= 0 || totalN == 0 {
+	total := m.vp.TotalLineCount()
+	visible := m.vp.VisibleLineCount()
+	if total <= visible || total == 0 {
 		for i := range cells {
 			cells[i] = " "
 		}
 		return strings.Join(cells, "\n")
 	}
-	thumb := max(1, min(rows, int(float64(rows)*float64(visN)/float64(totalN)+0.5)))
+	thumb := max(1, min(rows, int(float64(rows)*float64(visible)/float64(total)+0.5)))
 	rangeN := rows - thumb
-	thumbTop := int(float64(rangeN) * (1.0 - float64(scroll)/float64(maxScroll)))
+	thumbTop := int(float64(rangeN) * m.vp.ScrollPercent())
 	for i := 0; i < rows; i++ {
 		if i >= thumbTop && i < thumbTop+thumb {
 			cells[i] = lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("█")
@@ -606,11 +499,8 @@ func (m Model) renderInput() string {
 
 // --- hint --------------------------------------------------------------------
 
-func (m Model) renderHint(maxScroll int) string {
+func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	// MaxWidth keeps the hint to a single row in narrow terminals — terminal
-	// wrap would push the rest of the layout up and the top status bar off-
-	// screen.
 	if m.focus == focusTree {
 		return dim.MaxWidth(m.width).Render(" ↑↓ switch · ⇥/⎋/↩ back")
 	}
@@ -626,9 +516,9 @@ func (m Model) renderHint(maxScroll int) string {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^t hide")
 	}
 	parts = append(parts, thoughtsHint)
-	if m.scroll > 0 && m.focus == focusInput {
+	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
-		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d/%d", m.scroll, maxScroll)))
+		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))
 	}
 	parts = append(parts, "^c exit")
 	return dim.MaxWidth(m.width).Render(" " + strings.Join(parts, "  ·  "))

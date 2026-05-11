@@ -9,12 +9,12 @@ import (
 // persistedState is the small chunk of TUI-local state that survives a
 // /reload (process restart). Everything else — history, group list, metrics —
 // is re-fetched from the daemon on startup, so we only persist what is
-// genuinely local: which group the user was on, scroll position, and any
-// half-typed input for that group.
+// genuinely local: which group the user was on, and any half-typed input
+// for that group. Scroll position used to live here but viewport rebuilds
+// to "at bottom" each session, which is the right default for chat.
 type persistedState struct {
-	Cur    string `json:"cur,omitempty"`
-	Scroll int    `json:"scroll,omitempty"`
-	Draft  string `json:"draft,omitempty"`
+	Cur   string `json:"cur,omitempty"`
+	Draft string `json:"draft,omitempty"`
 }
 
 func statePath(sock string) string {

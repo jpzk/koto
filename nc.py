@@ -524,7 +524,10 @@ def main():
     ensure("main", main=True)
 
     if SOCK_PATH.exists(): SOCK_PATH.unlink()
-    s = socket.socket(socket.AF_UNIX); s.bind(str(SOCK_PATH)); s.listen(8)
+    # backlog=128: TUI startup fires N×2+ concurrent connects (list, metrics,
+    # plus history+subscribe per group). A small backlog (was 8) drops the
+    # excess with EAGAIN; history calls were the visible casualty.
+    s = socket.socket(socket.AF_UNIX); s.bind(str(SOCK_PATH)); s.listen(128)
     os.chmod(SOCK_PATH, 0o660)
     print(f"clawsond ready  socket={SOCK_PATH}", flush=True)
 

@@ -9,12 +9,18 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
-	maxLines      = 500
-	streamCapFrac = 2 // streamCap = logRows / streamCapFrac
+	// maxLines is the GLOBAL cap on m.lines (across all groups). It must be
+	// large enough that loading history for every group at startup doesn't
+	// evict any single group's lines. With ~10 groups, a chatty one can have
+	// >1k events; the cap was 500 and was wiping smaller groups' history out
+	// as soon as larger groups' history loaded — "renders then gone."
+	maxLines      = 10000
+	maxPerGroup   = 1000 // per-group cap applied at history load time
 	leftPaneWidth = 22
 	tickMs        = 80
 	metricsTickMs = 5000
@@ -112,7 +118,14 @@ type Model struct {
 	focus focusZone
 
 	treeIdx int
-	scroll  int
+
+	// vp drives the log scroll/clip. We stuff one big pre-wrapped content
+	// string into it via SetContent and let it handle vertical clipping +
+	// scrolling. autoFollow tracks "was at bottom before SetContent" so we
+	// stick to the tail when streaming, but release when the user scrolls up.
+	vp         viewport.Model
+	vpReady    bool
+	autoFollow bool
 
 	connected        bool
 	tick             int
@@ -162,6 +175,11 @@ func newModel(sock string, ctxWindow int) Model {
 		ti.SetValue(st.Draft)
 		ti.CursorEnd()
 	}
+	vp := viewport.New(80, 20)
+	// Disable viewport's own KeyMap — we route scroll keys ourselves so we
+	// can keep input focus while paging. Otherwise viewport eats letter keys
+	// like 'k'/'j' that we want going to the textinput.
+	vp.KeyMap = viewport.KeyMap{}
 
 	return Model{
 		sock:       sock,
@@ -176,7 +194,8 @@ func newModel(sock string, ctxWindow int) Model {
 		lastThoughtBody: map[string]string{},
 		input:      ti,
 		focus:      focusInput,
-		scroll:     st.Scroll,
+		vp:         vp,
+		autoFollow: true,
 		connected:  true,
 		ticking:    true, // Init kicks the first tick
 		width:      80,
@@ -335,6 +354,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.Width = max(20, msg.Width-leftPaneWidth-8)
+		m.resizeViewport()
+		m.refreshLog()
+		m.vpReady = true
 		return m, nil
 
 	case spinTickMsg:
@@ -371,6 +393,26 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.groups = msg.groups
 		cmds := []tea.Cmd{}
+		// Reloading: drop existing lines for groups we're about to refetch
+		// history for. Without this, the post-reconnect history call appends
+		// a second copy of every event already in m.lines, and the renderer
+		// shows each one twice. (Initial load: nothing to drop.)
+		toReload := map[string]bool{}
+		for g := range msg.groups {
+			if !m.subscribed[g] {
+				toReload[g] = true
+			}
+		}
+		if len(toReload) > 0 {
+			filtered := m.lines[:0]
+			for _, l := range m.lines {
+				if !toReload[l.group] {
+					filtered = append(filtered, l)
+				}
+			}
+			m.lines = filtered
+			m.refreshLog()
+		}
 		for g := range msg.groups {
 			if !m.subscribed[g] {
 				m.subscribed[g] = true
@@ -407,9 +449,18 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: ev.Ts})
 			}
 		}
+		// Per-group cap: keep only the most recent maxPerGroup events from
+		// this group's history. Avoids one chatty group's backlog crowding
+		// the global cap and evicting other groups.
+		if len(batch) > maxPerGroup {
+			batch = batch[len(batch)-maxPerGroup:]
+		}
 		m.lines = append(m.lines, batch...)
 		if len(m.lines) > maxLines {
 			m.lines = m.lines[len(m.lines)-maxLines:]
+		}
+		if msg.group == m.cur {
+			m.refreshLog()
 		}
 		return m, nil
 
@@ -469,6 +520,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)
 		}
+		if ev.Group == m.cur {
+			m.refreshLog()
+		}
 		return m, m.ensureTicking()
 
 	case streamClosedMsg:
@@ -476,6 +530,10 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.scheduleReconnect()
 
 	case reconnectAttemptMsg:
+		// Clear the guard before the attempt fires: if listMsg comes back
+		// with an err, its scheduleReconnect call needs to be able to queue
+		// the next attempt. (On success, the listMsg branch is idempotent.)
+		m.reconnecting = false
 		return m, listCmd(m.sock)
 
 	case daemonRespMsg:
@@ -483,6 +541,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pluginLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
+		if msg.group == m.cur {
+			m.refreshLog()
+		}
 		return m, nil
 
 	case pluginDoneMsg:
@@ -503,6 +564,93 @@ func (m *Model) addLine(l logLine) {
 	if len(m.lines) > maxLines {
 		m.lines = m.lines[len(m.lines)-maxLines:]
 	}
+	if l.group == "" || l.group == m.cur {
+		m.refreshLog()
+	}
+}
+
+// logViewportSize returns (width, height) for the log viewport, accounting
+// for tree pane visibility and the 1-col scrollbar + 1-col left padding.
+func (m Model) logViewportSize() (int, int) {
+	treeW := m.treePaneW()
+	w := max(10, m.width-treeW-2) // -1 padding-left, -1 scrollbar
+	h := max(1, m.height-5)       // status + input(3) + hint
+	return w, h
+}
+
+// logContentCols returns the column width passed to glamour for response
+// rendering. Prefixes (timestamp + glyph) eat ~10 cols, so we shrink
+// accordingly so prefixed lines still fit the viewport.
+func (m Model) logContentCols() int {
+	w, _ := m.logViewportSize()
+	return max(20, w-10)
+}
+
+func (m *Model) resizeViewport() {
+	w, h := m.logViewportSize()
+	m.vp.Width = w
+	m.vp.Height = h
+}
+
+// refreshLog rebuilds the viewport content from m.lines + live overlay.
+// Preserves "at bottom → stay at bottom" so streaming output naturally
+// follows the tail unless the user has scrolled up.
+func (m *Model) refreshLog() {
+	wasAtBottom := !m.vpReady || m.autoFollow || m.vp.AtBottom()
+	content := m.buildLogContent(m.logContentCols())
+	m.vp.SetContent(content)
+	if wasAtBottom {
+		m.vp.GotoBottom()
+		m.autoFollow = true
+	}
+}
+
+// buildLogContent renders every visible block + the live overlay into one
+// big pre-wrapped string ready for viewport.SetContent. No vertical clipping
+// here — viewport handles it.
+func (m Model) buildLogContent(contentCols int) string {
+	blocks := m.allBlocks(contentCols)
+	out := []string{}
+	for i, b := range blocks {
+		if i > 0 {
+			out = append(out, "")
+		}
+		out = append(out, renderBlockLines(b, contentCols)...)
+	}
+	liveText, liveKind := m.liveOverlay()
+	if liveText != "" {
+		if len(out) > 0 {
+			lastKind := ""
+			if len(blocks) > 0 {
+				lastKind = blocks[len(blocks)-1].kind
+			}
+			if lastKind != "response" || liveKind != "stream" {
+				out = append(out, "")
+			}
+		}
+		out = append(out, renderLiveLines(liveText, liveKind, m.tick)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+// liveOverlay returns the in-flight stream/thinking text for the current
+// group plus a tag ("thinking"|"stream"|"") so the renderer knows whether
+// to prefix it with the brain glyph or the spinner.
+func (m Model) liveOverlay() (string, string) {
+	if t, ok := m.thinkingBuf[m.cur]; ok {
+		full := t
+		if tail := m.thinkingTail[m.cur]; tail != "" {
+			if full != "" {
+				full += "\n"
+			}
+			full += tail
+		}
+		return full, "thinking"
+	}
+	if s, ok := m.streamBuf[m.cur]; ok {
+		return s, "stream"
+	}
+	return "", ""
 }
 
 // formatTool turns a tool name + raw JSON input into a single-line summary.
@@ -674,6 +822,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		}
 		m.lines = out
 		delete(m.streamBuf, msg.group)
+		m.refreshLog()
 		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("cleared context for %s", msg.group)})
 		return nil
 	case "config":
@@ -714,7 +863,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s == "ctrl+r" {
 		// Same path as /reload but preserves whatever's in the input box as
 		// the draft (typing "/reload" would have overwritten it).
-		saveState(m.sock, persistedState{Cur: m.cur, Scroll: m.scroll, Draft: m.input.Value()})
+		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
 		m.reloadPending = true
 		return m, tea.Quit
 	}
@@ -723,6 +872,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// either as `🧠 thought N words` (collapsed) or that line plus the
 		// full thinking transcript indented underneath (expanded).
 		m.expandedThoughts = !m.expandedThoughts
+		m.refreshLog()
 		return m, nil
 	}
 	if s == "tab" {
@@ -732,6 +882,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusInput
 			m.input.Focus()
 		}
+		// treeW changes with focus → log viewport width changes → re-wrap.
+		m.resizeViewport()
+		m.refreshLog()
 		return m, nil
 	}
 
@@ -742,18 +895,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.treeIdx > 0 {
 				m.treeIdx--
 				m.cur = order[m.treeIdx]
-				m.scroll = 0
+				m.refreshLog()
+				m.vp.GotoBottom()
+				m.autoFollow = true
 			}
 		case "down":
 			if m.treeIdx < len(order)-1 {
 				m.treeIdx++
 				m.cur = order[m.treeIdx]
-				m.scroll = 0
+				m.refreshLog()
+				m.vp.GotoBottom()
+				m.autoFollow = true
 			}
 		case "enter", "esc":
 			// Switching happens on hover; Enter/Esc just exits tree mode.
 			m.focus = focusInput
 			m.input.Focus()
+			// treeW shrinks to 0 → log viewport gets wider → re-wrap.
+			m.resizeViewport()
+			m.refreshLog()
 		}
 		return m, nil
 	}
@@ -761,6 +921,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// focus = input
 	if s == "esc" {
 		m.enterTree()
+		m.resizeViewport()
+		m.refreshLog()
 		return m, nil
 	}
 	if s == "enter" {
@@ -774,19 +936,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, tickCmd)
 	}
 
-	maxScroll := m.maxScroll()
 	switch s {
 	case "pgup":
-		m.scroll = min(maxScroll, m.scroll+3)
+		m.vp.HalfViewUp()
+		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "pgdown", "pgdn":
-		m.scroll = max(0, m.scroll-3)
+		m.vp.HalfViewDown()
+		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "shift+up":
-		m.scroll = min(maxScroll, m.scroll+1)
+		m.vp.LineUp(1)
+		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "shift+down":
-		m.scroll = max(0, m.scroll-1)
+		m.vp.LineDown(1)
+		m.autoFollow = m.vp.AtBottom()
+		return m, nil
+	case "home":
+		m.vp.GotoTop()
+		m.autoFollow = false
+		return m, nil
+	case "end":
+		m.vp.GotoBottom()
+		m.autoFollow = true
 		return m, nil
 	}
 
@@ -837,7 +1010,9 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if strings.HasPrefix(v, "/sw ") {
 		m.cur = strings.TrimSpace(v[4:])
-		m.scroll = 0
+		m.refreshLog()
+		m.vp.GotoBottom()
+		m.autoFollow = true
 		return listCmd(m.sock)
 	}
 	if v == "/ls" {
@@ -860,7 +1035,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			// Drop the focus first so we don't keep rendering a group whose
 			// log file is about to vanish.
 			m.cur = "main"
-			m.scroll = 0
+			m.autoFollow = true
 		}
 		// Wipe any cached state for the group so a future /new <name> with
 		// the same name starts clean.
@@ -876,6 +1051,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			}
 		}
 		m.lines = filtered
+		m.refreshLog()
 		return daemonCmd(m.sock, "destroy", target, nil)
 	}
 	if v == "/restart" || strings.HasPrefix(v, "/restart ") {
@@ -887,7 +1063,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return daemonCmd(m.sock, "restart", target, nil)
 	}
 	if v == "/reload" {
-		saveState(m.sock, persistedState{Cur: m.cur, Scroll: m.scroll, Draft: m.input.Value()})
+		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
 		m.reloadPending = true
 		return tea.Quit
 	}
@@ -952,35 +1128,6 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return nil
 	}
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v})
-}
-
-// maxScroll mirrors view.go slicing to clamp PgUp/PgDn.
-func (m Model) maxScroll() int {
-	logRows := max(1, m.height-5)
-	contentCols := max(20, m.width-leftPaneWidth-12)
-	streamCap := max(1, logRows/streamCapFrac)
-	reserve := 0
-	if s, ok := m.streamBuf[m.cur]; ok {
-		tail, _ := tailVisualRows(s, streamCap, contentCols)
-		reserve = min(streamCap, visualRows(tail, contentCols))
-	}
-	window := max(1, logRows-reserve)
-	blocks := m.allBlocks(contentCols)
-	visibleAtZero := 0
-	cum := 0
-	for i := len(blocks) - 1; i >= 0; i-- {
-		b := blocks[i]
-		sep := 0
-		if visibleAtZero > 0 {
-			sep = 1
-		}
-		if cum+b.rows+sep > window {
-			break
-		}
-		visibleAtZero++
-		cum += b.rows + sep
-	}
-	return max(0, len(blocks)-visibleAtZero)
 }
 
 func (m Model) allBlocks(contentCols int) []renderedBlock {
