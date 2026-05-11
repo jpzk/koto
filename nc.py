@@ -162,6 +162,40 @@ def stop(g):
     subprocess.run(["podman","rm","-f",f"cs_{g}"], capture_output=True)
 
 
+def destroy(g):
+    """Stop the sidecar, drop the group from groups.json, remove the
+    workspace dir. Used by /destroy from the TUI. `main` is protected —
+    it's the orchestrator with the /peers RW mount.
+    Note: proxy.py's port listener for this group keeps running (it only
+    adds, never removes). Accepted trade-off — port leaks until daemon
+    restart, no traffic flows there once the group's gone."""
+    if g == "main":
+        return {"ok": False, "error": "main group is protected; use `make stop` to tear everything down"}
+    stop(g)
+    # Drop from groups.json (frees port for re-allocation later).
+    if GROUPS_FILE.exists():
+        try:
+            m = json.loads(GROUPS_FILE.read_text())
+            if g in m:
+                del m[g]
+                GROUPS_FILE.write_text(json.dumps(m))
+        except Exception: pass
+    # Remove workspace (conversation history, .cs/log, config).
+    try:
+        import shutil
+        shutil.rmtree(vol(g), ignore_errors=True)
+    except Exception: pass
+    # Tear down daemon bookkeeping so future /new <g> starts clean.
+    with SUBS_LOCK:
+        TAILS.discard(g)
+        if g in SUBS:
+            for f in SUBS[g]:
+                try: f.close()
+                except Exception: pass
+            del SUBS[g]
+    return {"ok": True}
+
+
 # ---- streaming: tail group log files, fan out to subscribers --------------
 SUBS_LOCK = threading.Lock()
 SUBS = {}        # group -> set of file objects (writers) listening for events
@@ -187,6 +221,17 @@ def _emit(g, event, **kw):
             except Exception: pass
 
 
+def _ping_loop():
+    # Periodic write to every subscriber so a half-dead unix socket gets pruned.
+    # Without traffic, kernel may buffer indefinitely and _emit never sees the EPIPE
+    # that triggers cleanup → TUI's reader never sees EOF → no reconnect.
+    while True:
+        time.sleep(15)
+        with SUBS_LOCK: groups = list(SUBS.keys())
+        for g in groups:
+            _emit(g, "ping")
+
+
 _TS_RE = __import__("re").compile(r"^\[ts:(\d+)\]$")
 
 
@@ -204,16 +249,18 @@ def _tail_log(g):
     inode = p.stat().st_ino
     buf = ""
     pending_ts = None    # ts marker captured, applies to the next non-marker line
+    in_thinking = False  # between [[think_begin]] and [[think_end]] markers
+    think_body = []      # accumulated thinking lines; emitted on think_end
     while True:
         try:
             st = p.stat()
             if st.st_ino != inode:
                 # File replaced (sidecar restart with truncate-and-recreate)
                 f.close(); f = open(p, "r", encoding="utf-8", errors="replace")
-                inode = st.st_ino; buf = ""; pending_ts = None
+                inode = st.st_ino; buf = ""; pending_ts = None; in_thinking = False
             elif st.st_size < f.tell():
                 # File truncated in place (e.g. /clear via daemon)
-                f.seek(0); buf = ""; pending_ts = None
+                f.seek(0); buf = ""; pending_ts = None; in_thinking = False
         except OSError:
             time.sleep(0.1); continue
         chunk = f.read()
@@ -227,15 +274,49 @@ def _tail_log(g):
             ts_marker = _parse_ts_line(buf)
             if ts_marker is not None:
                 pending_ts = ts_marker
+            elif buf == "[[think_begin]]":
+                in_thinking = True
+                think_body = []
+                _emit(g, "thinking_begin", ts_override=pending_ts)
+                pending_ts = None
+            elif buf.startswith("[[think_end]] "):
+                # [[think_end]] <word_count>
+                try: words = int(buf[14:].strip())
+                except Exception: words = 0
+                in_thinking = False
+                body = "\n".join(think_body)
+                think_body = []
+                _emit(g, "thinking_done", words=words, body=body, ts_override=pending_ts)
+                pending_ts = None
+            elif in_thinking:
+                # Lines inside a thinking block — emit as full thinking line.
+                if buf:
+                    think_body.append(buf)
+                    _emit(g, "thinking", text=buf, ts_override=pending_ts)
+                    pending_ts = None
             elif buf.startswith(">>> "):
                 _emit(g, "prompt", msg=buf[4:], ts_override=pending_ts)
+                pending_ts = None
+            elif buf.startswith("[[tool]] "):
+                # [[tool]] <name> <input_json>
+                rest = buf[9:]
+                sp = rest.find(" ")
+                if sp < 0:
+                    name, inp = rest, ""
+                else:
+                    name, inp = rest[:sp], rest[sp+1:]
+                _emit(g, "tool", name=name, input=inp, ts_override=pending_ts)
                 pending_ts = None
             else:
                 _emit(g, "done", text=buf, ts_override=pending_ts)
                 pending_ts = None
             buf = ""; i = j + 1
-        if buf and not buf.startswith(">") and not buf.startswith("[ts:"):
-            _emit(g, "stream", text=buf)
+        # Partial-line emit: in-flight text or in-flight thinking.
+        if buf and not buf.startswith(">") and not buf.startswith("[ts:") and not buf.startswith("[[tool]]") and not buf.startswith("[[think"):
+            if in_thinking:
+                _emit(g, "thinking_stream", text=buf)
+            else:
+                _emit(g, "stream", text=buf)
 
 
 def _ensure_tail(g):
@@ -261,15 +342,46 @@ def _read_history(g):
         return []
     events = []
     pending_ts = None
+    in_thinking = False
+    think_body = []
     for line in text.split("\n"):
         if not line: continue
         ts_marker = _parse_ts_line(line)
         if ts_marker is not None:
             pending_ts = ts_marker; continue
-        ev = {"group": g, "historical": True,
-              "ts": pending_ts if pending_ts is not None else fallback_ts}
+        ts = pending_ts if pending_ts is not None else fallback_ts
+        # think_begin/end frame: collapse the entire thinking block into one
+        # `thinking_done` event with the full body attached so the TUI can
+        # expand it on demand (ctrl+t toggle) without re-reading the log.
+        if line == "[[think_begin]]":
+            in_thinking = True
+            think_body = []
+            pending_ts = None
+            continue
+        if line.startswith("[[think_end]] "):
+            try: words = int(line[14:].strip())
+            except Exception: words = 0
+            events.append({"group": g, "historical": True, "ts": ts,
+                           "event": "thinking_done", "words": words,
+                           "body": "\n".join(think_body)})
+            in_thinking = False
+            think_body = []
+            pending_ts = None
+            continue
+        if in_thinking:
+            think_body.append(line)
+            pending_ts = None
+            continue
+        ev = {"group": g, "historical": True, "ts": ts}
         if line.startswith(">>> "):
             ev["event"] = "prompt"; ev["msg"] = line[4:]
+        elif line.startswith("[[tool]] "):
+            rest = line[9:]
+            sp = rest.find(" ")
+            if sp < 0:
+                ev["event"] = "tool"; ev["name"] = rest; ev["input"] = ""
+            else:
+                ev["event"] = "tool"; ev["name"] = rest[:sp]; ev["input"] = rest[sp+1:]
         else:
             ev["event"] = "done"; ev["text"] = line
         events.append(ev)
@@ -356,6 +468,9 @@ def _met(req):
         "global_metric":  _latest_metric_any(),               # account-wide (budget)
     }
 
+def _destroy(req): return destroy(req["group"])
+
+
 def _restart(req):
     """Stop the sidecar container and respawn it. Workspace + session files
     are preserved (claude resumes via --continue on next message), so this
@@ -367,7 +482,7 @@ def _restart(req):
 
 
 HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop,
-            "restart": _restart,
+            "destroy": _destroy, "restart": _restart,
             "history": _hist, "config": _config, "metrics": _met, "clear": _clear}
 
 
@@ -413,6 +528,7 @@ def main():
     os.chmod(SOCK_PATH, 0o660)
     print(f"clawsond ready  socket={SOCK_PATH}", flush=True)
 
+    threading.Thread(target=_ping_loop, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     while True:
         try: c, _ = s.accept()

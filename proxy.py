@@ -6,6 +6,7 @@ HERE = pathlib.Path(__file__).parent
 CRED = pathlib.Path(os.environ.get("CRED_PATH") or pathlib.Path.home() / ".claude/.credentials.json")
 METRICS = HERE / "metrics.jsonl"
 GROUPS_FILE = HERE / "groups.json"
+GROUPS_DIR = HERE / "groups"
 UPSTREAM = "https://api.anthropic.com"
 KEY = os.environ.get("ANTHROPIC_API_KEY")
 LOCK = threading.Lock()
@@ -33,6 +34,22 @@ def auth_headers():
         "anthropic-beta": "oauth-2025-04-20",
         "anthropic-version": "2023-06-01",
     }
+
+
+def _log_append(group, data):
+    """Append raw bytes to the group's sidecar log so the daemon's tailer
+    picks them up. claude-code-cli filters `thinking` blocks out of its
+    stream-json output, but the API itself sends them; we intercept here
+    and route them into the same log file the sidecar writes to. The
+    daemon understands `[[think_begin]]` / `[[think_end]] <words>` framing
+    and routes lines between them as thinking events to subscribers.
+    POSIX guarantees writes <= PIPE_BUF (~4KB) under O_APPEND are atomic,
+    so this is race-safe with the sidecar's concurrent writes."""
+    if not group: return
+    p = GROUPS_DIR / group / ".cs" / "log"
+    try:
+        with open(p, "ab") as f: f.write(data)
+    except Exception: pass
 
 
 def log(group, path, status, hdrs, usage, dur):
@@ -81,6 +98,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if k.lower() not in skip: self.send_header(k, v)
         self.end_headers()
         usage = {}
+        in_thinking = False
+        thinking_words = 0
         try:
             if "event-stream" in rh.get("Content-Type", ""):
                 for line in r:
@@ -91,6 +110,25 @@ class H(http.server.BaseHTTPRequestHandler):
                             ev = json.loads(s[5:].strip())
                             for u in (ev.get("usage"), (ev.get("message") or {}).get("usage")):
                                 if u: usage.update(u)
+                            # Surface thinking blocks into the sidecar log so
+                            # they show up in the TUI alongside the response.
+                            t = ev.get("type", "")
+                            if t == "content_block_start":
+                                cb = ev.get("content_block", {})
+                                if cb.get("type") == "thinking":
+                                    in_thinking = True
+                                    thinking_words = 0
+                                    _log_append(group, b"[[think_begin]]\n")
+                            elif t == "content_block_delta" and in_thinking:
+                                d = ev.get("delta", {})
+                                if d.get("type") == "thinking_delta":
+                                    txt = d.get("thinking", "")
+                                    if txt:
+                                        _log_append(group, txt.encode("utf-8"))
+                                        thinking_words += len(txt.split())
+                            elif t == "content_block_stop" and in_thinking:
+                                in_thinking = False
+                                _log_append(group, f"\n[[think_end]] {thinking_words}\n".encode("utf-8"))
                         except Exception: pass
             else:
                 data = r.read(); self.wfile.write(data)

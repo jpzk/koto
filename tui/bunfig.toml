@@ -1,4 +1,0 @@
-# Project-local override of ~/.bunfig.toml.
-# Per CLAUDE.md: 6-week dependency lag rule. 6 weeks = 3,628,800 seconds.
-[install]
-minimumReleaseAge = 3628800
