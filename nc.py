@@ -4,6 +4,7 @@ import atexit, base64, datetime, json, os, pathlib, shutil, signal, socket, subp
 
 HERE = pathlib.Path(__file__).parent.resolve()
 ROOT = HERE / "groups"
+SKILLS_DIR = HERE / "skills"
 GROUPS_FILE = HERE / "groups.json"
 SOCK_DIR  = HERE / "run"
 SOCK_PATH = SOCK_DIR / "clawson.sock"
@@ -47,6 +48,11 @@ def ensure(g, main=False):
             "-e",f"ANTHROPIC_BASE_URL=http://{PROXY_HOST}:{port}"]
     if (HERE / "prompts/global.md").exists():
         args += ["-v", f"{HERE}/prompts/global.md:/prompts/global.md:ro"]
+    # Skills library: ro for everyone, rw for main so the orchestrator can
+    # author new skills mid-session. SKILLS_DIR exists from `make host-run`
+    # but we mkdir defensively so a fresh checkout works.
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    args += ["-v", f"{SKILLS_DIR}:/skills:{'rw' if main else 'ro'}"]
     if main: args += ["-v", f"{ROOT}:/peers"]
     args.append(IMAGE)
     subprocess.run(args, check=True, capture_output=True, text=True)
@@ -109,6 +115,105 @@ def _context_block(m):
     )
 
 
+_SKILL_CACHE = {"mtime": 0.0, "items": []}
+
+
+def _skill_catalog():
+    """Walk SKILLS_DIR/<name>/SKILL.md, parse frontmatter, return
+    [{"name": str, "description": str, "path": "/skills/<name>/SKILL.md"}].
+
+    Frontmatter convention (YAML-like, but we only care about two keys):
+        ---
+        name: <name>
+        description: <one-line description>
+        ---
+    Missing frontmatter ⇒ description from first non-blank body line.
+    Cached against the dir's mtime so a TUI listing is cheap to refresh."""
+    if not SKILLS_DIR.exists(): return []
+    try: mt = SKILLS_DIR.stat().st_mtime
+    except Exception: mt = 0.0
+    # also fold in each SKILL.md's mtime so edits to existing skills bust the cache
+    inner = 0.0
+    for sub in SKILLS_DIR.iterdir():
+        sm = sub / "SKILL.md"
+        if sm.exists():
+            try: inner = max(inner, sm.stat().st_mtime)
+            except Exception: pass
+    mt = max(mt, inner)
+    if mt and mt == _SKILL_CACHE["mtime"]:
+        return _SKILL_CACHE["items"]
+
+    items = []
+    for sub in sorted(SKILLS_DIR.iterdir()):
+        if not sub.is_dir(): continue
+        sm = sub / "SKILL.md"
+        if not sm.exists(): continue
+        try: txt = sm.read_text(encoding="utf-8", errors="replace")
+        except Exception: continue
+        name, desc = sub.name, ""
+        if txt.startswith("---"):
+            end = txt.find("\n---", 3)
+            if end > 0:
+                fm = txt[3:end]
+                for ln in fm.splitlines():
+                    if ":" not in ln: continue
+                    k, v = ln.split(":", 1)
+                    k, v = k.strip(), v.strip()
+                    if k == "name" and v: name = v
+                    elif k == "description" and v: desc = v
+        if not desc:
+            body = txt.split("---", 2)[-1] if txt.startswith("---") else txt
+            for ln in body.splitlines():
+                ln = ln.strip().lstrip("#").strip()
+                if ln: desc = ln; break
+        items.append({"name": name, "description": desc,
+                      "path": f"/skills/{sub.name}/SKILL.md"})
+    _SKILL_CACHE["mtime"] = mt
+    _SKILL_CACHE["items"] = items
+    return items
+
+
+def _compose_system_prompt(g):
+    """Build the full --append-system-prompt content for group `g`:
+       global.md → per-group prompt.md → enabled-skills manifest → memory note.
+    Empty sections are skipped. Returns the composed string."""
+    parts = []
+    gp = HERE / "prompts/global.md"
+    if gp.exists():
+        try: parts.append(gp.read_text(encoding="utf-8", errors="replace").rstrip())
+        except Exception: pass
+    lp = vol(g) / "prompt.md"
+    if lp.exists():
+        try: parts.append(lp.read_text(encoding="utf-8", errors="replace").rstrip())
+        except Exception: pass
+
+    enabled = []
+    cfg_p = vol(g) / ".cs/config.json"
+    if cfg_p.exists():
+        try: enabled = list(json.loads(cfg_p.read_text()).get("skills") or [])
+        except Exception: enabled = []
+    if enabled:
+        cat = {s["name"]: s for s in _skill_catalog()}
+        lines = ["## Available skills",
+                 "These are curated for this group. Load full content via your Read tool when relevant; descriptions below are deliberately terse."]
+        any_present = False
+        for nm in enabled:
+            it = cat.get(nm)
+            if not it: continue
+            any_present = True
+            lines.append(f"- **{it['name']}**: {it['description']} — path: {it['path']}")
+        if any_present:
+            parts.append("\n".join(lines))
+
+    parts.append(
+        "## Memory\n"
+        "Your persistent memory namespace is at /workspace/memory/. "
+        "Read MEMORY.md first for the index; create or update files under /workspace/memory/ "
+        "to persist facts across turns. Memory survives /clear."
+    )
+    return "\n\n".join(p for p in parts if p)
+
+
 def send(g, msg):
     # Idempotently ensure the sidecar is up — auto-spawns if user did /sw to
     # a stopped or never-spawned group and is now sending a message.
@@ -124,6 +229,19 @@ def send(g, msg):
     try:
         with open(log, "a") as f:
             f.write(f"[ts:{int(time.time()*1000)}]\n>>> {msg}\n")
+    except Exception: pass
+
+    # Compose the system prompt fresh per turn and write it to a workspace
+    # file the entrypoint will cat into --append-system-prompt. Centralizing
+    # this in Python (rather than in entrypoint.sh) makes the assembly
+    # testable and lets us add skills/memory/etc. without touching shell.
+    try:
+        sp = vol(g) / ".cs/system-prompt.md"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(_compose_system_prompt(g))
+    except Exception: pass
+    # Ensure the memory namespace exists so the agent can write into it.
+    try: (vol(g) / "memory").mkdir(parents=True, exist_ok=True)
     except Exception: pass
 
     metric = _latest_metric(g)
@@ -389,14 +507,15 @@ def _read_history(g):
     return events
 
 
-CONFIG_KEYS = ("model", "effort")  # whitelist what `config` accepts
+CONFIG_KEYS = ("model", "effort", "skills")  # whitelist what `config` accepts
 
 
 def _config(req):
-    """Get or merge per-group config. Empty string clears a field.
-    {"cmd":"config","group":"main"}                     → returns current
-    {"cmd":"config","group":"main","model":"sonnet"}    → sets, returns merged
-    {"cmd":"config","group":"main","model":""}          → clears `model`
+    """Get or merge per-group config. Empty string / empty list clears a field.
+    {"cmd":"config","group":"main"}                          → returns current
+    {"cmd":"config","group":"main","model":"sonnet"}         → sets, returns merged
+    {"cmd":"config","group":"main","skills":["x","y"]}       → sets list
+    {"cmd":"config","group":"main","model":""}               → clears `model`
     """
     g = req["group"]
     p = vol(g) / ".cs/config.json"
@@ -407,13 +526,20 @@ def _config(req):
         except Exception: cfg = {}
     changed = False
     for k in CONFIG_KEYS:
-        if k in req:
-            v = req[k]
-            if v is None or v == "":
-                if cfg.pop(k, None) is not None: changed = True
-            else:
-                if cfg.get(k) != v: changed = True
-                cfg[k] = v
+        if k not in req: continue
+        v = req[k]
+        # Clear semantics: None, "", or [] all drop the key.
+        if v is None or v == "" or v == []:
+            if cfg.pop(k, None) is not None: changed = True
+            continue
+        if k == "skills":
+            # Skills are a list of skill names. Reject non-list values rather
+            # than silently coercing, so the caller knows the shape is wrong.
+            if not isinstance(v, list): continue
+            # Dedup while preserving order so the agent sees a stable manifest.
+            v = list(dict.fromkeys(s for s in v if isinstance(s, str) and s))
+        if cfg.get(k) != v: changed = True
+        cfg[k] = v
     if changed: p.write_text(json.dumps(cfg))
     return {"ok": True, "config": cfg}
 
@@ -423,6 +549,58 @@ def _send(req):  send(req["group"], req["msg"]); return {"ok": True}
 def _list(req):  return {"ok": True, "groups": list_groups()}
 def _stop(req):  stop(req["group"]); return {"ok": True}
 def _hist(req):  return {"ok": True, "events": _read_history(req["group"])}
+
+
+_SKILL_NAME_RE = __import__("re").compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _skill_list(req):
+    """Return the skill catalog. If `group` is set, mark which skills are
+    enabled for that group so the TUI can render a single combined view."""
+    items = list(_skill_catalog())
+    enabled = set()
+    g = req.get("group")
+    if g:
+        cfg_p = vol(g) / ".cs/config.json"
+        if cfg_p.exists():
+            try: enabled = set(json.loads(cfg_p.read_text()).get("skills") or [])
+            except Exception: enabled = set()
+    for it in items:
+        it["enabled"] = it["name"] in enabled
+    return {"ok": True, "skills": items}
+
+
+def _skill_new(req):
+    """Scaffold skills/<name>/SKILL.md with frontmatter template. Idempotent —
+    refuses if the file already exists so we never clobber an in-progress edit."""
+    name = (req.get("name") or "").strip()
+    if not _SKILL_NAME_RE.match(name):
+        return {"ok": False, "error": "name must match [a-z0-9][a-z0-9_-]{0,63}"}
+    d = SKILLS_DIR / name
+    p = d / "SKILL.md"
+    if p.exists():
+        return {"ok": False, "error": f"skills/{name}/SKILL.md already exists"}
+    d.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        f"---\nname: {name}\ndescription: TODO one-line description.\n---\n"
+        f"# {name}\n\nReplace this body with the skill's full instructions.\n"
+    )
+    # Bust the catalog cache so the new skill shows up immediately.
+    _SKILL_CACHE["mtime"] = 0.0
+    return {"ok": True, "path": str(p.relative_to(HERE))}
+
+
+def _skill_read(req):
+    """Return raw SKILL.md content for a named skill. Used by /skill show in
+    the TUI, which can't read host files directly (sock-only container)."""
+    name = (req.get("name") or "").strip()
+    if not _SKILL_NAME_RE.match(name):
+        return {"ok": False, "error": "invalid skill name"}
+    p = SKILLS_DIR / name / "SKILL.md"
+    if not p.exists():
+        return {"ok": False, "error": f"no such skill: {name}"}
+    try: return {"ok": True, "name": name, "content": p.read_text(encoding="utf-8", errors="replace")}
+    except Exception as e: return {"ok": False, "error": str(e)}
 
 
 def _clear(req):
@@ -483,7 +661,8 @@ def _restart(req):
 
 HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop,
             "destroy": _destroy, "restart": _restart,
-            "history": _hist, "config": _config, "metrics": _met, "clear": _clear}
+            "history": _hist, "config": _config, "metrics": _met, "clear": _clear,
+            "skills": _skill_list, "skill_new": _skill_new, "skill_read": _skill_read}
 
 
 def serve(client):

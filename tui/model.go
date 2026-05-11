@@ -161,7 +161,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new  /sw  /ls  /restart  /destroy  /clear  /config  /reload  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -538,6 +538,60 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case daemonRespMsg:
 		return m, m.handleDaemonResp(msg)
+
+	case skillListMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/skill list: %v", msg.err)})
+			return m, nil
+		}
+		if len(msg.skills) == 0 {
+			m.addLine(logLine{kind: "sys", group: msg.group, text: "no skills in catalog (drop a SKILL.md into skills/<name>/)"})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("skills for %s:", msg.group)})
+		for _, s := range msg.skills {
+			mark := " "
+			if s.Enabled {
+				mark = "✓"
+			}
+			m.addLine(logLine{kind: "sys", group: msg.group,
+				text: fmt.Sprintf("  %s %s — %s", mark, s.Name, s.Description)})
+		}
+		return m, nil
+
+	case skillReadMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/skill show %s: %v", msg.name, msg.err)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("── skills/%s/SKILL.md ──", msg.name)})
+		// Treat as a response block so it gets glamour-rendered (markdown).
+		m.addLine(logLine{kind: "response", group: m.cur, text: msg.content})
+		return m, nil
+
+	case skillNewMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/skill new %s: %v", msg.name, msg.err)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur,
+			text: fmt.Sprintf("scaffolded %s — edit on host then /skill enable %s", msg.path, msg.name)})
+		return m, nil
+
+	case skillToggleMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/skill toggle %s: %v", msg.name, msg.err)})
+			return m, nil
+		}
+		switch msg.action {
+		case "enabled":
+			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("enabled skill %s for %s", msg.name, msg.group)})
+		case "disabled":
+			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("disabled skill %s for %s", msg.name, msg.group)})
+		default:
+			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("skill %s already in that state for %s", msg.name, msg.group)})
+		}
+		return m, nil
 
 	case pluginLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
@@ -1026,6 +1080,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if v == "/ls" {
 		return listCmd(m.sock)
+	}
+	if v == "/skill" || strings.HasPrefix(v, "/skill ") {
+		rest := ""
+		if len(v) > 6 {
+			rest = v[7:]
+		}
+		return m.handleSkillCmd(rest)
 	}
 	if v == "/clear" {
 		return daemonCmd(m.sock, "clear", m.cur, nil)

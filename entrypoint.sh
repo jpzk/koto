@@ -13,16 +13,13 @@ while IFS= read -r b64 <&3; do
   # FIFO line, so the TUI log shows the user's typed text. $msg here is the
   # AUGMENTED version (original + <clawson-context> rate-limit block).
 
-  GP=""; LP=""
-  [ -f /prompts/global.md ]   && GP=$(cat /prompts/global.md)
-  [ -f /workspace/prompt.md ] && LP=$(cat /workspace/prompt.md)
-  if [ -n "$GP" ] && [ -n "$LP" ]; then APPEND="$GP
-
-$LP"
-  elif [ -n "$GP" ]; then APPEND="$GP"
-  elif [ -n "$LP" ]; then APPEND="$LP"
-  else APPEND=""
-  fi
+  # System prompt is composed by the daemon (nc.py:_compose_system_prompt) and
+  # written to /workspace/.cs/system-prompt.md immediately before each FIFO
+  # write. We just cat it. Centralizing assembly in Python keeps the
+  # global/per-group/skills/memory layering testable and lets us evolve it
+  # without touching this shell loop.
+  APPEND=""
+  [ -f /workspace/.cs/system-prompt.md ] && APPEND=$(cat /workspace/.cs/system-prompt.md)
 
   # Per-group config (model / effort) lives in /workspace/.cs/config.json.
   # Read via node since the image has it; jq isn't installed.
