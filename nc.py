@@ -356,7 +356,18 @@ def _met(req):
         "global_metric":  _latest_metric_any(),               # account-wide (budget)
     }
 
+def _restart(req):
+    """Stop the sidecar container and respawn it. Workspace + session files
+    are preserved (claude resumes via --continue on next message), so this
+    is the right way to recover a wedged sidecar without losing context."""
+    g = req["group"]
+    stop(g)
+    port = ensure(g, main=(g == "main"))
+    return {"ok": True, "port": port}
+
+
 HANDLERS = {"spawn": _spawn, "send": _send, "list": _list, "stop": _stop,
+            "restart": _restart,
             "history": _hist, "config": _config, "metrics": _met, "clear": _clear}
 
 
