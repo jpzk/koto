@@ -555,6 +555,15 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		// Wheel up/down → forward to viewport. Viewport's Update handles
+		// the wheel buttons internally (MouseWheelEnabled defaults to true).
+		// Update autoFollow so the bottom-stick toggle matches keyboard scroll.
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		m.autoFollow = m.vp.AtBottom()
+		return m, cmd
 	}
 	return m, nil
 }

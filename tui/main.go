@@ -27,7 +27,7 @@ func main() {
 	}
 
 	m := newModel(sock, ctxWindow)
-	prog = tea.NewProgram(m, tea.WithAltScreen())
+	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := prog.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
