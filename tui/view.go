@@ -21,6 +21,7 @@ var (
 	cWhite    = lipgloss.Color("7")
 	cGray     = lipgloss.Color("8")
 	cBrWhite  = lipgloss.Color("15")
+	cPink     = lipgloss.Color("205")
 )
 
 // Powerline-ish glyphs. Same as the Ink TUI used.
@@ -274,7 +275,7 @@ func (m Model) renderTree(rows int) string {
 			others = order[1:]
 			running := m.groups["main"].Running
 			isCur := m.cur == "main"
-			lines = append(lines, m.renderTreeRow("main", "", running, isCur, hovered("main"), pad))
+			lines = append(lines, m.renderTreeRow("main", "", running, isCur, hovered("main"), m.unread["main"], pad))
 		}
 		for i, g := range others {
 			running := m.groups[g].Running
@@ -283,7 +284,7 @@ func (m Model) renderTree(rows int) string {
 			if i == len(others)-1 {
 				branch = "└─ "
 			}
-			lines = append(lines, m.renderTreeRow(g, branch, running, isCur, hovered(g), pad))
+			lines = append(lines, m.renderTreeRow(g, branch, running, isCur, hovered(g), m.unread[g], pad))
 		}
 	}
 
@@ -299,7 +300,7 @@ func (m Model) renderTree(rows int) string {
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
 }
 
-func (m Model) renderTreeRow(g, branch string, running, isCur, hov bool, pad func(string, int) string) string {
+func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool, pad func(string, int) string) string {
 	contentW := leftPaneWidth - 2 // account for paddingX
 	w := contentW - len(branch) - 2
 	if w < 1 {
@@ -317,6 +318,13 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov bool, pad fun
 	} else if !running {
 		nameColor = cGray
 	}
+	// Unread output (only meaningful when the group isn't the current focus)
+	// overrides the dot to a pink filled marker and bolds the name. Pink
+	// (256-color 205) is far enough from green/yellow to read distinctly.
+	if unread && !isCur {
+		dot = "● "
+		dotColor = cPink
+	}
 
 	if hov {
 		// highlight row with cyan background, black foreground for the whole row
@@ -330,7 +338,7 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov bool, pad fun
 	}
 	parts += lipgloss.NewStyle().Foreground(dotColor).Render(dot)
 	style := lipgloss.NewStyle().Foreground(nameColor)
-	if isCur {
+	if isCur || (unread && !isCur) {
 		style = style.Bold(true)
 	}
 	parts += style.Render(pad(g, w))
@@ -517,7 +525,9 @@ func (m Model) renderHint() string {
 		return dim.MaxWidth(m.width).Render(" ↑↓ switch · ⇥/⎋/↩ back")
 	}
 	var parts []string
-	if _, ok := m.streamBuf[m.cur]; ok {
+	_, streaming := m.streamBuf[m.cur]
+	_, thinking := m.thinkingBuf[m.cur]
+	if streaming || thinking {
 		parts = append(parts, " streaming…")
 	} else {
 		parts = append(parts, " ↩ send")
@@ -537,6 +547,10 @@ func (m Model) renderHint() string {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))
 	}
-	parts = append(parts, "^c exit")
+	if streaming || thinking {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render("^c stop"))
+	} else {
+		parts = append(parts, "^c exit")
+	}
 	return dim.MaxWidth(m.width).Render(" " + strings.Join(parts, "  ·  "))
 }

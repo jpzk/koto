@@ -161,6 +161,14 @@ type Model struct {
 	// Toggled with ctrl+d.
 	expandedToolOuts bool
 
+	// unread marks groups that produced output (a response, tool call,
+	// thought, or tool result) while not focused. Cleared on switch to the
+	// group and on /destroy. Ephemeral — not persisted across /reload, since
+	// "unread" only makes sense relative to what you've already looked at in
+	// the current TUI session. Historical events (replayed on subscribe) are
+	// explicitly skipped so a fresh attach doesn't light up every group.
+	unread map[string]bool
+
 	// mdCache holds glamour-rendered response bodies keyed by width + text.
 	// Without this, every View() pass — driven by stream events at up to
 	// 60+ msg/s — re-runs glamour on every completed response block (~3ms
@@ -175,7 +183,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -208,6 +216,7 @@ func newModel(sock string, ctxWindow int) Model {
 		lastThoughtBody: map[string]string{},
 		toolOutBuf:      map[string]string{},
 		toolOutTail:     map[string]string{},
+		unread:          map[string]bool{},
 		input:      ti,
 		focus:      focusInput,
 		vp:         vp,
@@ -526,6 +535,17 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)
+		}
+		// Mark the group unread only when an off-screen group emits a real
+		// response line (`done` with non-empty text). Thinking, tool calls,
+		// and tool results are noisy intermediate signals — they fire many
+		// times per turn while the agent is just working, so badging on them
+		// would turn every active sidecar pink. The pink dot should mean
+		// "there is a new model reply for you to read", not "this sidecar is
+		// busy."
+		if !ev.Historical && ev.Group != m.cur &&
+			ev.Event == "done" && ev.Text != "" {
+			m.unread[ev.Group] = true
 		}
 		if ev.Group == m.cur {
 			m.refreshLog()
@@ -908,6 +928,23 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("restarted %s", msg.group)})
 		}
 		return listCmd(m.sock)
+	case "interrupt":
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stop: %v", msg.err)})
+			return nil
+		}
+		// Drop any in-flight stream/thinking state so the spinner stops
+		// immediately rather than waiting for the daemon's next emit.
+		delete(m.streamBuf, msg.group)
+		delete(m.thinkingBuf, msg.group)
+		delete(m.thinkingTail, msg.group)
+		delete(m.toolOutBuf, msg.group)
+		delete(m.toolOutTail, msg.group)
+		m.addLine(logLine{kind: "sys", group: msg.group, text: "stopped agent"})
+		if msg.group == m.cur {
+			m.refreshLog()
+		}
+		return nil
 	case "clear":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("clear: %v", msg.err)})
@@ -954,6 +991,17 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	if s == "ctrl+c" {
+		// Mid-flight: stop the agent instead of quitting. The streaming or
+		// thinking buffer for the current group is the signal that claude is
+		// running right now; interrupting clears it server-side and frees
+		// the sidecar's FIFO loop for the next message. A second ctrl+c
+		// once the stream's gone falls through to the quit path.
+		if _, streaming := m.streamBuf[m.cur]; streaming {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
+		if _, thinking := m.thinkingBuf[m.cur]; thinking {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
 		if m.plugin != nil {
 			m.plugin.abort()
 		}
@@ -1001,6 +1049,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.treeIdx > 0 {
 				m.treeIdx--
 				m.cur = order[m.treeIdx]
+				delete(m.unread, m.cur)
 				m.refreshLog()
 				m.vp.GotoBottom()
 				m.autoFollow = true
@@ -1009,6 +1058,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.treeIdx < len(order)-1 {
 				m.treeIdx++
 				m.cur = order[m.treeIdx]
+				delete(m.unread, m.cur)
 				m.refreshLog()
 				m.vp.GotoBottom()
 				m.autoFollow = true
@@ -1116,6 +1166,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if strings.HasPrefix(v, "/sw ") {
 		m.cur = strings.TrimSpace(v[4:])
+		delete(m.unread, m.cur)
 		m.refreshLog()
 		m.vp.GotoBottom()
 		m.autoFollow = true
@@ -1148,6 +1199,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			// Drop the focus first so we don't keep rendering a group whose
 			// log file is about to vanish.
 			m.cur = "main"
+			delete(m.unread, m.cur)
 			m.autoFollow = true
 		}
 		// Wipe any cached state for the group so a future /new <name> with
@@ -1157,6 +1209,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		delete(m.thinkingBuf, target)
 		delete(m.thinkingTail, target)
 		delete(m.lastThoughtBody, target)
+		delete(m.unread, target)
 		filtered := m.lines[:0]
 		for _, l := range m.lines {
 			if l.group != target {
@@ -1174,6 +1227,9 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("restarting %s…", target)})
 		return daemonCmd(m.sock, "restart", target, nil)
+	}
+	if v == "/stop" {
+		return daemonCmd(m.sock, "interrupt", m.cur, nil)
 	}
 	if v == "/reload" {
 		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})

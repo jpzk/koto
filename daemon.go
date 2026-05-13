@@ -227,6 +227,40 @@ func stopGroup(g string) {
 	_ = exec.Command("podman", "rm", "-f", csName(g)).Run()
 }
 
+// interruptAgent sends SIGINT to the running claude process inside the
+// sidecar without killing the entrypoint shell, so the FIFO `read` loop
+// survives and the next inbound message still works. We walk /proc inside
+// the container and signal any non-PID-1 process whose cmdline mentions
+// `claude-code` (matches the npm-installed cli.js path; stream_filter.js
+// and agent-browser-chrome don't match). Stream_filter exits on SIGPIPE
+// once claude's stdout closes — no need to signal it explicitly.
+//
+// procps (pkill/pgrep) isn't installed in the bookworm-slim sidecar, so
+// the /proc walk is done in plain POSIX sh.
+func interruptAgent(g string) error {
+	name := csName(g)
+	if !podmanRunning(name) {
+		return fmt.Errorf("group '%s' is not running", g)
+	}
+	const script = `hit=0
+for d in /proc/[0-9]*; do
+  p=${d##*/}
+  [ "$p" = 1 ] && continue
+  grep -aq claude-code "$d/cmdline" 2>/dev/null || continue
+  kill -INT "$p" 2>/dev/null && hit=1
+done
+[ "$hit" = 1 ] || echo no-claude-process >&2
+exit 0`
+	out, err := exec.Command("podman", "exec", name, "sh", "-c", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("podman exec: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if strings.Contains(string(out), "no-claude-process") {
+		return fmt.Errorf("no running claude process in group '%s'", g)
+	}
+	return nil
+}
+
 // ---- metrics tail --------------------------------------------------------
 
 func readTail(path string, max int) ([]byte, error) {
@@ -858,6 +892,12 @@ func tailLog(g string) {
 				}
 				emit(g, Event{Event: "tool", Name: name, Input: input, Ts: ts})
 				hasPending = false
+			} else if strings.HasPrefix(buf, "[[think_end]] ") || strings.HasPrefix(buf, "[[tool_out_end]] ") {
+				// Stray close marker outside a block (e.g. an empty
+				// thinking block that emitted begin+end while we were
+				// still settling state). Swallow it — emitting it as a
+				// `done` event surfaces raw framing in the TUI.
+				hasPending = false
 			} else {
 				emit(g, Event{Event: "done", Text: buf, Ts: ts})
 				hasPending = false
@@ -962,6 +1002,11 @@ func readHistory(g string) []Event {
 		if line == "[[tool_out_begin]]" {
 			inToolOut = true
 			toolOutBody = nil
+			hasPending = false
+			continue
+		}
+		if strings.HasPrefix(line, "[[think_end]] ") || strings.HasPrefix(line, "[[tool_out_end]] ") {
+			// Stray close marker outside a block — same rationale as the live tailer.
 			hasPending = false
 			continue
 		}
@@ -1170,6 +1215,16 @@ func dispatch(line []byte) any {
 			return errResp(err.Error())
 		}
 		stopGroup(req.Group)
+		return baseResp{OK: true}
+
+	case "interrupt":
+		var req groupReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if err := interruptAgent(req.Group); err != nil {
+			return errResp(err.Error())
+		}
 		return baseResp{OK: true}
 
 	case "destroy":
