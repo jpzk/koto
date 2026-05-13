@@ -700,6 +700,8 @@ func tailLog(g string) {
 	hasPending := false
 	inThinking := false
 	thinkBody := []string{}
+	inToolOut := false
+	toolOutBody := []string{}
 	for {
 		st, err := os.Stat(p)
 		if err != nil {
@@ -722,6 +724,8 @@ func tailLog(g string) {
 			hasPending = false
 			inThinking = false
 			thinkBody = nil
+			inToolOut = false
+			toolOutBody = nil
 		} else {
 			pos, _ := f.Seek(0, io.SeekCurrent)
 			if st.Size() < pos {
@@ -730,6 +734,8 @@ func tailLog(g string) {
 				hasPending = false
 				inThinking = false
 				thinkBody = nil
+				inToolOut = false
+				toolOutBody = nil
 			}
 		}
 		data := make([]byte, 64*1024)
@@ -775,6 +781,21 @@ func tailLog(g string) {
 					emit(g, Event{Event: "thinking", Text: buf, Ts: ts})
 					hasPending = false
 				}
+			} else if buf == "[[tool_out_begin]]" {
+				inToolOut = true
+				toolOutBody = nil
+				emit(g, Event{Event: "tool_result_begin", Ts: ts})
+				hasPending = false
+			} else if strings.HasPrefix(buf, "[[tool_out_end]] ") {
+				inToolOut = false
+				body := strings.Join(toolOutBody, "\n")
+				toolOutBody = nil
+				emit(g, Event{Event: "tool_result_done", Body: body, Ts: ts})
+				hasPending = false
+			} else if inToolOut {
+				toolOutBody = append(toolOutBody, buf)
+				emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
+				hasPending = false
 			} else if strings.HasPrefix(buf, ">>> ") {
 				emit(g, Event{Event: "prompt", Msg: buf[4:], Ts: ts})
 				hasPending = false
@@ -795,9 +816,11 @@ func tailLog(g string) {
 			buf = ""
 			i += j + 1
 		}
-		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[think") {
+		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") {
 			if inThinking {
 				emit(g, Event{Event: "thinking_stream", Text: buf})
+			} else if inToolOut {
+				emit(g, Event{Event: "tool_result_stream", Text: buf})
 			} else {
 				emit(g, Event{Event: "stream", Text: buf})
 			}
@@ -832,6 +855,8 @@ func readHistory(g string) []Event {
 	var pendingTS float64
 	inThinking := false
 	var thinkBody []string
+	inToolOut := false
+	var toolOutBody []string
 	for _, line := range strings.Split(string(b), "\n") {
 		if line == "" {
 			continue
@@ -867,6 +892,27 @@ func readHistory(g string) []Event {
 		}
 		if inThinking {
 			thinkBody = append(thinkBody, line)
+			hasPending = false
+			continue
+		}
+		if line == "[[tool_out_begin]]" {
+			inToolOut = true
+			toolOutBody = nil
+			hasPending = false
+			continue
+		}
+		if strings.HasPrefix(line, "[[tool_out_end]] ") {
+			events = append(events, Event{
+				Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
+				Body: strings.Join(toolOutBody, "\n"),
+			})
+			inToolOut = false
+			toolOutBody = nil
+			hasPending = false
+			continue
+		}
+		if inToolOut {
+			toolOutBody = append(toolOutBody, line)
 			hasPending = false
 			continue
 		}

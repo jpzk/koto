@@ -114,6 +114,15 @@ type Model struct {
 	// lands in the chat.
 	lastThoughtBody map[string]string
 
+	// Tool-output (stdout/stderr that claude saw from each tool_use) is
+	// captured the same way as thinking: a per-group accumulating body
+	// while a tool_result block is in flight, plus an in-flight tail that
+	// holds the last partial line. Cleared on tool_result_done, replaced
+	// in m.lines with a condensed `📤 N lines` entry that expands under
+	// ctrl+d (mirrors ctrl+t for thinking).
+	toolOutBuf  map[string]string
+	toolOutTail map[string]string
+
 	input textinput.Model
 	focus focusZone
 
@@ -146,6 +155,11 @@ type Model struct {
 	// Toggled with ctrl+t. Bodies live in the same logLine.text but the
 	// renderer slices to the first line when this is false.
 	expandedThoughts bool
+
+	// expandedToolOuts: same shape as expandedThoughts but for the
+	// `tool_out` kind (stdout/stderr captured from each tool_result block).
+	// Toggled with ctrl+d.
+	expandedToolOuts bool
 
 	// mdCache holds glamour-rendered response bodies keyed by width + text.
 	// Without this, every View() pass — driven by stream events at up to
@@ -192,6 +206,8 @@ func newModel(sock string, ctxWindow int) Model {
 		thinkingBuf:     map[string]string{},
 		thinkingTail:    map[string]string{},
 		lastThoughtBody: map[string]string{},
+		toolOutBuf:      map[string]string{},
+		toolOutTail:     map[string]string{},
 		input:      ti,
 		focus:      focusInput,
 		vp:         vp,
@@ -419,6 +435,8 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.lastThoughtBody[msg.group] = ev.Body
 				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
+			case "tool_result_done":
+				batch = append(batch, logLine{kind: "tool_out", group: msg.group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
 			}
 		}
 		// Per-group cap: keep only the most recent maxPerGroup events from
@@ -488,6 +506,23 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.lastThoughtBody[ev.Group] = ev.Body
 			m.addLine(logLine{kind: "thought", group: ev.Group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
+		case "tool_result_begin":
+			m.toolOutBuf[ev.Group] = ""
+			delete(m.toolOutTail, ev.Group)
+		case "tool_result":
+			cur := m.toolOutBuf[ev.Group]
+			if cur != "" {
+				cur += "\n"
+			}
+			m.toolOutBuf[ev.Group] = cur + ev.Text
+			delete(m.toolOutTail, ev.Group)
+		case "tool_result_stream":
+			// In-flight partial line, re-emitted whole on each chunk.
+			m.toolOutTail[ev.Group] = ev.Text
+		case "tool_result_done":
+			delete(m.toolOutBuf, ev.Group)
+			delete(m.toolOutTail, ev.Group)
+			m.addLine(logLine{kind: "tool_out", group: ev.Group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
 		}
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)
@@ -768,6 +803,35 @@ func formatThoughtFull(words int, body string) string {
 	return s + "\n" + body
 }
 
+// formatToolOut returns the summary line for a tool_result block. Body lines
+// are counted as the displayable size — the byte count from the wire is
+// available too but lines map better to terminal real estate when expanded.
+func formatToolOut(body string) string {
+	if body == "" {
+		return "tool output (empty)"
+	}
+	n := strings.Count(body, "\n") + 1
+	if strings.HasSuffix(body, "\n") {
+		n--
+	}
+	if n < 1 {
+		n = 1
+	}
+	suffix := "lines"
+	if n == 1 {
+		suffix = "line"
+	}
+	return fmt.Sprintf("tool output %d %s", n, suffix)
+}
+
+func formatToolOutFull(body string) string {
+	s := formatToolOut(body)
+	if body == "" {
+		return s
+	}
+	return s + "\n" + body
+}
+
 func (m Model) isAnimating() bool {
 	if _, ok := m.streamBuf[m.cur]; ok {
 		return true
@@ -907,6 +971,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// either as `🧠 thought N words` (collapsed) or that line plus the
 		// full thinking transcript indented underneath (expanded).
 		m.expandedThoughts = !m.expandedThoughts
+		m.refreshLog()
+		return m, nil
+	}
+	if s == "ctrl+d" {
+		// Mirror of ctrl+t for tool output: collapsed shows
+		// `📤 tool output N lines`, expanded shows the full body indented.
+		m.expandedToolOuts = !m.expandedToolOuts
 		m.refreshLog()
 		return m, nil
 	}
@@ -1182,10 +1253,10 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 		if l.group != "" && l.group != m.cur {
 			continue
 		}
-		// Thought blocks carry a multiline body that needs to stay paired
-		// with its own summary line; merging consecutive ones would lose
-		// the per-thought boundary on expand.
-		if n := len(srcs); n > 0 && srcs[n-1].kind == l.kind && srcs[n-1].group == l.group && l.kind != "thought" {
+		// Thought and tool_out blocks each carry a multiline body that needs
+		// to stay paired with its own summary line; merging consecutive ones
+		// would lose the per-block boundary on expand.
+		if n := len(srcs); n > 0 && srcs[n-1].kind == l.kind && srcs[n-1].group == l.group && l.kind != "thought" && l.kind != "tool_out" {
 			srcs[n-1].text += "\n" + l.text
 			if srcs[n-1].ts == 0 && l.ts != 0 {
 				srcs[n-1].ts = l.ts
@@ -1200,6 +1271,12 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 		// Collapse thought body unless expanded. First line is the summary;
 		// drop everything after it when collapsed.
 		if s.kind == "thought" && !m.expandedThoughts {
+			if i := strings.IndexByte(rendered, '\n'); i >= 0 {
+				rendered = rendered[:i]
+			}
+		}
+		// Same collapse rule for tool_out.
+		if s.kind == "tool_out" && !m.expandedToolOuts {
 			if i := strings.IndexByte(rendered, '\n'); i >= 0 {
 				rendered = rendered[:i]
 			}

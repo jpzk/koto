@@ -443,6 +443,18 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		for _, ln := range srcLines[1:] {
 			out = append(out, indent+"   "+bodyStyle.Render(ln))
 		}
+	case "tool_out":
+		// Same shape as "thought": first line is the summary, rest is the
+		// raw stdout/stderr that claude saw. Rendered with a separate glyph
+		// and a slightly tighter body style — tool output is typically
+		// shell-formatted and benefits from a fixed-width feel.
+		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("📤  ")
+		summaryStyle := lipgloss.NewStyle().Foreground(cGray)
+		bodyStyle := lipgloss.NewStyle().Foreground(cGray)
+		out = append(out, stampStr+glyph+summaryStyle.Render(srcLines[0]))
+		for _, ln := range srcLines[1:] {
+			out = append(out, indent+"   "+bodyStyle.Render(ln))
+		}
 	default: // response
 		bar := lipgloss.NewStyle().Foreground(cGray).Render("│ ")
 		for i, ln := range srcLines {
@@ -516,6 +528,11 @@ func (m Model) renderHint() string {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^t hide")
 	}
 	parts = append(parts, thoughtsHint)
+	toolOutsHint := "^d output"
+	if m.expandedToolOuts {
+		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
+	}
+	parts = append(parts, toolOutsHint)
 	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))

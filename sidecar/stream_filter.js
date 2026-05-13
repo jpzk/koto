@@ -42,6 +42,33 @@ rl.on('line', (line) => {
       breakLine();
       // Open a framed region; subsequent thinking_delta text is the body.
       fs.writeSync(1, '[[think_begin]]\n');
+    } else if (e.content_block.type === 'tool_result') {
+      // Tool results arrive atomically in claude-code's stream-json: the body
+      // is present in content_block_start, not streamed via deltas. Content
+      // is either a string (typical for Bash/Read) or an array of
+      // {type:"text",text:...} parts (multi-part / mixed-media results).
+      let body = '';
+      const c = e.content_block.content;
+      if (typeof c === 'string') {
+        body = c;
+      } else if (Array.isArray(c)) {
+        for (const part of c) {
+          if (part && part.type === 'text' && typeof part.text === 'string') {
+            body += part.text;
+          }
+        }
+      }
+      stampOnce();
+      breakLine();
+      // Mirror [[think_begin]] / [[think_end]] framing so the daemon tailer
+      // can parse this with the same state-machine pattern. The trailing
+      // count is bytes (utf-8) — the TUI may also show it as "N lines".
+      const bytes = Buffer.byteLength(body, 'utf8');
+      fs.writeSync(1, '[[tool_out_begin]]\n');
+      if (body.length) {
+        fs.writeSync(1, body.endsWith('\n') ? body : body + '\n');
+      }
+      fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
     }
     return;
   }
