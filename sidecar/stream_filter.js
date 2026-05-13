@@ -32,6 +32,20 @@ function breakLine() {
 // {type:"text",text:...} parts; non-text parts (images, etc.) are skipped.
 // Empty body still emits the markers so the daemon tailer sees an explicit
 // "empty result" event rather than missing the call's output entirely.
+//
+// Body lines that look like our own close markers (`[[think_end]] N`,
+// `[[tool_out_end]] N`) are escaped with a leading backslash. The daemon
+// tailer's nesting rule already prevents a body containing `[[*_begin]]`
+// or a non-matching `[[*_end]]` from misparsing — only the matching close
+// marker for the currently-open block is a risk. Escaping those line
+// prefixes closes that last hole. A user who runs e.g.
+// `echo '[[tool_out_end]] 0'` will see `\[[tool_out_end]] 0` rendered,
+// which is a tiny visual artifact in exchange for the framing being
+// unforgeable from inside tool output.
+function escapeBody(s) {
+  return s.replace(/^(\[\[(?:think_end|tool_out_end)\]\] )/gm, '\\$1');
+}
+
 function emitToolOut(content) {
   let body = '';
   if (typeof content === 'string') {
@@ -44,9 +58,10 @@ function emitToolOut(content) {
   stampOnce();
   breakLine();
   const bytes = Buffer.byteLength(body, 'utf8');
+  const safe = escapeBody(body);
   fs.writeSync(1, '[[tool_out_begin]]\n');
-  if (body.length) {
-    fs.writeSync(1, body.endsWith('\n') ? body : body + '\n');
+  if (safe.length) {
+    fs.writeSync(1, safe.endsWith('\n') ? safe : safe + '\n');
   }
   fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
 }

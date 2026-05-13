@@ -516,7 +516,33 @@ func composeSystemPrompt(g string) string {
 
 // ---- send -----------------------------------------------------------------
 
+// sendLocks serializes send() per group. Without this, two concurrent
+// senders (two TUIs, TUI + socat probe, etc.) could interleave a four-step
+// non-atomic sequence — write log marker → write system-prompt.md → encode
+// → write to FIFO — and the sidecar could end up running message-A under
+// the system prompt prepared for message-B. The mutex is per-group because
+// blocking is only needed within a single sidecar's serialization, not
+// across the daemon.
+var (
+	sendLocksMu sync.Mutex
+	sendLocks   = map[string]*sync.Mutex{}
+)
+
+func sendLock(g string) *sync.Mutex {
+	sendLocksMu.Lock()
+	defer sendLocksMu.Unlock()
+	m, ok := sendLocks[g]
+	if !ok {
+		m = &sync.Mutex{}
+		sendLocks[g] = m
+	}
+	return m
+}
+
 func send(g, msg string) error {
+	mu := sendLock(g)
+	mu.Lock()
+	defer mu.Unlock()
 	if _, err := ensure(g, g == "main"); err != nil {
 		return err
 	}
@@ -771,41 +797,53 @@ func tailLog(g string) {
 			if v, ok := parseTSLine(buf); ok {
 				pendingTS = v
 				hasPending = true
+				// While inside a thinking or tool_out block, ONLY the matching
+				// end marker can close the block. Every other line — including
+				// other begin markers, tool calls, prompt echoes, even
+				// `[[tool_out_end]]` while in thinking — is appended as body.
+				// This is what prevents marker injection: a tool whose stdout
+				// contains `[[think_begin]]` no longer opens a phantom block.
+				// The only remaining hole is a tool whose stdout contains the
+				// EXACT close marker for the block we're currently inside;
+				// stream_filter.js escapes those line-starts in body content
+				// before they reach the log.
+			} else if inThinking {
+				if strings.HasPrefix(buf, "[[think_end]] ") {
+					words := 0
+					if v, err := strconv.Atoi(strings.TrimSpace(buf[len("[[think_end]] "):])); err == nil {
+						words = v
+					}
+					inThinking = false
+					body := strings.Join(thinkBody, "\n")
+					thinkBody = nil
+					emit(g, Event{Event: "thinking_done", Words: words, Body: body, Ts: ts})
+					hasPending = false
+				} else if buf != "" {
+					thinkBody = append(thinkBody, buf)
+					emit(g, Event{Event: "thinking", Text: buf, Ts: ts})
+					hasPending = false
+				}
+			} else if inToolOut {
+				if strings.HasPrefix(buf, "[[tool_out_end]] ") {
+					inToolOut = false
+					body := strings.Join(toolOutBody, "\n")
+					toolOutBody = nil
+					emit(g, Event{Event: "tool_result_done", Body: body, Ts: ts})
+					hasPending = false
+				} else {
+					toolOutBody = append(toolOutBody, buf)
+					emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
+					hasPending = false
+				}
 			} else if buf == "[[think_begin]]" {
 				inThinking = true
 				thinkBody = nil
 				emit(g, Event{Event: "thinking_begin", Ts: ts})
 				hasPending = false
-			} else if strings.HasPrefix(buf, "[[think_end]] ") {
-				words := 0
-				if v, err := strconv.Atoi(strings.TrimSpace(buf[len("[[think_end]] "):])); err == nil {
-					words = v
-				}
-				inThinking = false
-				body := strings.Join(thinkBody, "\n")
-				thinkBody = nil
-				emit(g, Event{Event: "thinking_done", Words: words, Body: body, Ts: ts})
-				hasPending = false
-			} else if inThinking {
-				if buf != "" {
-					thinkBody = append(thinkBody, buf)
-					emit(g, Event{Event: "thinking", Text: buf, Ts: ts})
-					hasPending = false
-				}
 			} else if buf == "[[tool_out_begin]]" {
 				inToolOut = true
 				toolOutBody = nil
 				emit(g, Event{Event: "tool_result_begin", Ts: ts})
-				hasPending = false
-			} else if strings.HasPrefix(buf, "[[tool_out_end]] ") {
-				inToolOut = false
-				body := strings.Join(toolOutBody, "\n")
-				toolOutBody = nil
-				emit(g, Event{Event: "tool_result_done", Body: body, Ts: ts})
-				hasPending = false
-			} else if inToolOut {
-				toolOutBody = append(toolOutBody, buf)
-				emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
 				hasPending = false
 			} else if strings.HasPrefix(buf, ">>> ") {
 				emit(g, Event{Event: "prompt", Msg: buf[4:], Ts: ts})
@@ -881,49 +919,49 @@ func readHistory(g string) []Event {
 		if hasPending {
 			ts = pendingTS
 		}
+		// Same nesting priority as the live tailer: while inside a block,
+		// only the matching end marker can close it. See tailLog comment.
+		if inThinking {
+			if strings.HasPrefix(line, "[[think_end]] ") {
+				words := 0
+				if v, err := strconv.Atoi(strings.TrimSpace(line[len("[[think_end]] "):])); err == nil {
+					words = v
+				}
+				events = append(events, Event{
+					Event: "thinking_done", Group: g, Ts: ts, Historical: true,
+					Words: words, Body: strings.Join(thinkBody, "\n"),
+				})
+				inThinking = false
+				thinkBody = nil
+			} else {
+				thinkBody = append(thinkBody, line)
+			}
+			hasPending = false
+			continue
+		}
+		if inToolOut {
+			if strings.HasPrefix(line, "[[tool_out_end]] ") {
+				events = append(events, Event{
+					Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
+					Body: strings.Join(toolOutBody, "\n"),
+				})
+				inToolOut = false
+				toolOutBody = nil
+			} else {
+				toolOutBody = append(toolOutBody, line)
+			}
+			hasPending = false
+			continue
+		}
 		if line == "[[think_begin]]" {
 			inThinking = true
 			thinkBody = nil
 			hasPending = false
 			continue
 		}
-		if strings.HasPrefix(line, "[[think_end]] ") {
-			words := 0
-			if v, err := strconv.Atoi(strings.TrimSpace(line[len("[[think_end]] "):])); err == nil {
-				words = v
-			}
-			events = append(events, Event{
-				Event: "thinking_done", Group: g, Ts: ts, Historical: true,
-				Words: words, Body: strings.Join(thinkBody, "\n"),
-			})
-			inThinking = false
-			thinkBody = nil
-			hasPending = false
-			continue
-		}
-		if inThinking {
-			thinkBody = append(thinkBody, line)
-			hasPending = false
-			continue
-		}
 		if line == "[[tool_out_begin]]" {
 			inToolOut = true
 			toolOutBody = nil
-			hasPending = false
-			continue
-		}
-		if strings.HasPrefix(line, "[[tool_out_end]] ") {
-			events = append(events, Event{
-				Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
-				Body: strings.Join(toolOutBody, "\n"),
-			})
-			inToolOut = false
-			toolOutBody = nil
-			hasPending = false
-			continue
-		}
-		if inToolOut {
-			toolOutBody = append(toolOutBody, line)
 			hasPending = false
 			continue
 		}
