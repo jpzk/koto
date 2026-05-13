@@ -1054,6 +1054,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.vp.GotoBottom()
 				m.autoFollow = true
 			}
+			return m, nil
 		case "down":
 			if m.treeIdx < len(order)-1 {
 				m.treeIdx++
@@ -1063,15 +1064,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.vp.GotoBottom()
 				m.autoFollow = true
 			}
-		case "enter", "esc":
-			// Switching happens on hover; Enter/Esc just exits tree mode.
+			return m, nil
+		case "esc":
+			// Esc always exits tree mode regardless of input contents.
 			m.focus = focusInput
-			m.input.Focus()
-			// treeW shrinks to 0 → log viewport gets wider → re-wrap.
 			m.resizeViewport()
 			m.refreshLog()
+			return m, nil
+		case "enter":
+			// Enter submits the current draft (if any) and stays in tree
+			// mode so the user can keep typing into one agent while
+			// browsing the others. Empty enter exits tree mode (matches
+			// the old behaviour so it's not a worse default for someone
+			// who only entered tree to switch agents).
+			v := strings.TrimSpace(m.input.Value())
+			if v == "" {
+				m.focus = focusInput
+				m.resizeViewport()
+				m.refreshLog()
+				return m, nil
+			}
+			m.input.SetValue("")
+			cmd := m.dispatchInput(v)
+			tickCmd := m.ensureTicking()
+			return m, tea.Batch(cmd, tickCmd)
 		}
-		return m, nil
+		// Anything else — printable chars, backspace, arrows-with-modifiers,
+		// etc. — goes to the textinput so the user can type while the tree
+		// is open. enterTree() keeps the input Focused so this works without
+		// a refocus step here.
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
 
 	// focus = input
@@ -1135,7 +1159,10 @@ func (m *Model) enterTree() {
 	}
 	m.treeIdx = idx
 	m.focus = focusTree
-	m.input.Blur()
+	// Keep the textinput focused while the tree is open so the user can
+	// continue typing a draft. The focus field (focusTree) is what routes
+	// up/down/enter to tree navigation; the input cursor staying alive is
+	// just a visual signal that typing still works.
 }
 
 func (m Model) treeOrder() []string {
