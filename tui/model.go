@@ -239,26 +239,15 @@ func historyCmd(sock, group string) tea.Cmd {
 		if err != nil {
 			return historyMsg{group: group, err: err}
 		}
-		raw, _ := resp["events"].([]any)
-		evs := make([]Event, 0, len(raw))
-		for _, e := range raw {
-			mp, _ := e.(map[string]any)
-			ev := Event{}
-			ev.Event, _ = mp["event"].(string)
-			ev.Group, _ = mp["group"].(string)
-			ev.Msg, _ = mp["msg"].(string)
-			ev.Text, _ = mp["text"].(string)
-			ev.Name, _ = mp["name"].(string)
-			ev.Input, _ = mp["input"].(string)
-			ev.Body, _ = mp["body"].(string)
-			if f, ok := mp["words"].(float64); ok {
-				ev.Words = int(f)
+		// Round-trip the events list through json so we get typed Event
+		// values without re-parsing each field by hand. daemonCall already
+		// decoded the outer envelope into a map; remarshal the inner slice
+		// and unmarshal into []Event.
+		var evs []Event
+		if raw, ok := resp["events"]; ok {
+			if b, err := json.Marshal(raw); err == nil {
+				_ = json.Unmarshal(b, &evs)
 			}
-			if f, ok := mp["ts"].(float64); ok {
-				ev.Ts = int64(f)
-			}
-			ev.Historical = true
-			evs = append(evs, ev)
 		}
 		return historyMsg{group: group, events: evs}
 	}
@@ -309,26 +298,9 @@ func startSubscribe(sock, group string) {
 			if trimmed == "" {
 				continue
 			}
-			// Manual decode: daemon emits ts as a float (time.time()), but
-			// Event.Ts is int64. encoding/json refuses fractional → int64
-			// and fails the whole event. Match historyCmd's float→int64 path.
-			var raw map[string]any
-			if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+			var ev Event
+			if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
 				continue
-			}
-			ev := Event{}
-			ev.Event, _ = raw["event"].(string)
-			ev.Group, _ = raw["group"].(string)
-			ev.Msg, _ = raw["msg"].(string)
-			ev.Text, _ = raw["text"].(string)
-			ev.Name, _ = raw["name"].(string)
-			ev.Input, _ = raw["input"].(string)
-			ev.Body, _ = raw["body"].(string)
-			if f, ok := raw["words"].(float64); ok {
-				ev.Words = int(f)
-			}
-			if f, ok := raw["ts"].(float64); ok {
-				ev.Ts = int64(f)
 			}
 			if ev.Event == "" || ev.Event == "ping" {
 				continue
@@ -432,13 +404,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			switch ev.Event {
 			case "prompt":
 				delete(m.lastThoughtBody, msg.group)
-				batch = append(batch, logLine{kind: "prompt", group: msg.group, text: ev.Msg, ts: ev.Ts})
+				batch = append(batch, logLine{kind: "prompt", group: msg.group, text: ev.Msg, ts: int64(ev.Ts)})
 			case "done":
 				if ev.Text != "" {
-					batch = append(batch, logLine{kind: "response", group: msg.group, text: ev.Text, ts: ev.Ts})
+					batch = append(batch, logLine{kind: "response", group: msg.group, text: ev.Text, ts: int64(ev.Ts)})
 				}
 			case "tool":
-				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: ev.Ts})
+				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 			case "thinking_done":
 				// Dedup: skip stray empty-body or exact-match dupes following
 				// a real thought. See the live handler for context.
@@ -446,7 +418,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					continue
 				}
 				m.lastThoughtBody[msg.group] = ev.Body
-				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: ev.Ts})
+				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 			}
 		}
 		// Per-group cap: keep only the most recent maxPerGroup events from
@@ -474,13 +446,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
 			delete(m.lastThoughtBody, ev.Group)
-			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: ev.Ts})
+			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: int64(ev.Ts)})
 		case "stream":
 			m.streamBuf[ev.Group] = ev.Text
 		case "done":
 			delete(m.streamBuf, ev.Group)
 			if ev.Text != "" {
-				m.addLine(logLine{kind: "response", group: ev.Group, text: ev.Text, ts: ev.Ts})
+				m.addLine(logLine{kind: "response", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
 			}
 		case "tool":
 			// Tool calls arrive between prompt and done; flush any in-flight
@@ -489,7 +461,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})
 				delete(m.streamBuf, ev.Group)
 			}
-			m.addLine(logLine{kind: "tool", group: ev.Group, text: formatTool(ev.Name, ev.Input), ts: ev.Ts})
+			m.addLine(logLine{kind: "tool", group: ev.Group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 		case "thinking_begin":
 			m.thinkingBuf[ev.Group] = ""
 			delete(m.thinkingTail, ev.Group)
@@ -515,7 +487,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.lastThoughtBody[ev.Group] = ev.Body
-			m.addLine(logLine{kind: "thought", group: ev.Group, text: formatThoughtFull(ev.Words, ev.Body), ts: ev.Ts})
+			m.addLine(logLine{kind: "thought", group: ev.Group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 		}
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)

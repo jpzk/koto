@@ -9,13 +9,13 @@ mkdir -p "$D"
 exec 3<> "$D/in"
 while IFS= read -r b64 <&3; do
   msg=$(printf '%s' "$b64" | base64 -d) || continue
-  # NOTE: nc.py writes the `>>> <original msg>` marker before delivering this
-  # FIFO line, so the TUI log shows the user's typed text. $msg here is the
-  # AUGMENTED version (original + <clawson-context> rate-limit block).
+  # NOTE: the daemon writes the `>>> <original msg>` marker before delivering
+  # this FIFO line, so the TUI log shows the user's typed text. $msg here is
+  # the AUGMENTED version (original + <clawson-context> rate-limit block).
 
-  # System prompt is composed by the daemon (nc.py:_compose_system_prompt) and
-  # written to /workspace/.cs/system-prompt.md immediately before each FIFO
-  # write. We just cat it. Centralizing assembly in Python keeps the
+  # System prompt is composed by the daemon (composeSystemPrompt in daemon.go)
+  # and written to /workspace/.cs/system-prompt.md immediately before each
+  # FIFO write. We just cat it. Centralizing assembly in the daemon keeps the
   # global/per-group/skills/memory layering testable and lets us evolve it
   # without touching this shell loop.
   APPEND=""

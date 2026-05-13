@@ -58,7 +58,7 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/agent-browser-chrome
 
 COPY start-chrome.sh /usr/local/bin/start-chrome
 COPY entrypoint.sh /e.sh
-# nc.py also bind-mounts entrypoint.sh and stream_filter.js into the
+# The daemon bind-mounts entrypoint.sh and stream_filter.js into the
 # container, overlaying the COPY'd /e.sh for hot-reload. The COPY remains
 # so the image is runnable standalone (e.g. for `podman run -it
 # --entrypoint sh clawson` smoke tests).

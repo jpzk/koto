@@ -5,6 +5,8 @@ metrics.jsonl
 proxy.log
 clawson.sock
 run/
+.gocache/
+.build/
 __pycache__/
 *.pyc
 tui/node_modules/

@@ -123,8 +123,8 @@ func skillToggleCmd(sock, group, name string, enable bool) tea.Cmd {
 		if action == "noop" {
 			return skillToggleMsg{group: group, name: name, action: action}
 		}
-		// 2. write back. Send the list as a JSON array; nc.py's _config has
-		//    been extended to accept lists for the `skills` key.
+		// 2. write back. Send the list as a JSON array; the daemon's config
+		//    handler accepts lists for the `skills` key.
 		payload := map[string]any{"group": group}
 		if len(list) == 0 {
 			payload["skills"] = "" // clear semantics

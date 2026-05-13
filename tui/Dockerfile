@@ -8,6 +8,12 @@
 
 FROM docker.io/library/golang:1.24-alpine AS builder
 WORKDIR /src
+# The shared wire types live in ../protocol as a separate stdlib-only Go
+# module; tui/go.mod's `replace` points one dir up. Lay out a matching
+# parent-sibling pair inside /src so `replace clawson-protocol => ../protocol`
+# resolves during go mod download and the build.
+WORKDIR /src/tui
+COPY protocol/ /src/protocol/
 # Cache module downloads independently of source changes.
 COPY tui/go.mod tui/go.sum* ./
 RUN go mod download

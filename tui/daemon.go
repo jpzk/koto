@@ -5,29 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+
+	"clawson-protocol"
 )
 
-// Wire types for the daemon protocol. Mirrors nc.py's line-delimited JSON.
-// Most ops are one-shot (request, one response, close). `subscribe` keeps
-// the conn open and pushes Event frames after the initial ack.
-
-type Event struct {
-	Event      string `json:"event"`              // prompt | stream | done | tool | thinking_begin | thinking | thinking_stream | thinking_done
-	Group      string `json:"group"`
-	Msg        string `json:"msg,omitempty"`
-	Text       string `json:"text,omitempty"`
-	Name       string `json:"name,omitempty"`     // tool name for event=tool
-	Input      string `json:"input,omitempty"`    // tool input json (raw) for event=tool
-	Words      int    `json:"words,omitempty"`    // word count for event=thinking_done
-	Body       string `json:"body,omitempty"`     // full thinking text for event=thinking_done (ctrl+t expand)
-	Ts         int64  `json:"ts,omitempty"`
-	Historical bool   `json:"historical,omitempty"`
-}
-
-type GroupInfo struct {
-	Port    int  `json:"port"`
-	Running bool `json:"running"`
-}
+// Wire types are shared with the daemon via the clawson-protocol module.
+// Aliasing under the TUI's existing names (Event, GroupInfo) keeps the
+// rest of the package readable. Ts on Event is now float64 (the actual
+// wire shape) — call sites that want int64 cast at use.
+type (
+	Event     = protocol.Event
+	GroupInfo = protocol.GroupInfo
+)
 
 // daemonCall opens a fresh connection, writes one JSON request, reads one
 // JSON response, closes. Suitable for spawn/send/list/history/clear/config/metrics.
