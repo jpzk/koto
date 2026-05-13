@@ -182,9 +182,20 @@ func ensure(g string, isMain bool) (int, error) {
 		"--security-opt", "label=disable",
 		"--userns=keep-id",
 		"--network=" + NETWORK,
+		// Bind-mount the whole sidecar/ directory ro instead of individual
+		// files. Single-file bind-mounts capture the source inode at mount
+		// time, so an atomic file replacement on the host (which is what
+		// most editors, including the harness's Edit tool, do — write to a
+		// tempfile + rename) leaves the container pointing at the now-orphan
+		// original inode. A directory mount resolves filename → inode on
+		// every open, so edits to entrypoint.sh / stream_filter.js are
+		// genuinely picked up on the next message invocation without a
+		// sidecar respawn. --entrypoint overrides the image's
+		// ENTRYPOINT=["/bin/sh","/e.sh"] so the live version under /sidecar
+		// is always used when the bind-mount is present.
+		"--entrypoint", `["/bin/sh","/sidecar/entrypoint.sh"]`,
 		"-v", v + ":/workspace",
-		"-v", HERE + "/sidecar/entrypoint.sh:/e.sh:ro",
-		"-v", HERE + "/sidecar/stream_filter.js:/stream_filter.js:ro",
+		"-v", HERE + "/sidecar:/sidecar:ro",
 		"-v", "/etc/localtime:/etc/localtime:ro",
 		"-e", "ANTHROPIC_API_KEY=proxied",
 		"-e", "HOME=/workspace",

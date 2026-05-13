@@ -28,9 +28,42 @@ function breakLine() {
   if (midline) { fs.writeSync(1, '\n'); midline = false; }
 }
 
+// Emit a framed tool output block. Body may be a string or an array of
+// {type:"text",text:...} parts; non-text parts (images, etc.) are skipped.
+// Empty body still emits the markers so the daemon tailer sees an explicit
+// "empty result" event rather than missing the call's output entirely.
+function emitToolOut(content) {
+  let body = '';
+  if (typeof content === 'string') {
+    body = content;
+  } else if (Array.isArray(content)) {
+    for (const p of content) {
+      if (p && p.type === 'text' && typeof p.text === 'string') body += p.text;
+    }
+  }
+  stampOnce();
+  breakLine();
+  const bytes = Buffer.byteLength(body, 'utf8');
+  fs.writeSync(1, '[[tool_out_begin]]\n');
+  if (body.length) {
+    fs.writeSync(1, body.endsWith('\n') ? body : body + '\n');
+  }
+  fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
+}
+
 rl.on('line', (line) => {
   let ev;
   try { ev = JSON.parse(line); } catch { return; }
+  // Tool results are injected by the harness (not the model), so claude-code
+  // emits them as a top-level `user` record containing tool_result content
+  // blocks — NOT inside the assistant's stream_event partials. Handle this
+  // record type before the stream_event gate.
+  if (ev.type === 'user' && ev.message && Array.isArray(ev.message.content)) {
+    for (const block of ev.message.content) {
+      if (block && block.type === 'tool_result') emitToolOut(block.content);
+    }
+    return;
+  }
   if (ev.type !== 'stream_event' || !ev.event) return;
   const e = ev.event;
   if (e.type === 'content_block_start' && e.content_block) {
@@ -42,33 +75,6 @@ rl.on('line', (line) => {
       breakLine();
       // Open a framed region; subsequent thinking_delta text is the body.
       fs.writeSync(1, '[[think_begin]]\n');
-    } else if (e.content_block.type === 'tool_result') {
-      // Tool results arrive atomically in claude-code's stream-json: the body
-      // is present in content_block_start, not streamed via deltas. Content
-      // is either a string (typical for Bash/Read) or an array of
-      // {type:"text",text:...} parts (multi-part / mixed-media results).
-      let body = '';
-      const c = e.content_block.content;
-      if (typeof c === 'string') {
-        body = c;
-      } else if (Array.isArray(c)) {
-        for (const part of c) {
-          if (part && part.type === 'text' && typeof part.text === 'string') {
-            body += part.text;
-          }
-        }
-      }
-      stampOnce();
-      breakLine();
-      // Mirror [[think_begin]] / [[think_end]] framing so the daemon tailer
-      // can parse this with the same state-machine pattern. The trailing
-      // count is bytes (utf-8) — the TUI may also show it as "N lines".
-      const bytes = Buffer.byteLength(body, 'utf8');
-      fs.writeSync(1, '[[tool_out_begin]]\n');
-      if (body.length) {
-        fs.writeSync(1, body.endsWith('\n') ? body : body + '\n');
-      }
-      fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
     }
     return;
   }

@@ -36,5 +36,5 @@ while IFS= read -r b64 <&3; do
   [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 
   printf '%s' "$msg" | "$@" 2>>"$D/log" \
-      | node /stream_filter.js >> "$D/log" 2>&1 || true
+      | node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
 done
