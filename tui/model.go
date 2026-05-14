@@ -42,6 +42,13 @@ type logLine struct {
 	ts    int64
 }
 
+type vpCacheEntry struct {
+	ver, globalVer int
+	cols           int
+	expT, expTO    bool
+	content        string
+}
+
 type renderedBlock struct {
 	kind      string
 	group     string
@@ -169,6 +176,12 @@ type Model struct {
 	// explicitly skipped so a fresh attach doesn't light up every group.
 	unread map[string]bool
 
+	// vpCache holds the fully-built viewport content string per group,
+	// keyed by (groupVer[g], groupVer[""], contentCols, expT, expTO).
+	// Bypassed when a live overlay is active so streaming updates are live.
+	vpCache  map[string]vpCacheEntry
+	groupVer map[string]int
+
 	// mdCache holds glamour-rendered response bodies keyed by width + text.
 	// Without this, every View() pass — driven by stream events at up to
 	// 60+ msg/s — re-runs glamour on every completed response block (~3ms
@@ -226,6 +239,8 @@ func newModel(sock string, ctxWindow int) Model {
 		width:      80,
 		height:     24,
 		mdCache:    map[string]string{},
+		vpCache:    map[string]vpCacheEntry{},
+		groupVer:   map[string]int{},
 	}
 }
 
@@ -653,7 +668,11 @@ func (m *Model) addLine(l logLine) {
 	m.lines = append(m.lines, l)
 	if len(m.lines) > maxLines {
 		m.lines = m.lines[len(m.lines)-maxLines:]
+		// Trim evicts unknown lines from any group; nuke the whole content cache.
+		m.vpCache = map[string]vpCacheEntry{}
+		m.groupVer = map[string]int{}
 	}
+	m.groupVer[l.group]++
 	if l.group == "" || l.group == m.cur {
 		m.refreshLog()
 	}
@@ -687,7 +706,32 @@ func (m *Model) resizeViewport() {
 // follows the tail unless the user has scrolled up.
 func (m *Model) refreshLog() {
 	wasAtBottom := !m.vpReady || m.autoFollow || m.vp.AtBottom()
-	content := m.buildLogContent(m.logContentCols())
+	cols := m.logContentCols()
+
+	// Skip the cache when a live overlay is active — the overlay text changes
+	// on every stream event and must not be baked into a cached entry.
+	liveText, _ := m.liveOverlay()
+	var content string
+	if liveText == "" {
+		ver := m.groupVer[m.cur]
+		gver := m.groupVer[""]
+		if e, ok := m.vpCache[m.cur]; ok &&
+			e.ver == ver && e.globalVer == gver &&
+			e.cols == cols &&
+			e.expT == m.expandedThoughts && e.expTO == m.expandedToolOuts {
+			content = e.content
+		} else {
+			content = m.buildLogContent(cols)
+			m.vpCache[m.cur] = vpCacheEntry{
+				ver: ver, globalVer: gver, cols: cols,
+				expT: m.expandedThoughts, expTO: m.expandedToolOuts,
+				content: content,
+			}
+		}
+	} else {
+		content = m.buildLogContent(cols)
+	}
+
 	m.vp.SetContent(content)
 	if wasAtBottom {
 		m.vp.GotoBottom()
