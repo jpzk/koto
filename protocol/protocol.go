@@ -100,6 +100,21 @@ type SubscribeReq struct {
 	Group string `json:"group"`
 }
 
+// LogsReq subscribes to the daemon's internal log stream. No fields — the
+// daemon log is global, not per-group. Like SubscribeReq, this transfers
+// connection ownership to the daemon's log-subscriber registry.
+type LogsReq struct{}
+
+// LogEvent is the streaming frame the daemon pushes to log subscribers.
+// Distinct from Event because daemon logs aren't keyed by group and carry
+// a level. Ts matches Event's float-seconds convention.
+type LogEvent struct {
+	Event string  `json:"event"` // always "log"
+	Level string  `json:"level"` // info | warn | error | debug
+	Msg   string  `json:"msg"`
+	Ts    float64 `json:"ts"`
+}
+
 // ---- Response envelopes ---------------------------------------------------
 
 // BaseResp is embedded in every typed response. Error is omitempty so
@@ -160,4 +175,10 @@ type SkillReadResp struct {
 type SubscribeResp struct {
 	BaseResp
 	Subscribed string `json:"subscribed,omitempty"`
+}
+
+// LogsResp is the ack for `cmd:"logs"`. After this frame the daemon may
+// replay buffered log lines, then push fresh LogEvent frames as they happen.
+type LogsResp struct {
+	BaseResp
 }

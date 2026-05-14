@@ -153,6 +153,12 @@ func (m Model) View() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
 	}
+	if m.focus == focusLog {
+		// Log view replaces the entire chat middle pane. Renders the
+		// status bar (reused) + log viewport + log-specific hint; no
+		// input line, no tree, no scrollbar geometry from the chat vp.
+		return m.renderLogView()
+	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
 	status := m.renderStatusBar(spin)
@@ -573,6 +579,7 @@ func (m Model) renderHint() string {
 		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
 	}
 	parts = append(parts, toolOutsHint)
+	parts = append(parts, "^l log")
 	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))

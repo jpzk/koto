@@ -55,6 +55,9 @@ type (
 	skillReadResp = protocol.SkillReadResp
 	subscribeReq  = protocol.SubscribeReq
 	subscribeResp = protocol.SubscribeResp
+	logsReq       = protocol.LogsReq
+	logsResp      = protocol.LogsResp
+	LogEvent      = protocol.LogEvent
 )
 
 var errResp = protocol.ErrResp
@@ -178,6 +181,7 @@ func ensure(g string, isMain bool) (int, error) {
 	if podmanRunning(name) {
 		return port, nil
 	}
+	emitLogf("info", "spawning sidecar group=%s port=%d main=%t", g, port, isMain)
 	args := []string{"run", "-d", "--rm", "--name", name,
 		"--security-opt", "label=disable",
 		"--userns=keep-id",
@@ -218,13 +222,16 @@ func ensure(g string, isMain bool) (int, error) {
 	cmd := exec.Command("podman", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		emitLogf("error", "spawn group=%s: %v: %s", g, err, strings.TrimSpace(string(out)))
 		return 0, fmt.Errorf("podman run: %v: %s", err, string(out))
 	}
+	emitLogf("info", "spawned group=%s container=%s", g, name)
 	return port, nil
 }
 
 func stopGroup(g string) {
 	_ = exec.Command("podman", "rm", "-f", csName(g)).Run()
+	emitLogf("info", "stopped group=%s", g)
 }
 
 // interruptAgent sends SIGINT to the running claude process inside the
@@ -577,7 +584,9 @@ func send(g, msg string) error {
 	mu := sendLock(g)
 	mu.Lock()
 	defer mu.Unlock()
+	emitLogf("info", "send group=%s bytes=%d", g, len(msg))
 	if _, err := ensure(g, g == "main"); err != nil {
+		emitLogf("error", "send/ensure group=%s: %v", g, err)
 		return err
 	}
 	v := vol(g)
@@ -640,6 +649,7 @@ func destroy(g string) baseResp {
 	if g == "main" {
 		return errResp("main group is protected; use `make stop` to tear everything down")
 	}
+	emitLogf("warn", "destroy group=%s (workspace will be deleted)", g)
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()
@@ -662,6 +672,7 @@ func destroy(g string) baseResp {
 }
 
 func restart(g string) (int, error) {
+	emitLogf("info", "restart group=%s", g)
 	stopGroup(g)
 	return ensure(g, g == "main")
 }
@@ -725,7 +736,82 @@ func pingLoop() {
 		for _, g := range gs {
 			emit(g, Event{Event: "ping"})
 		}
+		logSubsLock.Lock()
+		hasLogSubs := len(logSubs) > 0
+		logSubsLock.Unlock()
+		if hasLogSubs {
+			emitLog("debug", "ping")
+		}
 	}
+}
+
+// ---- daemon log: ring buffer + subscriber fan-out -------------------------
+//
+// Separate from the per-group `subscribers` map: daemon logs are global
+// (no group key) and carry a level. The ring buffer (logRing) holds the
+// most recent logRingMax lines so a fresh `cmd:"logs"` subscriber gets
+// some immediate context instead of an empty pane until something happens.
+
+const logRingMax = 200
+
+var (
+	logSubsLock sync.Mutex
+	logSubs     []net.Conn
+	logRing     [][]byte // pre-marshalled JSON+\n frames
+)
+
+// emitLog formats a LogEvent, mirrors it to stderr (so `make host-run`
+// stays useful for tail -F debugging), appends to the ring, and broadcasts
+// to all log subscribers. Dead subscribers are pruned in a second pass —
+// same dead-conn pattern as emit().
+func emitLog(level, msg string) {
+	ev := LogEvent{
+		Event: "log",
+		Level: level,
+		Msg:   msg,
+		Ts:    float64(time.Now().UnixNano()) / 1e9,
+	}
+	b, _ := json.Marshal(ev)
+	b = append(b, '\n')
+
+	fmt.Fprintf(os.Stderr, "[%s] %s\n", level, msg)
+
+	logSubsLock.Lock()
+	logRing = append(logRing, b)
+	if len(logRing) > logRingMax {
+		logRing = logRing[len(logRing)-logRingMax:]
+	}
+	conns := append([]net.Conn(nil), logSubs...)
+	logSubsLock.Unlock()
+
+	var dead []net.Conn
+	for _, c := range conns {
+		if _, err := c.Write(b); err != nil {
+			dead = append(dead, c)
+		}
+	}
+	if len(dead) > 0 {
+		logSubsLock.Lock()
+		alive := logSubs[:0]
+		deadSet := map[net.Conn]bool{}
+		for _, c := range dead {
+			deadSet[c] = true
+		}
+		for _, c := range logSubs {
+			if !deadSet[c] {
+				alive = append(alive, c)
+			}
+		}
+		logSubs = alive
+		logSubsLock.Unlock()
+		for _, c := range dead {
+			_ = c.Close()
+		}
+	}
+}
+
+func emitLogf(level, format string, args ...any) {
+	emitLog(level, fmt.Sprintf(format, args...))
 }
 
 var tsRE = regexp.MustCompile(`^\[ts:(\d+)\]$`)
@@ -1334,6 +1420,36 @@ func serve(c net.Conn) {
 			subscribed = true
 			return
 		}
+		// `logs` is the daemon-log analogue of subscribe: same connection-
+		// ownership transfer, but no per-group keying. Acks first, then
+		// replays the ring buffer so the client immediately sees recent
+		// activity, then pushes fresh frames as emitLog() runs.
+		if jerr := json.Unmarshal(line, &env); jerr == nil && env.Cmd == "logs" {
+			writeResp(c, logsResp{baseResp{OK: true}})
+			logSubsLock.Lock()
+			ring := append([][]byte(nil), logRing...)
+			logSubs = append(logSubs, c)
+			logSubsLock.Unlock()
+			for _, b := range ring {
+				if _, werr := c.Write(b); werr != nil {
+					// New conn died mid-replay: drop it from the registry
+					// and bail. Symmetric with emitLog's dead-conn prune.
+					logSubsLock.Lock()
+					alive := logSubs[:0]
+					for _, cc := range logSubs {
+						if cc != c {
+							alive = append(alive, cc)
+						}
+					}
+					logSubs = alive
+					logSubsLock.Unlock()
+					_ = c.Close()
+					return
+				}
+			}
+			subscribed = true
+			return
+		}
 		writeResp(c, dispatch(line))
 		if err != nil {
 			return
@@ -1376,9 +1492,10 @@ func daemonMain() {
 		os.Exit(1)
 	}
 	defer func() { _ = proxy.Process.Signal(syscall.SIGTERM) }()
+	emitLogf("info", "proxy started pid=%d log=%s", proxy.Process.Pid, PROXY_LOG)
 
 	if _, err := ensure("main", true); err != nil {
-		fmt.Fprintf(os.Stderr, "ensure main: %v\n", err)
+		emitLogf("error", "ensure main: %v", err)
 	}
 
 	_ = os.Remove(SOCK_PATH)
@@ -1388,7 +1505,7 @@ func daemonMain() {
 		os.Exit(1)
 	}
 	_ = os.Chmod(SOCK_PATH, 0o660)
-	fmt.Printf("clawsond ready  socket=%s\n", SOCK_PATH)
+	emitLogf("info", "clawsond ready socket=%s", SOCK_PATH)
 
 	go pingLoop()
 

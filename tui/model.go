@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"clawson-protocol"
 )
 
 const (
@@ -24,6 +26,11 @@ const (
 	leftPaneWidth = 22
 	tickMs        = 80
 	metricsTickMs = 5000
+	// maxLogLines caps the per-session daemon log buffer in the TUI. The
+	// daemon's own ring is logRingMax (200); we keep a deeper window here
+	// so the user can scroll back through what they've seen since opening
+	// the TUI without it growing unbounded over a long session.
+	maxLogLines = 2000
 )
 
 var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
@@ -33,6 +40,10 @@ type focusZone int
 const (
 	focusInput focusZone = iota
 	focusTree
+	// focusLog is the daemon-log view, opened with ctrl+L. While it is
+	// active the chat middle pane is hidden and key handling routes to
+	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
+	focusLog
 )
 
 type logLine struct {
@@ -91,6 +102,9 @@ type pluginLogMsg struct {
 }
 type pluginDoneMsg struct{ name string }
 type reconnectAttemptMsg struct{}
+
+// logEventMsg / logSubClosedMsg are defined in log_view.go alongside the
+// subscribe goroutine — they're only used by the focusLog code path.
 
 // --- Model -------------------------------------------------------------------
 
@@ -190,6 +204,23 @@ type Model struct {
 	// (width is part of the key, so stale entries also fall out naturally)
 	// and bounded to mdCacheMax to cap memory.
 	mdCache map[string]string
+
+	// Daemon log view (focusLog / ctrl+L). The subscription is lazy: we
+	// only open `cmd:"logs"` on the first ctrl+L press to avoid a wasted
+	// long-lived connection for users who never look at the log. The
+	// daemon's own ring buffer replays the most recent ~200 lines on
+	// subscribe, so opening the view late still shows recent context.
+	logVP         viewport.Model
+	logVPReady    bool
+	logLines      []string
+	logSubActive  bool
+	logAutoFollow bool
+	// preLogFocus remembers whether the chat side was in focusInput or
+	// focusTree when the user opened the log view, so exiting (ctrl+L /
+	// esc) drops back into the same mode instead of always landing in
+	// focusInput. Without this, opening the log from tree-nav mode and
+	// closing it again silently collapsed the tree pane.
+	preLogFocus focusZone
 }
 
 const mdCacheMax = 1024
@@ -230,10 +261,15 @@ func newModel(sock string, ctxWindow int) Model {
 		toolOutBuf:      map[string]string{},
 		toolOutTail:     map[string]string{},
 		unread:          map[string]bool{},
-		input:      ti,
-		focus:      focusInput,
-		vp:         vp,
-		autoFollow: true,
+		input: ti,
+		// Start in tree mode so the group list is visible immediately.
+		// The textinput is still Focus()'d (above) so typing a draft
+		// continues to work — focusTree only routes ↑/↓/⏎ to tree
+		// navigation; everything else still falls through to the input.
+		focus:         focusTree,
+		vp:            vp,
+		autoFollow:    true,
+		logAutoFollow: true,
 		connected:  true,
 		ticking:    true, // Init kicks the first tick
 		width:      80,
@@ -369,6 +405,10 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewport()
 		m.refreshLog()
 		m.vpReady = true
+		if m.logVPReady {
+			m.resizeLogViewport()
+			m.refreshLogViewport()
+		}
 		return m, nil
 
 	case spinTickMsg:
@@ -570,6 +610,22 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case streamClosedMsg:
 		delete(m.subscribed, msg.group)
 		return m, m.scheduleReconnect()
+
+	case logEventMsg:
+		// formatLogLine uses charmbracelet/log to render the styled line;
+		// we then push it through the same append/refresh path as live
+		// frames. Even when the user isn't on the log view, we accumulate
+		// so opening it later shows the buffered history.
+		m.appendLogLine(formatLogLine(protocol.LogEvent(msg)))
+		return m, nil
+
+	case logSubClosedMsg:
+		// Subscription died (daemon restarted, socket closed). Drop the
+		// active flag so the next ctrl+L re-opens it. We don't auto-
+		// reconnect here — the chat-level reconnect loop already covers
+		// daemon restarts; let it bring everything back together.
+		m.logSubActive = false
+		return m, nil
 
 	case reconnectAttemptMsg:
 		// Clear the guard before the attempt fires: if listMsg comes back
@@ -1073,6 +1129,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshLog()
 		return m, nil
 	}
+	if s == "ctrl+l" {
+		// Toggle the daemon log view. enterLog() is responsible for the
+		// lazy subscribe + viewport init; exitLog() just flips focus back.
+		if m.focus == focusLog {
+			m.exitLog()
+		} else {
+			m.enterLog()
+		}
+		return m, nil
+	}
+	if m.focus == focusLog {
+		// Read-only mode while the log view is open. No textinput routing
+		// here — esc / ctrl+L close, arrows scroll, everything else is
+		// dropped on purpose so a stray keystroke doesn't end up in the
+		// chat input or in tree navigation.
+		return m.handleLogKey(msg)
+	}
 	if s == "tab" {
 		if m.focus == focusInput {
 			m.enterTree()
@@ -1158,6 +1231,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd := m.dispatchInput(v)
 		tickCmd := m.ensureTicking()
 		return m, tea.Batch(cmd, tickCmd)
+	}
+
+	if s == "ctrl+h" {
+		m.input.SetValue("")
+		return m, nil
 	}
 
 	switch s {

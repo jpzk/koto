@@ -87,3 +87,37 @@ func daemonSubscribe(sock, group string) (net.Conn, *bufio.Reader, error) {
 	}
 	return c, br, nil
 }
+
+// daemonSubscribeLogs is the daemon-log analogue of daemonSubscribe: opens
+// a conn, sends `{"cmd":"logs"}`, waits for the ack, then returns the conn
+// for the caller to read LogEvent frames from. The daemon replays its
+// ring-buffered recent lines immediately after the ack.
+func daemonSubscribeLogs(sock string) (net.Conn, *bufio.Reader, error) {
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, nil, err
+	}
+	req := map[string]any{"cmd": "logs"}
+	b, _ := json.Marshal(req)
+	if _, err := c.Write(append(b, '\n')); err != nil {
+		c.Close()
+		return nil, nil, err
+	}
+	br := bufio.NewReader(c)
+	line, err := br.ReadBytes('\n')
+	if err != nil {
+		c.Close()
+		return nil, nil, err
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(line, &ack); err != nil {
+		c.Close()
+		return nil, nil, err
+	}
+	if ok, _ := ack["ok"].(bool); !ok {
+		c.Close()
+		errStr, _ := ack["error"].(string)
+		return nil, nil, fmt.Errorf("logs subscribe: %s", errStr)
+	}
+	return c, br, nil
+}
