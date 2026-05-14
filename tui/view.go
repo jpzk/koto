@@ -42,9 +42,11 @@ func pctColor(frac float64) lipgloss.Color {
 	return cCyan
 }
 
-// renderBar draws a [████░░░░] style bar: full blocks colored by utilization
-// for the filled portion, light-gray full blocks for the remainder.
-func renderBar(frac float64, width int) string {
+// renderBar draws a [████░░░░] style bar: full blocks in `fg` for the filled
+// portion, light-gray full blocks for the remainder. Caller picks the color so
+// the bar can encode either "high = bad" (utilization) or "high = good" (cache
+// hit ratio).
+func renderBar(frac float64, width int, fg lipgloss.Color) string {
 	if frac < 0 {
 		frac = 0
 	}
@@ -55,7 +57,7 @@ func renderBar(frac float64, width int) string {
 	if filled > width {
 		filled = width
 	}
-	on := lipgloss.NewStyle().Foreground(pctColor(frac)).Background(cBlack).
+	on := lipgloss.NewStyle().Foreground(fg).Background(cBlack).
 		Render(strings.Repeat("█", filled))
 	off := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
 		Render(strings.Repeat("█", width-filled))
@@ -127,6 +129,26 @@ func sumCtxTokens(m map[string]any) int {
 	return get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens")
 }
 
+// cacheHitRatio returns cache_read / (input + cache_read + cache_creation) for
+// the last call recorded on the per-group metric. -1 when there's no usage
+// data yet or the denominator is zero (no input on this call).
+func cacheHitRatio(m map[string]any) float64 {
+	usage, _ := m["usage"].(map[string]any)
+	if usage == nil {
+		return -1
+	}
+	get := func(k string) float64 {
+		v, _ := usage[k].(float64)
+		return v
+	}
+	read := get("cache_read_input_tokens")
+	denom := get("input_tokens") + read + get("cache_creation_input_tokens")
+	if denom <= 0 {
+		return -1
+	}
+	return read / denom
+}
+
 func (m Model) View() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
@@ -185,15 +207,20 @@ func (m Model) renderStatusRight(spin string) string {
 	useBars := m.width >= 110
 	barW := 8
 
-	renderMetric := func(label string, frac float64) string {
-		fg := pctColor(frac)
-		style := lipgloss.NewStyle().Foreground(fg).Background(cBlack).Bold(true)
+	// fracColor lets the caller invert the threshold scale. For utilization
+	// metrics (ctx, 5h, 7d) high = bad, so pctColor is used directly. For the
+	// cache hit ratio high = good, so we color by (1-frac) instead.
+	renderMetricColored := func(label string, frac float64, fracColor lipgloss.Color) string {
+		style := lipgloss.NewStyle().Foreground(fracColor).Background(cBlack).Bold(true)
 		if useBars {
 			return style.Render(fmt.Sprintf("  %s ", label)) +
-				renderBar(frac, barW) +
+				renderBar(frac, barW, fracColor) +
 				style.Render(fmt.Sprintf(" %d%% ", int(frac*100)))
 		}
 		return style.Render(fmt.Sprintf("  %s %d%% ", label, int(frac*100)))
+	}
+	renderMetric := func(label string, frac float64) string {
+		return renderMetricColored(label, frac, pctColor(frac))
 	}
 
 	if ctx := sumCtxTokens(m.metric); ctx > 0 {
@@ -202,6 +229,9 @@ func (m Model) renderStatusRight(spin string) string {
 			frac = float64(ctx) / float64(m.ctxWindow)
 		}
 		parts = append(parts, renderMetric("ctx", frac))
+	}
+	if hit := cacheHitRatio(m.metric); hit >= 0 {
+		parts = append(parts, renderMetricColored("cache", hit, pctColor(1-hit)))
 	}
 	if u5h := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-utilization"); u5h >= 0 {
 		if reset := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-reset"); reset > 0 {
