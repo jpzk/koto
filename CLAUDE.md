@@ -9,6 +9,8 @@ Minimal isolated claude-code orchestrator. Container-per-group. **Daemon + isola
 - **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `clawson-tui`, built as a static binary into `scratch`). It mounts only `clawson.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
 - `main` group has `/peers` mounted RW (orchestrator pattern: can read+write any group's workspace). Other groups have no peers mount.
+- `main` also has a **control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails the FIFO and applies a restricted verb set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`. Lets the main agent bootstrap and direct subagents without exposing the full daemon socket. See `prompts/global.md` for the agent-facing docs.
+- Sidecars can publish TCP ports to `127.0.0.1` on the host by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`). Daemon's `ensure()` reads the list and appends `-p 127.0.0.1:P:P` per port; range 1024–65535. Changes require `/restart <g>` because podman can't add `-p` to a live container. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly.
 
 ## Layout
 
@@ -64,9 +66,33 @@ client -> daemon                              daemon -> client
                                               {"event":"prompt","group":"foo","msg":"hi"}
                                               {"event":"stream","group":"foo","text":"partial..."}
                                               {"event":"done",  "group":"foo","text":"complete line"}
+                                              {"event":"sched_fired","group":"foo","id":"a1b2c3","msg":"..."}
+
+# scheduled prompts (crontab-driven, daemon-side)
+{"cmd":"sched_add","group":"main","cron":"*/15 * * * *","msg":"status?"}
+                                              {"ok":true,"item":{"id":"a1b2c3","group":"main",...}}
+{"cmd":"sched_list"}                          {"ok":true,"schedules":[{...},...]}
+{"cmd":"sched_list","group":"main"}           (same, filtered)
+{"cmd":"sched_del","id":"a1b2c3"}             {"ok":true}
+{"cmd":"sched_toggle","id":"a1b2c3","enabled":false}   {"ok":true}
+{"cmd":"sched_run","id":"a1b2c3"}             {"ok":true}   ← fire-now, out of band
 ```
 
 Errors come back as `{"ok": false, "error": "..."}`. Most connections are one-shot (send request, read one response, close). **`subscribe` is the exception**: the connection becomes long-lived after the ack, with the daemon pushing event frames as the group's log file grows. The TUI opens one subscribe connection per group plus separate one-shot connections for `spawn`/`send`/`list`. You can also drive the daemon from `socat`/`nc` for ad-hoc testing.
+
+Schedules are persisted to `schedules.json` and replayed at startup; the daemon's `cronLoop()` wakes at every wall-clock minute boundary. **No catch-up on downtime** — fires missed while the daemon was off are skipped (POSIX cron behavior). A fire is identical to a manual `send` once it reaches `sendMsg`, so it inherits the per-group `sendLock` serialization and the existing log-tailer event stream; the `sched_fired` event is a hint for the UI, not a replacement for the regular `prompt`/`done` frames that follow.
+
+TUI driving (all phrased as one shell-style line so cron fields don't need quoting):
+
+```
+/sched list                                 — all schedules
+/sched list main                            — filtered
+/sched add */15 * * * * status?             — current group, 5-field cron + msg
+/sched add main 0 9 * * 1-5 weekday update  — explicit group
+/sched add @daily run /summary              — alias form
+/sched on  <id>                             /sched off <id>
+/sched del <id>                             /sched run <id>   (fire now)
+```
 
 ## Non-obvious decisions (don't undo without reason)
 

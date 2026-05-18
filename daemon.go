@@ -44,6 +44,7 @@ type (
 	configReq     = protocol.ConfigReq
 	configResp    = protocol.ConfigResp
 	listResp      = protocol.ListResp
+	historyReq    = protocol.HistoryReq
 	historyResp   = protocol.HistoryResp
 	metricsReq    = protocol.MetricsReq
 	metricsResp   = protocol.MetricsResp
@@ -58,6 +59,13 @@ type (
 	logsReq       = protocol.LogsReq
 	logsResp      = protocol.LogsResp
 	LogEvent      = protocol.LogEvent
+	scheduleItem  = protocol.ScheduleItem
+	schedAddReq   = protocol.SchedAddReq
+	schedAddResp  = protocol.SchedAddResp
+	schedListReq  = protocol.SchedListReq
+	schedListResp = protocol.SchedListResp
+	schedIDReq    = protocol.SchedIDReq
+	schedToggleReq = protocol.SchedToggleReq
 )
 
 var errResp = protocol.ErrResp
@@ -85,6 +93,7 @@ var (
 	ROOT        string
 	SKILLS_DIR  string
 	GROUPS_FILE string
+	SCHED_FILE  string
 	SOCK_DIR    string
 	SOCK_PATH   string
 	METRICS     string
@@ -100,6 +109,7 @@ func initPaths() {
 	ROOT = filepath.Join(HERE, "groups")
 	SKILLS_DIR = filepath.Join(HERE, "skills")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
+	SCHED_FILE = filepath.Join(HERE, "schedules.json")
 	SOCK_DIR = filepath.Join(HERE, "run")
 	SOCK_PATH = filepath.Join(SOCK_DIR, "clawson.sock")
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
@@ -181,7 +191,34 @@ func ensure(g string, isMain bool) (int, error) {
 	if podmanRunning(name) {
 		return port, nil
 	}
-	emitLogf("info", "spawning sidecar group=%s port=%d main=%t", g, port, isMain)
+	// Read per-group ports from config.json. The user (or main agent) puts
+	// e.g. {"ports": [8080]} there and the daemon publishes those container
+	// ports to 127.0.0.1 on the host so a browser can reach them. Changes
+	// require /restart — podman can't add -p to a running container. Bind
+	// to 127.0.0.1 only so a compromised sidecar can't serve attacker
+	// content to the wider LAN.
+	var pubPorts []int
+	if b, err := os.ReadFile(filepath.Join(v, ".cs", "config.json")); err == nil {
+		var cfg map[string]any
+		if json.Unmarshal(b, &cfg) == nil {
+			if arr, ok := cfg["ports"].([]any); ok {
+				seen := map[int]bool{}
+				for _, x := range arr {
+					n, ok := anyAsInt(x)
+					if !ok {
+						continue
+					}
+					p := int(n)
+					if p < 1024 || p > 65535 || seen[p] {
+						continue
+					}
+					seen[p] = true
+					pubPorts = append(pubPorts, p)
+				}
+			}
+		}
+	}
+	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
 	args := []string{"run", "-d", "--rm", "--name", name,
 		"--security-opt", "label=disable",
 		"--userns=keep-id",
@@ -217,6 +254,9 @@ func ensure(g string, isMain bool) (int, error) {
 	args = append(args, "-v", SKILLS_DIR+":/skills:"+mode)
 	if isMain {
 		args = append(args, "-v", ROOT+":/peers")
+	}
+	for _, p := range pubPorts {
+		args = append(args, "-p", fmt.Sprintf("127.0.0.1:%d:%d", p, p))
 	}
 	args = append(args, IMAGE)
 	cmd := exec.Command("podman", args...)
@@ -917,6 +957,13 @@ func tailLog(g string) {
 			if v, ok := parseTSLine(buf); ok {
 				pendingTS = v
 				hasPending = true
+				// pendingTS is sticky once seen: stream_filter.js emits a
+				// single `[ts:N]` marker per claude turn (stampOnce), so
+				// every event we emit between markers should share that
+				// turn's ts. Don't reset hasPending after each emit — that
+				// silently fell back to ts=0 for all-but-the-first event
+				// per turn and broke any ts-based reasoning downstream.
+				//
 				// While inside a thinking or tool_out block, ONLY the matching
 				// end marker can close the block. Every other line — including
 				// other begin markers, tool calls, prompt echoes, even
@@ -937,11 +984,9 @@ func tailLog(g string) {
 					body := strings.Join(thinkBody, "\n")
 					thinkBody = nil
 					emit(g, Event{Event: "thinking_done", Words: words, Body: body, Ts: ts})
-					hasPending = false
 				} else if buf != "" {
 					thinkBody = append(thinkBody, buf)
 					emit(g, Event{Event: "thinking", Text: buf, Ts: ts})
-					hasPending = false
 				}
 			} else if inToolOut {
 				if strings.HasPrefix(buf, "[[tool_out_end]] ") {
@@ -949,25 +994,20 @@ func tailLog(g string) {
 					body := strings.Join(toolOutBody, "\n")
 					toolOutBody = nil
 					emit(g, Event{Event: "tool_result_done", Body: body, Ts: ts})
-					hasPending = false
 				} else {
 					toolOutBody = append(toolOutBody, buf)
 					emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
-					hasPending = false
 				}
 			} else if buf == "[[think_begin]]" {
 				inThinking = true
 				thinkBody = nil
 				emit(g, Event{Event: "thinking_begin", Ts: ts})
-				hasPending = false
 			} else if buf == "[[tool_out_begin]]" {
 				inToolOut = true
 				toolOutBody = nil
 				emit(g, Event{Event: "tool_result_begin", Ts: ts})
-				hasPending = false
 			} else if strings.HasPrefix(buf, ">>> ") {
 				emit(g, Event{Event: "prompt", Msg: buf[4:], Ts: ts})
-				hasPending = false
 			} else if strings.HasPrefix(buf, "[[tool]] ") {
 				rest := buf[len("[[tool]] "):]
 				sp := strings.IndexByte(rest, ' ')
@@ -977,16 +1017,13 @@ func tailLog(g string) {
 					input = rest[sp+1:]
 				}
 				emit(g, Event{Event: "tool", Name: name, Input: input, Ts: ts})
-				hasPending = false
 			} else if strings.HasPrefix(buf, "[[think_end]] ") || strings.HasPrefix(buf, "[[tool_out_end]] ") {
 				// Stray close marker outside a block (e.g. an empty
 				// thinking block that emitted begin+end while we were
 				// still settling state). Swallow it — emitting it as a
 				// `done` event surfaces raw framing in the TUI.
-				hasPending = false
 			} else {
 				emit(g, Event{Event: "done", Text: buf, Ts: ts})
-				hasPending = false
 			}
 			buf = ""
 			i += j + 1
@@ -1014,16 +1051,22 @@ func ensureTail(g string) {
 	go tailLog(g)
 }
 
-func readHistory(g string) []Event {
+// readHistory parses the group's log into events, then applies paging:
+// drop events with ts >= before (when before > 0), keep the tail `limit`
+// (default 1000), and report whether older events were trimmed via
+// the second return value. The parser is stateful (think_begin/end,
+// tool_out_begin/end blocks) so it has to scan from the start — paging
+// is applied to the resulting slice, not to the file read.
+func readHistory(g string, limit int, before float64) ([]Event, bool) {
 	p := filepath.Join(vol(g), ".cs", "log")
 	st, err := os.Stat(p)
 	if err != nil {
-		return []Event{}
+		return []Event{}, false
 	}
 	fallbackTS := float64(st.ModTime().UnixNano()) / 1e9
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return []Event{}
+		return []Event{}, false
 	}
 	events := []Event{}
 	hasPending := false
@@ -1045,6 +1088,15 @@ func readHistory(g string) []Event {
 		if hasPending {
 			ts = pendingTS
 		}
+		// pendingTS is sticky once seen: stream_filter.js emits a single
+		// `[ts:N]` marker per claude turn (stampOnce), so every event
+		// between markers should share that turn's ts. Earlier behavior
+		// reset hasPending after each event, which dropped subsequent
+		// events back to fallbackTS (file mtime, i.e. "now") — that
+		// silently broke any ts-based filtering (paging, ranges) and
+		// rendered `13:29` stamps everywhere because all but the first
+		// event of a turn picked up the same recent mtime.
+		//
 		// Same nesting priority as the live tailer: while inside a block,
 		// only the matching end marker can close it. See tailLog comment.
 		if inThinking {
@@ -1062,7 +1114,6 @@ func readHistory(g string) []Event {
 			} else {
 				thinkBody = append(thinkBody, line)
 			}
-			hasPending = false
 			continue
 		}
 		if inToolOut {
@@ -1076,24 +1127,20 @@ func readHistory(g string) []Event {
 			} else {
 				toolOutBody = append(toolOutBody, line)
 			}
-			hasPending = false
 			continue
 		}
 		if line == "[[think_begin]]" {
 			inThinking = true
 			thinkBody = nil
-			hasPending = false
 			continue
 		}
 		if line == "[[tool_out_begin]]" {
 			inToolOut = true
 			toolOutBody = nil
-			hasPending = false
 			continue
 		}
 		if strings.HasPrefix(line, "[[think_end]] ") || strings.HasPrefix(line, "[[tool_out_end]] ") {
 			// Stray close marker outside a block — same rationale as the live tailer.
-			hasPending = false
 			continue
 		}
 		ev := Event{Group: g, Ts: ts, Historical: true}
@@ -1116,9 +1163,29 @@ func readHistory(g string) []Event {
 			ev.Text = line
 		}
 		events = append(events, ev)
-		hasPending = false
 	}
-	return events
+	// Apply paging filter: drop events at or after `before`, then keep the
+	// tail `limit`. `more` tells the client whether older events were
+	// trimmed so it can decide if back-scroll should fetch again.
+	if before > 0 {
+		cut := len(events)
+		for i, ev := range events {
+			if ev.Ts >= before {
+				cut = i
+				break
+			}
+		}
+		events = events[:cut]
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	more := false
+	if len(events) > limit {
+		more = true
+		events = events[len(events)-limit:]
+	}
+	return events, more
 }
 
 // ---- config --------------------------------------------------------------
@@ -1157,6 +1224,42 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		cfg[key] = out
 		return
 	}
+	if key == "ports" {
+		// Accept either a JSON array of ints or a comma-separated string so
+		// `/config ports=8080,3000` (TUI tokenization splits on whitespace,
+		// not commas) works without quoting. Range-check to [1024, 65535] —
+		// privileged ports (<1024) can't be bound by rootless containers,
+		// and we don't want to publish e.g. port 0.
+		var ints []int
+		if err := json.Unmarshal(raw, &ints); err != nil {
+			var s string
+			if err := json.Unmarshal(raw, &s); err != nil {
+				return
+			}
+			for _, tok := range strings.Split(s, ",") {
+				tok = strings.TrimSpace(tok)
+				if tok == "" {
+					continue
+				}
+				n, err := strconv.Atoi(tok)
+				if err != nil {
+					return
+				}
+				ints = append(ints, n)
+			}
+		}
+		seen := map[int]bool{}
+		out := []int{}
+		for _, p := range ints {
+			if p < 1024 || p > 65535 || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+		cfg[key] = out
+		return
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return
@@ -1174,6 +1277,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "model", req.Model)
 	applyConfig(cfg, "effort", req.Effort)
 	applyConfig(cfg, "skills", req.Skills)
+	applyConfig(cfg, "ports", req.Ports)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
@@ -1332,11 +1436,12 @@ func dispatch(line []byte) any {
 		return spawnResp{baseResp{OK: true}, port}
 
 	case "history":
-		var req groupReq
+		var req historyReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
-		return historyResp{baseResp{OK: true}, readHistory(req.Group)}
+		evs, more := readHistory(req.Group, req.Limit, req.Before)
+		return historyResp{BaseResp: baseResp{OK: true}, Events: evs, More: more}
 
 	case "config":
 		var req configReq
@@ -1383,6 +1488,54 @@ func dispatch(line []byte) any {
 			return errResp(err.Error())
 		}
 		return skillReadCmd(req)
+
+	case "sched_add":
+		var req schedAddReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		it, err := addSched(req.Group, req.Cron, req.Msg)
+		if err != nil {
+			return errResp(err.Error())
+		}
+		return schedAddResp{baseResp{OK: true}, it}
+
+	case "sched_list":
+		var req schedListReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		return schedListResp{baseResp{OK: true}, listSched(req.Group)}
+
+	case "sched_del":
+		var req schedIDReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if err := delSched(req.ID); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
+
+	case "sched_toggle":
+		var req schedToggleReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if _, err := toggleSched(req.ID, req.Enabled); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
+
+	case "sched_run":
+		var req schedIDReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if err := runSchedNow(req.ID); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
 	}
 	return errResp("bad cmd: " + env.Cmd)
 }
@@ -1497,6 +1650,10 @@ func daemonMain() {
 	if _, err := ensure("main", true); err != nil {
 		emitLogf("error", "ensure main: %v", err)
 	}
+	if err := ensureCtlFIFO(); err != nil {
+		emitLogf("error", "ctl: ensure fifo: %v", err)
+	}
+	go ctlLoop()
 
 	_ = os.Remove(SOCK_PATH)
 	l, err := net.Listen("unix", SOCK_PATH)
@@ -1507,7 +1664,9 @@ func daemonMain() {
 	_ = os.Chmod(SOCK_PATH, 0o660)
 	emitLogf("info", "clawsond ready socket=%s", SOCK_PATH)
 
+	loadSched()
 	go pingLoop()
+	go cronLoop()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)

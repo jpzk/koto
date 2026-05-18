@@ -15,10 +15,19 @@ import (
 // frame. Cache is rebuilt on resize.
 
 var (
-	mdMu       sync.Mutex
-	mdCache    = map[int]*glamour.TermRenderer{}
-	ansiFence  = regexp.MustCompile("(?s)```ansi\\r?\\n(.*?)\\r?\\n```")
-	ansiEscRE  = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	mdMu      sync.Mutex
+	mdCache   = map[int]*glamour.TermRenderer{}
+	ansiFence = regexp.MustCompile("(?s)```ansi\\r?\\n(.*?)\\r?\\n```")
+	ansiEscRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+	// renderMu serializes calls to glamour.TermRenderer.Render. Glamour's
+	// renderer is not goroutine-safe, and we now call renderMarkdown from
+	// both the Bubble Tea Update goroutine (live refreshLog) and a tea.Cmd
+	// background goroutine (markdown pre-warm after history loads). Without
+	// this lock concurrent renders would race on glamour's internal state
+	// and produce garbled output. Contention is low in practice: prewarm
+	// runs once per group on history load, Update renders only on visible
+	// content change.
+	renderMu sync.Mutex
 )
 
 func getRenderer(width int) *glamour.TermRenderer {
@@ -60,6 +69,8 @@ func renderMarkdown(src string, width int) string {
 	if r == nil {
 		return src
 	}
+	renderMu.Lock()
+	defer renderMu.Unlock()
 
 	// Walk the source splitting on ```ansi fences.
 	var sb strings.Builder

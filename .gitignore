@@ -6,7 +6,11 @@ proxy.log
 clawson.sock
 run/
 .gocache/
+.gomodcache/
 .build/
+/clawson
+/tui/clawson-tui
+schedules.json
 __pycache__/
 *.pyc
 tui/node_modules/

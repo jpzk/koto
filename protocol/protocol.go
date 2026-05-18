@@ -30,6 +30,9 @@ type Event struct {
 	Words      int     `json:"words,omitempty"`
 	Body       string  `json:"body,omitempty"`
 	Historical bool    `json:"historical,omitempty"`
+	// ID identifies the schedule that produced a `sched_fired` event so the
+	// TUI can correlate the firing back to its row in /sched list.
+	ID string `json:"id,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
@@ -64,10 +67,19 @@ type SendReq struct {
 	Msg   string `json:"msg"`
 }
 
-// GroupReq covers stop / destroy / restart / history / clear — all take
-// only `group`.
+// GroupReq covers stop / destroy / restart / clear — all take only `group`.
 type GroupReq struct {
 	Group string `json:"group"`
+}
+
+// HistoryReq is the paged variant for `cmd:"history"`. Limit=0 → server
+// default (1000). Before=0 → tail page; otherwise return events with
+// strict `ts < Before` so callers can walk older pages by repeatedly
+// passing the smallest ts they've already seen.
+type HistoryReq struct {
+	Group  string  `json:"group"`
+	Limit  int     `json:"limit,omitempty"`
+	Before float64 `json:"before,omitempty"`
 }
 
 // ConfigReq uses RawMessage per field so the dispatcher can distinguish
@@ -78,6 +90,7 @@ type ConfigReq struct {
 	Model  json.RawMessage `json:"model,omitempty"`
 	Effort json.RawMessage `json:"effort,omitempty"`
 	Skills json.RawMessage `json:"skills,omitempty"`
+	Ports  json.RawMessage `json:"ports,omitempty"`
 }
 
 type SkillListReq struct {
@@ -141,6 +154,10 @@ type ListResp struct {
 type HistoryResp struct {
 	BaseResp
 	Events []Event `json:"events"`
+	// More signals that older events exist beyond what's returned. The TUI
+	// uses this to decide whether scrolling near the top should trigger
+	// another paged fetch.
+	More bool `json:"more,omitempty"`
 }
 
 type ConfigResp struct {
@@ -181,4 +198,50 @@ type SubscribeResp struct {
 // replay buffered log lines, then push fresh LogEvent frames as they happen.
 type LogsResp struct {
 	BaseResp
+}
+
+// ---- schedules ------------------------------------------------------------
+
+// ScheduleItem is the persisted shape of one cron-style schedule. Cron is
+// kept as the raw 5-field expression (or alias like `@daily`); the parsed
+// bitmask is rebuilt on daemon startup, not serialized. CreatedAt /
+// LastFiredAt / NextDueAt are unix seconds (matches Event.Ts).
+type ScheduleItem struct {
+	ID          string  `json:"id"`
+	Group       string  `json:"group"`
+	Cron        string  `json:"cron"`
+	Msg         string  `json:"msg"`
+	Enabled     bool    `json:"enabled"`
+	CreatedAt   float64 `json:"created_at"`
+	LastFiredAt float64 `json:"last_fired_at,omitempty"`
+	NextDueAt   float64 `json:"next_due_at,omitempty"`
+}
+
+type SchedAddReq struct {
+	Group string `json:"group"`
+	Cron  string `json:"cron"`
+	Msg   string `json:"msg"`
+}
+
+type SchedAddResp struct {
+	BaseResp
+	Item ScheduleItem `json:"item"`
+}
+
+type SchedListReq struct {
+	Group string `json:"group,omitempty"`
+}
+
+type SchedListResp struct {
+	BaseResp
+	Schedules []ScheduleItem `json:"schedules"`
+}
+
+type SchedIDReq struct {
+	ID string `json:"id"`
+}
+
+type SchedToggleReq struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
 }

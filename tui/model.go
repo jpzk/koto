@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,16 +17,20 @@ import (
 )
 
 const (
-	// maxLines is the GLOBAL cap on m.lines (across all groups). It must be
-	// large enough that loading history for every group at startup doesn't
-	// evict any single group's lines. With ~10 groups, a chatty one can have
-	// >1k events; the cap was 500 and was wiping smaller groups' history out
-	// as soon as larger groups' history loaded — "renders then gone."
-	maxLines      = 10000
-	maxPerGroup   = 1000 // per-group cap applied at history load time
+	// maxLines is the GLOBAL cap on m.lines (across all groups). With paged
+	// history, each group starts at ≤ historyPageSize; the cap is sized so
+	// many pages of back-scroll across many groups still fits. Eviction at
+	// the global cap is a safety lid, not a normal-path concern anymore.
+	maxLines        = 50000
+	historyPageSize = 1000 // events per history page (initial + each older-page fetch)
+	// pageTopThreshold is how close to the top (in viewport lines) we have to
+	// be before a scroll triggers an older-page fetch. Conservative so we
+	// don't fire while the user is just scanning the upper portion.
+	pageTopThreshold = 10
 	leftPaneWidth = 22
 	tickMs        = 80
 	metricsTickMs = 5000
+	listTickMs    = 1000
 	// maxLogLines caps the per-session daemon log buffer in the TUI. The
 	// daemon's own ring is logRingMax (200); we keep a deeper window here
 	// so the user can scroll back through what they've seen since opening
@@ -73,6 +78,7 @@ type renderedBlock struct {
 
 type spinTickMsg struct{}
 type metricsTickMsg struct{}
+type listTickMsg struct{}
 
 type listMsg struct {
 	groups map[string]GroupInfo
@@ -81,6 +87,10 @@ type listMsg struct {
 type historyMsg struct {
 	group  string
 	events []Event
+	more   bool
+	// before == 0 → initial/tail load (append + bottom-stick).
+	// before  > 0 → older-page response (prepend + scroll-anchor).
+	before float64
 	err    error
 }
 type streamEventMsg Event
@@ -105,6 +115,25 @@ type reconnectAttemptMsg struct{}
 
 // logEventMsg / logSubClosedMsg are defined in log_view.go alongside the
 // subscribe goroutine — they're only used by the focusLog code path.
+
+// mdPrewarmMsg carries a batch of pre-rendered markdown back from the
+// background pre-warm goroutine. The Update handler merges them into
+// m.mdCache so the first-visit refreshLog for an off-current group
+// hits cache for every response instead of paying glamour cost serially.
+type mdPrewarmMsg struct {
+	items map[string]string // key = "<cols>\x00<text>" → rendered ANSI
+}
+
+// vpPrewarmMsg carries a fully-built viewport content entry for an
+// off-current group. The goroutine that produces it has already done the
+// allBlocks + buildLogContent work, so the Update handler just stores it
+// in m.vpCache (after a ver/gver staleness check) — the next tree-nav
+// into that group hits the cache immediately, no synchronous rebuild.
+type vpPrewarmMsg struct {
+	group   string
+	entry   vpCacheEntry
+	mdItems map[string]string // markdown rendered along the way
+}
 
 // --- Model -------------------------------------------------------------------
 
@@ -205,6 +234,36 @@ type Model struct {
 	// and bounded to mdCacheMax to cap memory.
 	mdCache map[string]string
 
+	// loadedGroups tracks which groups have finished both history-load and
+	// render-pre-warm so the status bar can show a launch progress bar
+	// until everything is hot. Set on:
+	//   - historyMsg for the current group (refreshLog fills vpCache
+	//     synchronously, no prewarm goroutine fires)
+	//   - vpPrewarmMsg for off-current groups (only when the entry is
+	//     actually stored — staleness checks aside)
+	// The bar disappears once len(loadedGroups) == len(m.groups). On
+	// listMsg's toReload pass, any reloading groups are removed so they
+	// re-enter the loading state.
+	loadedGroups map[string]bool
+
+	// Paging state for chat history. The TUI fetches only the tail
+	// historyPageSize events per group on startup; older pages are
+	// lazy-loaded when the user scrolls near the top of the current
+	// group's viewport.
+	//   pageOldestTs[g]  — smallest ts currently held for group g; the next
+	//                      older-page request uses this as the strict
+	//                      upper bound (`before`). Slightly biased down by
+	//                      a small epsilon when stored so a peer event
+	//                      with identical ts at the page boundary is
+	//                      still captured on the next fetch.
+	//   pageLoading[g]   — in-flight guard so a flurry of upward scroll
+	//                      events doesn't dispatch duplicate fetches.
+	//   pageExhausted[g] — daemon's last response said no more older
+	//                      events exist; further scroll-up triggers nothing.
+	pageOldestTs  map[string]float64
+	pageLoading   map[string]bool
+	pageExhausted map[string]bool
+
 	// Daemon log view (focusLog / ctrl+L). The subscription is lazy: we
 	// only open `cmd:"logs"` on the first ctrl+L press to avoid a wasted
 	// long-lived connection for users who never look at the log. The
@@ -221,16 +280,45 @@ type Model struct {
 	// focusInput. Without this, opening the log from tree-nav mode and
 	// closing it again silently collapsed the tree pane.
 	preLogFocus focusZone
+
+	// promptHistory: per-group ring of the last N user prompts, oldest
+	// first. Populated from three independent sources — local sends
+	// (dispatchInput), live subscribe `prompt` events, and the per-group
+	// historyMsg replay on first attach — with adjacent dedup so the
+	// merged stream doesn't duplicate the same prompt. Ephemeral; lost on
+	// /reload, but the historyMsg path re-seeds from the daemon's log on
+	// the next attach.
+	promptHistory map[string][]string
+	picker        pickerState
+	prePickerFocus focusZone
+}
+
+const promptHistoryMax = 200
+
+type pickerState struct {
+	open    bool
+	input   textinput.Model
+	items   []string
+	matches []fuzzyMatch
+	cursor  int
 }
 
 const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
+	// Inline zsh-autosuggestions: bubbles renders matched suggestions as
+	// grayed-out ghost text inline. We feed candidates from promptHistory
+	// via refreshSuggestions; acceptance is wired to right-arrow at end-
+	// of-line in handleKey, so neutralize bubbles' default Tab binding to
+	// prevent accidental accepts (Tab is otherwise unused in input mode —
+	// the tree-toggle Tab is intercepted earlier in handleKey).
+	ti.ShowSuggestions = true
+	ti.KeyMap.AcceptSuggestion = key.Binding{}
 
 	st := loadState(sock)
 	cur := "main"
@@ -270,6 +358,10 @@ func newModel(sock string, ctxWindow int) Model {
 		vp:            vp,
 		autoFollow:    true,
 		logAutoFollow: true,
+		loadedGroups:  map[string]bool{},
+		pageOldestTs:  map[string]float64{},
+		pageLoading:   map[string]bool{},
+		pageExhausted: map[string]bool{},
 		connected:  true,
 		ticking:    true, // Init kicks the first tick
 		width:      80,
@@ -277,7 +369,55 @@ func newModel(sock string, ctxWindow int) Model {
 		mdCache:    map[string]string{},
 		vpCache:    map[string]vpCacheEntry{},
 		groupVer:   map[string]int{},
+		promptHistory: map[string][]string{},
 	}
+}
+
+// pushHistory appends msg to the per-group prompt ring used by the Ctrl+R
+// fuzzy picker. Adjacent-dedup only: avoids the double-count when a local
+// send (logged from dispatchInput) is later mirrored back by the daemon's
+// own subscribe event. Capped at promptHistoryMax per group.
+func (m *Model) pushHistory(group, msg string) {
+	msg = strings.TrimSpace(msg)
+	if group == "" || msg == "" {
+		return
+	}
+	h := m.promptHistory[group]
+	if n := len(h); n > 0 && h[n-1] == msg {
+		return
+	}
+	h = append(h, msg)
+	if len(h) > promptHistoryMax {
+		h = h[len(h)-promptHistoryMax:]
+	}
+	m.promptHistory[group] = h
+	if group == m.cur {
+		m.refreshSuggestions()
+	}
+}
+
+// refreshSuggestions rebuilds the inline autosuggestion pool the textinput
+// uses for ghost-completion of the current group's recent prompts. Empty
+// input → cleared list (otherwise bubbles' HasPrefix("foo", "") matches
+// everything and the newest entry would render as ghost the instant focus
+// lands). Multi-line prompts are skipped — they're recallable via the
+// Ctrl+R picker but can't render inline. Newest-first ordering so the
+// most recent matching prompt is the one bubbles picks.
+func (m *Model) refreshSuggestions() {
+	if m.focus != focusInput || m.input.Value() == "" {
+		m.input.SetSuggestions(nil)
+		return
+	}
+	hist := m.promptHistory[m.cur]
+	out := make([]string, 0, len(hist))
+	for i := len(hist) - 1; i >= 0; i-- {
+		p := hist[i]
+		if strings.ContainsRune(p, '\n') {
+			continue
+		}
+		out = append(out, p)
+	}
+	m.input.SetSuggestions(out)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -286,6 +426,7 @@ func (m Model) Init() tea.Cmd {
 		metricsCmd(m.sock, m.cur),
 		tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} }),
+		tea.Tick(listTickMs*time.Millisecond, func(time.Time) tea.Msg { return listTickMsg{} }),
 	)
 }
 
@@ -309,11 +450,21 @@ func listCmd(sock string) tea.Cmd {
 	}
 }
 
-func historyCmd(sock, group string) tea.Cmd {
+// historyCmd dispatches a paged history request. before=0 fetches the
+// tail page; before>0 fetches events with ts < before for back-scroll
+// lazy-loading. limit=0 lets the daemon default to historyPageSize.
+func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := daemonCall(sock, "history", map[string]any{"group": group})
+		args := map[string]any{"group": group}
+		if before > 0 {
+			args["before"] = before
+		}
+		if limit > 0 {
+			args["limit"] = limit
+		}
+		resp, err := daemonCall(sock, "history", args)
 		if err != nil {
-			return historyMsg{group: group, err: err}
+			return historyMsg{group: group, before: before, err: err}
 		}
 		// Round-trip the events list through json so we get typed Event
 		// values without re-parsing each field by hand. daemonCall already
@@ -325,7 +476,8 @@ func historyCmd(sock, group string) tea.Cmd {
 				_ = json.Unmarshal(b, &evs)
 			}
 		}
-		return historyMsg{group: group, events: evs}
+		more, _ := resp["more"].(bool)
+		return historyMsg{group: group, events: evs, more: more, before: before}
 	}
 }
 
@@ -338,6 +490,79 @@ func metricsCmd(sock, group string) tea.Cmd {
 		met, _ := resp["metric"].(map[string]any)
 		gmet, _ := resp["global_metric"].(map[string]any)
 		return metricsRespMsg{metric: met, global: gmet}
+	}
+}
+
+// prewarmGroupCmd does the full first-visit work for an off-current
+// group on a background goroutine: render every response's markdown
+// (populating an mdCache delta), then assemble the complete vpCache
+// content string for that group. Result lands in vpPrewarmMsg, which
+// the Update handler merges into m.mdCache + m.vpCache (staleness check
+// against current ver/gver). Once this runs for every group on history
+// load, tree navigation becomes pure cache-hit — no synchronous
+// rebuild on first hover.
+//
+// The goroutine works on snapshots so it can't race with the Update
+// goroutine's writes:
+//   - linesCopy: shallow slice copy of m.lines (logLine fields are
+//     value types, so a shallow copy is enough).
+//   - mdSnap: shallow map copy of m.mdCache. New entries rendered by
+//     this goroutine are tracked in newItems and shipped back so
+//     other groups' prewarms can reuse them.
+//
+// We construct a temporary Model with just the fields buildLogContent
+// reads, rather than refactoring buildLogContent into a free function —
+// less code to keep in sync with future changes to the assembler.
+func (m Model) prewarmGroupCmd(group string, cols int) tea.Cmd {
+	if group == "" {
+		return nil
+	}
+	// Snapshot the inputs the goroutine will read.
+	linesCopy := make([]logLine, len(m.lines))
+	copy(linesCopy, m.lines)
+	mdSnap := make(map[string]string, len(m.mdCache))
+	for k, v := range m.mdCache {
+		mdSnap[k] = v
+	}
+	expT := m.expandedThoughts
+	expTO := m.expandedToolOuts
+	ver := m.groupVer[group]
+	gver := m.groupVer[""]
+
+	return func() tea.Msg {
+		// Reuse the existing assembler by constructing a minimal Model.
+		// allBlocks/buildLogContent only read from m.lines/m.cur/expT/
+		// expTO and read+write m.mdCache, plus liveOverlay reads three
+		// per-group maps (nil-safe for read). No live overlay can apply
+		// to an off-current group anyway, so those start nil.
+		snap := Model{
+			lines:            linesCopy,
+			cur:              group,
+			expandedThoughts: expT,
+			expandedToolOuts: expTO,
+			mdCache:          mdSnap,
+		}
+		content := snap.buildLogContent(cols)
+
+		// Diff the post-build mdCache against the snapshot to extract
+		// only newly-rendered entries. The Update handler merges these
+		// back into the live mdCache so peer groups' prewarms can
+		// short-circuit on shared response text.
+		newItems := map[string]string{}
+		for k, v := range snap.mdCache {
+			if _, was := mdSnap[k]; !was {
+				newItems[k] = v
+			}
+		}
+
+		return vpPrewarmMsg{
+			group: group,
+			entry: vpCacheEntry{
+				ver: ver, globalVer: gver, cols: cols,
+				expT: expT, expTO: expTO, content: content,
+			},
+			mdItems: newItems,
+		}
 	}
 }
 
@@ -425,6 +650,15 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		)
 
+	case listTickMsg:
+		// Periodic group-list poll. Out-of-band spawns/stops (main agent's
+		// ctl plane, host-side socat probes) don't push refresh events, so
+		// we poll once a second. listMsg's handler is already idempotent.
+		return m, tea.Batch(
+			listCmd(m.sock),
+			tea.Tick(listTickMs*time.Millisecond, func(time.Time) tea.Msg { return listTickMsg{} }),
+		)
+
 	case metricsRespMsg:
 		if msg.err == nil {
 			m.metric = msg.metric
@@ -464,11 +698,22 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.lines = filtered
 			m.refreshLog()
+			// Reloading groups are leaving the "loaded" set until their
+			// fresh history + prewarm completes — keeps the status-bar
+			// progress bar honest after /reload or reconnect. Paging
+			// state is reset too so the new tail page seeds fresh
+			// pageOldestTs and the older-page chain restarts.
+			for g := range toReload {
+				delete(m.loadedGroups, g)
+				delete(m.pageOldestTs, g)
+				delete(m.pageLoading, g)
+				delete(m.pageExhausted, g)
+			}
 		}
 		for g := range msg.groups {
 			if !m.subscribed[g] {
 				m.subscribed[g] = true
-				cmds = append(cmds, historyCmd(m.sock, g))
+				cmds = append(cmds, historyCmd(m.sock, g, 0, historyPageSize))
 				startSubscribe(m.sock, g)
 			}
 		}
@@ -477,13 +722,22 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case historyMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("history: %v", msg.err)})
+			m.pageLoading[msg.group] = false
 			return m, nil
 		}
+		older := msg.before > 0
 		batch := make([]logLine, 0, len(msg.events))
 		for _, ev := range msg.events {
 			switch ev.Event {
 			case "prompt":
-				delete(m.lastThoughtBody, msg.group)
+				if !older {
+					// lastThoughtBody dedup tracks the most-recent thought
+					// per group so live thinking_done frames can drop empty
+					// echoes. Older-page replays must not touch this state —
+					// they describe earlier moments in the conversation.
+					delete(m.lastThoughtBody, msg.group)
+					m.pushHistory(msg.group, ev.Msg)
+				}
 				batch = append(batch, logLine{kind: "prompt", group: msg.group, text: ev.Msg, ts: int64(ev.Ts)})
 			case "done":
 				if ev.Text != "" {
@@ -492,30 +746,130 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			case "tool":
 				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 			case "thinking_done":
-				// Dedup: skip stray empty-body or exact-match dupes following
-				// a real thought. See the live handler for context.
-				if _, hadOne := m.lastThoughtBody[msg.group]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[msg.group]) {
-					continue
+				if !older {
+					// Same rationale: only the initial tail page mutates the
+					// live dedup state. Older replays just emit all events
+					// without filtering — they're historical context only.
+					if _, hadOne := m.lastThoughtBody[msg.group]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[msg.group]) {
+						continue
+					}
+					m.lastThoughtBody[msg.group] = ev.Body
 				}
-				m.lastThoughtBody[msg.group] = ev.Body
 				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 			case "tool_result_done":
 				batch = append(batch, logLine{kind: "tool_out", group: msg.group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
 			}
 		}
-		// Per-group cap: keep only the most recent maxPerGroup events from
-		// this group's history. Avoids one chatty group's backlog crowding
-		// the global cap and evicting other groups.
-		if len(batch) > maxPerGroup {
-			batch = batch[len(batch)-maxPerGroup:]
+		// Track the smallest ts in this batch so the next older-page request
+		// can use it as the strict upper bound. -0.0005s bias is a safety
+		// margin against ties: the daemon parser emits multiple events with
+		// identical ts (e.g. tool + tool_out in one exchange) and `before`
+		// is strict `<`, so without the bias we'd drop the tied peer.
+		if len(batch) > 0 {
+			minTs := batch[0].ts
+			for _, l := range batch[1:] {
+				if l.ts < minTs {
+					minTs = l.ts
+				}
+			}
+			next := float64(minTs) - 0.0005
+			cur, ok := m.pageOldestTs[msg.group]
+			if !ok || next < cur {
+				m.pageOldestTs[msg.group] = next
+			}
 		}
+		m.pageExhausted[msg.group] = !msg.more
+		m.pageLoading[msg.group] = false
+
+		if older {
+			// Older-page response: prepend to m.lines. allBlocks filters by
+			// group while preserving slice order, so per-group chronology
+			// holds (older events have lower ts). vpCache is invalidated
+			// via groupVer; the chat scroll position is anchored by the
+			// post-refresh TotalLineCount delta below.
+			if len(batch) == 0 {
+				return m, nil
+			}
+			combined := make([]logLine, 0, len(batch)+len(m.lines))
+			combined = append(combined, batch...)
+			combined = append(combined, m.lines...)
+			m.lines = combined
+			if len(m.lines) > maxLines {
+				m.lines = m.lines[len(m.lines)-maxLines:]
+				// Global trim wipes whole-cache state; mirror addLine's
+				// behavior so stale per-group versions don't keep ghost
+				// vpCache entries from a different m.lines layout.
+				m.vpCache = map[string]vpCacheEntry{}
+				m.groupVer = map[string]int{}
+			}
+			m.groupVer[msg.group]++
+			if msg.group == m.cur {
+				oldTotal := m.vp.TotalLineCount()
+				m.refreshLog()
+				newTotal := m.vp.TotalLineCount()
+				m.vp.SetYOffset(m.vp.YOffset + (newTotal - oldTotal))
+				m.autoFollow = m.vp.AtBottom()
+			} else {
+				// Off-current: invalidate cache; the next switch into this
+				// group will rebuild on demand. Prewarm would race the
+				// next page request, so skip it here.
+			}
+			return m, nil
+		}
+
+		// Initial (tail) page — original append path. No per-batch cap
+		// needed; the daemon already trimmed to historyPageSize.
 		m.lines = append(m.lines, batch...)
 		if len(m.lines) > maxLines {
 			m.lines = m.lines[len(m.lines)-maxLines:]
 		}
+		// Bump groupVer to invalidate any stale vpCache entry built before
+		// this history page landed. Without this, an earlier refreshLog
+		// (typically from listMsg's toReload path) cached empty content at
+		// ver=0; the refreshLog below would then cache-hit on the empty
+		// entry and leave the chat blank until the next live event bumped
+		// the version. The older-page branch already does this.
+		m.groupVer[msg.group]++
 		if msg.group == m.cur {
 			m.refreshLog()
+			m.refreshSuggestions()
+			// refreshLog populated vpCache synchronously, so the
+			// current group is fully loaded at this point. Off-current
+			// groups get marked when their vpPrewarmMsg lands.
+			m.loadedGroups[msg.group] = true
+			return m, nil
 		}
+		// Off-current group: pre-build the full vpCache entry on a
+		// background goroutine so the first ↑/↓ tree-nav into this
+		// group is a cache hit (no synchronous allBlocks + glamour
+		// chain on the user's keypress).
+		return m, m.prewarmGroupCmd(msg.group, m.logContentCols())
+
+	case vpPrewarmMsg:
+		// Merge any newly-rendered markdown so peer prewarms / future
+		// live renders can reuse them.
+		for k, v := range msg.mdItems {
+			if _, exists := m.mdCache[k]; exists {
+				continue
+			}
+			if len(m.mdCache) >= mdCacheMax {
+				m.mdCache = map[string]string{}
+			}
+			m.mdCache[k] = v
+		}
+		// Staleness check: if events arrived for this group while the
+		// goroutine was running (groupVer bumped), the cached content
+		// is wrong. Skip the store; the user's next refreshLog will
+		// rebuild from current m.lines. Same logic for the global
+		// version (sys messages can land between snapshot and now).
+		// Either way the group is "loaded enough" to drop from the
+		// progress bar — the launch-time work for it is done.
+		if m.groupVer[msg.group] == msg.entry.ver &&
+			m.groupVer[""] == msg.entry.globalVer &&
+			msg.entry.cols == m.logContentCols() {
+			m.vpCache[msg.group] = msg.entry
+		}
+		m.loadedGroups[msg.group] = true
 		return m, nil
 
 	case streamEventMsg:
@@ -529,6 +883,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
 			delete(m.lastThoughtBody, ev.Group)
 			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: int64(ev.Ts)})
+			m.pushHistory(ev.Group, ev.Msg)
 		case "stream":
 			m.streamBuf[ev.Group] = ev.Text
 		case "done":
@@ -587,6 +942,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.toolOutBuf, ev.Group)
 			delete(m.toolOutTail, ev.Group)
 			m.addLine(logLine{kind: "tool_out", group: ev.Group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
+		case "sched_fired", "sched_run":
+			tag := "⏰"
+			if ev.Event == "sched_run" {
+				tag = "▶"
+			}
+			m.addLine(logLine{kind: "sys", group: ev.Group,
+				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
 		}
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)
@@ -691,6 +1053,55 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case schedListMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched list: %v", msg.err)})
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			scope := "any group"
+			if msg.filter != "" {
+				scope = msg.filter
+			}
+			m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("no schedules for %s", scope)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "schedules:"})
+		for _, s := range msg.items {
+			mark := "·"
+			if s.Enabled {
+				mark = "✓"
+			}
+			next := formatRelative(s.NextDueAt)
+			if !s.Enabled {
+				next = "off"
+			}
+			preview := s.Msg
+			if len(preview) > 40 {
+				preview = preview[:37] + "…"
+			}
+			m.addLine(logLine{kind: "sys", group: m.cur,
+				text: fmt.Sprintf("  %s %s  %s  %-15s  next=%-6s  %s", mark, s.ID, s.Group, s.Cron, next, preview)})
+		}
+		return m, nil
+
+	case schedAddMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched add: %v", msg.err)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur,
+			text: fmt.Sprintf("scheduled %s → %s every %q (next in %s)", msg.item.ID, msg.item.Group, msg.item.Cron, formatRelative(msg.item.NextDueAt))})
+		return m, nil
+
+	case schedSimpleMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched %s %s: %v", msg.op, msg.id, msg.err)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("/sched %s %s ok", msg.op, msg.id)})
+		return m, nil
+
 	case pluginLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
 		if msg.group == m.cur {
@@ -715,7 +1126,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		m.autoFollow = m.vp.AtBottom()
-		return m, cmd
+		return m, tea.Batch(cmd, m.maybePageOlder())
 	}
 	return m, nil
 }
@@ -755,6 +1166,32 @@ func (m *Model) resizeViewport() {
 	w, h := m.logViewportSize()
 	m.vp.Width = w
 	m.vp.Height = h
+}
+
+// maybePageOlder dispatches an older-page history fetch when the current
+// group's chat viewport is scrolled close enough to the top and we know
+// older events exist. Returns nil when a fetch isn't warranted (no
+// older state, fetch already in flight, daemon said exhausted, or the
+// viewport is nowhere near the top). The caller is expected to thread
+// the returned tea.Cmd through its Update return so the dispatch lands
+// on the Bubble Tea loop.
+func (m *Model) maybePageOlder() tea.Cmd {
+	g := m.cur
+	if g == "" {
+		return nil
+	}
+	if m.pageLoading[g] || m.pageExhausted[g] {
+		return nil
+	}
+	before, ok := m.pageOldestTs[g]
+	if !ok || before <= 0 {
+		return nil
+	}
+	if m.vp.TotalLineCount() > m.vp.Height && m.vp.YOffset > pageTopThreshold {
+		return nil
+	}
+	m.pageLoading[g] = true
+	return historyCmd(m.sock, g, before, historyPageSize)
 }
 
 // refreshLog rebuilds the viewport content from m.lines + live overlay.
@@ -861,8 +1298,12 @@ func formatTool(name, input string) string {
 	}
 	clip := func(s string, n int) string {
 		s = strings.ReplaceAll(s, "\n", " ⏎ ")
-		if len(s) > n {
-			return s[:n-1] + "…"
+		// Truncate on rune boundary, not byte boundary. Slicing mid-rune
+		// emits broken UTF-8 that corrupts terminal state and propagates
+		// rendering breakage to every row below in the chat viewport.
+		runes := []rune(s)
+		if len(runes) > n {
+			return string(runes[:n-1]) + "…"
 		}
 		return s
 	}
@@ -1090,6 +1531,16 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
+	if m.picker.open {
+		// Ctrl+C while the picker is open dismisses it (matches fzf). Any
+		// other harness-level binding (ctrl+t / ctrl+d / ctrl+l) is also
+		// suppressed — the picker owns key input entirely until closed.
+		if s == "ctrl+c" {
+			m.closePicker()
+			return m, nil
+		}
+		return m.handlePickerKey(msg)
+	}
 	if s == "ctrl+c" {
 		// Mid-flight: stop the agent instead of quitting. The streaming or
 		// thinking buffer for the current group is the signal that claude is
@@ -1107,12 +1558,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	}
-	if s == "ctrl+r" {
-		// Same path as /reload but preserves whatever's in the input box as
-		// the draft (typing "/reload" would have overwritten it).
+	if s == "ctrl+shift+r" {
+		// Reload TUI (was ctrl+r, moved to free up the shell-style ctrl+r
+		// recall keybind). Same path as /reload but preserves whatever's in
+		// the input box as the draft (typing "/reload" would have
+		// overwritten it). Some terminals don't transmit shifted control
+		// keys distinctly — fall back to /reload if your terminal doesn't.
 		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
 		m.reloadPending = true
 		return m, tea.Quit
+	}
+	if s == "ctrl+r" {
+		// fzf-style prompt-history recall for the current group. Always
+		// opens — if history is empty, the picker shows nothing until the
+		// daemon's historyMsg replay lands (typically within a few ms on
+		// first attach).
+		m.openPicker()
+		return m, nil
 	}
 	if s == "ctrl+t" {
 		// Toggle thought-body expansion globally. Thought blocks render
@@ -1168,6 +1630,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cur = order[m.treeIdx]
 				delete(m.unread, m.cur)
 				m.refreshLog()
+				m.refreshSuggestions()
 				m.vp.GotoBottom()
 				m.autoFollow = true
 			}
@@ -1178,6 +1641,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cur = order[m.treeIdx]
 				delete(m.unread, m.cur)
 				m.refreshLog()
+				m.refreshSuggestions()
 				m.vp.GotoBottom()
 				m.autoFollow = true
 			}
@@ -1225,6 +1689,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s == "enter" {
 		v := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
+		m.refreshSuggestions()
 		if v == "" {
 			return m, nil
 		}
@@ -1235,14 +1700,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if s == "ctrl+h" {
 		m.input.SetValue("")
+		m.refreshSuggestions()
 		return m, nil
+	}
+
+	if s == "right" {
+		// zsh-autosuggestions-style accept: only when the cursor is at
+		// end-of-line AND a matched suggestion exists. Anywhere else,
+		// fall through so the default CharacterForward binding moves the
+		// cursor one position right (preserves normal editing).
+		val := m.input.Value()
+		if m.input.Position() == len([]rune(val)) {
+			if sug := m.input.CurrentSuggestion(); sug != "" {
+				m.input.SetValue(sug)
+				m.input.CursorEnd()
+				m.refreshSuggestions()
+				return m, nil
+			}
+		}
 	}
 
 	switch s {
 	case "pgup":
 		m.vp.HalfViewUp()
 		m.autoFollow = m.vp.AtBottom()
-		return m, nil
+		return m, m.maybePageOlder()
 	case "pgdown", "pgdn":
 		m.vp.HalfViewDown()
 		m.autoFollow = m.vp.AtBottom()
@@ -1250,7 +1732,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+up":
 		m.vp.LineUp(1)
 		m.autoFollow = m.vp.AtBottom()
-		return m, nil
+		return m, m.maybePageOlder()
 	case "shift+down":
 		m.vp.LineDown(1)
 		m.autoFollow = m.vp.AtBottom()
@@ -1258,7 +1740,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "home":
 		m.vp.GotoTop()
 		m.autoFollow = false
-		return m, nil
+		return m, m.maybePageOlder()
 	case "end":
 		m.vp.GotoBottom()
 		m.autoFollow = true
@@ -1267,6 +1749,77 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.refreshSuggestions()
+	return m, cmd
+}
+
+// openPicker snapshots the current group's prompt history (newest-first)
+// into pickerState and switches the model into picker mode. Items are
+// snapshotted at open time so background subscribe events arriving mid-
+// session don't shuffle the result list under the user's fingers.
+func (m *Model) openPicker() {
+	src := m.promptHistory[m.cur]
+	items := make([]string, 0, len(src))
+	for i := len(src) - 1; i >= 0; i-- {
+		items = append(items, src[i])
+	}
+	ti := textinput.New()
+	ti.Placeholder = "type to filter (esc=close, ↑↓=pick, enter=insert)"
+	ti.CharLimit = 0
+	ti.Width = 60
+	ti.Focus()
+	matches := fuzzyRank("", items, 0)
+	m.picker = pickerState{
+		open:    true,
+		input:   ti,
+		items:   items,
+		matches: matches,
+		cursor:  0,
+	}
+	m.prePickerFocus = m.focus
+}
+
+func (m *Model) closePicker() {
+	m.picker = pickerState{}
+	m.focus = m.prePickerFocus
+	if m.focus == focusInput {
+		m.input.Focus()
+	}
+}
+
+// handlePickerKey routes all key input while the picker overlay is open.
+// Returns nil cmd for state-only changes; never quits the program.
+func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	s := msg.String()
+	switch s {
+	case "esc", "ctrl+g":
+		m.closePicker()
+		return m, nil
+	case "enter":
+		if len(m.picker.matches) > 0 {
+			pick := m.picker.items[m.picker.matches[m.picker.cursor].Idx]
+			m.input.SetValue(pick)
+			m.input.CursorEnd()
+		}
+		m.closePicker()
+		return m, nil
+	case "up", "ctrl+p":
+		if m.picker.cursor > 0 {
+			m.picker.cursor--
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.picker.cursor < len(m.picker.matches)-1 {
+			m.picker.cursor++
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.picker.input, cmd = m.picker.input.Update(msg)
+	m.picker.matches = fuzzyRank(m.picker.input.Value(), m.picker.items, 200)
+	if m.picker.cursor >= len(m.picker.matches) {
+		m.picker.cursor = max(0, len(m.picker.matches)-1)
+	}
 	return m, cmd
 }
 
@@ -1317,6 +1870,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.cur = strings.TrimSpace(v[4:])
 		delete(m.unread, m.cur)
 		m.refreshLog()
+		m.refreshSuggestions()
 		m.vp.GotoBottom()
 		m.autoFollow = true
 		return listCmd(m.sock)
@@ -1324,12 +1878,22 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	if v == "/ls" {
 		return listCmd(m.sock)
 	}
+	if v == "/quit" || v == "/exit" {
+		return tea.Quit
+	}
 	if v == "/skill" || strings.HasPrefix(v, "/skill ") {
 		rest := ""
 		if len(v) > 6 {
 			rest = v[7:]
 		}
 		return m.handleSkillCmd(rest)
+	}
+	if v == "/sched" || strings.HasPrefix(v, "/sched ") {
+		rest := ""
+		if len(v) > 6 {
+			rest = strings.TrimSpace(v[6:])
+		}
+		return m.handleSchedCmd(rest)
 	}
 	if v == "/clear" {
 		return daemonCmd(m.sock, "clear", m.cur, nil)
@@ -1445,6 +2009,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("started /%s", p.name)})
 		return nil
 	}
+	m.pushHistory(m.cur, v)
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v})
 }
 

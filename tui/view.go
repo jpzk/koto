@@ -174,6 +174,9 @@ func (m Model) View() string {
 	} else {
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, logArea, scrollbar)
 	}
+	if m.picker.open {
+		middle = m.renderPicker(logRows)
+	}
 
 	input := m.renderInput()
 	hint := m.renderHint()
@@ -192,7 +195,11 @@ func (m Model) renderStatusBar(spin string) string {
 	if gap < 0 {
 		gap = 0
 	}
-	return left + strings.Repeat(" ", gap) + right
+	// MaxWidth clips at m.width so an overflowing right side (many metric
+	// segments on a narrow pane) can't wrap into a second row. Wrapping
+	// here would push the input/hint off-screen — the main view's vertical
+	// budget is exactly m.height with no slack.
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(left + strings.Repeat(" ", gap) + right)
 }
 
 func (m Model) renderStatusLeft() string {
@@ -204,7 +211,34 @@ func (m Model) renderStatusLeft() string {
 	}
 	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cBlue).Bold(true).Render("   " + m.cur + runDot + " ")
 	a2 := lipgloss.NewStyle().Foreground(cBlue).Background(cBlack).Render(pSep)
-	return app + a1 + grp + a2
+	return app + a1 + grp + a2 + m.renderLoadingSegment()
+}
+
+// renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
+// is still in flight on launch (or after /reload). Hidden once every group
+// in m.groups has been marked loaded. The bar uses the same renderBar
+// helper as the metric bars on the right so the visual style is uniform.
+func (m Model) renderLoadingSegment() string {
+	total := len(m.groups)
+	if total == 0 {
+		return ""
+	}
+	done := 0
+	for g := range m.groups {
+		if m.loadedGroups[g] {
+			done++
+		}
+	}
+	if done >= total {
+		return ""
+	}
+	frac := float64(done) / float64(total)
+	style := lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).Bold(true)
+	label := style.Render(fmt.Sprintf("  loading %d/%d ", done, total))
+	if m.width >= 110 {
+		return label + renderBar(frac, 8, cYellow) + style.Render(" ")
+	}
+	return label
 }
 
 func (m Model) renderStatusRight(spin string) string {
@@ -546,6 +580,10 @@ func (m Model) renderInput() string {
 	}
 	prefix := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(" ")
 	body := prefix + " " + m.input.View()
+	// Clip body before the border styling so an over-long textinput line
+	// (rare, but possible on a very narrow pane) can't wrap into a second
+	// row and push the hint off-screen.
+	body = lipgloss.NewStyle().MaxWidth(m.width - 4).Render(body)
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
@@ -584,10 +622,123 @@ func (m Model) renderHint() string {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))
 	}
+	if m.pageLoading[m.cur] {
+		spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
+		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).
+			Render(spin+" loading older…"))
+	} else if m.pageExhausted[m.cur] && m.vp.AtTop() {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cGray).
+			Render("◆ history start"))
+	}
 	if streaming || thinking {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render("^c stop"))
 	} else {
 		parts = append(parts, "^c exit")
 	}
 	return dim.MaxWidth(m.width).Render(" " + strings.Join(parts, "  ·  "))
+}
+
+// --- fuzzy picker overlay ----------------------------------------------------
+
+// renderPicker draws the Ctrl+R prompt-history picker inside the chat
+// middle area (between status bar and input). Replaces the log+tree
+// horizontal join while picker.open is true; status bar + input + hint
+// stay visible so the user retains orientation. Sized to fill the middle
+// area exactly to keep the View()'s JoinVertical layout stable.
+func (m Model) renderPicker(rows int) string {
+	boxW := m.width
+	if boxW > 100 {
+		boxW = 100
+	}
+	if boxW < 20 {
+		boxW = m.width
+	}
+	contentW := boxW - 4
+	if contentW < 10 {
+		contentW = 10
+	}
+
+	header := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
+		Render(fmt.Sprintf(" history · %s · %d/%d ", m.cur, len(m.picker.matches), len(m.picker.items)))
+
+	prefix := lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("❯ ")
+	inputLine := prefix + m.picker.input.View()
+	inputLine = lipgloss.NewStyle().MaxWidth(contentW).Render(inputLine)
+
+	// Reserve header(1) + input(1) + spacer(1) inside the box. The rest is
+	// for result rows. Subtract 2 more for the rounded border the outer
+	// style adds top+bottom.
+	maxResultRows := rows - 5
+	if maxResultRows < 1 {
+		maxResultRows = 1
+	}
+	if maxResultRows > len(m.picker.matches) {
+		maxResultRows = len(m.picker.matches)
+	}
+
+	// Window the visible results around the cursor so picking a deep
+	// match doesn't scroll off the bottom of the box.
+	start := 0
+	if m.picker.cursor >= maxResultRows {
+		start = m.picker.cursor - maxResultRows + 1
+	}
+	end := start + maxResultRows
+	if end > len(m.picker.matches) {
+		end = len(m.picker.matches)
+	}
+
+	resultLines := []string{}
+	for i := start; i < end; i++ {
+		idx := m.picker.matches[i].Idx
+		raw := m.picker.items[idx]
+		// Collapse newlines so multi-line prompts render as one row.
+		raw = strings.ReplaceAll(raw, "\n", " ⏎ ")
+		marker := "  "
+		style := lipgloss.NewStyle().Foreground(cWhite)
+		if i == m.picker.cursor {
+			marker = lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("❯ ")
+			style = lipgloss.NewStyle().Foreground(cCyan).Bold(true)
+		}
+		body := truncRunes(raw, contentW-2)
+		resultLines = append(resultLines, marker+style.Render(body))
+	}
+	if len(resultLines) == 0 {
+		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).
+			Render("  (no matches — type to filter, or send a prompt to seed history)"))
+	}
+
+	innerParts := []string{header, inputLine, ""}
+	innerParts = append(innerParts, resultLines...)
+	inner := strings.Join(innerParts, "\n")
+
+	box := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(cCyan).
+		Width(boxW - 2).
+		Padding(0, 1).
+		Render(inner)
+
+	// Place the box centered horizontally and top-aligned vertically inside
+	// the middle area. Top-aligned (not centered) keeps the box anchored
+	// to the status bar so growing the result count doesn't make the input
+	// line jump around between renders.
+	return lipgloss.Place(m.width, rows, lipgloss.Center, lipgloss.Top, box,
+		lipgloss.WithWhitespaceChars(" "))
+}
+
+// truncRunes clamps a string to n runes, appending "…" when it had to cut.
+// Picker rows are plain text (no ANSI in m.picker.items because they're
+// user-typed prompts), so rune-counting is safe.
+func truncRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n == 1 {
+		return "…"
+	}
+	return string(r[:n-1]) + "…"
 }
