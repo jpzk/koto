@@ -1,17 +1,23 @@
 package main
 
-// ctl.go — control plane for the `main` sidecar.
+// ctl.go — per-group control plane.
 //
-// Main's workspace mounts `/workspace/.cs/ctl` (a FIFO) and `/workspace/.cs/ctl.out`
-// (a regular file). The daemon owns both. Main writes one JSON command per
-// line to ctl; daemon executes it under a restricted verb set and appends
-// the response JSON line to ctl.out. Fire-and-forget for spawn/send/stop,
-// readable replies for list (and ack envelopes for errors).
+// Every group's workspace contains `.cs/ctl` (a FIFO) and `.cs/ctl.out`
+// (a regular file). The daemon owns both. The sidecar writes one JSON
+// command per line to ctl; the daemon executes it under a restricted
+// verb set tagged with the source group's identity, and appends the
+// response JSON line to ctl.out.
 //
-// Why restricted: a tier-3 sidecar gaining the full daemon socket would be a
-// trust-tier escalation (could spawn main:true peers, stop main, etc.). The
-// ctl plane intentionally exposes only the verbs main needs to orchestrate
-// subagents — spawn (non-main only), send, stop (non-main only), list.
+// Authorization is split on the owning group:
+//
+//   owner == "main"  → spawn / send / stop / list + sched_*  (cross-group)
+//   owner != "main"  → sched_* only, self-target forced       (self-scheduling)
+//
+// Why restricted: a tier-3 sidecar gaining the full daemon socket would
+// be a trust-tier escalation. The ctl plane exposes only the verbs the
+// agent actually needs. For non-main, the "delayed self-send" capability
+// is strictly weaker than the unrestricted `send` it already has to its
+// own `.cs/in` FIFO.
 
 import (
 	"bufio"
@@ -26,27 +32,39 @@ import (
 )
 
 const (
-	ctlOwner    = "main"
-	ctlMaxSpawn = 100 // cap of total registered groups; rejects further spawns from ctl
+	ctlMainGroup = "main"
+	ctlMaxSpawn  = 100 // cap of total registered groups; rejects further spawns from ctl
 )
 
-// ctlGroupRE is the allowlist for group names the main sidecar can spawn
-// or target. Same shape as skillNameRE: starts with [a-z0-9], then up to
-// 31 of [a-z0-9_-]. This blocks path traversal (`../foo`), shell-special
+// ctlGroupRE is the allowlist for group names ctl callers can spawn or
+// target. Same shape as skillNameRE: starts with [a-z0-9], then up to 31
+// of [a-z0-9_-]. This blocks path traversal (`../foo`), shell-special
 // chars, slashes, and uppercase — all of which would either escape the
 // groups/ directory under filepath.Join, produce malformed container
 // names, or pollute groups.json with junk keys.
 var ctlGroupRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
+// One global mutex serializing writes across all ctl.out files. Volume
+// is low (one line per agent command) so a single mutex is simpler than
+// per-group bookkeeping.
 var ctlOutMu sync.Mutex
 
-func ctlPaths() (fifo, out string) {
-	d := filepath.Join(vol(ctlOwner), ".cs")
+// Registry of running ctlLoop goroutines, keyed by group, so ensure()
+// can be called repeatedly without spawning duplicate readers. Entries
+// are removed when the loop exits (e.g. after destroy() removes the
+// workspace + FIFO).
+var (
+	ctlLoopsMu sync.Mutex
+	ctlLoops   = map[string]bool{}
+)
+
+func ctlPaths(group string) (fifo, out string) {
+	d := filepath.Join(vol(group), ".cs")
 	return filepath.Join(d, "ctl"), filepath.Join(d, "ctl.out")
 }
 
-func ensureCtlFIFO() error {
-	fifo, out := ctlPaths()
+func ensureCtlFIFO(group string) error {
+	fifo, out := ctlPaths(group)
 	if err := os.MkdirAll(filepath.Dir(fifo), 0o755); err != nil {
 		return err
 	}
@@ -67,10 +85,10 @@ func ensureCtlFIFO() error {
 	return nil
 }
 
-// ctlReply appends one JSON line to ctl.out. Serialized so concurrent
-// commands (if main ever pipelines them) don't interleave bytes mid-line.
-func ctlReply(resp any) {
-	_, out := ctlPaths()
+// ctlReply appends one JSON line to the group's ctl.out. Serialized so
+// concurrent commands don't interleave bytes mid-line.
+func ctlReply(group string, resp any) {
+	_, out := ctlPaths(group)
 	b, _ := json.Marshal(resp)
 	b = append(b, '\n')
 	ctlOutMu.Lock()
@@ -83,20 +101,40 @@ func ctlReply(resp any) {
 	_, _ = f.Write(b)
 }
 
-// ctlDispatch is the restricted analogue of dispatch() for the ctl plane.
-// Hard-coded allowlist plus main-protection on spawn/stop.
-func ctlDispatch(line []byte) any {
+// ownsSched returns true iff a schedule with id exists AND belongs to
+// owner. Used to gate del/toggle/run on the non-main ctl path. Returns
+// true when id is missing so the underlying call's "no schedule with
+// id" error bubbles back to the caller unchanged.
+func ownsSched(owner, id string) bool {
+	for _, s := range listSched("") {
+		if s.ID == id {
+			return s.Group == owner
+		}
+	}
+	return true
+}
+
+// ctlDispatch is the restricted analogue of dispatch() for the ctl
+// plane. The verb allowlist depends on `owner`: main gets the full
+// orchestration set, non-main gets sched-only with self-target forced.
+func ctlDispatch(owner string, line []byte) any {
 	var env cmdEnvelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		return errResp("json: " + err.Error())
 	}
+
+	isMain := owner == ctlMainGroup
+
 	switch env.Cmd {
 	case "spawn":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: spawn")
+		}
 		var req spawnReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
-		if req.Group == ctlOwner {
+		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot spawn 'main'")
 		}
 		if !ctlGroupRE.MatchString(req.Group) {
@@ -118,11 +156,14 @@ func ctlDispatch(line []byte) any {
 		return spawnResp{baseResp{OK: true}, port}
 
 	case "send":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: send")
+		}
 		var req sendReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
-		if req.Group == ctlOwner {
+		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot send to self")
 		}
 		if !ctlGroupRE.MatchString(req.Group) {
@@ -134,11 +175,14 @@ func ctlDispatch(line []byte) any {
 		return baseResp{OK: true}
 
 	case "stop":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: stop")
+		}
 		var req groupReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
-		if req.Group == ctlOwner {
+		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot stop 'main'")
 		}
 		if !ctlGroupRE.MatchString(req.Group) {
@@ -148,47 +192,144 @@ func ctlDispatch(line []byte) any {
 		return baseResp{OK: true}
 
 	case "list":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: list")
+		}
 		return listResp{baseResp{OK: true}, listGroups()}
+
+	case "sched_add":
+		var req schedAddReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain {
+			// Force self-target. Same shape as the "force main:false"
+			// overwrite on spawn — never trust the field from a non-main
+			// sidecar.
+			req.Group = owner
+		} else if req.Group == "" {
+			req.Group = ctlMainGroup
+		}
+		if !ctlGroupRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		it, err := addSched(req.Group, req.Cron, req.Msg)
+		if err != nil {
+			return errResp(err.Error())
+		}
+		return schedAddResp{baseResp{OK: true}, it}
+
+	case "sched_list":
+		var req schedListReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		filter := req.Group
+		if !isMain {
+			// Non-main can only see its own schedules.
+			filter = owner
+		}
+		return schedListResp{baseResp{OK: true}, listSched(filter)}
+
+	case "sched_del":
+		var req schedIDReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain && !ownsSched(owner, req.ID) {
+			return errResp("ctl: not your schedule")
+		}
+		if err := delSched(req.ID); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
+
+	case "sched_toggle":
+		var req schedToggleReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain && !ownsSched(owner, req.ID) {
+			return errResp("ctl: not your schedule")
+		}
+		if _, err := toggleSched(req.ID, req.Enabled); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
+
+	case "sched_run":
+		var req schedIDReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain && !ownsSched(owner, req.ID) {
+			return errResp("ctl: not your schedule")
+		}
+		if err := runSchedNow(req.ID); err != nil {
+			return errResp(err.Error())
+		}
+		return baseResp{OK: true}
 
 	default:
 		return errResp("ctl: verb not allowed: " + env.Cmd)
 	}
 }
 
-// ctlLoop tails the ctl FIFO line-by-line and dispatches each command.
-// The FIFO is opened O_RDWR so we never get EOF when a writer (the
-// sidecar's shell redirect) closes — same trick the sidecar entrypoint
-// uses on `.cs/in`. Lines are JSON envelopes matching the daemon socket
-// protocol; responses go to ctl.out.
-func ctlLoop() {
-	fifo, _ := ctlPaths()
-	if err := ensureCtlFIFO(); err != nil {
-		emitLogf("error", "ctl: ensure fifo: %v", err)
+// startCtlLoop ensures exactly one ctlLoop goroutine runs per group.
+// Safe to call repeatedly from ensure() — subsequent calls are no-ops
+// while a loop is already alive. When the loop exits (FIFO disappears
+// after destroy()) the registry entry is cleared so a future ensure()
+// can restart it.
+func startCtlLoop(group string) {
+	ctlLoopsMu.Lock()
+	if ctlLoops[group] {
+		ctlLoopsMu.Unlock()
+		return
+	}
+	ctlLoops[group] = true
+	ctlLoopsMu.Unlock()
+	go ctlLoop(group)
+}
+
+// ctlLoop tails one group's ctl FIFO line-by-line and dispatches each
+// command. The FIFO is opened O_RDWR so we never get EOF when a writer
+// (the sidecar's shell redirect) closes — same trick the sidecar
+// entrypoint uses on `.cs/in`. Lines are JSON envelopes matching the
+// daemon socket protocol; responses go to ctl.out.
+func ctlLoop(group string) {
+	defer func() {
+		ctlLoopsMu.Lock()
+		delete(ctlLoops, group)
+		ctlLoopsMu.Unlock()
+	}()
+	fifo, _ := ctlPaths(group)
+	if err := ensureCtlFIFO(group); err != nil {
+		emitLogf("error", "ctl[%s]: ensure fifo: %v", group, err)
 		return
 	}
 	fd, err := syscall.Open(fifo, syscall.O_RDWR, 0)
 	if err != nil {
-		emitLogf("error", "ctl: open fifo: %v", err)
+		emitLogf("error", "ctl[%s]: open fifo: %v", group, err)
 		return
 	}
 	f := os.NewFile(uintptr(fd), fifo)
 	defer f.Close()
-	emitLogf("info", "ctl: tailing %s", fifo)
+	emitLogf("info", "ctl[%s]: tailing %s", group, fifo)
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadBytes('\n')
 		if err != nil {
-			emitLogf("error", "ctl: read: %v", err)
+			emitLogf("error", "ctl[%s]: read: %v", group, err)
 			return
 		}
 		if len(line) == 1 { // just \n
 			continue
 		}
-		emitLogf("info", "ctl: %s", string(line[:len(line)-1]))
-		resp := ctlDispatch(line)
-		ctlReply(resp)
+		emitLogf("info", "ctl[%s]: %s", group, string(line[:len(line)-1]))
+		resp := ctlDispatch(group, line)
+		ctlReply(group, resp)
 		if r, ok := resp.(baseResp); ok && !r.OK {
-			emitLogf("warn", "ctl: error: %s", fmt.Sprint(resp))
+			emitLogf("warn", "ctl[%s]: error: %s", group, fmt.Sprint(resp))
 		}
 	}
 }

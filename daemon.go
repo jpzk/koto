@@ -186,6 +186,14 @@ func ensure(g string, isMain bool) (int, error) {
 			return 0, err
 		}
 	}
+	// Every group gets its own ctl FIFO. Main retains full orchestration
+	// authority; non-main groups are limited to self-scheduling. See
+	// ctl.go for the authorization split.
+	if err := ensureCtlFIFO(g); err != nil {
+		emitLogf("error", "ctl[%s]: ensure fifo: %v", g, err)
+	} else {
+		startCtlLoop(g)
+	}
 	port := allocPort(g)
 	name := csName(g)
 	if podmanRunning(name) {
@@ -1650,10 +1658,7 @@ func daemonMain() {
 	if _, err := ensure("main", true); err != nil {
 		emitLogf("error", "ensure main: %v", err)
 	}
-	if err := ensureCtlFIFO(); err != nil {
-		emitLogf("error", "ctl: ensure fifo: %v", err)
-	}
-	go ctlLoop()
+	// ctl FIFOs are now wired up inside ensure() per-group, including main.
 
 	_ = os.Remove(SOCK_PATH)
 	l, err := net.Listen("unix", SOCK_PATH)
