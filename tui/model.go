@@ -1608,6 +1608,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// chat input or in tree navigation.
 		return m.handleLogKey(msg)
 	}
+	if s == "ctrl+@" {
+		order := m.treeOrder()
+		cur := -1
+		for i, g := range order {
+			if g == m.cur {
+				cur = i
+				break
+			}
+		}
+		for i := 1; i <= len(order); i++ {
+			idx := (cur + i) % len(order)
+			if m.unread[order[idx]] {
+				m.cur = order[idx]
+				m.treeIdx = idx
+				delete(m.unread, m.cur)
+				m.refreshLog()
+				m.refreshSuggestions()
+				m.vp.GotoBottom()
+				m.autoFollow = true
+				return m, nil
+			}
+		}
+		return m, nil
+	}
 	if s == "tab" {
 		if m.focus == focusInput {
 			m.enterTree()
