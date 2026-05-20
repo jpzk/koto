@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -310,6 +311,71 @@ func ensure(g string, isMain bool) (int, error) {
 func stopGroup(g string) {
 	_ = exec.Command("podman", "rm", "-f", csName(g)).Run()
 	emitLogf("info", "stopped group=%s", g)
+}
+
+// bgTaskRE matches claude code's "task backgrounded" notice in tool_result
+// output. Captures the task id and the absolute path of the output file.
+// The notice format is stable across claude-code releases (verified
+// against the strings observed in groups/<g>/.cs/log).
+var bgTaskRE = regexp.MustCompile(`Command running in background with ID:?\s*([A-Za-z0-9_-]+)\.\s+Output is being written to:?\s*(\S+?\.output)\b`)
+
+// bgActive tracks which (group, task-id) pairs already have a tailer
+// running so we don't double-start on log replay or repeated emissions.
+var (
+	bgActive     = map[string]bool{}
+	bgActiveLock sync.Mutex
+)
+
+// tailBackgroundTask runs `podman exec <sidecar> tail -F -n 0 <path>` and
+// streams each line into the group's chat log framed as `[[bg]] <id> <line>`.
+// The daemon's live tailer + history parser turn that into a `bg` event;
+// the TUI renders with a distinct glyph so the operator can tell the
+// content came from a backgrounded shell, not from the model.
+//
+// Lifecycle: capped at 10 min total. If the sidecar dies the podman exec
+// returns and the goroutine exits. We deliberately don't try to detect
+// "task finished" — claude code surfaces that via a regular tool_result
+// in a later turn, and stale tailers are bounded by the time cap.
+func tailBackgroundTask(g, id, path string) {
+	key := g + "\x00" + id
+	bgActiveLock.Lock()
+	if bgActive[key] {
+		bgActiveLock.Unlock()
+		return
+	}
+	bgActive[key] = true
+	bgActiveLock.Unlock()
+	defer func() {
+		bgActiveLock.Lock()
+		delete(bgActive, key)
+		bgActiveLock.Unlock()
+	}()
+
+	name := csName(g)
+	if !podmanRunning(name) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "podman", "exec", name, "tail", "-F", "-n", "0", path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	emitLogf("info", "bg-tail start group=%s id=%s path=%s", g, id, path)
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		// Strip the path's prefix from anything that quotes it back, just
+		// to keep the chat readable.
+		logAppend(g, []byte("[[bg]] "+id+" "+line+"\n"))
+	}
+	_ = cmd.Wait()
+	emitLogf("info", "bg-tail end group=%s id=%s", g, id)
 }
 
 // interruptAgent sends SIGINT to the running claude process inside the
@@ -1035,6 +1101,15 @@ func tailLog(g string) {
 				} else {
 					toolOutBody = append(toolOutBody, buf)
 					emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
+					// Claude code backgrounds a long Bash and emits a tool_result
+					// of the form: "Command running in background with ID: X.
+					// Output is being written to: /tmp/.../X.output." We tail
+					// that file from the host side so the operator sees the
+					// real output as it accumulates, not just the "you will be
+					// notified" stub.
+					if m := bgTaskRE.FindStringSubmatch(buf); m != nil {
+						go tailBackgroundTask(g, m[1], m[2])
+					}
 				}
 			} else if buf == "[[think_begin]]" {
 				inThinking = true
@@ -1057,6 +1132,15 @@ func tailLog(g string) {
 				emit(g, Event{Event: "tool", Name: name, Input: input, Ts: ts})
 			} else if strings.HasPrefix(buf, "[[err]] ") {
 				emit(g, Event{Event: "err", Text: buf[len("[[err]] "):], Ts: ts})
+			} else if strings.HasPrefix(buf, "[[bg]] ") {
+				rest := buf[len("[[bg]] "):]
+				sp := strings.IndexByte(rest, ' ')
+				name, text := rest, ""
+				if sp >= 0 {
+					name = rest[:sp]
+					text = rest[sp+1:]
+				}
+				emit(g, Event{Event: "bg", Name: name, Text: text, Ts: ts})
 			} else if strings.HasPrefix(buf, "[[think_end]] ") || strings.HasPrefix(buf, "[[tool_out_end]] ") {
 				// Stray close marker outside a block (e.g. an empty
 				// thinking block that emitted begin+end while we were
@@ -1201,6 +1285,16 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 		case strings.HasPrefix(line, "[[err]] "):
 			ev.Event = "err"
 			ev.Text = line[len("[[err]] "):]
+		case strings.HasPrefix(line, "[[bg]] "):
+			rest := line[len("[[bg]] "):]
+			sp := strings.IndexByte(rest, ' ')
+			ev.Event = "bg"
+			if sp < 0 {
+				ev.Name = rest
+			} else {
+				ev.Name = rest[:sp]
+				ev.Text = rest[sp+1:]
+			}
 		default:
 			ev.Event = "done"
 			ev.Text = line

@@ -767,6 +767,8 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 			case "err":
 				batch = append(batch, logLine{kind: "err", group: msg.group, text: ev.Text, ts: int64(ev.Ts)})
+			case "bg":
+				batch = append(batch, logLine{kind: "bg", group: msg.group, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
 			case "thinking_done":
 				if !older {
 					// Same rationale: only the initial tail page mutates the
@@ -931,6 +933,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.streamBuf, ev.Group)
 			}
 			m.addLine(logLine{kind: "err", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
+		case "bg":
+			// Live output from a backgrounded shell that claude code stashed
+			// in /tmp/claude-1000/.../tasks/<id>.output. Daemon tails the
+			// file via podman exec and emits one bg event per line; we
+			// merge consecutive ones for the same task id into a single
+			// block by passing ev.Name as the group-discriminator suffix.
+			m.addLine(logLine{kind: "bg", group: ev.Group, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
 		case "thinking_begin":
 			m.thinkingBuf[ev.Group] = ""
 			delete(m.thinkingTail, ev.Group)

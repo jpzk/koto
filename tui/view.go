@@ -508,6 +508,20 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 				out = append(out, indent+glyph+body.Render(ln))
 			}
 		}
+	case "bg":
+		// Output streamed from a backgrounded shell that the daemon is
+		// tailing on the operator's behalf. Distinct cyan-tinted glyph
+		// so it's not mistaken for the model's voice or a regular tool
+		// result.
+		glyph := lipgloss.NewStyle().Foreground(cCyan).Render("⟳  ")
+		body := lipgloss.NewStyle().Foreground(cGray)
+		for i, ln := range srcLines {
+			if i == 0 {
+				out = append(out, stampStr+glyph+body.Render(ln))
+			} else {
+				out = append(out, indent+glyph+body.Render(ln))
+			}
+		}
 	case "thought":
 		// First line is the "thought N words" summary, remaining lines are
 		// the full thinking body. Body is only rendered when expandedThoughts
