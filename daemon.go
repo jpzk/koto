@@ -1052,6 +1052,8 @@ func tailLog(g string) {
 					input = rest[sp+1:]
 				}
 				emit(g, Event{Event: "tool", Name: name, Input: input, Ts: ts})
+			} else if strings.HasPrefix(buf, "[[err]] ") {
+				emit(g, Event{Event: "err", Text: buf[len("[[err]] "):], Ts: ts})
 			} else if strings.HasPrefix(buf, "[[think_end]] ") || strings.HasPrefix(buf, "[[tool_out_end]] ") {
 				// Stray close marker outside a block (e.g. an empty
 				// thinking block that emitted begin+end while we were
@@ -1193,6 +1195,9 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 				ev.Name = rest[:sp]
 				ev.Input = rest[sp+1:]
 			}
+		case strings.HasPrefix(line, "[[err]] "):
+			ev.Event = "err"
+			ev.Text = line[len("[[err]] "):]
 		default:
 			ev.Event = "done"
 			ev.Text = line

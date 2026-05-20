@@ -754,6 +754,8 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "tool":
 				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
+			case "err":
+				batch = append(batch, logLine{kind: "err", group: msg.group, text: ev.Text, ts: int64(ev.Ts)})
 			case "thinking_done":
 				if !older {
 					// Same rationale: only the initial tail page mutates the
@@ -910,6 +912,14 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.streamBuf, ev.Group)
 			}
 			m.addLine(logLine{kind: "tool", group: ev.Group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
+		case "err":
+			// Harness-injected error notice (proxy 5xx, etc.). Render with
+			// the red err glyph so the user can tell it's not the model.
+			if cur, ok := m.streamBuf[ev.Group]; ok {
+				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})
+				delete(m.streamBuf, ev.Group)
+			}
+			m.addLine(logLine{kind: "err", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
 		case "thinking_begin":
 			m.thinkingBuf[ev.Group] = ""
 			delete(m.thinkingTail, ev.Group)

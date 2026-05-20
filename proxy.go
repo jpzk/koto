@@ -130,7 +130,10 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	if reqID != "" {
 		msg += " (request " + reqID + ")"
 	}
-	logAppend(group, []byte(msg+"\n"))
+	// `[[err]] ` prefix routes through the daemon's log tailer as an
+	// `err` event so the TUI renders with the red glyph instead of
+	// pretending the model said it.
+	logAppend(group, []byte("[[err]] "+msg+"\n"))
 }
 
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
