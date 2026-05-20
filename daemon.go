@@ -1259,6 +1259,27 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		cfg[key] = out
 		return
 	}
+	if key == "pip" {
+		// TUI sends `/config pip=true` as the string "true"; also accept a
+		// raw JSON bool for direct daemon clients. Anything else is rejected
+		// silently so a typo doesn't toggle the flag unexpectedly.
+		var b bool
+		if err := json.Unmarshal(raw, &b); err == nil {
+			cfg[key] = b
+			return
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "1", "yes", "on":
+			cfg[key] = true
+		case "false", "0", "no", "off":
+			cfg[key] = false
+		}
+		return
+	}
 	if key == "ports" {
 		// Accept either a JSON array of ints or a comma-separated string so
 		// `/config ports=8080,3000` (TUI tokenization splits on whitespace,
@@ -1313,6 +1334,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "effort", req.Effort)
 	applyConfig(cfg, "skills", req.Skills)
 	applyConfig(cfg, "ports", req.Ports)
+	applyConfig(cfg, "pip", req.Pip)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)

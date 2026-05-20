@@ -91,6 +91,7 @@ type ConfigReq struct {
 	Effort json.RawMessage `json:"effort,omitempty"`
 	Skills json.RawMessage `json:"skills,omitempty"`
 	Ports  json.RawMessage `json:"ports,omitempty"`
+	Pip    json.RawMessage `json:"pip,omitempty"`
 }
 
 type SkillListReq struct {
