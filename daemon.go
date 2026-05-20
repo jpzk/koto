@@ -282,15 +282,18 @@ func ensure(g string, isMain bool) (int, error) {
 		//   well before reaching the container's init.
 		// - unmask=/proc/*: container default masks /proc/self/uid_map and
 		//   friends; the inner podman + storage driver need them readable.
-		// Inner containers default to --network=host (no /dev/net/tun in the
-		// sidecar). Pass --device /dev/net/tun if you want inner pasta/
-		// slirp4netns instead — out of scope for the default opt-in.
+		// - /dev/net/tun: inner pasta/slirp4netns needs this to create netns'd
+		//   network interfaces. Without it, inner containers can only use
+		//   --network=host (the sidecar's netns). Marginal security cost on
+		//   top of SYS_ADMIN — only enables raw L2/L3 packet construction
+		//   inside the sidecar's own netns; doesn't bridge to peers or host.
 		// Blast radius: SYS_ADMIN is "the new root" inside the sidecar's
 		// userns; combined with workspace RW and arbitrary container spawn,
 		// pip-enabled sidecars are noticeably higher-trust than peers.
 		args = append(args,
 			"--cap-add", "SETUID,SETGID,SYS_ADMIN",
 			"--security-opt", "unmask=/proc/*",
+			"--device", "/dev/net/tun",
 		)
 	}
 	args = append(args, IMAGE)
