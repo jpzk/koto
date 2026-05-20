@@ -206,6 +206,7 @@ func ensure(g string, isMain bool) (int, error) {
 	// to 127.0.0.1 only so a compromised sidecar can't serve attacker
 	// content to the wider LAN.
 	var pubPorts []int
+	var pip bool
 	if b, err := os.ReadFile(filepath.Join(v, ".cs", "config.json")); err == nil {
 		var cfg map[string]any
 		if json.Unmarshal(b, &cfg) == nil {
@@ -224,9 +225,12 @@ func ensure(g string, isMain bool) (int, error) {
 					pubPorts = append(pubPorts, p)
 				}
 			}
+			if v, ok := cfg["pip"].(bool); ok {
+				pip = v
+			}
 		}
 	}
-	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v pip=%t", g, port, isMain, pubPorts, pip)
 	args := []string{"run", "-d", "--rm", "--name", name,
 		"--security-opt", "label=disable",
 		"--userns=keep-id",
@@ -265,6 +269,29 @@ func ensure(g string, isMain bool) (int, error) {
 	}
 	for _, p := range pubPorts {
 		args = append(args, "-p", fmt.Sprintf("127.0.0.1:%d:%d", p, p))
+	}
+	if pip {
+		// Rootless podman-in-podman inside a --userns=keep-id container needs:
+		// - SETUID/SETGID: newuidmap/newgidmap are setuid root but the default
+		//   bounding set drops these. Without them in CapBnd, the kernel
+		//   refuses to honor the setuid bit on exec → newuidmap can't write
+		//   the child userns's uid_map.
+		// - SYS_ADMIN: required for the inner podman to create a new mount
+		//   namespace for the container's filesystem layout (overlay/vfs
+		//   mounts, /proc remount). Without it the inner runtime errors out
+		//   well before reaching the container's init.
+		// - unmask=/proc/*: container default masks /proc/self/uid_map and
+		//   friends; the inner podman + storage driver need them readable.
+		// Inner containers default to --network=host (no /dev/net/tun in the
+		// sidecar). Pass --device /dev/net/tun if you want inner pasta/
+		// slirp4netns instead — out of scope for the default opt-in.
+		// Blast radius: SYS_ADMIN is "the new root" inside the sidecar's
+		// userns; combined with workspace RW and arbitrary container spawn,
+		// pip-enabled sidecars are noticeably higher-trust than peers.
+		args = append(args,
+			"--cap-add", "SETUID,SETGID,SYS_ADMIN",
+			"--security-opt", "unmask=/proc/*",
+		)
 	}
 	args = append(args, IMAGE)
 	cmd := exec.Command("podman", args...)
