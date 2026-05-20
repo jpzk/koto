@@ -1280,9 +1280,11 @@ func (m Model) liveOverlay() (string, string) {
 	return "", ""
 }
 
-// formatTool turns a tool name + raw JSON input into a single-line summary.
+// formatTool turns a tool name + raw JSON input into a render-ready string.
 // Pulls the "main" argument per tool (file_path, command, pattern, description)
 // so the user sees what the orchestrator is doing without raw JSON noise.
+// Multi-line inputs (heredocs in Bash, multi-line task descriptions) are
+// preserved verbatim; the view renders them as indented continuation rows.
 func formatTool(name, input string) string {
 	var args map[string]any
 	if input != "" {
@@ -1296,17 +1298,6 @@ func formatTool(name, input string) string {
 		}
 		return ""
 	}
-	clip := func(s string, n int) string {
-		s = strings.ReplaceAll(s, "\n", " ⏎ ")
-		// Truncate on rune boundary, not byte boundary. Slicing mid-rune
-		// emits broken UTF-8 that corrupts terminal state and propagates
-		// rendering breakage to every row below in the chat viewport.
-		runes := []rune(s)
-		if len(runes) > n {
-			return string(runes[:n-1]) + "…"
-		}
-		return s
-	}
 	switch name {
 	case "Read", "Write", "Edit", "NotebookEdit":
 		if p := pick("file_path"); p != "" {
@@ -1314,16 +1305,16 @@ func formatTool(name, input string) string {
 		}
 	case "Bash":
 		if c := pick("command"); c != "" {
-			return fmt.Sprintf("Bash $ %s", clip(c, 90))
+			return fmt.Sprintf("Bash $ %s", c)
 		}
 	case "Grep":
 		patt := pick("pattern")
 		path := pick("path")
 		if path != "" {
-			return fmt.Sprintf("Grep /%s/ in %s", clip(patt, 60), path)
+			return fmt.Sprintf("Grep /%s/ in %s", patt, path)
 		}
 		if patt != "" {
-			return fmt.Sprintf("Grep /%s/", clip(patt, 80))
+			return fmt.Sprintf("Grep /%s/", patt)
 		}
 	case "Glob":
 		if p := pick("pattern"); p != "" {
@@ -1331,19 +1322,19 @@ func formatTool(name, input string) string {
 		}
 	case "Task", "Agent":
 		if d := pick("description", "subagent_type"); d != "" {
-			return fmt.Sprintf("%s: %s", name, clip(d, 80))
+			return fmt.Sprintf("%s: %s", name, d)
 		}
 	case "WebFetch":
 		if u := pick("url"); u != "" {
-			return fmt.Sprintf("WebFetch %s", clip(u, 80))
+			return fmt.Sprintf("WebFetch %s", u)
 		}
 	case "WebSearch":
 		if q := pick("query"); q != "" {
-			return fmt.Sprintf("WebSearch %s", clip(q, 80))
+			return fmt.Sprintf("WebSearch %s", q)
 		}
 	}
-	// Unknown tool or missing key: render name + clipped JSON.
-	return fmt.Sprintf("%s %s", name, clip(input, 80))
+	// Unknown tool or missing key: render name + raw JSON.
+	return fmt.Sprintf("%s %s", name, input)
 }
 
 func formatThought(words int) string {
