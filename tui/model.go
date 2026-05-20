@@ -173,6 +173,14 @@ type Model struct {
 	toolOutBuf  map[string]string
 	toolOutTail map[string]string
 
+	// busy marks groups whose claude turn is in flight. Set on the
+	// `prompt` event (daemon writes `>>> msg` then spawns claude), cleared
+	// on `done`. Lets ctrl+c route to `interrupt` even when claude is
+	// silent mid-tool-call (no stream/think/tool_out buffer populated) —
+	// otherwise an `until ...; do sleep; done` Bash hangs the FIFO and
+	// the user has no in-band way to cancel.
+	busy map[string]bool
+
 	input textinput.Model
 	focus focusZone
 
@@ -347,6 +355,7 @@ func newModel(sock string, ctxWindow int) Model {
 		thinkingTail:    map[string]string{},
 		lastThoughtBody: map[string]string{},
 		toolOutBuf:      map[string]string{},
+		busy:            map[string]bool{},
 		toolOutTail:     map[string]string{},
 		unread:          map[string]bool{},
 		input: ti,
@@ -882,12 +891,14 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
 			delete(m.lastThoughtBody, ev.Group)
+			m.busy[ev.Group] = true
 			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: int64(ev.Ts)})
 			m.pushHistory(ev.Group, ev.Msg)
 		case "stream":
 			m.streamBuf[ev.Group] = ev.Text
 		case "done":
 			delete(m.streamBuf, ev.Group)
+			delete(m.busy, ev.Group)
 			if ev.Text != "" {
 				m.addLine(logLine{kind: "response", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
 			}
@@ -1472,6 +1483,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		delete(m.thinkingTail, msg.group)
 		delete(m.toolOutBuf, msg.group)
 		delete(m.toolOutTail, msg.group)
+		delete(m.busy, msg.group)
 		m.addLine(logLine{kind: "sys", group: msg.group, text: "stopped agent"})
 		if msg.group == m.cur {
 			m.refreshLog()
@@ -1533,11 +1545,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePickerKey(msg)
 	}
 	if s == "ctrl+c" {
-		// Mid-flight: stop the agent instead of quitting. The streaming or
-		// thinking buffer for the current group is the signal that claude is
-		// running right now; interrupting clears it server-side and frees
-		// the sidecar's FIFO loop for the next message. A second ctrl+c
-		// once the stream's gone falls through to the quit path.
+		// Mid-flight: stop the agent instead of quitting. busy is set on the
+		// `prompt` event and cleared on `done`; streamBuf/thinkingBuf catch
+		// the cases where the prompt event didn't reach us (initial replay,
+		// daemon reconnect mid-stream). All three predicates routing to
+		// interrupt means a stuck tool call (no stream, no think) still
+		// gets cancellable in-band. A second ctrl+c once the turn ends
+		// falls through to the quit path.
+		if m.busy[m.cur] {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
 		if _, streaming := m.streamBuf[m.cur]; streaming {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
