@@ -107,6 +107,32 @@ func logAppend(group string, data []byte) {
 	_, _ = f.Write(data)
 }
 
+// logProxyError appends a human-readable line to the group's chat log for
+// non-200 upstream responses. The daemon's log tailer turns this into a
+// `done` event so the user sees *why* an agent went silent — claude code
+// retries 529s ~2-3 times then exits without printing anything, leaving the
+// TUI with an empty prompt and no explanation. status codes that aren't
+// model errors (404 token refresh checks, 401 expired) get muted.
+func logProxyError(group, path string, status int, dur time.Duration, reqID string) {
+	if group == "" || status == 200 || status == 404 || status == 401 {
+		return
+	}
+	reason := http.StatusText(status)
+	switch status {
+	case 529:
+		reason = "Overloaded" // Anthropic-specific; not in net/http
+	}
+	if reason == "" {
+		reason = fmt.Sprintf("status %d", status)
+	}
+	msg := fmt.Sprintf("[clawson-proxy] %s → %d %s in %dms",
+		path, status, reason, int(dur/time.Millisecond))
+	if reqID != "" {
+		msg += " (request " + reqID + ")"
+	}
+	logAppend(group, []byte(msg+"\n"))
+}
+
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
 	rl := map[string]string{}
 	for k, vs := range hdrs {
@@ -297,7 +323,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, time.Since(t0))
+	dur := time.Since(t0)
+	reqID := resp.Header.Get("request-id")
+	if reqID == "" {
+		reqID = resp.Header.Get("Request-Id")
+	}
+	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 }
 
 func listen(bind string, port int, group string) {
