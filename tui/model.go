@@ -56,6 +56,11 @@ type logLine struct {
 	group string
 	text  string
 	ts    int64
+	// expand forces this block to render its full body even when the
+	// per-kind collapse toggle (expandedThoughts / expandedToolOuts) is
+	// off. Set for tool_out blocks whose run time exceeded the elapsed
+	// threshold so the user sees what came back after a long wait.
+	expand bool
 }
 
 type vpCacheEntry struct {
@@ -172,6 +177,11 @@ type Model struct {
 	// ctrl+d (mirrors ctrl+t for thinking).
 	toolOutBuf  map[string]string
 	toolOutTail map[string]string
+	// toolBeginTs records the timestamp of each in-flight tool_result_begin
+	// per group, so on tool_result_done we can compute elapsed and decide
+	// whether to auto-expand (>= longToolThresholdMs) and embed " (Ns)"
+	// in the summary line.
+	toolBeginTs map[string]int64
 
 	// busy marks groups whose claude turn is in flight. Set on the
 	// `prompt` event (daemon writes `>>> msg` then spawns claude), cleared
@@ -355,6 +365,7 @@ func newModel(sock string, ctxWindow int) Model {
 		thinkingTail:    map[string]string{},
 		lastThoughtBody: map[string]string{},
 		toolOutBuf:      map[string]string{},
+		toolBeginTs:     map[string]int64{},
 		busy:            map[string]bool{},
 		toolOutTail:     map[string]string{},
 		unread:          map[string]bool{},
@@ -949,6 +960,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case "tool_result_begin":
 			m.toolOutBuf[ev.Group] = ""
 			delete(m.toolOutTail, ev.Group)
+			m.toolBeginTs[ev.Group] = int64(ev.Ts)
 		case "tool_result":
 			cur := m.toolOutBuf[ev.Group]
 			if cur != "" {
@@ -962,7 +974,19 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case "tool_result_done":
 			delete(m.toolOutBuf, ev.Group)
 			delete(m.toolOutTail, ev.Group)
-			m.addLine(logLine{kind: "tool_out", group: ev.Group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
+			elapsedMs := int64(0)
+			if begin, ok := m.toolBeginTs[ev.Group]; ok && begin > 0 {
+				elapsedMs = int64(ev.Ts) - begin
+				delete(m.toolBeginTs, ev.Group)
+			}
+			expand := elapsedMs >= longToolThresholdMs
+			m.addLine(logLine{
+				kind:   "tool_out",
+				group:  ev.Group,
+				text:   formatToolOutFullElapsed(ev.Body, elapsedMs),
+				ts:     int64(ev.Ts),
+				expand: expand,
+			})
 		case "sched_fired", "sched_run":
 			tag := "⏰"
 			if ev.Event == "sched_run" {
@@ -1403,6 +1427,42 @@ func formatToolOutFull(body string) string {
 		return s
 	}
 	return s + "\n" + body
+}
+
+// longToolThresholdMs is the elapsed-time cutoff (begin → done) above
+// which a tool's output gets auto-expanded in the TUI regardless of the
+// expandedToolOuts toggle. Tools that finish quickly stay collapsed to
+// keep the chat readable; slow ones surface their body because the user
+// likely cares about the result of a wait they noticed.
+const longToolThresholdMs = 30_000
+
+func formatElapsed(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	s := ms / 1000
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	s = s % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh%02dm", h, m)
+}
+
+func formatToolOutFullElapsed(body string, elapsedMs int64) string {
+	summary := formatToolOut(body)
+	if elapsedMs > 0 {
+		summary += fmt.Sprintf("  (%s)", formatElapsed(elapsedMs))
+	}
+	if body == "" {
+		return summary
+	}
+	return summary + "\n" + body
 }
 
 func (m Model) isAnimating() bool {
@@ -2059,6 +2119,7 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 	type src struct {
 		kind, group, text string
 		ts                int64
+		expand            bool
 	}
 	srcs := []src{}
 	for _, l := range m.lines {
@@ -2074,7 +2135,7 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 				srcs[n-1].ts = l.ts
 			}
 		} else {
-			srcs = append(srcs, src{kind: l.kind, group: l.group, text: l.text, ts: l.ts})
+			srcs = append(srcs, src{kind: l.kind, group: l.group, text: l.text, ts: l.ts, expand: l.expand})
 		}
 	}
 	out := make([]renderedBlock, 0, len(srcs))
@@ -2087,8 +2148,10 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 				rendered = rendered[:i]
 			}
 		}
-		// Same collapse rule for tool_out.
-		if s.kind == "tool_out" && !m.expandedToolOuts {
+		// Same collapse rule for tool_out, but s.expand (set when the tool
+		// ran longer than longToolThresholdMs) wins over the toggle so a
+		// noteworthy wait surfaces its result.
+		if s.kind == "tool_out" && !m.expandedToolOuts && !s.expand {
 			if i := strings.IndexByte(rendered, '\n'); i >= 0 {
 				rendered = rendered[:i]
 			}
