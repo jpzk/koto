@@ -1952,20 +1952,29 @@ func (m *Model) enterTree() {
 }
 
 func (m Model) treeOrder() []string {
-	others := []string{}
+	running := []string{}
+	stopped := []string{}
 	hasMain := false
-	for g := range m.groups {
+	for g, info := range m.groups {
 		if g == "main" {
 			hasMain = true
+			continue
+		}
+		if info.Running {
+			running = append(running, g)
 		} else {
-			others = append(others, g)
+			stopped = append(stopped, g)
 		}
 	}
-	sort.Strings(others)
+	sort.Strings(running)
+	sort.Strings(stopped)
+	out := []string{}
 	if hasMain {
-		return append([]string{"main"}, others...)
+		out = append(out, "main")
 	}
-	return others
+	out = append(out, running...)
+	out = append(out, stopped...)
+	return out
 }
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
