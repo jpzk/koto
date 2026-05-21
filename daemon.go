@@ -393,10 +393,17 @@ func interruptAgent(g string) error {
 	if !podmanRunning(name) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
+	// Skip our own pid ($$): this script body contains the literal string
+	// "claude-code" (in the grep below), so /proc/$$/cmdline matches and the
+	// loop would SIGINT itself. Claude does get killed first (lower pid,
+	// iterated earlier), but the self-suicide makes podman exec exit 130,
+	// which surfaces in the TUI as `stop: podman exec: exit status 130`
+	// even though the interrupt succeeded.
 	const script = `hit=0
 for d in /proc/[0-9]*; do
   p=${d##*/}
   [ "$p" = 1 ] && continue
+  [ "$p" = "$$" ] && continue
   grep -aq claude-code "$d/cmdline" 2>/dev/null || continue
   kill -INT "$p" 2>/dev/null && hit=1
 done
