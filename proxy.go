@@ -22,11 +22,13 @@ const (
 )
 
 var (
-	credPath  string
-	apiKey    string
-	credLock  sync.Mutex
-	listeners = map[int]bool{}
-	listLock  sync.Mutex
+	credPath     string
+	apiKey       string
+	credLock     sync.Mutex
+	listeners    = map[int]string{}       // port -> group (one-to-one invariant)
+	listenerSrvs = map[int]*http.Server{} // port -> server, for proxyUnlisten rollback
+	listLock     sync.Mutex
+	proxyBind    string // captured by proxyStart; used by ensure() via proxyListenForGroup
 )
 
 // veniceKeyPath returns the on-disk location of the Venice API key. It lives
@@ -514,55 +516,82 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
 }
 
-func listen(bind string, port int, group string) {
+// proxyListen registers an HTTP listener for group g on port. Idempotent:
+// a second call with the same (port, group) is a no-op; a call with the same
+// port and a different group returns an error (this is the invariant that
+// today's collision bug violated silently). Callers — daemon startup and
+// ensure() — must propagate the error so spawn fails atomically when the
+// invariant can't be maintained.
+func proxyListen(bind string, port int, group string) error {
 	addr := fmt.Sprintf("%s:%d", bind, port)
-	srv := &http.Server{Addr: addr, Handler: &handler{group: group}}
+	listLock.Lock()
+	if existing, ok := listeners[port]; ok {
+		listLock.Unlock()
+		if existing == group {
+			return nil
+		}
+		return fmt.Errorf("port %d already bound for group %q (requested for %q)", port, existing, group)
+	}
+	listLock.Unlock()
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "listen %s: %v\n", addr, err)
-		return
+		emitLogf("error", "proxy listen %s for %s: %v", addr, group, err)
+		return err
 	}
+	srv := &http.Server{Addr: addr, Handler: &handler{group: group}}
 	go func() { _ = srv.Serve(ln) }()
+
 	listLock.Lock()
-	listeners[port] = true
+	listeners[port] = group
+	listenerSrvs[port] = srv
 	listLock.Unlock()
-	fmt.Printf("+ %s -> %s:%d\n", group, bind, port)
+	emitLogf("info", "proxy + %s -> %s", group, addr)
+	return nil
 }
 
-func reload(bind string) {
+// proxyUnlisten releases the listener for port. Used to roll back when a
+// sidecar spawn fails after the listener has been created — without this
+// the orphan listener would block a future allocator from ever reusing the
+// port (and confuse the invariant if the group is destroyed + recreated).
+//
+// Best-effort: we close the http.Server via a record kept alongside the
+// listeners map. If the bookkeeping is missing the port stays bound until
+// daemon restart, which is correctness-preserving (still attributed to the
+// same group) just wasteful.
+func proxyUnlisten(port int) {
+	listLock.Lock()
+	srv := listenerSrvs[port]
+	delete(listeners, port)
+	delete(listenerSrvs, port)
+	listLock.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
+}
+
+// proxyStart brings the proxy up in the daemon process. Reads groups.json
+// once and registers a listener for every entry; any bind failure (typically
+// EADDRINUSE from on-disk port-collision corruption) is surfaced through
+// emitLogf so the operator sees it instead of getting silent cross-group
+// request routing. No polling loop: new groups are registered synchronously
+// by ensure() via proxyListen(), so groups.json no longer needs to be the
+// trigger.
+func proxyStart(bind string) {
+	proxyInitPaths()
+	proxyBind = bind
+	emitLogf("info", "proxy bind=%s upstream=%s venice=%s metrics=%s",
+		bind, upstream, veniceUpstream, METRICS)
 	b, err := os.ReadFile(GROUPS_FILE)
 	if err != nil {
 		return
 	}
 	var m map[string]int
 	if json.Unmarshal(b, &m) != nil {
+		emitLogf("error", "proxy: groups.json parse failed")
 		return
 	}
 	for g, p := range m {
-		listLock.Lock()
-		_, ok := listeners[p]
-		listLock.Unlock()
-		if !ok {
-			listen(bind, p, g)
-		}
-	}
-}
-
-func proxyMain() {
-	proxyInitPaths()
-	bind := os.Getenv("BIND")
-	if bind == "" {
-		bind = "127.0.0.1"
-	}
-	fmt.Printf("clawson-proxy bind=%s -> %s  metrics=%s\n", bind, upstream, METRICS)
-	var last time.Time
-	for {
-		if st, err := os.Stat(GROUPS_FILE); err == nil {
-			if !st.ModTime().Equal(last) {
-				last = st.ModTime()
-				reload(bind)
-			}
-		}
-		time.Sleep(1 * time.Second)
+		_ = proxyListen(bind, p, g)
 	}
 }

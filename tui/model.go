@@ -325,7 +325,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -465,7 +465,9 @@ func listCmd(sock string) tea.Cmd {
 			port, _ := mp["port"].(float64)
 			running, _ := mp["running"].(bool)
 			provider, _ := mp["provider"].(string)
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider}
+			model, _ := mp["model"].(string)
+			effort, _ := mp["effort"].(string)
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort}
 		}
 		return listMsg{groups: out}
 	}
@@ -1980,12 +1982,29 @@ func (m Model) treeOrder() []string {
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
 	if strings.HasPrefix(v, "/new ") {
-		g := strings.TrimSpace(v[5:])
-		if g == "" {
-			m.addLine(logLine{kind: "err", text: "usage: /new <group>"})
+		parts := strings.Fields(v[5:])
+		if len(parts) == 0 {
+			m.addLine(logLine{kind: "err", text: "usage: /new <group> [provider] [model]"})
 			return nil
 		}
-		return daemonCmd(m.sock, "spawn", g, nil)
+		g := parts[0]
+		extra := map[string]any{}
+		if len(parts) >= 2 {
+			p := parts[1]
+			if p != "claudesdk" && p != "venice" {
+				m.addLine(logLine{kind: "err", text: "provider must be claudesdk or venice"})
+				return nil
+			}
+			extra["provider"] = p
+		}
+		if len(parts) >= 3 {
+			extra["model"] = parts[2]
+		}
+		if len(parts) > 3 {
+			m.addLine(logLine{kind: "err", text: "usage: /new <group> [provider] [model]"})
+			return nil
+		}
+		return daemonCmd(m.sock, "spawn", g, extra)
 	}
 	if strings.HasPrefix(v, "/sw ") {
 		m.cur = strings.TrimSpace(v[4:])

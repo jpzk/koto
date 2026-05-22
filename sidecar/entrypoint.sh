@@ -49,6 +49,10 @@ while IFS= read -r b64 <&3; do
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
       MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" \
         node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || true
+      # Strict-ordering completion marker — daemon's send() holds sendLock
+      # until tailLog observes this line, so rapid sends serialize end-to-end
+      # rather than interleaving prompts with prior responses.
+      printf '[[turn_end]]\n' >> "$D/log"
       ;;
     *)
       set -- claude -p --continue --bare --dangerously-skip-permissions \
@@ -59,6 +63,8 @@ while IFS= read -r b64 <&3; do
 
       printf '%s' "$msg" | "$@" 2>>"$D/log" \
           | node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
+      # Strict-ordering completion marker (see venice branch comment).
+      printf '[[turn_end]]\n' >> "$D/log"
       ;;
   esac
 done

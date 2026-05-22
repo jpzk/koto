@@ -637,7 +637,17 @@ func (m Model) renderInput() string {
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
 	if m.focus == focusTree {
-		return dim.MaxWidth(m.width).Render(" ↑↓ switch · ⇥/⎋/↩ back")
+		left := " ↑↓ switch · ⇥/⎋/↩ back"
+		right := m.renderProviderModel()
+		leftW := lipgloss.Width(left)
+		rightW := lipgloss.Width(right)
+		gap := m.width - leftW - rightW
+		if gap < 1 {
+			return dim.MaxWidth(m.width).Render(left)
+		}
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(
+			dim.Render(left) + strings.Repeat(" ", gap) + right + " ",
+		)
 	}
 	var parts []string
 	_, streaming := m.streamBuf[m.cur]
@@ -676,7 +686,50 @@ func (m Model) renderHint() string {
 	} else {
 		parts = append(parts, "^c exit")
 	}
-	return dim.MaxWidth(m.width).Render(" " + strings.Join(parts, "  ·  "))
+	left := " " + strings.Join(parts, "  ·  ")
+	right := m.renderProviderModel()
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := m.width - leftW - rightW
+	if gap < 1 {
+		// Not enough room: drop the right side rather than wrapping.
+		return dim.MaxWidth(m.width).Render(left)
+	}
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(
+		dim.Render(left) + strings.Repeat(" ", gap) + right + " ",
+	)
+}
+
+// renderProviderModel formats the bottom-right "provider · model[ · effort]"
+// segment. claudesdk renders red to flag that the request will hit the
+// OAuth-credentialled Anthropic path (cost / rate-limit blast radius);
+// venice renders cyan. Effort is only appended when set in config.json
+// (claudesdk-only knob; harmless but noisy on venice if shown by default).
+// Empty string when the current group isn't known yet (pre-first list).
+func (m Model) renderProviderModel() string {
+	info, ok := m.groups[m.cur]
+	if !ok {
+		return ""
+	}
+	provider := info.Provider
+	if provider == "" {
+		provider = "claudesdk"
+	}
+	model := info.Model
+	if model == "" {
+		model = "(default)"
+	}
+	provColor := cCyan
+	if provider == "claudesdk" {
+		provColor = cRed
+	}
+	pStyle := lipgloss.NewStyle().Foreground(provColor).Bold(true)
+	mStyle := lipgloss.NewStyle().Foreground(cGray)
+	out := pStyle.Render(provider) + mStyle.Render(" · "+model)
+	if info.Effort != "" {
+		out += mStyle.Render(" · " + info.Effort)
+	}
+	return out
 }
 
 // --- fuzzy picker overlay ----------------------------------------------------

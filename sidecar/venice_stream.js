@@ -1,36 +1,47 @@
 #!/usr/bin/env node
-// Venice provider runner.
+// Venice provider runner with tool use (bash + file).
 //
-// Reads inputs from env (passed by entrypoint.sh):
-//   MSG_B64       base64-encoded user message (already augmented by daemon
-//                 with the <clawson-context> block).
+// Inputs from env (set by entrypoint.sh):
+//   MSG_B64       base64-encoded user message (already augmented by the
+//                 daemon with the <clawson-context> block).
 //   SP_B64        base64-encoded system prompt (composeSystemPrompt output);
 //                 empty if no global/per-group prompt is configured.
-//   VENICE_MODEL  model name (e.g. venice-uncensored). Defaults applied in
-//                 entrypoint.sh, not here.
+//   VENICE_MODEL  model name (default applied in entrypoint.sh).
 //
-// Conversation state lives in /workspace/.cs/venice-history.json — Venice's
-// API is stateless, so we replay the full transcript on every turn. The
-// daemon's clearCmd deletes this file when /clear is invoked.
+// History lives in /workspace/.cs/venice-history.json. Venice's chat API is
+// stateless so we replay the whole transcript on every turn, including any
+// tool_calls / tool messages from prior turns. /clear (handled in daemon's
+// clearCmd) wipes the file.
 //
-// Output format matches the Claude path so the daemon's log tailer
-// (tailLog in daemon.go) parses both providers identically:
-//   [ts:<epoch-ms>]\n   — stamped once before the first text byte
-//   <text deltas>       — written verbatim as SSE chunks arrive
-//   \n                  — a final newline so the last partial line flushes
-//                         as a `done` event instead of staying a `stream`.
+// Output framing matches the Claude path so daemon.go's tailLog parses both
+// providers identically:
+//   [ts:N]\n                              — stamped once before first text byte
+//   <delta text>                          — written verbatim
+//   [[tool]] <name> <json args>\n         — per tool call announcement
+//   [[tool_out_begin]]\n<result>\n[[tool_out_end]] <bytes>\n
+//                                         — per tool result (framed block)
+//   [[err]] venice: ...\n                 — errors surface in red in TUI
 //
-// Errors are written as `[[err]] <msg>\n` so they surface in the TUI with
-// the red glyph instead of being mistaken for assistant content.
+// Tool loop: after each assistant turn, if the response contained
+// `tool_calls`, we execute each, append the results as role:tool messages,
+// and re-call Venice. Loops up to TOOL_BUDGET (default 25) per user message
+// to prevent runaway. Trust model unchanged — bash runs as `node` (uid 1000)
+// inside the sidecar container, same blast radius as the claude path's bash.
 
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const url = require('url');
+const path = require('path');
+const { spawn } = require('child_process');
 
 const HISTORY = '/workspace/.cs/venice-history.json';
-const BASE = process.env.ANTHROPIC_BASE_URL; // proxy URL; both providers reuse it
+const BASE = process.env.ANTHROPIC_BASE_URL;
 const MODEL = process.env.VENICE_MODEL || 'venice-uncensored';
+const TOOL_BUDGET = 25;
+const BASH_TIMEOUT_MS = 30_000;
+const OUTPUT_CAP_BYTES = 1_000_000;
+const FILE_READ_CAP_BYTES = 1_000_000;
 
 function decodeB64(s) {
   if (!s) return '';
@@ -39,125 +50,378 @@ function decodeB64(s) {
 const USER_MSG = decodeB64(process.env.MSG_B64);
 const SYS_PROMPT = decodeB64(process.env.SP_B64);
 
-function writeErr(s) {
-  try { fs.writeSync(1, `[[err]] ${s}\n`); } catch {}
-}
+function writeOut(s) { try { fs.writeSync(1, s); } catch {} }
+function writeErr(s) { writeOut(`[[err]] ${s}\n`); }
 
-if (!BASE) {
-  writeErr('venice: ANTHROPIC_BASE_URL not set');
-  process.exit(0);
-}
-if (!USER_MSG) {
-  writeErr('venice: empty MSG_B64');
-  process.exit(0);
-}
+if (!BASE) { writeErr('venice: ANTHROPIC_BASE_URL not set'); process.exit(0); }
+if (!USER_MSG) { writeErr('venice: empty MSG_B64'); process.exit(0); }
 
-let history = [];
-try {
-  const raw = fs.readFileSync(HISTORY, 'utf8');
-  const parsed = JSON.parse(raw);
-  if (Array.isArray(parsed)) history = parsed;
-} catch {
-  // Missing or unparseable history file → start fresh. /clear wipes it; a
-  // brand-new group never had one.
-}
-
-const messages = [];
-if (SYS_PROMPT) messages.push({ role: 'system', content: SYS_PROMPT });
-for (const m of history) {
-  if (m && typeof m.role === 'string' && typeof m.content === 'string') {
-    messages.push({ role: m.role, content: m.content });
-  }
-}
-messages.push({ role: 'user', content: USER_MSG });
-
-const body = JSON.stringify({
-  model: MODEL,
-  messages,
-  stream: true,
-});
-
-// Parse BASE — proxy is plain HTTP inside the container network.
-const parsed = url.parse(BASE + '/api/v1/chat/completions');
-const opts = {
-  protocol: parsed.protocol,
-  hostname: parsed.hostname,
-  port: parsed.port,
-  path: parsed.path,
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer proxied', // sentinel; proxy replaces with real key
-    'Content-Length': Buffer.byteLength(body),
-    'Accept': 'text/event-stream',
-  },
-};
-const client = parsed.protocol === 'https:' ? https : http;
+// ---- log framing helpers --------------------------------------------------
 
 let stamped = false;
+let midline = false;
 function stampOnce() {
-  if (!stamped) { fs.writeSync(1, `[ts:${Date.now()}]\n`); stamped = true; }
+  if (!stamped) { writeOut(`[ts:${Date.now()}]\n`); stamped = true; }
+}
+function breakLine() {
+  if (midline) { writeOut('\n'); midline = false; }
+}
+// Same escape rule as stream_filter.js's escapeBody — body lines that look
+// like our own block-close marker get prefixed with `\` so the daemon's log
+// tailer can't be tricked into closing the frame early from inside payload.
+function escapeBody(s) {
+  return s.replace(/^(\[\[tool_out_end\]\] )/gm, '\\$1');
+}
+function emitToolCallHeader(name, argsJson) {
+  stampOnce();
+  breakLine();
+  writeOut(`[[tool]] ${name} ${argsJson}\n`);
+}
+function emitToolOut(body) {
+  const safe = escapeBody(body);
+  const bytes = Buffer.byteLength(body, 'utf8');
+  writeOut('[[tool_out_begin]]\n');
+  if (safe.length) writeOut(safe.endsWith('\n') ? safe : safe + '\n');
+  writeOut(`[[tool_out_end]] ${bytes}\n`);
 }
 
-let assistantBuf = '';
-let midline = false;
+// ---- tool implementations -------------------------------------------------
+//
+// Each tool returns a plain object. We JSON.stringify it for the role:tool
+// message content (OpenAI/Venice expect a string) and pretty-print it for the
+// [[tool_out_*]] log block so the human-facing rendering stays readable.
 
-const req = client.request(opts, (resp) => {
-  if (resp.statusCode !== 200) {
-    let errBody = '';
-    resp.on('data', (chunk) => { errBody += chunk.toString('utf8'); });
-    resp.on('end', () => {
-      writeErr(`venice: HTTP ${resp.statusCode}: ${errBody.slice(0, 500).replace(/\n/g, ' ')}`);
+function execBash(command) {
+  return new Promise((resolve) => {
+    if (typeof command !== 'string' || !command) {
+      resolve({ error: 'bash: command must be a non-empty string' });
+      return;
+    }
+    const proc = spawn('bash', ['-lc', command], {
+      cwd: '/workspace',
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return;
-  }
-  let sseBuf = '';
-  resp.setEncoding('utf8');
-  resp.on('data', (chunk) => {
-    sseBuf += chunk;
-    // SSE frames are separated by \n\n; within a frame we look for `data:` lines.
-    let idx;
-    while ((idx = sseBuf.indexOf('\n')) !== -1) {
-      const line = sseBuf.slice(0, idx);
-      sseBuf = sseBuf.slice(idx + 1);
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      let ev;
-      try { ev = JSON.parse(payload); } catch { continue; }
-      const choices = ev.choices;
-      if (!Array.isArray(choices) || choices.length === 0) continue;
-      const delta = choices[0].delta;
-      if (!delta || typeof delta.content !== 'string' || delta.content.length === 0) continue;
-      stampOnce();
-      // Write delta text directly to the log. tailLog treats unterminated
-      // buffers as `stream` events and \n-terminated lines as `done`,
-      // matching how the Claude path streams partial content.
-      fs.writeSync(1, delta.content);
-      assistantBuf += delta.content;
-      midline = !delta.content.endsWith('\n');
-    }
-  });
-  resp.on('end', () => {
-    // Terminating newline so the final partial line flushes as a `done`
-    // event in the TUI, and so the next turn's `[ts:N]` marker starts on
-    // its own line.
-    if (midline) fs.writeSync(1, '\n');
-    if (assistantBuf.length > 0) {
-      history.push({ role: 'user', content: USER_MSG });
-      history.push({ role: 'assistant', content: assistantBuf });
-      try {
-        fs.writeFileSync(HISTORY, JSON.stringify(history));
-      } catch (e) {
-        writeErr(`venice: history write failed: ${e.message}`);
+    let out = Buffer.alloc(0);
+    let truncated = false;
+    let timedOut = false;
+    const collect = (chunk) => {
+      if (truncated) return;
+      if (out.length + chunk.length > OUTPUT_CAP_BYTES) {
+        const room = Math.max(0, OUTPUT_CAP_BYTES - out.length);
+        if (room > 0) out = Buffer.concat([out, chunk.subarray(0, room)]);
+        truncated = true;
+        return;
       }
-    }
+      out = Buffer.concat([out, chunk]);
+    };
+    proc.stdout.on('data', collect);
+    proc.stderr.on('data', collect);
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill('SIGTERM'); } catch {}
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
+    }, BASH_TIMEOUT_MS);
+    proc.on('close', (code, signal) => {
+      clearTimeout(killTimer);
+      const result = { exit_code: code, output: out.toString('utf8') };
+      if (signal) result.signal = signal;
+      if (truncated) result.truncated = true;
+      if (timedOut) result.timed_out_after_ms = BASH_TIMEOUT_MS;
+      resolve(result);
+    });
+    proc.on('error', (e) => {
+      clearTimeout(killTimer);
+      resolve({ error: `bash spawn failed: ${e.message}` });
+    });
   });
-});
+}
 
-req.on('error', (e) => {
-  writeErr(`venice: request error: ${e.message}`);
-});
-req.write(body);
-req.end();
+function execFile(args) {
+  const op = args && args.op;
+  const p = args && args.path;
+  if (!op || !p) return { error: 'file: op and path are required' };
+  try {
+    switch (op) {
+      case 'read': {
+        const st = fs.statSync(p);
+        if (st.isDirectory()) return { error: `file read: ${p} is a directory` };
+        const buf = fs.readFileSync(p);
+        if (buf.length > FILE_READ_CAP_BYTES) {
+          return {
+            content: buf.subarray(0, FILE_READ_CAP_BYTES).toString('utf8'),
+            truncated: true,
+            total_bytes: buf.length,
+          };
+        }
+        return { content: buf.toString('utf8'), bytes: buf.length };
+      }
+      case 'write': {
+        const content = typeof args.content === 'string' ? args.content : '';
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, content);
+        return { ok: true, bytes_written: Buffer.byteLength(content, 'utf8') };
+      }
+      case 'edit': {
+        const oldS = args.old;
+        const newS = args.new;
+        if (typeof oldS !== 'string' || typeof newS !== 'string') {
+          return { error: 'file edit: old and new must be strings' };
+        }
+        const orig = fs.readFileSync(p, 'utf8');
+        const first = orig.indexOf(oldS);
+        if (first === -1) return { error: `file edit: old string not found in ${p}` };
+        if (orig.indexOf(oldS, first + oldS.length) !== -1) {
+          return { error: `file edit: old string is not unique in ${p}` };
+        }
+        const next = orig.slice(0, first) + newS + orig.slice(first + oldS.length);
+        fs.writeFileSync(p, next);
+        return { ok: true };
+      }
+      default:
+        return { error: `file: unknown op "${op}"` };
+    }
+  } catch (e) {
+    return { error: `file ${op} ${p}: ${e.message}` };
+  }
+}
+
+async function executeToolCall(call) {
+  // call.function.arguments is a JSON string per OpenAI spec; may be malformed
+  // if the model emitted bad JSON or streaming was cut short.
+  let args = {};
+  try {
+    args = call.function && call.function.arguments
+      ? JSON.parse(call.function.arguments)
+      : {};
+  } catch (e) {
+    return { error: `tool arg parse failed: ${e.message}`, raw: call.function && call.function.arguments };
+  }
+  const name = call.function && call.function.name;
+  switch (name) {
+    case 'bash': return await execBash(args.command);
+    case 'file': return execFile(args);
+    default:    return { error: `unknown tool: ${name}` };
+  }
+}
+
+// ---- tool schema (OpenAI shape) -------------------------------------------
+
+const TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description:
+        'Run a shell command via bash -lc in /workspace. Returns exit_code and combined stdout+stderr. ' +
+        `Output is capped at ${OUTPUT_CAP_BYTES} bytes (truncated flag set if hit). ` +
+        `Killed after ${BASH_TIMEOUT_MS / 1000}s. Use for inspection, builds, git, etc.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to execute.' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file',
+      description:
+        'Read, write, or edit a file in the sidecar filesystem. ' +
+        'read: returns text content (capped at 1MB). ' +
+        'write: overwrites the file, creating parent dirs as needed. ' +
+        'edit: literal-string replacement; old must appear exactly once in the file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          op:      { type: 'string', enum: ['read', 'write', 'edit'] },
+          path:    { type: 'string', description: 'Absolute or workspace-relative path.' },
+          content: { type: 'string', description: 'Full file content for op=write.' },
+          old:     { type: 'string', description: 'Literal string to replace for op=edit.' },
+          new:     { type: 'string', description: 'Replacement string for op=edit.' },
+        },
+        required: ['op', 'path'],
+      },
+    },
+  },
+];
+
+// ---- history --------------------------------------------------------------
+
+function loadHistory() {
+  try {
+    const raw = fs.readFileSync(HISTORY, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function saveHistory(h) {
+  try { fs.writeFileSync(HISTORY, JSON.stringify(h)); }
+  catch (e) { writeErr(`venice: history write failed: ${e.message}`); }
+}
+
+// ---- one turn against Venice ---------------------------------------------
+//
+// Returns { text, toolCalls, error }. text is anything written via
+// delta.content; toolCalls is an array of accumulated tool_calls in the
+// OpenAI shape (with id, function.name, function.arguments as a string).
+
+function streamTurn(messages) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ model: MODEL, messages, tools: TOOLS, stream: true });
+    const parsed = url.parse(BASE + '/api/v1/chat/completions');
+    const opts = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer proxied',
+        'Content-Length': Buffer.byteLength(body),
+        'Accept': 'text/event-stream',
+      },
+    };
+    const client = parsed.protocol === 'https:' ? https : http;
+
+    const req = client.request(opts, (resp) => {
+      if (resp.statusCode !== 200) {
+        let errBody = '';
+        resp.on('data', (c) => { errBody += c.toString('utf8'); });
+        resp.on('end', () => {
+          resolve({ error: `HTTP ${resp.statusCode}: ${errBody.slice(0, 500).replace(/\n/g, ' ')}` });
+        });
+        return;
+      }
+      let sseBuf = '';
+      let text = '';
+      const toolCallsByIdx = new Map();
+      resp.setEncoding('utf8');
+      resp.on('data', (chunk) => {
+        sseBuf += chunk;
+        let idx;
+        while ((idx = sseBuf.indexOf('\n')) !== -1) {
+          const line = sseBuf.slice(0, idx);
+          sseBuf = sseBuf.slice(idx + 1);
+          const t = line.trim();
+          if (!t.startsWith('data:')) continue;
+          const payload = t.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          let ev;
+          try { ev = JSON.parse(payload); } catch { continue; }
+          const choices = ev.choices;
+          if (!Array.isArray(choices) || choices.length === 0) continue;
+          const delta = choices[0].delta;
+          if (!delta) continue;
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            stampOnce();
+            writeOut(delta.content);
+            text += delta.content;
+            midline = !delta.content.endsWith('\n');
+          }
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const i = typeof tc.index === 'number' ? tc.index : 0;
+              let acc = toolCallsByIdx.get(i);
+              if (!acc) {
+                acc = { id: '', type: 'function', function: { name: '', arguments: '' } };
+                toolCallsByIdx.set(i, acc);
+              }
+              if (tc.id) acc.id = tc.id;
+              if (tc.function) {
+                if (tc.function.name) acc.function.name = tc.function.name;
+                if (tc.function.arguments) acc.function.arguments += tc.function.arguments;
+              }
+            }
+          }
+        }
+      });
+      resp.on('end', () => {
+        const toolCalls = [...toolCallsByIdx.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, v]) => v)
+          .filter((c) => c.function && c.function.name);
+        resolve({ text, toolCalls });
+      });
+      resp.on('error', (e) => resolve({ error: `response error: ${e.message}` }));
+    });
+    req.on('error', (e) => resolve({ error: `request error: ${e.message}` }));
+    req.write(body);
+    req.end();
+  });
+}
+
+// ---- main loop ------------------------------------------------------------
+
+(async () => {
+  const history = loadHistory();
+  const messages = [];
+  if (SYS_PROMPT) messages.push({ role: 'system', content: SYS_PROMPT });
+  for (const m of history) messages.push(m);
+  messages.push({ role: 'user', content: USER_MSG });
+
+  // Persist the user turn immediately so /clear-after-failure still scrubs
+  // it; tool/assistant turns are appended after each successful round.
+  history.push({ role: 'user', content: USER_MSG });
+
+  for (let iter = 0; iter < TOOL_BUDGET; iter++) {
+    const turn = await streamTurn(messages);
+    if (turn.error) {
+      writeErr(`venice: ${turn.error}`);
+      saveHistory(history);
+      return;
+    }
+    // Build the assistant message in OpenAI shape — content may be null when
+    // the response is tool-calls only; some Venice variants reject null and
+    // want '' instead, so use empty string.
+    const assistantMsg = { role: 'assistant', content: turn.text || '' };
+    if (turn.toolCalls.length > 0) assistantMsg.tool_calls = turn.toolCalls;
+    messages.push(assistantMsg);
+    history.push(assistantMsg);
+
+    if (turn.toolCalls.length === 0) {
+      // Pure text response — done. Flush trailing newline so the last partial
+      // line surfaces as a `done` event in the TUI.
+      if (midline) writeOut('\n');
+      saveHistory(history);
+      return;
+    }
+
+    // Execute each tool call sequentially (parallel would muddle the log
+    // ordering). Append role:tool messages with the JSON-stringified result
+    // so Venice can ingest them on the next turn.
+    for (const call of turn.toolCalls) {
+      emitToolCallHeader(call.function.name, call.function.arguments || '{}');
+      const result = await executeToolCall(call);
+      const resultStr = JSON.stringify(result);
+      // Human-readable rendering in the log: prefer raw bash output / file
+      // content directly under the result frame; everything else goes as
+      // pretty JSON.
+      let rendered;
+      if (typeof result.output === 'string' && result.exit_code !== undefined) {
+        rendered = `exit=${result.exit_code}${result.truncated ? ' (truncated)' : ''}${result.timed_out_after_ms ? ` timed_out_after_ms=${result.timed_out_after_ms}` : ''}\n${result.output}`;
+      } else if (typeof result.content === 'string') {
+        rendered = result.content;
+      } else {
+        rendered = JSON.stringify(result, null, 2);
+      }
+      emitToolOut(rendered);
+      const toolMsg = {
+        role: 'tool',
+        tool_call_id: call.id,
+        content: resultStr,
+      };
+      messages.push(toolMsg);
+      history.push(toolMsg);
+    }
+    // Loop back: re-call Venice with the appended tool results.
+  }
+
+  writeErr(`venice: tool-call budget exhausted (${TOOL_BUDGET}); stopping`);
+  saveHistory(history);
+})();

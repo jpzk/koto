@@ -44,6 +44,15 @@ type GroupInfo struct {
 	// api.venice.ai. Exposed in list so clients (TUI) can render per-provider
 	// markers without a second config round-trip per group.
 	Provider string `json:"provider,omitempty"`
+	// Model is the configured model alias (config.json's `model` field).
+	// Empty when unset — the sidecar entrypoint applies a provider-specific
+	// default in that case (venice-uncensored for venice; Claude CLI default
+	// for claudesdk).
+	Model string `json:"model,omitempty"`
+	// Effort is the configured reasoning-effort knob (config.json's `effort`
+	// field). Only consumed by claudesdk; the venice path ignores it. Empty
+	// when unset.
+	Effort string `json:"effort,omitempty"`
 }
 
 // SkillItem describes one skill in SkillsResp.
@@ -63,8 +72,10 @@ type CmdEnvelope struct {
 }
 
 type SpawnReq struct {
-	Group string `json:"group"`
-	Main  bool   `json:"main,omitempty"`
+	Group    string `json:"group"`
+	Main     bool   `json:"main,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 type SendReq struct {

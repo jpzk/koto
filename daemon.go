@@ -98,7 +98,6 @@ var (
 	SOCK_DIR    string
 	SOCK_PATH   string
 	METRICS     string
-	PROXY_LOG   string
 	IMAGE       = "clawson"
 	PORT_BASE   = 8787
 	PROXY_HOST  = "host.containers.internal"
@@ -114,7 +113,6 @@ func initPaths() {
 	SOCK_DIR = filepath.Join(HERE, "run")
 	SOCK_PATH = filepath.Join(SOCK_DIR, "clawson.sock")
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
-	PROXY_LOG = filepath.Join(HERE, "proxy.log")
 	if v := os.Getenv("PROXY_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			PORT_BASE = n
@@ -154,6 +152,11 @@ func writeGroups(m map[string]int) {
 	_ = os.WriteFile(GROUPS_FILE, b, 0o644)
 }
 
+// allocPort returns a stable port for g, allocating max(existing)+1 when g
+// is new. max+1 (rather than PORT_BASE+len(m)) is collision-free by induction:
+// if no current value duplicates, max+1 doesn't either. Holes left by
+// destroyed groups are never reused, which is fine — at <100 active groups
+// the range grows by ones and never approaches 65535.
 func allocPort(g string) int {
 	groupsLock.Lock()
 	defer groupsLock.Unlock()
@@ -161,9 +164,20 @@ func allocPort(g string) int {
 	if p, ok := m[g]; ok {
 		return p
 	}
-	m[g] = PORT_BASE + len(m)
+	next := PORT_BASE
+	for _, p := range m {
+		if p >= next {
+			next = p + 1
+		}
+	}
+	for _, p := range m {
+		if p == next {
+			panic(fmt.Sprintf("allocPort: computed duplicate port %d for %s", next, g))
+		}
+	}
+	m[g] = next
 	writeGroups(m)
-	return m[g]
+	return next
 }
 
 // ---- sidecar lifecycle ----------------------------------------------------
@@ -204,6 +218,15 @@ func ensure(g string, isMain bool) (int, error) {
 		startCtlLoop(g)
 	}
 	port := allocPort(g)
+	// Register the proxy listener synchronously. proxyListen is idempotent
+	// for the (port, group) pair already on file, so a re-ensure on a live
+	// group is a no-op; a collision with a *different* group is the hard
+	// invariant violation we want to surface here rather than serving the
+	// wrong group's traffic on the same socket. Rolled back below if the
+	// container spawn itself fails.
+	if err := proxyListen(proxyBind, port, g); err != nil {
+		return 0, fmt.Errorf("proxy listen: %w", err)
+	}
 	name := csName(g)
 	if podmanRunning(name) {
 		return port, nil
@@ -309,6 +332,7 @@ func ensure(g string, isMain bool) (int, error) {
 	cmd := exec.Command("podman", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		proxyUnlisten(port)
 		emitLogf("error", "spawn group=%s: %v: %s", g, err, strings.TrimSpace(string(out)))
 		return 0, fmt.Errorf("podman run: %v: %s", err, string(out))
 	}
@@ -789,9 +813,43 @@ func send(g, msg string) error {
 	if err := syscall.SetNonblock(fd, false); err != nil {
 		return err
 	}
+
+	// Block until the sidecar finishes processing this message. Without
+	// this, sendLock releases as soon as the FIFO accepts the bytes, and
+	// rapid concurrent sends interleave their `>>>` markers between prior
+	// responses in the log (the symptom that surfaced as "opsec coms look
+	// weird"). The wait works by:
+	//   1. ensureTail — tailLog must be running to observe `[[turn_end]]`,
+	//      otherwise no notification fires. Idempotent; cheap if already up.
+	//   2. drain — discard any stale turn_end tokens left over from prior
+	//      messages, so step 4 only sees ours.
+	//   3. FIFO write — sidecar will eventually emit [[turn_end]].
+	//   4. wait — block until tailLog observes our completion, with a
+	//      timeout to prevent a wedged sidecar from holding the lock
+	//      forever. Timeout is generous (5 min) to cover long claude
+	//      reasoning turns and venice tool loops near TOOL_BUDGET.
+	ensureTail(g)
+	doneC := turnDoneCh(g)
+drain:
+	for {
+		select {
+		case <-doneC:
+			continue
+		default:
+			break drain
+		}
+	}
 	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
-	_, err := syscall.Write(fd, []byte(enc+"\n"))
-	return err
+	if _, err := syscall.Write(fd, []byte(enc+"\n")); err != nil {
+		return err
+	}
+	select {
+	case <-doneC:
+		return nil
+	case <-time.After(5 * time.Minute):
+		emitLogf("warn", "send group=%s: turn_end not observed within 5m; releasing lock", g)
+		return nil
+	}
 }
 
 // ---- list / destroy / restart --------------------------------------------
@@ -803,6 +861,8 @@ func listGroups() map[string]GroupInfo {
 			Port:     p,
 			Running:  podmanRunning(csName(g)),
 			Provider: groupProviderName(g),
+			Model:    groupModelName(g),
+			Effort:   groupEffortName(g),
 		}
 	}
 	return out
@@ -844,6 +904,34 @@ func ensureProviderConfig(g string) error {
 	return os.WriteFile(p, newB, 0o644)
 }
 
+// seedSpawnConfig writes provider/model into a group's config.json before
+// ensure() runs. Used by the spawn dispatch so `/new <g> <provider> <model>`
+// lands its choice on disk before ensureProviderConfig's default kicks in.
+// Empty arguments are skipped (preserving any existing value).
+func seedSpawnConfig(g, provider, model string) error {
+	p := filepath.Join(vol(g), ".cs", "config.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	cfg := map[string]any{}
+	oldB, _ := os.ReadFile(p)
+	_ = json.Unmarshal(oldB, &cfg)
+	if provider != "" {
+		cfg["provider"] = provider
+	}
+	if model != "" {
+		cfg["model"] = model
+	}
+	newB, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(oldB, newB) {
+		return nil
+	}
+	return os.WriteFile(p, newB, 0o644)
+}
+
 // groupProviderName reads the provider field from a group's config.json.
 // ensureProviderConfig guarantees the field is present and valid on every
 // running group, so this returns the on-disk value verbatim — the only
@@ -862,6 +950,35 @@ func groupProviderName(g string) string {
 		return s
 	}
 	return defaultProvider
+}
+
+// groupModelName reads the model field from a group's config.json. Returns
+// "" when unset — callers (TUI) render that as the provider's default. We
+// deliberately don't substitute a default here because the actual default is
+// resolved per-provider inside the sidecar entrypoint, not the daemon.
+func groupModelName(g string) string {
+	return groupConfigString(g, "model")
+}
+
+// groupEffortName reads the reasoning-effort knob from config.json. Empty
+// when unset. Only meaningful for claudesdk; the venice path ignores it.
+func groupEffortName(g string) string {
+	return groupConfigString(g, "effort")
+}
+
+func groupConfigString(g, key string) string {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return ""
+	}
+	if s, ok := cfg[key].(string); ok {
+		return s
+	}
+	return ""
 }
 
 func destroy(g string) baseResp {
@@ -907,10 +1024,45 @@ var (
 // emit fans an Event out to all subscribers of `g`. The caller supplies
 // the variant-specific fields (Msg, Text, Name/Input, Words/Body, …); we
 // set Group and Ts (defaulting Ts to now if the caller left it zero).
+// turnDone is an internal per-group signal used by send() to block until
+// the sidecar has finished writing the response. emit() pushes a token on
+// every "turn_end" event; send() drains stale tokens before queuing and
+// then waits for the next one. Buffered so emit() never blocks even if no
+// sender is currently waiting (the standard case — TUI subscribers consume
+// turn_end via the socket, the channel is for in-process callers only).
+var (
+	turnDoneMu sync.Mutex
+	turnDone   = map[string]chan struct{}{}
+)
+
+func turnDoneCh(g string) chan struct{} {
+	turnDoneMu.Lock()
+	defer turnDoneMu.Unlock()
+	c, ok := turnDone[g]
+	if !ok {
+		c = make(chan struct{}, 16)
+		turnDone[g] = c
+	}
+	return c
+}
+
+func notifyTurnDone(g string) {
+	c := turnDoneCh(g)
+	select {
+	case c <- struct{}{}:
+	default:
+		// Buffer full — multiple completions piled up with no waiter.
+		// Dropping is safe; send() drains before waiting anyway.
+	}
+}
+
 func emit(g string, ev Event) {
 	ev.Group = g
 	if ev.Ts == 0 {
 		ev.Ts = float64(time.Now().UnixNano()) / 1e9
+	}
+	if ev.Event == "turn_end" {
+		notifyTurnDone(g)
 	}
 	b, _ := json.Marshal(ev)
 	b = append(b, '\n')
@@ -1221,6 +1373,12 @@ func tailLog(g string) {
 				// thinking block that emitted begin+end while we were
 				// still settling state). Swallow it — emitting it as a
 				// `done` event surfaces raw framing in the TUI.
+			} else if buf == "[[turn_end]]" {
+				// Sidecar's per-message provider invocation finished. Used
+				// by send() to hold sendLock until the response is fully
+				// written, so rapid sends serialize end-to-end rather than
+				// interleaving prompts with prior responses in the log.
+				emit(g, Event{Event: "turn_end", Ts: ts})
 			} else {
 				emit(g, Event{Event: "done", Text: buf, Ts: ts})
 			}
@@ -1634,6 +1792,14 @@ func dispatch(line []byte) any {
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
+		if req.Provider != "" && req.Provider != "claudesdk" && req.Provider != "venice" {
+			return errResp("provider must be claudesdk or venice")
+		}
+		if req.Provider != "" || req.Model != "" {
+			if err := seedSpawnConfig(req.Group, req.Provider, req.Model); err != nil {
+				return errResp(err.Error())
+			}
+		}
 		port, err := ensure(req.Group, req.Main)
 		if err != nil {
 			return errResp(err.Error())
@@ -1882,24 +2048,16 @@ func daemonMain() {
 	_ = os.MkdirAll(SOCK_DIR, 0o755)
 	allocPort("main")
 
-	plog, err := os.OpenFile(PROXY_LOG, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open proxy.log: %v\n", err)
-		os.Exit(1)
+	// Proxy runs in-process as goroutines (one per listener). Brings up
+	// listeners for every group already in groups.json; new groups get
+	// theirs registered synchronously by ensure() below. Replaces the
+	// prior subprocess + mtime-poller design — the poller was the silent-
+	// failure path that turned port collisions into cross-group routing.
+	bind := os.Getenv("BIND")
+	if bind == "" {
+		bind = "127.0.0.1"
 	}
-	self, err := os.Executable()
-	if err != nil {
-		self = os.Args[0]
-	}
-	proxy := exec.Command(self, "proxy")
-	proxy.Stdout = plog
-	proxy.Stderr = plog
-	if err := proxy.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "start proxy: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() { _ = proxy.Process.Signal(syscall.SIGTERM) }()
-	emitLogf("info", "proxy started pid=%d log=%s", proxy.Process.Pid, PROXY_LOG)
+	proxyStart(bind)
 
 	if _, err := ensure("main", true); err != nil {
 		emitLogf("error", "ensure main: %v", err)
@@ -1924,7 +2082,6 @@ func daemonMain() {
 	go func() {
 		<-sig
 		_ = l.Close()
-		_ = proxy.Process.Signal(syscall.SIGTERM)
 		os.Exit(0)
 	}()
 
