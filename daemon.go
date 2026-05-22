@@ -181,6 +181,14 @@ func ensure(g string, isMain bool) (int, error) {
 	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
 		return 0, err
 	}
+	// Provider is mandatory in config.json. Auto-fill on first ensure() so
+	// every group ends up with an explicit provider+model — proxy / daemon /
+	// sidecar can assume the field is always present, and the TUI tree always
+	// has a marker to render. Existing {} configs get the same treatment;
+	// pre-existing keys are preserved.
+	if err := ensureProviderConfig(g); err != nil {
+		emitLogf("warn", "ensure provider config[%s]: %v", g, err)
+	}
 	fifo := filepath.Join(v, ".cs", "in")
 	if _, err := os.Stat(fifo); errors.Is(err, os.ErrNotExist) {
 		if err := syscall.Mkfifo(fifo, 0o644); err != nil {
@@ -791,9 +799,69 @@ func send(g, msg string) error {
 func listGroups() map[string]GroupInfo {
 	out := map[string]GroupInfo{}
 	for g, p := range readGroups() {
-		out[g] = GroupInfo{Port: p, Running: podmanRunning(csName(g))}
+		out[g] = GroupInfo{
+			Port:     p,
+			Running:  podmanRunning(csName(g)),
+			Provider: groupProviderName(g),
+		}
 	}
 	return out
+}
+
+// defaultProvider is the value written into a new group's config.json by
+// ensureProviderConfig. Model is intentionally NOT seeded: the sidecar
+// entrypoint defaults to `venice-uncensored` when `model` is empty under the
+// venice provider, and Claude code's own default applies under claudesdk.
+// Seeding `model` here would mean `/config provider=claudesdk` on a fresh
+// group leaves `model=venice-uncensored` lying around, which the Claude CLI
+// would then reject.
+const defaultProvider = "venice"
+
+// ensureProviderConfig writes a provider default into a group's config.json
+// when missing or invalid. Idempotent — when the field is already a valid
+// value the file is left untouched. Called by ensure() on every spawn/send
+// so the invariant "every group has an explicit provider" holds even for
+// groups created before this code existed.
+func ensureProviderConfig(g string) error {
+	p := filepath.Join(vol(g), ".cs", "config.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	cfg := map[string]any{}
+	oldB, _ := os.ReadFile(p)
+	_ = json.Unmarshal(oldB, &cfg)
+	if s, ok := cfg["provider"].(string); ok && (s == "claudesdk" || s == "venice") {
+		return nil
+	}
+	cfg["provider"] = defaultProvider
+	newB, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(oldB, newB) {
+		return nil
+	}
+	return os.WriteFile(p, newB, 0o644)
+}
+
+// groupProviderName reads the provider field from a group's config.json.
+// ensureProviderConfig guarantees the field is present and valid on every
+// running group, so this returns the on-disk value verbatim — the only
+// time the fallback fires is a brief window during initial ensure() or if
+// a user has hand-edited config.json into an invalid state.
+func groupProviderName(g string) string {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return defaultProvider
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return defaultProvider
+	}
+	if s, ok := cfg["provider"].(string); ok && (s == "claudesdk" || s == "venice") {
+		return s
+	}
+	return defaultProvider
 }
 
 func destroy(g string) baseResp {
@@ -1368,6 +1436,21 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		cfg[key] = out
 		return
 	}
+	if key == "provider" {
+		// Only "claudesdk" (default) and "venice" are supported. Anything else
+		// is silently rejected so a typo doesn't silently swap providers — the
+		// next /config call will still show the previous value.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "claudesdk", "venice":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "pip" {
 		// TUI sends `/config pip=true` as the string "true"; also accept a
 		// raw JSON bool for direct daemon clients. Anything else is rejected
@@ -1444,6 +1527,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "skills", req.Skills)
 	applyConfig(cfg, "ports", req.Ports)
 	applyConfig(cfg, "pip", req.Pip)
+	applyConfig(cfg, "provider", req.Provider)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
@@ -1522,6 +1606,10 @@ func skillReadCmd(req skillReadReq) skillReadResp {
 func clearCmd(req groupReq) baseResp {
 	v := vol(req.Group)
 	_ = os.RemoveAll(filepath.Join(v, ".claude"))
+	// Venice provider keeps its own conversation history (Venice API is stateless,
+	// so the sidecar replays the whole transcript per turn). /clear must wipe it
+	// or the next message would still carry the prior turns.
+	_ = os.Remove(filepath.Join(v, ".cs", "venice-history.json"))
 	logPath := filepath.Join(v, ".cs", "log")
 	if _, err := os.Stat(logPath); err == nil {
 		_ = os.WriteFile(logPath, nil, 0o644)

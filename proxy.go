@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-const upstream = "https://api.anthropic.com"
+const (
+	upstream        = "https://api.anthropic.com"
+	veniceUpstream  = "https://api.venice.ai"
+)
 
 var (
 	credPath  string
@@ -25,6 +28,49 @@ var (
 	listeners = map[int]bool{}
 	listLock  sync.Mutex
 )
+
+// veniceKeyPath returns the on-disk location of the Venice API key. It lives
+// next to the Anthropic credentials file (creds/ on the host, mounted at
+// /root/.claude in cs_host) so the credential boundary is uniform: sidecars
+// never see this directory.
+func veniceKeyPath() string {
+	return filepath.Join(filepath.Dir(credPath), "venice.key")
+}
+
+// veniceAuth reads the Venice key from disk. Trimmed of whitespace so the
+// user can `echo $KEY > creds/venice.key` without worrying about the trailing
+// newline. Errors surface to the caller — caller returns 503 to the sidecar.
+func veniceAuth() (string, error) {
+	b, err := os.ReadFile(veniceKeyPath())
+	if err != nil {
+		return "", fmt.Errorf("no venice key: write to %s", veniceKeyPath())
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// groupProvider reads the per-group provider from config.json on every request.
+// Cheap (a few hundred bytes from disk) and avoids any cache-invalidation
+// dance when /config changes the value at runtime. Defaults to "venice" when
+// absent or unrecognized — this is a Venice-first deployment; opt back into
+// Claude with `/config provider=claudesdk`.
+func groupProvider(group string) string {
+	if group == "" {
+		return "venice"
+	}
+	p := filepath.Join(ROOT, group, ".cs", "config.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "venice"
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return "venice"
+	}
+	if s, ok := cfg["provider"].(string); ok && s == "claudesdk" {
+		return "claudesdk"
+	}
+	return "venice"
+}
 
 type oauthCreds struct {
 	AccessToken string  `json:"accessToken"`
@@ -185,6 +231,10 @@ var hopByHop = map[string]bool{
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if groupProvider(h.group) == "venice" {
+		h.serveVenice(w, r)
+		return
+	}
 	t0 := time.Now()
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
@@ -333,6 +383,135 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
+}
+
+// serveVenice forwards to api.venice.ai with credential injection mirroring
+// the Anthropic path: sidecar sends `Authorization: Bearer proxied` (sentinel)
+// and we replace it with the real Venice key read from disk. The sidecar
+// never sees the key. Body is passed through verbatim so the sidecar
+// controls model selection, streaming, system message, etc.
+//
+// Usage is normalized to the Anthropic shape (input_tokens/output_tokens) so
+// the daemon's contextBlock — which assumes Anthropic field names — still
+// surfaces token counts in the next turn's <clawson-context> header. Venice
+// doesn't expose rate-limit headers, so the rate-limit row of the context
+// block degrades to `?` for Venice groups, which is fine.
+func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
+	var body []byte
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		body, _ = io.ReadAll(r.Body)
+	}
+	key, err := veniceAuth()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	req, err := http.NewRequest(r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for k, vs := range r.Header {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		// Anthropic-specific headers leak nothing useful upstream and Venice's
+		// validator may complain — strip the lot. The sidecar's venice script
+		// doesn't send these anyway; this only matters if someone curls the
+		// proxy directly.
+		if strings.HasPrefix(strings.ToLower(k), "anthropic-") {
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("accept-encoding", "identity")
+
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	skip := map[string]bool{
+		"content-encoding":  true,
+		"transfer-encoding": true,
+		"content-length":    true,
+		"connection":        true,
+	}
+	for k, vs := range resp.Header {
+		if skip[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	flusher, _ := w.(http.Flusher)
+
+	usage := map[string]any{}
+	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if _, err := w.Write(append(line, '\n')); err != nil {
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			s := strings.TrimSpace(string(line))
+			if !strings.HasPrefix(s, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(s[5:])
+			if payload == "[DONE]" {
+				continue
+			}
+			var ev map[string]any
+			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+				continue
+			}
+			// Venice emits the OpenAI-shape usage block on the final chunk
+			// (after the model has stopped emitting deltas).
+			if u, ok := ev["usage"].(map[string]any); ok {
+				if v, ok := u["prompt_tokens"]; ok {
+					usage["input_tokens"] = v
+				}
+				if v, ok := u["completion_tokens"]; ok {
+					usage["output_tokens"] = v
+				}
+				usage["cache_read_input_tokens"] = 0
+				usage["cache_creation_input_tokens"] = 0
+			}
+		}
+	} else {
+		data, _ := io.ReadAll(resp.Body)
+		_, _ = w.Write(data)
+		var parsed map[string]any
+		if json.Unmarshal(data, &parsed) == nil {
+			if u, ok := parsed["usage"].(map[string]any); ok {
+				if v, ok := u["prompt_tokens"]; ok {
+					usage["input_tokens"] = v
+				}
+				if v, ok := u["completion_tokens"]; ok {
+					usage["output_tokens"] = v
+				}
+				usage["cache_read_input_tokens"] = 0
+				usage["cache_creation_input_tokens"] = 0
+			}
+		}
+	}
+	dur := time.Since(t0)
+	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
 }
 
 func listen(bind string, port int, group string) {

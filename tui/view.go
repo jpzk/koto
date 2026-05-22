@@ -343,18 +343,18 @@ func (m Model) renderTree(rows int) string {
 		others := order
 		if hasMain {
 			others = order[1:]
-			running := m.groups["main"].Running
+			info := m.groups["main"]
 			isCur := m.cur == "main"
-			lines = append(lines, m.renderTreeRow("main", "", running, isCur, hovered("main"), m.unread["main"], pad))
+			lines = append(lines, m.renderTreeRow("main", "", info.Running, isCur, hovered("main"), m.unread["main"], info.Provider, pad))
 		}
 		for i, g := range others {
-			running := m.groups[g].Running
+			info := m.groups[g]
 			isCur := m.cur == g
 			branch := "├─ "
 			if i == len(others)-1 {
 				branch = "└─ "
 			}
-			lines = append(lines, m.renderTreeRow(g, branch, running, isCur, hovered(g), m.unread[g], pad))
+			lines = append(lines, m.renderTreeRow(g, branch, info.Running, isCur, hovered(g), m.unread[g], info.Provider, pad))
 		}
 	}
 
@@ -370,9 +370,15 @@ func (m Model) renderTree(rows int) string {
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
 }
 
-func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool, pad func(string, int) string) string {
+func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool, provider string, pad func(string, int) string) string {
+	// A claudesdk-backed group gets a 4-cell `[C] ` marker rendered in red
+	// before the name; Venice (and any other future provider) gets 4 spaces
+	// of padding so names still line up vertically. Default-empty provider
+	// is treated as claudesdk to match existing groups created before the
+	// provider field existed.
+	const markerW = 4
 	contentW := leftPaneWidth - 2 // account for paddingX
-	w := contentW - len(branch) - 2
+	w := contentW - len(branch) - 2 - markerW
 	if w < 1 {
 		w = 1
 	}
@@ -395,11 +401,24 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 		dot = "● "
 		dotColor = cPink
 	}
+	// Each provider gets a 4-cell tag so names line up vertically:
+	//   claudesdk → red bold "[C] "
+	//   venice    → gray "[V] "
+	//   anything else (empty, unknown) → 4 spaces, so a daemon that hasn't
+	//     been restarted into the provider-aware build doesn't show a
+	//     misleading marker.
+	markerPlain := "    "
+	switch provider {
+	case "claudesdk":
+		markerPlain = "[C] "
+	case "venice":
+		markerPlain = "[V] "
+	}
 
 	if hov {
 		// highlight row with cyan background, black foreground for the whole row
 		full := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
-			Render(" " + branch + dot + pad(g, w))
+			Render(" " + branch + dot + markerPlain + pad(g, w))
 		return full
 	}
 	parts := " "
@@ -407,6 +426,14 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(branch)
 	}
 	parts += lipgloss.NewStyle().Foreground(dotColor).Render(dot)
+	switch provider {
+	case "claudesdk":
+		parts += lipgloss.NewStyle().Foreground(cRed).Bold(true).Render("[C] ")
+	case "venice":
+		parts += lipgloss.NewStyle().Foreground(cGray).Render("[V] ")
+	default:
+		parts += "    "
+	}
 	style := lipgloss.NewStyle().Foreground(nameColor)
 	if isCur || (unread && !isCur) {
 		style = style.Bold(true)

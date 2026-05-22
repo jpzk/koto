@@ -39,6 +39,11 @@ type Event struct {
 type GroupInfo struct {
 	Port    int  `json:"port"`
 	Running bool `json:"running"`
+	// Provider is the per-group LLM backend, taken from config.json. Empty
+	// or "claudesdk" mean the Claude-via-proxy path; "venice" routes to
+	// api.venice.ai. Exposed in list so clients (TUI) can render per-provider
+	// markers without a second config round-trip per group.
+	Provider string `json:"provider,omitempty"`
 }
 
 // SkillItem describes one skill in SkillsResp.
@@ -86,12 +91,13 @@ type HistoryReq struct {
 // three states: absent (nil), clear (`""`, `null`, `[]`), and set
 // (non-empty literal).
 type ConfigReq struct {
-	Group  string          `json:"group"`
-	Model  json.RawMessage `json:"model,omitempty"`
-	Effort json.RawMessage `json:"effort,omitempty"`
-	Skills json.RawMessage `json:"skills,omitempty"`
-	Ports  json.RawMessage `json:"ports,omitempty"`
-	Pip    json.RawMessage `json:"pip,omitempty"`
+	Group    string          `json:"group"`
+	Model    json.RawMessage `json:"model,omitempty"`
+	Effort   json.RawMessage `json:"effort,omitempty"`
+	Skills   json.RawMessage `json:"skills,omitempty"`
+	Ports    json.RawMessage `json:"ports,omitempty"`
+	Pip      json.RawMessage `json:"pip,omitempty"`
+	Provider json.RawMessage `json:"provider,omitempty"`
 }
 
 type SkillListReq struct {

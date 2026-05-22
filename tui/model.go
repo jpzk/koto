@@ -464,7 +464,8 @@ func listCmd(sock string) tea.Cmd {
 			mp, _ := v.(map[string]any)
 			port, _ := mp["port"].(float64)
 			running, _ := mp["running"].(bool)
-			out[k] = GroupInfo{Port: int(port), Running: running}
+			provider, _ := mp["provider"].(string)
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider}
 		}
 		return listMsg{groups: out}
 	}
