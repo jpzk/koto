@@ -1783,6 +1783,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.dispatchInput(v)
 			tickCmd := m.ensureTicking()
 			return m, tea.Batch(cmd, tickCmd)
+		case "pgup":
+			m.vp.ViewUp()
+			m.autoFollow = m.vp.AtBottom()
+			return m, m.maybePageOlder()
+		case "pgdown", "pgdn":
+			m.vp.ViewDown()
+			m.autoFollow = m.vp.AtBottom()
+			return m, nil
+		case "shift+up":
+			m.vp.LineUp(1)
+			m.autoFollow = m.vp.AtBottom()
+			return m, m.maybePageOlder()
+		case "shift+down":
+			m.vp.LineDown(1)
+			m.autoFollow = m.vp.AtBottom()
+			return m, nil
+		case "home":
+			m.vp.GotoTop()
+			m.autoFollow = false
+			return m, m.maybePageOlder()
+		case "end":
+			m.vp.GotoBottom()
+			m.autoFollow = true
+			return m, nil
 		}
 		// Anything else — printable chars, backspace, arrows-with-modifiers,
 		// etc. — goes to the textinput so the user can type while the tree
@@ -1836,11 +1860,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch s {
 	case "pgup":
-		m.vp.HalfViewUp()
+		m.vp.ViewUp()
 		m.autoFollow = m.vp.AtBottom()
 		return m, m.maybePageOlder()
 	case "pgdown", "pgdn":
-		m.vp.HalfViewDown()
+		m.vp.ViewDown()
 		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "shift+up":

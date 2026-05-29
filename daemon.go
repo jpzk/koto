@@ -1385,7 +1385,7 @@ func tailLog(g string) {
 			buf = ""
 			i += j + 1
 		}
-		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") {
+		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") {
 			if inThinking {
 				emit(g, Event{Event: "thinking_stream", Text: buf})
 			} else if inToolOut {

@@ -26,7 +26,7 @@ while IFS= read -r b64 <&3; do
   # isn't installed.
   # Default provider is venice on this branch; opt back into Claude
   # per-group with `/config provider=claudesdk`. Default Venice model is
-  # venice-uncensored — applied below in the `venice)` case if MODEL is empty.
+  # kimi-k2.5 — applied below in the `venice)` case if MODEL is empty.
   MODEL=""; EFFORT=""; PROVIDER="venice"
   if [ -f /workspace/.cs/config.json ]; then
     MODEL=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('/workspace/.cs/config.json','utf8')).model||'')}catch(e){}" 2>/dev/null)
@@ -43,7 +43,7 @@ while IFS= read -r b64 <&3; do
       # directly to the log in the same `[ts:N]\n<text>\n` format the
       # tailer expects from the Claude path.
       VENICE_MODEL="$MODEL"
-      [ -z "$VENICE_MODEL" ] && VENICE_MODEL=venice-uncensored
+      [ -z "$VENICE_MODEL" ] && VENICE_MODEL=kimi-k2.5
       MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
       SP_B64=""
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)

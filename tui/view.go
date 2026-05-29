@@ -371,14 +371,8 @@ func (m Model) renderTree(rows int) string {
 }
 
 func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool, provider string, pad func(string, int) string) string {
-	// A claudesdk-backed group gets a 4-cell `[C] ` marker rendered in red
-	// before the name; Venice (and any other future provider) gets 4 spaces
-	// of padding so names still line up vertically. Default-empty provider
-	// is treated as claudesdk to match existing groups created before the
-	// provider field existed.
-	const markerW = 4
 	contentW := leftPaneWidth - 2 // account for paddingX
-	w := contentW - len(branch) - 2 - markerW
+	w := contentW - len(branch) - 2
 	if w < 1 {
 		w = 1
 	}
@@ -401,24 +395,10 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 		dot = "● "
 		dotColor = cPink
 	}
-	// Each provider gets a 4-cell tag so names line up vertically:
-	//   claudesdk → red bold "[C] "
-	//   venice    → gray "[V] "
-	//   anything else (empty, unknown) → 4 spaces, so a daemon that hasn't
-	//     been restarted into the provider-aware build doesn't show a
-	//     misleading marker.
-	markerPlain := "    "
-	switch provider {
-	case "claudesdk":
-		markerPlain = "[C] "
-	case "venice":
-		markerPlain = "[V] "
-	}
-
 	if hov {
 		// highlight row with cyan background, black foreground for the whole row
 		full := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
-			Render(" " + branch + dot + markerPlain + pad(g, w))
+			Render(" " + branch + dot + pad(g, w))
 		return full
 	}
 	parts := " "
@@ -426,14 +406,6 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(branch)
 	}
 	parts += lipgloss.NewStyle().Foreground(dotColor).Render(dot)
-	switch provider {
-	case "claudesdk":
-		parts += lipgloss.NewStyle().Foreground(cRed).Bold(true).Render("[C] ")
-	case "venice":
-		parts += lipgloss.NewStyle().Foreground(cGray).Render("[V] ")
-	default:
-		parts += "    "
-	}
 	style := lipgloss.NewStyle().Foreground(nameColor)
 	if isCur || (unread && !isCur) {
 		style = style.Bold(true)
