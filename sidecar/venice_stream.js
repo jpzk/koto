@@ -37,7 +37,10 @@ const { spawn } = require('child_process');
 
 const HISTORY = '/workspace/.cs/venice-history.json';
 const BASE = process.env.ANTHROPIC_BASE_URL;
-const MODEL = process.env.VENICE_MODEL || 'venice-uncensored';
+// VENICE_MODEL is always set by entrypoint.sh (config model, else the daemon's
+// CLAWSON_DEFAULT_VENICE_MODEL). This literal is a last-resort fallback only;
+// keep it aligned with defaultVeniceModel in daemon.go.
+const MODEL = process.env.VENICE_MODEL || 'kimi-k2.5';
 const TOOL_BUDGET = 25;
 const BASH_TIMEOUT_MS = 30_000;
 const OUTPUT_CAP_BYTES = 1_000_000;

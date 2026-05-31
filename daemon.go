@@ -293,6 +293,10 @@ func ensure(g string, isMain bool) (int, error) {
 		"-e", "ANTHROPIC_API_KEY=proxied",
 		"-e", "HOME=/workspace",
 		"-e", "SHELL=/bin/bash",
+		// Single source of truth for the venice default model (see
+		// defaultVeniceModel). entrypoint.sh applies this when config has no
+		// `model`; groupModelName reports the same value to the TUI.
+		"-e", "CLAWSON_DEFAULT_VENICE_MODEL=" + defaultVeniceModel,
 		"-e", fmt.Sprintf("ANTHROPIC_BASE_URL=http://%s:%d", PROXY_HOST, port),
 	}
 	if _, err := os.Stat(filepath.Join(HERE, "prompts", "global.md")); err == nil {
@@ -906,12 +910,20 @@ func listGroups() map[string]GroupInfo {
 
 // defaultProvider is the value written into a new group's config.json by
 // ensureProviderConfig. Model is intentionally NOT seeded: the sidecar
-// entrypoint defaults to `venice-uncensored` when `model` is empty under the
+// entrypoint defaults to defaultVeniceModel when `model` is empty under the
 // venice provider, and Claude code's own default applies under claudesdk.
 // Seeding `model` here would mean `/config provider=claudesdk` on a fresh
-// group leaves `model=venice-uncensored` lying around, which the Claude CLI
+// group leaves a venice model string lying around, which the Claude CLI
 // would then reject.
 const defaultProvider = "venice"
+
+// defaultVeniceModel is the single source of truth for the model a venice
+// group uses when config.json has no `model`. The daemon injects it into the
+// sidecar as CLAWSON_DEFAULT_VENICE_MODEL (see ensure()), so entrypoint.sh
+// applies exactly this value and groupModelName reports it — no second copy
+// to drift. (entrypoint.sh keeps a hardcoded fallback only for the degenerate
+// case where the env is somehow unset.)
+const defaultVeniceModel = "kimi-k2.5"
 
 // ensureProviderConfig writes a provider default into a group's config.json
 // when missing or invalid. Idempotent — when the field is already a valid
@@ -992,8 +1004,20 @@ func groupProviderName(g string) string {
 // "" when unset — callers (TUI) render that as the provider's default. We
 // deliberately don't substitute a default here because the actual default is
 // resolved per-provider inside the sidecar entrypoint, not the daemon.
+// groupModelName reports the EFFECTIVE model the group runs, not just the raw
+// config value — so the TUI can always show what's actually in use. When
+// config.json has no `model`: a venice group falls back to defaultVeniceModel
+// (what entrypoint.sh actually applies), while a claudesdk group returns ""
+// (the claude CLI picks its own default; clawson doesn't set or know it, so
+// the TUI renders "(default)" there).
 func groupModelName(g string) string {
-	return groupConfigString(g, "model")
+	if m := groupConfigString(g, "model"); m != "" {
+		return m
+	}
+	if groupProviderName(g) == "venice" {
+		return defaultVeniceModel
+	}
+	return ""
 }
 
 // groupEffortName reads the reasoning-effort knob from config.json. Empty

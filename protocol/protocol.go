@@ -44,10 +44,11 @@ type GroupInfo struct {
 	// api.venice.ai. Exposed in list so clients (TUI) can render per-provider
 	// markers without a second config round-trip per group.
 	Provider string `json:"provider,omitempty"`
-	// Model is the configured model alias (config.json's `model` field).
-	// Empty when unset — the sidecar entrypoint applies a provider-specific
-	// default in that case (venice-uncensored for venice; Claude CLI default
-	// for claudesdk).
+	// Model is the EFFECTIVE model the group runs (daemon's groupModelName):
+	// the config.json `model` if set, else the provider default — kimi-k2.5
+	// for venice (defaultVeniceModel), or "" for claudesdk (the claude CLI
+	// picks its own default, which clawson doesn't set, so the TUI shows
+	// "(default)" there).
 	Model string `json:"model,omitempty"`
 	// Effort is the configured reasoning-effort knob (config.json's `effort`
 	// field). Only consumed by claudesdk; the venice path ignores it. Empty

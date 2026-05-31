@@ -34,8 +34,10 @@ while IFS= read -r b64 <&3; do
   # /workspace/.cs/config.json. Read via node since the image has it; jq
   # isn't installed.
   # Default provider is venice on this branch; opt back into Claude
-  # per-group with `/config provider=claudesdk`. Default Venice model is
-  # kimi-k2.5 — applied below in the `venice)` case if MODEL is empty.
+  # per-group with `/config provider=claudesdk`. Default Venice model comes
+  # from the daemon via CLAWSON_DEFAULT_VENICE_MODEL (single source of truth =
+  # defaultVeniceModel in daemon.go); applied below in the `venice)` case when
+  # MODEL is empty. The literal fallback is only for a missing env.
   MODEL=""; EFFORT=""; PROVIDER="venice"
   if [ -f /workspace/.cs/config.json ]; then
     MODEL=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('/workspace/.cs/config.json','utf8')).model||'')}catch(e){}" 2>/dev/null)
@@ -52,7 +54,7 @@ while IFS= read -r b64 <&3; do
       # directly to the log in the same `[ts:N]\n<text>\n` format the
       # tailer expects from the Claude path.
       VENICE_MODEL="$MODEL"
-      [ -z "$VENICE_MODEL" ] && VENICE_MODEL=kimi-k2.5
+      [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${CLAWSON_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
       MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
       SP_B64=""
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
