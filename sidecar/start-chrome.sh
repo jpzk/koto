@@ -11,7 +11,14 @@ if curl -sf "http://localhost:${PORT}/json/version" >/dev/null 2>&1; then
 fi
 PROFILE=/tmp/cdp-prof-${PORT}
 mkdir -p "$PROFILE"
-nohup "${AGENT_BROWSER_EXECUTABLE_PATH:-/usr/local/bin/agent-browser-chrome}" \
+# setsid (not nohup): Chrome is meant to persist across turns, so it must leave
+# the turn's session/process group. The per-turn `timeout -s KILL` watchdog in
+# entrypoint.sh group-kills the turn's process group on a hang; nohup only
+# ignores SIGHUP and stays in that group, so a single turn timeout would
+# silently kill a persistent Chrome. setsid puts it in its own session, out of
+# reach of any turn-scoped group/session kill. This is the detach contract:
+# anything meant to outlive a turn detaches; everything else is turn-scoped.
+setsid "${AGENT_BROWSER_EXECUTABLE_PATH:-/usr/local/bin/agent-browser-chrome}" \
   --headless=new --no-sandbox --disable-setuid-sandbox \
   --disable-dev-shm-usage --disable-gpu \
   --remote-debugging-port="${PORT}" \

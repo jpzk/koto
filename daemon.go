@@ -264,6 +264,14 @@ func ensure(g string, isMain bool) (int, error) {
 	}
 	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v pip=%t", g, port, isMain, pubPorts, pip)
 	args := []string{"run", "-d", "--rm", "--name", name,
+		// --init runs catatonit as pid 1 (the entrypoint sh becomes its child).
+		// Without a real init, orphaned tool subprocesses reparent to the
+		// entrypoint sh — which never wait()s them — so they pile up as
+		// zombies. catatonit reaps them. It does NOT kill live processes, so
+		// intentional cross-turn daemons (start-chrome, published dev servers)
+		// are unaffected; live in-group runaways are already reaped by the
+		// per-turn `timeout -s KILL` group-kill in entrypoint.sh.
+		"--init",
 		"--security-opt", "label=disable",
 		"--userns=keep-id",
 		"--network=" + NETWORK,
