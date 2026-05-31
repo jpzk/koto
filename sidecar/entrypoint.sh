@@ -3,6 +3,15 @@ set -e
 D=/workspace/.cs
 mkdir -p "$D"
 [ -p "$D/in" ] || mkfifo "$D/in"
+# Per-turn wall-clock watchdog. Without it, a tool subprocess that hangs or
+# busy-loops (e.g. a `column` spin on degenerate input) keeps `claude` blocked
+# in wait() forever, the stdout pipe never closes, `[[turn_end]]` below never
+# runs, and this `read` loop never advances — every queued message is stuck
+# until manual intervention. timeout -s KILL bounds the turn so the loop always
+# makes progress; the killed turn still emits turn_end (with an [[err]] marker)
+# instead of freezing the group. Generous default covers long claude reasoning
+# and venice's 25×30s tool loop; the daemon's send() wait sits above this.
+TURN_TIMEOUT="${TURN_TIMEOUT:-1200}"
 # Do NOT truncate .cs/log — it must persist across sidecar restarts so the
 # TUI can replay the conversation on attach (matches claude's session.jsonl
 # which also persists). >> below creates the file if missing.
@@ -47,8 +56,13 @@ while IFS= read -r b64 <&3; do
       MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
       SP_B64=""
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
+      vrc=0
       MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" \
-        node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || true
+        timeout -s KILL -k 10 "$TURN_TIMEOUT" \
+        node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || vrc=$?
+      if [ "$vrc" = "124" ] || [ "$vrc" = "137" ]; then
+        printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
+      fi
       # Strict-ordering completion marker — daemon's send() holds sendLock
       # until tailLog observes this line, so rapid sends serialize end-to-end
       # rather than interleaving prompts with prior responses.
@@ -61,8 +75,12 @@ while IFS= read -r b64 <&3; do
       [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
       [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 
-      printf '%s' "$msg" | "$@" 2>>"$D/log" \
+      { printf '%s' "$msg" | timeout -s KILL -k 10 "$TURN_TIMEOUT" "$@" 2>>"$D/log"; echo $? >"$D/.turn_rc"; } \
           | node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
+      crc=$(cat "$D/.turn_rc" 2>/dev/null)
+      if [ "$crc" = "124" ] || [ "$crc" = "137" ]; then
+        printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
+      fi
       # Strict-ordering completion marker (see venice branch comment).
       printf '[[turn_end]]\n' >> "$D/log"
       ;;
