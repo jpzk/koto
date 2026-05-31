@@ -825,9 +825,10 @@ func send(g, msg string) error {
 	//      messages, so step 4 only sees ours.
 	//   3. FIFO write — sidecar will eventually emit [[turn_end]].
 	//   4. wait — block until tailLog observes our completion, with a
-	//      timeout to prevent a wedged sidecar from holding the lock
-	//      forever. Timeout is generous (5 min) to cover long claude
-	//      reasoning turns and venice tool loops near TOOL_BUDGET.
+	//      timeout (turnWaitTimeout) to prevent a wedged sidecar from holding
+	//      the lock forever. It sits above entrypoint.sh's per-turn watchdog,
+	//      so a slow-but-bounded turn always completes first; hitting it means
+	//      the sidecar loop is wedged → the group is flagged stalled.
 	ensureTail(g)
 	doneC := turnDoneCh(g)
 drain:
@@ -846,11 +847,23 @@ drain:
 	select {
 	case <-doneC:
 		return nil
-	case <-time.After(5 * time.Minute):
-		emitLogf("warn", "send group=%s: turn_end not observed within 5m; releasing lock", g)
+	case <-time.After(turnWaitTimeout):
+		// Sits above entrypoint.sh's per-turn watchdog (TURN_TIMEOUT, default
+		// 1200s + 10s kill grace), which now guarantees a turn_end fires even
+		// for a killed turn. So reaching this branch means the sidecar's FIFO
+		// loop itself is wedged (dead/hung), not just running a long turn —
+		// flag the group stalled and release the lock so other senders proceed.
+		setStalled(g, true)
+		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (sidecar loop wedged?), releasing lock", g, turnWaitTimeout)
+		selfHeal(g, time.Now()) // restart the wedged loop (circuit-broken)
 		return nil
 	}
 }
+
+// turnWaitTimeout is how long send() waits for a turn's [[turn_end]] before
+// declaring the group stalled. Must exceed entrypoint.sh's TURN_TIMEOUT so a
+// legitimately long-but-bounded turn is never misread as a wedge.
+const turnWaitTimeout = 25 * time.Minute
 
 // ---- list / destroy / restart --------------------------------------------
 
@@ -863,6 +876,7 @@ func listGroups() map[string]GroupInfo {
 			Provider: groupProviderName(g),
 			Model:    groupModelName(g),
 			Effort:   groupEffortName(g),
+			Stalled:  isStalled(g),
 		}
 	}
 	return out
@@ -1046,7 +1060,85 @@ func turnDoneCh(g string) chan struct{} {
 	return c
 }
 
+// stalledG tracks groups whose sidecar FIFO loop appears wedged: a message was
+// delivered but no [[turn_end]] arrived within turnWaitTimeout. Set by send()
+// on that timeout, cleared by notifyTurnDone the instant any turn completes.
+// Surfaced via listGroups → GroupInfo.Stalled so the TUI can flag it.
+var (
+	stallMu  sync.Mutex
+	stalledG = map[string]bool{}
+)
+
+func setStalled(g string, v bool) {
+	stallMu.Lock()
+	stalledG[g] = v
+	stallMu.Unlock()
+}
+
+func isStalled(g string) bool {
+	stallMu.Lock()
+	defer stallMu.Unlock()
+	return stalledG[g]
+}
+
+// Self-heal: when send() declares a group stalled (sidecar loop wedged, not
+// just a slow turn — see turnWaitTimeout), restart it so the loop comes back.
+// restart() = stopGroup + ensure; conversation context survives via the
+// --continue session files in the bind-mounted workspace, so a heal is
+// transparent to the agent.
+//
+// Circuit breaker (healMaxAttempts per healWindow) is mandatory: a group that
+// wedges for a *deterministic* reason — poisoned session file, a prompt that
+// reliably hangs past TURN_TIMEOUT — would otherwise restart-loop forever. We
+// deliberately do NOT re-deliver the message that triggered the stall (it may
+// be the cause); we only restore the loop. Past the breaker we give up, leave
+// the group flagged STALLED, and log an error so it surfaces for manual
+// /restart rather than thrashing.
+const (
+	healMaxAttempts = 3
+	healWindow      = 30 * time.Minute
+)
+
+var (
+	healMu       sync.Mutex
+	healAttempts = map[string][]time.Time{}
+)
+
+// selfHeal restarts a wedged group unless the breaker is open. Returns true if
+// it restarted. Callers hold sendLock(g); restart()/stopGroup()/ensure() take
+// no sendLock, so this is reentrancy-safe.
+func selfHeal(g string, now time.Time) bool {
+	healMu.Lock()
+	cutoff := now.Add(-healWindow)
+	kept := healAttempts[g][:0]
+	for _, t := range healAttempts[g] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= healMaxAttempts {
+		healAttempts[g] = kept
+		healMu.Unlock()
+		emitLogf("error", "selfheal group=%s: circuit breaker OPEN (%d restarts within %s); leaving STALLED — manual /restart needed", g, len(kept), healWindow)
+		return false
+	}
+	kept = append(kept, now)
+	healAttempts[g] = kept
+	attempt := len(kept)
+	healMu.Unlock()
+
+	emitLogf("warn", "selfheal group=%s: restarting wedged sidecar (attempt %d/%d in %s)", g, attempt, healMaxAttempts, healWindow)
+	if _, err := restart(g); err != nil {
+		emitLogf("error", "selfheal group=%s: restart failed: %v", g, err)
+		return false
+	}
+	setStalled(g, false) // fresh loop is live; next turn_end would re-confirm
+	emitLogf("info", "selfheal group=%s: sidecar restarted; loop restored", g)
+	return true
+}
+
 func notifyTurnDone(g string) {
+	setStalled(g, false) // a turn completed → the loop is alive
 	c := turnDoneCh(g)
 	select {
 	case c <- struct{}{}:

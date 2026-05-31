@@ -345,7 +345,7 @@ func (m Model) renderTree(rows int) string {
 			others = order[1:]
 			info := m.groups["main"]
 			isCur := m.cur == "main"
-			lines = append(lines, m.renderTreeRow("main", "", info.Running, isCur, hovered("main"), m.unread["main"], info.Provider, pad))
+			lines = append(lines, m.renderTreeRow("main", "", info.Running, info.Stalled, isCur, hovered("main"), m.unread["main"], info.Provider, pad))
 		}
 		for i, g := range others {
 			info := m.groups[g]
@@ -354,7 +354,7 @@ func (m Model) renderTree(rows int) string {
 			if i == len(others)-1 {
 				branch = "└─ "
 			}
-			lines = append(lines, m.renderTreeRow(g, branch, info.Running, isCur, hovered(g), m.unread[g], info.Provider, pad))
+			lines = append(lines, m.renderTreeRow(g, branch, info.Running, info.Stalled, isCur, hovered(g), m.unread[g], info.Provider, pad))
 		}
 	}
 
@@ -370,7 +370,7 @@ func (m Model) renderTree(rows int) string {
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
 }
 
-func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool, provider string, pad func(string, int) string) string {
+func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unread bool, provider string, pad func(string, int) string) string {
 	contentW := leftPaneWidth - 2 // account for paddingX
 	w := contentW - len(branch) - 2
 	if w < 1 {
@@ -382,6 +382,13 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 		dot = "● "
 		dotColor = cGreen
 	}
+	// Stalled overrides running: the container is up but its FIFO loop is
+	// wedged (daemon saw no turn_end within turnWaitTimeout). Yellow ⚠ so it
+	// reads as "alive but stuck", distinct from green-healthy / gray-stopped.
+	if stalled {
+		dot = "⚠ "
+		dotColor = cYellow
+	}
 	nameColor := cWhite
 	if isCur {
 		nameColor = cCyan
@@ -391,7 +398,7 @@ func (m Model) renderTreeRow(g, branch string, running, isCur, hov, unread bool,
 	// Unread output (only meaningful when the group isn't the current focus)
 	// overrides the dot to a pink filled marker and bolds the name. Pink
 	// (256-color 205) is far enough from green/yellow to read distinctly.
-	if unread && !isCur {
+	if unread && !isCur && !stalled {
 		dot = "● "
 		dotColor = cPink
 	}

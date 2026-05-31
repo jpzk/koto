@@ -53,6 +53,13 @@ type GroupInfo struct {
 	// field). Only consumed by claudesdk; the venice path ignores it. Empty
 	// when unset.
 	Effort string `json:"effort,omitempty"`
+	// Stalled is set when the daemon delivered a message but never observed
+	// the turn's [[turn_end]] within its wait window — i.e. the sidecar's
+	// FIFO loop is wedged (dead/hung), not merely running a slow turn (the
+	// per-turn watchdog in entrypoint.sh bounds those). Cleared the moment any
+	// turn_end is observed for the group. Lets clients flag a wedged group
+	// instead of showing it as healthily "running".
+	Stalled bool `json:"stalled,omitempty"`
 }
 
 // SkillItem describes one skill in SkillsResp.
