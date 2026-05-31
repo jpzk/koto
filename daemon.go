@@ -418,43 +418,57 @@ func tailBackgroundTask(g, id, path string) {
 	emitLogf("info", "bg-tail end group=%s id=%s", g, id)
 }
 
-// interruptAgent sends SIGINT to the running claude process inside the
-// sidecar without killing the entrypoint shell, so the FIFO `read` loop
-// survives and the next inbound message still works. We walk /proc inside
-// the container and signal any non-PID-1 process whose cmdline mentions
-// `claude-code` (matches the npm-installed cli.js path; stream_filter.js
-// and agent-browser-chrome don't match). Stream_filter exits on SIGPIPE
-// once claude's stdout closes — no need to signal it explicitly.
+// agentWorkerPattern is the egrep alternation matching a turn's agent worker
+// process, provider-agnostic. Each provider's sidecar entrypoint branch
+// launches exactly one of these per message:
+//   - claudesdk → the claude CLI. NOTE: its argv is just "claude -p ...";
+//     the "claude-code" marker only appears in the RESOLVED EXECUTABLE PATH
+//     (/proc/PID/exe → .../@anthropic-ai/claude-code/bin/claude.exe), not in
+//     cmdline — so the matcher below greps exe AND cmdline, not cmdline alone.
+//   - venice    → node /sidecar/venice_stream.js (matches via cmdline).
+// stream_filter.js and agent-browser-chrome do NOT match, so they're left
+// alone. Adding a provider = add its worker's exe/argv marker here (one place).
+const agentWorkerPattern = `claude-code|venice_stream\.js`
+
+// interruptAgent sends SIGINT to the running turn worker inside the sidecar
+// without killing the entrypoint shell, so the FIFO `read` loop survives and
+// the next inbound message still works. We walk /proc in the container and
+// signal any non-PID-1 process whose resolved exe path OR argv matches
+// agentWorkerPattern. The worker aborts the turn on SIGINT; stream_filter
+// (claude path) exits on SIGPIPE once the worker's stdout closes, and the
+// per-turn `timeout` wrapper exits once its child dies — so we don't signal
+// them explicitly.
 //
-// procps (pkill/pgrep) isn't installed in the bookworm-slim sidecar, so
-// the /proc walk is done in plain POSIX sh.
+// procps (pkill/pgrep) isn't installed in the slim sidecar, so the /proc walk
+// is done in plain POSIX sh. readlink(exe) + cmdline both run as uid 1000
+// (same user as the worker), so /proc reads are permitted.
 func interruptAgent(g string) error {
 	name := csName(g)
 	if !podmanRunning(name) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
-	// Skip our own pid ($$): this script body contains the literal string
-	// "claude-code" (in the grep below), so /proc/$$/cmdline matches and the
-	// loop would SIGINT itself. Claude does get killed first (lower pid,
+	// Skip our own pid ($$): this script body contains the worker pattern
+	// literals (in the grep below), so /proc/$$/cmdline matches and the loop
+	// would SIGINT itself. The real worker gets killed first (lower pid,
 	// iterated earlier), but the self-suicide makes podman exec exit 130,
-	// which surfaces in the TUI as `stop: podman exec: exit status 130`
-	// even though the interrupt succeeded.
-	const script = `hit=0
+	// surfacing in the TUI as `exit status 130` even though it succeeded.
+	script := `hit=0
 for d in /proc/[0-9]*; do
   p=${d##*/}
   [ "$p" = 1 ] && continue
   [ "$p" = "$$" ] && continue
-  grep -aq claude-code "$d/cmdline" 2>/dev/null || continue
+  { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
+    | grep -aqE '` + agentWorkerPattern + `' || continue
   kill -INT "$p" 2>/dev/null && hit=1
 done
-[ "$hit" = 1 ] || echo no-claude-process >&2
+[ "$hit" = 1 ] || echo no-agent-process >&2
 exit 0`
 	out, err := exec.Command("podman", "exec", name, "sh", "-c", script).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("podman exec: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	if strings.Contains(string(out), "no-claude-process") {
-		return fmt.Errorf("no running claude process in group '%s'", g)
+	if strings.Contains(string(out), "no-agent-process") {
+		return fmt.Errorf("no running agent process in group '%s'", g)
 	}
 	return nil
 }
