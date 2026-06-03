@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -218,6 +219,66 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	_, _ = f.Write(b)
 }
 
+// retryableStatus reports whether an upstream status warrants a transparent
+// proxy-side retry. 529 (Anthropic "Overloaded") and 503 are capacity signals;
+// 429 is rate-limit. These are the only ones that can change on a re-send. We
+// never retry 4xx validation/auth (400/401/403/404) — the identical request
+// would fail identically — nor 5xx like 500/502 that don't signal "try again".
+func retryableStatus(code int) bool {
+	return code == 429 || code == 503 || code == 529
+}
+
+// retryDelay computes the wait before the next attempt. Honors an upstream
+// Retry-After header (seconds form, clamped to a sane 0–30s) when present;
+// otherwise exponential backoff 1s,2s,4s capped at 8s. attempt is the 0-based
+// index of the just-failed attempt.
+func retryDelay(h http.Header, attempt int) time.Duration {
+	if ra := strings.TrimSpace(h.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 && secs <= 30 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	d := time.Duration(1<<attempt) * time.Second
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
+}
+
+// doWithRetry issues the request built by mkReq, retrying transient upstream
+// overload / rate-limit responses up to maxRetries extra times with backoff.
+// mkReq is called fresh each attempt so the buffered request body is re-read
+// (callers pass a closure that builds a *bytes.Reader from their []byte). This
+// runs *before* any status/headers are written to the client, so retrying is
+// safe — a 529 arrives as a buffered JSON error, never mid-stream. On the
+// terminal attempt we return whatever we got (possibly still a 529) so the
+// caller forwards it verbatim and logProxyError still surfaces it. The whole
+// budget (worst case ~7s of sleeps + request times) sits far inside both the
+// 600s client timeout and the 1200s per-turn sidecar watchdog.
+func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request, error)) (*http.Response, error) {
+	const maxRetries = 3
+	for attempt := 0; ; attempt++ {
+		req, err := mkReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if attempt >= maxRetries || !retryableStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		delay := retryDelay(resp.Header, attempt)
+		// Drain + close so the keep-alive connection is reusable next attempt.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		emitLogf("info", "proxy retry %d/%d for %s: upstream %d, waiting %s",
+			attempt+1, maxRetries, group, resp.StatusCode, delay)
+		time.Sleep(delay)
+	}
+}
+
 type handler struct {
 	group string
 }
@@ -247,40 +308,40 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	// merge headers
-	req, err := http.NewRequest(r.Method, upstream+r.URL.RequestURI(), bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	clientBeta := ""
-	for k, vs := range r.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
+	// Merge the client's anthropic-beta list with ours once, outside the
+	// request builder, so the builder is a pure idempotent function of
+	// (body, headers, ah) safe to call once per retry attempt.
+	clientBeta := r.Header.Get("anthropic-beta")
+	mergedBeta := strings.Trim(strings.Trim(strings.Join([]string{clientBeta, ah["anthropic-beta"]}, ","), ","), ",")
+
+	mkReq := func() (*http.Request, error) {
+		req, err := http.NewRequest(r.Method, upstream+r.URL.RequestURI(), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
-		if strings.ToLower(k) == "anthropic-beta" {
-			if len(vs) > 0 {
-				clientBeta = vs[0]
+		for k, vs := range r.Header {
+			if hopByHop[strings.ToLower(k)] || strings.ToLower(k) == "anthropic-beta" {
+				continue
 			}
-			continue
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
 		}
-		for _, v := range vs {
-			req.Header.Add(k, v)
+		if mergedBeta != "" {
+			req.Header.Set("anthropic-beta", mergedBeta)
 		}
+		for k, v := range ah {
+			if k == "anthropic-beta" {
+				continue
+			}
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("accept-encoding", "identity")
+		return req, nil
 	}
-	mergedBeta := strings.Trim(strings.Join([]string{clientBeta, ah["anthropic-beta"]}, ","), ",")
-	mergedBeta = strings.Trim(mergedBeta, ",")
-	if mergedBeta != "" {
-		req.Header.Set("anthropic-beta", mergedBeta)
-	}
-	delete(ah, "anthropic-beta")
-	for k, v := range ah {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("accept-encoding", "identity")
 
 	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(client, h.group, mkReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -409,32 +470,34 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	req, err := http.NewRequest(r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	mkReq := func() (*http.Request, error) {
+		req, err := http.NewRequest(r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		for k, vs := range r.Header {
+			if hopByHop[strings.ToLower(k)] {
+				continue
+			}
+			// Anthropic-specific headers leak nothing useful upstream and Venice's
+			// validator may complain — strip the lot. The sidecar's venice script
+			// doesn't send these anyway; this only matters if someone curls the
+			// proxy directly.
+			if strings.HasPrefix(strings.ToLower(k), "anthropic-") {
+				continue
+			}
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("accept-encoding", "identity")
+		return req, nil
 	}
-	for k, vs := range r.Header {
-		if hopByHop[strings.ToLower(k)] {
-			continue
-		}
-		// Anthropic-specific headers leak nothing useful upstream and Venice's
-		// validator may complain — strip the lot. The sidecar's venice script
-		// doesn't send these anyway; this only matters if someone curls the
-		// proxy directly.
-		if strings.HasPrefix(strings.ToLower(k), "anthropic-") {
-			continue
-		}
-		for _, v := range vs {
-			req.Header.Add(k, v)
-		}
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("accept-encoding", "identity")
 
 	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(client, h.group, mkReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
