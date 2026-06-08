@@ -1202,6 +1202,7 @@ func emit(g string, ev Event) {
 	if ev.Event == "turn_end" {
 		notifyTurnDone(g)
 	}
+	ev = sanitizeEvent(ev)
 	b, _ := json.Marshal(ev)
 	b = append(b, '\n')
 	subsLock.Lock()
@@ -1999,6 +2000,9 @@ func dispatch(line []byte) any {
 			return errResp(err.Error())
 		}
 		evs, more := readHistory(req.Group, req.Limit, req.Before)
+		for i := range evs {
+			evs[i] = sanitizeEvent(evs[i])
+		}
 		return historyResp{BaseResp: baseResp{OK: true}, Events: evs, More: more}
 
 	case "config":
