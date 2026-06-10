@@ -169,7 +169,16 @@ func ctlDispatch(owner string, line []byte) any {
 		if !ctlGroupRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")
 		}
-		if err := send(req.Group, req.Msg); err != nil {
+		// Enqueue onto the target's send queue and ack immediately. The queue
+		// worker runs the turn; main's single ctlLoop goroutine never blocks
+		// behind a peer's turn (up to turnWaitTimeout, 25m), so it stays free
+		// to process every other ctl command and sends to other peers — no
+		// cross-group head-of-line stall. Same-peer sends stay FIFO-ordered
+		// (one worker per group). This matches the documented contract in
+		// prompts/global.md ("Sends are async … returns immediately; the
+		// response lands in the peer's log"). An overflow error (queue full)
+		// is returned synchronously on ctl.out in submission order.
+		if _, err := enqueueSend(req.Group, req.Msg); err != nil {
 			return errResp(err.Error())
 		}
 		return baseResp{OK: true}

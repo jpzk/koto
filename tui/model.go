@@ -309,6 +309,17 @@ type Model struct {
 	promptHistory map[string][]string
 	picker        pickerState
 	prePickerFocus focusZone
+
+	// pending holds prompts the local TUI has sent that the daemon has not
+	// yet started (they're sitting in the group's send queue behind an
+	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
+	// rows so the user sees their typed-ahead backlog instead of it being
+	// invisible until the daemon echoes a `prompt` event. FIFO per group:
+	// the head is popped when its matching `prompt` event arrives. Only the
+	// texts this TUI sent are known here; the tree's ⏳N badge (driven by the
+	// daemon's Queued count) remains the authoritative total, since ctl- and
+	// scheduler-enqueued prompts never pass through this client.
+	pending map[string][]string
 }
 
 const promptHistoryMax = 200
@@ -390,7 +401,26 @@ func newModel(sock string, ctxWindow int) Model {
 		vpCache:    map[string]vpCacheEntry{},
 		groupVer:   map[string]int{},
 		promptHistory: map[string][]string{},
+		pending:    map[string][]string{},
 	}
+}
+
+// popPending drops the head of g's pending queue when it matches msg (the
+// daemon just started that turn, so it's no longer queued). Match-on-head
+// rather than unconditional pop so a `prompt` event for an externally-
+// enqueued message (ctl / scheduler / another TUI) doesn't steal one of our
+// rows. Exact equality is safe: the daemon echoes the prompt text verbatim
+// (the same property pushHistory's adjacent-dedup already relies on).
+func (m *Model) popPending(g, msg string) {
+	p := m.pending[g]
+	if len(p) == 0 || p[0] != msg {
+		return
+	}
+	if len(p) == 1 {
+		delete(m.pending, g)
+		return
+	}
+	m.pending[g] = p[1:]
 }
 
 // pushHistory appends msg to the per-group prompt ring used by the Ctrl+R
@@ -468,7 +498,8 @@ func listCmd(sock string) tea.Cmd {
 			model, _ := mp["model"].(string)
 			effort, _ := mp["effort"].(string)
 			stalled, _ := mp["stalled"].(bool)
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled}
+			queued, _ := mp["queued"].(float64)
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued)}
 		}
 		return listMsg{groups: out}
 	}
@@ -911,6 +942,10 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
 			delete(m.lastThoughtBody, ev.Group)
 			m.busy[ev.Group] = true
+			// This turn just started → it's no longer queued. Drop the matching
+			// head from our local pending backlog (no-op for prompts we didn't
+			// originate, e.g. ctl/scheduler fires).
+			m.popPending(ev.Group, ev.Msg)
 			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: int64(ev.Ts)})
 			m.pushHistory(ev.Group, ev.Msg)
 		case "stream":
@@ -1260,10 +1295,12 @@ func (m *Model) refreshLog() {
 	cols := m.logContentCols()
 
 	// Skip the cache when a live overlay is active — the overlay text changes
-	// on every stream event and must not be baked into a cached entry.
+	// on every stream event and must not be baked into a cached entry. Pending
+	// (queued) rows are likewise ephemeral and not keyed into vpCache, so a
+	// non-empty backlog also bypasses the cache.
 	liveText, _ := m.liveOverlay()
 	var content string
-	if liveText == "" {
+	if liveText == "" && len(m.pending[m.cur]) == 0 {
 		ver := m.groupVer[m.cur]
 		gver := m.groupVer[""]
 		if e, ok := m.vpCache[m.cur]; ok &&
@@ -1314,6 +1351,14 @@ func (m Model) buildLogContent(contentCols int) string {
 			}
 		}
 		out = append(out, renderLiveLines(liveText, liveKind, m.tick)...)
+	}
+	// Queued-but-not-started prompts render last — below the in-flight turn's
+	// output, since they're waiting for it to finish.
+	if pend := m.pending[m.cur]; len(pend) > 0 {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, renderPendingLines(pend)...)
 	}
 	return strings.Join(out, "\n")
 }
@@ -1536,6 +1581,20 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		return listCmd(m.sock)
 	case "send":
 		if msg.err != nil {
+			// Enqueue was rejected (queue full) — the optimistic pending row we
+			// added never made it into the daemon's queue, so it'd never get a
+			// `prompt` event to pop it. Drop the newest pending entry (overflow
+			// rejects the latest send) to avoid a permanent phantom ⏳ row.
+			if p := m.pending[msg.group]; len(p) > 0 {
+				if len(p) == 1 {
+					delete(m.pending, msg.group)
+				} else {
+					m.pending[msg.group] = p[:len(p)-1]
+				}
+				if msg.group == m.cur {
+					m.refreshLog()
+				}
+			}
 			m.addLine(logLine{kind: "err", group: msg.group, text: msg.err.Error()})
 			return nil
 		}
@@ -1628,22 +1687,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePickerKey(msg)
 	}
 	if s == "ctrl+c" {
-		// Mid-flight: stop the agent instead of quitting. busy is set on the
-		// `prompt` event and cleared on `done`; streamBuf/thinkingBuf catch
-		// the cases where the prompt event didn't reach us (initial replay,
-		// daemon reconnect mid-stream). All three predicates routing to
-		// interrupt means a stuck tool call (no stream, no think) still
-		// gets cancellable in-band. A second ctrl+c once the turn ends
-		// falls through to the quit path.
-		if m.busy[m.cur] {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
-		}
-		if _, streaming := m.streamBuf[m.cur]; streaming {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
-		}
-		if _, thinking := m.thinkingBuf[m.cur]; thinking {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
-		}
+		// Quit. Agent interrupt moved to Esc (see the esc handler below the
+		// log-view block), so ctrl+c is now an unconditional exit even mid-
+		// turn — the daemon and the in-flight turn keep running; we're just
+		// detaching this client. A running plugin is aborted on the way out.
 		if m.plugin != nil {
 			m.plugin.abort()
 		}
@@ -1698,6 +1745,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// dropped on purpose so a stray keystroke doesn't end up in the
 		// chat input or in tree navigation.
 		return m.handleLogKey(msg)
+	}
+	if s == "esc" {
+		// Esc interrupts the in-flight turn for the current group (moved here
+		// from ctrl+c). Same predicates: busy is set on the `prompt` event and
+		// cleared on `done`; streamBuf/thinkingBuf cover the cases where the
+		// prompt event didn't reach us (initial replay, daemon reconnect mid-
+		// stream), so a stuck tool call is still cancellable in-band. Fires
+		// only when there's a turn to stop — otherwise esc falls through to its
+		// focus-toggle meaning (input→tree / tree→input) handled per focus zone
+		// below. While a turn runs, use Tab to reach the tree instead.
+		if m.busy[m.cur] {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
+		if _, streaming := m.streamBuf[m.cur]; streaming {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
+		if _, thinking := m.thinkingBuf[m.cur]; thinking {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
 	}
 	if s == "ctrl+@" {
 		order := m.treeOrder()
@@ -2088,6 +2154,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		delete(m.thinkingTail, target)
 		delete(m.lastThoughtBody, target)
 		delete(m.unread, target)
+		delete(m.pending, target)
 		filtered := m.lines[:0]
 		for _, l := range m.lines {
 			if l.group != target {
@@ -2175,6 +2242,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return nil
 	}
 	m.pushHistory(m.cur, v)
+	// Optimistically show the prompt as queued. It renders as an amber ⏳ row
+	// at the bottom of the chat until the daemon starts the turn (the matching
+	// `prompt` event pops it and the real prompt line takes its place). For an
+	// idle group this is a sub-second "sending…" flash; for a busy group it's
+	// the visible backlog of everything typed ahead.
+	m.pending[m.cur] = append(m.pending[m.cur], v)
+	m.refreshLog()
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v})
 }
 

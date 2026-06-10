@@ -766,33 +766,14 @@ func composeSystemPrompt(g string) string {
 
 // ---- send -----------------------------------------------------------------
 
-// sendLocks serializes send() per group. Without this, two concurrent
-// senders (two TUIs, TUI + socat probe, etc.) could interleave a four-step
-// non-atomic sequence — write log marker → write system-prompt.md → encode
-// → write to FIFO — and the sidecar could end up running message-A under
-// the system prompt prepared for message-B. The mutex is per-group because
-// blocking is only needed within a single sidecar's serialization, not
-// across the daemon.
-var (
-	sendLocksMu sync.Mutex
-	sendLocks   = map[string]*sync.Mutex{}
-)
-
-func sendLock(g string) *sync.Mutex {
-	sendLocksMu.Lock()
-	defer sendLocksMu.Unlock()
-	m, ok := sendLocks[g]
-	if !ok {
-		m = &sync.Mutex{}
-		sendLocks[g] = m
-	}
-	return m
-}
-
-func send(g, msg string) error {
-	mu := sendLock(g)
-	mu.Lock()
-	defer mu.Unlock()
+// sendNow performs one message turn for group g: compose the system prompt,
+// write the FIFO, and block until [[turn_end]] (or turnWaitTimeout). It is NOT
+// safe to call concurrently for the same group — serialization is provided by
+// the per-group queue worker (queue.go), its sole caller. Two concurrent turns
+// would interleave a non-atomic sequence (log marker → system-prompt.md →
+// encode → FIFO write), let the sidecar run message-A under the system prompt
+// prepared for message-B, and race on the shared turnDone channel.
+func sendNow(g, msg string) error {
 	emitLogf("info", "send group=%s bytes=%d", g, len(msg))
 	if _, err := ensure(g, g == "main"); err != nil {
 		emitLogf("error", "send/ensure group=%s: %v", g, err)
@@ -841,8 +822,8 @@ func send(g, msg string) error {
 	}
 
 	// Block until the sidecar finishes processing this message. Without
-	// this, sendLock releases as soon as the FIFO accepts the bytes, and
-	// rapid concurrent sends interleave their `>>>` markers between prior
+	// this, the queue worker would advance as soon as the FIFO accepts the
+	// bytes, and the next turn's `>>>` marker would interleave between prior
 	// responses in the log (the symptom that surfaced as "opsec coms look
 	// weird"). The wait works by:
 	//   1. ensureTail — tailLog must be running to observe `[[turn_end]]`,
@@ -851,8 +832,8 @@ func send(g, msg string) error {
 	//      messages, so step 4 only sees ours.
 	//   3. FIFO write — sidecar will eventually emit [[turn_end]].
 	//   4. wait — block until tailLog observes our completion, with a
-	//      timeout (turnWaitTimeout) to prevent a wedged sidecar from holding
-	//      the lock forever. It sits above entrypoint.sh's per-turn watchdog,
+	//      timeout (turnWaitTimeout) to prevent a wedged sidecar from
+	//      stalling the queue worker forever. It sits above entrypoint.sh's per-turn watchdog,
 	//      so a slow-but-bounded turn always completes first; hitting it means
 	//      the sidecar loop is wedged → the group is flagged stalled.
 	ensureTail(g)
@@ -878,9 +859,10 @@ drain:
 		// 1200s + 10s kill grace), which now guarantees a turn_end fires even
 		// for a killed turn. So reaching this branch means the sidecar's FIFO
 		// loop itself is wedged (dead/hung), not just running a long turn —
-		// flag the group stalled and release the lock so other senders proceed.
+		// flag the group stalled and return so the queue worker advances to
+		// the next message instead of blocking on a dead sidecar.
 		setStalled(g, true)
-		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (sidecar loop wedged?), releasing lock", g, turnWaitTimeout)
+		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (sidecar loop wedged?), advancing queue", g, turnWaitTimeout)
 		selfHeal(g, time.Now()) // restart the wedged loop (circuit-broken)
 		return nil
 	}
@@ -903,6 +885,7 @@ func listGroups() map[string]GroupInfo {
 			Model:    groupModelName(g),
 			Effort:   groupEffortName(g),
 			Stalled:  isStalled(g),
+			Queued:   queueDepth(g),
 		}
 	}
 	return out
@@ -1151,8 +1134,9 @@ var (
 )
 
 // selfHeal restarts a wedged group unless the breaker is open. Returns true if
-// it restarted. Callers hold sendLock(g); restart()/stopGroup()/ensure() take
-// no sendLock, so this is reentrancy-safe.
+// it restarted. Called only from sendNow (i.e. on the group's queue worker);
+// restart()/stopGroup()/ensure() touch no send queue, so this cannot deadlock
+// against the worker that invoked it.
 func selfHeal(g string, now time.Time) bool {
 	healMu.Lock()
 	cutoff := now.Add(-healWindow)
@@ -1513,9 +1497,9 @@ func tailLog(g string) {
 				// still settling state). Swallow it — emitting it as a
 				// `done` event surfaces raw framing in the TUI.
 			} else if buf == "[[turn_end]]" {
-				// Sidecar's per-message provider invocation finished. Used
-				// by send() to hold sendLock until the response is fully
-				// written, so rapid sends serialize end-to-end rather than
+				// Sidecar's per-message provider invocation finished. This is
+				// what sendNow blocks on (via turnDone) before the queue worker
+				// advances, so queued sends serialize end-to-end rather than
 				// interleaving prompts with prior responses in the log.
 				emit(g, Event{Event: "turn_end", Ts: ts})
 			} else {

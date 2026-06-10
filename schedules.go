@@ -186,17 +186,19 @@ func runSchedNow(id string) error {
 	return nil
 }
 
-// fireSchedule runs send() in a goroutine. The per-group sendLock inside
-// send() serializes against concurrent manual sends. We emit a sched_fired
-// event so subscribers (e.g. the TUI) can render a marker before the
-// prompt echo that send() writes into .cs/log.
+// fireSchedule enqueues the scheduled message onto the group's send queue.
+// The per-group worker serializes it (in arrival order) against concurrent
+// manual sends. We emit a sched_fired event so subscribers (e.g. the TUI) can
+// render a marker before the prompt echo sendNow writes into .cs/log. The
+// enqueue is non-blocking; we surface only an overflow error (queue full) —
+// the turn result flows to the group's log, not back here.
 func fireSchedule(it scheduleItem, manual bool) {
 	ev := Event{Event: "sched_fired", Msg: it.Msg, ID: it.ID}
 	if manual {
 		ev.Event = "sched_run"
 	}
 	emit(it.Group, ev)
-	if err := send(it.Group, it.Msg); err != nil {
+	if _, err := enqueueSend(it.Group, it.Msg); err != nil {
 		emitLogf("error", "sched fire id=%s group=%s: %v", it.ID, it.Group, err)
 	}
 }

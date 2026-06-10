@@ -61,6 +61,11 @@ type GroupInfo struct {
 	// turn_end is observed for the group. Lets clients flag a wedged group
 	// instead of showing it as healthily "running".
 	Stalled bool `json:"stalled,omitempty"`
+	// Queued is the number of messages waiting in the group's send queue —
+	// enqueued but not yet started (the in-flight turn is NOT counted). Lets
+	// clients show backlog/backpressure per group. Zero (the common case) is
+	// omitted from the wire.
+	Queued int `json:"queued,omitempty"`
 }
 
 // SkillItem describes one skill in SkillsResp.

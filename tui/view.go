@@ -345,7 +345,7 @@ func (m Model) renderTree(rows int) string {
 			others = order[1:]
 			info := m.groups["main"]
 			isCur := m.cur == "main"
-			lines = append(lines, m.renderTreeRow("main", "", info.Running, info.Stalled, isCur, hovered("main"), m.unread["main"], info.Provider, pad))
+			lines = append(lines, m.renderTreeRow("main", "", info.Running, info.Stalled, isCur, hovered("main"), m.unread["main"], info.Provider, info.Queued, pad))
 		}
 		for i, g := range others {
 			info := m.groups[g]
@@ -354,7 +354,7 @@ func (m Model) renderTree(rows int) string {
 			if i == len(others)-1 {
 				branch = "└─ "
 			}
-			lines = append(lines, m.renderTreeRow(g, branch, info.Running, info.Stalled, isCur, hovered(g), m.unread[g], info.Provider, pad))
+			lines = append(lines, m.renderTreeRow(g, branch, info.Running, info.Stalled, isCur, hovered(g), m.unread[g], info.Provider, info.Queued, pad))
 		}
 	}
 
@@ -370,11 +370,23 @@ func (m Model) renderTree(rows int) string {
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
 }
 
-func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unread bool, provider string, pad func(string, int) string) string {
+func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unread bool, provider string, queued int, pad func(string, int) string) string {
 	contentW := leftPaneWidth - 2 // account for paddingX
 	w := contentW - len(branch) - 2
 	if w < 1 {
 		w = 1
+	}
+	// Queue badge: pending (enqueued-but-not-started) message count. Shown as
+	// an amber "⏳N" pill, distinct from the stalled ⚠. Reserve its width out of
+	// the name field so the row never overflows the pane.
+	badge, badgeW := "", 0
+	if queued > 0 {
+		badge = fmt.Sprintf(" ⏳%d", queued)
+		badgeW = lipgloss.Width(badge)
+		w -= badgeW
+		if w < 1 {
+			w = 1
+		}
 	}
 	dot := "○ "
 	dotColor := cGray
@@ -405,7 +417,7 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 	if hov {
 		// highlight row with cyan background, black foreground for the whole row
 		full := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
-			Render(" " + branch + dot + pad(g, w))
+			Render(" " + branch + dot + pad(g, w) + badge)
 		return full
 	}
 	parts := " "
@@ -418,6 +430,9 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 		style = style.Bold(true)
 	}
 	parts += style.Render(pad(g, w))
+	if badge != "" {
+		parts += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(badge)
+	}
 	return parts
 }
 
@@ -456,6 +471,28 @@ func renderLiveLines(liveText, liveKind string, tick int) []string {
 			out = append(out, head+bodyStyle.Render(ln))
 		} else {
 			out = append(out, indent+bodyStyle.Render(ln))
+		}
+	}
+	return out
+}
+
+// renderPendingLines formats queued-but-not-yet-started prompts (typed ahead
+// while a turn is in flight) for the bottom of the chat viewport. They render
+// with an amber ⏳ glyph so they read as "waiting in the queue", distinct from
+// the cyan › of a prompt the daemon has already begun. Multi-line prompts keep
+// their shape with indented continuation rows.
+func renderPendingLines(pending []string) []string {
+	glyph := lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render("⏳ ")
+	body := lipgloss.NewStyle().Foreground(cYellow).Faint(true)
+	indent := "   "
+	out := make([]string, 0, len(pending))
+	for _, p := range pending {
+		for i, ln := range strings.Split(p, "\n") {
+			if i == 0 {
+				out = append(out, glyph+body.Render(ln))
+			} else {
+				out = append(out, indent+body.Render(ln))
+			}
 		}
 	}
 	return out
@@ -660,11 +697,10 @@ func (m Model) renderHint() string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGray).
 			Render("◆ history start"))
 	}
-	if streaming || thinking {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render("^c stop"))
-	} else {
-		parts = append(parts, "^c exit")
+	if streaming || thinking || m.busy[m.cur] {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render("⎋ stop"))
 	}
+	parts = append(parts, "^c exit")
 	left := " " + strings.Join(parts, "  ·  ")
 	right := m.renderProviderModel()
 	leftW := lipgloss.Width(left)
