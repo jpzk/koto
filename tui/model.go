@@ -638,30 +638,22 @@ func daemonCmd(sock, op, group string, extra map[string]any) tea.Cmd {
 
 func startSubscribe(sock, group string) {
 	go func() {
-		conn, br, err := daemonSubscribe(sock, group)
+		stream, cancel, err := openGroupStream(group)
 		if err != nil {
 			prog.Send(streamClosedMsg{group: group, err: err})
 			return
 		}
-		defer conn.Close()
+		defer cancel()
 		for {
-			line, err := br.ReadBytes('\n')
+			pev, err := stream.Recv()
 			if err != nil {
 				prog.Send(streamClosedMsg{group: group, err: err})
 				return
 			}
-			trimmed := strings.TrimSpace(string(line))
-			if trimmed == "" {
+			if pev.Event == "" || pev.Event == "ping" {
 				continue
 			}
-			var ev Event
-			if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
-				continue
-			}
-			if ev.Event == "" || ev.Event == "ping" {
-				continue
-			}
-			prog.Send(streamEventMsg(ev))
+			prog.Send(streamEventMsg(pbToEvent(pev)))
 		}
 	}()
 }
@@ -733,6 +725,18 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.addLine(logLine{kind: "sys", text: "reconnected to daemon"})
 		}
 		m.groups = msg.groups
+		// Keep the tree cursor (treeIdx → hovered row) locked to m.cur. up/down
+		// and enterTree() already move them in lockstep; re-deriving it here
+		// catches out-of-band m.cur changes (e.g. /new auto-switching to a
+		// freshly spawned group that only just appeared in this list refresh).
+		if order := m.treeOrder(); len(order) > 0 {
+			for i, g := range order {
+				if g == m.cur {
+					m.treeIdx = i
+					break
+				}
+			}
+		}
 		cmds := []tea.Cmd{}
 		// Reloading: drop existing lines for groups we're about to refetch
 		// history for. Without this, the post-reconnect history call appends
@@ -1577,6 +1581,18 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "err", text: fmt.Sprintf("spawn %s: %v", msg.group, msg.err)})
 		} else {
 			m.addLine(logLine{kind: "sys", text: fmt.Sprintf("spawned %s", msg.group)})
+			// Auto-switch focus to the freshly spawned group so the chat pane
+			// and the tree's current-marker (isCur = m.cur == g) both move to
+			// it. treeIdx re-syncs on the next enterTree(); the list refresh
+			// below populates the new row so isCur has something to highlight.
+			if msg.group != "" {
+				m.cur = msg.group
+				delete(m.unread, m.cur)
+				m.refreshLog()
+				m.refreshSuggestions()
+				m.vp.GotoBottom()
+				m.autoFollow = true
+			}
 		}
 		return listCmd(m.sock)
 	case "send":

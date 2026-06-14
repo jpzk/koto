@@ -1,0 +1,334 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+
+	"clawson-protocol/pb"
+
+	"google.golang.org/protobuf/types/known/structpb"
+)
+
+// clawsonServer implements pb.ClawsonServer. Each method is a thin wrapper over
+// the existing daemon helpers (ensure/send/listGroups/configCmd/...): it
+// converts the protobuf request to the helper's native types, calls the
+// unchanged helper, and converts the result back to protobuf. Application-level
+// failures are returned in-band via the response's ok/error fields with a nil
+// gRPC error — matching the old {ok:false,error} JSON contract the clients read.
+// gRPC status codes are reserved for transport/auth faults (see auth.go).
+type clawsonServer struct {
+	pb.UnimplementedClawsonServer
+}
+
+// ---- converters (protocol/native types -> protobuf) -----------------------
+
+func toPBEvent(ev Event) *pb.Event {
+	return &pb.Event{
+		Event:      ev.Event,
+		Group:      ev.Group,
+		Ts:         ev.Ts,
+		Msg:        ev.Msg,
+		Text:       ev.Text,
+		Name:       ev.Name,
+		Input:      ev.Input,
+		Words:      int32(ev.Words),
+		Body:       ev.Body,
+		Historical: ev.Historical,
+		Id:         ev.ID,
+	}
+}
+
+func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
+	return &pb.GroupInfo{
+		Port:     int32(gi.Port),
+		Running:  gi.Running,
+		Provider: gi.Provider,
+		Model:    gi.Model,
+		Effort:   gi.Effort,
+		Stalled:  gi.Stalled,
+		Queued:   int32(gi.Queued),
+	}
+}
+
+func toPBSkillItem(it skillItem) *pb.SkillItem {
+	return &pb.SkillItem{Name: it.Name, Description: it.Description, Path: it.Path, Enabled: it.Enabled}
+}
+
+func toPBScheduleItem(it scheduleItem) *pb.ScheduleItem {
+	return &pb.ScheduleItem{
+		Id:          it.ID,
+		Group:       it.Group,
+		Cron:        it.Cron,
+		Msg:         it.Msg,
+		Enabled:     it.Enabled,
+		CreatedAt:   it.CreatedAt,
+		LastFiredAt: it.LastFiredAt,
+		NextDueAt:   it.NextDueAt,
+	}
+}
+
+// fromPBConfigReq re-synthesizes the json.RawMessage tri-state (absent / clear /
+// set) the existing applyConfig/isClear logic expects, from the protobuf
+// presence (optional scalars) + oneof (skills). Absent => nil; clear => an
+// empty value isClear() recognizes; set => the JSON-encoded value.
+func fromPBConfigReq(r *pb.ConfigReq) configReq {
+	out := configReq{Group: r.GetGroup()}
+	optRaw := func(p *string) json.RawMessage {
+		if p == nil {
+			return nil // absent
+		}
+		b, _ := json.Marshal(*p) // "" -> `""` (clear); value -> set
+		return b
+	}
+	out.Model = optRaw(r.Model)
+	out.Effort = optRaw(r.Effort)
+	out.Ports = optRaw(r.Ports)
+	out.Pip = optRaw(r.Pip)
+	out.Provider = optRaw(r.Provider)
+	switch r.GetSkillsAction().(type) {
+	case *pb.ConfigReq_SkillsClear:
+		out.Skills = json.RawMessage("[]") // isClear -> delete key
+	case *pb.ConfigReq_SkillsSet:
+		b, _ := json.Marshal(r.GetSkillsSet().GetItems())
+		out.Skills = b
+	}
+	return out
+}
+
+// toStruct converts a map[string]any to a protobuf Struct. It JSON-normalizes
+// first because the config map carries native Go slices (applyConfig writes
+// []string for skills, []int for ports) that structpb.NewStruct rejects — the
+// round-trip coerces them to the []any / float64 forms structpb accepts (and
+// that the TUI already expects on the wire).
+func toStruct(m map[string]any) *structpb.Struct {
+	if m == nil {
+		return nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	var norm map[string]any
+	if err := json.Unmarshal(b, &norm); err != nil {
+		return nil
+	}
+	s, err := structpb.NewStruct(norm)
+	if err != nil {
+		return nil
+	}
+	return s
+}
+
+// ---- unary RPCs -----------------------------------------------------------
+
+func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
+	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
+		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
+	}
+	if r.Provider != "" || r.Model != "" {
+		if err := seedSpawnConfig(r.Group, r.Provider, r.Model); err != nil {
+			return &pb.SpawnResp{Error: err.Error()}, nil
+		}
+	}
+	port, err := ensure(r.Group, r.Main)
+	if err != nil {
+		return &pb.SpawnResp{Error: err.Error()}, nil
+	}
+	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
+}
+
+func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error) {
+	if err := send(r.Group, r.Msg); err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+func (s *clawsonServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, error) {
+	groups := map[string]*pb.GroupInfo{}
+	for g, gi := range listGroups() {
+		groups[g] = toPBGroupInfo(gi)
+	}
+	return &pb.ListResp{Ok: true, Groups: groups}, nil
+}
+
+func (s *clawsonServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	stopGroup(r.Group)
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+func (s *clawsonServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if err := interruptAgent(r.Group); err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+func (s *clawsonServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	br := destroy(r.Group)
+	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
+}
+
+func (s *clawsonServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
+	port, err := restart(r.Group)
+	if err != nil {
+		return &pb.SpawnResp{Error: err.Error()}, nil
+	}
+	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
+}
+
+func (s *clawsonServer) History(_ context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
+	evs, more := readHistory(r.Group, int(r.Limit), r.Before)
+	out := make([]*pb.Event, len(evs))
+	for i := range evs {
+		out[i] = toPBEvent(sanitizeEvent(evs[i]))
+	}
+	return &pb.HistoryResp{Ok: true, Events: out, More: more}, nil
+}
+
+func (s *clawsonServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, error) {
+	resp := configCmd(fromPBConfigReq(r))
+	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(resp.Config)}, nil
+}
+
+func (s *clawsonServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
+	out := &pb.MetricsResp{Ok: true, GlobalMetric: toStruct(latestMetricAny())}
+	if r.Group != "" {
+		out.Metric = toStruct(latestMetric(r.Group))
+	}
+	return out, nil
+}
+
+func (s *clawsonServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	br := clearCmd(groupReq{Group: r.Group})
+	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
+}
+
+func (s *clawsonServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.SkillsResp, error) {
+	resp := skillListCmd(skillListReq{Group: r.Group})
+	out := make([]*pb.SkillItem, len(resp.Skills))
+	for i := range resp.Skills {
+		out[i] = toPBSkillItem(resp.Skills[i])
+	}
+	return &pb.SkillsResp{Ok: resp.OK, Error: resp.Error, Skills: out}, nil
+}
+
+func (s *clawsonServer) SkillNew(_ context.Context, r *pb.SkillNewReq) (*pb.SkillNewResp, error) {
+	resp := skillNewCmd(skillNewReq{Name: r.Name})
+	return &pb.SkillNewResp{Ok: resp.OK, Error: resp.Error, Path: resp.Path}, nil
+}
+
+func (s *clawsonServer) SkillRead(_ context.Context, r *pb.SkillReadReq) (*pb.SkillReadResp, error) {
+	resp := skillReadCmd(skillReadReq{Name: r.Name})
+	return &pb.SkillReadResp{Ok: resp.OK, Error: resp.Error, Name: resp.Name, Content: resp.Content}, nil
+}
+
+func (s *clawsonServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {
+	it, err := addSched(r.Group, r.Cron, r.Msg)
+	if err != nil {
+		return &pb.SchedAddResp{Error: err.Error()}, nil
+	}
+	return &pb.SchedAddResp{Ok: true, Item: toPBScheduleItem(it)}, nil
+}
+
+func (s *clawsonServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.SchedListResp, error) {
+	items := listSched(r.Group)
+	out := make([]*pb.ScheduleItem, len(items))
+	for i := range items {
+		out[i] = toPBScheduleItem(items[i])
+	}
+	return &pb.SchedListResp{Ok: true, Schedules: out}, nil
+}
+
+func (s *clawsonServer) SchedDel(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+	if err := delSched(r.Id); err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+func (s *clawsonServer) SchedToggle(_ context.Context, r *pb.SchedToggleReq) (*pb.BaseResp, error) {
+	if _, err := toggleSched(r.Id, r.Enabled); err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+func (s *clawsonServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+	if err := runSchedNow(r.Id); err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
+}
+
+// ---- server-streaming RPCs ------------------------------------------------
+
+func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_SubscribeGroupServer) error {
+	g := r.GetGroup()
+	ensureTail(g)
+	sub := &groupSub{ch: make(chan *pb.Event, 256), done: make(chan struct{})}
+	subsLock.Lock()
+	subscribers[g] = append(subscribers[g], sub)
+	subsLock.Unlock()
+	defer func() {
+		subsLock.Lock()
+		kept := subscribers[g][:0]
+		for _, x := range subscribers[g] {
+			if x != sub {
+				kept = append(kept, x)
+			}
+		}
+		subscribers[g] = kept
+		subsLock.Unlock()
+	}()
+	ctx := stream.Context()
+	for {
+		select {
+		case ev := <-sub.ch:
+			if err := stream.Send(ev); err != nil {
+				return err
+			}
+		case <-sub.done: // group destroyed
+			return nil
+		case <-ctx.Done(): // client disconnected
+			return nil
+		}
+	}
+}
+
+func (s *clawsonServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Clawson_SubscribeLogsServer) error {
+	sub := &logSub{ch: make(chan *pb.LogEvent, 256)}
+	// Snapshot the ring and register under one lock so no frame is dropped or
+	// duplicated across the replay/live boundary.
+	logSubsLock.Lock()
+	ring := append([]*pb.LogEvent(nil), logRing...)
+	logSubs = append(logSubs, sub)
+	logSubsLock.Unlock()
+	defer func() {
+		logSubsLock.Lock()
+		kept := logSubs[:0]
+		for _, x := range logSubs {
+			if x != sub {
+				kept = append(kept, x)
+			}
+		}
+		logSubs = kept
+		logSubsLock.Unlock()
+	}()
+	for _, ev := range ring {
+		if err := stream.Send(ev); err != nil {
+			return err
+		}
+	}
+	ctx := stream.Context()
+	for {
+		select {
+		case ev := <-sub.ch:
+			if err := stream.Send(ev); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}

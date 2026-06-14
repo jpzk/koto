@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -79,30 +78,22 @@ func init() {
 // terminates by sending logSubClosedMsg.
 func startLogSubscribe(sock string) {
 	go func() {
-		conn, br, err := daemonSubscribeLogs(sock)
+		stream, cancel, err := openLogStream()
 		if err != nil {
 			prog.Send(logSubClosedMsg{err: err})
 			return
 		}
-		defer conn.Close()
+		defer cancel()
 		for {
-			line, err := br.ReadBytes('\n')
+			pev, err := stream.Recv()
 			if err != nil {
 				prog.Send(logSubClosedMsg{err: err})
 				return
 			}
-			trimmed := bytes.TrimSpace(line)
-			if len(trimmed) == 0 {
+			if pev.Event != "log" {
 				continue
 			}
-			var ev protocol.LogEvent
-			if jerr := json.Unmarshal(trimmed, &ev); jerr != nil {
-				continue
-			}
-			if ev.Event != "log" {
-				continue
-			}
-			prog.Send(logEventMsg(ev))
+			prog.Send(logEventMsg(pbToLogEvent(pev)))
 		}
 	}()
 }

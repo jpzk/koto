@@ -1,0 +1,190 @@
+// Wire contract shared by the clawson daemon (Go), the TUI (Go), and the
+// Android client (Kotlin). Generated Go code lands in ./pb (committed; run
+// `make proto-gen`). Field names are snake_case to match the historical JSON
+// keys the TUI still consumes via protojson(UseProtoNames:true).
+//
+// Conventions:
+//   - proto3 scalar zero-values are not serialized, reproducing the old
+//     `omitempty` behavior on the wire.
+//   - protobuf has no struct embedding, so the old BaseResp{ok,error} is
+//     flattened into every *Resp as fields 1 and 2.
+//   - `ts` and schedule timestamps stay `double` (Python time.time() seconds);
+//     History pages compare ts < before, so the float contract must hold.
+//   - arbitrary JSON objects (config, metrics) map to google.protobuf.Struct.
+syntax = "proto3";
+
+package clawson;
+
+option go_package = "clawson-protocol/pb;pb";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/empty.proto";
+
+service Clawson {
+  // ---- unary (one per legacy dispatch case) ----
+  rpc Spawn       (SpawnReq)       returns (SpawnResp);
+  rpc Send        (SendReq)        returns (BaseResp);
+  rpc List        (ListReq)        returns (ListResp);
+  rpc Stop        (GroupReq)       returns (BaseResp);
+  rpc Interrupt   (GroupReq)       returns (BaseResp);
+  rpc Destroy     (GroupReq)       returns (BaseResp);
+  rpc Restart     (GroupReq)       returns (SpawnResp);
+  rpc History     (HistoryReq)     returns (HistoryResp);
+  rpc Config      (ConfigReq)      returns (ConfigResp);
+  rpc Metrics     (MetricsReq)     returns (MetricsResp);
+  rpc Clear       (GroupReq)       returns (BaseResp);
+  rpc Skills      (SkillListReq)   returns (SkillsResp);
+  rpc SkillNew    (SkillNewReq)    returns (SkillNewResp);
+  rpc SkillRead   (SkillReadReq)   returns (SkillReadResp);
+  rpc SchedAdd    (SchedAddReq)    returns (SchedAddResp);
+  rpc SchedList   (SchedListReq)   returns (SchedListResp);
+  rpc SchedDel    (SchedIDReq)     returns (BaseResp);
+  rpc SchedToggle (SchedToggleReq) returns (BaseResp);
+  rpc SchedRun    (SchedIDReq)     returns (BaseResp);
+
+  // ---- server-streaming (the old connection-ownership-transfer cases) ----
+  // Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
+  // failed auth surfaces as a non-OK gRPC status at open time.
+  rpc SubscribeGroup (SubscribeReq) returns (stream Event);
+  rpc SubscribeLogs  (LogsReq)      returns (stream LogEvent);
+}
+
+// ---- streaming frames ----
+
+message Event {
+  string event      = 1;
+  string group      = 2;
+  double ts         = 3;
+  string msg        = 4;
+  string text       = 5;
+  string name       = 6;
+  string input      = 7;
+  int32  words      = 8;
+  string body       = 9;
+  bool   historical = 10;
+  string id         = 11;
+}
+
+message LogEvent {
+  string event = 1; // always "log"
+  string level = 2; // info | warn | error | debug
+  string msg   = 3;
+  double ts    = 4;
+}
+
+// ---- value shapes ----
+
+message GroupInfo {
+  int32  port     = 1;
+  bool   running  = 2;
+  string provider = 3;
+  string model    = 4;
+  string effort   = 5;
+  bool   stalled  = 6;
+  int32  queued   = 7;
+}
+
+message SkillItem {
+  string name        = 1;
+  string description = 2;
+  string path        = 3;
+  bool   enabled     = 4;
+}
+
+message ScheduleItem {
+  string id            = 1;
+  string group         = 2;
+  string cron          = 3;
+  string msg           = 4;
+  bool   enabled       = 5;
+  double created_at    = 6;
+  double last_fired_at = 7;
+  double next_due_at   = 8;
+}
+
+// ---- requests ----
+
+message SpawnReq  { string group = 1; bool main = 2; string provider = 3; string model = 4; }
+message SendReq   { string group = 1; string msg = 2; }
+message GroupReq  { string group = 1; } // stop / interrupt / destroy / restart / clear
+message ListReq   {}
+message LogsReq   {}
+message SubscribeReq { string group = 1; }
+
+message HistoryReq {
+  string group  = 1;
+  int32  limit  = 2; // 0 => server default
+  double before = 3; // 0 => tail page; else events with ts < before
+}
+
+// Tri-state per field (absent / clear / set), preserving the old
+// json.RawMessage semantics:
+//   - scalar fields use proto3 `optional` for presence: absent => not set;
+//     clear => present with value ""; set => present with value.
+//   - skills is a list, which has no field presence, so a oneof carries the
+//     three states explicitly.
+message SkillList { repeated string items = 1; }
+message ConfigReq {
+  string group = 1;
+  optional string model    = 2;
+  optional string effort   = 3;
+  optional string ports    = 5;
+  optional string pip      = 6;
+  optional string provider = 7;
+  oneof skills_action {
+    google.protobuf.Empty skills_clear = 8;
+    SkillList             skills_set   = 4;
+  }
+}
+
+message SkillListReq { string group = 1; }
+message SkillNewReq  { string name = 1; }
+message SkillReadReq { string name = 1; }
+message MetricsReq   { string group = 1; }
+
+message SchedAddReq    { string group = 1; string cron = 2; string msg = 3; }
+message SchedListReq   { string group = 1; }
+message SchedIDReq     { string id = 1; }
+message SchedToggleReq { string id = 1; bool enabled = 2; }
+
+// ---- responses (ok/error flattened from the old BaseResp) ----
+
+message BaseResp { bool ok = 1; string error = 2; }
+
+message SpawnResp { bool ok = 1; string error = 2; int32 port = 3; }
+
+message ListResp {
+  bool ok = 1; string error = 2;
+  map<string, GroupInfo> groups = 3;
+}
+
+message HistoryResp {
+  bool ok = 1; string error = 2;
+  repeated Event events = 3;
+  bool more = 4;
+}
+
+message ConfigResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct config = 3;
+}
+
+message MetricsResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct metric = 3;
+  google.protobuf.Struct global_metric = 4;
+}
+
+message SkillsResp {
+  bool ok = 1; string error = 2;
+  repeated SkillItem skills = 3;
+}
+
+message SkillNewResp { bool ok = 1; string error = 2; string path = 3; }
+message SkillReadResp { bool ok = 1; string error = 2; string name = 3; string content = 4; }
+
+message SchedAddResp { bool ok = 1; string error = 2; ScheduleItem item = 3; }
+message SchedListResp {
+  bool ok = 1; string error = 2;
+  repeated ScheduleItem schedules = 3;
+}

@@ -1,10 +1,13 @@
 # clawson-tui: dedicated container for the Go (Bubble Tea) TUI.
-# Network: none. Only access is the bind-mounted clawson.sock.
+#
+# Transport is now gRPC over mTLS + bearer token (the daemon may run off-box),
+# so the TUI needs network reach to the daemon and a mounted creds dir
+# (ca.crt + client cert/key + token). It no longer runs --network=none/sock-only
+# — see the trust-model note in CLAUDE.md. No system ca-certs are needed: the
+# client pins the daemon via our private CA (CLAWSON_CA), not the public roots.
 #
 # Multi-stage: build a static binary in golang:alpine, drop into scratch.
-# The runtime image has NO shell, NO toolchain, NO ca-certs — just the
-# binary. Unix socket only, no outbound network. Smallest trust surface
-# we can give a tier-2.5 component.
+# The runtime image has NO shell, NO toolchain, NO ca-certs — just the binary.
 
 FROM docker.io/library/golang:1.24-alpine AS builder
 WORKDIR /src
@@ -29,6 +32,12 @@ FROM scratch
 COPY --from=builder /out/clawson-tui /clawson-tui
 # TERM tells lipgloss/glamour we're on a 256-color terminal; without this
 # they fall back to no-color since scratch has no terminfo db.
-ENV SOCK_PATH=/clawson-run/clawson.sock \
-    TERM=xterm-256color
+# Cred paths default into /clawson-creds (mounted ro by `make tui`); the
+# endpoint, server name, and token are overridden per deployment.
+ENV TERM=xterm-256color \
+    CLAWSON_CA=/clawson-creds/ca.crt \
+    CLAWSON_CERT=/clawson-creds/client-tui.crt \
+    CLAWSON_KEY=/clawson-creds/client-tui.key \
+    CLAWSON_ENDPOINT=cs_host_go:8443 \
+    CLAWSON_SERVER_NAME=clawson-daemon
 ENTRYPOINT ["/clawson-tui"]

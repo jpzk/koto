@@ -1,123 +1,299 @@
 package main
 
 import (
-	"bufio"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"net"
+	"os"
+	"sync"
+	"time"
 
 	"clawson-protocol"
+	"clawson-protocol/pb"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // Wire types are shared with the daemon via the clawson-protocol module.
-// Aliasing under the TUI's existing names (Event, GroupInfo) keeps the
-// rest of the package readable. Ts on Event is now float64 (the actual
-// wire shape) — call sites that want int64 cast at use.
+// Aliasing under the TUI's existing names (Event, GroupInfo) keeps the rest of
+// the package readable. The daemon transport is now gRPC over mTLS+token (see
+// the daemon's auth.go); this file holds the client side. The historical
+// `sock` parameter on every *Cmd is retained for call-site stability but is no
+// longer the connection address — the endpoint + creds come from env.
 type (
 	Event     = protocol.Event
 	GroupInfo = protocol.GroupInfo
 )
 
-// daemonCall opens a fresh connection, writes one JSON request, reads one
-// JSON response, closes. Suitable for spawn/send/list/history/clear/config/metrics.
-func daemonCall(sock, cmd string, extra map[string]any) (map[string]any, error) {
-	c, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+// ---- connection (mTLS + bearer token, over a private overlay) -------------
 
-	req := map[string]any{"cmd": cmd}
-	for k, v := range extra {
-		req[k] = v
-	}
-	b, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		return nil, err
-	}
+// tokenCreds attaches the bearer token as `authorization` metadata on every
+// RPC (unary and stream). RequireTransportSecurity is true — the token only
+// ever travels inside the TLS channel.
+type tokenCreds struct{ token string }
 
-	br := bufio.NewReader(c)
-	line, err := br.ReadBytes('\n')
+func (t tokenCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + t.token}, nil
+}
+func (tokenCreds) RequireTransportSecurity() bool { return true }
+
+func clientTLS() (*tls.Config, error) {
+	certPath := envOr("CLAWSON_CERT", "/clawson-creds/client.crt")
+	keyPath := envOr("CLAWSON_KEY", "/clawson-creds/client.key")
+	caPath := envOr("CLAWSON_CA", "/clawson-creds/ca.crt")
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client cert: %w", err)
 	}
-	var resp map[string]any
-	if err := json.Unmarshal(line, &resp); err != nil {
-		return nil, err
+	caPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("ca: %w", err)
 	}
-	if ok, _ := resp["ok"].(bool); !ok {
-		errStr, _ := resp["error"].(string)
-		return resp, fmt.Errorf("daemon: %s", errStr)
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("ca %s: no certificates parsed", caPath)
 	}
-	return resp, nil
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		MinVersion:   tls.VersionTLS13,
+	}
+	// Override the verified server name when the dial target (an overlay IP)
+	// doesn't itself appear in the server cert SAN.
+	if sn := os.Getenv("CLAWSON_SERVER_NAME"); sn != "" {
+		cfg.ServerName = sn
+	}
+	return cfg, nil
 }
 
-// daemonSubscribe opens a long-lived conn, sends `subscribe`, waits for the
-// {"ok":true,"subscribed":group} ack, then returns the conn. Caller reads
-// JSON event lines until close.
-func daemonSubscribe(sock, group string) (net.Conn, *bufio.Reader, error) {
-	c, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, nil, err
-	}
-	req := map[string]any{"cmd": "subscribe", "group": group}
-	b, _ := json.Marshal(req)
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		c.Close()
-		return nil, nil, err
-	}
-	br := bufio.NewReader(c)
-	line, err := br.ReadBytes('\n')
-	if err != nil {
-		c.Close()
-		return nil, nil, err
-	}
-	var ack map[string]any
-	if err := json.Unmarshal(line, &ack); err != nil {
-		c.Close()
-		return nil, nil, err
-	}
-	if ok, _ := ack["ok"].(bool); !ok {
-		c.Close()
-		errStr, _ := ack["error"].(string)
-		return nil, nil, fmt.Errorf("subscribe %s: %s", group, errStr)
-	}
-	return c, br, nil
+var (
+	clientOnce sync.Once
+	client     pb.ClawsonClient
+	clientErr  error
+)
+
+func getClient() (pb.ClawsonClient, error) {
+	clientOnce.Do(func() {
+		tcfg, err := clientTLS()
+		if err != nil {
+			clientErr = err
+			return
+		}
+		ep := envOr("CLAWSON_ENDPOINT", "127.0.0.1:8443")
+		cc, err := grpc.NewClient(ep,
+			grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
+			grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("CLAWSON_TOKEN")}),
+		)
+		if err != nil {
+			clientErr = err
+			return
+		}
+		client = pb.NewClawsonClient(cc)
+	})
+	return client, clientErr
 }
 
-// daemonSubscribeLogs is the daemon-log analogue of daemonSubscribe: opens
-// a conn, sends `{"cmd":"logs"}`, waits for the ack, then returns the conn
-// for the caller to read LogEvent frames from. The daemon replays its
-// ring-buffered recent lines immediately after the ack.
-func daemonSubscribeLogs(sock string) (net.Conn, *bufio.Reader, error) {
-	c, err := net.Dial("unix", sock)
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// ---- unary: keep the map[string]any contract the call sites consume --------
+
+// daemonCall dispatches one unary RPC and returns its response as a
+// map[string]any (via protojson with proto field names, so the existing
+// snake_case map keys still resolve). Application-level failures surface as a
+// non-nil error with the daemon's message; transport/auth failures surface as
+// the raw gRPC error.
+func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, error) {
+	cl, err := getClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	msg, err := callRPC(ctx, cl, cmd, extra)
+	if err != nil {
+		return nil, err
+	}
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	if ok, _ := out["ok"].(bool); !ok {
+		es, _ := out["error"].(string)
+		return out, fmt.Errorf("daemon: %s", es)
+	}
+	return out, nil
+}
+
+func callRPC(ctx context.Context, cl pb.ClawsonClient, cmd string, extra map[string]any) (proto.Message, error) {
+	s := func(k string) string { v, _ := extra[k].(string); return v }
+	switch cmd {
+	case "list":
+		return cl.List(ctx, &pb.ListReq{})
+	case "spawn":
+		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model")}
+		if b, ok := extra["main"].(bool); ok {
+			r.Main = b
+		}
+		return cl.Spawn(ctx, r)
+	case "send":
+		return cl.Send(ctx, &pb.SendReq{Group: s("group"), Msg: s("msg")})
+	case "stop":
+		return cl.Stop(ctx, &pb.GroupReq{Group: s("group")})
+	case "interrupt":
+		return cl.Interrupt(ctx, &pb.GroupReq{Group: s("group")})
+	case "destroy":
+		return cl.Destroy(ctx, &pb.GroupReq{Group: s("group")})
+	case "restart":
+		return cl.Restart(ctx, &pb.GroupReq{Group: s("group")})
+	case "clear":
+		return cl.Clear(ctx, &pb.GroupReq{Group: s("group")})
+	case "history":
+		r := &pb.HistoryReq{Group: s("group")}
+		if v, ok := asFloat(extra["before"]); ok {
+			r.Before = v
+		}
+		if v, ok := asFloat(extra["limit"]); ok {
+			r.Limit = int32(v)
+		}
+		return cl.History(ctx, r)
+	case "metrics":
+		return cl.Metrics(ctx, &pb.MetricsReq{Group: s("group")})
+	case "config":
+		return cl.Config(ctx, buildConfigReq(extra))
+	case "skills":
+		return cl.Skills(ctx, &pb.SkillListReq{Group: s("group")})
+	case "skill_new":
+		return cl.SkillNew(ctx, &pb.SkillNewReq{Name: s("name")})
+	case "skill_read":
+		return cl.SkillRead(ctx, &pb.SkillReadReq{Name: s("name")})
+	case "sched_add":
+		return cl.SchedAdd(ctx, &pb.SchedAddReq{Group: s("group"), Cron: s("cron"), Msg: s("msg")})
+	case "sched_list":
+		return cl.SchedList(ctx, &pb.SchedListReq{Group: s("group")})
+	case "sched_del":
+		return cl.SchedDel(ctx, &pb.SchedIDReq{Id: s("id")})
+	case "sched_toggle":
+		r := &pb.SchedToggleReq{Id: s("id")}
+		if b, ok := extra["enabled"].(bool); ok {
+			r.Enabled = b
+		}
+		return cl.SchedToggle(ctx, r)
+	case "sched_run":
+		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
+	}
+	return nil, fmt.Errorf("unknown cmd: %s", cmd)
+}
+
+func asFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
+// buildConfigReq encodes the absent/clear/set tri-state. Scalar config values
+// arrive as strings (present => set, "" => clear, absent key => leave unset).
+// skills arrives as a []string (set) or "" (clear) from skillToggleCmd; a bare
+// non-empty string for skills is a no-op (matches the daemon's reject-non-list
+// behavior).
+func buildConfigReq(extra map[string]any) *pb.ConfigReq {
+	r := &pb.ConfigReq{}
+	if g, ok := extra["group"].(string); ok {
+		r.Group = g
+	}
+	setOpt := func(key string, dst **string) {
+		if v, ok := extra[key]; ok {
+			if str, ok := v.(string); ok {
+				sv := str
+				*dst = &sv
+			}
+		}
+	}
+	setOpt("model", &r.Model)
+	setOpt("effort", &r.Effort)
+	setOpt("ports", &r.Ports)
+	setOpt("pip", &r.Pip)
+	setOpt("provider", &r.Provider)
+	if sk, ok := extra["skills"]; ok {
+		switch v := sk.(type) {
+		case []string:
+			r.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: v}}
+		case []any:
+			items := make([]string, 0, len(v))
+			for _, e := range v {
+				if str, ok := e.(string); ok {
+					items = append(items, str)
+				}
+			}
+			r.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: items}}
+		case string:
+			if v == "" {
+				r.SkillsAction = &pb.ConfigReq_SkillsClear{SkillsClear: &emptypb.Empty{}}
+			}
+		}
+	}
+	return r
+}
+
+// ---- streaming -------------------------------------------------------------
+
+func openGroupStream(group string) (grpc.ServerStreamingClient[pb.Event], context.CancelFunc, error) {
+	cl, err := getClient()
 	if err != nil {
 		return nil, nil, err
 	}
-	req := map[string]any{"cmd": "logs"}
-	b, _ := json.Marshal(req)
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		c.Close()
-		return nil, nil, err
-	}
-	br := bufio.NewReader(c)
-	line, err := br.ReadBytes('\n')
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := cl.SubscribeGroup(ctx, &pb.SubscribeReq{Group: group})
 	if err != nil {
-		c.Close()
+		cancel()
 		return nil, nil, err
 	}
-	var ack map[string]any
-	if err := json.Unmarshal(line, &ack); err != nil {
-		c.Close()
+	return stream, cancel, nil
+}
+
+func openLogStream() (grpc.ServerStreamingClient[pb.LogEvent], context.CancelFunc, error) {
+	cl, err := getClient()
+	if err != nil {
 		return nil, nil, err
 	}
-	if ok, _ := ack["ok"].(bool); !ok {
-		c.Close()
-		errStr, _ := ack["error"].(string)
-		return nil, nil, fmt.Errorf("logs subscribe: %s", errStr)
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := cl.SubscribeLogs(ctx, &pb.LogsReq{})
+	if err != nil {
+		cancel()
+		return nil, nil, err
 	}
-	return c, br, nil
+	return stream, cancel, nil
+}
+
+func pbToEvent(p *pb.Event) Event {
+	return Event{
+		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,
+		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
+		Historical: p.Historical, ID: p.Id,
+	}
+}
+
+func pbToLogEvent(p *pb.LogEvent) protocol.LogEvent {
+	return protocol.LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts}
 }

@@ -23,6 +23,10 @@ import (
 	"time"
 
 	"clawson-protocol"
+	"clawson-protocol/pb"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // ---- wire-type aliases ---------------------------------------------------
@@ -1042,7 +1046,7 @@ func destroy(g string) baseResp {
 	delete(tails, g)
 	if subs, ok := subscribers[g]; ok {
 		for _, c := range subs {
-			_ = c.Close()
+			close(c.done) // unblock the stream handler so it returns (group is gone)
 		}
 		delete(subscribers, g)
 	}
@@ -1058,9 +1062,18 @@ func restart(g string) (int, error) {
 
 // ---- streaming: subscribers + tail ----------------------------------------
 
+// A subscriber is a live SubscribeGroup stream handler; emit() pushes pb.Events
+// to its buffered channel and the handler goroutine owns stream.Send. The old
+// []net.Conn registry + dead-conn pruning is replaced by per-stream context
+// cancellation (the handler deregisters itself on stream.Context().Done()).
+type groupSub struct {
+	ch   chan *pb.Event
+	done chan struct{} // closed by destroy() to force the stream handler to return
+}
+
 var (
 	subsLock    sync.Mutex
-	subscribers = map[string][]net.Conn{}
+	subscribers = map[string][]*groupSub{}
 	tails       = map[string]bool{}
 )
 
@@ -1187,33 +1200,18 @@ func emit(g string, ev Event) {
 		notifyTurnDone(g)
 	}
 	ev = sanitizeEvent(ev)
-	b, _ := json.Marshal(ev)
-	b = append(b, '\n')
+	pbev := toPBEvent(ev)
 	subsLock.Lock()
-	conns := append([]net.Conn(nil), subscribers[g]...)
+	subs := append([]*groupSub(nil), subscribers[g]...)
 	subsLock.Unlock()
-	var dead []net.Conn
-	for _, c := range conns {
-		if _, err := c.Write(b); err != nil {
-			dead = append(dead, c)
-		}
-	}
-	if len(dead) > 0 {
-		subsLock.Lock()
-		alive := subscribers[g][:0]
-		deadSet := map[net.Conn]bool{}
-		for _, c := range dead {
-			deadSet[c] = true
-		}
-		for _, c := range subscribers[g] {
-			if !deadSet[c] {
-				alive = append(alive, c)
-			}
-		}
-		subscribers[g] = alive
-		subsLock.Unlock()
-		for _, c := range dead {
-			_ = c.Close()
+	for _, s := range subs {
+		// Non-blocking: a slow consumer whose buffer is full drops this frame
+		// (bounded backpressure) rather than stalling the tailLog goroutine for
+		// every other subscriber of the group. The TUI re-fetches history on
+		// reconnect, so a dropped streaming frame is recoverable.
+		select {
+		case s.ch <- pbev:
+		default:
 		}
 	}
 }
@@ -1248,10 +1246,14 @@ func pingLoop() {
 
 const logRingMax = 200
 
+type logSub struct {
+	ch chan *pb.LogEvent
+}
+
 var (
 	logSubsLock sync.Mutex
-	logSubs     []net.Conn
-	logRing     [][]byte // pre-marshalled JSON+\n frames
+	logSubs     []*logSub
+	logRing     []*pb.LogEvent // recent frames, replayed to fresh subscribers
 )
 
 // emitLog formats a LogEvent, mirrors it to stderr (so `make host-run`
@@ -1259,47 +1261,27 @@ var (
 // to all log subscribers. Dead subscribers are pruned in a second pass —
 // same dead-conn pattern as emit().
 func emitLog(level, msg string) {
-	ev := LogEvent{
+	pbev := &pb.LogEvent{
 		Event: "log",
 		Level: level,
 		Msg:   msg,
 		Ts:    float64(time.Now().UnixNano()) / 1e9,
 	}
-	b, _ := json.Marshal(ev)
-	b = append(b, '\n')
 
 	fmt.Fprintf(os.Stderr, "[%s] %s\n", level, msg)
 
 	logSubsLock.Lock()
-	logRing = append(logRing, b)
+	logRing = append(logRing, pbev)
 	if len(logRing) > logRingMax {
 		logRing = logRing[len(logRing)-logRingMax:]
 	}
-	conns := append([]net.Conn(nil), logSubs...)
+	subs := append([]*logSub(nil), logSubs...)
 	logSubsLock.Unlock()
 
-	var dead []net.Conn
-	for _, c := range conns {
-		if _, err := c.Write(b); err != nil {
-			dead = append(dead, c)
-		}
-	}
-	if len(dead) > 0 {
-		logSubsLock.Lock()
-		alive := logSubs[:0]
-		deadSet := map[net.Conn]bool{}
-		for _, c := range dead {
-			deadSet[c] = true
-		}
-		for _, c := range logSubs {
-			if !deadSet[c] {
-				alive = append(alive, c)
-			}
-		}
-		logSubs = alive
-		logSubsLock.Unlock()
-		for _, c := range dead {
-			_ = c.Close()
+	for _, s := range subs {
+		select {
+		case s.ch <- pbev:
+		default:
 		}
 	}
 }
@@ -1898,273 +1880,6 @@ func clearCmd(req groupReq) baseResp {
 	return baseResp{OK: true}
 }
 
-// ---- dispatch -------------------------------------------------------------
-
-// dispatch reads the cmd, unmarshals the request line into the typed
-// request envelope for that command, and returns the typed response.
-// Subscribe is handled inline in serve() because it transfers conn
-// ownership to the SUBS registry.
-func dispatch(line []byte) any {
-	var env cmdEnvelope
-	if err := json.Unmarshal(line, &env); err != nil {
-		return errResp("json: " + err.Error())
-	}
-	switch env.Cmd {
-	case "spawn":
-		var req spawnReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if req.Provider != "" && req.Provider != "claudesdk" && req.Provider != "venice" {
-			return errResp("provider must be claudesdk or venice")
-		}
-		if req.Provider != "" || req.Model != "" {
-			if err := seedSpawnConfig(req.Group, req.Provider, req.Model); err != nil {
-				return errResp(err.Error())
-			}
-		}
-		port, err := ensure(req.Group, req.Main)
-		if err != nil {
-			return errResp(err.Error())
-		}
-		return spawnResp{baseResp{OK: true}, port}
-
-	case "send":
-		var req sendReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if err := send(req.Group, req.Msg); err != nil {
-			return errResp(err.Error())
-		}
-		return baseResp{OK: true}
-
-	case "list":
-		return listResp{baseResp{OK: true}, listGroups()}
-
-	case "stop":
-		var req groupReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		stopGroup(req.Group)
-		return baseResp{OK: true}
-
-	case "interrupt":
-		var req groupReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if err := interruptAgent(req.Group); err != nil {
-			return errResp(err.Error())
-		}
-		return baseResp{OK: true}
-
-	case "destroy":
-		var req groupReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return destroy(req.Group)
-
-	case "restart":
-		var req groupReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		port, err := restart(req.Group)
-		if err != nil {
-			return errResp(err.Error())
-		}
-		return spawnResp{baseResp{OK: true}, port}
-
-	case "history":
-		var req historyReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		evs, more := readHistory(req.Group, req.Limit, req.Before)
-		for i := range evs {
-			evs[i] = sanitizeEvent(evs[i])
-		}
-		return historyResp{BaseResp: baseResp{OK: true}, Events: evs, More: more}
-
-	case "config":
-		var req configReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return configCmd(req)
-
-	case "metrics":
-		var req metricsReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		var perGroup map[string]any
-		if req.Group != "" {
-			perGroup = latestMetric(req.Group)
-		}
-		return metricsResp{baseResp{OK: true}, perGroup, latestMetricAny()}
-
-	case "clear":
-		var req groupReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return clearCmd(req)
-
-	case "skills":
-		var req skillListReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return skillListCmd(req)
-
-	case "skill_new":
-		var req skillNewReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return skillNewCmd(req)
-
-	case "skill_read":
-		var req skillReadReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return skillReadCmd(req)
-
-	case "sched_add":
-		var req schedAddReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		it, err := addSched(req.Group, req.Cron, req.Msg)
-		if err != nil {
-			return errResp(err.Error())
-		}
-		return schedAddResp{baseResp{OK: true}, it}
-
-	case "sched_list":
-		var req schedListReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return schedListResp{baseResp{OK: true}, listSched(req.Group)}
-
-	case "sched_del":
-		var req schedIDReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if err := delSched(req.ID); err != nil {
-			return errResp(err.Error())
-		}
-		return baseResp{OK: true}
-
-	case "sched_toggle":
-		var req schedToggleReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if _, err := toggleSched(req.ID, req.Enabled); err != nil {
-			return errResp(err.Error())
-		}
-		return baseResp{OK: true}
-
-	case "sched_run":
-		var req schedIDReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		if err := runSchedNow(req.ID); err != nil {
-			return errResp(err.Error())
-		}
-		return baseResp{OK: true}
-	}
-	return errResp("bad cmd: " + env.Cmd)
-}
-
-func serve(c net.Conn) {
-	r := bufio.NewReader(c)
-	subscribed := false
-	defer func() {
-		if !subscribed {
-			_ = c.Close()
-		}
-	}()
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) == 0 && err != nil {
-			return
-		}
-		// Peek at cmd first; subscribe is special because it transfers
-		// connection ownership to the subscriber registry.
-		var env cmdEnvelope
-		if jerr := json.Unmarshal(line, &env); jerr == nil && env.Cmd == "subscribe" {
-			var req subscribeReq
-			if jerr := json.Unmarshal(line, &req); jerr != nil {
-				writeResp(c, errResp(jerr.Error()))
-				if err != nil {
-					return
-				}
-				continue
-			}
-			ensureTail(req.Group)
-			subsLock.Lock()
-			subscribers[req.Group] = append(subscribers[req.Group], c)
-			subsLock.Unlock()
-			writeResp(c, subscribeResp{baseResp{OK: true}, req.Group})
-			subscribed = true
-			return
-		}
-		// `logs` is the daemon-log analogue of subscribe: same connection-
-		// ownership transfer, but no per-group keying. Acks first, then
-		// replays the ring buffer so the client immediately sees recent
-		// activity, then pushes fresh frames as emitLog() runs.
-		if jerr := json.Unmarshal(line, &env); jerr == nil && env.Cmd == "logs" {
-			writeResp(c, logsResp{baseResp{OK: true}})
-			logSubsLock.Lock()
-			ring := append([][]byte(nil), logRing...)
-			logSubs = append(logSubs, c)
-			logSubsLock.Unlock()
-			for _, b := range ring {
-				if _, werr := c.Write(b); werr != nil {
-					// New conn died mid-replay: drop it from the registry
-					// and bail. Symmetric with emitLog's dead-conn prune.
-					logSubsLock.Lock()
-					alive := logSubs[:0]
-					for _, cc := range logSubs {
-						if cc != c {
-							alive = append(alive, cc)
-						}
-					}
-					logSubs = alive
-					logSubsLock.Unlock()
-					_ = c.Close()
-					return
-				}
-			}
-			subscribed = true
-			return
-		}
-		writeResp(c, dispatch(line))
-		if err != nil {
-			return
-		}
-	}
-}
-
-// writeResp marshals any typed response to the wire format (one JSON
-// document + newline). Accepts `any` because handlers return different
-// response types — all of them serialize to a JSON object with `ok` plus
-// command-specific fields.
-func writeResp(c net.Conn, resp any) {
-	b, _ := json.Marshal(resp)
-	b = append(b, '\n')
-	_, _ = c.Write(b)
-}
 
 // ---- daemon entrypoint ----------------------------------------------------
 
@@ -2190,14 +1905,36 @@ func daemonMain() {
 	}
 	// ctl FIFOs are now wired up inside ensure() per-group, including main.
 
-	_ = os.Remove(SOCK_PATH)
-	l, err := net.Listen("unix", SOCK_PATH)
+	// gRPC over TCP, secured by mTLS + a bearer-token interceptor. Bind the
+	// overlay (WireGuard) interface only — never 0.0.0.0 — so the control plane
+	// is reachable solely by peers on the private mesh. See auth.go for the TLS
+	// + token layers and the clients.allow fingerprint allowlist.
+	bindAddr := os.Getenv("CLAWSON_BIND")
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
+	grpcPort := os.Getenv("CLAWSON_PORT")
+	if grpcPort == "" {
+		grpcPort = "8443"
+	}
+	addr := net.JoinHostPort(bindAddr, grpcPort)
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "listen unix: %v\n", err)
+		fmt.Fprintf(os.Stderr, "listen tcp %s: %v\n", addr, err)
 		os.Exit(1)
 	}
-	_ = os.Chmod(SOCK_PATH, 0o660)
-	emitLogf("info", "clawsond ready socket=%s", SOCK_PATH)
+	tlsCfg, err := serverTLSConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tls config: %v\n", err)
+		os.Exit(1)
+	}
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.ChainUnaryInterceptor(authUnary),
+		grpc.ChainStreamInterceptor(authStream),
+	)
+	pb.RegisterClawsonServer(srv, &clawsonServer{})
+	emitLogf("info", "clawsond ready grpc=%s (mTLS+token)", addr)
 
 	loadSched()
 	go pingLoop()
@@ -2207,15 +1944,11 @@ func daemonMain() {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
-		_ = l.Close()
+		srv.GracefulStop()
 		os.Exit(0)
 	}()
 
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			return
-		}
-		go serve(c)
+	if err := srv.Serve(l); err != nil {
+		emitLogf("error", "grpc serve: %v", err)
 	}
 }
