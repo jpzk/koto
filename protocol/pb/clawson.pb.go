@@ -558,9 +558,21 @@ func (x *SpawnReq) GetModel() string {
 }
 
 type SendReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	Msg           string                 `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Group string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Msg   string                 `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	// Optional attachments. The daemon's Send handler processes these BEFORE
+	// enqueueSend, so the per-group queue still carries a plain text turn:
+	//   - image: written to groups/<g>/.cs/uploads/img-<ts>.<ext>; msg body gets
+	//     "\n[image: .cs/uploads/img-<ts>.<ext>]" appended so the claude CLI reads
+	//     the file from its workspace.
+	//   - audio: written to .cs/uploads/voice-<ts>.<ext>, transcribed server-side
+	//     (whisper); the transcript becomes (or augments) the msg body. The LLM
+	//     backends are text-only, so audio never reaches them directly.
+	Image         []byte `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
+	ImageMime     string `protobuf:"bytes,4,opt,name=image_mime,json=imageMime,proto3" json:"image_mime,omitempty"` // image/jpeg | image/png | ...
+	Audio         []byte `protobuf:"bytes,5,opt,name=audio,proto3" json:"audio,omitempty"`
+	AudioMime     string `protobuf:"bytes,6,opt,name=audio_mime,json=audioMime,proto3" json:"audio_mime,omitempty"` // audio/mp4 | audio/ogg | ...
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -605,6 +617,34 @@ func (x *SendReq) GetGroup() string {
 func (x *SendReq) GetMsg() string {
 	if x != nil {
 		return x.Msg
+	}
+	return ""
+}
+
+func (x *SendReq) GetImage() []byte {
+	if x != nil {
+		return x.Image
+	}
+	return nil
+}
+
+func (x *SendReq) GetImageMime() string {
+	if x != nil {
+		return x.ImageMime
+	}
+	return ""
+}
+
+func (x *SendReq) GetAudio() []byte {
+	if x != nil {
+		return x.Audio
+	}
+	return nil
+}
+
+func (x *SendReq) GetAudioMime() string {
+	if x != nil {
+		return x.AudioMime
 	}
 	return ""
 }
@@ -2113,10 +2153,16 @@ const file_clawson_proto_rawDesc = "" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04main\x18\x02 \x01(\bR\x04main\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x14\n" +
-	"\x05model\x18\x04 \x01(\tR\x05model\"1\n" +
+	"\x05model\x18\x04 \x01(\tR\x05model\"\x9b\x01\n" +
 	"\aSendReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x10\n" +
-	"\x03msg\x18\x02 \x01(\tR\x03msg\" \n" +
+	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x14\n" +
+	"\x05image\x18\x03 \x01(\fR\x05image\x12\x1d\n" +
+	"\n" +
+	"image_mime\x18\x04 \x01(\tR\timageMime\x12\x14\n" +
+	"\x05audio\x18\x05 \x01(\fR\x05audio\x12\x1d\n" +
+	"\n" +
+	"audio_mime\x18\x06 \x01(\tR\taudioMime\" \n" +
 	"\bGroupReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"\t\n" +
 	"\aListReq\"\t\n" +

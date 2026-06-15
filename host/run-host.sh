@@ -16,6 +16,13 @@ mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache"
 # an off-box daemon, set CLAWSON_BIND to the WireGuard interface IP instead.
 CLAWSON_BIND="${CLAWSON_BIND:-0.0.0.0}"
 CLAWSON_PORT="${CLAWSON_PORT:-8443}"
+# CLAWSON_PUBLISH (opt-in): host endpoint to publish the gRPC port to, e.g.
+# 127.0.0.1:8443. Needed for a local Android emulator, which reaches the host
+# loopback via 10.0.2.2 — set CLAWSON_PUBLISH=127.0.0.1:8443 so the guest can
+# dial 10.0.2.2:8443. Left unset by default to keep the port off the host (mTLS
+# +token still gate it, but loopback-only is the safer default).
+PUBLISH_ARG=""
+[ -n "${CLAWSON_PUBLISH:-}" ] && PUBLISH_ARG="-p ${CLAWSON_PUBLISH}:${CLAWSON_PORT}"
 podman rm -f cs_host_go >/dev/null 2>&1 || true
 # .gocache is a persistent Go build cache. Without it, the first compile
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon
@@ -23,6 +30,7 @@ podman rm -f cs_host_go >/dev/null 2>&1 || true
 # the host user's ~/.cache/go-build.
 podman run -d --rm \
   --name cs_host_go --network clawson-net \
+  $PUBLISH_ARG \
   --security-opt label=disable \
   -v "$SOCK:/run/podman/podman.sock" \
   -v "$HERE:$HERE" \

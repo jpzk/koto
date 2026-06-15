@@ -27,6 +27,13 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	// Register the gzip de/compressor so the server can decode requests that
+	// arrive with grpc-encoding: gzip. The Square Wire (Android) client gzips
+	// outgoing messages, and Go's grpc server only decompresses encodings that
+	// are registered — without this it rejects them with UNIMPLEMENTED
+	// "Decompressor is not installed for grpc-encoding gzip". Safe here: only
+	// mTLS+token-authenticated allowlisted peers reach the server.
+	_ "google.golang.org/grpc/encoding/gzip"
 )
 
 // ---- wire-type aliases ---------------------------------------------------

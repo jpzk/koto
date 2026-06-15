@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: build host-build tui-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client
+.PHONY: build host-build tui-build whisper-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -54,6 +54,15 @@ $(BUILD)/clawson-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
 	@touch $@
 
 tui-build: $(BUILD)/clawson-tui
+
+# --- clawson-whisper (offline STT image) -----------------------------------
+# Built rarely (only when host/whisper/* changes) and intentionally NOT a
+# dependency of host-run: the daemon's transcribeAudio path tolerates its
+# absence (returns an in-band error on the Send RPC) until you opt in by
+# building it once. Large first build: ~141MB model download + a whisper.cpp
+# C++ compile. See host/whisper/Dockerfile for the supply-chain pins.
+whisper-build:
+	podman build -t clawson-whisper:latest host/whisper
 
 # --- run / interactive targets ---------------------------------------------
 login: $(BUILD)/clawson-host

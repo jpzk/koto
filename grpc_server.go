@@ -138,7 +138,33 @@ func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp,
 }
 
 func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error) {
-	if err := send(r.Group, r.Msg); err != nil {
+	// Enqueue and return immediately — do NOT block on the turn. A turn runs for
+	// up to turnWaitTimeout (25m); a unary RPC blocking that long blows any
+	// client deadline (the TUI wraps every call in 30s, surfacing the long turn
+	// as a spurious DeadlineExceeded) and pins an HTTP/2 stream the whole time.
+	// Turn lifecycle (prompt/stream/done/turn_end) reaches clients over the
+	// Subscribe stream; the only thing a caller needs synchronously is whether
+	// the message made it into the bounded queue (overflow = backpressure),
+	// which enqueueSend reports immediately. Matches the ctl/scheduler producers.
+	//
+	// Attachments are resolved HERE, before enqueueSend, so the queue still
+	// carries a plain TEXT turn (queue.go / sendNow / the FIFO protocol stay
+	// attachment-unaware): an image is saved to the workspace and referenced
+	// inline, audio is transcribed locally by the whisper container and merged
+	// into the text. processAttachments runs synchronously — image save is a
+	// file write, and audio transcription is bounded by its own deadline — so a
+	// failure (oversize, whisper error) surfaces in-band on this RPC instead of
+	// silently dropping the turn. We only take the attachment path when bytes
+	// are actually present, leaving the no-attachment fast path untouched.
+	msg := r.Msg
+	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
+		m, err := processAttachments(r)
+		if err != nil {
+			return &pb.BaseResp{Error: err.Error()}, nil
+		}
+		msg = m
+	}
+	if _, err := enqueueSend(r.Group, msg); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
