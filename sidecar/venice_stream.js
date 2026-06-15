@@ -275,7 +275,12 @@ function saveHistory(h) {
 
 function streamTurn(messages) {
   return new Promise((resolve) => {
-    const body = JSON.stringify({ model: MODEL, messages, tools: TOOLS, stream: true });
+    // stream_options.include_usage is the OpenAI-compatible switch that makes
+    // Venice emit the usage block (incl. prompt_tokens_details.cached_tokens)
+    // on the terminal stream chunk. Venice currently sends usage without it,
+    // but that's undocumented for the streaming path — set it explicitly so the
+    // proxy's per-request metrics don't silently go empty on a Venice update.
+    const body = JSON.stringify({ model: MODEL, messages, tools: TOOLS, stream: true, stream_options: { include_usage: true } });
     const parsed = url.parse(BASE + '/api/v1/chat/completions');
     const opts = {
       protocol: parsed.protocol,
