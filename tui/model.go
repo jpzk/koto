@@ -229,6 +229,11 @@ type Model struct {
 	// Toggled with ctrl+d.
 	expandedToolOuts bool
 
+	// selectMode releases the mouse to the terminal so native click-drag text
+	// selection/copy works. Toggled with ctrl+s. When false (default) the mouse
+	// is captured for wheel-scroll. Keyboard scroll works in both modes.
+	selectMode bool
+
 	// unread marks groups that produced output (a response, tool call,
 	// thought, or tool result) while not focused. Cleared on switch to the
 	// group and on /destroy. Ephemeral — not persisted across /reload, since
@@ -1744,6 +1749,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.expandedToolOuts = !m.expandedToolOuts
 		m.refreshLog()
 		return m, nil
+	}
+	if s == "ctrl+s" {
+		// Toggle mouse capture. Scroll mode (default) captures the mouse for
+		// wheel-scroll; select mode releases it to the terminal so native
+		// click-drag selection/copy works. Keyboard scroll works in both. In
+		// raw mode IXON is off, so ctrl+s arrives as a keypress (no flow-control
+		// freeze).
+		m.selectMode = !m.selectMode
+		if m.selectMode {
+			return m, tea.DisableMouse
+		}
+		return m, tea.EnableMouseCellMotion
 	}
 	if s == "ctrl+l" {
 		// Toggle the daemon log view. enterLog() is responsible for the

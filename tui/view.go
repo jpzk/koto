@@ -684,6 +684,11 @@ func (m Model) renderHint() string {
 		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
 	}
 	parts = append(parts, toolOutsHint)
+	selectHint := "^s scroll"
+	if m.selectMode {
+		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^s SELECT")
+	}
+	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")
 	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
