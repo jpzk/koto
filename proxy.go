@@ -160,14 +160,22 @@ func logAppend(group string, data []byte) {
 // non-200 upstream responses. The daemon's log tailer turns this into a
 // `done` event so the user sees *why* an agent went silent — claude code
 // retries 529s ~2-3 times then exits without printing anything, leaving the
-// TUI with an empty prompt and no explanation. status codes that aren't
-// model errors (404 token refresh checks, 401 expired) get muted.
+// TUI with an empty prompt and no explanation. Only 404 (token-refresh probes)
+// is muted; a 401 DOES surface — an expired/invalid credential silently kills
+// every claudesdk group, and the user needs to see why (and that `make login`
+// is the fix) instead of staring at empty turns.
 func logProxyError(group, path string, status int, dur time.Duration, reqID string) {
-	if group == "" || status == 200 || status == 404 || status == 401 {
+	if group == "" || status == 200 || status == 404 {
 		return
 	}
 	reason := http.StatusText(status)
 	switch status {
+	case 401:
+		// Surfaced, not muted: the proxy's proactive refresh (authHeaders)
+		// already ran before this request, so a 401 here is terminal — the
+		// OAuth credential is expired/invalid. 401 is never retried
+		// (retryableStatus), so this is exactly one line per failed turn.
+		reason = "authentication failed — credential expired; run `make login`"
 	case 529:
 		reason = "Overloaded" // Anthropic-specific; not in net/http
 	}
@@ -183,6 +191,47 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	// `err` event so the TUI renders with the red glyph instead of
 	// pretending the model said it.
 	logAppend(group, []byte("[[err]] "+msg+"\n"))
+}
+
+// normalizeVeniceUsage maps Venice's OpenAI-shape usage block onto the
+// Anthropic keys the rest of clawson reads. Venice nests cache accounting
+// under `prompt_tokens_details` (cached_tokens = cache read; the non-standard
+// cache_creation_input_tokens = cache write); that object is nullable, so the
+// details may be absent on cache-miss turns / non-caching models — default to
+// 0 in that case.
+//
+// Semantics differ from Anthropic and we reconcile here: OpenAI's prompt_tokens
+// is the *total* prompt and cached_tokens/cache_creation are a breakdown
+// (subsets), whereas Anthropic's input_tokens is the *fresh* (uncached) portion
+// with cache_read/cache_creation as disjoint buckets. Consumers (TUI ctx gauge,
+// cache-hit ratio, <clawson-context> header) all assume the Anthropic disjoint
+// model, so we subtract the cache buckets out of input_tokens — otherwise the
+// cached tokens get double-counted (ctx inflated, hit ratio deflated).
+func normalizeVeniceUsage(u, usage map[string]any) {
+	prompt, completion := 0, 0
+	if v, ok := anyAsInt(u["prompt_tokens"]); ok {
+		prompt = int(v)
+	}
+	if v, ok := anyAsInt(u["completion_tokens"]); ok {
+		completion = int(v)
+	}
+	cacheRead, cacheCreate := 0, 0
+	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		if v, ok := anyAsInt(d["cached_tokens"]); ok {
+			cacheRead = int(v)
+		}
+		if v, ok := anyAsInt(d["cache_creation_input_tokens"]); ok {
+			cacheCreate = int(v)
+		}
+	}
+	fresh := prompt - cacheRead - cacheCreate
+	if fresh < 0 {
+		fresh = 0
+	}
+	usage["input_tokens"] = fresh
+	usage["output_tokens"] = completion
+	usage["cache_read_input_tokens"] = cacheRead
+	usage["cache_creation_input_tokens"] = cacheCreate
 }
 
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
@@ -547,14 +596,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 			// Venice emits the OpenAI-shape usage block on the final chunk
 			// (after the model has stopped emitting deltas).
 			if u, ok := ev["usage"].(map[string]any); ok {
-				if v, ok := u["prompt_tokens"]; ok {
-					usage["input_tokens"] = v
-				}
-				if v, ok := u["completion_tokens"]; ok {
-					usage["output_tokens"] = v
-				}
-				usage["cache_read_input_tokens"] = 0
-				usage["cache_creation_input_tokens"] = 0
+				normalizeVeniceUsage(u, usage)
 			}
 		}
 	} else {
@@ -563,14 +605,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		var parsed map[string]any
 		if json.Unmarshal(data, &parsed) == nil {
 			if u, ok := parsed["usage"].(map[string]any); ok {
-				if v, ok := u["prompt_tokens"]; ok {
-					usage["input_tokens"] = v
-				}
-				if v, ok := u["completion_tokens"]; ok {
-					usage["output_tokens"] = v
-				}
-				usage["cache_read_input_tokens"] = 0
-				usage["cache_creation_input_tokens"] = 0
+				normalizeVeniceUsage(u, usage)
 			}
 		}
 	}
