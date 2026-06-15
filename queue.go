@@ -99,15 +99,7 @@ func sendWorker(g string, q chan sendJob) {
 	}
 }
 
-// send enqueues msg for g and blocks until that turn completes, preserving the
-// synchronous semantics the socket dispatch path relies on (the caller is its
-// own per-connection goroutine, so blocking it is fine and lets the TUI learn
-// when the turn finished). ctl and the scheduler call enqueueSend directly and
-// do not wait. Returns the enqueue error on overflow, otherwise the turn result.
-func send(g, msg string) error {
-	done, err := enqueueSend(g, msg)
-	if err != nil {
-		return err
-	}
-	return <-done
-}
+// All producers — the gRPC Send handler, the ctl plane, and the scheduler —
+// call enqueueSend directly and do not wait on the returned channel: turn
+// completion is observed over the Subscribe stream, not the enqueue path. The
+// buffered(1) done channel means an unread result never blocks the worker.
