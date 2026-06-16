@@ -1612,6 +1612,13 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 			// Stray close marker outside a block — same rationale as the live tailer.
 			continue
 		}
+		if line == "[[turn_end]]" {
+			// Turn boundary. The live tailer turns this into a `turn_end` event;
+			// in a history replay it has no renderable content, so drop it instead
+			// of letting it fall through to the default case and surface as a raw
+			// "[[turn_end]]" response line in clients.
+			continue
+		}
 		ev := Event{Group: g, Ts: ts, Historical: true}
 		switch {
 		case strings.HasPrefix(line, ">>> "):
