@@ -26,11 +26,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"clawson-protocol/pb"
 )
+
+// whisper emits an all-caps bracketed marker on a line of its own when a segment
+// has no speech — most commonly "[BLANK_AUDIO]", also "[SILENCE]", "[MUSIC]",
+// "[NOISE]". These are NOT a transcript; without stripping them the literal
+// token gets forwarded to the model as the user's message. The all-caps shape
+// deliberately spares lowercase event tags like "[laughs]" that can be real
+// transcript content.
+var whisperMarkerRe = regexp.MustCompile(`^\[[A-Z_ ]+\]$`)
+
+// stripWhisperMarkers drops whole lines that are just a whisper non-speech
+// marker, returning the trimmed remainder.
+func stripWhisperMarkers(s string) string {
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, ln := range lines {
+		if whisperMarkerRe.MatchString(strings.TrimSpace(ln)) {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
 
 // Attachment size caps. Generous enough for phone photos / voice notes, tight
 // enough that a single SendReq can't dump arbitrary amounts into a workspace.
@@ -162,9 +185,9 @@ func transcribeAudio(g string, data []byte, mime string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("whisper transcribe: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	transcript := strings.TrimSpace(string(out))
+	transcript := stripWhisperMarkers(strings.TrimSpace(string(out)))
 	if transcript == "" {
-		return "", fmt.Errorf("whisper produced no transcript")
+		return "", fmt.Errorf("no speech detected in audio")
 	}
 	emitLogf("info", "attachment audio group=%s transcript=%dch", g, len(transcript))
 	return transcript, nil
