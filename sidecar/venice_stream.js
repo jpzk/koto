@@ -53,11 +53,18 @@ function decodeB64(s) {
 const USER_MSG = decodeB64(process.env.MSG_B64);
 const SYS_PROMPT = decodeB64(process.env.SP_B64);
 
-function writeOut(s) { try { fs.writeSync(1, s); } catch {} }
+// VENICE_ONESHOT: sub-agent mode (driven by cs-subagent). The streaming deltas
+// and tool framing are progress, not the return value, so they go to stderr;
+// only the final answer text is written to stdout (see the done branch). History
+// is ephemeral (saveHistory/loadHistory are skipped) so a sub-call never touches
+// the group's main /workspace/.cs/venice-history.json thread.
+const ONESHOT = !!process.env.VENICE_ONESHOT;
+function writeOut(s) { try { fs.writeSync(ONESHOT ? 2 : 1, s); } catch {} }
+function writeFinal(s) { try { fs.writeSync(1, s); } catch {} }
 function writeErr(s) { writeOut(`[[err]] ${s}\n`); }
 
-if (!BASE) { writeErr('venice: ANTHROPIC_BASE_URL not set'); process.exit(0); }
-if (!USER_MSG) { writeErr('venice: empty MSG_B64'); process.exit(0); }
+if (!BASE) { writeErr('venice: ANTHROPIC_BASE_URL not set'); process.exit(ONESHOT ? 1 : 0); }
+if (!USER_MSG) { writeErr('venice: empty MSG_B64'); process.exit(ONESHOT ? 1 : 0); }
 
 // ---- log framing helpers --------------------------------------------------
 
@@ -263,6 +270,7 @@ function loadHistory() {
 }
 
 function saveHistory(h) {
+  if (ONESHOT) return; // sub-agent history is ephemeral — never persist it
   try { fs.writeFileSync(HISTORY, JSON.stringify(h)); }
   catch (e) { writeErr(`venice: history write failed: ${e.message}`); }
 }
@@ -367,7 +375,7 @@ function streamTurn(messages) {
 // ---- main loop ------------------------------------------------------------
 
 (async () => {
-  const history = loadHistory();
+  const history = ONESHOT ? [] : loadHistory();
   const messages = [];
   if (SYS_PROMPT) messages.push({ role: 'system', content: SYS_PROMPT });
   for (const m of history) messages.push(m);
@@ -381,6 +389,7 @@ function streamTurn(messages) {
     const turn = await streamTurn(messages);
     if (turn.error) {
       writeErr(`venice: ${turn.error}`);
+      if (ONESHOT) process.exitCode = 1;
       saveHistory(history);
       return;
     }
@@ -393,9 +402,17 @@ function streamTurn(messages) {
     history.push(assistantMsg);
 
     if (turn.toolCalls.length === 0) {
-      // Pure text response — done. Flush trailing newline so the last partial
-      // line surfaces as a `done` event in the TUI.
-      if (midline) writeOut('\n');
+      // Pure text response — done.
+      if (ONESHOT) {
+        // The final answer is this turn's text; emit it (only) to stdout as the
+        // sub-agent's return value, with a trailing newline.
+        const ans = turn.text || '';
+        writeFinal(ans.endsWith('\n') ? ans : ans + '\n');
+      } else if (midline) {
+        // Flush trailing newline so the last partial line surfaces as a `done`
+        // event in the TUI.
+        writeOut('\n');
+      }
       saveHistory(history);
       return;
     }
@@ -431,5 +448,6 @@ function streamTurn(messages) {
   }
 
   writeErr(`venice: tool-call budget exhausted (${TOOL_BUDGET}); stopping`);
+  if (ONESHOT) process.exitCode = 1;
   saveHistory(history);
 })();

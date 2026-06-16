@@ -1,0 +1,56 @@
+#!/bin/sh
+# cs-subagent — provider-agnostic ONE-SHOT LLM call.
+#
+# Contract (uniform across providers): prompt in (argv or stdin),
+# final answer text on stdout, exit 0 on success. No streaming/log framing on
+# stdout — this is a return value the caller (usually cs-job) reads as data.
+#
+# This is the ONLY provider-aware file in the job system. cs-job is provider-blind.
+#
+# Isolation (must not pollute the group's main conversation thread):
+#   claudesdk -> fresh `claude -p` with NO --continue, under a throwaway HOME so
+#                the sub-agent session file is never written into
+#                /workspace/.claude/projects (a later main --continue could
+#                otherwise pick it up as "most recent").
+#   venice    -> venice_stream.js in VENICE_ONESHOT mode: ephemeral in-memory
+#                history (skips /workspace/.cs/venice-history.json), final text
+#                to stdout, tool/progress framing to stderr.
+#
+# Usage: cs-subagent [--system <text>] <prompt...>
+#        echo <prompt> | cs-subagent [--system <text>]
+set -e
+
+CFG=/workspace/.cs/config.json
+SYS=""
+if [ "$1" = "--system" ]; then SYS="$2"; shift 2; fi
+PROMPT="$*"
+[ -z "$PROMPT" ] && PROMPT=$(cat)
+[ -z "$PROMPT" ] && { echo "cs-subagent: empty prompt" >&2; exit 2; }
+
+# provider/model from per-group config (same node one-liner pattern as entrypoint.sh).
+jget() { node -e "try{process.stdout.write((JSON.parse(require('fs').readFileSync('$CFG','utf8'))['$1']||''))}catch(e){}" 2>/dev/null; }
+PROVIDER=$(jget provider); [ -z "$PROVIDER" ] && PROVIDER=venice
+MODEL=$(jget model)
+
+case "$PROVIDER" in
+  claudesdk)
+    H=$(mktemp -d)
+    trap 'rm -rf "$H"' EXIT
+    set -- claude -p "$PROMPT" --bare --dangerously-skip-permissions --output-format text
+    [ -n "$MODEL" ] && set -- "$@" --model "$MODEL"
+    [ -n "$SYS" ]   && set -- "$@" --append-system-prompt "$SYS"
+    env HOME="$H" "$@"
+    ;;
+  venice)
+    VM="$MODEL"; [ -z "$VM" ] && VM="${CLAWSON_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+    MSG_B64=$(printf '%s' "$PROMPT" | base64 -w 0)
+    SP_B64=""
+    [ -n "$SYS" ] && SP_B64=$(printf '%s' "$SYS" | base64 -w 0)
+    MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VM" VENICE_ONESHOT=1 \
+      node /sidecar/venice_stream.js
+    ;;
+  *)
+    echo "cs-subagent: unknown provider '$PROVIDER'" >&2
+    exit 2
+    ;;
+esac

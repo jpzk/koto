@@ -1919,6 +1919,22 @@ func daemonMain() {
 	}
 	// ctl FIFOs are now wired up inside ensure() per-group, including main.
 
+	// Re-establish ctl loops for groups whose sidecar is already running (the
+	// daemon restarted under live sidecars). ensure() does this for any group
+	// that gets a message, but until then the ctl FIFO has no reader — so
+	// self-scheduling and job-completion callbacks (cs-job --notify, which
+	// writes job_done to ctl) would block. startCtlLoop is idempotent.
+	for g := range readGroups() {
+		if g == "main" || !podmanRunning(csName(g)) {
+			continue
+		}
+		if err := ensureCtlFIFO(g); err != nil {
+			emitLogf("error", "ctl[%s]: ensure fifo at boot: %v", g, err)
+			continue
+		}
+		startCtlLoop(g)
+	}
+
 	// gRPC over TCP, secured by mTLS + a bearer-token interceptor. Bind the
 	// overlay (WireGuard) interface only — never 0.0.0.0 — so the control plane
 	// is reachable solely by peers on the private mesh. See auth.go for the TLS

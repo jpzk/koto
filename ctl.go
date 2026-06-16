@@ -206,6 +206,19 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		return listResp{baseResp{OK: true}, listGroups()}
 
+	case "job_done":
+		// Self-targeted (like sched_*): any group may signal completion of its
+		// OWN background jobs. The id is advisory — we (re)arm a debounce and
+		// flushNotify scans for all completed-but-unreported notify jobs, so a
+		// burst of fan-out completions coalesces into one self-send.
+		var req struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(line, &req)
+		emitLogf("info", "ctl[%s]: job_done %s", owner, req.ID)
+		scheduleNotifyFlush(owner)
+		return baseResp{OK: true}
+
 	case "sched_add":
 		var req schedAddReq
 		if err := json.Unmarshal(line, &req); err != nil {

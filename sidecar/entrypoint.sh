@@ -3,6 +3,20 @@ set -e
 D=/workspace/.cs
 mkdir -p "$D"
 [ -p "$D/in" ] || mkfifo "$D/in"
+
+# Make the in-container job tooling callable by name from the agent's bash tool
+# (claude/venice inherit this PATH, and so do their bash subprocesses).
+export PATH=/sidecar:$PATH
+
+# Background-job orphan reconciliation. A job killed by container teardown
+# (restart / stall recovery / ports change / stop) leaves status=running. If
+# THIS entrypoint is executing, the container just (re)started, so nothing from
+# a prior boot is alive — any surviving `running` marker is stale. Runs once,
+# before the read loop, so it can't race a job of the current boot.
+for jd in "$D"/jobs/*/; do
+  [ -d "$jd" ] || continue
+  [ "$(cat "$jd/status" 2>/dev/null)" = running ] && echo orphaned > "$jd/status"
+done
 # Per-turn wall-clock watchdog. Without it, a tool subprocess that hangs or
 # busy-loops (e.g. a `column` spin on degenerate input) keeps `claude` blocked
 # in wait() forever, the stdout pipe never closes, `[[turn_end]]` below never

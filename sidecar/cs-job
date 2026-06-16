@@ -1,0 +1,118 @@
+#!/bin/sh
+# cs-job — provider-blind background job runner for a sidecar agent.
+#
+# Lets the agent fan out work that OUTLIVES the current turn. Each job is a
+# detached (setsid) process whose stdout+stderr, exit code and status are
+# captured under /workspace/.cs/jobs/<id>/ (bind-mounted, so results persist
+# across turns and even container removal).
+#
+# Why setsid: the turn runs under `timeout -s KILL` (entrypoint.sh), which
+# signals the whole process group on completion/expiry. setsid puts the job in
+# a NEW session/group so it escapes that kill and is reaped by catatonit (PID 1,
+# --init). Verified empirically before this script existed.
+#
+# Orphan handling: a job killed by container teardown leaves status=running.
+# entrypoint.sh relabels those to "orphaned" at next boot (safe: if entrypoint
+# runs, nothing from a prior boot is alive).
+#
+# Commands:
+#   cs-job run -- <cmd...>     detach cmd, print <id>, return immediately
+#   cs-job spawn <prompt...>   = run -- cs-subagent <prompt...>  (LLM fan-out)
+#   cs-job list                id / status / rc / cmd table
+#   cs-job wait <id> [secs]    block until done (default 600s budget)
+#   cs-job status <id>         print status (running|done|orphaned)
+#   cs-job logs <id>           cat the job's combined output
+#   cs-job rm <id>             remove one job dir
+#   cs-job clean               remove all non-running job dirs
+set -e
+
+JOBS=/workspace/.cs/jobs
+LOCK="$JOBS/.lock"
+MAX=${CS_MAX_JOBS:-8}
+mkdir -p "$JOBS"
+
+jstatus() { cat "$JOBS/$1/status" 2>/dev/null || echo unknown; }
+count_running() { c=0; for d in "$JOBS"/*/; do [ "$(cat "$d/status" 2>/dev/null)" = running ] && c=$((c+1)); done; echo "$c"; }
+
+cmd=${1:-}; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+  run)
+    NOTIFY=
+    [ "${1:-}" = "--notify" ] && { NOTIFY=1; shift; }
+    [ "${1:-}" = "--" ] && shift
+    [ $# -eq 0 ] && { echo "cs-job run: no command" >&2; exit 2; }
+    # Atomic cap check + dir mint under flock so parallel `run &` can't exceed MAX.
+    exec 9>"$LOCK"; flock 9
+    running=$(count_running)
+    if [ "$running" -ge "$MAX" ]; then
+      echo "cs-job: job cap reached ($running/$MAX running); wait or raise CS_MAX_JOBS" >&2
+      exit 1
+    fi
+    D=$(mktemp -d "$JOBS/XXXXXXXX")
+    id=$(basename "$D")
+    { printf '%s ' "$@"; echo; } > "$D/cmd"
+    date +%s > "$D/started"
+    echo running > "$D/status"
+    [ -n "$NOTIFY" ] && : > "$D/notify"   # marker: post job_done to ctl on completion
+    flock -u 9
+    # Detach: new session escapes the turn's process-group kill; stdio -> files.
+    # On completion a notify job posts {"cmd":"job_done"} to the group ctl FIFO;
+    # the daemon debounces + coalesces those into one self-send (notify.go).
+    setsid sh -c '
+      exec >"'"$D"'/out" 2>&1
+      "$@"
+      rc=$?
+      echo "$rc" > "'"$D"'/rc"
+      echo done > "'"$D"'/status"
+      [ -f "'"$D"'/notify" ] && /sidecar/cs-job _notify "'"$id"'" || true
+    ' _ "$@" &
+    echo "$id"
+    ;;
+  _notify)
+    # internal: post a job_done event to the group ctl FIFO. Bounded by timeout
+    # so a down ctl reader (daemon stopped) can't hang the detached job — the
+    # notify is best-effort; the result is still readable via cs-job logs.
+    printf '{"cmd":"job_done","id":"%s"}\n' "${1:?}" | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true
+    ;;
+  spawn)
+    NF=
+    [ "${1:-}" = "--notify" ] && { NF=--notify; shift; }
+    [ $# -eq 0 ] && { echo "cs-job spawn: no prompt" >&2; exit 2; }
+    exec "$0" run $NF -- cs-subagent "$@"
+    ;;
+  list)
+    printf '%-10s %-9s %-4s %s\n' ID STATUS RC CMD
+    for d in "$JOBS"/*/; do
+      [ -d "$d" ] || continue
+      id=$(basename "$d")
+      printf '%-10s %-9s %-4s %s\n' "$id" "$(cat "$d/status" 2>/dev/null || echo ?)" \
+        "$(cat "$d/rc" 2>/dev/null || echo -)" "$(cat "$d/cmd" 2>/dev/null | head -c 80)"
+    done
+    ;;
+  wait)
+    id=${1:?cs-job wait <id> [secs]}; budget=${2:-600}
+    [ -d "$JOBS/$id" ] || { echo "cs-job: no such job $id" >&2; exit 2; }
+    waited=0
+    while [ "$(jstatus "$id")" = running ]; do
+      [ "$waited" -ge "$budget" ] && { echo "cs-job: wait timeout ($budget s) — job $id still running" >&2; exit 1; }
+      sleep 1; waited=$((waited+1))
+    done
+    echo "$(jstatus "$id") rc=$(cat "$JOBS/$id/rc" 2>/dev/null || echo unknown)"
+    ;;
+  status)  jstatus "${1:?cs-job status <id>}" ;;
+  logs)    cat "$JOBS/${1:?cs-job logs <id>}/out" 2>/dev/null || { echo "cs-job: no output for $1" >&2; exit 2; } ;;
+  rm)      rm -rf "$JOBS/${1:?cs-job rm <id>}"; echo removed ;;
+  clean)
+    n=0
+    for d in "$JOBS"/*/; do
+      [ -d "$d" ] || continue
+      [ "$(cat "$d/status" 2>/dev/null)" = running ] && continue
+      rm -rf "$d"; n=$((n+1))
+    done
+    echo "removed $n"
+    ;;
+  *)
+    echo "usage: cs-job {run -- <cmd...>|spawn <prompt...>|list|wait <id> [secs]|status <id>|logs <id>|rm <id>|clean}" >&2
+    exit 2
+    ;;
+esac
