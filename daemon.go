@@ -1417,6 +1417,26 @@ func tailLog(g string) {
 				// EXACT close marker for the block we're currently inside;
 				// stream_filter.js escapes those line-starts in body content
 				// before they reach the log.
+			} else if buf == "[[turn_end]]" {
+				// turn_end is a harness boundary: entrypoint.sh writes it directly
+				// (not via stream_filter, which escapes any literal [[turn_end]] in
+				// tool/think body), so it is always genuine and must take priority
+				// over an open block. Otherwise a turn whose final emission is a
+				// thinking/tool_out block leaves us inThinking/inToolOut, the
+				// [[turn_end]] line is swallowed as body, no turn_end event fires,
+				// notifyTurnDone never runs, and sendNow blocks for the full
+				// turnWaitTimeout — wedging the group's single-flight send queue.
+				// Force-close any open block, then emit the boundary.
+				if inThinking {
+					emit(g, Event{Event: "thinking_done", Body: strings.Join(thinkBody, "\n"), Ts: ts})
+					inThinking = false
+					thinkBody = nil
+				} else if inToolOut {
+					emit(g, Event{Event: "tool_result_done", Body: strings.Join(toolOutBody, "\n"), Ts: ts})
+					inToolOut = false
+					toolOutBody = nil
+				}
+				emit(g, Event{Event: "turn_end", Ts: ts})
 			} else if inThinking {
 				if strings.HasPrefix(buf, "[[think_end]] ") {
 					words := 0
@@ -1485,12 +1505,6 @@ func tailLog(g string) {
 				// thinking block that emitted begin+end while we were
 				// still settling state). Swallow it — emitting it as a
 				// `done` event surfaces raw framing in the TUI.
-			} else if buf == "[[turn_end]]" {
-				// Sidecar's per-message provider invocation finished. This is
-				// what sendNow blocks on (via turnDone) before the queue worker
-				// advances, so queued sends serialize end-to-end rather than
-				// interleaving prompts with prior responses in the log.
-				emit(g, Event{Event: "turn_end", Ts: ts})
 			} else {
 				emit(g, Event{Event: "done", Text: buf, Ts: ts})
 			}
@@ -1568,6 +1582,30 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 		//
 		// Same nesting priority as the live tailer: while inside a block,
 		// only the matching end marker can close it. See tailLog comment.
+		// Exception, mirroring tailLog: [[turn_end]] is a genuine harness
+		// boundary that must close out an open block rather than be absorbed
+		// as its body — otherwise a turn ending mid-thinking-block leaves the
+		// replay permanently inThinking and swallows everything after it.
+		if line == "[[turn_end]]" {
+			if inThinking {
+				events = append(events, Event{
+					Event: "thinking_done", Group: g, Ts: ts, Historical: true,
+					Body: strings.Join(thinkBody, "\n"),
+				})
+				inThinking = false
+				thinkBody = nil
+			} else if inToolOut {
+				events = append(events, Event{
+					Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
+					Body: strings.Join(toolOutBody, "\n"),
+				})
+				inToolOut = false
+				toolOutBody = nil
+			}
+			// No renderable content for a boundary in replay; drop it (matches
+			// the existing later turn_end handling).
+			continue
+		}
 		if inThinking {
 			if strings.HasPrefix(line, "[[think_end]] ") {
 				words := 0
@@ -1610,13 +1648,6 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 		}
 		if strings.HasPrefix(line, "[[think_end]] ") || strings.HasPrefix(line, "[[tool_out_end]] ") {
 			// Stray close marker outside a block — same rationale as the live tailer.
-			continue
-		}
-		if line == "[[turn_end]]" {
-			// Turn boundary. The live tailer turns this into a `turn_end` event;
-			// in a history replay it has no renderable content, so drop it instead
-			// of letting it fall through to the default case and surface as a raw
-			// "[[turn_end]]" response line in clients.
 			continue
 		}
 		ev := Event{Group: g, Ts: ts, Historical: true}

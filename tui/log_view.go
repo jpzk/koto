@@ -54,7 +54,7 @@ func init() {
 	styles.Levels[log.DebugLevel] = lipgloss.NewStyle().
 		SetString("DEBUG").Bold(true).Foreground(cGray)
 	styles.Levels[log.InfoLevel] = lipgloss.NewStyle().
-		SetString("INFO ").Bold(true).Foreground(cCyan)
+		SetString("INFO ").Bold(true).Foreground(cAmber)
 	styles.Levels[log.WarnLevel] = lipgloss.NewStyle().
 		SetString("WARN ").Bold(true).Foreground(cYellow)
 	styles.Levels[log.ErrorLevel] = lipgloss.NewStyle().
@@ -213,7 +213,7 @@ func (m Model) renderLogScrollbar() string {
 	col := make([]string, visible)
 	for i := range col {
 		if i >= pos && i < pos+thumbH {
-			col[i] = lipgloss.NewStyle().Foreground(cCyan).Render("▐")
+			col[i] = lipgloss.NewStyle().Foreground(cAmber).Render("▐")
 		} else {
 			col[i] = lipgloss.NewStyle().Foreground(cGray).Render("│")
 		}

@@ -133,13 +133,43 @@ tier 2: cs_host           nc.py + proxy.py + claude-for-refresh
                           mount allowlist, not by API restriction —
                           the socket is currently full DooD)
    |
-   | enforced by: workspace-only mounts, no creds in env, egress only
-   |              via proxy DNS, sidecar -> sidecar networking unrestricted
+   | enforced by: workspace-only mounts, no creds in env.
+   |              NETWORK IS NOT ISOLATED (see below).
    v
 tier 3: sidecars          cs_main_go, cs_<g>_go, ...
                           (untrusted; run claude on attacker-influenceable input)
                           have own /workspace + (main only) /peers RW
 ```
+
+**Sidecar network egress is NOT restricted.** `clawson-net` (created in
+`host/run-host.sh`) is a plain podman bridge — `"internal": false` — so every
+sidecar gets NAT'd outbound and can reach **the full internet and the host's
+local network (LAN)**, plus every other sidecar on the bridge. The
+credential-injecting proxy is only the *default* `ANTHROPIC_BASE_URL` for the
+Anthropic client; it is NOT a network boundary. claude's `bash` tool (and the
+Venice `bash` tool) can `curl` to any host, so a prompt-injected sidecar can
+exfiltrate workspace contents anywhere or scan the LAN. The proxy still
+protects the *credentials* (the OAuth/Venice key never enters a sidecar), but
+it does not contain a compromised sidecar's egress. To actually enforce
+"egress only via the proxy", recreate `clawson-net` with `--internal` and
+dual-home `cs_host_go` onto a second NAT'd network so the proxy keeps its API
+egress while sidecars lose theirs (decided against for now to keep the sidecar
+port-publishing feature working).
+
+**The container boundary is a shared-kernel boundary, not a VM.** All sidecars
+run as podman containers sharing the *host kernel* — isolation is namespaces +
+cgroups + seccomp, not hardware virtualization. A kernel LPE or a crun/runc
+escape from an untrusted sidecar collapses tier 3 → tier 1. Because of
+`--userns=keep-id`, an escape lands as **host uid 1000 (your user)**, not root —
+but on a single-user host that is already full authority for the account; the
+proxy/credential isolation does not help against a kernel escape. **`pip`-enabled
+sidecars are the worst case**: `--cap-add SYS_ADMIN` + `unmask=/proc/*` give a
+near-root escape surface, far larger than a normal sidecar. "The container is the
+security boundary" throughout this doc means exactly this — a namespacing
+boundary against a *non-kernel-exploiting* adversary. A real hardware boundary
+needs gVisor (`runsc`, user-space kernel — reduced syscall surface) or a microVM
+runtime (Kata / Firecracker); both are deferred (perf + the `--userns`/DooD
+interplay) and would be the move if sidecars ever run truly hostile workloads.
 
 The "we trust the host user" decision was deliberate. DooD socket equals host authority for `cs_host`; that's an accepted risk. If you ever want to drop tier 2 closer to tier 3, swap DooD for a 3-verb supervisor (sketch in earlier design discussion) or for rootless podman-in-podman.
 

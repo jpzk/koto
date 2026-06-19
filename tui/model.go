@@ -2209,6 +2209,18 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	if v == "/stop" {
 		return daemonCmd(m.sock, "interrupt", m.cur, nil)
 	}
+	if v == "/repaint" {
+		// Force a full redraw: clear the alt-screen buffer, then re-run the
+		// layout path with the current dimensions so every viewport re-wraps.
+		// Useful when the terminal got into a corrupt state (resize missed,
+		// stray escape sequence) and Bubble Tea's automatic repaint isn't
+		// enough.
+		w, h := m.width, m.height
+		return tea.Batch(
+			tea.ClearScreen,
+			func() tea.Msg { return tea.WindowSizeMsg{Width: w, Height: h} },
+		)
+	}
 	if v == "/reload" {
 		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
 		m.reloadPending = true

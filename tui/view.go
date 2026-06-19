@@ -13,11 +13,11 @@ import (
 var (
 	cBlack    = lipgloss.Color("0")
 	cRed      = lipgloss.Color("1")
-	cGreen    = lipgloss.Color("2")
 	cYellow   = lipgloss.Color("3")
 	cBlue     = lipgloss.Color("4")
 	cMagenta  = lipgloss.Color("5")
-	cCyan     = lipgloss.Color("6")
+	cAmber    = lipgloss.Color("214") // signature accent (256-color amber #ffaf00)
+	cDkAmber  = lipgloss.Color("130") // group indicator (256-color dark amber #af5f00)
 	cWhite    = lipgloss.Color("7")
 	cGray     = lipgloss.Color("8")
 	cBrWhite  = lipgloss.Color("15")
@@ -39,7 +39,7 @@ func pctColor(frac float64) lipgloss.Color {
 	if frac >= 0.50 {
 		return cYellow
 	}
-	return cCyan
+	return cAmber
 }
 
 // renderBar draws a [████░░░░] style bar: full blocks in `fg` for the filled
@@ -203,14 +203,14 @@ func (m Model) renderStatusBar(spin string) string {
 }
 
 func (m Model) renderStatusLeft() string {
-	app := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).Render("  clawson ")
-	a1 := lipgloss.NewStyle().Foreground(cCyan).Background(cBlue).Render(pSep)
+	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render("  clawson ")
+	a1 := lipgloss.NewStyle().Foreground(cAmber).Background(cDkAmber).Render(pSep)
 	runDot := " "
 	if g, ok := m.groups[m.cur]; ok && g.Running {
 		runDot = " "
 	}
-	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cBlue).Bold(true).Render("   " + m.cur + runDot + " ")
-	a2 := lipgloss.NewStyle().Foreground(cBlue).Background(cBlack).Render(pSep)
+	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + m.cur + runDot + " ")
+	a2 := lipgloss.NewStyle().Foreground(cDkAmber).Background(cBlack).Render(pSep)
 	return app + a1 + grp + a2 + m.renderLoadingSegment()
 }
 
@@ -306,8 +306,8 @@ func (m Model) renderStatusRight(spin string) string {
 			count++
 		}
 	}
-	tail := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Render(pCurveR) +
-		lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
+	tail := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Render(pCurveR) +
+		lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
 			Render(fmt.Sprintf("   %d  ", count))
 	parts = append(parts, tail)
 
@@ -320,10 +320,10 @@ func (m Model) renderTree(rows int) string {
 	order := m.treeOrder()
 	header := ""
 	if m.focus == focusTree {
-		header = lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
+		header = lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
 			Render(" agents (tab back) ")
 	} else {
-		header = lipgloss.NewStyle().Foreground(cCyan).Bold(true).
+		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
 			Render(" agents ")
 	}
 	lines := []string{header, ""}
@@ -392,18 +392,18 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 	dotColor := cGray
 	if running {
 		dot = "● "
-		dotColor = cGreen
+		dotColor = cAmber
 	}
 	// Stalled overrides running: the container is up but its FIFO loop is
 	// wedged (daemon saw no turn_end within turnWaitTimeout). Yellow ⚠ so it
-	// reads as "alive but stuck", distinct from green-healthy / gray-stopped.
+	// reads as "alive but stuck", distinct from orange-healthy / gray-stopped.
 	if stalled {
 		dot = "⚠ "
 		dotColor = cYellow
 	}
 	nameColor := cWhite
 	if isCur {
-		nameColor = cCyan
+		nameColor = cAmber
 	} else if !running {
 		nameColor = cGray
 	}
@@ -415,8 +415,8 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 		dotColor = cPink
 	}
 	if hov {
-		// highlight row with cyan background, black foreground for the whole row
-		full := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
+		// highlight row with amber background, black foreground for the whole row
+		full := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
 			Render(" " + branch + dot + pad(g, w) + badge)
 		return full
 	}
@@ -479,7 +479,7 @@ func renderLiveLines(liveText, liveKind string, tick int) []string {
 // renderPendingLines formats queued-but-not-yet-started prompts (typed ahead
 // while a turn is in flight) for the bottom of the chat viewport. They render
 // with an amber ⏳ glyph so they read as "waiting in the queue", distinct from
-// the cyan › of a prompt the daemon has already begun. Multi-line prompts keep
+// the amber › of a prompt the daemon has already begun. Multi-line prompts keep
 // their shape with indented continuation rows.
 func renderPendingLines(pending []string) []string {
 	glyph := lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render("⏳ ")
@@ -513,8 +513,8 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 
 	switch b.kind {
 	case "prompt":
-		glyph := lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("›  ")
-		body := lipgloss.NewStyle().Foreground(cCyan)
+		glyph := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("›  ")
+		body := lipgloss.NewStyle().Foreground(cAmber)
 		for i, ln := range srcLines {
 			if i == 0 {
 				out = append(out, stampStr+glyph+body.Render(ln))
@@ -553,10 +553,10 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		}
 	case "bg":
 		// Output streamed from a backgrounded shell that the daemon is
-		// tailing on the operator's behalf. Distinct cyan-tinted glyph
+		// tailing on the operator's behalf. Distinct amber-tinted glyph
 		// so it's not mistaken for the model's voice or a regular tool
 		// result.
-		glyph := lipgloss.NewStyle().Foreground(cCyan).Render("⟳  ")
+		glyph := lipgloss.NewStyle().Foreground(cAmber).Render("⟳  ")
 		body := lipgloss.NewStyle().Foreground(cGray)
 		for i, ln := range srcLines {
 			if i == 0 {
@@ -618,7 +618,7 @@ func (m Model) renderScrollbar(rows int) string {
 	thumbTop := int(float64(rangeN) * m.vp.ScrollPercent())
 	for i := 0; i < rows; i++ {
 		if i >= thumbTop && i < thumbTop+thumb {
-			cells[i] = lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("█")
+			cells[i] = lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("█")
 		} else {
 			cells[i] = lipgloss.NewStyle().Foreground(cGray).Render("│")
 		}
@@ -632,8 +632,8 @@ func (m Model) renderInput() string {
 	borderColor := cGray
 	prefixColor := cGray
 	if m.focus == focusInput {
-		borderColor = cCyan
-		prefixColor = cCyan
+		borderColor = cAmber
+		prefixColor = cAmber
 	}
 	prefix := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(" ")
 	body := prefix + " " + m.input.View()
@@ -723,7 +723,7 @@ func (m Model) renderHint() string {
 // renderProviderModel formats the bottom-right "provider · model[ · effort]"
 // segment. claudesdk renders red to flag that the request will hit the
 // OAuth-credentialled Anthropic path (cost / rate-limit blast radius);
-// venice renders cyan. Effort is only appended when set in config.json
+// venice renders amber. Effort is only appended when set in config.json
 // (claudesdk-only knob; harmless but noisy on venice if shown by default).
 // Empty string when the current group isn't known yet (pre-first list).
 func (m Model) renderProviderModel() string {
@@ -739,7 +739,7 @@ func (m Model) renderProviderModel() string {
 	if model == "" {
 		model = "(default)"
 	}
-	provColor := cCyan
+	provColor := cAmber
 	if provider == "claudesdk" {
 		provColor = cRed
 	}
@@ -772,10 +772,10 @@ func (m Model) renderPicker(rows int) string {
 		contentW = 10
 	}
 
-	header := lipgloss.NewStyle().Foreground(cBlack).Background(cCyan).Bold(true).
+	header := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
 		Render(fmt.Sprintf(" history · %s · %d/%d ", m.cur, len(m.picker.matches), len(m.picker.items)))
 
-	prefix := lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("❯ ")
+	prefix := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 	inputLine := prefix + m.picker.input.View()
 	inputLine = lipgloss.NewStyle().MaxWidth(contentW).Render(inputLine)
 
@@ -810,8 +810,8 @@ func (m Model) renderPicker(rows int) string {
 		marker := "  "
 		style := lipgloss.NewStyle().Foreground(cWhite)
 		if i == m.picker.cursor {
-			marker = lipgloss.NewStyle().Foreground(cCyan).Bold(true).Render("❯ ")
-			style = lipgloss.NewStyle().Foreground(cCyan).Bold(true)
+			marker = lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
+			style = lipgloss.NewStyle().Foreground(cAmber).Bold(true)
 		}
 		body := truncRunes(raw, contentW-2)
 		resultLines = append(resultLines, marker+style.Render(body))
@@ -827,7 +827,7 @@ func (m Model) renderPicker(rows int) string {
 
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(cCyan).
+		BorderForeground(cAmber).
 		Width(boxW - 2).
 		Padding(0, 1).
 		Render(inner)
