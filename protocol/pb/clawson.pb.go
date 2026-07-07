@@ -38,18 +38,25 @@ const (
 )
 
 type Event struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Event         string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
-	Group         string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	Ts            float64                `protobuf:"fixed64,3,opt,name=ts,proto3" json:"ts,omitempty"`
-	Msg           string                 `protobuf:"bytes,4,opt,name=msg,proto3" json:"msg,omitempty"`
-	Text          string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
-	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`
-	Input         string                 `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`
-	Words         int32                  `protobuf:"varint,8,opt,name=words,proto3" json:"words,omitempty"`
-	Body          string                 `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
-	Historical    bool                   `protobuf:"varint,10,opt,name=historical,proto3" json:"historical,omitempty"`
-	Id            string                 `protobuf:"bytes,11,opt,name=id,proto3" json:"id,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Event      string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
+	Group      string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
+	Ts         float64                `protobuf:"fixed64,3,opt,name=ts,proto3" json:"ts,omitempty"`
+	Msg        string                 `protobuf:"bytes,4,opt,name=msg,proto3" json:"msg,omitempty"`
+	Text       string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+	Name       string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`
+	Input      string                 `protobuf:"bytes,7,opt,name=input,proto3" json:"input,omitempty"`
+	Words      int32                  `protobuf:"varint,8,opt,name=words,proto3" json:"words,omitempty"`
+	Body       string                 `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
+	Historical bool                   `protobuf:"varint,10,opt,name=historical,proto3" json:"historical,omitempty"`
+	Id         string                 `protobuf:"bytes,11,opt,name=id,proto3" json:"id,omitempty"`
+	// Per-group monotonic sequence number, assigned by the daemon at emit
+	// time (starts at 1; resets on daemon restart). Streaming frames carry
+	// it so clients can resume a broken stream gaplessly via
+	// SubscribeReq.since_seq. History RPC events re-parsed from the log file
+	// have seq 0 — the cursor only exists for the live stream. The synthetic
+	// `gap` event (see SubscribeReq) also carries seq 0.
+	Seq           uint64 `protobuf:"varint,12,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -159,6 +166,13 @@ func (x *Event) GetId() string {
 		return x.Id
 	}
 	return ""
+}
+
+func (x *Event) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
 }
 
 type LogEvent struct {
@@ -765,16 +779,61 @@ func (*LogsReq) Descriptor() ([]byte, []int) {
 	return file_clawson_proto_rawDescGZIP(), []int{9}
 }
 
+type WatchReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchReq) Reset() {
+	*x = WatchReq{}
+	mi := &file_clawson_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchReq) ProtoMessage() {}
+
+func (x *WatchReq) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchReq.ProtoReflect.Descriptor instead.
+func (*WatchReq) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{10}
+}
+
+// since_seq = 0 requests live-only delivery (the historical behavior).
+// since_seq > 0 asks the daemon to first replay, from its in-memory
+// per-group ring, every event with seq > since_seq — registered atomically
+// with the ring snapshot, so the client sees no gap and no duplicate across
+// the replay/live boundary. When the ring cannot cover the range (events
+// aged out, or the daemon restarted and seq regressed), the stream starts
+// with a synthetic Event{event:"gap"}: the client's view is stale beyond
+// repair by replay and it should refetch via History.
 type SubscribeReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	SinceSeq      uint64                 `protobuf:"varint,2,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SubscribeReq) Reset() {
 	*x = SubscribeReq{}
-	mi := &file_clawson_proto_msgTypes[10]
+	mi := &file_clawson_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -786,7 +845,7 @@ func (x *SubscribeReq) String() string {
 func (*SubscribeReq) ProtoMessage() {}
 
 func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[10]
+	mi := &file_clawson_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -799,7 +858,7 @@ func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeReq.ProtoReflect.Descriptor instead.
 func (*SubscribeReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{10}
+	return file_clawson_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SubscribeReq) GetGroup() string {
@@ -807,6 +866,66 @@ func (x *SubscribeReq) GetGroup() string {
 		return x.Group
 	}
 	return ""
+}
+
+func (x *SubscribeReq) GetSinceSeq() uint64 {
+	if x != nil {
+		return x.SinceSeq
+	}
+	return 0
+}
+
+// One WatchState frame: the same groups map List returns, pushed on change.
+type StateFrame struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Groups        map[string]*GroupInfo  `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Ts            float64                `protobuf:"fixed64,2,opt,name=ts,proto3" json:"ts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateFrame) Reset() {
+	*x = StateFrame{}
+	mi := &file_clawson_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateFrame) ProtoMessage() {}
+
+func (x *StateFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateFrame.ProtoReflect.Descriptor instead.
+func (*StateFrame) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *StateFrame) GetGroups() map[string]*GroupInfo {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
+func (x *StateFrame) GetTs() float64 {
+	if x != nil {
+		return x.Ts
+	}
+	return 0
 }
 
 type HistoryReq struct {
@@ -820,7 +939,7 @@ type HistoryReq struct {
 
 func (x *HistoryReq) Reset() {
 	*x = HistoryReq{}
-	mi := &file_clawson_proto_msgTypes[11]
+	mi := &file_clawson_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -832,7 +951,7 @@ func (x *HistoryReq) String() string {
 func (*HistoryReq) ProtoMessage() {}
 
 func (x *HistoryReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[11]
+	mi := &file_clawson_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -845,7 +964,7 @@ func (x *HistoryReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryReq.ProtoReflect.Descriptor instead.
 func (*HistoryReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{11}
+	return file_clawson_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *HistoryReq) GetGroup() string {
@@ -884,7 +1003,7 @@ type SkillList struct {
 
 func (x *SkillList) Reset() {
 	*x = SkillList{}
-	mi := &file_clawson_proto_msgTypes[12]
+	mi := &file_clawson_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -896,7 +1015,7 @@ func (x *SkillList) String() string {
 func (*SkillList) ProtoMessage() {}
 
 func (x *SkillList) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[12]
+	mi := &file_clawson_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -909,7 +1028,7 @@ func (x *SkillList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillList.ProtoReflect.Descriptor instead.
 func (*SkillList) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{12}
+	return file_clawson_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SkillList) GetItems() []string {
@@ -938,7 +1057,7 @@ type ConfigReq struct {
 
 func (x *ConfigReq) Reset() {
 	*x = ConfigReq{}
-	mi := &file_clawson_proto_msgTypes[13]
+	mi := &file_clawson_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -950,7 +1069,7 @@ func (x *ConfigReq) String() string {
 func (*ConfigReq) ProtoMessage() {}
 
 func (x *ConfigReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[13]
+	mi := &file_clawson_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -963,7 +1082,7 @@ func (x *ConfigReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigReq.ProtoReflect.Descriptor instead.
 func (*ConfigReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{13}
+	return file_clawson_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ConfigReq) GetGroup() string {
@@ -1058,7 +1177,7 @@ type SkillListReq struct {
 
 func (x *SkillListReq) Reset() {
 	*x = SkillListReq{}
-	mi := &file_clawson_proto_msgTypes[14]
+	mi := &file_clawson_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1189,7 @@ func (x *SkillListReq) String() string {
 func (*SkillListReq) ProtoMessage() {}
 
 func (x *SkillListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[14]
+	mi := &file_clawson_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1202,7 @@ func (x *SkillListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillListReq.ProtoReflect.Descriptor instead.
 func (*SkillListReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{14}
+	return file_clawson_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SkillListReq) GetGroup() string {
@@ -1102,7 +1221,7 @@ type SkillNewReq struct {
 
 func (x *SkillNewReq) Reset() {
 	*x = SkillNewReq{}
-	mi := &file_clawson_proto_msgTypes[15]
+	mi := &file_clawson_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1114,7 +1233,7 @@ func (x *SkillNewReq) String() string {
 func (*SkillNewReq) ProtoMessage() {}
 
 func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[15]
+	mi := &file_clawson_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1127,7 +1246,7 @@ func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewReq.ProtoReflect.Descriptor instead.
 func (*SkillNewReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{15}
+	return file_clawson_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SkillNewReq) GetName() string {
@@ -1146,7 +1265,7 @@ type SkillReadReq struct {
 
 func (x *SkillReadReq) Reset() {
 	*x = SkillReadReq{}
-	mi := &file_clawson_proto_msgTypes[16]
+	mi := &file_clawson_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1158,7 +1277,7 @@ func (x *SkillReadReq) String() string {
 func (*SkillReadReq) ProtoMessage() {}
 
 func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[16]
+	mi := &file_clawson_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1171,7 +1290,7 @@ func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadReq.ProtoReflect.Descriptor instead.
 func (*SkillReadReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{16}
+	return file_clawson_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SkillReadReq) GetName() string {
@@ -1190,7 +1309,7 @@ type MetricsReq struct {
 
 func (x *MetricsReq) Reset() {
 	*x = MetricsReq{}
-	mi := &file_clawson_proto_msgTypes[17]
+	mi := &file_clawson_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1202,7 +1321,7 @@ func (x *MetricsReq) String() string {
 func (*MetricsReq) ProtoMessage() {}
 
 func (x *MetricsReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[17]
+	mi := &file_clawson_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1215,7 +1334,7 @@ func (x *MetricsReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReq.ProtoReflect.Descriptor instead.
 func (*MetricsReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{17}
+	return file_clawson_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *MetricsReq) GetGroup() string {
@@ -1236,7 +1355,7 @@ type SchedAddReq struct {
 
 func (x *SchedAddReq) Reset() {
 	*x = SchedAddReq{}
-	mi := &file_clawson_proto_msgTypes[18]
+	mi := &file_clawson_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1248,7 +1367,7 @@ func (x *SchedAddReq) String() string {
 func (*SchedAddReq) ProtoMessage() {}
 
 func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[18]
+	mi := &file_clawson_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1261,7 +1380,7 @@ func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddReq.ProtoReflect.Descriptor instead.
 func (*SchedAddReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{18}
+	return file_clawson_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SchedAddReq) GetGroup() string {
@@ -1294,7 +1413,7 @@ type SchedListReq struct {
 
 func (x *SchedListReq) Reset() {
 	*x = SchedListReq{}
-	mi := &file_clawson_proto_msgTypes[19]
+	mi := &file_clawson_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1306,7 +1425,7 @@ func (x *SchedListReq) String() string {
 func (*SchedListReq) ProtoMessage() {}
 
 func (x *SchedListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[19]
+	mi := &file_clawson_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1319,7 +1438,7 @@ func (x *SchedListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListReq.ProtoReflect.Descriptor instead.
 func (*SchedListReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{19}
+	return file_clawson_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SchedListReq) GetGroup() string {
@@ -1338,7 +1457,7 @@ type SchedIDReq struct {
 
 func (x *SchedIDReq) Reset() {
 	*x = SchedIDReq{}
-	mi := &file_clawson_proto_msgTypes[20]
+	mi := &file_clawson_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1350,7 +1469,7 @@ func (x *SchedIDReq) String() string {
 func (*SchedIDReq) ProtoMessage() {}
 
 func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[20]
+	mi := &file_clawson_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1363,7 +1482,7 @@ func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedIDReq.ProtoReflect.Descriptor instead.
 func (*SchedIDReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{20}
+	return file_clawson_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SchedIDReq) GetId() string {
@@ -1383,7 +1502,7 @@ type SchedToggleReq struct {
 
 func (x *SchedToggleReq) Reset() {
 	*x = SchedToggleReq{}
-	mi := &file_clawson_proto_msgTypes[21]
+	mi := &file_clawson_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1395,7 +1514,7 @@ func (x *SchedToggleReq) String() string {
 func (*SchedToggleReq) ProtoMessage() {}
 
 func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[21]
+	mi := &file_clawson_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1408,7 +1527,7 @@ func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedToggleReq.ProtoReflect.Descriptor instead.
 func (*SchedToggleReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{21}
+	return file_clawson_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SchedToggleReq) GetId() string {
@@ -1435,7 +1554,7 @@ type BaseResp struct {
 
 func (x *BaseResp) Reset() {
 	*x = BaseResp{}
-	mi := &file_clawson_proto_msgTypes[22]
+	mi := &file_clawson_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1447,7 +1566,7 @@ func (x *BaseResp) String() string {
 func (*BaseResp) ProtoMessage() {}
 
 func (x *BaseResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[22]
+	mi := &file_clawson_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1460,7 +1579,7 @@ func (x *BaseResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BaseResp.ProtoReflect.Descriptor instead.
 func (*BaseResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{22}
+	return file_clawson_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *BaseResp) GetOk() bool {
@@ -1488,7 +1607,7 @@ type SpawnResp struct {
 
 func (x *SpawnResp) Reset() {
 	*x = SpawnResp{}
-	mi := &file_clawson_proto_msgTypes[23]
+	mi := &file_clawson_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1500,7 +1619,7 @@ func (x *SpawnResp) String() string {
 func (*SpawnResp) ProtoMessage() {}
 
 func (x *SpawnResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[23]
+	mi := &file_clawson_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1513,7 +1632,7 @@ func (x *SpawnResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnResp.ProtoReflect.Descriptor instead.
 func (*SpawnResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{23}
+	return file_clawson_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SpawnResp) GetOk() bool {
@@ -1548,7 +1667,7 @@ type ListResp struct {
 
 func (x *ListResp) Reset() {
 	*x = ListResp{}
-	mi := &file_clawson_proto_msgTypes[24]
+	mi := &file_clawson_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1560,7 +1679,7 @@ func (x *ListResp) String() string {
 func (*ListResp) ProtoMessage() {}
 
 func (x *ListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[24]
+	mi := &file_clawson_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1573,7 +1692,7 @@ func (x *ListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResp.ProtoReflect.Descriptor instead.
 func (*ListResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{24}
+	return file_clawson_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ListResp) GetOk() bool {
@@ -1609,7 +1728,7 @@ type HistoryResp struct {
 
 func (x *HistoryResp) Reset() {
 	*x = HistoryResp{}
-	mi := &file_clawson_proto_msgTypes[25]
+	mi := &file_clawson_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1621,7 +1740,7 @@ func (x *HistoryResp) String() string {
 func (*HistoryResp) ProtoMessage() {}
 
 func (x *HistoryResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[25]
+	mi := &file_clawson_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1634,7 +1753,7 @@ func (x *HistoryResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryResp.ProtoReflect.Descriptor instead.
 func (*HistoryResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{25}
+	return file_clawson_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *HistoryResp) GetOk() bool {
@@ -1676,7 +1795,7 @@ type ConfigResp struct {
 
 func (x *ConfigResp) Reset() {
 	*x = ConfigResp{}
-	mi := &file_clawson_proto_msgTypes[26]
+	mi := &file_clawson_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1688,7 +1807,7 @@ func (x *ConfigResp) String() string {
 func (*ConfigResp) ProtoMessage() {}
 
 func (x *ConfigResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[26]
+	mi := &file_clawson_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1701,7 +1820,7 @@ func (x *ConfigResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigResp.ProtoReflect.Descriptor instead.
 func (*ConfigResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{26}
+	return file_clawson_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ConfigResp) GetOk() bool {
@@ -1737,7 +1856,7 @@ type MetricsResp struct {
 
 func (x *MetricsResp) Reset() {
 	*x = MetricsResp{}
-	mi := &file_clawson_proto_msgTypes[27]
+	mi := &file_clawson_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1749,7 +1868,7 @@ func (x *MetricsResp) String() string {
 func (*MetricsResp) ProtoMessage() {}
 
 func (x *MetricsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[27]
+	mi := &file_clawson_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1762,7 +1881,7 @@ func (x *MetricsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsResp.ProtoReflect.Descriptor instead.
 func (*MetricsResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{27}
+	return file_clawson_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *MetricsResp) GetOk() bool {
@@ -1804,7 +1923,7 @@ type SkillsResp struct {
 
 func (x *SkillsResp) Reset() {
 	*x = SkillsResp{}
-	mi := &file_clawson_proto_msgTypes[28]
+	mi := &file_clawson_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1816,7 +1935,7 @@ func (x *SkillsResp) String() string {
 func (*SkillsResp) ProtoMessage() {}
 
 func (x *SkillsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[28]
+	mi := &file_clawson_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1829,7 +1948,7 @@ func (x *SkillsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillsResp.ProtoReflect.Descriptor instead.
 func (*SkillsResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{28}
+	return file_clawson_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SkillsResp) GetOk() bool {
@@ -1864,7 +1983,7 @@ type SkillNewResp struct {
 
 func (x *SkillNewResp) Reset() {
 	*x = SkillNewResp{}
-	mi := &file_clawson_proto_msgTypes[29]
+	mi := &file_clawson_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1876,7 +1995,7 @@ func (x *SkillNewResp) String() string {
 func (*SkillNewResp) ProtoMessage() {}
 
 func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[29]
+	mi := &file_clawson_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1889,7 +2008,7 @@ func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewResp.ProtoReflect.Descriptor instead.
 func (*SkillNewResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{29}
+	return file_clawson_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SkillNewResp) GetOk() bool {
@@ -1925,7 +2044,7 @@ type SkillReadResp struct {
 
 func (x *SkillReadResp) Reset() {
 	*x = SkillReadResp{}
-	mi := &file_clawson_proto_msgTypes[30]
+	mi := &file_clawson_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1937,7 +2056,7 @@ func (x *SkillReadResp) String() string {
 func (*SkillReadResp) ProtoMessage() {}
 
 func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[30]
+	mi := &file_clawson_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1950,7 +2069,7 @@ func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadResp.ProtoReflect.Descriptor instead.
 func (*SkillReadResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{30}
+	return file_clawson_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *SkillReadResp) GetOk() bool {
@@ -1992,7 +2111,7 @@ type SchedAddResp struct {
 
 func (x *SchedAddResp) Reset() {
 	*x = SchedAddResp{}
-	mi := &file_clawson_proto_msgTypes[31]
+	mi := &file_clawson_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2004,7 +2123,7 @@ func (x *SchedAddResp) String() string {
 func (*SchedAddResp) ProtoMessage() {}
 
 func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[31]
+	mi := &file_clawson_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2017,7 +2136,7 @@ func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddResp.ProtoReflect.Descriptor instead.
 func (*SchedAddResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{31}
+	return file_clawson_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *SchedAddResp) GetOk() bool {
@@ -2052,7 +2171,7 @@ type SchedListResp struct {
 
 func (x *SchedListResp) Reset() {
 	*x = SchedListResp{}
-	mi := &file_clawson_proto_msgTypes[32]
+	mi := &file_clawson_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2064,7 +2183,7 @@ func (x *SchedListResp) String() string {
 func (*SchedListResp) ProtoMessage() {}
 
 func (x *SchedListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[32]
+	mi := &file_clawson_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2077,7 +2196,7 @@ func (x *SchedListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListResp.ProtoReflect.Descriptor instead.
 func (*SchedListResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{32}
+	return file_clawson_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *SchedListResp) GetOk() bool {
@@ -2105,7 +2224,7 @@ var File_clawson_proto protoreflect.FileDescriptor
 
 const file_clawson_proto_rawDesc = "" +
 	"\n" +
-	"\rclawson.proto\x12\aclawson\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xed\x01\n" +
+	"\rclawson.proto\x12\aclawson\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xff\x01\n" +
 	"\x05Event\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x0e\n" +
@@ -2120,7 +2239,8 @@ const file_clawson_proto_rawDesc = "" +
 	"historical\x18\n" +
 	" \x01(\bR\n" +
 	"historical\x12\x0e\n" +
-	"\x02id\x18\v \x01(\tR\x02id\"X\n" +
+	"\x02id\x18\v \x01(\tR\x02id\x12\x10\n" +
+	"\x03seq\x18\f \x01(\x04R\x03seq\"X\n" +
 	"\bLogEvent\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05level\x18\x02 \x01(\tR\x05level\x12\x10\n" +
@@ -2166,9 +2286,19 @@ const file_clawson_proto_rawDesc = "" +
 	"\bGroupReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"\t\n" +
 	"\aListReq\"\t\n" +
-	"\aLogsReq\"$\n" +
+	"\aLogsReq\"\n" +
+	"\n" +
+	"\bWatchReq\"A\n" +
 	"\fSubscribeReq\x12\x14\n" +
-	"\x05group\x18\x01 \x01(\tR\x05group\"P\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x1b\n" +
+	"\tsince_seq\x18\x02 \x01(\x04R\bsinceSeq\"\xa4\x01\n" +
+	"\n" +
+	"StateFrame\x127\n" +
+	"\x06groups\x18\x01 \x03(\v2\x1f.clawson.StateFrame.GroupsEntryR\x06groups\x12\x0e\n" +
+	"\x02ts\x18\x02 \x01(\x01R\x02ts\x1aM\n" +
+	"\vGroupsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
+	"\x05value\x18\x02 \x01(\v2\x12.clawson.GroupInfoR\x05value:\x028\x01\"P\n" +
 	"\n" +
 	"HistoryReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
@@ -2263,7 +2393,7 @@ const file_clawson_proto_rawDesc = "" +
 	"\rSchedListResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x123\n" +
-	"\tschedules\x18\x03 \x03(\v2\x15.clawson.ScheduleItemR\tschedules2\xdb\b\n" +
+	"\tschedules\x18\x03 \x03(\v2\x15.clawson.ScheduleItemR\tschedules2\x93\t\n" +
 	"\aClawson\x12.\n" +
 	"\x05Spawn\x12\x11.clawson.SpawnReq\x1a\x12.clawson.SpawnResp\x12+\n" +
 	"\x04Send\x12\x10.clawson.SendReq\x1a\x11.clawson.BaseResp\x12+\n" +
@@ -2285,7 +2415,9 @@ const file_clawson_proto_rawDesc = "" +
 	"\vSchedToggle\x12\x17.clawson.SchedToggleReq\x1a\x11.clawson.BaseResp\x122\n" +
 	"\bSchedRun\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x129\n" +
 	"\x0eSubscribeGroup\x12\x15.clawson.SubscribeReq\x1a\x0e.clawson.Event0\x01\x126\n" +
-	"\rSubscribeLogs\x12\x10.clawson.LogsReq\x1a\x11.clawson.LogEvent0\x01B\x18Z\x16clawson-protocol/pb;pbb\x06proto3"
+	"\rSubscribeLogs\x12\x10.clawson.LogsReq\x1a\x11.clawson.LogEvent0\x01\x126\n" +
+	"\n" +
+	"WatchState\x12\x11.clawson.WatchReq\x1a\x13.clawson.StateFrame0\x01B\x18Z\x16clawson-protocol/pb;pbb\x06proto3"
 
 var (
 	file_clawson_proto_rawDescOnce sync.Once
@@ -2299,7 +2431,7 @@ func file_clawson_proto_rawDescGZIP() []byte {
 	return file_clawson_proto_rawDescData
 }
 
-var file_clawson_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_clawson_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_clawson_proto_goTypes = []any{
 	(*Event)(nil),           // 0: clawson.Event
 	(*LogEvent)(nil),        // 1: clawson.LogEvent
@@ -2311,92 +2443,99 @@ var file_clawson_proto_goTypes = []any{
 	(*GroupReq)(nil),        // 7: clawson.GroupReq
 	(*ListReq)(nil),         // 8: clawson.ListReq
 	(*LogsReq)(nil),         // 9: clawson.LogsReq
-	(*SubscribeReq)(nil),    // 10: clawson.SubscribeReq
-	(*HistoryReq)(nil),      // 11: clawson.HistoryReq
-	(*SkillList)(nil),       // 12: clawson.SkillList
-	(*ConfigReq)(nil),       // 13: clawson.ConfigReq
-	(*SkillListReq)(nil),    // 14: clawson.SkillListReq
-	(*SkillNewReq)(nil),     // 15: clawson.SkillNewReq
-	(*SkillReadReq)(nil),    // 16: clawson.SkillReadReq
-	(*MetricsReq)(nil),      // 17: clawson.MetricsReq
-	(*SchedAddReq)(nil),     // 18: clawson.SchedAddReq
-	(*SchedListReq)(nil),    // 19: clawson.SchedListReq
-	(*SchedIDReq)(nil),      // 20: clawson.SchedIDReq
-	(*SchedToggleReq)(nil),  // 21: clawson.SchedToggleReq
-	(*BaseResp)(nil),        // 22: clawson.BaseResp
-	(*SpawnResp)(nil),       // 23: clawson.SpawnResp
-	(*ListResp)(nil),        // 24: clawson.ListResp
-	(*HistoryResp)(nil),     // 25: clawson.HistoryResp
-	(*ConfigResp)(nil),      // 26: clawson.ConfigResp
-	(*MetricsResp)(nil),     // 27: clawson.MetricsResp
-	(*SkillsResp)(nil),      // 28: clawson.SkillsResp
-	(*SkillNewResp)(nil),    // 29: clawson.SkillNewResp
-	(*SkillReadResp)(nil),   // 30: clawson.SkillReadResp
-	(*SchedAddResp)(nil),    // 31: clawson.SchedAddResp
-	(*SchedListResp)(nil),   // 32: clawson.SchedListResp
-	nil,                     // 33: clawson.ListResp.GroupsEntry
-	(*emptypb.Empty)(nil),   // 34: google.protobuf.Empty
-	(*structpb.Struct)(nil), // 35: google.protobuf.Struct
+	(*WatchReq)(nil),        // 10: clawson.WatchReq
+	(*SubscribeReq)(nil),    // 11: clawson.SubscribeReq
+	(*StateFrame)(nil),      // 12: clawson.StateFrame
+	(*HistoryReq)(nil),      // 13: clawson.HistoryReq
+	(*SkillList)(nil),       // 14: clawson.SkillList
+	(*ConfigReq)(nil),       // 15: clawson.ConfigReq
+	(*SkillListReq)(nil),    // 16: clawson.SkillListReq
+	(*SkillNewReq)(nil),     // 17: clawson.SkillNewReq
+	(*SkillReadReq)(nil),    // 18: clawson.SkillReadReq
+	(*MetricsReq)(nil),      // 19: clawson.MetricsReq
+	(*SchedAddReq)(nil),     // 20: clawson.SchedAddReq
+	(*SchedListReq)(nil),    // 21: clawson.SchedListReq
+	(*SchedIDReq)(nil),      // 22: clawson.SchedIDReq
+	(*SchedToggleReq)(nil),  // 23: clawson.SchedToggleReq
+	(*BaseResp)(nil),        // 24: clawson.BaseResp
+	(*SpawnResp)(nil),       // 25: clawson.SpawnResp
+	(*ListResp)(nil),        // 26: clawson.ListResp
+	(*HistoryResp)(nil),     // 27: clawson.HistoryResp
+	(*ConfigResp)(nil),      // 28: clawson.ConfigResp
+	(*MetricsResp)(nil),     // 29: clawson.MetricsResp
+	(*SkillsResp)(nil),      // 30: clawson.SkillsResp
+	(*SkillNewResp)(nil),    // 31: clawson.SkillNewResp
+	(*SkillReadResp)(nil),   // 32: clawson.SkillReadResp
+	(*SchedAddResp)(nil),    // 33: clawson.SchedAddResp
+	(*SchedListResp)(nil),   // 34: clawson.SchedListResp
+	nil,                     // 35: clawson.StateFrame.GroupsEntry
+	nil,                     // 36: clawson.ListResp.GroupsEntry
+	(*emptypb.Empty)(nil),   // 37: google.protobuf.Empty
+	(*structpb.Struct)(nil), // 38: google.protobuf.Struct
 }
 var file_clawson_proto_depIdxs = []int32{
-	34, // 0: clawson.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
-	12, // 1: clawson.ConfigReq.skills_set:type_name -> clawson.SkillList
-	33, // 2: clawson.ListResp.groups:type_name -> clawson.ListResp.GroupsEntry
-	0,  // 3: clawson.HistoryResp.events:type_name -> clawson.Event
-	35, // 4: clawson.ConfigResp.config:type_name -> google.protobuf.Struct
-	35, // 5: clawson.MetricsResp.metric:type_name -> google.protobuf.Struct
-	35, // 6: clawson.MetricsResp.global_metric:type_name -> google.protobuf.Struct
-	3,  // 7: clawson.SkillsResp.skills:type_name -> clawson.SkillItem
-	4,  // 8: clawson.SchedAddResp.item:type_name -> clawson.ScheduleItem
-	4,  // 9: clawson.SchedListResp.schedules:type_name -> clawson.ScheduleItem
-	2,  // 10: clawson.ListResp.GroupsEntry.value:type_name -> clawson.GroupInfo
-	5,  // 11: clawson.Clawson.Spawn:input_type -> clawson.SpawnReq
-	6,  // 12: clawson.Clawson.Send:input_type -> clawson.SendReq
-	8,  // 13: clawson.Clawson.List:input_type -> clawson.ListReq
-	7,  // 14: clawson.Clawson.Stop:input_type -> clawson.GroupReq
-	7,  // 15: clawson.Clawson.Interrupt:input_type -> clawson.GroupReq
-	7,  // 16: clawson.Clawson.Destroy:input_type -> clawson.GroupReq
-	7,  // 17: clawson.Clawson.Restart:input_type -> clawson.GroupReq
-	11, // 18: clawson.Clawson.History:input_type -> clawson.HistoryReq
-	13, // 19: clawson.Clawson.Config:input_type -> clawson.ConfigReq
-	17, // 20: clawson.Clawson.Metrics:input_type -> clawson.MetricsReq
-	7,  // 21: clawson.Clawson.Clear:input_type -> clawson.GroupReq
-	14, // 22: clawson.Clawson.Skills:input_type -> clawson.SkillListReq
-	15, // 23: clawson.Clawson.SkillNew:input_type -> clawson.SkillNewReq
-	16, // 24: clawson.Clawson.SkillRead:input_type -> clawson.SkillReadReq
-	18, // 25: clawson.Clawson.SchedAdd:input_type -> clawson.SchedAddReq
-	19, // 26: clawson.Clawson.SchedList:input_type -> clawson.SchedListReq
-	20, // 27: clawson.Clawson.SchedDel:input_type -> clawson.SchedIDReq
-	21, // 28: clawson.Clawson.SchedToggle:input_type -> clawson.SchedToggleReq
-	20, // 29: clawson.Clawson.SchedRun:input_type -> clawson.SchedIDReq
-	10, // 30: clawson.Clawson.SubscribeGroup:input_type -> clawson.SubscribeReq
-	9,  // 31: clawson.Clawson.SubscribeLogs:input_type -> clawson.LogsReq
-	23, // 32: clawson.Clawson.Spawn:output_type -> clawson.SpawnResp
-	22, // 33: clawson.Clawson.Send:output_type -> clawson.BaseResp
-	24, // 34: clawson.Clawson.List:output_type -> clawson.ListResp
-	22, // 35: clawson.Clawson.Stop:output_type -> clawson.BaseResp
-	22, // 36: clawson.Clawson.Interrupt:output_type -> clawson.BaseResp
-	22, // 37: clawson.Clawson.Destroy:output_type -> clawson.BaseResp
-	23, // 38: clawson.Clawson.Restart:output_type -> clawson.SpawnResp
-	25, // 39: clawson.Clawson.History:output_type -> clawson.HistoryResp
-	26, // 40: clawson.Clawson.Config:output_type -> clawson.ConfigResp
-	27, // 41: clawson.Clawson.Metrics:output_type -> clawson.MetricsResp
-	22, // 42: clawson.Clawson.Clear:output_type -> clawson.BaseResp
-	28, // 43: clawson.Clawson.Skills:output_type -> clawson.SkillsResp
-	29, // 44: clawson.Clawson.SkillNew:output_type -> clawson.SkillNewResp
-	30, // 45: clawson.Clawson.SkillRead:output_type -> clawson.SkillReadResp
-	31, // 46: clawson.Clawson.SchedAdd:output_type -> clawson.SchedAddResp
-	32, // 47: clawson.Clawson.SchedList:output_type -> clawson.SchedListResp
-	22, // 48: clawson.Clawson.SchedDel:output_type -> clawson.BaseResp
-	22, // 49: clawson.Clawson.SchedToggle:output_type -> clawson.BaseResp
-	22, // 50: clawson.Clawson.SchedRun:output_type -> clawson.BaseResp
-	0,  // 51: clawson.Clawson.SubscribeGroup:output_type -> clawson.Event
-	1,  // 52: clawson.Clawson.SubscribeLogs:output_type -> clawson.LogEvent
-	32, // [32:53] is the sub-list for method output_type
-	11, // [11:32] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	35, // 0: clawson.StateFrame.groups:type_name -> clawson.StateFrame.GroupsEntry
+	37, // 1: clawson.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
+	14, // 2: clawson.ConfigReq.skills_set:type_name -> clawson.SkillList
+	36, // 3: clawson.ListResp.groups:type_name -> clawson.ListResp.GroupsEntry
+	0,  // 4: clawson.HistoryResp.events:type_name -> clawson.Event
+	38, // 5: clawson.ConfigResp.config:type_name -> google.protobuf.Struct
+	38, // 6: clawson.MetricsResp.metric:type_name -> google.protobuf.Struct
+	38, // 7: clawson.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	3,  // 8: clawson.SkillsResp.skills:type_name -> clawson.SkillItem
+	4,  // 9: clawson.SchedAddResp.item:type_name -> clawson.ScheduleItem
+	4,  // 10: clawson.SchedListResp.schedules:type_name -> clawson.ScheduleItem
+	2,  // 11: clawson.StateFrame.GroupsEntry.value:type_name -> clawson.GroupInfo
+	2,  // 12: clawson.ListResp.GroupsEntry.value:type_name -> clawson.GroupInfo
+	5,  // 13: clawson.Clawson.Spawn:input_type -> clawson.SpawnReq
+	6,  // 14: clawson.Clawson.Send:input_type -> clawson.SendReq
+	8,  // 15: clawson.Clawson.List:input_type -> clawson.ListReq
+	7,  // 16: clawson.Clawson.Stop:input_type -> clawson.GroupReq
+	7,  // 17: clawson.Clawson.Interrupt:input_type -> clawson.GroupReq
+	7,  // 18: clawson.Clawson.Destroy:input_type -> clawson.GroupReq
+	7,  // 19: clawson.Clawson.Restart:input_type -> clawson.GroupReq
+	13, // 20: clawson.Clawson.History:input_type -> clawson.HistoryReq
+	15, // 21: clawson.Clawson.Config:input_type -> clawson.ConfigReq
+	19, // 22: clawson.Clawson.Metrics:input_type -> clawson.MetricsReq
+	7,  // 23: clawson.Clawson.Clear:input_type -> clawson.GroupReq
+	16, // 24: clawson.Clawson.Skills:input_type -> clawson.SkillListReq
+	17, // 25: clawson.Clawson.SkillNew:input_type -> clawson.SkillNewReq
+	18, // 26: clawson.Clawson.SkillRead:input_type -> clawson.SkillReadReq
+	20, // 27: clawson.Clawson.SchedAdd:input_type -> clawson.SchedAddReq
+	21, // 28: clawson.Clawson.SchedList:input_type -> clawson.SchedListReq
+	22, // 29: clawson.Clawson.SchedDel:input_type -> clawson.SchedIDReq
+	23, // 30: clawson.Clawson.SchedToggle:input_type -> clawson.SchedToggleReq
+	22, // 31: clawson.Clawson.SchedRun:input_type -> clawson.SchedIDReq
+	11, // 32: clawson.Clawson.SubscribeGroup:input_type -> clawson.SubscribeReq
+	9,  // 33: clawson.Clawson.SubscribeLogs:input_type -> clawson.LogsReq
+	10, // 34: clawson.Clawson.WatchState:input_type -> clawson.WatchReq
+	25, // 35: clawson.Clawson.Spawn:output_type -> clawson.SpawnResp
+	24, // 36: clawson.Clawson.Send:output_type -> clawson.BaseResp
+	26, // 37: clawson.Clawson.List:output_type -> clawson.ListResp
+	24, // 38: clawson.Clawson.Stop:output_type -> clawson.BaseResp
+	24, // 39: clawson.Clawson.Interrupt:output_type -> clawson.BaseResp
+	24, // 40: clawson.Clawson.Destroy:output_type -> clawson.BaseResp
+	25, // 41: clawson.Clawson.Restart:output_type -> clawson.SpawnResp
+	27, // 42: clawson.Clawson.History:output_type -> clawson.HistoryResp
+	28, // 43: clawson.Clawson.Config:output_type -> clawson.ConfigResp
+	29, // 44: clawson.Clawson.Metrics:output_type -> clawson.MetricsResp
+	24, // 45: clawson.Clawson.Clear:output_type -> clawson.BaseResp
+	30, // 46: clawson.Clawson.Skills:output_type -> clawson.SkillsResp
+	31, // 47: clawson.Clawson.SkillNew:output_type -> clawson.SkillNewResp
+	32, // 48: clawson.Clawson.SkillRead:output_type -> clawson.SkillReadResp
+	33, // 49: clawson.Clawson.SchedAdd:output_type -> clawson.SchedAddResp
+	34, // 50: clawson.Clawson.SchedList:output_type -> clawson.SchedListResp
+	24, // 51: clawson.Clawson.SchedDel:output_type -> clawson.BaseResp
+	24, // 52: clawson.Clawson.SchedToggle:output_type -> clawson.BaseResp
+	24, // 53: clawson.Clawson.SchedRun:output_type -> clawson.BaseResp
+	0,  // 54: clawson.Clawson.SubscribeGroup:output_type -> clawson.Event
+	1,  // 55: clawson.Clawson.SubscribeLogs:output_type -> clawson.LogEvent
+	12, // 56: clawson.Clawson.WatchState:output_type -> clawson.StateFrame
+	35, // [35:57] is the sub-list for method output_type
+	13, // [13:35] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_clawson_proto_init() }
@@ -2404,7 +2543,7 @@ func file_clawson_proto_init() {
 	if File_clawson_proto != nil {
 		return
 	}
-	file_clawson_proto_msgTypes[13].OneofWrappers = []any{
+	file_clawson_proto_msgTypes[15].OneofWrappers = []any{
 		(*ConfigReq_SkillsClear)(nil),
 		(*ConfigReq_SkillsSet)(nil),
 	}
@@ -2414,7 +2553,7 @@ func file_clawson_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clawson_proto_rawDesc), len(file_clawson_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   34,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

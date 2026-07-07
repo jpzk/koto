@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	// Register the gzip de/compressor so the server can decode requests that
 	// arrive with grpc-encoding: gzip. The Square Wire (Android) client gzips
 	// outgoing messages, and Go's grpc server only decompresses encodings that
@@ -1043,17 +1044,30 @@ func destroy(g string) baseResp {
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()
-	if _, ok := m[g]; ok {
+	port, hadPort := m[g]
+	if hadPort {
 		delete(m, g)
 		writeGroups(m)
 	}
 	groupsLock.Unlock()
+	if hadPort {
+		// Release the proxy listener with the allocation. Without this the
+		// port stays bound to the dead group's name and the allocator's next
+		// reuse of it makes every future spawn fail with "already bound"
+		// until a daemon restart.
+		proxyUnlisten(port)
+	}
 	_ = os.RemoveAll(vol(g))
 	subsLock.Lock()
 	delete(tails, g)
+	// Drop the seq counter + ring with the group: a later group of the same
+	// name starts a fresh sequence, and a client resuming across the
+	// destroy/respawn sees since_seq > cur → `gap` → history refetch.
+	delete(eventSeq, g)
+	delete(eventRing, g)
 	if subs, ok := subscribers[g]; ok {
 		for _, c := range subs {
-			close(c.done) // unblock the stream handler so it returns (group is gone)
+			c.shut() // unblock the stream handler so it returns (group is gone)
 		}
 		delete(subscribers, g)
 	}
@@ -1074,15 +1088,71 @@ func restart(g string) (int, error) {
 // []net.Conn registry + dead-conn pruning is replaced by per-stream context
 // cancellation (the handler deregisters itself on stream.Context().Done()).
 type groupSub struct {
-	ch   chan *pb.Event
-	done chan struct{} // closed by destroy() to force the stream handler to return
+	ch       chan *pb.Event
+	done     chan struct{} // closed via shut() to force the stream handler to return
+	shutOnce sync.Once
 }
+
+// shut closes the stream handler's done channel exactly once. Callers:
+// destroy() (group is gone) and emit() on buffer overflow (the subscriber
+// fell too far behind; ending the stream makes the loss visible so the
+// client reconnects with since_seq and replays exactly what it missed —
+// strictly better than the old silent frame drop).
+func (s *groupSub) shut() { s.shutOnce.Do(func() { close(s.done) }) }
+
+// eventRingMax bounds the per-group replay ring. Sized to cover several
+// turns of streaming frames — a reconnecting client whose since_seq has
+// aged out gets a synthetic `gap` event and refetches history instead.
+const eventRingMax = 1024
 
 var (
 	subsLock    sync.Mutex
 	subscribers = map[string][]*groupSub{}
 	tails       = map[string]bool{}
+	// eventSeq is the last sequence number assigned per group (starts at 1,
+	// in-memory only — resets on daemon restart, which clients observe as a
+	// `gap`). eventRing keeps the most recent frames for since_seq replay;
+	// both are guarded by subsLock so seq assignment, ring append, and
+	// subscriber registration are mutually atomic.
+	eventSeq  = map[string]uint64{}
+	eventRing = map[string][]*pb.Event{}
 )
+
+// recordEvent assigns the next per-group seq to pbev, appends it to the
+// group's replay ring, and snapshots the current subscriber list — one
+// atomic step under subsLock, so a concurrent SubscribeGroup either sees
+// this event in its replay snapshot or is in the returned subscriber list,
+// never neither and never both.
+func recordEvent(g string, pbev *pb.Event) []*groupSub {
+	subsLock.Lock()
+	defer subsLock.Unlock()
+	eventSeq[g]++
+	pbev.Seq = eventSeq[g]
+	ring := append(eventRing[g], pbev)
+	if len(ring) > eventRingMax {
+		ring = ring[len(ring)-eventRingMax:]
+	}
+	eventRing[g] = ring
+	return append([]*groupSub(nil), subscribers[g]...)
+}
+
+// replayFrom returns the ring suffix with seq > since, or a single synthetic
+// `gap` event when the ring cannot prove continuity: frames aged out of the
+// ring, or the counter regressed below since (daemon restart, destroy+respawn).
+// After a gap the client's view is stale beyond replay — it refetches via
+// History. Must be called with subsLock held; the returned slice is a copy.
+func replayFrom(g string, since uint64) []*pb.Event {
+	cur := eventSeq[g]
+	if since == cur {
+		return nil
+	}
+	ring := eventRing[g]
+	if since < cur && len(ring) > 0 && ring[0].Seq <= since+1 {
+		idx := int(since + 1 - ring[0].Seq)
+		return append([]*pb.Event(nil), ring[idx:]...)
+	}
+	return []*pb.Event{{Event: "gap", Group: g, Ts: float64(time.Now().UnixNano()) / 1e9}}
+}
 
 // emit fans an Event out to all subscribers of `g`. The caller supplies
 // the variant-specific fields (Msg, Text, Name/Input, Words/Body, …); we
@@ -1208,39 +1278,92 @@ func emit(g string, ev Event) {
 	}
 	ev = sanitizeEvent(ev)
 	pbev := toPBEvent(ev)
-	subsLock.Lock()
-	subs := append([]*groupSub(nil), subscribers[g]...)
-	subsLock.Unlock()
+	subs := recordEvent(g, pbev)
 	for _, s := range subs {
-		// Non-blocking: a slow consumer whose buffer is full drops this frame
-		// (bounded backpressure) rather than stalling the tailLog goroutine for
-		// every other subscriber of the group. The TUI re-fetches history on
-		// reconnect, so a dropped streaming frame is recoverable.
+		// Non-blocking: a slow consumer whose buffer is full must not stall
+		// the tailLog goroutine for every other subscriber of the group. But
+		// instead of silently dropping the frame (the old behavior — the
+		// client had no way to notice), shut the stream: the client sees it
+		// close, reconnects with since_seq, and the ring replays exactly the
+		// frames it missed.
 		select {
 		case s.ch <- pbev:
 		default:
+			s.shut()
 		}
 	}
 }
 
-func pingLoop() {
+// ---- state watch: push group snapshots on change ---------------------------
+//
+// Replaces client-side List polling (the TUI used to call List once per
+// second per client; each call shells out to podman per group). The daemon
+// recomputes the snapshot once per second — only while at least one watcher
+// is attached — and pushes a frame to each watcher whose last-delivered
+// snapshot differs. Delivery is non-blocking and lastSent only advances on a
+// successful send: a slow watcher simply retries next tick, and because
+// frames are idempotent snapshots (not deltas), missing an intermediate one
+// is harmless.
+
+type stateSub struct {
+	ch       chan *pb.StateFrame
+	lastSent string // stateHash of the last frame this watcher took
+}
+
+var (
+	stateSubsLock sync.Mutex
+	stateSubs     []*stateSub
+)
+
+// stateHash renders the snapshot into a canonical comparable string (sorted
+// by group name; excludes the frame timestamp so identical states compare
+// equal across ticks).
+func stateHash(gs map[string]GroupInfo) string {
+	names := make([]string, 0, len(gs))
+	for g := range gs {
+		names = append(names, g)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, g := range names {
+		gi := gs[g]
+		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d;", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued)
+	}
+	return b.String()
+}
+
+func toStateFrame(gs map[string]GroupInfo) *pb.StateFrame {
+	groups := map[string]*pb.GroupInfo{}
+	for g, gi := range gs {
+		groups[g] = toPBGroupInfo(gi)
+	}
+	return &pb.StateFrame{Groups: groups, Ts: float64(time.Now().UnixNano()) / 1e9}
+}
+
+func stateWatchLoop() {
 	for {
-		time.Sleep(15 * time.Second)
-		subsLock.Lock()
-		gs := make([]string, 0, len(subscribers))
-		for g := range subscribers {
-			gs = append(gs, g)
+		time.Sleep(time.Second)
+		stateSubsLock.Lock()
+		n := len(stateSubs)
+		stateSubsLock.Unlock()
+		if n == 0 {
+			continue
 		}
-		subsLock.Unlock()
-		for _, g := range gs {
-			emit(g, Event{Event: "ping"})
+		gs := listGroups()
+		hash := stateHash(gs)
+		frame := toStateFrame(gs)
+		stateSubsLock.Lock()
+		for _, w := range stateSubs {
+			if w.lastSent == hash {
+				continue
+			}
+			select {
+			case w.ch <- frame:
+				w.lastSent = hash
+			default:
+			}
 		}
-		logSubsLock.Lock()
-		hasLogSubs := len(logSubs) > 0
-		logSubsLock.Unlock()
-		if hasLogSubs {
-			emitLog("debug", "ping")
-		}
+		stateSubsLock.Unlock()
 	}
 }
 
@@ -1993,12 +2116,19 @@ func daemonMain() {
 		grpc.Creds(credentials.NewTLS(tlsCfg)),
 		grpc.ChainUnaryInterceptor(authUnary),
 		grpc.ChainStreamInterceptor(authStream),
+		// Transport-level keepalive replaces the old app-level `ping` events
+		// (one frame per group stream every 15s that every client had to
+		// filter out). HTTP/2 pings detect a dead link on otherwise-idle
+		// streams; enforcement MinTime stays below the Android client's
+		// 20s OkHttp pingInterval so its pings aren't punished as abusive.
+		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
 	)
 	pb.RegisterClawsonServer(srv, &clawsonServer{})
 	emitLogf("info", "clawsond ready grpc=%s (mTLS+token)", addr)
 
 	loadSched()
-	go pingLoop()
+	go stateWatchLoop()
 	go cronLoop()
 
 	sig := make(chan os.Signal, 1)

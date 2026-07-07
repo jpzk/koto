@@ -35,6 +35,7 @@ func toPBEvent(ev Event) *pb.Event {
 		Body:       ev.Body,
 		Historical: ev.Historical,
 		Id:         ev.ID,
+		Seq:        ev.Seq,
 	}
 }
 
@@ -293,7 +294,14 @@ func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_Sub
 	g := r.GetGroup()
 	ensureTail(g)
 	sub := &groupSub{ch: make(chan *pb.Event, 256), done: make(chan struct{})}
+	// Snapshot the resume replay and register under ONE lock acquisition:
+	// anything emitted after the snapshot lands in sub.ch, so the
+	// replay/live boundary has neither a gap nor a duplicate.
 	subsLock.Lock()
+	var replay []*pb.Event
+	if since := r.GetSinceSeq(); since > 0 {
+		replay = replayFrom(g, since)
+	}
 	subscribers[g] = append(subscribers[g], sub)
 	subsLock.Unlock()
 	defer func() {
@@ -307,6 +315,11 @@ func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_Sub
 		subscribers[g] = kept
 		subsLock.Unlock()
 	}()
+	for _, ev := range replay {
+		if err := stream.Send(ev); err != nil {
+			return err
+		}
+	}
 	ctx := stream.Context()
 	for {
 		select {
@@ -314,9 +327,46 @@ func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_Sub
 			if err := stream.Send(ev); err != nil {
 				return err
 			}
-		case <-sub.done: // group destroyed
+		case <-sub.done: // group destroyed, or this subscriber overflowed (resume via since_seq)
 			return nil
 		case <-ctx.Done(): // client disconnected
+			return nil
+		}
+	}
+}
+
+func (s *clawsonServer) WatchState(_ *pb.WatchReq, stream pb.Clawson_WatchStateServer) error {
+	// Compute the initial frame BEFORE registering: the watcher must not wait
+	// up to a full tick for its first snapshot. A state change racing between
+	// this compute and the registration is not lost — lastSent still holds
+	// the pre-change hash, so the next tick pushes the newer frame.
+	gs := listGroups()
+	sub := &stateSub{ch: make(chan *pb.StateFrame, 4), lastSent: stateHash(gs)}
+	stateSubsLock.Lock()
+	stateSubs = append(stateSubs, sub)
+	stateSubsLock.Unlock()
+	defer func() {
+		stateSubsLock.Lock()
+		kept := stateSubs[:0]
+		for _, x := range stateSubs {
+			if x != sub {
+				kept = append(kept, x)
+			}
+		}
+		stateSubs = kept
+		stateSubsLock.Unlock()
+	}()
+	if err := stream.Send(toStateFrame(gs)); err != nil {
+		return err
+	}
+	ctx := stream.Context()
+	for {
+		select {
+		case f := <-sub.ch:
+			if err := stream.Send(f); err != nil {
+				return err
+			}
+		case <-ctx.Done():
 			return nil
 		}
 	}

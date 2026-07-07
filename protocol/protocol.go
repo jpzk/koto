@@ -33,6 +33,10 @@ type Event struct {
 	// ID identifies the schedule that produced a `sched_fired` event so the
 	// TUI can correlate the firing back to its row in /sched list.
 	ID string `json:"id,omitempty"`
+	// Seq is the per-group monotonic sequence number the daemon assigns to
+	// live streaming frames (see clawson.proto Event.seq). Zero for events
+	// re-parsed from the log by the History RPC.
+	Seq uint64 `json:"seq,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.

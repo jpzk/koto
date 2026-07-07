@@ -47,6 +47,12 @@ service Clawson {
   // failed auth surfaces as a non-OK gRPC status at open time.
   rpc SubscribeGroup (SubscribeReq) returns (stream Event);
   rpc SubscribeLogs  (LogsReq)      returns (stream LogEvent);
+  // WatchState pushes a full group-state snapshot whenever it changes
+  // (spawn/stop/stall/queue-depth/config), replacing client-side List
+  // polling. The first frame arrives immediately; later frames only on
+  // change. Snapshots are idempotent — a client may miss intermediate
+  // frames and still converge on the latest one.
+  rpc WatchState (WatchReq) returns (stream StateFrame);
 }
 
 // ---- streaming frames ----
@@ -63,6 +69,13 @@ message Event {
   string body       = 9;
   bool   historical = 10;
   string id         = 11;
+  // Per-group monotonic sequence number, assigned by the daemon at emit
+  // time (starts at 1; resets on daemon restart). Streaming frames carry
+  // it so clients can resume a broken stream gaplessly via
+  // SubscribeReq.since_seq. History RPC events re-parsed from the log file
+  // have seq 0 — the cursor only exists for the live stream. The synthetic
+  // `gap` event (see SubscribeReq) also carries seq 0.
+  uint64 seq        = 12;
 }
 
 message LogEvent {
@@ -124,7 +137,26 @@ message SendReq   {
 message GroupReq  { string group = 1; } // stop / interrupt / destroy / restart / clear
 message ListReq   {}
 message LogsReq   {}
-message SubscribeReq { string group = 1; }
+message WatchReq  {}
+
+// since_seq = 0 requests live-only delivery (the historical behavior).
+// since_seq > 0 asks the daemon to first replay, from its in-memory
+// per-group ring, every event with seq > since_seq — registered atomically
+// with the ring snapshot, so the client sees no gap and no duplicate across
+// the replay/live boundary. When the ring cannot cover the range (events
+// aged out, or the daemon restarted and seq regressed), the stream starts
+// with a synthetic Event{event:"gap"}: the client's view is stale beyond
+// repair by replay and it should refetch via History.
+message SubscribeReq {
+  string group     = 1;
+  uint64 since_seq = 2;
+}
+
+// One WatchState frame: the same groups map List returns, pushed on change.
+message StateFrame {
+  map<string, GroupInfo> groups = 1;
+  double ts                     = 2;
+}
 
 message HistoryReq {
   string group  = 1;

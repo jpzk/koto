@@ -54,6 +54,7 @@ const (
 	Clawson_SchedRun_FullMethodName       = "/clawson.Clawson/SchedRun"
 	Clawson_SubscribeGroup_FullMethodName = "/clawson.Clawson/SubscribeGroup"
 	Clawson_SubscribeLogs_FullMethodName  = "/clawson.Clawson/SubscribeLogs"
+	Clawson_WatchState_FullMethodName     = "/clawson.Clawson/WatchState"
 )
 
 // ClawsonClient is the client API for Clawson service.
@@ -85,6 +86,12 @@ type ClawsonClient interface {
 	// failed auth surfaces as a non-OK gRPC status at open time.
 	SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 	SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error)
+	// WatchState pushes a full group-state snapshot whenever it changes
+	// (spawn/stop/stall/queue-depth/config), replacing client-side List
+	// polling. The first frame arrives immediately; later frames only on
+	// change. Snapshots are idempotent — a client may miss intermediate
+	// frames and still converge on the latest one.
+	WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error)
 }
 
 type clawsonClient struct {
@@ -323,6 +330,25 @@ func (c *clawsonClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Clawson_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
+func (c *clawsonClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[2], Clawson_WatchState_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchReq, StateFrame]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Clawson_WatchStateClient = grpc.ServerStreamingClient[StateFrame]
+
 // ClawsonServer is the server API for Clawson service.
 // All implementations must embed UnimplementedClawsonServer
 // for forward compatibility.
@@ -352,6 +378,12 @@ type ClawsonServer interface {
 	// failed auth surfaces as a non-OK gRPC status at open time.
 	SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error
 	SubscribeLogs(*LogsReq, grpc.ServerStreamingServer[LogEvent]) error
+	// WatchState pushes a full group-state snapshot whenever it changes
+	// (spawn/stop/stall/queue-depth/config), replacing client-side List
+	// polling. The first frame arrives immediately; later frames only on
+	// change. Snapshots are idempotent — a client may miss intermediate
+	// frames and still converge on the latest one.
+	WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error
 	mustEmbedUnimplementedClawsonServer()
 }
 
@@ -424,6 +456,9 @@ func (UnimplementedClawsonServer) SubscribeGroup(*SubscribeReq, grpc.ServerStrea
 }
 func (UnimplementedClawsonServer) SubscribeLogs(*LogsReq, grpc.ServerStreamingServer[LogEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeLogs not implemented")
+}
+func (UnimplementedClawsonServer) WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error {
+	return status.Error(codes.Unimplemented, "method WatchState not implemented")
 }
 func (UnimplementedClawsonServer) mustEmbedUnimplementedClawsonServer() {}
 func (UnimplementedClawsonServer) testEmbeddedByValue()                 {}
@@ -810,6 +845,17 @@ func _Clawson_SubscribeLogs_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Clawson_SubscribeLogsServer = grpc.ServerStreamingServer[LogEvent]
 
+func _Clawson_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchReq)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClawsonServer).WatchState(m, &grpc.GenericServerStream[WatchReq, StateFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Clawson_WatchStateServer = grpc.ServerStreamingServer[StateFrame]
+
 // Clawson_ServiceDesc is the grpc.ServiceDesc for Clawson service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -903,6 +949,11 @@ var Clawson_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SubscribeLogs",
 			Handler:       _Clawson_SubscribeLogs_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchState",
+			Handler:       _Clawson_WatchState_Handler,
 			ServerStreams: true,
 		},
 	},

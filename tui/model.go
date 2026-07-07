@@ -30,7 +30,6 @@ const (
 	leftPaneWidth = 22
 	tickMs        = 80
 	metricsTickMs = 5000
-	listTickMs    = 1000
 	// maxLogLines caps the per-session daemon log buffer in the TUI. The
 	// daemon's own ring is logRingMax (200); we keep a deeper window here
 	// so the user can scroll back through what they've seen since opening
@@ -83,7 +82,10 @@ type renderedBlock struct {
 
 type spinTickMsg struct{}
 type metricsTickMsg struct{}
-type listTickMsg struct{}
+
+// watchClosedMsg: the WatchState stream (daemon-pushed group snapshots,
+// which replaced the old 1s List poll) died — reconnect brings it back.
+type watchClosedMsg struct{ err error }
 
 type listMsg struct {
 	groups map[string]GroupInfo
@@ -150,7 +152,16 @@ type Model struct {
 
 	groups     map[string]GroupInfo
 	subscribed map[string]bool
-	cur        string
+	// lastSeq is the highest live-stream sequence number seen per group
+	// (Event.Seq, daemon-assigned). Used to resume a broken subscribe stream
+	// with since_seq so the daemon replays exactly the missed frames instead
+	// of us dropping the group's lines and refetching full history.
+	lastSeq map[string]uint64
+	// watching is true while the WatchState snapshot stream is up. It gates
+	// re-opening the stream from the listMsg handler (which watch frames
+	// themselves flow through).
+	watching bool
+	cur      string
 	lines      []logLine
 	streamBuf  map[string]string
 	// thinkingBuf accumulates completed thinking lines per-group while a
@@ -374,6 +385,7 @@ func newModel(sock string, ctxWindow int) Model {
 		ctxWindow:  ctxWindow,
 		groups:     map[string]GroupInfo{},
 		subscribed: map[string]bool{},
+		lastSeq:    map[string]uint64{},
 		cur:        cur,
 		lines:      []logLine{},
 		streamBuf:       map[string]string{},
@@ -476,12 +488,14 @@ func (m *Model) refreshSuggestions() {
 }
 
 func (m Model) Init() tea.Cmd {
+	// listCmd seeds the initial group map (and doubles as the reconnect
+	// probe); ongoing refreshes arrive over the WatchState push stream,
+	// started by the first successful listMsg.
 	return tea.Batch(
 		listCmd(m.sock),
 		metricsCmd(m.sock, m.cur),
 		tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} }),
-		tea.Tick(listTickMs*time.Millisecond, func(time.Time) tea.Msg { return listTickMsg{} }),
 	)
 }
 
@@ -641,9 +655,9 @@ func daemonCmd(sock, op, group string, extra map[string]any) tea.Cmd {
 
 // --- Subscribe goroutine -----------------------------------------------------
 
-func startSubscribe(sock, group string) {
+func startSubscribe(sock, group string, since uint64) {
 	go func() {
-		stream, cancel, err := openGroupStream(group)
+		stream, cancel, err := openGroupStream(group, since)
 		if err != nil {
 			prog.Send(streamClosedMsg{group: group, err: err})
 			return
@@ -659,6 +673,28 @@ func startSubscribe(sock, group string) {
 				continue
 			}
 			prog.Send(streamEventMsg(pbToEvent(pev)))
+		}
+	}()
+}
+
+// startWatchState consumes daemon-pushed group snapshots and feeds them into
+// the existing listMsg handler (a frame is exactly a successful List result).
+// Stream death surfaces as watchClosedMsg → reconnect loop.
+func startWatchState() {
+	go func() {
+		stream, cancel, err := openStateStream()
+		if err != nil {
+			prog.Send(watchClosedMsg{err: err})
+			return
+		}
+		defer cancel()
+		for {
+			f, err := stream.Recv()
+			if err != nil {
+				prog.Send(watchClosedMsg{err: err})
+				return
+			}
+			prog.Send(listMsg{groups: stateGroups(f)})
 		}
 	}()
 }
@@ -702,14 +738,12 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		)
 
-	case listTickMsg:
-		// Periodic group-list poll. Out-of-band spawns/stops (main agent's
-		// ctl plane, host-side socat probes) don't push refresh events, so
-		// we poll once a second. listMsg's handler is already idempotent.
-		return m, tea.Batch(
-			listCmd(m.sock),
-			tea.Tick(listTickMs*time.Millisecond, func(time.Time) tea.Msg { return listTickMsg{} }),
-		)
+	case watchClosedMsg:
+		// The state push stream died (daemon restart, link drop). The
+		// reconnect probe (listCmd) re-seeds the map and its success path
+		// restarts the watch.
+		m.watching = false
+		return m, m.scheduleReconnect()
 
 	case metricsRespMsg:
 		if msg.err == nil {
@@ -729,12 +763,23 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.reconnectAttempt = 0
 			m.addLine(logLine{kind: "sys", text: "reconnected to daemon"})
 		}
+		if !m.watching {
+			m.watching = true
+			startWatchState()
+		}
 		m.groups = msg.groups
 		// Keep the tree cursor (treeIdx → hovered row) locked to m.cur. up/down
 		// and enterTree() already move them in lockstep; re-deriving it here
 		// catches out-of-band m.cur changes (e.g. /new auto-switching to a
 		// freshly spawned group that only just appeared in this list refresh).
+		// Clamp first: when the list shrinks out from under the cursor (an
+		// out-of-band destroy pushed via WatchState) and m.cur itself is the
+		// vanished group, the re-derive loop won't run and a stale treeIdx
+		// would index past the new order in renderTree.
 		if order := m.treeOrder(); len(order) > 0 {
+			if m.treeIdx >= len(order) {
+				m.treeIdx = len(order) - 1
+			}
 			for i, g := range order {
 				if g == m.cur {
 					m.treeIdx = i
@@ -747,9 +792,15 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// history for. Without this, the post-reconnect history call appends
 		// a second copy of every event already in m.lines, and the renderer
 		// shows each one twice. (Initial load: nothing to drop.)
+		//
+		// Groups with a lastSeq cursor are NOT reloaded: they re-subscribe
+		// with since_seq and the daemon's ring replays exactly the frames
+		// missed while the stream was down — no line drop, no history
+		// refetch. If the ring can't cover the window, the stream opens with
+		// a `gap` event and the streamEventMsg handler does the full reload.
 		toReload := map[string]bool{}
 		for g := range msg.groups {
-			if !m.subscribed[g] {
+			if !m.subscribed[g] && m.lastSeq[g] == 0 {
 				toReload[g] = true
 			}
 		}
@@ -777,8 +828,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		for g := range msg.groups {
 			if !m.subscribed[g] {
 				m.subscribed[g] = true
-				cmds = append(cmds, historyCmd(m.sock, g, 0, historyPageSize))
-				startSubscribe(m.sock, g)
+				if since := m.lastSeq[g]; since > 0 {
+					// Resume: the ring replay delivers the missed frames.
+					startSubscribe(m.sock, g, since)
+				} else {
+					cmds = append(cmds, historyCmd(m.sock, g, 0, historyPageSize))
+					startSubscribe(m.sock, g, 0)
+				}
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -942,7 +998,44 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamEventMsg:
 		ev := Event(msg)
+		if ev.Seq > 0 {
+			// Belt-and-braces against replay overlap: the daemon's resume
+			// replay is strictly seq > since_seq, so duplicates shouldn't
+			// happen — but a frame we've already applied must never render
+			// twice.
+			if last, ok := m.lastSeq[ev.Group]; ok && ev.Seq <= last {
+				return m, nil
+			}
+			m.lastSeq[ev.Group] = ev.Seq
+		}
 		switch ev.Event {
+		case "gap":
+			// The daemon couldn't cover our resume window (frames aged out of
+			// its ring, or it restarted and the seq counter reset). Our view
+			// of this group is stale beyond repair by replay: drop it and
+			// refetch the tail history page. Live frames keep flowing on this
+			// same stream; lastSeq resets so their fresh (possibly smaller)
+			// seq values are accepted.
+			m.lastSeq[ev.Group] = 0
+			filtered := m.lines[:0]
+			for _, l := range m.lines {
+				if l.group != ev.Group {
+					filtered = append(filtered, l)
+				}
+			}
+			m.lines = filtered
+			delete(m.loadedGroups, ev.Group)
+			delete(m.pageOldestTs, ev.Group)
+			delete(m.pageLoading, ev.Group)
+			delete(m.pageExhausted, ev.Group)
+			delete(m.streamBuf, ev.Group)
+			delete(m.busy, ev.Group)
+			delete(m.thinkingBuf, ev.Group)
+			delete(m.thinkingTail, ev.Group)
+			delete(m.toolOutBuf, ev.Group)
+			delete(m.toolOutTail, ev.Group)
+			m.refreshLog()
+			return m, historyCmd(m.sock, ev.Group, 0, historyPageSize)
 		case "prompt":
 			if cur, ok := m.streamBuf[ev.Group]; ok {
 				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})

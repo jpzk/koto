@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -89,6 +90,15 @@ func getClient() (pb.ClawsonClient, error) {
 		cc, err := grpc.NewClient(ep,
 			grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
 			grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("CLAWSON_TOKEN")}),
+			// Transport keepalive replaces the daemon's old app-level `ping`
+			// frames: HTTP/2 pings detect a dead link under the long-lived
+			// Subscribe/Watch streams, which would otherwise block in Recv
+			// forever. Time must stay >= the server's enforcement MinTime (10s).
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
 		)
 		if err != nil {
 			clientErr = err
@@ -258,18 +268,56 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 
 // ---- streaming -------------------------------------------------------------
 
-func openGroupStream(group string) (grpc.ServerStreamingClient[pb.Event], context.CancelFunc, error) {
+// openGroupStream subscribes to a group's event stream. since > 0 asks the
+// daemon to replay every frame with seq > since from its ring before going
+// live (gapless resume after a broken stream); since = 0 is live-only, used
+// on first attach where the History RPC seeds the view instead.
+func openGroupStream(group string, since uint64) (grpc.ServerStreamingClient[pb.Event], context.CancelFunc, error) {
 	cl, err := getClient()
 	if err != nil {
 		return nil, nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := cl.SubscribeGroup(ctx, &pb.SubscribeReq{Group: group})
+	stream, err := cl.SubscribeGroup(ctx, &pb.SubscribeReq{Group: group, SinceSeq: since})
 	if err != nil {
 		cancel()
 		return nil, nil, err
 	}
 	return stream, cancel, nil
+}
+
+// openStateStream subscribes to daemon-pushed group-state snapshots
+// (WatchState), replacing the old 1s List polling loop.
+func openStateStream() (grpc.ServerStreamingClient[pb.StateFrame], context.CancelFunc, error) {
+	cl, err := getClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := cl.WatchState(ctx, &pb.WatchReq{})
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return stream, cancel, nil
+}
+
+// stateGroups converts a WatchState frame into the map the listMsg handler
+// already consumes.
+func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
+	out := map[string]GroupInfo{}
+	for g, gi := range f.GetGroups() {
+		out[g] = GroupInfo{
+			Port:     int(gi.GetPort()),
+			Running:  gi.GetRunning(),
+			Provider: gi.GetProvider(),
+			Model:    gi.GetModel(),
+			Effort:   gi.GetEffort(),
+			Stalled:  gi.GetStalled(),
+			Queued:   int(gi.GetQueued()),
+		}
+	}
+	return out
 }
 
 func openLogStream() (grpc.ServerStreamingClient[pb.LogEvent], context.CancelFunc, error) {
@@ -290,7 +338,7 @@ func pbToEvent(p *pb.Event) Event {
 	return Event{
 		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
-		Historical: p.Historical, ID: p.Id,
+		Historical: p.Historical, ID: p.Id, Seq: p.Seq,
 	}
 }
 

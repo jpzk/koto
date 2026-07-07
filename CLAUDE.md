@@ -36,7 +36,7 @@ groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
 .gocache/            persistent Go build cache for cs_host_go (gitignored)
 .build/              Makefile sentinels (gitignored)
-run/clawson.sock     daemon's unix socket — TUI/CLI talk to daemon over this (gitignored)
+run/                 daemon runtime droppings (gitignored); clients talk gRPC on :8443, not a unix socket
 metrics.jsonl        per-request metric line (gitignored)
 proxy.log            proxy stdout when launched by daemon (gitignored)
 ```
@@ -59,31 +59,51 @@ make stop          # tear down cs_host + all sidecars
 #   /ls        -> refresh group list + re-subscribe to streams
 ```
 
-## Daemon protocol (line-delimited JSON over `clawson.sock`)
+## Daemon protocol (gRPC over mTLS, `protocol/clawson.proto`)
 
-```
-client -> daemon                              daemon -> client
-{"cmd":"spawn","group":"foo","main":false}   {"ok":true,"port":8788}
-{"cmd":"send","group":"foo","msg":"hi"}      {"ok":true}
-{"cmd":"list"}                                {"ok":true,"groups":{"foo":{"port":8788,"running":true}}}
-{"cmd":"stop","group":"foo"}                  {"ok":true}
-{"cmd":"subscribe","group":"foo"}             {"ok":true,"subscribed":"foo"}  ← then unsolicited stream:
-                                              {"event":"prompt","group":"foo","msg":"hi"}
-                                              {"event":"stream","group":"foo","text":"partial..."}
-                                              {"event":"done",  "group":"foo","text":"complete line"}
-                                              {"event":"sched_fired","group":"foo","id":"a1b2c3","msg":"..."}
+The wire contract is the `Clawson` gRPC service in `protocol/clawson.proto`
+(generated Go in `protocol/pb`, regenerate with `make proto-gen`, CI-guard with
+`make proto-verify`). Transport is TCP `:8443` (bind via `CLAWSON_BIND`/
+`CLAWSON_PORT`), secured by mTLS (private CA + client-cert fingerprint
+allowlist in `creds/clients.allow`) plus a per-RPC bearer token — see
+`auth.go` and `make pki-init` / `make pki-client`. Clients: the Go TUI
+(`tui/daemon.go`) and the Android app; both consume the same proto, so
+changes must stay additive.
 
-# scheduled prompts (crontab-driven, daemon-side)
-{"cmd":"sched_add","group":"main","cron":"*/15 * * * *","msg":"status?"}
-                                              {"ok":true,"item":{"id":"a1b2c3","group":"main",...}}
-{"cmd":"sched_list"}                          {"ok":true,"schedules":[{...},...]}
-{"cmd":"sched_list","group":"main"}           (same, filtered)
-{"cmd":"sched_del","id":"a1b2c3"}             {"ok":true}
-{"cmd":"sched_toggle","id":"a1b2c3","enabled":false}   {"ok":true}
-{"cmd":"sched_run","id":"a1b2c3"}             {"ok":true}   ← fire-now, out of band
-```
+- **Unary RPCs** map 1:1 to the old JSON verbs: `Spawn`, `Send`, `List`,
+  `Stop`, `Interrupt`, `Destroy`, `Restart`, `Clear`, `History`, `Config`,
+  `Metrics`, `Skills`/`SkillNew`/`SkillRead`, `Sched*`. Application failures
+  come back in-band as `{ok:false, error}` response fields; gRPC status codes
+  are reserved for transport/auth faults. `Send` enqueues and returns
+  immediately (turn lifecycle arrives over the subscribe stream).
+- **`SubscribeGroup(group, since_seq) → stream Event`** — the live event
+  stream, fed by the daemon-side log tailer. Every frame carries a per-group
+  monotonic `seq`. `since_seq=0` means live-only; `since_seq>0` makes the
+  daemon replay every frame with `seq > since_seq` from its in-memory ring
+  (1024 frames/group), registered atomically with the ring snapshot, so a
+  client that reconnects after a broken stream resumes gaplessly without
+  refetching history. If the ring can't cover the window (frames aged out,
+  daemon restarted, group destroyed+respawned), the stream opens with a
+  synthetic `Event{event:"gap"}` — the client's cue to drop its view of that
+  group and refetch via `History`. A subscriber that falls too far behind
+  (256-frame buffer overflow) has its stream closed by the daemon rather than
+  frames silently dropped; reconnect-with-`since_seq` recovers exactly the
+  missed frames.
+- **`WatchState() → stream StateFrame`** — daemon-pushed group snapshots (the
+  same map `List` returns), first frame immediately, then only on change
+  (spawn/stop/stall/queue-depth/config). Replaces client-side `List` polling;
+  the daemon recomputes at 1 Hz only while watchers are attached, so the
+  podman-inspect churn is paid once per daemon, not once per client.
+- **`SubscribeLogs() → stream LogEvent`** — daemon's own log, ring-buffered
+  (200 lines) replay then live.
+- **Keepalive is transport-level** (HTTP/2 pings, server enforcement
+  `MinTime=10s`); there are no app-level ping frames. Clients must tolerate
+  arbitrary new `event` types on the stream (render-or-ignore).
 
-Errors come back as `{"ok": false, "error": "..."}`. Most connections are one-shot (send request, read one response, close). **`subscribe` is the exception**: the connection becomes long-lived after the ack, with the daemon pushing event frames as the group's log file grows. The TUI opens one subscribe connection per group plus separate one-shot connections for `spawn`/`send`/`list`. You can also drive the daemon from `socat`/`nc` for ad-hoc testing.
+The TUI keeps one `SubscribeGroup` stream per group plus one `WatchState`
+stream, and tracks `lastSeq` per group for resume. First attach seeds the
+view via `History` (paged, `ts < before` cursor); resume never refetches
+history unless it receives `gap`.
 
 Schedules are persisted to `schedules.json` and replayed at startup; the daemon's `cronLoop()` wakes at every wall-clock minute boundary. **No catch-up on downtime** — fires missed while the daemon was off are skipped (POSIX cron behavior). A fire is identical to a manual `send` once it reaches `sendMsg`, so it inherits the per-group `sendLock` serialization and the existing log-tailer event stream; the `sched_fired` event is a hint for the UI, not a replacement for the regular `prompt`/`done` frames that follow.
 
@@ -197,9 +217,12 @@ The TUI is a thin client. To exercise the proxy/sidecar/metrics path, skip it an
 tail -F groups/main/.cs/log
 ```
 
-You can also drive the socket directly with `socat`:
+To drive the gRPC API directly, use `grpcurl` with the client PKI material
+(the API is mTLS + bearer token — no anonymous plaintext endpoint):
 ```sh
-socat - UNIX-CONNECT:clawson.sock  # then type {"cmd":"list"}\n
+grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.key \
+  -H "authorization: Bearer $(cat creds/token-tui)" \
+  -proto protocol/clawson.proto 127.0.0.1:8443 clawson.Clawson/List
 ```
 
 ### Pitfalls observed in this codebase

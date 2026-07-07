@@ -337,7 +337,10 @@ func (m Model) renderTree(rows int) string {
 			return s + strings.Repeat(" ", w-len(s))
 		}
 		hovered := func(g string) bool {
-			return m.focus == focusTree && order[m.treeIdx] == g
+			// Bounds-guard: a WatchState frame can shrink the group list
+			// (out-of-band destroy) between the treeIdx clamp in the listMsg
+			// handler and this render — never index past the current order.
+			return m.focus == focusTree && m.treeIdx < len(order) && order[m.treeIdx] == g
 		}
 		hasMain := order[0] == "main"
 		others := order
