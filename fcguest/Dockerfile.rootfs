@@ -18,6 +18,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       curl \
       e2fsprogs \
       git \
+      iproute \
       jq \
       util-linux \
       nodejs \
@@ -47,5 +48,6 @@ RUN chmod -R a+rX /sidecar
 COPY fcguest/fc-agent /usr/local/bin/fc-agent
 RUN chmod 755 /usr/local/bin/fc-agent \
  && mkdir -p /workspace /skills \
- && printf '127.0.0.1 localhost clawson-vm\n' > /etc/hosts \
- && printf '' > /etc/resolv.conf
+ && printf '127.0.0.1 localhost clawson-vm\n' > /etc/hosts
+# NB: /etc/resolv.conf is fixed up in build-rootfs.sh (staging tree), not here —
+# podman bind-mounts /etc/resolv.conf during build, so a RUN can't replace it.

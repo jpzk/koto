@@ -16,3 +16,4 @@ __pycache__/
 tui/node_modules/
 fcassets/
 fcguest/fc-agent
+.kernelcache/

@@ -47,6 +47,7 @@ delivered as a tarball at VM init. Config/prompt/log are host-authoritative.
 | guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
 | guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
 | guest → host | 9002  | ctl plane (JSON lines, replies inline) | `.cs/ctl` + `.cs/ctl.out` |
+| guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`internet=full` only**) | a real NIC |
 | host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/shutdown) | `.cs/in` FIFO + `podman exec` |
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
@@ -153,8 +154,10 @@ one ergonomic regression vs podman's hot-reload mounts).
    `cs_host_go:<port>`), not on the real host loopback — host publishing
    needs a `-p` on cs_host itself (podman can't add one live).
 2. ~~No open-internet escape hatch yet.~~ **DONE** — the `internet` profile
-   (`none` default / `full`) forwards general egress *through the proxy*, no
-   NIC added. See "Internet egress profile" below.
+   (`none` default / `full`). `full` now attaches a gVisor L3 gateway over
+   vsock 9003 (real NIC: arbitrary TCP/UDP + DNS, egress-filtered at the
+   frame layer); `none` stays NIC-less. See "Internet egress profile" below.
+   *L3-native inbound is still a follow-up (see that section).*
 3. **`pip` (podman-in-podman) and Chrome groups** stay on the podman runtime
    (not in the minimal rootfs).
 4. **main on firecracker**: works protocol-wise (ctl over vsock), but skill
@@ -168,32 +171,66 @@ one ergonomic regression vs podman's hot-reload mounts).
 ## Internet egress profile (`internet`: `none` | `full`)
 
 Per-group config key controlling general outbound. Default `none` — a
-microVM group's only egress is the LLM upstream via the proxy. `full` grants
-arbitrary outbound **forwarded through the same proxy**, still with no NIC in
-the guest:
+microVM group has **no NIC and no route**; its only egress is the LLM upstream
+via the proxy (vsock 9000). `full` attaches a userspace **gVisor L3 gateway**
+(`containers/gvisor-tap-vsock`) over a new vsock port, giving the guest a real
+interface — arbitrary outbound TCP and UDP on any port with NAT, plus DNS.
+(ICMP/ping is best-effort — it needs the gateway process to open a
+raw/unprivileged ICMP socket on the host; TCP/UDP, i.e. all clawson tooling,
+need no special privilege.) Verified live: TCP to arbitrary ports (`:22` SSH
+banner, `:53`), UDP (NTP `:123`), and HTTPS all work; ICMP echo did not in the
+standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
 
-- **Reuses the existing channel.** No new vsock port. The guest's `bash`/
-  `curl`/`git`/`npm` get `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:18888`
-  (the same in-guest bridge → vsock 9000 → the group's proxy port) plus
-  `NO_PROXY=127.0.0.1,localhost` so the LLM client's own base URL stays
-  direct. The proxy recognizes `CONNECT` / absolute-form requests (LLM
-  clients only ever use origin-form) as egress and forwards them.
-- **Enforced server-side.** `serveEgress` (proxy.go) checks
-  `groupInternet(g)` on every request, so a compromised guest that sets its
-  own `HTTP_PROXY` gets a **403** unless the operator granted `full`. The
-  guest env is only the client-side enabler; the proxy gate is the authority.
-  Verified: a `none` group forcing the proxy → `403 CONNECT tunnel failed`.
-- **Auditable.** Every forward is logged `egress[<group>] CONNECT <host:port>`
-  (or the method for plain HTTP); denials log `egress[<group>] DENIED …`.
-- **Self-target guard.** `egressTargetAllowed` blocks loopback, `cs_host_go`,
-  link-local, and the daemon's gRPC port so a `full` guest can't turn the
-  forwarder back on the control plane. It does NOT do full SSRF/IP filtering:
-  a `full` group can reach the host LAN, same as a podman group with a NIC —
-  inherent to "full internet".
-- **Applies on `/restart`** (the guest env is set at spawn), but lowering to
-  `none` denies egress **live** on the next request (the gate reads config
-  per-request). Set via ctl `config_set internet=full` or by editing
-  config.json.
+- **Real L3, not an HTTP proxy.** On `full`, `fcSpawn` builds a per-group
+  `virtualnetwork` (gateway `192.168.127.1`, guest `192.168.127.2/24`) and
+  opens a guest→host listener on vsock **9003**. fc-agent, told `net="l3"` at
+  init, creates a TAP (`eth0`), self-assigns the address/route, points
+  `/etc/resolv.conf` at the gateway, and pumps ethernet frames to 9003. Framing
+  is the Qemu protocol (4-byte big-endian length prefix per frame), matching
+  the host's `AcceptQemu`.
+- **LLM traffic still rides the proxy.** `ANTHROPIC_BASE_URL` stays
+  `http://127.0.0.1:18888` → vsock 9000 → the credential-injecting proxy, so
+  key injection and per-group metrics are unchanged. `NO_PROXY=127.0.0.1`
+  keeps that base URL direct. **`HTTP_PROXY` is NOT set** on `full` — general
+  `curl`/`git`/`npm` go out over the NIC, NAT'd by the gateway.
+  - **Tradeoff:** general HTTPS is no longer L7-audited by the proxy (only the
+    LLM leg is). This is the cost of real L3 vs the old proxy-only egress.
+- **Egress authority moves to the frame layer.** gvisor-tap-vsock has no
+  destination-filter hook (it `net.Dial`s the packet's destination directly),
+  so `fcEgressConn` (fcnet.go) parses each guest frame and **drops** those
+  addressed to the control plane — loopback (`127/8`, `::1`, where the daemon's
+  gRPC and per-group proxy ports live), link-local (`169.254/16`, `fe80::/10`),
+  and a non-loopback `CLAWSON_BIND` if set. `Ec2MetadataAccess=false`
+  additionally blocks metadata inside the netstack. Everything else — including
+  the host LAN — is allowed, same posture as before (and as a podman NIC).
+  This replaces, for the L3 path, what `egressTargetAllowed` (proxy.go) does
+  for the L7 path.
+- **`none` keeps the invariant.** A `none` group never opens the 9003 listener
+  and never gets `net="l3"`, so no TAP and no route exist — "no NIC = no
+  egress" is enforced by the absence of a route, unchanged.
+- **Applies on `/restart`** (the gateway is attached at spawn and the guest
+  env/`net` flag are set then). Lowering to `none` and restarting tears the
+  gateway down.
+- **Inbound** still rides the published-port vsock path (`portBridge`),
+  delivered to the guest's loopback services — independent of L3. L3-native
+  inbound (the guest accepting on `192.168.127.2` via gateway forwards) is a
+  follow-up.
+- **Kernel:** `full` needs `CONFIG_TUN`, which FC's CI vmlinux lacks — so the
+  guest kernel is built from kernel.org sources + FC's config + `CONFIG_TUN=y`
+  (`build-kernel.sh`, `make fc-kernel`), not fetched.
+  - **Boot model — `acpi=off` (matched pair with the build).** FC's own CI
+    kernels come from the *Amazon Linux* tree; a *vanilla* kernel.org kernel
+    can't load FC's ACPI tables (`AE_BAD_PARAMETER` during region init →
+    virtio probes fail → no root device). So we boot FC's pre-ACPI way instead:
+    `fc.go` passes `acpi=off`, and `build-kernel.sh` enables
+    `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` so the guest finds its devices from the
+    `virtio_mmio.device=` entries FC injects on the cmdline (legacy interrupts).
+    Change one and you must change the other. Verified booting to init.
+  - **DNS/resolv.conf.** The rootfs is read-only, so `/etc/resolv.conf` is a
+    symlink to `/run/resolv.conf` (a tmpfs), set up in `build-rootfs.sh`'s
+    staging tree (a Dockerfile `RUN` can't, since podman bind-mounts
+    resolv.conf during build). fc-agent's `netUp` writes the target on `full`;
+    `none` leaves it dangling — no DNS, as intended.
 - **podman groups**: the profile is a firecracker feature. A podman group has
   a real NIC and full internet regardless; `internet=none` is not enforced
   there (would need `--internal` networking).

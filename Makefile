@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: build host-build tui-build whisper-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-rootfs fc-assets
+.PHONY: build host-build tui-build whisper-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -166,12 +166,19 @@ pki-client:
 
 # --- Firecracker microVM runtime assets -------------------------------------
 # Opt-in per group via config.json `"runtime": "firecracker"`. Assets land in
-# fcassets/ (gitignored): the FC binary + guest kernel (fc-fetch, pinned in
-# fcguest/fetch-assets.sh) and the golden rootfs (fc-rootfs — rebuild after
-# editing sidecar/*.{sh,js} or fcguest/, since microVMs have no live bind
-# mounts). run-host.sh passes /dev/kvm into cs_host automatically when present.
+# fcassets/ (gitignored): the FC binary (fc-fetch, pinned in fetch-assets.sh),
+# the guest kernel (fc-kernel — built with CONFIG_TUN for L3 networking, pinned
+# in build-kernel.sh), and the golden rootfs (fc-rootfs — rebuild after editing
+# sidecar/*.{sh,js} or fcguest/, since microVMs have no live bind mounts).
+# run-host.sh passes /dev/kvm into cs_host automatically when present.
 fc-fetch:
 	./fcguest/fetch-assets.sh
+
+$(BUILD)/fc-kernel: fcguest/build-kernel.sh | $(BUILD)
+	./fcguest/build-kernel.sh
+	@touch $@
+
+fc-kernel: $(BUILD)/fc-kernel
 
 FCGUEST_SRC := fcguest/main.go fcguest/go.mod fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
 $(BUILD)/fc-rootfs: $(FCGUEST_SRC) | $(BUILD)
@@ -180,7 +187,7 @@ $(BUILD)/fc-rootfs: $(FCGUEST_SRC) | $(BUILD)
 
 fc-rootfs: $(BUILD)/fc-rootfs
 
-fc-assets: fc-fetch fc-rootfs
+fc-assets: fc-fetch fc-kernel fc-rootfs
 
 clean: stop
 	rm -rf groups metrics.jsonl groups.json proxy.log run $(BUILD)

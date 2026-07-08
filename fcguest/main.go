@@ -112,6 +112,15 @@ func earlyInit() {
 	// Rootfs is read-only; /skills receives the init-op tarball, so it needs
 	// a writable tmpfs (the mount point itself is baked into the image).
 	mount("tmpfs", "/skills", "tmpfs", 0, "mode=755")
+	// /dev/net/tun for the L3 TAP (internet=full). With CONFIG_TUN=y devtmpfs
+	// usually auto-creates it, but create it defensively so netUp never trips
+	// on a missing node (harmless if it already exists).
+	_ = os.MkdirAll("/dev/net", 0o755)
+	if _, err := os.Stat("/dev/net/tun"); os.IsNotExist(err) {
+		if err := unix.Mknod("/dev/net/tun", unix.S_IFCHR|0o600, int(unix.Mkdev(10, 200))); err != nil {
+			logf("mknod /dev/net/tun: %v", err)
+		}
+	}
 	_ = unix.Sethostname([]byte("clawson-vm"))
 }
 
@@ -463,6 +472,7 @@ type agentReq struct {
 	UploadsTarB64 string            `json:"uploads_tar_b64"`
 	Ports         []int             `json:"ports"`
 	Env           map[string]string `json:"env"`
+	Net           string            `json:"net"` // "l3" → bring up the TAP (internet=full)
 }
 
 func reply(c *vconn, v any) {
@@ -511,6 +521,7 @@ func agentServer() {
 var (
 	initMu        sync.Mutex
 	entrypointUp  bool
+	netStarted    bool
 	portsUp       = map[int]bool{}
 	entrypointEnv map[string]string
 )
@@ -521,6 +532,15 @@ func handleInit(c *vconn, req *agentReq) {
 	if req.SkillsTarB64 != "" {
 		if err := untarSkills(req.SkillsTarB64); err != nil {
 			logf("skills untar: %v", err)
+		}
+	}
+	// internet=full: bring up the L3 TAP once, before the entrypoint starts,
+	// so the first turn already has a route.
+	if req.Net == "l3" && !netStarted {
+		if err := netUp(); err != nil {
+			logf("l3 net up: %v", err)
+		} else {
+			netStarted = true
 		}
 	}
 	for _, p := range req.Ports {

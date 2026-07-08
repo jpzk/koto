@@ -39,6 +39,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,10 @@ const (
 	fcPortProxy = 9000
 	fcPortLog   = 9001
 	fcPortCtl   = 9002
+	// fcPortNet carries L3 ethernet frames (Qemu-framed) to the group's gVisor
+	// gateway — attached only for internet=full (see fcnet.go). A `none` group
+	// never opens this listener, so no route exists.
+	fcPortNet   = 9003
 	fcPortAgent = 10000
 
 	// In-guest TCP port the agent's proxy bridge listens on; the guest's
@@ -147,6 +152,9 @@ func groupInternet(g string) string {
 type fcVM struct {
 	pid       int
 	listeners []net.Listener
+	// netCancel tears down the L3 gVisor gateway's AcceptQemu goroutines on
+	// stop (internet=full only; nil otherwise).
+	netCancel context.CancelFunc
 }
 
 var (
@@ -329,7 +337,8 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	for _, p := range []string{base,
 		fmt.Sprintf("%s_%d", base, fcPortProxy),
 		fmt.Sprintf("%s_%d", base, fcPortLog),
-		fmt.Sprintf("%s_%d", base, fcPortCtl)} {
+		fmt.Sprintf("%s_%d", base, fcPortCtl),
+		fmt.Sprintf("%s_%d", base, fcPortNet)} {
 		_ = os.Remove(p)
 	}
 
@@ -367,6 +376,29 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.listeners = append(vm.listeners, lnCtl)
 	go fcAcceptLoop(lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
 
+	// internet=full: attach the L3 gVisor gateway. The guest's fc-agent dials
+	// vsock 9003 once net="l3" is delivered at init; each accepted connection
+	// is handed to the gateway (egress-filtered — see fcnet.go). Gated here so
+	// a `none` group never even opens this listener.
+	if groupInternet(g) == "full" {
+		vn, err := fcNetGateway()
+		if err != nil {
+			return fail(fmt.Errorf("l3 gateway: %w", err))
+		}
+		lnNet, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortNet))
+		if err != nil {
+			return fail(err)
+		}
+		vm.listeners = append(vm.listeners, lnNet)
+		ctx, cancel := context.WithCancel(context.Background())
+		vm.netCancel = cancel
+		go fcAcceptLoop(lnNet, func(c net.Conn) {
+			if err := fcNetServe(ctx, vn, c); err != nil && ctx.Err() == nil {
+				emitLogf("warn", "fc[%s]: l3 gateway conn: %v", g, err)
+			}
+		})
+	}
+
 	// VM config. Root drive is the shared golden rootfs, read-only, so one
 	// image safely backs every group. console → per-group log file for boot
 	// debugging (quiet keeps it small in steady state).
@@ -374,7 +406,13 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	cfg := map[string]any{
 		"boot-source": map[string]any{
 			"kernel_image_path": fcKernelPath(),
-			"boot_args":         "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
+			// acpi=off: our vmlinux is built from vanilla kernel.org sources,
+			// which can't load FC's ACPI tables (FC's own kernels come from the
+			// amzn tree). We boot FC's pre-ACPI way instead — devices via the
+			// virtio_mmio.device= cmdline (CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES,
+			// enabled in build-kernel.sh) + legacy interrupts. The two are a
+			// matched pair; see build-kernel.sh.
+			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off acpi=off quiet init=/usr/local/bin/fc-agent",
 		},
 		"drives": []map[string]any{
 			{"drive_id": "rootfs", "path_on_host": fcRootfsPath(), "is_root_device": true, "is_read_only": true},
@@ -418,18 +456,15 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		"CLAWSON_DEFAULT_VENICE_MODEL": defaultVeniceModel,
 		"ANTHROPIC_BASE_URL":           fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
 	}
-	// internet=full: point the standard proxy env vars at the same in-guest
-	// bridge the LLM client uses (vsock 9000 → the group's proxy port). The
-	// proxy recognizes CONNECT / absolute-form requests as general egress and
-	// forwards them (gated server-side by the profile). NO_PROXY keeps the
-	// LLM client's own 127.0.0.1 base URL direct instead of self-proxying.
-	// A change here needs /restart (like ports); the proxy-side gate still
-	// flips live, so lowering to "none" denies egress immediately.
+	// internet=full: general traffic now has a real L3 route (the gVisor
+	// gateway attached above), so we do NOT set HTTP(S)_PROXY — curl/git/npm go
+	// out over the NIC, NAT'd by the gateway. The LLM client stays on
+	// ANTHROPIC_BASE_URL → vsock 9000 → the credential-injecting proxy, so key
+	// injection and per-group metrics are unchanged; NO_PROXY keeps that
+	// 127.0.0.1 base URL direct. `net=l3` tells fc-agent to bring the TAP up.
+	// (Tradeoff vs the old L7-proxy egress: general HTTPS is no longer
+	// proxy-audited — see firecracker-vsock.md.) A change here needs /restart.
 	if groupInternet(g) == "full" {
-		px := fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP)
-		for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
-			env[k] = px
-		}
 		for _, k := range []string{"NO_PROXY", "no_proxy"} {
 			env[k] = "127.0.0.1,localhost"
 		}
@@ -438,6 +473,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		"op":    "init",
 		"ports": pubPorts,
 		"env":   env,
+	}
+	if groupInternet(g) == "full" {
+		initReq["net"] = "l3"
 	}
 	if tar, err := fcSkillsTar(); err == nil && len(tar) > 0 {
 		initReq["skills_tar_b64"] = base64.StdEncoding.EncodeToString(tar)
@@ -510,6 +548,9 @@ func fcStop(g string) {
 	if pidAlive(vm.pid) {
 		emitLogf("warn", "fc[%s]: graceful shutdown timed out; killing pid=%d", g, vm.pid)
 		_ = syscall.Kill(vm.pid, syscall.SIGKILL)
+	}
+	if vm.netCancel != nil {
+		vm.netCancel() // stop the L3 gateway's AcceptQemu goroutines
 	}
 	for _, ln := range vm.listeners {
 		_ = ln.Close()

@@ -34,6 +34,12 @@ trap 'podman rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 podman unshare sh -eu <<EOF
 TMP=\$(mktemp -d)
 podman export "$CID" | tar -C "\$TMP" -xf -
+# /etc/resolv.conf → /run/resolv.conf (a writable tmpfs). Done here, not in the
+# Dockerfile, because podman bind-mounts /etc/resolv.conf during build so a RUN
+# can't replace it. fc-agent's netUp writes /run/resolv.conf for internet=full
+# groups; none groups leave the symlink dangling (no DNS — the correct default).
+rm -f "\$TMP/etc/resolv.conf"
+ln -sf /run/resolv.conf "\$TMP/etc/resolv.conf"
 # Size: content + 20% slack + 256M headroom, floor 2G. Root drive is
 # read-only at run time so growth headroom is irrelevant; slack is for
 # ext4 metadata.

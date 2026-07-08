@@ -5,7 +5,7 @@ Minimal isolated claude-code orchestrator. **microVM-per-group by default** (pod
 ## What it does
 
 - **Two group runtimes, selected per group by `config.json` `"runtime"`.** `"firecracker"` (the **default**) boots each group as a Firecracker microVM with **no network device** — its sole host↔guest channel is vsock, and the credential-injecting proxy becomes the *only* egress (verified: guest has `lo` only, no DNS, curl fails by default). `"podman"` is the explicit opt-out for groups that need capabilities the microVM lacks: pip (podman-in-podman) or Chrome/agent-browser. **`firecracker-vsock.md` is the authoritative design doc for the microVM runtime** — read it before touching `fc.go` / `fcguest/`. The bullets below describe behavior common to both runtimes unless tagged `[podman]` / `[firecracker]`; the microVM guest runs `sidecar/entrypoint.sh` byte-identically, so most of the mechanics are shared.
-- **Internet egress is a per-group profile: `config.json` `"internet"` = `"none"` (default) or `"full"`.** [firecracker] `none` = the proxy reaches only the LLM upstream (the guest has no other route). `full` = general outbound (`curl`/`git`/`npm`) is **forwarded through the same proxy**, no NIC added: the guest gets `HTTP_PROXY`/`HTTPS_PROXY` pointed at the in-guest bridge (vsock 9000 → the group's proxy port), and the proxy's `serveEgress` (proxy.go) recognizes `CONNECT`/absolute-form requests and forwards them. **Enforced server-side** — `groupInternet(g)` is checked on every request, so a compromised guest that sets its own `HTTP_PROXY` gets a 403 unless the operator granted `full`. Every forward is logged `egress[<group>] …`. A self-target guard (`egressTargetAllowed`) blocks loopback / `cs_host_go` / the daemon port; a `full` group can still reach the host LAN (same as a podman NIC — inherent to "full internet"). Applies on `/restart`; lowering to `none` denies live on the next request. [podman] not enforced (a podman group has a real NIC).
+- **Internet egress is a per-group profile: `config.json` `"internet"` = `"none"` (default) or `"full"`.** [firecracker] `none` = the guest has no NIC and no route; its only egress is the LLM upstream via the proxy. `full` = a real **L3 network** via a userspace **gVisor gateway** (`containers/gvisor-tap-vsock`) over vsock 9003: the guest gets a TAP (`eth0`, `192.168.127.2`) with arbitrary outbound TCP/UDP (any port), NAT'd, DNS via the gateway (ICMP/ping is best-effort — needs a raw-ICMP-capable gateway; TCP/UDP don't). The LLM leg still rides the credential-injecting proxy (`ANTHROPIC_BASE_URL` → vsock 9000), but general `curl`/`git`/`npm` go out raw over the NIC — **so general HTTPS is no longer proxy-audited** (the tradeoff of real L3). Egress is filtered at the frame layer (`fcEgressConn`, fcnet.go): guest packets to loopback / link-local / a non-loopback `CLAWSON_BIND` are dropped so a `full` guest can't reach the control plane; the host LAN stays reachable (same as a podman NIC). Needs a `CONFIG_TUN` kernel (`build-kernel.sh`). `none` never attaches the gateway. Applies on `/restart`. **See `firecracker-vsock.md` → "Internet egress profile".** [podman] not enforced (a podman group has a real NIC).
 - Each "group" is a long-lived worker running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the workspace ([podman] a bind mount; [firecracker] `groups/<g>/workspace.img`, an ext4 virtio-block image).
 - `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
 - **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `clawson-tui`, built as a static binary into `scratch`). It mounts only `clawson.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
@@ -190,11 +190,13 @@ false` — so every podman sidecar gets NAT'd outbound and can reach **the full
 internet and the host's local network (LAN)**, plus every other sidecar on
 the bridge. The credential-injecting proxy is only the *default*
 `ANTHROPIC_BASE_URL`; it is NOT a network boundary. A prompt-injected podman
-sidecar can `curl` anywhere. → **A microVM group has no NIC at all**: the
-proxy becomes the *only* egress, enforced by the absence of a route (verified
-from inside the guest: `lo` only, curl fails, no DNS). Open-internet access
-for a microVM group is a deliberate future feature (daemon-mediated CONNECT
-forwarder), not the default.
+sidecar can `curl` anywhere. → **A microVM group has no NIC by default**
+(`internet=none`): the proxy is the *only* egress, enforced by the absence of a
+route (verified from inside the guest: `lo` only, curl fails, no DNS).
+Open-internet is opt-in per group via `internet=full`, which attaches a gVisor
+L3 gateway over vsock (real NIC, egress-filtered at the frame layer to keep the
+control plane unreachable) — see the `internet` profile bullet above and
+`firecracker-vsock.md`.
 
 **[podman runtime] The container boundary is a shared-kernel boundary, not a
 VM.** All podman sidecars share the *host kernel* — isolation is namespaces +
@@ -204,9 +206,11 @@ the worst case (`--cap-add SYS_ADMIN` + `unmask=/proc/*`). → **A microVM group
 runs its own guest kernel behind KVM/VT-x**: an escape is now a VM escape
 against Firecracker's minimal device model (virtio-blk/net/vsock only), not a
 namespace escape. This is the "real hardware boundary" the next paragraph used
-to call deferred — it's shipped. gVisor was the lighter alternative;
-Firecracker won because the no-shared-FS constraint forced a clean vsock-only
-IPC that also solved the egress hole for free.
+to call deferred — it's shipped. gVisor was the lighter alternative *as a
+runtime sandbox*; Firecracker won because the no-shared-FS constraint forced a
+clean vsock-only IPC that also solved the egress hole for free. (gVisor's
+netstack does return for `internet=full` — but only as a userspace L3 gateway
+over vsock, not as the runtime boundary.)
 
 The "we trust the host user" decision was deliberate. DooD socket equals host authority for `cs_host`; that's an accepted risk. If you ever want to drop tier 2 closer to tier 3, swap DooD for a 3-verb supervisor (sketch in earlier design discussion) or for rootless podman-in-podman.
 
