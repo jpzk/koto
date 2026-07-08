@@ -14,19 +14,19 @@ import (
 )
 
 func TestFcBlockedDst(t *testing.T) {
-	t.Setenv("CLAWSON_BIND", "192.0.2.1")
+	// Note: cs_host's own IPs are also blocked (fcSelfIPs), but those depend on
+	// the host's interfaces, so this table covers only the static rules.
 	cases := []struct {
 		ip      string
 		blocked bool
 	}{
-		{"127.0.0.1", true},   // loopback (daemon gRPC/proxy live here)
-		{"127.5.6.7", true},   // all of 127/8
+		{"127.0.0.1", true},       // loopback (daemon gRPC/proxy live here)
+		{"127.5.6.7", true},       // all of 127/8
 		{"169.254.169.254", true}, // cloud metadata / link-local
-		{"192.0.2.1", true},    // configured CLAWSON_BIND (WireGuard control plane)
-		{"1.1.1.1", false},    // public
-		{"10.89.0.4", false},  // clawson-net LAN peer — allowed (parity with L7)
-		{"::1", true},         // v6 loopback
-		{"8.8.8.8", false},
+		{"1.1.1.1", false},        // public
+		{"8.8.8.8", false},        // public
+		{"::1", true},             // v6 loopback
+		{"fe80::1", true},         // v6 link-local
 	}
 	for _, c := range cases {
 		if got := fcBlockedDst(net.ParseIP(c.ip)); got != c.blocked {

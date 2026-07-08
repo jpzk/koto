@@ -198,12 +198,15 @@ standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
 - **Egress authority moves to the frame layer.** gvisor-tap-vsock has no
   destination-filter hook (it `net.Dial`s the packet's destination directly),
   so `fcEgressConn` (fcnet.go) parses each guest frame and **drops** those
-  addressed to the control plane — loopback (`127/8`, `::1`, where the daemon's
-  gRPC and per-group proxy ports live), link-local (`169.254/16`, `fe80::/10`),
-  and a non-loopback `CLAWSON_BIND` if set. `Ec2MetadataAccess=false`
+  addressed to the control plane — loopback (`127/8`, `::1`), link-local
+  (`169.254/16`, `fe80::/10`), and **cs_host's own interface IPs** (`fcSelfIPs`,
+  where the daemon gRPC on `CLAWSON_BIND:CLAWSON_PORT` and every group's proxy
+  port live — reachable on clawson-net as `cs_host_go:<port>`). `Ec2MetadataAccess=false`
   additionally blocks metadata inside the netstack. Everything else — including
-  the host LAN — is allowed, same posture as before (and as a podman NIC).
-  This replaces, for the L3 path, what `egressTargetAllowed` (proxy.go) does
+  the wider host LAN — is allowed, same posture as before (and as a podman NIC).
+  Verified live through the daemon: `cs_host_go:8443` times out from a `full`
+  guest while `example.com` returns 200. This replaces, for the L3 path, what
+  `egressTargetAllowed` (proxy.go) does
   for the L7 path.
 - **`none` keeps the invariant.** A `none` group never opens the 9003 listener
   and never gets `net="l3"`, so no TAP and no route exist — "no NIC = no

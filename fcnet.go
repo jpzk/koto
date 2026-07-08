@@ -28,9 +28,10 @@ package main
 // Egress authority: gvisor-tap-vsock has no destination-filter hook (its
 // forwarder net.Dial's the packet's destination directly), so we filter at the
 // frame layer BEFORE the netstack sees a packet — fcEgressConn drops guest
-// frames addressed to the control plane (loopback, link-local, the daemon's
-// gRPC bind). This replaces, for the L3 path, what egressTargetAllowed does for
-// the L7 proxy (proxy.go). Ec2MetadataAccess=false additionally blocks
+// frames addressed to the control plane (loopback, link-local, and cs_host's
+// own interface IPs — where the daemon gRPC and every group's proxy port live).
+// This replaces, for the L3 path, what egressTargetAllowed does for the L7
+// proxy (proxy.go). Ec2MetadataAccess=false additionally blocks
 // 169.254.169.254 inside the netstack as defense in depth.
 
 import (
@@ -39,7 +40,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
+	"sync"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
@@ -98,16 +99,38 @@ func fcBlockedDst(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true // 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
 	}
-	// If the daemon's gRPC control plane binds a non-loopback address (e.g. a
-	// WireGuard mesh IP via CLAWSON_BIND), block it too — the loopback rule
-	// above already covers the default 127.0.0.1 bind.
-	if b := os.Getenv("CLAWSON_BIND"); b != "" {
-		if bip := net.ParseIP(b); bip != nil && bip.Equal(ip) {
+	// Block cs_host's own addresses — the daemon and every group's proxy port
+	// live here (gRPC on CLAWSON_BIND:CLAWSON_PORT, proxies on 0.0.0.0:<port>,
+	// reachable on clawson-net as cs_host_go:<port>). This is the L3 equivalent
+	// of egressTargetAllowed blocking the `cs_host_go` host by name: a full
+	// guest can reach the wider LAN but never the control plane. (Note bind
+	// 0.0.0.0 resolves to every local IP, so enumerating our own addrs is the
+	// only reliable block — a literal 0.0.0.0 check never matches a packet.)
+	for _, self := range fcSelfIPs() {
+		if self.Equal(ip) {
 			return true
 		}
 	}
 	return false
 }
+
+// fcSelfIPs is the daemon/cs_host's own interface addresses, computed once.
+// Guest L3 packets to any of these are the control plane and are dropped.
+var fcSelfIPs = func() func() []net.IP {
+	var once sync.Once
+	var ips []net.IP
+	return func() []net.IP {
+		once.Do(func() {
+			addrs, _ := net.InterfaceAddrs()
+			for _, a := range addrs {
+				if n, ok := a.(*net.IPNet); ok {
+					ips = append(ips, n.IP)
+				}
+			}
+		})
+		return ips
+	}
+}()
 
 // fcEgressConn wraps the guest link conn. Reads (guest→host) are reframed so
 // that only allowed Qemu frames pass through to the netstack; writes
