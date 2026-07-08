@@ -1,10 +1,11 @@
 # Golden rootfs for clawson Firecracker microVM groups.
 #
-# Deliberately smaller than sidecar/Dockerfile: no Chrome stack, no podman
-# (pip groups stay on the podman runtime for now), no agent-browser. What
-# remains is exactly what sidecar/entrypoint.sh + the claude CLI + the venice
-# tool loop need, plus e2fsprogs (workspace mkfs fallback + fsck) and the
-# fc-agent PID-1 binary.
+# Smaller than sidecar/Dockerfile (no Chrome/agent-browser), but DOES ship
+# rootless podman: the agent can run containers inside the microVM. Unlike the
+# old podman-in-podman "pip" path (which needed SYS_ADMIN on the host and
+# collapsed isolation), here podman runs on the guest's own kernel behind KVM —
+# a container escape is contained by the VM. Rootless (as node/uid 1000), with
+# fuse-overlayfs storage and pasta networking over /dev/net/tun.
 #
 # This image is never run as a container — build-rootfs.sh exports its
 # filesystem into an ext4 image that Firecracker attaches read-only as the
@@ -29,6 +30,14 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       tar \
       gzip \
       which \
+      podman \
+      crun \
+      conmon \
+      containers-common \
+      fuse-overlayfs \
+      passt \
+      slirp4netns \
+      shadow-utils \
  && dnf clean all \
  && npm i -g @anthropic-ai/claude-code \
  && npm cache clean --force
@@ -36,6 +45,21 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 # Same uid/gid contract as the podman sidecar: entrypoint.sh runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
+
+# Rootless podman setup for node:
+#  - subuid/subgid: a subordinate id range so newuidmap can build the userns.
+#  - storage.conf: overlay via fuse-overlayfs (no host overlay privilege).
+#  - containers.conf: cgroupfs + file logger (no systemd in the guest); pasta
+#    networking (rootless, uses /dev/net/tun). graphroot lands under
+#    $HOME=/workspace (the writable ext4), not the read-only root.
+RUN printf 'node:100000:65536\n' > /etc/subuid \
+ && printf 'node:100000:65536\n' > /etc/subgid \
+ && mkdir -p /etc/containers \
+ && printf '[storage]\ndriver = "overlay"\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' > /etc/containers/storage.conf \
+ && printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n[network]\ndefault_rootless_network_cmd = "pasta"\n' > /etc/containers/containers.conf \
+ && chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap
+# ^ setuid bit, not file caps: mke2fs -d / the export tar don't carry the
+#   security.capability xattr, so rely on setuid-root for the id-map helpers.
 
 # Sidecar loop scripts, baked in (no bind mounts in a microVM — editing them
 # now requires `make fc-rootfs`, unlike the podman runtime's live mounts).

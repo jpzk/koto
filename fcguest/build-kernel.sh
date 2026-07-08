@@ -72,9 +72,18 @@ cd "linux-$KERNEL_VERSION"
 #   CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES — device discovery under acpi=off
 #   CONFIG_IKCONFIG[_PROC]            — /proc/config.gz for verification
 curl -fsSL "$FC_CONFIG_URL" >.config
+# FC's config already carries most of what rootless podman needs (USER_NS,
+# OVERLAY_FS, cgroup v2, BRIDGE/VETH, iptables NAT, SECCOMP). We add:
+#   TUN                        — L3 TAP + rootless podman's pasta/slirp4netns
+#   VIRTIO_MMIO_CMDLINE_DEVICES — device discovery under acpi=off
+#   FUSE_FS                    — fuse-overlayfs, the rootless storage driver
+#   NF_TABLES                  — netavark's nftables firewall backend
+#   IKCONFIG[_PROC]            — /proc/config.gz for verification
 ./scripts/config --file .config \
   -e CONFIG_TUN \
   -e CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES \
+  -e CONFIG_FUSE_FS \
+  -e CONFIG_NF_TABLES \
   -e CONFIG_IKCONFIG \
   -e CONFIG_IKCONFIG_PROC
 make olddefconfig >/dev/null
@@ -82,6 +91,7 @@ make olddefconfig >/dev/null
 grep -q '^CONFIG_TUN=y' .config || { echo "!! CONFIG_TUN not enabled"; exit 1; }
 grep -q '^CONFIG_PVH=y'  .config || { echo "!! CONFIG_PVH missing — FC needs PVH boot"; exit 1; }
 grep -q '^CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y' .config || { echo "!! CMDLINE_DEVICES missing — guest won't find /dev/vda under acpi=off"; exit 1; }
+grep -q '^CONFIG_FUSE_FS=y' .config || { echo "!! FUSE_FS missing — rootless podman storage (fuse-overlayfs) needs it"; exit 1; }
 
 make -j"$(nproc)" vmlinux >/dev/null
 cp vmlinux /out/vmlinux

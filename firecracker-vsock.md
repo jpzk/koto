@@ -237,3 +237,36 @@ standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
 - **podman groups**: the profile is a firecracker feature. A podman group has
   a real NIC and full internet regardless; `internet=none` is not enforced
   there (would need `--internal` networking).
+
+## Containers (rootless podman in the guest)
+
+The golden rootfs ships **rootless podman** (5.x) so the agent can run
+containers *inside* the microVM. This replaces the old podman-in-podman "pip"
+path we removed: there, the sidecar needed `SYS_ADMIN` on the **host**
+container, collapsing tier-3→tier-1 isolation on any runc/crun escape. Here
+podman runs on the guest's **own kernel behind KVM** — a container escape is a
+guest-VM escape, not a host escape. Rootless, as `node` (uid 1000).
+
+What makes it work (all verified live — pull over L3 + a container reaching the
+internet through pasta):
+
+- **Kernel** (`build-kernel.sh`): FC's config already had `USER_NS`,
+  `OVERLAY_FS`, cgroup v2, `BRIDGE`/`VETH`, iptables NAT, `SECCOMP`; we added
+  `FUSE_FS` (fuse-overlayfs) and `NF_TABLES` (netavark), and `TUN` was already
+  there for L3 (pasta reuses it).
+- **Rootfs** (`Dockerfile.rootfs`): `podman crun conmon containers-common
+  fuse-overlayfs passt slirp4netns shadow-utils`; `/etc/subuid`+`subgid` for
+  node; `storage.conf` (overlay+fuse-overlayfs); `containers.conf`
+  (`cgroup_manager=cgroupfs`, `events_logger=file`, pasta networking — no
+  systemd in the guest); and `newuidmap`/`newgidmap` marked **setuid** (the
+  `security.capability` xattr doesn't survive the export-tar → `mkfs -d`).
+- **Guest agent** (`earlyInit`): `mknod /dev/fuse`; `/dev/net/tun` is `0666`
+  (both the L3 TAP and pasta open it); mount `cgroup2`; make `/` rshared;
+  `/run/user/1000` (0700 node) under a 0755 `/run/user`; `XDG_RUNTIME_DIR` +
+  `TMPDIR=/workspace/.tmp` in the worker env (podman stages image blobs in
+  `TMPDIR`; `/var/tmp` is on the read-only rootfs).
+
+Practical notes: **pulling images needs egress**, so containers are effectively
+an `internet=full` feature (pull rides the L3 gateway; `none` has no registry
+access). Container images live under `$HOME=/workspace` (the writable ext4), so
+image-heavy groups may want a larger `workspace.img` and more `mem_mib`.

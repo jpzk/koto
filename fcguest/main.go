@@ -117,9 +117,33 @@ func earlyInit() {
 	// on a missing node (harmless if it already exists).
 	_ = os.MkdirAll("/dev/net", 0o755)
 	if _, err := os.Stat("/dev/net/tun"); os.IsNotExist(err) {
-		if err := unix.Mknod("/dev/net/tun", unix.S_IFCHR|0o600, int(unix.Mkdev(10, 200))); err != nil {
+		if err := unix.Mknod("/dev/net/tun", unix.S_IFCHR|0o666, int(unix.Mkdev(10, 200))); err != nil {
 			logf("mknod /dev/net/tun: %v", err)
 		}
+	}
+	// 0666 (not 0600): the L3 TAP (netUp, root) and rootless podman's pasta
+	// (node) both open this cloning device. devtmpfs may pre-create it 0600.
+	_ = os.Chmod("/dev/net/tun", 0o666)
+	// Rootless-podman prereqs (the guest ships podman; the agent/entrypoint runs
+	// containers as node). /dev/fuse → fuse-overlayfs storage; cgroup2 →
+	// resource accounting; /run/user/1000 → podman's XDG_RUNTIME_DIR.
+	if _, err := os.Stat("/dev/fuse"); os.IsNotExist(err) {
+		if err := unix.Mknod("/dev/fuse", unix.S_IFCHR|0o666, int(unix.Mkdev(10, 229))); err != nil {
+			logf("mknod /dev/fuse: %v", err)
+		}
+	}
+	_ = os.Chmod("/dev/fuse", 0o666) // devtmpfs auto-creates it 0600 root; node needs it
+	mount("cgroup2", "/sys/fs/cgroup", "cgroup2", 0, "")
+	// rootless podman/fuse-overlayfs want mount propagation shared on / so
+	// container mounts propagate correctly (else "/ is not a shared mount").
+	if err := unix.Mount("none", "/", "", unix.MS_REC|unix.MS_SHARED, ""); err != nil {
+		logf("make-rshared /: %v", err)
+	}
+	// XDG_RUNTIME_DIR for rootless podman: /run/user must be world-traversable
+	// (0755) so node can reach its own 0700 /run/user/1000.
+	_ = os.MkdirAll("/run/user", 0o755)
+	if err := os.Mkdir("/run/user/1000", 0o700); err == nil || os.IsExist(err) {
+		_ = os.Chown("/run/user/1000", workerUID, workerGID)
 	}
 	_ = unix.Sethostname([]byte("clawson-vm"))
 }
@@ -174,6 +198,10 @@ func setupCS() {
 	_ = os.Chown(out, workerUID, workerGID)
 	_ = os.MkdirAll(filepath.Join(wsDir, "memory"), 0o755)
 	_ = os.Chown(filepath.Join(wsDir, "memory"), workerUID, workerGID)
+	// Writable TMPDIR on the workspace disk (podman stages image blobs here;
+	// /var/tmp is on the read-only rootfs). See entrypointEnviron.
+	_ = os.MkdirAll(filepath.Join(wsDir, ".tmp"), 0o700)
+	_ = os.Chown(filepath.Join(wsDir, ".tmp"), workerUID, workerGID)
 	// Hold the in FIFO open O_RDWR for the agent's lifetime. A FIFO's buffer
 	// is discarded when its last fd closes — so an open-write-close in
 	// handleMsg loses the message if it races entrypoint.sh's `exec 3<>`
@@ -660,6 +688,9 @@ func entrypointEnviron(env map[string]string) []string {
 		"TERM=xterm-256color",
 		"USER=node",
 		"LOGNAME=node",
+		"XDG_RUNTIME_DIR=/run/user/1000",  // rootless podman runtime dir
+		"TMPDIR=" + wsDir + "/.tmp",        // writable temp on disk (podman stages
+		//                                     image blobs here; /var/tmp is read-only)
 	}
 	for k, v := range env {
 		out = append(out, k+"="+v)
