@@ -1,0 +1,51 @@
+# Golden rootfs for clawson Firecracker microVM groups.
+#
+# Deliberately smaller than sidecar/Dockerfile: no Chrome stack, no podman
+# (pip groups stay on the podman runtime for now), no agent-browser. What
+# remains is exactly what sidecar/entrypoint.sh + the claude CLI + the venice
+# tool loop need, plus e2fsprogs (workspace mkfs fallback + fsck) and the
+# fc-agent PID-1 binary.
+#
+# This image is never run as a container — build-rootfs.sh exports its
+# filesystem into an ext4 image that Firecracker attaches read-only as the
+# root drive (shared by every group VM).
+FROM fedora:44
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+      bash \
+      ca-certificates \
+      coreutils \
+      curl \
+      e2fsprogs \
+      git \
+      jq \
+      util-linux \
+      nodejs \
+      npm \
+      procps-ng \
+      python3 \
+      ripgrep \
+      tar \
+      gzip \
+      which \
+ && dnf clean all \
+ && npm i -g @anthropic-ai/claude-code \
+ && npm cache clean --force
+
+# Same uid/gid contract as the podman sidecar: entrypoint.sh runs as node
+# (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
+RUN useradd -u 1000 -m -s /bin/bash node
+
+# Sidecar loop scripts, baked in (no bind mounts in a microVM — editing them
+# now requires `make fc-rootfs`, unlike the podman runtime's live mounts).
+COPY sidecar/ /sidecar/
+RUN chmod -R a+rX /sidecar
+
+# The PID-1 agent. boot_args select it: init=/usr/local/bin/fc-agent
+# /workspace + /skills must pre-exist as mount points — the root drive is
+# attached read-only, so the agent can't create them at boot.
+COPY fcguest/fc-agent /usr/local/bin/fc-agent
+RUN chmod 755 /usr/local/bin/fc-agent \
+ && mkdir -p /workspace /skills \
+ && printf '127.0.0.1 localhost clawson-vm\n' > /etc/hosts \
+ && printf '' > /etc/resolv.conf

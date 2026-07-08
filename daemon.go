@@ -215,19 +215,26 @@ func ensure(g string, isMain bool) (int, error) {
 	if err := ensureProviderConfig(g); err != nil {
 		emitLogf("warn", "ensure provider config[%s]: %v", g, err)
 	}
-	fifo := filepath.Join(v, ".cs", "in")
-	if _, err := os.Stat(fifo); errors.Is(err, os.ErrNotExist) {
-		if err := syscall.Mkfifo(fifo, 0o644); err != nil {
-			return 0, err
+	rt := groupRuntime(g)
+	if rt == "podman" {
+		// Host-side FIFOs are the podman-runtime IPC. Firecracker groups get
+		// the equivalent channels over vsock (fc.go); creating unused host
+		// FIFOs for them would just leave a ctlLoop blocked on a pipe no one
+		// writes.
+		fifo := filepath.Join(v, ".cs", "in")
+		if _, err := os.Stat(fifo); errors.Is(err, os.ErrNotExist) {
+			if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+				return 0, err
+			}
 		}
-	}
-	// Every group gets its own ctl FIFO. Main retains full orchestration
-	// authority; non-main groups are limited to self-scheduling. See
-	// ctl.go for the authorization split.
-	if err := ensureCtlFIFO(g); err != nil {
-		emitLogf("error", "ctl[%s]: ensure fifo: %v", g, err)
-	} else {
-		startCtlLoop(g)
+		// Every group gets its own ctl FIFO. Main retains full orchestration
+		// authority; non-main groups are limited to self-scheduling. See
+		// ctl.go for the authorization split.
+		if err := ensureCtlFIFO(g); err != nil {
+			emitLogf("error", "ctl[%s]: ensure fifo: %v", g, err)
+		} else {
+			startCtlLoop(g)
+		}
 	}
 	port := allocPort(g)
 	// Register the proxy listener synchronously. proxyListen is idempotent
@@ -240,7 +247,11 @@ func ensure(g string, isMain bool) (int, error) {
 		return 0, fmt.Errorf("proxy listen: %w", err)
 	}
 	name := csName(g)
-	if podmanRunning(name) {
+	if rt == "firecracker" {
+		if fcRunning(g) {
+			return port, nil
+		}
+	} else if podmanRunning(name) {
 		return port, nil
 	}
 	// Read per-group ports from config.json. The user (or main agent) puts
@@ -273,6 +284,15 @@ func ensure(g string, isMain bool) (int, error) {
 				pip = v
 			}
 		}
+	}
+	if rt == "firecracker" {
+		emitLogf("info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+		if err := fcSpawn(g, port, pubPorts); err != nil {
+			proxyUnlisten(port)
+			emitLogf("error", "spawn group=%s: %v", g, err)
+			return 0, err
+		}
+		return port, nil
 	}
 	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v pip=%t", g, port, isMain, pubPorts, pip)
 	args := []string{"run", "-d", "--rm", "--name", name,
@@ -365,6 +385,10 @@ func ensure(g string, isMain bool) (int, error) {
 }
 
 func stopGroup(g string) {
+	if groupRuntime(g) == "firecracker" {
+		fcStop(g)
+		return
+	}
 	_ = exec.Command("podman", "rm", "-f", csName(g)).Run()
 	emitLogf("info", "stopped group=%s", g)
 }
@@ -408,18 +432,36 @@ func tailBackgroundTask(g, id, path string) {
 	}()
 
 	name := csName(g)
-	if !podmanRunning(name) {
+	if !groupRunning(g) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "podman", "exec", name, "tail", "-F", "-n", "0", path)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		return
+	var stdout io.Reader
+	var wait func()
+	if groupRuntime(g) == "firecracker" {
+		// exec_stream is the microVM analogue of a cancellable `podman exec`:
+		// closing the connection makes the guest agent kill the tail child.
+		q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+		rc, err := fcExecStream(g, "exec tail -F -n 0 "+q)
+		if err != nil {
+			return
+		}
+		timer := time.AfterFunc(10*time.Minute, func() { _ = rc.Close() })
+		defer func() { timer.Stop(); _ = rc.Close() }()
+		stdout = rc
+		wait = func() {}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "podman", "exec", name, "tail", "-F", "-n", "0", path)
+		p, err := cmd.StdoutPipe()
+		if err != nil {
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			return
+		}
+		stdout = p
+		wait = func() { _ = cmd.Wait() }
 	}
 	emitLogf("info", "bg-tail start group=%s id=%s path=%s", g, id, path)
 	sc := bufio.NewScanner(stdout)
@@ -430,7 +472,7 @@ func tailBackgroundTask(g, id, path string) {
 		// to keep the chat readable.
 		logAppend(g, []byte("[[bg]] "+id+" "+line+"\n"))
 	}
-	_ = cmd.Wait()
+	wait()
 	emitLogf("info", "bg-tail end group=%s id=%s", g, id)
 }
 
@@ -460,7 +502,7 @@ const agentWorkerPattern = `claude-code|venice_stream\.js`
 // (same user as the worker), so /proc reads are permitted.
 func interruptAgent(g string) error {
 	name := csName(g)
-	if !podmanRunning(name) {
+	if !groupRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
 	// Skip our own pid ($$): this script body contains the worker pattern
@@ -479,9 +521,23 @@ for d in /proc/[0-9]*; do
 done
 [ "$hit" = 1 ] || echo no-agent-process >&2
 exit 0`
-	out, err := exec.Command("podman", "exec", name, "sh", "-c", script).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("podman exec: %v: %s", err, strings.TrimSpace(string(out)))
+	var out []byte
+	var err error
+	if groupRuntime(g) == "firecracker" {
+		// Same /proc-walk script, delivered via the guest agent's exec op —
+		// the microVM analogue of `podman exec`. Runs as guest root (agent is
+		// PID 1), which can signal the uid-1000 worker just fine.
+		var s string
+		s, _, err = fcExec(g, script, 15*time.Second)
+		out = []byte(s)
+		if err != nil {
+			return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
+		}
+	} else {
+		out, err = exec.Command("podman", "exec", name, "sh", "-c", script).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("podman exec: %v: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	if strings.Contains(string(out), "no-agent-process") {
 		return fmt.Errorf("no running agent process in group '%s'", g)
@@ -800,15 +856,50 @@ func sendNow(g, msg string) error {
 		f.Close()
 	}
 
-	spPath := filepath.Join(v, ".cs", "system-prompt.md")
-	_ = os.MkdirAll(filepath.Dir(spPath), 0o755)
-	_ = os.WriteFile(spPath, []byte(composeSystemPrompt(g)), 0o644)
-	_ = os.MkdirAll(filepath.Join(v, "memory"), 0o755)
-
+	sp := composeSystemPrompt(g)
 	augmented := msg
 	if m := latestMetric(g); m != nil {
 		augmented = contextBlock(m) + "\n\n" + msg
 	}
+
+	if groupRuntime(g) == "firecracker" {
+		// microVM delivery: no host FIFO / workspace files. The guest agent
+		// materializes system-prompt.md + config.json in the guest workspace
+		// and writes the b64 line to the in-guest FIFO — entrypoint.sh sees
+		// exactly what the podman path produces. Turn completion still
+		// arrives as [[turn_end]] via the vsock log sink → host log →
+		// tailLog, so the wait logic below is shared.
+		ensureTail(g)
+		doneC := turnDoneCh(g)
+	fcDrain:
+		for {
+			select {
+			case <-doneC:
+				continue
+			default:
+				break fcDrain
+			}
+		}
+		cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
+		enc := base64.StdEncoding.EncodeToString([]byte(augmented))
+		if err := fcSendMsg(g, enc, sp, cfgB); err != nil {
+			return err
+		}
+		select {
+		case <-doneC:
+			return nil
+		case <-time.After(turnWaitTimeout):
+			setStalled(g, true)
+			emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
+			selfHeal(g, time.Now())
+			return nil
+		}
+	}
+
+	spPath := filepath.Join(v, ".cs", "system-prompt.md")
+	_ = os.MkdirAll(filepath.Dir(spPath), 0o755)
+	_ = os.WriteFile(spPath, []byte(sp), 0o644)
+	_ = os.MkdirAll(filepath.Join(v, "memory"), 0o755)
 
 	deadline := time.Now().Add(5 * time.Second)
 	var fd int
@@ -892,7 +983,7 @@ func listGroups() map[string]GroupInfo {
 	for g, p := range readGroups() {
 		out[g] = GroupInfo{
 			Port:     p,
-			Running:  podmanRunning(csName(g)),
+			Running:  groupRunning(g),
 			Provider: groupProviderName(g),
 			Model:    groupModelName(g),
 			Effort:   groupEffortName(g),
@@ -1058,6 +1149,15 @@ func destroy(g string) baseResp {
 		proxyUnlisten(port)
 	}
 	_ = os.RemoveAll(vol(g))
+	// Firecracker droppings (cfg/pid/console/vsock sockets) live under
+	// run/fc, not the workspace — sweep them so a name reuse starts clean.
+	for _, p := range []string{fcCfgPath(g), fcPidPath(g), fcConsolePath(g),
+		fcUDS(g),
+		fmt.Sprintf("%s_%d", fcUDS(g), fcPortProxy),
+		fmt.Sprintf("%s_%d", fcUDS(g), fcPortLog),
+		fmt.Sprintf("%s_%d", fcUDS(g), fcPortCtl)} {
+		_ = os.Remove(p)
+	}
 	subsLock.Lock()
 	delete(tails, g)
 	// Drop the seq counter + ring with the group: a later group of the same
@@ -2036,11 +2136,26 @@ func skillReadCmd(req skillReadReq) skillReadResp {
 
 func clearCmd(req groupReq) baseResp {
 	v := vol(req.Group)
-	_ = os.RemoveAll(filepath.Join(v, ".claude"))
-	// Venice provider keeps its own conversation history (Venice API is stateless,
-	// so the sidecar replays the whole transcript per turn). /clear must wipe it
-	// or the next message would still carry the prior turns.
-	_ = os.Remove(filepath.Join(v, ".cs", "venice-history.json"))
+	if groupRuntime(req.Group) == "firecracker" {
+		// Session state lives inside workspace.img, which the host must not
+		// touch while (or whether) the VM runs — clear it in-guest via the
+		// agent. ensure() first so a stopped group's history doesn't survive
+		// a /clear and resurrect on the next message.
+		if _, err := ensure(req.Group, req.Group == "main"); err != nil {
+			return errResp("clear: " + err.Error())
+		}
+		if _, _, err := fcExec(req.Group,
+			"rm -rf /workspace/.claude /workspace/.cs/venice-history.json", 15*time.Second); err != nil {
+			return errResp("clear: " + err.Error())
+		}
+	} else {
+		_ = os.RemoveAll(filepath.Join(v, ".claude"))
+		// Venice provider keeps its own conversation history (Venice API is
+		// stateless, so the sidecar replays the whole transcript per turn).
+		// /clear must wipe it or the next message would still carry the
+		// prior turns.
+		_ = os.Remove(filepath.Join(v, ".cs", "venice-history.json"))
+	}
 	logPath := filepath.Join(v, ".cs", "log")
 	if _, err := os.Stat(logPath); err == nil {
 		_ = os.WriteFile(logPath, nil, 0o644)

@@ -23,6 +23,12 @@ CLAWSON_PORT="${CLAWSON_PORT:-8443}"
 # +token still gate it, but loopback-only is the safer default).
 PUBLISH_ARG=""
 [ -n "${CLAWSON_PUBLISH:-}" ] && PUBLISH_ARG="-p ${CLAWSON_PUBLISH}:${CLAWSON_PORT}"
+# Firecracker runtime: pass /dev/kvm through when the host has it so the
+# daemon can boot microVM groups (config.json "runtime": "firecracker").
+# /dev/kvm is 0666 on Fedora — no group juggling needed. Hosts without KVM
+# still run fine; the fc runtime just fails its preflight with a clear error.
+KVM_ARG=""
+[ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm"
 podman rm -f cs_host_go >/dev/null 2>&1 || true
 # .gocache is a persistent Go build cache. Without it, the first compile
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon
@@ -31,6 +37,7 @@ podman rm -f cs_host_go >/dev/null 2>&1 || true
 podman run -d --rm \
   --name cs_host_go --network clawson-net \
   $PUBLISH_ARG \
+  $KVM_ARG \
   --security-opt label=disable \
   -v "$SOCK:/run/podman/podman.sock" \
   -v "$HERE:$HERE" \
