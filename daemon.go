@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -110,10 +108,7 @@ var (
 	SOCK_DIR    string
 	SOCK_PATH   string
 	METRICS     string
-	IMAGE       = "clawson"
 	PORT_BASE   = 8787
-	PROXY_HOST  = "host.containers.internal"
-	NETWORK     = "pasta"
 )
 
 func initPaths() {
@@ -130,20 +125,9 @@ func initPaths() {
 			PORT_BASE = n
 		}
 	}
-	if v := os.Getenv("PROXY_HOST"); v != "" {
-		PROXY_HOST = v
-	}
-	if v := os.Getenv("NC_NETWORK"); v != "" {
-		NETWORK = v
-	}
 }
 
 func vol(g string) string { return filepath.Join(ROOT, g) }
-
-// csName returns the podman container name for a group's sidecar.
-// The `_go` suffix lets this Go-based stack coexist with a Python-based
-// clawson on the same host without colliding on container names.
-func csName(g string) string { return "cs_" + g + "_go" }
 
 // ---- groups.json ----------------------------------------------------------
 
@@ -194,14 +178,6 @@ func allocPort(g string) int {
 
 // ---- sidecar lifecycle ----------------------------------------------------
 
-func podmanRunning(name string) bool {
-	out, err := exec.Command("podman", "ps", "-q", "-f", "name=^"+name+"$").Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
-}
-
 func ensure(g string, isMain bool) (int, error) {
 	v := vol(g)
 	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
@@ -215,27 +191,6 @@ func ensure(g string, isMain bool) (int, error) {
 	if err := ensureProviderConfig(g); err != nil {
 		emitLogf("warn", "ensure provider config[%s]: %v", g, err)
 	}
-	rt := groupRuntime(g)
-	if rt == "podman" {
-		// Host-side FIFOs are the podman-runtime IPC. Firecracker groups get
-		// the equivalent channels over vsock (fc.go); creating unused host
-		// FIFOs for them would just leave a ctlLoop blocked on a pipe no one
-		// writes.
-		fifo := filepath.Join(v, ".cs", "in")
-		if _, err := os.Stat(fifo); errors.Is(err, os.ErrNotExist) {
-			if err := syscall.Mkfifo(fifo, 0o644); err != nil {
-				return 0, err
-			}
-		}
-		// Every group gets its own ctl FIFO. Main retains full orchestration
-		// authority; non-main groups are limited to self-scheduling. See
-		// ctl.go for the authorization split.
-		if err := ensureCtlFIFO(g); err != nil {
-			emitLogf("error", "ctl[%s]: ensure fifo: %v", g, err)
-		} else {
-			startCtlLoop(g)
-		}
-	}
 	port := allocPort(g)
 	// Register the proxy listener synchronously. proxyListen is idempotent
 	// for the (port, group) pair already on file, so a re-ensure on a live
@@ -246,20 +201,12 @@ func ensure(g string, isMain bool) (int, error) {
 	if err := proxyListen(proxyBind, port, g); err != nil {
 		return 0, fmt.Errorf("proxy listen: %w", err)
 	}
-	name := csName(g)
-	if rt == "firecracker" {
-		if fcRunning(g) {
-			return port, nil
-		}
-	} else if podmanRunning(name) {
+	if fcRunning(g) {
 		return port, nil
 	}
 	// Read per-group ports from config.json. The user (or main agent) puts
-	// e.g. {"ports": [8080]} there and the daemon publishes those container
-	// ports to 127.0.0.1 on the host so a browser can reach them. Changes
-	// require /restart — podman can't add -p to a running container. Bind
-	// to 127.0.0.1 only so a compromised sidecar can't serve attacker
-	// content to the wider LAN.
+	// e.g. {"ports": [8080]} there and the daemon publishes them (via a
+	// vsock↔TCP bridge in cs_host). Changes require /restart.
 	var pubPorts []int
 	if b, err := os.ReadFile(filepath.Join(v, ".cs", "config.json")); err == nil {
 		var cfg map[string]any
@@ -281,86 +228,17 @@ func ensure(g string, isMain bool) (int, error) {
 			}
 		}
 	}
-	if rt == "firecracker" {
-		emitLogf("info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
-		if err := fcSpawn(g, port, pubPorts); err != nil {
-			proxyUnlisten(port)
-			emitLogf("error", "spawn group=%s: %v", g, err)
-			return 0, err
-		}
-		return port, nil
-	}
-	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
-	args := []string{"run", "-d", "--rm", "--name", name,
-		// --init runs catatonit as pid 1 (the entrypoint sh becomes its child).
-		// Without a real init, orphaned tool subprocesses reparent to the
-		// entrypoint sh — which never wait()s them — so they pile up as
-		// zombies. catatonit reaps them. It does NOT kill live processes, so
-		// intentional cross-turn daemons (start-chrome, published dev servers)
-		// are unaffected; live in-group runaways are already reaped by the
-		// per-turn `timeout -s KILL` group-kill in entrypoint.sh.
-		"--init",
-		"--security-opt", "label=disable",
-		"--userns=keep-id",
-		"--network=" + NETWORK,
-		// Bind-mount the whole sidecar/ directory ro instead of individual
-		// files. Single-file bind-mounts capture the source inode at mount
-		// time, so an atomic file replacement on the host (which is what
-		// most editors, including the harness's Edit tool, do — write to a
-		// tempfile + rename) leaves the container pointing at the now-orphan
-		// original inode. A directory mount resolves filename → inode on
-		// every open, so edits to entrypoint.sh / stream_filter.js are
-		// genuinely picked up on the next message invocation without a
-		// sidecar respawn. --entrypoint overrides the image's
-		// ENTRYPOINT=["/bin/sh","/e.sh"] so the live version under /sidecar
-		// is always used when the bind-mount is present.
-		"--entrypoint", `["/bin/sh","/sidecar/entrypoint.sh"]`,
-		"-v", v + ":/workspace",
-		"-v", HERE + "/sidecar:/sidecar:ro",
-		"-v", "/etc/localtime:/etc/localtime:ro",
-		"-e", "ANTHROPIC_API_KEY=proxied",
-		"-e", "HOME=/workspace",
-		"-e", "SHELL=/bin/bash",
-		// Single source of truth for the venice default model (see
-		// defaultVeniceModel). entrypoint.sh applies this when config has no
-		// `model`; groupModelName reports the same value to the TUI.
-		"-e", "CLAWSON_DEFAULT_VENICE_MODEL=" + defaultVeniceModel,
-		"-e", fmt.Sprintf("ANTHROPIC_BASE_URL=http://%s:%d", PROXY_HOST, port),
-	}
-	if _, err := os.Stat(filepath.Join(HERE, "prompts", "global.md")); err == nil {
-		args = append(args, "-v", HERE+"/prompts/global.md:/prompts/global.md:ro")
-	}
-	_ = os.MkdirAll(SKILLS_DIR, 0o755)
-	mode := "ro"
-	if isMain {
-		mode = "rw"
-	}
-	args = append(args, "-v", SKILLS_DIR+":/skills:"+mode)
-	if isMain {
-		args = append(args, "-v", ROOT+":/peers")
-	}
-	for _, p := range pubPorts {
-		args = append(args, "-p", fmt.Sprintf("127.0.0.1:%d:%d", p, p))
-	}
-	args = append(args, IMAGE)
-	cmd := exec.Command("podman", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	emitLogf("info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+	if err := fcSpawn(g, port, pubPorts); err != nil {
 		proxyUnlisten(port)
-		emitLogf("error", "spawn group=%s: %v: %s", g, err, strings.TrimSpace(string(out)))
-		return 0, fmt.Errorf("podman run: %v: %s", err, string(out))
+		emitLogf("error", "spawn group=%s: %v", g, err)
+		return 0, err
 	}
-	emitLogf("info", "spawned group=%s container=%s", g, name)
 	return port, nil
 }
 
 func stopGroup(g string) {
-	if groupRuntime(g) == "firecracker" {
-		fcStop(g)
-		return
-	}
-	_ = exec.Command("podman", "rm", "-f", csName(g)).Run()
-	emitLogf("info", "stopped group=%s", g)
+	fcStop(g)
 }
 
 // bgTaskRE matches claude code's "task backgrounded" notice in tool_result
@@ -401,38 +279,20 @@ func tailBackgroundTask(g, id, path string) {
 		bgActiveLock.Unlock()
 	}()
 
-	name := csName(g)
-	if !groupRunning(g) {
+	if !fcRunning(g) {
 		return
 	}
-	var stdout io.Reader
-	var wait func()
-	if groupRuntime(g) == "firecracker" {
-		// exec_stream is the microVM analogue of a cancellable `podman exec`:
-		// closing the connection makes the guest agent kill the tail child.
-		q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
-		rc, err := fcExecStream(g, "exec tail -F -n 0 "+q)
-		if err != nil {
-			return
-		}
-		timer := time.AfterFunc(10*time.Minute, func() { _ = rc.Close() })
-		defer func() { timer.Stop(); _ = rc.Close() }()
-		stdout = rc
-		wait = func() {}
-	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "podman", "exec", name, "tail", "-F", "-n", "0", path)
-		p, err := cmd.StdoutPipe()
-		if err != nil {
-			return
-		}
-		if err := cmd.Start(); err != nil {
-			return
-		}
-		stdout = p
-		wait = func() { _ = cmd.Wait() }
+	// exec_stream is a cancellable exec into the guest: closing the connection
+	// makes the guest agent kill the tail child.
+	q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	rc, err := fcExecStream(g, "exec tail -F -n 0 "+q)
+	if err != nil {
+		return
 	}
+	timer := time.AfterFunc(10*time.Minute, func() { _ = rc.Close() })
+	defer func() { timer.Stop(); _ = rc.Close() }()
+	var stdout io.Reader = rc
+	wait := func() {}
 	emitLogf("info", "bg-tail start group=%s id=%s path=%s", g, id, path)
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -471,14 +331,13 @@ const agentWorkerPattern = `claude-code|venice_stream\.js`
 // is done in plain POSIX sh. readlink(exe) + cmdline both run as uid 1000
 // (same user as the worker), so /proc reads are permitted.
 func interruptAgent(g string) error {
-	name := csName(g)
-	if !groupRunning(g) {
+	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
 	// Skip our own pid ($$): this script body contains the worker pattern
 	// literals (in the grep below), so /proc/$$/cmdline matches and the loop
 	// would SIGINT itself. The real worker gets killed first (lower pid,
-	// iterated earlier), but the self-suicide makes podman exec exit 130,
+	// iterated earlier), but the self-suicide makes the exec exit 130,
 	// surfacing in the TUI as `exit status 130` even though it succeeded.
 	script := `hit=0
 for d in /proc/[0-9]*; do
@@ -491,24 +350,13 @@ for d in /proc/[0-9]*; do
 done
 [ "$hit" = 1 ] || echo no-agent-process >&2
 exit 0`
-	var out []byte
-	var err error
-	if groupRuntime(g) == "firecracker" {
-		// Same /proc-walk script, delivered via the guest agent's exec op —
-		// the microVM analogue of `podman exec`. Runs as guest root (agent is
-		// PID 1), which can signal the uid-1000 worker just fine.
-		var s string
-		s, _, err = fcExec(g, script, 15*time.Second)
-		out = []byte(s)
-		if err != nil {
-			return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
-		}
-	} else {
-		out, err = exec.Command("podman", "exec", name, "sh", "-c", script).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("podman exec: %v: %s", err, strings.TrimSpace(string(out)))
-		}
+	// Delivered via the guest agent's exec op. Runs as guest root (agent is
+	// PID 1), which can signal the uid-1000 worker just fine.
+	s, _, err := fcExec(g, script, 15*time.Second)
+	if err != nil {
+		return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
 	}
+	out := []byte(s)
 	if strings.Contains(string(out), "no-agent-process") {
 		return fmt.Errorf("no running agent process in group '%s'", g)
 	}
@@ -818,7 +666,6 @@ func sendNow(g, msg string) error {
 		return err
 	}
 	v := vol(g)
-	fifo := filepath.Join(v, ".cs", "in")
 	logPath := filepath.Join(v, ".cs", "log")
 
 	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
@@ -832,83 +679,17 @@ func sendNow(g, msg string) error {
 		augmented = contextBlock(m) + "\n\n" + msg
 	}
 
-	if groupRuntime(g) == "firecracker" {
-		// microVM delivery: no host FIFO / workspace files. The guest agent
-		// materializes system-prompt.md + config.json in the guest workspace
-		// and writes the b64 line to the in-guest FIFO — entrypoint.sh sees
-		// exactly what the podman path produces. Turn completion still
-		// arrives as [[turn_end]] via the vsock log sink → host log →
-		// tailLog, so the wait logic below is shared.
-		ensureTail(g)
-		doneC := turnDoneCh(g)
-	fcDrain:
-		for {
-			select {
-			case <-doneC:
-				continue
-			default:
-				break fcDrain
-			}
-		}
-		cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
-		enc := base64.StdEncoding.EncodeToString([]byte(augmented))
-		if err := fcSendMsg(g, enc, sp, cfgB); err != nil {
-			return err
-		}
-		select {
-		case <-doneC:
-			return nil
-		case <-time.After(turnWaitTimeout):
-			setStalled(g, true)
-			emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
-			selfHeal(g, time.Now())
-			return nil
-		}
-	}
-
-	spPath := filepath.Join(v, ".cs", "system-prompt.md")
-	_ = os.MkdirAll(filepath.Dir(spPath), 0o755)
-	_ = os.WriteFile(spPath, []byte(sp), 0o644)
-	_ = os.MkdirAll(filepath.Join(v, "memory"), 0o755)
-
-	deadline := time.Now().Add(5 * time.Second)
-	var fd int
-	for {
-		f, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0)
-		if err == nil {
-			fd = f
-			break
-		}
-		var errno syscall.Errno
-		if errors.As(err, &errno) && errno == syscall.ENXIO {
-			if time.Now().After(deadline) {
-				return fmt.Errorf("group '%s' sidecar didn't attach FIFO within 5s", g)
-			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		return err
-	}
-	defer syscall.Close(fd)
-	if err := syscall.SetNonblock(fd, false); err != nil {
-		return err
-	}
-
-	// Block until the sidecar finishes processing this message. Without
-	// this, the queue worker would advance as soon as the FIFO accepts the
-	// bytes, and the next turn's `>>>` marker would interleave between prior
-	// responses in the log (the symptom that surfaced as "opsec coms look
-	// weird"). The wait works by:
-	//   1. ensureTail — tailLog must be running to observe `[[turn_end]]`,
-	//      otherwise no notification fires. Idempotent; cheap if already up.
-	//   2. drain — discard any stale turn_end tokens left over from prior
-	//      messages, so step 4 only sees ours.
-	//   3. FIFO write — sidecar will eventually emit [[turn_end]].
-	//   4. wait — block until tailLog observes our completion, with a
-	//      timeout (turnWaitTimeout) to prevent a wedged sidecar from
-	//      stalling the queue worker forever. It sits above entrypoint.sh's per-turn watchdog,
-	//      so a slow-but-bounded turn always completes first; hitting it means
-	//      the sidecar loop is wedged → the group is flagged stalled.
+	// microVM delivery: the guest agent materializes system-prompt.md +
+	// config.json in the guest workspace and writes the b64 line to the
+	// in-guest FIFO — entrypoint.sh runs unchanged. Turn completion arrives as
+	// [[turn_end]] via the vsock log sink → host log → tailLog, which drives
+	// the wait below.
+	//   1. ensureTail — tailLog must run to observe [[turn_end]]. Idempotent.
+	//   2. drain — discard stale turn_end tokens from prior messages.
+	//   3. fcSendMsg — deliver the turn; the guest eventually emits [[turn_end]].
+	//   4. wait — block until tailLog sees our completion, bounded by
+	//      turnWaitTimeout (a wedged guest loop is flagged stalled, not blocking
+	//      the queue worker forever).
 	ensureTail(g)
 	doneC := turnDoneCh(g)
 drain:
@@ -920,23 +701,18 @@ drain:
 			break drain
 		}
 	}
+	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
 	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
-	if _, err := syscall.Write(fd, []byte(enc+"\n")); err != nil {
+	if err := fcSendMsg(g, enc, sp, cfgB); err != nil {
 		return err
 	}
 	select {
 	case <-doneC:
 		return nil
 	case <-time.After(turnWaitTimeout):
-		// Sits above entrypoint.sh's per-turn watchdog (TURN_TIMEOUT, default
-		// 1200s + 10s kill grace), which now guarantees a turn_end fires even
-		// for a killed turn. So reaching this branch means the sidecar's FIFO
-		// loop itself is wedged (dead/hung), not just running a long turn —
-		// flag the group stalled and return so the queue worker advances to
-		// the next message instead of blocking on a dead sidecar.
 		setStalled(g, true)
-		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (sidecar loop wedged?), advancing queue", g, turnWaitTimeout)
-		selfHeal(g, time.Now()) // restart the wedged loop (circuit-broken)
+		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
+		selfHeal(g, time.Now())
 		return nil
 	}
 }
@@ -953,7 +729,7 @@ func listGroups() map[string]GroupInfo {
 	for g, p := range readGroups() {
 		out[g] = GroupInfo{
 			Port:     p,
-			Running:  groupRunning(g),
+			Running:  fcRunning(g),
 			Provider: groupProviderName(g),
 			Model:    groupModelName(g),
 			Effort:   groupEffortName(g),
@@ -982,12 +758,10 @@ const defaultProvider = "venice"
 const defaultVeniceModel = "kimi-k2.5"
 
 // ensureProviderConfig writes provider and runtime defaults into a group's
-// config.json when missing or invalid. Idempotent — when both fields are
-// already valid the file is left untouched. Called by ensure() on every
-// spawn/send so the invariants "every group has an explicit provider" and
-// "every group has an explicit runtime" hold even for groups created before
-// this code existed (podman-era groups get runtime=firecracker seeded and
-// their workspace migrated into workspace.img on the next spawn).
+// config.json when missing or invalid. Idempotent — when the field is already
+// valid the file is left untouched. Called by ensure() on every spawn/send so
+// the invariant "every group has an explicit provider" holds even for groups
+// created before this code existed.
 func ensureProviderConfig(g string) error {
 	p := filepath.Join(vol(g), ".cs", "config.json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -998,9 +772,6 @@ func ensureProviderConfig(g string) error {
 	_ = json.Unmarshal(oldB, &cfg)
 	if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
 		cfg["provider"] = defaultProvider
-	}
-	if s, ok := cfg["runtime"].(string); !ok || (s != "firecracker" && s != "podman") {
-		cfg["runtime"] = defaultRuntime
 	}
 	newB, err := json.Marshal(cfg)
 	if err != nil {
@@ -2134,25 +1905,17 @@ func skillReadCmd(req skillReadReq) skillReadResp {
 
 func clearCmd(req groupReq) baseResp {
 	v := vol(req.Group)
-	if groupRuntime(req.Group) == "firecracker" {
-		// Session state lives inside workspace.img, which the host must not
-		// touch while (or whether) the VM runs — clear it in-guest via the
-		// agent. ensure() first so a stopped group's history doesn't survive
-		// a /clear and resurrect on the next message.
-		if _, err := ensure(req.Group, req.Group == "main"); err != nil {
-			return errResp("clear: " + err.Error())
-		}
-		if _, _, err := fcExec(req.Group,
-			"rm -rf /workspace/.claude /workspace/.cs/venice-history.json", 15*time.Second); err != nil {
-			return errResp("clear: " + err.Error())
-		}
-	} else {
-		_ = os.RemoveAll(filepath.Join(v, ".claude"))
-		// Venice provider keeps its own conversation history (Venice API is
-		// stateless, so the sidecar replays the whole transcript per turn).
-		// /clear must wipe it or the next message would still carry the
-		// prior turns.
-		_ = os.Remove(filepath.Join(v, ".cs", "venice-history.json"))
+	// Session state lives inside workspace.img, which the host must not touch
+	// while (or whether) the VM runs — clear it in-guest via the agent (both
+	// the .claude session dir and venice's stateless-API history). ensure()
+	// first so a stopped group's history doesn't survive a /clear and resurrect
+	// on the next message.
+	if _, err := ensure(req.Group, req.Group == "main"); err != nil {
+		return errResp("clear: " + err.Error())
+	}
+	if _, _, err := fcExec(req.Group,
+		"rm -rf /workspace/.claude /workspace/.cs/venice-history.json", 15*time.Second); err != nil {
+		return errResp("clear: " + err.Error())
 	}
 	logPath := filepath.Join(v, ".cs", "log")
 	if _, err := os.Stat(logPath); err == nil {
@@ -2184,23 +1947,9 @@ func daemonMain() {
 	if _, err := ensure("main", true); err != nil {
 		emitLogf("error", "ensure main: %v", err)
 	}
-	// ctl FIFOs are now wired up inside ensure() per-group, including main.
-
-	// Re-establish ctl loops for groups whose sidecar is already running (the
-	// daemon restarted under live sidecars). ensure() does this for any group
-	// that gets a message, but until then the ctl FIFO has no reader — so
-	// self-scheduling and job-completion callbacks (cs-job --notify, which
-	// writes job_done to ctl) would block. startCtlLoop is idempotent.
-	for g := range readGroups() {
-		if g == "main" || !podmanRunning(csName(g)) {
-			continue
-		}
-		if err := ensureCtlFIFO(g); err != nil {
-			emitLogf("error", "ctl[%s]: ensure fifo at boot: %v", g, err)
-			continue
-		}
-		startCtlLoop(g)
-	}
+	// The ctl plane for a microVM group is served over vsock (fcCtlConn in
+	// fc.go) once fcSpawn brings the VM up — there are no host-side ctl FIFOs
+	// to re-establish on restart.
 
 	// gRPC over TCP, secured by mTLS + a bearer-token interceptor. Bind the
 	// overlay (WireGuard) interface only — never 0.0.0.0 — so the control plane

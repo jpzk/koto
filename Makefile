@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: build host-build tui-build whisper-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: host-build tui-build whisper-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -22,23 +22,17 @@ BUILD := .build
 $(BUILD):
 	@mkdir -p $@
 
-# --- clawson (sidecar image) ------------------------------------------------
-# Build context is sidecar/ so the Dockerfile's `COPY entrypoint.sh ...`
-# style stays unqualified. Inputs are tracked so a script edit triggers a
-# rebuild; the daemon's bind-mount of entrypoint.sh + stream_filter.js
-# overlays the COPY at runtime, but the COPY is still the source of truth
-# for standalone `podman run -it clawson sh` smoke tests.
-SIDECAR_SRC := sidecar/Dockerfile sidecar/entrypoint.sh sidecar/start-chrome.sh sidecar/stream_filter.js
-$(BUILD)/clawson: $(SIDECAR_SRC) | $(BUILD)
-	podman build -t clawson sidecar
-	@touch $@
-
-build: $(BUILD)/clawson
+# --- sidecar scripts --------------------------------------------------------
+# sidecar/entrypoint.sh + stream_filter.js + start-chrome.sh run INSIDE the
+# firecracker guest (baked into the rootfs — see fc-rootfs). They no longer
+# build a standalone podman image (the podman group runtime is retired); this
+# just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
+SIDECAR_SRC := sidecar/entrypoint.sh sidecar/start-chrome.sh sidecar/stream_filter.js
 
 # --- clawson-host (daemon image) -------------------------------------------
 # Inputs: just host/Dockerfile. Go sources land via bind mount, recompiled
 # by `go run` inside the container on every host-run.
-$(BUILD)/clawson-host: host/Dockerfile $(BUILD)/clawson | $(BUILD)
+$(BUILD)/clawson-host: host/Dockerfile | $(BUILD)
 	podman build -t clawson-host -f host/Dockerfile .
 	@touch $@
 

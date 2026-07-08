@@ -20,16 +20,11 @@ package main
 // own `.cs/in` FIFO.
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
-	"syscall"
 )
 
 const (
@@ -45,62 +40,9 @@ const (
 // names, or pollute groups.json with junk keys.
 var ctlGroupRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
-// One global mutex serializing writes across all ctl.out files. Volume
-// is low (one line per agent command) so a single mutex is simpler than
-// per-group bookkeeping.
-var ctlOutMu sync.Mutex
-
-// Registry of running ctlLoop goroutines, keyed by group, so ensure()
-// can be called repeatedly without spawning duplicate readers. Entries
-// are removed when the loop exits (e.g. after destroy() removes the
-// workspace + FIFO).
-var (
-	ctlLoopsMu sync.Mutex
-	ctlLoops   = map[string]bool{}
-)
-
-func ctlPaths(group string) (fifo, out string) {
-	d := filepath.Join(vol(group), ".cs")
-	return filepath.Join(d, "ctl"), filepath.Join(d, "ctl.out")
-}
-
-func ensureCtlFIFO(group string) error {
-	fifo, out := ctlPaths(group)
-	if err := os.MkdirAll(filepath.Dir(fifo), 0o755); err != nil {
-		return err
-	}
-	if st, err := os.Stat(fifo); err == nil {
-		if st.Mode()&os.ModeNamedPipe == 0 {
-			_ = os.Remove(fifo)
-		}
-	}
-	if _, err := os.Stat(fifo); errors.Is(err, os.ErrNotExist) {
-		if err := syscall.Mkfifo(fifo, 0o644); err != nil {
-			return err
-		}
-	}
-	// ctl.out is a regular file the agent tails / cats. Create empty if absent.
-	if f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		f.Close()
-	}
-	return nil
-}
-
-// ctlReply appends one JSON line to the group's ctl.out. Serialized so
-// concurrent commands don't interleave bytes mid-line.
-func ctlReply(group string, resp any) {
-	_, out := ctlPaths(group)
-	b, _ := json.Marshal(resp)
-	b = append(b, '\n')
-	ctlOutMu.Lock()
-	defer ctlOutMu.Unlock()
-	f, err := os.OpenFile(out, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = f.Write(b)
-}
+// The ctl plane is served over vsock: the guest's .cs/ctl FIFO is forwarded to
+// the daemon (fcCtlConn in fc.go), which calls ctlDispatch and writes the reply
+// back on the same connection. There are no host-side ctl FIFOs.
 
 // ownsSched returns true iff a schedule with id exists AND belongs to
 // owner. Used to gate del/toggle/run on the non-main ctl path. Returns
@@ -171,9 +113,9 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: invalid group name")
 		}
 		// Enqueue onto the target's send queue and ack immediately. The queue
-		// worker runs the turn; main's single ctlLoop goroutine never blocks
-		// behind a peer's turn (up to turnWaitTimeout, 25m), so it stays free
-		// to process every other ctl command and sends to other peers — no
+		// worker runs the turn; the ctl connection handling the command never
+		// blocks behind a peer's turn (up to turnWaitTimeout, 25m), so it stays
+		// free to process every other ctl command and sends to other peers — no
 		// cross-group head-of-line stall. Same-peer sends stay FIFO-ordered
 		// (one worker per group). This matches the documented contract in
 		// prompts/global.md ("Sends are async … returns immediately; the
@@ -368,61 +310,3 @@ func ctlDispatch(owner string, line []byte) any {
 	}
 }
 
-// startCtlLoop ensures exactly one ctlLoop goroutine runs per group.
-// Safe to call repeatedly from ensure() — subsequent calls are no-ops
-// while a loop is already alive. When the loop exits (FIFO disappears
-// after destroy()) the registry entry is cleared so a future ensure()
-// can restart it.
-func startCtlLoop(group string) {
-	ctlLoopsMu.Lock()
-	if ctlLoops[group] {
-		ctlLoopsMu.Unlock()
-		return
-	}
-	ctlLoops[group] = true
-	ctlLoopsMu.Unlock()
-	go ctlLoop(group)
-}
-
-// ctlLoop tails one group's ctl FIFO line-by-line and dispatches each
-// command. The FIFO is opened O_RDWR so we never get EOF when a writer
-// (the sidecar's shell redirect) closes — same trick the sidecar
-// entrypoint uses on `.cs/in`. Lines are JSON envelopes matching the
-// daemon socket protocol; responses go to ctl.out.
-func ctlLoop(group string) {
-	defer func() {
-		ctlLoopsMu.Lock()
-		delete(ctlLoops, group)
-		ctlLoopsMu.Unlock()
-	}()
-	fifo, _ := ctlPaths(group)
-	if err := ensureCtlFIFO(group); err != nil {
-		emitLogf("error", "ctl[%s]: ensure fifo: %v", group, err)
-		return
-	}
-	fd, err := syscall.Open(fifo, syscall.O_RDWR, 0)
-	if err != nil {
-		emitLogf("error", "ctl[%s]: open fifo: %v", group, err)
-		return
-	}
-	f := os.NewFile(uintptr(fd), fifo)
-	defer f.Close()
-	emitLogf("info", "ctl[%s]: tailing %s", group, fifo)
-	r := bufio.NewReader(f)
-	for {
-		line, err := r.ReadBytes('\n')
-		if err != nil {
-			emitLogf("error", "ctl[%s]: read: %v", group, err)
-			return
-		}
-		if len(line) == 1 { // just \n
-			continue
-		}
-		emitLogf("info", "ctl[%s]: %s", group, string(line[:len(line)-1]))
-		resp := ctlDispatch(group, line)
-		ctlReply(group, resp)
-		if r, ok := resp.(baseResp); ok && !r.OK {
-			emitLogf("warn", "ctl[%s]: error: %s", group, fmt.Sprint(resp))
-		}
-	}
-}

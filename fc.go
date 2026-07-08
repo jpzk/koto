@@ -85,13 +85,6 @@ const (
 	fcWorkerGID = 1000
 )
 
-// defaultRuntime is what groupRuntime returns when config.json has no valid
-// "runtime". Firecracker since the all-groups migration — only the daemon
-// itself remains a container. Podman is the explicit opt-out for groups that
-// need capabilities the microVM doesn't provide (pip, Chrome, open internet
-// until the CONNECT forwarder lands): `config_set runtime=podman` + restart.
-const defaultRuntime = "firecracker"
-
 func fcAssetsDir() string    { return filepath.Join(HERE, "fcassets") }
 func fcBinPath() string      { return filepath.Join(fcAssetsDir(), "firecracker") }
 func fcKernelPath() string   { return filepath.Join(fcAssetsDir(), "vmlinux") }
@@ -103,24 +96,6 @@ func fcCfgPath(g string) string     { return filepath.Join(fcRunDir(), g+".cfg.j
 func fcConsolePath(g string) string { return filepath.Join(fcRunDir(), g+".console.log") }
 func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.img") }
 
-// groupRuntime reads config.json's "runtime". Only the two literals are
-// honored; anything else (missing file, missing key, junk) falls back to
-// defaultRuntime. ensureProviderConfig seeds the field explicitly on first
-// ensure() so a running group's config always shows its effective runtime.
-func groupRuntime(g string) string {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return defaultRuntime
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return defaultRuntime
-	}
-	if s, ok := cfg["runtime"].(string); ok && (s == "firecracker" || s == "podman") {
-		return s
-	}
-	return defaultRuntime
-}
 
 // groupInternet reads config.json's "internet" profile: "full" grants
 // general outbound (forwarded through the proxy over the group's existing
@@ -196,13 +171,6 @@ func pidIsFirecracker(pid int) bool {
 	return err == nil && strings.TrimSpace(string(b)) == "firecracker"
 }
 
-// groupRunning is the runtime-aware replacement for podmanRunning(csName(g)).
-func groupRunning(g string) bool {
-	if groupRuntime(g) == "firecracker" {
-		return fcRunning(g)
-	}
-	return podmanRunning(csName(g))
-}
 
 // ---- spawn -----------------------------------------------------------------
 

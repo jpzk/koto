@@ -228,25 +228,6 @@ func TestFcSpliceToProxy(t *testing.T) {
 	a.Close()
 }
 
-// TestGroupRuntimeDefault: firecracker is the default; podman is the
-// explicit opt-out; junk falls back to the default.
-func TestGroupRuntimeDefault(t *testing.T) {
-	fcHarness(t)
-	if rt := groupRuntime("nope"); rt != "firecracker" {
-		t.Fatalf("missing config should default to firecracker, got %s", rt)
-	}
-	d := filepath.Join(vol("tg"), ".cs")
-	os.MkdirAll(d, 0o755)
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"runtime":"podman"}`), 0o644)
-	if rt := groupRuntime("tg"); rt != "podman" {
-		t.Fatalf("explicit podman opt-out not honored, got %s", rt)
-	}
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"runtime":"qemu"}`), 0o644)
-	if rt := groupRuntime("tg"); rt != "firecracker" {
-		t.Fatalf("unknown runtime should fall back to firecracker, got %s", rt)
-	}
-}
-
 // TestGroupInternetDefault: default none; only "full" opts in.
 func TestGroupInternetDefault(t *testing.T) {
 	fcHarness(t)
@@ -293,24 +274,24 @@ func TestEgressGate(t *testing.T) {
 	}
 }
 
-// TestEnsureProviderConfigSeedsRuntime: a podman-era config (provider only)
-// gets runtime seeded; valid explicit values are never overwritten.
-func TestEnsureProviderConfigSeedsRuntime(t *testing.T) {
+// TestEnsureProviderConfigSeedsProvider: an empty config gets venice seeded;
+// a valid explicit provider is never overwritten.
+func TestEnsureProviderConfigSeedsProvider(t *testing.T) {
 	fcHarness(t)
 	d := filepath.Join(vol("tg"), ".cs")
 	os.MkdirAll(d, 0o755)
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"venice"}`), 0o644)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{}`), 0o644)
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
 	}
-	if rt := groupRuntime("tg"); rt != "firecracker" {
-		t.Fatalf("runtime not seeded: %s", rt)
+	if p := groupProviderName("tg"); p != "venice" {
+		t.Fatalf("provider not seeded: %s", p)
 	}
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"venice","runtime":"podman"}`), 0o644)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"claudesdk"}`), 0o644)
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
 	}
-	if rt := groupRuntime("tg"); rt != "podman" {
-		t.Fatalf("explicit podman was clobbered: %s", rt)
+	if p := groupProviderName("tg"); p != "claudesdk" {
+		t.Fatalf("explicit provider was clobbered: %s", p)
 	}
 }
