@@ -406,13 +406,13 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	cfg := map[string]any{
 		"boot-source": map[string]any{
 			"kernel_image_path": fcKernelPath(),
-			// acpi=off: our vmlinux is built from vanilla kernel.org sources,
-			// which can't load FC's ACPI tables (FC's own kernels come from the
-			// amzn tree). We boot FC's pre-ACPI way instead — devices via the
-			// virtio_mmio.device= cmdline (CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES,
-			// enabled in build-kernel.sh) + legacy interrupts. The two are a
-			// matched pair; see build-kernel.sh.
-			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off acpi=off quiet init=/usr/local/bin/fc-agent",
+			// ACPI on: our vmlinux is built from the Amazon Linux tree (like
+			// FC's own kernels — see build-kernel.sh), which parses FC's ACPI
+			// tables. That brings up the local APIC + LAPIC timer, so the guest
+			// idles at ~0% CPU (a vanilla kernel needs acpi=off, which leaves no
+			// LAPIC timer → every idle VM busy-polls a full CPU; see
+			// kernel-amzn-vs-vanilla.md).
+			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
 		},
 		"drives": []map[string]any{
 			{"drive_id": "rootfs", "path_on_host": fcRootfsPath(), "is_root_device": true, "is_read_only": true},

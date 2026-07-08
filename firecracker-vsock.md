@@ -219,16 +219,18 @@ standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
   inbound (the guest accepting on `192.168.127.2` via gateway forwards) is a
   follow-up.
 - **Kernel:** `full` needs `CONFIG_TUN`, which FC's CI vmlinux lacks — so the
-  guest kernel is built from kernel.org sources + FC's config + `CONFIG_TUN=y`
-  (`build-kernel.sh`, `make fc-kernel`), not fetched.
-  - **Boot model — `acpi=off` (matched pair with the build).** FC's own CI
-    kernels come from the *Amazon Linux* tree; a *vanilla* kernel.org kernel
-    can't load FC's ACPI tables (`AE_BAD_PARAMETER` during region init →
-    virtio probes fail → no root device). So we boot FC's pre-ACPI way instead:
-    `fc.go` passes `acpi=off`, and `build-kernel.sh` enables
-    `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` so the guest finds its devices from the
-    `virtio_mmio.device=` entries FC injects on the cmdline (legacy interrupts).
-    Change one and you must change the other. Verified booting to init.
+  guest kernel is built (`build-kernel.sh`, `make fc-kernel`), not fetched.
+  - **Source = the Amazon Linux tree, like FC itself.** `build-kernel.sh` does
+    what FC's `resources/rebuild.sh` does: `git clone github.com/amazonlinux/linux`
+    at a pinned `microvm-kernel-*.amzn2023` tag, apply FC's guest config, and add
+    `CONFIG_TUN` + `FUSE_FS`/`NF_TABLES` (podman) + `IKCONFIG`. **NOT** kernel.org
+    vanilla: vanilla can't load FC's ACPI tables (`AE_BAD_PARAMETER` during
+    region init → panic), and the `acpi=off` workaround that gets it booting
+    leaves the guest with **no local APIC / no LAPIC timer**, so every idle
+    microVM busy-polls a full host CPU (~100%). The amzn tree boots **with
+    ACPI**, so the LAPIC timer works and idle is ~0% — and `fc.go` boots with no
+    `acpi=off`. Verified: fresh idle guest ~3% CPU, `LOC` incrementing. See
+    `kernel-amzn-vs-vanilla.md`.
   - **DNS/resolv.conf.** The rootfs is read-only, so `/etc/resolv.conf` is a
     symlink to `/run/resolv.conf` (a tmpfs), set up in `build-rootfs.sh`'s
     staging tree (a Dockerfile `RUN` can't, since podman bind-mounts
