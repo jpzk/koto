@@ -1,16 +1,17 @@
 # clawson
 
-Minimal isolated claude-code orchestrator. Container-per-group. **Daemon + isolated TUI container** split. Credential-injecting proxy. Per-group token metrics.
+Minimal isolated claude-code orchestrator. **microVM-per-group by default** (podman opt-out). **Daemon + isolated TUI container** split. Credential-injecting proxy. Per-group token metrics.
 
 ## What it does
 
-- Each "group" is a long-lived sidecar container running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the bind-mounted workspace.
+- **Two group runtimes, selected per group by `config.json` `"runtime"`.** `"firecracker"` (the **default**) boots each group as a Firecracker microVM with **no network device** — its sole host↔guest channel is vsock, and the credential-injecting proxy becomes the *only* egress (verified: guest has `lo` only, no DNS, curl fails). `"podman"` is the explicit opt-out for groups that need capabilities the microVM lacks: pip (podman-in-podman), Chrome/agent-browser, or open-internet egress (until the daemon-mediated CONNECT forwarder lands). **`firecracker-vsock.md` is the authoritative design doc for the microVM runtime** — read it before touching `fc.go` / `fcguest/`. The bullets below describe behavior common to both runtimes unless tagged `[podman]` / `[firecracker]`; the microVM guest runs `sidecar/entrypoint.sh` byte-identically, so most of the mechanics are shared.
+- Each "group" is a long-lived worker running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the workspace ([podman] a bind mount; [firecracker] `groups/<g>/workspace.img`, an ext4 virtio-block image).
 - `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
 - **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `clawson-tui`, built as a static binary into `scratch`). It mounts only `clawson.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
-- `main` group has `/peers` mounted RW (orchestrator pattern: can read+write any group's workspace). Other groups have no peers mount.
+- **Orchestration is verb-based, not file-based.** [podman] `main` also has `/peers` mounted RW (can read+write any group's workspace directly). [firecracker] there is **no shared filesystem** — a microVM group has no `/peers`, so `main` orchestrates peers purely through ctl-plane verbs: `spawn`/`send`/`stop`/`list`/`sched_*` plus `skill_write` (author a `skills/<name>/SKILL.md`), `config_set` (edit any group's config), and `tail` (one-shot last-N lines of a peer's log). Since firecracker is the default, treat the verb path as the primary one; the `/peers` mount is a podman-only convenience.
 - **Every group has a control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails one FIFO per group and authorizes by source group identity. `main` gets the full set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`, plus all `sched_*` verbs against any group. Non-main groups get **only** `sched_add` / `sched_list` / `sched_del` / `sched_toggle` / `sched_run`, with the target group force-overwritten to self — they can self-schedule but cannot reach peers, send arbitrary messages, or escalate. See `prompts/global.md` for the agent-facing docs.
-- Sidecars can publish TCP ports to `127.0.0.1` on the host by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`). Daemon's `ensure()` reads the list and appends `-p 127.0.0.1:P:P` per port; range 1024–65535. Changes require `/restart <g>` because podman can't add `-p` to a live container. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly.
+- Groups can publish TCP ports by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`); range 1024–65535; changes require `/restart <g>`. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly. [podman] the daemon appends `-p 127.0.0.1:P:P` so the port lands on the host loopback. [firecracker] the daemon runs a vsock↔TCP bridge per port that binds **inside `cs_host`** (reachable on `clawson-net` as `cs_host_go:<port>`, not the host loopback — host publishing would need a `-p` on `cs_host` itself).
 - **Provider per group, mandatory in config.json.** `groups/<g>/.cs/config.json` `"provider"` selects the LLM backend: `"venice"` (Venice API; key at `creds/venice.key`, injected by the proxy on a per-request basis) or `"claudesdk"` (Anthropic OAuth via the credential-injecting proxy). The daemon's `ensureProviderConfig` writes `provider=venice` into any group whose config is missing or invalid on the first `ensure()` call (every spawn / send), so every running group always has an explicit provider — the proxy, sidecar entrypoint, and TUI tree marker can rely on the field being set. Default Venice model is `kimi-k2.5` (single source of truth: `defaultVeniceModel` in `daemon.go`, injected into the sidecar as `CLAWSON_DEFAULT_VENICE_MODEL` and applied by `sidecar/entrypoint.sh` when `model` is unset; `groupModelName` reports the same value so the TUI always shows the effective model). We deliberately don't seed `model` into config.json, so flipping `provider=claudesdk` doesn't leave a stale Venice model string lying around for the Claude CLI to reject. Provider is read by the proxy on every request and by the sidecar entrypoint on every message — no `/restart` needed to flip it.
   - **Venice path is stateless on the API side**, so the sidecar maintains conversation history in `/workspace/.cs/venice-history.json` and replays the whole transcript per turn (including any `tool_calls`/`role:"tool"` entries from prior turns). `/clear` wipes it (extended in `clearCmd`). Skills are not wired in for Venice; the system prompt (`composeSystemPrompt`) is composed and sent as the first message in the chat array.
   - **Venice has tool use**: `bash` (runs `bash -lc <cmd>` in `/workspace`, 30s timeout, 1MB stdout+stderr cap) and `file` (`op=read|write|edit`, 1MB read cap, edit requires the `old` string to appear exactly once). Tools are advertised on every request via the OpenAI `tools` field; `venice_stream.js` accumulates `delta.tool_calls` chunks, executes each, appends `role:"tool"` messages, and re-calls Venice. Loop is hard-capped at 25 tool calls per user message — beyond that the script writes `[[err]] venice: tool-call budget exhausted` and exits, leaving the user to send another message. Same blast radius as the claude path's bash (runs as uid 1000 `node` inside the sidecar container; container is the trust boundary). Tool calls render in the TUI using the existing `[[tool]]` / `[[tool_out_begin]]…[[tool_out_end]] N` framing so claudesdk and venice groups display identically.
@@ -23,20 +24,25 @@ Minimal isolated claude-code orchestrator. Container-per-group. **Daemon + isola
 main.go              entry point dispatching `daemon` / `proxy` subcommands
 daemon.go            daemon: orchestrator + proxy supervisor + unix socket API + log-tail fan-out
 proxy.go             HTTP proxy, cred injection, metrics, multi-port watcher
+fc.go                Firecracker runtime: VM lifecycle, vsock multiplexer (proxy/log/ctl), agent RPC, workspace.img migration
+fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
+firecracker-vsock.md authoritative design doc for the microVM runtime (port map, guest/daemon split, limitations)
 go.mod               root module (require clawson-protocol → ./protocol)
 protocol/            shared wire types (separate stdlib-only Go module; imported by daemon + TUI)
-sidecar/             sidecar image bits — Dockerfile, entrypoint.sh, start-chrome.sh, stream_filter.js
-host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds)
+sidecar/             group worker bits — Dockerfile, entrypoint.sh, start-chrome.sh, stream_filter.js (baked into the fc rootfs too)
+host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
-prompts/             harness-controlled system prompts (global.md ro-mounted into every sidecar)
-groups/<g>/prompt.md per-group system prompt (lives in the workspace, sidecar-writable)
-Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean
+prompts/             harness-controlled system prompts (global.md delivered into every group)
+groups/<g>/prompt.md per-group system prompt (lives in the workspace, group-writable)
+groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
+Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean / fc-assets
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
+fcassets/            firecracker binary + vmlinux + rootfs.img (gitignored; `make fc-assets`)
 .gocache/            persistent Go build cache for cs_host_go (gitignored)
 .build/              Makefile sentinels (gitignored)
-run/                 daemon runtime droppings (gitignored); clients talk gRPC on :8443, not a unix socket
+run/                 daemon runtime droppings (gitignored); run/fc/ holds per-VM vsock/cfg/pid/console
 metrics.jsonl        per-request metric line (gitignored)
 proxy.log            proxy stdout when launched by daemon (gitignored)
 ```
@@ -45,12 +51,20 @@ proxy.log            proxy stdout when launched by daemon (gitignored)
 
 ```sh
 make host-build    # builds clawson + clawson-host images
+make fc-assets     # fetch firecracker (pinned v1.11.0) + CI kernel + build golden rootfs.img
+                   #   REQUIRED for the default (firecracker) runtime; rebuild the rootfs
+                   #   (`make fc-rootfs`) after editing sidecar/*.{sh,js} or fcguest/ —
+                   #   microVMs have no live bind mounts (the one ergonomic regression vs podman)
 make login         # one-time OAuth into ./creds/.credentials.json
-make host-run      # starts cs_host detached (daemon + proxy + main group)
+make host-run      # starts cs_host detached (daemon + proxy + main group); passes --device /dev/kvm when present
 make tui-build     # builds clawson-tui image (Go static binary on scratch); first time only
 make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
                    # Ctrl+C exits TUI; daemon keeps running. Reattach with `make tui` again.
-make stop          # tear down cs_host + all sidecars
+make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon
+
+# per-group runtime: `/config runtime=podman` (or firecracker) + `/restart <g>`.
+# default is firecracker; groups auto-seed runtime=firecracker + migrate their
+# workspace into workspace.img on first spawn.
 
 # inside the TUI:
 #   any text   -> sends to current group
@@ -247,6 +261,7 @@ grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.ke
 
 - **Edits to daemon/proxy `*.go` are live.** `host/Dockerfile` is just `golang:1.24-alpine + podman + claude-code-cli`; the entrypoint is `go run . daemon`. `host/run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`) plus a persistent `.gocache/` build cache, so a daemon edit followed by `make host-run` recompiles + restarts in ~1s. The first compile after `make clean` is ~12s (cold cache). Only rebuild the image (`make host-build`) when changing `host/Dockerfile`, `sidecar/Dockerfile`, or the installed deps (podman/nodejs/claude-code).
 - **Edits to `tui/*.go` require a rebuild.** No hot-reload — the runtime image is `scratch` + static binary. Cycle is `make tui-build && make tui`; Go compiles in 1-2s. Trade-off vs. the prior Ink/bun hot-reload: slower iteration in exchange for sock-only mount (no bind-mount of source), no JS runtime in the container, and ~10MB instead of ~80MB. To regenerate `go.sum` after changing `go.mod`, run `podman run --rm --security-opt label=disable -v $(pwd)/tui:/src -w /src docker.io/library/golang:1.24-alpine go mod tidy` from the project root.
-- **Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
+- **[podman] Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing podman sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
+- **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent`, node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make fc-rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `firecracker-vsock.md`. `fc.go` / `daemon.go` themselves are still live (`go run` in `cs_host`), so only guest-side changes need the rootfs rebuild.
 - **For testing, prefer FIFO writes over the TUI.** Write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic, no UI in the way.
 - **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.
