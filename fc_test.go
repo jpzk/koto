@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,6 +244,52 @@ func TestGroupRuntimeDefault(t *testing.T) {
 	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"runtime":"qemu"}`), 0o644)
 	if rt := groupRuntime("tg"); rt != "firecracker" {
 		t.Fatalf("unknown runtime should fall back to firecracker, got %s", rt)
+	}
+}
+
+// TestGroupInternetDefault: default none; only "full" opts in.
+func TestGroupInternetDefault(t *testing.T) {
+	fcHarness(t)
+	if groupInternet("nope") != "none" {
+		t.Fatal("missing config should be none")
+	}
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"full"}`), 0o644)
+	if groupInternet("tg") != "full" {
+		t.Fatal("explicit full not honored")
+	}
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"lan"}`), 0o644)
+	if groupInternet("tg") != "none" {
+		t.Fatal("unknown value should fall back to none")
+	}
+}
+
+// TestEgressGate: the profile gate (403 for none) + the self-target guard.
+// The 403 path returns before hijacking, so a plain recorder suffices; the
+// tunnel path is covered live in the smoke run (needs a real socket).
+func TestEgressGate(t *testing.T) {
+	fcHarness(t)
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	h := &handler{group: "tg"}
+
+	// none → 403 for CONNECT.
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"none"}`), 0o644)
+	req := &http.Request{Method: http.MethodConnect, Host: "example.com:443", URL: &url.URL{Host: "example.com:443"}}
+	rec := httptest.NewRecorder()
+	h.serveEgress(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("none group: expected 403, got %d", rec.Code)
+	}
+
+	// full → the self-target guard still blocks loopback / cs_host / daemon port.
+	if egressTargetAllowed("127.0.0.1:9") || egressTargetAllowed("cs_host_go:8080") ||
+		egressTargetAllowed("example.com:8443") || egressTargetAllowed("[::1]:80") {
+		t.Fatal("guard should block loopback/cs_host/daemon-port")
+	}
+	if !egressTargetAllowed("github.com:443") || !egressTargetAllowed("registry.npmjs.org:443") {
+		t.Fatal("guard should allow normal external hosts")
 	}
 }
 

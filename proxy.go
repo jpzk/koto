@@ -343,6 +343,14 @@ var hopByHop = map[string]bool{
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// General internet egress (internet=full groups). Identified by the
+	// CONNECT method (HTTPS tunnel) or an absolute-form request target (plain
+	// HTTP forward). The LLM clients always use origin-form to the
+	// Anthropic/Venice upstream, so this branch never shadows the API path.
+	if r.Method == http.MethodConnect || r.URL.IsAbs() {
+		h.serveEgress(w, r)
+		return
+	}
 	if groupProvider(h.group) == "venice" {
 		h.serveVenice(w, r)
 		return
@@ -692,4 +700,126 @@ func proxyStart(bind string) {
 	for g, p := range m {
 		_ = proxyListen(bind, p, g)
 	}
+}
+
+// ---- general internet egress (internet=full) ------------------------------
+
+// egressClient forwards plain-HTTP (absolute-form) requests for full-internet
+// groups. Redirects are NOT followed — we forward exactly what the guest asked
+// for and let the guest's client decide, so a redirect can't smuggle the guest
+// to a host it didn't name (and thus didn't get egress-logged for).
+var egressClient = &http.Client{
+	Timeout:       0, // large downloads (npm/pip tarballs) must not time out mid-stream
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// serveEgress handles forward-proxy requests (CONNECT tunnel or absolute-form
+// HTTP) from a group whose bash/curl/git points HTTP_PROXY at us. Gated by the
+// group's internet profile — the server-side enforcement point, so a
+// compromised guest that sets HTTP_PROXY itself still can't reach the internet
+// unless the operator granted internet=full.
+func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
+	target := r.Host // authority form for CONNECT; URL host for absolute-form
+	if target == "" {
+		target = r.URL.Host
+	}
+	if groupInternet(h.group) != "full" {
+		emitLogf("warn", "egress[%s] DENIED %s %s (internet profile is 'none')", h.group, r.Method, target)
+		http.Error(w, "egress denied: this group's internet profile is 'none'", http.StatusForbidden)
+		return
+	}
+	if !egressTargetAllowed(target) {
+		emitLogf("warn", "egress[%s] BLOCKED %s %s (self-target guard)", h.group, r.Method, target)
+		http.Error(w, "egress blocked: target not permitted", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodConnect {
+		h.egressConnect(w, r, target)
+		return
+	}
+	h.egressHTTP(w, r, target)
+}
+
+// egressTargetAllowed keeps a full-internet guest from turning the forward
+// proxy back on the control plane. It blocks the daemon's own gRPC port and
+// loopback/link-local hosts on ANY port. It does NOT attempt full SSRF/IP
+// filtering: a full-internet group can reach the host LAN, same as a podman
+// group with a NIC — that's inherent to "full internet" and documented.
+func egressTargetAllowed(hostport string) bool {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	if h == "localhost" || h == "cs_host_go" || strings.HasPrefix(h, "127.") ||
+		h == "::1" || strings.HasPrefix(h, "169.254.") || strings.HasPrefix(h, "fe80:") {
+		return false
+	}
+	// Never let egress reach the daemon's control port, wherever it resolves.
+	if dp := os.Getenv("CLAWSON_PORT"); dp != "" && port == dp {
+		return false
+	}
+	if port == "8443" {
+		return false
+	}
+	return true
+}
+
+func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target string) {
+	dst, err := net.DialTimeout("tcp", target, 15*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		dst.Close()
+		http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+		return
+	}
+	client, _, err := hj.Hijack()
+	if err != nil {
+		dst.Close()
+		return
+	}
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+		client.Close()
+		dst.Close()
+		return
+	}
+	emitLogf("info", "egress[%s] CONNECT %s", h.group, target)
+	splice(client, dst) // shared with fc.go: bidirectional copy, closes both
+}
+
+func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target string) {
+	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	for k, vs := range r.Header {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vs {
+			out.Header.Add(k, v)
+		}
+	}
+	emitLogf("info", "egress[%s] %s %s", h.group, r.Method, target)
+	resp, err := egressClient.Do(out)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }

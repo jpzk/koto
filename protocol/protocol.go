@@ -130,6 +130,10 @@ type ConfigReq struct {
 	// or "podman". Reaches the daemon via the ctl-plane config_set verb; not
 	// yet surfaced in the gRPC ConfigReq proto (additive change, later).
 	Runtime json.RawMessage `json:"runtime,omitempty"`
+	// Internet is the group's egress profile: "none" (default — proxy reaches
+	// only the LLM upstream) or "full" (general outbound forwarded through the
+	// proxy). Enforced under the firecracker runtime; ctl-plane config_set.
+	Internet json.RawMessage `json:"internet,omitempty"`
 }
 
 type SkillListReq struct {

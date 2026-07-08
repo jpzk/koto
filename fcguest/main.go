@@ -530,6 +530,13 @@ func handleInit(c *vconn, req *agentReq) {
 		portsUp[p] = true
 		go portBridge(uint32(p))
 	}
+	// Apply the init env to the agent (PID 1) itself so exec/exec_stream
+	// children inherit it too — not just entrypoint.sh. This is what makes a
+	// full-internet group's HTTP_PROXY visible to daemon-driven tooling and
+	// keeps `env` observable for debugging. Idempotent across re-inits.
+	for k, v := range req.Env {
+		_ = os.Setenv(k, v)
+	}
 	if !entrypointUp {
 		entrypointEnv = req.Env
 		entrypointUp = true

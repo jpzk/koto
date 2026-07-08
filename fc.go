@@ -117,6 +117,29 @@ func groupRuntime(g string) string {
 	return defaultRuntime
 }
 
+// groupInternet reads config.json's "internet" profile: "full" grants
+// general outbound (forwarded through the proxy over the group's existing
+// vsock/proxy channel), anything else (including missing) means "none" — the
+// default, where the proxy is the only egress and it only speaks to the LLM
+// upstream. Read on every proxy request AND at spawn (env injection), so it's
+// the single source of truth. Enforced by the proxy server-side (a compromised
+// guest can't grant itself egress by setting HTTP_PROXY); the guest env is
+// only the client-side enabler. See serveEgress in proxy.go.
+func groupInternet(g string) string {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return "none"
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return "none"
+	}
+	if s, ok := cfg["internet"].(string); ok && s == "full" {
+		return "full"
+	}
+	return "none"
+}
+
 // ---- VM registry -----------------------------------------------------------
 
 // fcVM tracks one running microVM's host-side resources so fcStop can tear
@@ -391,13 +414,30 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// Wait for the guest agent, then push init (skills + ports + env). The
 	// agent starts entrypoint.sh only after init, so a turn can't race an
 	// unconfigured guest.
+	env := map[string]string{
+		"CLAWSON_DEFAULT_VENICE_MODEL": defaultVeniceModel,
+		"ANTHROPIC_BASE_URL":           fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
+	}
+	// internet=full: point the standard proxy env vars at the same in-guest
+	// bridge the LLM client uses (vsock 9000 → the group's proxy port). The
+	// proxy recognizes CONNECT / absolute-form requests as general egress and
+	// forwards them (gated server-side by the profile). NO_PROXY keeps the
+	// LLM client's own 127.0.0.1 base URL direct instead of self-proxying.
+	// A change here needs /restart (like ports); the proxy-side gate still
+	// flips live, so lowering to "none" denies egress immediately.
+	if groupInternet(g) == "full" {
+		px := fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP)
+		for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			env[k] = px
+		}
+		for _, k := range []string{"NO_PROXY", "no_proxy"} {
+			env[k] = "127.0.0.1,localhost"
+		}
+	}
 	initReq := map[string]any{
 		"op":    "init",
 		"ports": pubPorts,
-		"env": map[string]string{
-			"CLAWSON_DEFAULT_VENICE_MODEL": defaultVeniceModel,
-			"ANTHROPIC_BASE_URL":           fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
-		},
+		"env":   env,
 	}
 	if tar, err := fcSkillsTar(); err == nil && len(tar) > 0 {
 		initReq["skills_tar_b64"] = base64.StdEncoding.EncodeToString(tar)

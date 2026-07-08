@@ -2001,6 +2001,21 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "internet" {
+		// Egress profile: none|full. Guest env is applied on the next spawn
+		// (/restart), but the proxy-side gate flips live — lowering to "none"
+		// denies egress on the very next request.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "none", "full":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "pip" {
 		// TUI sends `/config pip=true` as the string "true"; also accept a
 		// raw JSON bool for direct daemon clients. Anything else is rejected
@@ -2079,6 +2094,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "pip", req.Pip)
 	applyConfig(cfg, "provider", req.Provider)
 	applyConfig(cfg, "runtime", req.Runtime)
+	applyConfig(cfg, "internet", req.Internet)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)

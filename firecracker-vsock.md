@@ -152,9 +152,9 @@ one ergonomic regression vs podman's hot-reload mounts).
 1. **Published ports** bind inside cs_host (reachable on clawson-net as
    `cs_host_go:<port>`), not on the real host loopback — host publishing
    needs a `-p` on cs_host itself (podman can't add one live).
-2. **No open-internet escape hatch yet.** Groups needing git/npm/pip egress
-   should stay on podman, or we extend the 9000 handler into an
-   HTTP-CONNECT forwarder (auditable daemon-mediated egress, still no NIC).
+2. ~~No open-internet escape hatch yet.~~ **DONE** — the `internet` profile
+   (`none` default / `full`) forwards general egress *through the proxy*, no
+   NIC added. See "Internet egress profile" below.
 3. **`pip` (podman-in-podman) and Chrome groups** stay on the podman runtime
    (not in the minimal rootfs).
 4. **main on firecracker**: works protocol-wise (ctl over vsock), but skill
@@ -164,3 +164,36 @@ one ergonomic regression vs podman's hot-reload mounts).
    init) — same rule as the ports feature.
 6. **Migrating an existing podman group** doesn't move its workspace files
    into workspace.img; fresh workspace (or copy offline while stopped).
+
+## Internet egress profile (`internet`: `none` | `full`)
+
+Per-group config key controlling general outbound. Default `none` — a
+microVM group's only egress is the LLM upstream via the proxy. `full` grants
+arbitrary outbound **forwarded through the same proxy**, still with no NIC in
+the guest:
+
+- **Reuses the existing channel.** No new vsock port. The guest's `bash`/
+  `curl`/`git`/`npm` get `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:18888`
+  (the same in-guest bridge → vsock 9000 → the group's proxy port) plus
+  `NO_PROXY=127.0.0.1,localhost` so the LLM client's own base URL stays
+  direct. The proxy recognizes `CONNECT` / absolute-form requests (LLM
+  clients only ever use origin-form) as egress and forwards them.
+- **Enforced server-side.** `serveEgress` (proxy.go) checks
+  `groupInternet(g)` on every request, so a compromised guest that sets its
+  own `HTTP_PROXY` gets a **403** unless the operator granted `full`. The
+  guest env is only the client-side enabler; the proxy gate is the authority.
+  Verified: a `none` group forcing the proxy → `403 CONNECT tunnel failed`.
+- **Auditable.** Every forward is logged `egress[<group>] CONNECT <host:port>`
+  (or the method for plain HTTP); denials log `egress[<group>] DENIED …`.
+- **Self-target guard.** `egressTargetAllowed` blocks loopback, `cs_host_go`,
+  link-local, and the daemon's gRPC port so a `full` guest can't turn the
+  forwarder back on the control plane. It does NOT do full SSRF/IP filtering:
+  a `full` group can reach the host LAN, same as a podman group with a NIC —
+  inherent to "full internet".
+- **Applies on `/restart`** (the guest env is set at spawn), but lowering to
+  `none` denies egress **live** on the next request (the gate reads config
+  per-request). Set via ctl `config_set internet=full` or by editing
+  config.json.
+- **podman groups**: the profile is a firecracker feature. A podman group has
+  a real NIC and full internet regardless; `internet=none` is not enforced
+  there (would need `--internal` networking).
