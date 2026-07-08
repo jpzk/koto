@@ -243,8 +243,8 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("model", &r.Model)
 	setOpt("effort", &r.Effort)
 	setOpt("ports", &r.Ports)
-	setOpt("pip", &r.Pip)
 	setOpt("provider", &r.Provider)
+	setOpt("internet", &r.Internet)
 	if sk, ok := extra["skills"]; ok {
 		switch v := sk.(type) {
 		case []string:

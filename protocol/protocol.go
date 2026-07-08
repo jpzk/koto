@@ -124,15 +124,10 @@ type ConfigReq struct {
 	Effort   json.RawMessage `json:"effort,omitempty"`
 	Skills   json.RawMessage `json:"skills,omitempty"`
 	Ports    json.RawMessage `json:"ports,omitempty"`
-	Pip      json.RawMessage `json:"pip,omitempty"`
 	Provider json.RawMessage `json:"provider,omitempty"`
-	// Runtime selects the group's isolation backend: "firecracker" (default)
-	// or "podman". Reaches the daemon via the ctl-plane config_set verb; not
-	// yet surfaced in the gRPC ConfigReq proto (additive change, later).
-	Runtime json.RawMessage `json:"runtime,omitempty"`
-	// Internet is the group's egress profile: "none" (default — proxy reaches
-	// only the LLM upstream) or "full" (general outbound forwarded through the
-	// proxy). Enforced under the firecracker runtime; ctl-plane config_set.
+	// Internet is the group's egress profile: "none" (default — the guest has
+	// no NIC; the proxy reaches only the LLM upstream) or "full" (a real L3
+	// gateway; see fcnet.go). Applies on /restart.
 	Internet json.RawMessage `json:"internet,omitempty"`
 }
 

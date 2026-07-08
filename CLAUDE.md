@@ -63,9 +63,9 @@ make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
                    # Ctrl+C exits TUI; daemon keeps running. Reattach with `make tui` again.
 make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon
 
-# per-group runtime: `/config runtime=podman` (or firecracker) + `/restart <g>`.
-# default is firecracker; groups auto-seed runtime=firecracker + migrate their
-# workspace into workspace.img on first spawn.
+# per-group networking: `/config internet=full` (or none) + `/restart <g>`.
+# default is internet=none (no NIC). All groups run the firecracker runtime;
+# there is no `/config runtime=` — firecracker is the only backend surfaced.
 
 # inside the TUI:
 #   any text   -> sends to current group

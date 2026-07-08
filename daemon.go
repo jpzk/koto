@@ -261,7 +261,6 @@ func ensure(g string, isMain bool) (int, error) {
 	// to 127.0.0.1 only so a compromised sidecar can't serve attacker
 	// content to the wider LAN.
 	var pubPorts []int
-	var pip bool
 	if b, err := os.ReadFile(filepath.Join(v, ".cs", "config.json")); err == nil {
 		var cfg map[string]any
 		if json.Unmarshal(b, &cfg) == nil {
@@ -280,9 +279,6 @@ func ensure(g string, isMain bool) (int, error) {
 					pubPorts = append(pubPorts, p)
 				}
 			}
-			if v, ok := cfg["pip"].(bool); ok {
-				pip = v
-			}
 		}
 	}
 	if rt == "firecracker" {
@@ -294,7 +290,7 @@ func ensure(g string, isMain bool) (int, error) {
 		}
 		return port, nil
 	}
-	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v pip=%t", g, port, isMain, pubPorts, pip)
+	emitLogf("info", "spawning sidecar group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
 	args := []string{"run", "-d", "--rm", "--name", name,
 		// --init runs catatonit as pid 1 (the entrypoint sh becomes its child).
 		// Without a real init, orphaned tool subprocesses reparent to the
@@ -345,32 +341,6 @@ func ensure(g string, isMain bool) (int, error) {
 	}
 	for _, p := range pubPorts {
 		args = append(args, "-p", fmt.Sprintf("127.0.0.1:%d:%d", p, p))
-	}
-	if pip {
-		// Rootless podman-in-podman inside a --userns=keep-id container needs:
-		// - SETUID/SETGID: newuidmap/newgidmap are setuid root but the default
-		//   bounding set drops these. Without them in CapBnd, the kernel
-		//   refuses to honor the setuid bit on exec → newuidmap can't write
-		//   the child userns's uid_map.
-		// - SYS_ADMIN: required for the inner podman to create a new mount
-		//   namespace for the container's filesystem layout (overlay/vfs
-		//   mounts, /proc remount). Without it the inner runtime errors out
-		//   well before reaching the container's init.
-		// - unmask=/proc/*: container default masks /proc/self/uid_map and
-		//   friends; the inner podman + storage driver need them readable.
-		// - /dev/net/tun: inner pasta/slirp4netns needs this to create netns'd
-		//   network interfaces. Without it, inner containers can only use
-		//   --network=host (the sidecar's netns). Marginal security cost on
-		//   top of SYS_ADMIN — only enables raw L2/L3 packet construction
-		//   inside the sidecar's own netns; doesn't bridge to peers or host.
-		// Blast radius: SYS_ADMIN is "the new root" inside the sidecar's
-		// userns; combined with workspace RW and arbitrary container spawn,
-		// pip-enabled sidecars are noticeably higher-trust than peers.
-		args = append(args,
-			"--cap-add", "SETUID,SETGID,SYS_ADMIN",
-			"--security-opt", "unmask=/proc/*",
-			"--device", "/dev/net/tun",
-		)
 	}
 	args = append(args, IMAGE)
 	cmd := exec.Command("podman", args...)
@@ -1986,21 +1956,6 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
-	if key == "runtime" {
-		// Same silent-reject shape as provider: only the two literals. A
-		// change takes effect on the group's next spawn (/restart), matching
-		// the ports semantics.
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			return
-		}
-		s = strings.ToLower(strings.TrimSpace(s))
-		switch s {
-		case "firecracker", "podman":
-			cfg[key] = s
-		}
-		return
-	}
 	if key == "internet" {
 		// Egress profile: none|full. Guest env is applied on the next spawn
 		// (/restart), but the proxy-side gate flips live — lowering to "none"
@@ -2013,27 +1968,6 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		switch s {
 		case "none", "full":
 			cfg[key] = s
-		}
-		return
-	}
-	if key == "pip" {
-		// TUI sends `/config pip=true` as the string "true"; also accept a
-		// raw JSON bool for direct daemon clients. Anything else is rejected
-		// silently so a typo doesn't toggle the flag unexpectedly.
-		var b bool
-		if err := json.Unmarshal(raw, &b); err == nil {
-			cfg[key] = b
-			return
-		}
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			return
-		}
-		switch strings.ToLower(strings.TrimSpace(s)) {
-		case "true", "1", "yes", "on":
-			cfg[key] = true
-		case "false", "0", "no", "off":
-			cfg[key] = false
 		}
 		return
 	}
@@ -2091,9 +2025,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "effort", req.Effort)
 	applyConfig(cfg, "skills", req.Skills)
 	applyConfig(cfg, "ports", req.Ports)
-	applyConfig(cfg, "pip", req.Pip)
 	applyConfig(cfg, "provider", req.Provider)
-	applyConfig(cfg, "runtime", req.Runtime)
 	applyConfig(cfg, "internet", req.Internet)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {

@@ -176,8 +176,9 @@ message ConfigReq {
   optional string model    = 2;
   optional string effort   = 3;
   optional string ports    = 5;
-  optional string pip      = 6;
   optional string provider = 7;
+  optional string internet = 9;   // none|full — applies on /restart
+  reserved 6;                     // was `pip` (podman-only; removed)
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;
     SkillList             skills_set   = 4;
