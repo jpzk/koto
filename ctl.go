@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -205,6 +206,76 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: verb not allowed for non-main groups: list")
 		}
 		return listResp{baseResp{OK: true}, listGroups()}
+
+	// The three verbs below replace main's podman-era file-mount powers
+	// (rw /skills, rw /peers) under the firecracker runtime, where the only
+	// channel is this ctl plane. Main-only; same authority it already had
+	// via mounts, now mediated + validated by the daemon.
+	case "skill_write":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: skill_write")
+		}
+		var req struct {
+			Name    string `json:"name"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		return skillWriteCmd(req.Name, req.Content)
+
+	case "config_set":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: config_set")
+		}
+		var req configReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if req.Group == "" {
+			req.Group = owner
+		}
+		if !ctlGroupRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		return configCmd(req)
+
+	case "tail":
+		// Peer-log observability: the podman-era pattern was
+		// `tail -F /peers/<g>/.cs/log`; microVM main has no /peers, so it
+		// polls this instead (one-shot, bounded — the ctl plane is a
+		// line-oriented request/response channel, not a stream).
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: tail")
+		}
+		var req struct {
+			Group string `json:"group"`
+			N     int    `json:"n"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !ctlGroupRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		if req.N <= 0 {
+			req.N = 50
+		}
+		if req.N > 200 {
+			req.N = 200
+		}
+		b, err := readTail(filepath.Join(vol(req.Group), ".cs", "log"), 256*1024)
+		if err != nil {
+			return errResp("ctl: " + err.Error())
+		}
+		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+		if len(lines) > req.N {
+			lines = lines[len(lines)-req.N:]
+		}
+		return struct {
+			baseResp
+			Text string `json:"text"`
+		}{baseResp{OK: true}, strings.Join(lines, "\n")}
 
 	case "job_done":
 		// Self-targeted (like sched_*): any group may signal completion of its

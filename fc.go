@@ -64,11 +64,28 @@ const (
 	// ANTHROPIC_BASE_URL points here. High + odd to avoid dev-server clashes.
 	fcGuestProxyTCP = 18888
 
-	fcDefaultVcpus  = 2
-	fcDefaultMemMiB = 2048
+	fcDefaultVcpus = 2
+	// 1024, not 2048: this host runs several concurrent group VMs on ~2GiB
+	// of RAM. FC allocates guest memory lazily so idle VMs cost little, but
+	// the ceiling still bounds worst-case pressure. Override per group with
+	// config.json "mem_mib" for heavy workloads.
+	fcDefaultMemMiB = 1024
 	// workspace.img size for new groups. Sparse — allocates on write.
 	fcWorkspaceBytes = 8 << 30
+
+	// Guest worker uid/gid (the `node` user; claude refuses to run as root).
+	// Mirrors fcguest's workerUID/GID — the daemon needs it to normalize
+	// migrated-workspace ownership before mkfs.
+	fcWorkerUID = 1000
+	fcWorkerGID = 1000
 )
+
+// defaultRuntime is what groupRuntime returns when config.json has no valid
+// "runtime". Firecracker since the all-groups migration — only the daemon
+// itself remains a container. Podman is the explicit opt-out for groups that
+// need capabilities the microVM doesn't provide (pip, Chrome, open internet
+// until the CONNECT forwarder lands): `config_set runtime=podman` + restart.
+const defaultRuntime = "firecracker"
 
 func fcAssetsDir() string    { return filepath.Join(HERE, "fcassets") }
 func fcBinPath() string      { return filepath.Join(fcAssetsDir(), "firecracker") }
@@ -81,22 +98,23 @@ func fcCfgPath(g string) string     { return filepath.Join(fcRunDir(), g+".cfg.j
 func fcConsolePath(g string) string { return filepath.Join(fcRunDir(), g+".console.log") }
 func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.img") }
 
-// groupRuntime reads config.json's "runtime". Anything but the literal
-// "firecracker" (missing file, missing key, junk) means podman — the safe
-// default and the only value that existed before this feature.
+// groupRuntime reads config.json's "runtime". Only the two literals are
+// honored; anything else (missing file, missing key, junk) falls back to
+// defaultRuntime. ensureProviderConfig seeds the field explicitly on first
+// ensure() so a running group's config always shows its effective runtime.
 func groupRuntime(g string) string {
 	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
 	if err != nil {
-		return "podman"
+		return defaultRuntime
 	}
 	var cfg map[string]any
 	if json.Unmarshal(b, &cfg) != nil {
-		return "podman"
+		return defaultRuntime
 	}
-	if s, ok := cfg["runtime"].(string); ok && s == "firecracker" {
-		return "firecracker"
+	if s, ok := cfg["runtime"].(string); ok && (s == "firecracker" || s == "podman") {
+		return s
 	}
-	return "podman"
+	return defaultRuntime
 }
 
 // ---- VM registry -----------------------------------------------------------
@@ -175,27 +193,78 @@ func fcPreflight() error {
 // fcEnsureWorkspaceImg creates the per-group ext4 workspace image if absent.
 // Sparse file + mkfs.ext4 runs unprivileged (no loop mount needed). The guest
 // agent chowns the mounted root to uid 1000 on first boot.
+//
+// Migration: when the group has pre-existing workspace files (a podman-era
+// group flipping to firecracker), they are seeded into the image via
+// `mkfs.ext4 -d` so conversation history (.claude session files,
+// venice-history.json), memory/, prompt.md and user files survive the runtime
+// switch. Staged through cp -a into run/fc/ because mke2fs has no exclude
+// option and the staging dir must not contain the image being created; the
+// image is built at a temp path and renamed in so a crash never leaves a
+// half-written workspace.img behind.
 func fcEnsureWorkspaceImg(g string) error {
 	img := fcWorkspaceImg(g)
 	if _, err := os.Stat(img); err == nil {
 		return nil
 	}
-	f, err := os.OpenFile(img, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err := os.MkdirAll(fcRunDir(), 0o755); err != nil {
+		return err
+	}
+	tmpImg := filepath.Join(fcRunDir(), g+".ws.tmp")
+	_ = os.Remove(tmpImg)
+	f, err := os.OpenFile(tmpImg, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	if err := f.Truncate(fcWorkspaceBytes); err != nil {
 		f.Close()
-		os.Remove(img)
+		os.Remove(tmpImg)
 		return err
 	}
 	f.Close()
-	out, err := exec.Command("mkfs.ext4", "-F", "-q", img).CombinedOutput()
+
+	mkfsArgs := []string{"-F", "-q"}
+	stage := ""
+	if entries, err := os.ReadDir(vol(g)); err == nil && len(entries) > 0 {
+		stage = filepath.Join(fcRunDir(), g+".mig")
+		_ = os.RemoveAll(stage)
+		if err := os.MkdirAll(stage, 0o755); err != nil {
+			os.Remove(tmpImg)
+			return err
+		}
+		// cp -a keeps ownership (host uid 1000 == guest node), modes, and
+		// recreates the podman-era .cs FIFOs as FIFOs (mke2fs -d handles
+		// specials; the guest agent replaces/keeps them as needed).
+		if out, err := exec.Command("cp", "-a", vol(g)+"/.", stage).CombinedOutput(); err != nil {
+			os.RemoveAll(stage)
+			os.Remove(tmpImg)
+			return fmt.Errorf("workspace stage: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		// Normalize ownership to the guest worker uid. The daemon runs as uid
+		// 0 inside cs_host, which is host uid 1000 via the rootless mapping —
+		// so it sees the (host-1000-owned) workspace as uid 0, and cp -a +
+		// mkfs -d would bake root ownership into the image. The guest runs
+		// single-uid (node=1000), so every workspace file must be worker-
+		// owned or the sidecar hits EACCES (e.g. venice-history.json writes).
+		if out, err := exec.Command("chown", "-R",
+			fmt.Sprintf("%d:%d", fcWorkerUID, fcWorkerGID), stage).CombinedOutput(); err != nil {
+			os.RemoveAll(stage)
+			os.Remove(tmpImg)
+			return fmt.Errorf("workspace chown: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		mkfsArgs = append(mkfsArgs, "-d", stage)
+		emitLogf("info", "fc[%s]: migrating existing workspace into workspace.img", g)
+	}
+	mkfsArgs = append(mkfsArgs, tmpImg)
+	out, err := exec.Command("mkfs.ext4", mkfsArgs...).CombinedOutput()
+	if stage != "" {
+		_ = os.RemoveAll(stage)
+	}
 	if err != nil {
-		os.Remove(img)
+		os.Remove(tmpImg)
 		return fmt.Errorf("mkfs.ext4 %s: %v: %s", img, err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return os.Rename(tmpImg, img)
 }
 
 // fcMachineCfg reads optional vcpus/mem_mib overrides from the group config.
@@ -538,6 +607,13 @@ func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentR
 // fcSendMsg delivers one turn to the guest. The agent writes system-prompt.md
 // and config.json into the guest workspace, then writes the b64 line to the
 // in-guest .cs/in FIFO — from entrypoint.sh's perspective nothing changed.
+//
+// Attachments: the Send handler saves uploads into the HOST
+// groups/<g>/.cs/uploads (attachments.go) and embeds /workspace-relative
+// references in the message. The guest can't see host files, so any upload
+// newer than the last synced watermark rides along in the envelope and the
+// agent untars it into the guest workspace before the FIFO write. The
+// watermark is a host file so a daemon restart doesn't re-push history.
 func fcSendMsg(g, b64msg, systemPrompt string, cfgJSON []byte) error {
 	req := map[string]any{
 		"op":     "msg",
@@ -547,8 +623,55 @@ func fcSendMsg(g, b64msg, systemPrompt string, cfgJSON []byte) error {
 	if len(cfgJSON) > 0 {
 		req["cfg_b64"] = base64.StdEncoding.EncodeToString(cfgJSON)
 	}
-	_, err := fcAgentCall(g, req, 10*time.Second)
+	newWM, files := fcNewUploads(g)
+	if len(files) > 0 {
+		args := append([]string{"-C", filepath.Join(vol(g), ".cs", "uploads"), "-cf", "-"}, files...)
+		if out, err := exec.Command("tar", args...).Output(); err == nil {
+			req["uploads_tar_b64"] = base64.StdEncoding.EncodeToString(out)
+		} else {
+			emitLogf("warn", "fc[%s]: uploads tar: %v", g, err)
+		}
+	}
+	_, err := fcAgentCall(g, req, 30*time.Second)
+	if err == nil && !newWM.IsZero() {
+		_ = os.WriteFile(fcUploadsWM(g), []byte(fmt.Sprintf("%d\n", newWM.UnixNano())), 0o644)
+	}
 	return err
+}
+
+func fcUploadsWM(g string) string { return filepath.Join(vol(g), ".cs", ".uploads-synced") }
+
+// fcNewUploads lists upload basenames modified after the group's watermark,
+// plus the newest mtime seen (the next watermark).
+func fcNewUploads(g string) (time.Time, []string) {
+	var wm time.Time
+	if b, err := os.ReadFile(fcUploadsWM(g)); err == nil {
+		var ns int64
+		fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &ns)
+		wm = time.Unix(0, ns)
+	}
+	entries, err := os.ReadDir(filepath.Join(vol(g), ".cs", "uploads"))
+	if err != nil {
+		return time.Time{}, nil
+	}
+	var newest time.Time
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(wm) {
+			files = append(files, e.Name())
+			if info.ModTime().After(newest) {
+				newest = info.ModTime()
+			}
+		}
+	}
+	return newest, files
 }
 
 // fcExec runs a short script in the guest and returns its combined output.

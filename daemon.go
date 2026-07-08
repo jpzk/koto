@@ -1011,11 +1011,13 @@ const defaultProvider = "venice"
 // case where the env is somehow unset.)
 const defaultVeniceModel = "kimi-k2.5"
 
-// ensureProviderConfig writes a provider default into a group's config.json
-// when missing or invalid. Idempotent — when the field is already a valid
-// value the file is left untouched. Called by ensure() on every spawn/send
-// so the invariant "every group has an explicit provider" holds even for
-// groups created before this code existed.
+// ensureProviderConfig writes provider and runtime defaults into a group's
+// config.json when missing or invalid. Idempotent — when both fields are
+// already valid the file is left untouched. Called by ensure() on every
+// spawn/send so the invariants "every group has an explicit provider" and
+// "every group has an explicit runtime" hold even for groups created before
+// this code existed (podman-era groups get runtime=firecracker seeded and
+// their workspace migrated into workspace.img on the next spawn).
 func ensureProviderConfig(g string) error {
 	p := filepath.Join(vol(g), ".cs", "config.json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -1024,10 +1026,12 @@ func ensureProviderConfig(g string) error {
 	cfg := map[string]any{}
 	oldB, _ := os.ReadFile(p)
 	_ = json.Unmarshal(oldB, &cfg)
-	if s, ok := cfg["provider"].(string); ok && (s == "claudesdk" || s == "venice") {
-		return nil
+	if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
+		cfg["provider"] = defaultProvider
 	}
-	cfg["provider"] = defaultProvider
+	if s, ok := cfg["runtime"].(string); !ok || (s != "firecracker" && s != "podman") {
+		cfg["runtime"] = defaultRuntime
+	}
 	newB, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -1982,6 +1986,21 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "runtime" {
+		// Same silent-reject shape as provider: only the two literals. A
+		// change takes effect on the group's next spawn (/restart), matching
+		// the ports semantics.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "firecracker", "podman":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "pip" {
 		// TUI sends `/config pip=true` as the string "true"; also accept a
 		// raw JSON bool for direct daemon clients. Anything else is rejected
@@ -2059,6 +2078,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "ports", req.Ports)
 	applyConfig(cfg, "pip", req.Pip)
 	applyConfig(cfg, "provider", req.Provider)
+	applyConfig(cfg, "runtime", req.Runtime)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
@@ -2109,6 +2129,36 @@ func skillNewCmd(req skillNewReq) skillNewResp {
 	_ = os.MkdirAll(d, 0o755)
 	body := fmt.Sprintf("---\nname: %s\ndescription: TODO one-line description.\n---\n# %s\n\nReplace this body with the skill's full instructions.\n", name, name)
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		return skillNewResp{BaseResp: errResp(err.Error())}
+	}
+	skillCacheLock.Lock()
+	skillCacheMtime = time.Time{}
+	skillCacheLock.Unlock()
+	rel, _ := filepath.Rel(HERE, p)
+	return skillNewResp{baseResp{OK: true}, rel}
+}
+
+// skillWriteCmd creates or overwrites a skill's SKILL.md with full content.
+// This is the ctl-plane replacement for main's podman-era rw /skills mount:
+// under the firecracker runtime /skills in the guest is a tarball copy, so
+// authoring goes through the daemon (which owns the host skills/ dir) and
+// reaches peers on their next spawn. Size-capped: the ctl plane is driven by
+// a tier-3 agent, and "fill the host disk one JSON line at a time" shouldn't
+// be in its blast radius.
+func skillWriteCmd(name, content string) skillNewResp {
+	name = strings.TrimSpace(name)
+	if !skillNameRE.MatchString(name) {
+		return skillNewResp{BaseResp: errResp("name must match [a-z0-9][a-z0-9_-]{0,63}")}
+	}
+	if len(content) == 0 || len(content) > 256*1024 {
+		return skillNewResp{BaseResp: errResp("content must be 1B..256KB")}
+	}
+	d := filepath.Join(SKILLS_DIR, name)
+	p := filepath.Join(d, "SKILL.md")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return skillNewResp{BaseResp: errResp(err.Error())}
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return skillNewResp{BaseResp: errResp(err.Error())}
 	}
 	skillCacheLock.Lock()

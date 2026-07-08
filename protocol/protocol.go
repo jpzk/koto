@@ -126,6 +126,10 @@ type ConfigReq struct {
 	Ports    json.RawMessage `json:"ports,omitempty"`
 	Pip      json.RawMessage `json:"pip,omitempty"`
 	Provider json.RawMessage `json:"provider,omitempty"`
+	// Runtime selects the group's isolation backend: "firecracker" (default)
+	// or "podman". Reaches the daemon via the ctl-plane config_set verb; not
+	// yet surfaced in the gRPC ConfigReq proto (additive change, later).
+	Runtime json.RawMessage `json:"runtime,omitempty"`
 }
 
 type SkillListReq struct {

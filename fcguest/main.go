@@ -454,14 +454,15 @@ func appendCtlOut(line []byte) {
 // ---- agent RPC server ----------------------------------------------------------
 
 type agentReq struct {
-	Op           string            `json:"op"`
-	B64          string            `json:"b64"`
-	SPB64        string            `json:"sp_b64"`
-	CfgB64       string            `json:"cfg_b64"`
-	Script       string            `json:"script"`
-	SkillsTarB64 string            `json:"skills_tar_b64"`
-	Ports        []int             `json:"ports"`
-	Env          map[string]string `json:"env"`
+	Op            string            `json:"op"`
+	B64           string            `json:"b64"`
+	SPB64         string            `json:"sp_b64"`
+	CfgB64        string            `json:"cfg_b64"`
+	Script        string            `json:"script"`
+	SkillsTarB64  string            `json:"skills_tar_b64"`
+	UploadsTarB64 string            `json:"uploads_tar_b64"`
+	Ports         []int             `json:"ports"`
+	Env           map[string]string `json:"env"`
 }
 
 func reply(c *vconn, v any) {
@@ -538,12 +539,23 @@ func handleInit(c *vconn, req *agentReq) {
 }
 
 func untarSkills(b64 string) error {
+	if err := untarInto(b64, "/skills", false); err != nil {
+		return err
+	}
+	// Skill helper binaries must be readable/executable by the uid-1000 worker.
+	_ = runReaped("chmod", "-R", "a+rX", "/skills")
+	return nil
+}
+
+// untarInto extracts a base64 tarball under dest. chownWorker hands the tree
+// to the uid-1000 worker (uploads); skills stay root-owned + a+rX.
+func untarInto(b64, dest string, chownWorker bool) error {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return err
 	}
-	_ = os.MkdirAll("/skills", 0o755)
-	cmd := exec.Command("tar", "-C", "/skills", "-xf", "-")
+	_ = os.MkdirAll(dest, 0o755)
+	cmd := exec.Command("tar", "-C", dest, "-xf", "-")
 	cmd.Stdin = bytes.NewReader(raw)
 	_, ch, err := startTracked(cmd)
 	if err != nil {
@@ -553,8 +565,23 @@ func untarSkills(b64 string) error {
 	if ws.ExitStatus() != 0 {
 		return fmt.Errorf("tar exit %d", ws.ExitStatus())
 	}
-	// Skill helper binaries must be readable/executable by the uid-1000 worker.
-	_ = exec.Command("chmod", "-R", "a+rX", "/skills").Run()
+	if chownWorker {
+		_ = runReaped("chown", "-R", fmt.Sprintf("%d:%d", workerUID, workerGID), dest)
+	}
+	return nil
+}
+
+// runReaped runs a short helper through the tracked-pid reaper (a bare
+// cmd.Run would race the central wait4(-1) loop for the exit status).
+func runReaped(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	_, ch, err := startTracked(cmd)
+	if err != nil {
+		return err
+	}
+	if ws := <-ch; ws.ExitStatus() != 0 {
+		return fmt.Errorf("%s exit %d", name, ws.ExitStatus())
+	}
 	return nil
 }
 
@@ -625,6 +652,14 @@ func handleMsg(c *vconn, req *agentReq) {
 	if req.CfgB64 != "" {
 		if cfg, err := base64.StdEncoding.DecodeString(req.CfgB64); err == nil {
 			writeWorkerFile(filepath.Join(csDir, "config.json"), cfg)
+		}
+	}
+	// Attachments saved host-side by the daemon ride along per turn; the
+	// message body references /workspace/.cs/uploads/<name>, so land them
+	// there (worker-owned) before the FIFO write wakes entrypoint.sh.
+	if req.UploadsTarB64 != "" {
+		if err := untarInto(req.UploadsTarB64, filepath.Join(csDir, "uploads"), true); err != nil {
+			logf("uploads untar: %v", err)
 		}
 	}
 	// Write through the agent's permanent FIFO handle (setupCS) — never a
