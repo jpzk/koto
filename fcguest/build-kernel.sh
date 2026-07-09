@@ -68,10 +68,30 @@ cd /tmp/src/linux
 # NO acpi=off / CMDLINE_DEVICES workarounds: the amzn tree parses FC's ACPI
 # tables, so virtio is enumerated via ACPI and the LAPIC timer comes up.
 curl -fsSL "$FC_CONFIG_URL" >.config
+# Everything built-in (=y): the guest has no module loader, so netfilter/nft
+# bits can't be =m. FC's config has TUN off and only the nftables *core*; we
+# add the full nftables NAT stack netavark needs for podman *bridged*
+# networking (podman network create + --network), plus TUN/FUSE for L3 + podman.
 ./scripts/config --file .config \
   -e CONFIG_TUN \
   -e CONFIG_FUSE_FS \
   -e CONFIG_NF_TABLES \
+  -e CONFIG_NF_TABLES_INET \
+  -e CONFIG_NF_TABLES_IPV4 \
+  -e CONFIG_NF_TABLES_IPV6 \
+  -e CONFIG_NFT_NAT \
+  -e CONFIG_NFT_MASQ \
+  -e CONFIG_NFT_CT \
+  -e CONFIG_NFT_FIB_INET \
+  -e CONFIG_NFT_FIB_IPV4 \
+  -e CONFIG_NFT_FIB_IPV6 \
+  -e CONFIG_NFT_COMPAT \
+  -e CONFIG_NFT_REJECT \
+  -e CONFIG_NFT_REJECT_INET \
+  -e CONFIG_NFT_COUNTER \
+  -e CONFIG_NF_CONNTRACK \
+  -e CONFIG_NF_NAT \
+  -e CONFIG_BRIDGE_NF_EBTABLES \
   -e CONFIG_IKCONFIG \
   -e CONFIG_IKCONFIG_PROC
 make olddefconfig >/dev/null
@@ -80,6 +100,8 @@ grep -q '^CONFIG_TUN=y'     .config || { echo "!! CONFIG_TUN missing";     exit 
 grep -q '^CONFIG_PVH=y'     .config || { echo "!! CONFIG_PVH missing (FC needs PVH)"; exit 1; }
 grep -q '^CONFIG_FUSE_FS=y' .config || { echo "!! CONFIG_FUSE_FS missing (rootless podman)"; exit 1; }
 grep -q '^CONFIG_ACPI=y'    .config || { echo "!! CONFIG_ACPI missing (needed to drop acpi=off)"; exit 1; }
+grep -q '^CONFIG_NFT_NAT=y' .config || { echo "!! CONFIG_NFT_NAT missing (netavark bridged NAT)"; exit 1; }
+grep -q '^CONFIG_NFT_MASQ=y' .config || { echo "!! CONFIG_NFT_MASQ missing (netavark masquerade)"; exit 1; }
 
 make -j"$(nproc)" vmlinux >/dev/null
 cp vmlinux /out/vmlinux

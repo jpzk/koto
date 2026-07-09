@@ -254,8 +254,12 @@ internet through pasta):
 
 - **Kernel** (`build-kernel.sh`): FC's config already had `USER_NS`,
   `OVERLAY_FS`, cgroup v2, `BRIDGE`/`VETH`, iptables NAT, `SECCOMP`; we added
-  `FUSE_FS` (fuse-overlayfs) and `NF_TABLES` (netavark), and `TUN` was already
-  there for L3 (pasta reuses it).
+  `FUSE_FS` (fuse-overlayfs) and — built-in, since the guest has no module
+  loader — the **full nftables NAT stack** netavark needs for *bridged*
+  networking (`NF_TABLES` + `NF_TABLES_INET` + `NFT_NAT`/`NFT_MASQ`/`NFT_CT`/
+  `NFT_FIB_INET`/`NFT_COMPAT`). `TUN` was already there for L3 (rootless pasta
+  reuses it). Verified: `podman network create` + a container on the bridge
+  reaches the internet via netavark's nft masquerade.
 - **Rootfs** (`Dockerfile.rootfs`): `podman crun conmon containers-common
   fuse-overlayfs passt slirp4netns shadow-utils`; `/etc/subuid`+`subgid` for
   node; `storage.conf` (overlay+fuse-overlayfs); `containers.conf`
