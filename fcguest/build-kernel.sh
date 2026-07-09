@@ -14,7 +14,7 @@
 # and acpi=off leaves the guest with no local APIC / no LAPIC timer, so every
 # idle microVM busy-polls a full host CPU (~100%). The amzn tree boots WITH
 # ACPI, so the LAPIC timer works and idle is ~0% — and we drop acpi=off.
-# See kernel-amzn-vs-vanilla.md for the full argument.
+# See docs/kernel-amzn-vs-vanilla.md for the full argument.
 #
 # Output: fcassets/vmlinux (gitignored). Rebuild via `make fc-kernel`.
 # Containerized (Ubuntu 24.04, like FC's CI) so the host needs no toolchain.

@@ -451,7 +451,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			// tables. That brings up the local APIC + LAPIC timer, so the guest
 			// idles at ~0% CPU (a vanilla kernel needs acpi=off, which leaves no
 			// LAPIC timer → every idle VM busy-polls a full CPU; see
-			// kernel-amzn-vs-vanilla.md).
+			// docs/kernel-amzn-vs-vanilla.md).
 			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
 		},
 		"drives": []map[string]any{
@@ -503,7 +503,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// injection and per-group metrics are unchanged; NO_PROXY keeps that
 	// 127.0.0.1 base URL direct. `net=l3` tells fc-agent to bring the TAP up.
 	// (Tradeoff vs the old L7-proxy egress: general HTTPS is no longer
-	// proxy-audited — see firecracker-vsock.md.) A change here needs /restart.
+	// proxy-audited — see docs/firecracker-vsock.md.) A change here needs /restart.
 	if groupInternet(g) == "full" {
 		for _, k := range []string{"NO_PROXY", "no_proxy"} {
 			env[k] = "127.0.0.1,localhost"
