@@ -509,6 +509,11 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	go func() {
 		_ = cmd.Wait()
 		emitLogf("info", "fc[%s]: vm process exited", g)
+		// The VM is gone, so any turn still parked in sendNow waiting for
+		// [[turn_end]] can never complete. Wake it now instead of letting the
+		// queue worker block for the full turnWaitTimeout — otherwise a crash or
+		// /restart mid-turn hangs every message queued behind it (see queue.go).
+		abortInflightTurn(g)
 	}()
 
 	// Wait for the guest agent, then push init (skills + ports + env). The

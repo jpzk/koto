@@ -1118,6 +1118,23 @@ func notifyTurnDone(g string) {
 	}
 }
 
+// abortInflightTurn unblocks a sendNow that is parked on turnDoneCh waiting for
+// [[turn_end]] when the VM process it was talking to has exited — a crash or a
+// deliberate stop/restart. Without this the queue worker (queue.go) would stay
+// blocked for the full turnWaitTimeout (25m) on a turn that can never complete,
+// and every message queued behind it hangs until the timeout fires. Unlike
+// notifyTurnDone this does NOT clear the stalled flag or claim the loop is
+// alive — the turn was lost, not completed; it only wakes the worker so the
+// queue advances onto the freshly (re)started VM. A spurious token pushed when
+// no turn is in flight is drained by the next sendNow's pre-wait drain loop.
+func abortInflightTurn(g string) {
+	c := turnDoneCh(g)
+	select {
+	case c <- struct{}{}:
+	default:
+	}
+}
+
 func emit(g string, ev Event) {
 	ev.Group = g
 	if ev.Ts == 0 {

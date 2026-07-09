@@ -111,6 +111,77 @@ func TestQueueOverflowRejects(t *testing.T) {
 	})
 }
 
+// TestAbortInflightTurnAdvancesQueue reproduces the "messages hang in the queue
+// after restarting the VM" bug. A turn blocked waiting for [[turn_end]] (as
+// sendNow does) must be woken by abortInflightTurn — the wake the fc.go reaper
+// fires on VM process exit — so the single-flight worker advances to the next
+// queued message instead of parking for the full turnWaitTimeout. Before the
+// fix, a mid-turn crash or /restart left the worker blocked and every message
+// queued behind it hung.
+func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
+	const g = "q-abort"
+	// Stands in for the real 25-minute turnWaitTimeout: if the abort wake never
+	// fires, the blocked turn only clears after this, and the 2s assertions
+	// below fail — that is exactly the hang we are guarding against.
+	const fallback = 10 * time.Second
+
+	started := make(chan struct{}, 1)
+	processed := make(chan string, 2)
+
+	// stub mirrors sendNow's wait discipline: drain stale tokens, then block on
+	// turnDoneCh until a turn_end/abort token arrives (or the timeout backstop).
+	stub := func(g, msg string) error {
+	drain:
+		for {
+			select {
+			case <-turnDoneCh(g):
+			default:
+				break drain
+			}
+		}
+		if msg == "hang" {
+			started <- struct{}{}
+			select {
+			case <-turnDoneCh(g):
+			case <-time.After(fallback):
+				t.Errorf("turn %q not woken within %s — abort wake never fired", msg, fallback)
+			}
+		}
+		processed <- msg
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		if _, err := enqueueSend(g, "hang"); err != nil {
+			t.Fatalf("enqueue hang: %v", err)
+		}
+		if _, err := enqueueSend(g, "next"); err != nil {
+			t.Fatalf("enqueue next: %v", err)
+		}
+		// Wait until the worker is actually blocked in the hang turn, then
+		// simulate the VM process exiting under it (what the reaper does).
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("hang turn never started")
+		}
+		abortInflightTurn(g)
+
+		// Both turns must complete well under the fallback: hang wakes from the
+		// abort, then the worker advances to next in FIFO order.
+		for i, w := range []string{"hang", "next"} {
+			select {
+			case got := <-processed:
+				if got != w {
+					t.Fatalf("processed[%d]=%q, want %q", i, got, w)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for %q (abort wake likely failed)", w)
+			}
+		}
+	})
+}
+
 // TestQueueCrossGroupConcurrency: different groups run concurrently (one worker
 // each), so two groups can be mid-turn at the same time.
 func TestQueueCrossGroupConcurrency(t *testing.T) {
