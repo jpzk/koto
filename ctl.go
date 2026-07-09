@@ -20,6 +20,7 @@ package main
 // own `.cs/in` FIFO.
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -221,15 +222,21 @@ func ctlDispatch(owner string, line []byte) any {
 
 	case "job_done":
 		// Self-targeted (like sched_*): any group may signal completion of its
-		// OWN background jobs. The id is advisory — we (re)arm a debounce and
-		// flushNotify scans for all completed-but-unreported notify jobs, so a
-		// burst of fan-out completions coalesces into one self-send.
+		// OWN background job. The payload carries the result (rc + a base64 tail
+		// of output) because under firecracker the daemon can't read the job dir
+		// — it lives inside the guest's workspace.img. recordJobDone buffers it
+		// and (re)arms a debounce so a burst of fan-out completions coalesces
+		// into one self-send.
 		var req struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			RC    string `json:"rc"`
+			Out   string `json:"out"` // base64 of the output tail
+			Total int64  `json:"total"`
 		}
 		_ = json.Unmarshal(line, &req)
-		emitLogf("info", "ctl[%s]: job_done %s", owner, req.ID)
-		scheduleNotifyFlush(owner)
+		out, _ := base64.StdEncoding.DecodeString(req.Out)
+		emitLogf("info", "ctl[%s]: job_done %s rc=%s", owner, req.ID, req.RC)
+		recordJobDone(owner, jobResult{ID: req.ID, RC: req.RC, Out: string(out), Total: req.Total})
 		return baseResp{OK: true}
 
 	case "sched_add":

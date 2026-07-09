@@ -69,10 +69,20 @@ case "$cmd" in
     echo "$id"
     ;;
   _notify)
-    # internal: post a job_done event to the group ctl FIFO. Bounded by timeout
-    # so a down ctl reader (daemon stopped) can't hang the detached job — the
-    # notify is best-effort; the result is still readable via cs-job logs.
-    printf '{"cmd":"job_done","id":"%s"}\n' "${1:?}" | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true
+    # internal: post a job_done event to the group ctl FIFO, carrying the job's
+    # rc + a base64 tail of its output. Under firecracker the daemon CANNOT read
+    # the job dir (it lives inside workspace.img), so the result must ride the
+    # ctl payload — see notify.go. The tail is capped at 1500 bytes to match the
+    # daemon's old on-host trim; the full output stays readable via cs-job logs.
+    # Bounded by timeout so a down ctl reader (daemon stopped) can't hang the
+    # detached job — best-effort; the result is still on disk regardless.
+    id=${1:?}; D=$JOBS/$id
+    rc=$(cat "$D/rc" 2>/dev/null || echo '?')
+    total=$(wc -c < "$D/out" 2>/dev/null | tr -d ' '); [ -n "$total" ] || total=0
+    # base64 of the last 1500 bytes, newlines stripped so it's one JSON line.
+    b64=$(tail -c 1500 "$D/out" 2>/dev/null | base64 | tr -d '\n')
+    printf '{"cmd":"job_done","id":"%s","rc":"%s","total":%s,"out":"%s"}\n' \
+      "$id" "$rc" "$total" "$b64" | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true
     ;;
   spawn)
     NF=
