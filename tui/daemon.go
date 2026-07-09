@@ -246,6 +246,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("provider", &r.Provider)
 	setOpt("internet", &r.Internet)
 	setOpt("size", &r.Size)
+	setOpt("root", &r.Root)
 	if sk, ok := extra["skills"]; ok {
 		switch v := sk.(type) {
 		case []string:

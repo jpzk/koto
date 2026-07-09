@@ -246,6 +246,32 @@ func TestGroupInternetDefault(t *testing.T) {
 	}
 }
 
+// TestGroupRootDefault: default no; "yes" (string) and true (bool) opt in.
+func TestGroupRootDefault(t *testing.T) {
+	fcHarness(t)
+	if groupRoot("nope") {
+		t.Fatal("missing config should be false")
+	}
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"root":"yes"}`), 0o644)
+	if !groupRoot("tg") {
+		t.Fatal("explicit root=yes not honored")
+	}
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"root":true}`), 0o644)
+	if !groupRoot("tg") {
+		t.Fatal("bool root=true not honored")
+	}
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"root":"no"}`), 0o644)
+	if groupRoot("tg") {
+		t.Fatal("root=no should be false")
+	}
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"root":"maybe"}`), 0o644)
+	if groupRoot("tg") {
+		t.Fatal("unknown value should fall back to false")
+	}
+}
+
 // TestEgressGate: the profile gate (403 for none) + the self-target guard.
 // The 403 path returns before hijacking, so a plain recorder suffices; the
 // tunnel path is covered live in the smoke run (needs a real socket).

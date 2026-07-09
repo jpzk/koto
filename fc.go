@@ -105,17 +105,16 @@ var fcSizePresets = map[string]fcSize{
 	"large":  {4, 4096, 16 << 30},
 }
 
-func fcAssetsDir() string    { return filepath.Join(HERE, "fcassets") }
-func fcBinPath() string      { return filepath.Join(fcAssetsDir(), "firecracker") }
-func fcKernelPath() string   { return filepath.Join(fcAssetsDir(), "vmlinux") }
-func fcRootfsPath() string   { return filepath.Join(fcAssetsDir(), "rootfs.img") }
-func fcRunDir() string       { return filepath.Join(SOCK_DIR, "fc") }
-func fcUDS(g string) string  { return filepath.Join(fcRunDir(), g+".vsock") }
-func fcPidPath(g string) string     { return filepath.Join(fcRunDir(), g+".pid") }
-func fcCfgPath(g string) string     { return filepath.Join(fcRunDir(), g+".cfg.json") }
-func fcConsolePath(g string) string { return filepath.Join(fcRunDir(), g+".console.log") }
+func fcAssetsDir() string            { return filepath.Join(HERE, "fcassets") }
+func fcBinPath() string              { return filepath.Join(fcAssetsDir(), "firecracker") }
+func fcKernelPath() string           { return filepath.Join(fcAssetsDir(), "vmlinux") }
+func fcRootfsPath() string           { return filepath.Join(fcAssetsDir(), "rootfs.img") }
+func fcRunDir() string               { return filepath.Join(SOCK_DIR, "fc") }
+func fcUDS(g string) string          { return filepath.Join(fcRunDir(), g+".vsock") }
+func fcPidPath(g string) string      { return filepath.Join(fcRunDir(), g+".pid") }
+func fcCfgPath(g string) string      { return filepath.Join(fcRunDir(), g+".cfg.json") }
+func fcConsolePath(g string) string  { return filepath.Join(fcRunDir(), g+".console.log") }
 func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.img") }
-
 
 // groupInternet reads config.json's "internet" profile: "full" grants
 // general outbound (forwarded through the proxy over the group's existing
@@ -138,6 +137,30 @@ func groupInternet(g string) string {
 		return "full"
 	}
 	return "none"
+}
+
+// groupRoot reads config.json's "root" profile: "yes" grants the guest's node
+// user passwordless sudo, anything else (including missing) means "no" — the
+// default. Read at spawn and passed into the guest's init RPC; fc-agent installs
+// the sudoers grant at boot (handleInit → enableSudo). The microVM's KVM
+// boundary contains root-in-guest, so this doesn't widen the host blast radius.
+// Applies on /restart. Accepts a bool too, for a hand-edited config.json.
+func groupRoot(g string) bool {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return false
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return false
+	}
+	switch v := cfg["root"].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.ToLower(strings.TrimSpace(v)) == "yes"
+	}
+	return false
 }
 
 // ---- VM registry -----------------------------------------------------------
@@ -190,7 +213,6 @@ func pidIsFirecracker(pid int) bool {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	return err == nil && strings.TrimSpace(string(b)) == "firecracker"
 }
-
 
 // ---- spawn -----------------------------------------------------------------
 
@@ -517,6 +539,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if groupInternet(g) == "full" {
 		initReq["net"] = "l3"
 	}
+	if groupRoot(g) {
+		initReq["root"] = true
+	}
 	if tar, err := fcSkillsTar(); err == nil && len(tar) > 0 {
 		initReq["skills_tar_b64"] = base64.StdEncoding.EncodeToString(tar)
 	}
@@ -693,9 +718,9 @@ func fcHostDial(g string, port uint32, timeout time.Duration) (net.Conn, error) 
 }
 
 type fcAgentResp struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	RC    int    `json:"rc,omitempty"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	RC     int    `json:"rc,omitempty"`
 	OutB64 string `json:"out_b64,omitempty"`
 }
 

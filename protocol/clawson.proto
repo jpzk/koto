@@ -179,6 +179,7 @@ message ConfigReq {
   optional string provider = 7;
   optional string internet = 9;   // none|full — applies on /restart
   optional string size     = 10;  // small|medium|large — applies on /restart
+  optional string root     = 11;  // yes|no — passwordless sudo in guest; applies on /restart
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;
     SkillList             skills_set   = 4;

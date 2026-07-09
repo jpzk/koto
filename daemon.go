@@ -43,39 +43,39 @@ import (
 // aliases, not redefinitions; embedding `baseResp` in another struct
 // behaves identically to embedding `protocol.BaseResp`.
 type (
-	Event         = protocol.Event
-	GroupInfo     = protocol.GroupInfo
-	skillItem     = protocol.SkillItem
-	baseResp      = protocol.BaseResp
-	cmdEnvelope   = protocol.CmdEnvelope
-	spawnReq      = protocol.SpawnReq
-	spawnResp     = protocol.SpawnResp
-	sendReq       = protocol.SendReq
-	groupReq      = protocol.GroupReq
-	configReq     = protocol.ConfigReq
-	configResp    = protocol.ConfigResp
-	listResp      = protocol.ListResp
-	historyReq    = protocol.HistoryReq
-	historyResp   = protocol.HistoryResp
-	metricsReq    = protocol.MetricsReq
-	metricsResp   = protocol.MetricsResp
-	skillsResp    = protocol.SkillsResp
-	skillListReq  = protocol.SkillListReq
-	skillNewReq   = protocol.SkillNewReq
-	skillNewResp  = protocol.SkillNewResp
-	skillReadReq  = protocol.SkillReadReq
-	skillReadResp = protocol.SkillReadResp
-	subscribeReq  = protocol.SubscribeReq
-	subscribeResp = protocol.SubscribeResp
-	logsReq       = protocol.LogsReq
-	logsResp      = protocol.LogsResp
-	LogEvent      = protocol.LogEvent
-	scheduleItem  = protocol.ScheduleItem
-	schedAddReq   = protocol.SchedAddReq
-	schedAddResp  = protocol.SchedAddResp
-	schedListReq  = protocol.SchedListReq
-	schedListResp = protocol.SchedListResp
-	schedIDReq    = protocol.SchedIDReq
+	Event          = protocol.Event
+	GroupInfo      = protocol.GroupInfo
+	skillItem      = protocol.SkillItem
+	baseResp       = protocol.BaseResp
+	cmdEnvelope    = protocol.CmdEnvelope
+	spawnReq       = protocol.SpawnReq
+	spawnResp      = protocol.SpawnResp
+	sendReq        = protocol.SendReq
+	groupReq       = protocol.GroupReq
+	configReq      = protocol.ConfigReq
+	configResp     = protocol.ConfigResp
+	listResp       = protocol.ListResp
+	historyReq     = protocol.HistoryReq
+	historyResp    = protocol.HistoryResp
+	metricsReq     = protocol.MetricsReq
+	metricsResp    = protocol.MetricsResp
+	skillsResp     = protocol.SkillsResp
+	skillListReq   = protocol.SkillListReq
+	skillNewReq    = protocol.SkillNewReq
+	skillNewResp   = protocol.SkillNewResp
+	skillReadReq   = protocol.SkillReadReq
+	skillReadResp  = protocol.SkillReadResp
+	subscribeReq   = protocol.SubscribeReq
+	subscribeResp  = protocol.SubscribeResp
+	logsReq        = protocol.LogsReq
+	logsResp       = protocol.LogsResp
+	LogEvent       = protocol.LogEvent
+	scheduleItem   = protocol.ScheduleItem
+	schedAddReq    = protocol.SchedAddReq
+	schedAddResp   = protocol.SchedAddResp
+	schedListReq   = protocol.SchedListReq
+	schedListResp  = protocol.SchedListResp
+	schedIDReq     = protocol.SchedIDReq
 	schedToggleReq = protocol.SchedToggleReq
 )
 
@@ -314,6 +314,7 @@ func tailBackgroundTask(g, id, path string) {
 //     (/proc/PID/exe → .../@anthropic-ai/claude-code/bin/claude.exe), not in
 //     cmdline — so the matcher below greps exe AND cmdline, not cmdline alone.
 //   - venice    → node /sidecar/venice_stream.js (matches via cmdline).
+//
 // stream_filter.js and agent-browser-chrome do NOT match, so they're left
 // alone. Adding a provider = add its worker's exe/argv marker here (one place).
 const agentWorkerPattern = `claude-code|venice_stream\.js`
@@ -1760,6 +1761,23 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "root" {
+		// Passwordless sudo inside the guest: yes|no. Applies on the next spawn
+		// (/restart) — fc-agent installs the sudoers grant at boot (groupRoot →
+		// init "root" → enableSudo). The microVM's KVM boundary contains
+		// root-in-guest, so this doesn't widen the host blast radius. Unknown
+		// values are silently rejected, same shape as the internet branch.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "yes", "no":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "ports" {
 		// Accept either a JSON array of ints or a comma-separated string so
 		// `/config ports=8080,3000` (TUI tokenization splits on whitespace,
@@ -1817,6 +1835,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "provider", req.Provider)
 	applyConfig(cfg, "internet", req.Internet)
 	applyConfig(cfg, "size", req.Size)
+	applyConfig(cfg, "root", req.Root)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
@@ -1942,7 +1961,6 @@ func clearCmd(req groupReq) baseResp {
 	}
 	return baseResp{OK: true}
 }
-
 
 // ---- daemon entrypoint ----------------------------------------------------
 

@@ -38,6 +38,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       passt \
       slirp4netns \
       shadow-utils \
+      sudo \
  && dnf clean all \
  && npm i -g @anthropic-ai/claude-code \
  && npm cache clean --force
@@ -45,6 +46,12 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 # Same uid/gid contract as the podman sidecar: entrypoint.sh runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
+
+# `sudo` ships in the image, but the NOPASSWD grant for node is NOT baked here —
+# it's gated per group by config.json "root"=yes|no and installed at boot by
+# fc-agent (handleInit → enableSudo), since the root drive is read-only. The
+# microVM's KVM boundary contains root-in-guest, so granting sudo does not widen
+# the host blast radius (see docs/firecracker-vsock.md / the trust model).
 
 # Rootless podman setup for node:
 #  - subuid/subgid: a subordinate id range so newuidmap can build the userns.

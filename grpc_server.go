@@ -87,6 +87,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Provider = optRaw(r.Provider)
 	out.Internet = optRaw(r.Internet)
 	out.Size = optRaw(r.Size)
+	out.Root = optRaw(r.Root)
 	switch r.GetSkillsAction().(type) {
 	case *pb.ConfigReq_SkillsClear:
 		out.Skills = json.RawMessage("[]") // isClear -> delete key

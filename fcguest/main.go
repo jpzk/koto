@@ -245,8 +245,8 @@ func loopbackUp() {
 // (double-forked orphans from tool subprocesses) are silently reaped —
 // that's the catatonit role in the podman runtime.
 var (
-	trackMu  sync.Mutex
-	tracked  = map[int]chan unix.WaitStatus{}
+	trackMu sync.Mutex
+	tracked = map[int]chan unix.WaitStatus{}
 )
 
 func reaper() {
@@ -500,7 +500,8 @@ type agentReq struct {
 	UploadsTarB64 string            `json:"uploads_tar_b64"`
 	Ports         []int             `json:"ports"`
 	Env           map[string]string `json:"env"`
-	Net           string            `json:"net"` // "l3" → bring up the TAP (internet=full)
+	Net           string            `json:"net"`  // "l3" → bring up the TAP (internet=full)
+	Root          bool              `json:"root"` // true → passwordless sudo for node (config root=yes)
 }
 
 func reply(c *vconn, v any) {
@@ -550,6 +551,7 @@ var (
 	initMu        sync.Mutex
 	entrypointUp  bool
 	netStarted    bool
+	sudoEnabled   bool
 	portsUp       = map[int]bool{}
 	entrypointEnv map[string]string
 )
@@ -569,6 +571,15 @@ func handleInit(c *vconn, req *agentReq) {
 			logf("l3 net up: %v", err)
 		} else {
 			netStarted = true
+		}
+	}
+	// config root=yes: grant node passwordless sudo. Idempotent (guarded), done
+	// before the entrypoint starts so the first turn already has it.
+	if req.Root && !sudoEnabled {
+		if err := enableSudo(); err != nil {
+			logf("enable sudo: %v", err)
+		} else {
+			sudoEnabled = true
 		}
 	}
 	for _, p := range req.Ports {
@@ -591,6 +602,28 @@ func handleInit(c *vconn, req *agentReq) {
 		go entrypointLoop(req.Env)
 	}
 	reply(c, map[string]any{"ok": true})
+}
+
+// enableSudo grants the node user passwordless sudo (config root=yes). The root
+// drive is attached read-only, so /etc/sudoers.d can't be written directly;
+// overlay a small tmpfs on it and drop the NOPASSWD grant there. sudo's baked
+// /etc/sudoers already @includedir's this dir, and sudo's timestamp dir lives
+// under /run (a tmpfs). The grant file must be root-owned and not group/other
+// writable — fc-agent runs as root and writes it 0440. The KVM boundary
+// contains root-in-guest, so this doesn't widen the host blast radius. Note:
+// `sudo dnf install` won't persist (root drive is read-only) — sudo is for
+// running privileged commands against the writable workspace/tmpfs, network and
+// mount config, reading root-owned files, etc.
+func enableSudo() error {
+	const dir = "/etc/sudoers.d"
+	if err := unix.Mount("tmpfs", dir, "tmpfs", 0, "mode=755"); err != nil {
+		return fmt.Errorf("mount tmpfs %s: %w", dir, err)
+	}
+	f := filepath.Join(dir, "node")
+	if err := os.WriteFile(f, []byte("node ALL=(ALL) NOPASSWD: ALL\n"), 0o440); err != nil {
+		return fmt.Errorf("write %s: %w", f, err)
+	}
+	return nil
 }
 
 func untarSkills(b64 string) error {
@@ -688,8 +721,8 @@ func entrypointEnviron(env map[string]string) []string {
 		"TERM=xterm-256color",
 		"USER=node",
 		"LOGNAME=node",
-		"XDG_RUNTIME_DIR=/run/user/1000",  // rootless podman runtime dir
-		"TMPDIR=" + wsDir + "/.tmp",        // writable temp on disk (podman stages
+		"XDG_RUNTIME_DIR=/run/user/1000", // rootless podman runtime dir
+		"TMPDIR=" + wsDir + "/.tmp",      // writable temp on disk (podman stages
 		//                                     image blobs here; /var/tmp is read-only)
 	}
 	for k, v := range env {

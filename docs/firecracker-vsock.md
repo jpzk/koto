@@ -267,6 +267,34 @@ disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
   the resolved preset (clamped 1–32 and 128–65536 MiB), so any hand-tuned group
   keeps working. There is no raw disk-size override — disk follows the preset.
 
+## Root / sudo profile (`root`: `yes` | `no`)
+
+Per-group config key granting the guest's `node` user (uid 1000, the account
+the entrypoint + `claude` + all bash run as) **passwordless sudo**. Default
+`no` — `node` has no path to root, matching the podman-sidecar posture.
+
+- **Why it's safe to grant.** The microVM's KVM boundary is the security
+  boundary (see *Trust-model payoff*). Root *inside* the guest is still contained
+  by Firecracker's minimal device model — a root-in-guest is a VM escape away
+  from the host, exactly like non-root-in-guest. So unlike host-side sudo, this
+  does **not** widen the host blast radius. It's a per-group ergonomics knob, not
+  a trust decision.
+- **Plumbing.** `groupRoot(g)` (`fc.go`) reads config.json `"root"` at spawn and
+  sets `init.root=true` on the guest init RPC. `fc-agent`'s `handleInit`
+  (`fcguest/main.go`) then calls `enableSudo` once, before the entrypoint starts,
+  so the first turn already has it. Applied on **`/restart`**.
+- **How the grant is installed (read-only root workaround).** The root drive is
+  attached read-only, so `/etc/sudoers.d` can't be written directly. `enableSudo`
+  overlays a small **tmpfs** on `/etc/sudoers.d` and drops
+  `node ALL=(ALL) NOPASSWD: ALL` (mode 0440, root-owned) there; sudo's baked
+  `/etc/sudoers` already `@includedir`s that dir, and sudo's timestamp dir lives
+  under `/run` (also a tmpfs). `sudo` itself ships in the golden rootfs
+  unconditionally (`Dockerfile.rootfs`); only the grant is runtime-gated.
+- **`sudo dnf install` won't persist.** The root drive is read-only, so sudo is
+  for running privileged commands against the writable workspace/tmpfs, network
+  and mount config, reading root-owned files — not installing packages. Bake new
+  packages into the rootfs (`make fc-rootfs`) instead.
+
 ## Containers (rootless podman in the guest)
 
 The golden rootfs ships **rootless podman** (5.x) so the agent can run

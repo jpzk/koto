@@ -133,6 +133,10 @@ type ConfigReq struct {
 	// Size is the machine preset: "small" (default) | "medium" | "large" —
 	// sets vCPU, RAM, and workspace disk together. Applies on /restart.
 	Size json.RawMessage `json:"size,omitempty"`
+	// Root is passwordless-sudo-in-guest: "yes" | "no" (default). The microVM's
+	// KVM boundary contains root-in-guest, so it doesn't widen the host blast
+	// radius. Applies on /restart (fc-agent installs the sudoers grant at boot).
+	Root json.RawMessage `json:"root,omitempty"`
 }
 
 type SkillListReq struct {
