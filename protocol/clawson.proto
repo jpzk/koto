@@ -179,7 +179,6 @@ message ConfigReq {
   optional string provider = 7;
   optional string internet = 9;   // none|full — applies on /restart
   optional string size     = 10;  // small|medium|large — applies on /restart
-  reserved 6;                     // was `pip` (podman-only; removed)
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;
     SkillList             skills_set   = 4;

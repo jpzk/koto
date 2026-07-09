@@ -2322,7 +2322,7 @@ const file_clawson_proto_rawDesc = "" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06before\x18\x03 \x01(\x01R\x06before\"!\n" +
 	"\tSkillList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\x9a\x03\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\x94\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x01R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -2341,7 +2341,7 @@ const file_clawson_proto_rawDesc = "" +
 	"\x06_portsB\v\n" +
 	"\t_providerB\v\n" +
 	"\t_internetB\a\n" +
-	"\x05_sizeJ\x04\b\x06\x10\a\"$\n" +
+	"\x05_size\"$\n" +
 	"\fSkillListReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"!\n" +
 	"\vSkillNewReq\x12\x12\n" +
