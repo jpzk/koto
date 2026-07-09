@@ -27,7 +27,7 @@ $(BUILD):
 # firecracker guest (baked into the rootfs — see fc-rootfs). They no longer
 # build a standalone podman image (the podman group runtime is retired); this
 # just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
-SIDECAR_SRC := sidecar/entrypoint.sh sidecar/start-chrome.sh sidecar/stream_filter.js
+SIDECAR_SRC := sidecar/entrypoint.sh sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent
 
 # --- clawson-host (daemon image) -------------------------------------------
 # Inputs: just host/Dockerfile. Go sources land via bind mount, recompiled
