@@ -86,6 +86,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Ports = optRaw(r.Ports)
 	out.Provider = optRaw(r.Provider)
 	out.Internet = optRaw(r.Internet)
+	out.Size = optRaw(r.Size)
 	switch r.GetSkillsAction().(type) {
 	case *pb.ConfigReq_SkillsClear:
 		out.Skills = json.RawMessage("[]") // isClear -> delete key
@@ -126,8 +127,13 @@ func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp,
 	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
 		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
 	}
-	if r.Provider != "" || r.Model != "" {
-		if err := seedSpawnConfig(r.Group, r.Provider, r.Model); err != nil {
+	if r.Size != "" {
+		if _, ok := fcSizePresets[r.Size]; !ok {
+			return &pb.SpawnResp{Error: "size must be small, medium, or large"}, nil
+		}
+	}
+	if r.Provider != "" || r.Model != "" || r.Size != "" {
+		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size); err != nil {
 			return &pb.SpawnResp{Error: err.Error()}, nil
 		}
 	}

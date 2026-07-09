@@ -117,7 +117,7 @@ message ScheduleItem {
 
 // ---- requests ----
 
-message SpawnReq  { string group = 1; bool main = 2; string provider = 3; string model = 4; }
+message SpawnReq  { string group = 1; bool main = 2; string provider = 3; string model = 4; string size = 5; }
 message SendReq   {
   string group      = 1;
   string msg        = 2;
@@ -178,6 +178,7 @@ message ConfigReq {
   optional string ports    = 5;
   optional string provider = 7;
   optional string internet = 9;   // none|full — applies on /restart
+  optional string size     = 10;  // small|medium|large — applies on /restart
   reserved 6;                     // was `pip` (podman-only; removed)
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;

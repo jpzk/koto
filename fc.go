@@ -69,11 +69,12 @@ const (
 	// ANTHROPIC_BASE_URL points here. High + odd to avoid dev-server clashes.
 	fcGuestProxyTCP = 18888
 
-	fcDefaultVcpus = 2
-	// 1024, not 2048: this host runs several concurrent group VMs on ~2GiB
-	// of RAM. FC allocates guest memory lazily so idle VMs cost little, but
-	// the ceiling still bounds worst-case pressure. Override per group with
-	// config.json "mem_mib" for heavy workloads.
+	// Default machine size = the "small" preset (see fcSizePresets). 1024 MiB,
+	// not 2048: this host runs several concurrent group VMs on ~2GiB of RAM.
+	// FC allocates guest memory lazily so idle VMs cost little, but the ceiling
+	// still bounds worst-case pressure. Pick a bigger preset per group with
+	// config.json "size" (small|medium|large) for heavy workloads.
+	fcDefaultVcpus  = 2
 	fcDefaultMemMiB = 1024
 	// workspace.img size for new groups. Sparse — allocates on write.
 	fcWorkspaceBytes = 8 << 30
@@ -84,6 +85,25 @@ const (
 	fcWorkerUID = 1000
 	fcWorkerGID = 1000
 )
+
+// fcSize is one named machine preset: guest vCPU count, RAM, and workspace
+// disk size. Selected per group via config.json "size" (default: small).
+type fcSize struct {
+	vcpus     int
+	memMiB    int
+	diskBytes int64
+}
+
+// fcSizePresets maps a size name to its machine shape. "small" is the default
+// and equals the fcDefault* constants above; larger presets trade the host's
+// scarce RAM for headroom. Disk grows with the preset but never shrinks (see
+// fcEnsureWorkspaceImg). Keep in sync with the applyConfig "size" validator
+// and the TUI /new + /config help.
+var fcSizePresets = map[string]fcSize{
+	"small":  {fcDefaultVcpus, fcDefaultMemMiB, fcWorkspaceBytes},
+	"medium": {2, 2048, 12 << 30},
+	"large":  {4, 4096, 16 << 30},
+}
 
 func fcAssetsDir() string    { return filepath.Join(HERE, "fcassets") }
 func fcBinPath() string      { return filepath.Join(fcAssetsDir(), "firecracker") }
@@ -203,8 +223,12 @@ func fcPreflight() error {
 // half-written workspace.img behind.
 func fcEnsureWorkspaceImg(g string) error {
 	img := fcWorkspaceImg(g)
-	if _, err := os.Stat(img); err == nil {
-		return nil
+	target := fcWorkspaceDiskBytes(g)
+	if fi, err := os.Stat(img); err == nil {
+		// Image exists: grow it offline if the resolved size is larger (the
+		// VM is stopped during ensure(), so an offline resize is safe). Never
+		// shrink — that would risk workspace data.
+		return fcGrowWorkspaceImg(g, img, fi.Size(), target)
 	}
 	if err := os.MkdirAll(fcRunDir(), 0o755); err != nil {
 		return err
@@ -215,7 +239,7 @@ func fcEnsureWorkspaceImg(g string) error {
 	if err != nil {
 		return err
 	}
-	if err := f.Truncate(fcWorkspaceBytes); err != nil {
+	if err := f.Truncate(target); err != nil {
 		f.Close()
 		os.Remove(tmpImg)
 		return err
@@ -266,9 +290,40 @@ func fcEnsureWorkspaceImg(g string) error {
 	return os.Rename(tmpImg, img)
 }
 
-// fcMachineCfg reads optional vcpus/mem_mib overrides from the group config.
-func fcMachineCfg(g string) (vcpus, memMiB int) {
-	vcpus, memMiB = fcDefaultVcpus, fcDefaultMemMiB
+// fcGrowWorkspaceImg grows an existing workspace.img to target bytes when the
+// resolved size increased. It runs offline on the host (the VM is stopped):
+// grow the sparse backing file, force an fsck, then resize2fs. Shrinking is
+// never attempted (target <= current is a no-op) to protect workspace data.
+// resize2fs lives in Alpine's e2fsprogs-extra (see host/Dockerfile).
+func fcGrowWorkspaceImg(g, img string, current, target int64) error {
+	if target <= current {
+		return nil
+	}
+	emitLogf("info", "fc[%s]: growing workspace.img → %d GiB", g, target>>30)
+	if err := os.Truncate(img, target); err != nil {
+		return fmt.Errorf("workspace grow truncate: %w", err)
+	}
+	// e2fsck -f returns 1 when it fixed something (not fatal); resize2fs still
+	// needs a clean fs, so we run it and let resize2fs surface any real fault.
+	if out, err := exec.Command("e2fsck", "-fy", img).CombinedOutput(); err != nil {
+		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() > 1 {
+			return fmt.Errorf("workspace grow e2fsck: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+	if out, err := exec.Command("resize2fs", img).CombinedOutput(); err != nil {
+		return fmt.Errorf("workspace grow resize2fs: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// fcResolveSize resolves a group's machine shape from config.json. It starts
+// from the "small" preset, applies a named "size" preset if present and valid,
+// then honors optional raw "vcpus"/"mem_mib" overrides layered on top (the
+// legacy escape hatch — clamped 1–32 and 128–65536 MiB). Disk size comes from
+// the preset only.
+func fcResolveSize(g string) (vcpus, memMiB int, diskBytes int64) {
+	def := fcSizePresets["small"]
+	vcpus, memMiB, diskBytes = def.vcpus, def.memMiB, def.diskBytes
 	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
 	if err != nil {
 		return
@@ -277,6 +332,11 @@ func fcMachineCfg(g string) (vcpus, memMiB int) {
 	if json.Unmarshal(b, &cfg) != nil {
 		return
 	}
+	if s, ok := cfg["size"].(string); ok {
+		if p, ok := fcSizePresets[strings.ToLower(strings.TrimSpace(s))]; ok {
+			vcpus, memMiB, diskBytes = p.vcpus, p.memMiB, p.diskBytes
+		}
+	}
 	if n, ok := anyAsInt(cfg["vcpus"]); ok && n >= 1 && n <= 32 {
 		vcpus = int(n)
 	}
@@ -284,6 +344,18 @@ func fcMachineCfg(g string) (vcpus, memMiB int) {
 		memMiB = int(n)
 	}
 	return
+}
+
+// fcMachineCfg returns the resolved vCPU count and RAM for group g.
+func fcMachineCfg(g string) (vcpus, memMiB int) {
+	vcpus, memMiB, _ = fcResolveSize(g)
+	return
+}
+
+// fcWorkspaceDiskBytes returns the resolved workspace.img size for group g.
+func fcWorkspaceDiskBytes(g string) int64 {
+	_, _, disk := fcResolveSize(g)
+	return disk
 }
 
 // fcSpawn boots the microVM for group g and wires all host-side plumbing.

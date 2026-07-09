@@ -11,9 +11,11 @@
 # (`-v "$HERE:$HERE"`) and sets WORKDIR to that path, so `go run .` finds
 # go.mod + sources + ./protocol/ without anything being COPYed in.
 FROM docker.io/library/golang:1.24-alpine
-# e2fsprogs: mkfs.ext4 for per-group workspace.img (Firecracker runtime,
-# fcEnsureWorkspaceImg). tar: skills tarball delivery to microVM guests.
-RUN apk add --no-cache podman nodejs npm e2fsprogs tar \
+# e2fsprogs: mkfs.ext4 + e2fsck for per-group workspace.img (Firecracker
+# runtime, fcEnsureWorkspaceImg). e2fsprogs-extra: resize2fs, used to grow an
+# existing workspace.img when a group's size preset increases. tar: skills
+# tarball delivery to microVM guests.
+RUN apk add --no-cache podman nodejs npm e2fsprogs e2fsprogs-extra tar \
  && npm i -g @anthropic-ai/claude-code
 ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host_go \
     GOFLAGS=-mod=mod

@@ -2199,26 +2199,41 @@ func (m Model) treeOrder() []string {
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
 	if strings.HasPrefix(v, "/new ") {
-		parts := strings.Fields(v[5:])
-		if len(parts) == 0 {
-			m.addLine(logLine{kind: "err", text: "usage: /new <group> [provider] [model]"})
+		usage := "usage: /new <group> [provider] [model] [size=small|medium|large]"
+		extra := map[string]any{}
+		// Pull the optional size=<preset> token out first; the rest stay
+		// positional (group / provider / model).
+		var positional []string
+		for _, tok := range strings.Fields(v[5:]) {
+			if s, ok := strings.CutPrefix(tok, "size="); ok {
+				s = strings.ToLower(strings.TrimSpace(s))
+				if s != "small" && s != "medium" && s != "large" {
+					m.addLine(logLine{kind: "err", text: "size must be small, medium, or large"})
+					return nil
+				}
+				extra["size"] = s
+				continue
+			}
+			positional = append(positional, tok)
+		}
+		if len(positional) == 0 {
+			m.addLine(logLine{kind: "err", text: usage})
 			return nil
 		}
-		g := parts[0]
-		extra := map[string]any{}
-		if len(parts) >= 2 {
-			p := parts[1]
+		g := positional[0]
+		if len(positional) >= 2 {
+			p := positional[1]
 			if p != "claudesdk" && p != "venice" {
 				m.addLine(logLine{kind: "err", text: "provider must be claudesdk or venice"})
 				return nil
 			}
 			extra["provider"] = p
 		}
-		if len(parts) >= 3 {
-			extra["model"] = parts[2]
+		if len(positional) >= 3 {
+			extra["model"] = positional[2]
 		}
-		if len(parts) > 3 {
-			m.addLine(logLine{kind: "err", text: "usage: /new <group> [provider] [model]"})
+		if len(positional) > 3 {
+			m.addLine(logLine{kind: "err", text: usage})
 			return nil
 		}
 		return daemonCmd(m.sock, "spawn", g, extra)

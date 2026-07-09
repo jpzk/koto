@@ -96,7 +96,9 @@ recreating its environment inside the VM:
   retry loop (30s) as the readiness barrier, then per-port TCP bridges.
 - `fcStop`: agent shutdown op (graceful), 5s wait, SIGKILL fallback; pidfile
   + comm check guards pid reuse.
-- vcpus/mem per group: config.json `vcpus` / `mem_mib` (defaults 2 / 2048).
+- vcpus/mem/disk per group: config.json `size` preset (default `small` =
+  2 vCPU / 1024 MiB / 8 GiB). See "VM size profile" below. Raw `vcpus` /
+  `mem_mib` keys still override the preset (legacy escape hatch).
 - turn lifecycle is **shared**: `[[turn_end]]` arrives via vsock → host log →
   tailLog → `notifyTurnDone`, so sendNow's wait/stall/selfHeal logic is the
   same code path for both runtimes (restart() = stopGroup + ensure is already
@@ -239,6 +241,31 @@ standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
 - **podman groups**: the profile is a firecracker feature. A podman group has
   a real NIC and full internet regardless; `internet=none` is not enforced
   there (would need `--internal` networking).
+
+## VM size profile (`size`: `small` | `medium` | `large`)
+
+Per-group config key selecting the machine shape — vCPU, RAM, and workspace
+disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
+
+| preset | vCPU | RAM      | workspace.img |
+|--------|------|----------|---------------|
+| small  | 2    | 1024 MiB | 8 GiB (default; absent `size` ⇒ small) |
+| medium | 2    | 2048 MiB | 12 GiB        |
+| large  | 4    | 4096 MiB | 16 GiB        |
+
+- Set at spawn (`/new <g> [provider] [model] size=large`) or on an existing
+  group (`/config size=large`), then **applies on `/restart`** — `fcResolveSize`
+  is read by `fcMachineCfg` (machine-config) and `fcWorkspaceDiskBytes` (disk)
+  at the next `fcSpawn`.
+- **Disk grows, never shrinks.** `fcEnsureWorkspaceImg` grows an existing
+  `workspace.img` offline on the host (the VM is stopped during `ensure()`):
+  `truncate` the sparse backing file → `e2fsck -fy` → `resize2fs`. Shrinking is
+  never attempted (protects workspace data), so `large`→`small` drops RAM/vCPU
+  on the next boot but leaves the disk at its grown size. `resize2fs` comes from
+  Alpine's `e2fsprogs-extra` (`host/Dockerfile`).
+- **Legacy override.** Raw `vcpus` / `mem_mib` config keys still layer on top of
+  the resolved preset (clamped 1–32 and 128–65536 MiB), so any hand-tuned group
+  keeps working. There is no raw disk-size override — disk follows the preset.
 
 ## Containers (rootless podman in the guest)
 

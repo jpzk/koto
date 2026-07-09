@@ -93,6 +93,7 @@ type SpawnReq struct {
 	Main     bool   `json:"main,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+	Size     string `json:"size,omitempty"`
 }
 
 type SendReq struct {
@@ -129,6 +130,9 @@ type ConfigReq struct {
 	// no NIC; the proxy reaches only the LLM upstream) or "full" (a real L3
 	// gateway; see fcnet.go). Applies on /restart.
 	Internet json.RawMessage `json:"internet,omitempty"`
+	// Size is the machine preset: "small" (default) | "medium" | "large" —
+	// sets vCPU, RAM, and workspace disk together. Applies on /restart.
+	Size json.RawMessage `json:"size,omitempty"`
 }
 
 type SkillListReq struct {

@@ -783,11 +783,12 @@ func ensureProviderConfig(g string) error {
 	return os.WriteFile(p, newB, 0o644)
 }
 
-// seedSpawnConfig writes provider/model into a group's config.json before
-// ensure() runs. Used by the spawn dispatch so `/new <g> <provider> <model>`
-// lands its choice on disk before ensureProviderConfig's default kicks in.
-// Empty arguments are skipped (preserving any existing value).
-func seedSpawnConfig(g, provider, model string) error {
+// seedSpawnConfig writes provider/model/size into a group's config.json before
+// ensure() runs. Used by the spawn dispatch so `/new <g> <provider> <model>
+// size=<preset>` lands its choice on disk before ensureProviderConfig's default
+// kicks in (and before fcResolveSize reads the size). Empty arguments are
+// skipped (preserving any existing value).
+func seedSpawnConfig(g, provider, model, size string) error {
 	p := filepath.Join(vol(g), ".cs", "config.json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -800,6 +801,9 @@ func seedSpawnConfig(g, provider, model string) error {
 	}
 	if model != "" {
 		cfg["model"] = model
+	}
+	if size != "" {
+		cfg["size"] = size
 	}
 	newB, err := json.Marshal(cfg)
 	if err != nil {
@@ -1742,6 +1746,20 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "size" {
+		// Machine preset: small|medium|large (see fcSizePresets). Applies on
+		// the next spawn (/restart). Unknown values are silently rejected,
+		// preserving the prior value — same shape as the internet branch.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		if _, ok := fcSizePresets[s]; ok {
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "ports" {
 		// Accept either a JSON array of ints or a comma-separated string so
 		// `/config ports=8080,3000` (TUI tokenization splits on whitespace,
@@ -1798,6 +1816,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "ports", req.Ports)
 	applyConfig(cfg, "provider", req.Provider)
 	applyConfig(cfg, "internet", req.Internet)
+	applyConfig(cfg, "size", req.Size)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)

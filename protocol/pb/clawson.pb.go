@@ -509,6 +509,7 @@ type SpawnReq struct {
 	Main          bool                   `protobuf:"varint,2,opt,name=main,proto3" json:"main,omitempty"`
 	Provider      string                 `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
 	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	Size          string                 `protobuf:"bytes,5,opt,name=size,proto3" json:"size,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -567,6 +568,13 @@ func (x *SpawnReq) GetProvider() string {
 func (x *SpawnReq) GetModel() string {
 	if x != nil {
 		return x.Model
+	}
+	return ""
+}
+
+func (x *SpawnReq) GetSize() string {
+	if x != nil {
+		return x.Size
 	}
 	return ""
 }
@@ -1046,6 +1054,7 @@ type ConfigReq struct {
 	Ports    *string                `protobuf:"bytes,5,opt,name=ports,proto3,oneof" json:"ports,omitempty"`
 	Provider *string                `protobuf:"bytes,7,opt,name=provider,proto3,oneof" json:"provider,omitempty"`
 	Internet *string                `protobuf:"bytes,9,opt,name=internet,proto3,oneof" json:"internet,omitempty"` // none|full — applies on /restart
+	Size     *string                `protobuf:"bytes,10,opt,name=size,proto3,oneof" json:"size,omitempty"`        // small|medium|large — applies on /restart
 	// Types that are valid to be assigned to SkillsAction:
 	//
 	//	*ConfigReq_SkillsClear
@@ -1123,6 +1132,13 @@ func (x *ConfigReq) GetProvider() string {
 func (x *ConfigReq) GetInternet() string {
 	if x != nil && x.Internet != nil {
 		return *x.Internet
+	}
+	return ""
+}
+
+func (x *ConfigReq) GetSize() string {
+	if x != nil && x.Size != nil {
+		return *x.Size
 	}
 	return ""
 }
@@ -2268,12 +2284,13 @@ const file_clawson_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x06 \x01(\x01R\tcreatedAt\x12\"\n" +
 	"\rlast_fired_at\x18\a \x01(\x01R\vlastFiredAt\x12\x1e\n" +
-	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"f\n" +
+	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"z\n" +
 	"\bSpawnReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04main\x18\x02 \x01(\bR\x04main\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x14\n" +
-	"\x05model\x18\x04 \x01(\tR\x05model\"\x9b\x01\n" +
+	"\x05model\x18\x04 \x01(\tR\x05model\x12\x12\n" +
+	"\x04size\x18\x05 \x01(\tR\x04size\"\x9b\x01\n" +
 	"\aSendReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x14\n" +
@@ -2305,14 +2322,16 @@ const file_clawson_proto_rawDesc = "" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06before\x18\x03 \x01(\x01R\x06before\"!\n" +
 	"\tSkillList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\xf8\x02\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\x9a\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x01R\x05model\x88\x01\x01\x12\x1b\n" +
 	"\x06effort\x18\x03 \x01(\tH\x02R\x06effort\x88\x01\x01\x12\x19\n" +
 	"\x05ports\x18\x05 \x01(\tH\x03R\x05ports\x88\x01\x01\x12\x1f\n" +
 	"\bprovider\x18\a \x01(\tH\x04R\bprovider\x88\x01\x01\x12\x1f\n" +
-	"\binternet\x18\t \x01(\tH\x05R\binternet\x88\x01\x01\x12;\n" +
+	"\binternet\x18\t \x01(\tH\x05R\binternet\x88\x01\x01\x12\x17\n" +
+	"\x04size\x18\n" +
+	" \x01(\tH\x06R\x04size\x88\x01\x01\x12;\n" +
 	"\fskills_clear\x18\b \x01(\v2\x16.google.protobuf.EmptyH\x00R\vskillsClear\x123\n" +
 	"\n" +
 	"skills_set\x18\x04 \x01(\v2\x12.clawson.SkillListH\x00R\tskillsSetB\x0f\n" +
@@ -2321,7 +2340,8 @@ const file_clawson_proto_rawDesc = "" +
 	"\a_effortB\b\n" +
 	"\x06_portsB\v\n" +
 	"\t_providerB\v\n" +
-	"\t_internetJ\x04\b\x06\x10\a\"$\n" +
+	"\t_internetB\a\n" +
+	"\x05_sizeJ\x04\b\x06\x10\a\"$\n" +
 	"\fSkillListReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"!\n" +
 	"\vSkillNewReq\x12\x12\n" +
