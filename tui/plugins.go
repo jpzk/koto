@@ -78,10 +78,6 @@ func (p *pluginRunCtx) send(msg string) error {
 	return err
 }
 
-func (p *pluginRunCtx) call(cmd string, extra map[string]any) (map[string]any, error) {
-	return daemonCall(p.sock, cmd, extra)
-}
-
 func (p *pluginRunCtx) metrics() map[string]any {
 	resp, err := daemonCall(p.sock, "metrics", map[string]any{"group": p.group})
 	if err != nil {
@@ -116,13 +112,6 @@ func (p *pluginRunCtx) nextEvent(timeoutMs int) *Event {
 		case <-t.C:
 			return nil
 		}
-	}
-}
-
-func (p *pluginRunCtx) sleep(ms int) {
-	select {
-	case <-p.ctx.Done():
-	case <-time.After(time.Duration(ms) * time.Millisecond):
 	}
 }
 

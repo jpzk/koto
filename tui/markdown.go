@@ -18,7 +18,6 @@ var (
 	mdMu      sync.Mutex
 	mdCache   = map[int]*glamour.TermRenderer{}
 	ansiFence = regexp.MustCompile("(?s)```ansi\\r?\\n(.*?)\\r?\\n```")
-	ansiEscRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 	// renderMu serializes calls to glamour.TermRenderer.Render. Glamour's
 	// renderer is not goroutine-safe, and we now call renderMarkdown from
 	// both the Bubble Tea Update goroutine (live refreshLog) and a tea.Cmd
@@ -102,11 +101,6 @@ func renderMarkdown(src string, width int) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// stripAnsi removes CSI/SGR escapes so length math reflects screen cells.
-func stripAnsi(s string) string {
-	return ansiEscRE.ReplaceAllString(s, "")
-}
-
 // visualRows counts rendered terminal rows for s at column width cols.
 // Each `\n`-split logical line wraps to ceil(width/cols); empty lines
 // occupy one row. lipgloss.Width handles unicode + east-asian width.
@@ -124,42 +118,4 @@ func visualRows(s string, cols int) int {
 		}
 	}
 	return rows
-}
-
-// tailVisualRows keeps only the last maxRows visual rows of text.
-// Used to bound in-progress stream display so a runaway response can't
-// push the rest of the log out the top.
-func tailVisualRows(text string, maxRows, cols int) (out string, truncated bool) {
-	if maxRows <= 0 {
-		return "", true
-	}
-	if cols < 1 {
-		cols = 1
-	}
-	lines := strings.Split(text, "\n")
-	keep := []string{}
-	rows := 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		ln := lines[i]
-		w := lipgloss.Width(ln)
-		r := 1
-		if w > 0 {
-			r = (w + cols - 1) / cols
-		}
-		if rows+r > maxRows {
-			budget := maxRows - rows
-			if budget > 0 {
-				stripped := stripAnsi(ln)
-				// Lossy on ANSI mid-wrapped-line — acceptable for streaming display.
-				if len(stripped) > budget*cols {
-					stripped = stripped[len(stripped)-budget*cols:]
-				}
-				keep = append([]string{stripped}, keep...)
-			}
-			return strings.Join(keep, "\n"), true
-		}
-		keep = append([]string{ln}, keep...)
-		rows += r
-	}
-	return strings.Join(keep, "\n"), false
 }

@@ -97,7 +97,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if err != nil {
 			return errResp(err.Error())
 		}
-		return spawnResp{baseResp{OK: true}, port}
+		return spawnResp{BaseResp: baseResp{OK: true}, Port: port}
 
 	case "send":
 		if !isMain {
@@ -148,7 +148,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: list")
 		}
-		return listResp{baseResp{OK: true}, listGroups()}
+		return listResp{BaseResp: baseResp{OK: true}, Groups: listGroups()}
 
 	// The three verbs below replace main's podman-era file-mount powers
 	// (rw /skills, rw /peers) under the firecracker runtime, where the only
@@ -259,7 +259,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if err != nil {
 			return errResp(err.Error())
 		}
-		return schedAddResp{baseResp{OK: true}, it}
+		return schedAddResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "sched_list":
 		var req schedListReq
@@ -271,7 +271,7 @@ func ctlDispatch(owner string, line []byte) any {
 			// Non-main can only see its own schedules.
 			filter = owner
 		}
-		return schedListResp{baseResp{OK: true}, listSched(filter)}
+		return schedListResp{BaseResp: baseResp{OK: true}, Schedules: listSched(filter)}
 
 	case "sched_del":
 		var req schedIDReq

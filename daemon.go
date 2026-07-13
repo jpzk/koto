@@ -55,20 +55,12 @@ type (
 	configReq      = protocol.ConfigReq
 	configResp     = protocol.ConfigResp
 	listResp       = protocol.ListResp
-	historyReq     = protocol.HistoryReq
-	historyResp    = protocol.HistoryResp
-	metricsReq     = protocol.MetricsReq
-	metricsResp    = protocol.MetricsResp
 	skillsResp     = protocol.SkillsResp
 	skillListReq   = protocol.SkillListReq
 	skillNewReq    = protocol.SkillNewReq
 	skillNewResp   = protocol.SkillNewResp
 	skillReadReq   = protocol.SkillReadReq
 	skillReadResp  = protocol.SkillReadResp
-	subscribeReq   = protocol.SubscribeReq
-	subscribeResp  = protocol.SubscribeResp
-	logsReq        = protocol.LogsReq
-	logsResp       = protocol.LogsResp
 	LogEvent       = protocol.LogEvent
 	scheduleItem   = protocol.ScheduleItem
 	schedAddReq    = protocol.SchedAddReq
@@ -106,7 +98,6 @@ var (
 	GROUPS_FILE string
 	SCHED_FILE  string
 	SOCK_DIR    string
-	SOCK_PATH   string
 	METRICS     string
 	PORT_BASE   = 8787
 )
@@ -118,7 +109,6 @@ func initPaths() {
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
 	SCHED_FILE = filepath.Join(HERE, "schedules.json")
 	SOCK_DIR = filepath.Join(HERE, "run")
-	SOCK_PATH = filepath.Join(SOCK_DIR, "clawson.sock")
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
 	if v := os.Getenv("PROXY_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -1857,7 +1847,7 @@ func configCmd(req configReq) configResp {
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
 	}
-	return configResp{baseResp{OK: true}, cfg}
+	return configResp{BaseResp: baseResp{OK: true}, Config: cfg}
 }
 
 // ---- skills cmd -----------------------------------------------------------
@@ -1887,7 +1877,7 @@ func skillListCmd(req skillListReq) skillsResp {
 		it.Enabled = enabled[it.Name]
 		out[i] = it
 	}
-	return skillsResp{baseResp{OK: true}, out}
+	return skillsResp{BaseResp: baseResp{OK: true}, Skills: out}
 }
 
 func skillNewCmd(req skillNewReq) skillNewResp {
@@ -1909,7 +1899,7 @@ func skillNewCmd(req skillNewReq) skillNewResp {
 	skillCacheMtime = time.Time{}
 	skillCacheLock.Unlock()
 	rel, _ := filepath.Rel(HERE, p)
-	return skillNewResp{baseResp{OK: true}, rel}
+	return skillNewResp{BaseResp: baseResp{OK: true}, Path: rel}
 }
 
 // skillWriteCmd creates or overwrites a skill's SKILL.md with full content.
@@ -1939,7 +1929,7 @@ func skillWriteCmd(name, content string) skillNewResp {
 	skillCacheMtime = time.Time{}
 	skillCacheLock.Unlock()
 	rel, _ := filepath.Rel(HERE, p)
-	return skillNewResp{baseResp{OK: true}, rel}
+	return skillNewResp{BaseResp: baseResp{OK: true}, Path: rel}
 }
 
 func skillReadCmd(req skillReadReq) skillReadResp {
@@ -1955,7 +1945,7 @@ func skillReadCmd(req skillReadReq) skillReadResp {
 		}
 		return skillReadResp{BaseResp: errResp(err.Error())}
 	}
-	return skillReadResp{baseResp{OK: true}, name, string(b)}
+	return skillReadResp{BaseResp: baseResp{OK: true}, Name: name, Content: string(b)}
 }
 
 func clearCmd(req groupReq) baseResp {

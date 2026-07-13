@@ -123,14 +123,6 @@ type reconnectAttemptMsg struct{}
 // logEventMsg / logSubClosedMsg are defined in log_view.go alongside the
 // subscribe goroutine — they're only used by the focusLog code path.
 
-// mdPrewarmMsg carries a batch of pre-rendered markdown back from the
-// background pre-warm goroutine. The Update handler merges them into
-// m.mdCache so the first-visit refreshLog for an off-current group
-// hits cache for every response instead of paying glamour cost serially.
-type mdPrewarmMsg struct {
-	items map[string]string // key = "<cols>\x00<text>" → rendered ANSI
-}
-
 // vpPrewarmMsg carries a fully-built viewport content entry for an
 // off-current group. The goroutine that produces it has already done the
 // allBlocks + buildLogContent work, so the Update handler just stores it

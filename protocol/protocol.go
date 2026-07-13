@@ -1,8 +1,9 @@
-// Package protocol holds the wire types shared between the daemon and any
-// client (the TUI, ad-hoc socat probes, etc.). The daemon serializes these
-// to line-delimited JSON over clawson.sock; most commands are one-shot
-// (request, one response, close). `subscribe` keeps the connection open
-// and pushes Event frames after the initial SubscribeResp ack.
+// Package protocol holds the wire types shared between the daemon and its
+// clients. The client-facing transport is gRPC (see clawson.proto / pb);
+// these JSON types survive in two places: the per-group FIFO ctl plane
+// (ctl.go serializes them as line-delimited JSON over ctl/ctl.out) and as
+// the in-memory event/state shapes the daemon and TUI convert to and from
+// the generated pb messages.
 //
 // This package is a separate Go module (clawson-protocol) so it can be
 // imported by both the root daemon module and the tui module without
@@ -106,16 +107,6 @@ type GroupReq struct {
 	Group string `json:"group"`
 }
 
-// HistoryReq is the paged variant for `cmd:"history"`. Limit=0 → server
-// default (1000). Before=0 → tail page; otherwise return events with
-// strict `ts < Before` so callers can walk older pages by repeatedly
-// passing the smallest ts they've already seen.
-type HistoryReq struct {
-	Group  string  `json:"group"`
-	Limit  int     `json:"limit,omitempty"`
-	Before float64 `json:"before,omitempty"`
-}
-
 // ConfigReq uses RawMessage per field so the dispatcher can distinguish
 // three states: absent (nil), clear (`""`, `null`, `[]`), and set
 // (non-empty literal).
@@ -151,19 +142,6 @@ type SkillReadReq struct {
 	Name string `json:"name"`
 }
 
-type MetricsReq struct {
-	Group string `json:"group,omitempty"`
-}
-
-type SubscribeReq struct {
-	Group string `json:"group"`
-}
-
-// LogsReq subscribes to the daemon's internal log stream. No fields — the
-// daemon log is global, not per-group. Like SubscribeReq, this transfers
-// connection ownership to the daemon's log-subscriber registry.
-type LogsReq struct{}
-
 // LogEvent is the streaming frame the daemon pushes to log subscribers.
 // Distinct from Event because daemon logs aren't keyed by group and carry
 // a level. Ts matches Event's float-seconds convention.
@@ -197,26 +175,9 @@ type ListResp struct {
 	Groups map[string]GroupInfo `json:"groups"`
 }
 
-type HistoryResp struct {
-	BaseResp
-	Events []Event `json:"events"`
-	// More signals that older events exist beyond what's returned. The TUI
-	// uses this to decide whether scrolling near the top should trigger
-	// another paged fetch.
-	More bool `json:"more,omitempty"`
-}
-
 type ConfigResp struct {
 	BaseResp
 	Config map[string]any `json:"config"`
-}
-
-// MetricsResp keeps Metric and GlobalMetric without omitempty so the wire
-// always carries explicit nulls when no metric has been recorded.
-type MetricsResp struct {
-	BaseResp
-	Metric       map[string]any `json:"metric"`
-	GlobalMetric map[string]any `json:"global_metric"`
 }
 
 type SkillsResp struct {
@@ -233,17 +194,6 @@ type SkillReadResp struct {
 	BaseResp
 	Name    string `json:"name,omitempty"`
 	Content string `json:"content,omitempty"`
-}
-
-type SubscribeResp struct {
-	BaseResp
-	Subscribed string `json:"subscribed,omitempty"`
-}
-
-// LogsResp is the ack for `cmd:"logs"`. After this frame the daemon may
-// replay buffered log lines, then push fresh LogEvent frames as they happen.
-type LogsResp struct {
-	BaseResp
 }
 
 // ---- schedules ------------------------------------------------------------

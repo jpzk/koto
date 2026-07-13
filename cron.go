@@ -147,16 +147,3 @@ func (p parsedCron) next(after time.Time) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
-
-// nextFire is the package-level entry point used by the scheduler.
-func nextFire(expr string, after time.Time) (time.Time, error) {
-	p, err := parseCron(expr)
-	if err != nil {
-		return time.Time{}, err
-	}
-	t, ok := p.next(after)
-	if !ok {
-		return time.Time{}, fmt.Errorf("cron %q: no fire within 4 years", expr)
-	}
-	return t, nil
-}

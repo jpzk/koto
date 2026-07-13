@@ -14,7 +14,6 @@ var (
 	cBlack    = lipgloss.Color("0")
 	cRed      = lipgloss.Color("1")
 	cYellow   = lipgloss.Color("3")
-	cBlue     = lipgloss.Color("4")
 	cMagenta  = lipgloss.Color("5")
 	cAmber    = lipgloss.Color("214") // signature accent (256-color amber #ffaf00)
 	cDkAmber  = lipgloss.Color("130") // group indicator (256-color dark amber #af5f00)

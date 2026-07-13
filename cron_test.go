@@ -116,7 +116,11 @@ func TestInvalidExpressions(t *testing.T) {
 
 func TestUnsatisfiable(t *testing.T) {
 	// February 30th never exists.
-	if _, err := nextFire("0 0 30 2 *", time.Now()); err == nil {
-		t.Fatalf("expected unsatisfiable error")
+	p, err := parseCron("0 0 30 2 *")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, ok := p.next(time.Now()); ok {
+		t.Fatalf("expected no fire for an unsatisfiable date")
 	}
 }

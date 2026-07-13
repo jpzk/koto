@@ -548,12 +548,11 @@ func agentServer() {
 // ---- init: skills + ports + entrypoint --------------------------------------
 
 var (
-	initMu        sync.Mutex
-	entrypointUp  bool
-	netStarted    bool
-	sudoEnabled   bool
-	portsUp       = map[int]bool{}
-	entrypointEnv map[string]string
+	initMu       sync.Mutex
+	entrypointUp bool
+	netStarted   bool
+	sudoEnabled  bool
+	portsUp      = map[int]bool{}
 )
 
 func handleInit(c *vconn, req *agentReq) {
@@ -597,7 +596,6 @@ func handleInit(c *vconn, req *agentReq) {
 		_ = os.Setenv(k, v)
 	}
 	if !entrypointUp {
-		entrypointEnv = req.Env
 		entrypointUp = true
 		go entrypointLoop(req.Env)
 	}
