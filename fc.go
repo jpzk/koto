@@ -1,7 +1,7 @@
 package main
 
-// fc.go — Firecracker microVM runtime for groups (opt-in per group via
-// config.json `"runtime": "firecracker"`; default remains podman).
+// fc.go — Firecracker microVM runtime for groups (the only group runtime;
+// the podman sidecar runtime was retired).
 //
 // A microVM group has NO network device. Its single host↔guest channel is
 // Firecracker's hybrid vsock: one virtio-vsock device in the guest, backed on
@@ -110,7 +110,17 @@ func fcBinPath() string              { return filepath.Join(fcAssetsDir(), "fire
 func fcKernelPath() string           { return filepath.Join(fcAssetsDir(), "vmlinux") }
 func fcRootfsPath() string           { return filepath.Join(fcAssetsDir(), "rootfs.img") }
 func fcRunDir() string               { return filepath.Join(SOCK_DIR, "fc") }
-func fcUDS(g string) string          { return filepath.Join(fcRunDir(), g+".vsock") }
+
+// fcSockDir holds this group's vsock sockets in a dedicated directory so the
+// jailer can bind-mount exactly this VM's sockets (and nothing else) into its
+// chroot. fcUDS is the hybrid-vsock base path inside it: the daemon listens on
+// "<uds>_<port>" (guest→host) and Firecracker creates "<uds>" (host→guest).
+func fcSockDir(g string) string { return filepath.Join(fcRunDir(), g+".sock") }
+func fcUDS(g string) string     { return filepath.Join(fcSockDir(g), "v") }
+
+// fcJailDir is the per-VM chroot root the jailer stages and binds into.
+func fcJailDir(g string) string { return filepath.Join(fcRunDir(), g+".jail") }
+
 func fcPidPath(g string) string      { return filepath.Join(fcRunDir(), g+".pid") }
 func fcCfgPath(g string) string      { return filepath.Join(fcRunDir(), g+".cfg.json") }
 func fcConsolePath(g string) string  { return filepath.Join(fcRunDir(), g+".console.log") }
@@ -394,15 +404,17 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		return err
 	}
 	// Stale socket files from a previous run make both FC's bind (uds) and
-	// ours (uds_<port>) fail with EADDRINUSE.
-	base := fcUDS(g)
-	for _, p := range []string{base,
-		fmt.Sprintf("%s_%d", base, fcPortProxy),
-		fmt.Sprintf("%s_%d", base, fcPortLog),
-		fmt.Sprintf("%s_%d", base, fcPortCtl),
-		fmt.Sprintf("%s_%d", base, fcPortNet)} {
-		_ = os.Remove(p)
+	// ours (uds_<port>) fail with EADDRINUSE; a stale jail dir would collide
+	// with this boot's bind targets. Wipe both per-group dirs and recreate the
+	// socket dir fresh.
+	_ = os.RemoveAll(fcSockDir(g))
+	_ = os.RemoveAll(fcJailDir(g))
+	if err := os.MkdirAll(fcSockDir(g), 0o755); err != nil {
+		return err
 	}
+	base := fcUDS(g)
+	jailed := fcJailEnabled()
+	jailUID := fcJailUID(proxyPort)
 
 	vm := &fcVM{}
 	fail := func(err error) error {
@@ -461,13 +473,33 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		})
 	}
 
+	// When jailed, Firecracker runs as the unprivileged per-VM uid inside a
+	// chroot + private mount namespace. It reaches its vsock sockets and its
+	// workspace image through bind mounts, so the underlying host inodes must
+	// be accessible to that uid: hand it the socket directory (it creates its
+	// own "uds" listener there) and its workspace image, and make the
+	// daemon-created "uds_<port>" listener sockets connectable (they are owned
+	// by the daemon uid; a cross-uid connect needs write permission). Scoped to
+	// this group's own dir, so 0666 exposes nothing to other VMs.
+	if jailed {
+		if err := fcJailFixupPerms(g, jailUID); err != nil {
+			return fail(err)
+		}
+	}
+
 	// VM config. Root drive is the shared golden rootfs, read-only, so one
 	// image safely backs every group. console → per-group log file for boot
-	// debugging (quiet keeps it small in steady state).
+	// debugging (quiet keeps it small in steady state). Under the jailer the
+	// paths are chroot-relative (bind targets staged by fcStageJail); unjailed
+	// they are absolute host paths.
+	kernelPath, rootfsPath, wsPath, udsPath := fcKernelPath(), fcRootfsPath(), fcWorkspaceImg(g), base
+	if jailed {
+		kernelPath, rootfsPath, wsPath, udsPath = "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v"
+	}
 	vcpus, memMiB := fcMachineCfg(g)
 	cfg := map[string]any{
 		"boot-source": map[string]any{
-			"kernel_image_path": fcKernelPath(),
+			"kernel_image_path": kernelPath,
 			// ACPI on: our vmlinux is built from the Amazon Linux tree (like
 			// FC's own kernels — see build-kernel.sh), which parses FC's ACPI
 			// tables. That brings up the local APIC + LAPIC timer, so the guest
@@ -477,16 +509,13 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
 		},
 		"drives": []map[string]any{
-			{"drive_id": "rootfs", "path_on_host": fcRootfsPath(), "is_root_device": true, "is_read_only": true},
-			{"drive_id": "workspace", "path_on_host": fcWorkspaceImg(g), "is_root_device": false, "is_read_only": false},
+			{"drive_id": "rootfs", "path_on_host": rootfsPath, "is_root_device": true, "is_read_only": true},
+			{"drive_id": "workspace", "path_on_host": wsPath, "is_root_device": false, "is_read_only": false},
 		},
 		"machine-config": map[string]any{"vcpu_count": vcpus, "smt": false, "mem_size_mib": memMiB},
-		"vsock":          map[string]any{"guest_cid": 3, "uds_path": base},
+		"vsock":          map[string]any{"guest_cid": 3, "uds_path": udsPath},
 	}
 	cb, _ := json.Marshal(cfg)
-	if err := os.WriteFile(fcCfgPath(g), cb, 0o644); err != nil {
-		return fail(err)
-	}
 
 	console, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -494,7 +523,25 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	// --no-api: fully static config; lifecycle is process-level (the agent's
 	// shutdown op powers the guest off, which exits the FC process).
-	cmd := exec.Command(fcBinPath(), "--no-api", "--config-file", fcCfgPath(g))
+	var cmd *exec.Cmd
+	if jailed {
+		spec, serr := fcStageJail(g, cb, jailUID)
+		if serr != nil {
+			console.Close()
+			return fail(serr)
+		}
+		cmd, serr = fcJailCommand(spec)
+		if serr != nil {
+			console.Close()
+			return fail(serr)
+		}
+	} else {
+		if err := os.WriteFile(fcCfgPath(g), cb, 0o644); err != nil {
+			console.Close()
+			return fail(err)
+		}
+		cmd = exec.Command(fcBinPath(), "--no-api", "--config-file", fcCfgPath(g))
+	}
 	cmd.Stdout = console
 	cmd.Stderr = console
 	if err := cmd.Start(); err != nil {
@@ -608,6 +655,8 @@ func fcStop(g string) {
 			}
 		}
 		_ = os.Remove(fcPidPath(g))
+		_ = os.RemoveAll(fcSockDir(g))
+		_ = os.RemoveAll(fcJailDir(g))
 		return
 	}
 	_, _ = fcAgentCall(g, map[string]any{"op": "shutdown"}, 3*time.Second)
@@ -626,6 +675,8 @@ func fcStop(g string) {
 		_ = ln.Close()
 	}
 	_ = os.Remove(fcPidPath(g))
+	_ = os.RemoveAll(fcSockDir(g))
+	_ = os.RemoveAll(fcJailDir(g))
 	emitLogf("info", "fc[%s]: stopped", g)
 }
 

@@ -13,6 +13,11 @@ func main() {
 	switch os.Args[1] {
 	case "daemon":
 		daemonMain()
+	case "fcjail":
+		// Internal: the re-exec'd Firecracker jailer shim. Runs in fresh
+		// namespaces created by fcJailCommand, sets up the chroot, drops
+		// privilege, and execs Firecracker. Never returns on success.
+		fcjailMain()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		os.Exit(2)

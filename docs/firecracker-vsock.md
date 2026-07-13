@@ -116,8 +116,14 @@ groups/<g>/
                       gets a copy pushed per turn)
   prompt.md           host-authoritative (composeSystemPrompt reads it)
 run/fc/
-  <g>.vsock[_9000/1/2]  hybrid-vsock UDS + per-port listener sockets
-  <g>.cfg.json / <g>.pid / <g>.console.log
+  <g>.sock/v[_9000/1/2/3]  per-group dir: hybrid-vsock UDS + per-port listener
+                      sockets. Own dir so the jailer can bind-mount exactly
+                      this VM's sockets into its chroot (as /vsock).
+  <g>.jail/            per-VM chroot root the jailer stages (bind targets for
+                      firecracker/kernel/rootfs/workspace/dev/vsock + fc.json)
+  <g>.cfg.json         unjailed only (CLAWSON_FC_NOJAIL=1); jailed config is
+                      written into <g>.jail/fc.json instead
+  <g>.pid / <g>.console.log
 fcassets/             (gitignored) firecracker binary, vmlinux, rootfs.img
 ```
 
@@ -294,6 +300,70 @@ the entrypoint + `claude` + all bash run as) **passwordless sudo**. Default
   for running privileged commands against the writable workspace/tmpfs, network
   and mount config, reading root-owned files — not installing packages. Bake new
   packages into the rootfs (`make fc-rootfs`) instead.
+
+## Jailer (host-side isolation of the Firecracker process)
+
+The KVM boundary protects the host *from the guest*. The **jailer** protects
+the host from a compromise of the **Firecracker VMM process itself** (a bug in
+its virtio/vsock device model exploited from inside the guest). Upstream ships
+a `jailer` binary for exactly this, but it assumes real root — it `mknod`s
+`/dev/kvm` inside the chroot and manages cgroups, and `mknod` of a device node
+needs `CAP_MKNOD` in the **initial** user namespace, which a rootless
+`cs_host` container does not have. So `fcjail.go` implements the same model
+with primitives that work rootless (verified: real Firecracker v1.11 boots the
+real kernel to `Hypervisor detected: KVM` inside the jail).
+
+**Mechanism.** `fcSpawn` re-execs the daemon binary as `clawson fcjail <spec>`
+with `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS` and a uid/gid map of
+`{0→0, uid→uid}`. The child (`fcjailMain`) is mapped-root for setup, then in
+its **private mount namespace**: bind-mounts only what FC needs into the
+per-VM chroot (`<g>.jail/`) — the firecracker binary, kernel and rootfs
+(read-only), this VM's `workspace.img` and vsock socket dir (`/vsock`), and
+`/dev/kvm` + `/dev/urandom` — `chroot`s in, sets `PR_SET_NO_NEW_PRIVS`, drops
+to the unprivileged per-VM uid, and execs Firecracker. FC's own seccomp filter
+(never disabled) still applies on top.
+
+**Per-VM uid.** `fcJailUID` = `30000 + (proxyPort − PORT_BASE)`. clawson-host's
+rootless userns maps container uids `1..65536` to unprivileged host subuids, all
+distinct from the daemon (container uid 0 → host uid 1000). The uid is stable
+per group (proxy port is persisted), so the workspace image's ownership stays
+consistent across reboots. Distinct groups get distinct uids — VMs can't touch
+each other's files, and none share the daemon's uid.
+
+**What a VMM escape lands in**, versus the pre-jailer state (VMM ran as the
+daemon uid, in the daemon's namespaces, with the podman DooD socket and creds
+mount reachable):
+
+| Axis        | Jailed VMM |
+|-------------|-----------|
+| uid         | distinct unprivileged subuid — can't ptrace/signal the daemon, doesn't own the podman socket or creds |
+| filesystem  | empty chroot — no host FS, no `/run/podman/podman.sock` path, no `creds/`, no project dir |
+| network     | own netns — no route anywhere; the podman socket is a unix path it can't see and there's no TCP path either |
+| pid/ipc/uts | own namespaces |
+| privilege   | no capabilities (setuid from 0 drops them) + `no_new_privs` + FC seccomp |
+
+This closes **trust-model gap #1** (a VM escape no longer lands on host
+authority). It does **not** change what a compromised *guest* can do through
+its sanctioned channels (proxy egress, `main`'s peer-orchestration verbs) — the
+jailer is strictly about containing the host-side VMM process.
+
+**Permissions plumbing.** FC runs as the dropped uid but reaches its sockets
+and workspace through bind mounts, so `fcJailFixupPerms` chowns the socket dir
+(FC creates its own `uds` listener there) and `workspace.img` to the VM uid,
+and `chmod 0666`s the daemon-created `uds_<port>` listener sockets so the
+cross-uid connect is permitted (scoped to this group's own dir). The daemon
+keeps full access as the container's mapped-root (`CAP_DAC_OVERRIDE` over its
+subuids), so later resize/migration still works.
+
+**Opt-out.** `CLAWSON_FC_NOJAIL=1` runs FC unjailed as the daemon uid with the
+absolute-path config at `<g>.cfg.json` (the pre-jailer behavior) — for
+environments that can't create nested user namespaces, or for debugging.
+
+**Not (yet) covered.** cgroup resource caps — upstream's jailer sets them, but
+rootless cgroup-v2 delegation is unreliable and the machine-config already
+bounds vCPU + RAM. The e2fsck/resize2fs host-side parse of the guest-writable
+`workspace.img` (trust-model gap #2) also still runs unjailed; that's a
+separate follow-up.
 
 ## Containers (rootless podman in the guest)
 

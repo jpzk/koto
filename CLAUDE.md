@@ -34,7 +34,7 @@ docs/                design docs — firecracker-vsock.md (authoritative microVM
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
 go.mod               root module (require clawson-protocol → ./protocol)
 protocol/            shared wire types (separate stdlib-only Go module; imported by daemon + TUI)
-sidecar/             group worker bits — Dockerfile, entrypoint.sh, start-chrome.sh, stream_filter.js (baked into the fc rootfs too)
+sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-subagent (baked into the fc rootfs)
 host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
 prompts/             harness-controlled system prompts (global.md delivered into every group)
@@ -215,6 +215,20 @@ runtime sandbox*; Firecracker won because the no-shared-FS constraint forced a
 clean vsock-only IPC that also solved the egress hole for free. (gVisor's
 netstack does return for `internet=full` — but only as a userspace L3 gateway
 over vsock, not as the runtime boundary.)
+
+**The Firecracker VMM process is jailed** (`fcjail.go`). The KVM boundary
+protects the host from the *guest*; the jailer protects the host from a
+compromise of the *VMM process itself* (a virtio/vsock device-model bug). The
+daemon re-execs FC as `clawson fcjail` in `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|
+NEWIPC|NEWUTS`, bind-mounts only what FC needs into a per-VM chroot, and drops
+to a distinct unprivileged per-VM uid with `no_new_privs` (FC's own seccomp
+stays on). So a VMM escape lands as a nobody uid in an empty chroot with no
+network — **it cannot reach the DooD podman socket or the creds mount**, which
+otherwise equals host authority. Upstream's `jailer` binary isn't usable here
+(it `mknod`s devices, needing `CAP_MKNOD` in the init userns that a rootless
+`cs_host` lacks), so this reimplements its model with rootless-safe primitives;
+verified booting real FC to KVM. Opt out with `CLAWSON_FC_NOJAIL=1`. See
+`docs/firecracker-vsock.md` → "Jailer".
 
 The "we trust the host user" decision was deliberate. DooD socket equals host authority for `cs_host`; that's an accepted risk. If you ever want to drop tier 2 closer to tier 3, swap DooD for a 3-verb supervisor (sketch in earlier design discussion) or for rootless podman-in-podman.
 

@@ -110,6 +110,11 @@ func TestFcCtlConn(t *testing.T) {
 // per-port guest handler.
 func fakeFC(t *testing.T, g string, guest func(port int, c net.Conn)) net.Listener {
 	t.Helper()
+	// fcUDS now lives in a per-group socket dir (see fcSockDir); production
+	// fcSpawn creates it before listening, so mirror that here.
+	if err := os.MkdirAll(fcSockDir(g), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	ln, err := net.Listen("unix", fcUDS(g))
 	if err != nil {
 		t.Fatal(err)
