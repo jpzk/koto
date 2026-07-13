@@ -158,12 +158,11 @@ func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, er
 	// Attachments are resolved HERE, before enqueueSend, so the queue still
 	// carries a plain TEXT turn (queue.go / sendNow / the FIFO protocol stay
 	// attachment-unaware): an image is saved to the workspace and referenced
-	// inline, audio is transcribed locally by the whisper container and merged
-	// into the text. processAttachments runs synchronously — image save is a
-	// file write, and audio transcription is bounded by its own deadline — so a
-	// failure (oversize, whisper error) surfaces in-band on this RPC instead of
-	// silently dropping the turn. We only take the attachment path when bytes
-	// are actually present, leaving the no-attachment fast path untouched.
+	// inline. processAttachments runs synchronously (image save is a file write)
+	// so a failure — oversize, or an audio attachment, which is no longer
+	// supported since the whisper/DooD path was removed — surfaces in-band on
+	// this RPC instead of silently dropping the turn. We only take the
+	// attachment path when bytes are present, leaving the fast path untouched.
 	msg := r.Msg
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
 		m, err := processAttachments(r)

@@ -126,13 +126,16 @@ message SendReq   {
   //   - image: written to groups/<g>/.cs/uploads/img-<ts>.<ext>; msg body gets
   //     "\n[image: .cs/uploads/img-<ts>.<ext>]" appended so the claude CLI reads
   //     the file from its workspace.
-  //   - audio: written to .cs/uploads/voice-<ts>.<ext>, transcribed server-side
-  //     (whisper); the transcript becomes (or augments) the msg body. The LLM
-  //     backends are text-only, so audio never reaches them directly.
+  //   - audio: CURRENTLY UNSUPPORTED. Server-side transcription ran a whisper
+  //     container over the DooD podman socket, which was removed (it was
+  //     cs_host's last path to host authority). The fields are retained for
+  //     wire compat; a request carrying audio is rejected in-band with a clear
+  //     error. If voice notes return, transcribe via a pre-started
+  //     --network=none whisper sidecar over a private socket, not DooD.
   bytes  image      = 3;
   string image_mime = 4; // image/jpeg | image/png | ...
-  bytes  audio      = 5;
-  string audio_mime = 6; // audio/mp4 | audio/ogg | ...
+  bytes  audio      = 5; // currently rejected server-side (see above)
+  string audio_mime = 6;
 }
 message GroupReq  { string group = 1; } // stop / interrupt / destroy / restart / clear
 message ListReq   {}

@@ -1,7 +1,10 @@
 #!/bin/sh
 set -e
-SOCK=/run/user/$(id -u)/podman/podman.sock
-[ -S "$SOCK" ] || { echo "enable rootless socket: systemctl --user enable --now podman.socket"; exit 1; }
+# NOTE: the host user's own podman (below) creates clawson-net and the cs_host
+# container — that's tier-1 authority, by definition. What cs_host does NOT get
+# is the podman *socket*: there is no DooD mount anymore (groups are microVMs
+# launched via the firecracker binary, not podman). cs_host therefore has no
+# path to the host's podman daemon at all.
 podman network exists clawson-net || podman network create clawson-net >/dev/null
 # HERE = project root. The script lives in host/, so go up one level. The
 # matching-path bind mount (`-v "$HERE:$HERE"`) requires HERE to resolve to
@@ -39,12 +42,10 @@ podman run -d --rm \
   $PUBLISH_ARG \
   $KVM_ARG \
   --security-opt label=disable \
-  -v "$SOCK:/run/podman/podman.sock" \
   -v "$HERE:$HERE" \
   -v "$HERE/creds:/root/.claude" \
   -v "$HERE/.gocache:/root/.cache/go-build" \
   -v /etc/localtime:/etc/localtime:ro \
-  -e CONTAINER_HOST=unix:///run/podman/podman.sock \
   -e CLAWSON_BIND="$CLAWSON_BIND" \
   -e CLAWSON_PORT="$CLAWSON_PORT" \
   -e TERM="${TERM:-xterm-256color}" \

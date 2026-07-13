@@ -331,14 +331,17 @@ consistent across reboots. Distinct groups get distinct uids — VMs can't touch
 each other's files, and none share the daemon's uid.
 
 **What a VMM escape lands in**, versus the pre-jailer state (VMM ran as the
-daemon uid, in the daemon's namespaces, with the podman DooD socket and creds
-mount reachable):
+daemon uid, in the daemon's namespaces, with the creds mount + all group
+workspaces + the daemon's own control-plane authority reachable). Note the
+podman DooD socket — historically the worst thing reachable here — has since
+been removed outright (its last user, whisper STT, is gone), so it no longer
+factors in either the jailed or unjailed case:
 
 | Axis        | Jailed VMM |
 |-------------|-----------|
-| uid         | distinct unprivileged subuid — can't ptrace/signal the daemon, doesn't own the podman socket or creds |
-| filesystem  | empty chroot — no host FS, no `/run/podman/podman.sock` path, no `creds/`, no project dir |
-| network     | own netns — no route anywhere; the podman socket is a unix path it can't see and there's no TCP path either |
+| uid         | distinct unprivileged subuid — can't ptrace/signal the daemon, doesn't own `creds/` or the workspaces |
+| filesystem  | empty chroot — no host FS, no `creds/`, no other group's workspace, no project dir |
+| network     | own netns — no route anywhere, no TCP path to the daemon's gRPC control plane |
 | pid/ipc/uts | own namespaces |
 | privilege   | no capabilities (setuid from 0 drops them) + `no_new_privs` + FC seccomp |
 

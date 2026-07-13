@@ -588,13 +588,16 @@ type SendReq struct {
 	//   - image: written to groups/<g>/.cs/uploads/img-<ts>.<ext>; msg body gets
 	//     "\n[image: .cs/uploads/img-<ts>.<ext>]" appended so the claude CLI reads
 	//     the file from its workspace.
-	//   - audio: written to .cs/uploads/voice-<ts>.<ext>, transcribed server-side
-	//     (whisper); the transcript becomes (or augments) the msg body. The LLM
-	//     backends are text-only, so audio never reaches them directly.
+	//   - audio: CURRENTLY UNSUPPORTED. Server-side transcription ran a whisper
+	//     container over the DooD podman socket, which was removed (it was
+	//     cs_host's last path to host authority). The fields are retained for
+	//     wire compat; a request carrying audio is rejected in-band with a clear
+	//     error. If voice notes return, transcribe via a pre-started
+	//     --network=none whisper sidecar over a private socket, not DooD.
 	Image         []byte `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
 	ImageMime     string `protobuf:"bytes,4,opt,name=image_mime,json=imageMime,proto3" json:"image_mime,omitempty"` // image/jpeg | image/png | ...
-	Audio         []byte `protobuf:"bytes,5,opt,name=audio,proto3" json:"audio,omitempty"`
-	AudioMime     string `protobuf:"bytes,6,opt,name=audio_mime,json=audioMime,proto3" json:"audio_mime,omitempty"` // audio/mp4 | audio/ogg | ...
+	Audio         []byte `protobuf:"bytes,5,opt,name=audio,proto3" json:"audio,omitempty"`                          // currently rejected server-side (see above)
+	AudioMime     string `protobuf:"bytes,6,opt,name=audio_mime,json=audioMime,proto3" json:"audio_mime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
