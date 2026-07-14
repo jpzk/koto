@@ -114,6 +114,44 @@ tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch imag
   containers or mount host paths. Podman exists only *inside* guests,
   rootless, behind KVM.
 
+## SBOM (supply chain)
+
+No generated SBOM artifact is checked in; the surface is small enough to
+state outright. Everything Go-side is pinned via `go.sum` under a 6-week
+dependency-lag rule (each pin's release date is verified against
+proxy.golang.org before adoption — see CLAUDE.md → Conventions).
+
+**Go modules** (direct deps; indirect counts approximate):
+
+| module | direct deps | indirect |
+|--------|-------------|----------|
+| `clawson` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`internet=full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `clawson-protocol` | ~21 |
+| `protocol/` (wire types) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
+| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | ~35 |
+| `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
+
+**Pinned non-Go components:**
+
+| component | pin | where |
+|-----------|-----|-------|
+| Firecracker VMM | v1.11.0 (static musl, GitHub release) | `fcguest/fetch-assets.sh` |
+| guest kernel | `amazonlinux/linux` tag `microvm-kernel-6.1.170-31.327.amzn2023`, verified against a pinned commit sha | `fcguest/build-kernel.sh` |
+| protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
+
+**Container images:** cs_host = `golang:1.24-alpine` + nodejs/npm/
+e2fsprogs/tar; TUI runtime = `scratch` (one static binary, no shell, no
+ca-certs); guest rootfs = `fedora:44` + ~25 dnf packages (podman, crun,
+conmon, fuse-overlayfs, passt, nodejs, python3, git, ripgrep, sudo, …);
+build-only = `ubuntu:24.04` (kernel) and `golang:1.24-alpine` (protoc,
+fc-agent).
+
+**Known-floating** (what a formal SBOM would flag): `@anthropic-ai/
+claude-code` is installed unpinned by npm in both cs_host and the guest
+rootfs — it resolves to latest on every image build; the dnf packages and
+the base-image tags (`fedora:44`, `golang:1.24-alpine`, `ubuntu:24.04`)
+float within their tags. The Go trees are fully locked; the OS-package and
+claude-code layers are the accepted moving parts.
+
 ## Config profiles (per group, `groups/<g>/.cs/config.json`)
 
 | key | values | applies |
