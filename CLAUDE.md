@@ -66,7 +66,7 @@ tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, 
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt (lives in the workspace, group-writable)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
-Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean / fc-assets
+Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean (safe) / clean-groups (destructive, prompted) / fc-assets
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
@@ -305,7 +305,7 @@ grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.ke
 - The TUI is Go (Bubble Tea); all other host-side code is Python stdlib. Don't add a JS/TS runtime to the project — the prior Ink TUI's npm tree is the reason we rewrote it.
 - For Go deps in `tui/`: every direct + indirect entry in `go.mod` must be ≥6 weeks old. After `go mod tidy`, verify each pin via `curl -s https://proxy.golang.org/<mod>/@v/<ver>.info` and compare its `Time` to today minus 6 weeks.
 - When adding a sidecar feature, audit its blast radius: can it read `/peers` (main only)? does it have outbound network beyond the proxy? does it run as root?
-- Stop containers with `make clean` between unrelated tests; ports persist in `groups.json` until you wipe it.
+- `make clean` is SAFE (stop + runtime droppings only: logs, metrics, `run/`, sentinels) — group workspaces survive. The destructive wipe is `make clean-groups` (deletes `groups/` + `groups.json` + `schedules.json` — all sessions, prompts, schedules; confirmation-prompted, `FORCE=1` to skip). Split after a `make clean` irrecoverably deleted five groups' state.
 
 ## Iterating
 

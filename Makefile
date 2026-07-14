@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: host-build tui-build login host-run tui stop run proxy metrics clean clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: host-build tui-build login host-run tui stop run proxy metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -174,7 +174,24 @@ fc-rootfs: $(BUILD)/fc-rootfs
 
 fc-assets: fc-fetch fc-kernel fc-rootfs
 
+# clean is SAFE: stops the daemon and removes runtime droppings (logs,
+# metrics, run/, build sentinels). Group workspaces — every agent's session
+# history, prompt.md, and files — are untouched. The destructive wipe is
+# clean-groups, split out after a `make clean` deleted five groups' state.
 clean: stop
-	rm -rf groups metrics.jsonl groups.json proxy.log run $(BUILD)
+	rm -rf metrics.jsonl proxy.log run $(BUILD)
+
+# clean-groups PERMANENTLY DELETES all group state: groups/ (each group's
+# workspace.img = sessions, prompts, files), groups.json (port allocations),
+# and schedules.json (schedules reference groups; wiping one without the
+# other leaves orphans that fire into freshly-respawned empty groups).
+# Prompts for confirmation; FORCE=1 skips it for scripts.
+clean-groups: stop
+	@if [ "$(FORCE)" != "1" ]; then \
+	  printf 'This PERMANENTLY deletes ALL group workspaces, sessions, and schedules\n(groups/ + groups.json + schedules.json). There is no undo.\nType "yes" to continue: '; \
+	  read ans && [ "$$ans" = "yes" ] || { echo "aborted — nothing deleted"; exit 1; }; \
+	fi
+	rm -rf groups groups.json schedules.json
+
 clean-creds:
 	rm -rf creds
