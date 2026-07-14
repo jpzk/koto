@@ -47,12 +47,13 @@ while IFS= read -r b64 <&3; do
   # Per-group config (model / effort / provider) lives in
   # /workspace/.cs/config.json. Read via node since the image has it; jq
   # isn't installed.
-  # Default provider is venice on this branch; opt back into Claude
-  # per-group with `/config provider=claudesdk`. Default Venice model comes
-  # from the daemon via CLAWSON_DEFAULT_VENICE_MODEL (single source of truth =
-  # defaultVeniceModel in daemon.go); applied below in the `venice)` case when
-  # MODEL is empty. The literal fallback is only for a missing env.
-  MODEL=""; EFFORT=""; PROVIDER="venice"
+  # Default provider is claudesdk; opt into Venice per-group with
+  # `/config provider=venice`. Default models come from the daemon via
+  # CLAWSON_DEFAULT_CLAUDE_MODEL / CLAWSON_DEFAULT_VENICE_MODEL (single
+  # source of truth = defaultClaudeModel / defaultVeniceModel in groups.go);
+  # applied in each provider case when MODEL is empty. The literal venice
+  # fallback is only for a missing env.
+  MODEL=""; EFFORT=""; PROVIDER="claudesdk"
   if [ -f /workspace/.cs/config.json ]; then
     MODEL=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('/workspace/.cs/config.json','utf8')).model||'')}catch(e){}" 2>/dev/null)
     EFFORT=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('/workspace/.cs/config.json','utf8')).effort||'')}catch(e){}" 2>/dev/null)
@@ -88,6 +89,7 @@ while IFS= read -r b64 <&3; do
       set -- claude -p --continue --bare --dangerously-skip-permissions \
         --output-format stream-json --include-partial-messages --verbose
       [ -n "$APPEND" ] && set -- "$@" --append-system-prompt "$APPEND"
+      [ -z "$MODEL" ] && MODEL="${CLAWSON_DEFAULT_CLAUDE_MODEL:-}"
       [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
       [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 

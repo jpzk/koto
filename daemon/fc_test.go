@@ -305,8 +305,8 @@ func TestEgressGate(t *testing.T) {
 	}
 }
 
-// TestEnsureProviderConfigSeedsProvider: an empty config gets venice seeded;
-// a valid explicit provider is never overwritten.
+// TestEnsureProviderConfigSeedsProvider: an empty config gets the default
+// provider seeded; a valid explicit provider is never overwritten.
 func TestEnsureProviderConfigSeedsProvider(t *testing.T) {
 	fcHarness(t)
 	d := filepath.Join(vol("tg"), ".cs")
@@ -315,14 +315,14 @@ func TestEnsureProviderConfigSeedsProvider(t *testing.T) {
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
 	}
-	if p := groupProviderName("tg"); p != "venice" {
+	if p := groupProviderName("tg"); p != defaultProvider {
 		t.Fatalf("provider not seeded: %s", p)
 	}
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"claudesdk"}`), 0o644)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"venice"}`), 0o644)
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
 	}
-	if p := groupProviderName("tg"); p != "claudesdk" {
+	if p := groupProviderName("tg"); p != "venice" {
 		t.Fatalf("explicit provider was clobbered: %s", p)
 	}
 }

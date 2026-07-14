@@ -50,10 +50,10 @@ type GroupInfo struct {
 	// markers without a second config round-trip per group.
 	Provider string `json:"provider,omitempty"`
 	// Model is the EFFECTIVE model the group runs (daemon's groupModelName):
-	// the config.json `model` if set, else the provider default — kimi-k2.5
-	// for venice (defaultVeniceModel), or "" for claudesdk (the claude CLI
-	// picks its own default, which clawson doesn't set, so the TUI shows
-	// "(default)" there).
+	// the config.json `model` if set, else the provider default —
+	// claude-sonnet-5 for claudesdk (defaultClaudeModel) or kimi-k2.5 for
+	// venice (defaultVeniceModel). Never empty in practice; the TUI's
+	// "(default)" fallback survives only for old daemons.
 	Model string `json:"model,omitempty"`
 	// Effort is the configured reasoning-effort knob (config.json's `effort`
 	// field). Only consumed by claudesdk; the venice path ignores it. Empty

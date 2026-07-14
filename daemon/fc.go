@@ -567,6 +567,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// agent starts entrypoint.sh only after init, so a turn can't race an
 	// unconfigured guest.
 	env := map[string]string{
+		"CLAWSON_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
 		"CLAWSON_DEFAULT_VENICE_MODEL": defaultVeniceModel,
 		"ANTHROPIC_BASE_URL":           fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
 	}

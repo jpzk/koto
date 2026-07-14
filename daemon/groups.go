@@ -142,19 +142,22 @@ func listGroups() map[string]GroupInfo {
 
 // defaultProvider is the value written into a new group's config.json by
 // ensureProviderConfig. Model is intentionally NOT seeded: the sidecar
-// entrypoint defaults to defaultVeniceModel when `model` is empty under the
-// venice provider, and Claude code's own default applies under claudesdk.
-// Seeding `model` here would mean `/config provider=claudesdk` on a fresh
-// group leaves a venice model string lying around, which the Claude CLI
-// would then reject.
-const defaultProvider = "venice"
+// entrypoint defaults to the per-provider default model when `model` is
+// empty (defaultClaudeModel under claudesdk, defaultVeniceModel under
+// venice). Seeding `model` here would mean `/config provider=venice` on a
+// fresh group leaves a claude model string lying around, which the Venice
+// API would then reject.
+const defaultProvider = "claudesdk"
 
-// defaultVeniceModel is the single source of truth for the model a venice
-// group uses when config.json has no `model`. The daemon injects it into the
-// sidecar as CLAWSON_DEFAULT_VENICE_MODEL (see ensure()), so entrypoint.sh
-// applies exactly this value and groupModelName reports it — no second copy
-// to drift. (entrypoint.sh keeps a hardcoded fallback only for the degenerate
-// case where the env is somehow unset.)
+// defaultClaudeModel / defaultVeniceModel are the single source of truth for
+// the model a group uses when config.json has no `model`. The daemon injects
+// them into the guest as CLAWSON_DEFAULT_CLAUDE_MODEL /
+// CLAWSON_DEFAULT_VENICE_MODEL (see fc.go), so entrypoint.sh applies exactly
+// these values and groupModelName reports them — no second copy to drift.
+// (entrypoint.sh keeps a hardcoded venice fallback only for the degenerate
+// case where the env is somehow unset; the claude fallback is empty = CLI
+// default.)
+const defaultClaudeModel = "claude-sonnet-5"
 const defaultVeniceModel = "kimi-k2.5"
 
 // ensureProviderConfig writes provider and runtime defaults into a group's
@@ -252,7 +255,7 @@ func groupModelName(g string) string {
 	if groupProviderName(g) == "venice" {
 		return defaultVeniceModel
 	}
-	return ""
+	return defaultClaudeModel
 }
 
 // groupEffortName reads the reasoning-effort knob from config.json. Empty
