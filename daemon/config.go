@@ -192,5 +192,38 @@ func configCmd(req configReq) configResp {
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
 	}
-	return configResp{BaseResp: baseResp{OK: true}, Config: cfg}
+	return configResp{BaseResp: baseResp{OK: true}, Config: effectiveConfig(req.Group, cfg)}
+}
+
+// effectiveConfig resolves every knob to the value the group actually runs
+// with — defaults filled in — so clients can show the full configuration, not
+// only the keys a user happened to set. Disk still holds only explicit keys
+// (this is display-only, computed after the write); resolution goes through
+// the same accessors the runtime uses, so each default has a single source of
+// truth. The legacy "internet" key is folded into "network".
+func effectiveConfig(g string, cfg map[string]any) map[string]any {
+	eff := map[string]any{}
+	for k, v := range cfg {
+		eff[k] = v
+	}
+	delete(eff, "internet") // superseded by network (groupNetwork folds it in)
+	eff["provider"] = groupProviderName(g)
+	eff["model"] = groupModelName(g)
+	eff["network"] = groupNetwork(g)
+	if groupRoot(g) {
+		eff["root"] = "yes"
+	} else {
+		eff["root"] = "no"
+	}
+	size := "small"
+	if s, ok := cfg["size"].(string); ok {
+		if k := strings.ToLower(strings.TrimSpace(s)); fcSizePresets[k].memMiB != 0 {
+			size = k
+		}
+	}
+	eff["size"] = size
+	if _, ok := eff["effort"]; !ok {
+		eff["effort"] = "(default)"
+	}
+	return eff
 }
