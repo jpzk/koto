@@ -342,6 +342,40 @@ var hopByHop = map[string]bool{
 	"accept-encoding": true,
 }
 
+// injectThinkingDisplay sets thinking.display="summarized" on a /v1/messages
+// request that already has thinking enabled but left display unset, so the API
+// returns a readable reasoning summary instead of the default empty-text
+// blocks. It is deliberately conservative: it only touches an existing
+// thinking object whose type isn't "disabled" and never overrides an explicit
+// client display choice, so it can't enable thinking where the client didn't
+// ask for it. Any parse/shape surprise returns the body unchanged. Because
+// http.NewRequest recomputes Content-Length from the (possibly longer) body on
+// every retry, the length change is safe.
+func injectThinkingDisplay(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	th, ok := m["thinking"].(map[string]any)
+	if !ok {
+		return body
+	}
+	if t, _ := th["type"].(string); t == "disabled" {
+		return body
+	}
+	if _, set := th["display"]; set {
+		return body // respect an explicit client choice
+	}
+	th["display"] = "summarized"
+	if out, err := json.Marshal(m); err == nil {
+		return out
+	}
+	return body
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// General internet egress (internet=full groups). Identified by the
 	// CONNECT method (HTTPS tunnel) or an absolute-form request target (plain
@@ -359,6 +393,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		body, _ = io.ReadAll(r.Body)
+	}
+	// Ask the API to surface a readable SUMMARY of the model's reasoning.
+	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
+	// thinking.display to "omitted", so thinking blocks stream with empty text
+	// + a signature only — the guest's stream_filter then logs an empty
+	// [[think_begin]]/[[think_end]] 0 frame and the TUI shows nothing. claude
+	// code sends `thinking:{type:"adaptive"}` with no display, so it inherits
+	// that default. Rewriting it to display:"summarized" restores visible
+	// reasoning. (The raw chain of thought is never exposed on those models
+	// regardless; display only controls the summary and doesn't change billing.)
+	if r.URL.Path == "/v1/messages" {
+		body = injectThinkingDisplay(body)
 	}
 	ah, err := authHeaders()
 	if err != nil {
@@ -424,8 +470,6 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	usage := map[string]any{}
 	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
-		inThinking := false
-		thinkingWords := 0
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		for scanner.Scan() {
@@ -456,33 +500,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			t, _ := ev["type"].(string)
-			switch t {
-			case "content_block_start":
-				if cb, ok := ev["content_block"].(map[string]any); ok {
-					if ty, _ := cb["type"].(string); ty == "thinking" {
-						inThinking = true
-						thinkingWords = 0
-						logAppend(h.group, []byte("[[think_begin]]\n"))
-					}
-				}
-			case "content_block_delta":
-				if inThinking {
-					if d, ok := ev["delta"].(map[string]any); ok {
-						if dt, _ := d["type"].(string); dt == "thinking_delta" {
-							if txt, _ := d["thinking"].(string); txt != "" {
-								logAppend(h.group, []byte(txt))
-								thinkingWords += len(strings.Fields(txt))
-							}
-						}
-					}
-				}
-			case "content_block_stop":
-				if inThinking {
-					inThinking = false
-					logAppend(h.group, []byte(fmt.Sprintf("\n[[think_end]] %d\n", thinkingWords)))
-				}
-			}
+			// Thinking framing for the group log is produced by the guest's
+			// stream_filter.js (the single source of truth for every log event
+			// type). The proxy used to ALSO parse content_block_* thinking here
+			// and logAppend its own [[think_*]] frames, which double-wrote the
+			// same log — invisible while thinking blocks were empty, but visibly
+			// interleaved once display=summarized gave them text. Dropped; the
+			// proxy now only extracts usage/metrics from the stream.
 		}
 	} else {
 		data, _ := io.ReadAll(resp.Body)
