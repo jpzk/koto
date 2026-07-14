@@ -233,21 +233,68 @@ func TestFcSpliceToProxy(t *testing.T) {
 	a.Close()
 }
 
-// TestGroupInternetDefault: default none; only "full" opts in.
-func TestGroupInternetDefault(t *testing.T) {
+// TestApplyConfigNetwork: the new "network" key validates none|wan|lan|full;
+// the legacy "internet" key maps + migrates (full→network=wan, no "internet"
+// key left on disk).
+func TestApplyConfigNetwork(t *testing.T) {
+	// Legacy internet=full migrates to network=wan, dropping the old key.
+	cfg := map[string]any{"internet": "old"}
+	applyConfig(cfg, "internet", json.RawMessage(`"full"`))
+	if cfg["network"] != "wan" {
+		t.Fatalf("internet=full should map to network=wan, got %v", cfg["network"])
+	}
+	if _, ok := cfg["internet"]; ok {
+		t.Fatal("legacy internet key should be removed")
+	}
+	// Explicit network values.
+	cfg = map[string]any{}
+	applyConfig(cfg, "network", json.RawMessage(`"lan"`))
+	if cfg["network"] != "lan" {
+		t.Fatalf("network=lan not stored, got %v", cfg["network"])
+	}
+	// Bogus value rejected — prior value preserved.
+	cfg = map[string]any{"network": "wan"}
+	applyConfig(cfg, "network", json.RawMessage(`"bogus"`))
+	if cfg["network"] != "wan" {
+		t.Fatalf("bogus network should preserve prior value, got %v", cfg["network"])
+	}
+}
+
+// TestGroupNetwork: default none; wan|lan|full honored; unknown → none; the
+// legacy "internet" key maps (full→wan, none→none); explicit "network" wins
+// when both keys are present.
+func TestGroupNetwork(t *testing.T) {
 	fcHarness(t)
-	if groupInternet("nope") != "none" {
+	if groupNetwork("nope") != fcNetNone {
 		t.Fatal("missing config should be none")
 	}
 	d := filepath.Join(vol("tg"), ".cs")
 	os.MkdirAll(d, 0o755)
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"full"}`), 0o644)
-	if groupInternet("tg") != "full" {
-		t.Fatal("explicit full not honored")
+	write := func(s string) { os.WriteFile(filepath.Join(d, "config.json"), []byte(s), 0o644) }
+
+	for _, v := range []string{fcNetWAN, fcNetLAN, fcNetFull} {
+		write(`{"network":"` + v + `"}`)
+		if got := groupNetwork("tg"); got != v {
+			t.Fatalf("network=%s not honored, got %s", v, got)
+		}
 	}
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"lan"}`), 0o644)
-	if groupInternet("tg") != "none" {
-		t.Fatal("unknown value should fall back to none")
+	write(`{"network":"open"}`)
+	if groupNetwork("tg") != fcNetNone {
+		t.Fatal("unknown network value should fall back to none")
+	}
+	// Legacy internet key.
+	write(`{"internet":"full"}`)
+	if groupNetwork("tg") != fcNetWAN {
+		t.Fatal("legacy internet=full should map to wan")
+	}
+	write(`{"internet":"none"}`)
+	if groupNetwork("tg") != fcNetNone {
+		t.Fatal("legacy internet=none should map to none")
+	}
+	// Both present → network wins.
+	write(`{"internet":"full","network":"lan"}`)
+	if groupNetwork("tg") != fcNetLAN {
+		t.Fatal("explicit network should win over legacy internet")
 	}
 }
 
@@ -277,17 +324,36 @@ func TestGroupRootDefault(t *testing.T) {
 	}
 }
 
-// TestEgressGate: the profile gate (403 for none) + the self-target guard.
-// The 403 path returns before hijacking, so a plain recorder suffices; the
-// tunnel path is covered live in the smoke run (needs a real socket).
+// TestEgressGate: the profile gate (403 for none) + the policy-aware
+// self-target/LAN guard. The 403 path returns before hijacking, so a plain
+// recorder suffices; the tunnel path is covered live in the smoke run (needs a
+// real socket).
 func TestEgressGate(t *testing.T) {
 	fcHarness(t)
 	d := filepath.Join(vol("tg"), ".cs")
 	os.MkdirAll(d, 0o755)
 	h := &handler{group: "tg"}
 
+	// Stub DNS so hostname classification is deterministic and offline.
+	orig := egressLookupIP
+	egressLookupIP = func(host string) ([]net.IP, error) {
+		switch host {
+		case "github.com", "registry.npmjs.org":
+			return []net.IP{net.ParseIP("140.82.112.3")}, nil // public
+		case "intranet.local":
+			return []net.IP{net.ParseIP("192.168.1.10")}, nil // LAN
+		case "sneaky.example":
+			// One public + one loopback IP — one bad IP must deny.
+			return []net.IP{net.ParseIP("1.2.3.4"), net.ParseIP("127.0.0.1")}, nil
+		}
+		return nil, fmt.Errorf("nxdomain")
+	}
+	defer func() { egressLookupIP = orig }()
+
+	allowed := func(hp, pol string) bool { ok, _ := egressTargetAllowed(hp, pol); return ok }
+
 	// none → 403 for CONNECT.
-	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"internet":"none"}`), 0o644)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"none"}`), 0o644)
 	req := &http.Request{Method: http.MethodConnect, Host: "example.com:443", URL: &url.URL{Host: "example.com:443"}}
 	rec := httptest.NewRecorder()
 	h.serveEgress(rec, req)
@@ -295,13 +361,35 @@ func TestEgressGate(t *testing.T) {
 		t.Fatalf("none group: expected 403, got %d", rec.Code)
 	}
 
-	// full → the self-target guard still blocks loopback / cs_host / daemon port.
-	if egressTargetAllowed("127.0.0.1:9") || egressTargetAllowed("cs_host_go:8080") ||
-		egressTargetAllowed("example.com:8443") || egressTargetAllowed("[::1]:80") {
-		t.Fatal("guard should block loopback/cs_host/daemon-port")
+	// Control plane blocked under EVERY profile, including full.
+	for _, pol := range []string{fcNetWAN, fcNetLAN, fcNetFull} {
+		if allowed("127.0.0.1:9", pol) || allowed("cs_host_go:8080", pol) ||
+			allowed("example.com:8443", pol) || allowed("[::1]:80", pol) {
+			t.Fatalf("guard should block loopback/cs_host/daemon-port under %s", pol)
+		}
 	}
-	if !egressTargetAllowed("github.com:443") || !egressTargetAllowed("registry.npmjs.org:443") {
-		t.Fatal("guard should allow normal external hosts")
+	// DNS name resolving to a loopback IP is blocked even under full.
+	if allowed("sneaky.example:443", fcNetFull) {
+		t.Fatal("name resolving to loopback should be denied (one-bad-IP)")
+	}
+	// wan: public allowed, LAN denied.
+	if !allowed("github.com:443", fcNetWAN) || !allowed("registry.npmjs.org:443", fcNetWAN) {
+		t.Fatal("wan should allow public hosts")
+	}
+	if allowed("192.168.1.5:80", fcNetWAN) || allowed("intranet.local:80", fcNetWAN) ||
+		allowed("10.0.0.1:22", fcNetWAN) {
+		t.Fatal("wan should block LAN targets (literal and by-name)")
+	}
+	// lan: LAN allowed, public denied.
+	if !allowed("192.168.1.5:80", fcNetLAN) || !allowed("intranet.local:80", fcNetLAN) {
+		t.Fatal("lan should allow LAN targets")
+	}
+	if allowed("1.1.1.1:443", fcNetLAN) || allowed("github.com:443", fcNetLAN) {
+		t.Fatal("lan should block public targets")
+	}
+	// CGNAT / tailnet is WAN, not LAN.
+	if !allowed("100.100.1.1:443", fcNetWAN) || allowed("100.100.1.1:443", fcNetLAN) {
+		t.Fatal("tailnet (100.64/10) should be WAN-class")
 	}
 }
 

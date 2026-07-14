@@ -117,9 +117,14 @@ type ConfigReq struct {
 	Skills   json.RawMessage `json:"skills,omitempty"`
 	Ports    json.RawMessage `json:"ports,omitempty"`
 	Provider json.RawMessage `json:"provider,omitempty"`
-	// Internet is the group's egress profile: "none" (default — the guest has
-	// no NIC; the proxy reaches only the LLM upstream) or "full" (a real L3
-	// gateway; see fcnet.go). Applies on /restart.
+	// Network is the group's egress profile: "none" (default — the guest has
+	// no NIC; the proxy reaches only the LLM upstream), "wan" (real L3
+	// gateway, public internet only — LAN blocked), "lan" (LAN only), or
+	// "full" (both). See fcnet.go. Applies on /restart.
+	Network json.RawMessage `json:"network,omitempty"`
+	// Internet is the DEPRECATED pre-rename profile key (none|full). Still
+	// accepted from old clients; the daemon maps full→network=wan and
+	// migrates the stored key (applyConfig).
 	Internet json.RawMessage `json:"internet,omitempty"`
 	// Size is the machine preset: "small" (default) | "medium" | "large" —
 	// sets vCPU, RAM, and workspace disk together. Applies on /restart.

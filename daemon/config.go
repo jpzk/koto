@@ -60,18 +60,39 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
-	if key == "internet" {
-		// Egress profile: none|full. Guest env is applied on the next spawn
-		// (/restart), but the proxy-side gate flips live — lowering to "none"
-		// denies egress on the very next request.
+	if key == "network" {
+		// Egress profile: none|wan|lan|full (see fcnet.go for the destination
+		// classes). Frame filter + guest env apply on the next spawn
+		// (/restart), but the proxy-side L7 gate flips live — lowering to
+		// "none" denies proxy egress on the very next request.
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return
 		}
 		s = strings.ToLower(strings.TrimSpace(s))
 		switch s {
-		case "none", "full":
+		case fcNetNone, fcNetWAN, fcNetLAN, fcNetFull:
 			cfg[key] = s
+		}
+		return
+	}
+	if key == "internet" {
+		// Legacy key (pre-rename, none|full). Old clients (Android proto tag
+		// 9, old TUIs) still send it: map to the network profile and migrate
+		// the config forward — full→wan (the secure reading: public internet
+		// without the host LAN; LAN is an explicit network=lan/full opt-in),
+		// none→none. The stored key is always "network"; "internet" never
+		// lands on disk again.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		delete(cfg, "internet")
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "full":
+			cfg["network"] = fcNetWAN
+		case "none":
+			cfg["network"] = fcNetNone
 		}
 		return
 	}
@@ -161,7 +182,10 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "skills", req.Skills)
 	applyConfig(cfg, "ports", req.Ports)
 	applyConfig(cfg, "provider", req.Provider)
+	// Legacy key first, explicit "network" second — a request carrying both
+	// resolves in favor of the new key.
 	applyConfig(cfg, "internet", req.Internet)
+	applyConfig(cfg, "network", req.Network)
 	applyConfig(cfg, "size", req.Size)
 	applyConfig(cfg, "root", req.Root)
 

@@ -13,24 +13,47 @@ import (
 	"testing"
 )
 
-func TestFcBlockedDst(t *testing.T) {
-	// Note: cs_host's own IPs are also blocked (fcSelfIPs), but those depend on
-	// the host's interfaces, so this table covers only the static rules.
+func TestFcDstAllowed(t *testing.T) {
+	// Full destination × profile matrix. cs_host's own IPs are also ctl
+	// (fcSelfIPs), but those depend on the host's interfaces, so this table
+	// covers only the static classes.
 	cases := []struct {
-		ip      string
-		blocked bool
+		ip                  string
+		wan, lan, full bool
 	}{
-		{"127.0.0.1", true},       // loopback (daemon gRPC/proxy live here)
-		{"127.5.6.7", true},       // all of 127/8
-		{"169.254.169.254", true}, // cloud metadata / link-local
-		{"1.1.1.1", false},        // public
-		{"8.8.8.8", false},        // public
-		{"::1", true},             // v6 loopback
-		{"fe80::1", true},         // v6 link-local
+		// ctl — blocked under every profile
+		{"127.0.0.1", false, false, false},       // loopback (daemon gRPC/proxy)
+		{"127.5.6.7", false, false, false},       // all of 127/8
+		{"169.254.169.254", false, false, false}, // metadata / link-local
+		{"::1", false, false, false},             // v6 loopback
+		{"fe80::1", false, false, false},         // v6 link-local
+		{"224.0.0.251", false, false, false},     // mDNS — link-local multicast = ctl
+		// gw subnet — always allowed (guest↔gateway; DNS at .1)
+		{"192.168.127.1", true, true, true},
+		{"192.168.127.2", true, true, true},
+		// LAN — allowed only under lan|full
+		{"192.168.1.5", false, true, true},
+		{"10.0.0.7", false, true, true},
+		{"172.16.0.1", false, true, true},
+		{"fd00::1", false, true, true}, // IPv6 ULA
+		{"::ffff:192.168.1.5", false, true, true}, // v4-mapped LAN
+		{"239.255.255.250", false, true, true},    // SSDP — admin-scoped multicast
+		{"255.255.255.255", false, true, true},    // limited broadcast
+		// WAN — allowed only under wan|full; 100.64/10 (tailnet) is WAN
+		{"1.1.1.1", true, false, true},
+		{"8.8.8.8", true, false, true},
+		{"2606:4700::1111", true, false, true},
+		{"100.100.1.1", true, false, true}, // CGNAT / tailnet
 	}
 	for _, c := range cases {
-		if got := fcBlockedDst(net.ParseIP(c.ip)); got != c.blocked {
-			t.Errorf("fcBlockedDst(%s) = %v, want %v", c.ip, got, c.blocked)
+		ip := net.ParseIP(c.ip)
+		for _, p := range []struct {
+			pol  string
+			want bool
+		}{{fcNetWAN, c.wan}, {fcNetLAN, c.lan}, {fcNetFull, c.full}} {
+			if got := fcDstAllowed(ip, p.pol); got != p.want {
+				t.Errorf("fcDstAllowed(%s, %s) = %v, want %v", c.ip, p.pol, got, p.want)
+			}
 		}
 	}
 }
@@ -44,21 +67,48 @@ func ethFrame(dstIP string) []byte {
 	return f
 }
 
+// ethFrame6 builds a minimal ethernet+IPv6 frame with the given destination.
+func ethFrame6(dstIP string) []byte {
+	f := make([]byte, 54)
+	binary.BigEndian.PutUint16(f[12:14], 0x86DD) // IPv6
+	copy(f[38:54], net.ParseIP(dstIP).To16())    // IPv6 dst @ eth+24
+	return f
+}
+
 func TestFcFrameAllowed(t *testing.T) {
-	if !fcFrameAllowed(ethFrame("1.1.1.1")) {
-		t.Error("public dest should be allowed")
+	if !fcFrameAllowed(ethFrame("1.1.1.1"), fcNetWAN) {
+		t.Error("public dest should be allowed under wan")
 	}
-	if fcFrameAllowed(ethFrame("127.0.0.1")) {
-		t.Error("loopback dest should be dropped")
+	if fcFrameAllowed(ethFrame("192.168.1.5"), fcNetWAN) {
+		t.Error("LAN dest should be dropped under wan")
+	}
+	if !fcFrameAllowed(ethFrame("192.168.1.5"), fcNetLAN) {
+		t.Error("LAN dest should be allowed under lan")
+	}
+	if fcFrameAllowed(ethFrame("127.0.0.1"), fcNetFull) {
+		t.Error("loopback dest should be dropped under every profile")
+	}
+	// IPv6 frame parsing.
+	if !fcFrameAllowed(ethFrame6("2606:4700::1111"), fcNetWAN) {
+		t.Error("public IPv6 dest should be allowed under wan")
+	}
+	if fcFrameAllowed(ethFrame6("fd00::1"), fcNetWAN) {
+		t.Error("IPv6 ULA should be dropped under wan")
 	}
 	// ARP (non-IP) must pass — the guest↔gateway link needs it.
 	arp := make([]byte, 42)
 	binary.BigEndian.PutUint16(arp[12:14], 0x0806)
-	if !fcFrameAllowed(arp) {
+	if !fcFrameAllowed(arp, fcNetWAN) {
 		t.Error("ARP frame should be allowed")
 	}
+	// 802.1Q VLAN-tagged frames are dropped (they'd evade the offset parser).
+	vlan := make([]byte, 42)
+	binary.BigEndian.PutUint16(vlan[12:14], 0x8100)
+	if fcFrameAllowed(vlan, fcNetFull) {
+		t.Error("VLAN-tagged frame should be dropped")
+	}
 	// Runt frames are passed through (the netstack drops garbage).
-	if !fcFrameAllowed([]byte{1, 2, 3}) {
+	if !fcFrameAllowed([]byte{1, 2, 3}, fcNetWAN) {
 		t.Error("short frame should be allowed (passthrough)")
 	}
 }
@@ -90,7 +140,7 @@ func TestFcEgressConnFilters(t *testing.T) {
 		b.Close()
 	}()
 
-	ec := fcNewEgressConn(a)
+	ec := fcNewEgressConn(a, fcNetFull)
 	out, _ := io.ReadAll(ec)
 
 	var want bytes.Buffer
@@ -98,5 +148,34 @@ func TestFcEgressConnFilters(t *testing.T) {
 	writeFrame(&want, good2)
 	if !bytes.Equal(out, want.Bytes()) {
 		t.Errorf("filtered stream mismatch:\n got %x\nwant %x", out, want.Bytes())
+	}
+}
+
+func TestFcEgressConnWANDropsLAN(t *testing.T) {
+	// Under wan: a LAN frame is dropped, the gateway-subnet frame survives
+	// (DNS must work), and a public frame survives.
+	gw := ethFrame("192.168.127.1")
+	lan := ethFrame("192.168.1.5")
+	pub := ethFrame("1.1.1.1")
+
+	var in bytes.Buffer
+	writeFrame(&in, gw)
+	writeFrame(&in, lan)
+	writeFrame(&in, pub)
+
+	a, b := net.Pipe()
+	go func() {
+		_, _ = b.Write(in.Bytes())
+		b.Close()
+	}()
+
+	ec := fcNewEgressConn(a, fcNetWAN)
+	out, _ := io.ReadAll(ec)
+
+	var want bytes.Buffer
+	writeFrame(&want, gw)
+	writeFrame(&want, pub)
+	if !bytes.Equal(out, want.Bytes()) {
+		t.Errorf("wan-filtered stream mismatch:\n got %x\nwant %x", out, want.Bytes())
 	}
 }

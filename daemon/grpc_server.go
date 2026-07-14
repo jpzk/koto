@@ -86,6 +86,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Ports = optRaw(r.Ports)
 	out.Provider = optRaw(r.Provider)
 	out.Internet = optRaw(r.Internet)
+	out.Network = optRaw(r.Network)
 	out.Size = optRaw(r.Size)
 	out.Root = optRaw(r.Root)
 	switch r.GetSkillsAction().(type) {

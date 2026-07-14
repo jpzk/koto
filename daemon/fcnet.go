@@ -1,16 +1,16 @@
 package main
 
-// fcnet.go — L3 networking for internet=full microVM groups.
+// fcnet.go — L3 networking for networked microVM groups (network=wan|lan|full).
 //
-// The default group has no NIC; egress is an L7 proxy over vsock (proxy.go).
-// internet=full additionally attaches a userspace gVisor network stack
-// (containers/gvisor-tap-vsock) that gives the guest a real L3 interface:
-// arbitrary outbound TCP and UDP (any port) with NAT + DNS — without a host
+// The default group (network=none) has no NIC; egress is an L7 proxy over
+// vsock (proxy.go). The networked profiles attach a userspace gVisor network
+// stack (containers/gvisor-tap-vsock) that gives the guest a real L3
+// interface: outbound TCP and UDP (any port) with NAT + DNS — without a host
 // tap/bridge or root, so it fits the rootless cs_host. (ICMP/ping is
 // best-effort: the gateway must be able to open a raw/unprivileged ICMP socket
 // on the host; TCP/UDP — all clawson tooling — need no special privilege.)
 //
-// Topology (per full group):
+// Topology (per networked group):
 //
 //   guest 192.168.127.2/24  ──TAP──┐
 //                                   │  Qemu-framed ethernet
@@ -21,18 +21,34 @@ package main
 //
 // fc-agent (guest) creates the TAP and pumps frames to vsock 9003; the daemon
 // accepts that connection and hands it to the group's VirtualNetwork via
-// AcceptQemu. Attaching is gated on internet=full — a `none` group never gets
-// the 9003 listener, so no route exists (the "no NIC = no egress" invariant is
-// preserved for the default).
+// AcceptQemu. Attaching is gated on network != none — a `none` group never
+// gets the 9003 listener, so no route exists (the "no NIC = no egress"
+// invariant is preserved for the default).
 //
 // Egress authority: gvisor-tap-vsock has no destination-filter hook (its
 // forwarder net.Dial's the packet's destination directly), so we filter at the
-// frame layer BEFORE the netstack sees a packet — fcEgressConn drops guest
-// frames addressed to the control plane (loopback, link-local, and cs_host's
-// own interface IPs — where the daemon gRPC and every group's proxy port live).
+// frame layer BEFORE the netstack sees a packet. fcEgressConn classifies each
+// guest frame's destination (fcClassifyDst) and applies the group's network
+// profile (fcDstAllowed):
+//
+//   ctl  loopback / link-local / cs_host's own interface IPs (daemon gRPC +
+//        every proxy port) — ALWAYS dropped, every profile.
+//   gw   192.168.127.0/24, the guest↔gateway subnet (DNS at .1) — always
+//        allowed; carved out because it sits inside the 192.168/16 LAN range.
+//   lan  RFC1918 + IPv6 ULA + multicast + limited broadcast — the host LAN.
+//        Allowed for lan|full, dropped for wan.
+//   wan  everything else, including CGNAT 100.64/10 (the tailnet — treated as
+//        intentionally-shared infra, not LAN). Allowed for wan|full, dropped
+//        for lan.
+//
 // This replaces, for the L3 path, what egressTargetAllowed does for the L7
-// proxy (proxy.go). Ec2MetadataAccess=false additionally blocks
-// 169.254.169.254 inside the netstack as defense in depth.
+// proxy (proxy.go) — both share fcClassifyDst. Ec2MetadataAccess=false
+// additionally blocks 169.254.169.254 inside the netstack as defense in depth.
+//
+// Caveat (documented, accepted): guest DNS is resolved by the gateway on the
+// host, outside the frame filter — a lan guest can still resolve public names
+// (and exfiltrate bits via query names). Actual traffic cannot bypass the
+// filter: data frames carry the resolved destination IP.
 
 import (
 	"context"
@@ -54,6 +70,26 @@ const (
 	fcNetGatewayMAC = "5a:94:ef:e4:0c:01"
 	fcNetMTU        = 1500
 )
+
+// Network profile values (config.json "network"). fcNetNone means no NIC at
+// all; the other three select which destination classes the frame filter
+// passes. String-typed to match the config value end to end.
+const (
+	fcNetNone = "none"
+	fcNetWAN  = "wan"
+	fcNetLAN  = "lan"
+	fcNetFull = "full"
+)
+
+// fcNetSubnetNet is fcNetSubnet parsed once for the classifier's gateway-
+// subnet carve-out.
+var fcNetSubnetNet = func() *net.IPNet {
+	_, n, err := net.ParseCIDR(fcNetSubnet)
+	if err != nil {
+		panic(err) // literal const; cannot fail
+	}
+	return n
+}()
 
 // fcNetGateway builds the per-group virtual network (outbound NAT + DNS).
 //
@@ -83,35 +119,74 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 }
 
 // fcNetServe attaches one guest link connection to the gateway, filtering
-// egress at the frame layer. Blocks until the connection ends.
-func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn) error {
-	return vn.AcceptQemu(ctx, fcNewEgressConn(conn))
+// egress at the frame layer under the group's network profile. Blocks until
+// the connection ends. The policy is captured per link conn — i.e. fixed for
+// the VM's lifetime; a profile change applies on /restart, same as the
+// gateway attach itself.
+func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, policy string) error {
+	return vn.AcceptQemu(ctx, fcNewEgressConn(conn, policy))
 }
 
 // ---- frame-layer egress filter ---------------------------------------------
 
-// fcBlockedDst reports whether a guest packet to ip must be dropped: the
-// control plane the guest must never reach over L3. Mirrors the intent of
-// proxy.go's egressTargetAllowed (loopback / link-local / the daemon port),
-// but at L3 by destination IP. Everything else — including the host LAN — is
-// allowed, matching the documented "internet=full can reach the LAN" posture.
-func fcBlockedDst(ip net.IP) bool {
+// fcDstClass buckets a destination IP for the egress policy. See the header
+// comment for the class semantics.
+type fcDstClass int
+
+const (
+	fcDstCtl fcDstClass = iota // control plane — blocked under every profile
+	fcDstGW                    // guest↔gateway subnet — always allowed (frame layer)
+	fcDstLAN                   // private ranges / multicast / broadcast — the host LAN
+	fcDstWAN                   // everything else (incl. CGNAT 100.64/10 = tailnet)
+)
+
+// fcClassifyDst classifies a guest packet's destination. Check order matters:
+// control plane first (so a pathological cs_host address inside the gateway
+// subnet still blocks), then the gateway carve-out (192.168.127.0/24 sits
+// inside the 192.168/16 LAN range but carries guest↔gateway traffic — DNS to
+// .1 — that every networked profile needs), then LAN, else WAN.
+func fcClassifyDst(ip net.IP) fcDstClass {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true // 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
+		return fcDstCtl // 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
 	}
-	// Block cs_host's own addresses — the daemon and every group's proxy port
-	// live here (gRPC on CLAWSON_BIND:CLAWSON_PORT, proxies on 0.0.0.0:<port>,
-	// reachable on clawson-net as cs_host_go:<port>). This is the L3 equivalent
-	// of egressTargetAllowed blocking the `cs_host_go` host by name: a full
-	// guest can reach the wider LAN but never the control plane. (Note bind
-	// 0.0.0.0 resolves to every local IP, so enumerating our own addrs is the
-	// only reliable block — a literal 0.0.0.0 check never matches a packet.)
+	// cs_host's own addresses — the daemon and every group's proxy port live
+	// here (gRPC on CLAWSON_BIND:CLAWSON_PORT, proxies on 0.0.0.0:<port>,
+	// reachable on clawson-net as cs_host_go:<port>). (Bind 0.0.0.0 resolves
+	// to every local IP, so enumerating our own addrs is the only reliable
+	// block — a literal 0.0.0.0 check never matches a packet.)
 	for _, self := range fcSelfIPs() {
 		if self.Equal(ip) {
-			return true
+			return fcDstCtl
 		}
 	}
-	return false
+	if fcNetSubnetNet.Contains(ip) {
+		return fcDstGW
+	}
+	// IsPrivate covers exactly RFC1918 (10/8, 172.16/12, 192.168/16) and IPv6
+	// ULA fc00::/7, and is IPv4-mapped-IPv6 aware. Multicast is LAN by
+	// definition (its scope is the local segment — mDNS/SSDP discovery is
+	// precisely what wan exists to deny); link-local multicast was already
+	// caught as ctl above. 255.255.255.255 is the limited broadcast.
+	if ip.IsPrivate() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.Equal(net.IPv4bcast) {
+		return fcDstLAN
+	}
+	return fcDstWAN
+}
+
+// fcDstAllowed is the frame-layer policy table: may a guest under the given
+// network profile send to ip?
+func fcDstAllowed(ip net.IP, policy string) bool {
+	switch fcClassifyDst(ip) {
+	case fcDstCtl:
+		return false
+	case fcDstGW:
+		return true
+	case fcDstLAN:
+		return policy == fcNetLAN || policy == fcNetFull
+	default: // fcDstWAN
+		return policy == fcNetWAN || policy == fcNetFull
+	}
 }
 
 // fcSelfIPs is the daemon/cs_host's own interface addresses, computed once.
@@ -140,10 +215,13 @@ var fcSelfIPs = func() func() []net.IP {
 // times out, same as a firewall DROP.
 type fcEgressConn struct {
 	net.Conn
-	buf []byte // leftover allowed [len][frame] bytes not yet consumed by Read
+	policy string // network profile: fcNetWAN | fcNetLAN | fcNetFull
+	buf    []byte // leftover allowed [len][frame] bytes not yet consumed by Read
 }
 
-func fcNewEgressConn(c net.Conn) *fcEgressConn { return &fcEgressConn{Conn: c} }
+func fcNewEgressConn(c net.Conn, policy string) *fcEgressConn {
+	return &fcEgressConn{Conn: c, policy: policy}
+}
 
 func (e *fcEgressConn) Read(p []byte) (int, error) {
 	for len(e.buf) == 0 {
@@ -151,7 +229,7 @@ func (e *fcEgressConn) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if fcFrameAllowed(frame) {
+		if fcFrameAllowed(frame, e.policy) {
 			hdr := make([]byte, 4)
 			binary.BigEndian.PutUint32(hdr, uint32(len(frame)))
 			e.buf = append(hdr, frame...)
@@ -181,9 +259,13 @@ func (e *fcEgressConn) readFrame() ([]byte, error) {
 }
 
 // fcFrameAllowed parses an ethernet frame's L3 destination and applies
-// fcBlockedDst. Non-IP frames (ARP, etc.) and unparseable frames are allowed —
-// ARP is needed for the guest↔gateway link, and the netstack ignores garbage.
-func fcFrameAllowed(frame []byte) bool {
+// fcDstAllowed under the group's network profile. Non-IP frames (ARP, etc.)
+// and unparseable frames are allowed — ARP is needed for the guest↔gateway
+// link, and the netstack ignores garbage. VLAN-tagged frames are the one
+// exception: an 802.1Q/802.1ad tag would shift the IP header past our fixed
+// offsets, hiding the destination from the filter, so they are dropped
+// outright (the gateway link is untagged; nothing legitimate sends these).
+func fcFrameAllowed(frame []byte, policy string) bool {
 	if len(frame) < 14 {
 		return true
 	}
@@ -193,12 +275,14 @@ func fcFrameAllowed(frame []byte) bool {
 		if len(frame) < 34 {
 			return true
 		}
-		return !fcBlockedDst(net.IP(frame[30:34]))
+		return fcDstAllowed(net.IP(frame[30:34]), policy)
 	case 0x86DD: // IPv6
 		if len(frame) < 54 {
 			return true
 		}
-		return !fcBlockedDst(net.IP(frame[38:54]))
+		return fcDstAllowed(net.IP(frame[38:54]), policy)
+	case 0x8100, 0x88A8: // 802.1Q / 802.1ad VLAN tag — would evade the parser
+		return false
 	default:
 		return true
 	}

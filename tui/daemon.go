@@ -240,6 +240,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("ports", &r.Ports)
 	setOpt("provider", &r.Provider)
 	setOpt("internet", &r.Internet)
+	setOpt("network", &r.Network)
 	setOpt("size", &r.Size)
 	setOpt("root", &r.Root)
 	if sk, ok := extra["skills"]; ok {

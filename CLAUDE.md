@@ -5,8 +5,8 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
 ## What it does
 
 - **Every group is a Firecracker microVM** (the podman group runtime was retired). The daemon boots each group as a microVM with **no network device by default** — its sole host↔guest channel is vsock, and the credential-injecting proxy becomes the *only* egress (verified: guest has `lo` only, no DNS, curl fails by default). **`docs/firecracker-vsock.md` is the authoritative design doc** — read it before touching `fc.go` / `fcguest/`. The guest runs `sidecar/entrypoint.sh` (baked into the rootfs). **NOTE:** some bullets below are still tagged `[podman]` / `[firecracker]` from the two-runtime era — the `[firecracker]` behavior is current; `[podman]`-tagged text is historical (the group-podman runtime no longer exists). Podman now runs in exactly one *non-group* place: **inside** the guest (rootless containers, next bullet). The daemon holds **no podman socket** — the DooD mount into `cs_host` was removed along with its last user (the whisper STT container); `cs_host` has no path to any podman daemon.
-- **Internet egress is a per-group profile: `config.json` `"internet"` = `"none"` (default) or `"full"`.** [firecracker] `none` = the guest has no NIC and no route; its only egress is the LLM upstream via the proxy. `full` = a real **L3 network** via a userspace **gVisor gateway** (`containers/gvisor-tap-vsock`) over vsock 9003: the guest gets a TAP (`eth0`, `192.168.127.2`) with arbitrary outbound TCP/UDP (any port), NAT'd, DNS via the gateway (ICMP/ping is best-effort — needs a raw-ICMP-capable gateway; TCP/UDP don't). The LLM leg still rides the credential-injecting proxy (`ANTHROPIC_BASE_URL` → vsock 9000), but general `curl`/`git`/`npm` go out raw over the NIC — **so general HTTPS is no longer proxy-audited** (the tradeoff of real L3). Egress is filtered at the frame layer (`fcEgressConn`, fcnet.go): guest packets to loopback / link-local / cs_host's own interface IPs (where the daemon gRPC + every proxy port live) are dropped so a `full` guest can't reach the control plane; the wider host LAN stays reachable (same as a podman NIC). Needs a `CONFIG_TUN` kernel (`build-kernel.sh`). `none` never attaches the gateway. Applies on `/restart`. **See `docs/firecracker-vsock.md` → "Internet egress profile".** [podman] not enforced (a podman group has a real NIC).
-- **[firecracker] The guest ships rootless podman** — the agent can run containers *inside* the microVM (as `node`, fuse-overlayfs storage, pasta networking over `/dev/net/tun`). This is the safe replacement for the removed podman-in-podman "pip" path: podman runs on the guest's own kernel behind KVM, so a container escape is a VM escape, not a tier-3→tier-1 host escape. Pulling images needs egress, so it's effectively an `internet=full` feature; images live under `/workspace`, so image-heavy groups may want a bigger `size` preset (below). See `docs/firecracker-vsock.md` → "Containers (rootless podman in the guest)".
+- **Network egress is a per-group profile: `config.json` `"network"` = `"none"` (default) | `"wan"` | `"lan"` | `"full"`.** [firecracker] `none` = the guest has no NIC and no route; its only egress is the LLM upstream via the proxy. The other three attach a real **L3 network** via a userspace **gVisor gateway** (`containers/gvisor-tap-vsock`) over vsock 9003 — TAP (`eth0`, `192.168.127.2`), arbitrary outbound TCP/UDP (any port), NAT'd, DNS via the gateway (ICMP best-effort) — and differ only in *which destinations the frame filter passes*: **`wan`** = public internet only (host LAN blocked), **`lan`** = host LAN only (public blocked), **`full`** = both (the old `internet=full`). The tailnet (CGNAT `100.64/10`) is classed as **WAN**, not LAN, so `wan` can reach tailnet peers. The LLM leg still rides the credential-injecting proxy (`ANTHROPIC_BASE_URL` → vsock 9000), but general `curl`/`git`/`npm` go out raw over the NIC — **so general HTTPS is no longer proxy-audited** (the tradeoff of real L3). Filtering is at the frame layer (`fcClassifyDst`/`fcDstAllowed`, fcnet.go): control plane (loopback / link-local / cs_host's own IPs) always dropped; the gateway subnet `192.168.127.0/24` always allowed (DNS); LAN vs WAN gated by profile; VLAN-tagged frames dropped. The same classifier gates the L7 proxy path (`egressTargetAllowed`, proxy.go), resolving DNS names and denying if any resolved IP is disallowed. **Legacy `internet` key**: `internet=full` maps to `wan` (secure default — public egress, no LAN), `none`→`none`; writes migrate the key to `network`. Needs a `CONFIG_TUN` kernel (`build-kernel.sh`). `none` never attaches the gateway. Applies on `/restart`. **See `docs/firecracker-vsock.md` → "Network egress profile".** [podman] not enforced (a podman group has a real NIC).
+- **[firecracker] The guest ships rootless podman** — the agent can run containers *inside* the microVM (as `node`, fuse-overlayfs storage, pasta networking over `/dev/net/tun`). This is the safe replacement for the removed podman-in-podman "pip" path: podman runs on the guest's own kernel behind KVM, so a container escape is a VM escape, not a tier-3→tier-1 host escape. Pulling images needs egress, so it's effectively a networked-profile feature (`wan` or `full` for a public registry); images live under `/workspace`, so image-heavy groups may want a bigger `size` preset (below). See `docs/firecracker-vsock.md` → "Containers (rootless podman in the guest)".
 - **[firecracker] VM size is a per-group preset: `config.json` `"size"` = `"small"` (default) | `"medium"` | `"large"`.** One knob sets vCPU + RAM + workspace disk together (small = 2/1024 MiB/8 GiB, medium = 2/2048 MiB/12 GiB, large = 4/4096 MiB/16 GiB). Set at spawn (`/new <g> [provider] [model] size=large`) or on an existing group (`/config size=large`); **applies on `/restart`**. Disk **grows, never shrinks** (grown offline on the host via `truncate` → `e2fsck` → `resize2fs`; needs `e2fsprogs-extra`). Presets replace hand-editing the raw `vcpus`/`mem_mib` keys, which still work as a layered override. Resolved by `fcResolveSize` in `fc.go`; see `docs/firecracker-vsock.md` → "VM size profile".
 - **[firecracker] Passwordless sudo is a per-group profile: `config.json` `"root"` = `"no"` (default) | `"yes"`.** `yes` grants the guest's `node` user (uid 1000, which the entrypoint + `claude` + all bash run as) passwordless sudo; `no`/absent means no path to root. **Safe to grant because the microVM's KVM boundary is the security boundary** — root *inside* the guest is still contained by the VM, so unlike host-side sudo this doesn't widen the host blast radius. Set via `/config root=yes` (or `config_set` from `main`); **applies on `/restart`**. `sudo` ships in the golden rootfs unconditionally; only the grant is runtime-gated — the root drive is read-only, so `fc-agent`'s `enableSudo` (`handleInit`) overlays a tmpfs on `/etc/sudoers.d` and drops the NOPASSWD grant there at boot (gated by `groupRoot` in `fc.go`). **`sudo dnf install` won't persist** (read-only root) — bake packages into the rootfs instead. See `docs/firecracker-vsock.md` → "Root / sudo profile".
 - Each "group" is a long-lived worker running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the workspace ([podman] a bind mount; [firecracker] `groups/<g>/workspace.img`, an ext4 virtio-block image).
@@ -53,7 +53,7 @@ daemon/              the daemon Go module (module `clawson`):
   proxy.go             HTTP proxy, cred injection, metrics, multi-port watcher
   fc.go                Firecracker runtime: VM lifecycle, vsock multiplexer (proxy/log/ctl), agent RPC, workspace.img migration
   fcjail.go            host-side jail for the FC VMM process (userns/chroot re-exec)
-  fcnet.go             internet=full gateway: gVisor L3 over vsock + frame-layer egress filter
+  fcnet.go             network=wan|lan|full gateway: gVisor L3 over vsock + frame-layer egress filter (fcClassifyDst)
   wire/                daemon-internal JSON wire types (ctl FIFO plane + pb conversion shapes; moved out of protocol/)
 fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
@@ -93,8 +93,8 @@ make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
                    # Ctrl+C exits TUI; daemon keeps running. Reattach with `make tui` again.
 make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon
 
-# per-group networking: `/config internet=full` (or none) + `/restart <g>`.
-# default is internet=none (no NIC). All groups run the firecracker runtime;
+# per-group networking: `/config network=wan` (or lan/full/none) + `/restart <g>`.
+# default is network=none (no NIC). All groups run the firecracker runtime;
 # there is no `/config runtime=` — firecracker is the only backend surfaced.
 
 # inside the TUI:
@@ -222,12 +222,13 @@ internet and the host's local network (LAN)**, plus every other sidecar on
 the bridge. The credential-injecting proxy is only the *default*
 `ANTHROPIC_BASE_URL`; it is NOT a network boundary. A prompt-injected podman
 sidecar can `curl` anywhere. → **A microVM group has no NIC by default**
-(`internet=none`): the proxy is the *only* egress, enforced by the absence of a
+(`network=none`): the proxy is the *only* egress, enforced by the absence of a
 route (verified from inside the guest: `lo` only, curl fails, no DNS).
-Open-internet is opt-in per group via `internet=full`, which attaches a gVisor
-L3 gateway over vsock (real NIC, egress-filtered at the frame layer to keep the
-control plane unreachable) — see the `internet` profile bullet above and
-`docs/firecracker-vsock.md`.
+Network access is opt-in per group via `network=wan|lan|full`, which attaches a
+gVisor L3 gateway over vsock (real NIC, egress-filtered at the frame layer by
+destination class — control plane always unreachable, and `wan` also blocks the
+host LAN so a prompt-injected agent can't pivot into it) — see the `network`
+profile bullet above and `docs/firecracker-vsock.md`.
 
 **[podman runtime] The container boundary is a shared-kernel boundary, not a
 VM.** All podman sidecars share the *host kernel* — isolation is namespaces +
@@ -240,8 +241,8 @@ namespace escape. This is the "real hardware boundary" the next paragraph used
 to call deferred — it's shipped. gVisor was the lighter alternative *as a
 runtime sandbox*; Firecracker won because the no-shared-FS constraint forced a
 clean vsock-only IPC that also solved the egress hole for free. (gVisor's
-netstack does return for `internet=full` — but only as a userspace L3 gateway
-over vsock, not as the runtime boundary.)
+netstack does return for `network=wan|lan|full` — but only as a userspace L3
+gateway over vsock, not as the runtime boundary.)
 
 **The Firecracker VMM process is jailed** (`fcjail.go`). The KVM boundary
 protects the host from the *guest*; the jailer protects the host from a

@@ -47,7 +47,7 @@ delivered as a tarball at VM init. Config/prompt/log are host-authoritative.
 | guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
 | guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
 | guest → host | 9002  | ctl plane (JSON lines, replies inline) | `.cs/ctl` + `.cs/ctl.out` |
-| guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`internet=full` only**) | a real NIC |
+| guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`network` ≠ `none`**) | a real NIC |
 | host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/shutdown) | `.cs/in` FIFO + `podman exec` |
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
@@ -161,10 +161,11 @@ one ergonomic regression vs podman's hot-reload mounts).
 1. **Published ports** bind inside cs_host (reachable on clawson-net as
    `cs_host_go:<port>`), not on the real host loopback — host publishing
    needs a `-p` on cs_host itself (podman can't add one live).
-2. ~~No open-internet escape hatch yet.~~ **DONE** — the `internet` profile
-   (`none` default / `full`). `full` now attaches a gVisor L3 gateway over
-   vsock 9003 (real NIC: arbitrary TCP/UDP + DNS, egress-filtered at the
-   frame layer); `none` stays NIC-less. See "Internet egress profile" below.
+2. ~~No open-internet escape hatch yet.~~ **DONE** — the `network` profile
+   (`none` default / `wan` / `lan` / `full`). The networked profiles attach a
+   gVisor L3 gateway over vsock 9003 (real NIC: arbitrary TCP/UDP + DNS,
+   egress-filtered at the frame layer by destination class); `none` stays
+   NIC-less. See "Network egress profile" below.
    *L3-native inbound is still a follow-up (see that section).*
 3. **`pip` (podman-in-podman) and Chrome groups** stay on the podman runtime
    (not in the minimal rootfs).
@@ -176,46 +177,94 @@ one ergonomic regression vs podman's hot-reload mounts).
 6. **Migrating an existing podman group** doesn't move its workspace files
    into workspace.img; fresh workspace (or copy offline while stopped).
 
-## Internet egress profile (`internet`: `none` | `full`)
+## Network egress profile (`network`: `none` | `wan` | `lan` | `full`)
 
 Per-group config key controlling general outbound. Default `none` — a
 microVM group has **no NIC and no route**; its only egress is the LLM upstream
-via the proxy (vsock 9000). `full` attaches a userspace **gVisor L3 gateway**
-(`containers/gvisor-tap-vsock`) over a new vsock port, giving the guest a real
-interface — arbitrary outbound TCP and UDP on any port with NAT, plus DNS.
+via the proxy (vsock 9000). The three networked profiles attach a userspace
+**gVisor L3 gateway** (`containers/gvisor-tap-vsock`) over a new vsock port,
+giving the guest a real interface — outbound TCP and UDP on any port with NAT,
+plus DNS — and differ only in *which destinations the egress filter passes*:
+
+| profile | public internet (WAN) | host LAN | tailnet (CGNAT 100.64/10) |
+|---------|:---------------------:|:--------:|:-------------------------:|
+| `none`  | — no NIC at all —                                        |||
+| `wan`   | ✅ | ❌ | ✅ |
+| `lan`   | ❌ | ✅ | ❌ |
+| `full`  | ✅ | ✅ | ✅ |
+
+**`wan` is the safe general-purpose profile** (and where legacy `internet=full`
+now maps — see below): the agent can `curl`/`git`/`npm` the public internet but
+cannot reach the host LAN, so a prompt-injected agent can't scan or pivot into
+your other machines. `lan` is for the rare group that must talk to a LAN device
+but should not have public egress; `full` is both (the old `internet=full`
+behavior, now explicit). The **tailnet (CGNAT 100.64/10) is classed as WAN**,
+not LAN — it's treated as intentionally-shared infrastructure, so a `wan` group
+can reach tailnet peers.
+
 (ICMP/ping is best-effort — it needs the gateway process to open a
 raw/unprivileged ICMP socket on the host; TCP/UDP, i.e. all clawson tooling,
 need no special privilege.) Verified live: TCP to arbitrary ports (`:22` SSH
 banner, `:53`), UDP (NTP `:123`), and HTTPS all work; ICMP echo did not in the
 standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
 
-- **Real L3, not an HTTP proxy.** On `full`, `fcSpawn` builds a per-group
-  `virtualnetwork` (gateway `192.168.127.1`, guest `192.168.127.2/24`) and
-  opens a guest→host listener on vsock **9003**. fc-agent, told `net="l3"` at
-  init, creates a TAP (`eth0`), self-assigns the address/route, points
+**Legacy `internet` key.** Pre-rename configs (and old TUI/Android clients)
+carry `internet` = `none` | `full`. On read, `internet=full` maps to **`wan`**
+— the secure reading of "full internet" (public egress, no LAN); `internet=none`
+→ `none`. On write (`/config internet=…`), the daemon stores `network` and
+deletes the old key, migrating configs forward. An explicit `network` key
+always wins over a legacy `internet` key.
+
+- **Real L3, not an HTTP proxy.** On any networked profile, `fcSpawn` builds a
+  per-group `virtualnetwork` (gateway `192.168.127.1`, guest `192.168.127.2/24`)
+  and opens a guest→host listener on vsock **9003**. fc-agent, told `net="l3"`
+  at init, creates a TAP (`eth0`), self-assigns the address/route, points
   `/etc/resolv.conf` at the gateway, and pumps ethernet frames to 9003. Framing
   is the Qemu protocol (4-byte big-endian length prefix per frame), matching
-  the host's `AcceptQemu`.
+  the host's `AcceptQemu`. The guest-side setup is identical for `wan`/`lan`/
+  `full` — the profile only changes the host-side frame filter.
 - **LLM traffic still rides the proxy.** `ANTHROPIC_BASE_URL` stays
   `http://127.0.0.1:18888` → vsock 9000 → the credential-injecting proxy, so
   key injection and per-group metrics are unchanged. `NO_PROXY=127.0.0.1`
-  keeps that base URL direct. **`HTTP_PROXY` is NOT set** on `full` — general
-  `curl`/`git`/`npm` go out over the NIC, NAT'd by the gateway.
+  keeps that base URL direct. **`HTTP_PROXY` is NOT set** on a networked
+  profile — general `curl`/`git`/`npm` go out over the NIC, NAT'd by the gateway.
   - **Tradeoff:** general HTTPS is no longer L7-audited by the proxy (only the
     LLM leg is). This is the cost of real L3 vs the old proxy-only egress.
-- **Egress authority moves to the frame layer.** gvisor-tap-vsock has no
+- **Egress authority is at the frame layer.** gvisor-tap-vsock has no
   destination-filter hook (it `net.Dial`s the packet's destination directly),
-  so `fcEgressConn` (fcnet.go) parses each guest frame and **drops** those
-  addressed to the control plane — loopback (`127/8`, `::1`), link-local
-  (`169.254/16`, `fe80::/10`), and **cs_host's own interface IPs** (`fcSelfIPs`,
-  where the daemon gRPC on `CLAWSON_BIND:CLAWSON_PORT` and every group's proxy
-  port live — reachable on clawson-net as `cs_host_go:<port>`). `Ec2MetadataAccess=false`
-  additionally blocks metadata inside the netstack. Everything else — including
-  the wider host LAN — is allowed, same posture as before (and as a podman NIC).
-  Verified live through the daemon: `cs_host_go:8443` times out from a `full`
-  guest while `example.com` returns 200. This replaces, for the L3 path, what
-  `egressTargetAllowed` (proxy.go) does
-  for the L7 path.
+  so `fcEgressConn` (fcnet.go) parses each guest frame, classifies its
+  destination (`fcClassifyDst`), and applies the group's profile (`fcDstAllowed`).
+  The classes:
+  - **ctl** — loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`,
+    incl. link-local multicast like mDNS `224.0.0.251`), and **cs_host's own
+    interface IPs** (`fcSelfIPs`, where the daemon gRPC on
+    `CLAWSON_BIND:CLAWSON_PORT` and every group's proxy port live). **Dropped
+    under every profile.** `Ec2MetadataAccess=false` also blocks metadata inside
+    the netstack.
+  - **gw** — the guest↔gateway subnet `192.168.127.0/24` (DNS at `.1`). **Always
+    allowed** at the frame layer; carved out explicitly because it sits inside
+    the `192.168/16` LAN range, so `wan` DNS would otherwise break. (At the L7
+    proxy this carve-out does not apply — it's frame-layer-only.)
+  - **lan** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`), IPv6 ULA `fc00::/7`,
+    non-link-local multicast, limited broadcast. Allowed for `lan`/`full`.
+  - **wan** — everything else, incl. CGNAT `100.64/10` (tailnet). Allowed for
+    `wan`/`full`.
+  - **802.1Q/802.1ad VLAN-tagged frames are dropped** — a tag would shift the
+    IP header past the parser's fixed offsets and hide the destination. ARP
+    stays allowed (the gateway link needs it).
+  This mirrors, at L3, what `egressTargetAllowed` (proxy.go) does for the L7
+  proxy path — both share `fcClassifyDst`.
+- **DNS caveat.** The gateway resolves guest DNS queries on the **host** (via
+  the host resolver, from the daemon process) — outside the frame filter. So a
+  `lan` guest can still *resolve* public names (and a determined agent could
+  exfiltrate bits via query names), and a `wan` guest's lookups of LAN names hit
+  the host resolver. **Actual traffic can't bypass the filter** — data frames
+  carry the resolved destination IP, which is classified at connect time. Per-
+  profile DNS zones are a possible follow-up.
+- **`lan` can't reach the clawson host itself.** cs_host's own LAN IP is in
+  `fcSelfIPs` (ctl, unconditional), so `lan` reaches *other* LAN devices but not
+  services on the host running the daemon. Correct per the control-plane rule —
+  don't debug it as a bug.
 - **`none` keeps the invariant.** A `none` group never opens the 9003 listener
   and never gets `net="l3"`, so no TAP and no route exist — "no NIC = no
   egress" is enforced by the absence of a route, unchanged.
@@ -245,7 +294,7 @@ standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
     resolv.conf during build). fc-agent's `netUp` writes the target on `full`;
     `none` leaves it dangling — no DNS, as intended.
 - **podman groups**: the profile is a firecracker feature. A podman group has
-  a real NIC and full internet regardless; `internet=none` is not enforced
+  a real NIC and full internet regardless; `network=none` is not enforced
   there (would need `--internal` networking).
 
 ## VM size profile (`size`: `small` | `medium` | `large`)
@@ -401,6 +450,7 @@ internet through pasta):
   `TMPDIR`; `/var/tmp` is on the read-only rootfs).
 
 Practical notes: **pulling images needs egress**, so containers are effectively
-an `internet=full` feature (pull rides the L3 gateway; `none` has no registry
-access). Container images live under `$HOME=/workspace` (the writable ext4), so
+a networked-profile feature (pull rides the L3 gateway; needs `wan` or `full`
+to reach a public registry — `none` has no NIC; `lan` only reaches a LAN
+registry). Container images live under `$HOME=/workspace` (the writable ext4), so
 image-heavy groups may want a larger `workspace.img` and more `mem_mib`.

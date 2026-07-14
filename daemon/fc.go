@@ -126,27 +126,41 @@ func fcCfgPath(g string) string      { return filepath.Join(fcRunDir(), g+".cfg.
 func fcConsolePath(g string) string  { return filepath.Join(fcRunDir(), g+".console.log") }
 func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.img") }
 
-// groupInternet reads config.json's "internet" profile: "full" grants
-// general outbound (forwarded through the proxy over the group's existing
-// vsock/proxy channel), anything else (including missing) means "none" — the
-// default, where the proxy is the only egress and it only speaks to the LLM
-// upstream. Read on every proxy request AND at spawn (env injection), so it's
-// the single source of truth. Enforced by the proxy server-side (a compromised
-// guest can't grant itself egress by setting HTTP_PROXY); the guest env is
-// only the client-side enabler. See serveEgress in proxy.go.
-func groupInternet(g string) string {
+// groupNetwork reads config.json's "network" profile: wan|lan|full grant
+// general outbound over a real NIC, anything else (including missing) means
+// "none" — the default, where the proxy is the only egress and it only speaks
+// to the LLM upstream. Read on every proxy request AND at spawn (env
+// injection + gateway attach), so it's the single source of truth. Enforced
+// server-side (a compromised guest can't grant itself egress by setting
+// HTTP_PROXY, and the frame filter drops disallowed destinations); the guest
+// env is only the client-side enabler. See fcnet.go for the wan/lan/full
+// destination classes and serveEgress in proxy.go for the L7 twin.
+//
+// Legacy: pre-rename configs carry "internet" (none|full). internet=full maps
+// to WAN — the secure reading of "full internet": public egress without the
+// host LAN. Groups that genuinely need LAN opt in explicitly with
+// network=lan or network=full. An explicit "network" key always wins; writes
+// via /config migrate the old key away (see applyConfig).
+func groupNetwork(g string) string {
 	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
 	if err != nil {
-		return "none"
+		return fcNetNone
 	}
 	var cfg map[string]any
 	if json.Unmarshal(b, &cfg) != nil {
-		return "none"
+		return fcNetNone
+	}
+	if s, ok := cfg["network"].(string); ok {
+		switch s {
+		case fcNetWAN, fcNetLAN, fcNetFull:
+			return s
+		}
+		return fcNetNone
 	}
 	if s, ok := cfg["internet"].(string); ok && s == "full" {
-		return "full"
+		return fcNetWAN
 	}
-	return "none"
+	return fcNetNone
 }
 
 // groupRoot reads config.json's "root" profile: "yes" grants the guest's node
@@ -450,11 +464,12 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.listeners = append(vm.listeners, lnCtl)
 	go fcAcceptLoop(lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
 
-	// internet=full: attach the L3 gVisor gateway. The guest's fc-agent dials
-	// vsock 9003 once net="l3" is delivered at init; each accepted connection
-	// is handed to the gateway (egress-filtered — see fcnet.go). Gated here so
-	// a `none` group never even opens this listener.
-	if groupInternet(g) == "full" {
+	// network=wan|lan|full: attach the L3 gVisor gateway. The guest's fc-agent
+	// dials vsock 9003 once net="l3" is delivered at init; each accepted
+	// connection is handed to the gateway, egress-filtered under the group's
+	// profile (see fcnet.go). Gated here so a `none` group never even opens
+	// this listener. The policy is captured at spawn — changes apply on /restart.
+	if netPol := groupNetwork(g); netPol != fcNetNone {
 		vn, err := fcNetGateway()
 		if err != nil {
 			return fail(fmt.Errorf("l3 gateway: %w", err))
@@ -467,7 +482,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		vm.netCancel = cancel
 		go fcAcceptLoop(lnNet, func(c net.Conn) {
-			if err := fcNetServe(ctx, vn, c); err != nil && ctx.Err() == nil {
+			if err := fcNetServe(ctx, vn, c, netPol); err != nil && ctx.Err() == nil {
 				emitLogf("warn", "fc[%s]: l3 gateway conn: %v", g, err)
 			}
 		})
@@ -579,7 +594,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// 127.0.0.1 base URL direct. `net=l3` tells fc-agent to bring the TAP up.
 	// (Tradeoff vs the old L7-proxy egress: general HTTPS is no longer
 	// proxy-audited — see docs/firecracker-vsock.md.) A change here needs /restart.
-	if groupInternet(g) == "full" {
+	if groupNetwork(g) != fcNetNone {
 		for _, k := range []string{"NO_PROXY", "no_proxy"} {
 			env[k] = "127.0.0.1,localhost"
 		}
@@ -589,7 +604,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		"ports": pubPorts,
 		"env":   env,
 	}
-	if groupInternet(g) == "full" {
+	if groupNetwork(g) != fcNetNone {
 		initReq["net"] = "l3"
 	}
 	if groupRoot(g) {

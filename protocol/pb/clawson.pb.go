@@ -1056,9 +1056,10 @@ type ConfigReq struct {
 	Effort   *string                `protobuf:"bytes,3,opt,name=effort,proto3,oneof" json:"effort,omitempty"`
 	Ports    *string                `protobuf:"bytes,5,opt,name=ports,proto3,oneof" json:"ports,omitempty"`
 	Provider *string                `protobuf:"bytes,7,opt,name=provider,proto3,oneof" json:"provider,omitempty"`
-	Internet *string                `protobuf:"bytes,9,opt,name=internet,proto3,oneof" json:"internet,omitempty"` // none|full — applies on /restart
+	Internet *string                `protobuf:"bytes,9,opt,name=internet,proto3,oneof" json:"internet,omitempty"` // DEPRECATED — legacy none|full; daemon maps full→network=wan
 	Size     *string                `protobuf:"bytes,10,opt,name=size,proto3,oneof" json:"size,omitempty"`        // small|medium|large — applies on /restart
 	Root     *string                `protobuf:"bytes,11,opt,name=root,proto3,oneof" json:"root,omitempty"`        // yes|no — passwordless sudo in guest; applies on /restart
+	Network  *string                `protobuf:"bytes,12,opt,name=network,proto3,oneof" json:"network,omitempty"`  // none|wan|lan|full — egress profile; applies on /restart
 	// Types that are valid to be assigned to SkillsAction:
 	//
 	//	*ConfigReq_SkillsClear
@@ -1150,6 +1151,13 @@ func (x *ConfigReq) GetSize() string {
 func (x *ConfigReq) GetRoot() string {
 	if x != nil && x.Root != nil {
 		return *x.Root
+	}
+	return ""
+}
+
+func (x *ConfigReq) GetNetwork() string {
+	if x != nil && x.Network != nil {
+		return *x.Network
 	}
 	return ""
 }
@@ -2333,7 +2341,7 @@ const file_clawson_proto_rawDesc = "" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06before\x18\x03 \x01(\x01R\x06before\"!\n" +
 	"\tSkillList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\xb6\x03\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\xe1\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x01R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -2343,7 +2351,8 @@ const file_clawson_proto_rawDesc = "" +
 	"\binternet\x18\t \x01(\tH\x05R\binternet\x88\x01\x01\x12\x17\n" +
 	"\x04size\x18\n" +
 	" \x01(\tH\x06R\x04size\x88\x01\x01\x12\x17\n" +
-	"\x04root\x18\v \x01(\tH\aR\x04root\x88\x01\x01\x12;\n" +
+	"\x04root\x18\v \x01(\tH\aR\x04root\x88\x01\x01\x12\x1d\n" +
+	"\anetwork\x18\f \x01(\tH\bR\anetwork\x88\x01\x01\x12;\n" +
 	"\fskills_clear\x18\b \x01(\v2\x16.google.protobuf.EmptyH\x00R\vskillsClear\x123\n" +
 	"\n" +
 	"skills_set\x18\x04 \x01(\v2\x12.clawson.SkillListH\x00R\tskillsSetB\x0f\n" +
@@ -2354,7 +2363,9 @@ const file_clawson_proto_rawDesc = "" +
 	"\t_providerB\v\n" +
 	"\t_internetB\a\n" +
 	"\x05_sizeB\a\n" +
-	"\x05_root\"$\n" +
+	"\x05_rootB\n" +
+	"\n" +
+	"\b_network\"$\n" +
 	"\fSkillListReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"!\n" +
 	"\vSkillNewReq\x12\x12\n" +

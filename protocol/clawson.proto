@@ -180,9 +180,10 @@ message ConfigReq {
   optional string effort   = 3;
   optional string ports    = 5;
   optional string provider = 7;
-  optional string internet = 9;   // none|full — applies on /restart
+  optional string internet = 9;   // DEPRECATED — legacy none|full; daemon maps full→network=wan
   optional string size     = 10;  // small|medium|large — applies on /restart
   optional string root     = 11;  // yes|no — passwordless sudo in guest; applies on /restart
+  optional string network  = 12;  // none|wan|lan|full — egress profile; applies on /restart
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;
     SkillList             skills_set   = 4;

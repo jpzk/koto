@@ -20,7 +20,7 @@ you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
              ▼
    ┌─ microVM "main" ──┐  ┌─ microVM <g> ──┐   guest kernel behind KVM,
    │ claude -p loop    │  │ claude -p loop │   own /workspace (ext4 image),
-   │ + rootless podman │  │ ...            │   no NIC unless internet=full
+   │ + rootless podman │  │ ...            │   no NIC unless network=wan/lan/full
    └───────────────────┘  └────────────────┘
 ```
 
@@ -58,7 +58,7 @@ explicit `gap` event when the ring can't cover).
 | 9000 | LLM API egress → per-group proxy port (credential injection) |
 | 9001 | log stream (host file is the source of truth) |
 | 9002 | ctl plane (JSON lines) |
-| 9003 | L3 ethernet frames → gVisor gateway (`internet=full` only) |
+| 9003 | L3 ethernet frames → gVisor gateway (`network` ≠ `none`) |
 
 ## Threat model
 
@@ -91,11 +91,12 @@ tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch imag
   Venice key in process memory and injects per request; guests get a sentinel
   and a `ANTHROPIC_BASE_URL` pointing at vsock 9000. A compromised guest can
   *use* the proxy, not steal from it.
-- **Egress is a per-group profile.** `internet=none` (default): no NIC, no
+- **Egress is a per-group profile.** `network=none` (default): no NIC, no
   route, no DNS — the LLM leg via the proxy is the only egress, enforced by
-  absence of hardware, not policy. `internet=full`: a real L3 NIC via a
-  userspace gVisor gateway over vsock 9003, egress-filtered at the frame
-  layer so the guest can never reach loopback/link-local/cs_host itself (the
+  absence of hardware, not policy. `network=wan|lan|full`: a real L3 NIC via a
+  userspace gVisor gateway over vsock 9003, egress-filtered at the frame layer
+  by destination class — `wan` = public internet only, `lan` = host LAN only,
+  `full` = both. The guest can never reach loopback/link-local/cs_host itself (the
   control plane stays unreachable); general HTTPS then bypasses proxy audit —
   that's the documented tradeoff.
 - **No shared mutable filesystem.** Workspaces are per-group ext4 images;
@@ -125,7 +126,7 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 
 | module | direct deps | indirect |
 |--------|-------------|----------|
-| `clawson` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`internet=full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `clawson-protocol` | ~21 |
+| `clawson` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `clawson-protocol` | ~21 |
 | `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
 | `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | ~35 |
 | `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
@@ -157,7 +158,7 @@ claude-code layers are the accepted moving parts.
 | key | values | applies |
 |-----|--------|---------|
 | `provider` | `venice` (default) \| `claudesdk` | next message |
-| `internet` | `none` (default) \| `full` | `/restart` |
+| `network` | `none` (default) \| `wan` \| `lan` \| `full` | `/restart` |
 | `size` | `small` (default) \| `medium` \| `large` | `/restart` |
 | `root` | `no` (default) \| `yes` | `/restart` |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `clawson-net` | `/restart` |
@@ -198,7 +199,7 @@ configured into the host system itself. What the host must provide:
 
 Deliberate **non**-requirements: no root (all rootless), no `vhost_vsock`
 module (Firecracker's hybrid vsock is unix-socket-backed), no host
-`/dev/net/tun` (the `internet=full` gateway is userspace gVisor inside
+`/dev/net/tun` (the `network` gateway is userspace gVisor inside
 cs_host; `CONFIG_TUN` is a *guest* kernel option), no Go/Node/protoc
 toolchain on the host (all builds are containerized), and no SELinux
 tuning (`--security-opt label=disable` is set on every podman run).
