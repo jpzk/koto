@@ -178,8 +178,14 @@ fc-assets: fc-fetch fc-kernel fc-rootfs
 # metrics, run/, build sentinels). Group workspaces — every agent's session
 # history, prompt.md, and files — are untouched. The destructive wipe is
 # clean-groups, split out after a `make clean` deleted five groups' state.
+# run/fc holds per-VM droppings created by the JAILED firecracker processes,
+# whose per-VM uids map to host subuids — the host user can't rm those
+# directly (Permission denied). podman unshare re-enters the same subuid
+# userns as root, which can. The daemon removes them on a graceful stop;
+# the unshare here catches `podman rm -f` / crash leftovers.
 clean: stop
-	rm -rf metrics.jsonl proxy.log run $(BUILD)
+	rm -rf metrics.jsonl proxy.log $(BUILD)
+	podman unshare rm -rf run
 
 # clean-groups PERMANENTLY DELETES all group state: groups/ (each group's
 # workspace.img = sessions, prompts, files), groups.json (port allocations),
