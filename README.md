@@ -24,7 +24,8 @@ you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
    └───────────────────┘  └────────────────┘
 ```
 
-- **Daemon** (`daemon.go`, `fc.go`): boots/supervises microVMs, serializes one
+- **Daemon** (root `*.go`; entry in `daemon.go`, VM runtime in `fc.go`, one
+  topic per file — see CLAUDE.md → Layout): boots/supervises microVMs, serializes one
   `claude -p --continue` turn per inbound message, tails each group's log and
   fans events out to subscribers, runs the cron scheduler and the ctl verb
   plane.

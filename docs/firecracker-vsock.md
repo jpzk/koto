@@ -84,7 +84,7 @@ recreating its environment inside the VM:
 - PID-1 zombie reaping via a central wait4(-1) loop with a tracked-pid table
   (the catatonit role), children in their own process groups.
 
-## Daemon side (`fc.go` + branches in daemon.go)
+## Daemon side (`fc.go` + call sites in `groups.go`/`send.go`)
 
 - `groupRuntime(g)`: config.json `"runtime"`; anything but "firecracker" →
   podman. Branch points: `ensure()` (spawn), `sendNow()` (delivery),
