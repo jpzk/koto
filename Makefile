@@ -42,7 +42,7 @@ host-build: $(BUILD)/clawson-host
 # Build context stays at project root so the Dockerfile's `COPY protocol/`
 # and `COPY tui/...` paths resolve. Inputs cover the actual sources COPYed.
 TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
-PROTO_SRC  := $(wildcard protocol/*.go) $(wildcard protocol/pb/*.go) protocol/go.mod protocol/clawson.proto
+PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/clawson.proto
 $(BUILD)/clawson-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
 	podman build -t clawson-tui -f tui/Dockerfile .
 	@touch $@
@@ -80,9 +80,9 @@ stop:
 	@podman ps -a --format '{{.Names}}' | grep -E '^cs_.*_go$$' | xargs -r podman rm -f
 
 run:
-	go run . daemon
+	go run ./daemon daemon
 proxy:
-	go run . proxy
+	go run ./daemon proxy
 
 metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl

@@ -1,0 +1,24 @@
+// Monorepo workspace: each subproject is its own Go module, built
+// separately; the only shared code is the proto contract in protocol/
+// (clawson.proto + committed generated pb). The workspace exists so go
+// commands work from the repo root — most importantly `go run ./daemon
+// daemon`, which must run with cwd = repo root because the daemon resolves
+// its runtime dirs (groups/, creds/, fcassets/, run/) relative to cwd.
+go 1.24.2
+
+use (
+	./daemon
+	./fcguest
+	./protocol
+	./tui
+)
+
+// Workspace-only fix for an ambiguous-import: gvisor (via the daemon's
+// gvisor-tap-vsock dep) requires the pre-split genproto monolith, which
+// still ships googleapis/rpc/status — colliding with the split
+// genproto/googleapis/rpc module that grpc uses. Module-mode graph pruning
+// hides the monolith; the workspace's union graph does not. Pin it to a
+// post-split version (2024-02-13, no googleapis/rpc inside) so only the
+// split module provides the package. Harmless to module builds (GOWORK=off),
+// which never select the monolith at all.
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20240213162025-012b6fc9bca9

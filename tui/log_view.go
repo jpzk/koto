@@ -11,14 +11,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/muesli/termenv"
-
-	"clawson-protocol"
 )
 
 // logEventMsg carries one daemon log frame from the subscribe goroutine
-// into the Update loop. Aliasing the wire type keeps the call sites short
-// without dragging the protocol package into model.go's import list.
-type logEventMsg protocol.LogEvent
+// into the Update loop. Wrapping the view type (wire.go) keeps the call
+// sites short.
+type logEventMsg LogEvent
 
 // logSubClosedMsg signals the daemon log subscription died (daemon went
 // away, socket closed, etc.). Update() schedules a reconnect attempt the
@@ -102,7 +100,7 @@ func startLogSubscribe(sock string) {
 // using charmbracelet/log. SetTimeFunction pins the rendered timestamp to
 // the daemon's ev.Ts (otherwise the formatter uses time.Now(), which is
 // noticeably wrong for ring-buffer replays after a late `cmd:"logs"`).
-func formatLogLine(ev protocol.LogEvent) string {
+func formatLogLine(ev LogEvent) string {
 	logRenderBuf.Reset()
 	t := time.Unix(0, int64(ev.Ts*1e9))
 	logRenderer.SetTimeFunction(func(time.Time) time.Time { return t })

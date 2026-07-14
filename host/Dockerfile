@@ -8,8 +8,10 @@
 # or the npm-installed claude-code version.
 #
 # run-host.sh bind-mounts the project root at its matching host path
-# (`-v "$HERE:$HERE"`) and sets WORKDIR to that path, so `go run .` finds
-# go.mod + sources + ./protocol/ without anything being COPYed in.
+# (`-v "$HERE:$HERE"`) and sets WORKDIR to that path, so `go run ./daemon`
+# finds go.work + daemon/ + protocol/ without anything being COPYed in.
+# cwd stays the project root — the daemon resolves its runtime dirs
+# (groups/, creds/, fcassets/, run/) relative to cwd, not to its source.
 FROM docker.io/library/golang:1.24-alpine
 # e2fsprogs: mkfs.ext4 + e2fsck for per-group workspace.img (Firecracker
 # runtime, fcEnsureWorkspaceImg). e2fsprogs-extra: resize2fs, used to grow an
@@ -19,6 +21,7 @@ FROM docker.io/library/golang:1.24-alpine
 # podman CLI here) has been removed — cs_host has no path to any podman daemon.
 RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
  && npm i -g @anthropic-ai/claude-code
-ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host_go \
-    GOFLAGS=-mod=mod
-ENTRYPOINT ["go","run",".","daemon"]
+# No GOFLAGS=-mod=mod: workspace mode (go.work at the project root) only
+# permits -mod=readonly, and go run never needs to rewrite go.mod here.
+ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host_go
+ENTRYPOINT ["go","run","./daemon","daemon"]

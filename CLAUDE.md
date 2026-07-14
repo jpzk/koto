@@ -24,33 +24,42 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
 
 ## Layout
 
+Monorepo: each subproject is its own module, built separately; the only
+shared code is protocol/ (the proto contract). go.work at the root ties the
+Go modules together so `go run ./daemon daemon` works from the repo root —
+the daemon resolves its runtime dirs (groups/, creds/, fcassets/, run/)
+relative to cwd, which stays the repo root.
+
 ```
-main.go              entry point dispatching `daemon` / `proxy` / `fcjail` subcommands
-daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
-groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
-send.go              turn delivery: sendNow, turn-done/stall tracking, self-heal, interruptAgent, bg-task tailer
-events.go            event fan-out: subscriber registry + replay ring, state-watch push, daemon log ring
-logtail.go           per-group log tailer (live) + readHistory (replay parser) — the [[marker]] framing parser
-config.go            config.json command handling (applyConfig validation per key)
-skills.go            skill catalog + composeSystemPrompt + skill_* commands
-metrics.go           metrics.jsonl tail + <clawson-context> block injected into prompts
-queue.go             per-group single-flight send queue
-cron.go / schedules.go  cron parser + schedule store/loop
-ctl.go               in-guest control plane (FIFO verbs, per-group authorization)
-notify.go            job_done → ntfy push
-auth.go              gRPC mTLS + bearer-token layers
-sanitize.go          terminal-escape/bidi scrubbing of streamed events
-attachments.go       inbound attachment staging
-grpc_server.go       gRPC service methods (thin wrappers over the funcs above)
-proxy.go             HTTP proxy, cred injection, metrics, multi-port watcher
-fc.go                Firecracker runtime: VM lifecycle, vsock multiplexer (proxy/log/ctl), agent RPC, workspace.img migration
-fcjail.go            host-side jail for the FC VMM process (userns/chroot re-exec)
-fcnet.go             internet=full gateway: gVisor L3 over vsock + frame-layer egress filter
+go.work              workspace: daemon + fcguest + protocol + tui (plus the genproto pin — see its comment)
+daemon/              the daemon Go module (module `clawson`):
+  main.go              entry point dispatching `daemon` / `proxy` / `fcjail` subcommands
+  daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
+  groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
+  send.go              turn delivery: sendNow, turn-done/stall tracking, self-heal, interruptAgent, bg-task tailer
+  events.go            event fan-out: subscriber registry + replay ring, state-watch push, daemon log ring
+  logtail.go           per-group log tailer (live) + readHistory (replay parser) — the [[marker]] framing parser
+  config.go            config.json command handling (applyConfig validation per key)
+  skills.go            skill catalog + composeSystemPrompt + skill_* commands
+  metrics.go           metrics.jsonl tail + <clawson-context> block injected into prompts
+  queue.go             per-group single-flight send queue
+  cron.go / schedules.go  cron parser + schedule store/loop
+  ctl.go               in-guest control plane (FIFO verbs, per-group authorization)
+  notify.go            job_done → ntfy push
+  auth.go              gRPC mTLS + bearer-token layers
+  sanitize.go          terminal-escape/bidi scrubbing of streamed events
+  attachments.go       inbound attachment staging
+  grpc_server.go       gRPC service methods (thin wrappers over the funcs above)
+  proxy.go             HTTP proxy, cred injection, metrics, multi-port watcher
+  fc.go                Firecracker runtime: VM lifecycle, vsock multiplexer (proxy/log/ctl), agent RPC, workspace.img migration
+  fcjail.go            host-side jail for the FC VMM process (userns/chroot re-exec)
+  fcnet.go             internet=full gateway: gVisor L3 over vsock + frame-layer egress filter
+  wire/                daemon-internal JSON wire types (ctl FIFO plane + pb conversion shapes; moved out of protocol/)
 fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
-go.mod               root module (require clawson-protocol → ./protocol)
-protocol/            shared wire types (separate stdlib-only Go module; imported by daemon + TUI)
+protocol/            the cross-project contract: clawson.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import clawson-protocol/pb; android/ Wire-generates Kotlin from clawson.proto
+android/             Kotlin/Compose app (Gradle project; builds standalone — Wire reads ../protocol/clawson.proto)
 sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-subagent (baked into the fc rootfs)
 host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
@@ -300,7 +309,7 @@ grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.ke
 
 ## Iterating
 
-- **Edits to daemon/proxy `*.go` are live.** `host/Dockerfile` is just `golang:1.24-alpine + podman + claude-code-cli`; the entrypoint is `go run . daemon`. `host/run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`) plus a persistent `.gocache/` build cache, so a daemon edit followed by `make host-run` recompiles + restarts in ~1s. The first compile after `make clean` is ~12s (cold cache). Only rebuild the image (`make host-build`) when changing `host/Dockerfile`, `sidecar/Dockerfile`, or the installed deps (podman/nodejs/claude-code).
+- **Edits to daemon/proxy `*.go` are live.** `host/Dockerfile` is just `golang:1.24-alpine + podman + claude-code-cli`; the entrypoint is `go run ./daemon daemon` (cwd = repo root, resolved via the root `go.work`). `host/run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`) plus a persistent `.gocache/` build cache, so a daemon edit followed by `make host-run` recompiles + restarts in ~1s. The first compile after `make clean` is ~12s (cold cache). Only rebuild the image (`make host-build`) when changing `host/Dockerfile`, `sidecar/Dockerfile`, or the installed deps (podman/nodejs/claude-code).
 - **Edits to `tui/*.go` require a rebuild.** No hot-reload — the runtime image is `scratch` + static binary. Cycle is `make tui-build && make tui`; Go compiles in 1-2s. Trade-off vs. the prior Ink/bun hot-reload: slower iteration in exchange for sock-only mount (no bind-mount of source), no JS runtime in the container, and ~10MB instead of ~80MB. To regenerate `go.sum` after changing `go.mod`, run `podman run --rm --security-opt label=disable -v $(pwd)/tui:/src -w /src docker.io/library/golang:1.24-alpine go mod tidy` from the project root.
 - **[podman] Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing podman sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
 - **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent`, node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make fc-rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `docs/firecracker-vsock.md`. the host-side `*.go` (daemon/fc/proxy) is still live (`go run` in `cs_host`), so only guest-side changes need the rootfs rebuild.

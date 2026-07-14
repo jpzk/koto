@@ -4,10 +4,11 @@ go 1.24.0
 
 toolchain go1.24.13
 
-// The shared wire contract is now protobuf/gRPC (see clawson.proto; generated
-// code in ./pb). This module is no longer stdlib-only: the generated service
-// stubs pull in grpc + protobuf, so importing clawson-protocol/pb widens the
-// TUI's dep tree. Pins verified >=6 weeks old as of 2026-06-14:
+// This module is the entire cross-project contract: clawson.proto plus its
+// committed generated code in ./pb — nothing hand-written. The daemon and
+// TUI import clawson-protocol/pb; the Android app Wire-generates Kotlin
+// from clawson.proto at build time. The generated service stubs pull in
+// grpc + protobuf. Pins verified >=6 weeks old as of 2026-06-14:
 //   google.golang.org/grpc     v1.80.0  — 2026-04-01
 //   google.golang.org/protobuf v1.36.11 — 2025-12-12
 require (

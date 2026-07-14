@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"clawson-protocol"
 	"clawson-protocol/pb"
 
 	"google.golang.org/grpc"
@@ -21,16 +20,12 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// Wire types are shared with the daemon via the clawson-protocol module.
-// Aliasing under the TUI's existing names (Event, GroupInfo) keeps the rest of
-// the package readable. The daemon transport is now gRPC over mTLS+token (see
-// the daemon's auth.go); this file holds the client side. The historical
-// `sock` parameter on every *Cmd is retained for call-site stability but is no
+// The wire contract shared with the daemon is the proto alone (generated
+// code in clawson-protocol/pb); the view types it converts into live in
+// wire.go. The daemon transport is gRPC over mTLS+token (see the daemon's
+// auth.go); this file holds the client side. The historical `sock`
+// parameter on every *Cmd is retained for call-site stability but is no
 // longer the connection address — the endpoint + creds come from env.
-type (
-	Event     = protocol.Event
-	GroupInfo = protocol.GroupInfo
-)
 
 // ---- connection (mTLS + bearer token, over a private overlay) -------------
 
@@ -344,6 +339,6 @@ func pbToEvent(p *pb.Event) Event {
 	}
 }
 
-func pbToLogEvent(p *pb.LogEvent) protocol.LogEvent {
-	return protocol.LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts}
+func pbToLogEvent(p *pb.LogEvent) LogEvent {
+	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts}
 }

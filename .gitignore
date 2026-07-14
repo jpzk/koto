@@ -8,7 +8,8 @@ run/
 .gocache/
 .gomodcache/
 .build/
-/clawson
+/daemon/daemon
+/daemon/clawson
 /tui/clawson-tui
 schedules.json
 __pycache__/

@@ -21,8 +21,10 @@ require (
 	google.golang.org/protobuf v1.36.11
 )
 
-// Shared wire types live one directory up. The protocol module is stdlib-
-// only, so importing it does not widen the TUI's dep tree.
+// The only code shared with the daemon is the proto contract: the TUI
+// imports clawson-protocol/pb (committed generated code) and nothing else
+// from that module. The generated stubs pull in grpc + protobuf, both
+// pinned here under the same 6-week rule.
 replace clawson-protocol => ../protocol
 
 require (

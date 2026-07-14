@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"clawson-protocol"
 	"clawson-protocol/pb"
+	"clawson/wire"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -28,40 +28,40 @@ import (
 // ---- wire-type aliases ---------------------------------------------------
 
 // Re-export the wire types under the daemon's existing lowercase names so
-// the rest of this file reads naturally (spawnReq vs. protocol.SpawnReq).
-// Canonical definitions live in protocol/protocol.go — these are pure
-// aliases, not redefinitions; embedding `baseResp` in another struct
-// behaves identically to embedding `protocol.BaseResp`.
+// the rest of this file reads naturally (spawnReq vs. wire.SpawnReq).
+// Canonical definitions live in wire/wire.go — these are pure aliases, not
+// redefinitions; embedding `baseResp` in another struct behaves identically
+// to embedding `wire.BaseResp`.
 type (
-	Event          = protocol.Event
-	GroupInfo      = protocol.GroupInfo
-	skillItem      = protocol.SkillItem
-	baseResp       = protocol.BaseResp
-	cmdEnvelope    = protocol.CmdEnvelope
-	spawnReq       = protocol.SpawnReq
-	spawnResp      = protocol.SpawnResp
-	sendReq        = protocol.SendReq
-	groupReq       = protocol.GroupReq
-	configReq      = protocol.ConfigReq
-	configResp     = protocol.ConfigResp
-	listResp       = protocol.ListResp
-	skillsResp     = protocol.SkillsResp
-	skillListReq   = protocol.SkillListReq
-	skillNewReq    = protocol.SkillNewReq
-	skillNewResp   = protocol.SkillNewResp
-	skillReadReq   = protocol.SkillReadReq
-	skillReadResp  = protocol.SkillReadResp
-	LogEvent       = protocol.LogEvent
-	scheduleItem   = protocol.ScheduleItem
-	schedAddReq    = protocol.SchedAddReq
-	schedAddResp   = protocol.SchedAddResp
-	schedListReq   = protocol.SchedListReq
-	schedListResp  = protocol.SchedListResp
-	schedIDReq     = protocol.SchedIDReq
-	schedToggleReq = protocol.SchedToggleReq
+	Event          = wire.Event
+	GroupInfo      = wire.GroupInfo
+	skillItem      = wire.SkillItem
+	baseResp       = wire.BaseResp
+	cmdEnvelope    = wire.CmdEnvelope
+	spawnReq       = wire.SpawnReq
+	spawnResp      = wire.SpawnResp
+	sendReq        = wire.SendReq
+	groupReq       = wire.GroupReq
+	configReq      = wire.ConfigReq
+	configResp     = wire.ConfigResp
+	listResp       = wire.ListResp
+	skillsResp     = wire.SkillsResp
+	skillListReq   = wire.SkillListReq
+	skillNewReq    = wire.SkillNewReq
+	skillNewResp   = wire.SkillNewResp
+	skillReadReq   = wire.SkillReadReq
+	skillReadResp  = wire.SkillReadResp
+	LogEvent       = wire.LogEvent
+	scheduleItem   = wire.ScheduleItem
+	schedAddReq    = wire.SchedAddReq
+	schedAddResp   = wire.SchedAddResp
+	schedListReq   = wire.SchedListReq
+	schedListResp  = wire.SchedListResp
+	schedIDReq     = wire.SchedIDReq
+	schedToggleReq = wire.SchedToggleReq
 )
 
-var errResp = protocol.ErrResp
+var errResp = wire.ErrResp
 
 // ---- paths & config -------------------------------------------------------
 

@@ -12,8 +12,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-
-	"clawson-protocol"
 )
 
 const (
@@ -1165,7 +1163,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// we then push it through the same append/refresh path as live
 		// frames. Even when the user isn't on the log view, we accumulate
 		// so opening it later shows the buffered history.
-		m.appendLogLine(formatLogLine(protocol.LogEvent(msg)))
+		m.appendLogLine(formatLogLine(LogEvent(msg)))
 		return m, nil
 
 	case logSubClosedMsg:

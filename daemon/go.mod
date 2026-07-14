@@ -34,4 +34,4 @@ require (
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
 )
 
-replace clawson-protocol => ./protocol
+replace clawson-protocol => ../protocol

@@ -1,15 +1,15 @@
-// Package protocol holds the wire types shared between the daemon and its
-// clients. The client-facing transport is gRPC (see clawson.proto / pb);
+// Package wire holds the daemon's JSON wire types. The client-facing
+// transport is gRPC (see protocol/clawson.proto and the generated pb);
 // these JSON types survive in two places: the per-group FIFO ctl plane
 // (ctl.go serializes them as line-delimited JSON over ctl/ctl.out) and as
-// the in-memory event/state shapes the daemon and TUI convert to and from
-// the generated pb messages.
+// the in-memory event/state shapes the daemon converts to and from the
+// generated pb messages.
 //
-// This package is a separate Go module (clawson-protocol) so it can be
-// imported by both the root daemon module and the tui module without
-// merging their dep trees — the TUI's blast-radius isolation still holds
-// because this module is stdlib-only.
-package protocol
+// This package is daemon-internal. It used to live in the shared
+// clawson-protocol module, but the cross-project contract is now the proto
+// alone: the TUI and the Android app consume only clawson.proto (or its
+// committed generated code), never these types.
+package wire
 
 import "encoding/json"
 

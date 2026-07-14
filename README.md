@@ -24,7 +24,7 @@ you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
    └───────────────────┘  └────────────────┘
 ```
 
-- **Daemon** (root `*.go`; entry in `daemon.go`, VM runtime in `fc.go`, one
+- **Daemon** (`daemon/`; entry in `daemon.go`, VM runtime in `fc.go`, one
   topic per file — see CLAUDE.md → Layout): boots/supervises microVMs, serializes one
   `claude -p --continue` turn per inbound message, tails each group's log and
   fans events out to subscribers, runs the cron scheduler and the ctl verb
@@ -126,7 +126,7 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 | module | direct deps | indirect |
 |--------|-------------|----------|
 | `clawson` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`internet=full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `clawson-protocol` | ~21 |
-| `protocol/` (wire types) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
+| `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
 | `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | ~35 |
 | `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
 
