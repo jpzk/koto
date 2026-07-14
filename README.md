@@ -124,6 +124,47 @@ tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch imag
 | `root` | `no` (default) \| `yes` | `/restart` |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `clawson-net` | `/restart` |
 
+## Host requirements
+
+Everything runs rootless as the host user; nothing is installed on or
+configured into the host system itself. What the host must provide:
+
+- **Linux x86_64 with KVM** — `/dev/kvm` present and user-accessible
+  (VT-x/AMD-V, or nested virtualization when the host is itself a VM). This
+  is the one hard requirement: every group boots as a Firecracker microVM.
+  `run-host.sh` passes `--device /dev/kvm` through when present; without it
+  the daemon runs but group boots fail a clear preflight (`fcPreflight`,
+  `fc.go`).
+- **Rootless podman** with pasta networking (the Fedora default;
+  slirp4netns is not used) and working subuid/subgid ranges — the rootfs
+  build runs under `podman unshare`. Podman hosts cs_host, the TUI, and
+  every containerized build (Go, protoc, the guest kernel).
+- **Unprivileged user namespaces — nested.** Rootless podman puts cs_host
+  in a userns; the VMM jailer (`fcjail.go`) then clones a *second* userns
+  from inside that container. So the kernel must allow not just
+  unprivileged userns creation but creation from within an existing one:
+  `user.max_user_namespaces` > 0 and no seccomp/LSM policy blocking
+  `clone(CLONE_NEWUSER)` inside containers. Fedora's defaults satisfy
+  both; hardening like Ubuntu 24.04's
+  `kernel.apparmor_restrict_unprivileged_userns` is the kind of setting
+  that breaks it.
+- **e2fsprogs** (`mkfs.ext4`) for the golden-rootfs build. Workspace image
+  creation and growth at runtime use the copy baked into the cs_host image.
+- **Baseline CLI tools**: `make`, `curl`, `tar`, `git`, plus `openssl` for
+  the PKI targets and `jq` for `pki-client` / `metrics`.
+- **Build-time network and resources**: `make fc-assets` downloads the
+  pinned Firecracker release, clones the Amazon Linux kernel tree, and
+  compiles the guest kernel inside an Ubuntu container (a few GiB of disk
+  under `.kernelcache/`, minutes of CPU). At runtime each group reserves
+  1–4 GiB RAM and an 8–16 GiB workspace image per its `size` preset.
+
+Deliberate **non**-requirements: no root (all rootless), no `vhost_vsock`
+module (Firecracker's hybrid vsock is unix-socket-backed), no host
+`/dev/net/tun` (the `internet=full` gateway is userspace gVisor inside
+cs_host; `CONFIG_TUN` is a *guest* kernel option), no Go/Node/protoc
+toolchain on the host (all builds are containerized), and no SELinux
+tuning (`--security-opt label=disable` is set on every podman run).
+
 ## Build & run
 
 ```sh
