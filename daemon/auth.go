@@ -130,6 +130,11 @@ func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) erro
 	target, targeted := targetOf(req)
 	roles := strings.Join(id.Roles, ",")
 	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
+		if targeted {
+			emitLogf("acl", "info", "%s (roles %s) allowed %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
+		} else {
+			emitLogf("acl", "info", "%s (roles %s) allowed %s from %s", id.Name, roles, verb, peerAddr(ctx))
+		}
 		return nil
 	}
 	if targeted {
