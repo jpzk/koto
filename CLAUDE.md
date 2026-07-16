@@ -331,20 +331,31 @@ the same mTLS + bearer token + role ACL every client goes through, so a verb
 the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
 and endpoint resolve from `CLAWSON_*` env (`CLAWSON_ADDR`, `CLAWSON_CREDS_DIR`,
 `CLAWSON_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `CLAWSON_SERVER_NAME`).
+Every gRPC RPC has a `ctl` verb (25/25). Group lifecycle
+(`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
+(`send`, `ask`, `history`), `config`, skills (`skills`/`skill-new`/
+`skill-read`), streams (`metrics`, `tail`, `logs`, `watch`), `sched *`, and
+admin-only `acl get|set|del`.
 ```sh
 make pki-client NAME=agent ROLE=agent          # mint a scoped identity
 CLAWSON_CLIENT=agent ./clawson ctl list
 CLAWSON_CLIENT=agent ./clawson ctl ask main "status?"   # send + stream reply, exit at turn end
 CLAWSON_CLIENT=agent ./clawson ctl history -limit 20 main
+CLAWSON_CLIENT=agent ./clawson ctl config main            # read effective config
+CLAWSON_CLIENT=tui   ./clawson ctl config main -network wan -size large  # set (group FIRST, flags after)
+CLAWSON_CLIENT=agent ./clawson ctl tail main | jq .       # one event per line
 # admin-only ACL management:
 CLAWSON_CLIENT=tui ./clawson ctl acl get
 CLAWSON_CLIENT=tui ./clawson ctl acl set ops stop:ghost restart:ghost list metrics
 CLAWSON_CLIENT=tui ./clawson ctl acl del ops
 ```
-The daemon port isn't host-published by default (see run-host.sh
-`CLAWSON_PUBLISH`); `ctl` either runs on `clawson-net` or dials a published
-endpoint. `ask` subscribes before sending, so no reply frame is missed, and
-exits at `turn_end`.
+`config` takes the group as the first positional with flags *after* it
+(`config <group> [-flags]`); an explicit `-key ""` clears that key, an absent
+flag leaves it unchanged. Streaming verbs (`tail`/`logs`/`watch`) print one
+protojson frame per line. The daemon port isn't host-published by default (see
+run-host.sh `CLAWSON_PUBLISH`); `ctl` either runs on `clawson-net` or dials a
+published endpoint. `ask` subscribes before sending, so no reply frame is
+missed, and exits at `turn_end`.
 
 ### Pitfalls observed in this codebase
 

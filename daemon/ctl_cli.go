@@ -51,6 +51,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -65,11 +66,24 @@ conversation
   send <group> <msg...>        enqueue a message, return immediately ("-" = stdin)
   ask  [-timeout D] [-json] <group> <msg...>
                                send + stream the reply, exit at turn end
-  tail [-since N] <group>      raw event stream, one JSON line per event
   history [-limit N] [-before TS] <group>
 
-other
+config
+  config <group>                           print effective config (no flags = read)
+  config <group> [-model M] [-provider P] [-network none|wan|lan|full]
+         [-size small|medium|large] [-root yes|no] [-effort E] [-ports P]
+         [-skills a,b,c | -skills-clear]    set keys ("" clears a key)
+
+skills
+  skills [group]                           catalog + a group's enabled set
+  skill-new <name>                         scaffold skills/<name>/SKILL.md
+  skill-read <name>                        print a skill's SKILL.md
+
+streams
   metrics [group]
+  tail   [-since N] <group>                group event stream
+  logs                                     daemon's own log stream
+  watch                                    group-state snapshots on change
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
 
 acl (admin role only)
@@ -261,14 +275,7 @@ func ctlCliMain(args []string) {
 		if err != nil {
 			ctlFatal(1, "subscribe: %v", err)
 		}
-		for {
-			ev, err := stream.Recv()
-			if err != nil {
-				ctlFatal(1, "stream: %v", err)
-			}
-			b, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(ev)
-			fmt.Println(string(b))
-		}
+		ctlStreamJSON(func() (proto.Message, error) { return stream.Recv() })
 
 	case "history":
 		fs := flag.NewFlagSet("history", flag.ExitOnError)
@@ -317,6 +324,62 @@ func ctlCliMain(args []string) {
 		defer cancel()
 		resp, err := cl.Metrics(ctx, &pb.MetricsReq{Group: g})
 		ctlPrint(resp, err)
+
+	case "config":
+		ctlConfig(rest)
+
+	case "skills":
+		g := ""
+		if len(rest) == 1 {
+			g = rest[0]
+		} else if len(rest) > 1 {
+			ctlFatal(2, "usage: clawson ctl skills [group]")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Skills(ctx, &pb.SkillListReq{Group: g})
+		ctlPrint(resp, err)
+
+	case "skill-new":
+		if len(rest) != 1 {
+			ctlFatal(2, "usage: clawson ctl skill-new <name>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.SkillNew(ctx, &pb.SkillNewReq{Name: rest[0]})
+		ctlPrint(resp, err)
+
+	case "skill-read":
+		if len(rest) != 1 {
+			ctlFatal(2, "usage: clawson ctl skill-read <name>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.SkillRead(ctx, &pb.SkillReadReq{Name: rest[0]})
+		ctlPrint(resp, err)
+
+	case "logs":
+		if len(rest) != 0 {
+			ctlFatal(2, "usage: clawson ctl logs")
+		}
+		stream, err := ctlClient().SubscribeLogs(context.Background(), &pb.LogsReq{})
+		if err != nil {
+			ctlFatal(1, "logs: %v", err)
+		}
+		ctlStreamJSON(func() (proto.Message, error) { return stream.Recv() })
+
+	case "watch":
+		if len(rest) != 0 {
+			ctlFatal(2, "usage: clawson ctl watch")
+		}
+		stream, err := ctlClient().WatchState(context.Background(), &pb.WatchReq{})
+		if err != nil {
+			ctlFatal(1, "watch: %v", err)
+		}
+		ctlStreamJSON(func() (proto.Message, error) { return stream.Recv() })
 
 	case "sched":
 		ctlSched(rest)
@@ -397,6 +460,97 @@ func ctlAcl(args []string) {
 	default:
 		ctlFatal(2, "unknown acl subcommand: %s (get|set|del)", sub)
 	}
+}
+
+// ctlStreamJSON drains a server stream to stdout, one protojson line per
+// frame, until the stream ends or errors. Shared by tail/logs/watch — every
+// streaming verb prints the same one-frame-per-line shape agents can pipe
+// into jq. A clean EOF (io.EOF) exits 0; any other error exits 1.
+func ctlStreamJSON(recv func() (proto.Message, error)) {
+	for {
+		msg, err := recv()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			ctlFatal(1, "stream: %v", err)
+		}
+		b, _ := protojson.MarshalOptions{UseProtoNames: true}.Marshal(msg)
+		fmt.Println(string(b))
+	}
+}
+
+// ctlConfig reads or sets a group's config.json. With no -flags it's a pure
+// read (the daemon returns the effective config, all keys filled). A flag is
+// only sent when explicitly passed (fs.Visit), so an absent flag leaves its
+// key unchanged while an explicit empty value ("") clears it — matching the
+// optional-field semantics the TUI uses. Most keys apply on the next
+// /restart (network/size/root/ports); model/provider/effort take effect on
+// the next message.
+func ctlConfig(args []string) {
+	// Group is the first positional, flags follow (config <group> [-flags]).
+	// Go's flag package stops at the first non-flag token, so the group must
+	// lead — parse everything after it as flags.
+	if len(args) < 1 {
+		ctlFatal(2, "usage: clawson ctl config <group> [-model M] [-network none|wan|lan|full] [-skills a,b|-skills-clear] ...")
+	}
+	group, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	model := fs.String("model", "", `model (""=clear)`)
+	effort := fs.String("effort", "", "reasoning effort")
+	ports := fs.String("ports", "", "published ports (comma list)")
+	provider := fs.String("provider", "", "claudesdk|venice")
+	network := fs.String("network", "", "none|wan|lan|full")
+	size := fs.String("size", "", "small|medium|large")
+	root := fs.String("root", "", "yes|no")
+	skills := fs.String("skills", "", "enabled skills (comma list)")
+	skillsClear := fs.Bool("skills-clear", false, "clear the enabled-skills list")
+	fs.Parse(rest)
+	if fs.NArg() != 0 {
+		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
+	}
+	req := &pb.ConfigReq{Group: group}
+
+	seen := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+	if seen["model"] {
+		req.Model = model
+	}
+	if seen["effort"] {
+		req.Effort = effort
+	}
+	if seen["ports"] {
+		req.Ports = ports
+	}
+	if seen["provider"] {
+		req.Provider = provider
+	}
+	if seen["network"] {
+		req.Network = network
+	}
+	if seen["size"] {
+		req.Size = size
+	}
+	if seen["root"] {
+		req.Root = root
+	}
+	if seen["skills-clear"] && *skillsClear {
+		req.SkillsAction = &pb.ConfigReq_SkillsClear{SkillsClear: &emptypb.Empty{}}
+	} else if seen["skills"] {
+		var items []string
+		for _, s := range strings.Split(*skills, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				items = append(items, s)
+			}
+		}
+		req.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: items}}
+	}
+
+	cl := ctlClient()
+	ctx, cancel := ctlCtx()
+	defer cancel()
+	resp, err := cl.Config(ctx, req)
+	ctlPrint(resp, err)
 }
 
 // ctlAsk is the synchronous primitive agents actually want: send a message,
