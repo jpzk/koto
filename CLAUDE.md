@@ -323,6 +323,29 @@ grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.ke
   -proto protocol/clawson.proto 127.0.0.1:8443 clawson.Clawson/List
 ```
 
+**`clawson ctl` is the ergonomic client for agents** — the same daemon binary,
+`ctl` subcommand (`daemon/ctl_cli.go`), one process invocation per verb that
+prints the response as JSON and exits (0 ok, 1 daemon-error/transport, 2
+usage). Build with `make ctl-build` → `./clawson`. Auth + authorization are
+the same mTLS + bearer token + role ACL every client goes through, so a verb
+the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
+and endpoint resolve from `CLAWSON_*` env (`CLAWSON_ADDR`, `CLAWSON_CREDS_DIR`,
+`CLAWSON_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `CLAWSON_SERVER_NAME`).
+```sh
+make pki-client NAME=agent ROLE=agent          # mint a scoped identity
+CLAWSON_CLIENT=agent ./clawson ctl list
+CLAWSON_CLIENT=agent ./clawson ctl ask main "status?"   # send + stream reply, exit at turn end
+CLAWSON_CLIENT=agent ./clawson ctl history -limit 20 main
+# admin-only ACL management:
+CLAWSON_CLIENT=tui ./clawson ctl acl get
+CLAWSON_CLIENT=tui ./clawson ctl acl set ops stop:ghost restart:ghost list metrics
+CLAWSON_CLIENT=tui ./clawson ctl acl del ops
+```
+The daemon port isn't host-published by default (see run-host.sh
+`CLAWSON_PUBLISH`); `ctl` either runs on `clawson-net` or dials a published
+endpoint. `ask` subscribes before sending, so no reply frame is missed, and
+exits at `turn_end`.
+
 ### Pitfalls observed in this codebase
 
 - **`base64` default wraps at 76 cols** and breaks the entrypoint's `read -r b64`. Use `base64 -w 0` and append `\n` explicitly.

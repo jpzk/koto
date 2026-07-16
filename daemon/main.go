@@ -18,6 +18,12 @@ func main() {
 		// namespaces created by fcJailCommand, sets up the chroot, drops
 		// privilege, and execs Firecracker. Never returns on success.
 		fcjailMain()
+	case "ctl":
+		// Host-side CLI client for the daemon's gRPC API — the surface
+		// coding agents drive. Same binary, dials the running daemon; auth
+		// and authorization are the mTLS + bearer token + role ACL every
+		// other client goes through.
+		ctlCliMain(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		os.Exit(2)

@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: host-build tui-build login host-run tui stop run proxy metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -102,6 +102,12 @@ run:
 	go run ./daemon daemon
 proxy:
 	go run ./daemon proxy
+
+# clawson ctl: host-side CLI client for agents (same binary, `ctl` subcommand).
+# Builds a standalone `./clawson` so an agent can invoke `clawson ctl ...`
+# without a `go run` per call. Reads creds/ + CLAWSON_* env at runtime.
+ctl-build:
+	go build -o clawson ./daemon
 
 metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl

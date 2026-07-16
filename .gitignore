@@ -10,6 +10,7 @@ run/
 .build/
 /daemon/daemon
 /daemon/clawson
+/clawson
 /tui/clawson-tui
 schedules.json
 __pycache__/
