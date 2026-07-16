@@ -67,6 +67,9 @@ prompts/             harness-controlled system prompts (global.md delivered into
 groups/<g>/prompt.md per-group system prompt (lives in the workspace, group-writable)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
 Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean (safe) / clean-groups (destructive, prompted) / fc-assets
+scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
+                     into cs_tui at /clawson-scripts; run in the focused group's
+                     microVM as node via the admin-only RunScript RPC)
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
@@ -98,10 +101,12 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 # there is no `/config runtime=` — firecracker is the only backend surfaced.
 
 # inside the TUI:
-#   any text   -> sends to current group
-#   /new <g>   -> spawn new group via daemon
-#   /sw  <g>   -> switch active group
-#   /ls        -> refresh group list + re-subscribe to streams
+#   any text          -> sends to current group
+#   /new <g>          -> spawn new group via daemon
+#   /sw  <g>          -> switch active group
+#   /ls               -> refresh group list + re-subscribe to streams
+#   /runscript <file> -> run scripts/<file> in the focused group's microVM
+#                        (admin-only RunScript RPC), output streamed into chat
 ```
 
 ## Daemon protocol (gRPC over mTLS, `protocol/clawson.proto`)

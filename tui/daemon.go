@@ -332,6 +332,75 @@ func openLogStream() (grpc.ServerStreamingClient[pb.LogEvent], context.CancelFun
 	return stream, cancel, nil
 }
 
+// startRunScript opens a RunScript stream (admin-only) and pumps its combined
+// stdout+stderr into the model as scriptLogMsg lines. Output chunks are raw
+// bytes on no particular line boundary, so we buffer and split on '\n',
+// emitting one message per complete line (the trailing partial flushes when
+// the stream ends). Mirrors startSubscribe's goroutine+prog.Send shape.
+func startRunScript(group, name, script string) {
+	go func() {
+		cl, err := getClient()
+		if err != nil {
+			prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + err.Error()})
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stream, err := cl.RunScript(ctx, &pb.RunScriptReq{Group: group, Script: script})
+		if err != nil {
+			prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + err.Error()})
+			return
+		}
+		prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ▶ " + name})
+		var buf []byte
+		flush := func(final bool) {
+			for {
+				i := bytesIndexByte(buf, '\n')
+				if i < 0 {
+					break
+				}
+				prog.Send(scriptLogMsg{group: group, kind: "script", text: string(buf[:i])})
+				buf = buf[i+1:]
+			}
+			if final && len(buf) > 0 {
+				prog.Send(scriptLogMsg{group: group, kind: "script", text: string(buf)})
+				buf = nil
+			}
+		}
+		for {
+			ev, err := stream.Recv()
+			if err != nil {
+				flush(true)
+				prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + err.Error()})
+				return
+			}
+			switch ev.Event {
+			case "data":
+				buf = append(buf, ev.Chunk...)
+				flush(false)
+			case "error":
+				flush(true)
+				prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + ev.Error})
+				return
+			case "end":
+				flush(true)
+				prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ✓ " + name})
+				return
+			}
+		}
+	}()
+}
+
+// bytesIndexByte avoids importing bytes just for one call.
+func bytesIndexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
 func pbToEvent(p *pb.Event) Event {
 	return Event{
 		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,

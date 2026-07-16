@@ -79,6 +79,7 @@ tui: $(BUILD)/clawson-tui
 	    --network clawson-net \
 	    --security-opt label=disable \
 	    -v $(PWD)/creds:/clawson-creds:ro \
+	    -v $(PWD)/scripts:/clawson-scripts:ro \
 	    -v /etc/localtime:/etc/localtime:ro \
 	    -e CLAWSON_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
 	    -e CLAWSON_ENDPOINT=$(CS_HOST_NAME):8443 \

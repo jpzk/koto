@@ -116,6 +116,14 @@ type pluginLogMsg struct {
 	group, kind, text string
 }
 type pluginDoneMsg struct{ name string }
+
+// scriptLogMsg carries one line of a /runscript stream (RunScript RPC) into
+// the Update loop; kind distinguishes normal output ("script") from a
+// sys/err framing line. group pins it to the group the script ran on so it
+// lands in that group's transcript even if the user switches away.
+type scriptLogMsg struct {
+	group, kind, text string
+}
 type reconnectAttemptMsg struct{}
 
 // logEventMsg / logSubClosedMsg are defined in log_view.go alongside the
@@ -342,7 +350,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /runscript  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -1288,6 +1296,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case pluginLogMsg:
+		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
+		if msg.group == m.cur {
+			m.refreshLog()
+		}
+		return m, nil
+
+	case scriptLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
 		if msg.group == m.cur {
 			m.refreshLog()
@@ -2362,6 +2377,24 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			}
 		}
 		return daemonCmd(m.sock, "config", m.cur, extra)
+	}
+	if v == "/runscript" || strings.HasPrefix(v, "/runscript ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(v, "/runscript"))
+		if arg == "" {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "usage: /runscript <file>  (from scripts/, .sh optional)"})
+			return nil
+		}
+		if m.cur == "" {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/runscript: no group in focus"})
+			return nil
+		}
+		name, script, err := loadScript(arg)
+		if err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/runscript: " + err.Error()})
+			return nil
+		}
+		startRunScript(m.cur, name, script)
+		return nil
 	}
 	if strings.HasPrefix(v, "/") {
 		space := strings.IndexByte(v, ' ')

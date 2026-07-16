@@ -567,6 +567,22 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 				out = append(out, indent+glyph+body.Render(ln))
 			}
 		}
+	case "script":
+		// Output from an operator-run /runscript, streamed line-by-line off
+		// the RunScript RPC. Pink `$` prompt glyph so it reads as "a shell I
+		// ran", distinct from the model's voice, tool output (magenta ⚙), and
+		// the daemon's bg-tail (amber ⟳). The body is deliberately left
+		// UNSTYLED — same as the response case below — so script output sits
+		// at the same default foreground as the model's messages instead of
+		// adding another near-white to the palette.
+		glyph := lipgloss.NewStyle().Foreground(cPink).Render("$  ")
+		for i, ln := range srcLines {
+			if i == 0 {
+				out = append(out, stampStr+glyph+ln)
+			} else {
+				out = append(out, indent+glyph+ln)
+			}
+		}
 	case "thought":
 		// First line is the "thought N words" summary, remaining lines are
 		// the full thinking body. Body is only rendered when expandedThoughts
