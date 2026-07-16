@@ -482,7 +482,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		vm.netCancel = cancel
 		go fcAcceptLoop(lnNet, func(c net.Conn) {
-			if err := fcNetServe(ctx, vn, c, netPol); err != nil && ctx.Err() == nil {
+			if err := fcNetServe(ctx, vn, c, g, netPol); err != nil && ctx.Err() == nil {
 				emitLogf("fc", "warn", "[%s] l3 gateway conn: %v", g, err)
 			}
 		})

@@ -140,7 +140,7 @@ func TestFcEgressConnFilters(t *testing.T) {
 		b.Close()
 	}()
 
-	ec := fcNewEgressConn(a, fcNetFull)
+	ec := fcNewEgressConn(a, "testgroup", fcNetFull)
 	out, _ := io.ReadAll(ec)
 
 	var want bytes.Buffer
@@ -169,7 +169,7 @@ func TestFcEgressConnWANDropsLAN(t *testing.T) {
 		b.Close()
 	}()
 
-	ec := fcNewEgressConn(a, fcNetWAN)
+	ec := fcNewEgressConn(a, "testgroup", fcNetWAN)
 	out, _ := io.ReadAll(ec)
 
 	var want bytes.Buffer
@@ -177,5 +177,87 @@ func TestFcEgressConnWANDropsLAN(t *testing.T) {
 	writeFrame(&want, pub)
 	if !bytes.Equal(out, want.Bytes()) {
 		t.Errorf("wan-filtered stream mismatch:\n got %x\nwant %x", out, want.Bytes())
+	}
+}
+
+// tcpFrame builds an ethernet+IPv4+TCP frame (20-byte IP header, IHL=5).
+func tcpFrame(dst string, port uint16, flags byte) []byte {
+	f := make([]byte, 14+20+20)
+	binary.BigEndian.PutUint16(f[12:14], 0x0800)
+	f[14] = 0x45 // v4, IHL 5
+	f[23] = 6    // TCP
+	copy(f[26:30], net.ParseIP("192.168.127.2").To4())
+	copy(f[30:34], net.ParseIP(dst).To4())
+	binary.BigEndian.PutUint16(f[36:38], port) // TCP dst port
+	f[47] = flags                              // TCP flags
+	return f
+}
+
+// udpFrame builds an ethernet+IPv4+UDP frame.
+func udpFrame(dst string, port uint16) []byte {
+	f := make([]byte, 14+20+8)
+	binary.BigEndian.PutUint16(f[12:14], 0x0800)
+	f[14] = 0x45
+	f[23] = 17 // UDP
+	copy(f[26:30], net.ParseIP("192.168.127.2").To4())
+	copy(f[30:34], net.ParseIP(dst).To4())
+	binary.BigEndian.PutUint16(f[36:38], port) // UDP dst port
+	return f
+}
+
+func TestFcParseFlow(t *testing.T) {
+	// TCP SYN → a flow start.
+	fl, ok := fcParseFlow(tcpFrame("1.1.1.1", 443, 0x02))
+	if !ok || fl.proto != "TCP" || fl.dstPort != 443 || !fl.hasPort ||
+		fl.dst.String() != "1.1.1.1" || fl.src.String() != "192.168.127.2" {
+		t.Errorf("SYN parse = %+v ok=%v, want TCP 192.168.127.2 -> 1.1.1.1:443", fl, ok)
+	}
+	// SYN|ACK (handshake reply echoed back out) and mid-stream ACK: not starts.
+	if _, ok := fcParseFlow(tcpFrame("1.1.1.1", 443, 0x12)); ok {
+		t.Error("SYN|ACK should not parse as a flow start")
+	}
+	if _, ok := fcParseFlow(tcpFrame("1.1.1.1", 443, 0x10)); ok {
+		t.Error("bare ACK should not parse as a flow start")
+	}
+	// UDP: every packet is a candidate (dedup handles repeats).
+	fl, ok = fcParseFlow(udpFrame("9.9.9.9", 123))
+	if !ok || fl.proto != "UDP" || fl.dstPort != 123 {
+		t.Errorf("UDP parse = %+v ok=%v, want UDP :123", fl, ok)
+	}
+	// Headerless minimal frame (the ethFrame helper: IHL=0) and non-IP: no flow.
+	if _, ok := fcParseFlow(ethFrame("1.1.1.1")); ok {
+		t.Error("truncated IPv4 frame should not parse")
+	}
+	arp := make([]byte, 42)
+	binary.BigEndian.PutUint16(arp[12:14], 0x0806)
+	if _, ok := fcParseFlow(arp); ok {
+		t.Error("ARP should not parse as a flow")
+	}
+}
+
+func TestFcFlowLoggerDedup(t *testing.T) {
+	l := newFcFlowLogger("testgroup")
+	n0 := len(logRing)
+
+	l.record(tcpFrame("1.1.1.1", 443, 0x02), fcNetWAN, true)
+	l.record(tcpFrame("1.1.1.1", 443, 0x02), fcNetWAN, true) // SYN retransmit — deduped
+	if got := len(logRing) - n0; got != 1 {
+		t.Errorf("same tuple logged %d times, want 1", got)
+	}
+	l.record(tcpFrame("1.1.1.1", 80, 0x02), fcNetWAN, true) // new port — new tuple
+	if got := len(logRing) - n0; got != 2 {
+		t.Errorf("second tuple: %d lines, want 2", got)
+	}
+	// Gateway-subnet traffic (DNS to .1) is not egress — never logged.
+	l.record(udpFrame("192.168.127.1", 53), fcNetWAN, true)
+	if got := len(logRing) - n0; got != 2 {
+		t.Errorf("gw-subnet flow logged; %d lines, want 2", got)
+	}
+	// Blocked flow logs at warn with the profile in the message.
+	l.record(tcpFrame("192.168.1.5", 445, 0x02), fcNetWAN, false)
+	last := logRing[len(logRing)-1]
+	if last.Level != "warn" || last.Subsystem != "egress" ||
+		!bytes.Contains([]byte(last.Msg), []byte("BLOCKED flow TCP 192.168.127.2 -> 192.168.1.5:445")) {
+		t.Errorf("blocked flow line = %q level=%s sub=%s", last.Msg, last.Level, last.Subsystem)
 	}
 }

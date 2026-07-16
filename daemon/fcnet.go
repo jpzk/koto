@@ -56,7 +56,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
@@ -122,9 +124,9 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 // egress at the frame layer under the group's network profile. Blocks until
 // the connection ends. The policy is captured per link conn — i.e. fixed for
 // the VM's lifetime; a profile change applies on /restart, same as the
-// gateway attach itself.
-func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, policy string) error {
-	return vn.AcceptQemu(ctx, fcNewEgressConn(conn, policy))
+// gateway attach itself. group is only for the flow log lines.
+func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, group, policy string) error {
+	return vn.AcceptQemu(ctx, fcNewEgressConn(conn, group, policy))
 }
 
 // ---- frame-layer egress filter ---------------------------------------------
@@ -215,12 +217,13 @@ var fcSelfIPs = func() func() []net.IP {
 // times out, same as a firewall DROP.
 type fcEgressConn struct {
 	net.Conn
-	policy string // network profile: fcNetWAN | fcNetLAN | fcNetFull
-	buf    []byte // leftover allowed [len][frame] bytes not yet consumed by Read
+	policy string        // network profile: fcNetWAN | fcNetLAN | fcNetFull
+	buf    []byte        // leftover allowed [len][frame] bytes not yet consumed by Read
+	flows  *fcFlowLogger // summarized per-flow egress log
 }
 
-func fcNewEgressConn(c net.Conn, policy string) *fcEgressConn {
-	return &fcEgressConn{Conn: c, policy: policy}
+func fcNewEgressConn(c net.Conn, group, policy string) *fcEgressConn {
+	return &fcEgressConn{Conn: c, policy: policy, flows: newFcFlowLogger(group)}
 }
 
 func (e *fcEgressConn) Read(p []byte) (int, error) {
@@ -229,7 +232,9 @@ func (e *fcEgressConn) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if fcFrameAllowed(frame, e.policy) {
+		allowed := fcFrameAllowed(frame, e.policy)
+		e.flows.record(frame, e.policy, allowed)
+		if allowed {
 			hdr := make([]byte, 4)
 			binary.BigEndian.PutUint32(hdr, uint32(len(frame)))
 			e.buf = append(hdr, frame...)
@@ -256,6 +261,156 @@ func (e *fcEgressConn) readFrame() ([]byte, error) {
 		return nil, err
 	}
 	return frame, nil
+}
+
+// ---- summarized flow logging ------------------------------------------------
+//
+// Networked profiles trade the L7 proxy audit for real L3 — general egress is
+// otherwise invisible. The flow logger restores a summarized audit trail on
+// the `egress` subsystem: one line per new guest-initiated flow, at the same
+// choke point as the filter (every guest→host frame passes through Read).
+// "New flow" means a TCP SYN (without ACK), or the first UDP/ICMP packet of a
+// (proto, dst, port) tuple in fcFlowTTL — so an HTTPS request logs once, not
+// per packet, and SYN retransmits / DNS-heavy tools don't spam. Blocked flows
+// log at warn (mirroring the L7 proxy's BLOCKED lines), allowed at info.
+
+const (
+	fcFlowTTL     = time.Minute // one line per (proto,dst,port) tuple per TTL
+	fcFlowSeenMax = 4096        // dedup-map bound; prune expired, then reset
+)
+
+// logDedup rate-limits log lines to one per key per TTL. Shared by the L3
+// flow logger (below) and the L7 LLM-flow log (proxy.go).
+type logDedup struct {
+	ttl  time.Duration
+	max  int
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func newLogDedup(ttl time.Duration, max int) *logDedup {
+	return &logDedup{ttl: ttl, max: max, seen: map[string]time.Time{}}
+}
+
+// allow reports whether key hasn't fired within ttl, and records it if so.
+func (d *logDedup) allow(key string) bool {
+	now := time.Now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, seen := d.seen[key]; seen && now.Sub(t) < d.ttl {
+		return false
+	}
+	if len(d.seen) >= d.max {
+		for k, t := range d.seen {
+			if now.Sub(t) >= d.ttl {
+				delete(d.seen, k)
+			}
+		}
+		if len(d.seen) >= d.max {
+			d.seen = map[string]time.Time{} // pathological churn — start over
+		}
+	}
+	d.seen[key] = now
+	return true
+}
+
+type fcFlowLogger struct {
+	group string
+	seen  *logDedup
+}
+
+func newFcFlowLogger(group string) *fcFlowLogger {
+	return &fcFlowLogger{group: group, seen: newLogDedup(fcFlowTTL, fcFlowSeenMax)}
+}
+
+// fcFlow is one parsed guest-egress flow start.
+type fcFlow struct {
+	proto   string // TCP | UDP | ICMP | ICMPv6
+	src     net.IP
+	dst     net.IP
+	dstPort int  // meaningful only when hasPort
+	hasPort bool // false for ICMP
+}
+
+// record logs one summarized line for a frame the filter just judged, if the
+// frame starts a flow (see fcParseFlow) and the tuple hasn't logged within
+// fcFlowTTL. Guest↔gateway traffic (fcDstGW: DNS to .1) is not real egress
+// and is skipped.
+func (l *fcFlowLogger) record(frame []byte, policy string, allowed bool) {
+	fl, ok := fcParseFlow(frame)
+	if !ok || fcClassifyDst(fl.dst) == fcDstGW {
+		return
+	}
+	dst := fl.dst.String()
+	if fl.hasPort {
+		dst = net.JoinHostPort(dst, strconv.Itoa(fl.dstPort))
+	}
+	if !l.seen.allow(fl.proto + "|" + dst) {
+		return
+	}
+	if allowed {
+		emitLogf("egress", "info", "[%s] flow %s %s -> %s", l.group, fl.proto, fl.src, dst)
+	} else {
+		emitLogf("egress", "warn", "[%s] BLOCKED flow %s %s -> %s (network profile '%s')", l.group, fl.proto, fl.src, dst, policy)
+	}
+}
+
+// fcParseFlow extracts the L4 flow start from an ethernet frame. Returns
+// ok=false for anything that is not the start of a flow worth logging:
+// non-IP frames, IP fragments past the first, TCP packets that aren't an
+// initial SYN, IPv6 extension headers (rare; the filter still applies, only
+// the log line is skipped), and truncated headers.
+func fcParseFlow(frame []byte) (fcFlow, bool) {
+	if len(frame) < 14 {
+		return fcFlow{}, false
+	}
+	var proto byte
+	var src, dst net.IP
+	var l4 []byte
+	switch binary.BigEndian.Uint16(frame[12:14]) {
+	case 0x0800: // IPv4
+		if len(frame) < 34 {
+			return fcFlow{}, false
+		}
+		ihl := int(frame[14]&0x0f) * 4
+		if ihl < 20 || len(frame) < 14+ihl {
+			return fcFlow{}, false
+		}
+		if binary.BigEndian.Uint16(frame[20:22])&0x1fff != 0 {
+			return fcFlow{}, false // fragment continuation — no L4 header
+		}
+		proto = frame[23]
+		src, dst = net.IP(frame[26:30]), net.IP(frame[30:34])
+		l4 = frame[14+ihl:]
+	case 0x86DD: // IPv6
+		if len(frame) < 54 {
+			return fcFlow{}, false
+		}
+		proto = frame[20] // next header; extension headers → unknown proto below
+		src, dst = net.IP(frame[22:38]), net.IP(frame[38:54])
+		l4 = frame[54:]
+	default:
+		return fcFlow{}, false
+	}
+	switch proto {
+	case 6: // TCP — log connection starts only: SYN set, ACK clear
+		if len(l4) < 14 || l4[13]&0x12 != 0x02 {
+			return fcFlow{}, false
+		}
+		return fcFlow{proto: "TCP", src: src, dst: dst,
+			dstPort: int(binary.BigEndian.Uint16(l4[2:4])), hasPort: true}, true
+	case 17: // UDP
+		if len(l4) < 4 {
+			return fcFlow{}, false
+		}
+		return fcFlow{proto: "UDP", src: src, dst: dst,
+			dstPort: int(binary.BigEndian.Uint16(l4[2:4])), hasPort: true}, true
+	case 1:
+		return fcFlow{proto: "ICMP", src: src, dst: dst}, true
+	case 58:
+		return fcFlow{proto: "ICMPv6", src: src, dst: dst}, true
+	}
+	return fcFlow{}, false
 }
 
 // fcFrameAllowed parses an ethernet frame's L3 destination and applies

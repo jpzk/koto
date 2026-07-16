@@ -230,6 +230,16 @@ always wins over a legacy `internet` key.
   profile — general `curl`/`git`/`npm` go out over the NIC, NAT'd by the gateway.
   - **Tradeoff:** general HTTPS is no longer L7-audited by the proxy (only the
     LLM leg is). This is the cost of real L3 vs the old proxy-only egress.
+- **Summarized flow log.** The frame filter also logs every new guest-initiated
+  flow on the `egress` subsystem of the daemon log (`fcFlowLogger`, fcnet.go):
+  `[<g>] flow TCP 192.168.127.2 -> 1.2.3.4:443` at info, blocked flows at warn
+  (`BLOCKED flow … (network profile 'wan')`). "New flow" = a TCP SYN, or the
+  first UDP/ICMP packet of a (proto, dst, port) tuple per minute — one line per
+  HTTPS request/connection, not per packet; SYN retransmits and repeat traffic
+  within the TTL are deduped. Guest↔gateway traffic (DNS to `.1`) is skipped.
+  This restores a *who-talked-to-whom* audit trail for networked profiles
+  (IP-level, not L7 — URLs/SNI are not visible at the frame layer). Watch it
+  via the TUI log view (^L) or `clawson ctl logs`.
 - **Egress authority is at the frame layer.** gvisor-tap-vsock has no
   destination-filter hook (it `net.Dial`s the packet's destination directly),
   so `fcEgressConn` (fcnet.go) parses each guest frame, classifies its
