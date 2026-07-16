@@ -11,6 +11,16 @@ podman network exists clawson-net || podman network create clawson-net >/dev/nul
 # the same absolute path inside cs_host_go and on the real host, which is
 # only true when HERE is the project root (the path the user is in).
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# CLAWSON_INSTANCE (opt-in): lets a second checkout — e.g. a git worktree —
+# run its own daemon alongside this one on the same host. Every other piece
+# of state (groups/, groups.json, creds/, run/, .gocache, .gomodcache) is
+# already resolved relative to $HERE, so a second worktree gets its own for
+# free; the container *name* is the only thing hardcoded enough to collide
+# (this script force-removes it on every start). clawson-net stays shared —
+# containers on the same bridge don't collide on port or address, since each
+# has its own network namespace — so no per-instance network is needed.
+CS_HOST_NAME="cs_host_go"
+[ -n "${CLAWSON_INSTANCE:-}" ] && CS_HOST_NAME="cs_host_go_${CLAWSON_INSTANCE}"
 mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache" "$HERE/.gomodcache"
 [ -f "$HERE/creds/.credentials.json" ] || { echo "no creds: run \`make login\` first"; exit 1; }
 [ -f "$HERE/creds/server.crt" ] || { echo "no daemon TLS cert: run \`make pki-init\` first"; exit 1; }
@@ -32,7 +42,7 @@ PUBLISH_ARG=""
 # still run fine; the fc runtime just fails its preflight with a clear error.
 KVM_ARG=""
 [ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm"
-podman rm -f cs_host_go >/dev/null 2>&1 || true
+podman rm -f "$CS_HOST_NAME" >/dev/null 2>&1 || true
 # .gocache is a persistent Go build cache. Without it, the first compile
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon
 # edit take ~1s. Cache is local to this project so wiping it doesn't touch
@@ -44,7 +54,7 @@ podman rm -f cs_host_go >/dev/null 2>&1 || true
 # cold-start-to-gRPC-ready window. Persisting it drops restarts to
 # compile-only time. Local to this project, same rationale as .gocache.
 podman run -d --rm \
-  --name cs_host_go --network clawson-net \
+  --name "$CS_HOST_NAME" --network clawson-net \
   $PUBLISH_ARG \
   $KVM_ARG \
   --security-opt label=disable \
@@ -59,6 +69,8 @@ podman run -d --rm \
   ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \
   -w "$HERE" \
   clawson-host >/dev/null
-echo "cs_host_go running (daemon + proxy)"
-echo "  attach TUI: make tui"
-echo "  stop:       make stop"
+INSTANCE_ARG=""
+[ -n "${CLAWSON_INSTANCE:-}" ] && INSTANCE_ARG=" INSTANCE=$CLAWSON_INSTANCE"
+echo "$CS_HOST_NAME running (daemon + proxy)"
+echo "  attach TUI: make tui$INSTANCE_ARG"
+echo "  stop:       make stop$INSTANCE_ARG"

@@ -17,6 +17,18 @@
 PROTOC_GEN_GO_VER      := v1.36.11
 PROTOC_GEN_GO_GRPC_VER := v1.6.1
 
+# INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
+# worktree — `make host-run INSTANCE=cli`, `make tui INSTANCE=cli`,
+# `make stop INSTANCE=cli`. Every other piece of state (groups/, groups.json,
+# creds/, run/, .gocache, .gomodcache) is already resolved relative to the
+# working directory, so a second worktree gets its own automatically; only
+# the daemon container's *name* is hardcoded enough to collide across
+# instances, so that's the only thing this threads through. clawson-net
+# stays shared on purpose — containers on the same bridge don't collide on
+# port/address, since each has its own network namespace.
+INSTANCE ?=
+CS_HOST_NAME := cs_host_go$(if $(INSTANCE),_$(INSTANCE))
+
 BUILD := .build
 
 $(BUILD):
@@ -55,7 +67,7 @@ login: $(BUILD)/clawson-host
 	podman run --rm -it --security-opt label=disable -v $(PWD)/creds:/root/.claude --entrypoint claude clawson-host auth login
 
 host-run: $(BUILD)/clawson-host
-	./host/run-host.sh
+	CLAWSON_INSTANCE=$(INSTANCE) ./host/run-host.sh
 
 # The /reload inner loop re-invokes `$(MAKE) tui-build` so the same sentinel
 # logic kicks in: if the user edited any tui/*.go before pressing /reload,
@@ -69,6 +81,7 @@ tui: $(BUILD)/clawson-tui
 	    -v $(PWD)/creds:/clawson-creds:ro \
 	    -v /etc/localtime:/etc/localtime:ro \
 	    -e CLAWSON_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
+	    -e CLAWSON_ENDPOINT=$(CS_HOST_NAME):8443 \
 	    clawson-tui; ec=$$?; \
 	  [ $$ec -eq 75 ] || exit $$ec; \
 	  echo "/reload: rebuilding clawson-tui…"; \
@@ -76,8 +89,14 @@ tui: $(BUILD)/clawson-tui
 	done
 
 stop:
-	-podman rm -f cs_host_go
-	@podman ps -a --format '{{.Names}}' | grep -E '^cs_.*_go$$' | xargs -r podman rm -f
+	-podman rm -f $(CS_HOST_NAME)
+	# Sweep leftover podman-era sidecar containers (cs_<group>_go, from the
+	# retired group-podman runtime) — NOT daemon containers: cs_host_go and
+	# cs_host_go_<instance> both match `cs_.*_go` too, so without the
+	# exclusion this would tear down every OTHER instance's daemon on any
+	# `make stop INSTANCE=x` (found the hard way — it killed the default
+	# instance while tearing down a test one).
+	@podman ps -a --format '{{.Names}}' | grep -E '^cs_.*_go$$' | grep -v -E '^cs_host_go(_.+)?$$' | xargs -r podman rm -f
 
 run:
 	go run ./daemon daemon
