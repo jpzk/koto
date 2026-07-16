@@ -86,10 +86,11 @@ message Event {
 }
 
 message LogEvent {
-  string event = 1; // always "log"
-  string level = 2; // info | warn | error | debug
-  string msg   = 3;
-  double ts    = 4;
+  string event     = 1; // always "log"
+  string level     = 2; // info | warn | error | debug
+  string msg       = 3;
+  double ts        = 4;
+  string subsystem = 5; // emitting subsystem: acl | auth | fc | egress | sched | ...
 }
 
 // ---- value shapes ----

@@ -40,8 +40,9 @@ type GroupInfo struct {
 
 // LogEvent is one frame of the daemon's own log stream (SubscribeLogs).
 type LogEvent struct {
-	Event string // always "log"
-	Level string // info | warn | error | debug
-	Msg   string
-	Ts    float64
+	Event     string // always "log"
+	Level     string // info | warn | error | debug
+	Msg       string
+	Ts        float64
+	Subsystem string // emitting subsystem (acl, fc, egress, ...); may be empty from older daemons
 }

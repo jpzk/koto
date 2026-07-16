@@ -205,16 +205,19 @@ var (
 // emitLog formats a LogEvent, mirrors it to stderr (so `make host-run`
 // stays useful for tail -F debugging), appends to the ring, and broadcasts
 // to all log subscribers. Dead subscribers are pruned in a second pass —
-// same dead-conn pattern as emit().
-func emitLog(level, msg string) {
+// same dead-conn pattern as emit(). subsystem names the emitting area
+// (acl, auth, fc, egress, sched, ...) so clients can filter/label lines;
+// it replaces the old ad-hoc "acl:" / "fc[g]:" message prefixes.
+func emitLog(subsystem, level, msg string) {
 	pbev := &pb.LogEvent{
-		Event: "log",
-		Level: level,
-		Msg:   msg,
-		Ts:    float64(time.Now().UnixNano()) / 1e9,
+		Event:     "log",
+		Level:     level,
+		Msg:       msg,
+		Ts:        float64(time.Now().UnixNano()) / 1e9,
+		Subsystem: subsystem,
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] %s\n", level, msg)
+	fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", level, subsystem, msg)
 
 	logSubsLock.Lock()
 	logRing = append(logRing, pbev)
@@ -232,6 +235,6 @@ func emitLog(level, msg string) {
 	}
 }
 
-func emitLogf(level, format string, args ...any) {
-	emitLog(level, fmt.Sprintf(format, args...))
+func emitLogf(subsystem, level, format string, args ...any) {
+	emitLog(subsystem, level, fmt.Sprintf(format, args...))
 }

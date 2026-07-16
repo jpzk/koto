@@ -181,6 +181,7 @@ type LogEvent struct {
 	Level         string                 `protobuf:"bytes,2,opt,name=level,proto3" json:"level,omitempty"` // info | warn | error | debug
 	Msg           string                 `protobuf:"bytes,3,opt,name=msg,proto3" json:"msg,omitempty"`
 	Ts            float64                `protobuf:"fixed64,4,opt,name=ts,proto3" json:"ts,omitempty"`
+	Subsystem     string                 `protobuf:"bytes,5,opt,name=subsystem,proto3" json:"subsystem,omitempty"` // emitting subsystem: acl | auth | fc | egress | sched | ...
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -241,6 +242,13 @@ func (x *LogEvent) GetTs() float64 {
 		return x.Ts
 	}
 	return 0
+}
+
+func (x *LogEvent) GetSubsystem() string {
+	if x != nil {
+		return x.Subsystem
+	}
+	return ""
 }
 
 type GroupInfo struct {
@@ -2471,12 +2479,13 @@ const file_clawson_proto_rawDesc = "" +
 	" \x01(\bR\n" +
 	"historical\x12\x0e\n" +
 	"\x02id\x18\v \x01(\tR\x02id\x12\x10\n" +
-	"\x03seq\x18\f \x01(\x04R\x03seq\"X\n" +
+	"\x03seq\x18\f \x01(\x04R\x03seq\"v\n" +
 	"\bLogEvent\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05level\x18\x02 \x01(\tR\x05level\x12\x10\n" +
 	"\x03msg\x18\x03 \x01(\tR\x03msg\x12\x0e\n" +
-	"\x02ts\x18\x04 \x01(\x01R\x02ts\"\xb5\x01\n" +
+	"\x02ts\x18\x04 \x01(\x01R\x02ts\x12\x1c\n" +
+	"\tsubsystem\x18\x05 \x01(\tR\tsubsystem\"\xb5\x01\n" +
 	"\tGroupInfo\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1a\n" +

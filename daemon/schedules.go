@@ -31,14 +31,14 @@ func loadSched() {
 	}
 	var items []scheduleItem
 	if err := json.Unmarshal(b, &items); err != nil {
-		emitLogf("warn", "loadSched: %v", err)
+		emitLogf("sched", "warn", "load: %v", err)
 		return
 	}
 	sched = sched[:0]
 	for _, it := range items {
 		p, perr := parseCron(it.Cron)
 		if perr != nil {
-			emitLogf("warn", "loadSched: drop %s (bad cron %q: %v)", it.ID, it.Cron, perr)
+			emitLogf("sched", "warn", "load: drop %s (bad cron %q: %v)", it.ID, it.Cron, perr)
 			continue
 		}
 		// Recompute NextDueAt from now so a daemon restart doesn't re-fire
@@ -59,11 +59,11 @@ func loadSched() {
 func saveSched() {
 	b, err := json.MarshalIndent(sched, "", "  ")
 	if err != nil {
-		emitLogf("error", "saveSched marshal: %v", err)
+		emitLogf("sched", "error", "save marshal: %v", err)
 		return
 	}
 	if err := os.WriteFile(SCHED_FILE, b, 0o644); err != nil {
-		emitLogf("error", "saveSched write: %v", err)
+		emitLogf("sched", "error", "save write: %v", err)
 	}
 }
 
@@ -103,7 +103,7 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	sched = append(sched, it)
 	saveSched()
 	schedLock.Unlock()
-	emitLogf("info", "sched add id=%s group=%s cron=%q next=%s", it.ID, group, cronExpr, nx.Format(time.RFC3339))
+	emitLogf("sched", "info", "add id=%s group=%s cron=%q next=%s", it.ID, group, cronExpr, nx.Format(time.RFC3339))
 	return it, nil
 }
 
@@ -134,7 +134,7 @@ func delSched(id string) error {
 			sched = append(sched[:i], sched[i+1:]...)
 			delete(parsed, id)
 			saveSched()
-			emitLogf("info", "sched del id=%s", id)
+			emitLogf("sched", "info", "del id=%s", id)
 			return nil
 		}
 	}
@@ -157,7 +157,7 @@ func toggleSched(id string, enabled bool) (scheduleItem, error) {
 				}
 			}
 			saveSched()
-			emitLogf("info", "sched toggle id=%s enabled=%t", id, enabled)
+			emitLogf("sched", "info", "toggle id=%s enabled=%t", id, enabled)
 			return sched[i], nil
 		}
 	}
@@ -199,7 +199,7 @@ func fireSchedule(it scheduleItem, manual bool) {
 	}
 	emit(it.Group, ev)
 	if _, err := enqueueSend(it.Group, it.Msg); err != nil {
-		emitLogf("error", "sched fire id=%s group=%s: %v", it.ID, it.Group, err)
+		emitLogf("sched", "error", "fire id=%s group=%s: %v", it.ID, it.Group, err)
 	}
 }
 
@@ -247,7 +247,7 @@ func cronLoop() {
 		schedLock.Unlock()
 
 		for _, it := range toFire {
-			emitLogf("info", "sched fire id=%s group=%s cron=%q", it.ID, it.Group, it.Cron)
+			emitLogf("sched", "info", "fire id=%s group=%s cron=%q", it.ID, it.Group, it.Cron)
 			go fireSchedule(it, false)
 		}
 	}

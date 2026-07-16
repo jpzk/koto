@@ -80,7 +80,7 @@ func ensure(g string, isMain bool) (int, error) {
 	// has a marker to render. Existing {} configs get the same treatment;
 	// pre-existing keys are preserved.
 	if err := ensureProviderConfig(g); err != nil {
-		emitLogf("warn", "ensure provider config[%s]: %v", g, err)
+		emitLogf("group", "warn", "ensure provider config[%s]: %v", g, err)
 	}
 	port := allocPort(g)
 	// Register the proxy listener synchronously. proxyListen is idempotent
@@ -119,10 +119,10 @@ func ensure(g string, isMain bool) (int, error) {
 			}
 		}
 	}
-	emitLogf("info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+	emitLogf("group", "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
 	if err := fcSpawn(g, port, pubPorts); err != nil {
 		proxyUnlisten(port)
-		emitLogf("error", "spawn group=%s: %v", g, err)
+		emitLogf("group", "error", "spawn group=%s: %v", g, err)
 		return 0, err
 	}
 	return port, nil
@@ -299,7 +299,7 @@ func destroy(g string) baseResp {
 		// directory instead of just this group's.
 		return errResp("invalid group name")
 	}
-	emitLogf("warn", "destroy group=%s (workspace will be deleted)", g)
+	emitLogf("group", "warn", "destroy group=%s (workspace will be deleted)", g)
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()
@@ -347,7 +347,7 @@ func restart(g string) (int, error) {
 	if !validGroupName(g) {
 		return 0, fmt.Errorf("invalid group name")
 	}
-	emitLogf("info", "restart group=%s", g)
+	emitLogf("group", "info", "restart group=%s", g)
 	stopGroup(g)
 	return ensure(g, g == "main")
 }

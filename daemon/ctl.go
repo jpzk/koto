@@ -235,7 +235,7 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		_ = json.Unmarshal(line, &req)
 		out, _ := base64.StdEncoding.DecodeString(req.Out)
-		emitLogf("info", "ctl[%s]: job_done %s rc=%s", owner, req.ID, req.RC)
+		emitLogf("ctl", "info", "[%s] job_done %s rc=%s", owner, req.ID, req.RC)
 		recordJobDone(owner, jobResult{ID: req.ID, RC: req.RC, Out: string(out), Total: req.Total})
 		return baseResp{OK: true}
 

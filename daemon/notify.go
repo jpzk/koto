@@ -113,7 +113,7 @@ func flushNotify(group string) {
 	b.WriteString("\n(`cs-job logs <id>` for full output; `cs-job clean` to clear finished jobs.)")
 
 	if _, err := enqueueSend(group, b.String()); err != nil {
-		emitLogf("warn", "notify[%s]: enqueue failed, will retry on next job_done: %v", group, err)
+		emitLogf("notify", "warn", "[%s] enqueue failed, will retry on next job_done: %v", group, err)
 		return // leave pending buffered for retry
 	}
 
@@ -135,5 +135,5 @@ func flushNotify(group string) {
 		notifyPending[group] = remaining
 	}
 	notifyMu.Unlock()
-	emitLogf("info", "notify[%s]: reported %d completed job(s)", group, len(ready))
+	emitLogf("notify", "info", "[%s] reported %d completed job(s)", group, len(ready))
 }

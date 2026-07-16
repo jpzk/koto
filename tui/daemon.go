@@ -341,5 +341,5 @@ func pbToEvent(p *pb.Event) Event {
 }
 
 func pbToLogEvent(p *pb.LogEvent) LogEvent {
-	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts}
+	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts, Subsystem: p.Subsystem}
 }

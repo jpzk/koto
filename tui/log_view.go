@@ -49,6 +49,11 @@ func init() {
 	// payload reads naturally over a long stream of similar lines.
 	styles := log.DefaultStyles()
 	styles.Timestamp = lipgloss.NewStyle().Foreground(cGray)
+	// Subsystem (acl, fc, egress, ...) rides charmbracelet/log's prefix
+	// slot, rendered as "<sub>:" between the level tag and the message.
+	// Dark amber to match the tree's group-indicator color — categorical,
+	// distinct from every level color.
+	styles.Prefix = lipgloss.NewStyle().Foreground(cDkAmber).Bold(true)
 	styles.Levels[log.DebugLevel] = lipgloss.NewStyle().
 		SetString("DEBUG").Bold(true).Foreground(cGray)
 	styles.Levels[log.InfoLevel] = lipgloss.NewStyle().
@@ -104,6 +109,8 @@ func formatLogLine(ev LogEvent) string {
 	logRenderBuf.Reset()
 	t := time.Unix(0, int64(ev.Ts*1e9))
 	logRenderer.SetTimeFunction(func(time.Time) time.Time { return t })
+	// Empty subsystem (frames from an older daemon) renders no prefix.
+	logRenderer.SetPrefix(ev.Subsystem)
 	switch strings.ToLower(ev.Level) {
 	case "error":
 		logRenderer.Log(log.ErrorLevel, ev.Msg)

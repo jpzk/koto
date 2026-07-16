@@ -65,7 +65,7 @@ func tailBackgroundTask(g, id, path string) {
 	defer func() { timer.Stop(); _ = rc.Close() }()
 	var stdout io.Reader = rc
 	wait := func() {}
-	emitLogf("info", "bg-tail start group=%s id=%s path=%s", g, id, path)
+	emitLogf("send", "info", "bg-tail start group=%s id=%s path=%s", g, id, path)
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -75,7 +75,7 @@ func tailBackgroundTask(g, id, path string) {
 		logAppend(g, []byte("[[bg]] "+id+" "+line+"\n"))
 	}
 	wait()
-	emitLogf("info", "bg-tail end group=%s id=%s", g, id)
+	emitLogf("send", "info", "bg-tail end group=%s id=%s", g, id)
 }
 
 // agentWorkerPattern is the egrep alternation matching a turn's agent worker
@@ -146,9 +146,9 @@ exit 0`
 // encode → FIFO write), let the sidecar run message-A under the system prompt
 // prepared for message-B, and race on the shared turnDone channel.
 func sendNow(g, msg string) error {
-	emitLogf("info", "send group=%s bytes=%d", g, len(msg))
+	emitLogf("send", "info", "group=%s bytes=%d", g, len(msg))
 	if _, err := ensure(g, g == "main"); err != nil {
-		emitLogf("error", "send/ensure group=%s: %v", g, err)
+		emitLogf("send", "error", "ensure group=%s: %v", g, err)
 		return err
 	}
 	v := vol(g)
@@ -197,7 +197,7 @@ drain:
 		return nil
 	case <-time.After(turnWaitTimeout):
 		setStalled(g, true)
-		emitLogf("warn", "send group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
+		emitLogf("send", "warn", "group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
 		selfHeal(g, time.Now())
 		return nil
 	}
@@ -293,7 +293,7 @@ func selfHeal(g string, now time.Time) bool {
 	if len(kept) >= healMaxAttempts {
 		healAttempts[g] = kept
 		healMu.Unlock()
-		emitLogf("error", "selfheal group=%s: circuit breaker OPEN (%d restarts within %s); leaving STALLED — manual /restart needed", g, len(kept), healWindow)
+		emitLogf("selfheal", "error", "group=%s: circuit breaker OPEN (%d restarts within %s); leaving STALLED — manual /restart needed", g, len(kept), healWindow)
 		return false
 	}
 	kept = append(kept, now)
@@ -301,13 +301,13 @@ func selfHeal(g string, now time.Time) bool {
 	attempt := len(kept)
 	healMu.Unlock()
 
-	emitLogf("warn", "selfheal group=%s: restarting wedged sidecar (attempt %d/%d in %s)", g, attempt, healMaxAttempts, healWindow)
+	emitLogf("selfheal", "warn", "group=%s: restarting wedged sidecar (attempt %d/%d in %s)", g, attempt, healMaxAttempts, healWindow)
 	if _, err := restart(g); err != nil {
-		emitLogf("error", "selfheal group=%s: restart failed: %v", g, err)
+		emitLogf("selfheal", "error", "group=%s: restart failed: %v", g, err)
 		return false
 	}
 	setStalled(g, false) // fresh loop is live; next turn_end would re-confirm
-	emitLogf("info", "selfheal group=%s: sidecar restarted; loop restored", g)
+	emitLogf("selfheal", "info", "group=%s: sidecar restarted; loop restored", g)
 	return true
 }
 

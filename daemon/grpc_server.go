@@ -371,7 +371,7 @@ func (s *clawsonServer) AclSetRole(_ context.Context, r *pb.AclSetRoleReq) (*pb.
 	if err != nil {
 		return &pb.AclResp{Error: err.Error()}, nil
 	}
-	emitLogf("info", "acl: role %s updated", r.Role)
+	emitLogf("acl", "info", "role %s updated", r.Role)
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
 }
 
@@ -380,7 +380,7 @@ func (s *clawsonServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.
 	if err != nil {
 		return &pb.AclResp{Error: err.Error()}, nil
 	}
-	emitLogf("info", "acl: role %s deleted", r.Role)
+	emitLogf("acl", "info", "role %s deleted", r.Role)
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
 }
 

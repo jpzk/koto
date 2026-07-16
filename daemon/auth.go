@@ -117,7 +117,7 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 	}
 	id, ok := tokenIdentity(tok)
 	if !ok {
-		emitLogf("warn", "auth: rejected call from %s (bad/missing token)", peerAddr(ctx))
+		emitLogf("auth", "warn", "rejected call from %s (bad/missing token)", peerAddr(ctx))
 		return clientIdentity{}, status.Error(codes.Unauthenticated, "invalid or missing token")
 	}
 	return id, nil
@@ -128,15 +128,15 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 // grant must cover the request's target group (acl.go; union semantics).
 func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) error {
 	target, targeted := targetOf(req)
+	roles := strings.Join(id.Roles, ",")
 	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
 		return nil
 	}
-	roles := strings.Join(id.Roles, ",")
 	if targeted {
-		emitLogf("warn", "acl: %s (roles %s) denied %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
+		emitLogf("acl", "warn", "%s (roles %s) denied %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
 		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s on %q", roles, verb, target)
 	}
-	emitLogf("warn", "acl: %s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ctx))
+	emitLogf("acl", "warn", "%s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ctx))
 	return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 }
 
@@ -180,7 +180,7 @@ func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, hand
 	// subscribe_logs) this first check is the whole decision.
 	if !anyGrant(loadACL(), id.Roles, verb) {
 		roles := strings.Join(id.Roles, ",")
-		emitLogf("warn", "acl: %s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ss.Context()))
+		emitLogf("acl", "warn", "%s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ss.Context()))
 		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 	}
 	return handler(srv, &aclStream{ServerStream: ss, id: id, verb: verb})

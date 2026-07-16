@@ -151,10 +151,11 @@ type SkillReadReq struct {
 // Distinct from Event because daemon logs aren't keyed by group and carry
 // a level. Ts matches Event's float-seconds convention.
 type LogEvent struct {
-	Event string  `json:"event"` // always "log"
-	Level string  `json:"level"` // info | warn | error | debug
-	Msg   string  `json:"msg"`
-	Ts    float64 `json:"ts"`
+	Event     string  `json:"event"` // always "log"
+	Level     string  `json:"level"` // info | warn | error | debug
+	Msg       string  `json:"msg"`
+	Ts        float64 `json:"ts"`
+	Subsystem string  `json:"subsystem,omitempty"` // acl | auth | fc | egress | sched | ...
 }
 
 // ---- Response envelopes ---------------------------------------------------

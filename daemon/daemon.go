@@ -129,7 +129,7 @@ func daemonMain() {
 	proxyStart(bind)
 
 	if _, err := ensure("main", true); err != nil {
-		emitLogf("error", "ensure main: %v", err)
+		emitLogf("daemon", "error", "ensure main: %v", err)
 	}
 	// The ctl plane for a microVM group is served over vsock (fcCtlConn in
 	// fc.go) once fcSpawn brings the VM up — there are no host-side ctl FIFOs
@@ -171,7 +171,7 @@ func daemonMain() {
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
 	)
 	pb.RegisterClawsonServer(srv, &clawsonServer{})
-	emitLogf("info", "clawsond ready grpc=%s (mTLS+token)", addr)
+	emitLogf("daemon", "info", "clawsond ready grpc=%s (mTLS+token)", addr)
 
 	loadSched()
 	go stateWatchLoop()
@@ -186,6 +186,6 @@ func daemonMain() {
 	}()
 
 	if err := srv.Serve(l); err != nil {
-		emitLogf("error", "grpc serve: %v", err)
+		emitLogf("daemon", "error", "grpc serve: %v", err)
 	}
 }
