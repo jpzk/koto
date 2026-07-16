@@ -52,8 +52,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
 
 	"clawson-protocol/pb"
 )
@@ -252,6 +256,17 @@ func targetOf(req any) (target string, targeted bool) {
 	return "", false
 }
 
+// adminOnlyVerbs can never be granted through acl.json — not even by a "*"
+// verb wildcard. Managing the ACL is the one power that must not be
+// delegatable via the ACL itself: a role granting itself acl_set_role could
+// rewrite its own grants into full control. Only the hardcoded admin role
+// passes.
+var adminOnlyVerbs = map[string]bool{
+	"acl_get":      true,
+	"acl_set_role": true,
+	"acl_del_role": true,
+}
+
 // grantFor resolves the effective target set for role+verb: the verb's own
 // grant if present, else the role's "*" verb grant. Second return is false
 // when the role grants the verb in no form — deny before target matching.
@@ -264,6 +279,9 @@ func targetOf(req any) (target string, targeted bool) {
 func grantFor(acl aclTable, role, verb string) (targetSet, bool) {
 	if role == defaultRole {
 		return targetSet{any: true}, true
+	}
+	if adminOnlyVerbs[verb] {
+		return targetSet{}, false
 	}
 	grants, ok := acl[role]
 	if !ok {
@@ -290,6 +308,130 @@ func roleAllowed(acl aclTable, role, verb, target string, targeted bool) bool {
 		return true
 	}
 	return ts.any || ts.names[target]
+}
+
+// ---- ACL management (the acl_* verbs — hardcoded admin-only) ---------------
+
+// aclFileLock serializes read-modify-write cycles on acl.json across
+// concurrent AclSetRole/AclDelRole RPCs. Enforcement reads (loadACL) stay
+// lock-free — they read a complete file or they don't, and the write below
+// is an atomic rename.
+var aclFileLock sync.Mutex
+
+// roleNameRE mirrors the group-name allowlist: role names land in a JSON
+// document and in log lines, so keep them to the same boring charset.
+var roleNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
+
+// readACLDoc reads acl.json as a plain JSON document (not the compiled
+// aclTable — mutation must preserve the operator's file content, including
+// grants for roles the enforcement table would normalize away). Missing file
+// = empty document; corrupt file = error, so a mutation never clobbers a
+// file the operator may still want to salvage.
+func readACLDoc() (map[string]any, error) {
+	b, err := os.ReadFile(credFile("acl.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]any{}, nil
+		}
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, errors.New("acl.json is corrupt — fix or remove it on disk first")
+	}
+	return doc, nil
+}
+
+// writeACLDoc writes the document atomically (temp file + rename) so a
+// concurrent loadACL never sees a torn file.
+func writeACLDoc(doc map[string]any) error {
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := credFile(".acl.json.tmp")
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, credFile("acl.json"))
+}
+
+// validateGrants checks an AclSetRole grants object: keys are verbs ("*" or
+// snake_case names), values are "*" or a list of group-name strings. The
+// whole request is rejected on the first bad entry — a half-valid grant set
+// must not be written.
+func validateGrants(grants map[string]any) error {
+	for verb, v := range grants {
+		if verb != "*" && !roleNameRE.MatchString(verb) {
+			return fmt.Errorf("invalid verb %q", verb)
+		}
+		switch tv := v.(type) {
+		case string:
+			if tv != "*" {
+				return fmt.Errorf("verb %q: target must be \"*\" or a list of groups", verb)
+			}
+		case []any:
+			for _, e := range tv {
+				s, ok := e.(string)
+				if !ok || (s != "*" && !roleNameRE.MatchString(s)) {
+					return fmt.Errorf("verb %q: invalid target %v", verb, e)
+				}
+			}
+		default:
+			return fmt.Errorf("verb %q: target must be \"*\" or a list of groups", verb)
+		}
+	}
+	return nil
+}
+
+// aclSetRoleCmd creates or replaces one role's grants and returns the full
+// document. The hardcoded admin role can't be defined here — accepting it
+// would suggest the file governs admin when it never does.
+func aclSetRoleCmd(role string, grants map[string]any) (map[string]any, error) {
+	if role == defaultRole {
+		return nil, errors.New("the admin role is hardcoded and cannot be defined in the ACL")
+	}
+	if !roleNameRE.MatchString(role) {
+		return nil, fmt.Errorf("invalid role name %q", role)
+	}
+	if grants == nil {
+		grants = map[string]any{}
+	}
+	if err := validateGrants(grants); err != nil {
+		return nil, err
+	}
+	aclFileLock.Lock()
+	defer aclFileLock.Unlock()
+	doc, err := readACLDoc()
+	if err != nil {
+		return nil, err
+	}
+	doc[role] = grants
+	if err := writeACLDoc(doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// aclDelRoleCmd removes one role and returns the full document.
+func aclDelRoleCmd(role string) (map[string]any, error) {
+	if role == defaultRole {
+		return nil, errors.New("the admin role is hardcoded and cannot be deleted")
+	}
+	aclFileLock.Lock()
+	defer aclFileLock.Unlock()
+	doc, err := readACLDoc()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := doc[role]; !ok {
+		return nil, fmt.Errorf("no such role: %s", role)
+	}
+	delete(doc, role)
+	if err := writeACLDoc(doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
 }
 
 // rolesAllowed is the user-level decision: permissions are the union of the

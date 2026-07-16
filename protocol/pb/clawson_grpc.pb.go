@@ -52,6 +52,9 @@ const (
 	Clawson_SchedDel_FullMethodName       = "/clawson.Clawson/SchedDel"
 	Clawson_SchedToggle_FullMethodName    = "/clawson.Clawson/SchedToggle"
 	Clawson_SchedRun_FullMethodName       = "/clawson.Clawson/SchedRun"
+	Clawson_AclGet_FullMethodName         = "/clawson.Clawson/AclGet"
+	Clawson_AclSetRole_FullMethodName     = "/clawson.Clawson/AclSetRole"
+	Clawson_AclDelRole_FullMethodName     = "/clawson.Clawson/AclDelRole"
 	Clawson_SubscribeGroup_FullMethodName = "/clawson.Clawson/SubscribeGroup"
 	Clawson_SubscribeLogs_FullMethodName  = "/clawson.Clawson/SubscribeLogs"
 	Clawson_WatchState_FullMethodName     = "/clawson.Clawson/WatchState"
@@ -81,6 +84,12 @@ type ClawsonClient interface {
 	SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedToggle(ctx context.Context, in *SchedToggleReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// ---- ACL management (HARDCODED admin-only: these verbs can never be
+	// granted via acl.json — a role granting itself acl_set_role would be
+	// privilege escalation to full control; see daemon/acl.go) ----
+	AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error)
+	AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error)
+	AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error)
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -292,6 +301,36 @@ func (c *clawsonClient) SchedRun(ctx context.Context, in *SchedIDReq, opts ...gr
 	return out, nil
 }
 
+func (c *clawsonClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AclResp)
+	err := c.cc.Invoke(ctx, Clawson_AclGet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clawsonClient) AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AclResp)
+	err := c.cc.Invoke(ctx, Clawson_AclSetRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clawsonClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AclResp)
+	err := c.cc.Invoke(ctx, Clawson_AclDelRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clawsonClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[0], Clawson_SubscribeGroup_FullMethodName, cOpts...)
@@ -373,6 +412,12 @@ type ClawsonServer interface {
 	SchedDel(context.Context, *SchedIDReq) (*BaseResp, error)
 	SchedToggle(context.Context, *SchedToggleReq) (*BaseResp, error)
 	SchedRun(context.Context, *SchedIDReq) (*BaseResp, error)
+	// ---- ACL management (HARDCODED admin-only: these verbs can never be
+	// granted via acl.json — a role granting itself acl_set_role would be
+	// privilege escalation to full control; see daemon/acl.go) ----
+	AclGet(context.Context, *AclGetReq) (*AclResp, error)
+	AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error)
+	AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error)
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -450,6 +495,15 @@ func (UnimplementedClawsonServer) SchedToggle(context.Context, *SchedToggleReq) 
 }
 func (UnimplementedClawsonServer) SchedRun(context.Context, *SchedIDReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedRun not implemented")
+}
+func (UnimplementedClawsonServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
+}
+func (UnimplementedClawsonServer) AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method AclSetRole not implemented")
+}
+func (UnimplementedClawsonServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method AclDelRole not implemented")
 }
 func (UnimplementedClawsonServer) SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGroup not implemented")
@@ -823,6 +877,60 @@ func _Clawson_SchedRun_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Clawson_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AclGetReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClawsonServer).AclGet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Clawson_AclGet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClawsonServer).AclGet(ctx, req.(*AclGetReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Clawson_AclSetRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AclSetRoleReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClawsonServer).AclSetRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Clawson_AclSetRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClawsonServer).AclSetRole(ctx, req.(*AclSetRoleReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Clawson_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AclDelRoleReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClawsonServer).AclDelRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Clawson_AclDelRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClawsonServer).AclDelRole(ctx, req.(*AclDelRoleReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Clawson_SubscribeGroup_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SubscribeReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -938,6 +1046,18 @@ var Clawson_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SchedRun",
 			Handler:    _Clawson_SchedRun_Handler,
+		},
+		{
+			MethodName: "AclGet",
+			Handler:    _Clawson_AclGet_Handler,
+		},
+		{
+			MethodName: "AclSetRole",
+			Handler:    _Clawson_AclSetRole_Handler,
+		},
+		{
+			MethodName: "AclDelRole",
+			Handler:    _Clawson_AclDelRole_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

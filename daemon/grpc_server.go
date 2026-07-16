@@ -352,6 +352,38 @@ func (s *clawsonServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseR
 	return &pb.BaseResp{Ok: true}, nil
 }
 
+// ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------
+
+func (s *clawsonServer) AclGet(_ context.Context, _ *pb.AclGetReq) (*pb.AclResp, error) {
+	doc, err := readACLDoc()
+	if err != nil {
+		return &pb.AclResp{Error: err.Error()}, nil
+	}
+	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
+}
+
+func (s *clawsonServer) AclSetRole(_ context.Context, r *pb.AclSetRoleReq) (*pb.AclResp, error) {
+	var grants map[string]any
+	if r.Grants != nil {
+		grants = r.Grants.AsMap()
+	}
+	doc, err := aclSetRoleCmd(r.Role, grants)
+	if err != nil {
+		return &pb.AclResp{Error: err.Error()}, nil
+	}
+	emitLogf("info", "acl: role %s updated", r.Role)
+	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
+}
+
+func (s *clawsonServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.AclResp, error) {
+	doc, err := aclDelRoleCmd(r.Role)
+	if err != nil {
+		return &pb.AclResp{Error: err.Error()}, nil
+	}
+	emitLogf("info", "acl: role %s deleted", r.Role)
+	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
+}
+
 // ---- server-streaming RPCs ------------------------------------------------
 
 func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_SubscribeGroupServer) error {

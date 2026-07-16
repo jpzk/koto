@@ -134,7 +134,14 @@ role/verb, target outside the grant, corrupt acl.json → deny). **The `admin`
 role is hardcoded as a superuser** — every verb on every target, not defined
 in acl.json and not narrowable by it; a missing/corrupt file denies every
 non-admin role but never locks out admin. Both files are re-read per call —
-role/ACL edits need no restart. This governs the gRPC plane only; the
+role/ACL edits need no restart. **The ACL is manageable over the wire**
+(`AclGet`/`AclSetRole`/`AclDelRole` — read the document, create/replace a
+role's grants, delete a role), but those three verbs are hardcoded admin-only
+(`adminOnlyVerbs` in acl.go): no acl.json grant, not even a `"*"` verb
+wildcard, can cover them — otherwise a role could rewrite its own grants into
+full control. Mutations validate shape server-side, refuse to define/delete
+`admin`, refuse to touch a corrupt file (fix on disk instead), and write
+atomically. This governs the gRPC plane only; the
 in-guest ctl plane (ctl.go) stays hardcoded on group identity because its
 rules (non-main → sched_* with self-forced target) aren't expressible as a
 verb list.

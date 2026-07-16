@@ -42,6 +42,13 @@ service Clawson {
   rpc SchedToggle (SchedToggleReq) returns (BaseResp);
   rpc SchedRun    (SchedIDReq)     returns (BaseResp);
 
+  // ---- ACL management (HARDCODED admin-only: these verbs can never be
+  // granted via acl.json — a role granting itself acl_set_role would be
+  // privilege escalation to full control; see daemon/acl.go) ----
+  rpc AclGet     (AclGetReq)     returns (AclResp);
+  rpc AclSetRole (AclSetRoleReq) returns (AclResp);
+  rpc AclDelRole (AclDelRoleReq) returns (AclResp);
+
   // ---- server-streaming (the old connection-ownership-transfer cases) ----
   // Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
   // failed auth surfaces as a non-OK gRPC status at open time.
@@ -240,4 +247,19 @@ message SchedAddResp { bool ok = 1; string error = 2; ScheduleItem item = 3; }
 message SchedListResp {
   bool ok = 1; string error = 2;
   repeated ScheduleItem schedules = 3;
+}
+
+// ---- ACL management ---------------------------------------------------------
+// The ACL document (role -> {verb -> "*" | [groups]}) maps to a Struct the
+// same way config/metrics do. The admin role is hardcoded in the daemon and
+// never appears in (or is accepted into) this document.
+message AclGetReq {}
+message AclSetRoleReq {
+  string role = 1;
+  google.protobuf.Struct grants = 2;  // {verb: "*" | [group, ...]}
+}
+message AclDelRoleReq { string role = 1; }
+message AclResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct acl = 3;  // full document after the operation
 }

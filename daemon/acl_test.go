@@ -129,6 +129,88 @@ func TestRoleAllowedTargets(t *testing.T) {
 	}
 }
 
+// TestAdminOnlyVerbs: the acl_* management verbs can never be granted via
+// acl.json — even an explicit grant or a "*" verb wildcard must not cover
+// them, or a role could rewrite its own grants into full control.
+func TestAdminOnlyVerbs(t *testing.T) {
+	acl := parseACL([]byte(`{
+		"sneaky":   {"acl_set_role": "*", "acl_get": "*"},
+		"wildcard": {"*": "*"}
+	}`))
+	for _, verb := range []string{"acl_get", "acl_set_role", "acl_del_role"} {
+		if roleAllowed(acl, "sneaky", verb, "", false) {
+			t.Errorf("explicit acl.json grant of %s must be ignored", verb)
+		}
+		if roleAllowed(acl, "wildcard", verb, "", false) {
+			t.Errorf("verb wildcard must not cover %s", verb)
+		}
+		if !roleAllowed(acl, "admin", verb, "", false) {
+			t.Errorf("hardcoded admin must pass %s", verb)
+		}
+	}
+	// The wildcard role keeps everything else — the carve-out is only acl_*.
+	if !roleAllowed(acl, "wildcard", "destroy", "main", true) {
+		t.Error("non-acl verbs must still pass a wildcard grant")
+	}
+}
+
+// TestAclRoleCmds exercises the set/del round-trip on a real file: create,
+// read back, delete, and the guardrails (admin refusal, bad shapes, corrupt
+// file protection).
+func TestAclRoleCmds(t *testing.T) {
+	origHERE := HERE
+	defer func() { HERE = origHERE }()
+	HERE = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(HERE, "creds"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := aclSetRoleCmd("reader", map[string]any{"list": "*", "history": []any{"main"}})
+	if err != nil {
+		t.Fatalf("set reader: %v", err)
+	}
+	if _, ok := doc["reader"]; !ok {
+		t.Fatal("set must return the document containing the role")
+	}
+	if !roleAllowed(loadACL(), "reader", "history", "main", true) {
+		t.Error("a set role must be live for enforcement immediately")
+	}
+
+	if _, err := aclSetRoleCmd("admin", map[string]any{"list": "*"}); err == nil {
+		t.Error("defining admin must be refused")
+	}
+	if _, err := aclSetRoleCmd("bad", map[string]any{"list": 42}); err == nil {
+		t.Error("non-string/list target must be refused")
+	}
+	if _, err := aclSetRoleCmd("bad", map[string]any{"list": []any{"ok", 7}}); err == nil {
+		t.Error("non-string list element must be refused")
+	}
+	if _, err := aclDelRoleCmd("admin"); err == nil {
+		t.Error("deleting admin must be refused")
+	}
+	if _, err := aclDelRoleCmd("ghost-role"); err == nil {
+		t.Error("deleting an absent role must error")
+	}
+
+	if _, err := aclDelRoleCmd("reader"); err != nil {
+		t.Fatalf("del reader: %v", err)
+	}
+	if roleAllowed(loadACL(), "reader", "list", "", false) {
+		t.Error("a deleted role must lose its grants")
+	}
+
+	// Corrupt file: mutations must refuse rather than clobber.
+	if err := os.WriteFile(filepath.Join(HERE, "creds", "acl.json"), []byte("{broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := aclSetRoleCmd("reader", map[string]any{"list": "*"}); err == nil {
+		t.Error("set on a corrupt acl.json must refuse, not clobber")
+	}
+	if _, err := readACLDoc(); err == nil {
+		t.Error("readACLDoc must surface corruption")
+	}
+}
+
 // TestAdminHardcoded: admin is a built-in superuser — acl.json cannot narrow
 // or redefine it, so an "admin" key in the file is ignored.
 func TestAdminHardcoded(t *testing.T) {

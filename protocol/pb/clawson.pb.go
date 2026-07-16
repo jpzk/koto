@@ -2255,6 +2255,202 @@ func (x *SchedListResp) GetSchedules() []*ScheduleItem {
 	return nil
 }
 
+// ---- ACL management ---------------------------------------------------------
+// The ACL document (role -> {verb -> "*" | [groups]}) maps to a Struct the
+// same way config/metrics do. The admin role is hardcoded in the daemon and
+// never appears in (or is accepted into) this document.
+type AclGetReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AclGetReq) Reset() {
+	*x = AclGetReq{}
+	mi := &file_clawson_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AclGetReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AclGetReq) ProtoMessage() {}
+
+func (x *AclGetReq) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AclGetReq.ProtoReflect.Descriptor instead.
+func (*AclGetReq) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{35}
+}
+
+type AclSetRoleReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	Grants        *structpb.Struct       `protobuf:"bytes,2,opt,name=grants,proto3" json:"grants,omitempty"` // {verb: "*" | [group, ...]}
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AclSetRoleReq) Reset() {
+	*x = AclSetRoleReq{}
+	mi := &file_clawson_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AclSetRoleReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AclSetRoleReq) ProtoMessage() {}
+
+func (x *AclSetRoleReq) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AclSetRoleReq.ProtoReflect.Descriptor instead.
+func (*AclSetRoleReq) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *AclSetRoleReq) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *AclSetRoleReq) GetGrants() *structpb.Struct {
+	if x != nil {
+		return x.Grants
+	}
+	return nil
+}
+
+type AclDelRoleReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AclDelRoleReq) Reset() {
+	*x = AclDelRoleReq{}
+	mi := &file_clawson_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AclDelRoleReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AclDelRoleReq) ProtoMessage() {}
+
+func (x *AclDelRoleReq) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AclDelRoleReq.ProtoReflect.Descriptor instead.
+func (*AclDelRoleReq) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *AclDelRoleReq) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type AclResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Acl           *structpb.Struct       `protobuf:"bytes,3,opt,name=acl,proto3" json:"acl,omitempty"` // full document after the operation
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AclResp) Reset() {
+	*x = AclResp{}
+	mi := &file_clawson_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AclResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AclResp) ProtoMessage() {}
+
+func (x *AclResp) ProtoReflect() protoreflect.Message {
+	mi := &file_clawson_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AclResp.ProtoReflect.Descriptor instead.
+func (*AclResp) Descriptor() ([]byte, []int) {
+	return file_clawson_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *AclResp) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *AclResp) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *AclResp) GetAcl() *structpb.Struct {
+	if x != nil {
+		return x.Acl
+	}
+	return nil
+}
+
 var File_clawson_proto protoreflect.FileDescriptor
 
 const file_clawson_proto_rawDesc = "" +
@@ -2437,7 +2633,18 @@ const file_clawson_proto_rawDesc = "" +
 	"\rSchedListResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x123\n" +
-	"\tschedules\x18\x03 \x03(\v2\x15.clawson.ScheduleItemR\tschedules2\x93\t\n" +
+	"\tschedules\x18\x03 \x03(\v2\x15.clawson.ScheduleItemR\tschedules\"\v\n" +
+	"\tAclGetReq\"T\n" +
+	"\rAclSetRoleReq\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\x12/\n" +
+	"\x06grants\x18\x02 \x01(\v2\x17.google.protobuf.StructR\x06grants\"#\n" +
+	"\rAclDelRoleReq\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\"Z\n" +
+	"\aAclResp\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
+	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xb3\n" +
+	"\n" +
 	"\aClawson\x12.\n" +
 	"\x05Spawn\x12\x11.clawson.SpawnReq\x1a\x12.clawson.SpawnResp\x12+\n" +
 	"\x04Send\x12\x10.clawson.SendReq\x1a\x11.clawson.BaseResp\x12+\n" +
@@ -2457,7 +2664,12 @@ const file_clawson_proto_rawDesc = "" +
 	"\tSchedList\x12\x15.clawson.SchedListReq\x1a\x16.clawson.SchedListResp\x122\n" +
 	"\bSchedDel\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x129\n" +
 	"\vSchedToggle\x12\x17.clawson.SchedToggleReq\x1a\x11.clawson.BaseResp\x122\n" +
-	"\bSchedRun\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x129\n" +
+	"\bSchedRun\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x12.\n" +
+	"\x06AclGet\x12\x12.clawson.AclGetReq\x1a\x10.clawson.AclResp\x126\n" +
+	"\n" +
+	"AclSetRole\x12\x16.clawson.AclSetRoleReq\x1a\x10.clawson.AclResp\x126\n" +
+	"\n" +
+	"AclDelRole\x12\x16.clawson.AclDelRoleReq\x1a\x10.clawson.AclResp\x129\n" +
 	"\x0eSubscribeGroup\x12\x15.clawson.SubscribeReq\x1a\x0e.clawson.Event0\x01\x126\n" +
 	"\rSubscribeLogs\x12\x10.clawson.LogsReq\x1a\x11.clawson.LogEvent0\x01\x126\n" +
 	"\n" +
@@ -2475,7 +2687,7 @@ func file_clawson_proto_rawDescGZIP() []byte {
 	return file_clawson_proto_rawDescData
 }
 
-var file_clawson_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_clawson_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
 var file_clawson_proto_goTypes = []any{
 	(*Event)(nil),           // 0: clawson.Event
 	(*LogEvent)(nil),        // 1: clawson.LogEvent
@@ -2512,74 +2724,86 @@ var file_clawson_proto_goTypes = []any{
 	(*SkillReadResp)(nil),   // 32: clawson.SkillReadResp
 	(*SchedAddResp)(nil),    // 33: clawson.SchedAddResp
 	(*SchedListResp)(nil),   // 34: clawson.SchedListResp
-	nil,                     // 35: clawson.StateFrame.GroupsEntry
-	nil,                     // 36: clawson.ListResp.GroupsEntry
-	(*emptypb.Empty)(nil),   // 37: google.protobuf.Empty
-	(*structpb.Struct)(nil), // 38: google.protobuf.Struct
+	(*AclGetReq)(nil),       // 35: clawson.AclGetReq
+	(*AclSetRoleReq)(nil),   // 36: clawson.AclSetRoleReq
+	(*AclDelRoleReq)(nil),   // 37: clawson.AclDelRoleReq
+	(*AclResp)(nil),         // 38: clawson.AclResp
+	nil,                     // 39: clawson.StateFrame.GroupsEntry
+	nil,                     // 40: clawson.ListResp.GroupsEntry
+	(*emptypb.Empty)(nil),   // 41: google.protobuf.Empty
+	(*structpb.Struct)(nil), // 42: google.protobuf.Struct
 }
 var file_clawson_proto_depIdxs = []int32{
-	35, // 0: clawson.StateFrame.groups:type_name -> clawson.StateFrame.GroupsEntry
-	37, // 1: clawson.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
+	39, // 0: clawson.StateFrame.groups:type_name -> clawson.StateFrame.GroupsEntry
+	41, // 1: clawson.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
 	14, // 2: clawson.ConfigReq.skills_set:type_name -> clawson.SkillList
-	36, // 3: clawson.ListResp.groups:type_name -> clawson.ListResp.GroupsEntry
+	40, // 3: clawson.ListResp.groups:type_name -> clawson.ListResp.GroupsEntry
 	0,  // 4: clawson.HistoryResp.events:type_name -> clawson.Event
-	38, // 5: clawson.ConfigResp.config:type_name -> google.protobuf.Struct
-	38, // 6: clawson.MetricsResp.metric:type_name -> google.protobuf.Struct
-	38, // 7: clawson.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	42, // 5: clawson.ConfigResp.config:type_name -> google.protobuf.Struct
+	42, // 6: clawson.MetricsResp.metric:type_name -> google.protobuf.Struct
+	42, // 7: clawson.MetricsResp.global_metric:type_name -> google.protobuf.Struct
 	3,  // 8: clawson.SkillsResp.skills:type_name -> clawson.SkillItem
 	4,  // 9: clawson.SchedAddResp.item:type_name -> clawson.ScheduleItem
 	4,  // 10: clawson.SchedListResp.schedules:type_name -> clawson.ScheduleItem
-	2,  // 11: clawson.StateFrame.GroupsEntry.value:type_name -> clawson.GroupInfo
-	2,  // 12: clawson.ListResp.GroupsEntry.value:type_name -> clawson.GroupInfo
-	5,  // 13: clawson.Clawson.Spawn:input_type -> clawson.SpawnReq
-	6,  // 14: clawson.Clawson.Send:input_type -> clawson.SendReq
-	8,  // 15: clawson.Clawson.List:input_type -> clawson.ListReq
-	7,  // 16: clawson.Clawson.Stop:input_type -> clawson.GroupReq
-	7,  // 17: clawson.Clawson.Interrupt:input_type -> clawson.GroupReq
-	7,  // 18: clawson.Clawson.Destroy:input_type -> clawson.GroupReq
-	7,  // 19: clawson.Clawson.Restart:input_type -> clawson.GroupReq
-	13, // 20: clawson.Clawson.History:input_type -> clawson.HistoryReq
-	15, // 21: clawson.Clawson.Config:input_type -> clawson.ConfigReq
-	19, // 22: clawson.Clawson.Metrics:input_type -> clawson.MetricsReq
-	7,  // 23: clawson.Clawson.Clear:input_type -> clawson.GroupReq
-	16, // 24: clawson.Clawson.Skills:input_type -> clawson.SkillListReq
-	17, // 25: clawson.Clawson.SkillNew:input_type -> clawson.SkillNewReq
-	18, // 26: clawson.Clawson.SkillRead:input_type -> clawson.SkillReadReq
-	20, // 27: clawson.Clawson.SchedAdd:input_type -> clawson.SchedAddReq
-	21, // 28: clawson.Clawson.SchedList:input_type -> clawson.SchedListReq
-	22, // 29: clawson.Clawson.SchedDel:input_type -> clawson.SchedIDReq
-	23, // 30: clawson.Clawson.SchedToggle:input_type -> clawson.SchedToggleReq
-	22, // 31: clawson.Clawson.SchedRun:input_type -> clawson.SchedIDReq
-	11, // 32: clawson.Clawson.SubscribeGroup:input_type -> clawson.SubscribeReq
-	9,  // 33: clawson.Clawson.SubscribeLogs:input_type -> clawson.LogsReq
-	10, // 34: clawson.Clawson.WatchState:input_type -> clawson.WatchReq
-	25, // 35: clawson.Clawson.Spawn:output_type -> clawson.SpawnResp
-	24, // 36: clawson.Clawson.Send:output_type -> clawson.BaseResp
-	26, // 37: clawson.Clawson.List:output_type -> clawson.ListResp
-	24, // 38: clawson.Clawson.Stop:output_type -> clawson.BaseResp
-	24, // 39: clawson.Clawson.Interrupt:output_type -> clawson.BaseResp
-	24, // 40: clawson.Clawson.Destroy:output_type -> clawson.BaseResp
-	25, // 41: clawson.Clawson.Restart:output_type -> clawson.SpawnResp
-	27, // 42: clawson.Clawson.History:output_type -> clawson.HistoryResp
-	28, // 43: clawson.Clawson.Config:output_type -> clawson.ConfigResp
-	29, // 44: clawson.Clawson.Metrics:output_type -> clawson.MetricsResp
-	24, // 45: clawson.Clawson.Clear:output_type -> clawson.BaseResp
-	30, // 46: clawson.Clawson.Skills:output_type -> clawson.SkillsResp
-	31, // 47: clawson.Clawson.SkillNew:output_type -> clawson.SkillNewResp
-	32, // 48: clawson.Clawson.SkillRead:output_type -> clawson.SkillReadResp
-	33, // 49: clawson.Clawson.SchedAdd:output_type -> clawson.SchedAddResp
-	34, // 50: clawson.Clawson.SchedList:output_type -> clawson.SchedListResp
-	24, // 51: clawson.Clawson.SchedDel:output_type -> clawson.BaseResp
-	24, // 52: clawson.Clawson.SchedToggle:output_type -> clawson.BaseResp
-	24, // 53: clawson.Clawson.SchedRun:output_type -> clawson.BaseResp
-	0,  // 54: clawson.Clawson.SubscribeGroup:output_type -> clawson.Event
-	1,  // 55: clawson.Clawson.SubscribeLogs:output_type -> clawson.LogEvent
-	12, // 56: clawson.Clawson.WatchState:output_type -> clawson.StateFrame
-	35, // [35:57] is the sub-list for method output_type
-	13, // [13:35] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	42, // 11: clawson.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
+	42, // 12: clawson.AclResp.acl:type_name -> google.protobuf.Struct
+	2,  // 13: clawson.StateFrame.GroupsEntry.value:type_name -> clawson.GroupInfo
+	2,  // 14: clawson.ListResp.GroupsEntry.value:type_name -> clawson.GroupInfo
+	5,  // 15: clawson.Clawson.Spawn:input_type -> clawson.SpawnReq
+	6,  // 16: clawson.Clawson.Send:input_type -> clawson.SendReq
+	8,  // 17: clawson.Clawson.List:input_type -> clawson.ListReq
+	7,  // 18: clawson.Clawson.Stop:input_type -> clawson.GroupReq
+	7,  // 19: clawson.Clawson.Interrupt:input_type -> clawson.GroupReq
+	7,  // 20: clawson.Clawson.Destroy:input_type -> clawson.GroupReq
+	7,  // 21: clawson.Clawson.Restart:input_type -> clawson.GroupReq
+	13, // 22: clawson.Clawson.History:input_type -> clawson.HistoryReq
+	15, // 23: clawson.Clawson.Config:input_type -> clawson.ConfigReq
+	19, // 24: clawson.Clawson.Metrics:input_type -> clawson.MetricsReq
+	7,  // 25: clawson.Clawson.Clear:input_type -> clawson.GroupReq
+	16, // 26: clawson.Clawson.Skills:input_type -> clawson.SkillListReq
+	17, // 27: clawson.Clawson.SkillNew:input_type -> clawson.SkillNewReq
+	18, // 28: clawson.Clawson.SkillRead:input_type -> clawson.SkillReadReq
+	20, // 29: clawson.Clawson.SchedAdd:input_type -> clawson.SchedAddReq
+	21, // 30: clawson.Clawson.SchedList:input_type -> clawson.SchedListReq
+	22, // 31: clawson.Clawson.SchedDel:input_type -> clawson.SchedIDReq
+	23, // 32: clawson.Clawson.SchedToggle:input_type -> clawson.SchedToggleReq
+	22, // 33: clawson.Clawson.SchedRun:input_type -> clawson.SchedIDReq
+	35, // 34: clawson.Clawson.AclGet:input_type -> clawson.AclGetReq
+	36, // 35: clawson.Clawson.AclSetRole:input_type -> clawson.AclSetRoleReq
+	37, // 36: clawson.Clawson.AclDelRole:input_type -> clawson.AclDelRoleReq
+	11, // 37: clawson.Clawson.SubscribeGroup:input_type -> clawson.SubscribeReq
+	9,  // 38: clawson.Clawson.SubscribeLogs:input_type -> clawson.LogsReq
+	10, // 39: clawson.Clawson.WatchState:input_type -> clawson.WatchReq
+	25, // 40: clawson.Clawson.Spawn:output_type -> clawson.SpawnResp
+	24, // 41: clawson.Clawson.Send:output_type -> clawson.BaseResp
+	26, // 42: clawson.Clawson.List:output_type -> clawson.ListResp
+	24, // 43: clawson.Clawson.Stop:output_type -> clawson.BaseResp
+	24, // 44: clawson.Clawson.Interrupt:output_type -> clawson.BaseResp
+	24, // 45: clawson.Clawson.Destroy:output_type -> clawson.BaseResp
+	25, // 46: clawson.Clawson.Restart:output_type -> clawson.SpawnResp
+	27, // 47: clawson.Clawson.History:output_type -> clawson.HistoryResp
+	28, // 48: clawson.Clawson.Config:output_type -> clawson.ConfigResp
+	29, // 49: clawson.Clawson.Metrics:output_type -> clawson.MetricsResp
+	24, // 50: clawson.Clawson.Clear:output_type -> clawson.BaseResp
+	30, // 51: clawson.Clawson.Skills:output_type -> clawson.SkillsResp
+	31, // 52: clawson.Clawson.SkillNew:output_type -> clawson.SkillNewResp
+	32, // 53: clawson.Clawson.SkillRead:output_type -> clawson.SkillReadResp
+	33, // 54: clawson.Clawson.SchedAdd:output_type -> clawson.SchedAddResp
+	34, // 55: clawson.Clawson.SchedList:output_type -> clawson.SchedListResp
+	24, // 56: clawson.Clawson.SchedDel:output_type -> clawson.BaseResp
+	24, // 57: clawson.Clawson.SchedToggle:output_type -> clawson.BaseResp
+	24, // 58: clawson.Clawson.SchedRun:output_type -> clawson.BaseResp
+	38, // 59: clawson.Clawson.AclGet:output_type -> clawson.AclResp
+	38, // 60: clawson.Clawson.AclSetRole:output_type -> clawson.AclResp
+	38, // 61: clawson.Clawson.AclDelRole:output_type -> clawson.AclResp
+	0,  // 62: clawson.Clawson.SubscribeGroup:output_type -> clawson.Event
+	1,  // 63: clawson.Clawson.SubscribeLogs:output_type -> clawson.LogEvent
+	12, // 64: clawson.Clawson.WatchState:output_type -> clawson.StateFrame
+	40, // [40:65] is the sub-list for method output_type
+	15, // [15:40] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_clawson_proto_init() }
@@ -2597,7 +2821,7 @@ func file_clawson_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clawson_proto_rawDesc), len(file_clawson_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   37,
+			NumMessages:   41,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
