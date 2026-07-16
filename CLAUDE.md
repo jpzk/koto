@@ -139,7 +139,11 @@ role/ACL edits need no restart. **The ACL is manageable over the wire**
 role's grants, delete a role), but those three verbs are hardcoded admin-only
 (`adminOnlyVerbs` in acl.go): no acl.json grant, not even a `"*"` verb
 wildcard, can cover them — otherwise a role could rewrite its own grants into
-full control. Mutations validate shape server-side, refuse to define/delete
+full control. **`RunScript` is also in `adminOnlyVerbs`**: it streams a POSIX
+script's live combined output out of a group's microVM, executed as the guest
+worker user (`node`, uid 1000, cwd `/workspace`) — direct code execution
+outside the agent loop, deliberately reserved for the operator rather than
+grantable. Mutations validate shape server-side, refuse to define/delete
 `admin`, refuse to touch a corrupt file (fix on disk instead), and write
 atomically. This governs the gRPC plane only; the
 in-guest ctl plane (ctl.go) stays hardcoded on group identity because its
@@ -331,11 +335,13 @@ the same mTLS + bearer token + role ACL every client goes through, so a verb
 the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
 and endpoint resolve from `CLAWSON_*` env (`CLAWSON_ADDR`, `CLAWSON_CREDS_DIR`,
 `CLAWSON_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `CLAWSON_SERVER_NAME`).
-Every gRPC RPC has a `ctl` verb (25/25). Group lifecycle
+Every gRPC RPC has a `ctl` verb (26/26). Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, skills (`skills`/`skill-new`/
 `skill-read`), streams (`metrics`, `tail`, `logs`, `watch`), `sched *`, and
-admin-only `acl get|set|del`.
+admin-only `acl get|set|del` + `runscript <group> <script>` (run a POSIX
+script in the group's microVM as `node`, output streamed raw to stdout,
+`"-"` = script from stdin).
 ```sh
 make pki-client NAME=agent ROLE=agent          # mint a scoped identity
 CLAWSON_CLIENT=agent ./clawson ctl list

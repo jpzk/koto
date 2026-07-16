@@ -69,6 +69,7 @@ func TestTargetOf(t *testing.T) {
 		{&pb.SendReq{Group: "main"}, "main", true},
 		{&pb.GroupReq{Group: "dev"}, "dev", true},
 		{&pb.SubscribeReq{Group: "main"}, "main", true},
+		{&pb.RunScriptReq{Group: "dev"}, "dev", true},
 		{&pb.MetricsReq{}, "", true}, // global metrics = cross-group read
 		{&pb.ListReq{}, "", false},
 		{&pb.SkillNewReq{Name: "x"}, "", false},
@@ -134,10 +135,10 @@ func TestRoleAllowedTargets(t *testing.T) {
 // them, or a role could rewrite its own grants into full control.
 func TestAdminOnlyVerbs(t *testing.T) {
 	acl := parseACL([]byte(`{
-		"sneaky":   {"acl_set_role": "*", "acl_get": "*"},
+		"sneaky":   {"acl_set_role": "*", "acl_get": "*", "run_script": "*"},
 		"wildcard": {"*": "*"}
 	}`))
-	for _, verb := range []string{"acl_get", "acl_set_role", "acl_del_role"} {
+	for _, verb := range []string{"acl_get", "acl_set_role", "acl_del_role", "run_script"} {
 		if roleAllowed(acl, "sneaky", verb, "", false) {
 			t.Errorf("explicit acl.json grant of %s must be ignored", verb)
 		}
@@ -148,9 +149,10 @@ func TestAdminOnlyVerbs(t *testing.T) {
 			t.Errorf("hardcoded admin must pass %s", verb)
 		}
 	}
-	// The wildcard role keeps everything else — the carve-out is only acl_*.
+	// The wildcard role keeps everything else — the carve-out is only the
+	// admin-only set.
 	if !roleAllowed(acl, "wildcard", "destroy", "main", true) {
-		t.Error("non-acl verbs must still pass a wildcard grant")
+		t.Error("non-admin-only verbs must still pass a wildcard grant")
 	}
 }
 

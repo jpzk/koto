@@ -252,19 +252,24 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
+	case *pb.RunScriptReq:
+		return r.Group, true
 	}
 	return "", false
 }
 
 // adminOnlyVerbs can never be granted through acl.json — not even by a "*"
-// verb wildcard. Managing the ACL is the one power that must not be
-// delegatable via the ACL itself: a role granting itself acl_set_role could
-// rewrite its own grants into full control. Only the hardcoded admin role
-// passes.
+// verb wildcard. Only the hardcoded admin role passes. Two reasons to be
+// here: the acl_* verbs because ACL management must not be delegatable via
+// the ACL itself (a role granting itself acl_set_role could rewrite its own
+// grants into full control), and run_script because it is direct code
+// execution in a guest VM outside the agent loop — deliberately reserved
+// for the operator rather than expressible as a grant.
 var adminOnlyVerbs = map[string]bool{
 	"acl_get":      true,
 	"acl_set_role": true,
 	"acl_del_role": true,
+	"run_script":   true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

@@ -55,6 +55,7 @@ const (
 	Clawson_AclGet_FullMethodName         = "/clawson.Clawson/AclGet"
 	Clawson_AclSetRole_FullMethodName     = "/clawson.Clawson/AclSetRole"
 	Clawson_AclDelRole_FullMethodName     = "/clawson.Clawson/AclDelRole"
+	Clawson_RunScript_FullMethodName      = "/clawson.Clawson/RunScript"
 	Clawson_SubscribeGroup_FullMethodName = "/clawson.Clawson/SubscribeGroup"
 	Clawson_SubscribeLogs_FullMethodName  = "/clawson.Clawson/SubscribeLogs"
 	Clawson_WatchState_FullMethodName     = "/clawson.Clawson/WatchState"
@@ -90,6 +91,15 @@ type ClawsonClient interface {
 	AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error)
+	// RunScript executes a POSIX sh script inside a group's microVM as the
+	// guest worker user (node, uid 1000, cwd /workspace) and streams its
+	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
+	// it is direct code execution in the VM, bypassing the agent loop, so it
+	// is not delegatable via acl.json. Client cancel kills the script's
+	// process group in the guest. Frames: `data` (chunk bytes) … `end`;
+	// failures surface as one `error` frame (in-band, like {ok,error}).
+	// No exit code is carried — append `; echo rc=$?` if you need it.
+	RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error)
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -331,9 +341,28 @@ func (c *clawsonClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts 
 	return out, nil
 }
 
+func (c *clawsonClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[0], Clawson_RunScript_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RunScriptReq, ScriptEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Clawson_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
+
 func (c *clawsonClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[0], Clawson_SubscribeGroup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[1], Clawson_SubscribeGroup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +381,7 @@ type Clawson_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
 
 func (c *clawsonClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[1], Clawson_SubscribeLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[2], Clawson_SubscribeLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +400,7 @@ type Clawson_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
 func (c *clawsonClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[2], Clawson_WatchState_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[3], Clawson_WatchState_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +447,15 @@ type ClawsonServer interface {
 	AclGet(context.Context, *AclGetReq) (*AclResp, error)
 	AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error)
 	AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error)
+	// RunScript executes a POSIX sh script inside a group's microVM as the
+	// guest worker user (node, uid 1000, cwd /workspace) and streams its
+	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
+	// it is direct code execution in the VM, bypassing the agent loop, so it
+	// is not delegatable via acl.json. Client cancel kills the script's
+	// process group in the guest. Frames: `data` (chunk bytes) … `end`;
+	// failures surface as one `error` frame (in-band, like {ok,error}).
+	// No exit code is carried — append `; echo rc=$?` if you need it.
+	RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -504,6 +542,9 @@ func (UnimplementedClawsonServer) AclSetRole(context.Context, *AclSetRoleReq) (*
 }
 func (UnimplementedClawsonServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclDelRole not implemented")
+}
+func (UnimplementedClawsonServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
+	return status.Error(codes.Unimplemented, "method RunScript not implemented")
 }
 func (UnimplementedClawsonServer) SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGroup not implemented")
@@ -931,6 +972,17 @@ func _Clawson_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Clawson_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RunScriptReq)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClawsonServer).RunScript(m, &grpc.GenericServerStream[RunScriptReq, ScriptEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Clawson_RunScriptServer = grpc.ServerStreamingServer[ScriptEvent]
+
 func _Clawson_SubscribeGroup_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SubscribeReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1061,6 +1113,11 @@ var Clawson_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "RunScript",
+			Handler:       _Clawson_RunScript_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "SubscribeGroup",
 			Handler:       _Clawson_SubscribeGroup_Handler,

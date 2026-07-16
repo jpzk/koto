@@ -41,6 +41,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -780,8 +781,8 @@ func fcHostDial(g string, port uint32, timeout time.Duration) (net.Conn, error) 
 	// would over-read — its next fill could pull post-handshake stream bytes
 	// into a buffer we then discard by returning the raw conn. Harmless for
 	// the request/response ops (the guest sends nothing until it gets a
-	// request) but not for a streaming op, where a fast child's first output
-	// can arrive right behind the OK line.
+	// request) but not for exec_stream, where a fast child's first output can
+	// arrive right behind the OK line.
 	line, err := readLineByte(c)
 	if err != nil {
 		c.Close()
@@ -944,6 +945,43 @@ func fcExecStream(g, script string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// fcRunScriptDial opens the guest agent's run_script op: dial the agent port
+// and send the request line. The returned conn then carries framed output
+// ([type][uint32 len][payload], see fcReadScriptFrame) — a guest→host end
+// frame terminates it, because FC's hybrid vsock doesn't surface a guest-side
+// close as a host EOF. The caller owns the conn (read frames, Close to cancel:
+// closing makes the guest agent kill the script's process group).
+func fcRunScriptDial(g, script string) (net.Conn, error) {
+	c, err := fcHostDial(g, fcPortAgent, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := json.Marshal(map[string]any{"op": "run_script", "script": script})
+	if _, err := c.Write(append(b, '\n')); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// fcReadScriptFrame reads one run_script frame: a 5-byte header (1 type byte +
+// uint32 big-endian length) then exactly that many payload bytes. Types:
+// 'D' data, 'E' end (len 0), 'X' error (payload = message).
+func fcReadScriptFrame(c net.Conn) (typ byte, payload []byte, err error) {
+	var hdr [5]byte
+	if _, err = io.ReadFull(c, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[1:])
+	if n > 0 {
+		payload = make([]byte, n)
+		if _, err = io.ReadFull(c, payload); err != nil {
+			return 0, nil, err
+		}
+	}
+	return hdr[0], payload, nil
 }
 
 // fcSkillsTar packs the host skills/ directory for delivery to the guest at

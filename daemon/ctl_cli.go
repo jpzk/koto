@@ -86,7 +86,10 @@ streams
   watch                                    group-state snapshots on change
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
 
-acl (admin role only)
+admin role only
+  runscript <group> <script...>            run a POSIX script in the group's
+                                           microVM as node ("-" = stdin);
+                                           output streams live to stdout
   acl get                                  print the ACL document
   acl set <role> <verb>[:<groups>] ...     replace a role's grants
                                            groups = comma list or "*" (default "*")
@@ -383,6 +386,36 @@ func ctlCliMain(args []string) {
 
 	case "sched":
 		ctlSched(rest)
+
+	case "runscript":
+		// Raw output on purpose — this verb is "run my script, show me its
+		// bytes", not an event feed, so no protojson framing like tail/logs.
+		if len(rest) < 2 {
+			ctlFatal(2, "usage: clawson ctl runscript <group> <script...>")
+		}
+		cl := ctlClient()
+		stream, err := cl.RunScript(context.Background(),
+			&pb.RunScriptReq{Group: rest[0], Script: ctlMsgArg(rest[1:])})
+		if err != nil {
+			ctlFatal(1, "runscript: %v", err)
+		}
+		for {
+			ev, err := stream.Recv()
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				ctlFatal(1, "stream: %v", err)
+			}
+			switch ev.Event {
+			case "data":
+				_, _ = os.Stdout.Write(ev.Chunk)
+			case "end":
+				return
+			case "error":
+				ctlFatal(1, "%s", ev.Error)
+			}
+		}
 
 	case "acl":
 		ctlAcl(rest)

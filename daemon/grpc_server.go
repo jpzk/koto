@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"clawson-protocol/pb"
 
@@ -385,6 +386,66 @@ func (s *clawsonServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.
 }
 
 // ---- server-streaming RPCs ------------------------------------------------
+
+// RunScript runs a POSIX sh script in the group's microVM as the guest
+// worker user (node, uid 1000) and streams combined stdout+stderr back live.
+// Hardcoded admin-only (adminOnlyVerbs, acl.go). ensure() first so it works
+// against a stopped group, same as Send. Failures are in-band `error` frames
+// (gRPC status stays reserved for transport/auth, matching the unary verbs);
+// client cancel closes the vsock conn, which makes the guest agent SIGKILL
+// the script's process group. Output is raw — the caller asked for this
+// script's bytes, so no sanitizer (unlike agent streams rendered in the TUI).
+func (s *clawsonServer) RunScript(r *pb.RunScriptReq, stream pb.Clawson_RunScriptServer) error {
+	fail := func(msg string) error {
+		return stream.Send(&pb.ScriptEvent{Event: "error", Error: msg})
+	}
+	if !validGroupName(r.Group) {
+		return fail("invalid group name")
+	}
+	if strings.TrimSpace(r.Script) == "" {
+		return fail("empty script")
+	}
+	if _, err := ensure(r.Group, r.Group == "main"); err != nil {
+		return fail(err.Error())
+	}
+	emitLogf("exec", "info", "[%s] runscript start (%d-byte script)", r.Group, len(r.Script))
+	c, err := fcRunScriptDial(r.Group, r.Script)
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer c.Close()
+	ctx := stream.Context()
+	go func() { // client gone → close the vsock conn → guest kills the script
+		<-ctx.Done()
+		c.Close()
+	}()
+	for {
+		typ, payload, err := fcReadScriptFrame(c)
+		if err != nil {
+			// Frame read failed: either the client cancelled (ctx.Done closed
+			// c out from under us) or the VM died mid-run. The former is not
+			// an error to report; the latter is, but the stream is already
+			// going away — a best-effort error frame covers both.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			emitLogf("exec", "warn", "[%s] runscript transport: %v", r.Group, err)
+			return fail("guest connection lost: " + err.Error())
+		}
+		switch typ {
+		case 'D':
+			if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: payload}); serr != nil {
+				return serr
+			}
+		case 'E':
+			emitLogf("exec", "info", "[%s] runscript end", r.Group)
+			return stream.Send(&pb.ScriptEvent{Event: "end"})
+		case 'X':
+			emitLogf("exec", "warn", "[%s] runscript error: %s", r.Group, string(payload))
+			return fail(string(payload))
+		}
+	}
+}
 
 func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_SubscribeGroupServer) error {
 	g := r.GetGroup()

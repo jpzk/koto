@@ -19,8 +19,9 @@ package main
 //           the podman sidecar sees.
 //
 //   host → guest (daemon does hybrid-vsock "CONNECT 10000")
-//     10000 agent RPC: init / msg / exec / exec_stream / shutdown. One JSON
-//           line request; JSON line response (exec_stream: raw output).
+//     10000 agent RPC: init / msg / exec / exec_stream / run_script /
+//           shutdown. One JSON line request; JSON line response
+//           (exec_stream: raw output; run_script: framed output).
 //
 // As PID 1 the agent also owns early boot (mounts, loopback up, /dev/vdb
 // workspace mount with mkfs fallback) and zombie reaping. All children are
@@ -32,6 +33,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -535,6 +537,8 @@ func agentServer() {
 			handleExec(c, &req)
 		case "exec_stream":
 			handleExecStream(c, &req)
+		case "run_script":
+			handleRunScript(c, &req)
 		case "shutdown":
 			reply(c, map[string]any{"ok": true})
 			c.Close()
@@ -798,7 +802,10 @@ func handleExec(c *vconn, req *agentReq) {
 // handleExecStream pipes the child's combined output straight down the
 // connection. When the daemon closes its end (timeout / cancel), the read
 // below returns and the child's process group is killed — matching the
-// `podman exec` + context-cancel lifecycle.
+// `podman exec` + context-cancel lifecycle. Termination is always
+// daemon-driven (the sole caller is the bg-tailer's `tail -F`, which never
+// exits on its own), so there is no guest→host end signal here — see
+// handleRunScript for the framed variant that needs one.
 func handleExecStream(c *vconn, req *agentReq) {
 	cmd := exec.Command("/bin/sh", "-c", req.Script)
 	cmd.Dir = wsDir
@@ -815,6 +822,83 @@ func handleExecStream(c *vconn, req *agentReq) {
 		killGroup(pid, syscall.SIGKILL)
 	}()
 	<-ch
+}
+
+// ---- run_script: framed streaming exec as the worker user ----------------------
+//
+// RunScript (admin-only gRPC verb) needs a guest→host end-of-stream signal so
+// the daemon can close the client's stream when the script finishes. FC's
+// hybrid vsock does NOT propagate a guest-side close/shutdown to a host read
+// (verified: the host read blocks forever after the guest closes), so we
+// can't rely on connection close the way a normal socket would. Instead this
+// op frames the connection explicitly:
+//
+//	data frame  'D' <uint32 len> <bytes>   one chunk of combined stdout+stderr
+//	end frame   'E' <uint32 0>             the script exited; stream is done
+//	error frame 'X' <uint32 len> <bytes>   couldn't start (pipe/spawn failure)
+//
+// The child runs as the worker user (node/uid 1000, HOME=/workspace) — the
+// same world the agent's own bash sees — and writes to a PIPE, never the
+// vsock fd directly, so a backgrounded grandchild can't hold the connection
+// open and the frame loop owns termination.
+func handleRunScript(c *vconn, req *agentReq) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		writeScriptFrame(c, 'X', []byte(err.Error()))
+		return
+	}
+	cmd := exec.Command("/bin/sh", "-c", req.Script)
+	cmd.Dir = wsDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
+	}
+	cmd.Env = append(os.Environ(), "HOME="+wsDir, "USER=node", "LOGNAME=node")
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	pid, ch, err := startTracked(cmd)
+	pw.Close() // child holds the only write end; pr hits EOF when it (and any grandchild) exits
+	if err != nil {
+		pr.Close()
+		writeScriptFrame(c, 'X', []byte(err.Error()))
+		return
+	}
+	go func() {
+		one := make([]byte, 1)
+		_, _ = c.Read(one) // daemon closed its end (client cancel/timeout)
+		killGroup(pid, syscall.SIGKILL)
+		pr.Close() // unblock the copy loop so we stop framing
+	}()
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := pr.Read(buf)
+		if n > 0 {
+			if werr := writeScriptFrame(c, 'D', buf[:n]); werr != nil {
+				break // daemon gone; peer-close goroutine will reap
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	<-ch                              // reap the child
+	_ = writeScriptFrame(c, 'E', nil) // signal end (best-effort; conn may be gone)
+}
+
+// writeScriptFrame writes one [type][uint32 len][payload] frame. A single
+// Write per header/payload — vsock is a stream, the daemon reassembles via
+// io.ReadFull on the 5-byte header then the exact length.
+func writeScriptFrame(c *vconn, typ byte, payload []byte) error {
+	var hdr [5]byte
+	hdr[0] = typ
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
+	if _, err := c.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		_, err := c.Write(payload)
+		return err
+	}
+	return nil
 }
 
 // ---- shutdown -------------------------------------------------------------------

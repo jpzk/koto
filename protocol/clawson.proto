@@ -49,6 +49,16 @@ service Clawson {
   rpc AclSetRole (AclSetRoleReq) returns (AclResp);
   rpc AclDelRole (AclDelRoleReq) returns (AclResp);
 
+  // RunScript executes a POSIX sh script inside a group's microVM as the
+  // guest worker user (node, uid 1000, cwd /workspace) and streams its
+  // combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
+  // it is direct code execution in the VM, bypassing the agent loop, so it
+  // is not delegatable via acl.json. Client cancel kills the script's
+  // process group in the guest. Frames: `data` (chunk bytes) … `end`;
+  // failures surface as one `error` frame (in-band, like {ok,error}).
+  // No exit code is carried — append `; echo rc=$?` if you need it.
+  rpc RunScript (RunScriptReq) returns (stream ScriptEvent);
+
   // ---- server-streaming (the old connection-ownership-transfer cases) ----
   // Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
   // failed auth surfaces as a non-OK gRPC status at open time.
@@ -83,6 +93,17 @@ message Event {
   // have seq 0 — the cursor only exists for the live stream. The synthetic
   // `gap` event (see SubscribeReq) also carries seq 0.
   uint64 seq        = 12;
+}
+
+message RunScriptReq {
+  string group  = 1;
+  string script = 2; // passed to /bin/sh -c, cwd /workspace, as node (uid 1000)
+}
+
+message ScriptEvent {
+  string event = 1; // data | end | error
+  bytes  chunk = 2; // data: raw combined stdout+stderr bytes, in stream order
+  string error = 3; // error: what failed (spawn, VM dial, …)
 }
 
 message LogEvent {

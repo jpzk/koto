@@ -79,7 +79,10 @@ recreating its environment inside the VM:
   system-prompt.md + config.json into the guest workspace, then the b64 line
   into the in FIFO), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
   analogue used by interrupt + /clear), `exec_stream` (raw streamed output,
-  peer-close kills the child — used by background-job tailing), `shutdown`
+  peer-close kills the child — used by background-job tailing; the admin-only
+  RunScript RPC rides this op with `user:true`, which demotes the child from
+  the agent's root to node/uid 1000 with HOME=/workspace — daemon-internal
+  callers keep agent authority), `shutdown`
   (sync + umount + poweroff — dirty-ext4 protection for workspace.img).
 - PID-1 zombie reaping via a central wait4(-1) loop with a tracked-pid table
   (the catatonit role), children in their own process groups.
