@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -60,6 +61,15 @@ func allocPort(g string) int {
 // ---- sidecar lifecycle ----------------------------------------------------
 
 func ensure(g string, isMain bool) (int, error) {
+	if strings.TrimSpace(g) == "" {
+		// vol("") resolves to ROOT itself (filepath.Join drops the empty
+		// element), so an unvalidated empty name here writes its .cs/
+		// straight into groups/ instead of a proper per-group subdirectory,
+		// and every later destroy("") would RemoveAll(ROOT). Caught here,
+		// the single chokepoint every spawn/restart/clear path funnels
+		// through, rather than in each caller individually.
+		return 0, fmt.Errorf("group name must not be empty")
+	}
 	v := vol(g)
 	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
 		return 0, err
@@ -283,6 +293,12 @@ func destroy(g string) baseResp {
 	if g == "main" {
 		return errResp("main group is protected; use `make stop` to tear everything down")
 	}
+	if strings.TrimSpace(g) == "" {
+		// vol("") resolves to ROOT itself (filepath.Join drops the empty
+		// element), so without this guard the RemoveAll below would wipe
+		// every group's workspace instead of one.
+		return errResp("group name must not be empty")
+	}
 	emitLogf("warn", "destroy group=%s (workspace will be deleted)", g)
 	stopGroup(g)
 	groupsLock.Lock()
@@ -328,6 +344,9 @@ func destroy(g string) baseResp {
 }
 
 func restart(g string) (int, error) {
+	if strings.TrimSpace(g) == "" {
+		return 0, fmt.Errorf("group name must not be empty")
+	}
 	emitLogf("info", "restart group=%s", g)
 	stopGroup(g)
 	return ensure(g, g == "main")

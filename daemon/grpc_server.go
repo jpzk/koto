@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"clawson-protocol/pb"
 
@@ -126,6 +127,9 @@ func toStruct(m map[string]any) *structpb.Struct {
 // ---- unary RPCs -----------------------------------------------------------
 
 func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
+	if strings.TrimSpace(r.Group) == "" {
+		return &pb.SpawnResp{Error: "group name must not be empty"}, nil
+	}
 	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
 		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
 	}
