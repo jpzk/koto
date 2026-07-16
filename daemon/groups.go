@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -61,14 +60,15 @@ func allocPort(g string) int {
 // ---- sidecar lifecycle ----------------------------------------------------
 
 func ensure(g string, isMain bool) (int, error) {
-	if strings.TrimSpace(g) == "" {
-		// vol("") resolves to ROOT itself (filepath.Join drops the empty
-		// element), so an unvalidated empty name here writes its .cs/
-		// straight into groups/ instead of a proper per-group subdirectory,
-		// and every later destroy("") would RemoveAll(ROOT). Caught here,
-		// the single chokepoint every spawn/restart/clear path funnels
-		// through, rather than in each caller individually.
-		return 0, fmt.Errorf("group name must not be empty")
+	if !validGroupName(g) {
+		// vol(g) == filepath.Join(ROOT, g); an empty g resolves to ROOT
+		// itself (filepath.Join drops the empty element), and a g containing
+		// "/" or ".." can escape ROOT entirely — either way, every later
+		// destroy(g) would RemoveAll the wrong (or every) directory. validGroupName
+		// (grpc_server.go) is the same charset the gRPC/ctl boundaries already
+		// enforce; checked again here, the chokepoint every spawn/restart/clear
+		// path funnels through, so no future caller can reopen this.
+		return 0, fmt.Errorf("invalid group name")
 	}
 	v := vol(g)
 	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
@@ -293,11 +293,11 @@ func destroy(g string) baseResp {
 	if g == "main" {
 		return errResp("main group is protected; use `make stop` to tear everything down")
 	}
-	if strings.TrimSpace(g) == "" {
-		// vol("") resolves to ROOT itself (filepath.Join drops the empty
-		// element), so without this guard the RemoveAll below would wipe
-		// every group's workspace instead of one.
-		return errResp("group name must not be empty")
+	if !validGroupName(g) {
+		// Same rationale as the ensure() guard above: an invalid g here
+		// would make the RemoveAll below delete the wrong (or every)
+		// directory instead of just this group's.
+		return errResp("invalid group name")
 	}
 	emitLogf("warn", "destroy group=%s (workspace will be deleted)", g)
 	stopGroup(g)
@@ -344,8 +344,8 @@ func destroy(g string) baseResp {
 }
 
 func restart(g string) (int, error) {
-	if strings.TrimSpace(g) == "" {
-		return 0, fmt.Errorf("group name must not be empty")
+	if !validGroupName(g) {
+		return 0, fmt.Errorf("invalid group name")
 	}
 	emitLogf("info", "restart group=%s", g)
 	stopGroup(g)

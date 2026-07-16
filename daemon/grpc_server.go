@@ -3,12 +3,29 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"regexp"
 
 	"clawson-protocol/pb"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+// groupNameRE is the gRPC-boundary allowlist for group names. It's
+// deliberately more permissive than ctl.go's ctlGroupRE (which is
+// lowercase-only, for peer-spawned groups): existing groups spawned via this
+// RPC predate any validation and use mixed case (CHARLIE, XYZ, Z00M, 9AZ,
+// DELTA), so this only excludes what's actually dangerous — path
+// separators, "..", and control characters — which is what let an
+// unvalidated group name reach vol(g) (== filepath.Join(ROOT, g)) or any of
+// the fc.go path helpers that concatenate g directly (fcPidPath, fcCfgPath,
+// fcConsolePath, fcJailDir) and escape their intended directory. Every RPC
+// that takes a bare group name must check this before the name reaches any
+// of those helpers.
+var groupNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
+
+func validGroupName(g string) bool { return groupNameRE.MatchString(g) }
 
 // clawsonServer implements pb.ClawsonServer. Each method is a thin wrapper over
 // the existing daemon helpers (ensure/send/listGroups/configCmd/...): it
@@ -127,8 +144,8 @@ func toStruct(m map[string]any) *structpb.Struct {
 // ---- unary RPCs -----------------------------------------------------------
 
 func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
-	if strings.TrimSpace(r.Group) == "" {
-		return &pb.SpawnResp{Error: "group name must not be empty"}, nil
+	if !validGroupName(r.Group) {
+		return &pb.SpawnResp{Error: "invalid group name (must match [A-Za-z0-9][A-Za-z0-9_-]{0,31})"}, nil
 	}
 	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
 		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
@@ -168,6 +185,9 @@ func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, er
 	// supported since the whisper/DooD path was removed — surfaces in-band on
 	// this RPC instead of silently dropping the turn. We only take the
 	// attachment path when bytes are present, leaving the fast path untouched.
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
 	msg := r.Msg
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
 		m, err := processAttachments(r)
@@ -191,11 +211,17 @@ func (s *clawsonServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, er
 }
 
 func (s *clawsonServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
 	stopGroup(r.Group)
 	return &pb.BaseResp{Ok: true}, nil
 }
 
 func (s *clawsonServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
 	if err := interruptAgent(r.Group); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
@@ -203,11 +229,17 @@ func (s *clawsonServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseRe
 }
 
 func (s *clawsonServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
 	br := destroy(r.Group)
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
 func (s *clawsonServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.SpawnResp{Error: "invalid group name"}, nil
+	}
 	port, err := restart(r.Group)
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
@@ -216,6 +248,9 @@ func (s *clawsonServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnRes
 }
 
 func (s *clawsonServer) History(_ context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.HistoryResp{Error: "invalid group name"}, nil
+	}
 	evs, more := readHistory(r.Group, int(r.Limit), r.Before)
 	out := make([]*pb.Event, len(evs))
 	for i := range evs {
@@ -225,11 +260,17 @@ func (s *clawsonServer) History(_ context.Context, r *pb.HistoryReq) (*pb.Histor
 }
 
 func (s *clawsonServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.ConfigResp{Error: "invalid group name"}, nil
+	}
 	resp := configCmd(fromPBConfigReq(r))
 	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(resp.Config)}, nil
 }
 
 func (s *clawsonServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
+	if r.Group != "" && !validGroupName(r.Group) {
+		return &pb.MetricsResp{Error: "invalid group name"}, nil
+	}
 	out := &pb.MetricsResp{Ok: true, GlobalMetric: toStruct(latestMetricAny())}
 	if r.Group != "" {
 		out.Metric = toStruct(latestMetric(r.Group))
@@ -238,11 +279,17 @@ func (s *clawsonServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.Metric
 }
 
 func (s *clawsonServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
 	br := clearCmd(groupReq{Group: r.Group})
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
 func (s *clawsonServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.SkillsResp, error) {
+	if r.Group != "" && !validGroupName(r.Group) {
+		return &pb.SkillsResp{Error: "invalid group name"}, nil
+	}
 	resp := skillListCmd(skillListReq{Group: r.Group})
 	out := make([]*pb.SkillItem, len(resp.Skills))
 	for i := range resp.Skills {
@@ -262,6 +309,9 @@ func (s *clawsonServer) SkillRead(_ context.Context, r *pb.SkillReadReq) (*pb.Sk
 }
 
 func (s *clawsonServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.SchedAddResp{Error: "invalid group name"}, nil
+	}
 	it, err := addSched(r.Group, r.Cron, r.Msg)
 	if err != nil {
 		return &pb.SchedAddResp{Error: err.Error()}, nil
@@ -270,6 +320,9 @@ func (s *clawsonServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.Sche
 }
 
 func (s *clawsonServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.SchedListResp, error) {
+	if r.Group != "" && !validGroupName(r.Group) {
+		return &pb.SchedListResp{Error: "invalid group name"}, nil
+	}
 	items := listSched(r.Group)
 	out := make([]*pb.ScheduleItem, len(items))
 	for i := range items {
@@ -303,6 +356,9 @@ func (s *clawsonServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseR
 
 func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_SubscribeGroupServer) error {
 	g := r.GetGroup()
+	if !validGroupName(g) {
+		return status.Error(codes.InvalidArgument, "invalid group name")
+	}
 	ensureTail(g)
 	sub := &groupSub{ch: make(chan *pb.Event, 256), done: make(chan struct{})}
 	// Snapshot the resume replay and register under ONE lock acquisition:
