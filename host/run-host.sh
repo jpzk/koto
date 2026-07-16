@@ -24,6 +24,21 @@ CS_HOST_NAME="cs_host_go"
 mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache" "$HERE/.gomodcache"
 [ -f "$HERE/creds/.credentials.json" ] || { echo "no creds: run \`make login\` first"; exit 1; }
 [ -f "$HERE/creds/server.crt" ] || { echo "no daemon TLS cert: run \`make pki-init\` first"; exit 1; }
+# creds/ and fcassets/ are sometimes symlinked in from another checkout to
+# share one OAuth login + PKI, or the ~800MB firecracker binary+kernel+rootfs
+# (e.g. a second worktree running its own instance via CLAWSON_INSTANCE
+# above). The daemon reads both via a $HERE-relative path, resolved through
+# the `-v "$HERE:$HERE"` mount below — if the symlink target lives outside
+# $HERE, that target isn't mounted anywhere in the container's namespace and
+# the open() fails. Bind-mount each symlink's real target at its own
+# absolute path too, so the internal symlink traversal finds a live view.
+EXTRA_MOUNTS=""
+for d in creds fcassets; do
+  if [ -L "$HERE/$d" ]; then
+    real=$(cd "$HERE/$d" && pwd -P)
+    [ "$real" != "$HERE/$d" ] && EXTRA_MOUNTS="$EXTRA_MOUNTS -v $real:$real"
+  fi
+done
 # gRPC listener address. Inside cs_host_go (on the private clawson-net) 0.0.0.0
 # is reachable only by clawson-net peers — the port is NOT host-published. For
 # an off-box daemon, set CLAWSON_BIND to the WireGuard interface IP instead.
@@ -63,6 +78,7 @@ podman run -d --rm \
   -v "$HERE/.gocache:/root/.cache/go-build" \
   -v "$HERE/.gomodcache:/go/pkg/mod" \
   -v /etc/localtime:/etc/localtime:ro \
+  $EXTRA_MOUNTS \
   -e CLAWSON_BIND="$CLAWSON_BIND" \
   -e CLAWSON_PORT="$CLAWSON_PORT" \
   -e TERM="${TERM:-xterm-256color}" \
