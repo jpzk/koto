@@ -123,20 +123,21 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 	return id, nil
 }
 
-// aclCheck is the authorization decision for one decoded request: the
-// caller's role must grant the verb, and — for group-scoped verbs — the
-// grant must cover the request's target group (acl.go).
+// aclCheck is the authorization decision for one decoded request: some role
+// of the caller must grant the verb, and — for group-scoped verbs — that
+// grant must cover the request's target group (acl.go; union semantics).
 func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) error {
 	target, targeted := targetOf(req)
-	if roleAllowed(loadACL(), id.Role, verb, target, targeted) {
+	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
 		return nil
 	}
+	roles := strings.Join(id.Roles, ",")
 	if targeted {
-		emitLogf("warn", "acl: %s (role %s) denied %s on %q from %s", id.Name, id.Role, verb, target, peerAddr(ctx))
-		return status.Errorf(codes.PermissionDenied, "role %s may not call %s on %q", id.Role, verb, target)
+		emitLogf("warn", "acl: %s (roles %s) denied %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
+		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s on %q", roles, verb, target)
 	}
-	emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ctx))
-	return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
+	emitLogf("warn", "acl: %s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ctx))
+	return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 }
 
 func authUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -173,13 +174,14 @@ func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, hand
 		return err
 	}
 	verb := verbFromMethod(info.FullMethod)
-	// Verb-level gate now (deny a role with no grant at all before the
-	// handler runs); target-level gate rides RecvMsg once the request
-	// message exists. For targetless streams (watch_state, subscribe_logs)
-	// this first check is the whole decision.
-	if _, ok := grantFor(loadACL(), id.Role, verb); !ok {
-		emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ss.Context()))
-		return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
+	// Verb-level gate now (deny a caller none of whose roles grant the verb
+	// before the handler runs); target-level gate rides RecvMsg once the
+	// request message exists. For targetless streams (watch_state,
+	// subscribe_logs) this first check is the whole decision.
+	if !anyGrant(loadACL(), id.Roles, verb) {
+		roles := strings.Join(id.Roles, ",")
+		emitLogf("warn", "acl: %s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ss.Context()))
+		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 	}
 	return handler(srv, &aclStream{ServerStream: ss, id: id, verb: verb})
 }

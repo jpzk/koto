@@ -135,8 +135,10 @@ proto-verify: proto-gen
 # fingerprint. SAN on the server cert must match the overlay address clients
 # dial (override with SERVER_SAN=IP:<wg-ip> or DNS:<name>).
 #
-# Every client has exactly one ROLE (default admin), written into its
-# tokens.json entry. creds/acl.json maps role -> {verb -> targets}: verbs are
+# Every client has one or more roles (ROLE=reader,ops — default admin),
+# written into its tokens.json entry as a roles array; a client's effective
+# permissions are the union of its roles. creds/acl.json maps role ->
+# {verb -> targets}: verbs are
 # snake_case RPC names, targets are group names ("*" = any; targets only
 # apply to group-scoped verbs like send/stop/history — see daemon/acl.go).
 # The daemon enforces it per call and re-reads both files every time, so
@@ -186,8 +188,9 @@ pki-client:
 	  printf '%s' "$$tok" > creds/token-$(NAME); chmod 600 creds/token-$(NAME); \
 	  [ -f creds/tokens.json ] || echo '{}' > creds/tokens.json; \
 	  tmp=$$(mktemp); jq --arg n "$(NAME)" --arg h "$$hash" --arg r "$(ROLE)" \
-	    '.[$$n]={hash:$$h, role:$$r}' creds/tokens.json > $$tmp && mv $$tmp creds/tokens.json; \
-	  echo "token written to creds/token-$(NAME); role $(ROLE) registered in creds/tokens.json"
+	    '.[$$n]={hash:$$h, roles:($$r | split(",") | map(gsub("^\\s+|\\s+$$";"")) | map(select(. != "")))}' \
+	    creds/tokens.json > $$tmp && mv $$tmp creds/tokens.json; \
+	  echo "token written to creds/token-$(NAME); roles [$(ROLE)] registered in creds/tokens.json"
 
 # --- Firecracker microVM runtime assets -------------------------------------
 # Opt-in per group via config.json `"runtime": "firecracker"`. Assets land in

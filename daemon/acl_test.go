@@ -12,17 +12,32 @@ func TestParseTokens(t *testing.T) {
 	raw := []byte(`{
 		"tui":    "AABB01",
 		"agent1": {"hash": "ccdd02", "role": "agent"},
+		"multi":  {"hash": "ddee04", "roles": ["reader", " ops ", ""]},
 		"broken": {"role": "agent"},
 		"empty":  {"hash": "eeff03", "role": ""}
 	}`)
 	m := parseTokens(raw)
-	if got := m["aabb01"]; got.Name != "tui" || got.Role != "admin" {
-		t.Errorf("legacy bare hash: got %+v, want tui/admin", got)
+	rolesEq := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
 	}
-	if got := m["ccdd02"]; got.Name != "agent1" || got.Role != "agent" {
-		t.Errorf("object form: got %+v, want agent1/agent", got)
+	if got := m["aabb01"]; got.Name != "tui" || !rolesEq(got.Roles, []string{"admin"}) {
+		t.Errorf("legacy bare hash: got %+v, want tui/[admin]", got)
 	}
-	if len(m) != 2 {
+	if got := m["ccdd02"]; got.Name != "agent1" || !rolesEq(got.Roles, []string{"agent"}) {
+		t.Errorf("single-role object: got %+v, want agent1/[agent]", got)
+	}
+	if got := m["ddee04"]; got.Name != "multi" || !rolesEq(got.Roles, []string{"reader", "ops"}) {
+		t.Errorf("multi-role object: got %+v, want multi/[reader ops] (trimmed, empties dropped)", got)
+	}
+	if len(m) != 3 {
 		t.Errorf("malformed entries must be skipped, got %d entries: %+v", len(m), m)
 	}
 	if parseTokens([]byte("not json")) != nil {
@@ -109,6 +124,42 @@ func TestRoleAllowedTargets(t *testing.T) {
 	}
 	if roleAllowed(nil, "admin", "list", "", false) {
 		t.Error("nil ACL (corrupt acl.json) must deny everything")
+	}
+}
+
+// TestRolesUnion: a user's permissions are the union of their roles — any
+// one role granting verb-on-target suffices, and the union widens without
+// one role's targets leaking onto another role's verbs.
+func TestRolesUnion(t *testing.T) {
+	acl := parseACL([]byte(`{
+		"reader":   {"list": "*", "history": ["main"]},
+		"operator": {"stop": ["ghost"], "restart": ["ghost"]}
+	}`))
+	both := []string{"reader", "operator"}
+	cases := []struct {
+		roles          []string
+		verb, target   string
+		targeted, want bool
+	}{
+		{both, "history", "main", true, true},              // via reader
+		{both, "stop", "ghost", true, true},                // via operator
+		{both, "list", "", false, true},                    // via reader
+		{both, "stop", "main", true, false},                // operator's stop doesn't cover main
+		{both, "history", "ghost", true, false},            // reader's history doesn't cover ghost
+		{both, "destroy", "ghost", true, false},            // no role grants destroy
+		{[]string{"reader"}, "stop", "ghost", true, false}, // union needs the role present
+		{nil, "list", "", false, false},                    // no roles at all
+	}
+	for _, c := range cases {
+		if got := rolesAllowed(acl, c.roles, c.verb, c.target, c.targeted); got != c.want {
+			t.Errorf("rolesAllowed(%v, %q, %q) = %v, want %v", c.roles, c.verb, c.target, got, c.want)
+		}
+	}
+	if !anyGrant(acl, both, "stop") || anyGrant(acl, both, "destroy") {
+		t.Error("anyGrant must reflect the union of verb grants")
+	}
+	if anyGrant(acl, []string{"ghost-role"}, "list") {
+		t.Error("anyGrant with unknown roles must deny")
 	}
 }
 

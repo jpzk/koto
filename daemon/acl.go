@@ -4,13 +4,14 @@ package main
 //
 // Authentication (mTLS + bearer token, auth.go) answers "who is calling";
 // this file answers "what may they call, and on which group". The grant
-// model is USER (clientid) —has one→ ROLE —grants→ VERB on TARGET. Two
+// model is USER (clientid) —has→ ROLES —each granting→ VERB on TARGET; a
+// user's effective permissions are the UNION of their roles' grants. Two
 // gitignored files under creds/ drive it:
 //
-//   tokens.json — clientid → credential. Two value shapes:
-//                   "…hash…"                          (legacy: role "admin")
-//                   {"hash": "…", "role": "agent"}    (explicit role)
-//                 Every clientid has exactly one role.
+//   tokens.json — clientid → credential. Three value shapes:
+//                   "…hash…"                                  (legacy: admin)
+//                   {"hash": "…", "role": "agent"}            (single role)
+//                   {"hash": "…", "roles": ["reader", "ops"]} (multiple)
 //
 //   acl.json    — role → {verb → targets}:
 //                   {"admin": {"*": "*"},
@@ -56,8 +57,8 @@ import (
 
 // clientIdentity is one authenticated tokens.json entry.
 type clientIdentity struct {
-	Name string // clientid — the tokens.json key
-	Role string
+	Name  string // clientid — the tokens.json key
+	Roles []string
 }
 
 const defaultRole = "admin"
@@ -71,10 +72,11 @@ type targetSet struct {
 // aclTable is role → verb → allowed targets.
 type aclTable map[string]map[string]targetSet
 
-// parseTokens converts raw tokens.json bytes into hash → identity. The two
-// accepted value shapes are the legacy bare hash string (admin) and the
-// {"hash","role"} object. Entries that parse as neither are skipped —
-// half-valid credentials must not authenticate anyone.
+// parseTokens converts raw tokens.json bytes into hash → identity. Accepted
+// value shapes: legacy bare hash string (admin), {"hash","role"} (single
+// role), {"hash","roles":[…]} (multiple; wins over "role" if both present).
+// Entries that parse as none of these — or end up with no roles — are
+// skipped: half-valid credentials must not authenticate anyone.
 func parseTokens(raw []byte) map[string]clientIdentity {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(raw, &m) != nil {
@@ -82,21 +84,35 @@ func parseTokens(raw []byte) map[string]clientIdentity {
 	}
 	out := make(map[string]clientIdentity, len(m))
 	for name, v := range m {
-		var hash, role string
+		var hash string
+		var roles []string
 		var s string
 		if json.Unmarshal(v, &s) == nil {
-			hash, role = s, defaultRole
+			hash, roles = s, []string{defaultRole}
 		} else {
 			var obj struct {
-				Hash string `json:"hash"`
-				Role string `json:"role"`
+				Hash  string   `json:"hash"`
+				Role  string   `json:"role"`
+				Roles []string `json:"roles"`
 			}
-			if json.Unmarshal(v, &obj) != nil || obj.Hash == "" || obj.Role == "" {
+			if json.Unmarshal(v, &obj) != nil || obj.Hash == "" {
 				continue
 			}
-			hash, role = obj.Hash, obj.Role
+			hash = obj.Hash
+			src := obj.Roles
+			if len(src) == 0 && obj.Role != "" {
+				src = []string{obj.Role}
+			}
+			for _, r := range src {
+				if r = strings.TrimSpace(r); r != "" {
+					roles = append(roles, r)
+				}
+			}
+			if len(roles) == 0 {
+				continue
+			}
 		}
-		out[strings.ToLower(strings.TrimSpace(hash))] = clientIdentity{Name: name, Role: role}
+		out[strings.ToLower(strings.TrimSpace(hash))] = clientIdentity{Name: name, Roles: roles}
 	}
 	return out
 }
@@ -250,9 +266,9 @@ func grantFor(acl aclTable, role, verb string) (targetSet, bool) {
 	return targetSet{}, false
 }
 
-// roleAllowed is the full authorization decision: role has verb, and — for
-// targeted verbs — the grant covers the target. Everything unknown fails
-// closed.
+// roleAllowed is the authorization decision for ONE role: role has verb,
+// and — for targeted verbs — the grant covers the target. Everything unknown
+// fails closed.
 func roleAllowed(acl aclTable, role, verb, target string, targeted bool) bool {
 	ts, ok := grantFor(acl, role, verb)
 	if !ok {
@@ -262,4 +278,26 @@ func roleAllowed(acl aclTable, role, verb, target string, targeted bool) bool {
 		return true
 	}
 	return ts.any || ts.names[target]
+}
+
+// rolesAllowed is the user-level decision: permissions are the union of the
+// user's roles, so any single role granting verb-on-target suffices.
+func rolesAllowed(acl aclTable, roles []string, verb, target string, targeted bool) bool {
+	for _, r := range roles {
+		if roleAllowed(acl, r, verb, target, targeted) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyGrant reports whether any of the user's roles grants the verb in any
+// form (used as the streaming pre-gate, before the target is known).
+func anyGrant(acl aclTable, roles []string, verb string) bool {
+	for _, r := range roles {
+		if _, ok := grantFor(acl, r, verb); ok {
+			return true
+		}
+	}
+	return false
 }

@@ -115,9 +115,11 @@ allowlist in `creds/clients.allow`) plus a per-RPC bearer token — see
 (`tui/daemon.go`) and the Android app; both consume the same proto, so
 changes must stay additive.
 
-**Authorization is role-based (`acl.go`): USER (clientid) has one ROLE; a
-role grants VERB on TARGET.** Every tokens.json clientid has exactly one role
-(`make pki-client NAME=x ROLE=agent`; legacy bare-hash entries = `admin`).
+**Authorization is role-based (`acl.go`): USER (clientid) has ROLES; each
+role grants VERB on TARGET; a user's permissions are the union of their
+roles' grants.** A tokens.json clientid carries one or more roles
+(`make pki-client NAME=x ROLE=reader,operator`; single `"role"` and legacy
+bare-hash entries (= `admin`) still parse).
 `creds/acl.json` maps role → {verb → targets}: verbs are snake_case RPC names
 (`stop`, `skill_new`, `subscribe_group`, …; `"*"` = every verb), targets are
 group names (`"*"` = any; e.g. `"send": ["main"]` confines an agent to one
