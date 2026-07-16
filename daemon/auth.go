@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -86,33 +85,17 @@ func loadClientAllow() (map[string]bool, error) {
 	return out, nil
 }
 
-// loadTokens reads creds/tokens.json ({"<name>": "<sha256hex-of-token>"}) into a
-// set of valid token hashes. Read per call so rotation needs no restart.
-func loadTokens() map[string]bool {
-	b, err := os.ReadFile(credFile("tokens.json"))
-	if err != nil {
-		return nil
-	}
-	var m map[string]string
-	if json.Unmarshal(b, &m) != nil {
-		return nil
-	}
-	out := make(map[string]bool, len(m))
-	for _, h := range m {
-		out[strings.ToLower(strings.TrimSpace(h))] = true
-	}
-	return out
-}
-
-// tokenValid hashes the presented bearer token and checks set membership. Both
-// sides are SHA-256 hashes, so a plain lookup leaks no usable timing (preimage
-// resistance) — the secret never sits in memory as plaintext for comparison.
-func tokenValid(tok string) bool {
+// tokenIdentity hashes the presented bearer token and looks up the matching
+// tokens.json entry (see acl.go for the file shape). Both sides are SHA-256
+// hashes, so a plain lookup leaks no usable timing (preimage resistance) —
+// the secret never sits in memory as plaintext for comparison.
+func tokenIdentity(tok string) (clientIdentity, bool) {
 	if tok == "" {
-		return false
+		return clientIdentity{}, false
 	}
 	sum := sha256.Sum256([]byte(tok))
-	return loadTokens()[hex.EncodeToString(sum[:])]
+	id, ok := loadTokenIdentities()[hex.EncodeToString(sum[:])]
+	return id, ok
 }
 
 func peerAddr(ctx context.Context) string {
@@ -122,31 +105,39 @@ func peerAddr(ctx context.Context) string {
 	return "?"
 }
 
-// authFromCtx enforces the bearer token. mTLS (cert chain + fingerprint
-// allowlist) is already enforced by the TLS layer before any RPC dispatches, so
-// reaching here means the peer holds a valid allowlisted client cert.
-func authFromCtx(ctx context.Context) error {
+// authFromCtx enforces the bearer token (authentication), then the ACL
+// (authorization: the caller's role must list the method's verb — acl.go).
+// mTLS (cert chain + fingerprint allowlist) is already enforced by the TLS
+// layer before any RPC dispatches, so reaching here means the peer holds a
+// valid allowlisted client cert.
+func authFromCtx(ctx context.Context, fullMethod string) error {
 	md, _ := metadata.FromIncomingContext(ctx)
 	tok := ""
 	if vals := md.Get("authorization"); len(vals) > 0 {
 		tok = strings.TrimSpace(strings.TrimPrefix(vals[0], "Bearer "))
 	}
-	if !tokenValid(tok) {
+	id, ok := tokenIdentity(tok)
+	if !ok {
 		emitLogf("warn", "auth: rejected call from %s (bad/missing token)", peerAddr(ctx))
 		return status.Error(codes.Unauthenticated, "invalid or missing token")
+	}
+	verb := verbFromMethod(fullMethod)
+	if !roleAllowed(loadACL(), id.Role, verb) {
+		emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ctx))
+		return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
 	}
 	return nil
 }
 
-func authUnary(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	if err := authFromCtx(ctx); err != nil {
+func authUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	if err := authFromCtx(ctx, info.FullMethod); err != nil {
 		return nil, err
 	}
 	return handler(ctx, req)
 }
 
-func authStream(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	if err := authFromCtx(ss.Context()); err != nil {
+func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if err := authFromCtx(ss.Context(), info.FullMethod); err != nil {
 		return err
 	}
 	return handler(srv, ss)

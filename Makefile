@@ -134,7 +134,14 @@ proto-verify: proto-gen
 # a client cert signed by the CA, appended to creds/clients.allow by SHA-256
 # fingerprint. SAN on the server cert must match the overlay address clients
 # dial (override with SERVER_SAN=IP:<wg-ip> or DNS:<name>).
+#
+# Every client has exactly one ROLE (default admin), written into its
+# tokens.json entry. creds/acl.json maps role -> allowed gRPC verbs ("*" =
+# everything); the daemon enforces it per call and re-reads both files every
+# time, so editing a role or the ACL needs no restart. pki-init seeds acl.json
+# with admin (full) and agent (read/converse, no lifecycle or config verbs).
 SERVER_SAN ?= DNS:clawson-daemon,DNS:localhost,IP:127.0.0.1
+ROLE ?= admin
 pki-init:
 	@mkdir -p creds
 	@command -v openssl >/dev/null || { echo "openssl required"; exit 1; }
@@ -147,6 +154,11 @@ pki-init:
 	openssl x509 -req -in creds/server.csr -CA creds/ca.crt -CAkey creds/ca.key \
 	  -CAcreateserial -sha256 -days 825 -extfile creds/server.ext -out creds/server.crt
 	@rm -f creds/server.csr creds/server.ext
+	@[ -f creds/acl.json ] || printf '%s\n' \
+	  '{' \
+	  '  "admin": ["*"],' \
+	  '  "agent": ["list", "send", "history", "metrics", "skills", "skill_read", "sched_list", "subscribe_group", "watch_state"]' \
+	  '}' > creds/acl.json
 	@echo "CA + server cert written to creds/. Distribute creds/ca.crt to clients."
 
 pki-client:
@@ -165,8 +177,9 @@ pki-client:
 	  hash=$$(printf '%s' "$$tok" | sha256sum | cut -d' ' -f1); \
 	  printf '%s' "$$tok" > creds/token-$(NAME); chmod 600 creds/token-$(NAME); \
 	  [ -f creds/tokens.json ] || echo '{}' > creds/tokens.json; \
-	  tmp=$$(mktemp); jq --arg n "$(NAME)" --arg h "$$hash" '.[$$n]=$$h' creds/tokens.json > $$tmp && mv $$tmp creds/tokens.json; \
-	  echo "token written to creds/token-$(NAME); sha256 registered in creds/tokens.json"
+	  tmp=$$(mktemp); jq --arg n "$(NAME)" --arg h "$$hash" --arg r "$(ROLE)" \
+	    '.[$$n]={hash:$$h, role:$$r}' creds/tokens.json > $$tmp && mv $$tmp creds/tokens.json; \
+	  echo "token written to creds/token-$(NAME); role $(ROLE) registered in creds/tokens.json"
 
 # --- Firecracker microVM runtime assets -------------------------------------
 # Opt-in per group via config.json `"runtime": "firecracker"`. Assets land in

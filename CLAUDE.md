@@ -115,6 +115,17 @@ allowlist in `creds/clients.allow`) plus a per-RPC bearer token — see
 (`tui/daemon.go`) and the Android app; both consume the same proto, so
 changes must stay additive.
 
+**Authorization is role-based (`acl.go`).** Every tokens.json clientid has
+exactly one role (`make pki-client NAME=x ROLE=agent`; legacy bare-hash
+entries = `admin`), and `creds/acl.json` maps role → allowed verbs (snake_case
+RPC names: `stop`, `skill_new`, `subscribe_group`, …; `"*"` = all). Enforced
+in both interceptors as `PermissionDenied`, fails closed (unknown role/verb,
+corrupt acl.json → deny; missing acl.json → built-in `admin: ["*"]` only).
+Both files are re-read per call — role/ACL edits need no restart. This governs
+the gRPC plane only; the in-guest ctl plane (ctl.go) stays hardcoded on group
+identity because its rules (non-main → sched_* with self-forced target) aren't
+expressible as a verb list.
+
 - **Unary RPCs** map 1:1 to the old JSON verbs: `Spawn`, `Send`, `List`,
   `Stop`, `Interrupt`, `Destroy`, `Restart`, `Clear`, `History`, `Config`,
   `Metrics`, `Skills`/`SkillNew`/`SkillRead`, `Sched*`. Application failures
