@@ -16,7 +16,7 @@ schedules.json
 __pycache__/
 *.pyc
 tui/node_modules/
-fcassets/
+fcassets
 fcguest/fc-agent
 fcguest/clawson-fcagent
 .kernelcache/
