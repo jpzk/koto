@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,23 @@ func TestInjectThinkingDisplay(t *testing.T) {
 				t.Errorf("display after inject = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestLlmFlowLogDedup(t *testing.T) {
+	n0 := len(logRing)
+	llmFlowLog("llmtest-a", "POST", "https://api.anthropic.com", "/v1/messages")
+	llmFlowLog("llmtest-a", "POST", "https://api.anthropic.com", "/v1/messages") // same tuple — deduped
+	if got := len(logRing) - n0; got != 1 {
+		t.Errorf("same tuple logged %d times, want 1", got)
+	}
+	llmFlowLog("llmtest-b", "POST", "https://api.venice.ai", "/api/v1/chat/completions")
+	if got := len(logRing) - n0; got != 2 {
+		t.Errorf("distinct tuple: %d lines, want 2", got)
+	}
+	last := logRing[len(logRing)-1]
+	if last.Subsystem != "llm" || last.Level != "info" ||
+		!strings.Contains(last.Msg, "[llmtest-b] flow POST api.venice.ai/api/v1/chat/completions") {
+		t.Errorf("llm flow line = %q level=%s sub=%s", last.Msg, last.Level, last.Subsystem)
 	}
 }

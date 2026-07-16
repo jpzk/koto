@@ -376,6 +376,24 @@ func injectThinkingDisplay(body []byte) []byte {
 	return body
 }
 
+// llmFlowSeen dedups the LLM-leg flow log the same way the L3 flow logger
+// dedups guest NIC flows (fcnet.go): one line per key per fcFlowTTL.
+var llmFlowSeen = newLogDedup(fcFlowTTL, fcFlowSeenMax)
+
+// llmFlowLog emits one summarized `llm`-subsystem line per (group, method,
+// upstream path) per TTL for the LLM leg — the origin-form requests the proxy
+// forwards to the Anthropic/Venice upstream with credentials injected. The
+// vsock-9000 counterpart of the L3 flow log, on its own subsystem so the
+// steady LLM heartbeat is filterable apart from `egress` (general traffic,
+// which is the anomaly-hunting ground). Logged before the upstream call, so
+// failed/retried requests still leave a trace.
+func llmFlowLog(group, method, upstreamURL, path string) {
+	target := strings.TrimPrefix(strings.TrimPrefix(upstreamURL, "https://"), "http://") + path
+	if llmFlowSeen.allow(group + "|" + method + "|" + target) {
+		emitLogf("llm", "info", "[%s] flow %s %s", group, method, target)
+	}
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// General internet egress (internet=full groups). Identified by the
 	// CONNECT method (HTTPS tunnel) or an absolute-form request target (plain
@@ -389,6 +407,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveVenice(w, r)
 		return
 	}
+	llmFlowLog(h.group, r.Method, upstream, r.URL.Path)
 	t0 := time.Now()
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
@@ -541,6 +560,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // doesn't expose rate-limit headers, so the rate-limit row of the context
 // block degrades to `?` for Venice groups, which is fine.
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
+	llmFlowLog(h.group, r.Method, veniceUpstream, r.URL.Path)
 	t0 := time.Now()
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {

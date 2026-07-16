@@ -238,8 +238,14 @@ always wins over a legacy `internet` key.
   HTTPS request/connection, not per packet; SYN retransmits and repeat traffic
   within the TTL are deduped. Guest↔gateway traffic (DNS to `.1`) is skipped.
   This restores a *who-talked-to-whom* audit trail for networked profiles
-  (IP-level, not L7 — URLs/SNI are not visible at the frame layer). Watch it
-  via the TUI log view (^L) or `clawson ctl logs`.
+  (IP-level, not L7 — URLs/SNI are not visible at the frame layer). The **LLM
+  leg is covered too**, on its own **`llm` subsystem** (`llmFlowLog`, proxy.go):
+  each origin-form request the proxy forwards upstream logs
+  `[<g>] flow POST api.anthropic.com/v1/messages` (or the Venice equivalent),
+  deduped per (group, method, path) on the same TTL. Split from `egress` so the
+  steady LLM heartbeat is filterable apart from general traffic — `egress` is
+  the anomaly-hunting ground, `llm` the expected baseline. Watch either via the
+  TUI log view (^L) or `clawson ctl logs`.
 - **Egress authority is at the frame layer.** gvisor-tap-vsock has no
   destination-filter hook (it `net.Dial`s the packet's destination directly),
   so `fcEgressConn` (fcnet.go) parses each guest frame, classifies its
