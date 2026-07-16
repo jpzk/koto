@@ -13,17 +13,20 @@ package main
 //                   {"hash": "…", "role": "agent"}            (single role)
 //                   {"hash": "…", "roles": ["reader", "ops"]} (multiple)
 //
-//   acl.json    — role → {verb → targets}:
-//                   {"admin": {"*": "*"},
-//                    "agent": {"list": "*",
+//   acl.json    — role → {verb → targets}, for every role EXCEPT admin:
+//                   {"agent": {"list": "*",
 //                              "send": ["main"],
 //                              "subscribe_group": ["main", "dev"]}}
 //                 Targets are group names; "*" (or ["*"]) means any. A verb
 //                 key of "*" grants every verb on the given targets. The
 //                 flat legacy shape {"agent": ["list", "send"]} still parses
-//                 as those verbs on any target. Missing acl.json falls back
-//                 to the built-in {"admin": {"*": "*"}} so legacy deployments
-//                 (bare-hash tokens, no acl.json) keep full access unchanged.
+//                 as those verbs on any target.
+//
+//                 The admin role is hardcoded (grantFor): every verb on
+//                 every target, regardless of acl.json — the file cannot
+//                 narrow it, and a missing/corrupt file never locks it out.
+//                 Legacy deployments (bare-hash tokens = admin, no acl.json)
+//                 therefore keep full access unchanged.
 //
 // Verbs are the snake_case form of the gRPC method names (SkillNew →
 // skill_new, SubscribeGroup → subscribe_group), the same vocabulary the
@@ -185,14 +188,14 @@ func parseACL(raw []byte) aclTable {
 	return out
 }
 
-// loadACL reads creds/acl.json per call. A missing or unreadable file yields
-// the built-in default (admin on everything); a file that exists but doesn't
-// parse yields nil, which denies everything — a corrupt ACL must not widen
-// access.
+// loadACL reads creds/acl.json per call. The file only defines non-admin
+// roles (admin is hardcoded in grantFor), so a missing file just means no
+// other roles exist, and a corrupt file denies every non-admin role — bad
+// state never widens access and never locks out admin.
 func loadACL() aclTable {
 	b, err := os.ReadFile(credFile("acl.json"))
 	if err != nil {
-		return aclTable{defaultRole: {"*": targetSet{any: true}}}
+		return aclTable{}
 	}
 	return parseACL(b)
 }
@@ -252,7 +255,16 @@ func targetOf(req any) (target string, targeted bool) {
 // grantFor resolves the effective target set for role+verb: the verb's own
 // grant if present, else the role's "*" verb grant. Second return is false
 // when the role grants the verb in no form — deny before target matching.
+//
+// The admin role is HARDCODED as a superuser: every verb on every target,
+// unconditionally. It does not come from acl.json and cannot be narrowed,
+// removed, or locked out by one — an "admin" key in the file is ignored.
+// That keeps the recovery property absolute: whatever state acl.json is in
+// (missing, corrupt, or hostile), the admin token still drives the daemon.
 func grantFor(acl aclTable, role, verb string) (targetSet, bool) {
+	if role == defaultRole {
+		return targetSet{any: true}, true
+	}
 	grants, ok := acl[role]
 	if !ok {
 		return targetSet{}, false

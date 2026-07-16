@@ -130,9 +130,11 @@ alone, and a group-scoped request that omits the group (global metrics,
 unfiltered sched_list) reads across all groups so it needs the `"*"` target.
 Enforced in both interceptors as `PermissionDenied` (streaming targets are
 checked on RecvMsg, when the request actually decodes); fails closed (unknown
-role/verb, target outside the grant, corrupt acl.json → deny; missing
-acl.json → built-in `admin: {"*": "*"}` only). Both files are re-read per
-call — role/ACL edits need no restart. This governs the gRPC plane only; the
+role/verb, target outside the grant, corrupt acl.json → deny). **The `admin`
+role is hardcoded as a superuser** — every verb on every target, not defined
+in acl.json and not narrowable by it; a missing/corrupt file denies every
+non-admin role but never locks out admin. Both files are re-read per call —
+role/ACL edits need no restart. This governs the gRPC plane only; the
 in-guest ctl plane (ctl.go) stays hardcoded on group identity because its
 rules (non-main → sched_* with self-forced target) aren't expressible as a
 verb list.

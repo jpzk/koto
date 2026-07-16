@@ -137,15 +137,16 @@ proto-verify: proto-gen
 #
 # Every client has one or more roles (ROLE=reader,ops — default admin),
 # written into its tokens.json entry as a roles array; a client's effective
-# permissions are the union of its roles. creds/acl.json maps role ->
-# {verb -> targets}: verbs are
-# snake_case RPC names, targets are group names ("*" = any; targets only
-# apply to group-scoped verbs like send/stop/history — see daemon/acl.go).
-# The daemon enforces it per call and re-reads both files every time, so
-# editing a role or the ACL needs no restart. pki-init seeds acl.json with
-# admin (everything) and agent (read/converse on any group, no lifecycle or
-# config verbs) — narrow an agent to specific groups by replacing its "*"
-# values with group lists, e.g. "send": ["main"].
+# permissions are the union of its roles. The admin role is hardcoded in the
+# daemon (every verb on every target — acl.json can't narrow it or lock it
+# out). All other roles come from creds/acl.json, mapping role ->
+# {verb -> targets}: verbs are snake_case RPC names, targets are group names
+# ("*" = any; targets only apply to group-scoped verbs like send/stop/history
+# — see daemon/acl.go). The daemon enforces it per call and re-reads both
+# files every time, so editing a role or the ACL needs no restart. pki-init
+# seeds acl.json with an agent role (read/converse on any group, no lifecycle
+# or config verbs) — narrow it to specific groups by replacing its "*" values
+# with group lists, e.g. "send": ["main"].
 SERVER_SAN ?= DNS:clawson-daemon,DNS:localhost,IP:127.0.0.1
 ROLE ?= admin
 pki-init:
@@ -162,7 +163,6 @@ pki-init:
 	@rm -f creds/server.csr creds/server.ext
 	@[ -f creds/acl.json ] || printf '%s\n' \
 	  '{' \
-	  '  "admin": {"*": "*"},' \
 	  '  "agent": {' \
 	  '    "list": "*", "send": "*", "history": "*", "metrics": "*",' \
 	  '    "skills": "*", "skill_read": "*", "sched_list": "*",' \

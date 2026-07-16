@@ -84,7 +84,6 @@ func TestTargetOf(t *testing.T) {
 
 func TestRoleAllowedTargets(t *testing.T) {
 	acl := parseACL([]byte(`{
-		"admin": {"*": "*"},
 		"agent": {
 			"list": "*",
 			"send": ["main"],
@@ -98,7 +97,7 @@ func TestRoleAllowedTargets(t *testing.T) {
 		targeted           bool
 		want               bool
 	}{
-		{"admin", "destroy", "anything", true, true}, // verb+target wildcard
+		{"admin", "destroy", "anything", true, true}, // hardcoded superuser
 		{"admin", "list", "", false, true},
 
 		{"agent", "list", "", false, true},              // untargeted verb
@@ -122,8 +121,23 @@ func TestRoleAllowedTargets(t *testing.T) {
 				c.role, c.verb, c.target, c.targeted, got, c.want)
 		}
 	}
-	if roleAllowed(nil, "admin", "list", "", false) {
-		t.Error("nil ACL (corrupt acl.json) must deny everything")
+	if roleAllowed(nil, "agent", "list", "", false) {
+		t.Error("nil ACL (corrupt acl.json) must deny every non-admin role")
+	}
+	if !roleAllowed(nil, "admin", "destroy", "main", true) {
+		t.Error("admin is hardcoded: even a nil ACL must not lock it out")
+	}
+}
+
+// TestAdminHardcoded: admin is a built-in superuser — acl.json cannot narrow
+// or redefine it, so an "admin" key in the file is ignored.
+func TestAdminHardcoded(t *testing.T) {
+	acl := parseACL([]byte(`{"admin": {"list": ["main"]}}`)) // attempted narrowing
+	if !roleAllowed(acl, "admin", "destroy", "ghost", true) {
+		t.Error("acl.json must not be able to narrow the admin role")
+	}
+	if !roleAllowed(aclTable{}, "admin", "stop", "main", true) {
+		t.Error("admin must work with an empty ACL (no acl.json)")
 	}
 }
 
@@ -179,9 +193,9 @@ func TestVerbWildcardWithRestrictedTargets(t *testing.T) {
 	}
 }
 
-// TestLoadACLFallback exercises the file-level behavior: missing acl.json
-// falls back to admin-only wildcard (legacy deployments keep working);
-// corrupt acl.json denies everything.
+// TestLoadACLFallback exercises the file-level behavior: a missing acl.json
+// means no non-admin roles exist; a corrupt one denies every non-admin role;
+// admin (hardcoded) survives both.
 func TestLoadACLFallback(t *testing.T) {
 	origHERE := HERE
 	defer func() { HERE = origHERE }()
@@ -195,14 +209,17 @@ func TestLoadACLFallback(t *testing.T) {
 		t.Error("missing acl.json: admin must keep full access")
 	}
 	if roleAllowed(acl, "agent", "list", "", false) {
-		t.Error("missing acl.json: only the built-in admin role exists")
+		t.Error("missing acl.json: no non-admin roles exist")
 	}
 
 	if err := os.WriteFile(filepath.Join(HERE, "creds", "acl.json"), []byte("{broken"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if roleAllowed(loadACL(), "admin", "list", "", false) {
-		t.Error("corrupt acl.json must fail closed, even for admin")
+	if roleAllowed(loadACL(), "agent", "list", "", false) {
+		t.Error("corrupt acl.json must fail closed for non-admin roles")
+	}
+	if !roleAllowed(loadACL(), "admin", "list", "", false) {
+		t.Error("corrupt acl.json must not lock out the hardcoded admin")
 	}
 
 	good := []byte(`{"agent": {"list": "*", "Send ": ["main"]}}`)
@@ -212,8 +229,5 @@ func TestLoadACLFallback(t *testing.T) {
 	acl = loadACL()
 	if !roleAllowed(acl, "agent", "list", "", false) || !roleAllowed(acl, "agent", "send", "main", true) {
 		t.Error("verbs must be matched case/space-insensitively")
-	}
-	if roleAllowed(acl, "admin", "list", "", false) {
-		t.Error("a present acl.json fully replaces the built-in default — no implicit admin")
 	}
 }
