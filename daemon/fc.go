@@ -776,7 +776,13 @@ func fcHostDial(g string, port uint32, timeout time.Duration) (net.Conn, error) 
 		c.Close()
 		return nil, err
 	}
-	line, err := bufio.NewReader(c).ReadString('\n')
+	// Read the "OK <port>\n" handshake ONE BYTE AT A TIME. A bufio.Reader
+	// would over-read — its next fill could pull post-handshake stream bytes
+	// into a buffer we then discard by returning the raw conn. Harmless for
+	// the request/response ops (the guest sends nothing until it gets a
+	// request) but not for a streaming op, where a fast child's first output
+	// can arrive right behind the OK line.
+	line, err := readLineByte(c)
 	if err != nil {
 		c.Close()
 		return nil, fmt.Errorf("vsock CONNECT %d: %w", port, err)
@@ -787,6 +793,26 @@ func fcHostDial(g string, port uint32, timeout time.Duration) (net.Conn, error) 
 	}
 	_ = c.SetDeadline(time.Time{})
 	return c, nil
+}
+
+// readLineByte reads through the first '\n' without buffering past it, so the
+// caller can keep using the conn for whatever bytes follow. One-shot use on a
+// tiny handshake line, so the per-byte syscall cost is irrelevant.
+func readLineByte(c net.Conn) (string, error) {
+	var b []byte
+	one := make([]byte, 1)
+	for {
+		n, err := c.Read(one)
+		if n > 0 {
+			if one[0] == '\n' {
+				return string(b), nil
+			}
+			b = append(b, one[0])
+		}
+		if err != nil {
+			return string(b), err
+		}
+	}
 }
 
 type fcAgentResp struct {
