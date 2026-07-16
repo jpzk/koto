@@ -136,10 +136,14 @@ proto-verify: proto-gen
 # dial (override with SERVER_SAN=IP:<wg-ip> or DNS:<name>).
 #
 # Every client has exactly one ROLE (default admin), written into its
-# tokens.json entry. creds/acl.json maps role -> allowed gRPC verbs ("*" =
-# everything); the daemon enforces it per call and re-reads both files every
-# time, so editing a role or the ACL needs no restart. pki-init seeds acl.json
-# with admin (full) and agent (read/converse, no lifecycle or config verbs).
+# tokens.json entry. creds/acl.json maps role -> {verb -> targets}: verbs are
+# snake_case RPC names, targets are group names ("*" = any; targets only
+# apply to group-scoped verbs like send/stop/history — see daemon/acl.go).
+# The daemon enforces it per call and re-reads both files every time, so
+# editing a role or the ACL needs no restart. pki-init seeds acl.json with
+# admin (everything) and agent (read/converse on any group, no lifecycle or
+# config verbs) — narrow an agent to specific groups by replacing its "*"
+# values with group lists, e.g. "send": ["main"].
 SERVER_SAN ?= DNS:clawson-daemon,DNS:localhost,IP:127.0.0.1
 ROLE ?= admin
 pki-init:
@@ -156,8 +160,12 @@ pki-init:
 	@rm -f creds/server.csr creds/server.ext
 	@[ -f creds/acl.json ] || printf '%s\n' \
 	  '{' \
-	  '  "admin": ["*"],' \
-	  '  "agent": ["list", "send", "history", "metrics", "skills", "skill_read", "sched_list", "subscribe_group", "watch_state"]' \
+	  '  "admin": {"*": "*"},' \
+	  '  "agent": {' \
+	  '    "list": "*", "send": "*", "history": "*", "metrics": "*",' \
+	  '    "skills": "*", "skill_read": "*", "sched_list": "*",' \
+	  '    "subscribe_group": "*", "watch_state": "*"' \
+	  '  }' \
 	  '}' > creds/acl.json
 	@echo "CA + server cert written to creds/. Distribute creds/ca.crt to clients."
 

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"clawson-protocol/pb"
 )
 
 func TestParseTokens(t *testing.T) {
@@ -43,29 +45,86 @@ func TestVerbFromMethod(t *testing.T) {
 	}
 }
 
-func TestRoleAllowed(t *testing.T) {
-	acl := map[string]map[string]bool{
-		"admin": {"*": true},
-		"agent": {"list": true, "send": true},
-	}
+func TestTargetOf(t *testing.T) {
 	cases := []struct {
-		role, verb string
-		want       bool
+		req      any
+		target   string
+		targeted bool
 	}{
-		{"admin", "destroy", true},      // wildcard
-		{"agent", "list", true},         // explicit grant
-		{"agent", "destroy", false},     // not listed
-		{"agent", "future_verb", false}, // new RPCs denied by default
-		{"ghost", "list", false},        // unknown role
-		{"", "list", false},             // empty role
+		{&pb.SendReq{Group: "main"}, "main", true},
+		{&pb.GroupReq{Group: "dev"}, "dev", true},
+		{&pb.SubscribeReq{Group: "main"}, "main", true},
+		{&pb.MetricsReq{}, "", true}, // global metrics = cross-group read
+		{&pb.ListReq{}, "", false},
+		{&pb.SkillNewReq{Name: "x"}, "", false},
+		{&pb.SchedIDReq{Id: "abc"}, "", false},
 	}
 	for _, c := range cases {
-		if got := roleAllowed(acl, c.role, c.verb); got != c.want {
-			t.Errorf("roleAllowed(%q, %q) = %v, want %v", c.role, c.verb, got, c.want)
+		target, targeted := targetOf(c.req)
+		if target != c.target || targeted != c.targeted {
+			t.Errorf("targetOf(%T) = (%q, %v), want (%q, %v)", c.req, target, targeted, c.target, c.targeted)
 		}
 	}
-	if roleAllowed(nil, "admin", "list") {
+}
+
+func TestRoleAllowedTargets(t *testing.T) {
+	acl := parseACL([]byte(`{
+		"admin": {"*": "*"},
+		"agent": {
+			"list": "*",
+			"send": ["main"],
+			"history": ["main", "dev"],
+			"subscribe_group": "*"
+		},
+		"legacy": ["list", "send"]
+	}`))
+	cases := []struct {
+		role, verb, target string
+		targeted           bool
+		want               bool
+	}{
+		{"admin", "destroy", "anything", true, true}, // verb+target wildcard
+		{"admin", "list", "", false, true},
+
+		{"agent", "list", "", false, true},              // untargeted verb
+		{"agent", "send", "main", true, true},           // in target set
+		{"agent", "send", "abc", true, false},           // outside target set
+		{"agent", "send", "", true, false},              // empty target never matches a name set
+		{"agent", "history", "dev", true, true},         // multi-target
+		{"agent", "subscribe_group", "abc", true, true}, // "*" targets
+		{"agent", "destroy", "main", true, false},       // verb not granted
+		{"agent", "future_verb", "", false, false},      // new RPCs denied by default
+
+		{"legacy", "send", "anything", true, true}, // flat list = any target
+		{"legacy", "stop", "main", true, false},
+
+		{"ghost", "list", "", false, false}, // unknown role
+		{"", "list", "", false, false},      // empty role
+	}
+	for _, c := range cases {
+		if got := roleAllowed(acl, c.role, c.verb, c.target, c.targeted); got != c.want {
+			t.Errorf("roleAllowed(%q, %q, %q, %v) = %v, want %v",
+				c.role, c.verb, c.target, c.targeted, got, c.want)
+		}
+	}
+	if roleAllowed(nil, "admin", "list", "", false) {
 		t.Error("nil ACL (corrupt acl.json) must deny everything")
+	}
+}
+
+// TestVerbWildcardWithRestrictedTargets: {"*": ["main"]} grants every verb
+// but only on main — untargeted verbs pass (no target dimension), targeted
+// verbs are held to the target set.
+func TestVerbWildcardWithRestrictedTargets(t *testing.T) {
+	acl := parseACL([]byte(`{"op": {"*": ["main"]}}`))
+	if !roleAllowed(acl, "op", "list", "", false) {
+		t.Error("untargeted verb must pass a verb-wildcard grant")
+	}
+	if !roleAllowed(acl, "op", "stop", "main", true) {
+		t.Error("targeted verb on listed target must pass")
+	}
+	if roleAllowed(acl, "op", "stop", "dev", true) {
+		t.Error("targeted verb outside the target set must be denied")
 	}
 }
 
@@ -81,29 +140,29 @@ func TestLoadACLFallback(t *testing.T) {
 	}
 
 	acl := loadACL() // no acl.json
-	if !roleAllowed(acl, "admin", "destroy") {
+	if !roleAllowed(acl, "admin", "destroy", "main", true) {
 		t.Error("missing acl.json: admin must keep full access")
 	}
-	if roleAllowed(acl, "agent", "list") {
+	if roleAllowed(acl, "agent", "list", "", false) {
 		t.Error("missing acl.json: only the built-in admin role exists")
 	}
 
 	if err := os.WriteFile(filepath.Join(HERE, "creds", "acl.json"), []byte("{broken"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if roleAllowed(loadACL(), "admin", "list") {
+	if roleAllowed(loadACL(), "admin", "list", "", false) {
 		t.Error("corrupt acl.json must fail closed, even for admin")
 	}
 
-	good := []byte(`{"agent": ["list", "Send "]}`)
+	good := []byte(`{"agent": {"list": "*", "Send ": ["main"]}}`)
 	if err := os.WriteFile(filepath.Join(HERE, "creds", "acl.json"), good, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	acl = loadACL()
-	if !roleAllowed(acl, "agent", "list") || !roleAllowed(acl, "agent", "send") {
+	if !roleAllowed(acl, "agent", "list", "", false) || !roleAllowed(acl, "agent", "send", "main", true) {
 		t.Error("verbs must be matched case/space-insensitively")
 	}
-	if roleAllowed(acl, "admin", "list") {
+	if roleAllowed(acl, "admin", "list", "", false) {
 		t.Error("a present acl.json fully replaces the built-in default — no implicit admin")
 	}
 }

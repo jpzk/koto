@@ -105,12 +105,11 @@ func peerAddr(ctx context.Context) string {
 	return "?"
 }
 
-// authFromCtx enforces the bearer token (authentication), then the ACL
-// (authorization: the caller's role must list the method's verb — acl.go).
-// mTLS (cert chain + fingerprint allowlist) is already enforced by the TLS
-// layer before any RPC dispatches, so reaching here means the peer holds a
-// valid allowlisted client cert.
-func authFromCtx(ctx context.Context, fullMethod string) error {
+// authFromCtx enforces the bearer token (authentication) and resolves the
+// caller's identity. mTLS (cert chain + fingerprint allowlist) is already
+// enforced by the TLS layer before any RPC dispatches, so reaching here means
+// the peer holds a valid allowlisted client cert.
+func authFromCtx(ctx context.Context) (clientIdentity, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 	tok := ""
 	if vals := md.Get("authorization"); len(vals) > 0 {
@@ -119,26 +118,68 @@ func authFromCtx(ctx context.Context, fullMethod string) error {
 	id, ok := tokenIdentity(tok)
 	if !ok {
 		emitLogf("warn", "auth: rejected call from %s (bad/missing token)", peerAddr(ctx))
-		return status.Error(codes.Unauthenticated, "invalid or missing token")
+		return clientIdentity{}, status.Error(codes.Unauthenticated, "invalid or missing token")
 	}
-	verb := verbFromMethod(fullMethod)
-	if !roleAllowed(loadACL(), id.Role, verb) {
-		emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ctx))
-		return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
+	return id, nil
+}
+
+// aclCheck is the authorization decision for one decoded request: the
+// caller's role must grant the verb, and — for group-scoped verbs — the
+// grant must cover the request's target group (acl.go).
+func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) error {
+	target, targeted := targetOf(req)
+	if roleAllowed(loadACL(), id.Role, verb, target, targeted) {
+		return nil
 	}
-	return nil
+	if targeted {
+		emitLogf("warn", "acl: %s (role %s) denied %s on %q from %s", id.Name, id.Role, verb, target, peerAddr(ctx))
+		return status.Errorf(codes.PermissionDenied, "role %s may not call %s on %q", id.Role, verb, target)
+	}
+	emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ctx))
+	return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
 }
 
 func authUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	if err := authFromCtx(ctx, info.FullMethod); err != nil {
+	id, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := aclCheck(ctx, id, verbFromMethod(info.FullMethod), req); err != nil {
 		return nil, err
 	}
 	return handler(ctx, req)
 }
 
-func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	if err := authFromCtx(ss.Context(), info.FullMethod); err != nil {
+// aclStream wraps a ServerStream so the target check runs when the request
+// message actually decodes: a streaming RPC's request isn't available at
+// interception time (the generated handler calls RecvMsg *after* the
+// interceptor chain), so target enforcement has to ride the RecvMsg path.
+type aclStream struct {
+	grpc.ServerStream
+	id   clientIdentity
+	verb string
+}
+
+func (s *aclStream) RecvMsg(m any) error {
+	if err := s.ServerStream.RecvMsg(m); err != nil {
 		return err
 	}
-	return handler(srv, ss)
+	return aclCheck(s.Context(), s.id, s.verb, m)
+}
+
+func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	id, err := authFromCtx(ss.Context())
+	if err != nil {
+		return err
+	}
+	verb := verbFromMethod(info.FullMethod)
+	// Verb-level gate now (deny a role with no grant at all before the
+	// handler runs); target-level gate rides RecvMsg once the request
+	// message exists. For targetless streams (watch_state, subscribe_logs)
+	// this first check is the whole decision.
+	if _, ok := grantFor(loadACL(), id.Role, verb); !ok {
+		emitLogf("warn", "acl: %s (role %s) denied %s from %s", id.Name, id.Role, verb, peerAddr(ss.Context()))
+		return status.Errorf(codes.PermissionDenied, "role %s may not call %s", id.Role, verb)
+	}
+	return handler(srv, &aclStream{ServerStream: ss, id: id, verb: verb})
 }

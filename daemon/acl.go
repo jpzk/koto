@@ -3,28 +3,42 @@ package main
 // acl.go — role-based authorization for the gRPC control plane.
 //
 // Authentication (mTLS + bearer token, auth.go) answers "who is calling";
-// this file answers "what may they call". Two gitignored files under creds/
-// drive it:
+// this file answers "what may they call, and on which group". The grant
+// model is USER (clientid) —has one→ ROLE —grants→ VERB on TARGET. Two
+// gitignored files under creds/ drive it:
 //
 //   tokens.json — clientid → credential. Two value shapes:
 //                   "…hash…"                          (legacy: role "admin")
 //                   {"hash": "…", "role": "agent"}    (explicit role)
 //                 Every clientid has exactly one role.
 //
-//   acl.json    — role → verb allowlist:
-//                   {"admin": ["*"],
-//                    "agent": ["list", "send", "history", …]}
-//                 "*" grants every verb. Missing file falls back to the
-//                 built-in {"admin": ["*"]} so legacy deployments (bare-hash
-//                 tokens, no acl.json) keep full access unchanged.
+//   acl.json    — role → {verb → targets}:
+//                   {"admin": {"*": "*"},
+//                    "agent": {"list": "*",
+//                              "send": ["main"],
+//                              "subscribe_group": ["main", "dev"]}}
+//                 Targets are group names; "*" (or ["*"]) means any. A verb
+//                 key of "*" grants every verb on the given targets. The
+//                 flat legacy shape {"agent": ["list", "send"]} still parses
+//                 as those verbs on any target. Missing acl.json falls back
+//                 to the built-in {"admin": {"*": "*"}} so legacy deployments
+//                 (bare-hash tokens, no acl.json) keep full access unchanged.
 //
 // Verbs are the snake_case form of the gRPC method names (SkillNew →
 // skill_new, SubscribeGroup → subscribe_group), the same vocabulary the
 // in-guest ctl plane already uses (sched_add, skill_write, …). The mapping is
 // mechanical, so future RPCs get a verb automatically — and because an
 // unlisted verb is denied, a new RPC is *denied by default* for every role
-// without "*" until the operator grants it. Unknown role, role absent from
-// the ACL, or malformed acl.json all fail closed too.
+// without a "*" verb until the operator grants it. Unknown role, role absent
+// from the ACL, or malformed acl.json all fail closed too.
+//
+// TARGETS apply only to verbs whose request carries a group (targetOf):
+// spawn, send, stop, interrupt, destroy, restart, clear, history, config,
+// metrics, skills, sched_add, sched_list, subscribe_group. The rest (list,
+// watch_state, subscribe_logs, skill_new, skill_read, sched_del/toggle/run)
+// are verb-only — a grant's target set is ignored for them. A group-scoped
+// request that *omits* the group (global metrics, unfiltered sched_list)
+// reads across every group, so it requires the "*" target grant.
 //
 // NOTE this governs the gRPC plane (TUI, Android, CLI agents — anything with
 // a client cert + token). The in-guest FIFO ctl plane (ctl.go) is a separate
@@ -36,6 +50,8 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+
+	"clawson-protocol/pb"
 )
 
 // clientIdentity is one authenticated tokens.json entry.
@@ -45,6 +61,15 @@ type clientIdentity struct {
 }
 
 const defaultRole = "admin"
+
+// targetSet is the allowed targets of one verb grant.
+type targetSet struct {
+	any   bool
+	names map[string]bool
+}
+
+// aclTable is role → verb → allowed targets.
+type aclTable map[string]map[string]targetSet
 
 // parseTokens converts raw tokens.json bytes into hash → identity. The two
 // accepted value shapes are the legacy bare hash string (admin) and the
@@ -86,28 +111,74 @@ func loadTokenIdentities() map[string]clientIdentity {
 	return parseTokens(b)
 }
 
-// loadACL reads creds/acl.json (role → verb list) into role → verb set.
-// A missing or unreadable file yields the built-in default; a file that
-// exists but doesn't parse yields nil, which denies everything — a corrupt
-// ACL must not widen access.
-func loadACL() map[string]map[string]bool {
-	b, err := os.ReadFile(credFile("acl.json"))
-	if err != nil {
-		return map[string]map[string]bool{defaultRole: {"*": true}}
+// parseTargets converts one grant value — "*", "name", or a list of either —
+// into a targetSet. Unparseable values yield an empty set (grants nothing on
+// targeted verbs) rather than an error: one bad grant must not widen or void
+// the rest of the file.
+func parseTargets(raw json.RawMessage) targetSet {
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		if one == "*" {
+			return targetSet{any: true}
+		}
+		return targetSet{names: map[string]bool{one: true}}
 	}
-	var m map[string][]string
-	if json.Unmarshal(b, &m) != nil {
+	var many []string
+	if json.Unmarshal(raw, &many) != nil {
+		return targetSet{}
+	}
+	ts := targetSet{names: map[string]bool{}}
+	for _, t := range many {
+		t = strings.TrimSpace(t)
+		if t == "*" {
+			ts.any = true
+		} else if t != "" {
+			ts.names[t] = true
+		}
+	}
+	return ts
+}
+
+// parseACL converts raw acl.json bytes into the grant table. Each role's
+// value is either the verb→targets object or the legacy flat verb list
+// (= those verbs on any target). nil on malformed JSON — deny everything.
+func parseACL(raw []byte) aclTable {
+	var roles map[string]json.RawMessage
+	if json.Unmarshal(raw, &roles) != nil {
 		return nil
 	}
-	out := make(map[string]map[string]bool, len(m))
-	for role, verbs := range m {
-		set := make(map[string]bool, len(verbs))
-		for _, v := range verbs {
-			set[strings.ToLower(strings.TrimSpace(v))] = true
+	out := make(aclTable, len(roles))
+	for role, v := range roles {
+		grants := map[string]targetSet{}
+		var flat []string
+		if json.Unmarshal(v, &flat) == nil {
+			for _, verb := range flat {
+				grants[strings.ToLower(strings.TrimSpace(verb))] = targetSet{any: true}
+			}
+		} else {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(v, &obj) != nil {
+				continue // malformed role: grants nothing
+			}
+			for verb, tv := range obj {
+				grants[strings.ToLower(strings.TrimSpace(verb))] = parseTargets(tv)
+			}
 		}
-		out[role] = set
+		out[role] = grants
 	}
 	return out
+}
+
+// loadACL reads creds/acl.json per call. A missing or unreadable file yields
+// the built-in default (admin on everything); a file that exists but doesn't
+// parse yields nil, which denies everything — a corrupt ACL must not widen
+// access.
+func loadACL() aclTable {
+	b, err := os.ReadFile(credFile("acl.json"))
+	if err != nil {
+		return aclTable{defaultRole: {"*": targetSet{any: true}}}
+	}
+	return parseACL(b)
 }
 
 // verbFromMethod maps a gRPC full method name to its ACL verb:
@@ -130,12 +201,65 @@ func verbFromMethod(fullMethod string) string {
 	return b.String()
 }
 
-// roleAllowed reports whether role may invoke the verb under the ACL.
-// Everything unknown fails closed.
-func roleAllowed(acl map[string]map[string]bool, role, verb string) bool {
-	verbs, ok := acl[role]
+// targetOf extracts the group target from a request message. targeted=false
+// means the verb has no target dimension (list, skill_new, sched_del, …) and
+// is authorized by verb alone. A targeted request with an empty group (global
+// metrics, unfiltered sched_list) reads across all groups and so needs the
+// "*" grant — roleAllowed handles that by matching "" against names[""],
+// which parseTargets never populates.
+func targetOf(req any) (target string, targeted bool) {
+	switch r := req.(type) {
+	case *pb.SpawnReq:
+		return r.Group, true
+	case *pb.SendReq:
+		return r.Group, true
+	case *pb.GroupReq: // Stop, Interrupt, Destroy, Restart, Clear
+		return r.Group, true
+	case *pb.HistoryReq:
+		return r.Group, true
+	case *pb.ConfigReq:
+		return r.Group, true
+	case *pb.MetricsReq:
+		return r.Group, true
+	case *pb.SkillListReq:
+		return r.Group, true
+	case *pb.SchedAddReq:
+		return r.Group, true
+	case *pb.SchedListReq:
+		return r.Group, true
+	case *pb.SubscribeReq:
+		return r.GetGroup(), true
+	}
+	return "", false
+}
+
+// grantFor resolves the effective target set for role+verb: the verb's own
+// grant if present, else the role's "*" verb grant. Second return is false
+// when the role grants the verb in no form — deny before target matching.
+func grantFor(acl aclTable, role, verb string) (targetSet, bool) {
+	grants, ok := acl[role]
+	if !ok {
+		return targetSet{}, false
+	}
+	if ts, ok := grants[verb]; ok {
+		return ts, true
+	}
+	if ts, ok := grants["*"]; ok {
+		return ts, true
+	}
+	return targetSet{}, false
+}
+
+// roleAllowed is the full authorization decision: role has verb, and — for
+// targeted verbs — the grant covers the target. Everything unknown fails
+// closed.
+func roleAllowed(acl aclTable, role, verb, target string, targeted bool) bool {
+	ts, ok := grantFor(acl, role, verb)
 	if !ok {
 		return false
 	}
-	return verbs["*"] || verbs[verb]
+	if !targeted {
+		return true
+	}
+	return ts.any || ts.names[target]
 }
