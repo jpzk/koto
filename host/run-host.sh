@@ -11,7 +11,7 @@ podman network exists clawson-net || podman network create clawson-net >/dev/nul
 # the same absolute path inside cs_host_go and on the real host, which is
 # only true when HERE is the project root (the path the user is in).
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache"
+mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache" "$HERE/.gomodcache"
 [ -f "$HERE/creds/.credentials.json" ] || { echo "no creds: run \`make login\` first"; exit 1; }
 [ -f "$HERE/creds/server.crt" ] || { echo "no daemon TLS cert: run \`make pki-init\` first"; exit 1; }
 # gRPC listener address. Inside cs_host_go (on the private clawson-net) 0.0.0.0
@@ -37,6 +37,12 @@ podman rm -f cs_host_go >/dev/null 2>&1 || true
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon
 # edit take ~1s. Cache is local to this project so wiping it doesn't touch
 # the host user's ~/.cache/go-build.
+# .gomodcache is a persistent Go module (download) cache. cs_host_go runs
+# --rm, so without this mount every restart re-fetches all ~20 deps
+# (grpc, gvisor-tap-vsock, x/net, ...) from the module proxy over the
+# network before the daemon can even compile — measured ~11s of the ~19s
+# cold-start-to-gRPC-ready window. Persisting it drops restarts to
+# compile-only time. Local to this project, same rationale as .gocache.
 podman run -d --rm \
   --name cs_host_go --network clawson-net \
   $PUBLISH_ARG \
@@ -45,6 +51,7 @@ podman run -d --rm \
   -v "$HERE:$HERE" \
   -v "$HERE/creds:/root/.claude" \
   -v "$HERE/.gocache:/root/.cache/go-build" \
+  -v "$HERE/.gomodcache:/go/pkg/mod" \
   -v /etc/localtime:/etc/localtime:ro \
   -e CLAWSON_BIND="$CLAWSON_BIND" \
   -e CLAWSON_PORT="$CLAWSON_PORT" \

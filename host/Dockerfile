@@ -21,7 +21,10 @@ FROM docker.io/library/golang:1.24-alpine
 # podman CLI here) has been removed — cs_host has no path to any podman daemon.
 RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
  && npm i -g @anthropic-ai/claude-code
-# No GOFLAGS=-mod=mod: workspace mode (go.work at the project root) only
-# permits -mod=readonly, and go run never needs to rewrite go.mod here.
+# GOFLAGS explicitly cleared: the golang base image sets GOFLAGS=-mod=mod,
+# which workspace mode (go.work at the project root) rejects outright
+# ("-mod may only be set to readonly or vendor when in workspace mode").
+# go run never needs to rewrite go.mod here anyway.
+ENV GOFLAGS=""
 ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host_go
 ENTRYPOINT ["go","run","./daemon","daemon"]
