@@ -350,7 +350,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /restart  /destroy  /clear  /config  /runscript  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -1220,6 +1220,14 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("── skills/%s/SKILL.md ──", msg.name)})
 		// Treat as a response block so it gets glamour-rendered (markdown).
 		m.addLine(logLine{kind: "response", group: m.cur, text: msg.content})
+		return m, nil
+
+	case promptFireMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/prompt %s: %v", msg.name, msg.err)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("prompt ▶ %s (%s)", msg.name, msg.source)})
 		return m, nil
 
 	case skillNewMsg:
@@ -2395,6 +2403,18 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		startRunScript(m.cur, name, script)
 		return nil
+	}
+	if v == "/prompt" || strings.HasPrefix(v, "/prompt ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(v, "/prompt"))
+		if arg == "" {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "usage: /prompt <name>  (skills/<name>/SKILL.md, else prompts/<name>.md)"})
+			return nil
+		}
+		if m.cur == "" {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/prompt: no group in focus"})
+			return nil
+		}
+		return promptFireCmd(m.sock, m.cur, arg)
 	}
 	if strings.HasPrefix(v, "/") {
 		space := strings.IndexByte(v, ' ')
