@@ -1,6 +1,6 @@
 package main
 
-// ctl_cli.go — `clawson ctl`: host-side CLI client for the daemon's gRPC API.
+// ctl_cli.go — `koto ctl`: host-side CLI client for the daemon's gRPC API.
 //
 // This is the integration surface for coding agents (claude code, or any
 // framework with a shell tool): every verb is one process invocation that
@@ -18,12 +18,12 @@ package main
 // Endpoint + creds resolve from env, defaulting to a `creds/` dir under the
 // current working directory (agents run from the project root):
 //
-//   CLAWSON_ADDR        dial target            (default 127.0.0.1:8443)
-//   CLAWSON_CREDS_DIR   PKI directory          (default ./creds)
-//   CLAWSON_CLIENT      identity name          (default agent) — resolves
+//   KOTO_ADDR        dial target            (default 127.0.0.1:8443)
+//   KOTO_CREDS_DIR   PKI directory          (default ./creds)
+//   KOTO_CLIENT      identity name          (default agent) — resolves
 //                       client-<name>.{crt,key} + token-<name> in CREDS_DIR
-//   CLAWSON_CERT/KEY/CA/TOKEN  individual overrides (TOKEN is the value)
-//   CLAWSON_SERVER_NAME TLS server-name override for off-SAN dial targets
+//   KOTO_CERT/KEY/CA/TOKEN  individual overrides (TOKEN is the value)
+//   KOTO_SERVER_NAME TLS server-name override for off-SAN dial targets
 //
 // Output contract: unary verbs print the full response as one protojson line
 // (snake_case fields, same shapes the TUI consumes); `tail` prints one event
@@ -44,7 +44,7 @@ import (
 	"strings"
 	"time"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -55,7 +55,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-const ctlUsage = `usage: clawson ctl <verb> [flags] [args]
+const ctlUsage = `usage: koto ctl <verb> [flags] [args]
 
 group lifecycle
   list                                     all groups + state
@@ -96,8 +96,8 @@ admin role only
                                            e.g. acl set ops stop:ghost restart:ghost list
   acl del <role>                           remove a role
 
-env: CLAWSON_ADDR (127.0.0.1:8443), CLAWSON_CREDS_DIR (./creds),
-     CLAWSON_CLIENT (agent), CLAWSON_CERT/KEY/CA/TOKEN, CLAWSON_SERVER_NAME
+env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds),
+     KOTO_CLIENT (agent), KOTO_CERT/KEY/CA/TOKEN, KOTO_SERVER_NAME
 `
 
 func ctlEnvOr(k, def string) string {
@@ -108,24 +108,24 @@ func ctlEnvOr(k, def string) string {
 }
 
 func ctlFatal(code int, format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "clawson ctl: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "koto ctl: "+format+"\n", a...)
 	os.Exit(code)
 }
 
 // ctlClient dials the daemon with the same mTLS+token scheme as the TUI
 // (tui/daemon.go); kept separate because the TUI is its own module.
-func ctlClient() pb.ClawsonClient {
-	credsDir := ctlEnvOr("CLAWSON_CREDS_DIR", "creds")
-	name := ctlEnvOr("CLAWSON_CLIENT", "agent")
-	certPath := ctlEnvOr("CLAWSON_CERT", filepath.Join(credsDir, "client-"+name+".crt"))
-	keyPath := ctlEnvOr("CLAWSON_KEY", filepath.Join(credsDir, "client-"+name+".key"))
-	caPath := ctlEnvOr("CLAWSON_CA", filepath.Join(credsDir, "ca.crt"))
+func ctlClient() pb.KotoClient {
+	credsDir := ctlEnvOr("KOTO_CREDS_DIR", "creds")
+	name := ctlEnvOr("KOTO_CLIENT", "agent")
+	certPath := ctlEnvOr("KOTO_CERT", filepath.Join(credsDir, "client-"+name+".crt"))
+	keyPath := ctlEnvOr("KOTO_KEY", filepath.Join(credsDir, "client-"+name+".key"))
+	caPath := ctlEnvOr("KOTO_CA", filepath.Join(credsDir, "ca.crt"))
 
-	token := os.Getenv("CLAWSON_TOKEN")
+	token := os.Getenv("KOTO_TOKEN")
 	if token == "" {
 		b, err := os.ReadFile(filepath.Join(credsDir, "token-"+name))
 		if err != nil {
-			ctlFatal(1, "no token: set CLAWSON_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)",
+			ctlFatal(1, "no token: set KOTO_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)",
 				filepath.Join(credsDir, "token-"+name), name)
 		}
 		token = strings.TrimSpace(string(b))
@@ -148,11 +148,11 @@ func ctlClient() pb.ClawsonClient {
 		RootCAs:      pool,
 		MinVersion:   tls.VersionTLS13,
 	}
-	if sn := os.Getenv("CLAWSON_SERVER_NAME"); sn != "" {
+	if sn := os.Getenv("KOTO_SERVER_NAME"); sn != "" {
 		tcfg.ServerName = sn
 	}
 
-	cc, err := grpc.NewClient(ctlEnvOr("CLAWSON_ADDR", "127.0.0.1:8443"),
+	cc, err := grpc.NewClient(ctlEnvOr("KOTO_ADDR", "127.0.0.1:8443"),
 		grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
 		grpc.WithPerRPCCredentials(tokenCreds{token}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -164,7 +164,7 @@ func ctlClient() pb.ClawsonClient {
 	if err != nil {
 		ctlFatal(1, "dial: %v", err)
 	}
-	return pb.NewClawsonClient(cc)
+	return pb.NewKotoClient(cc)
 }
 
 // tokenCreds attaches the bearer token to every RPC (same shape as the TUI's).
@@ -220,9 +220,9 @@ func ctlCliMain(args []string) {
 	verb, rest := args[0], args[1:]
 
 	// Group-only verbs share one shape.
-	groupVerb := func(call func(context.Context, pb.ClawsonClient, string) (proto.Message, error)) {
+	groupVerb := func(call func(context.Context, pb.KotoClient, string) (proto.Message, error)) {
 		if len(rest) != 1 {
-			ctlFatal(2, "usage: clawson ctl %s <group>", verb)
+			ctlFatal(2, "usage: koto ctl %s <group>", verb)
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -245,7 +245,7 @@ func ctlCliMain(args []string) {
 		model := fs.String("model", "", "model override")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: clawson ctl spawn [-provider P] [-model M] <group>")
+			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] <group>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -255,7 +255,7 @@ func ctlCliMain(args []string) {
 
 	case "send":
 		if len(rest) < 2 {
-			ctlFatal(2, "usage: clawson ctl send <group> <msg...>")
+			ctlFatal(2, "usage: koto ctl send <group> <msg...>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -271,7 +271,7 @@ func ctlCliMain(args []string) {
 		since := fs.Uint64("since", 0, "replay ring frames with seq > N before going live")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: clawson ctl tail [-since N] <group>")
+			ctlFatal(2, "usage: koto ctl tail [-since N] <group>")
 		}
 		cl := ctlClient()
 		stream, err := cl.SubscribeGroup(context.Background(), &pb.SubscribeReq{Group: fs.Arg(0), SinceSeq: *since})
@@ -286,7 +286,7 @@ func ctlCliMain(args []string) {
 		before := fs.Float64("before", 0, "ts cursor (exclusive)")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: clawson ctl history [-limit N] [-before TS] <group>")
+			ctlFatal(2, "usage: koto ctl history [-limit N] [-before TS] <group>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -295,23 +295,23 @@ func ctlCliMain(args []string) {
 		ctlPrint(resp, err)
 
 	case "stop":
-		groupVerb(func(ctx context.Context, cl pb.ClawsonClient, g string) (proto.Message, error) {
+		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Stop(ctx, &pb.GroupReq{Group: g})
 		})
 	case "interrupt":
-		groupVerb(func(ctx context.Context, cl pb.ClawsonClient, g string) (proto.Message, error) {
+		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Interrupt(ctx, &pb.GroupReq{Group: g})
 		})
 	case "destroy":
-		groupVerb(func(ctx context.Context, cl pb.ClawsonClient, g string) (proto.Message, error) {
+		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Destroy(ctx, &pb.GroupReq{Group: g})
 		})
 	case "restart":
-		groupVerb(func(ctx context.Context, cl pb.ClawsonClient, g string) (proto.Message, error) {
+		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Restart(ctx, &pb.GroupReq{Group: g})
 		})
 	case "clear":
-		groupVerb(func(ctx context.Context, cl pb.ClawsonClient, g string) (proto.Message, error) {
+		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Clear(ctx, &pb.GroupReq{Group: g})
 		})
 
@@ -320,7 +320,7 @@ func ctlCliMain(args []string) {
 		if len(rest) == 1 {
 			g = rest[0]
 		} else if len(rest) > 1 {
-			ctlFatal(2, "usage: clawson ctl metrics [group]")
+			ctlFatal(2, "usage: koto ctl metrics [group]")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -336,7 +336,7 @@ func ctlCliMain(args []string) {
 		if len(rest) == 1 {
 			g = rest[0]
 		} else if len(rest) > 1 {
-			ctlFatal(2, "usage: clawson ctl skills [group]")
+			ctlFatal(2, "usage: koto ctl skills [group]")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -346,7 +346,7 @@ func ctlCliMain(args []string) {
 
 	case "skill-new":
 		if len(rest) != 1 {
-			ctlFatal(2, "usage: clawson ctl skill-new <name>")
+			ctlFatal(2, "usage: koto ctl skill-new <name>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -356,7 +356,7 @@ func ctlCliMain(args []string) {
 
 	case "skill-read":
 		if len(rest) != 1 {
-			ctlFatal(2, "usage: clawson ctl skill-read <name>")
+			ctlFatal(2, "usage: koto ctl skill-read <name>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
@@ -366,7 +366,7 @@ func ctlCliMain(args []string) {
 
 	case "logs":
 		if len(rest) != 0 {
-			ctlFatal(2, "usage: clawson ctl logs")
+			ctlFatal(2, "usage: koto ctl logs")
 		}
 		stream, err := ctlClient().SubscribeLogs(context.Background(), &pb.LogsReq{})
 		if err != nil {
@@ -376,7 +376,7 @@ func ctlCliMain(args []string) {
 
 	case "watch":
 		if len(rest) != 0 {
-			ctlFatal(2, "usage: clawson ctl watch")
+			ctlFatal(2, "usage: koto ctl watch")
 		}
 		stream, err := ctlClient().WatchState(context.Background(), &pb.WatchReq{})
 		if err != nil {
@@ -391,7 +391,7 @@ func ctlCliMain(args []string) {
 		// Raw output on purpose — this verb is "run my script, show me its
 		// bytes", not an event feed, so no protojson framing like tail/logs.
 		if len(rest) < 2 {
-			ctlFatal(2, "usage: clawson ctl runscript <group> <script...>")
+			ctlFatal(2, "usage: koto ctl runscript <group> <script...>")
 		}
 		cl := ctlClient()
 		stream, err := cl.RunScript(context.Background(),
@@ -438,7 +438,7 @@ func ctlCliMain(args []string) {
 // acl_* verbs are hardcoded admin-only server-side.
 func ctlAcl(args []string) {
 	if len(args) < 1 {
-		ctlFatal(2, "usage: clawson ctl acl get|set|del ...")
+		ctlFatal(2, "usage: koto ctl acl get|set|del ...")
 	}
 	sub, rest := args[0], args[1:]
 	cl := ctlClient()
@@ -448,14 +448,14 @@ func ctlAcl(args []string) {
 	switch sub {
 	case "get":
 		if len(rest) != 0 {
-			ctlFatal(2, "usage: clawson ctl acl get")
+			ctlFatal(2, "usage: koto ctl acl get")
 		}
 		resp, err := cl.AclGet(ctx, &pb.AclGetReq{})
 		ctlPrint(resp, err)
 
 	case "set":
 		if len(rest) < 1 {
-			ctlFatal(2, "usage: clawson ctl acl set <role> <verb>[:<groups>] ...")
+			ctlFatal(2, "usage: koto ctl acl set <role> <verb>[:<groups>] ...")
 		}
 		role, grantArgs := rest[0], rest[1:]
 		grants := map[string]any{}
@@ -485,7 +485,7 @@ func ctlAcl(args []string) {
 
 	case "del":
 		if len(rest) != 1 {
-			ctlFatal(2, "usage: clawson ctl acl del <role>")
+			ctlFatal(2, "usage: koto ctl acl del <role>")
 		}
 		resp, err := cl.AclDelRole(ctx, &pb.AclDelRoleReq{Role: rest[0]})
 		ctlPrint(resp, err)
@@ -525,7 +525,7 @@ func ctlConfig(args []string) {
 	// Go's flag package stops at the first non-flag token, so the group must
 	// lead — parse everything after it as flags.
 	if len(args) < 1 {
-		ctlFatal(2, "usage: clawson ctl config <group> [-model M] [-network none|wan|lan|full] [-skills a,b|-skills-clear] ...")
+		ctlFatal(2, "usage: koto ctl config <group> [-model M] [-network none|wan|lan|full] [-skills a,b|-skills-clear] ...")
 	}
 	group, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
@@ -597,7 +597,7 @@ func ctlAsk(args []string) {
 	asJSON := fs.Bool("json", false, "print captured events as JSON lines instead of plain text")
 	fs.Parse(args)
 	if fs.NArg() < 2 {
-		ctlFatal(2, "usage: clawson ctl ask [-timeout D] [-json] <group> <msg...>")
+		ctlFatal(2, "usage: koto ctl ask [-timeout D] [-json] <group> <msg...>")
 	}
 	group, msg := fs.Arg(0), ctlMsgArg(fs.Args()[1:])
 
@@ -659,7 +659,7 @@ func ctlAsk(args []string) {
 //	sched del|on|off|run <id>
 func ctlSched(args []string) {
 	if len(args) < 1 {
-		ctlFatal(2, "usage: clawson ctl sched list|add|del|on|off|run ...")
+		ctlFatal(2, "usage: koto ctl sched list|add|del|on|off|run ...")
 	}
 	sub, rest := args[0], args[1:]
 	cl := ctlClient()
@@ -672,14 +672,14 @@ func ctlSched(args []string) {
 		if len(rest) == 1 {
 			g = rest[0]
 		} else if len(rest) > 1 {
-			ctlFatal(2, "usage: clawson ctl sched list [group]")
+			ctlFatal(2, "usage: koto ctl sched list [group]")
 		}
 		resp, err := cl.SchedList(ctx, &pb.SchedListReq{Group: g})
 		ctlPrint(resp, err)
 
 	case "add":
 		if len(rest) < 3 {
-			ctlFatal(2, "usage: clawson ctl sched add <group> <cron...> <msg...>")
+			ctlFatal(2, "usage: koto ctl sched add <group> <cron...> <msg...>")
 		}
 		group := rest[0]
 		var cron, msg string
@@ -699,7 +699,7 @@ func ctlSched(args []string) {
 
 	case "del", "run", "on", "off":
 		if len(rest) != 1 {
-			ctlFatal(2, "usage: clawson ctl sched %s <id>", sub)
+			ctlFatal(2, "usage: koto ctl sched %s <id>", sub)
 		}
 		switch sub {
 		case "del":

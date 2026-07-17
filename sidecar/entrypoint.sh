@@ -34,7 +34,7 @@ while IFS= read -r b64 <&3; do
   msg=$(printf '%s' "$b64" | base64 -d) || continue
   # NOTE: the daemon writes the `>>> <original msg>` marker before delivering
   # this FIFO line, so the TUI log shows the user's typed text. $msg here is
-  # the AUGMENTED version (original + <clawson-context> rate-limit block).
+  # the AUGMENTED version (original + <koto-context> rate-limit block).
 
   # System prompt is composed by the daemon (composeSystemPrompt in daemon.go)
   # and written to /workspace/.cs/system-prompt.md immediately before each
@@ -49,7 +49,7 @@ while IFS= read -r b64 <&3; do
   # isn't installed.
   # Default provider is claudesdk; opt into Venice per-group with
   # `/config provider=venice`. Default models come from the daemon via
-  # CLAWSON_DEFAULT_CLAUDE_MODEL / CLAWSON_DEFAULT_VENICE_MODEL (single
+  # KOTO_DEFAULT_CLAUDE_MODEL / KOTO_DEFAULT_VENICE_MODEL (single
   # source of truth = defaultClaudeModel / defaultVeniceModel in groups.go);
   # applied in each provider case when MODEL is empty. The literal venice
   # fallback is only for a missing env.
@@ -69,7 +69,7 @@ while IFS= read -r b64 <&3; do
       # directly to the log in the same `[ts:N]\n<text>\n` format the
       # tailer expects from the Claude path.
       VENICE_MODEL="$MODEL"
-      [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${CLAWSON_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+      [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
       MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
       SP_B64=""
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
@@ -89,7 +89,7 @@ while IFS= read -r b64 <&3; do
       set -- claude -p --continue --bare --dangerously-skip-permissions \
         --output-format stream-json --include-partial-messages --verbose
       [ -n "$APPEND" ] && set -- "$@" --append-system-prompt "$APPEND"
-      [ -z "$MODEL" ] && MODEL="${CLAWSON_DEFAULT_CLAUDE_MODEL:-}"
+      [ -z "$MODEL" ] && MODEL="${KOTO_DEFAULT_CLAUDE_MODEL:-}"
       [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
       [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 

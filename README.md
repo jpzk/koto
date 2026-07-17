@@ -1,4 +1,4 @@
-# clawson
+# koto
 
 Minimal isolated orchestrator for long-lived `claude` agents. Every group
 (agent) runs in its own **Firecracker microVM** with **no network by default**;
@@ -71,7 +71,7 @@ host filesystem, no control-plane authority beyond its own group.
 tier 1   host user            full authority (by definition)
   │  boundary: dedicated creds dir; no ~/.claude mount; no podman socket in cs_host
 tier 2   cs_host              daemon + proxy; vetted code, pinned deps
-  │      blast radius: clawson OAuth token + workspaces — no path to host podman
+  │      blast radius: koto OAuth token + workspaces — no path to host podman
   │  boundary: KVM + jailer; vsock-only IPC; no shared FS; verb authorization
 tier 3   microVM groups       untrusted; own kernel, no NIC, sentinel creds
 tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch image
@@ -126,7 +126,7 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 
 | module | direct deps | indirect |
 |--------|-------------|----------|
-| `clawson` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `clawson-protocol` | ~21 |
+| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | ~21 |
 | `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
 | `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | ~35 |
 | `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
@@ -161,7 +161,7 @@ claude-code layers are the accepted moving parts.
 | `network` | `none` (default) \| `wan` \| `lan` \| `full` | `/restart` |
 | `size` | `small` (default) \| `medium` \| `large` | `/restart` |
 | `root` | `no` (default) \| `yes` | `/restart` |
-| `ports` | e.g. `[8080]` — vsock↔TCP bridge into `clawson-net` | `/restart` |
+| `ports` | e.g. `[8080]` — vsock↔TCP bridge into `koto-net` | `/restart` |
 
 ## Host requirements
 

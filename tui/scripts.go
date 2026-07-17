@@ -8,13 +8,13 @@ import (
 )
 
 // scriptsDir is where /runscript looks. The cs_tui container mounts the host
-// scripts/ read-only here; CLAWSON_SCRIPTS_DIR overrides it for a bare-host
+// scripts/ read-only here; KOTO_SCRIPTS_DIR overrides it for a bare-host
 // TUI run (make tui-local / dev).
 func scriptsDir() string {
-	if d := os.Getenv("CLAWSON_SCRIPTS_DIR"); d != "" {
+	if d := os.Getenv("KOTO_SCRIPTS_DIR"); d != "" {
 		return d
 	}
-	return "/clawson-scripts"
+	return "/koto-scripts"
 }
 
 // loadScript resolves a /runscript argument to (displayName, scriptText). The

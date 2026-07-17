@@ -182,7 +182,7 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	if reason == "" {
 		reason = fmt.Sprintf("status %d", status)
 	}
-	msg := fmt.Sprintf("[clawson-proxy] %s → %d %s in %dms",
+	msg := fmt.Sprintf("[koto-proxy] %s → %d %s in %dms",
 		path, status, reason, int(dur/time.Millisecond))
 	if reqID != "" {
 		msg += " (request " + reqID + ")"
@@ -194,7 +194,7 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 }
 
 // normalizeVeniceUsage maps Venice's OpenAI-shape usage block onto the
-// Anthropic keys the rest of clawson reads. Venice nests cache accounting
+// Anthropic keys the rest of koto reads. Venice nests cache accounting
 // under `prompt_tokens_details` (cached_tokens = cache read; the non-standard
 // cache_creation_input_tokens = cache write); that object is nullable, so the
 // details may be absent on cache-miss turns / non-caching models — default to
@@ -204,7 +204,7 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 // is the *total* prompt and cached_tokens/cache_creation are a breakdown
 // (subsets), whereas Anthropic's input_tokens is the *fresh* (uncached) portion
 // with cache_read/cache_creation as disjoint buckets. Consumers (TUI ctx gauge,
-// cache-hit ratio, <clawson-context> header) all assume the Anthropic disjoint
+// cache-hit ratio, <koto-context> header) all assume the Anthropic disjoint
 // model, so we subtract the cache buckets out of input_tokens — otherwise the
 // cached tokens get double-counted (ctx inflated, hit ratio deflated).
 func normalizeVeniceUsage(u, usage map[string]any) {
@@ -556,7 +556,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 // Usage is normalized to the Anthropic shape (input_tokens/output_tokens) so
 // the daemon's contextBlock — which assumes Anthropic field names — still
-// surfaces token counts in the next turn's <clawson-context> header. Venice
+// surfaces token counts in the next turn's <koto-context> header. Venice
 // doesn't expose rate-limit headers, so the rate-limit row of the context
 // block degrades to `?` for Venice groups, which is fine.
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
@@ -812,7 +812,7 @@ func egressTargetAllowed(hostport, pol string) (bool, string) {
 		return false, ""
 	}
 	// Never let egress reach the daemon's control port, wherever it resolves.
-	if dp := os.Getenv("CLAWSON_PORT"); dp != "" && port == dp {
+	if dp := os.Getenv("KOTO_PORT"); dp != "" && port == dp {
 		return false, ""
 	}
 	if port == "8443" {

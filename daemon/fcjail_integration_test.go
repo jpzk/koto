@@ -5,12 +5,12 @@ package main
 // asserts the guest kernel reaches KVM. Exercises the actual staging, bind
 // mounts, chroot, uid drop, and exec — not a reimplementation.
 //
-// Gated behind CLAWSON_FC_JAIL_IT=1 because it needs /dev/kvm, the fetched
+// Gated behind KOTO_FC_JAIL_IT=1 because it needs /dev/kvm, the fetched
 // assets (fcassets/{firecracker,vmlinux,rootfs.img}), and the ability to
-// create nested user namespaces — i.e. it runs inside clawson-host, not in
+// create nested user namespaces — i.e. it runs inside koto-host, not in
 // unit-test CI. Run:
 //
-//   go test -run TestFcJailBootsReal -v   (with CLAWSON_FC_JAIL_IT=1 + assets)
+//   go test -run TestFcJailBootsReal -v   (with KOTO_FC_JAIL_IT=1 + assets)
 
 import (
 	"os"
@@ -22,21 +22,21 @@ import (
 )
 
 func TestFcJailBootsReal(t *testing.T) {
-	if os.Getenv("CLAWSON_FC_JAIL_IT") != "1" {
-		t.Skip("integration test; set CLAWSON_FC_JAIL_IT=1 (needs /dev/kvm + assets)")
+	if os.Getenv("KOTO_FC_JAIL_IT") != "1" {
+		t.Skip("integration test; set KOTO_FC_JAIL_IT=1 (needs /dev/kvm + assets)")
 	}
 	// Assets live in the real project tree; point HERE there so fcBinPath/
 	// fcKernelPath/fcRootfsPath resolve, but keep run/ + groups/ in a tempdir.
-	proj := os.Getenv("CLAWSON_PROJ")
+	proj := os.Getenv("KOTO_PROJ")
 	if proj == "" {
-		proj = "/home/<user>/clawson"
+		proj = "/home/<user>/koto"
 	}
 	HERE = proj
 	tmp := t.TempDir()
 	// The shim must re-exec the real daemon binary (its main() dispatches
 	// `fcjail`); os.Executable() here is the test binary, which would rerun the
 	// suite instead. Build the real binary once and point the jailer at it.
-	self := filepath.Join(tmp, "clawson")
+	self := filepath.Join(tmp, "koto")
 	run(t, "go", "build", "-o", self, ".")
 	fcJailSelfExe = self
 	ROOT = filepath.Join(tmp, "groups")

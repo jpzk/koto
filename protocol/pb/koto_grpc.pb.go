@@ -1,4 +1,4 @@
-// Wire contract shared by the clawson daemon (Go), the TUI (Go), and the
+// Wire contract shared by the koto daemon (Go), the TUI (Go), and the
 // Android client (Kotlin). Generated Go code lands in ./pb (committed; run
 // `make proto-gen`). Field names are snake_case to match the historical JSON
 // keys the TUI still consumes via protojson(UseProtoNames:true).
@@ -16,7 +16,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v6.31.1
-// source: clawson.proto
+// source: koto.proto
 
 package pb
 
@@ -33,38 +33,38 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Clawson_Spawn_FullMethodName          = "/clawson.Clawson/Spawn"
-	Clawson_Send_FullMethodName           = "/clawson.Clawson/Send"
-	Clawson_List_FullMethodName           = "/clawson.Clawson/List"
-	Clawson_Stop_FullMethodName           = "/clawson.Clawson/Stop"
-	Clawson_Interrupt_FullMethodName      = "/clawson.Clawson/Interrupt"
-	Clawson_Destroy_FullMethodName        = "/clawson.Clawson/Destroy"
-	Clawson_Restart_FullMethodName        = "/clawson.Clawson/Restart"
-	Clawson_History_FullMethodName        = "/clawson.Clawson/History"
-	Clawson_Config_FullMethodName         = "/clawson.Clawson/Config"
-	Clawson_Metrics_FullMethodName        = "/clawson.Clawson/Metrics"
-	Clawson_Clear_FullMethodName          = "/clawson.Clawson/Clear"
-	Clawson_Skills_FullMethodName         = "/clawson.Clawson/Skills"
-	Clawson_SkillNew_FullMethodName       = "/clawson.Clawson/SkillNew"
-	Clawson_SkillRead_FullMethodName      = "/clawson.Clawson/SkillRead"
-	Clawson_SchedAdd_FullMethodName       = "/clawson.Clawson/SchedAdd"
-	Clawson_SchedList_FullMethodName      = "/clawson.Clawson/SchedList"
-	Clawson_SchedDel_FullMethodName       = "/clawson.Clawson/SchedDel"
-	Clawson_SchedToggle_FullMethodName    = "/clawson.Clawson/SchedToggle"
-	Clawson_SchedRun_FullMethodName       = "/clawson.Clawson/SchedRun"
-	Clawson_AclGet_FullMethodName         = "/clawson.Clawson/AclGet"
-	Clawson_AclSetRole_FullMethodName     = "/clawson.Clawson/AclSetRole"
-	Clawson_AclDelRole_FullMethodName     = "/clawson.Clawson/AclDelRole"
-	Clawson_RunScript_FullMethodName      = "/clawson.Clawson/RunScript"
-	Clawson_SubscribeGroup_FullMethodName = "/clawson.Clawson/SubscribeGroup"
-	Clawson_SubscribeLogs_FullMethodName  = "/clawson.Clawson/SubscribeLogs"
-	Clawson_WatchState_FullMethodName     = "/clawson.Clawson/WatchState"
+	Koto_Spawn_FullMethodName          = "/koto.Koto/Spawn"
+	Koto_Send_FullMethodName           = "/koto.Koto/Send"
+	Koto_List_FullMethodName           = "/koto.Koto/List"
+	Koto_Stop_FullMethodName           = "/koto.Koto/Stop"
+	Koto_Interrupt_FullMethodName      = "/koto.Koto/Interrupt"
+	Koto_Destroy_FullMethodName        = "/koto.Koto/Destroy"
+	Koto_Restart_FullMethodName        = "/koto.Koto/Restart"
+	Koto_History_FullMethodName        = "/koto.Koto/History"
+	Koto_Config_FullMethodName         = "/koto.Koto/Config"
+	Koto_Metrics_FullMethodName        = "/koto.Koto/Metrics"
+	Koto_Clear_FullMethodName          = "/koto.Koto/Clear"
+	Koto_Skills_FullMethodName         = "/koto.Koto/Skills"
+	Koto_SkillNew_FullMethodName       = "/koto.Koto/SkillNew"
+	Koto_SkillRead_FullMethodName      = "/koto.Koto/SkillRead"
+	Koto_SchedAdd_FullMethodName       = "/koto.Koto/SchedAdd"
+	Koto_SchedList_FullMethodName      = "/koto.Koto/SchedList"
+	Koto_SchedDel_FullMethodName       = "/koto.Koto/SchedDel"
+	Koto_SchedToggle_FullMethodName    = "/koto.Koto/SchedToggle"
+	Koto_SchedRun_FullMethodName       = "/koto.Koto/SchedRun"
+	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
+	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
+	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
+	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
+	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
+	Koto_SubscribeLogs_FullMethodName  = "/koto.Koto/SubscribeLogs"
+	Koto_WatchState_FullMethodName     = "/koto.Koto/WatchState"
 )
 
-// ClawsonClient is the client API for Clawson service.
+// KotoClient is the client API for Koto service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type ClawsonClient interface {
+type KotoClient interface {
 	// ---- unary (one per legacy dispatch case) ----
 	Spawn(ctx context.Context, in *SpawnReq, opts ...grpc.CallOption) (*SpawnResp, error)
 	Send(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*BaseResp, error)
@@ -113,237 +113,237 @@ type ClawsonClient interface {
 	WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error)
 }
 
-type clawsonClient struct {
+type kotoClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewClawsonClient(cc grpc.ClientConnInterface) ClawsonClient {
-	return &clawsonClient{cc}
+func NewKotoClient(cc grpc.ClientConnInterface) KotoClient {
+	return &kotoClient{cc}
 }
 
-func (c *clawsonClient) Spawn(ctx context.Context, in *SpawnReq, opts ...grpc.CallOption) (*SpawnResp, error) {
+func (c *kotoClient) Spawn(ctx context.Context, in *SpawnReq, opts ...grpc.CallOption) (*SpawnResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SpawnResp)
-	err := c.cc.Invoke(ctx, Clawson_Spawn_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Spawn_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Send(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) Send(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_Send_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Send_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) List(ctx context.Context, in *ListReq, opts ...grpc.CallOption) (*ListResp, error) {
+func (c *kotoClient) List(ctx context.Context, in *ListReq, opts ...grpc.CallOption) (*ListResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListResp)
-	err := c.cc.Invoke(ctx, Clawson_List_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_List_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Stop(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) Stop(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_Stop_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Stop_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_Interrupt_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Interrupt_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Destroy(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) Destroy(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_Destroy_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Destroy_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Restart(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*SpawnResp, error) {
+func (c *kotoClient) Restart(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*SpawnResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SpawnResp)
-	err := c.cc.Invoke(ctx, Clawson_Restart_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Restart_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) History(ctx context.Context, in *HistoryReq, opts ...grpc.CallOption) (*HistoryResp, error) {
+func (c *kotoClient) History(ctx context.Context, in *HistoryReq, opts ...grpc.CallOption) (*HistoryResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HistoryResp)
-	err := c.cc.Invoke(ctx, Clawson_History_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_History_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Config(ctx context.Context, in *ConfigReq, opts ...grpc.CallOption) (*ConfigResp, error) {
+func (c *kotoClient) Config(ctx context.Context, in *ConfigReq, opts ...grpc.CallOption) (*ConfigResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConfigResp)
-	err := c.cc.Invoke(ctx, Clawson_Config_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Config_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Metrics(ctx context.Context, in *MetricsReq, opts ...grpc.CallOption) (*MetricsResp, error) {
+func (c *kotoClient) Metrics(ctx context.Context, in *MetricsReq, opts ...grpc.CallOption) (*MetricsResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MetricsResp)
-	err := c.cc.Invoke(ctx, Clawson_Metrics_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Metrics_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_Clear_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Clear_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) Skills(ctx context.Context, in *SkillListReq, opts ...grpc.CallOption) (*SkillsResp, error) {
+func (c *kotoClient) Skills(ctx context.Context, in *SkillListReq, opts ...grpc.CallOption) (*SkillsResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SkillsResp)
-	err := c.cc.Invoke(ctx, Clawson_Skills_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_Skills_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SkillNew(ctx context.Context, in *SkillNewReq, opts ...grpc.CallOption) (*SkillNewResp, error) {
+func (c *kotoClient) SkillNew(ctx context.Context, in *SkillNewReq, opts ...grpc.CallOption) (*SkillNewResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SkillNewResp)
-	err := c.cc.Invoke(ctx, Clawson_SkillNew_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SkillNew_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SkillRead(ctx context.Context, in *SkillReadReq, opts ...grpc.CallOption) (*SkillReadResp, error) {
+func (c *kotoClient) SkillRead(ctx context.Context, in *SkillReadReq, opts ...grpc.CallOption) (*SkillReadResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SkillReadResp)
-	err := c.cc.Invoke(ctx, Clawson_SkillRead_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SkillRead_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SchedAdd(ctx context.Context, in *SchedAddReq, opts ...grpc.CallOption) (*SchedAddResp, error) {
+func (c *kotoClient) SchedAdd(ctx context.Context, in *SchedAddReq, opts ...grpc.CallOption) (*SchedAddResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SchedAddResp)
-	err := c.cc.Invoke(ctx, Clawson_SchedAdd_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SchedAdd_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SchedList(ctx context.Context, in *SchedListReq, opts ...grpc.CallOption) (*SchedListResp, error) {
+func (c *kotoClient) SchedList(ctx context.Context, in *SchedListReq, opts ...grpc.CallOption) (*SchedListResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SchedListResp)
-	err := c.cc.Invoke(ctx, Clawson_SchedList_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SchedList_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_SchedDel_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SchedDel_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SchedToggle(ctx context.Context, in *SchedToggleReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) SchedToggle(ctx context.Context, in *SchedToggleReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_SchedToggle_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SchedToggle_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error) {
+func (c *kotoClient) SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
-	err := c.cc.Invoke(ctx, Clawson_SchedRun_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_SchedRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
+func (c *kotoClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
-	err := c.cc.Invoke(ctx, Clawson_AclGet_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_AclGet_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
+func (c *kotoClient) AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
-	err := c.cc.Invoke(ctx, Clawson_AclSetRole_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_AclSetRole_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
+func (c *kotoClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
-	err := c.cc.Invoke(ctx, Clawson_AclDelRole_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Koto_AclDelRole_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *clawsonClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
+func (c *kotoClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[0], Clawson_RunScript_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[0], Koto_RunScript_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -358,11 +358,11 @@ func (c *clawsonClient) RunScript(ctx context.Context, in *RunScriptReq, opts ..
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
+type Koto_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
 
-func (c *clawsonClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
+func (c *kotoClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[1], Clawson_SubscribeGroup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_SubscribeGroup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -377,11 +377,11 @@ func (c *clawsonClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, op
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
+type Koto_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
 
-func (c *clawsonClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
+func (c *kotoClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[2], Clawson_SubscribeLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_SubscribeLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -396,11 +396,11 @@ func (c *clawsonClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
+type Koto_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
-func (c *clawsonClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
+func (c *kotoClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Clawson_ServiceDesc.Streams[3], Clawson_WatchState_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_WatchState_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -415,12 +415,12 @@ func (c *clawsonClient) WatchState(ctx context.Context, in *WatchReq, opts ...gr
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_WatchStateClient = grpc.ServerStreamingClient[StateFrame]
+type Koto_WatchStateClient = grpc.ServerStreamingClient[StateFrame]
 
-// ClawsonServer is the server API for Clawson service.
-// All implementations must embed UnimplementedClawsonServer
+// KotoServer is the server API for Koto service.
+// All implementations must embed UnimplementedKotoServer
 // for forward compatibility.
-type ClawsonServer interface {
+type KotoServer interface {
 	// ---- unary (one per legacy dispatch case) ----
 	Spawn(context.Context, *SpawnReq) (*SpawnResp, error)
 	Send(context.Context, *SendReq) (*BaseResp, error)
@@ -467,672 +467,672 @@ type ClawsonServer interface {
 	// change. Snapshots are idempotent — a client may miss intermediate
 	// frames and still converge on the latest one.
 	WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error
-	mustEmbedUnimplementedClawsonServer()
+	mustEmbedUnimplementedKotoServer()
 }
 
-// UnimplementedClawsonServer must be embedded to have
+// UnimplementedKotoServer must be embedded to have
 // forward compatible implementations.
 //
 // NOTE: this should be embedded by value instead of pointer to avoid a nil
 // pointer dereference when methods are called.
-type UnimplementedClawsonServer struct{}
+type UnimplementedKotoServer struct{}
 
-func (UnimplementedClawsonServer) Spawn(context.Context, *SpawnReq) (*SpawnResp, error) {
+func (UnimplementedKotoServer) Spawn(context.Context, *SpawnReq) (*SpawnResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Spawn not implemented")
 }
-func (UnimplementedClawsonServer) Send(context.Context, *SendReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) Send(context.Context, *SendReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Send not implemented")
 }
-func (UnimplementedClawsonServer) List(context.Context, *ListReq) (*ListResp, error) {
+func (UnimplementedKotoServer) List(context.Context, *ListReq) (*ListResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method List not implemented")
 }
-func (UnimplementedClawsonServer) Stop(context.Context, *GroupReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) Stop(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Stop not implemented")
 }
-func (UnimplementedClawsonServer) Interrupt(context.Context, *GroupReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) Interrupt(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Interrupt not implemented")
 }
-func (UnimplementedClawsonServer) Destroy(context.Context, *GroupReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) Destroy(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Destroy not implemented")
 }
-func (UnimplementedClawsonServer) Restart(context.Context, *GroupReq) (*SpawnResp, error) {
+func (UnimplementedKotoServer) Restart(context.Context, *GroupReq) (*SpawnResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Restart not implemented")
 }
-func (UnimplementedClawsonServer) History(context.Context, *HistoryReq) (*HistoryResp, error) {
+func (UnimplementedKotoServer) History(context.Context, *HistoryReq) (*HistoryResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method History not implemented")
 }
-func (UnimplementedClawsonServer) Config(context.Context, *ConfigReq) (*ConfigResp, error) {
+func (UnimplementedKotoServer) Config(context.Context, *ConfigReq) (*ConfigResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Config not implemented")
 }
-func (UnimplementedClawsonServer) Metrics(context.Context, *MetricsReq) (*MetricsResp, error) {
+func (UnimplementedKotoServer) Metrics(context.Context, *MetricsReq) (*MetricsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Metrics not implemented")
 }
-func (UnimplementedClawsonServer) Clear(context.Context, *GroupReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) Clear(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Clear not implemented")
 }
-func (UnimplementedClawsonServer) Skills(context.Context, *SkillListReq) (*SkillsResp, error) {
+func (UnimplementedKotoServer) Skills(context.Context, *SkillListReq) (*SkillsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Skills not implemented")
 }
-func (UnimplementedClawsonServer) SkillNew(context.Context, *SkillNewReq) (*SkillNewResp, error) {
+func (UnimplementedKotoServer) SkillNew(context.Context, *SkillNewReq) (*SkillNewResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SkillNew not implemented")
 }
-func (UnimplementedClawsonServer) SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error) {
+func (UnimplementedKotoServer) SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SkillRead not implemented")
 }
-func (UnimplementedClawsonServer) SchedAdd(context.Context, *SchedAddReq) (*SchedAddResp, error) {
+func (UnimplementedKotoServer) SchedAdd(context.Context, *SchedAddReq) (*SchedAddResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedAdd not implemented")
 }
-func (UnimplementedClawsonServer) SchedList(context.Context, *SchedListReq) (*SchedListResp, error) {
+func (UnimplementedKotoServer) SchedList(context.Context, *SchedListReq) (*SchedListResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedList not implemented")
 }
-func (UnimplementedClawsonServer) SchedDel(context.Context, *SchedIDReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) SchedDel(context.Context, *SchedIDReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedDel not implemented")
 }
-func (UnimplementedClawsonServer) SchedToggle(context.Context, *SchedToggleReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) SchedToggle(context.Context, *SchedToggleReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedToggle not implemented")
 }
-func (UnimplementedClawsonServer) SchedRun(context.Context, *SchedIDReq) (*BaseResp, error) {
+func (UnimplementedKotoServer) SchedRun(context.Context, *SchedIDReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedRun not implemented")
 }
-func (UnimplementedClawsonServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
+func (UnimplementedKotoServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
 }
-func (UnimplementedClawsonServer) AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error) {
+func (UnimplementedKotoServer) AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclSetRole not implemented")
 }
-func (UnimplementedClawsonServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
+func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclDelRole not implemented")
 }
-func (UnimplementedClawsonServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
+func (UnimplementedKotoServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
 	return status.Error(codes.Unimplemented, "method RunScript not implemented")
 }
-func (UnimplementedClawsonServer) SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
+func (UnimplementedKotoServer) SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGroup not implemented")
 }
-func (UnimplementedClawsonServer) SubscribeLogs(*LogsReq, grpc.ServerStreamingServer[LogEvent]) error {
+func (UnimplementedKotoServer) SubscribeLogs(*LogsReq, grpc.ServerStreamingServer[LogEvent]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeLogs not implemented")
 }
-func (UnimplementedClawsonServer) WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error {
+func (UnimplementedKotoServer) WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error {
 	return status.Error(codes.Unimplemented, "method WatchState not implemented")
 }
-func (UnimplementedClawsonServer) mustEmbedUnimplementedClawsonServer() {}
-func (UnimplementedClawsonServer) testEmbeddedByValue()                 {}
+func (UnimplementedKotoServer) mustEmbedUnimplementedKotoServer() {}
+func (UnimplementedKotoServer) testEmbeddedByValue()              {}
 
-// UnsafeClawsonServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to ClawsonServer will
+// UnsafeKotoServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to KotoServer will
 // result in compilation errors.
-type UnsafeClawsonServer interface {
-	mustEmbedUnimplementedClawsonServer()
+type UnsafeKotoServer interface {
+	mustEmbedUnimplementedKotoServer()
 }
 
-func RegisterClawsonServer(s grpc.ServiceRegistrar, srv ClawsonServer) {
-	// If the following call panics, it indicates UnimplementedClawsonServer was
+func RegisterKotoServer(s grpc.ServiceRegistrar, srv KotoServer) {
+	// If the following call panics, it indicates UnimplementedKotoServer was
 	// embedded by pointer and is nil.  This will cause panics if an
 	// unimplemented method is ever invoked, so we test this at initialization
 	// time to prevent it from happening at runtime later due to I/O.
 	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
 		t.testEmbeddedByValue()
 	}
-	s.RegisterService(&Clawson_ServiceDesc, srv)
+	s.RegisterService(&Koto_ServiceDesc, srv)
 }
 
-func _Clawson_Spawn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Spawn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SpawnReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Spawn(ctx, in)
+		return srv.(KotoServer).Spawn(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Spawn_FullMethodName,
+		FullMethod: Koto_Spawn_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Spawn(ctx, req.(*SpawnReq))
+		return srv.(KotoServer).Spawn(ctx, req.(*SpawnReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Send_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Send_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SendReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Send(ctx, in)
+		return srv.(KotoServer).Send(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Send_FullMethodName,
+		FullMethod: Koto_Send_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Send(ctx, req.(*SendReq))
+		return srv.(KotoServer).Send(ctx, req.(*SendReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).List(ctx, in)
+		return srv.(KotoServer).List(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_List_FullMethodName,
+		FullMethod: Koto_List_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).List(ctx, req.(*ListReq))
+		return srv.(KotoServer).List(ctx, req.(*ListReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Stop_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Stop_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GroupReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Stop(ctx, in)
+		return srv.(KotoServer).Stop(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Stop_FullMethodName,
+		FullMethod: Koto_Stop_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Stop(ctx, req.(*GroupReq))
+		return srv.(KotoServer).Stop(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GroupReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Interrupt(ctx, in)
+		return srv.(KotoServer).Interrupt(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Interrupt_FullMethodName,
+		FullMethod: Koto_Interrupt_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Interrupt(ctx, req.(*GroupReq))
+		return srv.(KotoServer).Interrupt(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Destroy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Destroy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GroupReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Destroy(ctx, in)
+		return srv.(KotoServer).Destroy(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Destroy_FullMethodName,
+		FullMethod: Koto_Destroy_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Destroy(ctx, req.(*GroupReq))
+		return srv.(KotoServer).Destroy(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Restart_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Restart_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GroupReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Restart(ctx, in)
+		return srv.(KotoServer).Restart(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Restart_FullMethodName,
+		FullMethod: Koto_Restart_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Restart(ctx, req.(*GroupReq))
+		return srv.(KotoServer).Restart(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_History_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_History_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HistoryReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).History(ctx, in)
+		return srv.(KotoServer).History(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_History_FullMethodName,
+		FullMethod: Koto_History_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).History(ctx, req.(*HistoryReq))
+		return srv.(KotoServer).History(ctx, req.(*HistoryReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Config_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Config_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ConfigReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Config(ctx, in)
+		return srv.(KotoServer).Config(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Config_FullMethodName,
+		FullMethod: Koto_Config_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Config(ctx, req.(*ConfigReq))
+		return srv.(KotoServer).Config(ctx, req.(*ConfigReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Metrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Metrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MetricsReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Metrics(ctx, in)
+		return srv.(KotoServer).Metrics(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Metrics_FullMethodName,
+		FullMethod: Koto_Metrics_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Metrics(ctx, req.(*MetricsReq))
+		return srv.(KotoServer).Metrics(ctx, req.(*MetricsReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Clear_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Clear_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GroupReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Clear(ctx, in)
+		return srv.(KotoServer).Clear(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Clear_FullMethodName,
+		FullMethod: Koto_Clear_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Clear(ctx, req.(*GroupReq))
+		return srv.(KotoServer).Clear(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_Skills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_Skills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SkillListReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).Skills(ctx, in)
+		return srv.(KotoServer).Skills(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_Skills_FullMethodName,
+		FullMethod: Koto_Skills_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).Skills(ctx, req.(*SkillListReq))
+		return srv.(KotoServer).Skills(ctx, req.(*SkillListReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SkillNew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SkillNew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SkillNewReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SkillNew(ctx, in)
+		return srv.(KotoServer).SkillNew(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SkillNew_FullMethodName,
+		FullMethod: Koto_SkillNew_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SkillNew(ctx, req.(*SkillNewReq))
+		return srv.(KotoServer).SkillNew(ctx, req.(*SkillNewReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SkillRead_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SkillRead_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SkillReadReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SkillRead(ctx, in)
+		return srv.(KotoServer).SkillRead(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SkillRead_FullMethodName,
+		FullMethod: Koto_SkillRead_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SkillRead(ctx, req.(*SkillReadReq))
+		return srv.(KotoServer).SkillRead(ctx, req.(*SkillReadReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SchedAdd_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SchedAdd_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedAddReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SchedAdd(ctx, in)
+		return srv.(KotoServer).SchedAdd(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SchedAdd_FullMethodName,
+		FullMethod: Koto_SchedAdd_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SchedAdd(ctx, req.(*SchedAddReq))
+		return srv.(KotoServer).SchedAdd(ctx, req.(*SchedAddReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SchedList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SchedList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedListReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SchedList(ctx, in)
+		return srv.(KotoServer).SchedList(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SchedList_FullMethodName,
+		FullMethod: Koto_SchedList_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SchedList(ctx, req.(*SchedListReq))
+		return srv.(KotoServer).SchedList(ctx, req.(*SchedListReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SchedDel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SchedDel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedIDReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SchedDel(ctx, in)
+		return srv.(KotoServer).SchedDel(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SchedDel_FullMethodName,
+		FullMethod: Koto_SchedDel_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SchedDel(ctx, req.(*SchedIDReq))
+		return srv.(KotoServer).SchedDel(ctx, req.(*SchedIDReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SchedToggle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SchedToggle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedToggleReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SchedToggle(ctx, in)
+		return srv.(KotoServer).SchedToggle(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SchedToggle_FullMethodName,
+		FullMethod: Koto_SchedToggle_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SchedToggle(ctx, req.(*SchedToggleReq))
+		return srv.(KotoServer).SchedToggle(ctx, req.(*SchedToggleReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_SchedRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_SchedRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedIDReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).SchedRun(ctx, in)
+		return srv.(KotoServer).SchedRun(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_SchedRun_FullMethodName,
+		FullMethod: Koto_SchedRun_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).SchedRun(ctx, req.(*SchedIDReq))
+		return srv.(KotoServer).SchedRun(ctx, req.(*SchedIDReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclGetReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).AclGet(ctx, in)
+		return srv.(KotoServer).AclGet(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_AclGet_FullMethodName,
+		FullMethod: Koto_AclGet_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).AclGet(ctx, req.(*AclGetReq))
+		return srv.(KotoServer).AclGet(ctx, req.(*AclGetReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_AclSetRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_AclSetRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclSetRoleReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).AclSetRole(ctx, in)
+		return srv.(KotoServer).AclSetRole(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_AclSetRole_FullMethodName,
+		FullMethod: Koto_AclSetRole_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).AclSetRole(ctx, req.(*AclSetRoleReq))
+		return srv.(KotoServer).AclSetRole(ctx, req.(*AclSetRoleReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Koto_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclDelRoleReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ClawsonServer).AclDelRole(ctx, in)
+		return srv.(KotoServer).AclDelRole(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Clawson_AclDelRole_FullMethodName,
+		FullMethod: Koto_AclDelRole_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ClawsonServer).AclDelRole(ctx, req.(*AclDelRoleReq))
+		return srv.(KotoServer).AclDelRole(ctx, req.(*AclDelRoleReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Clawson_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
+func _Koto_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RunScriptReq)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ClawsonServer).RunScript(m, &grpc.GenericServerStream[RunScriptReq, ScriptEvent]{ServerStream: stream})
+	return srv.(KotoServer).RunScript(m, &grpc.GenericServerStream[RunScriptReq, ScriptEvent]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_RunScriptServer = grpc.ServerStreamingServer[ScriptEvent]
+type Koto_RunScriptServer = grpc.ServerStreamingServer[ScriptEvent]
 
-func _Clawson_SubscribeGroup_Handler(srv interface{}, stream grpc.ServerStream) error {
+func _Koto_SubscribeGroup_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SubscribeReq)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ClawsonServer).SubscribeGroup(m, &grpc.GenericServerStream[SubscribeReq, Event]{ServerStream: stream})
+	return srv.(KotoServer).SubscribeGroup(m, &grpc.GenericServerStream[SubscribeReq, Event]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_SubscribeGroupServer = grpc.ServerStreamingServer[Event]
+type Koto_SubscribeGroupServer = grpc.ServerStreamingServer[Event]
 
-func _Clawson_SubscribeLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+func _Koto_SubscribeLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(LogsReq)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ClawsonServer).SubscribeLogs(m, &grpc.GenericServerStream[LogsReq, LogEvent]{ServerStream: stream})
+	return srv.(KotoServer).SubscribeLogs(m, &grpc.GenericServerStream[LogsReq, LogEvent]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_SubscribeLogsServer = grpc.ServerStreamingServer[LogEvent]
+type Koto_SubscribeLogsServer = grpc.ServerStreamingServer[LogEvent]
 
-func _Clawson_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
+func _Koto_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(WatchReq)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ClawsonServer).WatchState(m, &grpc.GenericServerStream[WatchReq, StateFrame]{ServerStream: stream})
+	return srv.(KotoServer).WatchState(m, &grpc.GenericServerStream[WatchReq, StateFrame]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Clawson_WatchStateServer = grpc.ServerStreamingServer[StateFrame]
+type Koto_WatchStateServer = grpc.ServerStreamingServer[StateFrame]
 
-// Clawson_ServiceDesc is the grpc.ServiceDesc for Clawson service.
+// Koto_ServiceDesc is the grpc.ServiceDesc for Koto service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var Clawson_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "clawson.Clawson",
-	HandlerType: (*ClawsonServer)(nil),
+var Koto_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "koto.Koto",
+	HandlerType: (*KotoServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "Spawn",
-			Handler:    _Clawson_Spawn_Handler,
+			Handler:    _Koto_Spawn_Handler,
 		},
 		{
 			MethodName: "Send",
-			Handler:    _Clawson_Send_Handler,
+			Handler:    _Koto_Send_Handler,
 		},
 		{
 			MethodName: "List",
-			Handler:    _Clawson_List_Handler,
+			Handler:    _Koto_List_Handler,
 		},
 		{
 			MethodName: "Stop",
-			Handler:    _Clawson_Stop_Handler,
+			Handler:    _Koto_Stop_Handler,
 		},
 		{
 			MethodName: "Interrupt",
-			Handler:    _Clawson_Interrupt_Handler,
+			Handler:    _Koto_Interrupt_Handler,
 		},
 		{
 			MethodName: "Destroy",
-			Handler:    _Clawson_Destroy_Handler,
+			Handler:    _Koto_Destroy_Handler,
 		},
 		{
 			MethodName: "Restart",
-			Handler:    _Clawson_Restart_Handler,
+			Handler:    _Koto_Restart_Handler,
 		},
 		{
 			MethodName: "History",
-			Handler:    _Clawson_History_Handler,
+			Handler:    _Koto_History_Handler,
 		},
 		{
 			MethodName: "Config",
-			Handler:    _Clawson_Config_Handler,
+			Handler:    _Koto_Config_Handler,
 		},
 		{
 			MethodName: "Metrics",
-			Handler:    _Clawson_Metrics_Handler,
+			Handler:    _Koto_Metrics_Handler,
 		},
 		{
 			MethodName: "Clear",
-			Handler:    _Clawson_Clear_Handler,
+			Handler:    _Koto_Clear_Handler,
 		},
 		{
 			MethodName: "Skills",
-			Handler:    _Clawson_Skills_Handler,
+			Handler:    _Koto_Skills_Handler,
 		},
 		{
 			MethodName: "SkillNew",
-			Handler:    _Clawson_SkillNew_Handler,
+			Handler:    _Koto_SkillNew_Handler,
 		},
 		{
 			MethodName: "SkillRead",
-			Handler:    _Clawson_SkillRead_Handler,
+			Handler:    _Koto_SkillRead_Handler,
 		},
 		{
 			MethodName: "SchedAdd",
-			Handler:    _Clawson_SchedAdd_Handler,
+			Handler:    _Koto_SchedAdd_Handler,
 		},
 		{
 			MethodName: "SchedList",
-			Handler:    _Clawson_SchedList_Handler,
+			Handler:    _Koto_SchedList_Handler,
 		},
 		{
 			MethodName: "SchedDel",
-			Handler:    _Clawson_SchedDel_Handler,
+			Handler:    _Koto_SchedDel_Handler,
 		},
 		{
 			MethodName: "SchedToggle",
-			Handler:    _Clawson_SchedToggle_Handler,
+			Handler:    _Koto_SchedToggle_Handler,
 		},
 		{
 			MethodName: "SchedRun",
-			Handler:    _Clawson_SchedRun_Handler,
+			Handler:    _Koto_SchedRun_Handler,
 		},
 		{
 			MethodName: "AclGet",
-			Handler:    _Clawson_AclGet_Handler,
+			Handler:    _Koto_AclGet_Handler,
 		},
 		{
 			MethodName: "AclSetRole",
-			Handler:    _Clawson_AclSetRole_Handler,
+			Handler:    _Koto_AclSetRole_Handler,
 		},
 		{
 			MethodName: "AclDelRole",
-			Handler:    _Clawson_AclDelRole_Handler,
+			Handler:    _Koto_AclDelRole_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "RunScript",
-			Handler:       _Clawson_RunScript_Handler,
+			Handler:       _Koto_RunScript_Handler,
 			ServerStreams: true,
 		},
 		{
 			StreamName:    "SubscribeGroup",
-			Handler:       _Clawson_SubscribeGroup_Handler,
+			Handler:       _Koto_SubscribeGroup_Handler,
 			ServerStreams: true,
 		},
 		{
 			StreamName:    "SubscribeLogs",
-			Handler:       _Clawson_SubscribeLogs_Handler,
+			Handler:       _Koto_SubscribeLogs_Handler,
 			ServerStreams: true,
 		},
 		{
 			StreamName:    "WatchState",
-			Handler:       _Clawson_WatchState_Handler,
+			Handler:       _Koto_WatchState_Handler,
 			ServerStreams: true,
 		},
 	},
-	Metadata: "clawson.proto",
+	Metadata: "koto.proto",
 }

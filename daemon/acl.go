@@ -59,7 +59,7 @@ import (
 	"strings"
 	"sync"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 )
 
 // clientIdentity is one authenticated tokens.json entry.
@@ -205,7 +205,7 @@ func loadACL() aclTable {
 }
 
 // verbFromMethod maps a gRPC full method name to its ACL verb:
-// "/clawson.Clawson/SkillNew" → "skill_new".
+// "/koto.Koto/SkillNew" → "skill_new".
 func verbFromMethod(fullMethod string) string {
 	name := fullMethod
 	if i := strings.LastIndexByte(name, '/'); i >= 0 {

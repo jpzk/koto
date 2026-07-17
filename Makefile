@@ -3,7 +3,7 @@
 # Dockerfile + COPY'd source inputs, so `make host-run` / `make tui` only
 # rebuild when something relevant actually changed.
 #
-# Daemon/proxy *.go files are NOT inputs to clawson-host — they're bind-
+# Daemon/proxy *.go files are NOT inputs to koto-host — they're bind-
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
@@ -23,7 +23,7 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # creds/, run/, .gocache, .gomodcache) is already resolved relative to the
 # working directory, so a second worktree gets its own automatically; only
 # the daemon container's *name* is hardcoded enough to collide across
-# instances, so that's the only thing this threads through. clawson-net
+# instances, so that's the only thing this threads through. koto-net
 # stays shared on purpose — containers on the same bridge don't collide on
 # port/address, since each has its own network namespace.
 INSTANCE ?=
@@ -41,52 +41,52 @@ $(BUILD):
 # just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
 SIDECAR_SRC := sidecar/entrypoint.sh sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent
 
-# --- clawson-host (daemon image) -------------------------------------------
+# --- koto-host (daemon image) -------------------------------------------
 # Inputs: just host/Dockerfile. Go sources land via bind mount, recompiled
 # by `go run` inside the container on every host-run.
-$(BUILD)/clawson-host: host/Dockerfile | $(BUILD)
-	podman build -t clawson-host -f host/Dockerfile .
+$(BUILD)/koto-host: host/Dockerfile | $(BUILD)
+	podman build -t koto-host -f host/Dockerfile .
 	@touch $@
 
-host-build: $(BUILD)/clawson-host
+host-build: $(BUILD)/koto-host
 
-# --- clawson-tui (TUI image) -----------------------------------------------
+# --- koto-tui (TUI image) -----------------------------------------------
 # Build context stays at project root so the Dockerfile's `COPY protocol/`
 # and `COPY tui/...` paths resolve. Inputs cover the actual sources COPYed.
 TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
-PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/clawson.proto
-$(BUILD)/clawson-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
-	podman build -t clawson-tui -f tui/Dockerfile .
+PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto
+$(BUILD)/koto-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
+	podman build -t koto-tui -f tui/Dockerfile .
 	@touch $@
 
-tui-build: $(BUILD)/clawson-tui
+tui-build: $(BUILD)/koto-tui
 
 # --- run / interactive targets ---------------------------------------------
-login: $(BUILD)/clawson-host
+login: $(BUILD)/koto-host
 	@mkdir -p creds
-	podman run --rm -it --security-opt label=disable -v $(PWD)/creds:/root/.claude --entrypoint claude clawson-host auth login
+	podman run --rm -it --security-opt label=disable -v $(PWD)/creds:/root/.claude --entrypoint claude koto-host auth login
 
-host-run: $(BUILD)/clawson-host
-	CLAWSON_INSTANCE=$(INSTANCE) ./host/run-host.sh
+host-run: $(BUILD)/koto-host
+	KOTO_INSTANCE=$(INSTANCE) ./host/run-host.sh
 
 # The /reload inner loop re-invokes `$(MAKE) tui-build` so the same sentinel
 # logic kicks in: if the user edited any tui/*.go before pressing /reload,
 # Make rebuilds; otherwise it's a no-op and the TUI just respawns.
-tui: $(BUILD)/clawson-tui
+tui: $(BUILD)/koto-tui
 	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`make pki-init && make pki-client NAME=tui\`"; exit 1; }
 	@while :; do \
 	  podman run --rm -it \
-	    --network clawson-net \
+	    --network koto-net \
 	    --security-opt label=disable \
-	    -v $(PWD)/creds:/clawson-creds:ro \
-	    -v $(PWD)/scripts:/clawson-scripts:ro \
-	    -v $(PWD)/prompts:/clawson-prompts:ro \
+	    -v $(PWD)/creds:/koto-creds:ro \
+	    -v $(PWD)/scripts:/koto-scripts:ro \
+	    -v $(PWD)/prompts:/koto-prompts:ro \
 	    -v /etc/localtime:/etc/localtime:ro \
-	    -e CLAWSON_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
-	    -e CLAWSON_ENDPOINT=$(CS_HOST_NAME):8443 \
-	    clawson-tui; ec=$$?; \
+	    -e KOTO_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
+	    -e KOTO_ENDPOINT=$(CS_HOST_NAME):8443 \
+	    koto-tui; ec=$$?; \
 	  [ $$ec -eq 75 ] || exit $$ec; \
-	  echo "/reload: rebuilding clawson-tui…"; \
+	  echo "/reload: rebuilding koto-tui…"; \
 	  $(MAKE) tui-build || exit $$?; \
 	done
 
@@ -105,19 +105,19 @@ run:
 proxy:
 	go run ./daemon proxy
 
-# clawson ctl: host-side CLI client for agents (same binary, `ctl` subcommand).
-# Builds a standalone `./clawson` so an agent can invoke `clawson ctl ...`
-# without a `go run` per call. Reads creds/ + CLAWSON_* env at runtime.
+# koto ctl: host-side CLI client for agents (same binary, `ctl` subcommand).
+# Builds a standalone `./koto` so an agent can invoke `koto ctl ...`
+# without a `go run` per call. Reads creds/ + KOTO_* env at runtime.
 ctl-build:
-	go build -o clawson ./daemon
+	go build -o koto ./daemon
 
 metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl
 
 # --- protobuf / gRPC codegen (host-only; generated code is committed) -------
 # Runs entirely in an ephemeral golang:alpine container with pinned plugins.
-# Output: protocol/pb/clawson.pb.go + clawson_grpc.pb.go (module-mapped so the
-# go_package `clawson-protocol/pb` lands in protocol/pb/). The runtime images
+# Output: protocol/pb/koto.pb.go + koto_grpc.pb.go (module-mapped so the
+# go_package `koto-protocol/pb` lands in protocol/pb/). The runtime images
 # never invoke protoc — they compile the committed generated code.
 proto-gen:
 	podman run --rm --security-opt label=disable \
@@ -129,9 +129,9 @@ proto-gen:
 	    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VER); \
 	    export PATH=$$PATH:$$(go env GOPATH)/bin; \
 	    protoc -I . -I /usr/include \
-	      --go_out=. --go_opt=module=clawson-protocol \
-	      --go-grpc_out=. --go-grpc_opt=module=clawson-protocol \
-	      clawson.proto'
+	      --go_out=. --go_opt=module=koto-protocol \
+	      --go-grpc_out=. --go-grpc_opt=module=koto-protocol \
+	      koto.proto'
 
 # CI drift guard: regenerate and fail if the committed output differs.
 proto-verify: proto-gen
@@ -155,16 +155,16 @@ proto-verify: proto-gen
 # seeds acl.json with an agent role (read/converse on any group, no lifecycle
 # or config verbs) — narrow it to specific groups by replacing its "*" values
 # with group lists, e.g. "send": ["main"].
-SERVER_SAN ?= DNS:clawson-daemon,DNS:localhost,IP:127.0.0.1
+SERVER_SAN ?= DNS:koto-daemon,DNS:localhost,IP:127.0.0.1
 ROLE ?= admin
 pki-init:
 	@mkdir -p creds
 	@command -v openssl >/dev/null || { echo "openssl required"; exit 1; }
 	openssl ecparam -name prime256v1 -genkey -noout -out creds/ca.key
 	openssl req -x509 -new -key creds/ca.key -sha256 -days 3650 \
-	  -subj "/CN=clawson-ca" -out creds/ca.crt
+	  -subj "/CN=koto-ca" -out creds/ca.crt
 	openssl ecparam -name prime256v1 -genkey -noout -out creds/server.key
-	openssl req -new -key creds/server.key -subj "/CN=clawson-daemon" -out creds/server.csr
+	openssl req -new -key creds/server.key -subj "/CN=koto-daemon" -out creds/server.csr
 	printf 'subjectAltName=%s\n' "$(SERVER_SAN)" > creds/server.ext
 	openssl x509 -req -in creds/server.csr -CA creds/ca.crt -CAkey creds/ca.key \
 	  -CAcreateserial -sha256 -days 825 -extfile creds/server.ext -out creds/server.crt

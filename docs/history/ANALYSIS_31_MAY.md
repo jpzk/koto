@@ -1,11 +1,11 @@
-# Clawson — Problem Analysis (2026-05-31)
+# Koto — Problem Analysis (2026-05-31)
 
 Audit of the project to surface its **big problems**. Three parallel code audits
 (security/proxy, daemon + control plane, sidecar + Venice + TUI) followed by
 **verification of every high-impact claim against the actual source**. Overstated or
 false agent findings were dropped (see "Debunked").
 
-**Trust-model note:** the daemon socket (`run/clawson.sock`, `0o660`) and the host user are
+**Trust-model note:** the daemon socket (`run/koto.sock`, `0o660`) and the host user are
 trusted by design (CLAUDE.md "Trust model"). Several issues below are therefore
 **defense-in-depth / robustness**, not remote-exploitable. The distinction is flagged because
 it drives priority.
@@ -56,7 +56,7 @@ it drives priority.
 
 ## Tier B — confirmed, medium impact
 
-### B1. Per-group proxy listeners bind `0.0.0.0` on `clawson-net` with no per-group auth
+### B1. Per-group proxy listeners bind `0.0.0.0` on `koto-net` with no per-group auth
 - **Where:** proxy listener bind + `groups.json` port map; documented in `SECURITY_19_MAY.md` (#1).
 - **Problem:** Any sidecar can reach any other group's port (`http://cs_host:<port>`), get
   requests served with the operator's OAuth token, attributed to/billed against the victim
@@ -102,7 +102,7 @@ it drives priority.
 ## Verification (reference, when fixes are made)
 - **A1:** Run a turn >10 min (or lower `TURN_TIMEOUT` + a sleep-heavy bash tool call); confirm
   completion instead of truncation; watch `proxy.log` for no client-timeout and a clean `[[turn_end]]`.
-- **A2:** `socat - UNIX-CONNECT:run/clawson.sock` then
+- **A2:** `socat - UNIX-CONNECT:run/koto.sock` then
   `{"cmd":"history","group":"../../etc/hostname"}` — must error, not return file contents.
   Re-run `/new`, `/sw`, normal send to confirm valid names still work.
 - **A3:** `destroy` a non-main group, respawn the same name, send two messages — confirm no

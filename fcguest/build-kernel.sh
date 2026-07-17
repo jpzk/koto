@@ -5,7 +5,7 @@
 # Amazon Linux kernel repo (github.com/amazonlinux/linux) at a pinned
 # `microvm-kernel-*.amzn2023` tag (this is what resources/rebuild.sh does:
 # `git clone amazonlinux/linux` + `git checkout $(get_tag …)`). We add the
-# options clawson needs on top of FC's guest config: CONFIG_TUN (L3 TAP +
+# options koto needs on top of FC's guest config: CONFIG_TUN (L3 TAP +
 # rootless-podman pasta), FUSE_FS + NF_TABLES (rootless podman storage/net),
 # IKCONFIG (verification).
 #

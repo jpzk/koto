@@ -2,9 +2,9 @@ package main
 
 // TUI-local view types, populated from the generated pb messages (see
 // pbToEvent / stateGroups / pbToLogEvent in daemon.go). These used to be
-// aliases into the shared clawson-protocol module; they are now defined
+// aliases into the shared koto-protocol module; they are now defined
 // here so the only code shared with the daemon (and the Android app) is
-// the proto contract itself — protocol/clawson.proto and its committed
+// the proto contract itself — protocol/koto.proto and its committed
 // generated pb. Field semantics are documented on the proto messages.
 
 // Event is one streaming frame from SubscribeGroup / History.

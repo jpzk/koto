@@ -586,9 +586,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// agent starts entrypoint.sh only after init, so a turn can't race an
 	// unconfigured guest.
 	env := map[string]string{
-		"CLAWSON_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
-		"CLAWSON_DEFAULT_VENICE_MODEL": defaultVeniceModel,
-		"ANTHROPIC_BASE_URL":           fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
+		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
+		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
+		"ANTHROPIC_BASE_URL":        fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
 	}
 	// internet=full: general traffic now has a real L3 route (the gVisor
 	// gateway attached above), so we do NOT set HTTP(S)_PROXY — curl/git/npm go
@@ -627,7 +627,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 
 	// Published ports: TCP listener per port, spliced into the guest over
-	// vsock. NOTE: this binds inside cs_host — reachable from clawson-net as
+	// vsock. NOTE: this binds inside cs_host — reachable from koto-net as
 	// cs_host_go:<port>; publishing to the real host loopback additionally
 	// needs a -p on cs_host itself (documented limitation).
 	for _, p := range pubPorts {

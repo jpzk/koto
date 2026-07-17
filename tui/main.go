@@ -17,7 +17,7 @@ var prog *tea.Program
 func main() {
 	sock := os.Getenv("SOCK_PATH")
 	if sock == "" {
-		sock = "/clawson-run/clawson.sock"
+		sock = "/koto-run/koto.sock"
 	}
 	ctxWindow := 200_000
 	if v := os.Getenv("CTX_WINDOW"); v != "" {

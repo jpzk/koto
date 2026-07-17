@@ -42,7 +42,7 @@ case "$PROVIDER" in
     env HOME="$H" "$@"
     ;;
   venice)
-    VM="$MODEL"; [ -z "$VM" ] && VM="${CLAWSON_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+    VM="$MODEL"; [ -z "$VM" ] && VM="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
     MSG_B64=$(printf '%s' "$PROMPT" | base64 -w 0)
     SP_B64=""
     [ -n "$SYS" ] && SP_B64=$(printf '%s' "$SYS" | base64 -w 0)

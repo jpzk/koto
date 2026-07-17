@@ -1,6 +1,6 @@
 // Monorepo workspace: each subproject is its own Go module, built
 // separately; the only shared code is the proto contract in protocol/
-// (clawson.proto + committed generated pb). The workspace exists so go
+// (koto.proto + committed generated pb). The workspace exists so go
 // commands work from the repo root — most importantly `go run ./daemon
 // daemon`, which must run with cwd = repo root because the daemon resolves
 // its runtime dirs (groups/, creds/, fcassets/, run/) relative to cwd.

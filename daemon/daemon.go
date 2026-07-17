@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"clawson-protocol/pb"
-	"clawson/wire"
+	"koto-protocol/pb"
+	"koto/wire"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -139,11 +139,11 @@ func daemonMain() {
 	// overlay (WireGuard) interface only — never 0.0.0.0 — so the control plane
 	// is reachable solely by peers on the private mesh. See auth.go for the TLS
 	// + token layers and the clients.allow fingerprint allowlist.
-	bindAddr := os.Getenv("CLAWSON_BIND")
+	bindAddr := os.Getenv("KOTO_BIND")
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1"
 	}
-	grpcPort := os.Getenv("CLAWSON_PORT")
+	grpcPort := os.Getenv("KOTO_PORT")
 	if grpcPort == "" {
 		grpcPort = "8443"
 	}
@@ -170,8 +170,8 @@ func daemonMain() {
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
 	)
-	pb.RegisterClawsonServer(srv, &clawsonServer{})
-	emitLogf("daemon", "info", "clawsond ready grpc=%s (mTLS+token)", addr)
+	pb.RegisterKotoServer(srv, &kotoServer{})
+	emitLogf("daemon", "info", "kotod ready grpc=%s (mTLS+token)", addr)
 
 	loadSched()
 	go stateWatchLoop()

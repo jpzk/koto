@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 )
 
 func TestParseTokens(t *testing.T) {
@@ -47,11 +47,11 @@ func TestParseTokens(t *testing.T) {
 
 func TestVerbFromMethod(t *testing.T) {
 	cases := map[string]string{
-		"/clawson.Clawson/Spawn":          "spawn",
-		"/clawson.Clawson/SkillNew":       "skill_new",
-		"/clawson.Clawson/SchedToggle":    "sched_toggle",
-		"/clawson.Clawson/SubscribeGroup": "subscribe_group",
-		"/clawson.Clawson/List":           "list",
+		"/koto.Koto/Spawn":          "spawn",
+		"/koto.Koto/SkillNew":       "skill_new",
+		"/koto.Koto/SchedToggle":    "sched_toggle",
+		"/koto.Koto/SubscribeGroup": "subscribe_group",
+		"/koto.Koto/List":           "list",
 	}
 	for in, want := range cases {
 		if got := verbFromMethod(in); got != want {

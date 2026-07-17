@@ -1,4 +1,4 @@
-module clawson-tui
+module koto-tui
 
 go 1.24.2
 
@@ -12,7 +12,7 @@ toolchain go1.24.13
 //   glamour   v1.0.0  — 2025-11-24
 //   log       v1.0.0  — 2026-03-09
 require (
-	clawson-protocol v0.0.0
+	koto-protocol v0.0.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
@@ -22,10 +22,10 @@ require (
 )
 
 // The only code shared with the daemon is the proto contract: the TUI
-// imports clawson-protocol/pb (committed generated code) and nothing else
+// imports koto-protocol/pb (committed generated code) and nothing else
 // from that module. The generated stubs pull in grpc + protobuf, both
 // pinned here under the same 6-week rule.
-replace clawson-protocol => ../protocol
+replace koto-protocol => ../protocol
 
 require (
 	github.com/charmbracelet/log v1.0.0

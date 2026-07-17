@@ -1,6 +1,6 @@
 package main
 
-// fc-agent — PID 1 inside a clawson Firecracker microVM.
+// fc-agent — PID 1 inside a koto Firecracker microVM.
 //
 // The guest has NO network device; this agent is the sole bridge between the
 // in-guest sidecar loop (sidecar/entrypoint.sh, byte-identical to the podman
@@ -144,7 +144,7 @@ func earlyInit() {
 	if err := os.Mkdir("/run/user/1000", 0o700); err == nil || os.IsExist(err) {
 		_ = os.Chown("/run/user/1000", workerUID, workerGID)
 	}
-	_ = unix.Sethostname([]byte("clawson-vm"))
+	_ = unix.Sethostname([]byte("koto-vm"))
 }
 
 // mountWorkspace mounts the per-group virtio-block workspace. The daemon

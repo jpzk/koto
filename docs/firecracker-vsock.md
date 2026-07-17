@@ -125,7 +125,7 @@ run/fc/
                       this VM's sockets into its chroot (as /vsock).
   <g>.jail/            per-VM chroot root the jailer stages (bind targets for
                       firecracker/kernel/rootfs/workspace/dev/vsock + fc.json)
-  <g>.cfg.json         unjailed only (CLAWSON_FC_NOJAIL=1); jailed config is
+  <g>.cfg.json         unjailed only (KOTO_FC_NOJAIL=1); jailed config is
                       written into <g>.jail/fc.json instead
   <g>.pid / <g>.console.log
 fcassets/             (gitignored) firecracker binary, vmlinux, rootfs.img
@@ -165,7 +165,7 @@ one ergonomic regression vs podman's hot-reload mounts).
 
 ## Known limitations / follow-ups
 
-1. **Published ports** bind inside cs_host (reachable on clawson-net as
+1. **Published ports** bind inside cs_host (reachable on koto-net as
    `cs_host_go:<port>`), not on the real host loopback — host publishing
    needs a `-p` on cs_host itself (podman can't add one live).
 2. ~~No open-internet escape hatch yet.~~ **DONE** — the `network` profile
@@ -213,7 +213,7 @@ the LAN, so a `wan` group cannot reach them; tailnet access requires `lan` or
 `full`.
 
 (ICMP/ping is best-effort — it needs the gateway process to open a
-raw/unprivileged ICMP socket on the host; TCP/UDP, i.e. all clawson tooling,
+raw/unprivileged ICMP socket on the host; TCP/UDP, i.e. all koto tooling,
 need no special privilege.) Verified live: TCP to arbitrary ports (`:22` SSH
 banner, `:53`), UDP (NTP `:123`), and HTTPS all work; ICMP echo did not in the
 standalone test. See `fcnet.go` (host) and `fcguest/net.go` (guest).
@@ -255,7 +255,7 @@ always wins over a legacy `internet` key.
   deduped per (group, method, path) on the same TTL. Split from `egress` so the
   steady LLM heartbeat is filterable apart from general traffic — `egress` is
   the anomaly-hunting ground, `llm` the expected baseline. Watch either via the
-  TUI log view (^L) or `clawson ctl logs`.
+  TUI log view (^L) or `koto ctl logs`.
 - **Egress authority is at the frame layer.** gvisor-tap-vsock has no
   destination-filter hook (it `net.Dial`s the packet's destination directly),
   so `fcEgressConn` (fcnet.go) parses each guest frame, classifies its
@@ -264,7 +264,7 @@ always wins over a legacy `internet` key.
   - **ctl** — loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`,
     incl. link-local multicast like mDNS `224.0.0.251`), and **cs_host's own
     interface IPs** (`fcSelfIPs`, where the daemon gRPC on
-    `CLAWSON_BIND:CLAWSON_PORT` and every group's proxy port live). **Dropped
+    `KOTO_BIND:KOTO_PORT` and every group's proxy port live). **Dropped
     under every profile.** `Ec2MetadataAccess=false` also blocks metadata inside
     the netstack.
   - **gw** — the guest↔gateway subnet `192.168.127.0/24` (DNS at `.1`). **Always
@@ -287,7 +287,7 @@ always wins over a legacy `internet` key.
   the host resolver. **Actual traffic can't bypass the filter** — data frames
   carry the resolved destination IP, which is classified at connect time. Per-
   profile DNS zones are a possible follow-up.
-- **`lan` can't reach the clawson host itself.** cs_host's own LAN IP is in
+- **`lan` can't reach the koto host itself.** cs_host's own LAN IP is in
   `fcSelfIPs` (ctl, unconditional), so `lan` reaches *other* LAN devices but not
   services on the host running the daemon. Correct per the control-plane rule —
   don't debug it as a bug.
@@ -388,7 +388,7 @@ needs `CAP_MKNOD` in the **initial** user namespace, which a rootless
 with primitives that work rootless (verified: real Firecracker v1.11 boots the
 real kernel to `Hypervisor detected: KVM` inside the jail).
 
-**Mechanism.** `fcSpawn` re-execs the daemon binary as `clawson fcjail <spec>`
+**Mechanism.** `fcSpawn` re-execs the daemon binary as `koto fcjail <spec>`
 with `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS` and a uid/gid map of
 `{0→0, uid→uid}`. The child (`fcjailMain`) is mapped-root for setup, then in
 its **private mount namespace**: bind-mounts only what FC needs into the
@@ -398,7 +398,7 @@ per-VM chroot (`<g>.jail/`) — the firecracker binary, kernel and rootfs
 to the unprivileged per-VM uid, and execs Firecracker. FC's own seccomp filter
 (never disabled) still applies on top.
 
-**Per-VM uid.** `fcJailUID` = `30000 + (proxyPort − PORT_BASE)`. clawson-host's
+**Per-VM uid.** `fcJailUID` = `30000 + (proxyPort − PORT_BASE)`. koto-host's
 rootless userns maps container uids `1..65536` to unprivileged host subuids, all
 distinct from the daemon (container uid 0 → host uid 1000). The uid is stable
 per group (proxy port is persisted), so the workspace image's ownership stays
@@ -433,7 +433,7 @@ cross-uid connect is permitted (scoped to this group's own dir). The daemon
 keeps full access as the container's mapped-root (`CAP_DAC_OVERRIDE` over its
 subuids), so later resize/migration still works.
 
-**Opt-out.** `CLAWSON_FC_NOJAIL=1` runs FC unjailed as the daemon uid with the
+**Opt-out.** `KOTO_FC_NOJAIL=1` runs FC unjailed as the daemon uid with the
 absolute-path config at `<g>.cfg.json` (the pre-jailer behavior) — for
 environments that can't create nested user namespaces, or for debugging.
 

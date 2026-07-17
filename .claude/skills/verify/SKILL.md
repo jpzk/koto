@@ -1,9 +1,9 @@
 ---
 name: verify
-description: Drive the clawson daemon gRPC API and the TUI end-to-end without an LLM call — containerized grpcurl for the wire, python-pty for the TUI, log-file injection for deterministic events.
+description: Drive the koto daemon gRPC API and the TUI end-to-end without an LLM call — containerized grpcurl for the wire, python-pty for the TUI, log-file injection for deterministic events.
 ---
 
-# Verifying clawson changes at runtime
+# Verifying koto changes at runtime
 
 ## Restart the daemon on new code
 
@@ -14,18 +14,18 @@ Confirm with `podman logs cs_host_go | tail`.
 ## Drive the gRPC API (no grpcurl on host)
 
 ```sh
-GRPCURL='podman run --rm -i --network clawson-net --userns=keep-id --user 1000 \
+GRPCURL='podman run --rm -i --network koto-net --userns=keep-id --user 1000 \
   --security-opt label=disable -v '"$PWD"'/creds:/creds:ro -v '"$PWD"'/protocol:/protocol:ro \
   docker.io/fullstorydev/grpcurl:latest -cacert /creds/ca.crt \
-  -cert /creds/client-tui.crt -key /creds/client-tui.key -servername clawson-daemon \
+  -cert /creds/client-tui.crt -key /creds/client-tui.key -servername koto-daemon \
   -H "authorization: Bearer '"$(cat creds/token-tui)"'" \
-  -proto /protocol/clawson.proto -import-path /protocol'
-eval "$GRPCURL cs_host_go:8443 clawson.Clawson/List"
-eval "timeout 10 $GRPCURL -d '{\"group\":\"g\",\"since_seq\":2}' cs_host_go:8443 clawson.Clawson/SubscribeGroup"
+  -proto /protocol/koto.proto -import-path /protocol'
+eval "$GRPCURL cs_host_go:8443 koto.Koto/List"
+eval "timeout 10 $GRPCURL -d '{\"group\":\"g\",\"since_seq\":2}' cs_host_go:8443 koto.Koto/SubscribeGroup"
 ```
 
 Gotchas: `--userns=keep-id --user 1000` or the key file is unreadable in the
-container; `-servername clawson-daemon` because you dial `cs_host_go`, which
+container; `-servername koto-daemon` because you dial `cs_host_go`, which
 isn't in the server cert SAN; streaming RPCs need `timeout N` to terminate.
 
 ## Deterministic events without an LLM call
@@ -51,9 +51,9 @@ exits with "terminal too small"):
 m, s = pty.openpty()
 fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
 subprocess.Popen(["podman","run","--rm","-it","--name","cs_tui_verify",
-  "--network","clawson-net","--security-opt","label=disable",
-  "-v", HERE+"/creds:/clawson-creds:ro","-e","TERM=xterm-256color",
-  "-e","CLAWSON_TOKEN="+token, "clawson-tui"], stdin=s, stdout=s, stderr=s)
+  "--network","koto-net","--security-opt","label=disable",
+  "-v", HERE+"/creds:/koto-creds:ro","-e","TERM=xterm-256color",
+  "-e","KOTO_TOKEN="+token, "koto-tui"], stdin=s, stdout=s, stderr=s)
 # read from m in a select loop into a raw file; os.write(m, b"/sw g\r") to type
 ```
 

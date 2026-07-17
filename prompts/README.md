@@ -17,5 +17,5 @@ Everything else in this directory is a fireable prompt template for the TUI's
   `/skill enable`/`disable` composes two `config` round-trips.
 
 This directory is mounted **read-only** into the `cs_tui` container at
-`/clawson-prompts`. Only files directly in it are usable — no subdirectories,
+`/koto-prompts`. Only files directly in it are usable — no subdirectories,
 no `..` (same bare-filename rule as `scripts/`).

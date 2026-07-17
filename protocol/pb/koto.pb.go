@@ -1,4 +1,4 @@
-// Wire contract shared by the clawson daemon (Go), the TUI (Go), and the
+// Wire contract shared by the koto daemon (Go), the TUI (Go), and the
 // Android client (Kotlin). Generated Go code lands in ./pb (committed; run
 // `make proto-gen`). Field names are snake_case to match the historical JSON
 // keys the TUI still consumes via protojson(UseProtoNames:true).
@@ -16,7 +16,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.31.1
-// source: clawson.proto
+// source: koto.proto
 
 package pb
 
@@ -63,7 +63,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_clawson_proto_msgTypes[0]
+	mi := &file_koto_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -75,7 +75,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[0]
+	mi := &file_koto_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -88,7 +88,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{0}
+	return file_koto_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Event) GetEvent() string {
@@ -185,7 +185,7 @@ type RunScriptReq struct {
 
 func (x *RunScriptReq) Reset() {
 	*x = RunScriptReq{}
-	mi := &file_clawson_proto_msgTypes[1]
+	mi := &file_koto_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -197,7 +197,7 @@ func (x *RunScriptReq) String() string {
 func (*RunScriptReq) ProtoMessage() {}
 
 func (x *RunScriptReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[1]
+	mi := &file_koto_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -210,7 +210,7 @@ func (x *RunScriptReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunScriptReq.ProtoReflect.Descriptor instead.
 func (*RunScriptReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{1}
+	return file_koto_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *RunScriptReq) GetGroup() string {
@@ -238,7 +238,7 @@ type ScriptEvent struct {
 
 func (x *ScriptEvent) Reset() {
 	*x = ScriptEvent{}
-	mi := &file_clawson_proto_msgTypes[2]
+	mi := &file_koto_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -250,7 +250,7 @@ func (x *ScriptEvent) String() string {
 func (*ScriptEvent) ProtoMessage() {}
 
 func (x *ScriptEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[2]
+	mi := &file_koto_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -263,7 +263,7 @@ func (x *ScriptEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScriptEvent.ProtoReflect.Descriptor instead.
 func (*ScriptEvent) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{2}
+	return file_koto_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ScriptEvent) GetEvent() string {
@@ -300,7 +300,7 @@ type LogEvent struct {
 
 func (x *LogEvent) Reset() {
 	*x = LogEvent{}
-	mi := &file_clawson_proto_msgTypes[3]
+	mi := &file_koto_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +312,7 @@ func (x *LogEvent) String() string {
 func (*LogEvent) ProtoMessage() {}
 
 func (x *LogEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[3]
+	mi := &file_koto_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +325,7 @@ func (x *LogEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEvent.ProtoReflect.Descriptor instead.
 func (*LogEvent) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{3}
+	return file_koto_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *LogEvent) GetEvent() string {
@@ -378,7 +378,7 @@ type GroupInfo struct {
 
 func (x *GroupInfo) Reset() {
 	*x = GroupInfo{}
-	mi := &file_clawson_proto_msgTypes[4]
+	mi := &file_koto_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -390,7 +390,7 @@ func (x *GroupInfo) String() string {
 func (*GroupInfo) ProtoMessage() {}
 
 func (x *GroupInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[4]
+	mi := &file_koto_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -403,7 +403,7 @@ func (x *GroupInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupInfo.ProtoReflect.Descriptor instead.
 func (*GroupInfo) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{4}
+	return file_koto_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GroupInfo) GetPort() int32 {
@@ -467,7 +467,7 @@ type SkillItem struct {
 
 func (x *SkillItem) Reset() {
 	*x = SkillItem{}
-	mi := &file_clawson_proto_msgTypes[5]
+	mi := &file_koto_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -479,7 +479,7 @@ func (x *SkillItem) String() string {
 func (*SkillItem) ProtoMessage() {}
 
 func (x *SkillItem) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[5]
+	mi := &file_koto_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -492,7 +492,7 @@ func (x *SkillItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillItem.ProtoReflect.Descriptor instead.
 func (*SkillItem) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{5}
+	return file_koto_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SkillItem) GetName() string {
@@ -539,7 +539,7 @@ type ScheduleItem struct {
 
 func (x *ScheduleItem) Reset() {
 	*x = ScheduleItem{}
-	mi := &file_clawson_proto_msgTypes[6]
+	mi := &file_koto_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +551,7 @@ func (x *ScheduleItem) String() string {
 func (*ScheduleItem) ProtoMessage() {}
 
 func (x *ScheduleItem) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[6]
+	mi := &file_koto_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +564,7 @@ func (x *ScheduleItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduleItem.ProtoReflect.Descriptor instead.
 func (*ScheduleItem) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{6}
+	return file_koto_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ScheduleItem) GetId() string {
@@ -636,7 +636,7 @@ type SpawnReq struct {
 
 func (x *SpawnReq) Reset() {
 	*x = SpawnReq{}
-	mi := &file_clawson_proto_msgTypes[7]
+	mi := &file_koto_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +648,7 @@ func (x *SpawnReq) String() string {
 func (*SpawnReq) ProtoMessage() {}
 
 func (x *SpawnReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[7]
+	mi := &file_koto_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +661,7 @@ func (x *SpawnReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnReq.ProtoReflect.Descriptor instead.
 func (*SpawnReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{7}
+	return file_koto_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SpawnReq) GetGroup() string {
@@ -724,7 +724,7 @@ type SendReq struct {
 
 func (x *SendReq) Reset() {
 	*x = SendReq{}
-	mi := &file_clawson_proto_msgTypes[8]
+	mi := &file_koto_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +736,7 @@ func (x *SendReq) String() string {
 func (*SendReq) ProtoMessage() {}
 
 func (x *SendReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[8]
+	mi := &file_koto_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +749,7 @@ func (x *SendReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendReq.ProtoReflect.Descriptor instead.
 func (*SendReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{8}
+	return file_koto_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SendReq) GetGroup() string {
@@ -803,7 +803,7 @@ type GroupReq struct {
 
 func (x *GroupReq) Reset() {
 	*x = GroupReq{}
-	mi := &file_clawson_proto_msgTypes[9]
+	mi := &file_koto_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -815,7 +815,7 @@ func (x *GroupReq) String() string {
 func (*GroupReq) ProtoMessage() {}
 
 func (x *GroupReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[9]
+	mi := &file_koto_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -828,7 +828,7 @@ func (x *GroupReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupReq.ProtoReflect.Descriptor instead.
 func (*GroupReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{9}
+	return file_koto_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GroupReq) GetGroup() string {
@@ -846,7 +846,7 @@ type ListReq struct {
 
 func (x *ListReq) Reset() {
 	*x = ListReq{}
-	mi := &file_clawson_proto_msgTypes[10]
+	mi := &file_koto_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -858,7 +858,7 @@ func (x *ListReq) String() string {
 func (*ListReq) ProtoMessage() {}
 
 func (x *ListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[10]
+	mi := &file_koto_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -871,7 +871,7 @@ func (x *ListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListReq.ProtoReflect.Descriptor instead.
 func (*ListReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{10}
+	return file_koto_proto_rawDescGZIP(), []int{10}
 }
 
 type LogsReq struct {
@@ -882,7 +882,7 @@ type LogsReq struct {
 
 func (x *LogsReq) Reset() {
 	*x = LogsReq{}
-	mi := &file_clawson_proto_msgTypes[11]
+	mi := &file_koto_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -894,7 +894,7 @@ func (x *LogsReq) String() string {
 func (*LogsReq) ProtoMessage() {}
 
 func (x *LogsReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[11]
+	mi := &file_koto_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -907,7 +907,7 @@ func (x *LogsReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogsReq.ProtoReflect.Descriptor instead.
 func (*LogsReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{11}
+	return file_koto_proto_rawDescGZIP(), []int{11}
 }
 
 type WatchReq struct {
@@ -918,7 +918,7 @@ type WatchReq struct {
 
 func (x *WatchReq) Reset() {
 	*x = WatchReq{}
-	mi := &file_clawson_proto_msgTypes[12]
+	mi := &file_koto_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -930,7 +930,7 @@ func (x *WatchReq) String() string {
 func (*WatchReq) ProtoMessage() {}
 
 func (x *WatchReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[12]
+	mi := &file_koto_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -943,7 +943,7 @@ func (x *WatchReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReq.ProtoReflect.Descriptor instead.
 func (*WatchReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{12}
+	return file_koto_proto_rawDescGZIP(), []int{12}
 }
 
 // since_seq = 0 requests live-only delivery (the historical behavior).
@@ -964,7 +964,7 @@ type SubscribeReq struct {
 
 func (x *SubscribeReq) Reset() {
 	*x = SubscribeReq{}
-	mi := &file_clawson_proto_msgTypes[13]
+	mi := &file_koto_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -976,7 +976,7 @@ func (x *SubscribeReq) String() string {
 func (*SubscribeReq) ProtoMessage() {}
 
 func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[13]
+	mi := &file_koto_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -989,7 +989,7 @@ func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeReq.ProtoReflect.Descriptor instead.
 func (*SubscribeReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{13}
+	return file_koto_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SubscribeReq) GetGroup() string {
@@ -1017,7 +1017,7 @@ type StateFrame struct {
 
 func (x *StateFrame) Reset() {
 	*x = StateFrame{}
-	mi := &file_clawson_proto_msgTypes[14]
+	mi := &file_koto_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1029,7 @@ func (x *StateFrame) String() string {
 func (*StateFrame) ProtoMessage() {}
 
 func (x *StateFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[14]
+	mi := &file_koto_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1042,7 @@ func (x *StateFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateFrame.ProtoReflect.Descriptor instead.
 func (*StateFrame) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{14}
+	return file_koto_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StateFrame) GetGroups() map[string]*GroupInfo {
@@ -1070,7 +1070,7 @@ type HistoryReq struct {
 
 func (x *HistoryReq) Reset() {
 	*x = HistoryReq{}
-	mi := &file_clawson_proto_msgTypes[15]
+	mi := &file_koto_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1082,7 +1082,7 @@ func (x *HistoryReq) String() string {
 func (*HistoryReq) ProtoMessage() {}
 
 func (x *HistoryReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[15]
+	mi := &file_koto_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1095,7 +1095,7 @@ func (x *HistoryReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryReq.ProtoReflect.Descriptor instead.
 func (*HistoryReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{15}
+	return file_koto_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *HistoryReq) GetGroup() string {
@@ -1134,7 +1134,7 @@ type SkillList struct {
 
 func (x *SkillList) Reset() {
 	*x = SkillList{}
-	mi := &file_clawson_proto_msgTypes[16]
+	mi := &file_koto_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1146,7 +1146,7 @@ func (x *SkillList) String() string {
 func (*SkillList) ProtoMessage() {}
 
 func (x *SkillList) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[16]
+	mi := &file_koto_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1159,7 +1159,7 @@ func (x *SkillList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillList.ProtoReflect.Descriptor instead.
 func (*SkillList) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{16}
+	return file_koto_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SkillList) GetItems() []string {
@@ -1191,7 +1191,7 @@ type ConfigReq struct {
 
 func (x *ConfigReq) Reset() {
 	*x = ConfigReq{}
-	mi := &file_clawson_proto_msgTypes[17]
+	mi := &file_koto_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1203,7 +1203,7 @@ func (x *ConfigReq) String() string {
 func (*ConfigReq) ProtoMessage() {}
 
 func (x *ConfigReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[17]
+	mi := &file_koto_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1216,7 +1216,7 @@ func (x *ConfigReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigReq.ProtoReflect.Descriptor instead.
 func (*ConfigReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{17}
+	return file_koto_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ConfigReq) GetGroup() string {
@@ -1332,7 +1332,7 @@ type SkillListReq struct {
 
 func (x *SkillListReq) Reset() {
 	*x = SkillListReq{}
-	mi := &file_clawson_proto_msgTypes[18]
+	mi := &file_koto_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1344,7 @@ func (x *SkillListReq) String() string {
 func (*SkillListReq) ProtoMessage() {}
 
 func (x *SkillListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[18]
+	mi := &file_koto_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1357,7 @@ func (x *SkillListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillListReq.ProtoReflect.Descriptor instead.
 func (*SkillListReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{18}
+	return file_koto_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SkillListReq) GetGroup() string {
@@ -1376,7 +1376,7 @@ type SkillNewReq struct {
 
 func (x *SkillNewReq) Reset() {
 	*x = SkillNewReq{}
-	mi := &file_clawson_proto_msgTypes[19]
+	mi := &file_koto_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1388,7 +1388,7 @@ func (x *SkillNewReq) String() string {
 func (*SkillNewReq) ProtoMessage() {}
 
 func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[19]
+	mi := &file_koto_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1401,7 +1401,7 @@ func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewReq.ProtoReflect.Descriptor instead.
 func (*SkillNewReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{19}
+	return file_koto_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SkillNewReq) GetName() string {
@@ -1420,7 +1420,7 @@ type SkillReadReq struct {
 
 func (x *SkillReadReq) Reset() {
 	*x = SkillReadReq{}
-	mi := &file_clawson_proto_msgTypes[20]
+	mi := &file_koto_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1432,7 +1432,7 @@ func (x *SkillReadReq) String() string {
 func (*SkillReadReq) ProtoMessage() {}
 
 func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[20]
+	mi := &file_koto_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1445,7 +1445,7 @@ func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadReq.ProtoReflect.Descriptor instead.
 func (*SkillReadReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{20}
+	return file_koto_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SkillReadReq) GetName() string {
@@ -1464,7 +1464,7 @@ type MetricsReq struct {
 
 func (x *MetricsReq) Reset() {
 	*x = MetricsReq{}
-	mi := &file_clawson_proto_msgTypes[21]
+	mi := &file_koto_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1476,7 +1476,7 @@ func (x *MetricsReq) String() string {
 func (*MetricsReq) ProtoMessage() {}
 
 func (x *MetricsReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[21]
+	mi := &file_koto_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1489,7 +1489,7 @@ func (x *MetricsReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReq.ProtoReflect.Descriptor instead.
 func (*MetricsReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{21}
+	return file_koto_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *MetricsReq) GetGroup() string {
@@ -1510,7 +1510,7 @@ type SchedAddReq struct {
 
 func (x *SchedAddReq) Reset() {
 	*x = SchedAddReq{}
-	mi := &file_clawson_proto_msgTypes[22]
+	mi := &file_koto_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1522,7 +1522,7 @@ func (x *SchedAddReq) String() string {
 func (*SchedAddReq) ProtoMessage() {}
 
 func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[22]
+	mi := &file_koto_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1535,7 +1535,7 @@ func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddReq.ProtoReflect.Descriptor instead.
 func (*SchedAddReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{22}
+	return file_koto_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SchedAddReq) GetGroup() string {
@@ -1568,7 +1568,7 @@ type SchedListReq struct {
 
 func (x *SchedListReq) Reset() {
 	*x = SchedListReq{}
-	mi := &file_clawson_proto_msgTypes[23]
+	mi := &file_koto_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1580,7 +1580,7 @@ func (x *SchedListReq) String() string {
 func (*SchedListReq) ProtoMessage() {}
 
 func (x *SchedListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[23]
+	mi := &file_koto_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1593,7 +1593,7 @@ func (x *SchedListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListReq.ProtoReflect.Descriptor instead.
 func (*SchedListReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{23}
+	return file_koto_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SchedListReq) GetGroup() string {
@@ -1612,7 +1612,7 @@ type SchedIDReq struct {
 
 func (x *SchedIDReq) Reset() {
 	*x = SchedIDReq{}
-	mi := &file_clawson_proto_msgTypes[24]
+	mi := &file_koto_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1624,7 +1624,7 @@ func (x *SchedIDReq) String() string {
 func (*SchedIDReq) ProtoMessage() {}
 
 func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[24]
+	mi := &file_koto_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1637,7 +1637,7 @@ func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedIDReq.ProtoReflect.Descriptor instead.
 func (*SchedIDReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{24}
+	return file_koto_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SchedIDReq) GetId() string {
@@ -1657,7 +1657,7 @@ type SchedToggleReq struct {
 
 func (x *SchedToggleReq) Reset() {
 	*x = SchedToggleReq{}
-	mi := &file_clawson_proto_msgTypes[25]
+	mi := &file_koto_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1669,7 +1669,7 @@ func (x *SchedToggleReq) String() string {
 func (*SchedToggleReq) ProtoMessage() {}
 
 func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[25]
+	mi := &file_koto_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1682,7 +1682,7 @@ func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedToggleReq.ProtoReflect.Descriptor instead.
 func (*SchedToggleReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{25}
+	return file_koto_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SchedToggleReq) GetId() string {
@@ -1709,7 +1709,7 @@ type BaseResp struct {
 
 func (x *BaseResp) Reset() {
 	*x = BaseResp{}
-	mi := &file_clawson_proto_msgTypes[26]
+	mi := &file_koto_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1721,7 +1721,7 @@ func (x *BaseResp) String() string {
 func (*BaseResp) ProtoMessage() {}
 
 func (x *BaseResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[26]
+	mi := &file_koto_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1734,7 +1734,7 @@ func (x *BaseResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BaseResp.ProtoReflect.Descriptor instead.
 func (*BaseResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{26}
+	return file_koto_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *BaseResp) GetOk() bool {
@@ -1762,7 +1762,7 @@ type SpawnResp struct {
 
 func (x *SpawnResp) Reset() {
 	*x = SpawnResp{}
-	mi := &file_clawson_proto_msgTypes[27]
+	mi := &file_koto_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1774,7 +1774,7 @@ func (x *SpawnResp) String() string {
 func (*SpawnResp) ProtoMessage() {}
 
 func (x *SpawnResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[27]
+	mi := &file_koto_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1787,7 +1787,7 @@ func (x *SpawnResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnResp.ProtoReflect.Descriptor instead.
 func (*SpawnResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{27}
+	return file_koto_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SpawnResp) GetOk() bool {
@@ -1822,7 +1822,7 @@ type ListResp struct {
 
 func (x *ListResp) Reset() {
 	*x = ListResp{}
-	mi := &file_clawson_proto_msgTypes[28]
+	mi := &file_koto_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1834,7 +1834,7 @@ func (x *ListResp) String() string {
 func (*ListResp) ProtoMessage() {}
 
 func (x *ListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[28]
+	mi := &file_koto_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1847,7 +1847,7 @@ func (x *ListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResp.ProtoReflect.Descriptor instead.
 func (*ListResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{28}
+	return file_koto_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListResp) GetOk() bool {
@@ -1883,7 +1883,7 @@ type HistoryResp struct {
 
 func (x *HistoryResp) Reset() {
 	*x = HistoryResp{}
-	mi := &file_clawson_proto_msgTypes[29]
+	mi := &file_koto_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1895,7 +1895,7 @@ func (x *HistoryResp) String() string {
 func (*HistoryResp) ProtoMessage() {}
 
 func (x *HistoryResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[29]
+	mi := &file_koto_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1908,7 +1908,7 @@ func (x *HistoryResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryResp.ProtoReflect.Descriptor instead.
 func (*HistoryResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{29}
+	return file_koto_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *HistoryResp) GetOk() bool {
@@ -1950,7 +1950,7 @@ type ConfigResp struct {
 
 func (x *ConfigResp) Reset() {
 	*x = ConfigResp{}
-	mi := &file_clawson_proto_msgTypes[30]
+	mi := &file_koto_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1962,7 +1962,7 @@ func (x *ConfigResp) String() string {
 func (*ConfigResp) ProtoMessage() {}
 
 func (x *ConfigResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[30]
+	mi := &file_koto_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1975,7 +1975,7 @@ func (x *ConfigResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigResp.ProtoReflect.Descriptor instead.
 func (*ConfigResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{30}
+	return file_koto_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ConfigResp) GetOk() bool {
@@ -2011,7 +2011,7 @@ type MetricsResp struct {
 
 func (x *MetricsResp) Reset() {
 	*x = MetricsResp{}
-	mi := &file_clawson_proto_msgTypes[31]
+	mi := &file_koto_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2023,7 +2023,7 @@ func (x *MetricsResp) String() string {
 func (*MetricsResp) ProtoMessage() {}
 
 func (x *MetricsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[31]
+	mi := &file_koto_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2036,7 +2036,7 @@ func (x *MetricsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsResp.ProtoReflect.Descriptor instead.
 func (*MetricsResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{31}
+	return file_koto_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *MetricsResp) GetOk() bool {
@@ -2078,7 +2078,7 @@ type SkillsResp struct {
 
 func (x *SkillsResp) Reset() {
 	*x = SkillsResp{}
-	mi := &file_clawson_proto_msgTypes[32]
+	mi := &file_koto_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2090,7 +2090,7 @@ func (x *SkillsResp) String() string {
 func (*SkillsResp) ProtoMessage() {}
 
 func (x *SkillsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[32]
+	mi := &file_koto_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2103,7 +2103,7 @@ func (x *SkillsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillsResp.ProtoReflect.Descriptor instead.
 func (*SkillsResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{32}
+	return file_koto_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *SkillsResp) GetOk() bool {
@@ -2138,7 +2138,7 @@ type SkillNewResp struct {
 
 func (x *SkillNewResp) Reset() {
 	*x = SkillNewResp{}
-	mi := &file_clawson_proto_msgTypes[33]
+	mi := &file_koto_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2150,7 +2150,7 @@ func (x *SkillNewResp) String() string {
 func (*SkillNewResp) ProtoMessage() {}
 
 func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[33]
+	mi := &file_koto_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2163,7 +2163,7 @@ func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewResp.ProtoReflect.Descriptor instead.
 func (*SkillNewResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{33}
+	return file_koto_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *SkillNewResp) GetOk() bool {
@@ -2199,7 +2199,7 @@ type SkillReadResp struct {
 
 func (x *SkillReadResp) Reset() {
 	*x = SkillReadResp{}
-	mi := &file_clawson_proto_msgTypes[34]
+	mi := &file_koto_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2211,7 @@ func (x *SkillReadResp) String() string {
 func (*SkillReadResp) ProtoMessage() {}
 
 func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[34]
+	mi := &file_koto_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2224,7 @@ func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadResp.ProtoReflect.Descriptor instead.
 func (*SkillReadResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{34}
+	return file_koto_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *SkillReadResp) GetOk() bool {
@@ -2266,7 +2266,7 @@ type SchedAddResp struct {
 
 func (x *SchedAddResp) Reset() {
 	*x = SchedAddResp{}
-	mi := &file_clawson_proto_msgTypes[35]
+	mi := &file_koto_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2278,7 +2278,7 @@ func (x *SchedAddResp) String() string {
 func (*SchedAddResp) ProtoMessage() {}
 
 func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[35]
+	mi := &file_koto_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2291,7 +2291,7 @@ func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddResp.ProtoReflect.Descriptor instead.
 func (*SchedAddResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{35}
+	return file_koto_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SchedAddResp) GetOk() bool {
@@ -2326,7 +2326,7 @@ type SchedListResp struct {
 
 func (x *SchedListResp) Reset() {
 	*x = SchedListResp{}
-	mi := &file_clawson_proto_msgTypes[36]
+	mi := &file_koto_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2338,7 +2338,7 @@ func (x *SchedListResp) String() string {
 func (*SchedListResp) ProtoMessage() {}
 
 func (x *SchedListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[36]
+	mi := &file_koto_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2351,7 +2351,7 @@ func (x *SchedListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListResp.ProtoReflect.Descriptor instead.
 func (*SchedListResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{36}
+	return file_koto_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SchedListResp) GetOk() bool {
@@ -2387,7 +2387,7 @@ type AclGetReq struct {
 
 func (x *AclGetReq) Reset() {
 	*x = AclGetReq{}
-	mi := &file_clawson_proto_msgTypes[37]
+	mi := &file_koto_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2399,7 +2399,7 @@ func (x *AclGetReq) String() string {
 func (*AclGetReq) ProtoMessage() {}
 
 func (x *AclGetReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[37]
+	mi := &file_koto_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2412,7 +2412,7 @@ func (x *AclGetReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclGetReq.ProtoReflect.Descriptor instead.
 func (*AclGetReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{37}
+	return file_koto_proto_rawDescGZIP(), []int{37}
 }
 
 type AclSetRoleReq struct {
@@ -2425,7 +2425,7 @@ type AclSetRoleReq struct {
 
 func (x *AclSetRoleReq) Reset() {
 	*x = AclSetRoleReq{}
-	mi := &file_clawson_proto_msgTypes[38]
+	mi := &file_koto_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2437,7 +2437,7 @@ func (x *AclSetRoleReq) String() string {
 func (*AclSetRoleReq) ProtoMessage() {}
 
 func (x *AclSetRoleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[38]
+	mi := &file_koto_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2450,7 +2450,7 @@ func (x *AclSetRoleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclSetRoleReq.ProtoReflect.Descriptor instead.
 func (*AclSetRoleReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{38}
+	return file_koto_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *AclSetRoleReq) GetRole() string {
@@ -2476,7 +2476,7 @@ type AclDelRoleReq struct {
 
 func (x *AclDelRoleReq) Reset() {
 	*x = AclDelRoleReq{}
-	mi := &file_clawson_proto_msgTypes[39]
+	mi := &file_koto_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2488,7 +2488,7 @@ func (x *AclDelRoleReq) String() string {
 func (*AclDelRoleReq) ProtoMessage() {}
 
 func (x *AclDelRoleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[39]
+	mi := &file_koto_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2501,7 +2501,7 @@ func (x *AclDelRoleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclDelRoleReq.ProtoReflect.Descriptor instead.
 func (*AclDelRoleReq) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{39}
+	return file_koto_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *AclDelRoleReq) GetRole() string {
@@ -2522,7 +2522,7 @@ type AclResp struct {
 
 func (x *AclResp) Reset() {
 	*x = AclResp{}
-	mi := &file_clawson_proto_msgTypes[40]
+	mi := &file_koto_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2534,7 +2534,7 @@ func (x *AclResp) String() string {
 func (*AclResp) ProtoMessage() {}
 
 func (x *AclResp) ProtoReflect() protoreflect.Message {
-	mi := &file_clawson_proto_msgTypes[40]
+	mi := &file_koto_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2547,7 +2547,7 @@ func (x *AclResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclResp.ProtoReflect.Descriptor instead.
 func (*AclResp) Descriptor() ([]byte, []int) {
-	return file_clawson_proto_rawDescGZIP(), []int{40}
+	return file_koto_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *AclResp) GetOk() bool {
@@ -2571,11 +2571,12 @@ func (x *AclResp) GetAcl() *structpb.Struct {
 	return nil
 }
 
-var File_clawson_proto protoreflect.FileDescriptor
+var File_koto_proto protoreflect.FileDescriptor
 
-const file_clawson_proto_rawDesc = "" +
+const file_koto_proto_rawDesc = "" +
 	"\n" +
-	"\rclawson.proto\x12\aclawson\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xff\x01\n" +
+	"\n" +
+	"koto.proto\x12\x04koto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xff\x01\n" +
 	"\x05Event\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x0e\n" +
@@ -2651,21 +2652,21 @@ const file_clawson_proto_rawDesc = "" +
 	"\bWatchReq\"A\n" +
 	"\fSubscribeReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x1b\n" +
-	"\tsince_seq\x18\x02 \x01(\x04R\bsinceSeq\"\xa4\x01\n" +
+	"\tsince_seq\x18\x02 \x01(\x04R\bsinceSeq\"\x9e\x01\n" +
 	"\n" +
-	"StateFrame\x127\n" +
-	"\x06groups\x18\x01 \x03(\v2\x1f.clawson.StateFrame.GroupsEntryR\x06groups\x12\x0e\n" +
-	"\x02ts\x18\x02 \x01(\x01R\x02ts\x1aM\n" +
+	"StateFrame\x124\n" +
+	"\x06groups\x18\x01 \x03(\v2\x1c.koto.StateFrame.GroupsEntryR\x06groups\x12\x0e\n" +
+	"\x02ts\x18\x02 \x01(\x01R\x02ts\x1aJ\n" +
 	"\vGroupsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
-	"\x05value\x18\x02 \x01(\v2\x12.clawson.GroupInfoR\x05value:\x028\x01\"P\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12%\n" +
+	"\x05value\x18\x02 \x01(\v2\x0f.koto.GroupInfoR\x05value:\x028\x01\"P\n" +
 	"\n" +
 	"HistoryReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06before\x18\x03 \x01(\x01R\x06before\"!\n" +
 	"\tSkillList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\xe1\x03\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\xde\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x01R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -2677,9 +2678,9 @@ const file_clawson_proto_rawDesc = "" +
 	" \x01(\tH\x06R\x04size\x88\x01\x01\x12\x17\n" +
 	"\x04root\x18\v \x01(\tH\aR\x04root\x88\x01\x01\x12\x1d\n" +
 	"\anetwork\x18\f \x01(\tH\bR\anetwork\x88\x01\x01\x12;\n" +
-	"\fskills_clear\x18\b \x01(\v2\x16.google.protobuf.EmptyH\x00R\vskillsClear\x123\n" +
+	"\fskills_clear\x18\b \x01(\v2\x16.google.protobuf.EmptyH\x00R\vskillsClear\x120\n" +
 	"\n" +
-	"skills_set\x18\x04 \x01(\v2\x12.clawson.SkillListH\x00R\tskillsSetB\x0f\n" +
+	"skills_set\x18\x04 \x01(\v2\x0f.koto.SkillListH\x00R\tskillsSetB\x0f\n" +
 	"\rskills_actionB\b\n" +
 	"\x06_modelB\t\n" +
 	"\a_effortB\b\n" +
@@ -2717,18 +2718,18 @@ const file_clawson_proto_rawDesc = "" +
 	"\tSpawnResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x12\n" +
-	"\x04port\x18\x03 \x01(\x05R\x04port\"\xb6\x01\n" +
+	"\x04port\x18\x03 \x01(\x05R\x04port\"\xb0\x01\n" +
 	"\bListResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x125\n" +
-	"\x06groups\x18\x03 \x03(\v2\x1d.clawson.ListResp.GroupsEntryR\x06groups\x1aM\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x122\n" +
+	"\x06groups\x18\x03 \x03(\v2\x1a.koto.ListResp.GroupsEntryR\x06groups\x1aJ\n" +
 	"\vGroupsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12(\n" +
-	"\x05value\x18\x02 \x01(\v2\x12.clawson.GroupInfoR\x05value:\x028\x01\"o\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12%\n" +
+	"\x05value\x18\x02 \x01(\v2\x0f.koto.GroupInfoR\x05value:\x028\x01\"l\n" +
 	"\vHistoryResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x12&\n" +
-	"\x06events\x18\x03 \x03(\v2\x0e.clawson.EventR\x06events\x12\x12\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12#\n" +
+	"\x06events\x18\x03 \x03(\v2\v.koto.EventR\x06events\x12\x12\n" +
 	"\x04more\x18\x04 \x01(\bR\x04more\"c\n" +
 	"\n" +
 	"ConfigResp\x12\x0e\n" +
@@ -2739,12 +2740,12 @@ const file_clawson_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12/\n" +
 	"\x06metric\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x06metric\x12<\n" +
-	"\rglobal_metric\x18\x04 \x01(\v2\x17.google.protobuf.StructR\fglobalMetric\"^\n" +
+	"\rglobal_metric\x18\x04 \x01(\v2\x17.google.protobuf.StructR\fglobalMetric\"[\n" +
 	"\n" +
 	"SkillsResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x12*\n" +
-	"\x06skills\x18\x03 \x03(\v2\x12.clawson.SkillItemR\x06skills\"H\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12'\n" +
+	"\x06skills\x18\x03 \x03(\v2\x0f.koto.SkillItemR\x06skills\"H\n" +
 	"\fSkillNewResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x12\n" +
@@ -2753,15 +2754,15 @@ const file_clawson_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x18\n" +
-	"\acontent\x18\x04 \x01(\tR\acontent\"_\n" +
+	"\acontent\x18\x04 \x01(\tR\acontent\"\\\n" +
 	"\fSchedAddResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
-	"\x04item\x18\x03 \x01(\v2\x15.clawson.ScheduleItemR\x04item\"j\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12&\n" +
+	"\x04item\x18\x03 \x01(\v2\x12.koto.ScheduleItemR\x04item\"g\n" +
 	"\rSchedListResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\x123\n" +
-	"\tschedules\x18\x03 \x03(\v2\x15.clawson.ScheduleItemR\tschedules\"\v\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x120\n" +
+	"\tschedules\x18\x03 \x03(\v2\x12.koto.ScheduleItemR\tschedules\"\v\n" +
 	"\tAclGetReq\"T\n" +
 	"\rAclSetRoleReq\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12/\n" +
@@ -2771,167 +2772,166 @@ const file_clawson_proto_rawDesc = "" +
 	"\aAclResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
-	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xef\n" +
+	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xd0\t\n" +
+	"\x04Koto\x12(\n" +
+	"\x05Spawn\x12\x0e.koto.SpawnReq\x1a\x0f.koto.SpawnResp\x12%\n" +
+	"\x04Send\x12\r.koto.SendReq\x1a\x0e.koto.BaseResp\x12%\n" +
+	"\x04List\x12\r.koto.ListReq\x1a\x0e.koto.ListResp\x12&\n" +
+	"\x04Stop\x12\x0e.koto.GroupReq\x1a\x0e.koto.BaseResp\x12+\n" +
+	"\tInterrupt\x12\x0e.koto.GroupReq\x1a\x0e.koto.BaseResp\x12)\n" +
+	"\aDestroy\x12\x0e.koto.GroupReq\x1a\x0e.koto.BaseResp\x12*\n" +
+	"\aRestart\x12\x0e.koto.GroupReq\x1a\x0f.koto.SpawnResp\x12.\n" +
+	"\aHistory\x12\x10.koto.HistoryReq\x1a\x11.koto.HistoryResp\x12+\n" +
+	"\x06Config\x12\x0f.koto.ConfigReq\x1a\x10.koto.ConfigResp\x12.\n" +
+	"\aMetrics\x12\x10.koto.MetricsReq\x1a\x11.koto.MetricsResp\x12'\n" +
+	"\x05Clear\x12\x0e.koto.GroupReq\x1a\x0e.koto.BaseResp\x12.\n" +
+	"\x06Skills\x12\x12.koto.SkillListReq\x1a\x10.koto.SkillsResp\x121\n" +
+	"\bSkillNew\x12\x11.koto.SkillNewReq\x1a\x12.koto.SkillNewResp\x124\n" +
+	"\tSkillRead\x12\x12.koto.SkillReadReq\x1a\x13.koto.SkillReadResp\x121\n" +
+	"\bSchedAdd\x12\x11.koto.SchedAddReq\x1a\x12.koto.SchedAddResp\x124\n" +
+	"\tSchedList\x12\x12.koto.SchedListReq\x1a\x13.koto.SchedListResp\x12,\n" +
+	"\bSchedDel\x12\x10.koto.SchedIDReq\x1a\x0e.koto.BaseResp\x123\n" +
+	"\vSchedToggle\x12\x14.koto.SchedToggleReq\x1a\x0e.koto.BaseResp\x12,\n" +
+	"\bSchedRun\x12\x10.koto.SchedIDReq\x1a\x0e.koto.BaseResp\x12(\n" +
+	"\x06AclGet\x12\x0f.koto.AclGetReq\x1a\r.koto.AclResp\x120\n" +
 	"\n" +
-	"\aClawson\x12.\n" +
-	"\x05Spawn\x12\x11.clawson.SpawnReq\x1a\x12.clawson.SpawnResp\x12+\n" +
-	"\x04Send\x12\x10.clawson.SendReq\x1a\x11.clawson.BaseResp\x12+\n" +
-	"\x04List\x12\x10.clawson.ListReq\x1a\x11.clawson.ListResp\x12,\n" +
-	"\x04Stop\x12\x11.clawson.GroupReq\x1a\x11.clawson.BaseResp\x121\n" +
-	"\tInterrupt\x12\x11.clawson.GroupReq\x1a\x11.clawson.BaseResp\x12/\n" +
-	"\aDestroy\x12\x11.clawson.GroupReq\x1a\x11.clawson.BaseResp\x120\n" +
-	"\aRestart\x12\x11.clawson.GroupReq\x1a\x12.clawson.SpawnResp\x124\n" +
-	"\aHistory\x12\x13.clawson.HistoryReq\x1a\x14.clawson.HistoryResp\x121\n" +
-	"\x06Config\x12\x12.clawson.ConfigReq\x1a\x13.clawson.ConfigResp\x124\n" +
-	"\aMetrics\x12\x13.clawson.MetricsReq\x1a\x14.clawson.MetricsResp\x12-\n" +
-	"\x05Clear\x12\x11.clawson.GroupReq\x1a\x11.clawson.BaseResp\x124\n" +
-	"\x06Skills\x12\x15.clawson.SkillListReq\x1a\x13.clawson.SkillsResp\x127\n" +
-	"\bSkillNew\x12\x14.clawson.SkillNewReq\x1a\x15.clawson.SkillNewResp\x12:\n" +
-	"\tSkillRead\x12\x15.clawson.SkillReadReq\x1a\x16.clawson.SkillReadResp\x127\n" +
-	"\bSchedAdd\x12\x14.clawson.SchedAddReq\x1a\x15.clawson.SchedAddResp\x12:\n" +
-	"\tSchedList\x12\x15.clawson.SchedListReq\x1a\x16.clawson.SchedListResp\x122\n" +
-	"\bSchedDel\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x129\n" +
-	"\vSchedToggle\x12\x17.clawson.SchedToggleReq\x1a\x11.clawson.BaseResp\x122\n" +
-	"\bSchedRun\x12\x13.clawson.SchedIDReq\x1a\x11.clawson.BaseResp\x12.\n" +
-	"\x06AclGet\x12\x12.clawson.AclGetReq\x1a\x10.clawson.AclResp\x126\n" +
+	"AclSetRole\x12\x13.koto.AclSetRoleReq\x1a\r.koto.AclResp\x120\n" +
 	"\n" +
-	"AclSetRole\x12\x16.clawson.AclSetRoleReq\x1a\x10.clawson.AclResp\x126\n" +
+	"AclDelRole\x12\x13.koto.AclDelRoleReq\x1a\r.koto.AclResp\x124\n" +
+	"\tRunScript\x12\x12.koto.RunScriptReq\x1a\x11.koto.ScriptEvent0\x01\x123\n" +
+	"\x0eSubscribeGroup\x12\x12.koto.SubscribeReq\x1a\v.koto.Event0\x01\x120\n" +
+	"\rSubscribeLogs\x12\r.koto.LogsReq\x1a\x0e.koto.LogEvent0\x01\x120\n" +
 	"\n" +
-	"AclDelRole\x12\x16.clawson.AclDelRoleReq\x1a\x10.clawson.AclResp\x12:\n" +
-	"\tRunScript\x12\x15.clawson.RunScriptReq\x1a\x14.clawson.ScriptEvent0\x01\x129\n" +
-	"\x0eSubscribeGroup\x12\x15.clawson.SubscribeReq\x1a\x0e.clawson.Event0\x01\x126\n" +
-	"\rSubscribeLogs\x12\x10.clawson.LogsReq\x1a\x11.clawson.LogEvent0\x01\x126\n" +
-	"\n" +
-	"WatchState\x12\x11.clawson.WatchReq\x1a\x13.clawson.StateFrame0\x01B\x18Z\x16clawson-protocol/pb;pbb\x06proto3"
+	"WatchState\x12\x0e.koto.WatchReq\x1a\x10.koto.StateFrame0\x01B\x15Z\x13koto-protocol/pb;pbb\x06proto3"
 
 var (
-	file_clawson_proto_rawDescOnce sync.Once
-	file_clawson_proto_rawDescData []byte
+	file_koto_proto_rawDescOnce sync.Once
+	file_koto_proto_rawDescData []byte
 )
 
-func file_clawson_proto_rawDescGZIP() []byte {
-	file_clawson_proto_rawDescOnce.Do(func() {
-		file_clawson_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_clawson_proto_rawDesc), len(file_clawson_proto_rawDesc)))
+func file_koto_proto_rawDescGZIP() []byte {
+	file_koto_proto_rawDescOnce.Do(func() {
+		file_koto_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_koto_proto_rawDesc), len(file_koto_proto_rawDesc)))
 	})
-	return file_clawson_proto_rawDescData
+	return file_koto_proto_rawDescData
 }
 
-var file_clawson_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
-var file_clawson_proto_goTypes = []any{
-	(*Event)(nil),           // 0: clawson.Event
-	(*RunScriptReq)(nil),    // 1: clawson.RunScriptReq
-	(*ScriptEvent)(nil),     // 2: clawson.ScriptEvent
-	(*LogEvent)(nil),        // 3: clawson.LogEvent
-	(*GroupInfo)(nil),       // 4: clawson.GroupInfo
-	(*SkillItem)(nil),       // 5: clawson.SkillItem
-	(*ScheduleItem)(nil),    // 6: clawson.ScheduleItem
-	(*SpawnReq)(nil),        // 7: clawson.SpawnReq
-	(*SendReq)(nil),         // 8: clawson.SendReq
-	(*GroupReq)(nil),        // 9: clawson.GroupReq
-	(*ListReq)(nil),         // 10: clawson.ListReq
-	(*LogsReq)(nil),         // 11: clawson.LogsReq
-	(*WatchReq)(nil),        // 12: clawson.WatchReq
-	(*SubscribeReq)(nil),    // 13: clawson.SubscribeReq
-	(*StateFrame)(nil),      // 14: clawson.StateFrame
-	(*HistoryReq)(nil),      // 15: clawson.HistoryReq
-	(*SkillList)(nil),       // 16: clawson.SkillList
-	(*ConfigReq)(nil),       // 17: clawson.ConfigReq
-	(*SkillListReq)(nil),    // 18: clawson.SkillListReq
-	(*SkillNewReq)(nil),     // 19: clawson.SkillNewReq
-	(*SkillReadReq)(nil),    // 20: clawson.SkillReadReq
-	(*MetricsReq)(nil),      // 21: clawson.MetricsReq
-	(*SchedAddReq)(nil),     // 22: clawson.SchedAddReq
-	(*SchedListReq)(nil),    // 23: clawson.SchedListReq
-	(*SchedIDReq)(nil),      // 24: clawson.SchedIDReq
-	(*SchedToggleReq)(nil),  // 25: clawson.SchedToggleReq
-	(*BaseResp)(nil),        // 26: clawson.BaseResp
-	(*SpawnResp)(nil),       // 27: clawson.SpawnResp
-	(*ListResp)(nil),        // 28: clawson.ListResp
-	(*HistoryResp)(nil),     // 29: clawson.HistoryResp
-	(*ConfigResp)(nil),      // 30: clawson.ConfigResp
-	(*MetricsResp)(nil),     // 31: clawson.MetricsResp
-	(*SkillsResp)(nil),      // 32: clawson.SkillsResp
-	(*SkillNewResp)(nil),    // 33: clawson.SkillNewResp
-	(*SkillReadResp)(nil),   // 34: clawson.SkillReadResp
-	(*SchedAddResp)(nil),    // 35: clawson.SchedAddResp
-	(*SchedListResp)(nil),   // 36: clawson.SchedListResp
-	(*AclGetReq)(nil),       // 37: clawson.AclGetReq
-	(*AclSetRoleReq)(nil),   // 38: clawson.AclSetRoleReq
-	(*AclDelRoleReq)(nil),   // 39: clawson.AclDelRoleReq
-	(*AclResp)(nil),         // 40: clawson.AclResp
-	nil,                     // 41: clawson.StateFrame.GroupsEntry
-	nil,                     // 42: clawson.ListResp.GroupsEntry
+var file_koto_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
+var file_koto_proto_goTypes = []any{
+	(*Event)(nil),           // 0: koto.Event
+	(*RunScriptReq)(nil),    // 1: koto.RunScriptReq
+	(*ScriptEvent)(nil),     // 2: koto.ScriptEvent
+	(*LogEvent)(nil),        // 3: koto.LogEvent
+	(*GroupInfo)(nil),       // 4: koto.GroupInfo
+	(*SkillItem)(nil),       // 5: koto.SkillItem
+	(*ScheduleItem)(nil),    // 6: koto.ScheduleItem
+	(*SpawnReq)(nil),        // 7: koto.SpawnReq
+	(*SendReq)(nil),         // 8: koto.SendReq
+	(*GroupReq)(nil),        // 9: koto.GroupReq
+	(*ListReq)(nil),         // 10: koto.ListReq
+	(*LogsReq)(nil),         // 11: koto.LogsReq
+	(*WatchReq)(nil),        // 12: koto.WatchReq
+	(*SubscribeReq)(nil),    // 13: koto.SubscribeReq
+	(*StateFrame)(nil),      // 14: koto.StateFrame
+	(*HistoryReq)(nil),      // 15: koto.HistoryReq
+	(*SkillList)(nil),       // 16: koto.SkillList
+	(*ConfigReq)(nil),       // 17: koto.ConfigReq
+	(*SkillListReq)(nil),    // 18: koto.SkillListReq
+	(*SkillNewReq)(nil),     // 19: koto.SkillNewReq
+	(*SkillReadReq)(nil),    // 20: koto.SkillReadReq
+	(*MetricsReq)(nil),      // 21: koto.MetricsReq
+	(*SchedAddReq)(nil),     // 22: koto.SchedAddReq
+	(*SchedListReq)(nil),    // 23: koto.SchedListReq
+	(*SchedIDReq)(nil),      // 24: koto.SchedIDReq
+	(*SchedToggleReq)(nil),  // 25: koto.SchedToggleReq
+	(*BaseResp)(nil),        // 26: koto.BaseResp
+	(*SpawnResp)(nil),       // 27: koto.SpawnResp
+	(*ListResp)(nil),        // 28: koto.ListResp
+	(*HistoryResp)(nil),     // 29: koto.HistoryResp
+	(*ConfigResp)(nil),      // 30: koto.ConfigResp
+	(*MetricsResp)(nil),     // 31: koto.MetricsResp
+	(*SkillsResp)(nil),      // 32: koto.SkillsResp
+	(*SkillNewResp)(nil),    // 33: koto.SkillNewResp
+	(*SkillReadResp)(nil),   // 34: koto.SkillReadResp
+	(*SchedAddResp)(nil),    // 35: koto.SchedAddResp
+	(*SchedListResp)(nil),   // 36: koto.SchedListResp
+	(*AclGetReq)(nil),       // 37: koto.AclGetReq
+	(*AclSetRoleReq)(nil),   // 38: koto.AclSetRoleReq
+	(*AclDelRoleReq)(nil),   // 39: koto.AclDelRoleReq
+	(*AclResp)(nil),         // 40: koto.AclResp
+	nil,                     // 41: koto.StateFrame.GroupsEntry
+	nil,                     // 42: koto.ListResp.GroupsEntry
 	(*emptypb.Empty)(nil),   // 43: google.protobuf.Empty
 	(*structpb.Struct)(nil), // 44: google.protobuf.Struct
 }
-var file_clawson_proto_depIdxs = []int32{
-	41, // 0: clawson.StateFrame.groups:type_name -> clawson.StateFrame.GroupsEntry
-	43, // 1: clawson.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
-	16, // 2: clawson.ConfigReq.skills_set:type_name -> clawson.SkillList
-	42, // 3: clawson.ListResp.groups:type_name -> clawson.ListResp.GroupsEntry
-	0,  // 4: clawson.HistoryResp.events:type_name -> clawson.Event
-	44, // 5: clawson.ConfigResp.config:type_name -> google.protobuf.Struct
-	44, // 6: clawson.MetricsResp.metric:type_name -> google.protobuf.Struct
-	44, // 7: clawson.MetricsResp.global_metric:type_name -> google.protobuf.Struct
-	5,  // 8: clawson.SkillsResp.skills:type_name -> clawson.SkillItem
-	6,  // 9: clawson.SchedAddResp.item:type_name -> clawson.ScheduleItem
-	6,  // 10: clawson.SchedListResp.schedules:type_name -> clawson.ScheduleItem
-	44, // 11: clawson.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
-	44, // 12: clawson.AclResp.acl:type_name -> google.protobuf.Struct
-	4,  // 13: clawson.StateFrame.GroupsEntry.value:type_name -> clawson.GroupInfo
-	4,  // 14: clawson.ListResp.GroupsEntry.value:type_name -> clawson.GroupInfo
-	7,  // 15: clawson.Clawson.Spawn:input_type -> clawson.SpawnReq
-	8,  // 16: clawson.Clawson.Send:input_type -> clawson.SendReq
-	10, // 17: clawson.Clawson.List:input_type -> clawson.ListReq
-	9,  // 18: clawson.Clawson.Stop:input_type -> clawson.GroupReq
-	9,  // 19: clawson.Clawson.Interrupt:input_type -> clawson.GroupReq
-	9,  // 20: clawson.Clawson.Destroy:input_type -> clawson.GroupReq
-	9,  // 21: clawson.Clawson.Restart:input_type -> clawson.GroupReq
-	15, // 22: clawson.Clawson.History:input_type -> clawson.HistoryReq
-	17, // 23: clawson.Clawson.Config:input_type -> clawson.ConfigReq
-	21, // 24: clawson.Clawson.Metrics:input_type -> clawson.MetricsReq
-	9,  // 25: clawson.Clawson.Clear:input_type -> clawson.GroupReq
-	18, // 26: clawson.Clawson.Skills:input_type -> clawson.SkillListReq
-	19, // 27: clawson.Clawson.SkillNew:input_type -> clawson.SkillNewReq
-	20, // 28: clawson.Clawson.SkillRead:input_type -> clawson.SkillReadReq
-	22, // 29: clawson.Clawson.SchedAdd:input_type -> clawson.SchedAddReq
-	23, // 30: clawson.Clawson.SchedList:input_type -> clawson.SchedListReq
-	24, // 31: clawson.Clawson.SchedDel:input_type -> clawson.SchedIDReq
-	25, // 32: clawson.Clawson.SchedToggle:input_type -> clawson.SchedToggleReq
-	24, // 33: clawson.Clawson.SchedRun:input_type -> clawson.SchedIDReq
-	37, // 34: clawson.Clawson.AclGet:input_type -> clawson.AclGetReq
-	38, // 35: clawson.Clawson.AclSetRole:input_type -> clawson.AclSetRoleReq
-	39, // 36: clawson.Clawson.AclDelRole:input_type -> clawson.AclDelRoleReq
-	1,  // 37: clawson.Clawson.RunScript:input_type -> clawson.RunScriptReq
-	13, // 38: clawson.Clawson.SubscribeGroup:input_type -> clawson.SubscribeReq
-	11, // 39: clawson.Clawson.SubscribeLogs:input_type -> clawson.LogsReq
-	12, // 40: clawson.Clawson.WatchState:input_type -> clawson.WatchReq
-	27, // 41: clawson.Clawson.Spawn:output_type -> clawson.SpawnResp
-	26, // 42: clawson.Clawson.Send:output_type -> clawson.BaseResp
-	28, // 43: clawson.Clawson.List:output_type -> clawson.ListResp
-	26, // 44: clawson.Clawson.Stop:output_type -> clawson.BaseResp
-	26, // 45: clawson.Clawson.Interrupt:output_type -> clawson.BaseResp
-	26, // 46: clawson.Clawson.Destroy:output_type -> clawson.BaseResp
-	27, // 47: clawson.Clawson.Restart:output_type -> clawson.SpawnResp
-	29, // 48: clawson.Clawson.History:output_type -> clawson.HistoryResp
-	30, // 49: clawson.Clawson.Config:output_type -> clawson.ConfigResp
-	31, // 50: clawson.Clawson.Metrics:output_type -> clawson.MetricsResp
-	26, // 51: clawson.Clawson.Clear:output_type -> clawson.BaseResp
-	32, // 52: clawson.Clawson.Skills:output_type -> clawson.SkillsResp
-	33, // 53: clawson.Clawson.SkillNew:output_type -> clawson.SkillNewResp
-	34, // 54: clawson.Clawson.SkillRead:output_type -> clawson.SkillReadResp
-	35, // 55: clawson.Clawson.SchedAdd:output_type -> clawson.SchedAddResp
-	36, // 56: clawson.Clawson.SchedList:output_type -> clawson.SchedListResp
-	26, // 57: clawson.Clawson.SchedDel:output_type -> clawson.BaseResp
-	26, // 58: clawson.Clawson.SchedToggle:output_type -> clawson.BaseResp
-	26, // 59: clawson.Clawson.SchedRun:output_type -> clawson.BaseResp
-	40, // 60: clawson.Clawson.AclGet:output_type -> clawson.AclResp
-	40, // 61: clawson.Clawson.AclSetRole:output_type -> clawson.AclResp
-	40, // 62: clawson.Clawson.AclDelRole:output_type -> clawson.AclResp
-	2,  // 63: clawson.Clawson.RunScript:output_type -> clawson.ScriptEvent
-	0,  // 64: clawson.Clawson.SubscribeGroup:output_type -> clawson.Event
-	3,  // 65: clawson.Clawson.SubscribeLogs:output_type -> clawson.LogEvent
-	14, // 66: clawson.Clawson.WatchState:output_type -> clawson.StateFrame
+var file_koto_proto_depIdxs = []int32{
+	41, // 0: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
+	43, // 1: koto.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
+	16, // 2: koto.ConfigReq.skills_set:type_name -> koto.SkillList
+	42, // 3: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
+	0,  // 4: koto.HistoryResp.events:type_name -> koto.Event
+	44, // 5: koto.ConfigResp.config:type_name -> google.protobuf.Struct
+	44, // 6: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
+	44, // 7: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	5,  // 8: koto.SkillsResp.skills:type_name -> koto.SkillItem
+	6,  // 9: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
+	6,  // 10: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
+	44, // 11: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
+	44, // 12: koto.AclResp.acl:type_name -> google.protobuf.Struct
+	4,  // 13: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
+	4,  // 14: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
+	7,  // 15: koto.Koto.Spawn:input_type -> koto.SpawnReq
+	8,  // 16: koto.Koto.Send:input_type -> koto.SendReq
+	10, // 17: koto.Koto.List:input_type -> koto.ListReq
+	9,  // 18: koto.Koto.Stop:input_type -> koto.GroupReq
+	9,  // 19: koto.Koto.Interrupt:input_type -> koto.GroupReq
+	9,  // 20: koto.Koto.Destroy:input_type -> koto.GroupReq
+	9,  // 21: koto.Koto.Restart:input_type -> koto.GroupReq
+	15, // 22: koto.Koto.History:input_type -> koto.HistoryReq
+	17, // 23: koto.Koto.Config:input_type -> koto.ConfigReq
+	21, // 24: koto.Koto.Metrics:input_type -> koto.MetricsReq
+	9,  // 25: koto.Koto.Clear:input_type -> koto.GroupReq
+	18, // 26: koto.Koto.Skills:input_type -> koto.SkillListReq
+	19, // 27: koto.Koto.SkillNew:input_type -> koto.SkillNewReq
+	20, // 28: koto.Koto.SkillRead:input_type -> koto.SkillReadReq
+	22, // 29: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
+	23, // 30: koto.Koto.SchedList:input_type -> koto.SchedListReq
+	24, // 31: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
+	25, // 32: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
+	24, // 33: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
+	37, // 34: koto.Koto.AclGet:input_type -> koto.AclGetReq
+	38, // 35: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
+	39, // 36: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
+	1,  // 37: koto.Koto.RunScript:input_type -> koto.RunScriptReq
+	13, // 38: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
+	11, // 39: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
+	12, // 40: koto.Koto.WatchState:input_type -> koto.WatchReq
+	27, // 41: koto.Koto.Spawn:output_type -> koto.SpawnResp
+	26, // 42: koto.Koto.Send:output_type -> koto.BaseResp
+	28, // 43: koto.Koto.List:output_type -> koto.ListResp
+	26, // 44: koto.Koto.Stop:output_type -> koto.BaseResp
+	26, // 45: koto.Koto.Interrupt:output_type -> koto.BaseResp
+	26, // 46: koto.Koto.Destroy:output_type -> koto.BaseResp
+	27, // 47: koto.Koto.Restart:output_type -> koto.SpawnResp
+	29, // 48: koto.Koto.History:output_type -> koto.HistoryResp
+	30, // 49: koto.Koto.Config:output_type -> koto.ConfigResp
+	31, // 50: koto.Koto.Metrics:output_type -> koto.MetricsResp
+	26, // 51: koto.Koto.Clear:output_type -> koto.BaseResp
+	32, // 52: koto.Koto.Skills:output_type -> koto.SkillsResp
+	33, // 53: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
+	34, // 54: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
+	35, // 55: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
+	36, // 56: koto.Koto.SchedList:output_type -> koto.SchedListResp
+	26, // 57: koto.Koto.SchedDel:output_type -> koto.BaseResp
+	26, // 58: koto.Koto.SchedToggle:output_type -> koto.BaseResp
+	26, // 59: koto.Koto.SchedRun:output_type -> koto.BaseResp
+	40, // 60: koto.Koto.AclGet:output_type -> koto.AclResp
+	40, // 61: koto.Koto.AclSetRole:output_type -> koto.AclResp
+	40, // 62: koto.Koto.AclDelRole:output_type -> koto.AclResp
+	2,  // 63: koto.Koto.RunScript:output_type -> koto.ScriptEvent
+	0,  // 64: koto.Koto.SubscribeGroup:output_type -> koto.Event
+	3,  // 65: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
+	14, // 66: koto.Koto.WatchState:output_type -> koto.StateFrame
 	41, // [41:67] is the sub-list for method output_type
 	15, // [15:41] is the sub-list for method input_type
 	15, // [15:15] is the sub-list for extension type_name
@@ -2939,12 +2939,12 @@ var file_clawson_proto_depIdxs = []int32{
 	0,  // [0:15] is the sub-list for field type_name
 }
 
-func init() { file_clawson_proto_init() }
-func file_clawson_proto_init() {
-	if File_clawson_proto != nil {
+func init() { file_koto_proto_init() }
+func file_koto_proto_init() {
+	if File_koto_proto != nil {
 		return
 	}
-	file_clawson_proto_msgTypes[17].OneofWrappers = []any{
+	file_koto_proto_msgTypes[17].OneofWrappers = []any{
 		(*ConfigReq_SkillsClear)(nil),
 		(*ConfigReq_SkillsSet)(nil),
 	}
@@ -2952,17 +2952,17 @@ func file_clawson_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clawson_proto_rawDesc), len(file_clawson_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_koto_proto_rawDesc), len(file_koto_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   43,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_clawson_proto_goTypes,
-		DependencyIndexes: file_clawson_proto_depIdxs,
-		MessageInfos:      file_clawson_proto_msgTypes,
+		GoTypes:           file_koto_proto_goTypes,
+		DependencyIndexes: file_koto_proto_depIdxs,
+		MessageInfos:      file_koto_proto_msgTypes,
 	}.Build()
-	File_clawson_proto = out.File
-	file_clawson_proto_goTypes = nil
-	file_clawson_proto_depIdxs = nil
+	File_koto_proto = out.File
+	file_koto_proto_goTypes = nil
+	file_koto_proto_depIdxs = nil
 }

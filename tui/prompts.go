@@ -9,13 +9,13 @@ import (
 
 // promptsDir is where /prompt looks for a fallback template when no skill
 // matches. The cs_tui container mounts the host prompts/ read-only here;
-// CLAWSON_PROMPTS_DIR overrides it for a bare-host TUI run (make tui-local /
+// KOTO_PROMPTS_DIR overrides it for a bare-host TUI run (make tui-local /
 // dev). Mirrors scriptsDir in scripts.go.
 func promptsDir() string {
-	if d := os.Getenv("CLAWSON_PROMPTS_DIR"); d != "" {
+	if d := os.Getenv("KOTO_PROMPTS_DIR"); d != "" {
 		return d
 	}
-	return "/clawson-prompts"
+	return "/koto-prompts"
 }
 
 // loadPrompt resolves a /prompt fallback argument to (displayName, content).

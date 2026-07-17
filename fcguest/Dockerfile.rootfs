@@ -1,4 +1,4 @@
-# Golden rootfs for clawson Firecracker microVM groups.
+# Golden rootfs for koto Firecracker microVM groups.
 #
 # Smaller than sidecar/Dockerfile (no Chrome/agent-browser), but DOES ship
 # rootless podman: the agent can run containers inside the microVM. Unlike the
@@ -79,6 +79,6 @@ RUN chmod -R a+rX /sidecar
 COPY fcguest/fc-agent /usr/local/bin/fc-agent
 RUN chmod 755 /usr/local/bin/fc-agent \
  && mkdir -p /workspace /skills \
- && printf '127.0.0.1 localhost clawson-vm\n' > /etc/hosts
+ && printf '127.0.0.1 localhost koto-vm\n' > /etc/hosts
 # NB: /etc/resolv.conf is fixed up in build-rootfs.sh (staging tree), not here —
 # podman bind-mounts /etc/resolv.conf during build, so a RUN can't replace it.

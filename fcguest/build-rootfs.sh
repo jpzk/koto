@@ -24,10 +24,10 @@ podman run --rm --security-opt label=disable \
   sh -c 'CGO_ENABLED=0 go build -ldflags="-s -w" -o fc-agent .'
 
 echo "==> building rootfs image"
-podman build -t clawson-fcrootfs -f "$HERE/fcguest/Dockerfile.rootfs" "$HERE"
+podman build -t koto-fcrootfs -f "$HERE/fcguest/Dockerfile.rootfs" "$HERE"
 
 echo "==> exporting filesystem + mkfs.ext4"
-CID=$(podman create clawson-fcrootfs)
+CID=$(podman create koto-fcrootfs)
 trap 'podman rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 # All ownership-sensitive work inside the rootless userns.

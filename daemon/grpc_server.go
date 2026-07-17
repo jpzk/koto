@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,15 +28,15 @@ var groupNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
 func validGroupName(g string) bool { return groupNameRE.MatchString(g) }
 
-// clawsonServer implements pb.ClawsonServer. Each method is a thin wrapper over
+// kotoServer implements pb.KotoServer. Each method is a thin wrapper over
 // the existing daemon helpers (ensure/send/listGroups/configCmd/...): it
 // converts the protobuf request to the helper's native types, calls the
 // unchanged helper, and converts the result back to protobuf. Application-level
 // failures are returned in-band via the response's ok/error fields with a nil
 // gRPC error — matching the old {ok:false,error} JSON contract the clients read.
 // gRPC status codes are reserved for transport/auth faults (see auth.go).
-type clawsonServer struct {
-	pb.UnimplementedClawsonServer
+type kotoServer struct {
+	pb.UnimplementedKotoServer
 }
 
 // ---- converters (protocol/native types -> protobuf) -----------------------
@@ -144,7 +144,7 @@ func toStruct(m map[string]any) *structpb.Struct {
 
 // ---- unary RPCs -----------------------------------------------------------
 
-func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
+func (s *kotoServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name (must match [A-Za-z0-9][A-Za-z0-9_-]{0,31})"}, nil
 	}
@@ -168,7 +168,7 @@ func (s *clawsonServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp,
 	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
 }
 
-func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error) {
 	// Enqueue and return immediately — do NOT block on the turn. A turn runs for
 	// up to turnWaitTimeout (25m); a unary RPC blocking that long blows any
 	// client deadline (the TUI wraps every call in 30s, surfacing the long turn
@@ -203,7 +203,7 @@ func (s *clawsonServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, er
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *clawsonServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, error) {
+func (s *kotoServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, error) {
 	groups := map[string]*pb.GroupInfo{}
 	for g, gi := range listGroups() {
 		groups[g] = toPBGroupInfo(gi)
@@ -211,7 +211,7 @@ func (s *clawsonServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, er
 	return &pb.ListResp{Ok: true, Groups: groups}, nil
 }
 
-func (s *clawsonServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
@@ -219,7 +219,7 @@ func (s *clawsonServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, e
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *clawsonServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
@@ -229,7 +229,7 @@ func (s *clawsonServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseRe
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *clawsonServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
@@ -237,7 +237,7 @@ func (s *clawsonServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
-func (s *clawsonServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
+func (s *kotoServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name"}, nil
 	}
@@ -248,7 +248,7 @@ func (s *clawsonServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnRes
 	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
 }
 
-func (s *clawsonServer) History(_ context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
+func (s *kotoServer) History(_ context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.HistoryResp{Error: "invalid group name"}, nil
 	}
@@ -260,7 +260,7 @@ func (s *clawsonServer) History(_ context.Context, r *pb.HistoryReq) (*pb.Histor
 	return &pb.HistoryResp{Ok: true, Events: out, More: more}, nil
 }
 
-func (s *clawsonServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, error) {
+func (s *kotoServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.ConfigResp{Error: "invalid group name"}, nil
 	}
@@ -268,7 +268,7 @@ func (s *clawsonServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigRe
 	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(resp.Config)}, nil
 }
 
-func (s *clawsonServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
+func (s *kotoServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
 	if r.Group != "" && !validGroupName(r.Group) {
 		return &pb.MetricsResp{Error: "invalid group name"}, nil
 	}
@@ -279,7 +279,7 @@ func (s *clawsonServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.Metric
 	return out, nil
 }
 
-func (s *clawsonServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
@@ -287,7 +287,7 @@ func (s *clawsonServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, 
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
-func (s *clawsonServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.SkillsResp, error) {
+func (s *kotoServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.SkillsResp, error) {
 	if r.Group != "" && !validGroupName(r.Group) {
 		return &pb.SkillsResp{Error: "invalid group name"}, nil
 	}
@@ -299,17 +299,17 @@ func (s *clawsonServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.Skill
 	return &pb.SkillsResp{Ok: resp.OK, Error: resp.Error, Skills: out}, nil
 }
 
-func (s *clawsonServer) SkillNew(_ context.Context, r *pb.SkillNewReq) (*pb.SkillNewResp, error) {
+func (s *kotoServer) SkillNew(_ context.Context, r *pb.SkillNewReq) (*pb.SkillNewResp, error) {
 	resp := skillNewCmd(skillNewReq{Name: r.Name})
 	return &pb.SkillNewResp{Ok: resp.OK, Error: resp.Error, Path: resp.Path}, nil
 }
 
-func (s *clawsonServer) SkillRead(_ context.Context, r *pb.SkillReadReq) (*pb.SkillReadResp, error) {
+func (s *kotoServer) SkillRead(_ context.Context, r *pb.SkillReadReq) (*pb.SkillReadResp, error) {
 	resp := skillReadCmd(skillReadReq{Name: r.Name})
 	return &pb.SkillReadResp{Ok: resp.OK, Error: resp.Error, Name: resp.Name, Content: resp.Content}, nil
 }
 
-func (s *clawsonServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {
+func (s *kotoServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.SchedAddResp{Error: "invalid group name"}, nil
 	}
@@ -320,7 +320,7 @@ func (s *clawsonServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.Sche
 	return &pb.SchedAddResp{Ok: true, Item: toPBScheduleItem(it)}, nil
 }
 
-func (s *clawsonServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.SchedListResp, error) {
+func (s *kotoServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.SchedListResp, error) {
 	if r.Group != "" && !validGroupName(r.Group) {
 		return &pb.SchedListResp{Error: "invalid group name"}, nil
 	}
@@ -332,21 +332,21 @@ func (s *clawsonServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.Sc
 	return &pb.SchedListResp{Ok: true, Schedules: out}, nil
 }
 
-func (s *clawsonServer) SchedDel(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+func (s *kotoServer) SchedDel(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
 	if err := delSched(r.Id); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *clawsonServer) SchedToggle(_ context.Context, r *pb.SchedToggleReq) (*pb.BaseResp, error) {
+func (s *kotoServer) SchedToggle(_ context.Context, r *pb.SchedToggleReq) (*pb.BaseResp, error) {
 	if _, err := toggleSched(r.Id, r.Enabled); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *clawsonServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+func (s *kotoServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
 	if err := runSchedNow(r.Id); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
@@ -355,7 +355,7 @@ func (s *clawsonServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseR
 
 // ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------
 
-func (s *clawsonServer) AclGet(_ context.Context, _ *pb.AclGetReq) (*pb.AclResp, error) {
+func (s *kotoServer) AclGet(_ context.Context, _ *pb.AclGetReq) (*pb.AclResp, error) {
 	doc, err := readACLDoc()
 	if err != nil {
 		return &pb.AclResp{Error: err.Error()}, nil
@@ -363,7 +363,7 @@ func (s *clawsonServer) AclGet(_ context.Context, _ *pb.AclGetReq) (*pb.AclResp,
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
 }
 
-func (s *clawsonServer) AclSetRole(_ context.Context, r *pb.AclSetRoleReq) (*pb.AclResp, error) {
+func (s *kotoServer) AclSetRole(_ context.Context, r *pb.AclSetRoleReq) (*pb.AclResp, error) {
 	var grants map[string]any
 	if r.Grants != nil {
 		grants = r.Grants.AsMap()
@@ -376,7 +376,7 @@ func (s *clawsonServer) AclSetRole(_ context.Context, r *pb.AclSetRoleReq) (*pb.
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
 }
 
-func (s *clawsonServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.AclResp, error) {
+func (s *kotoServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.AclResp, error) {
 	doc, err := aclDelRoleCmd(r.Role)
 	if err != nil {
 		return &pb.AclResp{Error: err.Error()}, nil
@@ -395,7 +395,7 @@ func (s *clawsonServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.
 // client cancel closes the vsock conn, which makes the guest agent SIGKILL
 // the script's process group. Output is raw — the caller asked for this
 // script's bytes, so no sanitizer (unlike agent streams rendered in the TUI).
-func (s *clawsonServer) RunScript(r *pb.RunScriptReq, stream pb.Clawson_RunScriptServer) error {
+func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServer) error {
 	fail := func(msg string) error {
 		return stream.Send(&pb.ScriptEvent{Event: "error", Error: msg})
 	}
@@ -447,7 +447,7 @@ func (s *clawsonServer) RunScript(r *pb.RunScriptReq, stream pb.Clawson_RunScrip
 	}
 }
 
-func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_SubscribeGroupServer) error {
+func (s *kotoServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Koto_SubscribeGroupServer) error {
 	g := r.GetGroup()
 	if !validGroupName(g) {
 		return status.Error(codes.InvalidArgument, "invalid group name")
@@ -495,7 +495,7 @@ func (s *clawsonServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Clawson_Sub
 	}
 }
 
-func (s *clawsonServer) WatchState(_ *pb.WatchReq, stream pb.Clawson_WatchStateServer) error {
+func (s *kotoServer) WatchState(_ *pb.WatchReq, stream pb.Koto_WatchStateServer) error {
 	// Compute the initial frame BEFORE registering: the watcher must not wait
 	// up to a full tick for its first snapshot. A state change racing between
 	// this compute and the registration is not lost — lastSent still holds
@@ -532,7 +532,7 @@ func (s *clawsonServer) WatchState(_ *pb.WatchReq, stream pb.Clawson_WatchStateS
 	}
 }
 
-func (s *clawsonServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Clawson_SubscribeLogsServer) error {
+func (s *kotoServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Koto_SubscribeLogsServer) error {
 	sub := &logSub{ch: make(chan *pb.LogEvent, 256)}
 	// Snapshot the ring and register under one lock so no frame is dropped or
 	// duplicated across the replay/live boundary.

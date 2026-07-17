@@ -3,7 +3,7 @@
 //
 // Inputs from env (set by entrypoint.sh):
 //   MSG_B64       base64-encoded user message (already augmented by the
-//                 daemon with the <clawson-context> block).
+//                 daemon with the <koto-context> block).
 //   SP_B64        base64-encoded system prompt (composeSystemPrompt output);
 //                 empty if no global/per-group prompt is configured.
 //   VENICE_MODEL  model name (default applied in entrypoint.sh).
@@ -38,7 +38,7 @@ const { spawn } = require('child_process');
 const HISTORY = '/workspace/.cs/venice-history.json';
 const BASE = process.env.ANTHROPIC_BASE_URL;
 // VENICE_MODEL is always set by entrypoint.sh (config model, else the daemon's
-// CLAWSON_DEFAULT_VENICE_MODEL). This literal is a last-resort fallback only;
+// KOTO_DEFAULT_VENICE_MODEL). This literal is a last-resort fallback only;
 // keep it aligned with defaultVeniceModel in daemon.go.
 const MODEL = process.env.VENICE_MODEL || 'kimi-k2.5';
 const TOOL_BUDGET = 25;

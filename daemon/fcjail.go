@@ -1,6 +1,6 @@
 package main
 
-// fcjail.go — a minimal Firecracker jailer adapted to clawson's rootless
+// fcjail.go — a minimal Firecracker jailer adapted to koto's rootless
 // deployment. Upstream's `jailer` binary assumes real root: it mknod's
 // /dev/kvm inside the chroot and manages cgroups, neither of which works
 // inside a rootless podman container (mknod of a device needs CAP_MKNOD in
@@ -8,7 +8,7 @@ package main
 // the primitives that ARE available rootless — verified empirically to boot
 // real Firecracker with full KVM access.
 //
-// The mechanism: the daemon re-execs itself as `clawson fcjail <spec>` with
+// The mechanism: the daemon re-execs itself as `koto fcjail <spec>` with
 // CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS and a uid/gid map that makes
 // the child mapped-root for setup and reserves a distinct unprivileged uid for
 // Firecracker itself. The child (fcjailMain) then, inside its private mount
@@ -41,7 +41,7 @@ import (
 	"syscall"
 )
 
-// fcJailBaseUID is the start of the per-VM uid band. clawson-host's rootless
+// fcJailBaseUID is the start of the per-VM uid band. koto-host's rootless
 // userns maps container uids 1..65536 to unprivileged host subuids, all
 // distinct from the daemon (container uid 0 → host uid 1000). We carve VM uids
 // out of the high end so they never collide with the image's service accounts.
@@ -61,10 +61,10 @@ func fcJailUID(proxyPort int) int {
 }
 
 // fcJailEnabled reports whether Firecracker should be jailed. On by default;
-// CLAWSON_FC_NOJAIL=1 opts out (unjailed, VMM runs as the daemon uid) for
+// KOTO_FC_NOJAIL=1 opts out (unjailed, VMM runs as the daemon uid) for
 // environments that can't create nested user namespaces or for debugging.
 func fcJailEnabled() bool {
-	return os.Getenv("CLAWSON_FC_NOJAIL") != "1"
+	return os.Getenv("KOTO_FC_NOJAIL") != "1"
 }
 
 // fcBind is one bind mount from a host path (src) to a chroot-relative path

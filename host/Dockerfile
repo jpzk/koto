@@ -26,5 +26,5 @@ RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
 # ("-mod may only be set to readonly or vendor when in workspace mode").
 # go run never needs to rewrite go.mod here anyway.
 ENV GOFLAGS=""
-ENV BIND=0.0.0.0 NC_NETWORK=clawson-net PROXY_HOST=cs_host_go
+ENV BIND=0.0.0.0 NC_NETWORK=koto-net PROXY_HOST=cs_host_go
 ENTRYPOINT ["go","run","./daemon","daemon"]

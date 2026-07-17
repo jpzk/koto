@@ -7,7 +7,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: clawson daemon")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon")
 		os.Exit(2)
 	}
 	switch os.Args[1] {

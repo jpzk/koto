@@ -1,4 +1,4 @@
-# clawson
+# koto
 
 Minimal isolated claude-code orchestrator. **Every group is a Firecracker microVM.** **Daemon + isolated TUI container** split. Credential-injecting proxy. Per-group token metrics.
 
@@ -10,13 +10,13 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
 - **[firecracker] VM size is a per-group preset: `config.json` `"size"` = `"small"` (default) | `"medium"` | `"large"`.** One knob sets vCPU + RAM + workspace disk together (small = 2/1024 MiB/8 GiB, medium = 2/2048 MiB/12 GiB, large = 4/4096 MiB/16 GiB). Set at spawn (`/new <g> [provider] [model] size=large`) or on an existing group (`/config size=large`); **applies on `/restart`**. Disk **grows, never shrinks** (grown offline on the host via `truncate` → `e2fsck` → `resize2fs`; needs `e2fsprogs-extra`). Presets replace hand-editing the raw `vcpus`/`mem_mib` keys, which still work as a layered override. Resolved by `fcResolveSize` in `fc.go`; see `docs/firecracker-vsock.md` → "VM size profile".
 - **[firecracker] Passwordless sudo is a per-group profile: `config.json` `"root"` = `"no"` (default) | `"yes"`.** `yes` grants the guest's `node` user (uid 1000, which the entrypoint + `claude` + all bash run as) passwordless sudo; `no`/absent means no path to root. **Safe to grant because the microVM's KVM boundary is the security boundary** — root *inside* the guest is still contained by the VM, so unlike host-side sudo this doesn't widen the host blast radius. Set via `/config root=yes` (or `config_set` from `main`); **applies on `/restart`**. `sudo` ships in the golden rootfs unconditionally; only the grant is runtime-gated — the root drive is read-only, so `fc-agent`'s `enableSudo` (`handleInit`) overlays a tmpfs on `/etc/sudoers.d` and drops the NOPASSWD grant there at boot (gated by `groupRoot` in `fc.go`). **`sudo dnf install` won't persist** (read-only root) — bake packages into the rootfs instead. See `docs/firecracker-vsock.md` → "Root / sudo profile".
 - Each "group" is a long-lived worker running `claude` in a FIFO loop. One `claude -p --continue` invocation per inbound message; `--continue` threads the conversation via session files persisted in the workspace ([podman] a bind mount; [firecracker] `groups/<g>/workspace.img`, an ext4 virtio-block image).
-- `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `clawson-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
-- **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `clawson-tui`, built as a static binary into `scratch`). It mounts only `clawson.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
+- `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `koto-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
+- **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `koto-tui`, built as a static binary into `scratch`). It mounts only `koto.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
 - **Orchestration is verb-based, not file-based.** [podman] `main` also has `/peers` mounted RW (can read+write any group's workspace directly). [firecracker] there is **no shared filesystem** — a microVM group has no `/peers`, so `main` orchestrates peers purely through ctl-plane verbs: `spawn`/`send`/`stop`/`list`/`sched_*` plus `skill_write` (author a `skills/<name>/SKILL.md`), `config_set` (edit any group's config), and `tail` (one-shot last-N lines of a peer's log). Since firecracker is the default, treat the verb path as the primary one; the `/peers` mount is a podman-only convenience.
 - **Every group has a control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails one FIFO per group and authorizes by source group identity. `main` gets the full set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`, plus all `sched_*` verbs against any group. Non-main groups get **only** `sched_add` / `sched_list` / `sched_del` / `sched_toggle` / `sched_run`, with the target group force-overwritten to self — they can self-schedule but cannot reach peers, send arbitrary messages, or escalate. See `prompts/global.md` for the agent-facing docs.
-- Groups can publish TCP ports by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`); range 1024–65535; changes require `/restart <g>`. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly. [podman] the daemon appends `-p 127.0.0.1:P:P` so the port lands on the host loopback. [firecracker] the daemon runs a vsock↔TCP bridge per port that binds **inside `cs_host`** (reachable on `clawson-net` as `cs_host_go:<port>`, not the host loopback — host publishing would need a `-p` on `cs_host` itself).
-- **Provider per group, mandatory in config.json.** `groups/<g>/.cs/config.json` `"provider"` selects the LLM backend: `"venice"` (Venice API; key at `creds/venice.key`, injected by the proxy on a per-request basis) or `"claudesdk"` (Anthropic OAuth via the credential-injecting proxy). The daemon's `ensureProviderConfig` writes `provider=claudesdk` (the default) into any group whose config is missing or invalid on the first `ensure()` call (every spawn / send), so every running group always has an explicit provider — the proxy, sidecar entrypoint, and TUI tree marker can rely on the field being set. Default models when config.json has no `model`: `claude-sonnet-5` for claudesdk, `kimi-k2.5` for venice (single source of truth: `defaultClaudeModel` / `defaultVeniceModel` in `groups.go`, injected into the guest as `CLAWSON_DEFAULT_CLAUDE_MODEL` / `CLAWSON_DEFAULT_VENICE_MODEL` and applied by `sidecar/entrypoint.sh` when `model` is unset; `groupModelName` reports the same values so the TUI always shows the effective model). We deliberately don't seed `model` into config.json, so flipping a group's provider doesn't leave the other provider's model string lying around to be rejected. Provider is read by the proxy on every request and by the sidecar entrypoint on every message — no `/restart` needed to flip it.
+- Groups can publish TCP ports by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`); range 1024–65535; changes require `/restart <g>`. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly. [podman] the daemon appends `-p 127.0.0.1:P:P` so the port lands on the host loopback. [firecracker] the daemon runs a vsock↔TCP bridge per port that binds **inside `cs_host`** (reachable on `koto-net` as `cs_host_go:<port>`, not the host loopback — host publishing would need a `-p` on `cs_host` itself).
+- **Provider per group, mandatory in config.json.** `groups/<g>/.cs/config.json` `"provider"` selects the LLM backend: `"venice"` (Venice API; key at `creds/venice.key`, injected by the proxy on a per-request basis) or `"claudesdk"` (Anthropic OAuth via the credential-injecting proxy). The daemon's `ensureProviderConfig` writes `provider=claudesdk` (the default) into any group whose config is missing or invalid on the first `ensure()` call (every spawn / send), so every running group always has an explicit provider — the proxy, sidecar entrypoint, and TUI tree marker can rely on the field being set. Default models when config.json has no `model`: `claude-sonnet-5` for claudesdk, `kimi-k2.5` for venice (single source of truth: `defaultClaudeModel` / `defaultVeniceModel` in `groups.go`, injected into the guest as `KOTO_DEFAULT_CLAUDE_MODEL` / `KOTO_DEFAULT_VENICE_MODEL` and applied by `sidecar/entrypoint.sh` when `model` is unset; `groupModelName` reports the same values so the TUI always shows the effective model). We deliberately don't seed `model` into config.json, so flipping a group's provider doesn't leave the other provider's model string lying around to be rejected. Provider is read by the proxy on every request and by the sidecar entrypoint on every message — no `/restart` needed to flip it.
   - **Venice path is stateless on the API side**, so the sidecar maintains conversation history in `/workspace/.cs/venice-history.json` and replays the whole transcript per turn (including any `tool_calls`/`role:"tool"` entries from prior turns). `/clear` wipes it (extended in `clearCmd`). Skills are not wired in for Venice; the system prompt (`composeSystemPrompt`) is composed and sent as the first message in the chat array.
   - **Venice has tool use**: `bash` (runs `bash -lc <cmd>` in `/workspace`, 30s timeout, 1MB stdout+stderr cap) and `file` (`op=read|write|edit`, 1MB read cap, edit requires the `old` string to appear exactly once). Tools are advertised on every request via the OpenAI `tools` field; `venice_stream.js` accumulates `delta.tool_calls` chunks, executes each, appends `role:"tool"` messages, and re-calls Venice. Loop is hard-capped at 25 tool calls per user message — beyond that the script writes `[[err]] venice: tool-call budget exhausted` and exits, leaving the user to send another message. Same blast radius as the claude path's bash (runs as uid 1000 `node` inside the sidecar container; container is the trust boundary). Tool calls render in the TUI using the existing `[[tool]]` / `[[tool_out_begin]]…[[tool_out_end]] N` framing so claudesdk and venice groups display identically.
   - **Streaming format is shared between providers.** `sidecar/venice_stream.js` parses Venice's OpenAI-shape SSE deltas and writes them to `/workspace/.cs/log` in the same `[ts:N]\n<text>\n` framing that `stream_filter.js` produces from Claude's stream-json — so the daemon's `tailLog` parses both identically (partial buffer → `stream` event, `\n`-terminated line → `done`).
@@ -32,7 +32,7 @@ relative to cwd, which stays the repo root.
 
 ```
 go.work              workspace: daemon + fcguest + protocol + tui (plus the genproto pin — see its comment)
-daemon/              the daemon Go module (module `clawson`):
+daemon/              the daemon Go module (module `koto`):
   main.go              entry point dispatching `daemon` / `proxy` / `fcjail` subcommands
   daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
   groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
@@ -41,7 +41,7 @@ daemon/              the daemon Go module (module `clawson`):
   logtail.go           per-group log tailer (live) + readHistory (replay parser) — the [[marker]] framing parser
   config.go            config.json command handling (applyConfig validation per key)
   skills.go            skill catalog + composeSystemPrompt + skill_* commands
-  metrics.go           metrics.jsonl tail + <clawson-context> block injected into prompts
+  metrics.go           metrics.jsonl tail + <koto-context> block injected into prompts
   queue.go             per-group single-flight send queue
   cron.go / schedules.go  cron parser + schedule store/loop
   ctl.go               in-guest control plane (FIFO verbs, per-group authorization)
@@ -58,8 +58,8 @@ daemon/              the daemon Go module (module `clawson`):
 fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
-protocol/            the cross-project contract: clawson.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import clawson-protocol/pb; android/ Wire-generates Kotlin from clawson.proto
-android/             Kotlin/Compose app (Gradle project; builds standalone — Wire reads ../protocol/clawson.proto)
+protocol/            the cross-project contract: koto.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import koto-protocol/pb; android/ Wire-generates Kotlin from koto.proto
+android/             Kotlin/Compose app (Gradle project; builds standalone — Wire reads ../protocol/koto.proto)
 sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-subagent (baked into the fc rootfs)
 host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
@@ -68,7 +68,7 @@ groups/<g>/prompt.md per-group system prompt (lives in the workspace, group-writ
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
 Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean (safe) / clean-groups (destructive, prompted) / fc-assets
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
-                     into cs_tui at /clawson-scripts; run in the focused group's
+                     into cs_tui at /koto-scripts; run in the focused group's
                      microVM as node via the admin-only RunScript RPC)
 creds/               OAuth credentials (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
@@ -84,14 +84,14 @@ proxy.log            proxy stdout when launched by daemon (gitignored)
 ## Build & run
 
 ```sh
-make host-build    # builds clawson + clawson-host images
+make host-build    # builds koto + koto-host images
 make fc-assets     # fetch firecracker (pinned v1.11.0) + CI kernel + build golden rootfs.img
                    #   REQUIRED for the default (firecracker) runtime; rebuild the rootfs
                    #   (`make fc-rootfs`) after editing sidecar/*.{sh,js} or fcguest/ —
                    #   microVMs have no live bind mounts (the one ergonomic regression vs podman)
 make login         # one-time OAuth into ./creds/.credentials.json
 make host-run      # starts cs_host detached (daemon + proxy + main group); passes --device /dev/kvm when present
-make tui-build     # builds clawson-tui image (Go static binary on scratch); first time only
+make tui-build     # builds koto-tui image (Go static binary on scratch); first time only
 make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
                    # Ctrl+C exits TUI; daemon keeps running. Reattach with `make tui` again.
 make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon
@@ -109,12 +109,12 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        (admin-only RunScript RPC), output streamed into chat
 ```
 
-## Daemon protocol (gRPC over mTLS, `protocol/clawson.proto`)
+## Daemon protocol (gRPC over mTLS, `protocol/koto.proto`)
 
-The wire contract is the `Clawson` gRPC service in `protocol/clawson.proto`
+The wire contract is the `Koto` gRPC service in `protocol/koto.proto`
 (generated Go in `protocol/pb`, regenerate with `make proto-gen`, CI-guard with
-`make proto-verify`). Transport is TCP `:8443` (bind via `CLAWSON_BIND`/
-`CLAWSON_PORT`), secured by mTLS (private CA + client-cert fingerprint
+`make proto-verify`). Transport is TCP `:8443` (bind via `KOTO_BIND`/
+`KOTO_PORT`), secured by mTLS (private CA + client-cert fingerprint
 allowlist in `creds/clients.allow`) plus a per-RPC bearer token — see
 `auth.go` and `make pki-init` / `make pki-client`. Clients: the Go TUI
 (`tui/daemon.go`) and the Android app; both consume the same proto, so
@@ -213,12 +213,12 @@ TUI driving (all phrased as one shell-style line so cron fields don't need quoti
 - **Proxy merges `anthropic-beta` headers.** Claude code sends a beta list including `context-management-*`. Overwriting that with only `oauth-2025-04-20` makes the API return `400 "Extra inputs are not permitted"`. The proxy now appends our oauth beta to whatever the client sent.
 - **Proxy stdout redirected to file.** Proxy goes to `proxy.log` so it never corrupts a foreground TUI's escape sequences. `podman run` calls in `nc.py` use `capture_output=True` for the same reason.
 - **Streaming events come from a daemon-side log tailer, not from the TUI.** `nc.py` runs one `_tail_log(g)` thread per group with at least one subscriber; it parses lines (`>>> ` = prompt, otherwise = response) and fans out JSON event frames to all subscribers. Trade-off vs. the old approach: the daemon does more work, but `cs_tui` no longer needs filesystem access — it can run with `--network=none` and a single bind-mounted socket.
-- **`cs_tui` runs with `--network=none` and only `clawson.sock` mounted.** The TUI is a Go (Bubble Tea) static binary on `scratch` — 4 direct deps (`bubbletea`/`bubbles`/`lipgloss`/`glamour`, all charmbracelet org) plus ~30 indirect, every one pinned and >6 weeks old per the supply-chain rule. The runtime image has no shell, no toolchain, no ca-certs, just the binary. A compromised TUI cannot reach the proxy, the API, or other sidecars.
+- **`cs_tui` runs with `--network=none` and only `koto.sock` mounted.** The TUI is a Go (Bubble Tea) static binary on `scratch` — 4 direct deps (`bubbletea`/`bubbles`/`lipgloss`/`glamour`, all charmbracelet org) plus ~30 indirect, every one pinned and >6 weeks old per the supply-chain rule. The runtime image has no shell, no toolchain, no ca-certs, just the binary. A compromised TUI cannot reach the proxy, the API, or other sidecars.
 - **`claude -p --bare` for sidecars.** `--bare` disables CLAUDE.md auto-discovery, hooks, plugin sync, auto-memory, background prefetch, and keychain reads. We want the harness to be the only source of context — no surprise pickup of files inside the workspace. Tools (bash/edit/read) and the default tool-describing system prompt remain. Combined with `--append-system-prompt` reading from `prompts/global.md` + `/workspace/prompt.md`, this gives us two-tier prompt control without claude code's discovery surface.
 - **Per-group prompts live inside the sidecar's writable workspace.** `groups/<g>/prompt.md` is read on every message via the existing workspace mount; the sidecar can rewrite it (only affecting its own future invocations). Accepted trade-off vs. moving per-group prompts to a host-only `prompts/<g>.md` and ro-mounting them — co-location with the workspace was the priority.
 - **TUI maintains one subscribe connection per group + ad-hoc one-shots for commands.** Subscribe is the only long-lived verb in the protocol; everything else is request/response/close. The `subscribe` handler in `serve()` returns early to skip the connection-close in the `finally` clause, transferring writer ownership to the `SUBS` registry.
 - **Matching-path bind mount in `host/run-host.sh`** (`-v "$HERE:$HERE"`). Originally required because podman-era sidecars were spawned via the outer podman socket, which resolved `-v` paths against the *real host* filesystem — so the project had to sit at the same absolute path inside `cs_host_go`. That socket is now gone (no DooD); Firecracker resolves asset/workspace paths directly inside `cs_host`, so the *matching* aspect is vestigial. The mount itself stays — it's how the source reaches `cs_host` for `go run` — and keeping it path-matched costs nothing.
-- **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the clawson token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
+- **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the koto token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
 - **`--security-opt label=disable` on every podman run.** Fedora SELinux policy denies container access to user-owned bind mounts unless this is set or `:Z` relabeling is used. We pick `label=disable` because the trust model already accepts that; `:Z` would relabel the user's home dir.
 
 ## Trust model
@@ -233,7 +233,7 @@ tier 1: HOST USER         you, run-host.sh, real podman daemon
    v
 tier 2: cs_host           nc.py + proxy.py + claude-for-refresh
                           (semi-trusted; vetted code + pinned deps)
-                          blast radius: clawson OAuth token + workspaces.
+                          blast radius: koto OAuth token + workspaces.
                           NO podman socket — the DooD mount was removed
                           (its last user, whisper STT, is gone), so a
                           cs_host compromise no longer reaches the host's
@@ -255,7 +255,7 @@ host↔guest channel is vsock; see `docs/firecracker-vsock.md`. The two paragrap
 below describe the podman runtime's weaknesses — **both are closed by the
 microVM runtime**, which is why it's now the default:
 
-**[podman runtime] Sidecar network egress is NOT restricted.** `clawson-net`
+**[podman runtime] Sidecar network egress is NOT restricted.** `koto-net`
 (created in `host/run-host.sh`) is a plain podman bridge — `"internal":
 false` — so every podman sidecar gets NAT'd outbound and can reach **the full
 internet and the host's local network (LAN)**, plus every other sidecar on
@@ -287,7 +287,7 @@ gateway over vsock, not as the runtime boundary.)
 **The Firecracker VMM process is jailed** (`fcjail.go`). The KVM boundary
 protects the host from the *guest*; the jailer protects the host from a
 compromise of the *VMM process itself* (a virtio/vsock device-model bug). The
-daemon re-execs FC as `clawson fcjail` in `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|
+daemon re-execs FC as `koto fcjail` in `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|
 NEWIPC|NEWUTS`, bind-mounts only what FC needs into a per-VM chroot, and drops
 to a distinct unprivileged per-VM uid with `no_new_privs` (FC's own seccomp
 stays on). So a VMM escape lands as a nobody uid in an empty chroot with no
@@ -295,10 +295,10 @@ network — **it cannot reach the creds mount** (and there is no longer a podman
 socket to reach either — see below). Upstream's `jailer` binary isn't usable here
 (it `mknod`s devices, needing `CAP_MKNOD` in the init userns that a rootless
 `cs_host` lacks), so this reimplements its model with rootless-safe primitives;
-verified booting real FC to KVM. Opt out with `CLAWSON_FC_NOJAIL=1`. See
+verified booting real FC to KVM. Opt out with `KOTO_FC_NOJAIL=1`. See
 `docs/firecracker-vsock.md` → "Jailer".
 
-The "we trust the host user" decision was deliberate. **The DooD podman socket has been removed** — it used to be mounted into `cs_host` and equalled host authority, but its only remaining user was the whisper STT container, so removing whisper let us drop the mount entirely (and podman from the `cs_host` image). A `cs_host` compromise can now reach the clawson OAuth token + workspaces, but has **no path to the host's podman daemon** and so cannot spawn privileged containers or mount the host root. This was tier 2's single largest blast-radius reduction. (If voice notes come back, run whisper as a pre-started `--network=none` sidecar the daemon talks to over a private socket — not by re-mounting the DooD socket.)
+The "we trust the host user" decision was deliberate. **The DooD podman socket has been removed** — it used to be mounted into `cs_host` and equalled host authority, but its only remaining user was the whisper STT container, so removing whisper let us drop the mount entirely (and podman from the `cs_host` image). A `cs_host` compromise can now reach the koto OAuth token + workspaces, but has **no path to the host's podman daemon** and so cannot spawn privileged containers or mount the host root. This was tier 2's single largest blast-radius reduction. (If voice notes come back, run whisper as a pre-started `--network=none` sidecar the daemon talks to over a private socket — not by re-mounting the DooD socket.)
 
 ## Trust model addendum: cs_tui
 
@@ -306,7 +306,7 @@ The "we trust the host user" decision was deliberate. **The DooD podman socket h
 
 ```
 tier 2.5: cs_tui          Go (Bubble Tea) TUI, static binary on scratch
-                          --network=none, fs: clawson.sock only
+                          --network=none, fs: koto.sock only
                           can: send commands the daemon accepts, read stream events
                           cannot: reach proxy, sidecars, API, read group workspaces, or exec anything
 ```
@@ -329,17 +329,17 @@ To drive the gRPC API directly, use `grpcurl` with the client PKI material
 ```sh
 grpcurl -cacert creds/ca.crt -cert creds/client-tui.crt -key creds/client-tui.key \
   -H "authorization: Bearer $(cat creds/token-tui)" \
-  -proto protocol/clawson.proto 127.0.0.1:8443 clawson.Clawson/List
+  -proto protocol/koto.proto 127.0.0.1:8443 koto.Koto/List
 ```
 
-**`clawson ctl` is the ergonomic client for agents** — the same daemon binary,
+**`koto ctl` is the ergonomic client for agents** — the same daemon binary,
 `ctl` subcommand (`daemon/ctl_cli.go`), one process invocation per verb that
 prints the response as JSON and exits (0 ok, 1 daemon-error/transport, 2
-usage). Build with `make ctl-build` → `./clawson`. Auth + authorization are
+usage). Build with `make ctl-build` → `./koto`. Auth + authorization are
 the same mTLS + bearer token + role ACL every client goes through, so a verb
 the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
-and endpoint resolve from `CLAWSON_*` env (`CLAWSON_ADDR`, `CLAWSON_CREDS_DIR`,
-`CLAWSON_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `CLAWSON_SERVER_NAME`).
+and endpoint resolve from `KOTO_*` env (`KOTO_ADDR`, `KOTO_CREDS_DIR`,
+`KOTO_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `KOTO_SERVER_NAME`).
 Every gRPC RPC has a `ctl` verb (26/26). Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, skills (`skills`/`skill-new`/
@@ -349,22 +349,22 @@ script in the group's microVM as `node`, output streamed raw to stdout,
 `"-"` = script from stdin).
 ```sh
 make pki-client NAME=agent ROLE=agent          # mint a scoped identity
-CLAWSON_CLIENT=agent ./clawson ctl list
-CLAWSON_CLIENT=agent ./clawson ctl ask main "status?"   # send + stream reply, exit at turn end
-CLAWSON_CLIENT=agent ./clawson ctl history -limit 20 main
-CLAWSON_CLIENT=agent ./clawson ctl config main            # read effective config
-CLAWSON_CLIENT=tui   ./clawson ctl config main -network wan -size large  # set (group FIRST, flags after)
-CLAWSON_CLIENT=agent ./clawson ctl tail main | jq .       # one event per line
+KOTO_CLIENT=agent ./koto ctl list
+KOTO_CLIENT=agent ./koto ctl ask main "status?"   # send + stream reply, exit at turn end
+KOTO_CLIENT=agent ./koto ctl history -limit 20 main
+KOTO_CLIENT=agent ./koto ctl config main            # read effective config
+KOTO_CLIENT=tui   ./koto ctl config main -network wan -size large  # set (group FIRST, flags after)
+KOTO_CLIENT=agent ./koto ctl tail main | jq .       # one event per line
 # admin-only ACL management:
-CLAWSON_CLIENT=tui ./clawson ctl acl get
-CLAWSON_CLIENT=tui ./clawson ctl acl set ops stop:ghost restart:ghost list metrics
-CLAWSON_CLIENT=tui ./clawson ctl acl del ops
+KOTO_CLIENT=tui ./koto ctl acl get
+KOTO_CLIENT=tui ./koto ctl acl set ops stop:ghost restart:ghost list metrics
+KOTO_CLIENT=tui ./koto ctl acl del ops
 ```
 `config` takes the group as the first positional with flags *after* it
 (`config <group> [-flags]`); an explicit `-key ""` clears that key, an absent
 flag leaves it unchanged. Streaming verbs (`tail`/`logs`/`watch`) print one
 protojson frame per line. The daemon port isn't host-published by default (see
-run-host.sh `CLAWSON_PUBLISH`); `ctl` either runs on `clawson-net` or dials a
+run-host.sh `KOTO_PUBLISH`); `ctl` either runs on `koto-net` or dials a
 published endpoint. `ask` subscribes before sending, so no reply frame is
 missed, and exits at `turn_end`.
 

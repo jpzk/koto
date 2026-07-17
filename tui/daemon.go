@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -21,7 +21,7 @@ import (
 )
 
 // The wire contract shared with the daemon is the proto alone (generated
-// code in clawson-protocol/pb); the view types it converts into live in
+// code in koto-protocol/pb); the view types it converts into live in
 // wire.go. The daemon transport is gRPC over mTLS+token (see the daemon's
 // auth.go); this file holds the client side. The historical `sock`
 // parameter on every *Cmd is retained for call-site stability but is no
@@ -40,9 +40,9 @@ func (t tokenCreds) GetRequestMetadata(context.Context, ...string) (map[string]s
 func (tokenCreds) RequireTransportSecurity() bool { return true }
 
 func clientTLS() (*tls.Config, error) {
-	certPath := envOr("CLAWSON_CERT", "/clawson-creds/client.crt")
-	keyPath := envOr("CLAWSON_KEY", "/clawson-creds/client.key")
-	caPath := envOr("CLAWSON_CA", "/clawson-creds/ca.crt")
+	certPath := envOr("KOTO_CERT", "/koto-creds/client.crt")
+	keyPath := envOr("KOTO_KEY", "/koto-creds/client.key")
+	caPath := envOr("KOTO_CA", "/koto-creds/ca.crt")
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("client cert: %w", err)
@@ -62,7 +62,7 @@ func clientTLS() (*tls.Config, error) {
 	}
 	// Override the verified server name when the dial target (an overlay IP)
 	// doesn't itself appear in the server cert SAN.
-	if sn := os.Getenv("CLAWSON_SERVER_NAME"); sn != "" {
+	if sn := os.Getenv("KOTO_SERVER_NAME"); sn != "" {
 		cfg.ServerName = sn
 	}
 	return cfg, nil
@@ -70,21 +70,21 @@ func clientTLS() (*tls.Config, error) {
 
 var (
 	clientOnce sync.Once
-	client     pb.ClawsonClient
+	client     pb.KotoClient
 	clientErr  error
 )
 
-func getClient() (pb.ClawsonClient, error) {
+func getClient() (pb.KotoClient, error) {
 	clientOnce.Do(func() {
 		tcfg, err := clientTLS()
 		if err != nil {
 			clientErr = err
 			return
 		}
-		ep := envOr("CLAWSON_ENDPOINT", "127.0.0.1:8443")
+		ep := envOr("KOTO_ENDPOINT", "127.0.0.1:8443")
 		cc, err := grpc.NewClient(ep,
 			grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
-			grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("CLAWSON_TOKEN")}),
+			grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("KOTO_TOKEN")}),
 			// Transport keepalive replaces the daemon's old app-level `ping`
 			// frames: HTTP/2 pings detect a dead link under the long-lived
 			// Subscribe/Watch streams, which would otherwise block in Recv
@@ -99,7 +99,7 @@ func getClient() (pb.ClawsonClient, error) {
 			clientErr = err
 			return
 		}
-		client = pb.NewClawsonClient(cc)
+		client = pb.NewKotoClient(cc)
 	})
 	return client, clientErr
 }
@@ -145,7 +145,7 @@ func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, err
 	return out, nil
 }
 
-func callRPC(ctx context.Context, cl pb.ClawsonClient, cmd string, extra map[string]any) (proto.Message, error) {
+func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string]any) (proto.Message, error) {
 	s := func(k string) string { v, _ := extra[k].(string); return v }
 	switch cmd {
 	case "list":

@@ -1,4 +1,4 @@
-// Wire contract shared by the clawson daemon (Go), the TUI (Go), and the
+// Wire contract shared by the koto daemon (Go), the TUI (Go), and the
 // Android client (Kotlin). Generated Go code lands in ./pb (committed; run
 // `make proto-gen`). Field names are snake_case to match the historical JSON
 // keys the TUI still consumes via protojson(UseProtoNames:true).
@@ -13,14 +13,14 @@
 //   - arbitrary JSON objects (config, metrics) map to google.protobuf.Struct.
 syntax = "proto3";
 
-package clawson;
+package koto;
 
-option go_package = "clawson-protocol/pb;pb";
+option go_package = "koto-protocol/pb;pb";
 
 import "google/protobuf/struct.proto";
 import "google/protobuf/empty.proto";
 
-service Clawson {
+service Koto {
   // ---- unary (one per legacy dispatch case) ----
   rpc Spawn       (SpawnReq)       returns (SpawnResp);
   rpc Send        (SendReq)        returns (BaseResp);

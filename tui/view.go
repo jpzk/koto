@@ -202,7 +202,7 @@ func (m Model) renderStatusBar(spin string) string {
 }
 
 func (m Model) renderStatusLeft() string {
-	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render("  clawson ")
+	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render("  koto ")
 	a1 := lipgloss.NewStyle().Foreground(cAmber).Background(cDkAmber).Render(pSep)
 	runDot := " "
 	if g, ok := m.groups[m.cur]; ok && g.Running {

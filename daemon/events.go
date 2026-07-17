@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 )
 
 // ---- streaming: subscribers + tail ----------------------------------------

@@ -8,7 +8,7 @@ package main
 // interface: outbound TCP and UDP (any port) with NAT + DNS — without a host
 // tap/bridge or root, so it fits the rootless cs_host. (ICMP/ping is
 // best-effort: the gateway must be able to open a raw/unprivileged ICMP socket
-// on the host; TCP/UDP — all clawson tooling — need no special privilege.)
+// on the host; TCP/UDP — all koto tooling — need no special privilege.)
 //
 // Topology (per networked group):
 //
@@ -162,8 +162,8 @@ func fcClassifyDst(ip net.IP) fcDstClass {
 		return fcDstCtl // 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
 	}
 	// cs_host's own addresses — the daemon and every group's proxy port live
-	// here (gRPC on CLAWSON_BIND:CLAWSON_PORT, proxies on 0.0.0.0:<port>,
-	// reachable on clawson-net as cs_host_go:<port>). (Bind 0.0.0.0 resolves
+	// here (gRPC on KOTO_BIND:KOTO_PORT, proxies on 0.0.0.0:<port>,
+	// reachable on koto-net as cs_host_go:<port>). (Bind 0.0.0.0 resolves
 	// to every local IP, so enumerating our own addrs is the only reliable
 	// block — a literal 0.0.0.0 check never matches a packet.)
 	for _, self := range fcSelfIPs() {

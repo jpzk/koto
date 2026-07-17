@@ -1,4 +1,4 @@
-module clawson-fcagent
+module koto-fcagent
 
 go 1.24.0
 

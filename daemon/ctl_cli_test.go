@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
-// TestCtlCLI exercises the built `clawson ctl` binary end to end against an
+// TestCtlCLI exercises the built `koto ctl` binary end to end against an
 // in-process gRPC server running the real TLS config, auth + ACL
 // interceptors, and handlers. It asserts the happy path (agent list), the
 // role/ACL gate (agent may not stop, admin may), the admin-only ACL verbs
@@ -44,7 +44,7 @@ func TestCtlCLI(t *testing.T) {
 		grpc.ChainUnaryInterceptor(authUnary),
 		grpc.ChainStreamInterceptor(authStream),
 	)
-	pb.RegisterClawsonServer(srv, &clawsonServer{})
+	pb.RegisterKotoServer(srv, &kotoServer{})
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -53,8 +53,8 @@ func TestCtlCLI(t *testing.T) {
 	defer srv.Stop()
 
 	// Build the binary from the package under test (the daemon dir is the
-	// test's working directory), so `clawson ctl` is the code we just wrote.
-	bin := filepath.Join(t.TempDir(), "clawson")
+	// test's working directory), so `koto ctl` is the code we just wrote.
+	bin := filepath.Join(t.TempDir(), "koto")
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -62,10 +62,10 @@ func TestCtlCLI(t *testing.T) {
 	run := func(client string, args ...string) (string, string, error) {
 		cmd := exec.Command(bin, append([]string{"ctl"}, args...)...)
 		cmd.Env = append(os.Environ(),
-			"CLAWSON_ADDR="+l.Addr().String(),
-			"CLAWSON_CREDS_DIR="+filepath.Join(HERE, "creds"),
-			"CLAWSON_CLIENT="+client,
-			"CLAWSON_SERVER_NAME=localhost",
+			"KOTO_ADDR="+l.Addr().String(),
+			"KOTO_CREDS_DIR="+filepath.Join(HERE, "creds"),
+			"KOTO_CLIENT="+client,
+			"KOTO_SERVER_NAME=localhost",
 		)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -161,11 +161,11 @@ func TestCtlCLI(t *testing.T) {
 	t.Run("bad-token-fails", func(t *testing.T) {
 		cmd := exec.Command(bin, "ctl", "list")
 		cmd.Env = append(os.Environ(),
-			"CLAWSON_ADDR="+l.Addr().String(),
-			"CLAWSON_CREDS_DIR="+filepath.Join(HERE, "creds"),
-			"CLAWSON_CLIENT=agent",
-			"CLAWSON_SERVER_NAME=localhost",
-			"CLAWSON_TOKEN=wrong",
+			"KOTO_ADDR="+l.Addr().String(),
+			"KOTO_CREDS_DIR="+filepath.Join(HERE, "creds"),
+			"KOTO_CLIENT=agent",
+			"KOTO_SERVER_NAME=localhost",
+			"KOTO_TOKEN=wrong",
 		)
 		if err := cmd.Run(); err == nil {
 			t.Fatal("bad token should fail")

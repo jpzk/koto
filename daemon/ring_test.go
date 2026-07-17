@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 )
 
 // resetRingState clears the seq/ring globals so each test starts clean.

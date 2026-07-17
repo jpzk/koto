@@ -1,4 +1,4 @@
-# clawson backend security analysis — 2026-05-19
+# koto backend security analysis — 2026-05-19
 
 Scope: host-side Go (`daemon.go`, `proxy.go`, `ctl.go`, `schedules.go`, `cron.go`, `main.go`), the host/sidecar shell glue (`host/run-host.sh`, `host/Dockerfile`, `sidecar/entrypoint.sh`, `sidecar/stream_filter.js`, `sidecar/start-chrome.sh`, `sidecar/Dockerfile`), `Makefile`, and `prompts/global.md`. TUI excluded.
 
@@ -9,10 +9,10 @@ operator (uid 1000)  ──┐
    │                   │ unix socket (0o660, no auth)
    │                   ▼
    │           ┌──────────────────┐  DooD ─► /run/podman/podman.sock (root)
-   │           │  cs_host_go      │  has clawson OAuth creds RW
+   │           │  cs_host_go      │  has koto OAuth creds RW
    │           │  daemon + proxy  │  go run . (toolchain in image)
    │           └──────┬───────────┘
-   │                  │ clawson-net (BIND=0.0.0.0)
+   │                  │ koto-net (BIND=0.0.0.0)
    │                  │ ANTHROPIC_BASE_URL=http://cs_host_go:<port>
    ▼                  ▼
   cs_tui (no net,     cs_main_go ─── /peers RW ───► cs_<g>_go (peers)
@@ -26,13 +26,13 @@ Tiers (per CLAUDE.md): host user (1) ▶ cs_host_go (2) ▶ sidecars (3), with c
 
 ### 1. Proxy ports are advertised, not authenticated  (HIGH, design)
 
-`proxy.go:303` — `listen(bind, port, group)` binds a TCP listener per group on cs_host_go. The `group` is a label baked into the handler at listen time, with no verification against the connecting peer. Any sidecar on `clawson-net` can hit `http://cs_host_go:<any-other-port>/v1/messages` and:
+`proxy.go:303` — `listen(bind, port, group)` binds a TCP listener per group on cs_host_go. The `group` is a label baked into the handler at listen time, with no verification against the connecting peer. Any sidecar on `koto-net` can hit `http://cs_host_go:<any-other-port>/v1/messages` and:
 
 - have the request authenticated with the operator's OAuth token,
 - be attributed in `metrics.jsonl` and `[ts:N]` log to a different group,
 - consume that group's rate-limit budget (5h/7d).
 
-Host-side `BIND=0.0.0.0` in `host/Dockerfile` makes every per-group port reachable from every sidecar. Pasta + `clawson-net` prevent LAN exposure, but **intra-net cross-group impersonation is unmitigated**. Any other container later attached to `clawson-net` also gets free upstream Anthropic calls billed to the operator.
+Host-side `BIND=0.0.0.0` in `host/Dockerfile` makes every per-group port reachable from every sidecar. Pasta + `koto-net` prevent LAN exposure, but **intra-net cross-group impersonation is unmitigated**. Any other container later attached to `koto-net` also gets free upstream Anthropic calls billed to the operator.
 
 Fixes worth considering: bind per-group ports to distinct unix sockets and mount only the matching one into each sidecar; or include a per-group token in `ANTHROPIC_BASE_URL` that the proxy checks.
 
@@ -46,7 +46,7 @@ Fixes worth considering: bind per-group ports to distinct unix sockets and mount
 - `config`  → writes `.cs/config.json`
 - `history` → reads `.cs/log` (info disclosure)
 
-The ctl plane already validates with `ctlGroupRE`; the daemon socket path is trusted only because the socket itself is. But `run/clawson.sock` is `0o660` — anyone in the operator's primary group, plus root, plus anything in the operator's UID, can connect. Combined with DooD this is full host root, but socket access already implies that. Treat as defense-in-depth: apply `ctlGroupRE` (or stricter) at `dispatch()` too. Cheap, removes a class of "future verb forgets to validate" footguns.
+The ctl plane already validates with `ctlGroupRE`; the daemon socket path is trusted only because the socket itself is. But `run/koto.sock` is `0o660` — anyone in the operator's primary group, plus root, plus anything in the operator's UID, can connect. Combined with DooD this is full host root, but socket access already implies that. Treat as defense-in-depth: apply `ctlGroupRE` (or stricter) at `dispatch()` too. Cheap, removes a class of "future verb forgets to validate" footguns.
 
 ### 3. Persistent prompt injection via `prompt.md`  (HIGH, design)
 
@@ -89,7 +89,7 @@ Mounted ro into every sidecar including untrusted ones. Currently contains: the 
 
 ### 9. `anthropic-beta` is client-controlled  (LOW)
 
-Proxy concatenates the client's `anthropic-beta` header with the proxy's `oauth-2025-04-20`. Sidecars can opt into any beta the API accepts. Bounded by what Anthropic exposes, but not a clawson-side allowlist. Acceptable; just note it.
+Proxy concatenates the client's `anthropic-beta` header with the proxy's `oauth-2025-04-20`. Sidecars can opt into any beta the API accepts. Bounded by what Anthropic exposes, but not a koto-side allowlist. Acceptable; just note it.
 
 ## Items checked and OK
 

@@ -142,12 +142,12 @@ func contextBlock(m map[string]any) string {
 		dur = strconv.FormatInt(n, 10)
 	}
 	return fmt.Sprintf(
-		"<clawson-context>\n"+
+		"<koto-context>\n"+
 			"now: %s (%s)\n"+
 			"rate-limit: 5h=%s (resets %s) | 7d=%s (resets %s)\n"+
 			"overage: %s\n"+
 			"last-call: in=%d cache_rd=%d cache_cr=%d out=%d dur=%sms\n"+
-			"</clawson-context>",
+			"</koto-context>",
 		now.Format("2006-01-02T15:04:05-07:00"),
 		now.Format("Monday"),
 		util("anthropic-ratelimit-unified-5h-utilization"),

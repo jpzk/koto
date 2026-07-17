@@ -13,7 +13,7 @@ package main
 //     daemon does not push image bytes into the model. Keeps the trust boundary
 //     unchanged: bytes land in the group's own writable workspace, nowhere else.
 //   - Audio (voice notes) is currently NOT supported: local transcription used a
-//     clawson-whisper container over the DooD podman socket, and that socket was
+//     koto-whisper container over the DooD podman socket, and that socket was
 //     removed (it was cs_host's last path to host authority — see run-host.sh).
 //     The audio wire fields are retained; a request carrying audio is rejected
 //     with a clear error rather than silently dropped.
@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 )
 
 // Attachment size cap for images. Generous enough for phone photos, tight

@@ -1,13 +1,13 @@
 // Package wire holds the daemon's JSON wire types. The client-facing
-// transport is gRPC (see protocol/clawson.proto and the generated pb);
+// transport is gRPC (see protocol/koto.proto and the generated pb);
 // these JSON types survive in two places: the per-group FIFO ctl plane
 // (ctl.go serializes them as line-delimited JSON over ctl/ctl.out) and as
 // the in-memory event/state shapes the daemon converts to and from the
 // generated pb messages.
 //
 // This package is daemon-internal. It used to live in the shared
-// clawson-protocol module, but the cross-project contract is now the proto
-// alone: the TUI and the Android app consume only clawson.proto (or its
+// koto-protocol module, but the cross-project contract is now the proto
+// alone: the TUI and the Android app consume only koto.proto (or its
 // committed generated code), never these types.
 package wire
 
@@ -35,7 +35,7 @@ type Event struct {
 	// TUI can correlate the firing back to its row in /sched list.
 	ID string `json:"id,omitempty"`
 	// Seq is the per-group monotonic sequence number the daemon assigns to
-	// live streaming frames (see clawson.proto Event.seq). Zero for events
+	// live streaming frames (see koto.proto Event.seq). Zero for events
 	// re-parsed from the log by the History RPC.
 	Seq uint64 `json:"seq,omitempty"`
 }

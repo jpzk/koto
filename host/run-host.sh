@@ -1,32 +1,32 @@
 #!/bin/sh
 set -e
-# NOTE: the host user's own podman (below) creates clawson-net and the cs_host
+# NOTE: the host user's own podman (below) creates koto-net and the cs_host
 # container — that's tier-1 authority, by definition. What cs_host does NOT get
 # is the podman *socket*: there is no DooD mount anymore (groups are microVMs
 # launched via the firecracker binary, not podman). cs_host therefore has no
 # path to the host's podman daemon at all.
-podman network exists clawson-net || podman network create clawson-net >/dev/null
+podman network exists koto-net || podman network create koto-net >/dev/null
 # HERE = project root. The script lives in host/, so go up one level. The
 # matching-path bind mount (`-v "$HERE:$HERE"`) requires HERE to resolve to
 # the same absolute path inside cs_host_go and on the real host, which is
 # only true when HERE is the project root (the path the user is in).
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-# CLAWSON_INSTANCE (opt-in): lets a second checkout — e.g. a git worktree —
+# KOTO_INSTANCE (opt-in): lets a second checkout — e.g. a git worktree —
 # run its own daemon alongside this one on the same host. Every other piece
 # of state (groups/, groups.json, creds/, run/, .gocache, .gomodcache) is
 # already resolved relative to $HERE, so a second worktree gets its own for
 # free; the container *name* is the only thing hardcoded enough to collide
-# (this script force-removes it on every start). clawson-net stays shared —
+# (this script force-removes it on every start). koto-net stays shared —
 # containers on the same bridge don't collide on port or address, since each
 # has its own network namespace — so no per-instance network is needed.
 CS_HOST_NAME="cs_host_go"
-[ -n "${CLAWSON_INSTANCE:-}" ] && CS_HOST_NAME="cs_host_go_${CLAWSON_INSTANCE}"
+[ -n "${KOTO_INSTANCE:-}" ] && CS_HOST_NAME="cs_host_go_${KOTO_INSTANCE}"
 mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache" "$HERE/.gomodcache"
 [ -f "$HERE/creds/.credentials.json" ] || { echo "no creds: run \`make login\` first"; exit 1; }
 [ -f "$HERE/creds/server.crt" ] || { echo "no daemon TLS cert: run \`make pki-init\` first"; exit 1; }
 # creds/ and fcassets/ are sometimes symlinked in from another checkout to
 # share one OAuth login + PKI, or the ~800MB firecracker binary+kernel+rootfs
-# (e.g. a second worktree running its own instance via CLAWSON_INSTANCE
+# (e.g. a second worktree running its own instance via KOTO_INSTANCE
 # above). The daemon reads both via a $HERE-relative path, resolved through
 # the `-v "$HERE:$HERE"` mount below — if the symlink target lives outside
 # $HERE, that target isn't mounted anywhere in the container's namespace and
@@ -39,18 +39,18 @@ for d in creds fcassets; do
     [ "$real" != "$HERE/$d" ] && EXTRA_MOUNTS="$EXTRA_MOUNTS -v $real:$real"
   fi
 done
-# gRPC listener address. Inside cs_host_go (on the private clawson-net) 0.0.0.0
-# is reachable only by clawson-net peers — the port is NOT host-published. For
-# an off-box daemon, set CLAWSON_BIND to the WireGuard interface IP instead.
-CLAWSON_BIND="${CLAWSON_BIND:-0.0.0.0}"
-CLAWSON_PORT="${CLAWSON_PORT:-8443}"
-# CLAWSON_PUBLISH (opt-in): host endpoint to publish the gRPC port to, e.g.
+# gRPC listener address. Inside cs_host_go (on the private koto-net) 0.0.0.0
+# is reachable only by koto-net peers — the port is NOT host-published. For
+# an off-box daemon, set KOTO_BIND to the WireGuard interface IP instead.
+KOTO_BIND="${KOTO_BIND:-0.0.0.0}"
+KOTO_PORT="${KOTO_PORT:-8443}"
+# KOTO_PUBLISH (opt-in): host endpoint to publish the gRPC port to, e.g.
 # 127.0.0.1:8443. Needed for a local Android emulator, which reaches the host
-# loopback via 10.0.2.2 — set CLAWSON_PUBLISH=127.0.0.1:8443 so the guest can
+# loopback via 10.0.2.2 — set KOTO_PUBLISH=127.0.0.1:8443 so the guest can
 # dial 10.0.2.2:8443. Left unset by default to keep the port off the host (mTLS
 # +token still gate it, but loopback-only is the safer default).
 PUBLISH_ARG=""
-[ -n "${CLAWSON_PUBLISH:-}" ] && PUBLISH_ARG="-p ${CLAWSON_PUBLISH}:${CLAWSON_PORT}"
+[ -n "${KOTO_PUBLISH:-}" ] && PUBLISH_ARG="-p ${KOTO_PUBLISH}:${KOTO_PORT}"
 # Firecracker runtime: pass /dev/kvm through when the host has it so the
 # daemon can boot microVM groups (config.json "runtime": "firecracker").
 # /dev/kvm is 0666 on Fedora — no group juggling needed. Hosts without KVM
@@ -69,7 +69,7 @@ podman rm -f "$CS_HOST_NAME" >/dev/null 2>&1 || true
 # cold-start-to-gRPC-ready window. Persisting it drops restarts to
 # compile-only time. Local to this project, same rationale as .gocache.
 podman run -d --rm \
-  --name "$CS_HOST_NAME" --network clawson-net \
+  --name "$CS_HOST_NAME" --network koto-net \
   $PUBLISH_ARG \
   $KVM_ARG \
   --security-opt label=disable \
@@ -79,14 +79,14 @@ podman run -d --rm \
   -v "$HERE/.gomodcache:/go/pkg/mod" \
   -v /etc/localtime:/etc/localtime:ro \
   $EXTRA_MOUNTS \
-  -e CLAWSON_BIND="$CLAWSON_BIND" \
-  -e CLAWSON_PORT="$CLAWSON_PORT" \
+  -e KOTO_BIND="$KOTO_BIND" \
+  -e KOTO_PORT="$KOTO_PORT" \
   -e TERM="${TERM:-xterm-256color}" \
   ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \
   -w "$HERE" \
-  clawson-host >/dev/null
+  koto-host >/dev/null
 INSTANCE_ARG=""
-[ -n "${CLAWSON_INSTANCE:-}" ] && INSTANCE_ARG=" INSTANCE=$CLAWSON_INSTANCE"
+[ -n "${KOTO_INSTANCE:-}" ] && INSTANCE_ARG=" INSTANCE=$KOTO_INSTANCE"
 echo "$CS_HOST_NAME running (daemon + proxy)"
 echo "  attach TUI: make tui$INSTANCE_ARG"
 echo "  stop:       make stop$INSTANCE_ARG"

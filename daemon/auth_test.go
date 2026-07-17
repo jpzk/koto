@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"clawson-protocol/pb"
+	"koto-protocol/pb"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -51,7 +51,7 @@ func TestAuthMatrix(t *testing.T) {
 		grpc.ChainUnaryInterceptor(authUnary),
 		grpc.ChainStreamInterceptor(authStream),
 	)
-	pb.RegisterClawsonServer(srv, &clawsonServer{})
+	pb.RegisterKotoServer(srv, &kotoServer{})
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -72,12 +72,12 @@ func TestAuthMatrix(t *testing.T) {
 		return credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{cert},
 			RootCAs:      pool,
-			ServerName:   "clawson-daemon", // matches the server cert SAN
+			ServerName:   "koto-daemon", // matches the server cert SAN
 			MinVersion:   tls.VersionTLS13,
 		})
 	}
 
-	dial := func(token string) (pb.ClawsonClient, *grpc.ClientConn) {
+	dial := func(token string) (pb.KotoClient, *grpc.ClientConn) {
 		cc, err := grpc.NewClient(addr,
 			grpc.WithTransportCredentials(clientTLS()),
 			grpc.WithPerRPCCredentials(testToken{token}),
@@ -85,7 +85,7 @@ func TestAuthMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return pb.NewClawsonClient(cc), cc
+		return pb.NewKotoClient(cc), cc
 	}
 
 	// (a) valid cert + valid token -> success

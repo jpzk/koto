@@ -8,8 +8,8 @@ import (
 
 func TestLoadScript(t *testing.T) {
 	dir := t.TempDir()
-	os.Setenv("CLAWSON_SCRIPTS_DIR", dir)
-	defer os.Unsetenv("CLAWSON_SCRIPTS_DIR")
+	os.Setenv("KOTO_SCRIPTS_DIR", dir)
+	defer os.Unsetenv("KOTO_SCRIPTS_DIR")
 
 	if err := os.WriteFile(filepath.Join(dir, "diag.sh"), []byte("echo hi\n"), 0o644); err != nil {
 		t.Fatal(err)

@@ -161,8 +161,8 @@ const defaultProvider = "claudesdk"
 
 // defaultClaudeModel / defaultVeniceModel are the single source of truth for
 // the model a group uses when config.json has no `model`. The daemon injects
-// them into the guest as CLAWSON_DEFAULT_CLAUDE_MODEL /
-// CLAWSON_DEFAULT_VENICE_MODEL (see fc.go), so entrypoint.sh applies exactly
+// them into the guest as KOTO_DEFAULT_CLAUDE_MODEL /
+// KOTO_DEFAULT_VENICE_MODEL (see fc.go), so entrypoint.sh applies exactly
 // these values and groupModelName reports them — no second copy to drift.
 // (entrypoint.sh keeps a hardcoded venice fallback only for the degenerate
 // case where the env is somehow unset; the claude fallback is empty = CLI
@@ -256,7 +256,7 @@ func groupProviderName(g string) string {
 // config value — so the TUI can always show what's actually in use. When
 // config.json has no `model`: a venice group falls back to defaultVeniceModel
 // (what entrypoint.sh actually applies), while a claudesdk group returns ""
-// (the claude CLI picks its own default; clawson doesn't set or know it, so
+// (the claude CLI picks its own default; koto doesn't set or know it, so
 // the TUI renders "(default)" there).
 func groupModelName(g string) string {
 	if m := groupConfigString(g, "model"); m != "" {

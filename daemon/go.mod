@@ -1,11 +1,11 @@
-module clawson
+module koto
 
 go 1.24.0
 
 toolchain go1.24.13
 
 require (
-	clawson-protocol v0.0.0
+	koto-protocol v0.0.0
 	github.com/containers/gvisor-tap-vsock v0.8.8
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -34,4 +34,4 @@ require (
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
 )
 
-replace clawson-protocol => ../protocol
+replace koto-protocol => ../protocol
