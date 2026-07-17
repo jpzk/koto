@@ -93,14 +93,12 @@ func skillCatalog() []skillItem {
 	return items
 }
 
-func composeSystemPrompt(g string) string {
-	var parts []string
-	if b, err := os.ReadFile(filepath.Join(HERE, "prompts", "global.md")); err == nil {
-		parts = append(parts, strings.TrimRight(string(b), "\n"))
-	}
-	if b, err := os.ReadFile(filepath.Join(vol(g), "prompt.md")); err == nil {
-		parts = append(parts, strings.TrimRight(string(b), "\n"))
-	}
+// enabledSkillCatalog returns the catalog entries for the skills enabled on
+// group g (its .cs/config.json "skills" array), Enabled always true — every
+// entry returned here IS one of the caller's enabled skills. Shared by
+// composeSystemPrompt (per-turn prompt text, host-side) and the ctl plane's
+// skill_list verb (what the guest can query for itself over vsock).
+func enabledSkillCatalog(g string) []skillItem {
 	var enabled []string
 	if b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json")); err == nil {
 		var cfg map[string]any
@@ -114,27 +112,47 @@ func composeSystemPrompt(g string) string {
 			}
 		}
 	}
-	if len(enabled) > 0 {
-		cat := map[string]skillItem{}
-		for _, it := range skillCatalog() {
-			cat[it.Name] = it
+	if len(enabled) == 0 {
+		return nil
+	}
+	cat := map[string]skillItem{}
+	for _, it := range skillCatalog() {
+		cat[it.Name] = it
+	}
+	out := make([]skillItem, 0, len(enabled))
+	for _, nm := range enabled {
+		it, ok := cat[nm]
+		if !ok {
+			continue
 		}
+		it.Enabled = true
+		out = append(out, it)
+	}
+	return out
+}
+
+func composeSystemPrompt(g string) string {
+	var parts []string
+	if b, err := os.ReadFile(filepath.Join(HERE, "prompts", "global.md")); err == nil {
+		parts = append(parts, strings.TrimRight(string(b), "\n"))
+	}
+	if b, err := os.ReadFile(filepath.Join(vol(g), "prompt.md")); err == nil {
+		parts = append(parts, strings.TrimRight(string(b), "\n"))
+	}
+	// Skills are no longer pre-baked into the guest at boot (no more tarball
+	// + tmpfs) — the guest pulls the catalog and any skill body it wants over
+	// the ctl plane, on demand, so a config_set skills= toggle takes effect
+	// on the guest's very next turn instead of needing a /restart.
+	if items := enabledSkillCatalog(g); len(items) > 0 {
 		lines := []string{
 			"## Available skills",
-			"These are curated for this group. Load full content via your Read tool when relevant; descriptions below are deliberately terse.",
+			"These are curated for this group. Descriptions below are deliberately terse — fetch a skill's full body over the ctl plane when it's actually relevant to the current request:",
+			`  printf '%s\n' '{"cmd":"skill_read","name":"<name>"}' > /workspace/.cs/ctl; tail -n 1 /workspace/.cs/ctl.out`,
 		}
-		any := false
-		for _, nm := range enabled {
-			it, ok := cat[nm]
-			if !ok {
-				continue
-			}
-			any = true
-			lines = append(lines, fmt.Sprintf("- **%s**: %s — path: %s", it.Name, it.Description, it.Path))
+		for _, it := range items {
+			lines = append(lines, fmt.Sprintf("- **%s**: %s", it.Name, it.Description))
 		}
-		if any {
-			parts = append(parts, strings.Join(lines, "\n"))
-		}
+		parts = append(parts, strings.Join(lines, "\n"))
 	}
 	parts = append(parts,
 		"## Memory\n"+

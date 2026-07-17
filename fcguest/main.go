@@ -111,9 +111,6 @@ func earlyInit() {
 	mount("devpts", "/dev/pts", "devpts", 0, "")
 	_ = os.MkdirAll("/dev/shm", 0o1777)
 	mount("tmpfs", "/dev/shm", "tmpfs", 0, "mode=1777")
-	// Rootfs is read-only; /skills receives the init-op tarball, so it needs
-	// a writable tmpfs (the mount point itself is baked into the image).
-	mount("tmpfs", "/skills", "tmpfs", 0, "mode=755")
 	// /dev/net/tun for the L3 TAP (internet=full). With CONFIG_TUN=y devtmpfs
 	// usually auto-creates it, but create it defensively so netUp never trips
 	// on a missing node (harmless if it already exists).
@@ -498,7 +495,6 @@ type agentReq struct {
 	SPB64         string            `json:"sp_b64"`
 	CfgB64        string            `json:"cfg_b64"`
 	Script        string            `json:"script"`
-	SkillsTarB64  string            `json:"skills_tar_b64"`
 	UploadsTarB64 string            `json:"uploads_tar_b64"`
 	Ports         []int             `json:"ports"`
 	Env           map[string]string `json:"env"`
@@ -562,11 +558,6 @@ var (
 func handleInit(c *vconn, req *agentReq) {
 	initMu.Lock()
 	defer initMu.Unlock()
-	if req.SkillsTarB64 != "" {
-		if err := untarSkills(req.SkillsTarB64); err != nil {
-			logf("skills untar: %v", err)
-		}
-	}
 	// internet=full: bring up the L3 TAP once, before the entrypoint starts,
 	// so the first turn already has a route.
 	if req.Net == "l3" && !netStarted {
@@ -625,15 +616,6 @@ func enableSudo() error {
 	if err := os.WriteFile(f, []byte("node ALL=(ALL) NOPASSWD: ALL\n"), 0o440); err != nil {
 		return fmt.Errorf("write %s: %w", f, err)
 	}
-	return nil
-}
-
-func untarSkills(b64 string) error {
-	if err := untarInto(b64, "/skills", false); err != nil {
-		return err
-	}
-	// Skill helper binaries must be readable/executable by the uid-1000 worker.
-	_ = runReaped("chmod", "-R", "a+rX", "/skills")
 	return nil
 }
 

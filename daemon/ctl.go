@@ -167,6 +167,23 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		return skillWriteCmd(req.Name, req.Content)
 
+	// skill_list / skill_read are self-service and open to every group (main
+	// or not) — no shared filesystem means this is the guest's only way to
+	// discover and load skill content, replacing the old boot-time tarball
+	// (which pre-populated a guest /skills tmpfs and went stale until
+	// /restart). skill_list mirrors composeSystemPrompt's own catalog filter
+	// exactly (enabledSkillCatalog), so what a group sees here always matches
+	// what its system prompt already told it was available.
+	case "skill_list":
+		return skillsResp{BaseResp: baseResp{OK: true}, Skills: enabledSkillCatalog(owner)}
+
+	case "skill_read":
+		var req skillReadReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		return skillReadCmd(req)
+
 	case "config_set":
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: config_set")
@@ -316,4 +333,3 @@ func ctlDispatch(owner string, line []byte) any {
 		return errResp("ctl: verb not allowed: " + env.Cmd)
 	}
 }
-

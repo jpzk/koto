@@ -16,11 +16,14 @@ package main
 //           /clear truncation, proxy logAppend, `>>>` markers all unchanged).
 //     9002  ctl plane: JSON lines → ctlDispatch(g, line), response written
 //           back on the same connection (agent routes it to .cs/ctl.out).
+//           Also how the guest self-serves skills now: skill_list /
+//           skill_read, no shared filesystem, no boot-time tarball — see
+//           daemon/skills.go's enabledSkillCatalog.
 //
 //   host → guest  (daemon connects to "<uds>", sends "CONNECT 10000\n")
 //     10000 agent RPC — ops:
-//       init        skills tarball + published ports + env; agent starts
-//                   entrypoint.sh after applying. Idempotent.
+//       init        published ports + env; agent starts entrypoint.sh after
+//                   applying. Idempotent.
 //       msg         one turn: system-prompt + config.json + base64 message;
 //                   agent materializes the files in the guest workspace and
 //                   writes the b64 line to the in-guest .cs/in FIFO, so
@@ -611,9 +614,6 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if groupRoot(g) {
 		initReq["root"] = true
 	}
-	if tar, err := fcSkillsTar(); err == nil && len(tar) > 0 {
-		initReq["skills_tar_b64"] = base64.StdEncoding.EncodeToString(tar)
-	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		_, err = fcAgentCall(g, initReq, 5*time.Second)
@@ -982,20 +982,6 @@ func fcReadScriptFrame(c net.Conn) (typ byte, payload []byte, err error) {
 		}
 	}
 	return hdr[0], payload, nil
-}
-
-// fcSkillsTar packs the host skills/ directory for delivery to the guest at
-// init (microVMs can't bind-mount it). Uses the system tar via stdout to
-// avoid hand-rolling archive/tar walking; skills are small (text + scripts).
-func fcSkillsTar() ([]byte, error) {
-	if st, err := os.Stat(SKILLS_DIR); err != nil || !st.IsDir() {
-		return nil, err
-	}
-	out, err := exec.Command("tar", "-C", SKILLS_DIR, "-cf", "-", ".").Output()
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // splice copies bidirectionally and closes both ends when one side finishes.
