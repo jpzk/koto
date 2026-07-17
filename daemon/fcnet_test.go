@@ -18,7 +18,7 @@ func TestFcDstAllowed(t *testing.T) {
 	// (fcSelfIPs), but those depend on the host's interfaces, so this table
 	// covers only the static classes.
 	cases := []struct {
-		ip                  string
+		ip             string
 		wan, lan, full bool
 	}{
 		// ctl — blocked under every profile
@@ -35,15 +35,15 @@ func TestFcDstAllowed(t *testing.T) {
 		{"192.168.1.5", false, true, true},
 		{"10.0.0.7", false, true, true},
 		{"172.16.0.1", false, true, true},
-		{"fd00::1", false, true, true}, // IPv6 ULA
+		{"fd00::1", false, true, true},            // IPv6 ULA
 		{"::ffff:192.168.1.5", false, true, true}, // v4-mapped LAN
 		{"239.255.255.250", false, true, true},    // SSDP — admin-scoped multicast
 		{"255.255.255.255", false, true, true},    // limited broadcast
-		// WAN — allowed only under wan|full; 100.64/10 (tailnet) is WAN
+		{"100.100.1.1", false, true, true},        // CGNAT / tailnet — LAN, not WAN
+		// WAN — allowed only under wan|full
 		{"1.1.1.1", true, false, true},
 		{"8.8.8.8", true, false, true},
 		{"2606:4700::1111", true, false, true},
-		{"100.100.1.1", true, false, true}, // CGNAT / tailnet
 	}
 	for _, c := range cases {
 		ip := net.ParseIP(c.ip)

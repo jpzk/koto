@@ -387,9 +387,9 @@ func TestEgressGate(t *testing.T) {
 	if allowed("1.1.1.1:443", fcNetLAN) || allowed("github.com:443", fcNetLAN) {
 		t.Fatal("lan should block public targets")
 	}
-	// CGNAT / tailnet is WAN, not LAN.
-	if !allowed("100.100.1.1:443", fcNetWAN) || allowed("100.100.1.1:443", fcNetLAN) {
-		t.Fatal("tailnet (100.64/10) should be WAN-class")
+	// CGNAT / tailnet is LAN, not WAN — a wan-only group cannot reach it.
+	if allowed("100.100.1.1:443", fcNetWAN) || !allowed("100.100.1.1:443", fcNetLAN) {
+		t.Fatal("tailnet (100.64/10) should be LAN-class")
 	}
 }
 

@@ -35,11 +35,10 @@ package main
 //        every proxy port) — ALWAYS dropped, every profile.
 //   gw   192.168.127.0/24, the guest↔gateway subnet (DNS at .1) — always
 //        allowed; carved out because it sits inside the 192.168/16 LAN range.
-//   lan  RFC1918 + IPv6 ULA + multicast + limited broadcast — the host LAN.
-//        Allowed for lan|full, dropped for wan.
-//   wan  everything else, including CGNAT 100.64/10 (the tailnet — treated as
-//        intentionally-shared infra, not LAN). Allowed for wan|full, dropped
-//        for lan.
+//   lan  RFC1918 + IPv6 ULA + multicast + limited broadcast + CGNAT 100.64/10
+//        (the tailnet — treated as host-reachable infra, same trust tier as
+//        the LAN) — the host LAN. Allowed for lan|full, dropped for wan.
+//   wan  everything else. Allowed for wan|full, dropped for lan.
 //
 // This replaces, for the L3 path, what egressTargetAllowed does for the L7
 // proxy (proxy.go) — both share fcClassifyDst. Ec2MetadataAccess=false
@@ -138,9 +137,20 @@ type fcDstClass int
 const (
 	fcDstCtl fcDstClass = iota // control plane — blocked under every profile
 	fcDstGW                    // guest↔gateway subnet — always allowed (frame layer)
-	fcDstLAN                   // private ranges / multicast / broadcast — the host LAN
-	fcDstWAN                   // everything else (incl. CGNAT 100.64/10 = tailnet)
+	fcDstLAN                   // private ranges / multicast / broadcast / tailnet — the host LAN
+	fcDstWAN                   // everything else
 )
+
+// fcTailnetNet is the CGNAT range Tailscale allocates from (100.64.0.0/10),
+// classified as LAN so a wan-only group cannot reach tailnet peers — tailnet
+// access now requires lan|full, same as the rest of the host's network.
+var fcTailnetNet = func() *net.IPNet {
+	_, n, err := net.ParseCIDR("100.64.0.0/10")
+	if err != nil {
+		panic(err) // literal const; cannot fail
+	}
+	return n
+}()
 
 // fcClassifyDst classifies a guest packet's destination. Check order matters:
 // control plane first (so a pathological cs_host address inside the gateway
@@ -170,7 +180,7 @@ func fcClassifyDst(ip net.IP) fcDstClass {
 	// precisely what wan exists to deny); link-local multicast was already
 	// caught as ctl above. 255.255.255.255 is the limited broadcast.
 	if ip.IsPrivate() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() ||
-		ip.Equal(net.IPv4bcast) {
+		ip.Equal(net.IPv4bcast) || fcTailnetNet.Contains(ip) {
 		return fcDstLAN
 	}
 	return fcDstWAN

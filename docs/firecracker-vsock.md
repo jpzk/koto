@@ -198,8 +198,8 @@ plus DNS — and differ only in *which destinations the egress filter passes*:
 | profile | public internet (WAN) | host LAN | tailnet (CGNAT 100.64/10) |
 |---------|:---------------------:|:--------:|:-------------------------:|
 | `none`  | — no NIC at all —                                        |||
-| `wan`   | ✅ | ❌ | ✅ |
-| `lan`   | ❌ | ✅ | ❌ |
+| `wan`   | ✅ | ❌ | ❌ |
+| `lan`   | ❌ | ✅ | ✅ |
 | `full`  | ✅ | ✅ | ✅ |
 
 **`wan` is the safe general-purpose profile** (and where legacy `internet=full`
@@ -207,9 +207,10 @@ now maps — see below): the agent can `curl`/`git`/`npm` the public internet bu
 cannot reach the host LAN, so a prompt-injected agent can't scan or pivot into
 your other machines. `lan` is for the rare group that must talk to a LAN device
 but should not have public egress; `full` is both (the old `internet=full`
-behavior, now explicit). The **tailnet (CGNAT 100.64/10) is classed as WAN**,
-not LAN — it's treated as intentionally-shared infrastructure, so a `wan` group
-can reach tailnet peers.
+behavior, now explicit). The **tailnet (CGNAT 100.64/10) is classed as LAN**,
+not WAN — tailnet peers are host-reachable infrastructure, same trust tier as
+the LAN, so a `wan` group cannot reach them; tailnet access requires `lan` or
+`full`.
 
 (ICMP/ping is best-effort — it needs the gateway process to open a
 raw/unprivileged ICMP socket on the host; TCP/UDP, i.e. all clawson tooling,
@@ -271,9 +272,9 @@ always wins over a legacy `internet` key.
     the `192.168/16` LAN range, so `wan` DNS would otherwise break. (At the L7
     proxy this carve-out does not apply — it's frame-layer-only.)
   - **lan** — RFC1918 (`10/8`, `172.16/12`, `192.168/16`), IPv6 ULA `fc00::/7`,
-    non-link-local multicast, limited broadcast. Allowed for `lan`/`full`.
-  - **wan** — everything else, incl. CGNAT `100.64/10` (tailnet). Allowed for
-    `wan`/`full`.
+    non-link-local multicast, limited broadcast, CGNAT `100.64/10` (tailnet).
+    Allowed for `lan`/`full`.
+  - **wan** — everything else. Allowed for `wan`/`full`.
   - **802.1Q/802.1ad VLAN-tagged frames are dropped** — a tag would shift the
     IP header past the parser's fixed offsets and hide the destination. ARP
     stays allowed (the gateway link needs it).
