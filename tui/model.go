@@ -324,6 +324,17 @@ type Model struct {
 	picker        pickerState
 	prePickerFocus focusZone
 
+	// histNav: per-group shell-history navigation cursor for ↑/↓ recall in
+	// the input box (only active while the tree pane is closed, i.e.
+	// focus == focusInput). 0 = not navigating (input shows the live
+	// draft); N = N steps back from the newest prompt in promptHistory.
+	// Keyed by group so recall state naturally resets on a group switch
+	// without special-casing every m.cur assignment. histDraft stashes the
+	// in-progress line the moment navigation starts, restored when the
+	// user arrows back down past the newest entry.
+	histNav   map[string]int
+	histDraft map[string]string
+
 	// pending holds prompts the local TUI has sent that the daemon has not
 	// yet started (they're sitting in the group's send queue behind an
 	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
@@ -416,6 +427,8 @@ func newModel(sock string, ctxWindow int) Model {
 		vpCache:    map[string]vpCacheEntry{},
 		groupVer:   map[string]int{},
 		promptHistory: map[string][]string{},
+		histNav:       map[string]int{},
+		histDraft:     map[string]string{},
 		pending:    map[string][]string{},
 	}
 }
@@ -2034,6 +2047,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
 		m.refreshSuggestions()
+		delete(m.histNav, m.cur)
+		delete(m.histDraft, m.cur)
 		if v == "" {
 			return m, nil
 		}
@@ -2065,6 +2080,35 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch s {
+	case "up":
+		hist := m.promptHistory[m.cur]
+		if n := len(hist); n > 0 {
+			steps := m.histNav[m.cur]
+			if steps == 0 {
+				m.histDraft[m.cur] = m.input.Value()
+				steps = 1
+			} else if steps < n {
+				steps++
+			}
+			m.histNav[m.cur] = steps
+			m.input.SetValue(hist[n-steps])
+			m.input.CursorEnd()
+		}
+		return m, nil
+	case "down":
+		if steps := m.histNav[m.cur]; steps > 0 {
+			steps--
+			m.histNav[m.cur] = steps
+			if steps == 0 {
+				m.input.SetValue(m.histDraft[m.cur])
+				delete(m.histDraft, m.cur)
+			} else {
+				hist := m.promptHistory[m.cur]
+				m.input.SetValue(hist[len(hist)-steps])
+			}
+			m.input.CursorEnd()
+		}
+		return m, nil
 	case "pgup":
 		m.vp.ViewUp()
 		m.autoFollow = m.vp.AtBottom()
