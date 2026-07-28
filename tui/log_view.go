@@ -131,7 +131,10 @@ func formatLogLine(ev LogEvent) string {
 // the tree doesn't apply).
 func (m Model) logPaneSize() (int, int) {
 	w := max(10, m.width-2) // -1 left padding, -1 scrollbar
-	h := max(1, m.height-4) // status + hint + metrics (no input bar in log view)
+	// -3: status + hint + metrics (no input bar in log view). Fills the
+	// frame to exactly m.height like the chat and shell views, keeping the
+	// bottom rows fixed across every view toggle.
+	h := max(1, m.height-3)
 	return w, h
 }
 

@@ -1413,7 +1413,7 @@ func (m Model) logViewportSize() (int, int) {
 		// narrow to split — the viewport isn't drawn at all in that case,
 		// so its size here is moot.
 		if chatW := m.shellChatW(); chatW > 0 {
-			return max(10, chatW-2), max(1, m.height-4)
+			return max(10, chatW-2), max(1, m.height-3) // height matches shellPaneSize
 		}
 	}
 	treeW := m.treePaneW()

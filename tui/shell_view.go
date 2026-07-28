@@ -280,7 +280,11 @@ func (m Model) shellPaneSize() (int, int) {
 		total -= chatW + 1
 	}
 	w := max(10, total-2)
-	h := max(1, m.height-4)
+	// -3: status + hint + metrics. This makes the frame exactly m.height
+	// rows, same as the chat view — so the hint/metrics rows sit on the
+	// same terminal rows in both views and toggling the shell pane in and
+	// out (ctrl+]) doesn't make the bottom lines jump.
+	h := max(1, m.height-3)
 	return w, h
 }
 
