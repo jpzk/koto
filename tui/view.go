@@ -369,6 +369,7 @@ func (m Model) renderTree(rows int) string {
 			return s + strings.Repeat(" ", w-len(s))
 		}
 		active := m.activeSession(m.cur)
+		treeLive := m.treeCursorLive()
 		for i, r := range trows {
 			// isCur marks the exact conversation being viewed: the group row
 			// is current only when its DEFAULT session is active; a named
@@ -380,7 +381,7 @@ func (m Model) renderTree(rows int) string {
 			// Bounds-guard on treeIdx: a WatchState frame can shrink the row
 			// list (out-of-band destroy) between the listMsg clamp and this
 			// render — compare by index, never index past the slice.
-			hov := m.focus == focusTree && m.treeIdx == i
+			hov := treeLive && m.treeIdx == i
 			lines = append(lines, m.renderTreeRow(r, isCur, hov, unread, pad))
 		}
 	}
@@ -395,6 +396,17 @@ func (m Model) renderTree(rows int) string {
 	// Box with paddingX=1 and fixed width.
 	col := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
+}
+
+// treeCursorLive reports whether the tree cursor row should carry its
+// amber-background highlight: the tree focused directly, or visible alongside
+// the log view where shift+↑/↓ still moves it (the cursor picks the log
+// scope, so hiding the marker would hide what the pane is filtered to). The
+// shell view keeps it unhighlighted — keys go raw to the guest pty there, so
+// the cursor isn't actionable.
+func (m Model) treeCursorLive() bool {
+	return m.focus == focusTree ||
+		(m.focus == focusLog && m.preLogFocus == focusTree)
 }
 
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {

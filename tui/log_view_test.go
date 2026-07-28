@@ -94,6 +94,31 @@ func TestLogViewRescopesOnGroupSwitch(t *testing.T) {
 	}
 }
 
+// The tree cursor keeps its highlight while the log view is open alongside
+// the tree (shift+↑/↓ still retargets it there), but not from the shell view
+// or when the log view was entered from the input side.
+func TestTreeCursorLiveAcrossViews(t *testing.T) {
+	m := logModel(t, "main")
+	cases := []struct {
+		name          string
+		focus, before focusZone
+		want          bool
+	}{
+		{"tree focused", focusTree, focusInput, true},
+		{"log from tree", focusLog, focusTree, true},
+		{"log from input", focusLog, focusInput, false},
+		{"shell from tree", focusShell, focusTree, false},
+		{"input", focusInput, focusInput, false},
+	}
+	for _, c := range cases {
+		m.focus = c.focus
+		m.preLogFocus, m.preShellFocus = c.before, c.before
+		if got := m.treeCursorLive(); got != c.want {
+			t.Errorf("%s: treeCursorLive = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // A group that has produced no log lines yet gets an explanatory placeholder
 // rather than an empty pane that reads as a dead daemon.
 func TestLogViewEmptyScopePlaceholder(t *testing.T) {
