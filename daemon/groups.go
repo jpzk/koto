@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -80,7 +82,7 @@ func ensure(g string, isMain bool) (int, error) {
 	// has a marker to render. Existing {} configs get the same treatment;
 	// pre-existing keys are preserved.
 	if err := ensureProviderConfig(g); err != nil {
-		emitLogf("group", "warn", "ensure provider config[%s]: %v", g, err)
+		emitLogfG("group", g, "warn", "ensure provider config[%s]: %v", g, err)
 	}
 	port := allocPort(g)
 	// Register the proxy listener synchronously. proxyListen is idempotent
@@ -119,13 +121,82 @@ func ensure(g string, isMain bool) (int, error) {
 			}
 		}
 	}
-	emitLogf("group", "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+	emitLogfG("group", g, "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
+	// A pre-existing workspace.img means this is a REstart: the agent had
+	// state running in the old VM that is now gone. A fresh group's first
+	// boot has lost nothing and gets no notice.
+	restarted := false
+	if _, err := os.Stat(fcWorkspaceImg(g)); err == nil {
+		restarted = true
+	}
 	if err := fcSpawn(g, port, pubPorts); err != nil {
 		proxyUnlisten(port)
-		emitLogf("group", "error", "spawn group=%s: %v", g, err)
+		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
 		return 0, err
 	}
+	if restarted && armBootNotice(g) {
+		// Boot notice: wake the agent (default session) so it can resurrect
+		// whatever should be running — the on-boot hook that makes services
+		// and watchdogs survive VM restarts. Queued like any other send, so
+		// when the boot was triggered by an inbound message (ensure() inside
+		// sendNow), that message's turn runs first and the notice follows.
+		// Fire-and-forget: a full queue just drops the notice.
+		const bootMsg = "[koto] Your VM has just been restarted. Everything " +
+			"that was running inside it is gone: background jobs that were " +
+			"running are now marked orphaned (`cs-job list` to review — rerun " +
+			"what still matters) and any servers/processes you had started " +
+			"are down. Restart anything that should be running, then continue."
+		if _, err := enqueueSend(g, "", bootMsg); err != nil {
+			emitLogfG("group", g, "warn", "boot notice for %s dropped: %v", g, err)
+		}
+	}
 	return port, nil
+}
+
+// autostartGroups boots every group whose config.json carries autostart=yes.
+// Called once from daemonMain, in a goroutine: fcSpawn takes seconds per VM,
+// and a slow (or failing) group boot must not hold up the gRPC listener.
+// Sequential, so a fleet of autostart groups doesn't contend for KVM and RAM
+// all at once; each group's boot notice (ensure() → armBootNotice) fires as it
+// would for any other restart, which is exactly the wake-up an autostarted
+// agent wants. "main" is skipped — daemonMain ensures it unconditionally.
+// Sorted for a deterministic boot order (readGroups returns a map).
+func autostartGroups() {
+	var names []string
+	for g := range readGroups() {
+		if g != "main" && groupAutostart(g) {
+			names = append(names, g)
+		}
+	}
+	sort.Strings(names)
+	for _, g := range names {
+		if _, err := ensure(g, false); err != nil {
+			emitLogfG("group", g, "error", "autostart %s: %v", g, err)
+			continue
+		}
+		emitLogfG("group", g, "info", "autostart %s: up", g)
+	}
+}
+
+// armBootNotice rate-limits restart notices to one per group per window.
+// Without it a crash-looping VM would feed on its own notices: the notice
+// turn re-ensures the group, respawns the dying VM, and enqueues the next
+// notice — an unbounded spawn loop that a silent failing group never had.
+const bootNoticeWindow = 5 * time.Minute
+
+var (
+	bootNoticeMu   sync.Mutex
+	bootNoticeLast = map[string]time.Time{}
+)
+
+func armBootNotice(g string) bool {
+	bootNoticeMu.Lock()
+	defer bootNoticeMu.Unlock()
+	if time.Since(bootNoticeLast[g]) < bootNoticeWindow {
+		return false
+	}
+	bootNoticeLast[g] = time.Now()
+	return true
 }
 
 func stopGroup(g string) {
@@ -145,6 +216,8 @@ func listGroups() map[string]GroupInfo {
 			Effort:   groupEffortName(g),
 			Stalled:  isStalled(g),
 			Queued:   queueDepth(g),
+			Sessions: listSessions(g),
+			Jobs:     jobsSnapshot(g),
 		}
 	}
 	return out
@@ -274,6 +347,35 @@ func groupEffortName(g string) string {
 	return groupConfigString(g, "effort")
 }
 
+// groupAutostart reads config.json's "autostart" profile: "yes" boots the
+// group's microVM as soon as the daemon starts, anything else (including
+// missing) means "no" — the default, where a group's VM only comes up lazily,
+// on its first message (ensure() from a send/spawn/restart). Read once per
+// daemon start by autostartGroups, so a change applies on the next daemon
+// start, NOT on /restart of the group.
+func groupAutostart(g string) bool { return groupConfigBool(g, "autostart") }
+
+// groupConfigBool reads a yes/no knob from a group's config.json. Absent,
+// unparseable, or any other value is false — these knobs grant capability, so
+// they fail closed. A real JSON bool is accepted too, for a hand-edited config.
+func groupConfigBool(g, key string) bool {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return false
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return false
+	}
+	switch v := cfg[key].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.ToLower(strings.TrimSpace(v)) == "yes"
+	}
+	return false
+}
+
 func groupConfigString(g, key string) string {
 	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
 	if err != nil {
@@ -299,7 +401,7 @@ func destroy(g string) baseResp {
 		// directory instead of just this group's.
 		return errResp("invalid group name")
 	}
-	emitLogf("group", "warn", "destroy group=%s (workspace will be deleted)", g)
+	emitLogfG("group", g, "warn", "destroy group=%s (workspace will be deleted)", g)
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()
@@ -347,28 +449,69 @@ func restart(g string) (int, error) {
 	if !validGroupName(g) {
 		return 0, fmt.Errorf("invalid group name")
 	}
-	emitLogf("group", "info", "restart group=%s", g)
+	emitLogfG("group", g, "info", "restart group=%s", g)
 	stopGroup(g)
 	return ensure(g, g == "main")
 }
 
 func clearCmd(req groupReq) baseResp {
+	// req.Session selects the scope: "" = the whole group (every session +
+	// the full transcript — the legacy behavior); "-"/"default" = only the
+	// default session; a name = only that session (see koto.proto GroupReq).
+	if req.Session != "" {
+		sess, err := normalizeSession(req.Session)
+		if err != nil {
+			return errResp("clear: " + err.Error())
+		}
+		return clearSession(req.Group, sess)
+	}
 	v := vol(req.Group)
 	// Session state lives inside workspace.img, which the host must not touch
-	// while (or whether) the VM runs — clear it in-guest via the agent (both
-	// the .claude session dir and venice's stateless-API history). ensure()
-	// first so a stopped group's history doesn't survive a /clear and resurrect
-	// on the next message.
+	// while (or whether) the VM runs — clear it in-guest via the agent (the
+	// .claude session dir, the per-session id pointers, and venice's
+	// stateless-API history files). ensure() first so a stopped group's
+	// history doesn't survive a /clear and resurrect on the next message.
 	if _, err := ensure(req.Group, req.Group == "main"); err != nil {
 		return errResp("clear: " + err.Error())
 	}
 	if _, _, err := fcExec(req.Group,
-		"rm -rf /workspace/.claude /workspace/.cs/venice-history.json", 15*time.Second); err != nil {
+		"rm -rf /workspace/.claude /workspace/.cs/sessions /workspace/.cs/venice-history.json /workspace/.cs/venice-history-*.json", 15*time.Second); err != nil {
 		return errResp("clear: " + err.Error())
 	}
+	clearSessionReg(req.Group)
 	logPath := filepath.Join(v, ".cs", "log")
 	if _, err := os.Stat(logPath); err == nil {
 		_ = os.WriteFile(logPath, nil, 0o644)
 	}
+	return baseResp{OK: true}
+}
+
+// clearSession resets a single session ("" = default) without touching its
+// siblings: in-guest, remove the session's claude conversation file (looked
+// up via its id pointer), the pointer itself, and its venice history; on the
+// host, rewrite the transcript dropping the session's segments and drop the
+// name from the registry. The guest's sessions/ dir is deliberately left in
+// place — its existence is what keeps entrypoint.sh's one-time `--continue`
+// migration shim from resurrecting a cleared default session.
+func clearSession(g, sess string) baseResp {
+	if _, err := ensure(g, g == "main"); err != nil {
+		return errResp("clear: " + err.Error())
+	}
+	name := sessionMarkerName(sess) // "" → "default", matching entrypoint.sh's id-file name
+	vh := "/workspace/.cs/venice-history-" + name + ".json"
+	if sess == "" {
+		vh = "/workspace/.cs/venice-history.json"
+	}
+	script := `I=/workspace/.cs/sessions/` + name + `.id
+if [ -s "$I" ]; then rm -f /workspace/.claude/projects/*/"$(cat "$I")".jsonl; fi
+rm -f "$I" ` + vh + `
+true`
+	if _, _, err := fcExec(g, script, 15*time.Second); err != nil {
+		return errResp("clear: " + err.Error())
+	}
+	if err := filterLogSession(filepath.Join(vol(g), ".cs", "log"), sess); err != nil {
+		return errResp("clear: " + err.Error())
+	}
+	removeSession(g, sess)
 	return baseResp{OK: true}
 }

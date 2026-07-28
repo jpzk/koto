@@ -322,7 +322,7 @@ func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request,
 		// Drain + close so the keep-alive connection is reusable next attempt.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		emitLogf("proxy", "info", "retry %d/%d for %s: upstream %d, waiting %s",
+		emitLogfG("proxy", group, "info", "retry %d/%d for %s: upstream %d, waiting %s",
 			attempt+1, maxRetries, group, resp.StatusCode, delay)
 		time.Sleep(delay)
 	}
@@ -390,7 +390,7 @@ var llmFlowSeen = newLogDedup(fcFlowTTL, fcFlowSeenMax)
 func llmFlowLog(group, method, upstreamURL, path string) {
 	target := strings.TrimPrefix(strings.TrimPrefix(upstreamURL, "https://"), "http://") + path
 	if llmFlowSeen.allow(group + "|" + method + "|" + target) {
-		emitLogf("llm", "info", "[%s] flow %s %s", group, method, target)
+		emitLogfG("llm", group, "info", "[%s] flow %s %s", group, method, target)
 	}
 }
 
@@ -686,7 +686,7 @@ func proxyListen(bind string, port int, group string) error {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		emitLogf("proxy", "error", "listen %s for %s: %v", addr, group, err)
+		emitLogfG("proxy", group, "error", "listen %s for %s: %v", addr, group, err)
 		return err
 	}
 	srv := &http.Server{Addr: addr, Handler: &handler{group: group}}
@@ -696,7 +696,7 @@ func proxyListen(bind string, port int, group string) error {
 	listeners[port] = group
 	listenerSrvs[port] = srv
 	listLock.Unlock()
-	emitLogf("proxy", "info", "+ %s -> %s", group, addr)
+	emitLogfG("proxy", group, "info", "+ %s -> %s", group, addr)
 	return nil
 }
 
@@ -774,13 +774,13 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 	}
 	pol := groupNetwork(h.group)
 	if pol == fcNetNone {
-		emitLogf("egress", "warn", "[%s] DENIED %s %s (network profile is 'none')", h.group, r.Method, target)
+		emitLogfG("egress", h.group, "warn", "[%s] DENIED %s %s (network profile is 'none')", h.group, r.Method, target)
 		http.Error(w, "egress denied: this group's network profile is 'none'", http.StatusForbidden)
 		return
 	}
 	ok, vetted := egressTargetAllowed(target, pol)
 	if !ok {
-		emitLogf("egress", "warn", "[%s] BLOCKED %s %s (network profile '%s')", h.group, r.Method, target, pol)
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (network profile '%s')", h.group, r.Method, target, pol)
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)
 		return
 	}
@@ -880,7 +880,7 @@ func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target, 
 		dst.Close()
 		return
 	}
-	emitLogf("egress", "info", "[%s] CONNECT %s", h.group, target)
+	emitLogfG("egress", h.group, "info", "[%s] CONNECT %s", h.group, target)
 	splice(client, dst) // shared with fc.go: bidirectional copy, closes both
 }
 
@@ -905,7 +905,7 @@ func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target stri
 			out.Header.Add(k, v)
 		}
 	}
-	emitLogf("egress", "info", "[%s] %s %s", h.group, r.Method, target)
+	emitLogfG("egress", h.group, "info", "[%s] %s %s", h.group, r.Method, target)
 	resp, err := egressClient.Do(out)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

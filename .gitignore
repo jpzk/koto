@@ -11,6 +11,8 @@ run/
 /daemon/daemon
 /daemon/koto
 /koto
+/koto-static
+/koto-tui
 /tui/koto-tui
 schedules.json
 __pycache__/

@@ -38,6 +38,10 @@ type Event struct {
 	// live streaming frames (see koto.proto Event.seq). Zero for events
 	// re-parsed from the log by the History RPC.
 	Seq uint64 `json:"seq,omitempty"`
+	// Session within the group this frame belongs to ("" = the default
+	// session; see koto.proto Event.session). Stamped by the log parser
+	// from the [[session]] turn markers.
+	Session string `json:"session,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
@@ -71,6 +75,26 @@ type GroupInfo struct {
 	// clients show backlog/backpressure per group. Zero (the common case) is
 	// omitted from the wire.
 	Queued int `json:"queued,omitempty"`
+	// Sessions lists the group's named sessions (sorted; the default
+	// session is implicit and never listed). See koto.proto.
+	Sessions []string `json:"sessions,omitempty"`
+	// Jobs is the daemon's mirror of the group's background jobs (cs-job),
+	// each attributed to the chat session that launched it. See koto.proto
+	// JobInfo and daemon/jobs.go.
+	Jobs []JobInfo `json:"jobs,omitempty"`
+}
+
+// JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors
+// koto.proto JobInfo.
+type JobInfo struct {
+	ID      string `json:"id"`
+	Session string `json:"session,omitempty"` // "" = default session
+	Status  string `json:"status"`            // running | done | orphaned | unknown
+	RC      string `json:"rc,omitempty"`
+	Cmd     string `json:"cmd,omitempty"`
+	Started int64  `json:"started,omitempty"`
+	OutSize int64  `json:"out_size,omitempty"`
+	Group   string `json:"group,omitempty"` // set in JobsResp entries
 }
 
 // SkillItem describes one skill in SkillsResp.
@@ -100,11 +124,17 @@ type SpawnReq struct {
 type SendReq struct {
 	Group string `json:"group"`
 	Msg   string `json:"msg"`
+	// Session to deliver the turn into ("" = default; see koto.proto
+	// SendReq.session).
+	Session string `json:"session,omitempty"`
 }
 
-// GroupReq covers stop / destroy / restart / clear — all take only `group`.
+// GroupReq covers stop / destroy / restart / clear — all take `group`.
+// Session is read by clear only: "" = whole group, "-"/"default" = the
+// default session, a name = that session (see koto.proto GroupReq).
 type GroupReq struct {
-	Group string `json:"group"`
+	Group   string `json:"group"`
+	Session string `json:"session,omitempty"`
 }
 
 // ConfigReq uses RawMessage per field so the dispatcher can distinguish
@@ -133,6 +163,10 @@ type ConfigReq struct {
 	// KVM boundary contains root-in-guest, so it doesn't widen the host blast
 	// radius. Applies on /restart (fc-agent installs the sudoers grant at boot).
 	Root json.RawMessage `json:"root,omitempty"`
+	// Autostart is "yes" | "no" (default): boot this group's microVM as soon as
+	// the daemon starts, instead of lazily on its first message. Read only at
+	// daemon startup, so setting it takes effect on the next daemon restart.
+	Autostart json.RawMessage `json:"autostart,omitempty"`
 }
 
 type SkillListReq struct {

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"koto-protocol/pb"
@@ -56,11 +59,12 @@ func toPBEvent(ev Event) *pb.Event {
 		Historical: ev.Historical,
 		Id:         ev.ID,
 		Seq:        ev.Seq,
+		Session:    ev.Session,
 	}
 }
 
 func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
-	return &pb.GroupInfo{
+	out := &pb.GroupInfo{
 		Port:     int32(gi.Port),
 		Running:  gi.Running,
 		Provider: gi.Provider,
@@ -68,6 +72,18 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		Effort:   gi.Effort,
 		Stalled:  gi.Stalled,
 		Queued:   int32(gi.Queued),
+		Sessions: gi.Sessions,
+	}
+	for _, j := range gi.Jobs {
+		out.Jobs = append(out.Jobs, toPBJobInfo(j))
+	}
+	return out
+}
+
+func toPBJobInfo(j JobInfo) *pb.JobInfo {
+	return &pb.JobInfo{
+		Id: j.ID, Session: j.Session, Status: j.Status, Rc: j.RC,
+		Cmd: j.Cmd, Started: j.Started, OutSize: j.OutSize, Group: j.Group,
 	}
 }
 
@@ -109,6 +125,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Network = optRaw(r.Network)
 	out.Size = optRaw(r.Size)
 	out.Root = optRaw(r.Root)
+	out.Autostart = optRaw(r.Autostart)
 	switch r.GetSkillsAction().(type) {
 	case *pb.ConfigReq_SkillsClear:
 		out.Skills = json.RawMessage("[]") // isClear -> delete key
@@ -190,6 +207,10 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
+	session, err := normalizeSession(r.Session)
+	if err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
 	msg := r.Msg
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
 		m, err := processAttachments(r)
@@ -198,9 +219,12 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 		}
 		msg = m
 	}
-	if _, err := enqueueSend(r.Group, msg); err != nil {
+	if _, err := enqueueSend(r.Group, session, msg); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
+	// Register after a successful enqueue so the name shows up in
+	// GroupInfo.sessions even before its first turn completes.
+	registerSession(r.Group, session)
 	return &pb.BaseResp{Ok: true}, nil
 }
 
@@ -280,11 +304,117 @@ func (s *kotoServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsRe
 	return out, nil
 }
 
+// Jobs is the fresh "ls" of a group's background jobs — it re-reads the
+// guest (bounded by fcExec's timeout) rather than serving the watch-loop
+// mirror, so `koto ctl jobs` never shows stale state. Group "" sweeps every
+// running group (ACL-wise that's the read-across-all form, like global
+// metrics). Stopped groups simply contribute nothing: their job dirs are
+// unreachable inside workspace.img, and observability must not boot VMs.
+func (s *kotoServer) Jobs(_ context.Context, r *pb.JobsReq) (*pb.JobsResp, error) {
+	if r.Group != "" && !validGroupName(r.Group) {
+		return &pb.JobsResp{Error: "invalid group name"}, nil
+	}
+	groups := []string{r.Group}
+	if r.Group == "" {
+		groups = groups[:0]
+		for g := range readGroups() {
+			groups = append(groups, g)
+		}
+		sort.Strings(groups)
+	}
+	out := &pb.JobsResp{Ok: true}
+	for _, g := range groups {
+		for _, j := range refreshJobs(g) {
+			j.Group = g
+			out.Jobs = append(out.Jobs, toPBJobInfo(j))
+		}
+	}
+	return out, nil
+}
+
+// JobLogs returns one job's metadata plus a tail of its combined output.
+// Output is sanitized like chat events — it is attacker-influenceable bytes
+// headed for a terminal.
+func (s *kotoServer) JobLogs(_ context.Context, r *pb.JobLogsReq) (*pb.JobLogsResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.JobLogsResp{Error: "invalid group name"}, nil
+	}
+	if !fcRunning(r.Group) {
+		return &pb.JobLogsResp{Error: "group not running"}, nil
+	}
+	res, err := fcJobLogs(r.Group, r.Id, r.Tail)
+	if err != nil {
+		return &pb.JobLogsResp{Error: err.Error()}, nil
+	}
+	j := res.Job
+	j.Group = r.Group
+	return &pb.JobLogsResp{
+		Ok:        true,
+		Job:       toPBJobInfo(j),
+		Output:    sanitize(res.Output),
+		Truncated: res.Truncated,
+	}, nil
+}
+
+// JobTail streams one job's combined output live: `tail -c <window> -f` in
+// the guest over the agent's exec_stream (client cancel closes the vsock
+// conn, which makes the guest agent kill the tail — same lifecycle as
+// RunScript). Output is line-buffered and sanitized per line before it goes
+// to the client: job output is attacker-influenceable bytes headed for a
+// terminal, unlike RunScript's deliberately-raw operator channel. The
+// stream keeps following until the client cancels — a finished job simply
+// stops producing frames after the initial window.
+func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) error {
+	fail := func(msg string) error {
+		return stream.Send(&pb.ScriptEvent{Event: "error", Error: msg})
+	}
+	if !validGroupName(r.Group) {
+		return fail("invalid group name")
+	}
+	if !jobIDRE.MatchString(r.Id) {
+		return fail("invalid job id")
+	}
+	if !fcRunning(r.Group) {
+		return fail("group not running")
+	}
+	window := r.Tail
+	if window <= 0 {
+		window = jobLogsMaxTail
+	}
+	if window > jobLogsMaxTail {
+		window = jobLogsMaxTail
+	}
+	path := "/workspace/.cs/jobs/" + r.Id + "/out"
+	rc, err := fcExecStream(r.Group, fmt.Sprintf("exec tail -c %d -f %s", window, path))
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer rc.Close()
+	ctx := stream.Context()
+	go func() { // client gone → close the vsock conn → guest kills the tail
+		<-ctx.Done()
+		rc.Close()
+	}()
+	sc := bufio.NewScanner(rc)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sanitize(sc.Text())
+		if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: []byte(line + "\n")}); serr != nil {
+			return serr
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err() // client cancelled — the normal end
+	}
+	// Guest side went away (VM stopped/restarted mid-tail).
+	return stream.Send(&pb.ScriptEvent{Event: "end"})
+}
+
 func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
-	br := clearCmd(groupReq{Group: r.Group})
+	br := clearCmd(groupReq{Group: r.Group, Session: r.Session})
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
@@ -409,7 +539,7 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 	if _, err := ensure(r.Group, r.Group == "main"); err != nil {
 		return fail(err.Error())
 	}
-	emitLogf("exec", "info", "[%s] runscript start (%d-byte script)", r.Group, len(r.Script))
+	emitLogfG("exec", r.Group, "info", "[%s] runscript start (%d-byte script)", r.Group, len(r.Script))
 	c, err := fcRunScriptDial(r.Group, r.Script)
 	if err != nil {
 		return fail(err.Error())
@@ -430,7 +560,7 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			emitLogf("exec", "warn", "[%s] runscript transport: %v", r.Group, err)
+			emitLogfG("exec", r.Group, "warn", "[%s] runscript transport: %v", r.Group, err)
 			return fail("guest connection lost: " + err.Error())
 		}
 		switch typ {
@@ -439,10 +569,10 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 				return serr
 			}
 		case 'E':
-			emitLogf("exec", "info", "[%s] runscript end", r.Group)
+			emitLogfG("exec", r.Group, "info", "[%s] runscript end", r.Group)
 			return stream.Send(&pb.ScriptEvent{Event: "end"})
 		case 'X':
-			emitLogf("exec", "warn", "[%s] runscript error: %s", r.Group, string(payload))
+			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, string(payload))
 			return fail(string(payload))
 		}
 	}
@@ -486,7 +616,7 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 	if _, err := ensure(group, group == "main"); err != nil {
 		return status.Errorf(codes.FailedPrecondition, "%v", err)
 	}
-	emitLogf("shell", "info", "[%s] attach session=%s cols=%d rows=%d", group, session, open.Cols, open.Rows)
+	emitLogfG("shell", group, "info", "[%s] attach session=%s cols=%d rows=%d", group, session, open.Cols, open.Rows)
 
 	c, err := fcShellDial(group, session, uint16(open.Cols), uint16(open.Rows))
 	if err != nil {
@@ -513,11 +643,11 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 					return
 				}
 			case 'E':
-				emitLogf("shell", "info", "[%s] session=%s detached", group, session)
+				emitLogfG("shell", group, "info", "[%s] session=%s detached", group, session)
 				_ = stream.Send(&pb.ShellFrame{Event: "end"})
 				return
 			case 'X':
-				emitLogf("shell", "warn", "[%s] session=%s error: %s", group, session, string(payload))
+				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, string(payload))
 				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: string(payload)})
 				return
 			}

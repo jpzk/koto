@@ -25,6 +25,10 @@ type Event struct {
 	// Seq is the per-group monotonic sequence number of live streaming
 	// frames; zero for events replayed by the History RPC.
 	Seq uint64
+	// Session within the group this frame belongs to ("" = the default
+	// session). Stamped by the daemon's log parser; pre-session daemons
+	// leave it empty, which reads as the default session.
+	Session string
 }
 
 // GroupInfo is one group's row in the WatchState / List snapshot.
@@ -36,6 +40,24 @@ type GroupInfo struct {
 	Effort   string
 	Stalled  bool
 	Queued   int
+	// Sessions lists the group's named sessions (the default session is
+	// implicit and never listed). Drives the /session picker.
+	Sessions []string
+	// Jobs is the daemon's mirror of the group's background jobs (cs-job),
+	// attributed to the chat session that launched each. Drives the tree's
+	// job rows and the hover peek pane.
+	Jobs []JobInfo
+}
+
+// JobInfo is one background job in a group's guest (koto.proto JobInfo).
+type JobInfo struct {
+	ID      string
+	Session string // "" = default session
+	Status  string // running | done | orphaned | unknown
+	RC      string
+	Cmd     string
+	Started int64
+	OutSize int64
 }
 
 // LogEvent is one frame of the daemon's own log stream (SubscribeLogs).
@@ -45,4 +67,5 @@ type LogEvent struct {
 	Msg       string
 	Ts        float64
 	Subsystem string // emitting subsystem (acl, fc, egress, ...); may be empty from older daemons
+	Group     string // owning group for group-scoped lines; "" = daemon-wide
 }

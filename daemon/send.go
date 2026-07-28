@@ -65,7 +65,7 @@ func tailBackgroundTask(g, id, path string) {
 	defer func() { timer.Stop(); _ = rc.Close() }()
 	var stdout io.Reader = rc
 	wait := func() {}
-	emitLogf("send", "info", "bg-tail start group=%s id=%s path=%s", g, id, path)
+	emitLogfG("send", g, "info", "bg-tail start group=%s id=%s path=%s", g, id, path)
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -75,7 +75,7 @@ func tailBackgroundTask(g, id, path string) {
 		logAppend(g, []byte("[[bg]] "+id+" "+line+"\n"))
 	}
 	wait()
-	emitLogf("send", "info", "bg-tail end group=%s id=%s", g, id)
+	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }
 
 // agentWorkerPattern is the egrep alternation matching a turn's agent worker
@@ -138,24 +138,29 @@ exit 0`
 
 // ---- send -----------------------------------------------------------------
 
-// sendNow performs one message turn for group g: compose the system prompt,
-// write the FIFO, and block until [[turn_end]] (or turnWaitTimeout). It is NOT
-// safe to call concurrently for the same group — serialization is provided by
-// the per-group queue worker (queue.go), its sole caller. Two concurrent turns
-// would interleave a non-atomic sequence (log marker → system-prompt.md →
-// encode → FIFO write), let the sidecar run message-A under the system prompt
-// prepared for message-B, and race on the shared turnDone channel.
-func sendNow(g, msg string) error {
-	emitLogf("send", "info", "group=%s bytes=%d", g, len(msg))
+// sendNow performs one message turn for group g in the given session ("" =
+// default): compose the system prompt, write the FIFO, and block until
+// [[turn_end]] (or turnWaitTimeout). It is NOT safe to call concurrently for
+// the same group — serialization is provided by the per-group queue worker
+// (queue.go), its sole caller. Two concurrent turns would interleave a
+// non-atomic sequence (log marker → system-prompt.md → encode → FIFO write),
+// let the sidecar run message-A under the system prompt prepared for
+// message-B, and race on the shared turnDone channel.
+func sendNow(g, session, msg string) error {
+	emitLogfG("send", g, "info", "group=%s session=%s bytes=%d", g, sessionMarkerName(session), len(msg))
 	if _, err := ensure(g, g == "main"); err != nil {
-		emitLogf("send", "error", "ensure group=%s: %v", g, err)
+		emitLogfG("send", g, "error", "ensure group=%s: %v", g, err)
 		return err
 	}
 	v := vol(g)
 	logPath := filepath.Join(v, ".cs", "log")
 
+	// The [[session]] marker attributes everything from here to the next
+	// marker to this turn's session — both in the live tailer and in History
+	// replay. Written unconditionally (default = "-") so a default turn after
+	// a named one resets the attribution.
 	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		fmt.Fprintf(f, "[ts:%d]\n>>> %s\n", time.Now().UnixMilli(), msg)
+		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), msg)
 		f.Close()
 	}
 
@@ -189,7 +194,7 @@ drain:
 	}
 	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
 	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
-	if err := fcSendMsg(g, enc, sp, cfgB); err != nil {
+	if err := fcSendMsg(g, session, enc, sp, cfgB); err != nil {
 		return err
 	}
 	select {
@@ -197,7 +202,7 @@ drain:
 		return nil
 	case <-time.After(turnWaitTimeout):
 		setStalled(g, true)
-		emitLogf("send", "warn", "group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
+		emitLogfG("send", g, "warn", "group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
 		selfHeal(g, time.Now())
 		return nil
 	}
@@ -293,7 +298,7 @@ func selfHeal(g string, now time.Time) bool {
 	if len(kept) >= healMaxAttempts {
 		healAttempts[g] = kept
 		healMu.Unlock()
-		emitLogf("selfheal", "error", "group=%s: circuit breaker OPEN (%d restarts within %s); leaving STALLED — manual /restart needed", g, len(kept), healWindow)
+		emitLogfG("selfheal", g, "error", "group=%s: circuit breaker OPEN (%d restarts within %s); leaving STALLED — manual /restart needed", g, len(kept), healWindow)
 		return false
 	}
 	kept = append(kept, now)
@@ -301,13 +306,13 @@ func selfHeal(g string, now time.Time) bool {
 	attempt := len(kept)
 	healMu.Unlock()
 
-	emitLogf("selfheal", "warn", "group=%s: restarting wedged sidecar (attempt %d/%d in %s)", g, attempt, healMaxAttempts, healWindow)
+	emitLogfG("selfheal", g, "warn", "group=%s: restarting wedged sidecar (attempt %d/%d in %s)", g, attempt, healMaxAttempts, healWindow)
 	if _, err := restart(g); err != nil {
-		emitLogf("selfheal", "error", "group=%s: restart failed: %v", g, err)
+		emitLogfG("selfheal", g, "error", "group=%s: restart failed: %v", g, err)
 		return false
 	}
 	setStalled(g, false) // fresh loop is live; next turn_end would re-confirm
-	emitLogf("selfheal", "info", "group=%s: sidecar restarted; loop restored", g)
+	emitLogfG("selfheal", g, "info", "group=%s: sidecar restarted; loop restored", g)
 	return true
 }
 

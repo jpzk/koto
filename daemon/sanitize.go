@@ -27,7 +27,14 @@ import "strings"
 //
 // Note this addresses injection and spoofing, not pure cell-width wobble of
 // otherwise-legitimate wide/emoji content — terminals disagree on those widths
-// and the daemon has no client geometry to wrap against.
+// and the daemon has no client geometry to wrap against. The one width
+// exception: U+FF9E/U+FF9F (halfwidth katakana sound marks) are rewritten to
+// their spacing forms U+309B/U+309C. UAX #29 gives the halfwidth pair
+// Grapheme_Cluster_Break=Extend, so uniseg-based clients (lipgloss) measure
+// them at width 0 while terminals render a cell (wcwidth 1) — a padded row
+// containing one overflows the terminal by a column and shears the layout
+// below it. The spacing forms are width 2 under both rulers and visually
+// near-identical.
 func sanitize(s string) string {
 	// Fast path: pure printable-ASCII (plus \n/\t) is the overwhelmingly
 	// common case and needs no rune decode.
@@ -60,6 +67,10 @@ func sanitize(s string) string {
 			// drop
 		case isBidiOrFormat(r):
 			// drop
+		case r == 0xff9e: // halfwidth voiced sound mark → spacing form
+			b.WriteRune(0x309b)
+		case r == 0xff9f: // halfwidth semi-voiced sound mark → spacing form
+			b.WriteRune(0x309c)
 		default:
 			b.WriteRune(r)
 		}

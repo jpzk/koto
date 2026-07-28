@@ -15,6 +15,10 @@ import (
 type persistedState struct {
 	Cur   string `json:"cur,omitempty"`
 	Draft string `json:"draft,omitempty"`
+	// Sessions is the per-group active chat session (only non-default
+	// entries are kept), so a /reload doesn't silently retarget sends to
+	// each group's default session.
+	Sessions map[string]string `json:"sessions,omitempty"`
 }
 
 func statePath(sock string) string {

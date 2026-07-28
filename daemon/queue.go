@@ -32,8 +32,9 @@ import (
 const sendQueueDepth = 64
 
 type sendJob struct {
-	msg  string
-	done chan error // buffered(1); worker delivers the turn result, never blocks
+	session string // "" = the group's default session
+	msg     string
+	done    chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
 var (
@@ -41,15 +42,20 @@ var (
 	queues   = map[string]chan sendJob{}
 )
 
-// enqueueSend appends msg to g's queue, starting the worker on first use.
-// Returns a buffered channel that receives the turn's result (nil on success)
-// once processed, or an error immediately if the queue is full. Fire-and-forget
-// callers (ctl, scheduler) ignore the returned channel; send() waits on it.
+// enqueueSend appends msg to g's queue for the given session ("" = default),
+// starting the worker on first use. Returns a buffered channel that receives
+// the turn's result (nil on success) once processed, or an error immediately
+// if the queue is full. Fire-and-forget callers (ctl, scheduler) ignore the
+// returned channel; send() waits on it.
+//
+// Sessions share the group's single queue on purpose: one turn in flight per
+// group is the invariant sendNow depends on (shared log file, shared VM), so
+// sessions interleave rather than run concurrently.
 //
 // The non-blocking channel send happens under queuesMu so it can never race a
 // future teardown; it never blocks because the channel is buffered and we fall
 // through to the overflow error when full.
-func enqueueSend(g, msg string) (<-chan error, error) {
+func enqueueSend(g, session, msg string) (<-chan error, error) {
 	done := make(chan error, 1)
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
@@ -60,7 +66,7 @@ func enqueueSend(g, msg string) (<-chan error, error) {
 		go sendWorker(g, q)
 	}
 	select {
-	case q <- sendJob{msg: msg, done: done}:
+	case q <- sendJob{session: session, msg: msg, done: done}:
 		return done, nil
 	default:
 		return nil, fmt.Errorf("group %q send queue full (%d pending); retry later", g, sendQueueDepth)
@@ -71,13 +77,13 @@ func enqueueSend(g, msg string) (<-chan error, error) {
 // test seam (sendNow spawns containers); nil in production. Not initialized to
 // sendNow directly because that would form a static initialization cycle
 // (sendNow → … → sendWorker → turnFn).
-var turnFn func(g, msg string) error
+var turnFn func(g, session, msg string) error
 
-func runTurn(g, msg string) error {
+func runTurn(g, session, msg string) error {
 	if turnFn != nil {
-		return turnFn(g, msg)
+		return turnFn(g, session, msg)
 	}
-	return sendNow(g, msg)
+	return sendNow(g, session, msg)
 }
 
 // queueDepth reports how many messages are buffered (enqueued, not yet
@@ -95,7 +101,7 @@ func queueDepth(g string) int {
 // sendNow depends on.
 func sendWorker(g string, q chan sendJob) {
 	for job := range q {
-		job.done <- runTurn(g, job.msg)
+		job.done <- runTurn(g, job.session, job.msg)
 	}
 }
 

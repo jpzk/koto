@@ -123,6 +123,17 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 	return id, nil
 }
 
+// aclLogGroup maps a group-scoped verb's target onto the LogEvent.group
+// field. A concrete group name attributes the decision to that group's log;
+// the "*" wildcard (a request that reads across every group, e.g. unfiltered
+// metrics) is daemon-wide, so it stays unattributed.
+func aclLogGroup(target string) string {
+	if target == "*" {
+		return ""
+	}
+	return target
+}
+
 // aclCheck is the authorization decision for one decoded request: some role
 // of the caller must grant the verb, and — for group-scoped verbs — that
 // grant must cover the request's target group (acl.go; union semantics).
@@ -131,14 +142,14 @@ func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) erro
 	roles := strings.Join(id.Roles, ",")
 	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
 		if targeted {
-			emitLogf("acl", "info", "%s (roles %s) allowed %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
+			emitLogfG("acl", aclLogGroup(target), "info", "%s (roles %s) allowed %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
 		} else {
 			emitLogf("acl", "info", "%s (roles %s) allowed %s from %s", id.Name, roles, verb, peerAddr(ctx))
 		}
 		return nil
 	}
 	if targeted {
-		emitLogf("acl", "warn", "%s (roles %s) denied %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
+		emitLogfG("acl", aclLogGroup(target), "warn", "%s (roles %s) denied %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
 		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s on %q", roles, verb, target)
 	}
 	emitLogf("acl", "warn", "%s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ctx))

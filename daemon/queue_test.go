@@ -11,7 +11,7 @@ import (
 // restores it after. Tests use unique group names so their dedicated workers
 // never read turnFn concurrently with the swap (each read is ordered after the
 // enqueue that follows the swap).
-func withTurnFn(stub func(g, msg string) error, fn func()) {
+func withTurnFn(stub func(g, session, msg string) error, fn func()) {
 	prev := turnFn
 	turnFn = stub
 	defer func() { turnFn = prev }()
@@ -29,7 +29,7 @@ func TestQueueFIFOAndSingleFlight(t *testing.T) {
 	active := 0
 	maxActive := 0
 
-	stub := func(_, msg string) error {
+	stub := func(_, _, msg string) error {
 		mu.Lock()
 		active++
 		if active > maxActive {
@@ -47,7 +47,7 @@ func TestQueueFIFOAndSingleFlight(t *testing.T) {
 	withTurnFn(stub, func() {
 		dones := make([]<-chan error, 0, n)
 		for i := 0; i < n; i++ {
-			d, err := enqueueSend(g, fmt.Sprintf("%02d", i))
+			d, err := enqueueSend(g, "", fmt.Sprintf("%02d", i))
 			if err != nil {
 				t.Fatalf("enqueue %d: %v", i, err)
 			}
@@ -76,7 +76,7 @@ func TestQueueOverflowRejects(t *testing.T) {
 	const g = "q-overflow"
 	release := make(chan struct{})
 
-	stub := func(_, _ string) error {
+	stub := func(_, _, _ string) error {
 		<-release // hold the worker so the buffer fills and stays full
 		return nil
 	}
@@ -86,7 +86,7 @@ func TestQueueOverflowRejects(t *testing.T) {
 		// First job is pulled by the worker (which then blocks on release),
 		// leaving the buffer free; the next sendQueueDepth fill it exactly.
 		// Give the worker a moment to pick up job 0 before measuring.
-		d0, err := enqueueSend(g, "j0")
+		d0, err := enqueueSend(g, "", "j0")
 		if err != nil {
 			t.Fatalf("first enqueue: %v", err)
 		}
@@ -94,14 +94,14 @@ func TestQueueOverflowRejects(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		for i := 0; i < sendQueueDepth; i++ {
-			d, err := enqueueSend(g, fmt.Sprintf("fill-%d", i))
+			d, err := enqueueSend(g, "", fmt.Sprintf("fill-%d", i))
 			if err != nil {
 				t.Fatalf("fill enqueue %d rejected early: %v", i, err)
 			}
 			dones = append(dones, d)
 		}
 		// Buffer is now full; the next enqueue must be rejected.
-		if _, err := enqueueSend(g, "overflow"); err == nil {
+		if _, err := enqueueSend(g, "", "overflow"); err == nil {
 			t.Fatal("expected overflow error, got nil")
 		}
 		close(release) // let the worker drain
@@ -130,7 +130,7 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 
 	// stub mirrors sendNow's wait discipline: drain stale tokens, then block on
 	// turnDoneCh until a turn_end/abort token arrives (or the timeout backstop).
-	stub := func(g, msg string) error {
+	stub := func(g, _, msg string) error {
 	drain:
 		for {
 			select {
@@ -152,10 +152,10 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 	}
 
 	withTurnFn(stub, func() {
-		if _, err := enqueueSend(g, "hang"); err != nil {
+		if _, err := enqueueSend(g, "", "hang"); err != nil {
 			t.Fatalf("enqueue hang: %v", err)
 		}
-		if _, err := enqueueSend(g, "next"); err != nil {
+		if _, err := enqueueSend(g, "", "next"); err != nil {
 			t.Fatalf("enqueue next: %v", err)
 		}
 		// Wait until the worker is actually blocked in the hang turn, then
@@ -188,18 +188,18 @@ func TestQueueCrossGroupConcurrency(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 
-	stub := func(g, _ string) error {
+	stub := func(g, _, _ string) error {
 		started <- g
 		<-release
 		return nil
 	}
 
 	withTurnFn(stub, func() {
-		da, err := enqueueSend("q-cc-a", "x")
+		da, err := enqueueSend("q-cc-a", "", "x")
 		if err != nil {
 			t.Fatalf("enqueue a: %v", err)
 		}
-		db, err := enqueueSend("q-cc-b", "x")
+		db, err := enqueueSend("q-cc-b", "", "x")
 		if err != nil {
 			t.Fatalf("enqueue b: %v", err)
 		}

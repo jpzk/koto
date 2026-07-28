@@ -127,6 +127,22 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "autostart" {
+		// Boot this group's VM with the daemon: yes|no. Read once at daemon
+		// startup (autostartGroups), so unlike the other spawn-time knobs a
+		// /restart of the group does nothing — it applies on the next daemon
+		// start. Unknown values are silently rejected, same shape as root.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "yes", "no":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "ports" {
 		// Accept either a JSON array of ints or a comma-separated string so
 		// `/config ports=8080,3000` (TUI tokenization splits on whitespace,
@@ -188,6 +204,7 @@ func configCmd(req configReq) configResp {
 	applyConfig(cfg, "network", req.Network)
 	applyConfig(cfg, "size", req.Size)
 	applyConfig(cfg, "root", req.Root)
+	applyConfig(cfg, "autostart", req.Autostart)
 
 	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
 		_ = os.WriteFile(p, newB, 0o644)
@@ -214,6 +231,11 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 		eff["root"] = "yes"
 	} else {
 		eff["root"] = "no"
+	}
+	if groupAutostart(g) {
+		eff["autostart"] = "yes"
+	} else {
+		eff["autostart"] = "no"
 	}
 	size := "small"
 	if s, ok := cfg["size"].(string); ok {

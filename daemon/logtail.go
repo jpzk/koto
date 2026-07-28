@@ -56,6 +56,16 @@ func tailLog(g string) {
 	thinkBody := []string{}
 	inToolOut := false
 	toolOutBody := []string{}
+	// curSession attributes frames to the session of the current turn, set
+	// by the [[session]] marker sendNow writes before each turn ("" =
+	// default, which is also what everything before the first marker is).
+	// Sticky between markers: turns are serialized per group, so every line
+	// until the next marker belongs to this turn's session.
+	curSession := ""
+	emitS := func(ev Event) {
+		ev.Session = curSession
+		emit(g, ev)
+	}
 	for {
 		st, err := os.Stat(p)
 		if err != nil {
@@ -67,12 +77,18 @@ func tailLog(g string) {
 			curIno = sys.Ino
 		}
 		if curIno != ino {
+			// The file was replaced (per-session clear rewrites it via
+			// tmp+rename — see filterLogSession). Reopen at EOF: re-reading
+			// from offset 0 would re-emit the entire surviving history as
+			// live frames to every subscriber. Clients drop the cleared
+			// session's lines themselves or refetch via History.
 			f.Close()
 			f, err = os.Open(p)
 			if err != nil {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
+			_, _ = f.Seek(0, io.SeekEnd)
 			ino = curIno
 			buf = ""
 			hasPending = false
@@ -111,7 +127,13 @@ func tailLog(g string) {
 			if hasPending {
 				ts = pendingTS
 			}
-			if v, ok := parseTSLine(buf); ok {
+			if name, ok := parseSessionMarker(buf); ok && !inThinking && !inToolOut {
+				// Turn boundary written by sendNow — switch attribution for
+				// everything until the next marker. Not emitted as an event.
+				// Inside a thinking/tool_out block the line is body content
+				// (same injection rule as every other marker), handled below.
+				curSession = name
+			} else if v, ok := parseTSLine(buf); ok {
 				pendingTS = v
 				hasPending = true
 				// pendingTS is sticky once seen: stream_filter.js emits a
@@ -142,15 +164,15 @@ func tailLog(g string) {
 				// turnWaitTimeout — wedging the group's single-flight send queue.
 				// Force-close any open block, then emit the boundary.
 				if inThinking {
-					emit(g, Event{Event: "thinking_done", Body: strings.Join(thinkBody, "\n"), Ts: ts})
+					emitS(Event{Event: "thinking_done", Body: strings.Join(thinkBody, "\n"), Ts: ts})
 					inThinking = false
 					thinkBody = nil
 				} else if inToolOut {
-					emit(g, Event{Event: "tool_result_done", Body: strings.Join(toolOutBody, "\n"), Ts: ts})
+					emitS(Event{Event: "tool_result_done", Body: strings.Join(toolOutBody, "\n"), Ts: ts})
 					inToolOut = false
 					toolOutBody = nil
 				}
-				emit(g, Event{Event: "turn_end", Ts: ts})
+				emitS(Event{Event: "turn_end", Ts: ts})
 			} else if inThinking {
 				if strings.HasPrefix(buf, "[[think_end]] ") {
 					words := 0
@@ -160,20 +182,20 @@ func tailLog(g string) {
 					inThinking = false
 					body := strings.Join(thinkBody, "\n")
 					thinkBody = nil
-					emit(g, Event{Event: "thinking_done", Words: words, Body: body, Ts: ts})
+					emitS(Event{Event: "thinking_done", Words: words, Body: body, Ts: ts})
 				} else if buf != "" {
 					thinkBody = append(thinkBody, buf)
-					emit(g, Event{Event: "thinking", Text: buf, Ts: ts})
+					emitS(Event{Event: "thinking", Text: buf, Ts: ts})
 				}
 			} else if inToolOut {
 				if strings.HasPrefix(buf, "[[tool_out_end]] ") {
 					inToolOut = false
 					body := strings.Join(toolOutBody, "\n")
 					toolOutBody = nil
-					emit(g, Event{Event: "tool_result_done", Body: body, Ts: ts})
+					emitS(Event{Event: "tool_result_done", Body: body, Ts: ts})
 				} else {
 					toolOutBody = append(toolOutBody, buf)
-					emit(g, Event{Event: "tool_result", Text: buf, Ts: ts})
+					emitS(Event{Event: "tool_result", Text: buf, Ts: ts})
 					// Claude code backgrounds a long Bash and emits a tool_result
 					// of the form: "Command running in background with ID: X.
 					// Output is being written to: /tmp/.../X.output." We tail
@@ -187,13 +209,13 @@ func tailLog(g string) {
 			} else if buf == "[[think_begin]]" {
 				inThinking = true
 				thinkBody = nil
-				emit(g, Event{Event: "thinking_begin", Ts: ts})
+				emitS(Event{Event: "thinking_begin", Ts: ts})
 			} else if buf == "[[tool_out_begin]]" {
 				inToolOut = true
 				toolOutBody = nil
-				emit(g, Event{Event: "tool_result_begin", Ts: ts})
+				emitS(Event{Event: "tool_result_begin", Ts: ts})
 			} else if strings.HasPrefix(buf, ">>> ") {
-				emit(g, Event{Event: "prompt", Msg: buf[4:], Ts: ts})
+				emitS(Event{Event: "prompt", Msg: buf[4:], Ts: ts})
 			} else if strings.HasPrefix(buf, "[[tool]] ") {
 				rest := buf[len("[[tool]] "):]
 				sp := strings.IndexByte(rest, ' ')
@@ -202,9 +224,9 @@ func tailLog(g string) {
 					name = rest[:sp]
 					input = rest[sp+1:]
 				}
-				emit(g, Event{Event: "tool", Name: name, Input: input, Ts: ts})
+				emitS(Event{Event: "tool", Name: name, Input: input, Ts: ts})
 			} else if strings.HasPrefix(buf, "[[err]] ") {
-				emit(g, Event{Event: "err", Text: buf[len("[[err]] "):], Ts: ts})
+				emitS(Event{Event: "err", Text: buf[len("[[err]] "):], Ts: ts})
 			} else if strings.HasPrefix(buf, "[[bg]] ") {
 				rest := buf[len("[[bg]] "):]
 				sp := strings.IndexByte(rest, ' ')
@@ -213,25 +235,25 @@ func tailLog(g string) {
 					name = rest[:sp]
 					text = rest[sp+1:]
 				}
-				emit(g, Event{Event: "bg", Name: name, Text: text, Ts: ts})
+				emitS(Event{Event: "bg", Name: name, Text: text, Ts: ts})
 			} else if strings.HasPrefix(buf, "[[think_end]] ") || strings.HasPrefix(buf, "[[tool_out_end]] ") {
 				// Stray close marker outside a block (e.g. an empty
 				// thinking block that emitted begin+end while we were
 				// still settling state). Swallow it — emitting it as a
 				// `done` event surfaces raw framing in the TUI.
 			} else {
-				emit(g, Event{Event: "done", Text: buf, Ts: ts})
+				emitS(Event{Event: "done", Text: buf, Ts: ts})
 			}
 			buf = ""
 			i += j + 1
 		}
-		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") {
+		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") && !strings.HasPrefix(buf, "[[sess") {
 			if inThinking {
-				emit(g, Event{Event: "thinking_stream", Text: buf})
+				emitS(Event{Event: "thinking_stream", Text: buf})
 			} else if inToolOut {
-				emit(g, Event{Event: "tool_result_stream", Text: buf})
+				emitS(Event{Event: "tool_result_stream", Text: buf})
 			} else {
-				emit(g, Event{Event: "stream", Text: buf})
+				emitS(Event{Event: "stream", Text: buf})
 			}
 		}
 	}
@@ -272,8 +294,16 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 	var thinkBody []string
 	inToolOut := false
 	var toolOutBody []string
+	// Same session attribution as the live tailer: [[session]] markers switch
+	// the current session; everything before the first marker (including all
+	// pre-session logs) is the default session "".
+	curSession := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		if line == "" {
+			continue
+		}
+		if name, ok := parseSessionMarker(line); ok && !inThinking && !inToolOut {
+			curSession = name
 			continue
 		}
 		if v, ok := parseTSLine(line); ok {
@@ -304,14 +334,14 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 			if inThinking {
 				events = append(events, Event{
 					Event: "thinking_done", Group: g, Ts: ts, Historical: true,
-					Body: strings.Join(thinkBody, "\n"),
+					Session: curSession, Body: strings.Join(thinkBody, "\n"),
 				})
 				inThinking = false
 				thinkBody = nil
 			} else if inToolOut {
 				events = append(events, Event{
 					Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
-					Body: strings.Join(toolOutBody, "\n"),
+					Session: curSession, Body: strings.Join(toolOutBody, "\n"),
 				})
 				inToolOut = false
 				toolOutBody = nil
@@ -328,7 +358,7 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 				}
 				events = append(events, Event{
 					Event: "thinking_done", Group: g, Ts: ts, Historical: true,
-					Words: words, Body: strings.Join(thinkBody, "\n"),
+					Session: curSession, Words: words, Body: strings.Join(thinkBody, "\n"),
 				})
 				inThinking = false
 				thinkBody = nil
@@ -341,7 +371,7 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 			if strings.HasPrefix(line, "[[tool_out_end]] ") {
 				events = append(events, Event{
 					Event: "tool_result_done", Group: g, Ts: ts, Historical: true,
-					Body: strings.Join(toolOutBody, "\n"),
+					Session: curSession, Body: strings.Join(toolOutBody, "\n"),
 				})
 				inToolOut = false
 				toolOutBody = nil
@@ -364,7 +394,7 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 			// Stray close marker outside a block — same rationale as the live tailer.
 			continue
 		}
-		ev := Event{Group: g, Ts: ts, Historical: true}
+		ev := Event{Group: g, Ts: ts, Historical: true, Session: curSession}
 		switch {
 		case strings.HasPrefix(line, ">>> "):
 			ev.Event = "prompt"

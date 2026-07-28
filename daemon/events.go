@@ -143,7 +143,13 @@ func stateHash(gs map[string]GroupInfo) string {
 	var b strings.Builder
 	for _, g := range names {
 		gi := gs[g]
-		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d;", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued)
+		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%s", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, strings.Join(gi.Sessions, ","))
+		for _, j := range gi.Jobs {
+			// id/status/rc/size cover every observable transition (a running
+			// job's growing output bumps size, so watchers see progress).
+			fmt.Fprintf(&b, "|%s:%s:%s:%s:%d", j.ID, j.Session, j.Status, j.RC, j.OutSize)
+		}
+		b.WriteString(";")
 	}
 	return b.String()
 }
@@ -166,6 +172,14 @@ func stateWatchLoop() {
 			continue
 		}
 		gs := listGroups()
+		// Keep the job mirrors warm while (and only while) someone watches:
+		// stale running-group mirrors refresh in the background and surface
+		// on a later tick via the hash change.
+		for g, gi := range gs {
+			if gi.Running {
+				kickJobsRefresh(g, false)
+			}
+		}
 		hash := stateHash(gs)
 		frame := toStateFrame(gs)
 		stateSubsLock.Lock()
@@ -209,12 +223,22 @@ var (
 // (acl, auth, fc, egress, sched, ...) so clients can filter/label lines;
 // it replaces the old ad-hoc "acl:" / "fc[g]:" message prefixes.
 func emitLog(subsystem, level, msg string) {
+	emitLogG(subsystem, "", level, msg)
+}
+
+// emitLogG is emitLog with group attribution: group names the one group a
+// line is about (fc/egress/send/shell/... lines), "" for daemon-wide lines.
+// The message text keeps its own "[g]"/"group=g" wording — the field is
+// structured metadata so clients can *scope* the log view to the group the
+// user is looking at without parsing prose.
+func emitLogG(subsystem, group, level, msg string) {
 	pbev := &pb.LogEvent{
 		Event:     "log",
 		Level:     level,
 		Msg:       msg,
 		Ts:        float64(time.Now().UnixNano()) / 1e9,
 		Subsystem: subsystem,
+		Group:     group,
 	}
 
 	fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", level, subsystem, msg)
@@ -237,4 +261,8 @@ func emitLog(subsystem, level, msg string) {
 
 func emitLogf(subsystem, level, format string, args ...any) {
 	emitLog(subsystem, level, fmt.Sprintf(format, args...))
+}
+
+func emitLogfG(subsystem, group, level, format string, args ...any) {
+	emitLogG(subsystem, group, level, fmt.Sprintf(format, args...))
 }

@@ -47,6 +47,9 @@ const (
 	Koto_Skills_FullMethodName         = "/koto.Koto/Skills"
 	Koto_SkillNew_FullMethodName       = "/koto.Koto/SkillNew"
 	Koto_SkillRead_FullMethodName      = "/koto.Koto/SkillRead"
+	Koto_Jobs_FullMethodName           = "/koto.Koto/Jobs"
+	Koto_JobLogs_FullMethodName        = "/koto.Koto/JobLogs"
+	Koto_JobTail_FullMethodName        = "/koto.Koto/JobTail"
 	Koto_SchedAdd_FullMethodName       = "/koto.Koto/SchedAdd"
 	Koto_SchedList_FullMethodName      = "/koto.Koto/SchedList"
 	Koto_SchedDel_FullMethodName       = "/koto.Koto/SchedDel"
@@ -81,6 +84,17 @@ type KotoClient interface {
 	Skills(ctx context.Context, in *SkillListReq, opts ...grpc.CallOption) (*SkillsResp, error)
 	SkillNew(ctx context.Context, in *SkillNewReq, opts ...grpc.CallOption) (*SkillNewResp, error)
 	SkillRead(ctx context.Context, in *SkillReadReq, opts ...grpc.CallOption) (*SkillReadResp, error)
+	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
+	// group "" reads across all running groups (needs the "*" target, like
+	// global metrics). JobLogs returns one job's metadata + an output tail.
+	Jobs(ctx context.Context, in *JobsReq, opts ...grpc.CallOption) (*JobsResp, error)
+	JobLogs(ctx context.Context, in *JobLogsReq, opts ...grpc.CallOption) (*JobLogsResp, error)
+	// JobTail streams a job's combined output LIVE: an initial tail window,
+	// then lines as the job writes them (guest-side `tail -c -f` over the
+	// agent's exec_stream; client cancel kills the guest tail). Reuses the
+	// ScriptEvent frame vocabulary (data/end/error); data chunks are whole
+	// sanitized lines. Ordinary grantable verb (job_tail), group-scoped.
+	JobTail(ctx context.Context, in *JobTailReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error)
 	SchedAdd(ctx context.Context, in *SchedAddReq, opts ...grpc.CallOption) (*SchedAddResp, error)
 	SchedList(ctx context.Context, in *SchedListReq, opts ...grpc.CallOption) (*SchedListResp, error)
 	SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
@@ -282,6 +296,45 @@ func (c *kotoClient) SkillRead(ctx context.Context, in *SkillReadReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) Jobs(ctx context.Context, in *JobsReq, opts ...grpc.CallOption) (*JobsResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JobsResp)
+	err := c.cc.Invoke(ctx, Koto_Jobs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) JobLogs(ctx context.Context, in *JobLogsReq, opts ...grpc.CallOption) (*JobLogsResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JobLogsResp)
+	err := c.cc.Invoke(ctx, Koto_JobLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) JobTail(ctx context.Context, in *JobTailReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[0], Koto_JobTail_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[JobTailReq, ScriptEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_JobTailClient = grpc.ServerStreamingClient[ScriptEvent]
+
 func (c *kotoClient) SchedAdd(ctx context.Context, in *SchedAddReq, opts ...grpc.CallOption) (*SchedAddResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SchedAddResp)
@@ -364,7 +417,7 @@ func (c *kotoClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...
 
 func (c *kotoClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[0], Koto_RunScript_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_RunScript_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +436,7 @@ type Koto_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
 
 func (c *kotoClient) AttachShell(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ShellInput, ShellFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_AttachShell_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_AttachShell_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +449,7 @@ type Koto_AttachShellClient = grpc.BidiStreamingClient[ShellInput, ShellFrame]
 
 func (c *kotoClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_SubscribeGroup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_SubscribeGroup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +468,7 @@ type Koto_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
 
 func (c *kotoClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_SubscribeLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[4], Koto_SubscribeLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +487,7 @@ type Koto_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
 func (c *kotoClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[4], Koto_WatchState_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[5], Koto_WatchState_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -470,6 +523,17 @@ type KotoServer interface {
 	Skills(context.Context, *SkillListReq) (*SkillsResp, error)
 	SkillNew(context.Context, *SkillNewReq) (*SkillNewResp, error)
 	SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error)
+	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
+	// group "" reads across all running groups (needs the "*" target, like
+	// global metrics). JobLogs returns one job's metadata + an output tail.
+	Jobs(context.Context, *JobsReq) (*JobsResp, error)
+	JobLogs(context.Context, *JobLogsReq) (*JobLogsResp, error)
+	// JobTail streams a job's combined output LIVE: an initial tail window,
+	// then lines as the job writes them (guest-side `tail -c -f` over the
+	// agent's exec_stream; client cancel kills the guest tail). Reuses the
+	// ScriptEvent frame vocabulary (data/end/error); data chunks are whole
+	// sanitized lines. Ordinary grantable verb (job_tail), group-scoped.
+	JobTail(*JobTailReq, grpc.ServerStreamingServer[ScriptEvent]) error
 	SchedAdd(context.Context, *SchedAddReq) (*SchedAddResp, error)
 	SchedList(context.Context, *SchedListReq) (*SchedListResp, error)
 	SchedDel(context.Context, *SchedIDReq) (*BaseResp, error)
@@ -572,6 +636,15 @@ func (UnimplementedKotoServer) SkillNew(context.Context, *SkillNewReq) (*SkillNe
 }
 func (UnimplementedKotoServer) SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SkillRead not implemented")
+}
+func (UnimplementedKotoServer) Jobs(context.Context, *JobsReq) (*JobsResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Jobs not implemented")
+}
+func (UnimplementedKotoServer) JobLogs(context.Context, *JobLogsReq) (*JobLogsResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method JobLogs not implemented")
+}
+func (UnimplementedKotoServer) JobTail(*JobTailReq, grpc.ServerStreamingServer[ScriptEvent]) error {
+	return status.Error(codes.Unimplemented, "method JobTail not implemented")
 }
 func (UnimplementedKotoServer) SchedAdd(context.Context, *SchedAddReq) (*SchedAddResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedAdd not implemented")
@@ -885,6 +958,53 @@ func _Koto_SkillRead_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Jobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JobsReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Jobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Jobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Jobs(ctx, req.(*JobsReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_JobLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JobLogsReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).JobLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_JobLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).JobLogs(ctx, req.(*JobLogsReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_JobTail_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(JobTailReq)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(KotoServer).JobTail(m, &grpc.GenericServerStream[JobTailReq, ScriptEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_JobTailServer = grpc.ServerStreamingServer[ScriptEvent]
+
 func _Koto_SchedAdd_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SchedAddReq)
 	if err := dec(in); err != nil {
@@ -1144,6 +1264,14 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Koto_SkillRead_Handler,
 		},
 		{
+			MethodName: "Jobs",
+			Handler:    _Koto_Jobs_Handler,
+		},
+		{
+			MethodName: "JobLogs",
+			Handler:    _Koto_JobLogs_Handler,
+		},
+		{
 			MethodName: "SchedAdd",
 			Handler:    _Koto_SchedAdd_Handler,
 		},
@@ -1177,6 +1305,11 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "JobTail",
+			Handler:       _Koto_JobTail_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "RunScript",
 			Handler:       _Koto_RunScript_Handler,

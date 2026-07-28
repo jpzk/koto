@@ -35,7 +35,10 @@ const url = require('url');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const HISTORY = '/workspace/.cs/venice-history.json';
+// KOTO_VH_FILE is set by entrypoint.sh: the default chat session keeps the
+// historical filename, named sessions each get venice-history-<name>.json so
+// their transcripts stay independent (per-session /clear removes one file).
+const HISTORY = process.env.KOTO_VH_FILE || '/workspace/.cs/venice-history.json';
 const BASE = process.env.ANTHROPIC_BASE_URL;
 // VENICE_MODEL is always set by entrypoint.sh (config model, else the daemon's
 // KOTO_DEFAULT_VENICE_MODEL). This literal is a last-resort fallback only;

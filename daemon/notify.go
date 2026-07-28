@@ -39,11 +39,18 @@ const (
 // (the guest already tail-trimmed Out to ~1500 bytes in cs-job _notify; the
 // agent runs `cs-job logs <id>` for the full text).
 type jobResult struct {
-	ID    string
-	RC    string
-	Out   string // trailing bytes of the job's combined output
-	Total int64  // full output size in bytes (for the truncation hint)
+	ID      string
+	RC      string
+	Out     string // trailing bytes of the job's combined output
+	Total   int64  // full output size in bytes (for the truncation hint)
+	Session string // chat session whose turn launched the job ("" = default)
 }
+
+// Debounce buffers are keyed per (group, session): a job launched from a
+// named session wakes THAT conversation, not the group's default one — the
+// resume state, transcript, and shared shell the follow-up turn sees are the
+// ones the job actually belongs to.
+func notifyKey(group, session string) string { return group + "\x00" + session }
 
 var (
 	notifyMu      sync.Mutex
@@ -51,15 +58,16 @@ var (
 	notifyPending = map[string][]jobResult{}
 )
 
-// recordJobDone buffers one completed job's result and (re)arms the per-group
-// debounce timer. Called from the ctl loop (serialized per group); the mutex
-// covers cross-group races on the maps.
+// recordJobDone buffers one completed job's result and (re)arms the
+// per-conversation debounce timer. Called from the ctl loop (serialized per
+// group); the mutex covers cross-group races on the maps.
 func recordJobDone(group string, res jobResult) {
 	notifyMu.Lock()
 	defer notifyMu.Unlock()
 
+	key := notifyKey(group, res.Session)
 	// Dedup by id so a job that somehow posts twice doesn't double-report.
-	pend := notifyPending[group]
+	pend := notifyPending[key]
 	replaced := false
 	for i := range pend {
 		if pend[i].ID == res.ID {
@@ -69,27 +77,30 @@ func recordJobDone(group string, res jobResult) {
 		}
 	}
 	if !replaced {
-		notifyPending[group] = append(pend, res)
+		notifyPending[key] = append(pend, res)
 	}
 
-	if t, ok := notifyTimers[group]; ok {
+	if t, ok := notifyTimers[key]; ok {
 		t.Stop()
 	}
-	notifyTimers[group] = time.AfterFunc(notifyDebounce, func() {
+	session := res.Session
+	notifyTimers[key] = time.AfterFunc(notifyDebounce, func() {
 		notifyMu.Lock()
-		delete(notifyTimers, group)
+		delete(notifyTimers, key)
 		notifyMu.Unlock()
-		flushNotify(group)
+		flushNotify(group, session)
 	})
 }
 
-// flushNotify coalesces every buffered result for the group into one self-send.
-// Reported jobs are cleared only on a successful enqueue (by id, so results that
-// arrive between the snapshot and the clear survive); a full queue leaves them
-// buffered to retry on the next job_done rather than silently dropping them.
-func flushNotify(group string) {
+// flushNotify coalesces every buffered result for one (group, session) into
+// one self-send into that session. Reported jobs are cleared only on a
+// successful enqueue (by id, so results that arrive between the snapshot and
+// the clear survive); a full queue leaves them buffered to retry on the next
+// job_done rather than silently dropping them.
+func flushNotify(group, session string) {
+	key := notifyKey(group, session)
 	notifyMu.Lock()
-	pend := notifyPending[group]
+	pend := notifyPending[key]
 	ready := make([]jobResult, len(pend))
 	copy(ready, pend)
 	notifyMu.Unlock()
@@ -112,8 +123,8 @@ func flushNotify(group string) {
 	}
 	b.WriteString("\n(`cs-job logs <id>` for full output; `cs-job clean` to clear finished jobs.)")
 
-	if _, err := enqueueSend(group, b.String()); err != nil {
-		emitLogf("notify", "warn", "[%s] enqueue failed, will retry on next job_done: %v", group, err)
+	if _, err := enqueueSend(group, session, b.String()); err != nil {
+		emitLogfG("notify", group, "warn", "[%s] enqueue failed, will retry on next job_done: %v", group, err)
 		return // leave pending buffered for retry
 	}
 
@@ -124,16 +135,16 @@ func flushNotify(group string) {
 		reported[r.ID] = true
 	}
 	var remaining []jobResult
-	for _, r := range notifyPending[group] {
+	for _, r := range notifyPending[key] {
 		if !reported[r.ID] {
 			remaining = append(remaining, r)
 		}
 	}
 	if len(remaining) == 0 {
-		delete(notifyPending, group)
+		delete(notifyPending, key)
 	} else {
-		notifyPending[group] = remaining
+		notifyPending[key] = remaining
 	}
 	notifyMu.Unlock()
-	emitLogf("notify", "info", "[%s] reported %d completed job(s)", group, len(ready))
+	emitLogfG("notify", group, "info", "[%s] reported %d completed job(s) to session %s", group, len(ready), sessionMarkerName(session))
 }

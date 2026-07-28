@@ -48,6 +48,11 @@ func TestSanitize(t *testing.T) {
 		{"isolates", "\u2066x\u2069", "x"},
 		{"zwsp_bom", "a\u200b\ufeffb", "ab"},
 		{"line_sep", "a\u2028b", "ab"},
+
+		// Halfwidth katakana sound marks \u2192 spacing forms: uniseg measures the
+		// halfwidth pair at width 0 (GCB=Extend) but terminals render a cell,
+		// so a padded row containing one overflows and shears the layout.
+		{"halfwidth_sound_marks", "\ua564.\uff9f ha\uff9e", "\ua564.\u309c ha\u309b"},
 	}
 	for _, c := range cases {
 		if got := sanitize(c.in); got != c.want {

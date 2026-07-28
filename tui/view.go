@@ -7,20 +7,21 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Color palette — 256-color codes that work in any modern terminal.
 var (
-	cBlack    = lipgloss.Color("0")
-	cRed      = lipgloss.Color("1")
-	cYellow   = lipgloss.Color("3")
-	cMagenta  = lipgloss.Color("5")
-	cAmber    = lipgloss.Color("214") // signature accent (256-color amber #ffaf00)
-	cDkAmber  = lipgloss.Color("130") // group indicator (256-color dark amber #af5f00)
-	cWhite    = lipgloss.Color("7")
-	cGray     = lipgloss.Color("8")
-	cBrWhite  = lipgloss.Color("15")
-	cPink     = lipgloss.Color("205")
+	cBlack   = lipgloss.Color("0")
+	cRed     = lipgloss.Color("1")
+	cYellow  = lipgloss.Color("3")
+	cMagenta = lipgloss.Color("5")
+	cAmber   = lipgloss.Color("214") // signature accent (256-color amber #ffaf00)
+	cDkAmber = lipgloss.Color("130") // group indicator (256-color dark amber #af5f00)
+	cWhite   = lipgloss.Color("7")
+	cGray    = lipgloss.Color("8")
+	cBrWhite = lipgloss.Color("15")
+	cPink    = lipgloss.Color("205")
 )
 
 // Powerline-ish glyphs. Same as the Ink TUI used.
@@ -167,11 +168,15 @@ func (m Model) View() string {
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
 	status := m.renderStatusBar(spin)
-	logRows := max(1, m.height-6)
+	logRows := m.chatRows()
 	treeW := m.treePaneW()
 
 	logArea := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
 	scrollbar := m.renderScrollbar(logRows)
+	if peek, ok := m.renderJobPeek(logRows); ok {
+		logArea = peek
+		scrollbar = ""
+	}
 	var middle string
 	if treeW > 0 {
 		tree := m.renderTree(logRows)
@@ -215,7 +220,11 @@ func (m Model) renderStatusLeft() string {
 	if g, ok := m.groups[m.cur]; ok && g.Running {
 		runDot = " "
 	}
-	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + m.cur + runDot + " ")
+	cur := m.cur
+	if s := m.activeSession(m.cur); s != "" {
+		cur += ":" + s // viewing a named session — make the send target visible
+	}
+	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + cur + runDot + " ")
 	a2 := lipgloss.NewStyle().Foreground(cDkAmber).Background(cBlack).Render(pSep)
 	return app + a1 + grp + a2 + m.renderLoadingSegment()
 }
@@ -340,7 +349,6 @@ func (m Model) renderMetricsBar() string {
 // --- tree pane ---------------------------------------------------------------
 
 func (m Model) renderTree(rows int) string {
-	order := m.treeOrder()
 	header := ""
 	if m.focus == focusTree {
 		header = lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
@@ -349,8 +357,9 @@ func (m Model) renderTree(rows int) string {
 		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
 			Render(" agents ")
 	}
+	trows := m.treeRows()
 	lines := []string{header, ""}
-	if len(order) == 0 {
+	if len(trows) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(cGray).Render(" (none)"))
 	} else {
 		pad := func(s string, w int) string {
@@ -359,28 +368,20 @@ func (m Model) renderTree(rows int) string {
 			}
 			return s + strings.Repeat(" ", w-len(s))
 		}
-		hovered := func(g string) bool {
-			// Bounds-guard: a WatchState frame can shrink the group list
-			// (out-of-band destroy) between the treeIdx clamp in the listMsg
-			// handler and this render — never index past the current order.
-			return m.focus == focusTree && m.treeIdx < len(order) && order[m.treeIdx] == g
-		}
-		hasMain := order[0] == "main"
-		others := order
-		if hasMain {
-			others = order[1:]
-			info := m.groups["main"]
-			isCur := m.cur == "main"
-			lines = append(lines, m.renderTreeRow("main", "", info.Running, info.Stalled, isCur, hovered("main"), m.unread["main"], info.Provider, info.Queued, pad))
-		}
-		for i, g := range others {
-			info := m.groups[g]
-			isCur := m.cur == g
-			branch := "├─ "
-			if i == len(others)-1 {
-				branch = "└─ "
-			}
-			lines = append(lines, m.renderTreeRow(g, branch, info.Running, info.Stalled, isCur, hovered(g), m.unread[g], info.Provider, info.Queued, pad))
+		active := m.activeSession(m.cur)
+		for i, r := range trows {
+			// isCur marks the exact conversation being viewed: the group row
+			// is current only when its DEFAULT session is active; a named
+			// session row only when that session is. Job rows are peeked,
+			// not "current", and share their session's unread key — both
+			// markers stay on the conversation rows.
+			isCur := r.job == "" && r.group == m.cur && r.session == active
+			unread := r.job == "" && m.isUnread(r.group, r.session)
+			// Bounds-guard on treeIdx: a WatchState frame can shrink the row
+			// list (out-of-band destroy) between the listMsg clamp and this
+			// render — compare by index, never index past the slice.
+			hov := m.focus == focusTree && m.treeIdx == i
+			lines = append(lines, m.renderTreeRow(r, isCur, hov, unread, pad))
 		}
 	}
 
@@ -396,17 +397,36 @@ func (m Model) renderTree(rows int) string {
 	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
 }
 
-func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unread bool, provider string, queued int, pad func(string, int) string) string {
+func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
+	info := m.groups[r.group]
+	running, stalled, queued := info.Running, info.Stalled, info.Queued
+	name := r.group
+	isSession := r.session != "" && r.job == ""
+	isJob := r.job != ""
+	if isSession {
+		name = r.session
+	}
+	var job *JobInfo
+	if isJob {
+		name = r.job
+		for i := range info.Jobs {
+			if info.Jobs[i].ID == r.job {
+				job = &info.Jobs[i]
+				break
+			}
+		}
+	}
 	contentW := leftPaneWidth - 2 // account for paddingX
-	w := contentW - len(branch) - 2
+	w := contentW - len(r.branch) - 2
 	if w < 1 {
 		w = 1
 	}
 	// Queue badge: pending (enqueued-but-not-started) message count. Shown as
 	// an amber "⏳N" pill, distinct from the stalled ⚠. Reserve its width out of
-	// the name field so the row never overflows the pane.
+	// the name field so the row never overflows the pane. Group-level (the
+	// daemon's queue is shared across sessions), so group rows only.
 	badge, badgeW := "", 0
-	if queued > 0 {
+	if queued > 0 && !isSession && !isJob {
 		badge = fmt.Sprintf(" ⏳%d", queued)
 		badgeW = lipgloss.Width(badge)
 		w -= badgeW
@@ -427,39 +447,172 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 		dot = "⚠ "
 		dotColor = cYellow
 	}
+	if isSession {
+		// Session rows carry the conversation, not the VM: run/stall state
+		// stays on the group row; a hollow marker keeps the hierarchy legible.
+		dot = "◦ "
+		dotColor = cGray
+	}
+	if isJob {
+		// Job rows show the job's own lifecycle, not the VM's.
+		dot, dotColor = "? ", cGray
+		if job != nil {
+			switch job.Status {
+			case "running":
+				dot, dotColor = "⚙ ", cYellow
+			case "done":
+				if job.RC == "0" {
+					dot, dotColor = "✓ ", cAmber
+				} else {
+					dot, dotColor = "✗ ", cRed
+				}
+			case "orphaned":
+				dot, dotColor = "⚠ ", cYellow
+			}
+			// Finished rows only exist inside their linger window (see
+			// jobVisible) — blink the icon there so the completion is
+			// noticeable before the row hides itself.
+			if job.Status != "running" && m.jobBlinking(r.group, r.job) &&
+				(m.tick/jobBlinkTicks)%2 == 1 {
+				dot = "  "
+			}
+		}
+	}
 	nameColor := cWhite
 	if isCur {
 		nameColor = cAmber
-	} else if !running {
+	} else if !running || isJob {
 		nameColor = cGray
 	}
-	// Unread output (only meaningful when the group isn't the current focus)
+	// Unread output (only meaningful when the row isn't the current focus)
 	// overrides the dot to a pink filled marker and bolds the name. Pink
 	// (256-color 205) is far enough from green/yellow to read distinctly.
-	if unread && !isCur && !stalled {
+	if unread && !isCur && !(stalled && !isSession && !isJob) {
 		dot = "● "
 		dotColor = cPink
 	}
 	if hov {
 		// highlight row with amber background, black foreground for the whole row
 		full := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-			Render(" " + branch + dot + pad(g, w) + badge)
+			Render(" " + r.branch + dot + pad(name, w) + badge)
 		return full
 	}
 	parts := " "
-	if branch != "" {
-		parts += lipgloss.NewStyle().Foreground(cGray).Render(branch)
+	if r.branch != "" {
+		parts += lipgloss.NewStyle().Foreground(cGray).Render(r.branch)
 	}
 	parts += lipgloss.NewStyle().Foreground(dotColor).Render(dot)
 	style := lipgloss.NewStyle().Foreground(nameColor)
-	if isCur || (unread && !isCur) {
+	if isCur || unread {
 		style = style.Bold(true)
 	}
-	parts += style.Render(pad(g, w))
+	parts += style.Render(pad(name, w))
 	if badge != "" {
 		parts += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(badge)
 	}
 	return parts
+}
+
+// jobPeekHeaderRows is the fixed header height of the peek pane (meta line,
+// command line, separator); refreshPeekVP sizes the scroll viewport as the
+// pane height minus this.
+const jobPeekHeaderRows = 3
+
+// renderJobPeek builds the chat-column replacement shown while a job row is
+// hovered in the tree (focusTree only): the job's metadata plus a tail of
+// its combined output (fetched via the JobLogs RPC, refreshed on a 2s tick
+// while the hover lasts — see jobPeekTickMsg). Returns ok=false when no job
+// row is hovered, keeping the normal chat viewport.
+func (m Model) renderJobPeek(rows int) (string, bool) {
+	if m.focus != focusTree {
+		return "", false
+	}
+	trows := m.treeRows()
+	if m.treeIdx >= len(trows) || trows[m.treeIdx].job == "" {
+		return "", false
+	}
+	r := trows[m.treeIdx]
+	var job JobInfo
+	found := false
+	for _, j := range m.groups[r.group].Jobs {
+		if j.ID == r.job {
+			job = j
+			found = true
+			break
+		}
+	}
+	w, _ := m.logViewportSize()
+	head := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(cGray)
+	lines := []string{}
+	sess := job.Session
+	if sess == "" {
+		sess = "default"
+	}
+	statusTxt := job.Status
+	if !found {
+		statusTxt = "(gone)"
+	}
+	meta := fmt.Sprintf("job %s · session %s · %s", r.job, sess, statusTxt)
+	if job.RC != "" {
+		meta += " rc=" + job.RC
+	}
+	if job.Started > 0 {
+		meta += " · started " + fmtTime(job.Started)
+	}
+	if job.OutSize > 0 {
+		meta += fmt.Sprintf(" · %d bytes", job.OutSize)
+	}
+	// A fixed jobPeekHeaderRows-row header (meta, command, separator — the
+	// first two clip rather than wrap, so the height never varies) keeps the
+	// scroll viewport's geometry stable across refreshes.
+	armed := m.peekJob == (jobRef{group: r.group, id: r.job})
+	if m.peekEnded {
+		meta += " · stream ended"
+	}
+	if !m.peekVP.AtBottom() {
+		meta += " · ▲scroll (End: follow)"
+	}
+	lines = append(lines, head.Render(meta))
+	cmdLine := ""
+	if job.Cmd != "" {
+		cmdLine = dim.Render("$ " + job.Cmd)
+	}
+	lines = append(lines, cmdLine)
+	lines = append(lines, dim.Render(strings.Repeat("─", max(1, w-2))))
+	switch {
+	case armed && m.peekOut != "" && !m.peekPrimed:
+		// Backlog still arriving. Showing it now would render the replay as
+		// it streams in — the pane scrolling through scrollback on every
+		// hover. Hold one placeholder frame; flushPeek paints it at EOF.
+		lines = append(lines, dim.Render("(loading tail…)"))
+	case armed && m.peekOut != "":
+		// Output we already hold wins over any terminal status: the tail is
+		// what the row was hovered for, and a stream that ended or errored
+		// after delivering it must not blank the pane. The viewport owns
+		// scrolling (PgUp/PgDn, shift+↑/↓, Home/End while the row is
+		// hovered) and bottom-follow; content is (re)built in refreshPeekVP
+		// as each line lands.
+		lines = append(lines, strings.Split(m.peekVP.View(), "\n")...)
+	case !armed || !m.peekFetched:
+		lines = append(lines, dim.Render("(fetching output…)"))
+	case m.peekErr != "":
+		lines = append(lines, lipgloss.NewStyle().Foreground(cRed).Render("fetch failed: "+m.peekErr))
+	case m.peekEnded:
+		lines = append(lines, dim.Render("(no output)"))
+	default:
+		lines = append(lines, dim.Render("(no output yet)"))
+	}
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
+	// Match the replaced geometry exactly: logArea's PaddingLeft(1) + the
+	// viewport width + the scrollbar column (+1), so JoinHorizontal lays the
+	// pane out identically to the chat column it stands in for.
+	return lipgloss.NewStyle().PaddingLeft(1).MaxWidth(w + 2).Render(strings.Join(lines, "\n")), true
 }
 
 // --- log area ----------------------------------------------------------------
@@ -478,6 +631,13 @@ func (m Model) treePaneW() int {
 		return leftPaneWidth
 	}
 	if m.focus == focusShell && m.preShellFocus == focusTree {
+		return leftPaneWidth
+	}
+	// Same deal for the log view: its content is scoped to whatever group
+	// the tree cursor sits on (log_view.go logScopeFor), so keeping the tree
+	// visible shows *why* the pane is filtered — and shift+↑/↓ retargets it
+	// without leaving the view.
+	if m.focus == focusLog && m.preLogFocus == focusTree {
 		return leftPaneWidth
 	}
 	return 0
@@ -534,6 +694,18 @@ func renderPendingLines(pending []string) []string {
 	return out
 }
 
+// wrapLine hard-wraps one logical line to cols terminal columns (ANSI- and
+// width-aware) and returns the resulting rows — at least one, so an empty
+// line still occupies a row. Used for tool command/output lines, which are
+// raw shell text: unlike response blocks (pre-wrapped by glamour) they'd
+// otherwise exceed the viewport width and be clipped at the pane edge.
+func wrapLine(ln string, cols int) []string {
+	if cols <= 0 || ansi.StringWidth(ln) <= cols {
+		return []string{ln}
+	}
+	return strings.Split(ansi.Hardwrap(ln, cols, true), "\n")
+}
+
 func renderBlockLines(b renderedBlock, contentCols int) []string {
 	stamp := fmtTime(b.ts)
 	stampStyle := lipgloss.NewStyle().Foreground(cGray)
@@ -580,11 +752,15 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 	case "tool":
 		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("⚙  ")
 		body := lipgloss.NewStyle().Foreground(cGray)
-		for i, ln := range srcLines {
-			if i == 0 {
-				out = append(out, stampStr+glyph+body.Render(ln))
-			} else {
-				out = append(out, indent+glyph+body.Render(ln))
+		first := true
+		for _, ln := range srcLines {
+			for _, seg := range wrapLine(ln, contentCols) {
+				if first {
+					out = append(out, stampStr+glyph+body.Render(seg))
+					first = false
+				} else {
+					out = append(out, indent+glyph+body.Render(seg))
+				}
 			}
 		}
 	case "bg":
@@ -640,7 +816,9 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		bodyStyle := lipgloss.NewStyle().Foreground(cGray)
 		out = append(out, stampStr+glyph+summaryStyle.Render(srcLines[0]))
 		for _, ln := range srcLines[1:] {
-			out = append(out, indent+"   "+bodyStyle.Render(ln))
+			for _, seg := range wrapLine(ln, contentCols) {
+				out = append(out, indent+"   "+bodyStyle.Render(seg))
+			}
 		}
 	default: // response
 		bar := lipgloss.NewStyle().Foreground(cGray).Render("│ ")
@@ -680,6 +858,157 @@ func (m Model) renderScrollbar(rows int) string {
 
 // --- input -------------------------------------------------------------------
 
+// inputTextCols is the column budget for the prompt input's text: the
+// bordered box's interior minus the 2-cell prefix and the textinput's own
+// prompt. Matches the MaxWidth clip renderInput applies to each body row.
+func (m Model) inputTextCols() int { return max(10, m.width-6-m.inputPromptW()) }
+
+// inputPromptW is the rendered width of the textinput's prompt ("> "), which
+// we now draw ourselves — bubbles' View() only handles the placeholder path.
+func (m Model) inputPromptW() int {
+	return lipgloss.Width(m.input.PromptStyle.Render(m.input.Prompt))
+}
+
+// maxInputRows caps how tall the prompt box may grow. Past the cap the value
+// scrolls inside the box (renderInputLines keeps the cursor row visible)
+// rather than swallowing the chat pane — a pasted paragraph shouldn't push
+// the conversation off-screen.
+func (m Model) maxInputRows() int { return max(1, min(10, m.height-8)) }
+
+// inputRows reports how many text rows the prompt box occupies right now.
+// View() and logViewportSize() budget the chat pane around it, so this must
+// agree with what renderInput actually draws.
+func (m Model) inputRows() int {
+	if m.input.Value() == "" {
+		return 1 // placeholder is clipped, never wrapped — see renderInput
+	}
+	rows, _, _ := wrapInput([]rune(m.input.Value()), m.input.Position(), m.inputTextCols())
+	return min(len(rows), m.maxInputRows())
+}
+
+// wrapInput word-wraps the prompt value to cols cells and reports where the
+// cursor lands (row index, rune offset within that row). Wrapping is greedy
+// on spaces, falling back to a hard break for a word longer than the row, and
+// never drops or rewrites a rune — so the returned coordinates index straight
+// back into the caller's value.
+//
+// A blank cell is appended when the cursor sits at end-of-value so it always
+// has a cell to occupy; that cell is also what rolls the box onto a new row
+// when the last one is exactly full.
+func wrapInput(rs []rune, pos, cols int) (rows [][]rune, curRow, curCol int) {
+	if cols < 1 {
+		cols = 1
+	}
+	pos = clampInt(pos, 0, len(rs))
+	if pos == len(rs) {
+		rs = append(append([]rune{}, rs...), ' ')
+	}
+	var (
+		cur  []rune
+		w    int
+		seen bool
+	)
+	for i, r := range rs {
+		rw := runeCells(r)
+		if w+rw > cols && len(cur) > 0 {
+			brk := len(cur)
+			for j := len(cur) - 1; j > 0; j-- {
+				if cur[j-1] == ' ' {
+					brk = j
+					break
+				}
+			}
+			head := cur[:brk]
+			tail := append([]rune{}, cur[brk:]...)
+			if seen && curRow == len(rows) && curCol >= brk {
+				// The cursor was inside the chunk that just got carried to
+				// the next row — move it along with the runes it sits on.
+				curRow, curCol = len(rows)+1, curCol-brk
+			}
+			rows = append(rows, head)
+			cur, w = tail, runesCells(tail)
+		}
+		if i == pos {
+			curRow, curCol, seen = len(rows), len(cur), true
+		}
+		cur = append(cur, r)
+		w += rw
+	}
+	return append(rows, cur), curRow, curCol
+}
+
+func runeCells(r rune) int {
+	if w := ansi.StringWidth(string(r)); w > 1 {
+		return w
+	}
+	return 1
+}
+
+func runesCells(rs []rune) int {
+	w := 0
+	for _, r := range rs {
+		w += runeCells(r)
+	}
+	return w
+}
+
+func clampInt(v, lo, hi int) int { return max(lo, min(hi, v)) }
+
+// inputGhost returns the un-typed remainder of the matched autosuggestion —
+// the zsh-autosuggestions ghost text bubbles' own View() would have drawn
+// inline. Only offered at end-of-line, which is also the only position where
+// right-arrow accepts it (handleKey).
+func (m Model) inputGhost() string {
+	if !m.input.Focused() {
+		return ""
+	}
+	v := m.input.Value()
+	if m.input.Position() != len([]rune(v)) {
+		return ""
+	}
+	sug := m.input.CurrentSuggestion()
+	if sug == "" || !strings.HasPrefix(sug, v) {
+		return ""
+	}
+	return sug[len(v):]
+}
+
+// renderInputLines draws the value wrapped to cols, with the block cursor at
+// the cursor position and the suggestion ghost trailing it. Returns at most
+// maxInputRows rows, windowed on the cursor.
+func (m Model) renderInputLines(cols int) []string {
+	rs := []rune(m.input.Value())
+	rows, curRow, curCol := wrapInput(rs, m.input.Position(), cols)
+
+	start := 0
+	if maxRows := m.maxInputRows(); len(rows) > maxRows {
+		if curRow >= maxRows {
+			start = curRow - maxRows + 1
+		}
+		rows = rows[start:min(len(rows), start+maxRows)]
+	}
+
+	ghost := lipgloss.NewStyle().Foreground(cGray)
+	out := make([]string, 0, len(rows))
+	for i, row := range rows {
+		if !m.input.Focused() || i+start != curRow || curCol >= len(row) {
+			out = append(out, string(row)) // curCol guard: never panic the whole TUI over a cursor
+			continue
+		}
+		cur := m.input.Cursor // copy: blink state is owned by m.input
+		ch, after := string(row[curCol]), string(row[curCol+1:])
+		if g := []rune(m.inputGhost()); len(g) > 0 && curCol == len(row)-1 {
+			// End-of-value: the cursor sits on the ghost's first cell (what
+			// bubbles does) and the rest trails it, clipped by renderInput.
+			cur.TextStyle = ghost
+			ch, after = string(g[0]), ghost.Render(string(g[1:]))
+		}
+		cur.SetChar(ch)
+		out = append(out, string(row[:curCol])+cur.View()+after)
+	}
+	return out
+}
+
 func (m Model) renderInput() string {
 	borderColor := cGray
 	prefixColor := cGray
@@ -688,11 +1017,31 @@ func (m Model) renderInput() string {
 		prefixColor = cAmber
 	}
 	prefix := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(" ")
-	body := prefix + " " + m.input.View()
-	// Clip body before the border styling so an over-long textinput line
-	// (rare, but possible on a very narrow pane) can't wrap into a second
-	// row and push the hint off-screen.
-	body = lipgloss.NewStyle().MaxWidth(m.width - 4).Render(body)
+	// Clip each row before the border styling so an over-wide cell (the
+	// suggestion ghost, a wide rune straddling the last column) can't wrap
+	// into an unbudgeted extra row and push the hint off-screen.
+	clip := lipgloss.NewStyle().MaxWidth(m.width - 4)
+
+	var body string
+	if m.input.Value() == "" {
+		// Placeholder path: bubbles truncates the cheatsheet to input.Width
+		// itself. Deliberately not wrapped — an empty box would otherwise
+		// open as a half-screen wall of command names.
+		body = clip.Render(prefix + " " + m.input.View())
+	} else {
+		rows := m.renderInputLines(m.inputTextCols())
+		// Continuations align under the first row's text — the glyph, the
+		// space and the textinput prompt are all first-row-only.
+		cont := strings.Repeat(" ", 2+m.inputPromptW())
+		for i, row := range rows {
+			pfx := cont
+			if i == 0 {
+				pfx = prefix + " " + m.input.PromptStyle.Render(m.input.Prompt)
+			}
+			rows[i] = clip.Render(pfx + row)
+		}
+		body = strings.Join(rows, "\n")
+	}
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
@@ -880,7 +1229,7 @@ func (m Model) renderPicker(rows int) string {
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(cAmber).
-		Width(boxW - 2).
+		Width(boxW-2).
 		Padding(0, 1).
 		Render(inner)
 

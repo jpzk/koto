@@ -103,7 +103,7 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	sched = append(sched, it)
 	saveSched()
 	schedLock.Unlock()
-	emitLogf("sched", "info", "add id=%s group=%s cron=%q next=%s", it.ID, group, cronExpr, nx.Format(time.RFC3339))
+	emitLogfG("sched", group, "info", "add id=%s group=%s cron=%q next=%s", it.ID, group, cronExpr, nx.Format(time.RFC3339))
 	return it, nil
 }
 
@@ -134,7 +134,7 @@ func delSched(id string) error {
 			sched = append(sched[:i], sched[i+1:]...)
 			delete(parsed, id)
 			saveSched()
-			emitLogf("sched", "info", "del id=%s", id)
+			emitLogfG("sched", it.Group, "info", "del id=%s", id)
 			return nil
 		}
 	}
@@ -157,7 +157,7 @@ func toggleSched(id string, enabled bool) (scheduleItem, error) {
 				}
 			}
 			saveSched()
-			emitLogf("sched", "info", "toggle id=%s enabled=%t", id, enabled)
+			emitLogfG("sched", sched[i].Group, "info", "toggle id=%s enabled=%t", id, enabled)
 			return sched[i], nil
 		}
 	}
@@ -198,8 +198,8 @@ func fireSchedule(it scheduleItem, manual bool) {
 		ev.Event = "sched_run"
 	}
 	emit(it.Group, ev)
-	if _, err := enqueueSend(it.Group, it.Msg); err != nil {
-		emitLogf("sched", "error", "fire id=%s group=%s: %v", it.ID, it.Group, err)
+	if _, err := enqueueSend(it.Group, "", it.Msg); err != nil {
+		emitLogfG("sched", it.Group, "error", "fire id=%s group=%s: %v", it.ID, it.Group, err)
 	}
 }
 
@@ -247,7 +247,7 @@ func cronLoop() {
 		schedLock.Unlock()
 
 		for _, it := range toFire {
-			emitLogf("sched", "info", "fire id=%s group=%s cron=%q", it.ID, it.Group, it.Cron)
+			emitLogfG("sched", it.Group, "info", "fire id=%s group=%s cron=%q", it.ID, it.Group, it.Cron)
 			go fireSchedule(it, false)
 		}
 	}

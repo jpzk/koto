@@ -16,10 +16,17 @@
 # runs, nothing from a prior boot is alive).
 #
 # Commands:
-#   cs-job run -- <cmd...>     detach cmd, print <id>, return immediately
+#   cs-job run -- <cmd...>     detach cmd, print <id>, return immediately.
+#                              NOTIFY BY DEFAULT: completion posts job_done to
+#                              the ctl plane and the daemon wakes the launching
+#                              session with the result. --no-notify opts out
+#                              (--notify still accepted, now a no-op).
 #   cs-job spawn <prompt...>   = run -- cs-subagent <prompt...>  (LLM fan-out)
-#   cs-job list                id / status / rc / cmd table
-#   cs-job wait <id> [secs]    block until done (default 600s budget)
+#   cs-job list                id / status / rc / session / cmd table
+#   cs-job wait <id> [secs]    block until done (default 600s budget) — the
+#                              EXPLICIT in-turn join; cancels the job's pending
+#                              completion callback, since the caller is
+#                              consuming the result right here.
 #   cs-job status <id>         print status (running|done|orphaned)
 #   cs-job logs <id>           cat the job's combined output
 #   cs-job rm <id>             remove one job dir
@@ -37,8 +44,14 @@ count_running() { c=0; for d in "$JOBS"/*/; do [ "$(cat "$d/status" 2>/dev/null)
 cmd=${1:-}; [ $# -gt 0 ] && shift || true
 case "$cmd" in
   run)
-    NOTIFY=
-    [ "${1:-}" = "--notify" ] && { NOTIFY=1; shift; }
+    # Notify is the DEFAULT: fire-and-forget with a callback is the contract,
+    # blocking is the explicit exception (cs-job wait). --notify is kept as an
+    # accepted no-op so existing agent habits don't break.
+    NOTIFY=1
+    case "${1:-}" in
+      --notify) shift ;;
+      --no-notify) NOTIFY=; shift ;;
+    esac
     [ "${1:-}" = "--" ] && shift
     [ $# -eq 0 ] && { echo "cs-job run: no command" >&2; exit 2; }
     # Atomic cap check + dir mint under flock so parallel `run &` can't exceed MAX.
@@ -52,6 +65,10 @@ case "$cmd" in
     id=$(basename "$D")
     { printf '%s ' "$@"; echo; } > "$D/cmd"
     date +%s > "$D/started"
+    # Attribute the job to the chat session whose turn launched it
+    # (KOTO_SESSION is exported per turn by entrypoint.sh). The daemon's
+    # jobs mirror and the TUI tree nest the job under this session.
+    printf '%s' "${KOTO_SESSION:-default}" > "$D/session"
     echo running > "$D/status"
     [ -n "$NOTIFY" ] && : > "$D/notify"   # marker: post job_done to ctl on completion
     flock -u 9
@@ -78,30 +95,43 @@ case "$cmd" in
     # detached job — best-effort; the result is still on disk regardless.
     id=${1:?}; D=$JOBS/$id
     rc=$(cat "$D/rc" 2>/dev/null || echo '?')
+    sess=$(cat "$D/session" 2>/dev/null || echo '')
     total=$(wc -c < "$D/out" 2>/dev/null | tr -d ' '); [ -n "$total" ] || total=0
     # base64 of the last 1500 bytes, newlines stripped so it's one JSON line.
     b64=$(tail -c 1500 "$D/out" 2>/dev/null | base64 | tr -d '\n')
-    printf '{"cmd":"job_done","id":"%s","rc":"%s","total":%s,"out":"%s"}\n' \
-      "$id" "$rc" "$total" "$b64" | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true
+    # session rides along so the daemon wakes the conversation that launched
+    # the job, not the group's default one (notify.go).
+    printf '{"cmd":"job_done","id":"%s","rc":"%s","total":%s,"session":"%s","out":"%s"}\n' \
+      "$id" "$rc" "$total" "$sess" "$b64" | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true
     ;;
   spawn)
     NF=
-    [ "${1:-}" = "--notify" ] && { NF=--notify; shift; }
+    case "${1:-}" in
+      --notify) NF=--notify; shift ;;
+      --no-notify) NF=--no-notify; shift ;;
+    esac
     [ $# -eq 0 ] && { echo "cs-job spawn: no prompt" >&2; exit 2; }
     exec "$0" run $NF -- cs-subagent "$@"
     ;;
   list)
-    printf '%-10s %-9s %-4s %s\n' ID STATUS RC CMD
+    printf '%-10s %-9s %-4s %-12s %s\n' ID STATUS RC SESSION CMD
     for d in "$JOBS"/*/; do
       [ -d "$d" ] || continue
       id=$(basename "$d")
-      printf '%-10s %-9s %-4s %s\n' "$id" "$(cat "$d/status" 2>/dev/null || echo ?)" \
-        "$(cat "$d/rc" 2>/dev/null || echo -)" "$(cat "$d/cmd" 2>/dev/null | head -c 80)"
+      printf '%-10s %-9s %-4s %-12s %s\n' "$id" "$(cat "$d/status" 2>/dev/null || echo ?)" \
+        "$(cat "$d/rc" 2>/dev/null || echo -)" "$(cat "$d/session" 2>/dev/null || echo default)" \
+        "$(cat "$d/cmd" 2>/dev/null | head -c 80)"
     done
     ;;
   wait)
     id=${1:?cs-job wait <id> [secs]}; budget=${2:-600}
     [ -d "$JOBS/$id" ] || { echo "cs-job: no such job $id" >&2; exit 2; }
+    # The caller is consuming the result in-turn — cancel the completion
+    # callback so the daemon doesn't ALSO wake the session with a result it
+    # already has. Best-effort: a job that completed before this wait started
+    # has posted already (nothing to cancel), and a completion racing the rm
+    # can still slip one through — a harmless duplicate, not a loss.
+    rm -f "$JOBS/$id/notify"
     waited=0
     while [ "$(jstatus "$id")" = running ]; do
       [ "$waited" -ge "$budget" ] && { echo "cs-job: wait timeout ($budget s) — job $id still running" >&2; exit 1; }
@@ -122,7 +152,7 @@ case "$cmd" in
     echo "removed $n"
     ;;
   *)
-    echo "usage: cs-job {run -- <cmd...>|spawn <prompt...>|list|wait <id> [secs]|status <id>|logs <id>|rm <id>|clean}" >&2
+    echo "usage: cs-job {run [--no-notify] -- <cmd...>|spawn [--no-notify] <prompt...>|list|wait <id> [secs]|status <id>|logs <id>|rm <id>|clean}" >&2
     exit 2
     ;;
 esac

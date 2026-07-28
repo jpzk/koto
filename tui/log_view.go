@@ -127,10 +127,10 @@ func formatLogLine(ev LogEvent) string {
 }
 
 // logViewportSize mirrors logViewportSize in model.go but for the log
-// pane: full width minus padding/scrollbar, no tree pane (logs are global,
-// the tree doesn't apply).
+// pane: full width minus padding/scrollbar, minus the tree column when it's
+// showing alongside (treePaneW — the tree is the log's scope selector).
 func (m Model) logPaneSize() (int, int) {
-	w := max(10, m.width-2) // -1 left padding, -1 scrollbar
+	w := max(10, m.width-2-m.treePaneW()) // -1 left padding, -1 scrollbar
 	// -3: status + hint + metrics (no input bar in log view). Fills the
 	// frame to exactly m.height like the chat and shell views, keeping the
 	// bottom rows fixed across every view toggle.
@@ -146,13 +146,39 @@ func (m *Model) resizeLogViewport() {
 	m.logVP.Height = h
 }
 
-// appendLogLine adds one rendered line to the log buffer (capped to
-// maxLogLines), refreshes the viewport content, and sticks to the bottom
-// when autoFollow is on. Called from Update on logEventMsg.
-func (m *Model) appendLogLine(rendered string) {
-	m.logLines = append(m.logLines, rendered)
-	if len(m.logLines) > maxLogLines {
-		m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
+// logEntry is one buffered daemon log frame: the raw event (kept for its
+// Group, so the buffer can be re-filtered when the user moves around the
+// tree) plus its pre-rendered styled line (formatting once at arrival, not
+// once per re-scope).
+type logEntry struct {
+	group    string
+	rendered string
+}
+
+// logScopeFor maps the current tree position onto a log filter. main is the
+// orchestrator — it sees the whole daemon, so no filtering. On any other
+// group the pane narrows to lines the daemon attributed to that group
+// (LogEvent.group, set at emit time; see daemon/events.go emitLogG).
+// Daemon-wide lines (bind, cron load, role edits) carry no group and so are
+// only visible from main.
+func (m Model) logScopeFor() string {
+	if m.cur == "" || m.cur == "main" {
+		return ""
+	}
+	return m.cur
+}
+
+// appendLogEvent buffers one frame (capped to maxLogLines) and refreshes the
+// viewport. The buffer is unfiltered — every frame is kept regardless of the
+// active scope, so switching to a group shows the lines it produced while
+// you were looking somewhere else. Called from Update on logEventMsg.
+func (m *Model) appendLogEvent(ev LogEvent) {
+	m.logEntries = append(m.logEntries, logEntry{
+		group:    ev.Group,
+		rendered: formatLogLine(ev),
+	})
+	if len(m.logEntries) > maxLogLines {
+		m.logEntries = m.logEntries[len(m.logEntries)-maxLogLines:]
 	}
 	m.refreshLogViewport()
 }
@@ -165,13 +191,40 @@ func (m *Model) refreshLogViewport() {
 	if !m.logVPReady {
 		return
 	}
+	scope := m.logScopeFor()
+	m.logScope = scope
+	lines := make([]string, 0, len(m.logEntries))
+	for _, e := range m.logEntries {
+		if scope == "" || e.group == scope {
+			lines = append(lines, e.rendered)
+		}
+	}
 	wasBottom := m.logVP.AtBottom() || m.logAutoFollow
-	content := strings.Join(m.logLines, "\n")
+	content := strings.Join(lines, "\n")
+	if len(lines) == 0 && scope != "" {
+		content = lipgloss.NewStyle().Foreground(cGray).
+			Render(fmt.Sprintf("no daemon log lines for %s yet — "+
+				"switch to main for the full log", scope))
+	}
 	m.logVP.SetContent(content)
 	if wasBottom {
 		m.logVP.GotoBottom()
 		m.logAutoFollow = true
 	}
+}
+
+// syncLogScope re-filters the log pane after the tree position moved. Called
+// from every site that reassigns m.cur; a no-op when the scope is unchanged
+// or the log view was never opened. A scope change jumps to the bottom —
+// the old scroll offset indexes into a different set of lines, so keeping it
+// would land the user at an arbitrary point in the new content.
+func (m *Model) syncLogScope() {
+	if !m.logVPReady || m.logScope == m.logScopeFor() {
+		return
+	}
+	m.refreshLogViewport()
+	m.logVP.GotoBottom()
+	m.logAutoFollow = true
 }
 
 // renderLogView draws the full log-mode UI: status bar (reused), the log
@@ -193,6 +246,10 @@ func (m Model) renderLogView() string {
 	}
 	scrollbar := m.renderLogScrollbar()
 	middle := lipgloss.JoinHorizontal(lipgloss.Top, body, scrollbar)
+	if m.treePaneW() > 0 {
+		_, h := m.logPaneSize()
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h), body, scrollbar)
+	}
 
 	hint := m.renderLogHint()
 	metricsBar := m.renderMetricsBar()
@@ -233,7 +290,14 @@ func (m Model) renderLogScrollbar() string {
 // renderLogHint mirrors renderHint but with log-specific bindings.
 func (m Model) renderLogHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" daemon log", "↑↓ scroll", "^l close"}
+	// Scope is part of the hint, not just implied by the tree: a filtered
+	// pane that happens to be quiet looks identical to a stalled daemon
+	// otherwise.
+	scope := " daemon log · all"
+	if s := m.logScopeFor(); s != "" {
+		scope = " daemon log · " + s
+	}
+	parts := []string{scope, "↑↓ scroll", "⇧↑↓ group", "^l close"}
 	if m.logVPReady && !m.logVP.AtBottom() {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%",
@@ -265,6 +329,15 @@ func (m *Model) enterLog() {
 	}
 	m.focus = focusLog
 	m.input.Blur()
+	// Geometry and scope are both focus-dependent (treePaneW keys off
+	// focusLog+preLogFocus; the content is filtered by m.cur), and the
+	// viewport is only *created* on the first open — so recompute both here
+	// rather than at creation, otherwise the second open reuses the first
+	// open's width and the group it was scoped to.
+	m.resizeLogViewport()
+	m.refreshLogViewport()
+	m.logVP.GotoBottom()
+	m.logAutoFollow = true
 }
 
 // exitLog returns from the log view to whichever focus the user was in
@@ -298,6 +371,20 @@ func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s {
 	case "esc", "ctrl+l":
 		m.exitLog()
+		return m, nil
+	case "shift+up", "shift+down":
+		// Retarget the log's scope without leaving the view: move the tree
+		// cursor (same rows/selection path as tree-mode ↑/↓), and
+		// selectTreeRow's syncLogScope re-filters the pane. Plain ↑/↓ stay
+		// bound to scrolling — this view is read-mostly.
+		rows := m.treeRows()
+		if s == "shift+up" && m.treeIdx > 0 && m.treeIdx-1 < len(rows) {
+			m.treeIdx--
+			m.selectTreeRow(rows[m.treeIdx])
+		} else if s == "shift+down" && m.treeIdx < len(rows)-1 {
+			m.treeIdx++
+			m.selectTreeRow(rows[m.treeIdx])
+		}
 		return m, nil
 	case "up":
 		m.logVP.LineUp(1)

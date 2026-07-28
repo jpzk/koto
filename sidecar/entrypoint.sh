@@ -30,11 +30,43 @@ TURN_TIMEOUT="${TURN_TIMEOUT:-1200}"
 # TUI can replay the conversation on attach (matches claude's session.jsonl
 # which also persists). >> below creates the file if missing.
 exec 3<> "$D/in"
-while IFS= read -r b64 <&3; do
+while IFS= read -r line <&3; do
+  # FIFO line framing: `<b64>` targets the default session; `<session> <b64>`
+  # targets a named one (fcguest handleMsg adds the prefix; names are
+  # daemon-validated [A-Za-z0-9][A-Za-z0-9_-]*, so the first space is an
+  # unambiguous separator — base64 -w0 output never contains one).
+  case "$line" in
+    *' '*) SESS=${line%% *}; b64=${line#* } ;;
+    *)     SESS=default;     b64=$line ;;
+  esac
   msg=$(printf '%s' "$b64" | base64 -d) || continue
   # NOTE: the daemon writes the `>>> <original msg>` marker before delivering
   # this FIFO line, so the TUI log shows the user's typed text. $msg here is
   # the AUGMENTED version (original + <koto-context> rate-limit block).
+
+  # Each session pins its own claude conversation via an id file. The very
+  # first turn of a session has no id file and starts a fresh conversation;
+  # stream_filter.js captures the run's session_id into $IDF so the next turn
+  # can --resume it. Migration shim: a workspace from before sessions existed
+  # has no sessions/ dir at all — resume its ongoing thread via --continue
+  # exactly once (the id gets captured and pins it from then on). The dir's
+  # existence is the shim's off-switch, which is why a per-session clear
+  # removes id files but never the dir (see daemon clearSession).
+  SESSDIR="$D/sessions"
+  MIGRATE_CONTINUE=0
+  [ ! -d "$SESSDIR" ] && [ "$SESS" = default ] && MIGRATE_CONTINUE=1
+  mkdir -p "$SESSDIR"
+  IDF="$SESSDIR/$SESS.id"
+  # Per-session shared terminal: each chat session gets its own tmux session
+  # so parallel conversations don't type into each other's shell. The default
+  # chat session keeps the historical "koto-shell" name; named ones get
+  # "koto-shell-<name>". Exported into the turn's env (KOTO_SESSION /
+  # KOTO_SHELL_SESSION, inherited by the agent's bash subprocesses) so the
+  # agent attaches the shell belonging to the conversation it is in — the
+  # TUI derives the same name client-side (shellSessionName, tui/shell_view.go).
+  SHELL_SESS=koto-shell
+  [ "$SESS" != default ] && SHELL_SESS="koto-shell-$SESS"
+  export KOTO_SESSION="$SESS" KOTO_SHELL_SESSION="$SHELL_SESS"
 
   # System prompt is composed by the daemon (composeSystemPrompt in daemon.go)
   # and written to /workspace/.cs/system-prompt.md immediately before each
@@ -70,11 +102,16 @@ while IFS= read -r b64 <&3; do
       # tailer expects from the Claude path.
       VENICE_MODEL="$MODEL"
       [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+      # Per-session venice history: the default session keeps the historical
+      # filename, named sessions get their own file (wiped by per-session
+      # clear — see daemon clearSession).
+      VH_FILE="$D/venice-history.json"
+      [ "$SESS" != default ] && VH_FILE="$D/venice-history-$SESS.json"
       MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
       SP_B64=""
       [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
       vrc=0
-      MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" \
+      MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" KOTO_VH_FILE="$VH_FILE" \
         timeout -s KILL -k 10 "$TURN_TIMEOUT" \
         node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || vrc=$?
       if [ "$vrc" = "124" ] || [ "$vrc" = "137" ]; then
@@ -86,15 +123,23 @@ while IFS= read -r b64 <&3; do
       printf '[[turn_end]]\n' >> "$D/log"
       ;;
     *)
-      set -- claude -p --continue --bare --dangerously-skip-permissions \
+      set -- claude -p --bare --dangerously-skip-permissions \
         --output-format stream-json --include-partial-messages --verbose
+      # Session selection: a captured id resumes that exact conversation;
+      # no id + migration shim continues the pre-sessions thread once;
+      # otherwise this is the session's first turn and starts fresh.
+      if [ -s "$IDF" ]; then
+        set -- "$@" --resume "$(cat "$IDF")"
+      elif [ "$MIGRATE_CONTINUE" = 1 ]; then
+        set -- "$@" --continue
+      fi
       [ -n "$APPEND" ] && set -- "$@" --append-system-prompt "$APPEND"
       [ -z "$MODEL" ] && MODEL="${KOTO_DEFAULT_CLAUDE_MODEL:-}"
       [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
       [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 
       { printf '%s' "$msg" | timeout -s KILL -k 10 "$TURN_TIMEOUT" "$@" 2>>"$D/log"; echo $? >"$D/.turn_rc"; } \
-          | node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
+          | KOTO_SESSION_ID_FILE="$IDF" node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
       crc=$(cat "$D/.turn_rc" 2>/dev/null)
       if [ "$crc" = "124" ] || [ "$crc" = "137" ]; then
         printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"

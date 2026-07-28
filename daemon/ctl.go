@@ -122,9 +122,14 @@ func ctlDispatch(owner string, line []byte) any {
 		// prompts/global.md ("Sends are async … returns immediately; the
 		// response lands in the peer's log"). An overflow error (queue full)
 		// is returned synchronously on ctl.out in submission order.
-		if _, err := enqueueSend(req.Group, req.Msg); err != nil {
+		sess, err := normalizeSession(req.Session)
+		if err != nil {
+			return errResp("ctl: " + err.Error())
+		}
+		if _, err := enqueueSend(req.Group, sess, req.Msg); err != nil {
 			return errResp(err.Error())
 		}
+		registerSession(req.Group, sess)
 		return baseResp{OK: true}
 
 	case "stop":
@@ -245,15 +250,23 @@ func ctlDispatch(owner string, line []byte) any {
 		// and (re)arms a debounce so a burst of fan-out completions coalesces
 		// into one self-send.
 		var req struct {
-			ID    string `json:"id"`
-			RC    string `json:"rc"`
-			Out   string `json:"out"` // base64 of the output tail
-			Total int64  `json:"total"`
+			ID      string `json:"id"`
+			RC      string `json:"rc"`
+			Out     string `json:"out"` // base64 of the output tail
+			Total   int64  `json:"total"`
+			Session string `json:"session"` // chat session that launched the job
 		}
 		_ = json.Unmarshal(line, &req)
 		out, _ := base64.StdEncoding.DecodeString(req.Out)
-		emitLogf("ctl", "info", "[%s] job_done %s rc=%s", owner, req.ID, req.RC)
-		recordJobDone(owner, jobResult{ID: req.ID, RC: req.RC, Out: string(out), Total: req.Total})
+		sess, serr := normalizeSession(req.Session)
+		if serr != nil {
+			sess = "" // malformed attribution → default session, never an error
+		}
+		emitLogfG("ctl", owner, "info", "[%s] job_done %s rc=%s session=%s", owner, req.ID, req.RC, sessionMarkerName(sess))
+		recordJobDone(owner, jobResult{ID: req.ID, RC: req.RC, Out: string(out), Total: req.Total, Session: sess})
+		// Completion is the moment the tree wants fresh state — don't wait
+		// out the watch loop's TTL.
+		kickJobsRefresh(owner, true)
 		return baseResp{OK: true}
 
 	case "sched_add":

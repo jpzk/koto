@@ -78,7 +78,11 @@ recreating its environment inside the VM:
 - agent RPC (vsock 10000): `init` (published ports + env; starts
   entrypoint.sh as uid 1000 afterwards, restart-with-backoff), `msg` (writes
   system-prompt.md + config.json into the guest workspace, then the b64 line
-  into the in FIFO), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
+  into the in FIFO; an optional `session` field prefixes the line as
+  `<session> <b64>` — entrypoint.sh routes the turn to that chat session's
+  claude conversation via a per-session id file under
+  `/workspace/.cs/sessions/`, `--resume`d on later turns; a bare b64 line is
+  the default session), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
   analogue used by interrupt + /clear), `exec_stream` (raw streamed output,
   peer-close kills the child — used by background-job tailing; the admin-only
   RunScript RPC rides this op with `user:true`, which demotes the child from
@@ -376,6 +380,36 @@ the entrypoint + `claude` + all bash run as) **passwordless sudo**. Default
   for running privileged commands against the writable workspace/tmpfs, network
   and mount config, reading root-owned files — not installing packages. Bake new
   packages into the rootfs (`make fc-rootfs`) instead.
+
+## Autostart profile (`autostart`: `yes` | `no`)
+
+Per-group config key deciding **when** the group's microVM boots. Default `no`:
+a group's VM comes up lazily, on the first thing that needs it (a send, a spawn,
+a `/restart`, a schedule firing) — the daemon starts with only `main` running,
+so a fleet of idle groups costs nothing. `yes` boots the group as soon as the
+daemon does.
+
+- **Why.** Some groups have to be up before anyone talks to them: a group
+  publishing a port (`ports`) has nothing listening until its VM boots, and a
+  group whose work is entirely scheduled would otherwise be down until its first
+  cron fire. Autostart makes "the daemon is up" imply "this group is up".
+- **Plumbing.** `groupAutostart(g)` (`groups.go`) reads config.json
+  `"autostart"`; `autostartGroups()` runs once from `daemonMain` in a goroutine
+  (a VM boot is seconds — the gRPC listener must not wait on it), sorted for a
+  deterministic order and **sequential**, so N groups don't contend for KVM and
+  RAM at once. `main` is skipped: `daemonMain` ensures it unconditionally,
+  autostart or not.
+- **Applies at daemon start, not `/restart`.** This is the one spawn-adjacent
+  knob a `/restart <g>` does nothing for — the value is read only while the
+  daemon comes up. Setting it takes effect on the next daemon start; to get the
+  VM up right now, just send the group a message (or `/restart` it), which boots
+  it the ordinary way.
+- **Boot notice still fires.** An autostarted group goes through the same
+  `ensure()` path as any other boot, so a group with an existing `workspace.img`
+  gets the `[koto]` restart notice (rate-limited by `armBootNotice`) — the
+  autostarted agent wakes up knowing its VM is fresh and can resurrect services.
+- **Failures are logged, not fatal.** A group that fails to boot logs at `error`
+  on its own group subsystem and the loop continues to the next one.
 
 ## Jailer (host-side isolation of the Firecracker process)
 

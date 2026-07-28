@@ -66,9 +66,20 @@ function emitToolOut(content) {
   fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
 }
 
+// Session pinning: every stream-json record carries the run's session_id.
+// Capture the first one into $KOTO_SESSION_ID_FILE (set by entrypoint.sh to
+// /workspace/.cs/sessions/<name>.id) so the next turn of this chat session
+// can `claude --resume <id>` the same conversation. Written once per run —
+// a single -p invocation has a single session id.
+const idFile = process.env.KOTO_SESSION_ID_FILE || '';
+let wroteId = false;
+
 rl.on('line', (line) => {
   let ev;
   try { ev = JSON.parse(line); } catch { return; }
+  if (idFile && !wroteId && typeof ev.session_id === 'string' && ev.session_id) {
+    try { fs.writeFileSync(idFile, ev.session_id); wroteId = true; } catch {}
+  }
   // Tool results are injected by the harness (not the model), so claude-code
   // emits them as a top-level `user` record containing tool_result content
   // blocks — NOT inside the assistant's stream_event partials. Handle this

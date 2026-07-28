@@ -247,6 +247,12 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.MetricsReq:
 		return r.Group, true
+	case *pb.JobsReq: // "" = all groups → needs the "*" target, like global metrics
+		return r.Group, true
+	case *pb.JobLogsReq:
+		return r.Group, true
+	case *pb.JobTailReq:
+		return r.Group, true
 	case *pb.SkillListReq:
 		return r.Group, true
 	case *pb.SchedAddReq:

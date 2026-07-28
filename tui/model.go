@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,9 +27,9 @@ const (
 	// be before a scroll triggers an older-page fetch. Conservative so we
 	// don't fire while the user is just scanning the upper portion.
 	pageTopThreshold = 10
-	leftPaneWidth = 22
-	tickMs        = 80
-	metricsTickMs = 5000
+	leftPaneWidth    = 22
+	tickMs           = 80
+	metricsTickMs    = 5000
 	// maxLogLines caps the per-session daemon log buffer in the TUI. The
 	// daemon's own ring is logRingMax (200); we keep a deeper window here
 	// so the user can scroll back through what they've seen since opening
@@ -58,8 +60,13 @@ const (
 type logLine struct {
 	kind  string // prompt | response | sys | err | tool
 	group string
-	text  string
-	ts    int64
+	// session the line belongs to within its group ("" = the default
+	// session), copied from the event's Session stamp. Only chat kinds are
+	// session-scoped (see lineInSession); sys/err/script lines show in
+	// every session of the group.
+	session string
+	text    string
+	ts      int64
 	// expand forces this block to render its full body even when the
 	// per-kind collapse toggle (expandedThoughts / expandedToolOuts) is
 	// off. Set for tool_out blocks whose run time exceeded the elapsed
@@ -105,6 +112,65 @@ type historyMsg struct {
 	before float64
 	err    error
 }
+
+// jobRef identifies one background job for the peek pane.
+type jobRef struct{ group, id string }
+
+// peekFlushMsg fires the coalesced peek repaint. sid pins it to one stream
+// and seq to one debounce window — a frame that landed after this timer was
+// armed bumps seq, so the stale timer drops instead of repainting mid-burst.
+type peekFlushMsg struct {
+	sid int
+	seq int
+}
+
+func peekFlushCmd(sid, seq int) tea.Cmd {
+	return tea.Tick(peekQuietMs*time.Millisecond, func(time.Time) tea.Msg {
+		return peekFlushMsg{sid: sid, seq: seq}
+	})
+}
+
+// jobTailMsg carries one frame of the hovered job's live output stream
+// (JobTail RPC — same push model as chat subscribe). sid ties frames to the
+// stream generation that produced them, so a burst arriving after the user
+// moved to another row is dropped instead of polluting the new peek.
+type jobTailMsg struct {
+	sid     int
+	line    string // one sanitized output line (data frames)
+	opened  bool   // stream established — even a silent job leaves "fetching…"
+	end     bool   // guest side ended (VM stopped/restarted)
+	errText string
+}
+
+// jobPeekTailBytes is the initial window JobTail replays before following
+// live; peekBufCap bounds the TUI-side scrollback accumulated on top of it.
+const (
+	jobPeekTailBytes = 65536
+	peekBufCap       = 256 * 1024
+)
+
+// Peek repaints are coalesced. JobTail replays its 64KB window one line per
+// frame, so repainting per line makes the pane render the backlog as it
+// arrives — the user watches ~1s of scrollback scroll past before it settles
+// at EOF, every single hover. Instead the buffer accumulates and repaints
+// once the burst goes quiet (peekQuietMs), so a replay lands as one paint,
+// already at the bottom. peekPrimeCapMs bounds how long the first paint can
+// be held if the stream never goes quiet; peekLiveCapMs is the tighter
+// staleness bound once output is on screen and only live lines are landing.
+const (
+	peekQuietMs    = 120
+	peekPrimeCapMs = 2000
+	peekLiveCapMs  = 250
+)
+
+// jobLingerMs is how long a finished job's row stays in the tree (icon
+// blinking) before it is hidden. jobBlinkTicks is the blink half-period in
+// spinner ticks (tickMs=80ms each → ~480ms on/off).
+const (
+	jobLingerMs   = 10000
+	jobBlinkTicks = 6
+)
+
 type streamEventMsg Event
 type streamClosedMsg struct {
 	group string
@@ -112,8 +178,12 @@ type streamClosedMsg struct {
 }
 type daemonRespMsg struct {
 	op, group string
-	resp      map[string]any
-	err       error
+	// session the op targeted, verbatim from extra["session"] (clear uses
+	// it to scope the local line drop: "" = whole group, "-" = default
+	// session, name = that session).
+	session string
+	resp    map[string]any
+	err     error
 }
 type metricsRespMsg struct {
 	metric, global map[string]any
@@ -165,10 +235,10 @@ type Model struct {
 	// watching is true while the WatchState snapshot stream is up. It gates
 	// re-opening the stream from the listMsg handler (which watch frames
 	// themselves flow through).
-	watching bool
-	cur      string
-	lines      []logLine
-	streamBuf  map[string]string
+	watching  bool
+	cur       string
+	lines     []logLine
+	streamBuf map[string]string
 	// thinkingBuf accumulates completed thinking lines per-group while a
 	// thinking block is in flight. thinkingTail holds the in-flight partial
 	// line that's still being streamed (replaced wholesale on each
@@ -250,12 +320,14 @@ type Model struct {
 	// is captured for wheel-scroll. Keyboard scroll works in both modes.
 	selectMode bool
 
-	// unread marks groups that produced output (a response, tool call,
-	// thought, or tool result) while not focused. Cleared on switch to the
-	// group and on /destroy. Ephemeral — not persisted across /reload, since
-	// "unread" only makes sense relative to what you've already looked at in
-	// the current TUI session. Historical events (replayed on subscribe) are
-	// explicitly skipped so a fresh attach doesn't light up every group.
+	// unread marks conversations — keyed per (group, session) via unreadKey —
+	// that produced a model reply while not being viewed, so every tree row
+	// (group rows and their session children) carries its own pink marker.
+	// Cleared on switching to that exact conversation and on /destroy.
+	// Ephemeral — not persisted across /reload, since "unread" only makes
+	// sense relative to what you've already looked at in the current TUI
+	// session. Historical events (replayed on subscribe) are explicitly
+	// skipped so a fresh attach doesn't light up every row.
 	unread map[string]bool
 
 	// vpCache holds the fully-built viewport content string per group,
@@ -308,9 +380,16 @@ type Model struct {
 	// long-lived connection for users who never look at the log. The
 	// daemon's own ring buffer replays the most recent ~200 lines on
 	// subscribe, so opening the view late still shows recent context.
+	//
+	// Frames are buffered unfiltered (logEntries) and filtered at render
+	// time by logScopeFor() — the tree position decides what the pane
+	// shows, so switching groups re-scopes the *existing* buffer instead
+	// of needing a re-subscribe. logScope records which scope the viewport
+	// content was last built for, so syncLogScope() can detect drift.
 	logVP         viewport.Model
 	logVPReady    bool
-	logLines      []string
+	logEntries    []logEntry
+	logScope      string
 	logSubActive  bool
 	logAutoFollow bool
 	// preLogFocus remembers whether the chat side was in focusInput or
@@ -334,8 +413,8 @@ type Model struct {
 	// merged stream doesn't duplicate the same prompt. Ephemeral; lost on
 	// /reload, but the historyMsg path re-seeds from the daemon's log on
 	// the next attach.
-	promptHistory map[string][]string
-	picker        pickerState
+	promptHistory  map[string][]string
+	picker         pickerState
 	prePickerFocus focusZone
 
 	// histNav: per-group shell-history navigation cursor for ↑/↓ recall in
@@ -349,16 +428,81 @@ type Model struct {
 	histNav   map[string]int
 	histDraft map[string]string
 
+	// Job lifecycle tracking for the tree: finished jobs are not shown
+	// forever — a job that completes while we watch blinks for
+	// jobLingerMs and then disappears from the tree (the daemon still
+	// reports it; `koto ctl jobs` remains the full ls).
+	//   jobStatusSeen — last status observed per (group, job), to detect
+	//                   the running→done/orphaned transition.
+	//   jobDoneAt     — when we observed a job finish; drives the blink
+	//                   window and the hide cutoff.
+	//   jobsPrimed    — groups whose job list we've processed at least
+	//                   once; a backlog of already-finished jobs present at
+	//                   first sight is hidden immediately instead of all
+	//                   blinking at attach.
+	jobStatusSeen map[string]string
+	jobDoneAt     map[string]time.Time
+	jobsPrimed    map[string]bool
+
+	// peekJob is the background job whose live state the chat column shows
+	// while its tree row is hovered (focusTree only); zero when no job row
+	// is hovered. peekOut holds the last fetched output tail; peekTicking
+	// guards the single 2s refresh chain.
+	peekJob     jobRef
+	peekOut     string
+	peekErr     string // stream failure, shown in the pane
+	peekFetched bool   // the JobTail stream is established (data may still be empty)
+	peekEnded   bool   // guest side closed the tail (job finished / VM stopped)
+	// Repaint coalescing (see peekQuietMs). peekPrimed flips on the first
+	// paint of a stream — until then the pane shows a placeholder rather
+	// than a half-arrived backlog. peekFlushSeq invalidates superseded
+	// debounce timers so only the newest one repaints.
+	peekDirty     bool
+	peekPrimed    bool
+	peekFlushSeq  int
+	peekArmedAt   time.Time
+	peekPaintedAt time.Time
+	// peekSID/peekCancel manage the one live JobTail stream: a new hover
+	// bumps the generation and cancels the old stream; stale frames are
+	// dropped by sid mismatch.
+	peekSID    int
+	peekCancel context.CancelFunc
+	// peekVP scrolls the fetched output (a 64KB tail window). peekFollow
+	// mirrors the chat viewport's autoFollow: stick to the bottom while new
+	// output arrives, release when the user scrolls up.
+	peekVP     viewport.Model
+	peekFollow bool
+
+	// session is the per-group active chat session the user is viewing and
+	// sending into ("" or missing key = the default session). Switched with
+	// /session; chat lines whose session doesn't match are filtered out of
+	// the viewport (lineInSession) but stay in m.lines, so switching back
+	// is instant.
+	session map[string]string
+	// turnSession is the session of each group's in-flight turn, set by its
+	// `prompt` event. Gates the live overlay (streamBuf/thinkingBuf) so a
+	// turn running in another session doesn't bleed into the current view.
+	turnSession map[string]string
+
 	// pending holds prompts the local TUI has sent that the daemon has not
 	// yet started (they're sitting in the group's send queue behind an
 	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
 	// rows so the user sees their typed-ahead backlog instead of it being
 	// invisible until the daemon echoes a `prompt` event. FIFO per group:
-	// the head is popped when its matching `prompt` event arrives. Only the
-	// texts this TUI sent are known here; the tree's ⏳N badge (driven by the
-	// daemon's Queued count) remains the authoritative total, since ctl- and
-	// scheduler-enqueued prompts never pass through this client.
-	pending map[string][]string
+	// the head is popped when its matching `prompt` event arrives. Each
+	// entry remembers the session it was sent to, so the row only renders
+	// in that session's view. Only the texts this TUI sent are known here;
+	// the tree's ⏳N badge (driven by the daemon's Queued count) remains the
+	// authoritative total, since ctl- and scheduler-enqueued prompts never
+	// pass through this client.
+	pending map[string][]pendingPrompt
+}
+
+// pendingPrompt is one queued-but-not-started send: the text plus the chat
+// session it targets ("" = default), so the ⏳ row renders only in that
+// session's view and pops against the matching session's prompt event.
+type pendingPrompt struct {
+	session, text string
 }
 
 const promptHistoryMax = 200
@@ -375,7 +519,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -393,6 +537,12 @@ func newModel(sock string, ctxWindow int) Model {
 	if st.Cur != "" {
 		cur = st.Cur
 	}
+	sessions := map[string]string{}
+	for g, sess := range st.Sessions {
+		if sess != "" {
+			sessions[g] = sess
+		}
+	}
 	if st.Draft != "" {
 		ti.SetValue(st.Draft)
 		ti.CursorEnd()
@@ -402,15 +552,17 @@ func newModel(sock string, ctxWindow int) Model {
 	// can keep input focus while paging. Otherwise viewport eats letter keys
 	// like 'k'/'j' that we want going to the textinput.
 	vp.KeyMap = viewport.KeyMap{}
+	pvp := viewport.New(80, 20)
+	pvp.KeyMap = viewport.KeyMap{}
 
 	return Model{
-		sock:       sock,
-		ctxWindow:  ctxWindow,
-		groups:     map[string]GroupInfo{},
-		subscribed: map[string]bool{},
-		lastSeq:    map[string]uint64{},
-		cur:        cur,
-		lines:      []logLine{},
+		sock:            sock,
+		ctxWindow:       ctxWindow,
+		groups:          map[string]GroupInfo{},
+		subscribed:      map[string]bool{},
+		lastSeq:         map[string]uint64{},
+		cur:             cur,
+		lines:           []logLine{},
 		streamBuf:       map[string]string{},
 		thinkingBuf:     map[string]string{},
 		thinkingTail:    map[string]string{},
@@ -420,7 +572,7 @@ func newModel(sock string, ctxWindow int) Model {
 		busy:            map[string]bool{},
 		toolOutTail:     map[string]string{},
 		unread:          map[string]bool{},
-		input: ti,
+		input:           ti,
 		// Start in tree mode so the group list is visible immediately.
 		// The textinput is still Focus()'d (above) so typing a draft
 		// continues to work — focusTree only routes ↑/↓/⏎ to tree
@@ -433,29 +585,85 @@ func newModel(sock string, ctxWindow int) Model {
 		pageOldestTs:  map[string]float64{},
 		pageLoading:   map[string]bool{},
 		pageExhausted: map[string]bool{},
-		connected:  true,
-		ticking:    true, // Init kicks the first tick
-		width:      80,
-		height:     24,
-		mdCache:    map[string]string{},
-		vpCache:    map[string]vpCacheEntry{},
-		groupVer:   map[string]int{},
+		connected:     true,
+		ticking:       true, // Init kicks the first tick
+		width:         80,
+		height:        24,
+		mdCache:       map[string]string{},
+		vpCache:       map[string]vpCacheEntry{},
+		groupVer:      map[string]int{},
 		promptHistory: map[string][]string{},
 		histNav:       map[string]int{},
 		histDraft:     map[string]string{},
-		pending:    map[string][]string{},
+		pending:       map[string][]pendingPrompt{},
+		session:       sessions,
+		turnSession:   map[string]string{},
+		peekVP:        pvp,
+		peekFollow:    true,
+		jobStatusSeen: map[string]string{},
+		jobDoneAt:     map[string]time.Time{},
+		jobsPrimed:    map[string]bool{},
 	}
 }
 
-// popPending drops the head of g's pending queue when it matches msg (the
-// daemon just started that turn, so it's no longer queued). Match-on-head
-// rather than unconditional pop so a `prompt` event for an externally-
-// enqueued message (ctl / scheduler / another TUI) doesn't steal one of our
-// rows. Exact equality is safe: the daemon echoes the prompt text verbatim
-// (the same property pushHistory's adjacent-dedup already relies on).
-func (m *Model) popPending(g, msg string) {
+// activeSession is the chat session currently viewed for group g ("" = the
+// default session).
+func (m Model) activeSession(g string) string { return m.session[g] }
+
+// sessionDisplay is the human-readable name of a session ("" → "default").
+func sessionDisplay(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return s
+}
+
+// unread is keyed per (group, session) so each tree row can carry its own
+// pink marker. "\x00" cannot appear in either name.
+func unreadKey(g, s string) string { return g + "\x00" + s }
+
+func (m Model) isUnread(g, s string) bool { return m.unread[unreadKey(g, s)] }
+func (m *Model) clearUnread(g, s string)  { delete(m.unread, unreadKey(g, s)) }
+func (m *Model) markUnread(g, s string)   { m.unread[unreadKey(g, s)] = true }
+
+// clearGroupUnread drops every session's unread mark for g (group destroy).
+func (m *Model) clearGroupUnread(g string) {
+	for k := range m.unread {
+		if strings.HasPrefix(k, g+"\x00") {
+			delete(m.unread, k)
+		}
+	}
+}
+
+// chatKind reports whether a line kind carries conversation content (and is
+// therefore session-scoped); sys feedback, errors, and script output are
+// group-wide.
+func chatKind(k string) bool {
+	switch k {
+	case "prompt", "response", "tool", "thought", "tool_out", "bg":
+		return true
+	}
+	return false
+}
+
+// lineInSession reports whether a line is visible in the given session view.
+func lineInSession(l logLine, active string) bool {
+	return !chatKind(l.kind) || l.session == active
+}
+
+// sessionNameRE mirrors the daemon's session-name allowlist so bad names are
+// rejected locally with a usable message instead of a daemon round-trip.
+var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
+
+// popPending drops the head of g's pending queue when it matches the just-
+// started turn's (session, msg). Match-on-head rather than unconditional pop
+// so a `prompt` event for an externally-enqueued message (ctl / scheduler /
+// another TUI) doesn't steal one of our rows. Exact equality is safe: the
+// daemon echoes the prompt text verbatim and stamps the event with the
+// session the send targeted.
+func (m *Model) popPending(g, session, msg string) {
 	p := m.pending[g]
-	if len(p) == 0 || p[0] != msg {
+	if len(p) == 0 || p[0].text != msg || p[0].session != session {
 		return
 	}
 	if len(p) == 1 {
@@ -543,10 +751,57 @@ func listCmd(sock string) tea.Cmd {
 			effort, _ := mp["effort"].(string)
 			stalled, _ := mp["stalled"].(bool)
 			queued, _ := mp["queued"].(float64)
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued)}
+			// sessions must be parsed here too, not just in stateGroups: a
+			// List lands after every send (and on /ls and every reconnect
+			// probe) and wholesale-replaces m.groups — dropping the field
+			// here would wipe the tree's session rows on each of those.
+			var sessions []string
+			if raw, ok := mp["sessions"].([]any); ok {
+				for _, sv := range raw {
+					if str, ok := sv.(string); ok {
+						sessions = append(sessions, str)
+					}
+				}
+			}
+			// jobs likewise — same wholesale-replace hazard as sessions.
+			var jobs []JobInfo
+			if raw, ok := mp["jobs"].([]any); ok {
+				for _, jv := range raw {
+					jm, ok := jv.(map[string]any)
+					if !ok {
+						continue
+					}
+					id, _ := jm["id"].(string)
+					if id == "" {
+						continue
+					}
+					sess, _ := jm["session"].(string)
+					st, _ := jm["status"].(string)
+					rc, _ := jm["rc"].(string)
+					cmd, _ := jm["cmd"].(string)
+					jobs = append(jobs, JobInfo{
+						ID: id, Session: sess, Status: st, RC: rc, Cmd: cmd,
+						Started: asInt64(jm["started"]), OutSize: asInt64(jm["out_size"]),
+					})
+				}
+			}
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs}
 		}
 		return listMsg{groups: out}
 	}
+}
+
+// asInt64 parses protojson's int64 encoding, which is a JSON *string* (and
+// tolerates a plain number for robustness).
+func asInt64(v any) int64 {
+	switch n := v.(type) {
+	case string:
+		x, _ := strconv.ParseInt(n, 10, 64)
+		return x
+	case float64:
+		return int64(n)
+	}
+	return 0
 }
 
 // historyCmd dispatches a paged history request. before=0 fetches the
@@ -637,6 +892,7 @@ func (m Model) prewarmGroupCmd(group string, cols int) tea.Cmd {
 		snap := Model{
 			lines:            linesCopy,
 			cur:              group,
+			session:          map[string]string{group: m.session[group]},
 			expandedThoughts: expT,
 			expandedToolOuts: expTO,
 			mdCache:          mdSnap,
@@ -673,14 +929,18 @@ func daemonCmd(sock, op, group string, extra map[string]any) tea.Cmd {
 		if group != "" {
 			extra["group"] = group
 		}
+		sess, _ := extra["session"].(string)
 		resp, err := daemonCall(sock, op, extra)
-		return daemonRespMsg{op: op, group: group, resp: resp, err: err}
+		return daemonRespMsg{op: op, group: group, session: sess, resp: resp, err: err}
 	}
 }
 
 // --- Subscribe goroutine -----------------------------------------------------
 
 func startSubscribe(sock, group string, since uint64) {
+	if prog == nil {
+		return // no program to push frames into (tests)
+	}
 	go func() {
 		stream, cancel, err := openGroupStream(group, since)
 		if err != nil {
@@ -706,6 +966,9 @@ func startSubscribe(sock, group string, since uint64) {
 // the existing listMsg handler (a frame is exactly a successful List result).
 // Stream death surfaces as watchClosedMsg → reconnect loop.
 func startWatchState() {
+	if prog == nil {
+		return // no program to push frames into (tests)
+	}
 	go func() {
 		stream, cancel, err := openStateStream()
 		if err != nil {
@@ -739,8 +1002,11 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = max(20, msg.Width-leftPaneWidth-8)
+		// Only drives the placeholder's truncation now — the value is
+		// wrapped and rendered by renderInput, not by textinput.View().
+		m.input.Width = max(20, msg.Width-6)
 		m.resizeViewport()
+		m.refreshPeekVP()
 		m.refreshLog()
 		m.vpReady = true
 		if m.logVPReady {
@@ -798,6 +1064,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.watching = true
 			startWatchState()
 		}
+		m.processJobTransitions(msg.groups)
 		m.groups = msg.groups
 		// Keep the tree cursor (treeIdx → hovered row) locked to m.cur. up/down
 		// and enterTree() already move them in lockstep; re-deriving it here
@@ -807,16 +1074,26 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// out-of-band destroy pushed via WatchState) and m.cur itself is the
 		// vanished group, the re-derive loop won't run and a stale treeIdx
 		// would index past the new order in renderTree.
-		if order := m.treeOrder(); len(order) > 0 {
-			if m.treeIdx >= len(order) {
-				m.treeIdx = len(order) - 1
+		if rows := m.treeRows(); len(rows) > 0 {
+			if m.treeIdx >= len(rows) {
+				m.treeIdx = len(rows) - 1
 			}
-			for i, g := range order {
-				if g == m.cur {
-					m.treeIdx = i
-					break
+			active := m.activeSession(m.cur)
+			// Keep the cursor where it is when it already points into the
+			// current conversation (including a hovered job row — a state
+			// push must not yank the peek pane away); otherwise re-derive.
+			at := rows[m.treeIdx]
+			if !(at.group == m.cur && at.session == active) {
+				for i, r := range rows {
+					if r.group == m.cur && r.session == active && r.job == "" {
+						m.treeIdx = i
+						break
+					}
 				}
 			}
+			// The row under the cursor may now be a different job than the
+			// one being streamed (job rows re-sort as jobs start/finish).
+			m.syncPeekToHover()
 		}
 		cmds := []tea.Cmd{}
 		// Reloading: drop existing lines for groups we're about to refetch
@@ -868,6 +1145,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// A job finishing in this frame opened a blink-linger window;
+		// the tick chain must run for it (no-op when nothing animates).
+		cmds = append(cmds, m.ensureTicking())
 		return m, tea.Batch(cmds...)
 
 	case historyMsg:
@@ -889,17 +1169,17 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					delete(m.lastThoughtBody, msg.group)
 					m.pushHistory(msg.group, ev.Msg)
 				}
-				batch = append(batch, logLine{kind: "prompt", group: msg.group, text: ev.Msg, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "prompt", group: msg.group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts)})
 			case "done":
 				if ev.Text != "" {
-					batch = append(batch, logLine{kind: "response", group: msg.group, text: ev.Text, ts: int64(ev.Ts)})
+					batch = append(batch, logLine{kind: "response", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 				}
 			case "tool":
-				batch = append(batch, logLine{kind: "tool", group: msg.group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "tool", group: msg.group, session: ev.Session, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 			case "err":
-				batch = append(batch, logLine{kind: "err", group: msg.group, text: ev.Text, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "err", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 			case "bg":
-				batch = append(batch, logLine{kind: "bg", group: msg.group, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "bg", group: msg.group, session: ev.Session, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
 			case "thinking_done":
 				if !older {
 					// Same rationale: only the initial tail page mutates the
@@ -910,9 +1190,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.lastThoughtBody[msg.group] = ev.Body
 				}
-				batch = append(batch, logLine{kind: "thought", group: msg.group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 			case "tool_result_done":
-				batch = append(batch, logLine{kind: "tool_out", group: msg.group, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "tool_out", group: msg.group, session: ev.Session, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
 			}
 		}
 		// Track the smallest ts in this batch so the next older-page request
@@ -1027,6 +1307,64 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadedGroups[msg.group] = true
 		return m, nil
 
+	case jobTailMsg:
+		if msg.sid != m.peekSID {
+			return m, nil // frame from a superseded stream
+		}
+		if m.peekJob.id == "" || m.focus != focusTree {
+			// Hover is gone but the stream outlived it (left the tree via a
+			// path without an explicit stop) — self-heal by cancelling.
+			m.stopPeek()
+			return m, nil
+		}
+		switch {
+		case msg.errText != "":
+			m.peekFetched, m.peekErr = true, msg.errText
+			m.flushPeek() // paint whatever landed before the failure
+		case msg.end:
+			// The tail closing is not a failure and must not replace the
+			// output we already have — a finished job (and every job in a
+			// VM that restarted) ends this way, and its tail is exactly
+			// what the user hovered to read. Status goes in the header.
+			// No more frames are coming, so paint now rather than waiting
+			// out a debounce window that nothing will close.
+			m.peekFetched, m.peekEnded = true, true
+			m.flushPeek()
+		case msg.opened:
+			m.peekFetched = true
+		default:
+			m.peekOut += msg.line + "\n"
+			if len(m.peekOut) > peekBufCap {
+				cut := m.peekOut[len(m.peekOut)-peekBufCap/2:]
+				if i := strings.IndexByte(cut, '\n'); i >= 0 {
+					cut = cut[i+1:]
+				}
+				m.peekOut = cut
+			}
+			m.peekDirty = true
+			// Repaint only once the burst goes quiet, so a replay window
+			// arrives as one paint instead of scrolling past line by line.
+			// The cap keeps a stream that never goes quiet from starving it.
+			base, cap := m.peekPaintedAt, time.Duration(peekLiveCapMs)*time.Millisecond
+			if !m.peekPrimed {
+				base, cap = m.peekArmedAt, time.Duration(peekPrimeCapMs)*time.Millisecond
+			}
+			if time.Since(base) >= cap {
+				m.flushPeek()
+				return m, nil
+			}
+			m.peekFlushSeq++
+			return m, peekFlushCmd(m.peekSID, m.peekFlushSeq)
+		}
+		return m, nil
+
+	case peekFlushMsg:
+		if msg.sid != m.peekSID || msg.seq != m.peekFlushSeq || !m.peekDirty {
+			return m, nil // superseded by a later frame, or nothing to paint
+		}
+		m.flushPeek()
+		return m, nil
+
 	case streamEventMsg:
 		ev := Event(msg)
 		if ev.Seq > 0 {
@@ -1065,21 +1403,28 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.thinkingTail, ev.Group)
 			delete(m.toolOutBuf, ev.Group)
 			delete(m.toolOutTail, ev.Group)
+			delete(m.turnSession, ev.Group)
 			m.refreshLog()
 			return m, historyCmd(m.sock, ev.Group, 0, historyPageSize)
 		case "prompt":
 			if cur, ok := m.streamBuf[ev.Group]; ok {
-				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})
+				// Leftover stream text belongs to the PREVIOUS turn — tag it
+				// with that turn's session, not this prompt's.
+				m.addLine(logLine{kind: "response", group: ev.Group, session: m.turnSession[ev.Group], text: cur})
 				delete(m.streamBuf, ev.Group)
 			}
+			// Every frame of the turn that follows carries this session; track
+			// it so live buffers (which are keyed per group only) can be
+			// attributed and the overlay gated per session.
+			m.turnSession[ev.Group] = ev.Session
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
 			delete(m.lastThoughtBody, ev.Group)
 			m.busy[ev.Group] = true
 			// This turn just started → it's no longer queued. Drop the matching
 			// head from our local pending backlog (no-op for prompts we didn't
 			// originate, e.g. ctl/scheduler fires).
-			m.popPending(ev.Group, ev.Msg)
-			m.addLine(logLine{kind: "prompt", group: ev.Group, text: ev.Msg, ts: int64(ev.Ts)})
+			m.popPending(ev.Group, ev.Session, ev.Msg)
+			m.addLine(logLine{kind: "prompt", group: ev.Group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts)})
 			m.pushHistory(ev.Group, ev.Msg)
 		case "stream":
 			m.streamBuf[ev.Group] = ev.Text
@@ -1087,31 +1432,31 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.streamBuf, ev.Group)
 			delete(m.busy, ev.Group)
 			if ev.Text != "" {
-				m.addLine(logLine{kind: "response", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
+				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 			}
 		case "tool":
 			// Tool calls arrive between prompt and done; flush any in-flight
 			// stream buffer first so order is preserved in the view.
 			if cur, ok := m.streamBuf[ev.Group]; ok {
-				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})
+				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
 				delete(m.streamBuf, ev.Group)
 			}
-			m.addLine(logLine{kind: "tool", group: ev.Group, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
+			m.addLine(logLine{kind: "tool", group: ev.Group, session: ev.Session, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 		case "err":
 			// Harness-injected error notice (proxy 5xx, etc.). Render with
 			// the red err glyph so the user can tell it's not the model.
 			if cur, ok := m.streamBuf[ev.Group]; ok {
-				m.addLine(logLine{kind: "response", group: ev.Group, text: cur})
+				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
 				delete(m.streamBuf, ev.Group)
 			}
-			m.addLine(logLine{kind: "err", group: ev.Group, text: ev.Text, ts: int64(ev.Ts)})
+			m.addLine(logLine{kind: "err", group: ev.Group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 		case "bg":
 			// Live output from a backgrounded shell that claude code stashed
 			// in /tmp/claude-1000/.../tasks/<id>.output. Daemon tails the
 			// file via podman exec and emits one bg event per line; we
 			// merge consecutive ones for the same task id into a single
 			// block by passing ev.Name as the group-discriminator suffix.
-			m.addLine(logLine{kind: "bg", group: ev.Group, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
+			m.addLine(logLine{kind: "bg", group: ev.Group, session: ev.Session, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
 		case "thinking_begin":
 			m.thinkingBuf[ev.Group] = ""
 			delete(m.thinkingTail, ev.Group)
@@ -1137,7 +1482,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.lastThoughtBody[ev.Group] = ev.Body
-			m.addLine(logLine{kind: "thought", group: ev.Group, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
+			m.addLine(logLine{kind: "thought", group: ev.Group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 		case "tool_result_begin":
 			m.toolOutBuf[ev.Group] = ""
 			delete(m.toolOutTail, ev.Group)
@@ -1162,11 +1507,12 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			expand := elapsedMs >= longToolThresholdMs
 			m.addLine(logLine{
-				kind:   "tool_out",
-				group:  ev.Group,
-				text:   formatToolOutFullElapsed(ev.Body, elapsedMs),
-				ts:     int64(ev.Ts),
-				expand: expand,
+				kind:    "tool_out",
+				group:   ev.Group,
+				session: ev.Session,
+				text:    formatToolOutFullElapsed(ev.Body, elapsedMs),
+				ts:      int64(ev.Ts),
+				expand:  expand,
 			})
 		case "sched_fired", "sched_run":
 			tag := "⏰"
@@ -1186,9 +1532,9 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// would turn every active sidecar pink. The pink dot should mean
 		// "there is a new model reply for you to read", not "this sidecar is
 		// busy."
-		if !ev.Historical && ev.Group != m.cur &&
-			ev.Event == "done" && ev.Text != "" {
-			m.unread[ev.Group] = true
+		if !ev.Historical && ev.Event == "done" && ev.Text != "" &&
+			(ev.Group != m.cur || ev.Session != m.activeSession(ev.Group)) {
+			m.markUnread(ev.Group, ev.Session)
 		}
 		if ev.Group == m.cur {
 			m.refreshLog()
@@ -1204,7 +1550,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// we then push it through the same append/refresh path as live
 		// frames. Even when the user isn't on the log view, we accumulate
 		// so opening it later shows the buffered history.
-		m.appendLogLine(formatLogLine(LogEvent(msg)))
+		m.appendLogEvent(LogEvent(msg))
 		return m, nil
 
 	case logSubClosedMsg:
@@ -1373,7 +1719,18 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		rows := m.inputRows()
+		nm, cmd := m.handleKey(msg)
+		// The prompt box grows and shrinks as the value wraps; the chat
+		// viewport owns the slack, so re-size it whenever the row count moves
+		// (typing past the right edge, clearing on enter, history recall).
+		if mm, ok := nm.(Model); ok && mm.inputRows() != rows {
+			mm.resizeViewport()
+			mm.refreshPeekVP() // hovering a job row while typing in tree focus
+			mm.refreshLog()
+			return mm, cmd
+		}
+		return nm, cmd
 
 	case tea.MouseMsg:
 		// Wheel up/down → forward to viewport. Viewport's Update handles
@@ -1418,8 +1775,16 @@ func (m Model) logViewportSize() (int, int) {
 	}
 	treeW := m.treePaneW()
 	w := max(10, m.width-treeW-2) // -1 padding-left, -1 scrollbar
-	h := max(1, m.height-6)       // status + input(3) + hint + metrics
-	return w, h
+	return w, m.chatRows()
+}
+
+// chatRows is the height of the middle (chat) pane: what the status bar, the
+// prompt box, the hint row and the metrics row leave over. The prompt box
+// grows as the value wraps (inputRows), so this shrinks with it — View() and
+// the viewport must agree on the number or the frame overflows the terminal.
+func (m Model) chatRows() int {
+	// status(1) + input borders(2) + hint(1) + metrics(1) = 5
+	return max(1, m.height-5-m.inputRows())
 }
 
 // logContentCols returns the column width passed to glamour for response
@@ -1475,7 +1840,7 @@ func (m *Model) refreshLog() {
 	// non-empty backlog also bypasses the cache.
 	liveText, _ := m.liveOverlay()
 	var content string
-	if liveText == "" && len(m.pending[m.cur]) == 0 {
+	if liveText == "" && len(m.pendingForView()) == 0 {
 		ver := m.groupVer[m.cur]
 		gver := m.groupVer[""]
 		if e, ok := m.vpCache[m.cur]; ok &&
@@ -1529,7 +1894,7 @@ func (m Model) buildLogContent(contentCols int) string {
 	}
 	// Queued-but-not-started prompts render last — below the in-flight turn's
 	// output, since they're waiting for it to finish.
-	if pend := m.pending[m.cur]; len(pend) > 0 {
+	if pend := m.pendingForView(); len(pend) > 0 {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
@@ -1538,10 +1903,29 @@ func (m Model) buildLogContent(contentCols int) string {
 	return strings.Join(out, "\n")
 }
 
+// pendingForView returns the queued prompt texts for the current group's
+// active session — the only ones that belong in this view; entries targeting
+// other sessions render when the user switches there.
+func (m Model) pendingForView() []string {
+	var out []string
+	active := m.activeSession(m.cur)
+	for _, pp := range m.pending[m.cur] {
+		if pp.session == active {
+			out = append(out, pp.text)
+		}
+	}
+	return out
+}
+
 // liveOverlay returns the in-flight stream/thinking text for the current
 // group plus a tag ("thinking"|"stream"|"") so the renderer knows whether
 // to prefix it with the brain glyph or the spinner.
 func (m Model) liveOverlay() (string, string) {
+	// A turn streaming in a different session of this group is not part of
+	// this view; its completed lines land session-tagged and stay hidden.
+	if m.turnSession[m.cur] != m.activeSession(m.cur) {
+		return "", ""
+	}
 	if t, ok := m.thinkingBuf[m.cur]; ok {
 		full := t
 		if tail := m.thinkingTail[m.cur]; tail != "" {
@@ -1716,6 +2100,14 @@ func (m Model) isAnimating() bool {
 	if !m.connected {
 		return true
 	}
+	// A finished job's blink-linger window needs frames until it expires —
+	// both for the blink itself and for the render that finally hides the
+	// row (no other event is guaranteed to arrive in time).
+	for _, t := range m.jobDoneAt {
+		if time.Since(t) < jobLingerMs*time.Millisecond {
+			return true
+		}
+	}
 	return false
 }
 
@@ -1763,8 +2155,9 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			// below populates the new row so isCur has something to highlight.
 			if msg.group != "" {
 				m.cur = msg.group
-				delete(m.unread, m.cur)
+				m.clearUnread(m.cur, m.activeSession(m.cur))
 				m.refreshLog()
+				m.syncLogScope()
 				m.refreshSuggestions()
 				m.vp.GotoBottom()
 				m.autoFollow = true
@@ -1828,16 +2221,39 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("clear: %v", msg.err)})
 			return nil
 		}
+		// Scope of the wipe follows the request: session "" = the whole
+		// group (legacy), "-" = the default session, name = that session.
+		// The daemon rewrote the log accordingly but deliberately does not
+		// re-emit surviving lines (the tailer reopens at EOF), so the local
+		// drop here is what updates the view.
+		all := msg.session == ""
+		target := msg.session
+		if target == "-" || target == "default" {
+			target = ""
+		}
 		out := m.lines[:0]
 		for _, l := range m.lines {
 			if l.group != msg.group {
+				out = append(out, l)
+				continue
+			}
+			if !all && !(chatKind(l.kind) && l.session == target) {
 				out = append(out, l)
 			}
 		}
 		m.lines = out
 		delete(m.streamBuf, msg.group)
+		if all {
+			delete(m.session, msg.group)
+			delete(m.turnSession, msg.group)
+		}
+		m.groupVer[msg.group]++
 		m.refreshLog()
-		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("cleared context for %s", msg.group)})
+		scope := msg.group
+		if !all {
+			scope = msg.group + ":" + sessionDisplay(target)
+		}
+		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("cleared context for %s", scope)})
 		return nil
 	case "config":
 		if msg.err != nil {
@@ -1908,7 +2324,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the input box as the draft (typing "/reload" would have
 		// overwritten it). Some terminals don't transmit shifted control
 		// keys distinctly — fall back to /reload if your terminal doesn't.
-		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
+		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
 		m.reloadPending = true
 		return m, tea.Quit
 	}
@@ -1959,9 +2375,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if s == "ctrl+]" {
 		// Attach the shared-shell pane, mirroring ctrl+l's shape for the log
-		// view. Reattaches to whatever session was last open for this group
-		// (enterShell("") -> daemon default "koto-shell"). The detach half of
-		// the toggle lives at the top of this function: once focus is on the
+		// view. enterShell("") targets the active chat session's own shell
+		// (shellSessionName — koto-shell[-<session>]), redialing if the pane
+		// was last attached to a different one. The detach half of the
+		// toggle lives at the top of this function: once focus is on the
 		// shell, every key except ctrl+] is forwarded to the guest pty raw.
 		m.enterShell("")
 		// Kick the tick chain for the cursor blink; enterShell alone can't
@@ -1996,24 +2413,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if s == "ctrl+@" {
-		order := m.treeOrder()
+		rows := m.treeRows()
 		cur := -1
-		for i, g := range order {
-			if g == m.cur {
+		active := m.activeSession(m.cur)
+		for i, r := range rows {
+			if r.group == m.cur && r.session == active {
 				cur = i
 				break
 			}
 		}
-		for i := 1; i <= len(order); i++ {
-			idx := (cur + i) % len(order)
-			if m.unread[order[idx]] {
-				m.cur = order[idx]
+		for i := 1; i <= len(rows); i++ {
+			idx := (cur + i) % len(rows)
+			r := rows[idx]
+			// Job rows share their session's unread key — skip them so the
+			// cycle lands on the conversation itself.
+			if r.job == "" && m.isUnread(r.group, r.session) {
 				m.treeIdx = idx
-				delete(m.unread, m.cur)
-				m.refreshLog()
-				m.refreshSuggestions()
-				m.vp.GotoBottom()
-				m.autoFollow = true
+				m.selectTreeRow(r)
 				return m, nil
 			}
 		}
@@ -2023,6 +2439,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusInput {
 			m.enterTree()
 		} else {
+			m.stopPeek()
+			m.peekJob = jobRef{}
 			m.focus = focusInput
 			m.input.Focus()
 		}
@@ -2033,32 +2451,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.focus == focusTree {
-		order := m.treeOrder()
+		rows := m.treeRows()
 		switch s {
 		case "up":
-			if m.treeIdx > 0 {
+			if m.treeIdx > 0 && m.treeIdx-1 < len(rows) {
 				m.treeIdx--
-				m.cur = order[m.treeIdx]
-				delete(m.unread, m.cur)
-				m.refreshLog()
-				m.refreshSuggestions()
-				m.vp.GotoBottom()
-				m.autoFollow = true
+				m.selectTreeRow(rows[m.treeIdx])
 			}
 			return m, nil
 		case "down":
-			if m.treeIdx < len(order)-1 {
+			if m.treeIdx < len(rows)-1 {
 				m.treeIdx++
-				m.cur = order[m.treeIdx]
-				delete(m.unread, m.cur)
-				m.refreshLog()
-				m.refreshSuggestions()
-				m.vp.GotoBottom()
-				m.autoFollow = true
+				m.selectTreeRow(rows[m.treeIdx])
 			}
 			return m, nil
 		case "esc":
 			// Esc always exits tree mode regardless of input contents.
+			m.stopPeek()
+			m.peekJob = jobRef{}
 			m.focus = focusInput
 			m.input.Focus() // may be blurred if tree was restored by exitLog/exitShell
 			m.resizeViewport()
@@ -2083,26 +2493,56 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			tickCmd := m.ensureTicking()
 			return m, tea.Batch(cmd, tickCmd)
 		case "pgup":
+			if m.peekActive() {
+				m.peekVP.ViewUp()
+				m.peekFollow = m.peekVP.AtBottom()
+				return m, nil
+			}
 			m.vp.ViewUp()
 			m.autoFollow = m.vp.AtBottom()
 			return m, m.maybePageOlder()
 		case "pgdown", "pgdn":
+			if m.peekActive() {
+				m.peekVP.ViewDown()
+				m.peekFollow = m.peekVP.AtBottom()
+				return m, nil
+			}
 			m.vp.ViewDown()
 			m.autoFollow = m.vp.AtBottom()
 			return m, nil
 		case "shift+up":
+			if m.peekActive() {
+				m.peekVP.LineUp(1)
+				m.peekFollow = m.peekVP.AtBottom()
+				return m, nil
+			}
 			m.vp.LineUp(1)
 			m.autoFollow = m.vp.AtBottom()
 			return m, m.maybePageOlder()
 		case "shift+down":
+			if m.peekActive() {
+				m.peekVP.LineDown(1)
+				m.peekFollow = m.peekVP.AtBottom()
+				return m, nil
+			}
 			m.vp.LineDown(1)
 			m.autoFollow = m.vp.AtBottom()
 			return m, nil
 		case "home":
+			if m.peekActive() {
+				m.peekVP.GotoTop()
+				m.peekFollow = false
+				return m, nil
+			}
 			m.vp.GotoTop()
 			m.autoFollow = false
 			return m, m.maybePageOlder()
 		case "end":
+			if m.peekActive() {
+				m.peekVP.GotoBottom()
+				m.peekFollow = true
+				return m, nil
+			}
 			m.vp.GotoBottom()
 			m.autoFollow = true
 			return m, nil
@@ -2292,10 +2732,11 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) enterTree() {
-	order := m.treeOrder()
+	rows := m.treeRows()
 	idx := 0
-	for i, g := range order {
-		if g == m.cur {
+	active := m.activeSession(m.cur)
+	for i, r := range rows {
+		if r.group == m.cur && r.session == active && r.job == "" {
 			idx = i
 			break
 		}
@@ -2306,6 +2747,318 @@ func (m *Model) enterTree() {
 	// continue typing a draft. The focus field (focusTree) is what routes
 	// up/down/enter to tree navigation; the input cursor staying alive is
 	// just a visual signal that typing still works.
+}
+
+// treeRow is one navigable row of the left tree pane: a group row
+// (session == "" and job == "", representing the group's default session),
+// a named chat-session row nested under its group, or a background-job row
+// nested under the session that launched it (job != ""; session is the
+// OWNING session, "" for default-session jobs that hang directly off the
+// group row). branch is the tree-drawing prefix, computed here alongside
+// row order so navigation and rendering can never drift apart.
+type treeRow struct {
+	group   string
+	session string
+	job     string
+	branch  string
+}
+
+func jobKey(g, id string) string { return g + "\x00" + id }
+
+// processJobTransitions diffs the incoming state frame's job lists against
+// what we last saw, opening a blink-linger window for each job observed
+// finishing. First sight of a group's list only primes the baseline — a
+// backlog of long-finished jobs must not light up on attach. Also prunes
+// tracking state for jobs that vanished (cs-job rm/clean, group destroy).
+//
+// An EMPTY job list is treated as "no information", not as "this group has
+// no jobs" — the daemon's mirror is a cache that starts empty (cold, before
+// the first guest read completes) and is dropped whenever the group stops or
+// the daemon restarts. Priming or pruning off an empty list is what made
+// finished/orphaned jobs re-appear: the empty frame wiped the baseline, then
+// the real list landed and every long-finished job looked new-to-a-primed-
+// group, i.e. freshly completed, and blinked back into the tree.
+func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
+	now := time.Now()
+	live := map[string]bool{}
+	// Groups whose list this frame actually carries — only those may prune.
+	authoritative := map[string]bool{}
+	for g, gi := range groups {
+		if len(gi.Jobs) == 0 {
+			continue
+		}
+		authoritative[g] = true
+		primed := m.jobsPrimed[g]
+		for _, j := range gi.Jobs {
+			k := jobKey(g, j.ID)
+			live[k] = true
+			prev, known := m.jobStatusSeen[k]
+			m.jobStatusSeen[k] = j.Status
+			if j.Status == "running" {
+				delete(m.jobDoneAt, k) // (re)started — no linger window
+				continue
+			}
+			if _, has := m.jobDoneAt[k]; has {
+				continue
+			}
+			// Finished now if we saw it running, or if it's new to a primed
+			// group (completed inside the refresh gap, we never saw it run).
+			if (known && prev == "running") || (!known && primed) {
+				m.jobDoneAt[k] = now
+			}
+		}
+		m.jobsPrimed[g] = true
+	}
+	for k := range m.jobStatusSeen {
+		g, _, _ := strings.Cut(k, "\x00")
+		_, stillAGroup := groups[g]
+		// Drop tracking when the group itself is gone (destroyed), or when a
+		// frame that did carry the group's list no longer lists the job
+		// (cs-job rm/clean).
+		if !stillAGroup || (authoritative[g] && !live[k]) {
+			delete(m.jobStatusSeen, k)
+			delete(m.jobDoneAt, k)
+		}
+	}
+	for k, t := range m.jobDoneAt {
+		if now.Sub(t) > 2*jobLingerMs*time.Millisecond {
+			delete(m.jobDoneAt, k)
+		}
+	}
+}
+
+// jobVisible reports whether a job row belongs in the tree: running jobs
+// always; finished ones only inside their post-completion linger window.
+func (m Model) jobVisible(g string, j JobInfo) bool {
+	if j.Status == "running" {
+		return true
+	}
+	t, ok := m.jobDoneAt[jobKey(g, j.ID)]
+	return ok && time.Since(t) < jobLingerMs*time.Millisecond
+}
+
+// jobBlinking reports whether the job's linger window is active — the
+// renderer blinks the icon for exactly that window.
+func (m Model) jobBlinking(g, id string) bool {
+	t, ok := m.jobDoneAt[jobKey(g, id)]
+	return ok && time.Since(t) < jobLingerMs*time.Millisecond
+}
+
+// treeRows flattens the tree: main, then main's default-session jobs, named
+// sessions (each with its own jobs one level deeper), and the other groups
+// as main's children — each group repeating the same shape. Session lists
+// come from GroupInfo.Sessions and job lists from GroupInfo.Jobs (both
+// daemon-pushed via WatchState/List), so sessions and jobs created by any
+// client appear here as the daemon's mirrors update.
+func (m Model) treeRows() []treeRow {
+	order := m.treeOrder()
+	rows := []treeRow{}
+	jobsOf := func(g, sess string) []JobInfo {
+		var out []JobInfo
+		for _, j := range m.groups[g].Jobs {
+			if j.Session == sess && m.jobVisible(g, j) {
+				out = append(out, j)
+			}
+		}
+		// Newest on top (the daemon sends oldest-first).
+		sort.SliceStable(out, func(a, b int) bool { return out[a].Started > out[b].Started })
+		return out
+	}
+	// appendSession emits one named-session row plus its job children.
+	appendSession := func(g, sess, glyph, cont string) {
+		rows = append(rows, treeRow{group: g, session: sess, branch: glyph})
+		jl := jobsOf(g, sess)
+		for k, j := range jl {
+			jb := "├─ "
+			if k == len(jl)-1 {
+				jb = "└─ "
+			}
+			rows = append(rows, treeRow{group: g, session: sess, job: j.ID, branch: cont + jb})
+		}
+	}
+	groups := order
+	var mainSess []string
+	var mainJobs []JobInfo
+	if len(order) > 0 && order[0] == "main" {
+		groups = order[1:]
+		mainSess = m.groups["main"].Sessions
+		mainJobs = jobsOf("main", "")
+		rows = append(rows, treeRow{group: "main"})
+	}
+	nChildren := len(mainJobs) + len(mainSess) + len(groups)
+	child := 0
+	branchFor := func() (string, string) {
+		child++
+		if child == nChildren {
+			return "└─ ", "   "
+		}
+		return "├─ ", "│  "
+	}
+	for _, j := range mainJobs {
+		b, _ := branchFor()
+		rows = append(rows, treeRow{group: "main", job: j.ID, branch: b})
+	}
+	for _, s := range mainSess {
+		b, cont := branchFor()
+		appendSession("main", s, b, cont)
+	}
+	for _, g := range groups {
+		gb, cont := branchFor()
+		rows = append(rows, treeRow{group: g, branch: gb})
+		defJobs := jobsOf(g, "")
+		sess := m.groups[g].Sessions
+		nGC := len(defJobs) + len(sess)
+		gc := 0
+		gBranch := func() (string, string) {
+			gc++
+			if gc == nGC {
+				return cont + "└─ ", cont + "   "
+			}
+			return cont + "├─ ", cont + "│  "
+		}
+		for _, j := range defJobs {
+			b, _ := gBranch()
+			rows = append(rows, treeRow{group: g, job: j.ID, branch: b})
+		}
+		for _, s2 := range sess {
+			b, c2 := gBranch()
+			appendSession(g, s2, b, c2)
+		}
+	}
+	return rows
+}
+
+// setActiveSession switches which chat session of g is viewed/sent-to,
+// invalidating g's cached viewport content (the vpCache key carries no
+// session dimension). No-op when already active.
+func (m *Model) setActiveSession(g, s string) {
+	if m.session[g] == s {
+		return
+	}
+	if s == "" {
+		delete(m.session, g)
+	} else {
+		m.session[g] = s
+	}
+	m.groupVer[g]++
+}
+
+// selectTreeRow focuses a tree row: switches the current group AND its
+// active session, clears that conversation's unread mark, and re-renders.
+// Landing on a job row additionally arms the peek pane (renderJobPeek): the
+// chat column shows the job's live state while it stays hovered. Shared by
+// tree up/down, ctrl+@ unread-cycling, and anything else that lands on a
+// row. Callers thread m.peekCmds() into their returned tea.Cmd so the peek
+// fetch + refresh tick actually run.
+func (m *Model) selectTreeRow(r treeRow) {
+	m.cur = r.group
+	m.setActiveSession(r.group, r.session)
+	m.clearUnread(r.group, r.session)
+	m.syncLogScope()
+	if r.job != "" {
+		m.armPeek(r.group, r.job)
+	} else {
+		m.clearPeek()
+	}
+	m.refreshLog()
+	m.refreshSuggestions()
+	m.vp.GotoBottom()
+	m.autoFollow = true
+}
+
+// armPeek points the peek pane at one job: drops any previous stream, clears
+// the buffer, re-arms bottom-follow, and opens a fresh JobTail. Re-arming on
+// the job already shown is a no-op, so a scrolled-back reader keeps their
+// position until they hover something else.
+func (m *Model) armPeek(g, id string) {
+	if m.peekJob == (jobRef{group: g, id: id}) {
+		return
+	}
+	m.stopPeek()
+	m.peekJob = jobRef{group: g, id: id}
+	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
+	m.peekDirty, m.peekPrimed = false, false
+	m.peekArmedAt, m.peekPaintedAt = time.Now(), time.Time{}
+	m.peekFollow = true
+	m.refreshPeekVP()
+	m.peekSID++
+	m.peekCancel = startJobTail(m.peekSID, g, id)
+}
+
+// flushPeek rebuilds the viewport from the accumulated buffer and marks the
+// pane painted. Bottom-follow is applied by refreshPeekVP, so a coalesced
+// burst lands at EOF in one step instead of scrolling there.
+func (m *Model) flushPeek() {
+	m.refreshPeekVP()
+	m.peekDirty = false
+	m.peekPrimed = true
+	m.peekPaintedAt = time.Now()
+}
+
+// clearPeek tears the stream down and forgets the job — the pane is not
+// showing a job row any more.
+func (m *Model) clearPeek() {
+	m.stopPeek()
+	m.peekJob = jobRef{}
+	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
+	m.peekDirty, m.peekPrimed = false, false
+	m.peekArmedAt, m.peekPaintedAt = time.Time{}, time.Time{}
+}
+
+// syncPeekToHover keeps the live tail bound to whichever job row is actually
+// under the cursor. Job rows sort newest-first and finished ones hide after
+// their blink, so a job starting or ending renames the row at treeIdx with no
+// keypress involved — and selectTreeRow, which is keypress-driven, never runs.
+// Without this the pane sits on "(fetching output…)" against a stream still
+// attached to the previous job until the user navigates away and back.
+func (m *Model) syncPeekToHover() {
+	if !m.peekActive() {
+		if m.peekJob.id != "" {
+			m.clearPeek()
+		}
+		return
+	}
+	r := m.treeRows()[m.treeIdx]
+	m.armPeek(r.group, r.job)
+}
+
+// peekActive reports whether the peek pane is what the middle column shows:
+// tree focus with a job row hovered. Scroll keys route to the peek viewport
+// exactly then.
+func (m Model) peekActive() bool {
+	if m.focus != focusTree {
+		return false
+	}
+	rows := m.treeRows()
+	return m.treeIdx < len(rows) && rows[m.treeIdx].job != ""
+}
+
+// refreshPeekVP resizes the peek viewport to the current pane geometry and
+// rebuilds its content from the fetched output (wrapped to width), keeping
+// the bottom pinned while peekFollow holds. Called on data arrival, hover
+// start, and window resize.
+func (m *Model) refreshPeekVP() {
+	w, h := m.logViewportSize()
+	m.peekVP.Width = w
+	m.peekVP.Height = max(1, h-jobPeekHeaderRows)
+	var lines []string
+	for _, ln := range strings.Split(strings.TrimRight(m.peekOut, "\n"), "\n") {
+		lines = append(lines, wrapLine(ln, max(10, w-2))...)
+	}
+	m.peekVP.SetContent(strings.Join(lines, "\n"))
+	if m.peekFollow {
+		m.peekVP.GotoBottom()
+	}
+}
+
+// stopPeek cancels the live JobTail stream, if any. The cancel closes the
+// gRPC stream, which closes the daemon's vsock conn, which makes the guest
+// agent kill its tail child — nothing lingers on any tier.
+func (m *Model) stopPeek() {
+	if m.peekCancel != nil {
+		m.peekCancel()
+		m.peekCancel = nil
+	}
 }
 
 func (m Model) treeOrder() []string {
@@ -2377,8 +3130,9 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if strings.HasPrefix(v, "/sw ") {
 		m.cur = strings.TrimSpace(v[4:])
-		delete(m.unread, m.cur)
+		m.clearUnread(m.cur, m.activeSession(m.cur))
 		m.refreshLog()
+		m.syncLogScope()
 		m.refreshSuggestions()
 		m.vp.GotoBottom()
 		m.autoFollow = true
@@ -2404,8 +3158,47 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		return m.handleSchedCmd(rest)
 	}
-	if v == "/clear" {
-		return daemonCmd(m.sock, "clear", m.cur, nil)
+	if v == "/clear" || v == "/clear all" {
+		if v == "/clear all" {
+			// Whole group: every session + the full transcript.
+			return daemonCmd(m.sock, "clear", m.cur, nil)
+		}
+		// Just the session being viewed. "-" is the wire alias for the
+		// default session (a clear with session "" means the whole group).
+		sess := m.activeSession(m.cur)
+		if sess == "" {
+			sess = "-"
+		}
+		return daemonCmd(m.sock, "clear", m.cur, map[string]any{"session": sess})
+	}
+	if v == "/session" || strings.HasPrefix(v, "/session ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(v, "/session"))
+		if arg == "" {
+			cur := sessionDisplay(m.activeSession(m.cur))
+			known := append([]string{"default"}, m.groups[m.cur].Sessions...)
+			m.addLine(logLine{kind: "sys", group: m.cur,
+				text: fmt.Sprintf("session: %s   (known: %s)   /session <name> switches, first send creates", cur, strings.Join(known, ", "))})
+			return nil
+		}
+		sess := arg
+		if sess == "default" || sess == "-" {
+			sess = ""
+		}
+		if sess != "" && !sessionNameRE.MatchString(sess) {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "session name must match [A-Za-z0-9][A-Za-z0-9_-]{0,31}"})
+			return nil
+		}
+		if m.activeSession(m.cur) == sess {
+			m.addLine(logLine{kind: "sys", group: m.cur, text: "already on session " + sessionDisplay(sess)})
+			return nil
+		}
+		m.setActiveSession(m.cur, sess)
+		m.clearUnread(m.cur, sess)
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "session → " + sessionDisplay(sess)})
+		m.refreshLog()
+		m.vp.GotoBottom()
+		m.autoFollow = true
+		return nil
 	}
 	if strings.HasPrefix(v, "/destroy ") || v == "/destroy" {
 		target := strings.TrimSpace(strings.TrimPrefix(v, "/destroy"))
@@ -2421,17 +3214,20 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			// Drop the focus first so we don't keep rendering a group whose
 			// log file is about to vanish.
 			m.cur = "main"
-			delete(m.unread, m.cur)
+			m.clearUnread(m.cur, m.activeSession(m.cur))
 			m.autoFollow = true
+			m.syncLogScope()
 		}
 		// Wipe any cached state for the group so a future /new <name> with
 		// the same name starts clean.
 		delete(m.subscribed, target)
+		delete(m.session, target)
+		delete(m.turnSession, target)
 		delete(m.streamBuf, target)
 		delete(m.thinkingBuf, target)
 		delete(m.thinkingTail, target)
 		delete(m.lastThoughtBody, target)
-		delete(m.unread, target)
+		m.clearGroupUnread(target)
 		delete(m.pending, target)
 		filtered := m.lines[:0]
 		for _, l := range m.lines {
@@ -2467,7 +3263,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		)
 	}
 	if v == "/reload" {
-		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value()})
+		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
 		m.reloadPending = true
 		return tea.Quit
 	}
@@ -2530,7 +3326,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if v == "/shell" || strings.HasPrefix(v, "/shell ") {
 		arg := strings.TrimSpace(strings.TrimPrefix(v, "/shell"))
-		m.enterShell(arg) // arg == "" -> daemon default session "koto-shell"
+		m.enterShell(arg) // arg == "" -> the active chat session's shell (shellSessionName)
 		// Same as the ctrl+] path: start the tick chain for the cursor blink.
 		return m.ensureTicking()
 	}
@@ -2573,9 +3369,9 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// `prompt` event pops it and the real prompt line takes its place). For an
 	// idle group this is a sub-second "sending…" flash; for a busy group it's
 	// the visible backlog of everything typed ahead.
-	m.pending[m.cur] = append(m.pending[m.cur], v)
+	m.pending[m.cur] = append(m.pending[m.cur], pendingPrompt{session: m.activeSession(m.cur), text: v})
 	m.refreshLog()
-	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v})
+	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": m.activeSession(m.cur)})
 }
 
 func (m Model) allBlocks(contentCols int) []renderedBlock {
@@ -2585,8 +3381,12 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 		expand            bool
 	}
 	srcs := []src{}
+	active := m.activeSession(m.cur)
 	for _, l := range m.lines {
 		if l.group != "" && l.group != m.cur {
+			continue
+		}
+		if !lineInSession(l, active) {
 			continue
 		}
 		// Thought and tool_out blocks each carry a multiline body that needs

@@ -157,7 +157,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		}
 		return cl.Spawn(ctx, r)
 	case "send":
-		return cl.Send(ctx, &pb.SendReq{Group: s("group"), Msg: s("msg")})
+		return cl.Send(ctx, &pb.SendReq{Group: s("group"), Msg: s("msg"), Session: s("session")})
 	case "stop":
 		return cl.Stop(ctx, &pb.GroupReq{Group: s("group")})
 	case "interrupt":
@@ -167,7 +167,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "restart":
 		return cl.Restart(ctx, &pb.GroupReq{Group: s("group")})
 	case "clear":
-		return cl.Clear(ctx, &pb.GroupReq{Group: s("group")})
+		return cl.Clear(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "history":
 		r := &pb.HistoryReq{Group: s("group")}
 		if v, ok := asFloat(extra["before"]); ok {
@@ -179,6 +179,12 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.History(ctx, r)
 	case "metrics":
 		return cl.Metrics(ctx, &pb.MetricsReq{Group: s("group")})
+	case "job_logs":
+		r := &pb.JobLogsReq{Group: s("group"), Id: s("id")}
+		if v, ok := asFloat(extra["tail"]); ok {
+			r.Tail = int64(v)
+		}
+		return cl.JobLogs(ctx, r)
 	case "config":
 		return cl.Config(ctx, buildConfigReq(extra))
 	case "skills":
@@ -243,6 +249,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("network", &r.Network)
 	setOpt("size", &r.Size)
 	setOpt("root", &r.Root)
+	setOpt("autostart", &r.Autostart)
 	if sk, ok := extra["skills"]; ok {
 		switch v := sk.(type) {
 		case []string:
@@ -313,6 +320,8 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 			Effort:   gi.GetEffort(),
 			Stalled:  gi.GetStalled(),
 			Queued:   int(gi.GetQueued()),
+			Sessions: gi.GetSessions(),
+			Jobs:     pbToJobs(gi.GetJobs()),
 		}
 	}
 	return out
@@ -391,6 +400,55 @@ func startRunScript(group, name, script string) {
 	}()
 }
 
+// startJobTail opens a live JobTail stream for the hovered job row and pumps
+// its frames into the Update loop as jobTailMsg — the same push shape as
+// startSubscribe/startRunScript. Returns the cancel func the model stores;
+// cancelling tears the stream (and the guest-side tail) down. sid stamps
+// every frame so the model can drop leftovers from a superseded hover.
+func startJobTail(sid int, group, id string) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	if prog == nil {
+		return cancel // no program to push frames into (tests)
+	}
+	go func() {
+		cl, err := getClient()
+		if err != nil {
+			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
+			return
+		}
+		stream, err := cl.JobTail(ctx, &pb.JobTailReq{Group: group, Id: id, Tail: jobPeekTailBytes})
+		if err != nil {
+			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
+			return
+		}
+		prog.Send(jobTailMsg{sid: sid, opened: true})
+		for {
+			ev, rerr := stream.Recv()
+			if rerr != nil {
+				if ctx.Err() == nil {
+					prog.Send(jobTailMsg{sid: sid, end: true})
+				}
+				return
+			}
+			switch ev.Event {
+			case "data":
+				line := string(ev.Chunk)
+				for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
+					line = line[:len(line)-1]
+				}
+				prog.Send(jobTailMsg{sid: sid, line: line})
+			case "end":
+				prog.Send(jobTailMsg{sid: sid, end: true})
+				return
+			case "error":
+				prog.Send(jobTailMsg{sid: sid, errText: ev.Error})
+				return
+			}
+		}
+	}()
+	return cancel
+}
+
 // bytesIndexByte avoids importing bytes just for one call.
 func bytesIndexByte(b []byte, c byte) int {
 	for i := range b {
@@ -401,14 +459,28 @@ func bytesIndexByte(b []byte, c byte) int {
 	return -1
 }
 
+func pbToJobs(js []*pb.JobInfo) []JobInfo {
+	if len(js) == 0 {
+		return nil
+	}
+	out := make([]JobInfo, 0, len(js))
+	for _, j := range js {
+		out = append(out, JobInfo{
+			ID: j.GetId(), Session: j.GetSession(), Status: j.GetStatus(),
+			RC: j.GetRc(), Cmd: j.GetCmd(), Started: j.GetStarted(), OutSize: j.GetOutSize(),
+		})
+	}
+	return out
+}
+
 func pbToEvent(p *pb.Event) Event {
 	return Event{
 		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
-		Historical: p.Historical, ID: p.Id, Seq: p.Seq,
+		Historical: p.Historical, ID: p.Id, Seq: p.Seq, Session: p.Session,
 	}
 }
 
 func pbToLogEvent(p *pb.LogEvent) LogEvent {
-	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts, Subsystem: p.Subsystem}
+	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts, Subsystem: p.Subsystem, Group: p.Group}
 }

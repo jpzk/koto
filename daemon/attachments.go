@@ -82,7 +82,7 @@ func saveImage(g string, data []byte, mime string) (string, error) {
 	if err := os.WriteFile(abs, data, 0o644); err != nil {
 		return "", err
 	}
-	emitLogf("attach", "info", "image group=%s bytes=%d -> %s", g, len(data), rel)
+	emitLogfG("attach", g, "info", "image group=%s bytes=%d -> %s", g, len(data), rel)
 	return rel, nil
 }
 

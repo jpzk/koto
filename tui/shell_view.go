@@ -288,18 +288,38 @@ func (m Model) shellPaneSize() (int, int) {
 	return w, h
 }
 
+// shellSessionName is the tmux session backing the current group's ACTIVE
+// chat session: "koto-shell" for the default session (the historical name),
+// "koto-shell-<name>" for a named one. Each chat session gets its own
+// terminal so parallel conversations don't type into each other's shell;
+// the same convention is exported into the agent's turn env as
+// KOTO_SHELL_SESSION (entrypoint.sh) so the group's agent joins the shell
+// belonging to the conversation it is in.
+func (m Model) shellSessionName() string {
+	if s := m.activeSession(m.cur); s != "" {
+		return "koto-shell-" + s
+	}
+	return "koto-shell"
+}
+
 // enterShell opens (or refocuses) the shared-shell pane for the current
-// group. Switching to a different group while a session is already open
-// tears the old one down first (closing the stream, not the tmux session —
-// see shellSession.close); re-entering for the SAME group just refocuses
-// and, if the terminal geometry changed while the pane was hidden, resizes.
+// group's active chat session. An explicit session arg (/shell <name>)
+// overrides the derived per-chat-session default. Switching to a different
+// group — or a different tmux session, e.g. after /session — while one is
+// already open tears the old one down first (closing the stream, not the
+// tmux session — see shellSession.close); re-entering the SAME session just
+// refocuses and, if the terminal geometry changed while the pane was
+// hidden, resizes.
 func (m *Model) enterShell(session string) {
 	if m.cur == "" {
 		m.addLine(logLine{kind: "err", group: m.cur, text: "/shell: no group in focus"})
 		return
 	}
+	if session == "" {
+		session = m.shellSessionName()
+	}
 	w, h := m.shellPaneSize()
-	if m.shell == nil || m.shell.group != m.cur || m.shell.ended {
+	if m.shell == nil || m.shell.group != m.cur || m.shell.session != session || m.shell.ended {
 		if m.shell != nil {
 			m.shell.close()
 		}

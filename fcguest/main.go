@@ -508,11 +508,11 @@ type agentReq struct {
 	UploadsTarB64 string            `json:"uploads_tar_b64"`
 	Ports         []int             `json:"ports"`
 	Env           map[string]string `json:"env"`
-	Net           string            `json:"net"`  // "l3" → bring up the TAP (internet=full)
-	Root          bool              `json:"root"` // true → passwordless sudo for node (config root=yes)
-	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell)
-	Cols          uint32            `json:"cols"`     // shell_attach: initial pty width
-	Rows          uint32            `json:"rows"`     // shell_attach: initial pty height
+	Net           string            `json:"net"`     // "l3" → bring up the TAP (internet=full)
+	Root          bool              `json:"root"`    // true → passwordless sudo for node (config root=yes)
+	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell); msg: chat session name ("" = default)
+	Cols          uint32            `json:"cols"`    // shell_attach: initial pty width
+	Rows          uint32            `json:"rows"`    // shell_attach: initial pty height
 }
 
 func reply(c *vconn, v any) {
@@ -766,7 +766,15 @@ func handleMsg(c *vconn, req *agentReq) {
 		replyErr(c, fmt.Errorf("in fifo unavailable"))
 		return
 	}
-	if _, err := inFIFO.Write([]byte(req.B64 + "\n")); err != nil {
+	// Named chat session: prefix the FIFO line with the session name (one
+	// space-delimited token; the daemon validated the charset) so
+	// entrypoint.sh pins the turn to that claude conversation. The default
+	// session stays the bare-b64 line for compat with older entrypoints.
+	line := req.B64
+	if req.Session != "" {
+		line = req.Session + " " + req.B64
+	}
+	if _, err := inFIFO.Write([]byte(line + "\n")); err != nil {
 		replyErr(c, err)
 		return
 	}

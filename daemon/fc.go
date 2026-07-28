@@ -174,23 +174,7 @@ func groupNetwork(g string) string {
 // the sudoers grant at boot (handleInit → enableSudo). The microVM's KVM
 // boundary contains root-in-guest, so this doesn't widen the host blast radius.
 // Applies on /restart. Accepts a bool too, for a hand-edited config.json.
-func groupRoot(g string) bool {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return false
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return false
-	}
-	switch v := cfg["root"].(type) {
-	case bool:
-		return v
-	case string:
-		return strings.ToLower(strings.TrimSpace(v)) == "yes"
-	}
-	return false
-}
+func groupRoot(g string) bool { return groupConfigBool(g, "root") }
 
 // ---- VM registry -----------------------------------------------------------
 
@@ -327,7 +311,7 @@ func fcEnsureWorkspaceImg(g string) error {
 			return fmt.Errorf("workspace chown: %v: %s", err, strings.TrimSpace(string(out)))
 		}
 		mkfsArgs = append(mkfsArgs, "-d", stage)
-		emitLogf("fc", "info", "[%s] migrating existing workspace into workspace.img", g)
+		emitLogfG("fc", g, "info", "[%s] migrating existing workspace into workspace.img", g)
 	}
 	mkfsArgs = append(mkfsArgs, tmpImg)
 	out, err := exec.Command("mkfs.ext4", mkfsArgs...).CombinedOutput()
@@ -350,7 +334,7 @@ func fcGrowWorkspaceImg(g, img string, current, target int64) error {
 	if target <= current {
 		return nil
 	}
-	emitLogf("fc", "info", "[%s] growing workspace.img → %d GiB", g, target>>30)
+	emitLogfG("fc", g, "info", "[%s] growing workspace.img → %d GiB", g, target>>30)
 	if err := os.Truncate(img, target); err != nil {
 		return fmt.Errorf("workspace grow truncate: %w", err)
 	}
@@ -488,7 +472,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		vm.netCancel = cancel
 		go fcAcceptLoop(lnNet, func(c net.Conn) {
 			if err := fcNetServe(ctx, vn, c, g, netPol); err != nil && ctx.Err() == nil {
-				emitLogf("fc", "warn", "[%s] l3 gateway conn: %v", g, err)
+				emitLogfG("fc", g, "warn", "[%s] l3 gateway conn: %v", g, err)
 			}
 		})
 	}
@@ -575,7 +559,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// fcRunning flips promptly.
 	go func() {
 		_ = cmd.Wait()
-		emitLogf("fc", "info", "[%s] vm process exited", g)
+		emitLogfG("fc", g, "info", "[%s] vm process exited", g)
 		// The VM is gone, so any turn still parked in sendNow waiting for
 		// [[turn_end]] can never complete. Wake it now instead of letting the
 		// queue worker block for the full turnWaitTimeout — otherwise a crash or
@@ -634,7 +618,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	for _, p := range pubPorts {
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
 		if err != nil {
-			emitLogf("fc", "warn", "[%s] publish port %d: %v", g, p, err)
+			emitLogfG("fc", g, "warn", "[%s] publish port %d: %v", g, p, err)
 			continue
 		}
 		vm.listeners = append(vm.listeners, ln)
@@ -652,7 +636,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	fcMu.Lock()
 	fcVMs[g] = vm
 	fcMu.Unlock()
-	emitLogf("fc", "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB ports=%v", g, vm.pid, vcpus, memMiB, pubPorts)
+	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB ports=%v", g, vm.pid, vcpus, memMiB, pubPorts)
 	return nil
 }
 
@@ -683,7 +667,7 @@ func fcStop(g string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if pidAlive(vm.pid) {
-		emitLogf("fc", "warn", "[%s] graceful shutdown timed out; killing pid=%d", g, vm.pid)
+		emitLogfG("fc", g, "warn", "[%s] graceful shutdown timed out; killing pid=%d", g, vm.pid)
 		_ = syscall.Kill(vm.pid, syscall.SIGKILL)
 	}
 	if vm.netCancel != nil {
@@ -695,7 +679,7 @@ func fcStop(g string) {
 	_ = os.Remove(fcPidPath(g))
 	_ = os.RemoveAll(fcSockDir(g))
 	_ = os.RemoveAll(fcJailDir(g))
-	emitLogf("fc", "info", "[%s] stopped", g)
+	emitLogfG("fc", g, "info", "[%s] stopped", g)
 }
 
 // ---- guest→host connection handlers ----------------------------------------
@@ -736,7 +720,7 @@ func fcLogSink(g string, c net.Conn) {
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		emitLogf("fc", "error", "[%s] log sink open: %v", g, err)
+		emitLogfG("fc", g, "error", "[%s] log sink open: %v", g, err)
 		return
 	}
 	defer f.Close()
@@ -755,7 +739,7 @@ func fcCtlConn(g string, c net.Conn) {
 		if len(line) == 0 {
 			continue
 		}
-		emitLogf("ctl", "info", "[%s] %s", g, string(line))
+		emitLogfG("ctl", g, "info", "[%s] %s", g, string(line))
 		resp := ctlDispatch(g, line)
 		b, _ := json.Marshal(resp)
 		if _, err := c.Write(append(b, '\n')); err != nil {
@@ -860,11 +844,17 @@ func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentR
 // newer than the last synced watermark rides along in the envelope and the
 // agent untars it into the guest workspace before the FIFO write. The
 // watermark is a host file so a daemon restart doesn't re-push history.
-func fcSendMsg(g, b64msg, systemPrompt string, cfgJSON []byte) error {
+func fcSendMsg(g, session, b64msg, systemPrompt string, cfgJSON []byte) error {
 	req := map[string]any{
 		"op":     "msg",
 		"b64":    b64msg,
 		"sp_b64": base64.StdEncoding.EncodeToString([]byte(systemPrompt)),
+	}
+	// Named session: the guest agent prefixes the FIFO line with the name so
+	// entrypoint.sh pins the turn to that claude conversation. Absent for the
+	// default session — the bare-b64 line older rootfs images expect.
+	if session != "" {
+		req["session"] = session
 	}
 	if len(cfgJSON) > 0 {
 		req["cfg_b64"] = base64.StdEncoding.EncodeToString(cfgJSON)
@@ -875,7 +865,7 @@ func fcSendMsg(g, b64msg, systemPrompt string, cfgJSON []byte) error {
 		if out, err := exec.Command("tar", args...).Output(); err == nil {
 			req["uploads_tar_b64"] = base64.StdEncoding.EncodeToString(out)
 		} else {
-			emitLogf("fc", "warn", "[%s] uploads tar: %v", g, err)
+			emitLogfG("fc", g, "warn", "[%s] uploads tar: %v", g, err)
 		}
 	}
 	_, err := fcAgentCall(g, req, 30*time.Second)

@@ -35,6 +35,7 @@ import (
 type (
 	Event          = wire.Event
 	GroupInfo      = wire.GroupInfo
+	JobInfo        = wire.JobInfo
 	skillItem      = wire.SkillItem
 	baseResp       = wire.BaseResp
 	cmdEnvelope    = wire.CmdEnvelope
@@ -131,6 +132,10 @@ func daemonMain() {
 	if _, err := ensure("main", true); err != nil {
 		emitLogf("daemon", "error", "ensure main: %v", err)
 	}
+	// Groups with autostart=yes come up with the daemon rather than lazily on
+	// their first message. Backgrounded: one VM boot is seconds, and nothing
+	// below (the gRPC listener, cron) should wait on them.
+	go autostartGroups()
 	// The ctl plane for a microVM group is served over vsock (fcCtlConn in
 	// fc.go) once fcSpawn brings the VM up — there are no host-side ctl FIFOs
 	// to re-establish on restart.

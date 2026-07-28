@@ -76,7 +76,8 @@ config
   config <group>                           print effective config (no flags = read)
   config <group> [-model M] [-provider P] [-network none|wan|lan|full]
          [-size small|medium|large|xlarge] [-root yes|no] [-effort E] [-ports P]
-         [-skills a,b,c | -skills-clear]    set keys ("" clears a key)
+         [-autostart yes|no] [-skills a,b,c | -skills-clear]
+                                           set keys ("" clears a key)
 
 skills
   skills [group]                           catalog + a group's enabled set
@@ -88,15 +89,21 @@ streams
   tail   [-since N] <group>                group event stream
   logs                                     daemon's own log stream
   watch                                    group-state snapshots on change
+  jobs [group]                             ls background jobs (cs-job), fresh
+                                           from the guest; no group = all
+  job-logs [-tail N] <group> <id>          one job's metadata + output tail
+  job-tail [-tail N] <group> <id>          follow a job's output live (^C stops)
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
-                                           the group's microVM (default
-                                           session "koto-shell" — the same
-                                           one the group's own agent can join
-                                           via its Bash tool); ctrl-] detaches
-                                           without ending the session
+                                           the group's microVM (default tmux
+                                           session "koto-shell" = the default
+                                           chat session's shell; a named chat
+                                           session's is "koto-shell-<name>" —
+                                           the same one that session's agent
+                                           joins via its Bash tool); ctrl-]
+                                           detaches without ending the session
 
 admin role only
   runscript <group> <script...>            run a POSIX script in the group's
@@ -266,13 +273,16 @@ func ctlCliMain(args []string) {
 		ctlPrint(resp, err)
 
 	case "send":
-		if len(rest) < 2 {
-			ctlFatal(2, "usage: koto ctl send <group> <msg...>")
+		fs := flag.NewFlagSet("send", flag.ExitOnError)
+		session := fs.String("session", "", "chat session within the group (\"\" = default)")
+		fs.Parse(rest)
+		if fs.NArg() < 2 {
+			ctlFatal(2, "usage: koto ctl send [-session S] <group> <msg...>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
 		defer cancel()
-		resp, err := cl.Send(ctx, &pb.SendReq{Group: rest[0], Msg: ctlMsgArg(rest[1:])})
+		resp, err := cl.Send(ctx, &pb.SendReq{Group: fs.Arg(0), Msg: ctlMsgArg(fs.Args()[1:]), Session: *session})
 		ctlPrint(resp, err)
 
 	case "ask":
@@ -323,9 +333,70 @@ func ctlCliMain(args []string) {
 			return cl.Restart(ctx, &pb.GroupReq{Group: g})
 		})
 	case "clear":
-		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
-			return cl.Clear(ctx, &pb.GroupReq{Group: g})
-		})
+		fs := flag.NewFlagSet("clear", flag.ExitOnError)
+		session := fs.String("session", "", "clear only this chat session (\"-\" or \"default\" = the default session); omit for the whole group")
+		fs.Parse(rest)
+		if fs.NArg() != 1 {
+			ctlFatal(2, "usage: koto ctl clear [-session S] <group>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Clear(ctx, &pb.GroupReq{Group: fs.Arg(0), Session: *session})
+		ctlPrint(resp, err)
+
+	case "jobs":
+		g := ""
+		if len(rest) == 1 {
+			g = rest[0]
+		} else if len(rest) > 1 {
+			ctlFatal(2, "usage: koto ctl jobs [group]")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Jobs(ctx, &pb.JobsReq{Group: g})
+		ctlPrint(resp, err)
+
+	case "job-logs":
+		fs := flag.NewFlagSet("job-logs", flag.ExitOnError)
+		tail := fs.Int64("tail", 0, "output bytes from the end (default 4096, max 65536)")
+		fs.Parse(rest)
+		if fs.NArg() != 2 {
+			ctlFatal(2, "usage: koto ctl job-logs [-tail N] <group> <id>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.JobLogs(ctx, &pb.JobLogsReq{Group: fs.Arg(0), Id: fs.Arg(1), Tail: *tail})
+		ctlPrint(resp, err)
+
+	case "job-tail":
+		fs := flag.NewFlagSet("job-tail", flag.ExitOnError)
+		tail := fs.Int64("tail", 0, "initial window bytes (default 65536)")
+		fs.Parse(rest)
+		if fs.NArg() != 2 {
+			ctlFatal(2, "usage: koto ctl job-tail [-tail N] <group> <id>")
+		}
+		cl := ctlClient()
+		stream, err := cl.JobTail(context.Background(), &pb.JobTailReq{Group: fs.Arg(0), Id: fs.Arg(1), Tail: *tail})
+		if err != nil {
+			ctlFatal(1, "job-tail: %v", err)
+		}
+		for {
+			ev, rerr := stream.Recv()
+			if rerr != nil {
+				ctlFatal(1, "stream: %v", rerr)
+			}
+			switch ev.Event {
+			case "data":
+				os.Stdout.Write(ev.Chunk)
+			case "end":
+				return
+			case "error":
+				ctlFatal(1, "%s", ev.Error)
+			}
+		}
 
 	case "metrics":
 		g := ""
@@ -658,7 +729,7 @@ func ctlWinsize() (cols, rows int) {
 // key unchanged while an explicit empty value ("") clears it — matching the
 // optional-field semantics the TUI uses. Most keys apply on the next
 // /restart (network/size/root/ports); model/provider/effort take effect on
-// the next message.
+// the next message; autostart is read only at daemon start.
 func ctlConfig(args []string) {
 	// Group is the first positional, flags follow (config <group> [-flags]).
 	// Go's flag package stops at the first non-flag token, so the group must
@@ -675,6 +746,7 @@ func ctlConfig(args []string) {
 	network := fs.String("network", "", "none|wan|lan|full")
 	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")
+	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
 	skills := fs.String("skills", "", "enabled skills (comma list)")
 	skillsClear := fs.Bool("skills-clear", false, "clear the enabled-skills list")
 	fs.Parse(rest)
@@ -706,6 +778,9 @@ func ctlConfig(args []string) {
 	if seen["root"] {
 		req.Root = root
 	}
+	if seen["autostart"] {
+		req.Autostart = autostart
+	}
 	if seen["skills-clear"] && *skillsClear {
 		req.SkillsAction = &pb.ConfigReq_SkillsClear{SkillsClear: &emptypb.Empty{}}
 	} else if seen["skills"] {
@@ -734,9 +809,10 @@ func ctlAsk(args []string) {
 	fs := flag.NewFlagSet("ask", flag.ExitOnError)
 	timeout := fs.Duration("timeout", 30*time.Minute, "give up after this long")
 	asJSON := fs.Bool("json", false, "print captured events as JSON lines instead of plain text")
+	session := fs.String("session", "", "chat session within the group (\"\" = default)")
 	fs.Parse(args)
 	if fs.NArg() < 2 {
-		ctlFatal(2, "usage: koto ctl ask [-timeout D] [-json] <group> <msg...>")
+		ctlFatal(2, "usage: koto ctl ask [-timeout D] [-json] [-session S] <group> <msg...>")
 	}
 	group, msg := fs.Arg(0), ctlMsgArg(fs.Args()[1:])
 
@@ -748,7 +824,7 @@ func ctlAsk(args []string) {
 		ctlFatal(1, "subscribe: %v", err)
 	}
 	sendCtx, sendCancel := ctlCtx()
-	resp, err := cl.Send(sendCtx, &pb.SendReq{Group: group, Msg: msg})
+	resp, err := cl.Send(sendCtx, &pb.SendReq{Group: group, Msg: msg, Session: *session})
 	sendCancel()
 	if err != nil {
 		ctlFatal(1, "send: %v", err)

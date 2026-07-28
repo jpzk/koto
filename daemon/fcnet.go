@@ -359,9 +359,9 @@ func (l *fcFlowLogger) record(frame []byte, policy string, allowed bool) {
 		return
 	}
 	if allowed {
-		emitLogf("egress", "info", "[%s] flow %s %s -> %s", l.group, fl.proto, fl.src, dst)
+		emitLogfG("egress", l.group, "info", "[%s] flow %s %s -> %s", l.group, fl.proto, fl.src, dst)
 	} else {
-		emitLogf("egress", "warn", "[%s] BLOCKED flow %s %s -> %s (network profile '%s')", l.group, fl.proto, fl.src, dst, policy)
+		emitLogfG("egress", l.group, "warn", "[%s] BLOCKED flow %s %s -> %s (network profile '%s')", l.group, fl.proto, fl.src, dst, policy)
 	}
 }
 

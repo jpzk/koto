@@ -36,6 +36,17 @@ service Koto {
   rpc Skills      (SkillListReq)   returns (SkillsResp);
   rpc SkillNew    (SkillNewReq)    returns (SkillNewResp);
   rpc SkillRead   (SkillReadReq)   returns (SkillReadResp);
+  // Jobs lists a group's background jobs (cs-job) fresh from the guest —
+  // group "" reads across all running groups (needs the "*" target, like
+  // global metrics). JobLogs returns one job's metadata + an output tail.
+  rpc Jobs        (JobsReq)        returns (JobsResp);
+  rpc JobLogs     (JobLogsReq)     returns (JobLogsResp);
+  // JobTail streams a job's combined output LIVE: an initial tail window,
+  // then lines as the job writes them (guest-side `tail -c -f` over the
+  // agent's exec_stream; client cancel kills the guest tail). Reuses the
+  // ScriptEvent frame vocabulary (data/end/error); data chunks are whole
+  // sanitized lines. Ordinary grantable verb (job_tail), group-scoped.
+  rpc JobTail     (JobTailReq)     returns (stream ScriptEvent);
   rpc SchedAdd    (SchedAddReq)    returns (SchedAddResp);
   rpc SchedList   (SchedListReq)   returns (SchedListResp);
   rpc SchedDel    (SchedIDReq)     returns (BaseResp);
@@ -114,6 +125,12 @@ message Event {
   // have seq 0 — the cursor only exists for the live stream. The synthetic
   // `gap` event (see SubscribeReq) also carries seq 0.
   uint64 seq        = 12;
+  // Session within the group this frame belongs to. "" is the group's
+  // default session (which is also what every pre-session log line parses
+  // as); a non-empty name is one of the multiplexed side-sessions created
+  // by sending with SendReq.session. Stamped by the daemon's log parser
+  // from the [[session]] turn markers, so live and History frames agree.
+  string session    = 13;
 }
 
 message RunScriptReq {
@@ -186,6 +203,10 @@ message LogEvent {
   string msg       = 3;
   double ts        = 4;
   string subsystem = 5; // emitting subsystem: acl | auth | fc | egress | sched | ...
+  // Owning group when the line is about one group (fc/egress/send/shell/...);
+  // "" for daemon-wide lines (bind, cron load, acl role edits). Clients use
+  // it to scope the log view to whatever group the user is looking at.
+  string group     = 6;
 }
 
 // ---- value shapes ----
@@ -198,6 +219,28 @@ message GroupInfo {
   string effort   = 5;
   bool   stalled  = 6;
   int32  queued   = 7;
+  // Named sessions known to this group (sorted; the default session is
+  // implicit and never listed). Fed from the daemon's host-side registry,
+  // updated on send/clear, so clients can offer a session picker.
+  repeated string sessions = 8;
+  // Background jobs (cs-job) currently on the guest's disk, from the
+  // daemon's periodically refreshed mirror (see daemon/jobs.go) — the tree's
+  // per-session job rows are driven by this. Meta only; output rides the
+  // JobLogs RPC.
+  repeated JobInfo jobs = 9;
+}
+
+// One background job (sidecar/cs-job) in a group's guest, attributed to the
+// chat session whose turn launched it (cs-job records $KOTO_SESSION at mint).
+message JobInfo {
+  string id       = 1;
+  string session  = 2; // "" = the group's default session
+  string status   = 3; // running | done | orphaned | unknown
+  string rc       = 4; // exit code as string; "" while running
+  string cmd      = 5; // command line, truncated to ~200 bytes
+  int64  started  = 6; // unix seconds
+  int64  out_size = 7; // combined-output bytes so far
+  string group    = 8; // set in JobsResp (all-groups form); implied elsewhere
 }
 
 message SkillItem {
@@ -239,8 +282,20 @@ message SendReq   {
   string image_mime = 4; // image/jpeg | image/png | ...
   bytes  audio      = 5; // currently rejected server-side (see above)
   string audio_mime = 6;
+  // Session to deliver the turn into. "" (and the aliases "-"/"default")
+  // is the group's default session — the pre-session behavior. Any other
+  // name (same charset as group names) addresses an independent claude
+  // conversation multiplexed onto the same group/VM: first send creates
+  // it, later sends continue it. Turns across sessions of one group are
+  // still serialized by the per-group queue.
+  string session    = 7;
 }
-message GroupReq  { string group = 1; } // stop / interrupt / destroy / restart / clear
+// stop / interrupt / destroy / restart / clear. `session` is read by Clear
+// only: "" = clear the whole group (every session + the full transcript,
+// the legacy behavior); "-"/"default" = only the default session; a name =
+// only that session. Per-session clear resets the conversation and removes
+// the session's lines from the transcript, leaving other sessions intact.
+message GroupReq  { string group = 1; string session = 2; }
 message ListReq   {}
 message LogsReq   {}
 message WatchReq  {}
@@ -287,10 +342,35 @@ message ConfigReq {
   optional string size     = 10;  // small|medium|large|xlarge — applies on /restart
   optional string root     = 11;  // yes|no — passwordless sudo in guest; applies on /restart
   optional string network  = 12;  // none|wan|lan|full — egress profile; applies on /restart
+  optional string autostart = 13; // yes|no — boot this group's VM when the daemon starts
   oneof skills_action {
     google.protobuf.Empty skills_clear = 8;
     SkillList             skills_set   = 4;
   }
+}
+
+message JobsReq { string group = 1; } // "" = all running groups
+message JobsResp {
+  bool ok = 1; string error = 2;
+  repeated JobInfo jobs = 3; // JobInfo.group set on every entry
+}
+
+message JobLogsReq {
+  string group = 1;
+  string id    = 2;
+  int64  tail  = 3; // output bytes from the end; 0 => 4096, capped at 65536
+}
+message JobTailReq {
+  string group = 1;
+  string id    = 2;
+  int64  tail  = 3; // initial window bytes before following; 0 => 65536
+}
+
+message JobLogsResp {
+  bool ok = 1; string error = 2;
+  JobInfo job      = 3;
+  string  output    = 4; // the tail itself (sanitized like chat events)
+  bool    truncated = 5; // true when out_size exceeds the returned tail
 }
 
 message SkillListReq { string group = 1; }
