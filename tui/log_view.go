@@ -131,7 +131,7 @@ func formatLogLine(ev LogEvent) string {
 // the tree doesn't apply).
 func (m Model) logPaneSize() (int, int) {
 	w := max(10, m.width-2) // -1 left padding, -1 scrollbar
-	h := max(1, m.height-3) // status + hint (no input bar in log view)
+	h := max(1, m.height-4) // status + hint + metrics (no input bar in log view)
 	return w, h
 }
 
@@ -192,7 +192,8 @@ func (m Model) renderLogView() string {
 	middle := lipgloss.JoinHorizontal(lipgloss.Top, body, scrollbar)
 
 	hint := m.renderLogHint()
-	return lipgloss.JoinVertical(lipgloss.Left, status, middle, hint)
+	metricsBar := m.renderMetricsBar()
+	return lipgloss.JoinVertical(lipgloss.Left, status, middle, hint, metricsBar)
 }
 
 // renderLogScrollbar is a stripped copy of renderScrollbar tailored to
@@ -275,9 +276,13 @@ func (m *Model) exitLog() {
 		target = focusInput
 	}
 	m.focus = target
-	if target == focusInput {
-		m.input.Focus()
-	}
+	// Re-focus the textinput for BOTH chat focuses, not just focusInput:
+	// tree mode deliberately routes typing into the input ("keep typing
+	// while browsing", see the tree enter handler). Restoring focusTree
+	// with a blurred input made every subsequent keystroke vanish silently
+	// — and a ctrl+c in that state quits the TUI, which is how this was
+	// found (E2E sweep: log view → esc → typed commands dead).
+	m.input.Focus()
 	m.resizeViewport()
 	m.refreshLog()
 }

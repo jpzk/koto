@@ -158,10 +158,16 @@ func (m Model) View() string {
 		// input line, no tree, no scrollbar geometry from the chat vp.
 		return m.renderLogView()
 	}
+	if m.focus == focusShell {
+		// Shared shell replaces the entire chat middle pane, same as
+		// focusLog — no input line (keystrokes go to handleShellKey, not
+		// the textinput), no tree, no chat scrollbar.
+		return m.renderShellView()
+	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
 	status := m.renderStatusBar(spin)
-	logRows := max(1, m.height-5)
+	logRows := max(1, m.height-6)
 	treeW := m.treePaneW()
 
 	logArea := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
@@ -179,8 +185,9 @@ func (m Model) View() string {
 
 	input := m.renderInput()
 	hint := m.renderHint()
+	metricsBar := m.renderMetricsBar()
 
-	return lipgloss.JoinVertical(lipgloss.Left, status, middle, input, hint)
+	return lipgloss.JoinVertical(lipgloss.Left, status, middle, input, hint, metricsBar)
 }
 
 // --- status bar --------------------------------------------------------------
@@ -243,6 +250,45 @@ func (m Model) renderLoadingSegment() string {
 func (m Model) renderStatusRight(spin string) string {
 	var parts []string
 
+	if !m.connected {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Background(cBlack).Bold(true).
+			Render(fmt.Sprintf("  reconnecting %s ", spin)))
+	}
+	if m.plugin != nil {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cMagenta).Background(cBlack).Bold(true).
+			Render(fmt.Sprintf("  ▶ /%s %s ", m.plugin.name, spin)))
+	}
+	streaming := ""
+	if _, ok := m.streamBuf[m.cur]; ok {
+		streaming = lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).
+			Render(fmt.Sprintf("   streaming %s ", spin))
+	} else {
+		streaming = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
+			Render("   idle ")
+	}
+	parts = append(parts, streaming)
+
+	count := 0
+	for _, l := range m.lines {
+		if l.group == m.cur {
+			count++
+		}
+	}
+	tail := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Render(pCurveR) +
+		lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
+			Render(fmt.Sprintf("   %d  ", count))
+	parts = append(parts, tail)
+
+	return strings.Join(parts, "")
+}
+
+// renderMetricsBar draws the bottom-most line: ctx/cache/5h/7d utilization,
+// right-aligned the same way the status bar's right side used to be. Split
+// out from renderStatusRight so the token/rate-limit metrics live below the
+// hint line instead of competing for space in the top status bar.
+func (m Model) renderMetricsBar() string {
+	var parts []string
+
 	useBars := m.width >= 110
 	barW := 8
 
@@ -281,36 +327,14 @@ func (m Model) renderStatusRight(spin string) string {
 	if u7d := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-7d-utilization"); u7d >= 0 {
 		parts = append(parts, renderMetric("7d", u7d))
 	}
-	if !m.connected {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Background(cBlack).Bold(true).
-			Render(fmt.Sprintf("  reconnecting %s ", spin)))
-	}
-	if m.plugin != nil {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cMagenta).Background(cBlack).Bold(true).
-			Render(fmt.Sprintf("  ▶ /%s %s ", m.plugin.name, spin)))
-	}
-	streaming := ""
-	if _, ok := m.streamBuf[m.cur]; ok {
-		streaming = lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).
-			Render(fmt.Sprintf("   streaming %s ", spin))
-	} else {
-		streaming = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
-			Render("   idle ")
-	}
-	parts = append(parts, streaming)
 
-	count := 0
-	for _, l := range m.lines {
-		if l.group == m.cur {
-			count++
-		}
+	right := strings.Join(parts, "")
+	rightW := lipgloss.Width(right)
+	gap := m.width - rightW
+	if gap < 0 {
+		gap = 0
 	}
-	tail := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Render(pCurveR) +
-		lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-			Render(fmt.Sprintf("   %d  ", count))
-	parts = append(parts, tail)
-
-	return strings.Join(parts, "")
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(strings.Repeat(" ", gap) + right)
 }
 
 // --- tree pane ---------------------------------------------------------------
@@ -440,10 +464,20 @@ func (m Model) renderTreeRow(g, branch string, running, stalled, isCur, hov, unr
 
 // --- log area ----------------------------------------------------------------
 
-// treePaneW is leftPaneWidth when the tree is focused (visible) and 0 otherwise.
-// Hides the tree from the casual chat view; tab brings it back.
+// treePaneW is leftPaneWidth when the tree is visible and 0 otherwise. In the
+// normal chat view that's exactly when the tree is focused (tab toggles both
+// together). In the shell view (shell_view.go), focus itself is pinned to
+// focusShell so keystrokes reach the guest pty — instead the tree stays
+// visible if it was open (focused) at the moment the shell was entered,
+// tracked via preShellFocus. This lets the tree and the shared-shell pane
+// stay open side by side: open the tree with tab, then ctrl+] to attach —
+// detaching (ctrl+]) and tabbing again still works to switch groups while
+// the session keeps running in the background.
 func (m Model) treePaneW() int {
 	if m.focus == focusTree {
+		return leftPaneWidth
+	}
+	if m.focus == focusShell && m.preShellFocus == focusTree {
 		return leftPaneWidth
 	}
 	return 0

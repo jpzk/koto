@@ -101,12 +101,13 @@ type fcSize struct {
 // fcSizePresets maps a size name to its machine shape. "small" is the default
 // and equals the fcDefault* constants above; larger presets trade the host's
 // scarce RAM for headroom. Disk grows with the preset but never shrinks (see
-// fcEnsureWorkspaceImg). Keep in sync with the applyConfig "size" validator
-// and the TUI /new + /config help.
+// fcEnsureWorkspaceImg). Keep in sync with the Spawn RPC validator and the
+// TUI /new + /config help.
 var fcSizePresets = map[string]fcSize{
 	"small":  {fcDefaultVcpus, fcDefaultMemMiB, fcWorkspaceBytes},
 	"medium": {2, 2048, 12 << 30},
 	"large":  {4, 4096, 16 << 30},
+	"xlarge": {8, 8192, 24 << 30},
 }
 
 func fcAssetsDir() string            { return filepath.Join(HERE, "fcassets") }
@@ -982,6 +983,58 @@ func fcReadScriptFrame(c net.Conn) (typ byte, payload []byte, err error) {
 		}
 	}
 	return hdr[0], payload, nil
+}
+
+// fcShellDial opens the guest agent's shell_attach op: dial the agent port
+// and send the open request as one JSON line (session name + initial pty
+// geometry). The returned conn then carries frames in BOTH directions — see
+// fcguest/main.go's writeShellFrame/readShellFrame for the full type
+// catalog ('D'/'E'/'X' guest→host, same meaning as run_script's frames;
+// 'I' input / 'R' resize host→guest, new — no prior op ever wrote payload
+// data into a connection after the request line).
+//
+// Unlike fcRunScriptDial, closing this conn must NOT be read by the guest as
+// "kill the session" — only "detach this client" (handleShellAttach SIGHUPs
+// its local tmux-attach client, never the tmux server), so the tmux session
+// survives a daemon-side close and is reattachable on the next call.
+func fcShellDial(g, session string, cols, rows uint16) (net.Conn, error) {
+	c, err := fcHostDial(g, fcPortAgent, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := json.Marshal(map[string]any{
+		"op": "shell_attach", "session": session, "cols": cols, "rows": rows,
+	})
+	if _, err := c.Write(append(b, '\n')); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// fcReadShellFrame reads one AttachShell frame off the guest→host direction.
+// Same wire shape as fcReadScriptFrame (a shared frame format, not a
+// coincidence) — reused as-is rather than duplicated.
+func fcReadShellFrame(c net.Conn) (typ byte, payload []byte, err error) {
+	return fcReadScriptFrame(c)
+}
+
+// fcWriteShellFrame writes one host→guest AttachShell frame ('I' input data,
+// 'R' resize — see fcShellDial's doc comment for the full catalog). Nothing
+// on the RunScript path ever needed to write frames after the request line,
+// so this direction is new.
+func fcWriteShellFrame(c net.Conn, typ byte, payload []byte) error {
+	var hdr [5]byte
+	hdr[0] = typ
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
+	if _, err := c.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		_, err := c.Write(payload)
+		return err
+	}
+	return nil
 }
 
 // splice copies bidirectionally and closes both ends when one side finishes.

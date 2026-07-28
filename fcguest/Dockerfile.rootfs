@@ -29,6 +29,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       ripgrep \
       tar \
       gzip \
+      tmux \
       which \
       podman \
       crun \
@@ -67,6 +68,13 @@ RUN printf 'node:100000:65536\n' > /etc/subuid \
  && chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap
 # ^ setuid bit, not file caps: mke2fs -d / the export tar don't carry the
 #   security.capability xattr, so rely on setuid-root for the id-map helpers.
+
+# Disable tmux's status bar for the shared-shell session (fcguest/main.go's
+# shell_attach spawns `tmux new-session`) — stock tmux defaults to a green
+# status line, which is otherwise the first thing rendered in every /shell
+# attach. /etc/tmux.conf is read before any per-user config, so this applies
+# regardless of which user starts the session.
+RUN printf 'set -g status off\n' > /etc/tmux.conf
 
 # Sidecar loop scripts, baked in (no bind mounts in a microVM — editing them
 # now requires `make fc-rootfs`, unlike the podman runtime's live mounts).

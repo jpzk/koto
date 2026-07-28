@@ -126,7 +126,7 @@ type ConfigReq struct {
 	// accepted from old clients; the daemon maps full→network=wan and
 	// migrates the stored key (applyConfig).
 	Internet json.RawMessage `json:"internet,omitempty"`
-	// Size is the machine preset: "small" (default) | "medium" | "large" —
+	// Size is the machine preset: "small" (default) | "medium" | "large" | "xlarge" —
 	// sets vCPU, RAM, and workspace disk together. Applies on /restart.
 	Size json.RawMessage `json:"size,omitempty"`
 	// Root is passwordless-sudo-in-guest: "yes" | "no" (default). The microVM's

@@ -38,7 +38,10 @@ package main
 //
 // TARGETS apply only to verbs whose request carries a group (targetOf):
 // spawn, send, stop, interrupt, destroy, restart, clear, history, config,
-// metrics, skills, sched_add, sched_list, subscribe_group. The rest (list,
+// metrics, skills, sched_add, sched_list, subscribe_group, attach_shell
+// (every ShellInput message repeats `group` — see koto.proto's AttachShell
+// comment for why the target check must ride every message, not just the
+// first). The rest (list,
 // watch_state, subscribe_logs, skill_new, skill_read, sched_del/toggle/run)
 // are verb-only — a grant's target set is ignored for them. A group-scoped
 // request that *omits* the group (global metrics, unfiltered sched_list)
@@ -253,6 +256,8 @@ func targetOf(req any) (target string, targeted bool) {
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
+		return r.Group, true
+	case *pb.ShellInput:
 		return r.Group, true
 	}
 	return "", false

@@ -56,6 +56,7 @@ const (
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
 	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
+	Koto_AttachShell_FullMethodName    = "/koto.Koto/AttachShell"
 	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
 	Koto_SubscribeLogs_FullMethodName  = "/koto.Koto/SubscribeLogs"
 	Koto_WatchState_FullMethodName     = "/koto.Koto/WatchState"
@@ -100,6 +101,26 @@ type KotoClient interface {
 	// failures surface as one `error` frame (in-band, like {ok,error}).
 	// No exit code is carried — append `; echo rc=$?` if you need it.
 	RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error)
+	// AttachShell is the first bidi-streaming RPC in this file: the client
+	// sends a stream of ShellInput (one `open`, then any number of `data` /
+	// `resize` messages as the human types/resizes their terminal) and
+	// receives a stream of ShellFrame (raw PTY output). It attaches to a
+	// persistent tmux session in the group's guest VM (default "koto-shell") —
+	// tmux itself, not this RPC, owns multi-attach mirroring and survival
+	// across client disconnects (see daemon/fc.go fcShellDial, fcguest/main.go
+	// handleShellAttach). An ordinary per-role grantable verb (attach_shell),
+	// NOT hardcoded admin-only like run_script — see daemon/acl.go: unlike
+	// run_script this is meant to be agent-cooperative, not an operator bypass.
+	//
+	// `group` is repeated on every ShellInput variant, not just `open`. This
+	// isn't redundancy for its own sake: daemon/auth.go's aclStream.RecvMsg
+	// re-authorizes EVERY client-sent message against its own decoded target,
+	// so a `data`/`resize` message without `group` would silently downgrade to
+	// verb-only authorization instead of verb+target for the rest of the
+	// stream. The daemon captures `group` from the `open` message and treats
+	// it as fixed for the life of the call — a later message naming a
+	// different (even if independently-authorized) group is a protocol error.
+	AttachShell(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ShellInput, ShellFrame], error)
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -360,9 +381,22 @@ func (c *kotoClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Koto_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
 
+func (c *kotoClient) AttachShell(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ShellInput, ShellFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_AttachShell_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ShellInput, ShellFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_AttachShellClient = grpc.BidiStreamingClient[ShellInput, ShellFrame]
+
 func (c *kotoClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_SubscribeGroup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_SubscribeGroup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +415,7 @@ type Koto_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
 
 func (c *kotoClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_SubscribeLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_SubscribeLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +434,7 @@ type Koto_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
 func (c *kotoClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_WatchState_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[4], Koto_WatchState_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -456,6 +490,26 @@ type KotoServer interface {
 	// failures surface as one `error` frame (in-band, like {ok,error}).
 	// No exit code is carried — append `; echo rc=$?` if you need it.
 	RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error
+	// AttachShell is the first bidi-streaming RPC in this file: the client
+	// sends a stream of ShellInput (one `open`, then any number of `data` /
+	// `resize` messages as the human types/resizes their terminal) and
+	// receives a stream of ShellFrame (raw PTY output). It attaches to a
+	// persistent tmux session in the group's guest VM (default "koto-shell") —
+	// tmux itself, not this RPC, owns multi-attach mirroring and survival
+	// across client disconnects (see daemon/fc.go fcShellDial, fcguest/main.go
+	// handleShellAttach). An ordinary per-role grantable verb (attach_shell),
+	// NOT hardcoded admin-only like run_script — see daemon/acl.go: unlike
+	// run_script this is meant to be agent-cooperative, not an operator bypass.
+	//
+	// `group` is repeated on every ShellInput variant, not just `open`. This
+	// isn't redundancy for its own sake: daemon/auth.go's aclStream.RecvMsg
+	// re-authorizes EVERY client-sent message against its own decoded target,
+	// so a `data`/`resize` message without `group` would silently downgrade to
+	// verb-only authorization instead of verb+target for the rest of the
+	// stream. The daemon captures `group` from the `open` message and treats
+	// it as fixed for the life of the call — a later message naming a
+	// different (even if independently-authorized) group is a protocol error.
+	AttachShell(grpc.BidiStreamingServer[ShellInput, ShellFrame]) error
 	// ---- server-streaming (the old connection-ownership-transfer cases) ----
 	// Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
 	// failed auth surfaces as a non-OK gRPC status at open time.
@@ -545,6 +599,9 @@ func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*Acl
 }
 func (UnimplementedKotoServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
 	return status.Error(codes.Unimplemented, "method RunScript not implemented")
+}
+func (UnimplementedKotoServer) AttachShell(grpc.BidiStreamingServer[ShellInput, ShellFrame]) error {
+	return status.Error(codes.Unimplemented, "method AttachShell not implemented")
 }
 func (UnimplementedKotoServer) SubscribeGroup(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method SubscribeGroup not implemented")
@@ -983,6 +1040,13 @@ func _Koto_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Koto_RunScriptServer = grpc.ServerStreamingServer[ScriptEvent]
 
+func _Koto_AttachShell_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(KotoServer).AttachShell(&grpc.GenericServerStream[ShellInput, ShellFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_AttachShellServer = grpc.BidiStreamingServer[ShellInput, ShellFrame]
+
 func _Koto_SubscribeGroup_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(SubscribeReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1117,6 +1181,12 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "RunScript",
 			Handler:       _Koto_RunScript_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "AttachShell",
+			Handler:       _Koto_AttachShell_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "SubscribeGroup",

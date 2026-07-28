@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -153,7 +154,7 @@ func (s *kotoServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, er
 	}
 	if r.Size != "" {
 		if _, ok := fcSizePresets[r.Size]; !ok {
-			return &pb.SpawnResp{Error: "size must be small, medium, or large"}, nil
+			return &pb.SpawnResp{Error: "size must be small, medium, large, or xlarge"}, nil
 		}
 	}
 	if r.Provider != "" || r.Model != "" || r.Size != "" {
@@ -443,6 +444,111 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 		case 'X':
 			emitLogf("exec", "warn", "[%s] runscript error: %s", r.Group, string(payload))
 			return fail(string(payload))
+		}
+	}
+}
+
+// AttachShell is the first bidi-streaming RPC in this codebase: the client
+// opens with one ShellInput{open:...}, then sends any number of
+// data/resize/close messages, while receiving a stream of ShellFrame (raw
+// pty output). An ordinary per-role grantable verb (attach_shell) — NOT
+// hardcoded admin-only like RunScript, since this is meant to be
+// agent-cooperative (the group's own agent can attach the same tmux session
+// via its Bash tool), not an operator bypass. Output is raw, same as
+// RunScript's ScriptEvent.Chunk — no sanitizer — safe here only because the
+// TUI renders it through its own terminal-emulator library rather than
+// writing it straight to a real terminal (see the shared-shell plan doc).
+//
+// Every ShellInput carries `group`, and daemon/auth.go's aclStream.RecvMsg
+// re-authorizes each one independently — so a mid-session ACL revocation
+// takes effect on the very next frame, not just at connect time. This
+// handler additionally pins `group` to whatever the `open` message named:
+// later messages naming a different group are a protocol error (the vsock
+// conn was dialed once, to one group), even though ACL would independently
+// authorize that other group on its own.
+func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	open := first.GetOpen()
+	if open == nil {
+		return status.Error(codes.InvalidArgument, "first message must be `open`")
+	}
+	group := first.Group
+	if !validGroupName(group) {
+		return status.Error(codes.InvalidArgument, "invalid group name")
+	}
+	session := open.Session
+	if session == "" {
+		session = "koto-shell"
+	}
+	if _, err := ensure(group, group == "main"); err != nil {
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	emitLogf("shell", "info", "[%s] attach session=%s cols=%d rows=%d", group, session, open.Cols, open.Rows)
+
+	c, err := fcShellDial(group, session, uint16(open.Cols), uint16(open.Rows))
+	if err != nil {
+		return stream.Send(&pb.ShellFrame{Event: "error", Error: err.Error()})
+	}
+	defer c.Close()
+
+	ctx := stream.Context()
+	go func() { // client gone → close the vsock conn → guest detaches this client (SIGHUP, not the tmux session)
+		<-ctx.Done()
+		c.Close()
+	}()
+
+	// guest -> client: pty output / end / error frames.
+	go func() {
+		for {
+			typ, payload, ferr := fcReadShellFrame(c)
+			if ferr != nil {
+				return
+			}
+			switch typ {
+			case 'D':
+				if stream.Send(&pb.ShellFrame{Event: "data", Chunk: payload}) != nil {
+					return
+				}
+			case 'E':
+				emitLogf("shell", "info", "[%s] session=%s detached", group, session)
+				_ = stream.Send(&pb.ShellFrame{Event: "end"})
+				return
+			case 'X':
+				emitLogf("shell", "warn", "[%s] session=%s error: %s", group, session, string(payload))
+				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: string(payload)})
+				return
+			}
+		}
+	}()
+
+	// client -> guest: keystrokes / pastes / resizes. Every Recv() here has
+	// already passed aclCheck (auth.go's aclStream) against this message's
+	// own Group before this loop ever sees it.
+	for {
+		in, rerr := stream.Recv()
+		if rerr != nil {
+			return nil // client closed/cancelled — normal end
+		}
+		if in.Group != group {
+			return status.Error(codes.InvalidArgument, "group changed mid-stream")
+		}
+		switch v := in.Input.(type) {
+		case *pb.ShellInput_Data:
+			if fcWriteShellFrame(c, 'I', v.Data) != nil {
+				return nil
+			}
+		case *pb.ShellInput_Resize:
+			payload := make([]byte, 4)
+			binary.BigEndian.PutUint16(payload[0:2], uint16(v.Resize.Cols))
+			binary.BigEndian.PutUint16(payload[2:4], uint16(v.Resize.Rows))
+			if fcWriteShellFrame(c, 'R', payload) != nil {
+				return nil
+			}
+		case *pb.ShellInput_Close:
+			return nil
 		}
 	}
 }

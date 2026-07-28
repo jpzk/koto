@@ -287,6 +287,319 @@ func (x *ScriptEvent) GetError() string {
 	return ""
 }
 
+// One client->server message. `group` is repeated on every variant (see the
+// AttachShell rpc comment above) so daemon/acl.go's targetOf() can authorize
+// every message, not just the first. Exactly one `open` must be sent, first,
+// before any `data`/`resize` — a `data`/`resize` before `open` is a protocol
+// error and aborts the stream. `close` is a clean client-requested end,
+// distinct from just cancelling the stream (the common path); it exists for
+// parity with ShellFrame's event vocabulary, not because callers must use it.
+type ShellInput struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Group string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	// Types that are valid to be assigned to Input:
+	//
+	//	*ShellInput_Open
+	//	*ShellInput_Data
+	//	*ShellInput_Resize
+	//	*ShellInput_Close
+	Input         isShellInput_Input `protobuf_oneof:"input"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShellInput) Reset() {
+	*x = ShellInput{}
+	mi := &file_koto_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShellInput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShellInput) ProtoMessage() {}
+
+func (x *ShellInput) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShellInput.ProtoReflect.Descriptor instead.
+func (*ShellInput) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ShellInput) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *ShellInput) GetInput() isShellInput_Input {
+	if x != nil {
+		return x.Input
+	}
+	return nil
+}
+
+func (x *ShellInput) GetOpen() *ShellOpen {
+	if x != nil {
+		if x, ok := x.Input.(*ShellInput_Open); ok {
+			return x.Open
+		}
+	}
+	return nil
+}
+
+func (x *ShellInput) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Input.(*ShellInput_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+func (x *ShellInput) GetResize() *ShellResize {
+	if x != nil {
+		if x, ok := x.Input.(*ShellInput_Resize); ok {
+			return x.Resize
+		}
+	}
+	return nil
+}
+
+func (x *ShellInput) GetClose() bool {
+	if x != nil {
+		if x, ok := x.Input.(*ShellInput_Close); ok {
+			return x.Close
+		}
+	}
+	return false
+}
+
+type isShellInput_Input interface {
+	isShellInput_Input()
+}
+
+type ShellInput_Open struct {
+	Open *ShellOpen `protobuf:"bytes,2,opt,name=open,proto3,oneof"`
+}
+
+type ShellInput_Data struct {
+	Data []byte `protobuf:"bytes,3,opt,name=data,proto3,oneof"` // raw bytes to write to the pty (keystrokes, pastes)
+}
+
+type ShellInput_Resize struct {
+	Resize *ShellResize `protobuf:"bytes,4,opt,name=resize,proto3,oneof"`
+}
+
+type ShellInput_Close struct {
+	Close bool `protobuf:"varint,5,opt,name=close,proto3,oneof"` // client-requested clean end
+}
+
+func (*ShellInput_Open) isShellInput_Input() {}
+
+func (*ShellInput_Data) isShellInput_Input() {}
+
+func (*ShellInput_Resize) isShellInput_Input() {}
+
+func (*ShellInput_Close) isShellInput_Input() {}
+
+// First message of a stream. `session` names the tmux session to
+// create-or-attach (tmux -A semantics); empty defaults to "koto-shell", the
+// convention documented in prompts/global.md so the group's own agent can
+// find the same session via its Bash tool. cols/rows seed the pty's initial
+// TIOCSWINSZ before tmux starts.
+type ShellOpen struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	Cols          uint32                 `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          uint32                 `protobuf:"varint,3,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShellOpen) Reset() {
+	*x = ShellOpen{}
+	mi := &file_koto_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShellOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShellOpen) ProtoMessage() {}
+
+func (x *ShellOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShellOpen.ProtoReflect.Descriptor instead.
+func (*ShellOpen) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ShellOpen) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *ShellOpen) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *ShellOpen) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+type ShellResize struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Cols          uint32                 `protobuf:"varint,1,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          uint32                 `protobuf:"varint,2,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShellResize) Reset() {
+	*x = ShellResize{}
+	mi := &file_koto_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShellResize) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShellResize) ProtoMessage() {}
+
+func (x *ShellResize) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShellResize.ProtoReflect.Descriptor instead.
+func (*ShellResize) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ShellResize) GetCols() uint32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *ShellResize) GetRows() uint32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+// One server->client message. Mirrors ScriptEvent's event vocabulary
+// (data/end/error) on purpose, though `end` means something different here:
+// for RunScript it means "the script exited"; for AttachShell it means "the
+// guest-side pty/tmux-client plumbing for THIS connection tore down" (e.g.
+// the VM restarted) — the tmux SESSION itself may still be alive and
+// reattachable on the next AttachShell call, since detaching a client never
+// kills a tmux session.
+type ShellFrame struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Event         string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"` // data | end | error
+	Chunk         []byte                 `protobuf:"bytes,2,opt,name=chunk,proto3" json:"chunk,omitempty"` // data: raw PTY output bytes, in stream order
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"` // error: what failed (pty alloc, tmux spawn, vsock dial)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShellFrame) Reset() {
+	*x = ShellFrame{}
+	mi := &file_koto_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShellFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShellFrame) ProtoMessage() {}
+
+func (x *ShellFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShellFrame.ProtoReflect.Descriptor instead.
+func (*ShellFrame) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ShellFrame) GetEvent() string {
+	if x != nil {
+		return x.Event
+	}
+	return ""
+}
+
+func (x *ShellFrame) GetChunk() []byte {
+	if x != nil {
+		return x.Chunk
+	}
+	return nil
+}
+
+func (x *ShellFrame) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 type LogEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Event         string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"` // always "log"
@@ -300,7 +613,7 @@ type LogEvent struct {
 
 func (x *LogEvent) Reset() {
 	*x = LogEvent{}
-	mi := &file_koto_proto_msgTypes[3]
+	mi := &file_koto_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +625,7 @@ func (x *LogEvent) String() string {
 func (*LogEvent) ProtoMessage() {}
 
 func (x *LogEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[3]
+	mi := &file_koto_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +638,7 @@ func (x *LogEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEvent.ProtoReflect.Descriptor instead.
 func (*LogEvent) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{3}
+	return file_koto_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *LogEvent) GetEvent() string {
@@ -378,7 +691,7 @@ type GroupInfo struct {
 
 func (x *GroupInfo) Reset() {
 	*x = GroupInfo{}
-	mi := &file_koto_proto_msgTypes[4]
+	mi := &file_koto_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -390,7 +703,7 @@ func (x *GroupInfo) String() string {
 func (*GroupInfo) ProtoMessage() {}
 
 func (x *GroupInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[4]
+	mi := &file_koto_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -403,7 +716,7 @@ func (x *GroupInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupInfo.ProtoReflect.Descriptor instead.
 func (*GroupInfo) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{4}
+	return file_koto_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GroupInfo) GetPort() int32 {
@@ -467,7 +780,7 @@ type SkillItem struct {
 
 func (x *SkillItem) Reset() {
 	*x = SkillItem{}
-	mi := &file_koto_proto_msgTypes[5]
+	mi := &file_koto_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -479,7 +792,7 @@ func (x *SkillItem) String() string {
 func (*SkillItem) ProtoMessage() {}
 
 func (x *SkillItem) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[5]
+	mi := &file_koto_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -492,7 +805,7 @@ func (x *SkillItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillItem.ProtoReflect.Descriptor instead.
 func (*SkillItem) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{5}
+	return file_koto_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SkillItem) GetName() string {
@@ -539,7 +852,7 @@ type ScheduleItem struct {
 
 func (x *ScheduleItem) Reset() {
 	*x = ScheduleItem{}
-	mi := &file_koto_proto_msgTypes[6]
+	mi := &file_koto_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +864,7 @@ func (x *ScheduleItem) String() string {
 func (*ScheduleItem) ProtoMessage() {}
 
 func (x *ScheduleItem) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[6]
+	mi := &file_koto_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +877,7 @@ func (x *ScheduleItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduleItem.ProtoReflect.Descriptor instead.
 func (*ScheduleItem) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{6}
+	return file_koto_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ScheduleItem) GetId() string {
@@ -636,7 +949,7 @@ type SpawnReq struct {
 
 func (x *SpawnReq) Reset() {
 	*x = SpawnReq{}
-	mi := &file_koto_proto_msgTypes[7]
+	mi := &file_koto_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +961,7 @@ func (x *SpawnReq) String() string {
 func (*SpawnReq) ProtoMessage() {}
 
 func (x *SpawnReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[7]
+	mi := &file_koto_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +974,7 @@ func (x *SpawnReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnReq.ProtoReflect.Descriptor instead.
 func (*SpawnReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{7}
+	return file_koto_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SpawnReq) GetGroup() string {
@@ -724,7 +1037,7 @@ type SendReq struct {
 
 func (x *SendReq) Reset() {
 	*x = SendReq{}
-	mi := &file_koto_proto_msgTypes[8]
+	mi := &file_koto_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +1049,7 @@ func (x *SendReq) String() string {
 func (*SendReq) ProtoMessage() {}
 
 func (x *SendReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[8]
+	mi := &file_koto_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +1062,7 @@ func (x *SendReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendReq.ProtoReflect.Descriptor instead.
 func (*SendReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{8}
+	return file_koto_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SendReq) GetGroup() string {
@@ -803,7 +1116,7 @@ type GroupReq struct {
 
 func (x *GroupReq) Reset() {
 	*x = GroupReq{}
-	mi := &file_koto_proto_msgTypes[9]
+	mi := &file_koto_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -815,7 +1128,7 @@ func (x *GroupReq) String() string {
 func (*GroupReq) ProtoMessage() {}
 
 func (x *GroupReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[9]
+	mi := &file_koto_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -828,7 +1141,7 @@ func (x *GroupReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupReq.ProtoReflect.Descriptor instead.
 func (*GroupReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{9}
+	return file_koto_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GroupReq) GetGroup() string {
@@ -846,7 +1159,7 @@ type ListReq struct {
 
 func (x *ListReq) Reset() {
 	*x = ListReq{}
-	mi := &file_koto_proto_msgTypes[10]
+	mi := &file_koto_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -858,7 +1171,7 @@ func (x *ListReq) String() string {
 func (*ListReq) ProtoMessage() {}
 
 func (x *ListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[10]
+	mi := &file_koto_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -871,7 +1184,7 @@ func (x *ListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListReq.ProtoReflect.Descriptor instead.
 func (*ListReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{10}
+	return file_koto_proto_rawDescGZIP(), []int{14}
 }
 
 type LogsReq struct {
@@ -882,7 +1195,7 @@ type LogsReq struct {
 
 func (x *LogsReq) Reset() {
 	*x = LogsReq{}
-	mi := &file_koto_proto_msgTypes[11]
+	mi := &file_koto_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -894,7 +1207,7 @@ func (x *LogsReq) String() string {
 func (*LogsReq) ProtoMessage() {}
 
 func (x *LogsReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[11]
+	mi := &file_koto_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -907,7 +1220,7 @@ func (x *LogsReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogsReq.ProtoReflect.Descriptor instead.
 func (*LogsReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{11}
+	return file_koto_proto_rawDescGZIP(), []int{15}
 }
 
 type WatchReq struct {
@@ -918,7 +1231,7 @@ type WatchReq struct {
 
 func (x *WatchReq) Reset() {
 	*x = WatchReq{}
-	mi := &file_koto_proto_msgTypes[12]
+	mi := &file_koto_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -930,7 +1243,7 @@ func (x *WatchReq) String() string {
 func (*WatchReq) ProtoMessage() {}
 
 func (x *WatchReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[12]
+	mi := &file_koto_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -943,7 +1256,7 @@ func (x *WatchReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchReq.ProtoReflect.Descriptor instead.
 func (*WatchReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{12}
+	return file_koto_proto_rawDescGZIP(), []int{16}
 }
 
 // since_seq = 0 requests live-only delivery (the historical behavior).
@@ -964,7 +1277,7 @@ type SubscribeReq struct {
 
 func (x *SubscribeReq) Reset() {
 	*x = SubscribeReq{}
-	mi := &file_koto_proto_msgTypes[13]
+	mi := &file_koto_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -976,7 +1289,7 @@ func (x *SubscribeReq) String() string {
 func (*SubscribeReq) ProtoMessage() {}
 
 func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[13]
+	mi := &file_koto_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -989,7 +1302,7 @@ func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeReq.ProtoReflect.Descriptor instead.
 func (*SubscribeReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{13}
+	return file_koto_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *SubscribeReq) GetGroup() string {
@@ -1017,7 +1330,7 @@ type StateFrame struct {
 
 func (x *StateFrame) Reset() {
 	*x = StateFrame{}
-	mi := &file_koto_proto_msgTypes[14]
+	mi := &file_koto_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1342,7 @@ func (x *StateFrame) String() string {
 func (*StateFrame) ProtoMessage() {}
 
 func (x *StateFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[14]
+	mi := &file_koto_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1355,7 @@ func (x *StateFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateFrame.ProtoReflect.Descriptor instead.
 func (*StateFrame) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{14}
+	return file_koto_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StateFrame) GetGroups() map[string]*GroupInfo {
@@ -1070,7 +1383,7 @@ type HistoryReq struct {
 
 func (x *HistoryReq) Reset() {
 	*x = HistoryReq{}
-	mi := &file_koto_proto_msgTypes[15]
+	mi := &file_koto_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1082,7 +1395,7 @@ func (x *HistoryReq) String() string {
 func (*HistoryReq) ProtoMessage() {}
 
 func (x *HistoryReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[15]
+	mi := &file_koto_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1095,7 +1408,7 @@ func (x *HistoryReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryReq.ProtoReflect.Descriptor instead.
 func (*HistoryReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{15}
+	return file_koto_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HistoryReq) GetGroup() string {
@@ -1134,7 +1447,7 @@ type SkillList struct {
 
 func (x *SkillList) Reset() {
 	*x = SkillList{}
-	mi := &file_koto_proto_msgTypes[16]
+	mi := &file_koto_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1146,7 +1459,7 @@ func (x *SkillList) String() string {
 func (*SkillList) ProtoMessage() {}
 
 func (x *SkillList) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[16]
+	mi := &file_koto_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1159,7 +1472,7 @@ func (x *SkillList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillList.ProtoReflect.Descriptor instead.
 func (*SkillList) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{16}
+	return file_koto_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SkillList) GetItems() []string {
@@ -1177,7 +1490,7 @@ type ConfigReq struct {
 	Ports    *string                `protobuf:"bytes,5,opt,name=ports,proto3,oneof" json:"ports,omitempty"`
 	Provider *string                `protobuf:"bytes,7,opt,name=provider,proto3,oneof" json:"provider,omitempty"`
 	Internet *string                `protobuf:"bytes,9,opt,name=internet,proto3,oneof" json:"internet,omitempty"` // DEPRECATED — legacy none|full; daemon maps full→network=wan
-	Size     *string                `protobuf:"bytes,10,opt,name=size,proto3,oneof" json:"size,omitempty"`        // small|medium|large — applies on /restart
+	Size     *string                `protobuf:"bytes,10,opt,name=size,proto3,oneof" json:"size,omitempty"`        // small|medium|large|xlarge — applies on /restart
 	Root     *string                `protobuf:"bytes,11,opt,name=root,proto3,oneof" json:"root,omitempty"`        // yes|no — passwordless sudo in guest; applies on /restart
 	Network  *string                `protobuf:"bytes,12,opt,name=network,proto3,oneof" json:"network,omitempty"`  // none|wan|lan|full — egress profile; applies on /restart
 	// Types that are valid to be assigned to SkillsAction:
@@ -1191,7 +1504,7 @@ type ConfigReq struct {
 
 func (x *ConfigReq) Reset() {
 	*x = ConfigReq{}
-	mi := &file_koto_proto_msgTypes[17]
+	mi := &file_koto_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1203,7 +1516,7 @@ func (x *ConfigReq) String() string {
 func (*ConfigReq) ProtoMessage() {}
 
 func (x *ConfigReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[17]
+	mi := &file_koto_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1216,7 +1529,7 @@ func (x *ConfigReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigReq.ProtoReflect.Descriptor instead.
 func (*ConfigReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{17}
+	return file_koto_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ConfigReq) GetGroup() string {
@@ -1332,7 +1645,7 @@ type SkillListReq struct {
 
 func (x *SkillListReq) Reset() {
 	*x = SkillListReq{}
-	mi := &file_koto_proto_msgTypes[18]
+	mi := &file_koto_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1657,7 @@ func (x *SkillListReq) String() string {
 func (*SkillListReq) ProtoMessage() {}
 
 func (x *SkillListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[18]
+	mi := &file_koto_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1670,7 @@ func (x *SkillListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillListReq.ProtoReflect.Descriptor instead.
 func (*SkillListReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{18}
+	return file_koto_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SkillListReq) GetGroup() string {
@@ -1376,7 +1689,7 @@ type SkillNewReq struct {
 
 func (x *SkillNewReq) Reset() {
 	*x = SkillNewReq{}
-	mi := &file_koto_proto_msgTypes[19]
+	mi := &file_koto_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1388,7 +1701,7 @@ func (x *SkillNewReq) String() string {
 func (*SkillNewReq) ProtoMessage() {}
 
 func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[19]
+	mi := &file_koto_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1401,7 +1714,7 @@ func (x *SkillNewReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewReq.ProtoReflect.Descriptor instead.
 func (*SkillNewReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{19}
+	return file_koto_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SkillNewReq) GetName() string {
@@ -1420,7 +1733,7 @@ type SkillReadReq struct {
 
 func (x *SkillReadReq) Reset() {
 	*x = SkillReadReq{}
-	mi := &file_koto_proto_msgTypes[20]
+	mi := &file_koto_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1432,7 +1745,7 @@ func (x *SkillReadReq) String() string {
 func (*SkillReadReq) ProtoMessage() {}
 
 func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[20]
+	mi := &file_koto_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1445,7 +1758,7 @@ func (x *SkillReadReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadReq.ProtoReflect.Descriptor instead.
 func (*SkillReadReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{20}
+	return file_koto_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SkillReadReq) GetName() string {
@@ -1464,7 +1777,7 @@ type MetricsReq struct {
 
 func (x *MetricsReq) Reset() {
 	*x = MetricsReq{}
-	mi := &file_koto_proto_msgTypes[21]
+	mi := &file_koto_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1476,7 +1789,7 @@ func (x *MetricsReq) String() string {
 func (*MetricsReq) ProtoMessage() {}
 
 func (x *MetricsReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[21]
+	mi := &file_koto_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1489,7 +1802,7 @@ func (x *MetricsReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsReq.ProtoReflect.Descriptor instead.
 func (*MetricsReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{21}
+	return file_koto_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MetricsReq) GetGroup() string {
@@ -1510,7 +1823,7 @@ type SchedAddReq struct {
 
 func (x *SchedAddReq) Reset() {
 	*x = SchedAddReq{}
-	mi := &file_koto_proto_msgTypes[22]
+	mi := &file_koto_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1522,7 +1835,7 @@ func (x *SchedAddReq) String() string {
 func (*SchedAddReq) ProtoMessage() {}
 
 func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[22]
+	mi := &file_koto_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1535,7 +1848,7 @@ func (x *SchedAddReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddReq.ProtoReflect.Descriptor instead.
 func (*SchedAddReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{22}
+	return file_koto_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SchedAddReq) GetGroup() string {
@@ -1568,7 +1881,7 @@ type SchedListReq struct {
 
 func (x *SchedListReq) Reset() {
 	*x = SchedListReq{}
-	mi := &file_koto_proto_msgTypes[23]
+	mi := &file_koto_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1580,7 +1893,7 @@ func (x *SchedListReq) String() string {
 func (*SchedListReq) ProtoMessage() {}
 
 func (x *SchedListReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[23]
+	mi := &file_koto_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1593,7 +1906,7 @@ func (x *SchedListReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListReq.ProtoReflect.Descriptor instead.
 func (*SchedListReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{23}
+	return file_koto_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SchedListReq) GetGroup() string {
@@ -1612,7 +1925,7 @@ type SchedIDReq struct {
 
 func (x *SchedIDReq) Reset() {
 	*x = SchedIDReq{}
-	mi := &file_koto_proto_msgTypes[24]
+	mi := &file_koto_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1624,7 +1937,7 @@ func (x *SchedIDReq) String() string {
 func (*SchedIDReq) ProtoMessage() {}
 
 func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[24]
+	mi := &file_koto_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1637,7 +1950,7 @@ func (x *SchedIDReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedIDReq.ProtoReflect.Descriptor instead.
 func (*SchedIDReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{24}
+	return file_koto_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *SchedIDReq) GetId() string {
@@ -1657,7 +1970,7 @@ type SchedToggleReq struct {
 
 func (x *SchedToggleReq) Reset() {
 	*x = SchedToggleReq{}
-	mi := &file_koto_proto_msgTypes[25]
+	mi := &file_koto_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1669,7 +1982,7 @@ func (x *SchedToggleReq) String() string {
 func (*SchedToggleReq) ProtoMessage() {}
 
 func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[25]
+	mi := &file_koto_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1682,7 +1995,7 @@ func (x *SchedToggleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedToggleReq.ProtoReflect.Descriptor instead.
 func (*SchedToggleReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{25}
+	return file_koto_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SchedToggleReq) GetId() string {
@@ -1709,7 +2022,7 @@ type BaseResp struct {
 
 func (x *BaseResp) Reset() {
 	*x = BaseResp{}
-	mi := &file_koto_proto_msgTypes[26]
+	mi := &file_koto_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1721,7 +2034,7 @@ func (x *BaseResp) String() string {
 func (*BaseResp) ProtoMessage() {}
 
 func (x *BaseResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[26]
+	mi := &file_koto_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1734,7 +2047,7 @@ func (x *BaseResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BaseResp.ProtoReflect.Descriptor instead.
 func (*BaseResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{26}
+	return file_koto_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BaseResp) GetOk() bool {
@@ -1762,7 +2075,7 @@ type SpawnResp struct {
 
 func (x *SpawnResp) Reset() {
 	*x = SpawnResp{}
-	mi := &file_koto_proto_msgTypes[27]
+	mi := &file_koto_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1774,7 +2087,7 @@ func (x *SpawnResp) String() string {
 func (*SpawnResp) ProtoMessage() {}
 
 func (x *SpawnResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[27]
+	mi := &file_koto_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1787,7 +2100,7 @@ func (x *SpawnResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnResp.ProtoReflect.Descriptor instead.
 func (*SpawnResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{27}
+	return file_koto_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SpawnResp) GetOk() bool {
@@ -1822,7 +2135,7 @@ type ListResp struct {
 
 func (x *ListResp) Reset() {
 	*x = ListResp{}
-	mi := &file_koto_proto_msgTypes[28]
+	mi := &file_koto_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1834,7 +2147,7 @@ func (x *ListResp) String() string {
 func (*ListResp) ProtoMessage() {}
 
 func (x *ListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[28]
+	mi := &file_koto_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1847,7 +2160,7 @@ func (x *ListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResp.ProtoReflect.Descriptor instead.
 func (*ListResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{28}
+	return file_koto_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ListResp) GetOk() bool {
@@ -1883,7 +2196,7 @@ type HistoryResp struct {
 
 func (x *HistoryResp) Reset() {
 	*x = HistoryResp{}
-	mi := &file_koto_proto_msgTypes[29]
+	mi := &file_koto_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1895,7 +2208,7 @@ func (x *HistoryResp) String() string {
 func (*HistoryResp) ProtoMessage() {}
 
 func (x *HistoryResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[29]
+	mi := &file_koto_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1908,7 +2221,7 @@ func (x *HistoryResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryResp.ProtoReflect.Descriptor instead.
 func (*HistoryResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{29}
+	return file_koto_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *HistoryResp) GetOk() bool {
@@ -1950,7 +2263,7 @@ type ConfigResp struct {
 
 func (x *ConfigResp) Reset() {
 	*x = ConfigResp{}
-	mi := &file_koto_proto_msgTypes[30]
+	mi := &file_koto_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1962,7 +2275,7 @@ func (x *ConfigResp) String() string {
 func (*ConfigResp) ProtoMessage() {}
 
 func (x *ConfigResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[30]
+	mi := &file_koto_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1975,7 +2288,7 @@ func (x *ConfigResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigResp.ProtoReflect.Descriptor instead.
 func (*ConfigResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{30}
+	return file_koto_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ConfigResp) GetOk() bool {
@@ -2011,7 +2324,7 @@ type MetricsResp struct {
 
 func (x *MetricsResp) Reset() {
 	*x = MetricsResp{}
-	mi := &file_koto_proto_msgTypes[31]
+	mi := &file_koto_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2023,7 +2336,7 @@ func (x *MetricsResp) String() string {
 func (*MetricsResp) ProtoMessage() {}
 
 func (x *MetricsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[31]
+	mi := &file_koto_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2036,7 +2349,7 @@ func (x *MetricsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricsResp.ProtoReflect.Descriptor instead.
 func (*MetricsResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{31}
+	return file_koto_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *MetricsResp) GetOk() bool {
@@ -2078,7 +2391,7 @@ type SkillsResp struct {
 
 func (x *SkillsResp) Reset() {
 	*x = SkillsResp{}
-	mi := &file_koto_proto_msgTypes[32]
+	mi := &file_koto_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2090,7 +2403,7 @@ func (x *SkillsResp) String() string {
 func (*SkillsResp) ProtoMessage() {}
 
 func (x *SkillsResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[32]
+	mi := &file_koto_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2103,7 +2416,7 @@ func (x *SkillsResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillsResp.ProtoReflect.Descriptor instead.
 func (*SkillsResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{32}
+	return file_koto_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SkillsResp) GetOk() bool {
@@ -2138,7 +2451,7 @@ type SkillNewResp struct {
 
 func (x *SkillNewResp) Reset() {
 	*x = SkillNewResp{}
-	mi := &file_koto_proto_msgTypes[33]
+	mi := &file_koto_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2150,7 +2463,7 @@ func (x *SkillNewResp) String() string {
 func (*SkillNewResp) ProtoMessage() {}
 
 func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[33]
+	mi := &file_koto_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2163,7 +2476,7 @@ func (x *SkillNewResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillNewResp.ProtoReflect.Descriptor instead.
 func (*SkillNewResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{33}
+	return file_koto_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *SkillNewResp) GetOk() bool {
@@ -2199,7 +2512,7 @@ type SkillReadResp struct {
 
 func (x *SkillReadResp) Reset() {
 	*x = SkillReadResp{}
-	mi := &file_koto_proto_msgTypes[34]
+	mi := &file_koto_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2524,7 @@ func (x *SkillReadResp) String() string {
 func (*SkillReadResp) ProtoMessage() {}
 
 func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[34]
+	mi := &file_koto_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2537,7 @@ func (x *SkillReadResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillReadResp.ProtoReflect.Descriptor instead.
 func (*SkillReadResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{34}
+	return file_koto_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *SkillReadResp) GetOk() bool {
@@ -2266,7 +2579,7 @@ type SchedAddResp struct {
 
 func (x *SchedAddResp) Reset() {
 	*x = SchedAddResp{}
-	mi := &file_koto_proto_msgTypes[35]
+	mi := &file_koto_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2278,7 +2591,7 @@ func (x *SchedAddResp) String() string {
 func (*SchedAddResp) ProtoMessage() {}
 
 func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[35]
+	mi := &file_koto_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2291,7 +2604,7 @@ func (x *SchedAddResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedAddResp.ProtoReflect.Descriptor instead.
 func (*SchedAddResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{35}
+	return file_koto_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SchedAddResp) GetOk() bool {
@@ -2326,7 +2639,7 @@ type SchedListResp struct {
 
 func (x *SchedListResp) Reset() {
 	*x = SchedListResp{}
-	mi := &file_koto_proto_msgTypes[36]
+	mi := &file_koto_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2338,7 +2651,7 @@ func (x *SchedListResp) String() string {
 func (*SchedListResp) ProtoMessage() {}
 
 func (x *SchedListResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[36]
+	mi := &file_koto_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2351,7 +2664,7 @@ func (x *SchedListResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchedListResp.ProtoReflect.Descriptor instead.
 func (*SchedListResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{36}
+	return file_koto_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *SchedListResp) GetOk() bool {
@@ -2387,7 +2700,7 @@ type AclGetReq struct {
 
 func (x *AclGetReq) Reset() {
 	*x = AclGetReq{}
-	mi := &file_koto_proto_msgTypes[37]
+	mi := &file_koto_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2399,7 +2712,7 @@ func (x *AclGetReq) String() string {
 func (*AclGetReq) ProtoMessage() {}
 
 func (x *AclGetReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[37]
+	mi := &file_koto_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2412,7 +2725,7 @@ func (x *AclGetReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclGetReq.ProtoReflect.Descriptor instead.
 func (*AclGetReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{37}
+	return file_koto_proto_rawDescGZIP(), []int{41}
 }
 
 type AclSetRoleReq struct {
@@ -2425,7 +2738,7 @@ type AclSetRoleReq struct {
 
 func (x *AclSetRoleReq) Reset() {
 	*x = AclSetRoleReq{}
-	mi := &file_koto_proto_msgTypes[38]
+	mi := &file_koto_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2437,7 +2750,7 @@ func (x *AclSetRoleReq) String() string {
 func (*AclSetRoleReq) ProtoMessage() {}
 
 func (x *AclSetRoleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[38]
+	mi := &file_koto_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2450,7 +2763,7 @@ func (x *AclSetRoleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclSetRoleReq.ProtoReflect.Descriptor instead.
 func (*AclSetRoleReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{38}
+	return file_koto_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *AclSetRoleReq) GetRole() string {
@@ -2476,7 +2789,7 @@ type AclDelRoleReq struct {
 
 func (x *AclDelRoleReq) Reset() {
 	*x = AclDelRoleReq{}
-	mi := &file_koto_proto_msgTypes[39]
+	mi := &file_koto_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2488,7 +2801,7 @@ func (x *AclDelRoleReq) String() string {
 func (*AclDelRoleReq) ProtoMessage() {}
 
 func (x *AclDelRoleReq) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[39]
+	mi := &file_koto_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2501,7 +2814,7 @@ func (x *AclDelRoleReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclDelRoleReq.ProtoReflect.Descriptor instead.
 func (*AclDelRoleReq) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{39}
+	return file_koto_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *AclDelRoleReq) GetRole() string {
@@ -2522,7 +2835,7 @@ type AclResp struct {
 
 func (x *AclResp) Reset() {
 	*x = AclResp{}
-	mi := &file_koto_proto_msgTypes[40]
+	mi := &file_koto_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2534,7 +2847,7 @@ func (x *AclResp) String() string {
 func (*AclResp) ProtoMessage() {}
 
 func (x *AclResp) ProtoReflect() protoreflect.Message {
-	mi := &file_koto_proto_msgTypes[40]
+	mi := &file_koto_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2547,7 +2860,7 @@ func (x *AclResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AclResp.ProtoReflect.Descriptor instead.
 func (*AclResp) Descriptor() ([]byte, []int) {
-	return file_koto_proto_rawDescGZIP(), []int{40}
+	return file_koto_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *AclResp) GetOk() bool {
@@ -2597,6 +2910,26 @@ const file_koto_proto_rawDesc = "" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
 	"\x06script\x18\x02 \x01(\tR\x06script\"O\n" +
 	"\vScriptEvent\x12\x14\n" +
+	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
+	"\x05chunk\x18\x02 \x01(\fR\x05chunk\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\xad\x01\n" +
+	"\n" +
+	"ShellInput\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12%\n" +
+	"\x04open\x18\x02 \x01(\v2\x0f.koto.ShellOpenH\x00R\x04open\x12\x14\n" +
+	"\x04data\x18\x03 \x01(\fH\x00R\x04data\x12+\n" +
+	"\x06resize\x18\x04 \x01(\v2\x11.koto.ShellResizeH\x00R\x06resize\x12\x16\n" +
+	"\x05close\x18\x05 \x01(\bH\x00R\x05closeB\a\n" +
+	"\x05input\"M\n" +
+	"\tShellOpen\x12\x18\n" +
+	"\asession\x18\x01 \x01(\tR\asession\x12\x12\n" +
+	"\x04cols\x18\x02 \x01(\rR\x04cols\x12\x12\n" +
+	"\x04rows\x18\x03 \x01(\rR\x04rows\"5\n" +
+	"\vShellResize\x12\x12\n" +
+	"\x04cols\x18\x01 \x01(\rR\x04cols\x12\x12\n" +
+	"\x04rows\x18\x02 \x01(\rR\x04rows\"N\n" +
+	"\n" +
+	"ShellFrame\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05chunk\x18\x02 \x01(\fR\x05chunk\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\"v\n" +
@@ -2772,7 +3105,8 @@ const file_koto_proto_rawDesc = "" +
 	"\aAclResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
-	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xd0\t\n" +
+	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\x87\n" +
+	"\n" +
 	"\x04Koto\x12(\n" +
 	"\x05Spawn\x12\x0e.koto.SpawnReq\x1a\x0f.koto.SpawnResp\x12%\n" +
 	"\x04Send\x12\r.koto.SendReq\x1a\x0e.koto.BaseResp\x12%\n" +
@@ -2798,7 +3132,8 @@ const file_koto_proto_rawDesc = "" +
 	"AclSetRole\x12\x13.koto.AclSetRoleReq\x1a\r.koto.AclResp\x120\n" +
 	"\n" +
 	"AclDelRole\x12\x13.koto.AclDelRoleReq\x1a\r.koto.AclResp\x124\n" +
-	"\tRunScript\x12\x12.koto.RunScriptReq\x1a\x11.koto.ScriptEvent0\x01\x123\n" +
+	"\tRunScript\x12\x12.koto.RunScriptReq\x1a\x11.koto.ScriptEvent0\x01\x125\n" +
+	"\vAttachShell\x12\x10.koto.ShellInput\x1a\x10.koto.ShellFrame(\x010\x01\x123\n" +
 	"\x0eSubscribeGroup\x12\x12.koto.SubscribeReq\x1a\v.koto.Event0\x01\x120\n" +
 	"\rSubscribeLogs\x12\r.koto.LogsReq\x1a\x0e.koto.LogEvent0\x01\x120\n" +
 	"\n" +
@@ -2816,127 +3151,135 @@ func file_koto_proto_rawDescGZIP() []byte {
 	return file_koto_proto_rawDescData
 }
 
-var file_koto_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
+var file_koto_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_koto_proto_goTypes = []any{
 	(*Event)(nil),           // 0: koto.Event
 	(*RunScriptReq)(nil),    // 1: koto.RunScriptReq
 	(*ScriptEvent)(nil),     // 2: koto.ScriptEvent
-	(*LogEvent)(nil),        // 3: koto.LogEvent
-	(*GroupInfo)(nil),       // 4: koto.GroupInfo
-	(*SkillItem)(nil),       // 5: koto.SkillItem
-	(*ScheduleItem)(nil),    // 6: koto.ScheduleItem
-	(*SpawnReq)(nil),        // 7: koto.SpawnReq
-	(*SendReq)(nil),         // 8: koto.SendReq
-	(*GroupReq)(nil),        // 9: koto.GroupReq
-	(*ListReq)(nil),         // 10: koto.ListReq
-	(*LogsReq)(nil),         // 11: koto.LogsReq
-	(*WatchReq)(nil),        // 12: koto.WatchReq
-	(*SubscribeReq)(nil),    // 13: koto.SubscribeReq
-	(*StateFrame)(nil),      // 14: koto.StateFrame
-	(*HistoryReq)(nil),      // 15: koto.HistoryReq
-	(*SkillList)(nil),       // 16: koto.SkillList
-	(*ConfigReq)(nil),       // 17: koto.ConfigReq
-	(*SkillListReq)(nil),    // 18: koto.SkillListReq
-	(*SkillNewReq)(nil),     // 19: koto.SkillNewReq
-	(*SkillReadReq)(nil),    // 20: koto.SkillReadReq
-	(*MetricsReq)(nil),      // 21: koto.MetricsReq
-	(*SchedAddReq)(nil),     // 22: koto.SchedAddReq
-	(*SchedListReq)(nil),    // 23: koto.SchedListReq
-	(*SchedIDReq)(nil),      // 24: koto.SchedIDReq
-	(*SchedToggleReq)(nil),  // 25: koto.SchedToggleReq
-	(*BaseResp)(nil),        // 26: koto.BaseResp
-	(*SpawnResp)(nil),       // 27: koto.SpawnResp
-	(*ListResp)(nil),        // 28: koto.ListResp
-	(*HistoryResp)(nil),     // 29: koto.HistoryResp
-	(*ConfigResp)(nil),      // 30: koto.ConfigResp
-	(*MetricsResp)(nil),     // 31: koto.MetricsResp
-	(*SkillsResp)(nil),      // 32: koto.SkillsResp
-	(*SkillNewResp)(nil),    // 33: koto.SkillNewResp
-	(*SkillReadResp)(nil),   // 34: koto.SkillReadResp
-	(*SchedAddResp)(nil),    // 35: koto.SchedAddResp
-	(*SchedListResp)(nil),   // 36: koto.SchedListResp
-	(*AclGetReq)(nil),       // 37: koto.AclGetReq
-	(*AclSetRoleReq)(nil),   // 38: koto.AclSetRoleReq
-	(*AclDelRoleReq)(nil),   // 39: koto.AclDelRoleReq
-	(*AclResp)(nil),         // 40: koto.AclResp
-	nil,                     // 41: koto.StateFrame.GroupsEntry
-	nil,                     // 42: koto.ListResp.GroupsEntry
-	(*emptypb.Empty)(nil),   // 43: google.protobuf.Empty
-	(*structpb.Struct)(nil), // 44: google.protobuf.Struct
+	(*ShellInput)(nil),      // 3: koto.ShellInput
+	(*ShellOpen)(nil),       // 4: koto.ShellOpen
+	(*ShellResize)(nil),     // 5: koto.ShellResize
+	(*ShellFrame)(nil),      // 6: koto.ShellFrame
+	(*LogEvent)(nil),        // 7: koto.LogEvent
+	(*GroupInfo)(nil),       // 8: koto.GroupInfo
+	(*SkillItem)(nil),       // 9: koto.SkillItem
+	(*ScheduleItem)(nil),    // 10: koto.ScheduleItem
+	(*SpawnReq)(nil),        // 11: koto.SpawnReq
+	(*SendReq)(nil),         // 12: koto.SendReq
+	(*GroupReq)(nil),        // 13: koto.GroupReq
+	(*ListReq)(nil),         // 14: koto.ListReq
+	(*LogsReq)(nil),         // 15: koto.LogsReq
+	(*WatchReq)(nil),        // 16: koto.WatchReq
+	(*SubscribeReq)(nil),    // 17: koto.SubscribeReq
+	(*StateFrame)(nil),      // 18: koto.StateFrame
+	(*HistoryReq)(nil),      // 19: koto.HistoryReq
+	(*SkillList)(nil),       // 20: koto.SkillList
+	(*ConfigReq)(nil),       // 21: koto.ConfigReq
+	(*SkillListReq)(nil),    // 22: koto.SkillListReq
+	(*SkillNewReq)(nil),     // 23: koto.SkillNewReq
+	(*SkillReadReq)(nil),    // 24: koto.SkillReadReq
+	(*MetricsReq)(nil),      // 25: koto.MetricsReq
+	(*SchedAddReq)(nil),     // 26: koto.SchedAddReq
+	(*SchedListReq)(nil),    // 27: koto.SchedListReq
+	(*SchedIDReq)(nil),      // 28: koto.SchedIDReq
+	(*SchedToggleReq)(nil),  // 29: koto.SchedToggleReq
+	(*BaseResp)(nil),        // 30: koto.BaseResp
+	(*SpawnResp)(nil),       // 31: koto.SpawnResp
+	(*ListResp)(nil),        // 32: koto.ListResp
+	(*HistoryResp)(nil),     // 33: koto.HistoryResp
+	(*ConfigResp)(nil),      // 34: koto.ConfigResp
+	(*MetricsResp)(nil),     // 35: koto.MetricsResp
+	(*SkillsResp)(nil),      // 36: koto.SkillsResp
+	(*SkillNewResp)(nil),    // 37: koto.SkillNewResp
+	(*SkillReadResp)(nil),   // 38: koto.SkillReadResp
+	(*SchedAddResp)(nil),    // 39: koto.SchedAddResp
+	(*SchedListResp)(nil),   // 40: koto.SchedListResp
+	(*AclGetReq)(nil),       // 41: koto.AclGetReq
+	(*AclSetRoleReq)(nil),   // 42: koto.AclSetRoleReq
+	(*AclDelRoleReq)(nil),   // 43: koto.AclDelRoleReq
+	(*AclResp)(nil),         // 44: koto.AclResp
+	nil,                     // 45: koto.StateFrame.GroupsEntry
+	nil,                     // 46: koto.ListResp.GroupsEntry
+	(*emptypb.Empty)(nil),   // 47: google.protobuf.Empty
+	(*structpb.Struct)(nil), // 48: google.protobuf.Struct
 }
 var file_koto_proto_depIdxs = []int32{
-	41, // 0: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
-	43, // 1: koto.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
-	16, // 2: koto.ConfigReq.skills_set:type_name -> koto.SkillList
-	42, // 3: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
-	0,  // 4: koto.HistoryResp.events:type_name -> koto.Event
-	44, // 5: koto.ConfigResp.config:type_name -> google.protobuf.Struct
-	44, // 6: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
-	44, // 7: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
-	5,  // 8: koto.SkillsResp.skills:type_name -> koto.SkillItem
-	6,  // 9: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
-	6,  // 10: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
-	44, // 11: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
-	44, // 12: koto.AclResp.acl:type_name -> google.protobuf.Struct
-	4,  // 13: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
-	4,  // 14: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
-	7,  // 15: koto.Koto.Spawn:input_type -> koto.SpawnReq
-	8,  // 16: koto.Koto.Send:input_type -> koto.SendReq
-	10, // 17: koto.Koto.List:input_type -> koto.ListReq
-	9,  // 18: koto.Koto.Stop:input_type -> koto.GroupReq
-	9,  // 19: koto.Koto.Interrupt:input_type -> koto.GroupReq
-	9,  // 20: koto.Koto.Destroy:input_type -> koto.GroupReq
-	9,  // 21: koto.Koto.Restart:input_type -> koto.GroupReq
-	15, // 22: koto.Koto.History:input_type -> koto.HistoryReq
-	17, // 23: koto.Koto.Config:input_type -> koto.ConfigReq
-	21, // 24: koto.Koto.Metrics:input_type -> koto.MetricsReq
-	9,  // 25: koto.Koto.Clear:input_type -> koto.GroupReq
-	18, // 26: koto.Koto.Skills:input_type -> koto.SkillListReq
-	19, // 27: koto.Koto.SkillNew:input_type -> koto.SkillNewReq
-	20, // 28: koto.Koto.SkillRead:input_type -> koto.SkillReadReq
-	22, // 29: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
-	23, // 30: koto.Koto.SchedList:input_type -> koto.SchedListReq
-	24, // 31: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
-	25, // 32: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
-	24, // 33: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
-	37, // 34: koto.Koto.AclGet:input_type -> koto.AclGetReq
-	38, // 35: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
-	39, // 36: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
-	1,  // 37: koto.Koto.RunScript:input_type -> koto.RunScriptReq
-	13, // 38: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
-	11, // 39: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
-	12, // 40: koto.Koto.WatchState:input_type -> koto.WatchReq
-	27, // 41: koto.Koto.Spawn:output_type -> koto.SpawnResp
-	26, // 42: koto.Koto.Send:output_type -> koto.BaseResp
-	28, // 43: koto.Koto.List:output_type -> koto.ListResp
-	26, // 44: koto.Koto.Stop:output_type -> koto.BaseResp
-	26, // 45: koto.Koto.Interrupt:output_type -> koto.BaseResp
-	26, // 46: koto.Koto.Destroy:output_type -> koto.BaseResp
-	27, // 47: koto.Koto.Restart:output_type -> koto.SpawnResp
-	29, // 48: koto.Koto.History:output_type -> koto.HistoryResp
-	30, // 49: koto.Koto.Config:output_type -> koto.ConfigResp
-	31, // 50: koto.Koto.Metrics:output_type -> koto.MetricsResp
-	26, // 51: koto.Koto.Clear:output_type -> koto.BaseResp
-	32, // 52: koto.Koto.Skills:output_type -> koto.SkillsResp
-	33, // 53: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
-	34, // 54: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
-	35, // 55: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
-	36, // 56: koto.Koto.SchedList:output_type -> koto.SchedListResp
-	26, // 57: koto.Koto.SchedDel:output_type -> koto.BaseResp
-	26, // 58: koto.Koto.SchedToggle:output_type -> koto.BaseResp
-	26, // 59: koto.Koto.SchedRun:output_type -> koto.BaseResp
-	40, // 60: koto.Koto.AclGet:output_type -> koto.AclResp
-	40, // 61: koto.Koto.AclSetRole:output_type -> koto.AclResp
-	40, // 62: koto.Koto.AclDelRole:output_type -> koto.AclResp
-	2,  // 63: koto.Koto.RunScript:output_type -> koto.ScriptEvent
-	0,  // 64: koto.Koto.SubscribeGroup:output_type -> koto.Event
-	3,  // 65: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
-	14, // 66: koto.Koto.WatchState:output_type -> koto.StateFrame
-	41, // [41:67] is the sub-list for method output_type
-	15, // [15:41] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	4,  // 0: koto.ShellInput.open:type_name -> koto.ShellOpen
+	5,  // 1: koto.ShellInput.resize:type_name -> koto.ShellResize
+	45, // 2: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
+	47, // 3: koto.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
+	20, // 4: koto.ConfigReq.skills_set:type_name -> koto.SkillList
+	46, // 5: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
+	0,  // 6: koto.HistoryResp.events:type_name -> koto.Event
+	48, // 7: koto.ConfigResp.config:type_name -> google.protobuf.Struct
+	48, // 8: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
+	48, // 9: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	9,  // 10: koto.SkillsResp.skills:type_name -> koto.SkillItem
+	10, // 11: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
+	10, // 12: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
+	48, // 13: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
+	48, // 14: koto.AclResp.acl:type_name -> google.protobuf.Struct
+	8,  // 15: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
+	8,  // 16: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
+	11, // 17: koto.Koto.Spawn:input_type -> koto.SpawnReq
+	12, // 18: koto.Koto.Send:input_type -> koto.SendReq
+	14, // 19: koto.Koto.List:input_type -> koto.ListReq
+	13, // 20: koto.Koto.Stop:input_type -> koto.GroupReq
+	13, // 21: koto.Koto.Interrupt:input_type -> koto.GroupReq
+	13, // 22: koto.Koto.Destroy:input_type -> koto.GroupReq
+	13, // 23: koto.Koto.Restart:input_type -> koto.GroupReq
+	19, // 24: koto.Koto.History:input_type -> koto.HistoryReq
+	21, // 25: koto.Koto.Config:input_type -> koto.ConfigReq
+	25, // 26: koto.Koto.Metrics:input_type -> koto.MetricsReq
+	13, // 27: koto.Koto.Clear:input_type -> koto.GroupReq
+	22, // 28: koto.Koto.Skills:input_type -> koto.SkillListReq
+	23, // 29: koto.Koto.SkillNew:input_type -> koto.SkillNewReq
+	24, // 30: koto.Koto.SkillRead:input_type -> koto.SkillReadReq
+	26, // 31: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
+	27, // 32: koto.Koto.SchedList:input_type -> koto.SchedListReq
+	28, // 33: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
+	29, // 34: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
+	28, // 35: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
+	41, // 36: koto.Koto.AclGet:input_type -> koto.AclGetReq
+	42, // 37: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
+	43, // 38: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
+	1,  // 39: koto.Koto.RunScript:input_type -> koto.RunScriptReq
+	3,  // 40: koto.Koto.AttachShell:input_type -> koto.ShellInput
+	17, // 41: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
+	15, // 42: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
+	16, // 43: koto.Koto.WatchState:input_type -> koto.WatchReq
+	31, // 44: koto.Koto.Spawn:output_type -> koto.SpawnResp
+	30, // 45: koto.Koto.Send:output_type -> koto.BaseResp
+	32, // 46: koto.Koto.List:output_type -> koto.ListResp
+	30, // 47: koto.Koto.Stop:output_type -> koto.BaseResp
+	30, // 48: koto.Koto.Interrupt:output_type -> koto.BaseResp
+	30, // 49: koto.Koto.Destroy:output_type -> koto.BaseResp
+	31, // 50: koto.Koto.Restart:output_type -> koto.SpawnResp
+	33, // 51: koto.Koto.History:output_type -> koto.HistoryResp
+	34, // 52: koto.Koto.Config:output_type -> koto.ConfigResp
+	35, // 53: koto.Koto.Metrics:output_type -> koto.MetricsResp
+	30, // 54: koto.Koto.Clear:output_type -> koto.BaseResp
+	36, // 55: koto.Koto.Skills:output_type -> koto.SkillsResp
+	37, // 56: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
+	38, // 57: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
+	39, // 58: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
+	40, // 59: koto.Koto.SchedList:output_type -> koto.SchedListResp
+	30, // 60: koto.Koto.SchedDel:output_type -> koto.BaseResp
+	30, // 61: koto.Koto.SchedToggle:output_type -> koto.BaseResp
+	30, // 62: koto.Koto.SchedRun:output_type -> koto.BaseResp
+	44, // 63: koto.Koto.AclGet:output_type -> koto.AclResp
+	44, // 64: koto.Koto.AclSetRole:output_type -> koto.AclResp
+	44, // 65: koto.Koto.AclDelRole:output_type -> koto.AclResp
+	2,  // 66: koto.Koto.RunScript:output_type -> koto.ScriptEvent
+	6,  // 67: koto.Koto.AttachShell:output_type -> koto.ShellFrame
+	0,  // 68: koto.Koto.SubscribeGroup:output_type -> koto.Event
+	7,  // 69: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
+	18, // 70: koto.Koto.WatchState:output_type -> koto.StateFrame
+	44, // [44:71] is the sub-list for method output_type
+	17, // [17:44] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_koto_proto_init() }
@@ -2944,7 +3287,13 @@ func file_koto_proto_init() {
 	if File_koto_proto != nil {
 		return
 	}
-	file_koto_proto_msgTypes[17].OneofWrappers = []any{
+	file_koto_proto_msgTypes[3].OneofWrappers = []any{
+		(*ShellInput_Open)(nil),
+		(*ShellInput_Data)(nil),
+		(*ShellInput_Resize)(nil),
+		(*ShellInput_Close)(nil),
+	}
+	file_koto_proto_msgTypes[21].OneofWrappers = []any{
 		(*ConfigReq_SkillsClear)(nil),
 		(*ConfigReq_SkillsSet)(nil),
 	}
@@ -2954,7 +3303,7 @@ func file_koto_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_koto_proto_rawDesc), len(file_koto_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   43,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

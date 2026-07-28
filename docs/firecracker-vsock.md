@@ -323,7 +323,7 @@ always wins over a legacy `internet` key.
   a real NIC and full internet regardless; `network=none` is not enforced
   there (would need `--internal` networking).
 
-## VM size profile (`size`: `small` | `medium` | `large`)
+## VM size profile (`size`: `small` | `medium` | `large` | `xlarge`)
 
 Per-group config key selecting the machine shape — vCPU, RAM, and workspace
 disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
@@ -333,6 +333,7 @@ disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
 | small  | 2    | 1024 MiB | 8 GiB (default; absent `size` ⇒ small) |
 | medium | 2    | 2048 MiB | 12 GiB        |
 | large  | 4    | 4096 MiB | 16 GiB        |
+| xlarge | 8    | 8192 MiB | 24 GiB        |
 
 - Set at spawn (`/new <g> [provider] [model] size=large`) or on an existing
   group (`/config size=large`), then **applies on `/restart`** — `fcResolveSize`

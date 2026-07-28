@@ -32,6 +32,7 @@ package main
 // error, 2 = usage.
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -40,12 +41,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"koto-protocol/pb"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -71,7 +75,7 @@ conversation
 config
   config <group>                           print effective config (no flags = read)
   config <group> [-model M] [-provider P] [-network none|wan|lan|full]
-         [-size small|medium|large] [-root yes|no] [-effort E] [-ports P]
+         [-size small|medium|large|xlarge] [-root yes|no] [-effort E] [-ports P]
          [-skills a,b,c | -skills-clear]    set keys ("" clears a key)
 
 skills
@@ -85,6 +89,14 @@ streams
   logs                                     daemon's own log stream
   watch                                    group-state snapshots on change
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
+
+shared shell
+  shell <group> [session]                  attach an interactive terminal to
+                                           the group's microVM (default
+                                           session "koto-shell" — the same
+                                           one the group's own agent can join
+                                           via its Bash tool); ctrl-] detaches
+                                           without ending the session
 
 admin role only
   runscript <group> <script...>            run a POSIX script in the group's
@@ -417,6 +429,16 @@ func ctlCliMain(args []string) {
 			}
 		}
 
+	case "shell":
+		if len(rest) < 1 || len(rest) > 2 {
+			ctlFatal(2, "usage: koto ctl shell <group> [session]")
+		}
+		session := ""
+		if len(rest) == 2 {
+			session = rest[1]
+		}
+		ctlShell(rest[0], session)
+
 	case "acl":
 		ctlAcl(rest)
 
@@ -513,6 +535,123 @@ func ctlStreamJSON(recv func() (proto.Message, error)) {
 	}
 }
 
+// ctlShell drives the AttachShell bidi RPC as an interactive terminal — the
+// fastest way to exercise the shared-shell feature without the TUI. Puts
+// stdin into raw mode (cfmakeraw-equivalent via direct termios ioctls —
+// golang.org/x/sys/unix is already this module's dependency, no need for a
+// separate terminal library) so keystrokes reach the guest pty unmodified,
+// including control characters (ctrl-C etc. go to the remote shell, not to
+// this process — ISIG is disabled). ctrl-] (0x1d) is the local detach key,
+// mirroring telnet's escape convention, since raw mode swallows the usual
+// ctrl-C/ctrl-D interrupt path.
+func ctlShell(group, session string) {
+	fd := int(os.Stdin.Fd())
+	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		ctlFatal(1, "shell: stdin is not a terminal: %v", err)
+	}
+	raw := *old
+	raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
+	raw.Oflag &^= unix.OPOST
+	raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
+	raw.Cflag &^= unix.CSIZE | unix.PARENB
+	raw.Cflag |= unix.CS8
+	raw.Cc[unix.VMIN] = 1
+	raw.Cc[unix.VTIME] = 0
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &raw); err != nil {
+		ctlFatal(1, "shell: enter raw mode: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_ = unix.IoctlSetTermios(fd, unix.TCSETS, old)
+		}
+	}
+	defer restore()
+	// ctlFatal calls os.Exit directly, which skips defers — every fatal path
+	// below must restore the terminal itself first.
+	fail := func(format string, a ...any) {
+		restore()
+		ctlFatal(1, format, a...)
+	}
+
+	cols, rows := ctlWinsize()
+	cl := ctlClient()
+	stream, err := cl.AttachShell(context.Background())
+	if err != nil {
+		fail("shell: %v", err)
+	}
+	if err := stream.Send(&pb.ShellInput{
+		Group: group,
+		Input: &pb.ShellInput_Open{Open: &pb.ShellOpen{Session: session, Cols: uint32(cols), Rows: uint32(rows)}},
+	}); err != nil {
+		fail("shell: open: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "[attached to %s — ctrl-] detaches]\r\n", group)
+
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	go func() {
+		for range winch {
+			c, r := ctlWinsize()
+			_ = stream.Send(&pb.ShellInput{
+				Group: group,
+				Input: &pb.ShellInput_Resize{Resize: &pb.ShellResize{Cols: uint32(c), Rows: uint32(r)}},
+			})
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := os.Stdin.Read(buf)
+			if n > 0 {
+				if bytes.IndexByte(buf[:n], 0x1d) >= 0 {
+					restore()
+					fmt.Fprintf(os.Stderr, "\r\n[detached — session left running]\r\n")
+					os.Exit(0)
+				}
+				chunk := append([]byte(nil), buf[:n]...)
+				if serr := stream.Send(&pb.ShellInput{Group: group, Input: &pb.ShellInput_Data{Data: chunk}}); serr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		frame, rerr := stream.Recv()
+		if rerr == io.EOF {
+			return
+		}
+		if rerr != nil {
+			fail("shell: %v", rerr)
+		}
+		switch frame.Event {
+		case "data":
+			_, _ = os.Stdout.Write(frame.Chunk)
+		case "end":
+			restore()
+			fmt.Fprintf(os.Stderr, "\r\n[connection ended — session may still be running]\r\n")
+			return
+		case "error":
+			fail("%s", frame.Error)
+		}
+	}
+}
+
+func ctlWinsize() (cols, rows int) {
+	ws, err := unix.IoctlGetWinsize(int(os.Stdin.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		return 80, 24
+	}
+	return int(ws.Col), int(ws.Row)
+}
+
 // ctlConfig reads or sets a group's config.json. With no -flags it's a pure
 // read (the daemon returns the effective config, all keys filled). A flag is
 // only sent when explicitly passed (fs.Visit), so an absent flag leaves its
@@ -534,7 +673,7 @@ func ctlConfig(args []string) {
 	ports := fs.String("ports", "", "published ports (comma list)")
 	provider := fs.String("provider", "", "claudesdk|venice")
 	network := fs.String("network", "", "none|wan|lan|full")
-	size := fs.String("size", "", "small|medium|large")
+	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")
 	skills := fs.String("skills", "", "enabled skills (comma list)")
 	skillsClear := fs.Bool("skills-clear", false, "clear the enabled-skills list")

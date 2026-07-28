@@ -59,6 +59,27 @@ service Koto {
   // No exit code is carried — append `; echo rc=$?` if you need it.
   rpc RunScript (RunScriptReq) returns (stream ScriptEvent);
 
+  // AttachShell is the first bidi-streaming RPC in this file: the client
+  // sends a stream of ShellInput (one `open`, then any number of `data` /
+  // `resize` messages as the human types/resizes their terminal) and
+  // receives a stream of ShellFrame (raw PTY output). It attaches to a
+  // persistent tmux session in the group's guest VM (default "koto-shell") —
+  // tmux itself, not this RPC, owns multi-attach mirroring and survival
+  // across client disconnects (see daemon/fc.go fcShellDial, fcguest/main.go
+  // handleShellAttach). An ordinary per-role grantable verb (attach_shell),
+  // NOT hardcoded admin-only like run_script — see daemon/acl.go: unlike
+  // run_script this is meant to be agent-cooperative, not an operator bypass.
+  //
+  // `group` is repeated on every ShellInput variant, not just `open`. This
+  // isn't redundancy for its own sake: daemon/auth.go's aclStream.RecvMsg
+  // re-authorizes EVERY client-sent message against its own decoded target,
+  // so a `data`/`resize` message without `group` would silently downgrade to
+  // verb-only authorization instead of verb+target for the rest of the
+  // stream. The daemon captures `group` from the `open` message and treats
+  // it as fixed for the life of the call — a later message naming a
+  // different (even if independently-authorized) group is a protocol error.
+  rpc AttachShell (stream ShellInput) returns (stream ShellFrame);
+
   // ---- server-streaming (the old connection-ownership-transfer cases) ----
   // Stream-open replaces the old {ok,subscribed} ack frame. A bad group or
   // failed auth surfaces as a non-OK gRPC status at open time.
@@ -104,6 +125,59 @@ message ScriptEvent {
   string event = 1; // data | end | error
   bytes  chunk = 2; // data: raw combined stdout+stderr bytes, in stream order
   string error = 3; // error: what failed (spawn, VM dial, …)
+}
+
+// ---- shared shell (AttachShell) --------------------------------------------
+//
+// Wire framing on the underlying guest vsock connection (daemon/fc.go
+// fcShellDial, fcguest/main.go handleShellAttach) is the same
+// [type byte][uint32 BE len][payload] shape run_script uses (fc.go
+// fcReadScriptFrame / fcguest writeScriptFrame), extended with two new
+// host->guest frame types ('I' input, 'R' resize) alongside the existing
+// guest->host 'D'/'E'/'X'. This proto only carries the gRPC-facing shape;
+// the vsock frame types are an internal daemon<->guest wire detail.
+
+// One client->server message. `group` is repeated on every variant (see the
+// AttachShell rpc comment above) so daemon/acl.go's targetOf() can authorize
+// every message, not just the first. Exactly one `open` must be sent, first,
+// before any `data`/`resize` — a `data`/`resize` before `open` is a protocol
+// error and aborts the stream. `close` is a clean client-requested end,
+// distinct from just cancelling the stream (the common path); it exists for
+// parity with ShellFrame's event vocabulary, not because callers must use it.
+message ShellInput {
+  string group = 1;
+  oneof input {
+    ShellOpen   open   = 2;
+    bytes       data   = 3; // raw bytes to write to the pty (keystrokes, pastes)
+    ShellResize resize = 4;
+    bool        close  = 5; // client-requested clean end
+  }
+}
+
+// First message of a stream. `session` names the tmux session to
+// create-or-attach (tmux -A semantics); empty defaults to "koto-shell", the
+// convention documented in prompts/global.md so the group's own agent can
+// find the same session via its Bash tool. cols/rows seed the pty's initial
+// TIOCSWINSZ before tmux starts.
+message ShellOpen {
+  string session = 1;
+  uint32 cols    = 2;
+  uint32 rows    = 3;
+}
+
+message ShellResize { uint32 cols = 1; uint32 rows = 2; }
+
+// One server->client message. Mirrors ScriptEvent's event vocabulary
+// (data/end/error) on purpose, though `end` means something different here:
+// for RunScript it means "the script exited"; for AttachShell it means "the
+// guest-side pty/tmux-client plumbing for THIS connection tore down" (e.g.
+// the VM restarted) — the tmux SESSION itself may still be alive and
+// reattachable on the next AttachShell call, since detaching a client never
+// kills a tmux session.
+message ShellFrame {
+  string event = 1; // data | end | error
+  bytes  chunk = 2; // data: raw PTY output bytes, in stream order
+  string error = 3; // error: what failed (pty alloc, tmux spawn, vsock dial)
 }
 
 message LogEvent {
@@ -210,7 +284,7 @@ message ConfigReq {
   optional string ports    = 5;
   optional string provider = 7;
   optional string internet = 9;   // DEPRECATED — legacy none|full; daemon maps full→network=wan
-  optional string size     = 10;  // small|medium|large — applies on /restart
+  optional string size     = 10;  // small|medium|large|xlarge — applies on /restart
   optional string root     = 11;  // yes|no — passwordless sudo in guest; applies on /restart
   optional string network  = 12;  // none|wan|lan|full — egress profile; applies on /restart
   oneof skills_action {

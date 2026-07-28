@@ -273,11 +273,21 @@ func reaper() {
 // startTracked launches a command and returns (pid, exit-status channel).
 // The child gets its own process group so timeouts/cancellation can kill the
 // whole tree, mirroring entrypoint.sh's `timeout -s KILL` group-kill.
+//
+// Skipped when the caller already asked for Setsid: setsid() already makes
+// the child its own process group leader (pgid == pid) as a side effect, and
+// POSIX forbids a session leader from changing its own process group —
+// forcing Setpgid too makes the child's fork/exec fail outright with EPERM
+// (found the hard way via handleShellAttach, which needs Setsid to detach
+// the tmux client from fc-agent's own session). killGroup(pid, ...) still
+// works identically either way, since the pgid already equals pid.
 func startTracked(cmd *exec.Cmd) (int, chan unix.WaitStatus, error) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.Setpgid = true
+	if !cmd.SysProcAttr.Setsid {
+		cmd.SysProcAttr.Setpgid = true
+	}
 	ch := make(chan unix.WaitStatus, 1)
 	trackMu.Lock()
 	if err := cmd.Start(); err != nil {
@@ -500,6 +510,9 @@ type agentReq struct {
 	Env           map[string]string `json:"env"`
 	Net           string            `json:"net"`  // "l3" → bring up the TAP (internet=full)
 	Root          bool              `json:"root"` // true → passwordless sudo for node (config root=yes)
+	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell)
+	Cols          uint32            `json:"cols"`     // shell_attach: initial pty width
+	Rows          uint32            `json:"rows"`     // shell_attach: initial pty height
 }
 
 func reply(c *vconn, v any) {
@@ -535,6 +548,15 @@ func agentServer() {
 			handleExecStream(c, &req)
 		case "run_script":
 			handleRunScript(c, &req)
+		case "shell_attach":
+			// Unlike every other op, the host keeps writing to this
+			// connection after the request line (stdin/resize frames for as
+			// long as the session stays attached) — so reads must continue
+			// on the SAME bufio.Reader `r` used to read the request line,
+			// not a fresh read on `c`. `r` may already have buffered bytes
+			// past the request line's '\n' (bufio reads ahead in chunks),
+			// and reading `c` directly here would silently drop them.
+			handleShellAttach(c, r, &req)
 		case "shutdown":
 			reply(c, map[string]any{"ok": true})
 			c.Close()
@@ -881,6 +903,187 @@ func writeScriptFrame(c *vconn, typ byte, payload []byte) error {
 		return err
 	}
 	return nil
+}
+
+// ---- shell_attach: persistent pty attached to a tmux session -------------------
+//
+// Backs the AttachShell gRPC RPC (protocol/koto.proto): a human (and, via its
+// own Bash tool, the group's agent) share one real terminal. Framing on this
+// connection is bidirectional, unlike every other agent-RPC op:
+//
+//	guest -> host  (pty output / teardown / spawn failure — same meaning as
+//	                run_script's frames)
+//	  'D' data   <uint32 len> <bytes>   one chunk of raw pty output
+//	  'E' end    <uint32 0>             this connection's pty/tmux-client
+//	                                    plumbing tore down (the tmux SESSION
+//	                                    may still be alive and reattachable —
+//	                                    see below)
+//	  'X' error  <uint32 len> <bytes>   couldn't allocate a pty / start tmux
+//
+//	host -> guest  (new for this op — no prior op ever wrote payload data
+//	                into a connection after the request line)
+//	  'I' input  <uint32 len> <bytes>   raw bytes to write to the pty master
+//	                                    (keystrokes, pastes)
+//	  'R' resize <uint32 4>   <cols u16 BE><rows u16 BE>   TIOCSWINSZ
+//
+// tmux (`new-session -A -s <session>`, create-or-attach) owns session
+// persistence and multi-client mirroring — fc-agent keeps no session
+// registry of its own. This is deliberate: killing this connection's local
+// "tmux attach" client process must NEVER kill the tmux SERVER (the session
+// and everything running in it). It's safe because startTracked always sets
+// Setpgid, so this client starts as its own process-group leader, and
+// tmux's first client to a not-yet-running server double-forks a detached
+// server process (its own session id) *before* attaching — that detached
+// server is never a member of this client's pgid, so a
+// killGroup(pid, SIGHUP) here can only ever reach the local client. The
+// orphaned server reparents to fc-agent (PID 1) and is reaped by the
+// existing catch-all reaper() (untracked pids are silently reaped) whenever
+// it eventually exits.
+func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
+	session := req.Session
+	if session == "" {
+		session = "koto-shell"
+	}
+
+	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		_ = writeShellFrame(c, 'X', []byte(err.Error()))
+		return
+	}
+	if err := unix.IoctlSetPointerInt(int(ptmx.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		_ = writeShellFrame(c, 'X', []byte("unlock pty: "+err.Error()))
+		ptmx.Close()
+		return
+	}
+	ptn, err := unix.IoctlGetInt(int(ptmx.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		_ = writeShellFrame(c, 'X', []byte("pty number: "+err.Error()))
+		ptmx.Close()
+		return
+	}
+	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", ptn), os.O_RDWR, 0)
+	if err != nil {
+		_ = writeShellFrame(c, 'X', []byte("open slave: "+err.Error()))
+		ptmx.Close()
+		return
+	}
+	if req.Cols > 0 && req.Rows > 0 {
+		_ = unix.IoctlSetWinsize(int(ptmx.Fd()), unix.TIOCSWINSZ,
+			&unix.Winsize{Row: uint16(req.Rows), Col: uint16(req.Cols)})
+	}
+
+	cmd := exec.Command("tmux", "new-session", "-A", "-s", session)
+	cmd.Dir = wsDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
+		Setsid:     true,
+		// Setctty IS needed, despite the tmux-manages-its-own-ptys reasoning
+		// this comment used to make: without it, this pty never becomes a
+		// session's controlling terminal, so it has no foreground process
+		// group — and TIOCSWINSZ only delivers SIGWINCH to a foreground
+		// process group. Verified: without Setctty, sending a resize updated
+		// the kernel's winsize struct fine, but tmux never re-queried and
+		// stayed at its original size (confirmed via `tmux list-clients`
+		// still reporting the old geometry seconds after a resize).
+		//
+		// The EPERM this was originally pulled to avoid was a false lead:
+		// it was actually startTracked's unconditional Setpgid conflicting
+		// with Setsid (POSIX forbids a session leader changing its own
+		// process group) — fixed there instead (see startTracked's doc
+		// comment). With that fixed, TIOCSCTTY's forced-steal ioctl (arg=1,
+		// which Go's runtime issues unconditionally) only needs CAP_SYS_ADMIN
+		// when the target pty already belongs to another session — never
+		// true here, since this is a freshly allocated /dev/ptmx pty every
+		// time — so it succeeds even after Credential drops to uid 1000.
+		Setctty: true,
+	}
+	cmd.Env = append(os.Environ(), "HOME="+wsDir, "USER=node", "LOGNAME=node", "TERM=xterm-256color")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	pid, ch, err := startTracked(cmd)
+	slave.Close() // child holds the controlling reference now
+	if err != nil {
+		_ = writeShellFrame(c, 'X', []byte(err.Error()))
+		ptmx.Close()
+		return
+	}
+
+	// host frames -> pty master (stdin bytes / resize). Runs until the host
+	// closes its end (client cancel/detach) or the connection errors, then
+	// detaches (SIGHUP) this client only — never the tmux session, see above.
+	go func() {
+		for {
+			typ, payload, ferr := readShellFrame(r)
+			if ferr != nil {
+				break
+			}
+			switch typ {
+			case 'I':
+				_, _ = ptmx.Write(payload)
+			case 'R':
+				if len(payload) == 4 {
+					cols := binary.BigEndian.Uint16(payload[0:2])
+					rows := binary.BigEndian.Uint16(payload[2:4])
+					_ = unix.IoctlSetWinsize(int(ptmx.Fd()), unix.TIOCSWINSZ,
+						&unix.Winsize{Row: rows, Col: cols})
+				}
+			}
+		}
+		killGroup(pid, syscall.SIGHUP)
+		ptmx.Close()
+	}()
+
+	// pty master -> host frames (raw terminal output).
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := ptmx.Read(buf)
+		if n > 0 {
+			if werr := writeShellFrame(c, 'D', buf[:n]); werr != nil {
+				break // daemon gone; the frame-in goroutine will reap on its own read error
+			}
+		}
+		if rerr != nil {
+			break // client detached or tmux session itself ended (EIO once no one holds the slave)
+		}
+	}
+	<-ch                             // reap this attach client
+	_ = writeShellFrame(c, 'E', nil) // best-effort; the tmux session itself lives on
+}
+
+// writeShellFrame / readShellFrame share writeScriptFrame's exact
+// [type][uint32 BE len][payload] shape, but unlike run_script's helpers
+// (guest->host only) this connection is framed in BOTH directions, so
+// readShellFrame is genuinely new — no prior op ever needed to read
+// anything but the initial request line off the host. readShellFrame takes
+// the SAME *bufio.Reader agentServer used for that request line (see the
+// case "shell_attach" comment in agentServer) so no already-buffered bytes
+// are lost.
+func writeShellFrame(w io.Writer, typ byte, payload []byte) error {
+	var hdr [5]byte
+	hdr[0] = typ
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		_, err := w.Write(payload)
+		return err
+	}
+	return nil
+}
+
+func readShellFrame(r io.Reader) (typ byte, payload []byte, err error) {
+	var hdr [5]byte
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[1:])
+	if n > 0 {
+		payload = make([]byte, n)
+		if _, err = io.ReadFull(r, payload); err != nil {
+			return 0, nil, err
+		}
+	}
+	return hdr[0], payload, nil
 }
 
 // ---- shutdown -------------------------------------------------------------------

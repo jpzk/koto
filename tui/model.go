@@ -46,6 +46,13 @@ const (
 	// active the chat middle pane is hidden and key handling routes to
 	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
 	focusLog
+	// focusShell is the shared-shell view, opened with /shell or ctrl+]
+	// (see shell_view.go). Unlike focusLog it is NOT read-only: while
+	// active, almost every keystroke round-trips as raw bytes to the
+	// group's guest pty via handleShellKey; ctrl+] is the one reserved
+	// local escape, toggling back out (detach without ending the remote
+	// session).
+	focusShell
 )
 
 type logLine struct {
@@ -313,6 +320,13 @@ type Model struct {
 	// closing it again silently collapsed the tree pane.
 	preLogFocus focusZone
 
+	// Shared shell (focusShell / "/shell"). shell is nil until the first
+	// /shell attach; it survives a focus switch away from focusShell (see
+	// exitShell in shell_view.go) so returning to the pane doesn't lose
+	// terminal state or force a redial. preShellFocus mirrors preLogFocus.
+	shell         *shellSession
+	preShellFocus focusZone
+
 	// promptHistory: per-group ring of the last N user prompts, oldest
 	// first. Populated from three independent sources — local sends
 	// (dispatchInput), live subscribe `prompt` events, and the per-group
@@ -361,7 +375,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -732,6 +746,12 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if m.logVPReady {
 			m.resizeLogViewport()
 			m.refreshLogViewport()
+		}
+		if m.shell != nil && m.focus == focusShell {
+			w, h := m.shellPaneSize()
+			if w != m.shell.cols || h != m.shell.rows {
+				m.shell.resize(w, h)
+			}
 		}
 		return m, nil
 
@@ -1316,6 +1336,21 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("/sched %s %s ok", msg.op, msg.id)})
 		return m, nil
 
+	case shellFrameMsg:
+		// Stale frame from a superseded session (detach+reattach in quick
+		// succession, or a group switch that started a new one) — drop it.
+		if m.shell == nil || msg.id != m.shell.id {
+			return m, nil
+		}
+		if len(msg.data) > 0 {
+			_, _ = m.shell.term.Write(msg.data)
+		}
+		if msg.end || msg.errText != "" {
+			m.shell.ended = true
+			m.shell.errText = msg.errText
+		}
+		return m, nil
+
 	case pluginLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
 		if msg.group == m.cur {
@@ -1369,9 +1404,21 @@ func (m *Model) addLine(l logLine) {
 // logViewportSize returns (width, height) for the log viewport, accounting
 // for tree pane visibility and the 1-col scrollbar + 1-col left padding.
 func (m Model) logViewportSize() (int, int) {
+	if m.focus == focusShell {
+		// Split-shell mode (shell_view.go): the viewport becomes the
+		// read-only chat column to the left of the shell pane, sized to
+		// match renderShellView's logArea exactly (-2: 1 padding-left, 1
+		// spare) and to shellPaneSize's height (no separate input row while
+		// focus is on the shell). chatW == 0 means the terminal is too
+		// narrow to split — the viewport isn't drawn at all in that case,
+		// so its size here is moot.
+		if chatW := m.shellChatW(); chatW > 0 {
+			return max(10, chatW-2), max(1, m.height-4)
+		}
+	}
 	treeW := m.treePaneW()
 	w := max(10, m.width-treeW-2) // -1 padding-left, -1 scrollbar
-	h := max(1, m.height-5)       // status + input(3) + hint
+	h := max(1, m.height-6)       // status + input(3) + hint + metrics
 	return w, h
 }
 
@@ -1652,6 +1699,11 @@ func formatToolOutFullElapsed(body string, elapsedMs int64) string {
 }
 
 func (m Model) isAnimating() bool {
+	// The shell pane's blinking cursor needs the tick chain even when the
+	// guest is silent (shell_view.go overlayShellCursor).
+	if m.focus == focusShell && m.shell != nil && !m.shell.ended {
+		return true
+	}
 	if _, ok := m.streamBuf[m.cur]; ok {
 		return true
 	}
@@ -1816,6 +1868,20 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
+	if m.focus == focusShell {
+		// Shell focus owns EVERY key before any chrome binding below gets a
+		// look — ctrl+c must reach the guest as SIGINT (job control), ctrl+r
+		// must reach bash history search, ctrl+d must be EOF, ctrl+l a
+		// redraw. Found the hard way: with this dispatch below the chrome
+		// bindings, ctrl+c in the shell hit the quit branch and killed the
+		// whole TUI. ctrl+] is the single reserved local escape (detach);
+		// exiting the TUI from the shell is ctrl+] then ctrl+c.
+		if s == "ctrl+]" {
+			m.exitShell()
+			return m, nil
+		}
+		return m.handleShellKey(msg)
+	}
 	if m.picker.open {
 		// Ctrl+C while the picker is open dismisses it (matches fzf). Any
 		// other harness-level binding (ctrl+t / ctrl+d / ctrl+l) is also
@@ -1890,6 +1956,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.enterLog()
 		}
 		return m, nil
+	}
+	if s == "ctrl+]" {
+		// Attach the shared-shell pane, mirroring ctrl+l's shape for the log
+		// view. Reattaches to whatever session was last open for this group
+		// (enterShell("") -> daemon default "koto-shell"). The detach half of
+		// the toggle lives at the top of this function: once focus is on the
+		// shell, every key except ctrl+] is forwarded to the guest pty raw.
+		m.enterShell("")
+		// Kick the tick chain for the cursor blink; enterShell alone can't
+		// return a cmd (isAnimating is now true, but nothing restarts the
+		// chain until the next unrelated event otherwise).
+		return m, m.ensureTicking()
 	}
 	if m.focus == focusLog {
 		// Read-only mode while the log view is open. No textinput routing
@@ -1982,6 +2060,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			// Esc always exits tree mode regardless of input contents.
 			m.focus = focusInput
+			m.input.Focus() // may be blurred if tree was restored by exitLog/exitShell
 			m.resizeViewport()
 			m.refreshLog()
 			return m, nil
@@ -1994,6 +2073,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
 				m.focus = focusInput
+				m.input.Focus() // see the esc case above
 				m.resizeViewport()
 				m.refreshLog()
 				return m, nil
@@ -2256,7 +2336,7 @@ func (m Model) treeOrder() []string {
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
 	if strings.HasPrefix(v, "/new ") {
-		usage := "usage: /new <group> [provider] [model] [size=small|medium|large]"
+		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"
 		extra := map[string]any{}
 		// Pull the optional size=<preset> token out first; the rest stay
 		// positional (group / provider / model).
@@ -2264,8 +2344,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		for _, tok := range strings.Fields(v[5:]) {
 			if s, ok := strings.CutPrefix(tok, "size="); ok {
 				s = strings.ToLower(strings.TrimSpace(s))
-				if s != "small" && s != "medium" && s != "large" {
-					m.addLine(logLine{kind: "err", text: "size must be small, medium, or large"})
+				if s != "small" && s != "medium" && s != "large" && s != "xlarge" {
+					m.addLine(logLine{kind: "err", text: "size must be small, medium, large, or xlarge"})
 					return nil
 				}
 				extra["size"] = s
@@ -2447,6 +2527,12 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		startRunScript(m.cur, name, script)
 		return nil
+	}
+	if v == "/shell" || strings.HasPrefix(v, "/shell ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(v, "/shell"))
+		m.enterShell(arg) // arg == "" -> daemon default session "koto-shell"
+		// Same as the ctrl+] path: start the tick chain for the cursor blink.
+		return m.ensureTicking()
 	}
 	if v == "/prompt" || strings.HasPrefix(v, "/prompt ") {
 		arg := strings.TrimSpace(strings.TrimPrefix(v, "/prompt"))

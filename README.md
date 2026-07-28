@@ -159,7 +159,7 @@ claude-code layers are the accepted moving parts.
 |-----|--------|---------|
 | `provider` | `venice` (default) \| `claudesdk` | next message |
 | `network` | `none` (default) \| `wan` \| `lan` \| `full` | `/restart` |
-| `size` | `small` (default) \| `medium` \| `large` | `/restart` |
+| `size` | `small` (default) \| `medium` \| `large` \| `xlarge` | `/restart` |
 | `root` | `no` (default) \| `yes` | `/restart` |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `koto-net` | `/restart` |
 
