@@ -227,6 +227,25 @@ func pidIsFirecracker(pid int) bool {
 	return err == nil && strings.TrimSpace(string(b)) == "firecracker"
 }
 
+// fcClearStalePids removes every leftover pidfile at daemon start. FC
+// processes are the daemon's children, so none survived the previous daemon
+// run — but their pidfiles did, and after a restart resets the container's
+// pid space, a stale pidfile's pid can land on another group's fresh VMM.
+// That defeats pidIsFirecracker (same comm) and makes fcRunning report a
+// dead VM as up forever: the lazy boot never fires and the jobs refresher
+// hammers the dead vsock at 1 Hz. Observed live: hhweather.pid from the
+// previous run pointing at BRAVO's new VMM. If VMs ever outlive the daemon
+// (detached spawn), this sweep must learn to skip live ones.
+func fcClearStalePids() {
+	stale, _ := filepath.Glob(filepath.Join(fcRunDir(), "*.pid"))
+	for _, p := range stale {
+		_ = os.Remove(p)
+	}
+	if len(stale) > 0 {
+		emitLogf("fc", "info", "cleared %d stale pidfile(s) from previous daemon run", len(stale))
+	}
+}
+
 // ---- spawn -----------------------------------------------------------------
 
 // fcPreflight returns a descriptive error when the host isn't ready to boot

@@ -116,6 +116,10 @@ func daemonMain() {
 	initPaths()
 	_ = os.MkdirAll(ROOT, 0o755)
 	_ = os.MkdirAll(SOCK_DIR, 0o755)
+	// Before anything can consult fcRunning: pidfiles from the previous
+	// daemon run are stale by construction (VMs die with the daemon) and a
+	// recycled pid would read as a live VM. See fcClearStalePids.
+	fcClearStalePids()
 	allocPort("main")
 
 	// Proxy runs in-process as goroutines (one per listener). Brings up

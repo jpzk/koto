@@ -414,3 +414,32 @@ func TestEnsureProviderConfigSeedsProvider(t *testing.T) {
 		t.Fatalf("explicit provider was clobbered: %s", p)
 	}
 }
+
+// TestFcClearStalePids: pidfiles left by a previous daemon run are swept at
+// start — a recycled pid in one can belong to another group's fresh VMM
+// (defeating pidIsFirecracker), so fcRunning must never see them. The sweep
+// removes only *.pid; sibling run/fc files (console logs, sock dirs) stay.
+func TestFcClearStalePids(t *testing.T) {
+	fcHarness(t)
+	for _, g := range []string{"a", "b"} {
+		if err := os.WriteFile(fcPidPath(g), []byte("123\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := filepath.Join(fcRunDir(), "a.console.log")
+	os.WriteFile(keep, []byte("x"), 0o644)
+
+	fcClearStalePids()
+
+	for _, g := range []string{"a", "b"} {
+		if _, err := os.Stat(fcPidPath(g)); !os.IsNotExist(err) {
+			t.Fatalf("stale pidfile %s survived the sweep", fcPidPath(g))
+		}
+		if fcRunning(g) {
+			t.Fatalf("fcRunning(%s) true after sweep", g)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("non-pid file was swept: %v", err)
+	}
+}
