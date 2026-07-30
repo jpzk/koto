@@ -725,6 +725,10 @@ func entrypointEnviron(env map[string]string) []string {
 		"SHELL=/bin/bash",
 		"ANTHROPIC_API_KEY=proxied",
 		"TERM=xterm-256color",
+		// UTF-8 locale, or every tmux server spawned from this env (the agent
+		// touching the shared shell first) treats clients as ASCII-only and
+		// redraws non-ASCII cells as "_" (fc-agent boots with no locale at all).
+		"LANG=C.UTF-8",
 		"USER=node",
 		"LOGNAME=node",
 		"XDG_RUNTIME_DIR=/run/user/1000", // rootless podman runtime dir
@@ -980,7 +984,21 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 			&unix.Winsize{Row: uint16(req.Rows), Col: uint16(req.Cols)})
 	}
 
-	cmd := exec.Command("tmux", "new-session", "-A", "-s", session)
+	// The trailing `; set-option -g mouse on` runs after create-or-attach and
+	// makes tmux request mouse reporting from its client terminal (DECSET
+	// 1000/1002/1006), which the TUI's shell pane answers by forwarding wheel/
+	// click events (tui/shell_view.go forwardShellMouse) — that's what makes
+	// wheel-scroll enter copy-mode and move the scrollback. Set here rather
+	// than in a baked /etc/tmux.conf so the behavior lives next to the session
+	// spawn; -g + idempotent, so re-running it on every attach is harmless.
+	// -u declares this client's terminal UTF-8-capable. Without it (and with
+	// no locale in fc-agent's env) tmux redrew every non-ASCII cell as "_" —
+	// the pane content was stored correctly (tmux is UTF-8 internally since
+	// 2.2, which is why capture-pane always looked right), but the client
+	// redraw leg checks LC_ALL/LC_CTYPE/LANG and fell back to ASCII. LANG
+	// below covers the same for the server env this client may spawn (pane
+	// shells inherit it).
+	cmd := exec.Command("tmux", "-u", "new-session", "-A", "-s", session, ";", "set-option", "-g", "mouse", "on")
 	cmd.Dir = wsDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
@@ -1005,7 +1023,7 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 		// time — so it succeeds even after Credential drops to uid 1000.
 		Setctty: true,
 	}
-	cmd.Env = append(os.Environ(), "HOME="+wsDir, "USER=node", "LOGNAME=node", "TERM=xterm-256color")
+	cmd.Env = append(os.Environ(), "HOME="+wsDir, "USER=node", "LOGNAME=node", "TERM=xterm-256color", "LANG=C.UTF-8")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	pid, ch, err := startTracked(cmd)
 	slave.Close() // child holds the controlling reference now
