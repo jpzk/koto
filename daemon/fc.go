@@ -417,6 +417,14 @@ func fcWorkspaceDiskBytes(g string) int64 {
 // Mirrors the podman path's contract: on any error everything this call
 // created is torn down (the caller rolls back the proxy listener).
 func fcSpawn(g string, proxyPort int, pubPorts []int) error {
+	if fcRunning(g) {
+		// Backstop behind ensure()'s own check (both run under groupOpMu, so
+		// this can't fire from that path). Booting a second VM onto the same
+		// workspace.img means two rw ext4 mounts of one image — guaranteed
+		// corruption — and the new spawn's socket-dir wipe below would cut
+		// the live VM's control plane. Refuse loudly instead.
+		return fmt.Errorf("group %s already has a live firecracker process", g)
+	}
 	if err := fcPreflight(); err != nil {
 		return err
 	}

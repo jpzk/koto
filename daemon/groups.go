@@ -61,7 +61,44 @@ func allocPort(g string) int {
 
 // ---- sidecar lifecycle ----------------------------------------------------
 
+// groupOpMu serializes VM lifecycle transitions (ensure/stop/restart) per
+// group. Without it, /restart racing an inbound send double-spawned the
+// microVM: restart's fcStop flipped fcRunning to false, then restart's
+// ensure and the send's ensure both passed the check-then-spawn window and
+// booted two Firecracker processes onto the SAME workspace.img (rw, twice —
+// ext4 corruption) while the second spawn clobbered the first VM's vsock
+// socket dir and jail dir. Observed live on 2026-08-01 (groups BRAVO + 9AZ,
+// two VMs each). Keyed lazily; entries are never removed — a stale mutex per
+// destroyed group name is noise, not a leak that matters.
+var (
+	groupOpMusMu sync.Mutex
+	groupOpMus   = map[string]*sync.Mutex{}
+)
+
+func groupOpMu(g string) *sync.Mutex {
+	groupOpMusMu.Lock()
+	defer groupOpMusMu.Unlock()
+	mu := groupOpMus[g]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		groupOpMus[g] = mu
+	}
+	return mu
+}
+
 func ensure(g string, isMain bool) (int, error) {
+	mu := groupOpMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+	return ensureLocked(g, isMain)
+}
+
+// ensureLocked is ensure's body; callers must hold groupOpMu(g). Split out so
+// restart can run stop+ensure as one atomic transition without a recursive
+// lock. Holding the mutex across fcSpawn (seconds) is deliberate — only
+// same-group operations serialize behind it, and "second caller waits for the
+// boot, then sees fcRunning and returns" is exactly the wanted semantics.
+func ensureLocked(g string, isMain bool) (int, error) {
 	if !validGroupName(g) {
 		// vol(g) == filepath.Join(ROOT, g); an empty g resolves to ROOT
 		// itself (filepath.Join drops the empty element), and a g containing
@@ -200,6 +237,9 @@ func armBootNotice(g string) bool {
 }
 
 func stopGroup(g string) {
+	mu := groupOpMu(g)
+	mu.Lock()
+	defer mu.Unlock()
 	fcStop(g)
 }
 
@@ -450,8 +490,14 @@ func restart(g string) (int, error) {
 		return 0, fmt.Errorf("invalid group name")
 	}
 	emitLogfG("group", g, "info", "restart group=%s", g)
-	stopGroup(g)
-	return ensure(g, g == "main")
+	// One lock across stop+ensure: a send arriving mid-restart blocks until
+	// the new VM is up instead of slipping into the stopped-but-not-yet-
+	// spawned window and booting a second one (see groupOpMu).
+	mu := groupOpMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+	fcStop(g)
+	return ensureLocked(g, g == "main")
 }
 
 func clearCmd(req groupReq) baseResp {
