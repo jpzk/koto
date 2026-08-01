@@ -48,12 +48,14 @@ const (
 	// active the chat middle pane is hidden and key handling routes to
 	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
 	focusLog
-	// focusShell is the shared-shell view, opened with /shell or ctrl+]
+	// focusShell is the shared-shell pane, opened with /shell or ctrl+]
 	// (see shell_view.go). Unlike focusLog it is NOT read-only: while
-	// active, almost every keystroke round-trips as raw bytes to the
+	// focused, almost every keystroke round-trips as raw bytes to the
 	// group's guest pty via handleShellKey; ctrl+] is the one reserved
-	// local escape, toggling back out (detach without ending the remote
-	// session).
+	// local escape, and it CLOSES the pane (same as /shell off) rather than
+	// merely handing focus back. The pane can also sit open but unfocused
+	// (shellOpen, split mode) — a click on the chat column detaches focus
+	// that way, and a click on the grid takes it back.
 	focusShell
 )
 
@@ -136,7 +138,8 @@ func peekFlushCmd(sid, seq int) tea.Cmd {
 // moved to another row is dropped instead of polluting the new peek.
 type jobTailMsg struct {
 	sid     int
-	line    string // one sanitized output line (data frames)
+	line    string // one sanitized output line (data frames — pre-parsed daemons)
+	ev      *Event // one chat-grammar frame (event frames — JobTailReq.parsed)
 	opened  bool   // stream established — even a silent job leaves "fetching…"
 	end     bool   // guest side ended (VM stopped/restarted)
 	errText string
@@ -186,6 +189,10 @@ type daemonRespMsg struct {
 	err     error
 }
 type metricsRespMsg struct {
+	// group the `metric` map was fetched for. Carried so the retention in
+	// mergeMetric can be scoped: a poll for a different group replaces the
+	// held usage outright instead of merging another group's into it.
+	group          string
 	metric, global map[string]any
 	err            error
 }
@@ -296,7 +303,20 @@ type Model struct {
 	reconnecting     bool
 	reconnectAttempt int
 
+	// metric / globalMetric are the *best known* metric maps, not verbatim
+	// the last poll: their "usage" / "ratelimit" sub-maps survive a poll that
+	// carries none (see mergeMetric). The daemon answers `metrics` with the
+	// newest line in metrics.jsonl whatever it is, and the proxy logs a line
+	// per request — including claude-code's /api/hello startup ping and
+	// count_tokens, which have no anthropic-ratelimit-* headers and no usage,
+	// so they land as {"ratelimit":{},"usage":{}}. ~20% of lines are those,
+	// each newest for ~7s (longer than the 5s poll), so without retention the
+	// bottom bar's ctx/cache/5h/7d chips blink out at the start of every turn
+	// — in any group, since global_metric is group-agnostic.
 	metric, globalMetric map[string]any
+	// metricGroup is the group `metric` belongs to, so a group switch drops
+	// the retained usage rather than showing the previous group's.
+	metricGroup string
 
 	plugin *pluginHandle
 
@@ -403,8 +423,18 @@ type Model struct {
 	// /shell attach; it survives a focus switch away from focusShell (see
 	// exitShell in shell_view.go) so returning to the pane doesn't lose
 	// terminal state or force a redial. preShellFocus mirrors preLogFocus.
+	// shellOpen is the pane's open/closed state, independent of focus: while
+	// true (and the terminal is wide enough to split), the pane stays on
+	// screen with the chat column + message bar beside it even when focus is
+	// on the input or the tree. Cleared by /shell off — never by a mere
+	// focus change.
+	// shellChaseSeq stamps the debounced follow-the-selection timers
+	// (chaseShell/retargetShell in shell_view.go); only the latest
+	// shellChaseMsg is honored.
 	shell         *shellSession
 	preShellFocus focusZone
+	shellOpen     bool
+	shellChaseSeq int
 
 	// promptHistory: per-group ring of the last N user prompts, oldest
 	// first. Populated from three independent sources — local sends
@@ -453,6 +483,18 @@ type Model struct {
 	peekErr     string // stream failure, shown in the pane
 	peekFetched bool   // the JobTail stream is established (data may still be empty)
 	peekEnded   bool   // guest side closed the tail (job finished / VM stopped)
+	// Parsed-stream state (JobTailReq.parsed — the normal path against a
+	// current daemon; peekOut only accumulates raw `data` frames from older
+	// ones). peekLines holds finished chat blocks in logLine form; an open
+	// thinking/tool_out block streams into peekOpen until its *_done frame
+	// replaces it with the terminal block. peekFramed flips once the stream
+	// shows real chat framing (ts stamps, tool/thinking/err frames) — the
+	// render cue to use chat blocks instead of the plain wrapped-lines view
+	// (plain shell jobs parse entirely to bare "done" frames and stay raw).
+	peekLines    []logLine
+	peekOpen     []string
+	peekOpenKind string // "" | "thought" | "tool_out"
+	peekFramed   bool
 	// Repaint coalescing (see peekQuietMs). peekPrimed flips on the first
 	// paint of a stream — until then the pane shows a placeholder rather
 	// than a half-arrived backlog. peekFlushSeq invalidates superseded
@@ -531,6 +573,13 @@ func newModel(sock string, ctxWindow int) Model {
 	// the tree-toggle Tab is intercepted earlier in handleKey).
 	ti.ShowSuggestions = true
 	ti.KeyMap.AcceptSuggestion = key.Binding{}
+	// Suggestion cycling is unbound too: up/down are history navigation
+	// (intercepted in handleKey before reaching the input), and bubbles
+	// v1.0.0's previousSuggestion wraps currentSuggestionIndex to -1 when
+	// nothing matches — the next CurrentSuggestion call then panics on
+	// matchedSuggestions[-1], killing the whole TUI (seen live via ctrl+p).
+	ti.KeyMap.NextSuggestion = key.Binding{}
+	ti.KeyMap.PrevSuggestion = key.Binding{}
 
 	st := loadState(sock)
 	cur := "main"
@@ -843,8 +892,33 @@ func metricsCmd(sock, group string) tea.Cmd {
 		}
 		met, _ := resp["metric"].(map[string]any)
 		gmet, _ := resp["global_metric"].(map[string]any)
-		return metricsRespMsg{metric: met, global: gmet}
+		return metricsRespMsg{group: group, metric: met, global: gmet}
 	}
+}
+
+// mergeMetric folds a freshly polled metric map into the held one, retaining
+// the named sub-map ("usage" / "ratelimit") when the new poll carries none —
+// see the metric/globalMetric field comment on Model for why ~20% of
+// metrics.jsonl lines are empty on those keys and why blinking chips are the
+// symptom. next wins whenever it actually has the sub-map; a nil poll leaves
+// the held value untouched.
+func mergeMetric(prev, next map[string]any, key string) map[string]any {
+	if next == nil {
+		return prev
+	}
+	if sub, _ := next[key].(map[string]any); len(sub) > 0 {
+		return next
+	}
+	held, _ := prev[key].(map[string]any)
+	if len(held) == 0 {
+		return next
+	}
+	merged := make(map[string]any, len(next)+1)
+	for k, v := range next {
+		merged[k] = v
+	}
+	merged[key] = held
+	return merged
 }
 
 // prewarmGroupCmd does the full first-visit work for an off-current
@@ -1013,12 +1087,8 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeLogViewport()
 			m.refreshLogViewport()
 		}
-		if m.shell != nil && m.focus == focusShell {
-			w, h := m.shellPaneSize()
-			if w != m.shell.cols || h != m.shell.rows {
-				m.shell.resize(w, h)
-			}
-		}
+		// (the shell pty, when open, was resized by resizeViewport above —
+		// see syncShellSize in shell_view.go)
 		return m, nil
 
 	case spinTickMsg:
@@ -1044,8 +1114,14 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case metricsRespMsg:
 		if msg.err == nil {
-			m.metric = msg.metric
-			m.globalMetric = msg.global
+			// Group-scoped for `metric` (usage is per-group), unscoped for
+			// `global` (the rate-limit window is account-wide).
+			if msg.group == m.metricGroup {
+				m.metric = mergeMetric(m.metric, msg.metric, "usage")
+			} else {
+				m.metric, m.metricGroup = msg.metric, msg.group
+			}
+			m.globalMetric = mergeMetric(m.globalMetric, msg.global, "ratelimit")
 		}
 		return m, nil
 
@@ -1066,6 +1142,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.processJobTransitions(msg.groups)
 		m.groups = msg.groups
+		// The open shell pane may be waiting on this refresh: a chase that
+		// fired while the focused group's VM wasn't (yet) marked Running
+		// dropped the pane rather than boot the VM (retargetShell) — e.g.
+		// right after /new, before the spawned group first appears here.
+		// Re-arm it now that the state is current; no-op when already on
+		// target or the pane is closed.
+		m.chaseShell()
 		// Keep the tree cursor (treeIdx → hovered row) locked to m.cur. up/down
 		// and enterTree() already move them in lockstep; re-deriving it here
 		// catches out-of-band m.cur changes (e.g. /new auto-switching to a
@@ -1333,13 +1416,17 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.opened:
 			m.peekFetched = true
 		default:
-			m.peekOut += msg.line + "\n"
-			if len(m.peekOut) > peekBufCap {
-				cut := m.peekOut[len(m.peekOut)-peekBufCap/2:]
-				if i := strings.IndexByte(cut, '\n'); i >= 0 {
-					cut = cut[i+1:]
+			if msg.ev != nil {
+				m.applyPeekEvent(*msg.ev)
+			} else {
+				m.peekOut += msg.line + "\n"
+				if len(m.peekOut) > peekBufCap {
+					cut := m.peekOut[len(m.peekOut)-peekBufCap/2:]
+					if i := strings.IndexByte(cut, '\n'); i >= 0 {
+						cut = cut[i+1:]
+					}
+					m.peekOut = cut
 				}
-				m.peekOut = cut
 			}
 			m.peekDirty = true
 			// Repaint only once the burst goes quiet, so a replay window
@@ -1697,6 +1784,15 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case shellChaseMsg:
+		// Debounced follow-the-selection (chaseShell, shell_view.go). A stale
+		// seq means the selection moved again after this timer was armed —
+		// a newer timer is in flight, let that one do the redial.
+		if msg.seq == m.shellChaseSeq {
+			m.retargetShell()
+		}
+		return m, nil
+
 	case pluginLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
 		if msg.group == m.cur {
@@ -1733,6 +1829,31 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return nm, cmd
 
 	case tea.MouseMsg:
+		// Shell pane: events over the pty grid go to the guest as terminal
+		// mouse reporting (tmux scrollback via wheel, clicks in htop, …) —
+		// see forwardShellMouse (shell_view.go). Events outside the grid
+		// (the chat column in split mode) fall through to the viewport
+		// below. While the pane is visible but UNFOCUSED only wheel events
+		// are forwarded — an in-grid left click is focus traffic
+		// (handleLeftClick focuses the pane), not input for the guest.
+		// ctrl+s select-mode releases the mouse entirely, so no MouseMsg
+		// arrives here at all in that mode.
+		if m.shell != nil && !m.shell.ended {
+			ev := tea.MouseEvent(msg)
+			if m.focus == focusShell || (m.shellSplitVisible() && ev.IsWheel()) {
+				if m.forwardShellMouse(ev) {
+					return m, nil
+				}
+			}
+		}
+		// Left click → focus the clicked pane / select the clicked tree row
+		// (mouse.go). Suppressed while the picker overlays the middle pane —
+		// its rows don't align with the tree geometry underneath.
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !m.picker.open {
+			if m.handleLeftClick(msg.X, msg.Y) {
+				return m, nil
+			}
+		}
 		// Wheel up/down → forward to viewport. Viewport's Update handles
 		// the wheel buttons internally (MouseWheelEnabled defaults to true).
 		// Update autoFollow so the bottom-stick toggle matches keyboard scroll.
@@ -1761,17 +1882,14 @@ func (m *Model) addLine(l logLine) {
 // logViewportSize returns (width, height) for the log viewport, accounting
 // for tree pane visibility and the 1-col scrollbar + 1-col left padding.
 func (m Model) logViewportSize() (int, int) {
-	if m.focus == focusShell {
-		// Split-shell mode (shell_view.go): the viewport becomes the
-		// read-only chat column to the left of the shell pane, sized to
-		// match renderShellView's logArea exactly (-2: 1 padding-left, 1
-		// spare) and to shellPaneSize's height (no separate input row while
-		// focus is on the shell). chatW == 0 means the terminal is too
-		// narrow to split — the viewport isn't drawn at all in that case,
-		// so its size here is moot.
-		if chatW := m.shellChatW(); chatW > 0 {
-			return max(10, chatW-2), max(1, m.height-3) // height matches shellPaneSize
-		}
+	if m.shellSplitVisible() {
+		// Split-shell mode (shell_view.go): the viewport becomes the chat
+		// column to the left of the shell pane, sized to match
+		// renderShellView's chat block exactly (-2: 1 padding-left, 1
+		// spare). Height is chatRows — the message bar stays visible below
+		// the viewport in split mode regardless of which pane is focused,
+		// so the budget matches the normal chat view's.
+		return max(10, m.shellChatW()-2), m.chatRows()
 	}
 	treeW := m.treePaneW()
 	w := max(10, m.width-treeW-2) // -1 padding-left, -1 scrollbar
@@ -1799,6 +1917,10 @@ func (m *Model) resizeViewport() {
 	w, h := m.logViewportSize()
 	m.vp.Width = w
 	m.vp.Height = h
+	// Layout mode (focus, tree visibility, window size) also decides the
+	// shell pane's geometry — keep the guest pty in step from the same choke
+	// point every layout change already goes through.
+	m.syncShellSize()
 }
 
 // maybePageOlder dispatches an older-page history fetch when the current
@@ -2161,6 +2283,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 				m.refreshSuggestions()
 				m.vp.GotoBottom()
 				m.autoFollow = true
+				m.chaseShell()
 			}
 		}
 		return listCmd(m.sock)
@@ -2290,10 +2413,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// must reach bash history search, ctrl+d must be EOF, ctrl+l a
 		// redraw. Found the hard way: with this dispatch below the chrome
 		// bindings, ctrl+c in the shell hit the quit branch and killed the
-		// whole TUI. ctrl+] is the single reserved local escape (detach);
-		// exiting the TUI from the shell is ctrl+] then ctrl+c.
-		if s == "ctrl+]" {
-			m.exitShell()
+		// whole TUI. Exactly two keys are reserved locally: ctrl+] CLOSES the
+		// pane (closeShell, which hands focus back on the way out — an
+		// open/close toggle, never a focus toggle), and tab rotates focus
+		// onward to the message bar (cycleFocus), leaving the pane open. The
+		// tab reservation is why bash completion doesn't work inside the pane:
+		// tab means "next zone" in every zone, the guest included. Exiting the
+		// TUI from the shell is tab (or ctrl+]) then ctrl+c.
+		switch s {
+		case "ctrl+]":
+			m.closeShell()
+			return m, nil
+		case "tab":
+			m.cycleFocus()
 			return m, nil
 		}
 		return m.handleShellKey(msg)
@@ -2374,12 +2506,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+]" {
-		// Attach the shared-shell pane, mirroring ctrl+l's shape for the log
-		// view. enterShell("") targets the active chat session's own shell
+		// Open/close the shared-shell pane, mirroring ctrl+l's shape for the
+		// log view. It toggles the PANE, not focus: an open-but-unfocused
+		// pane (split mode, typing in the message bar) closes here rather
+		// than stealing focus — use a click on the grid for that. The close
+		// half for a focused pty lives at the top of this function.
+		if m.shellOpen {
+			m.closeShell()
+			return m, nil
+		}
+		// enterShell("") targets the active chat session's own shell
 		// (shellSessionName — koto-shell[-<session>]), redialing if the pane
-		// was last attached to a different one. The detach half of the
-		// toggle lives at the top of this function: once focus is on the
-		// shell, every key except ctrl+] is forwarded to the guest pty raw.
+		// was last attached to a different one, and focuses it — otherwise
+		// opening would leave the pty unreachable from the keyboard.
 		m.enterShell("")
 		// Kick the tick chain for the cursor blink; enterShell alone can't
 		// return a cmd (isAnimating is now true, but nothing restarts the
@@ -2394,14 +2533,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogKey(msg)
 	}
 	if s == "esc" {
-		// Esc interrupts the in-flight turn for the current group (moved here
-		// from ctrl+c). Same predicates: busy is set on the `prompt` event and
+		// esc and ctrl+[ are the SAME key — both are byte 0x1b, terminals
+		// can't tell them apart and Bubble Tea reports both as "esc". So this
+		// one handler is the ctrl+[ binding too.
+		//
+		// First meaning: interrupt the in-flight turn for the current group
+		// (moved here from ctrl+c). busy is set on the `prompt` event and
 		// cleared on `done`; streamBuf/thinkingBuf cover the cases where the
 		// prompt event didn't reach us (initial replay, daemon reconnect mid-
-		// stream), so a stuck tool call is still cancellable in-band. Fires
-		// only when there's a turn to stop — otherwise esc falls through to its
-		// focus-toggle meaning (input→tree / tree→input) handled per focus zone
-		// below. While a turn runs, use Tab to reach the tree instead.
+		// stream), so a stuck tool call is still cancellable in-band.
 		if m.busy[m.cur] {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
@@ -2411,6 +2551,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if _, thinking := m.thinkingBuf[m.cur]; thinking {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
+		// Second meaning, with no turn to stop: the message-bar ↔ tree toggle
+		// that used to be on tab (tab now rotates across all open zones —
+		// cycleFocus). While a turn runs esc is the interrupt, so reach the
+		// tree with tab instead.
+		if m.focus == focusTree {
+			m.exitTree()
+		} else {
+			m.enterTree()
+			m.resizeViewport()
+			m.refreshLog()
+		}
+		return m, nil
 	}
 	if s == "ctrl+@" {
 		rows := m.treeRows()
@@ -2436,17 +2588,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "tab" {
-		if m.focus == focusInput {
-			m.enterTree()
-		} else {
-			m.stopPeek()
-			m.peekJob = jobRef{}
-			m.focus = focusInput
-			m.input.Focus()
-		}
-		// treeW changes with focus → log viewport width changes → re-wrap.
-		m.resizeViewport()
-		m.refreshLog()
+		// Tab rotates focus across the open zones (cycleFocus). The plain
+		// message-bar ↔ tree toggle it used to be now lives on esc / ctrl+[
+		// (same byte, see the esc handler above).
+		m.cycleFocus()
 		return m, nil
 	}
 
@@ -2465,15 +2610,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectTreeRow(rows[m.treeIdx])
 			}
 			return m, nil
-		case "esc":
-			// Esc always exits tree mode regardless of input contents.
-			m.stopPeek()
-			m.peekJob = jobRef{}
-			m.focus = focusInput
-			m.input.Focus() // may be blurred if tree was restored by exitLog/exitShell
-			m.resizeViewport()
-			m.refreshLog()
-			return m, nil
+		// esc / ctrl+[ exits tree mode regardless of input contents — handled
+		// globally above (it doubles as the interrupt key), so there's no
+		// case for it here.
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while
@@ -2482,10 +2621,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// who only entered tree to switch agents).
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
-				m.focus = focusInput
-				m.input.Focus() // see the esc case above
-				m.resizeViewport()
-				m.refreshLog()
+				m.exitTree()
 				return m, nil
 			}
 			m.input.SetValue("")
@@ -2584,18 +2720,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if s == "right" {
-		// zsh-autosuggestions-style accept: only when the cursor is at
-		// end-of-line AND a matched suggestion exists. Anywhere else,
-		// fall through so the default CharacterForward binding moves the
-		// cursor one position right (preserves normal editing).
-		val := m.input.Value()
-		if m.input.Position() == len([]rune(val)) {
-			if sug := m.input.CurrentSuggestion(); sug != "" {
-				m.input.SetValue(sug)
-				m.input.CursorEnd()
-				m.refreshSuggestions()
-				return m, nil
-			}
+		// zsh-autosuggestions-style accept: exactly the ghost the user can
+		// see (inputGhost is non-empty only at end-of-line with a matched
+		// suggestion). Anywhere else, fall through so the default
+		// CharacterForward binding moves the cursor one position right
+		// (preserves normal editing).
+		if g := m.inputGhost(); g != "" {
+			m.input.SetValue(m.input.Value() + g)
+			m.input.CursorEnd()
+			m.refreshSuggestions()
+			return m, nil
 		}
 	}
 
@@ -2747,6 +2881,60 @@ func (m *Model) enterTree() {
 	// continue typing a draft. The focus field (focusTree) is what routes
 	// up/down/enter to tree navigation; the input cursor staying alive is
 	// just a visual signal that typing still works.
+}
+
+// exitTree drops tree focus back to the message bar. The job peek only exists
+// while the tree is up (renderJobPeek gates on tree focus), so it goes with
+// it; input.Focus() matters because the tree may have been restored by
+// exitLog/exitShell with the textinput blurred. Callers that need the tree's
+// width change reflected get it here via resizeViewport.
+func (m *Model) exitTree() {
+	m.stopPeek()
+	m.peekJob = jobRef{}
+	m.focus = focusInput
+	m.input.Focus()
+	m.resizeViewport()
+	m.refreshLog()
+}
+
+// cycleFocus is tab's rotation across the zones that are actually on screen:
+// message bar → tree → terminal → message bar, skipping the terminal when the
+// pane is closed (so with no shell open it degenerates to the old two-way
+// toggle). Composed entirely of the existing transitions — enterTree,
+// focusShellPane, exitTree, exitShell — so tab can't reach a state the other
+// bindings couldn't.
+//
+// Note the terminal leg costs the guest its tab key: while the pty is focused
+// every other keystroke is forwarded raw, but tab is reserved here, so bash
+// completion inside the shell is not available (deliberate — tab means "next
+// zone" everywhere, consistently).
+func (m *Model) cycleFocus() {
+	switch m.focus {
+	case focusTree:
+		if m.shellFocusable() {
+			m.focusShellPane()
+			return
+		}
+		m.exitTree()
+	case focusShell:
+		// Terminal → message bar. exitShell hands focus back to whatever
+		// preShellFocus recorded, which for a rotation arriving from the tree
+		// would bounce straight back into it — pin the target so the cycle
+		// keeps going forward. The pane stays open (ctrl+] is what closes it).
+		m.preShellFocus = focusInput
+		m.exitShell()
+	default: // focusInput (focusLog never reaches here — handleLogKey owns it)
+		m.enterTree()
+		// treeW changes with focus → log viewport width changes → re-wrap.
+		m.resizeViewport()
+		m.refreshLog()
+	}
+}
+
+// shellFocusable reports whether the terminal pane is a live focus target for
+// the tab rotation: attached, not ended, and open on screen.
+func (m Model) shellFocusable() bool {
+	return m.shell != nil && !m.shell.ended && m.shellOpen
 }
 
 // treeRow is one navigable row of the left tree pane: a group row
@@ -2964,6 +3152,7 @@ func (m *Model) selectTreeRow(r treeRow) {
 	m.refreshSuggestions()
 	m.vp.GotoBottom()
 	m.autoFollow = true
+	m.chaseShell()
 }
 
 // armPeek points the peek pane at one job: drops any previous stream, clears
@@ -2977,6 +3166,7 @@ func (m *Model) armPeek(g, id string) {
 	m.stopPeek()
 	m.peekJob = jobRef{group: g, id: id}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
+	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
 	m.peekDirty, m.peekPrimed = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Now(), time.Time{}
 	m.peekFollow = true
@@ -3001,6 +3191,7 @@ func (m *Model) clearPeek() {
 	m.stopPeek()
 	m.peekJob = jobRef{}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
+	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
 	m.peekDirty, m.peekPrimed = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Time{}, time.Time{}
 }
@@ -3034,18 +3225,15 @@ func (m Model) peekActive() bool {
 }
 
 // refreshPeekVP resizes the peek viewport to the current pane geometry and
-// rebuilds its content from the fetched output (wrapped to width), keeping
-// the bottom pinned while peekFollow holds. Called on data arrival, hover
-// start, and window resize.
+// rebuilds its content from the fetched output (chat-grammar parsed for
+// framed agent output, raw wrapped lines otherwise — see peekContent),
+// keeping the bottom pinned while peekFollow holds. Called on data arrival,
+// hover start, and window resize.
 func (m *Model) refreshPeekVP() {
 	w, h := m.logViewportSize()
 	m.peekVP.Width = w
 	m.peekVP.Height = max(1, h-jobPeekHeaderRows)
-	var lines []string
-	for _, ln := range strings.Split(strings.TrimRight(m.peekOut, "\n"), "\n") {
-		lines = append(lines, wrapLine(ln, max(10, w-2))...)
-	}
-	m.peekVP.SetContent(strings.Join(lines, "\n"))
+	m.peekVP.SetContent(m.peekContent(w))
 	if m.peekFollow {
 		m.peekVP.GotoBottom()
 	}
@@ -3136,6 +3324,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.refreshSuggestions()
 		m.vp.GotoBottom()
 		m.autoFollow = true
+		m.chaseShell()
 		return listCmd(m.sock)
 	}
 	if v == "/ls" {
@@ -3198,6 +3387,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.refreshLog()
 		m.vp.GotoBottom()
 		m.autoFollow = true
+		m.chaseShell()
 		return nil
 	}
 	if strings.HasPrefix(v, "/destroy ") || v == "/destroy" {
@@ -3217,6 +3407,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.clearUnread(m.cur, m.activeSession(m.cur))
 			m.autoFollow = true
 			m.syncLogScope()
+			m.chaseShell()
 		}
 		// Wipe any cached state for the group so a future /new <name> with
 		// the same name starts clean.
@@ -3326,6 +3517,14 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if v == "/shell" || strings.HasPrefix(v, "/shell ") {
 		arg := strings.TrimSpace(strings.TrimPrefix(v, "/shell"))
+		if arg == "off" || arg == "close" {
+			// Close (hide) the pane. The stream survives (closeShell) so a
+			// later /shell reopens the same terminal instantly. Accepted
+			// corner case: a tmux session literally named "off"/"close"
+			// can't be attached by name from here.
+			m.closeShell()
+			return nil
+		}
 		m.enterShell(arg) // arg == "" -> the active chat session's shell (shellSessionName)
 		// Same as the ctrl+] path: start the tick chain for the cursor blink.
 		return m.ensureTicking()

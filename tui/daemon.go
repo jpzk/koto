@@ -416,7 +416,7 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
 			return
 		}
-		stream, err := cl.JobTail(ctx, &pb.JobTailReq{Group: group, Id: id, Tail: jobPeekTailBytes})
+		stream, err := cl.JobTail(ctx, &pb.JobTailReq{Group: group, Id: id, Tail: jobPeekTailBytes, Parsed: true})
 		if err != nil {
 			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
 			return
@@ -432,11 +432,18 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 			}
 			switch ev.Event {
 			case "data":
+				// Raw-line frame: a daemon predating JobTailReq.parsed
+				// ignores the flag and streams these; keep rendering them.
 				line := string(ev.Chunk)
 				for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
 					line = line[:len(line)-1]
 				}
 				prog.Send(jobTailMsg{sid: sid, line: line})
+			case "event":
+				if ev.Parsed != nil {
+					pe := pbToEvent(ev.Parsed)
+					prog.Send(jobTailMsg{sid: sid, ev: &pe})
+				}
 			case "end":
 				prog.Send(jobTailMsg{sid: sid, end: true})
 				return

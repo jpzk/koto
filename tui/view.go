@@ -159,10 +159,12 @@ func (m Model) View() string {
 		// input line, no tree, no scrollbar geometry from the chat vp.
 		return m.renderLogView()
 	}
-	if m.focus == focusShell {
-		// Shared shell replaces the entire chat middle pane, same as
-		// focusLog — no input line (keystrokes go to handleShellKey, not
-		// the textinput), no tree, no chat scrollbar.
+	if m.focus == focusShell || m.shellSplitVisible() {
+		// Shared shell: fullscreen while focused on a narrow terminal, or
+		// the chat-column + message-bar + pty split whenever the pane is
+		// open (shellOpen) and the terminal is wide enough — including with
+		// focus on the input or tree, so the terminal stays on screen while
+		// the user types to the agent.
 		return m.renderShellView()
 	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
@@ -401,12 +403,15 @@ func (m Model) renderTree(rows int) string {
 // treeCursorLive reports whether the tree cursor row should carry its
 // amber-background highlight: the tree focused directly, or visible alongside
 // the log view where shift+↑/↓ still moves it (the cursor picks the log
-// scope, so hiding the marker would hide what the pane is filtered to). The
-// shell view keeps it unhighlighted — keys go raw to the guest pty there, so
-// the cursor isn't actionable.
+// scope, so hiding the marker would hide what the pane is filtered to), or
+// alongside the focused shell pane. There the keys go raw to the guest pty so
+// the cursor isn't movable — but it still marks the active conversation (the
+// one the shell belongs to and the message bar targets), and dropping the
+// highlight on a mere focus toggle read as the selection getting lost.
 func (m Model) treeCursorLive() bool {
 	return m.focus == focusTree ||
-		(m.focus == focusLog && m.preLogFocus == focusTree)
+		(m.focus == focusLog && m.preLogFocus == focusTree) ||
+		(m.focus == focusShell && m.preShellFocus == focusTree)
 }
 
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
@@ -593,12 +598,12 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 	lines = append(lines, cmdLine)
 	lines = append(lines, dim.Render(strings.Repeat("─", max(1, w-2))))
 	switch {
-	case armed && m.peekOut != "" && !m.peekPrimed:
+	case armed && m.peekHasContent() && !m.peekPrimed:
 		// Backlog still arriving. Showing it now would render the replay as
 		// it streams in — the pane scrolling through scrollback on every
 		// hover. Hold one placeholder frame; flushPeek paints it at EOF.
 		lines = append(lines, dim.Render("(loading tail…)"))
-	case armed && m.peekOut != "":
+	case armed && m.peekHasContent():
 		// Output we already hold wins over any terminal status: the tail is
 		// what the row was hovered for, and a stream that ended or errored
 		// after delivering it must not blank the pane. The viewport owns
@@ -631,13 +636,12 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 
 // treePaneW is leftPaneWidth when the tree is visible and 0 otherwise. In the
 // normal chat view that's exactly when the tree is focused (tab toggles both
-// together). In the shell view (shell_view.go), focus itself is pinned to
-// focusShell so keystrokes reach the guest pty — instead the tree stays
-// visible if it was open (focused) at the moment the shell was entered,
-// tracked via preShellFocus. This lets the tree and the shared-shell pane
-// stay open side by side: open the tree with tab, then ctrl+] to attach —
-// detaching (ctrl+]) and tabbing again still works to switch groups while
-// the session keeps running in the background.
+// together). While the shell pane itself is FOCUSED, keystrokes go to the
+// guest pty rather than tree navigation — the tree stays visible if it was
+// open (focused) at the moment the shell took focus, tracked via
+// preShellFocus. With the pane open but unfocused (shellOpen split mode) the
+// normal rule applies: tab toggles the tree in and out beside the split, and
+// tree navigation works as usual.
 func (m Model) treePaneW() int {
 	if m.focus == focusTree {
 		return leftPaneWidth
@@ -870,10 +874,21 @@ func (m Model) renderScrollbar(rows int) string {
 
 // --- input -------------------------------------------------------------------
 
+// inputBoxW is the total width budget of the prompt box (borders included):
+// the full terminal normally, the chat column when the shell split is on
+// screen (renderShellView stacks the box under the viewport there, matching
+// its Width(chatW-1) chat block).
+func (m Model) inputBoxW() int {
+	if m.shellSplitVisible() {
+		return m.shellChatW() - 1
+	}
+	return m.width
+}
+
 // inputTextCols is the column budget for the prompt input's text: the
 // bordered box's interior minus the 2-cell prefix and the textinput's own
 // prompt. Matches the MaxWidth clip renderInput applies to each body row.
-func (m Model) inputTextCols() int { return max(10, m.width-6-m.inputPromptW()) }
+func (m Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputPromptW()) }
 
 // inputPromptW is the rendered width of the textinput's prompt ("> "), which
 // we now draw ourselves — bubbles' View() only handles the placeholder path.
@@ -978,6 +993,9 @@ func (m Model) inputGhost() string {
 	if m.input.Position() != len([]rune(v)) {
 		return ""
 	}
+	if m.input.CurrentSuggestionIndex() < 0 {
+		return "" // bubbles v1.0.0 would index matchedSuggestions[-1] and panic
+	}
 	sug := m.input.CurrentSuggestion()
 	if sug == "" || !strings.HasPrefix(sug, v) {
 		return ""
@@ -1029,10 +1047,11 @@ func (m Model) renderInput() string {
 		prefixColor = cAmber
 	}
 	prefix := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(" ")
+	boxW := m.inputBoxW()
 	// Clip each row before the border styling so an over-wide cell (the
 	// suggestion ghost, a wide rune straddling the last column) can't wrap
 	// into an unbudgeted extra row and push the hint off-screen.
-	clip := lipgloss.NewStyle().MaxWidth(m.width - 4)
+	clip := lipgloss.NewStyle().MaxWidth(boxW - 4)
 
 	var body string
 	if m.input.Value() == "" {
@@ -1057,7 +1076,7 @@ func (m Model) renderInput() string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Width(m.width - 2).
+		Width(boxW - 2).
 		Render(body)
 }
 
@@ -1066,7 +1085,9 @@ func (m Model) renderInput() string {
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
 	if m.focus == focusTree {
-		left := " ↑↓ switch · ⇥/⎋/↩ back"
+		// ⇥ rotates on (terminal next, if it's open); ⎋ (= ctrl+[) and ↩ go
+		// straight back to the message bar.
+		left := " ↑↓ switch · ⇥ next · ⎋/↩ back"
 		right := m.renderProviderModel()
 		leftW := lipgloss.Width(left)
 		rightW := lipgloss.Width(right)
@@ -1086,7 +1107,11 @@ func (m Model) renderHint() string {
 	} else {
 		parts = append(parts, " ↩ send")
 	}
-	parts = append(parts, "↑↓ scroll", "⇥ tree")
+	nextHint := "⇥ tree"
+	if m.shellFocusable() {
+		nextHint = "⇥ next" // tab rotates message bar → tree → terminal
+	}
+	parts = append(parts, "↑↓ scroll", nextHint, "⎋ tree")
 	thoughtsHint := "^t thoughts"
 	if m.expandedThoughts {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^t hide")
@@ -1103,6 +1128,11 @@ func (m Model) renderHint() string {
 	}
 	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")
+	shellHint := "^] shell"
+	if m.shellSplitVisible() {
+		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
+	}
+	parts = append(parts, shellHint)
 	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))

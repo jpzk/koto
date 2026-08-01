@@ -169,9 +169,10 @@ func groupNetwork(g string) string {
 }
 
 // groupRoot reads config.json's "root" profile: "yes" grants the guest's node
-// user passwordless sudo, anything else (including missing) means "no" — the
-// default. Read at spawn and passed into the guest's init RPC; fc-agent installs
-// the sudoers grant at boot (handleInit → enableSudo). The microVM's KVM
+// user passwordless sudo plus a writable-persistent root overlay, anything else
+// (including missing) means "no" — the default. Read at spawn and passed into
+// the guest's init RPC; fc-agent applies it at boot (handleInit → enableRoot;
+// overlays /usr /etc /var /opt onto the workspace disk). The microVM's KVM
 // boundary contains root-in-guest, so this doesn't widen the host blast radius.
 // Applies on /restart. Accepts a bool too, for a hand-edited config.json.
 func groupRoot(g string) bool { return groupConfigBool(g, "root") }

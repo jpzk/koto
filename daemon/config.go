@@ -111,11 +111,12 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		return
 	}
 	if key == "root" {
-		// Passwordless sudo inside the guest: yes|no. Applies on the next spawn
-		// (/restart) — fc-agent installs the sudoers grant at boot (groupRoot →
-		// init "root" → enableSudo). The microVM's KVM boundary contains
-		// root-in-guest, so this doesn't widen the host blast radius. Unknown
-		// values are silently rejected, same shape as the internet branch.
+		// Passwordless sudo + writable-persistent root overlay inside the
+		// guest: yes|no. Applies on the next spawn (/restart) — fc-agent
+		// applies it at boot (groupRoot → init "root" → enableRoot). The
+		// microVM's KVM boundary contains root-in-guest, so this doesn't widen
+		// the host blast radius. Unknown values are silently rejected, same
+		// shape as the internet branch.
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return

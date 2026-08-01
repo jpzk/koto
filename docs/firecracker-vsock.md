@@ -367,19 +367,42 @@ the entrypoint + `claude` + all bash run as) **passwordless sudo**. Default
   a trust decision.
 - **Plumbing.** `groupRoot(g)` (`fc.go`) reads config.json `"root"` at spawn and
   sets `init.root=true` on the guest init RPC. `fc-agent`'s `handleInit`
-  (`fcguest/main.go`) then calls `enableSudo` once, before the entrypoint starts,
+  (`fcguest/main.go`) then calls `enableRoot` once, before the entrypoint starts,
   so the first turn already has it. Applied on **`/restart`**.
-- **How the grant is installed (read-only root workaround).** The root drive is
-  attached read-only, so `/etc/sudoers.d` can't be written directly. `enableSudo`
-  overlays a small **tmpfs** on `/etc/sudoers.d` and drops
-  `node ALL=(ALL) NOPASSWD: ALL` (mode 0440, root-owned) there; sudo's baked
-  `/etc/sudoers` already `@includedir`s that dir, and sudo's timestamp dir lives
-  under `/run` (also a tmpfs). `sudo` itself ships in the golden rootfs
+- **Writable-persistent root (`sudo dnf install` works and survives restarts).**
+  The root drive is the shared golden rootfs, attached read-only — it is never
+  written. Instead `enableRoot` → `overlayRootDirs` mounts an **overlayfs** on
+  each package-manager-owned directory (`/usr`, `/etc`, `/var`, `/opt`) with the
+  upper/work layers on the per-group workspace ext4 under
+  `/workspace/.rootovl/<dir>/{upper,work}` (root-owned `0700` at the top, so
+  `node` can't tamper with the layer except through sudo). `sudo dnf install`,
+  `sudo npm i -g`, config edits under `/etc` — all land in the upper layer and
+  **persist across `/restart`** with the rest of the workspace image, while the
+  golden rootfs stays pristine and shared by every VM. Needs
+  `CONFIG_OVERLAY_FS` (already `=y` in the FC microvm CI kernel config our
+  vmlinux builds from). Package installs need repo egress, so pair `root=yes`
+  with `network=wan`/`full` in practice.
+- **How the sudo grant is installed.** With the `/etc` overlay up, `enableRoot`
+  simply writes `node ALL=(ALL) NOPASSWD: ALL` to `/etc/sudoers.d/node`
+  (mode 0440, root-owned); sudo's baked `/etc/sudoers` already `@includedir`s
+  that dir, and sudo's timestamp dir lives under `/run` (a tmpfs). If the
+  overlay mounts fail (e.g. a stale pre-`CONFIG_OVERLAY_FS` vmlinux), it falls
+  back to the original scheme — a small **tmpfs** on `/etc/sudoers.d` — so
+  `root=yes` still means sudo even when it can't mean persistence. A partial
+  overlay failure unwinds every already-mounted layer first, so the fallback
+  never runs on a half-applied set. `sudo` itself ships in the golden rootfs
   unconditionally (`Dockerfile.rootfs`); only the grant is runtime-gated.
-- **`sudo dnf install` won't persist.** The root drive is read-only, so sudo is
-  for running privileged commands against the writable workspace/tmpfs, network
-  and mount config, reading root-owned files — not installing packages. Bake new
-  packages into the rootfs (`make fc-rootfs`) instead.
+- **Caveats.** (1) Installs consume **workspace disk** — dnf-heavy groups may
+  want a bigger `size` preset. (2) Upper-layer entries **shadow the golden
+  rootfs**: after a `make fc-rootfs` that upgrades a file the group also
+  modified, the group keeps its upper copy. Reset by deleting the `.rootovl`
+  tree while its overlays are NOT mounted (never rm a live upper layer): stop
+  the group and wipe it from `workspace.img` host-side, or destroy/recreate the
+  group. (3) Dirs outside the four overlays
+  (`/root`, `/home`, `/boot`) stay read-only; Fedora packages virtually never
+  write there at install time. (4) Flipping back to `root=no` leaves the
+  `.rootovl` tree on disk but unmounted — its contents (including the persisted
+  sudoers grant) become invisible until `root=yes` returns.
 
 ## Autostart profile (`autostart`: `yes` | `no`)
 

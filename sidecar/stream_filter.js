@@ -6,11 +6,22 @@
 // block (otherwise history replay can only stamp emit-time, which is
 // minutes-to-days off for old log entries).
 // One trailing newline at message_stop so the TUI can distinguish turns.
-// fs.writeSync(1, ...) bypasses Node's stdout buffering; without it,
+// fs.writeSync(OUT, ...) bypasses Node's stdout buffering; without it,
 // small writes coalesce and streaming visibility disappears.
 const fs = require('fs');
 const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin });
+// KOTO_SUBAGENT: sub-agent mode (driven by cs-subagent). Same fd contract as
+// venice_stream.js's VENICE_ONESHOT: the streamed framing (text/thinking
+// deltas, tool calls) is progress, not the return value, so it goes to
+// stderr — under cs-job both fds land in the job's out file, so the job view
+// streams live — and only the final `result` record's text is written to
+// stdout. The filter is the last command in cs-subagent's pipeline, so its
+// exit code is the job's: 1 when the stream ends without a successful result
+// (claude crashed, or the result record carries is_error).
+const SUB = !!process.env.KOTO_SUBAGENT;
+const OUT = SUB ? 2 : 1;
+let gotResult = false;
 let stamped = false;
 // "midline" means we've emitted content and not yet emitted a trailing \n,
 // so the next marker needs a separator first. Toggled by writes.
@@ -22,10 +33,10 @@ const tools = {};
 const thinking = {};
 
 function stampOnce() {
-  if (!stamped) { fs.writeSync(1, `[ts:${Date.now()}]\n`); stamped = true; }
+  if (!stamped) { fs.writeSync(OUT, `[ts:${Date.now()}]\n`); stamped = true; }
 }
 function breakLine() {
-  if (midline) { fs.writeSync(1, '\n'); midline = false; }
+  if (midline) { fs.writeSync(OUT, '\n'); midline = false; }
 }
 
 // Emit a framed tool output block. Body may be a string or an array of
@@ -59,11 +70,11 @@ function emitToolOut(content) {
   breakLine();
   const bytes = Buffer.byteLength(body, 'utf8');
   const safe = escapeBody(body);
-  fs.writeSync(1, '[[tool_out_begin]]\n');
+  fs.writeSync(OUT, '[[tool_out_begin]]\n');
   if (safe.length) {
-    fs.writeSync(1, safe.endsWith('\n') ? safe : safe + '\n');
+    fs.writeSync(OUT, safe.endsWith('\n') ? safe : safe + '\n');
   }
-  fs.writeSync(1, `[[tool_out_end]] ${bytes}\n`);
+  fs.writeSync(OUT, `[[tool_out_end]] ${bytes}\n`);
 }
 
 // Session pinning: every stream-json record carries the run's session_id.
@@ -90,6 +101,22 @@ rl.on('line', (line) => {
     }
     return;
   }
+  // The run's final `result` record. In subagent mode this IS the return
+  // value: its text goes to stdout (everything above went to stderr). In
+  // normal mode it stays ignored — the streamed deltas already carried it.
+  if (ev.type === 'result') {
+    if (SUB) {
+      if (!ev.is_error && typeof ev.result === 'string') {
+        const ans = ev.result;
+        fs.writeSync(1, ans.endsWith('\n') || !ans.length ? ans : ans + '\n');
+        gotResult = true;
+      } else {
+        breakLine();
+        fs.writeSync(OUT, `[[err]] claude: ${ev.subtype || 'error'}\n`);
+      }
+    }
+    return;
+  }
   if (ev.type !== 'stream_event' || !ev.event) return;
   const e = ev.event;
   if (e.type === 'content_block_start' && e.content_block) {
@@ -100,20 +127,20 @@ rl.on('line', (line) => {
       stampOnce();
       breakLine();
       // Open a framed region; subsequent thinking_delta text is the body.
-      fs.writeSync(1, '[[think_begin]]\n');
+      fs.writeSync(OUT, '[[think_begin]]\n');
     }
     return;
   }
   if (e.type === 'content_block_delta' && e.delta) {
     if (e.delta.type === 'text_delta' && e.delta.text) {
       stampOnce();
-      fs.writeSync(1, e.delta.text);
+      fs.writeSync(OUT, e.delta.text);
       midline = !e.delta.text.endsWith('\n');
     } else if (e.delta.type === 'thinking_delta' && thinking[e.index] && e.delta.thinking) {
       // Stream thinking text into the log as-is. The daemon's tailer is
       // stateful: anything between [[think_begin]] and [[think_end]] is
       // emitted as `event:"thinking_stream"` (partial) / `"thinking"` (line).
-      fs.writeSync(1, e.delta.thinking);
+      fs.writeSync(OUT, e.delta.thinking);
       thinking[e.index].wordsBuf += e.delta.thinking;
       midline = !e.delta.thinking.endsWith('\n');
     } else if (e.delta.type === 'input_json_delta' && tools[e.index]) {
@@ -127,18 +154,25 @@ rl.on('line', (line) => {
       delete tools[e.index];
       stampOnce();
       breakLine();
-      fs.writeSync(1, `[[tool]] ${t.name} ${t.inputBuf || '{}'}\n`);
+      fs.writeSync(OUT, `[[tool]] ${t.name} ${t.inputBuf || '{}'}\n`);
     } else if (thinking[e.index]) {
       const t = thinking[e.index];
       delete thinking[e.index];
       const words = (t.wordsBuf.trim().split(/\s+/).filter(Boolean)).length;
       breakLine();
-      fs.writeSync(1, `[[think_end]] ${words}\n`);
+      fs.writeSync(OUT, `[[think_end]] ${words}\n`);
     }
     return;
   }
   if (e.type === 'message_stop') {
-    fs.writeSync(1, '\n');
+    fs.writeSync(OUT, '\n');
     midline = false;
   }
+});
+
+// Stream ended without a successful result record → the claude process died
+// (or errored) before finishing. Surface that as the subagent's exit code so
+// cs-job records rc!=0 instead of a silent empty success.
+rl.on('close', () => {
+  if (SUB && !gotResult) process.exitCode = 1;
 });

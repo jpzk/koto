@@ -116,6 +116,19 @@ func TestInputWrapCapped(t *testing.T) {
 	}
 }
 
+// TestInputCtrlPWithoutMatchesDoesNotPanic: bubbles v1.0.0's PrevSuggestion
+// (ctrl+p) wraps its suggestion index to -1 when nothing matches, and the
+// next View() indexed matchedSuggestions[-1] — a panic that killed the whole
+// TUI. The binding is now neutralized and inputGhost guards the index.
+func TestInputCtrlPWithoutMatchesDoesNotPanic(t *testing.T) {
+	m := inputModel(t, "no history matches this")
+	for _, k := range []tea.KeyType{tea.KeyCtrlP, tea.KeyCtrlN} {
+		nm, _ := m.Update(tea.KeyMsg{Type: k})
+		m = nm.(Model)
+		_ = m.View()
+	}
+}
+
 // TestInputRowChangeResizesViewport: the growth has to reach the viewport
 // through Update, not just through a resize event.
 func TestInputRowChangeResizesViewport(t *testing.T) {

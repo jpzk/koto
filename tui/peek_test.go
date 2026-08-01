@@ -257,3 +257,92 @@ func TestPeekPrimeCapPaintsEventually(t *testing.T) {
 		t.Errorf("capped paint did not render output:\n%s", pane)
 	}
 }
+
+// feedEv pushes one parsed-stream frame through Update.
+func feedEv(m Model, ev Event) Model {
+	return feed(m, jobTailMsg{sid: m.peekSID, ev: &ev})
+}
+
+// TestPeekParsedFramesRenderAsChatBlocks drives the parsed JobTail path (the
+// daemon-side logParser events) and expects chat-style blocks: tool glyph
+// line, collapsed tool output summary, thought summary, response text — no
+// raw [[marker]] framing anywhere.
+func TestPeekParsedFramesRenderAsChatBlocks(t *testing.T) {
+	m := hoverJob(t, "KOTO", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	ts := 1785000000.0
+	m = feedEv(m, Event{Event: "thinking_begin", Ts: ts})
+	m = feedEv(m, Event{Event: "thinking", Text: "pondering hard", Ts: ts})
+	m = feedEv(m, Event{Event: "thinking_done", Words: 2, Body: "pondering hard", Ts: ts})
+	m = feedEv(m, Event{Event: "tool", Name: "Bash", Input: `{"command":"ls /tmp"}`, Ts: ts})
+	m = feedEv(m, Event{Event: "tool_result_begin", Ts: ts})
+	m = feedEv(m, Event{Event: "tool_result", Text: "file1", Ts: ts})
+	m = feedEv(m, Event{Event: "tool_result_done", Body: "file1", Ts: ts})
+	m = feedEv(m, Event{Event: "done", Text: "the final answer", Ts: ts})
+	m = settle(m)
+
+	if !m.peekFramed {
+		t.Fatal("peekFramed = false after framed events")
+	}
+	pane, ok := m.renderJobPeek(m.chatRows())
+	if !ok {
+		t.Fatal("renderJobPeek returned ok=false")
+	}
+	for _, want := range []string{"Bash $ ls /tmp", "thought 2 words", "tool output 1 line", "the final answer"} {
+		if !strings.Contains(pane, want) {
+			t.Errorf("pane missing %q; pane:\n%s", want, pane)
+		}
+	}
+	if strings.Contains(pane, "[[") {
+		t.Errorf("raw framing leaked into pane:\n%s", pane)
+	}
+}
+
+// TestPeekParsedOpenBlockStreamsExpanded: an in-flight tool_out block (no
+// *_done yet) must show its body live rather than hiding behind a collapsed
+// summary the user can't expand mid-stream.
+func TestPeekParsedOpenBlockStreamsExpanded(t *testing.T) {
+	m := hoverJob(t, "KOTO", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	ts := 1785000000.0
+	m = feedEv(m, Event{Event: "tool_result_begin", Ts: ts})
+	m = feedEv(m, Event{Event: "tool_result", Text: "chunk one", Ts: ts})
+	m = feedEv(m, Event{Event: "tool_result", Text: "chunk two", Ts: ts})
+	m = settle(m)
+
+	pane, ok := m.renderJobPeek(m.chatRows())
+	if !ok {
+		t.Fatal("renderJobPeek returned ok=false")
+	}
+	if !strings.Contains(pane, "chunk two") {
+		t.Errorf("live open-block body not visible; pane:\n%s", pane)
+	}
+}
+
+// TestPeekParsedPlainJobStaysRaw: a plain job (no framing) parses to bare
+// done frames; the pane must keep the raw view — in particular no markdown
+// mangling and no chat glyphs.
+func TestPeekParsedPlainJobStaysRaw(t *testing.T) {
+	m := hoverJob(t, "9AZ", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	for i := 1; i <= 3; i++ {
+		m = feedEv(m, Event{Event: "done", Text: fmt.Sprintf("tick %d", i)})
+	}
+	m = settle(m)
+
+	if m.peekFramed {
+		t.Fatal("peekFramed = true for unframed output")
+	}
+	pane, ok := m.renderJobPeek(m.chatRows())
+	if !ok {
+		t.Fatal("renderJobPeek returned ok=false")
+	}
+	for i := 1; i <= 3; i++ {
+		if !strings.Contains(pane, fmt.Sprintf("tick %d", i)) {
+			t.Errorf("pane missing tick %d:\n%s", i, pane)
+		}
+	}
+	if strings.Contains(pane, "│") {
+		t.Errorf("chat response glyph in raw pane:\n%s", pane)
+	}
+}

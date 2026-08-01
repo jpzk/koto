@@ -4,6 +4,8 @@
 # Contract (uniform across providers): prompt in (argv or stdin),
 # final answer text on stdout, exit 0 on success. No streaming/log framing on
 # stdout — this is a return value the caller (usually cs-job) reads as data.
+# Progress (text/thinking/tool framing) streams on STDERR for both providers,
+# so a cs-job out file (which merges 2>&1) shows the run live in the job view.
 #
 # This is the ONLY provider-aware file in the job system. cs-job is provider-blind.
 #
@@ -36,10 +38,19 @@ case "$PROVIDER" in
   claudesdk)
     H=$(mktemp -d)
     trap 'rm -rf "$H"' EXIT
-    set -- claude -p "$PROMPT" --bare --dangerously-skip-permissions --output-format text
+    # stream-json through stream_filter.js in subagent mode (KOTO_SUBAGENT):
+    # progress framing streams to stderr AS IT HAPPENS — under cs-job both fds
+    # land in the job's out file, so the TUI job peek pane follows the run
+    # live instead of staying blank until completion (--output-format text
+    # buffered everything until the end). Only the final result text lands on
+    # stdout. The filter is the pipeline's last command, so its exit status is
+    # ours: it exits 1 when the stream ends without a successful result, which
+    # carries a claude crash through to the job's rc despite the pipe.
+    set -- claude -p "$PROMPT" --bare --dangerously-skip-permissions \
+      --output-format stream-json --include-partial-messages --verbose
     [ -n "$MODEL" ] && set -- "$@" --model "$MODEL"
     [ -n "$SYS" ]   && set -- "$@" --append-system-prompt "$SYS"
-    env HOME="$H" "$@"
+    env HOME="$H" "$@" | KOTO_SUBAGENT=1 node /sidecar/stream_filter.js
     ;;
   venice)
     VM="$MODEL"; [ -z "$VM" ] && VM="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"

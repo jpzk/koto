@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -184,6 +185,9 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 // can call this (Update() and the term.Read() drain loop) and grpc-go
 // forbids concurrent Send calls on the same stream.
 func (s *shellSession) send(b []byte) {
+	if s.stream == nil {
+		return // test stubs build a shellSession with no live stream (see resize)
+	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	_ = s.stream.Send(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Data{Data: b}})
@@ -195,6 +199,9 @@ func (s *shellSession) send(b []byte) {
 func (s *shellSession) resize(cols, rows int) {
 	s.cols, s.rows = cols, rows
 	s.term.Resize(cols, rows)
+	if s.stream == nil {
+		return // test stubs build a shellSession with no live stream
+	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	_ = s.stream.Send(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Resize{
@@ -302,6 +309,95 @@ func (m Model) shellSessionName() string {
 	return "koto-shell"
 }
 
+// shellAttach is the dial used by enterShell — a package var so tests can
+// stub the gRPC leg (startShellAttach needs a live daemon AND a live
+// tea.Program for its Recv goroutine's prog.Send).
+var shellAttach = startShellAttach
+
+// shellChaseDelay is how long the selection must rest on a conversation
+// before the open shell pane redials onto its terminal. Long enough that
+// holding ↓ through the tree doesn't attach/detach a tmux client per row,
+// short enough that the pane visibly follows a deliberate switch.
+const shellChaseDelay = 400 * time.Millisecond
+
+// shellChaseMsg fires a debounced retargetShell. seq ties it to the
+// chaseShell call that scheduled it — a later switch bumps the counter, so
+// the earlier timer's message arrives stale and is dropped (same pattern as
+// shellSessionSeq/peekSID).
+type shellChaseMsg struct{ seq int }
+
+// scheduleShellChase delivers shellChaseMsg{seq} after shellChaseDelay — a
+// package var so tests can capture the schedule and feed the message through
+// Update themselves (prog is nil in tests, same guard as startJobTail).
+var scheduleShellChase = func(seq int) {
+	if prog == nil {
+		return
+	}
+	time.AfterFunc(shellChaseDelay, func() { prog.Send(shellChaseMsg{seq: seq}) })
+}
+
+// shellOnTarget reports whether the attached shell pane already shows the
+// current conversation's terminal (right group, right tmux session, stream
+// alive).
+func (m Model) shellOnTarget() bool {
+	return m.shell != nil && !m.shell.ended &&
+		m.shell.group == m.cur && m.shell.session == m.shellSessionName()
+}
+
+// chaseShell makes the open shell pane follow a conversation switch: every
+// path that retargets m.cur / the active session (/sw, /session, spawn
+// auto-switch, /destroy fallback, tree selection) calls this, and once the
+// selection has rested for shellChaseDelay the pane redials onto the new
+// conversation's shell (retargetShell, via shellChaseMsg). Debounced rather
+// than immediate because tree ↑/↓ browsing retargets on every row — a redial
+// per keypress would churn tmux attach/detach in the guest, and worse,
+// AttachShell's ensure() boots stopped VMs (retargetShell guards that too).
+// No-op while the pane is closed or already on target.
+func (m *Model) chaseShell() {
+	if !m.shellOpen || m.shellOnTarget() {
+		return
+	}
+	m.shellChaseSeq++
+	scheduleShellChase(m.shellChaseSeq)
+}
+
+// retargetShell swaps the open pane to the current conversation's shell —
+// the debounced tail of chaseShell. Distinct from enterShell: focus stays
+// where it is, and a switch onto a group whose VM isn't running DROPS the
+// pane (m.shell = nil, shellOpen kept) instead of dialing — AttachShell's
+// ensure() would boot the VM, and a mere view switch must never carry that
+// side effect. The pane comes back automatically on the next chase onto a
+// running group, or explicitly via ctrl+] / /shell (which does boot).
+func (m *Model) retargetShell() {
+	if !m.shellOpen || m.shellOnTarget() {
+		return // pane closed, or settled back on target, while debouncing
+	}
+	if !m.groups[m.cur].Running {
+		if m.shell != nil {
+			m.shell.close()
+			m.shell = nil
+		}
+		if m.focus == focusShell {
+			m.exitShell() // don't leave key focus on a pane that just vanished
+		}
+	} else {
+		w, h := m.shellPaneSize()
+		sess, err := shellAttach(m.cur, m.shellSessionName(), w, h)
+		if err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/shell follow: " + err.Error()})
+			return // keep the old pane; its hint still names its session
+		}
+		if m.shell != nil {
+			m.shell.close()
+		}
+		m.shell = sess
+	}
+	// The split may have appeared/disappeared (shell nil ↔ attached) — the
+	// chat viewport width depends on it (logViewportSize).
+	m.resizeViewport()
+	m.refreshLog()
+}
+
 // enterShell opens (or refocuses) the shared-shell pane for the current
 // group's active chat session. An explicit session arg (/shell <name>)
 // overrides the derived per-chat-session default. Switching to a different
@@ -309,7 +405,16 @@ func (m Model) shellSessionName() string {
 // already open tears the old one down first (closing the stream, not the
 // tmux session — see shellSession.close); re-entering the SAME session just
 // refocuses and, if the terminal geometry changed while the pane was
-// hidden, resizes.
+// hidden, resizes (syncShellSize via focusShellPane's resizeViewport).
+//
+// The pane does NOT chase tree-cursor hovers per keypress: while it is open
+// but unfocused, ↑/↓ browsing the tree retargets m.cur on every row without
+// immediately touching the pane (a redial per keypress would churn
+// attach/detach in the guest). Instead every conversation switch schedules a
+// debounced follow (chaseShell → retargetShell above), so once the selection
+// rests the pane swaps to the selected conversation's shell on its own; an
+// explicit attach — ctrl+], /shell, or a tree-row click while focused —
+// still swaps immediately through here.
 func (m *Model) enterShell(session string) {
 	if m.cur == "" {
 		m.addLine(logLine{kind: "err", group: m.cur, text: "/shell: no group in focus"})
@@ -323,32 +428,42 @@ func (m *Model) enterShell(session string) {
 		if m.shell != nil {
 			m.shell.close()
 		}
-		sess, err := startShellAttach(m.cur, session, w, h)
+		sess, err := shellAttach(m.cur, session, w, h)
 		if err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/shell: " + err.Error()})
 			return
 		}
 		m.shell = sess
-	} else if w != m.shell.cols || h != m.shell.rows {
-		m.shell.resize(w, h)
 	}
+	m.shellOpen = true
+	m.focusShellPane()
+}
+
+// focusShellPane moves key focus onto the already-attached pane without
+// touching the stream — enterShell's tail, and the in-grid click-to-focus
+// path (handleLeftClick).
+func (m *Model) focusShellPane() {
 	if m.focus != focusShell {
 		m.preShellFocus = m.focus
 	}
 	m.focus = focusShell
 	m.input.Blur()
-	// The chat viewport's wrap width depends on m.focus (see
-	// logViewportSize): entering split mode narrows it to the chat column,
-	// entering fullscreen-shell mode is moot since the viewport isn't drawn.
-	// Neither is covered by a WindowSizeMsg, so recompute here.
+	// The chat viewport's wrap width depends on the layout mode (see
+	// logViewportSize), which isn't covered by a WindowSizeMsg — recompute
+	// here. Also brings the guest pty to this mode's geometry (syncShellSize).
 	m.resizeViewport()
 	m.refreshLog()
 }
 
-// exitShell returns to whichever focus the user was in before opening the
-// shell pane. Deliberately does NOT close m.shell — leaving the pane (and
-// coming back later) should not lose terminal state or force a redial; the
-// session only tears down on group switch (enterShell) or TUI exit.
+// exitShell returns key focus to whichever zone the user was in before
+// focusing the shell pane. The pane STAYS OPEN (shellOpen) — in split mode it
+// keeps rendering beside the chat column while the user types into the
+// message bar; a click on the grid focuses it again. Detaching focus is a
+// mouse/peek path only: ctrl+] and /shell off both CLOSE the pane (closeShell,
+// which calls through here to hand focus back). Deliberately does NOT close
+// m.shell either —
+// leaving the pane should not lose terminal state or force a redial; the
+// stream only tears down on group switch (enterShell) or TUI exit.
 func (m *Model) exitShell() {
 	target := m.preShellFocus
 	if target != focusInput && target != focusTree {
@@ -359,9 +474,55 @@ func (m *Model) exitShell() {
 	// (same rationale and same bug as exitLog's, see log_view.go).
 	m.input.Focus()
 	// Leaving the (possibly narrowed) split viewport width behind — see the
-	// matching comment in enterShell.
+	// matching comment in focusShellPane.
 	m.resizeViewport()
 	m.refreshLog()
+}
+
+// closeShell hides the pane (ctrl+], /shell off). Like exitShell it keeps the stream
+// attached — m.shell survives, so /shell reopens the same terminal instantly
+// with its screen state intact; only the on-screen pane goes away.
+func (m *Model) closeShell() {
+	m.shellOpen = false
+	if m.focus == focusShell {
+		m.exitShell()
+		return
+	}
+	m.resizeViewport()
+	m.refreshLog()
+}
+
+// shellSplitVisible reports whether the shell pane is on screen alongside the
+// chat column + message bar (renderShellView's split mode). False when the
+// pane is closed, when the log view covers everything, and when the terminal
+// is too narrow to split (there the pane only shows fullscreen, while
+// focused).
+func (m Model) shellSplitVisible() bool {
+	if m.shell == nil || m.focus == focusLog {
+		return false
+	}
+	if m.focus != focusShell && !m.shellOpen {
+		return false
+	}
+	return m.shellChatW() > 0
+}
+
+// syncShellSize brings the guest pty's geometry in line with the pane's
+// current on-screen size. Called from resizeViewport — the choke point every
+// layout change (window resize, focus/tree toggles, pane open/close) already
+// goes through — so tmux reflows exactly when the rendered pane changes
+// shape, and never otherwise (resize is skipped when the size already
+// matches).
+func (m *Model) syncShellSize() {
+	if m.shell == nil || m.shell.ended {
+		return
+	}
+	if m.focus != focusShell && !m.shellOpen {
+		return
+	}
+	if w, h := m.shellPaneSize(); w != m.shell.cols || h != m.shell.rows {
+		m.shell.resize(w, h)
+	}
 }
 
 // handleShellKey routes keys when focus == focusShell. Unlike handleLogKey
@@ -375,11 +536,9 @@ func (m *Model) exitShell() {
 // here, so it never falls through to this function.
 //
 // Known v1 gap, documented rather than silently missing: bracketed paste
-// and mouse reporting are NOT translated — pasted text arrives as a plain
-// rune burst (fine for a shell prompt, occasionally wrong for e.g. vim's
-// autoindent), and mouse events (scroll-in-less, htop clicks) aren't
-// forwarded at all. Both would need a translation layer this codebase has
-// no precedent for; keyboard-only fidelity was the stated v1 goal.
+// is NOT translated — pasted text arrives as a plain rune burst (fine for
+// a shell prompt, occasionally wrong for e.g. vim's autoindent). Mouse
+// events, by contrast, ARE forwarded — see forwardShellMouse below.
 func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.shell == nil {
 		return m, nil
@@ -428,15 +587,98 @@ func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// shellMouseOrigin returns the terminal-screen cell where the emulator
+// grid's (0,0) sits, mirroring renderShellView's layout arithmetic exactly:
+// row 0 is the status bar, and the grid is preceded horizontally by the
+// optional tree column (+separator), the optional chat column (its logArea
+// block is chatW-1 wide, +1 separator = chatW), and shellBody's own
+// 1-col PaddingLeft.
+func (m Model) shellMouseOrigin() (int, int) {
+	x := 0
+	if tw := m.treePaneW(); tw > 0 {
+		x += tw + 1
+	}
+	if chatW := m.shellChatW(); chatW > 0 {
+		x += chatW
+	}
+	return x + 1, 1
+}
+
+// shellMouseButtons maps Bubble Tea's parsed button back to the X11 button
+// code vt/ansi encode from. The two enums list the same buttons in the same
+// order, but neither package documents that as a contract — an explicit
+// table beats a numeric cast that would silently skew if either side ever
+// reordered.
+var shellMouseButtons = map[tea.MouseButton]vt.MouseButton{
+	tea.MouseButtonNone:       vt.MouseNone,
+	tea.MouseButtonLeft:       vt.MouseLeft,
+	tea.MouseButtonMiddle:     vt.MouseMiddle,
+	tea.MouseButtonRight:      vt.MouseRight,
+	tea.MouseButtonWheelUp:    vt.MouseWheelUp,
+	tea.MouseButtonWheelDown:  vt.MouseWheelDown,
+	tea.MouseButtonWheelLeft:  vt.MouseWheelLeft,
+	tea.MouseButtonWheelRight: vt.MouseWheelRight,
+	tea.MouseButtonBackward:   vt.MouseBackward,
+	tea.MouseButtonForward:    vt.MouseForward,
+}
+
+// forwardShellMouse is handleShellKey's mouse counterpart: it reconstructs
+// the terminal-protocol mouse event a real terminal would have sent and
+// hands it to the emulator via SendMouse. The emulator — not us — tracks
+// whether the guest actually enabled mouse reporting (tmux `mouse on` sets
+// DECSET 1000/1002/1006 during redraw, parsed from the output stream):
+// if it did, SendMouse encodes the event (SGR or X10) into its internal
+// pipe, which the drain goroutine in startShellAttach already relays to the
+// guest pty exactly like the DA1/OSC auto-responses; if it didn't, SendMouse
+// is a no-op — so a guest without mouse support never sees escape-sequence
+// garbage typed into its prompt. Returns false when the event falls outside
+// the pty grid (tree/chat columns, status/hint rows) so the caller can route
+// it to the chat viewport instead; true means "the shell pane owns this
+// event", even in the no-op case — scrolling the chat column while pointing
+// at the shell would be worse than doing nothing.
+func (m Model) forwardShellMouse(ev tea.MouseEvent) bool {
+	ox, oy := m.shellMouseOrigin()
+	x, y := ev.X-ox, ev.Y-oy
+	if x < 0 || y < 0 || x >= m.shell.cols || y >= m.shell.rows {
+		return false
+	}
+	btn, ok := shellMouseButtons[ev.Button]
+	if !ok {
+		return true // button 10/11 etc. — swallow rather than mistranslate
+	}
+	var mod vt.KeyMod
+	if ev.Shift {
+		mod |= vt.ModShift
+	}
+	if ev.Alt {
+		mod |= vt.ModAlt
+	}
+	if ev.Ctrl {
+		mod |= vt.ModCtrl
+	}
+	switch {
+	case ev.IsWheel():
+		m.shell.term.SendMouse(vt.MouseWheel{X: x, Y: y, Button: btn, Mod: mod})
+	case ev.Action == tea.MouseActionMotion:
+		m.shell.term.SendMouse(vt.MouseMotion{X: x, Y: y, Button: btn, Mod: mod})
+	case ev.Action == tea.MouseActionRelease:
+		m.shell.term.SendMouse(vt.MouseRelease{X: x, Y: y, Button: btn, Mod: mod})
+	default:
+		m.shell.term.SendMouse(vt.MouseClick{X: x, Y: y, Button: btn, Mod: mod})
+	}
+	return true
+}
+
 // renderShellView draws the shell pane: status bar (reused), the emulator's
 // live screen rendered via vt.Emulator.Render() (already ANSI-styled —
 // colors/attributes the guest app set are preserved, just never
 // interpreted as commands to the REAL terminal, see the package doc
 // comment above), and a hint line. On a wide-enough terminal (shellChatW >
-// 0) the shell pane splits to the right of a read-only chat/log column
-// instead of replacing it, so the operator keeps the conversation in view
-// while driving the shared shell; narrower terminals fall back to the prior
-// fullscreen behavior, mirroring renderLogView.
+// 0) the shell pane splits to the right of the chat column instead of
+// replacing it — and the chat column keeps its message bar, so the operator
+// can toggle focus between typing to the agent and driving the shared shell
+// (ctrl+]) with both panes staying on screen; narrower terminals fall back
+// to the prior fullscreen behavior, mirroring renderLogView.
 func (m Model) renderShellView() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
@@ -467,7 +709,10 @@ func (m Model) renderShellView() string {
 		if len(lines) > h {
 			lines = lines[:h]
 		}
-		if !m.shell.ended && (m.tick/shellCursorBlinkTicks)%2 == 0 {
+		// The block cursor doubles as the focus indicator: drawn (blinking)
+		// only while keystrokes actually go to the guest pty. With focus on
+		// the message bar, the bar's own cursor is the live one.
+		if m.focus == focusShell && !m.shell.ended && (m.tick/shellCursorBlinkTicks)%2 == 0 {
 			lines = m.overlayShellCursor(lines)
 		}
 		shellBody = lipgloss.NewStyle().PaddingLeft(1).Render(strings.Join(lines, "\n"))
@@ -475,20 +720,42 @@ func (m Model) renderShellView() string {
 
 	body := shellBody
 	if chatW := m.shellChatW(); chatW > 0 {
-		// Clip to the viewport width first (defense against any cached
-		// markdown wrapped at a stale width), then pad to a fixed block
-		// width so the separator column doesn't wobble with content. The
-		// Width(chatW-1) block wraps only content wider than chatW-2, which
-		// the MaxWidth clip has just made impossible.
-		clipped := lipgloss.NewStyle().MaxWidth(chatW - 2).Render(m.vp.View())
-		logArea := lipgloss.NewStyle().Width(chatW - 1).PaddingLeft(1).Render(clipped)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, logArea, shellVSep(h), shellBody)
+		// Split mode: the chat column keeps its message bar underneath the
+		// viewport — same vertical budget as the normal chat view (chatRows
+		// + input box = h), so both panes stay open and focusable side by
+		// side and moving focus between them (a click either way) moves
+		// nothing on screen.
+		rows := m.chatRows()
+		var chatArea string
+		if peek, ok := m.renderJobPeek(rows); ok {
+			// Hovering a job row in tree focus swaps the chat column for the
+			// live peek pane, exactly like the normal view. Clip-then-pad so
+			// the separator column can't wobble or rewrap (see below).
+			clipped := lipgloss.NewStyle().MaxWidth(chatW - 1).Render(peek)
+			chatArea = lipgloss.NewStyle().Width(chatW - 1).Render(clipped)
+		} else {
+			// Clip to the viewport width first (defense against any cached
+			// markdown wrapped at a stale width), then pad to a fixed block
+			// width so the separator column doesn't wobble with content. The
+			// Width(chatW-1) block wraps only content wider than chatW-2,
+			// which the MaxWidth clip has just made impossible.
+			clipped := lipgloss.NewStyle().MaxWidth(chatW - 2).Render(m.vp.View())
+			chatArea = lipgloss.NewStyle().Width(chatW - 1).PaddingLeft(1).Render(clipped)
+		}
+		chatArea = lipgloss.NewStyle().Height(rows).MaxHeight(rows).Render(chatArea)
+		chatCol := lipgloss.JoinVertical(lipgloss.Left, chatArea, m.renderInput())
+		body = lipgloss.JoinHorizontal(lipgloss.Top, chatCol, shellVSep(h), shellBody)
 	}
 	if treeW := m.treePaneW(); treeW > 0 {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h), shellVSep(h), body)
 	}
 
+	// Bottom hint follows the focused pane: pty key bindings while the shell
+	// has focus, the regular chat hints while the message bar does.
 	hint := m.renderShellHint()
+	if m.focus != focusShell {
+		hint = m.renderHint()
+	}
 	metricsBar := m.renderMetricsBar()
 	return lipgloss.JoinVertical(lipgloss.Left, status, body, hint, metricsBar)
 }
@@ -550,6 +817,6 @@ func (m Model) renderShellHint() string {
 			parts = append(parts, red.Render(txt))
 		}
 	}
-	parts = append(parts, "ctrl+] detach")
+	parts = append(parts, "ctrl+] close", "⇥ next pane")
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }

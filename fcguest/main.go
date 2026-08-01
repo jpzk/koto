@@ -509,7 +509,7 @@ type agentReq struct {
 	Ports         []int             `json:"ports"`
 	Env           map[string]string `json:"env"`
 	Net           string            `json:"net"`     // "l3" → bring up the TAP (internet=full)
-	Root          bool              `json:"root"`    // true → passwordless sudo for node (config root=yes)
+	Root          bool              `json:"root"`    // true → writable-persistent root overlay + passwordless sudo for node (config root=yes)
 	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell); msg: chat session name ("" = default)
 	Cols          uint32            `json:"cols"`    // shell_attach: initial pty width
 	Rows          uint32            `json:"rows"`    // shell_attach: initial pty height
@@ -573,7 +573,7 @@ var (
 	initMu       sync.Mutex
 	entrypointUp bool
 	netStarted   bool
-	sudoEnabled  bool
+	rootEnabled  bool
 	portsUp      = map[int]bool{}
 )
 
@@ -589,13 +589,14 @@ func handleInit(c *vconn, req *agentReq) {
 			netStarted = true
 		}
 	}
-	// config root=yes: grant node passwordless sudo. Idempotent (guarded), done
-	// before the entrypoint starts so the first turn already has it.
-	if req.Root && !sudoEnabled {
-		if err := enableSudo(); err != nil {
-			logf("enable sudo: %v", err)
+	// config root=yes: writable-persistent root dirs + passwordless sudo for
+	// node. Idempotent (guarded), done before the entrypoint starts so the
+	// first turn already has it.
+	if req.Root && !rootEnabled {
+		if err := enableRoot(); err != nil {
+			logf("enable root: %v", err)
 		} else {
-			sudoEnabled = true
+			rootEnabled = true
 		}
 	}
 	for _, p := range req.Ports {
@@ -619,24 +620,74 @@ func handleInit(c *vconn, req *agentReq) {
 	reply(c, map[string]any{"ok": true})
 }
 
-// enableSudo grants the node user passwordless sudo (config root=yes). The root
-// drive is attached read-only, so /etc/sudoers.d can't be written directly;
-// overlay a small tmpfs on it and drop the NOPASSWD grant there. sudo's baked
-// /etc/sudoers already @includedir's this dir, and sudo's timestamp dir lives
-// under /run (a tmpfs). The grant file must be root-owned and not group/other
-// writable — fc-agent runs as root and writes it 0440. The KVM boundary
-// contains root-in-guest, so this doesn't widen the host blast radius. Note:
-// `sudo dnf install` won't persist (root drive is read-only) — sudo is for
-// running privileged commands against the writable workspace/tmpfs, network and
-// mount config, reading root-owned files, etc.
-func enableSudo() error {
-	const dir = "/etc/sudoers.d"
-	if err := unix.Mount("tmpfs", dir, "tmpfs", 0, "mode=755"); err != nil {
-		return fmt.Errorf("mount tmpfs %s: %w", dir, err)
+// enableRoot applies the root=yes profile: make root *useful*, not just
+// reachable. The root drive is the shared golden rootfs, attached read-only, so
+// instead of writing it we mount an overlayfs on each directory a package
+// manager touches (/usr /etc /var /opt), with the upper layer on the per-group
+// workspace disk (/workspace/.rootovl) — `sudo dnf install` (and npm -g, and
+// anything else that writes those trees) works and PERSISTS across restarts,
+// while the golden image stays pristine and shared. Then grant node
+// passwordless sudo by writing /etc/sudoers.d/node through the now-writable
+// /etc (falling back to the pre-overlay tmpfs trick if the overlay failed,
+// e.g. a stale vmlinux without CONFIG_OVERLAY_FS). sudo's baked /etc/sudoers
+// already @includedir's that dir, and sudo's timestamp dir lives under /run (a
+// tmpfs). The grant file must be root-owned and not group/other writable —
+// fc-agent runs as root and writes it 0440. The KVM boundary contains
+// root-in-guest, so none of this widens the host blast radius.
+//
+// Caveats (documented in docs/firecracker-vsock.md → "Root / sudo profile"):
+// installs consume workspace disk (the `size` preset), and upper-layer entries
+// shadow the golden rootfs — after a `make fc-rootfs` a previously-upgraded
+// file keeps its old upper copy until the .rootovl tree is reset.
+func enableRoot() error {
+	if err := overlayRootDirs(); err != nil {
+		logf("root overlay: %v — sudo grant falls back to tmpfs", err)
+		if merr := unix.Mount("tmpfs", "/etc/sudoers.d", "tmpfs", 0, "mode=755"); merr != nil {
+			return fmt.Errorf("mount tmpfs /etc/sudoers.d: %w", merr)
+		}
 	}
-	f := filepath.Join(dir, "node")
+	f := "/etc/sudoers.d/node"
 	if err := os.WriteFile(f, []byte("node ALL=(ALL) NOPASSWD: ALL\n"), 0o440); err != nil {
 		return fmt.Errorf("write %s: %w", f, err)
+	}
+	return nil
+}
+
+// overlayRootDirs mounts a persistent overlay on each package-manager-owned
+// root directory. Upper/work live on the workspace ext4 (same fs, as overlayfs
+// requires), root-owned 0700 at the top so the node user can't tamper with the
+// layer except through sudo. lowerdir is resolved at mount time, so mounting
+// *onto* the same path it names is the standard self-overlay idiom. On partial
+// failure every overlay mounted so far is unwound — a retried or fallen-back
+// init must never stack a second overlay on a half-applied set.
+func overlayRootDirs() error {
+	base := filepath.Join(wsDir, ".rootovl")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return err
+	}
+	_ = os.Chown(base, 0, 0) // workspace root is node-owned; keep the layer tree root's
+	var mounted []string
+	for _, d := range []string{"usr", "etc", "var", "opt"} {
+		upper := filepath.Join(base, d, "upper")
+		work := filepath.Join(base, d, "work")
+		target := "/" + d
+		var err error
+		for _, p := range []string{upper, work} {
+			if err = os.MkdirAll(p, 0o755); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", target, upper, work)
+			err = unix.Mount("overlay", target, "overlay", 0, opts)
+		}
+		if err != nil {
+			for _, m := range mounted {
+				_ = unix.Unmount(m, unix.MNT_DETACH)
+			}
+			return fmt.Errorf("overlay %s: %w", target, err)
+		}
+		mounted = append(mounted, target)
 	}
 	return nil
 }

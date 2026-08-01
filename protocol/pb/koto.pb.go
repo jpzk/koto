@@ -241,10 +241,15 @@ func (x *RunScriptReq) GetScript() string {
 }
 
 type ScriptEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Event         string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"` // data | end | error
-	Chunk         []byte                 `protobuf:"bytes,2,opt,name=chunk,proto3" json:"chunk,omitempty"` // data: raw combined stdout+stderr bytes, in stream order
-	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"` // error: what failed (spawn, VM dial, …)
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Event string                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"` // data | end | error | event
+	Chunk []byte                 `protobuf:"bytes,2,opt,name=chunk,proto3" json:"chunk,omitempty"` // data: raw combined stdout+stderr bytes, in stream order
+	Error string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"` // error: what failed (spawn, VM dial, …)
+	// event: one chat-grammar frame, present when JobTailReq.parsed asked the
+	// daemon to run the job's output through the same [[marker]] parser the
+	// group log tailer uses (a cs-subagent job writes that framing). chunk is
+	// empty on these frames.
+	Parsed        *Event `protobuf:"bytes,4,opt,name=parsed,proto3" json:"parsed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -298,6 +303,13 @@ func (x *ScriptEvent) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *ScriptEvent) GetParsed() *Event {
+	if x != nil {
+		return x.Parsed
+	}
+	return nil
 }
 
 // One client->server message. `group` is repeated on every variant (see the
@@ -1985,10 +1997,15 @@ func (x *JobLogsReq) GetTail() int64 {
 }
 
 type JobTailReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	Tail          int64                  `protobuf:"varint,3,opt,name=tail,proto3" json:"tail,omitempty"` // initial window bytes before following; 0 => 65536
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Group string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Id    string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Tail  int64                  `protobuf:"varint,3,opt,name=tail,proto3" json:"tail,omitempty"` // initial window bytes before following; 0 => 65536
+	// Parse the output stream with the daemon's log-tailer grammar and send
+	// `event` frames (ScriptEvent.parsed) instead of raw `data` chunks. Lets
+	// clients render agent-framed job output (cs-job spawn) exactly like a
+	// chat turn without reimplementing the marker grammar client-side.
+	Parsed        bool `protobuf:"varint,4,opt,name=parsed,proto3" json:"parsed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2042,6 +2059,13 @@ func (x *JobTailReq) GetTail() int64 {
 		return x.Tail
 	}
 	return 0
+}
+
+func (x *JobTailReq) GetParsed() bool {
+	if x != nil {
+		return x.Parsed
+	}
+	return false
 }
 
 type JobLogsResp struct {
@@ -3393,11 +3417,12 @@ const file_koto_proto_rawDesc = "" +
 	"\asession\x18\r \x01(\tR\asession\"<\n" +
 	"\fRunScriptReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
-	"\x06script\x18\x02 \x01(\tR\x06script\"O\n" +
+	"\x06script\x18\x02 \x01(\tR\x06script\"t\n" +
 	"\vScriptEvent\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05chunk\x18\x02 \x01(\fR\x05chunk\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"\xad\x01\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12#\n" +
+	"\x06parsed\x18\x04 \x01(\v2\v.koto.EventR\x06parsed\"\xad\x01\n" +
 	"\n" +
 	"ShellInput\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12%\n" +
@@ -3536,12 +3561,13 @@ const file_koto_proto_rawDesc = "" +
 	"JobLogsReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
-	"\x04tail\x18\x03 \x01(\x03R\x04tail\"F\n" +
+	"\x04tail\x18\x03 \x01(\x03R\x04tail\"^\n" +
 	"\n" +
 	"JobTailReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
-	"\x04tail\x18\x03 \x01(\x03R\x04tail\"\x8a\x01\n" +
+	"\x04tail\x18\x03 \x01(\x03R\x04tail\x12\x16\n" +
+	"\x06parsed\x18\x04 \x01(\bR\x06parsed\"\x8a\x01\n" +
 	"\vJobLogsResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x1f\n" +
@@ -3736,91 +3762,92 @@ var file_koto_proto_goTypes = []any{
 	(*structpb.Struct)(nil), // 54: google.protobuf.Struct
 }
 var file_koto_proto_depIdxs = []int32{
-	4,  // 0: koto.ShellInput.open:type_name -> koto.ShellOpen
-	5,  // 1: koto.ShellInput.resize:type_name -> koto.ShellResize
-	9,  // 2: koto.GroupInfo.jobs:type_name -> koto.JobInfo
-	51, // 3: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
-	53, // 4: koto.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
-	21, // 5: koto.ConfigReq.skills_set:type_name -> koto.SkillList
-	9,  // 6: koto.JobsResp.jobs:type_name -> koto.JobInfo
-	9,  // 7: koto.JobLogsResp.job:type_name -> koto.JobInfo
-	52, // 8: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
-	0,  // 9: koto.HistoryResp.events:type_name -> koto.Event
-	54, // 10: koto.ConfigResp.config:type_name -> google.protobuf.Struct
-	54, // 11: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
-	54, // 12: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
-	10, // 13: koto.SkillsResp.skills:type_name -> koto.SkillItem
-	11, // 14: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
-	11, // 15: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
-	54, // 16: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
-	54, // 17: koto.AclResp.acl:type_name -> google.protobuf.Struct
-	8,  // 18: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
-	8,  // 19: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
-	12, // 20: koto.Koto.Spawn:input_type -> koto.SpawnReq
-	13, // 21: koto.Koto.Send:input_type -> koto.SendReq
-	15, // 22: koto.Koto.List:input_type -> koto.ListReq
-	14, // 23: koto.Koto.Stop:input_type -> koto.GroupReq
-	14, // 24: koto.Koto.Interrupt:input_type -> koto.GroupReq
-	14, // 25: koto.Koto.Destroy:input_type -> koto.GroupReq
-	14, // 26: koto.Koto.Restart:input_type -> koto.GroupReq
-	20, // 27: koto.Koto.History:input_type -> koto.HistoryReq
-	22, // 28: koto.Koto.Config:input_type -> koto.ConfigReq
-	31, // 29: koto.Koto.Metrics:input_type -> koto.MetricsReq
-	14, // 30: koto.Koto.Clear:input_type -> koto.GroupReq
-	28, // 31: koto.Koto.Skills:input_type -> koto.SkillListReq
-	29, // 32: koto.Koto.SkillNew:input_type -> koto.SkillNewReq
-	30, // 33: koto.Koto.SkillRead:input_type -> koto.SkillReadReq
-	23, // 34: koto.Koto.Jobs:input_type -> koto.JobsReq
-	25, // 35: koto.Koto.JobLogs:input_type -> koto.JobLogsReq
-	26, // 36: koto.Koto.JobTail:input_type -> koto.JobTailReq
-	32, // 37: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
-	33, // 38: koto.Koto.SchedList:input_type -> koto.SchedListReq
-	34, // 39: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
-	35, // 40: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
-	34, // 41: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
-	47, // 42: koto.Koto.AclGet:input_type -> koto.AclGetReq
-	48, // 43: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
-	49, // 44: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
-	1,  // 45: koto.Koto.RunScript:input_type -> koto.RunScriptReq
-	3,  // 46: koto.Koto.AttachShell:input_type -> koto.ShellInput
-	18, // 47: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
-	16, // 48: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
-	17, // 49: koto.Koto.WatchState:input_type -> koto.WatchReq
-	37, // 50: koto.Koto.Spawn:output_type -> koto.SpawnResp
-	36, // 51: koto.Koto.Send:output_type -> koto.BaseResp
-	38, // 52: koto.Koto.List:output_type -> koto.ListResp
-	36, // 53: koto.Koto.Stop:output_type -> koto.BaseResp
-	36, // 54: koto.Koto.Interrupt:output_type -> koto.BaseResp
-	36, // 55: koto.Koto.Destroy:output_type -> koto.BaseResp
-	37, // 56: koto.Koto.Restart:output_type -> koto.SpawnResp
-	39, // 57: koto.Koto.History:output_type -> koto.HistoryResp
-	40, // 58: koto.Koto.Config:output_type -> koto.ConfigResp
-	41, // 59: koto.Koto.Metrics:output_type -> koto.MetricsResp
-	36, // 60: koto.Koto.Clear:output_type -> koto.BaseResp
-	42, // 61: koto.Koto.Skills:output_type -> koto.SkillsResp
-	43, // 62: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
-	44, // 63: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
-	24, // 64: koto.Koto.Jobs:output_type -> koto.JobsResp
-	27, // 65: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
-	2,  // 66: koto.Koto.JobTail:output_type -> koto.ScriptEvent
-	45, // 67: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
-	46, // 68: koto.Koto.SchedList:output_type -> koto.SchedListResp
-	36, // 69: koto.Koto.SchedDel:output_type -> koto.BaseResp
-	36, // 70: koto.Koto.SchedToggle:output_type -> koto.BaseResp
-	36, // 71: koto.Koto.SchedRun:output_type -> koto.BaseResp
-	50, // 72: koto.Koto.AclGet:output_type -> koto.AclResp
-	50, // 73: koto.Koto.AclSetRole:output_type -> koto.AclResp
-	50, // 74: koto.Koto.AclDelRole:output_type -> koto.AclResp
-	2,  // 75: koto.Koto.RunScript:output_type -> koto.ScriptEvent
-	6,  // 76: koto.Koto.AttachShell:output_type -> koto.ShellFrame
-	0,  // 77: koto.Koto.SubscribeGroup:output_type -> koto.Event
-	7,  // 78: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
-	19, // 79: koto.Koto.WatchState:output_type -> koto.StateFrame
-	50, // [50:80] is the sub-list for method output_type
-	20, // [20:50] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	0,  // 0: koto.ScriptEvent.parsed:type_name -> koto.Event
+	4,  // 1: koto.ShellInput.open:type_name -> koto.ShellOpen
+	5,  // 2: koto.ShellInput.resize:type_name -> koto.ShellResize
+	9,  // 3: koto.GroupInfo.jobs:type_name -> koto.JobInfo
+	51, // 4: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
+	53, // 5: koto.ConfigReq.skills_clear:type_name -> google.protobuf.Empty
+	21, // 6: koto.ConfigReq.skills_set:type_name -> koto.SkillList
+	9,  // 7: koto.JobsResp.jobs:type_name -> koto.JobInfo
+	9,  // 8: koto.JobLogsResp.job:type_name -> koto.JobInfo
+	52, // 9: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
+	0,  // 10: koto.HistoryResp.events:type_name -> koto.Event
+	54, // 11: koto.ConfigResp.config:type_name -> google.protobuf.Struct
+	54, // 12: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
+	54, // 13: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	10, // 14: koto.SkillsResp.skills:type_name -> koto.SkillItem
+	11, // 15: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
+	11, // 16: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
+	54, // 17: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
+	54, // 18: koto.AclResp.acl:type_name -> google.protobuf.Struct
+	8,  // 19: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
+	8,  // 20: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
+	12, // 21: koto.Koto.Spawn:input_type -> koto.SpawnReq
+	13, // 22: koto.Koto.Send:input_type -> koto.SendReq
+	15, // 23: koto.Koto.List:input_type -> koto.ListReq
+	14, // 24: koto.Koto.Stop:input_type -> koto.GroupReq
+	14, // 25: koto.Koto.Interrupt:input_type -> koto.GroupReq
+	14, // 26: koto.Koto.Destroy:input_type -> koto.GroupReq
+	14, // 27: koto.Koto.Restart:input_type -> koto.GroupReq
+	20, // 28: koto.Koto.History:input_type -> koto.HistoryReq
+	22, // 29: koto.Koto.Config:input_type -> koto.ConfigReq
+	31, // 30: koto.Koto.Metrics:input_type -> koto.MetricsReq
+	14, // 31: koto.Koto.Clear:input_type -> koto.GroupReq
+	28, // 32: koto.Koto.Skills:input_type -> koto.SkillListReq
+	29, // 33: koto.Koto.SkillNew:input_type -> koto.SkillNewReq
+	30, // 34: koto.Koto.SkillRead:input_type -> koto.SkillReadReq
+	23, // 35: koto.Koto.Jobs:input_type -> koto.JobsReq
+	25, // 36: koto.Koto.JobLogs:input_type -> koto.JobLogsReq
+	26, // 37: koto.Koto.JobTail:input_type -> koto.JobTailReq
+	32, // 38: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
+	33, // 39: koto.Koto.SchedList:input_type -> koto.SchedListReq
+	34, // 40: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
+	35, // 41: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
+	34, // 42: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
+	47, // 43: koto.Koto.AclGet:input_type -> koto.AclGetReq
+	48, // 44: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
+	49, // 45: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
+	1,  // 46: koto.Koto.RunScript:input_type -> koto.RunScriptReq
+	3,  // 47: koto.Koto.AttachShell:input_type -> koto.ShellInput
+	18, // 48: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
+	16, // 49: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
+	17, // 50: koto.Koto.WatchState:input_type -> koto.WatchReq
+	37, // 51: koto.Koto.Spawn:output_type -> koto.SpawnResp
+	36, // 52: koto.Koto.Send:output_type -> koto.BaseResp
+	38, // 53: koto.Koto.List:output_type -> koto.ListResp
+	36, // 54: koto.Koto.Stop:output_type -> koto.BaseResp
+	36, // 55: koto.Koto.Interrupt:output_type -> koto.BaseResp
+	36, // 56: koto.Koto.Destroy:output_type -> koto.BaseResp
+	37, // 57: koto.Koto.Restart:output_type -> koto.SpawnResp
+	39, // 58: koto.Koto.History:output_type -> koto.HistoryResp
+	40, // 59: koto.Koto.Config:output_type -> koto.ConfigResp
+	41, // 60: koto.Koto.Metrics:output_type -> koto.MetricsResp
+	36, // 61: koto.Koto.Clear:output_type -> koto.BaseResp
+	42, // 62: koto.Koto.Skills:output_type -> koto.SkillsResp
+	43, // 63: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
+	44, // 64: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
+	24, // 65: koto.Koto.Jobs:output_type -> koto.JobsResp
+	27, // 66: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
+	2,  // 67: koto.Koto.JobTail:output_type -> koto.ScriptEvent
+	45, // 68: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
+	46, // 69: koto.Koto.SchedList:output_type -> koto.SchedListResp
+	36, // 70: koto.Koto.SchedDel:output_type -> koto.BaseResp
+	36, // 71: koto.Koto.SchedToggle:output_type -> koto.BaseResp
+	36, // 72: koto.Koto.SchedRun:output_type -> koto.BaseResp
+	50, // 73: koto.Koto.AclGet:output_type -> koto.AclResp
+	50, // 74: koto.Koto.AclSetRole:output_type -> koto.AclResp
+	50, // 75: koto.Koto.AclDelRole:output_type -> koto.AclResp
+	2,  // 76: koto.Koto.RunScript:output_type -> koto.ScriptEvent
+	6,  // 77: koto.Koto.AttachShell:output_type -> koto.ShellFrame
+	0,  // 78: koto.Koto.SubscribeGroup:output_type -> koto.Event
+	7,  // 79: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
+	19, // 80: koto.Koto.WatchState:output_type -> koto.StateFrame
+	51, // [51:81] is the sub-list for method output_type
+	21, // [21:51] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_koto_proto_init() }

@@ -50,9 +50,11 @@ RUN useradd -u 1000 -m -s /bin/bash node
 
 # `sudo` ships in the image, but the NOPASSWD grant for node is NOT baked here —
 # it's gated per group by config.json "root"=yes|no and installed at boot by
-# fc-agent (handleInit → enableSudo), since the root drive is read-only. The
-# microVM's KVM boundary contains root-in-guest, so granting sudo does not widen
-# the host blast radius (see docs/firecracker-vsock.md / the trust model).
+# fc-agent (handleInit → enableRoot), which also mounts persistent overlays on
+# /usr /etc /var /opt (upper on the workspace disk) so `sudo dnf install`
+# persists without ever writing this shared read-only image. The microVM's KVM
+# boundary contains root-in-guest, so granting sudo does not widen the host
+# blast radius (see docs/firecracker-vsock.md / the trust model).
 
 # Rootless podman setup for node:
 #  - subuid/subgid: a subordinate id range so newuidmap can build the userns.

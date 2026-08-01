@@ -139,9 +139,14 @@ message RunScriptReq {
 }
 
 message ScriptEvent {
-  string event = 1; // data | end | error
+  string event = 1; // data | end | error | event
   bytes  chunk = 2; // data: raw combined stdout+stderr bytes, in stream order
   string error = 3; // error: what failed (spawn, VM dial, …)
+  // event: one chat-grammar frame, present when JobTailReq.parsed asked the
+  // daemon to run the job's output through the same [[marker]] parser the
+  // group log tailer uses (a cs-subagent job writes that framing). chunk is
+  // empty on these frames.
+  Event  parsed = 4;
 }
 
 // ---- shared shell (AttachShell) --------------------------------------------
@@ -364,6 +369,11 @@ message JobTailReq {
   string group = 1;
   string id    = 2;
   int64  tail  = 3; // initial window bytes before following; 0 => 65536
+  // Parse the output stream with the daemon's log-tailer grammar and send
+  // `event` frames (ScriptEvent.parsed) instead of raw `data` chunks. Lets
+  // clients render agent-framed job output (cs-job spawn) exactly like a
+  // chat turn without reimplementing the marker grammar client-side.
+  bool   parsed = 4;
 }
 
 message JobLogsResp {

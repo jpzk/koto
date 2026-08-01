@@ -397,7 +397,22 @@ func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) err
 	}()
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	// Parsed mode runs each line through the same logParser grammar the group
+	// log tailer uses (a cs-subagent job's out carries that framing), sending
+	// typed `event` frames the client renders exactly like chat. Raw mode
+	// keeps the original sanitized-line chunks. The tail window can open
+	// mid-block; the grammar degrades gracefully there (stray close markers
+	// are swallowed, body-before-window is simply absent).
+	lp := logParser{}
 	for sc.Scan() {
+		if r.Parsed {
+			for _, ev := range lp.feedLine(sc.Text()) {
+				if serr := stream.Send(&pb.ScriptEvent{Event: "event", Parsed: toPBEvent(sanitizeEvent(ev))}); serr != nil {
+					return serr
+				}
+			}
+			continue
+		}
 		line := sanitize(sc.Text())
 		if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: []byte(line + "\n")}); serr != nil {
 			return serr

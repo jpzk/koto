@@ -28,6 +28,11 @@
 #                              completion callback, since the caller is
 #                              consuming the result right here.
 #   cs-job status <id>         print status (running|done|orphaned)
+#   cs-job peek [-n N|-new] <id>
+#                              NON-BLOCKING progress check: status header +
+#                              a bounded slice of the output, returns at once.
+#                              The polling counterpart to `wait` — mid-turn
+#                              peeking never holds the group hostage.
 #   cs-job logs <id>           cat the job's combined output
 #   cs-job rm <id>             remove one job dir
 #   cs-job clean               remove all non-running job dirs
@@ -36,6 +41,10 @@ set -e
 JOBS=/workspace/.cs/jobs
 LOCK="$JOBS/.lock"
 MAX=${CS_MAX_JOBS:-8}
+# Byte cap on one `peek`. A peek lands in the agent's context, so an output
+# firehose must not be able to blow the turn: we print the TAIL of the slice
+# and say how much was skipped.
+PEEK_MAX=${CS_PEEK_MAX:-8000}
 mkdir -p "$JOBS"
 
 jstatus() { cat "$JOBS/$1/status" 2>/dev/null || echo unknown; }
@@ -139,6 +148,52 @@ case "$cmd" in
     done
     echo "$(jstatus "$id") rc=$(cat "$JOBS/$id/rc" 2>/dev/null || echo unknown)"
     ;;
+  peek)
+    # Non-blocking look at a running job. `wait` blocks the whole group until
+    # the job ends; `peek` reads what exists right now and returns — so an
+    # agent can check on a long build mid-turn, or across turns, without
+    # stalling the conversation.
+    #   peek <id>        last $lines lines
+    #   peek -n N <id>   last N lines
+    #   peek -new <id>   only what was appended since this job's LAST peek
+    #                    (byte cursor in <job>/peek, so successive peeks —
+    #                    including from later turns — never repeat output)
+    lines=40; mode=tail
+    while :; do
+      case "${1:-}" in
+        -n) lines=${2:?cs-job peek -n <lines>}; shift 2 ;;
+        -new|--new) mode=new; shift ;;
+        *) break ;;
+      esac
+    done
+    id=${1:?cs-job peek [-n LINES|-new] <id>}; D=$JOBS/$id
+    [ -d "$D" ] || { echo "cs-job: no such job $id" >&2; exit 2; }
+    # 2>/dev/null BEFORE the input redirect: redirections apply left to right,
+    # so this is what silences the shell's own error on a job whose `out` does
+    # not exist yet (mint → exec race).
+    total=$(wc -c 2>/dev/null < "$D/out" | tr -d ' '); [ -n "$total" ] || total=0
+    started=$(cat "$D/started" 2>/dev/null || echo '')
+    age=-; [ -n "$started" ] && age=$(( $(date +%s) - started ))
+    printf '%s %s rc=%s bytes=%s age=%ss\n' "$id" "$(jstatus "$id")" \
+      "$(cat "$D/rc" 2>/dev/null || echo -)" "$total" "$age"
+    if [ "$mode" = new ]; then
+      off=$(cat "$D/peek" 2>/dev/null || echo 0)
+      case "$off" in ''|*[!0-9]*) off=0 ;; esac
+      # Output truncated/rewritten under us — restart from the top.
+      [ "$off" -gt "$total" ] && off=0
+      printf '%s' "$total" > "$D/peek"
+      if [ "$off" -eq "$total" ]; then
+        echo "(no new output)"
+      elif [ $((total - off)) -gt "$PEEK_MAX" ]; then
+        echo "(skipped $((total - off - PEEK_MAX)) of $((total - off)) new bytes)"
+        tail -c "$PEEK_MAX" "$D/out"
+      else
+        tail -c +$((off + 1)) "$D/out"
+      fi
+    else
+      tail -n "$lines" "$D/out" 2>/dev/null | tail -c "$PEEK_MAX" || true
+    fi
+    ;;
   status)  jstatus "${1:?cs-job status <id>}" ;;
   logs)    cat "$JOBS/${1:?cs-job logs <id>}/out" 2>/dev/null || { echo "cs-job: no output for $1" >&2; exit 2; } ;;
   rm)      rm -rf "$JOBS/${1:?cs-job rm <id>}"; echo removed ;;
@@ -152,7 +207,7 @@ case "$cmd" in
     echo "removed $n"
     ;;
   *)
-    echo "usage: cs-job {run [--no-notify] -- <cmd...>|spawn [--no-notify] <prompt...>|list|wait <id> [secs]|status <id>|logs <id>|rm <id>|clean}" >&2
+    echo "usage: cs-job {run [--no-notify] -- <cmd...>|spawn [--no-notify] <prompt...>|list|wait <id> [secs]|status <id>|peek [-n LINES|-new] <id>|logs <id>|rm <id>|clean}" >&2
     exit 2
     ;;
 esac

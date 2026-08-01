@@ -94,9 +94,9 @@ func TestLogViewRescopesOnGroupSwitch(t *testing.T) {
 	}
 }
 
-// The tree cursor keeps its highlight while the log view is open alongside
-// the tree (shift+↑/↓ still retargets it there), but not from the shell view
-// or when the log view was entered from the input side.
+// The tree cursor keeps its highlight while the log view or the shell pane
+// is open alongside the tree (it marks the log scope / the shell's active
+// conversation), but not when either view was entered from the input side.
 func TestTreeCursorLiveAcrossViews(t *testing.T) {
 	m := logModel(t, "main")
 	cases := []struct {
@@ -107,7 +107,8 @@ func TestTreeCursorLiveAcrossViews(t *testing.T) {
 		{"tree focused", focusTree, focusInput, true},
 		{"log from tree", focusLog, focusTree, true},
 		{"log from input", focusLog, focusInput, false},
-		{"shell from tree", focusShell, focusTree, false},
+		{"shell from tree", focusShell, focusTree, true},
+		{"shell from input", focusShell, focusInput, false},
 		{"input", focusInput, focusInput, false},
 	}
 	for _, c := range cases {
