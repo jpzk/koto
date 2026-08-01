@@ -200,8 +200,17 @@ func (m Model) View() string {
 // --- status bar --------------------------------------------------------------
 
 func (m Model) renderStatusBar(spin string) string {
-	left := m.renderStatusLeft()
-	right := m.renderStatusRight(spin)
+	// Focus indicator: an amber dot pinned to the far edge of the bar —
+	// leftmost while the tree/chat side owns the keyboard, rightmost while
+	// the terminal pane does (alt+←/→ switches sides). Both cells are always
+	// reserved so the bar doesn't shift a column on focus changes.
+	dot := lipgloss.NewStyle().Foreground(cAmber).Render("●")
+	ldot, rdot := dot, " "
+	if m.focus == focusShell {
+		ldot, rdot = " ", dot
+	}
+	left := ldot + m.renderStatusLeft()
+	right := m.renderStatusRight(spin) + rdot
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
 	gap := m.width - leftW - rightW
@@ -1085,9 +1094,12 @@ func (m Model) renderInput() string {
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
 	if m.focus == focusTree {
-		// ⇥ rotates on (terminal next, if it's open); ⎋ (= ctrl+[) and ↩ go
-		// straight back to the message bar.
-		left := " ↑↓ switch · ⇥ next · ⎋/↩ back"
+		// ⇥ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
+		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
+		left := " ↑↓ switch · ^r prompts · ⇥/⎋ close"
+		if m.shellFocusable() {
+			left += " · ⌥→ term"
+		}
 		right := m.renderProviderModel()
 		leftW := lipgloss.Width(left)
 		rightW := lipgloss.Width(right)
@@ -1107,11 +1119,10 @@ func (m Model) renderHint() string {
 	} else {
 		parts = append(parts, " ↩ send")
 	}
-	nextHint := "⇥ tree"
+	parts = append(parts, "↑↓ scroll", "⇥/⎋ tree")
 	if m.shellFocusable() {
-		nextHint = "⇥ next" // tab rotates message bar → tree → terminal
+		parts = append(parts, "⌥→ term")
 	}
-	parts = append(parts, "↑↓ scroll", nextHint, "⎋ tree")
 	thoughtsHint := "^t thoughts"
 	if m.expandedThoughts {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^t hide")

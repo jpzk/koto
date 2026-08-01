@@ -2413,19 +2413,51 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// must reach bash history search, ctrl+d must be EOF, ctrl+l a
 		// redraw. Found the hard way: with this dispatch below the chrome
 		// bindings, ctrl+c in the shell hit the quit branch and killed the
-		// whole TUI. Exactly two keys are reserved locally: ctrl+] CLOSES the
-		// pane (closeShell, which hands focus back on the way out — an
-		// open/close toggle, never a focus toggle), and tab rotates focus
-		// onward to the message bar (cycleFocus), leaving the pane open. The
-		// tab reservation is why bash completion doesn't work inside the pane:
-		// tab means "next zone" in every zone, the guest included. Exiting the
-		// TUI from the shell is tab (or ctrl+]) then ctrl+c.
+		// whole TUI. The reserved local keys: ctrl+] CLOSES the pane
+		// (closeShell, which hands focus back on the way out — an
+		// open/close toggle, never a focus toggle), alt+← moves focus
+		// back to the tree/chat side (exitShell), leaving the pane open,
+		// and esc (== ctrl+[) toggles the tree column — see its case below.
+		// Tab is deliberately NOT reserved — it reaches the guest, so bash
+		// completion works inside the pane; alt+←/→ are the focus keys.
+		// Exiting the TUI from the shell is alt+← (or ctrl+]) then ctrl+c.
 		switch s {
 		case "ctrl+]":
 			m.closeShell()
 			return m, nil
-		case "tab":
-			m.cycleFocus()
+		case "esc":
+			// esc and ctrl+[ are the same byte (0x1b) — this is the ctrl+[
+			// binding, kept consistent with the rest of the focus keymap: it
+			// toggles the tree column open/closed beside the pane. The pty
+			// KEEPS focus — only the layout changes. treePaneW keys off
+			// preShellFocus while the shell is focused, and preShellFocus
+			// doubles as alt+←'s return target, so flipping it here keeps
+			// "tree visible ⇒ alt+← lands in the tree" consistent. The cost
+			// is a literal ESC no longer reaching the guest on this key —
+			// alt+esc (below) is the escape hatch for vim/less inside.
+			if m.preShellFocus == focusTree {
+				m.preShellFocus = focusInput
+			} else {
+				m.preShellFocus = focusTree
+			}
+			m.resizeViewport()
+			m.refreshLog()
+			return m, nil
+		case "alt+esc":
+			// Deliver a single literal ESC to the guest — plain esc is the
+			// tree toggle above, so this is the only way to feed the escape
+			// key to a full-screen guest app (vim, less).
+			if m.shell != nil {
+				m.shell.send([]byte{0x1b})
+			}
+			return m, nil
+		case "alt+left":
+			m.exitShell()
+			return m, nil
+		case "alt+right":
+			// Already on the terminal side — swallow rather than forward:
+			// it's a focus key everywhere else, and leaking ESC-[C into a
+			// guest readline as a half-recognized word-jump would be worse.
 			return m, nil
 		}
 		return m.handleShellKey(msg)
@@ -2532,6 +2564,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// chat input or in tree navigation.
 		return m.handleLogKey(msg)
 	}
+	if s == "alt+right" {
+		// Focus the terminal pane. A pure focus move — nothing opens or
+		// closes (ctrl+] is the open/close toggle) — so it's a no-op when
+		// no live pane is on screen. alt+← is the way back (handled in the
+		// shell-focus block above). Costs the textinput its alt+arrow
+		// word-jump; ctrl+←/→ still does that.
+		if m.shellFocusable() {
+			m.focusShellPane()
+		}
+		return m, nil
+	}
+	if s == "alt+left" {
+		return m, nil // already on the tree/chat side — reserved as a focus key
+	}
 	if s == "esc" {
 		// esc and ctrl+[ are the SAME key — both are byte 0x1b, terminals
 		// can't tell them apart and Bubble Tea reports both as "esc". So this
@@ -2551,10 +2597,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if _, thinking := m.thinkingBuf[m.cur]; thinking {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
-		// Second meaning, with no turn to stop: the message-bar ↔ tree toggle
-		// that used to be on tab (tab now rotates across all open zones —
-		// cycleFocus). While a turn runs esc is the interrupt, so reach the
-		// tree with tab instead.
+		// Second meaning, with no turn to stop: the message-bar ↔ tree
+		// toggle. Tab is the same toggle and keeps working mid-turn (while
+		// a turn runs esc means interrupt, so reach the tree with tab).
 		if m.focus == focusTree {
 			m.exitTree()
 		} else {
@@ -2588,10 +2633,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "tab" {
-		// Tab rotates focus across the open zones (cycleFocus). The plain
-		// message-bar ↔ tree toggle it used to be now lives on esc / ctrl+[
-		// (same byte, see the esc handler above).
-		m.cycleFocus()
+		// Tab mirrors esc/ctrl+[ — the tree open/close toggle — but keeps
+		// working mid-turn (esc doubles as the interrupt then). It never
+		// reaches here with the pty focused: the shell-focus block forwards
+		// tab to the guest as a completion key; alt+←/→ move focus instead.
+		if m.focus == focusTree {
+			m.exitTree()
+		} else {
+			m.enterTree()
+			m.resizeViewport()
+			m.refreshLog()
+		}
 		return m, nil
 	}
 
@@ -2897,42 +2949,8 @@ func (m *Model) exitTree() {
 	m.refreshLog()
 }
 
-// cycleFocus is tab's rotation across the zones that are actually on screen:
-// message bar → tree → terminal → message bar, skipping the terminal when the
-// pane is closed (so with no shell open it degenerates to the old two-way
-// toggle). Composed entirely of the existing transitions — enterTree,
-// focusShellPane, exitTree, exitShell — so tab can't reach a state the other
-// bindings couldn't.
-//
-// Note the terminal leg costs the guest its tab key: while the pty is focused
-// every other keystroke is forwarded raw, but tab is reserved here, so bash
-// completion inside the shell is not available (deliberate — tab means "next
-// zone" everywhere, consistently).
-func (m *Model) cycleFocus() {
-	switch m.focus {
-	case focusTree:
-		if m.shellFocusable() {
-			m.focusShellPane()
-			return
-		}
-		m.exitTree()
-	case focusShell:
-		// Terminal → message bar. exitShell hands focus back to whatever
-		// preShellFocus recorded, which for a rotation arriving from the tree
-		// would bounce straight back into it — pin the target so the cycle
-		// keeps going forward. The pane stays open (ctrl+] is what closes it).
-		m.preShellFocus = focusInput
-		m.exitShell()
-	default: // focusInput (focusLog never reaches here — handleLogKey owns it)
-		m.enterTree()
-		// treeW changes with focus → log viewport width changes → re-wrap.
-		m.resizeViewport()
-		m.refreshLog()
-	}
-}
-
 // shellFocusable reports whether the terminal pane is a live focus target for
-// the tab rotation: attached, not ended, and open on screen.
+// alt+→: attached, not ended, and open on screen.
 func (m Model) shellFocusable() bool {
 	return m.shell != nil && !m.shell.ended && m.shellOpen
 }

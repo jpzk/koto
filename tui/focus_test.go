@@ -1,20 +1,34 @@
 package main
 
-// focus_test.go — the focus keymap: tab rotates across the zones that are on
-// screen (message bar → tree → terminal → message bar), esc / ctrl+[ is the
-// plain message-bar ↔ tree toggle tab used to be. Note esc and ctrl+[ are the
-// same byte (0x1b) — one binding, two names. See handleKey/cycleFocus.
+// focus_test.go — the focus keymap: tab and esc/ctrl+[ both toggle the tree
+// open/closed (esc doubles as the interrupt mid-turn, tab always toggles),
+// ctrl+] opens/closes the terminal pane, and alt+←/→ move focus between the
+// tree/chat side and the terminal pane without opening or closing anything.
+// While the pty is focused tab is NOT reserved — it reaches the guest as a
+// completion key — but esc IS: it toggles the tree beside the pane (alt+esc
+// feeds the guest a literal ESC instead). Note esc and ctrl+[ are the same
+// byte (0x1b) — one binding, two names. See handleKey (model.go).
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
+
+func stripANSI(s string) string { return ansi.Strip(s) }
 
 func press(t *testing.T, m Model, k tea.KeyType) Model {
 	t.Helper()
 	nm, _ := m.Update(tea.KeyMsg{Type: k})
+	return nm.(Model)
+}
+
+func pressAlt(t *testing.T, m Model, k tea.KeyType) Model {
+	t.Helper()
+	nm, _ := m.Update(tea.KeyMsg{Type: k, Alt: true})
 	return nm.(Model)
 }
 
@@ -30,9 +44,8 @@ func focusModel(t *testing.T) Model {
 	return m
 }
 
-// TestTabCycleWithoutShell: with no terminal open tab degenerates to the
-// two-way message bar ↔ tree rotation.
-func TestTabCycleWithoutShell(t *testing.T) {
+// TestTabTogglesTree: tab is the tree open/close toggle, both directions.
+func TestTabTogglesTree(t *testing.T) {
 	m := focusModel(t)
 	m = press(t, m, tea.KeyTab)
 	if m.focus != focusTree {
@@ -44,48 +57,122 @@ func TestTabCycleWithoutShell(t *testing.T) {
 	}
 }
 
-// TestTabCycleWithShell: with the pane open tab visits all three zones in
-// order and comes back round, leaving the pane open throughout.
-func TestTabCycleWithShell(t *testing.T) {
+// TestTabNeverFocusesShell: with the pane open tab still only toggles the
+// tree — it never lands on the terminal (that's alt+→) and never closes the
+// pane.
+func TestTabNeverFocusesShell(t *testing.T) {
 	m := splitShellModel(t) // input focus, shellOpen, wide enough to split
-	for i, want := range []focusZone{focusTree, focusShell, focusInput, focusTree} {
+	for i, want := range []focusZone{focusTree, focusInput, focusTree} {
 		m = press(t, m, tea.KeyTab)
 		if m.focus != want {
 			t.Fatalf("step %d: focus = %v, want %v", i, m.focus, want)
 		}
 		if !m.shellOpen {
-			t.Fatalf("step %d: tab closed the pane — it only moves focus", i)
+			t.Fatalf("step %d: tab closed the pane — it only toggles the tree", i)
 		}
 	}
 }
 
-// TestTabSkipsEndedShell: a dead pty is not a focus target — the rotation
-// falls back to the two-way toggle.
-func TestTabSkipsEndedShell(t *testing.T) {
+// TestTabFromPtyReachesGuest: tab is NOT reserved while the pty is focused —
+// it forwards to the guest as a completion key instead of moving focus.
+func TestTabFromPtyReachesGuest(t *testing.T) {
 	m := splitShellModel(t)
-	m.shell.ended = true
+	m.focusShellPane()
 	m = press(t, m, tea.KeyTab)
-	if m.focus != focusTree {
-		t.Fatalf("focus = %v, want focusTree", m.focus)
+	if m.focus != focusShell {
+		t.Fatalf("focus = %v after tab in the pty, want focusShell (tab belongs to the guest)", m.focus)
 	}
-	m = press(t, m, tea.KeyTab)
-	if m.focus != focusInput {
-		t.Fatalf("focus = %v after tab from tree, want focusInput (ended pty skipped)", m.focus)
+	if !m.shellOpen {
+		t.Fatal("tab closed the pane — it must be forwarded to the guest")
 	}
 }
 
-// TestTabFromPtyDoesNotReachGuest: tab is reserved by the TUI while the pty is
-// focused — it rotates on instead of being forwarded as a completion key.
-func TestTabFromPtyDoesNotReachGuest(t *testing.T) {
+// TestAltRightFocusesShell: alt+→ moves focus onto the open pane, recording
+// where it came from, and closes nothing.
+func TestAltRightFocusesShell(t *testing.T) {
 	m := splitShellModel(t)
-	m.focusShellPane()
-	before := m.shell.term.String()
-	m = press(t, m, tea.KeyTab)
-	if m.focus != focusInput {
-		t.Fatalf("focus = %v after tab from the pty, want focusInput", m.focus)
+	m = pressAlt(t, m, tea.KeyRight)
+	if m.focus != focusShell {
+		t.Fatalf("focus = %v after alt+right, want focusShell", m.focus)
 	}
-	if got := m.shell.term.String(); got != before {
-		t.Error("tab reached the guest pty — it must be reserved for focus rotation")
+	if !m.shellOpen {
+		t.Fatal("alt+right closed the pane — it must only move focus")
+	}
+	if m.preShellFocus != focusInput {
+		t.Fatalf("preShellFocus = %v, want focusInput", m.preShellFocus)
+	}
+}
+
+// TestAltRightFromTree: arriving from tree focus keeps the tree as the
+// return target (alt+← goes back to where the user was).
+func TestAltRightFromTree(t *testing.T) {
+	m := splitShellModel(t)
+	m = press(t, m, tea.KeyTab) // open tree
+	m = pressAlt(t, m, tea.KeyRight)
+	if m.focus != focusShell {
+		t.Fatalf("focus = %v after alt+right from tree, want focusShell", m.focus)
+	}
+	m = pressAlt(t, m, tea.KeyLeft)
+	if m.focus != focusTree {
+		t.Fatalf("focus = %v after alt+left, want focusTree (the side it left from)", m.focus)
+	}
+	if !m.shellOpen {
+		t.Fatal("the focus round-trip closed the pane")
+	}
+}
+
+// TestAltRightNoShell: with no pane on screen alt+→ is a no-op, not an open.
+func TestAltRightNoShell(t *testing.T) {
+	m := focusModel(t)
+	m = pressAlt(t, m, tea.KeyRight)
+	if m.focus != focusInput || m.shellOpen {
+		t.Fatalf("focus = %v shellOpen = %v — alt+right must not open anything", m.focus, m.shellOpen)
+	}
+}
+
+// TestAltRightEndedShell: a dead pty is not a focus target.
+func TestAltRightEndedShell(t *testing.T) {
+	m := splitShellModel(t)
+	m.shell.ended = true
+	m = pressAlt(t, m, tea.KeyRight)
+	if m.focus != focusInput {
+		t.Fatalf("focus = %v — an ended pty must not take focus", m.focus)
+	}
+}
+
+// TestCtrlRBesideOpenShell: with the pane open but unfocused, ctrl+r still
+// opens the prompt-history picker on the chat side (in the pty it belongs to
+// bash history — covered by the shell-focus block owning every key).
+func TestCtrlRBesideOpenShell(t *testing.T) {
+	m := splitShellModel(t)
+	m = press(t, m, tea.KeyCtrlR)
+	if !m.picker.open {
+		t.Fatal("ctrl+r on the chat side must open the prompt picker")
+	}
+	if m.shellOpen != true {
+		t.Fatal("ctrl+r closed the shell pane")
+	}
+}
+
+// TestStatusDotFollowsFocus: the amber dot sits at the far left of the
+// status bar while the tree/chat side has focus, and at the far right while
+// the terminal pane does.
+func TestStatusDotFollowsFocus(t *testing.T) {
+	m := splitShellModel(t)
+	bar := stripANSI(m.renderStatusBar(" "))
+	if !strings.HasPrefix(bar, "●") {
+		t.Errorf("status bar %q — want the amber dot leftmost with chat-side focus", bar)
+	}
+	if strings.HasSuffix(strings.TrimRight(bar, " "), "●") {
+		t.Errorf("status bar %q — right dot lit without terminal focus", bar)
+	}
+	m.focusShellPane()
+	bar = stripANSI(m.renderStatusBar(" "))
+	if strings.HasPrefix(bar, "●") {
+		t.Errorf("status bar %q — left dot lit with terminal focus", bar)
+	}
+	if !strings.HasSuffix(bar, "●") {
+		t.Errorf("status bar %q — want the amber dot rightmost with terminal focus", bar)
 	}
 }
 
@@ -122,10 +209,23 @@ func TestEscInterruptsWhileBusy(t *testing.T) {
 	}
 }
 
-// TestEscInPtyReachesGuest: esc is NOT reserved while the pty is focused (vim
-// would be unusable) — it goes to the guest like every other key but tab and
-// ctrl+].
-func TestEscInPtyReachesGuest(t *testing.T) {
+// TestTabTogglesTreeWhileBusy: tab has no interrupt meaning, so it reaches
+// the tree even mid-turn (that's its role vs esc).
+func TestTabTogglesTreeWhileBusy(t *testing.T) {
+	m := focusModel(t)
+	m.busy = map[string]bool{"main": true}
+	m = press(t, m, tea.KeyTab)
+	if m.focus != focusTree {
+		t.Fatalf("focus = %v after tab while busy, want focusTree", m.focus)
+	}
+}
+
+// TestEscInPtyTogglesTree: esc (== ctrl+[) IS reserved while the pty is
+// focused — it toggles the tree column beside the pane, both directions,
+// while the pty keeps focus. The flip goes through preShellFocus (what
+// treePaneW keys off while the shell is focused, and where alt+← returns
+// to). Guest apps get their literal ESC via alt+esc instead.
+func TestEscInPtyTogglesTree(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
@@ -139,6 +239,38 @@ func TestEscInPtyReachesGuest(t *testing.T) {
 
 	m = press(t, m, tea.KeyEscape)
 	if m.focus != focusShell {
-		t.Fatalf("focus = %v — esc must stay with the guest, not toggle the tree", m.focus)
+		t.Fatalf("focus = %v after esc, want focusShell (only the tree toggles)", m.focus)
+	}
+	if m.treePaneW() == 0 {
+		t.Fatal("tree column not shown after esc in the pty")
+	}
+	m = press(t, m, tea.KeyEscape)
+	if m.focus != focusShell || m.treePaneW() != 0 {
+		t.Fatalf("focus = %v treePaneW = %d after second esc, want focusShell + tree hidden",
+			m.focus, m.treePaneW())
+	}
+	if !m.shellOpen {
+		t.Fatal("esc closed the pane — it must only toggle the tree")
+	}
+}
+
+// TestAltEscSendsLiteralEsc: alt+esc is the literal-ESC hatch — it stays in
+// the pty (no tree toggle, no focus move) so the byte can reach the guest.
+func TestAltEscSendsLiteralEsc(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 200, 30
+	m.groups = map[string]GroupInfo{"main": {Running: true}}
+	m.cur = "main"
+	term := vt.NewEmulator(80, 20)
+	t.Cleanup(func() { _ = term.Close() })
+	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 80, rows: 20}
+	m.shellOpen = true
+	m.preShellFocus = focusInput
+	m.focus = focusShell
+
+	m = pressAlt(t, m, tea.KeyEscape)
+	if m.focus != focusShell || m.treePaneW() != 0 || !m.shellOpen {
+		t.Fatalf("alt+esc changed layout/focus (focus=%v treePaneW=%d shellOpen=%v) — it must only feed the guest",
+			m.focus, m.treePaneW(), m.shellOpen)
 	}
 }

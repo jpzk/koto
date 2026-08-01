@@ -449,10 +449,10 @@ func (m *Model) focusShellPane() {
 // exitShell returns key focus to whichever zone the user was in before
 // focusing the shell pane. The pane STAYS OPEN (shellOpen) — in split mode it
 // keeps rendering beside the chat column while the user types into the
-// message bar; a click on the grid focuses it again. Detaching focus is a
-// mouse/peek path only: ctrl+] and /shell off both CLOSE the pane (closeShell,
-// which calls through here to hand focus back). Deliberately does NOT close
-// m.shell either —
+// message bar; alt+← is the keyboard path here, a click on the grid (or
+// alt+→) focuses the pane again. ctrl+] and /shell off both CLOSE the pane
+// (closeShell, which calls through here to hand focus back). Deliberately
+// does NOT close m.shell either —
 // leaving the pane should not lose terminal state or force a redial; the
 // stream only tears down on group switch (enterShell) or TUI exit.
 func (m *Model) exitShell() {
@@ -520,11 +520,13 @@ func (m *Model) syncShellSize() {
 // (read-only), almost every keystroke here must reach the guest pty as raw
 // bytes — so this reconstructs the byte sequence a real terminal would have
 // sent from Bubble Tea's parsed tea.KeyMsg, rather than interpreting it
-// semantically. ctrl+] is the one reserved local escape (mirrors telnet's
-// convention, and `koto ctl shell`'s — see ctl_cli.go): it detaches back to
-// chat/tree focus without touching the remote session. That toggle is
-// handled globally in handleKey (model.go), before focus dispatch reaches
-// here, so it never falls through to this function.
+// semantically. The reserved local escapes — ctrl+] (close the pane,
+// mirroring telnet's convention and `koto ctl shell`'s — see ctl_cli.go),
+// alt+←/→ (move focus without closing anything), and esc/alt+esc (tree
+// toggle / literal-ESC hatch) — are handled in handleKey's shell-focus block
+// (model.go) before dispatch reaches here, so they never fall through to
+// this function. Tab is NOT reserved: it's forwarded like any other key, so
+// completion works in the guest shell.
 //
 // Known v1 gap, documented rather than silently missing: bracketed paste
 // is NOT translated — pasted text arrives as a plain rune burst (fine for
@@ -808,6 +810,6 @@ func (m Model) renderShellHint() string {
 			parts = append(parts, red.Render(txt))
 		}
 	}
-	parts = append(parts, "ctrl+] close", "⇥ next pane")
+	parts = append(parts, "⎋ tree", "⌥⎋ esc→guest", "ctrl+] close", "⌥← chat")
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
