@@ -288,6 +288,15 @@ type Model struct {
 	focus focusZone
 
 	treeIdx int
+	// treeSel is the identity (group, session, job; branch always "") of the
+	// row treeIdx points at — the selection anchor. treeRows() changes shape
+	// out from under the flat index without any keypress: jobs insert
+	// newest-first above their siblings, finished rows hide when their linger
+	// window expires, treeOrder re-buckets a group when it starts or stops.
+	// normalizeTreeCursor re-derives treeIdx from this identity after every
+	// update(); everything that moves the cursor on purpose must set it
+	// (selectTreeRow, enterTree).
+	treeSel treeRow
 
 	// vp drives the log scroll/clip. We stuff one big pre-wrapped content
 	// string into it via SetContent and let it handle vertical clipping +
@@ -1063,7 +1072,23 @@ func startWatchState() {
 
 // --- Update ------------------------------------------------------------------
 
+// Update wraps update() so the tree cursor is re-derived from its identity
+// anchor after EVERY message, on every early-return path out of the switch.
+// The handlers mutate the state treeRows() is built from (state frames, job
+// transitions, and — via nothing but time passing between ticks — linger
+// expiry), and View runs right after; this is the one choke point between
+// the two.
 func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(raw)
+	nm, ok := next.(Model)
+	if !ok {
+		return next, cmd
+	}
+	nm.normalizeTreeCursor()
+	return nm, cmd
+}
+
+func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := raw.(type) {
 
 	case tea.WindowSizeMsg:
@@ -1149,35 +1174,8 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-arm it now that the state is current; no-op when already on
 		// target or the pane is closed.
 		m.chaseShell()
-		// Keep the tree cursor (treeIdx → hovered row) locked to m.cur. up/down
-		// and enterTree() already move them in lockstep; re-deriving it here
-		// catches out-of-band m.cur changes (e.g. /new auto-switching to a
-		// freshly spawned group that only just appeared in this list refresh).
-		// Clamp first: when the list shrinks out from under the cursor (an
-		// out-of-band destroy pushed via WatchState) and m.cur itself is the
-		// vanished group, the re-derive loop won't run and a stale treeIdx
-		// would index past the new order in renderTree.
-		if rows := m.treeRows(); len(rows) > 0 {
-			if m.treeIdx >= len(rows) {
-				m.treeIdx = len(rows) - 1
-			}
-			active := m.activeSession(m.cur)
-			// Keep the cursor where it is when it already points into the
-			// current conversation (including a hovered job row — a state
-			// push must not yank the peek pane away); otherwise re-derive.
-			at := rows[m.treeIdx]
-			if !(at.group == m.cur && at.session == active) {
-				for i, r := range rows {
-					if r.group == m.cur && r.session == active && r.job == "" {
-						m.treeIdx = i
-						break
-					}
-				}
-			}
-			// The row under the cursor may now be a different job than the
-			// one being streamed (job rows re-sort as jobs start/finish).
-			m.syncPeekToHover()
-		}
+		// (treeIdx is re-derived from the treeSel anchor against the new
+		// state in normalizeTreeCursor, on the way out of Update.)
 		cmds := []tea.Cmd{}
 		// Reloading: drop existing lines for groups we're about to refetch
 		// history for. Without this, the post-reconnect history call appends
@@ -2928,6 +2926,7 @@ func (m *Model) enterTree() {
 		}
 	}
 	m.treeIdx = idx
+	m.treeSel = treeRow{group: m.cur, session: active}
 	m.focus = focusTree
 	// Keep the textinput focused while the tree is open so the user can
 	// continue typing a draft. The focus field (focusTree) is what routes
@@ -2968,6 +2967,10 @@ type treeRow struct {
 	job     string
 	branch  string
 }
+
+// id strips the branch prefix, leaving the comparable row identity —
+// the shape treeSel anchors on.
+func (r treeRow) id() treeRow { return treeRow{group: r.group, session: r.session, job: r.job} }
 
 func jobKey(g, id string) string { return g + "\x00" + id }
 
@@ -3157,6 +3160,7 @@ func (m *Model) setActiveSession(g, s string) {
 // row. Callers thread m.peekCmds() into their returned tea.Cmd so the peek
 // fetch + refresh tick actually run.
 func (m *Model) selectTreeRow(r treeRow) {
+	m.treeSel = r.id()
 	m.cur = r.group
 	m.setActiveSession(r.group, r.session)
 	m.clearUnread(r.group, r.session)
@@ -3212,6 +3216,52 @@ func (m *Model) clearPeek() {
 	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
 	m.peekDirty, m.peekPrimed = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Time{}, time.Time{}
+}
+
+// normalizeTreeCursor re-derives treeIdx from the treeSel anchor against the
+// current shape of treeRows(). Runs once per message, after update() (see
+// the Update wrapper), so both View and the next keypress act on a cursor
+// that still points at the thing the user chose — wherever its row moved.
+//
+// An anchor outside the current conversation means m.cur changed out-of-band
+// (/new auto-switch, /sw): re-anchor to that conversation first, preserving
+// the old "cursor locked to m.cur" behavior of the listMsg handler this
+// replaces. When the anchored row is gone entirely (job row hidden after its
+// linger window, session cleared) fall back to its conversation row; when
+// even that is gone (group destroyed while hovered) just clamp — the next
+// out-of-band m.cur change re-anchors properly.
+func (m *Model) normalizeTreeCursor() {
+	rows := m.treeRows()
+	if len(rows) == 0 {
+		m.treeIdx = 0
+		return
+	}
+	active := m.activeSession(m.cur)
+	if m.treeSel.group != m.cur || m.treeSel.session != active {
+		m.treeSel = treeRow{group: m.cur, session: active}
+	}
+	found, conv := -1, -1
+	for i, r := range rows {
+		if r.id() == m.treeSel {
+			found = i
+			break
+		}
+		if conv < 0 && r.group == m.treeSel.group && r.session == m.treeSel.session && r.job == "" {
+			conv = i
+		}
+	}
+	switch {
+	case found >= 0:
+		m.treeIdx = found
+	case conv >= 0:
+		m.treeIdx = conv
+		m.treeSel = rows[conv].id()
+	case m.treeIdx >= len(rows):
+		m.treeIdx = len(rows) - 1
+	}
+	// The hovered row may have changed identity (a fallback above) — keep
+	// the live tail bound to what's actually under the cursor.
+	m.syncPeekToHover()
 }
 
 // syncPeekToHover keeps the live tail bound to whichever job row is actually

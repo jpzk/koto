@@ -389,9 +389,10 @@ func (m Model) renderTree(rows int) string {
 			// markers stay on the conversation rows.
 			isCur := r.job == "" && r.group == m.cur && r.session == active
 			unread := r.job == "" && m.isUnread(r.group, r.session)
-			// Bounds-guard on treeIdx: a WatchState frame can shrink the row
-			// list (out-of-band destroy) between the listMsg clamp and this
-			// render — compare by index, never index past the slice.
+			// Bounds-guard on treeIdx: normalizeTreeCursor ran on the way out
+			// of Update, but jobVisible is time-based, so a linger window can
+			// expire between it and this render's treeRows() rebuild —
+			// compare by index, never index past the slice.
 			hov := treeLive && m.treeIdx == i
 			lines = append(lines, m.renderTreeRow(r, isCur, hov, unread, pad))
 		}

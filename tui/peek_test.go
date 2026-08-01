@@ -29,6 +29,7 @@ func hoverJob(t *testing.T, g, id string) Model {
 		t.Fatalf("job row %q not present in tree rows %+v", id, rows)
 	}
 	m.treeIdx = idx
+	m.treeSel = rows[idx].id()
 	startPeek(&m, g, id)
 	if !m.peekActive() {
 		t.Fatal("peek pane not active after hovering job row")
@@ -158,10 +159,12 @@ func TestPeekKeepsOutputAfterStreamEnd(t *testing.T) {
 	}
 }
 
-// TestPeekReattachesWhenRowShifts covers a new job appearing while a job row
-// is hovered. Job rows sort newest-first, so the row under treeIdx becomes a
-// different job without any keypress.
-func TestPeekReattachesWhenRowShifts(t *testing.T) {
+// TestCursorFollowsJobWhenRowShifts covers a new job appearing while a job
+// row is hovered. Job rows sort newest-first, so the hovered job's row index
+// shifts without any keypress — the cursor (and the live tail bound to it)
+// must follow the JOB to its new index, not stay parked on the old slot and
+// silently retarget to the newcomer.
+func TestCursorFollowsJobWhenRowShifts(t *testing.T) {
 	m := hoverJob(t, "9AZ", "abc123")
 	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
 	m = feedLines(m, 30, "output line %d")
@@ -169,7 +172,8 @@ func TestPeekReattachesWhenRowShifts(t *testing.T) {
 	if hovered.job != "abc123" {
 		t.Fatalf("precondition: hovering %q", hovered.job)
 	}
-	// A newer job shows up; it sorts above abc123, so treeIdx now names it.
+	oldIdx := m.treeIdx
+	// A newer job shows up; it sorts above abc123, shifting its row down.
 	// Delivered the way the daemon delivers it: a state frame.
 	gi := m.groups["9AZ"]
 	jobs := append([]JobInfo{}, gi.Jobs...)
@@ -182,28 +186,23 @@ func TestPeekReattachesWhenRowShifts(t *testing.T) {
 	m = nm.(Model)
 
 	nowHovered := m.treeRows()[m.treeIdx]
-	if nowHovered.job == "abc123" {
-		t.Skip("row order did not shift; nothing to assert")
+	if nowHovered.job != "abc123" {
+		t.Fatalf("cursor did not follow the hovered job: hovering %q (idx %d→%d)",
+			nowHovered.job, oldIdx, m.treeIdx)
 	}
-	if m.peekJob.id != nowHovered.job {
-		t.Fatalf("live tail still bound to %q after the hovered row became %q — "+
-			"no keypress will ever re-arm it", m.peekJob.id, nowHovered.job)
+	if m.treeIdx == oldIdx {
+		t.Fatal("row order did not shift; the test exercised nothing")
 	}
-	// The re-armed stream delivers the new job's output, and it lands at EOF.
-	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
-	m = feedLines(m, 40, "newer out %d")
+	if m.peekJob.id != "abc123" {
+		t.Fatalf("live tail rebound to %q; the hovered job never changed", m.peekJob.id)
+	}
+	// The stream was never torn down: buffered output survives the shift.
 	pane, ok := m.renderJobPeek(m.chatRows())
 	if !ok {
 		t.Fatal("peek pane went inactive")
 	}
-	if !m.peekVP.AtBottom() {
-		t.Errorf("re-armed peek not at bottom: YOffset=%d", m.peekVP.YOffset)
-	}
-	if !strings.Contains(pane, "newer out 40") {
-		t.Errorf("re-armed peek does not show the new job's newest line:\n%s", pane)
-	}
-	if strings.Contains(pane, "output line 30") {
-		t.Errorf("re-armed peek still shows the previous job's output:\n%s", pane)
+	if !strings.Contains(pane, "output line 30") {
+		t.Errorf("hovered job's output vanished after its row shifted:\n%s", pane)
 	}
 }
 
