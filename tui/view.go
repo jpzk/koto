@@ -703,17 +703,23 @@ func renderLiveLines(liveText, liveKind string, tick int) []string {
 // with an amber ⏳ glyph so they read as "waiting in the queue", distinct from
 // the amber › of a prompt the daemon has already begun. Multi-line prompts keep
 // their shape with indented continuation rows.
-func renderPendingLines(pending []string) []string {
+func renderPendingLines(pending []string, contentCols int) []string {
 	glyph := lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render("⏳ ")
 	body := lipgloss.NewStyle().Foreground(cYellow).Faint(true)
 	indent := "   "
 	out := make([]string, 0, len(pending))
 	for _, p := range pending {
-		for i, ln := range strings.Split(p, "\n") {
-			if i == 0 {
-				out = append(out, glyph+body.Render(ln))
-			} else {
-				out = append(out, indent+body.Render(ln))
+		first := true
+		for _, ln := range strings.Split(p, "\n") {
+			// Same wrap treatment as the started-prompt case in
+			// renderBlockLines — a queued prompt is the same raw user text.
+			for _, seg := range wrapLine(ln, contentCols) {
+				if first {
+					out = append(out, glyph+body.Render(seg))
+					first = false
+				} else {
+					out = append(out, indent+body.Render(seg))
+				}
 			}
 		}
 	}
@@ -747,13 +753,20 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 
 	switch b.kind {
 	case "prompt":
+		// Wrap like the tool case: prompts are raw user text, not glamour
+		// output, so a long single-line message would otherwise run past the
+		// viewport edge and be clipped.
 		glyph := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("›  ")
 		body := lipgloss.NewStyle().Foreground(cAmber)
-		for i, ln := range srcLines {
-			if i == 0 {
-				out = append(out, stampStr+glyph+body.Render(ln))
-			} else {
-				out = append(out, indent+"   "+body.Render(ln))
+		first := true
+		for _, ln := range srcLines {
+			for _, seg := range wrapLine(ln, contentCols) {
+				if first {
+					out = append(out, stampStr+glyph+body.Render(seg))
+					first = false
+				} else {
+					out = append(out, indent+"   "+body.Render(seg))
+				}
 			}
 		}
 	case "err":

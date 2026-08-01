@@ -2018,7 +2018,7 @@ func (m Model) buildLogContent(contentCols int) string {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
-		out = append(out, renderPendingLines(pend)...)
+		out = append(out, renderPendingLines(pend, contentCols)...)
 	}
 	return strings.Join(out, "\n")
 }
