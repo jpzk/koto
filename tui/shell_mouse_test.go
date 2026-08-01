@@ -9,7 +9,7 @@ import (
 )
 
 // shellMouseModel builds a model in fullscreen shell mode (width 60 is below
-// shellSplitPaneW+shellSplitChatMinW, so no chat split; focus straight from
+// 2×shellSplitChatMinW, so no chat split; focus straight from
 // input, so no tree column) — the emulator grid's origin is (1,1): one col of
 // PaddingLeft, one row of status bar.
 //
@@ -79,11 +79,11 @@ func TestForwardShellMouseWheel(t *testing.T) {
 
 func TestShellMouseOriginSplit(t *testing.T) {
 	m, _ := shellMouseModel(t)
-	// Wide enough to split: chatW = 200-90-1 = 109, logArea (chatW-1) +
-	// separator (1) = 109 cols before shellBody's 1-col padding.
+	// Wide enough to split (50/50, no tree): chatW = (200-1)/2 = 99, logArea
+	// (chatW-1) + separator (1) = 99 cols before shellBody's 1-col padding.
 	m.width = 200
 	x, y := m.shellMouseOrigin()
-	if x != 110 || y != 1 {
-		t.Fatalf("split-mode origin = (%d,%d), want (110,1)", x, y)
+	if want := m.shellChatW() + 1; x != want || y != 1 {
+		t.Fatalf("split-mode origin = (%d,%d), want (%d,1)", x, y, want)
 	}
 }

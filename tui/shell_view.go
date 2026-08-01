@@ -221,15 +221,10 @@ func (s *shellSession) close() {
 	_ = s.term.Close()
 }
 
-// shellSplitPaneW is the preferred pty width once the shell pane splits
-// alongside the chat log (roughly a classic 80-col terminal plus slack for
-// prompts/tmux status). shellSplitChatMinW is the least width the read-only
-// chat column needs to stay legible; below it, splitting would make both
-// halves worse than a fullscreen shell.
-const (
-	shellSplitPaneW    = 90
-	shellSplitChatMinW = 50
-)
+// shellSplitChatMinW is the least width the read-only chat column needs to
+// stay legible; below it, splitting would make both halves worse than a
+// fullscreen shell.
+const shellSplitChatMinW = 50
 
 // shellChatW returns the width of the read-only chat/log column shown to the
 // left of the shell pane, or 0 when the terminal isn't wide enough to split
@@ -240,19 +235,15 @@ const (
 // see treePaneW's doc comment — so the chat column shrinks (or drops) before
 // the tree does.
 func (m Model) shellChatW() int {
+	// The chat column and the shell pane split the available width evenly —
+	// with or without the tree column (which is reserved first, separator
+	// included). The shell used to take a fixed preferred width in the
+	// no-tree case, but that left a lopsided chat column; 50/50 everywhere.
 	avail := m.width
 	if tw := m.treePaneW(); tw > 0 {
-		// With the tree open, the chat column and the shell pane split the
-		// remaining width evenly (the shell's fixed preferred width would
-		// leave a lopsided chat column on typical tree+split geometries).
 		avail -= tw + 1 // tree column + its separator
-		chatW := (avail - 1) / 2
-		if chatW < shellSplitChatMinW {
-			return 0
-		}
-		return chatW
 	}
-	chatW := avail - shellSplitPaneW - 1 // -1: the vertical separator column
+	chatW := (avail - 1) / 2 // -1: the vertical separator column
 	if chatW < shellSplitChatMinW {
 		return 0
 	}

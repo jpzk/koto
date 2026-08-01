@@ -15,7 +15,7 @@ import (
 )
 
 // splitShellModel builds a model wide enough to split (width 200 ≫
-// shellSplitPaneW+shellSplitChatMinW) with an open shell pane and focus on
+// 2×shellSplitChatMinW) with an open shell pane and focus on
 // the message bar. The emulator starts at a wrong size on purpose — the
 // resizeViewport call must bring it to shellPaneSize via syncShellSize
 // (the stub session has no stream; resize skips the wire send).
@@ -157,6 +157,26 @@ func TestShellGridClickFocusesPane(t *testing.T) {
 	}
 	if !m.shellOpen {
 		t.Error("pane closed by click focus round-trip")
+	}
+}
+
+// TestShellSplitEvenNoTree: with the tree hidden the chat column and the
+// shell pane split the width 50/50 (chatW and the pty width within a couple
+// of cells of each other once separators/padding are accounted for).
+func TestShellSplitEvenNoTree(t *testing.T) {
+	m := splitShellModel(t)
+	if m.treePaneW() != 0 {
+		t.Fatal("precondition: tree hidden")
+	}
+	chatW := m.shellChatW()
+	paneW, _ := m.shellPaneSize()
+	if chatW == 0 {
+		t.Fatal("no split at width 200")
+	}
+	// chat column: chatW cells; pty: what's left minus the separator and the
+	// pane's 2-cell padding allowance. An even split keeps them within 3.
+	if diff := chatW - paneW; diff < -3 || diff > 3 {
+		t.Errorf("chatW = %d, shell pane w = %d — want a ~50/50 split", chatW, paneW)
 	}
 }
 
