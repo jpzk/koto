@@ -41,11 +41,20 @@ $(BUILD):
 # just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
 SIDECAR_SRC := sidecar/entrypoint.sh sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent
 
+# Every image rebuild moves its tag, orphaning the previous build as a
+# dangling <none> image (~650MB per rootfs build — they once accumulated to
+# 7GB and filled the disk). Sweep dangling images after each build target.
+# Never touches tagged images or the layers the live containers use.
+define prune-dangling
+	@podman image prune -f >/dev/null 2>&1 || true
+endef
+
 # --- koto-host (daemon image) -------------------------------------------
 # Inputs: just host/Dockerfile. Go sources land via bind mount, recompiled
 # by `go run` inside the container on every host-run.
 $(BUILD)/koto-host: host/Dockerfile | $(BUILD)
 	podman build -t koto-host -f host/Dockerfile .
+	$(prune-dangling)
 	@touch $@
 
 host-build: $(BUILD)/koto-host
@@ -57,6 +66,7 @@ TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
 PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto
 $(BUILD)/koto-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
 	podman build -t koto-tui -f tui/Dockerfile .
+	$(prune-dangling)
 	@touch $@
 
 tui-build: $(BUILD)/koto-tui
@@ -219,6 +229,7 @@ fc-kernel: $(BUILD)/fc-kernel
 FCGUEST_SRC := fcguest/main.go fcguest/go.mod fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
 $(BUILD)/fc-rootfs: $(FCGUEST_SRC) | $(BUILD)
 	./fcguest/build-rootfs.sh
+	$(prune-dangling)
 	@touch $@
 
 fc-rootfs: $(BUILD)/fc-rootfs
