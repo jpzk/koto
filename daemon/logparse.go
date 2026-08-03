@@ -8,9 +8,55 @@ package main
 // of truth for the grammar — change it here, never fork it per call site.
 
 import (
+	"encoding/base64"
 	"strconv"
 	"strings"
 )
+
+// notifyMarker renders the [[notify]] log line the ctl `notify` verb queues
+// host-side and feedLine parses — kept next to the parser so write and parse
+// can never drift. b64 keeps arbitrary title/message one-line- and
+// injection-safe; the empty string encodes as "-" so the field count stays
+// fixed at 5 (b64("") is "" and would vanish under strings.Fields). session
+// is the chat session that raised it, "-" for the default (same convention
+// as the [[session]] marker; the name's charset is space-free so it needs
+// no encoding).
+func notifyMarker(unixMs int64, severity, session, title, msg string) string {
+	enc := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return base64.StdEncoding.EncodeToString([]byte(s))
+	}
+	sess := session
+	if sess == "" {
+		sess = "-"
+	}
+	return "[[notify]] " + strconv.FormatInt(unixMs, 10) + " " + severity +
+		" " + sess + " " + enc(title) + " " + enc(msg)
+}
+
+// flattenInline collapses line/column control whitespace to plain spaces.
+// Notification titles and messages render into single banner rows in
+// clients that size their frame by row count — an embedded \n would make
+// one logical row paint as several and shear the layout below it.
+func flattenInline(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// notifyField decodes one b64 field of a [[notify]] marker ("-" = empty).
+func notifyField(f string) (string, error) {
+	if f == "-" {
+		return "", nil
+	}
+	b, err := base64.StdEncoding.DecodeString(f)
+	return string(b), err
+}
 
 // logParser holds the cross-line state of the marker grammar. The zero value
 // is ready to use; callers reset by replacing the value (keeping curSession
@@ -127,6 +173,54 @@ func (p *logParser) feedLine(line string) []Event {
 	case strings.HasPrefix(line, "[[bg]] "):
 		name, text, _ := strings.Cut(line[len("[[bg]] "):], " ")
 		return []Event{ev(Event{Event: "bg", Name: name, Text: text})}
+	case strings.HasPrefix(line, "[[notify]] "):
+		// Host-written by the ctl `notify` verb (see notifyMarker). Malformed
+		// lines are swallowed like the stray-close case below — surfacing raw
+		// framing in the TUI is worse than dropping a broken notification.
+		// 5 fields is current (with session); 4 is the pre-session shape,
+		// still parsed so transcripts written before the field existed keep
+		// their notifications.
+		f := strings.Fields(line[len("[[notify]] "):])
+		if len(f) != 4 && len(f) != 5 {
+			return nil
+		}
+		ms, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil {
+			return nil
+		}
+		sev := f[1]
+		if sev != "high" {
+			sev = "normal"
+		}
+		sess := ""
+		idx := 2
+		if len(f) == 5 {
+			idx = 3
+			if s, serr := normalizeSession(f[2]); serr == nil {
+				sess = s
+			}
+		}
+		title, terr := notifyField(f[idx])
+		msg, merr := notifyField(f[idx+1])
+		if terr != nil || merr != nil {
+			return nil
+		}
+		// Flatten + cap HERE, not only in the ctl verb: the parser is the
+		// one chokepoint every consumer shares (live tailer, History,
+		// Android), and a marker forged by model output in plain response
+		// text never went through the verb's clamps. A multi-line or
+		// megabyte title must not reach a client that renders the banner
+		// as one fixed row.
+		title = truncateRunes(flattenInline(title), notifyTitleMax)
+		msg = truncateRunes(flattenInline(msg), notifyMsgMax)
+		// Ts comes from the marker itself, not the turn's sticky pendingTS —
+		// a notification is not part of the surrounding turn's timeline.
+		// Session likewise: the marker names the session that raised it,
+		// which need not be the one currently streaming.
+		e := ev(Event{Event: "notification", Severity: sev, Title: title, Text: msg})
+		e.Ts = float64(ms) / 1000.0
+		e.Session = sess
+		return []Event{e}
 	case strings.HasPrefix(line, "[[think_end]] ") || strings.HasPrefix(line, "[[tool_out_end]] "):
 		// Stray close marker outside a block (e.g. an empty thinking block
 		// that emitted begin+end while state was still settling). Swallow it

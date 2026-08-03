@@ -62,7 +62,13 @@ type Event struct {
 	// as); a non-empty name is one of the multiplexed side-sessions created
 	// by sending with SendReq.session. Stamped by the daemon's log parser
 	// from the [[session]] turn markers, so live and History frames agree.
-	Session       string `protobuf:"bytes,13,opt,name=session,proto3" json:"session,omitempty"`
+	Session string `protobuf:"bytes,13,opt,name=session,proto3" json:"session,omitempty"`
+	// Notification payload (event == "notification"): severity is "high" |
+	// "normal" (daemon-clamped; clients treat unknown values as normal),
+	// title is the short headline. The message body rides the existing
+	// `text` field.
+	Severity      string `protobuf:"bytes,14,opt,name=severity,proto3" json:"severity,omitempty"`
+	Title         string `protobuf:"bytes,15,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -184,6 +190,20 @@ func (x *Event) GetSeq() uint64 {
 func (x *Event) GetSession() string {
 	if x != nil {
 		return x.Session
+	}
+	return ""
+}
+
+func (x *Event) GetSeverity() string {
+	if x != nil {
+		return x.Severity
+	}
+	return ""
+}
+
+func (x *Event) GetTitle() string {
+	if x != nil {
+		return x.Title
 	}
 	return ""
 }
@@ -3397,7 +3417,7 @@ var File_koto_proto protoreflect.FileDescriptor
 const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"koto.proto\x12\x04koto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\x99\x02\n" +
+	"koto.proto\x12\x04koto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1bgoogle/protobuf/empty.proto\"\xcb\x02\n" +
 	"\x05Event\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x0e\n" +
@@ -3414,7 +3434,9 @@ const file_koto_proto_rawDesc = "" +
 	"historical\x12\x0e\n" +
 	"\x02id\x18\v \x01(\tR\x02id\x12\x10\n" +
 	"\x03seq\x18\f \x01(\x04R\x03seq\x12\x18\n" +
-	"\asession\x18\r \x01(\tR\asession\"<\n" +
+	"\asession\x18\r \x01(\tR\asession\x12\x1a\n" +
+	"\bseverity\x18\x0e \x01(\tR\bseverity\x12\x14\n" +
+	"\x05title\x18\x0f \x01(\tR\x05title\"<\n" +
 	"\fRunScriptReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
 	"\x06script\x18\x02 \x01(\tR\x06script\"t\n" +

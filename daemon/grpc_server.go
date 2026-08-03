@@ -60,6 +60,8 @@ func toPBEvent(ev Event) *pb.Event {
 		Id:         ev.ID,
 		Seq:        ev.Seq,
 		Session:    ev.Session,
+		Severity:   ev.Severity,
+		Title:      ev.Title,
 	}
 }
 

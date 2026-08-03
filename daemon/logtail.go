@@ -7,9 +7,118 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// ---- notify marker delivery -------------------------------------------------
+//
+// The ctl `notify` verb must not append its [[notify]] marker directly: the
+// guest's log stream (fcLogSink) writes the same file, so a blind O_APPEND
+// lands mid-line whenever a turn is streaming (the marker glues onto the
+// partial line and stops parsing as a marker), and a marker landing inside an
+// open [[think]]/[[tool_out]] block is deliberately swallowed as body by the
+// parser's nesting rule (which must stay — tool output is attacker
+// influenceable, and un-nesting the marker would let fetched content forge
+// operator notifications). Only the tailer knows both hazards: whether the
+// file tail is at a line boundary AND whether the parser is inside a block.
+// So the verb queues the rendered marker line here and the tailer appends it
+// at the next safe point, typically within one 50ms poll on an idle group.
+// In-memory and best-effort by design (cs-notify documents this): a daemon
+// restart drops undelivered markers.
+
+// notifyQueueMax bounds a group's undelivered markers. The verb's rate limit
+// already caps inflow; this is the backstop for a group parked inside a
+// never-ending block. Excess is rejected, not silently dropped.
+const notifyQueueMax = 32
+
+var (
+	notifyQueueMu sync.Mutex
+	notifyQueue   = map[string][]string{}
+
+	// logWriteLocks serializes appends to a group's host log file between
+	// fcLogSink (the guest stream) and the tailer's marker flush, so the
+	// boundary check and the append are atomic against the sink.
+	logWriteLocks   = map[string]*sync.Mutex{}
+	logWriteLocksMu sync.Mutex
+)
+
+func logWriteLock(g string) *sync.Mutex {
+	logWriteLocksMu.Lock()
+	defer logWriteLocksMu.Unlock()
+	mu := logWriteLocks[g]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		logWriteLocks[g] = mu
+	}
+	return mu
+}
+
+// queueNotify enqueues one rendered [[notify]] marker line (no trailing
+// newline) for delivery by the group's tailer. False = backlog full.
+func queueNotify(g, marker string) bool {
+	notifyQueueMu.Lock()
+	defer notifyQueueMu.Unlock()
+	if len(notifyQueue[g]) >= notifyQueueMax {
+		return false
+	}
+	notifyQueue[g] = append(notifyQueue[g], marker)
+	return true
+}
+
+// tryFlushNotify appends the group's queued markers if the tailer is at a
+// safe point: caught up to EOF with no partial line buffered (atBoundary)
+// and not inside a thinking/tool_out block. The write lock makes the
+// file-tail recheck and the append atomic against fcLogSink — the sink may
+// have written since the tailer's last read.
+func tryFlushNotify(g string, lp *logParser, atBoundary bool) {
+	if !atBoundary || lp.inThinking || lp.inToolOut {
+		return
+	}
+	notifyQueueMu.Lock()
+	pending := notifyQueue[g]
+	if len(pending) == 0 {
+		notifyQueueMu.Unlock()
+		return
+	}
+	delete(notifyQueue, g)
+	notifyQueueMu.Unlock()
+
+	mu := logWriteLock(g)
+	mu.Lock()
+	defer mu.Unlock()
+	if !logAtLineBoundary(g) {
+		// The sink beat us to it mid-line — requeue and retry next poll.
+		notifyQueueMu.Lock()
+		notifyQueue[g] = append(pending, notifyQueue[g]...)
+		notifyQueueMu.Unlock()
+		return
+	}
+	for _, m := range pending {
+		logAppend(g, []byte(m+"\n"))
+	}
+}
+
+// logAtLineBoundary reports whether the group's log file currently ends at a
+// line boundary (empty/missing counts — the marker can open the file).
+func logAtLineBoundary(g string) bool {
+	p := filepath.Join(vol(g), ".cs", "log")
+	f, err := os.Open(p)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return err == nil
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], st.Size()-1); err != nil {
+		return false
+	}
+	return b[0] == '\n'
+}
 
 var tsRE = regexp.MustCompile(`^\[ts:(\d+)\]$`)
 
@@ -94,6 +203,11 @@ func tailLog(g string) {
 		data := make([]byte, 64*1024)
 		n, _ := f.Read(data)
 		if n == 0 {
+			// Caught up to EOF: buf and the parser's block state describe
+			// the file's true tail, so this is the safe point to deliver
+			// queued [[notify]] markers (they're read back and parsed on
+			// the next iteration like any other line).
+			tryFlushNotify(g, &lp, buf == "")
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
@@ -123,7 +237,7 @@ func tailLog(g string) {
 			buf = ""
 			i += j + 1
 		}
-		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") && !strings.HasPrefix(buf, "[[sess") {
+		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") && !strings.HasPrefix(buf, "[[sess") && !strings.HasPrefix(buf, "[[notify") {
 			pev := Event{Event: "stream", Text: buf, Session: lp.curSession}
 			if lp.inThinking {
 				pev.Event = "thinking_stream"

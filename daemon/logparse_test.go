@@ -135,3 +135,134 @@ func TestLogParserPlainLinesAreDone(t *testing.T) {
 		t.Fatalf("unframed ts = %v, want 0", evs[0].Ts)
 	}
 }
+
+func TestLogParserNotifyMarker(t *testing.T) {
+	marker := notifyMarker(1785000000123, "high", "ops", "Deploy failed", "prod is down")
+	body := strings.Join([]string{
+		"[ts:1785000000000]", // a turn's sticky ts must NOT override the marker's own
+		marker,
+	}, "\n")
+	evs := feedAll(t, body)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event, got %v", names(evs))
+	}
+	e := evs[0]
+	if e.Event != "notification" || e.Severity != "high" ||
+		e.Title != "Deploy failed" || e.Text != "prod is down" {
+		t.Fatalf("bad event: %+v", e)
+	}
+	if e.Ts != 1785000000.123 {
+		t.Fatalf("ts: want 1785000000.123, got %v", e.Ts)
+	}
+	if e.Session != "ops" {
+		t.Fatalf("session: want ops, got %q", e.Session)
+	}
+}
+
+// TestLogParserNotifySessionOverridesTurn: the marker's own session wins over
+// the surrounding turn's sticky [[session]] attribution — a bg job from
+// session A may notify while session B streams.
+func TestLogParserNotifySessionOverridesTurn(t *testing.T) {
+	body := strings.Join([]string{
+		"[[session]] other",
+		notifyMarker(1000, "normal", "ops", "T", ""),
+		notifyMarker(1000, "normal", "", "T2", ""), // default session, not "other"
+	}, "\n")
+	var got []Event
+	for _, e := range feedAll(t, body) {
+		if e.Event == "notification" {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 2 || got[0].Session != "ops" || got[1].Session != "" {
+		t.Fatalf("marker session not honored: %+v", got)
+	}
+}
+
+// TestLogParserNotifyLegacyFourFields: pre-session markers (no session
+// field) still parse, attributed to the default session.
+func TestLogParserNotifyLegacyFourFields(t *testing.T) {
+	evs := feedAll(t, "[[notify]] 1000 high dGl0bGU= bXNn") // "title" "msg"
+	if len(evs) != 1 || evs[0].Title != "title" || evs[0].Text != "msg" || evs[0].Session != "" {
+		t.Fatalf("legacy 4-field marker failed: %+v", evs)
+	}
+}
+
+// TestLogParserNotifyFlattensAndCaps: newlines/tabs in decoded fields are
+// collapsed to spaces and oversized fields are clipped AT THE PARSER — a
+// forged marker in model output never went through the ctl verb's clamps,
+// and clients render the banner as one fixed-height row.
+func TestLogParserNotifyFlattensAndCaps(t *testing.T) {
+	evs := feedAll(t, notifyMarker(1000, "high", "", "line1\nline2\ttab", "a\r\nb"))
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event, got %v", names(evs))
+	}
+	if evs[0].Title != "line1 line2 tab" || evs[0].Text != "a  b" {
+		t.Fatalf("not flattened: title=%q text=%q", evs[0].Title, evs[0].Text)
+	}
+	huge := strings.Repeat("x", notifyMsgMax+5000)
+	evs = feedAll(t, notifyMarker(1000, "high", "", huge, huge))
+	if len(evs) != 1 || len(evs[0].Title) != notifyTitleMax || len(evs[0].Text) != notifyMsgMax {
+		t.Fatalf("forged oversize not capped: title=%d text=%d", len(evs[0].Title), len(evs[0].Text))
+	}
+}
+
+// TestLogParserNotifyBadSessionIsDefault: an invalid session token in the
+// marker degrades to the default session, never an error.
+func TestLogParserNotifyBadSessionIsDefault(t *testing.T) {
+	evs := feedAll(t, "[[notify]] 1000 high ../evil dGl0bGU= -")
+	if len(evs) != 1 || evs[0].Session != "" || evs[0].Title != "title" {
+		t.Fatalf("bad session not degraded: %+v", evs)
+	}
+}
+
+func TestLogParserNotifyEmptyFields(t *testing.T) {
+	evs := feedAll(t, notifyMarker(1000, "normal", "", "", "just a body"))
+	if len(evs) != 1 || evs[0].Title != "" || evs[0].Text != "just a body" {
+		t.Fatalf("empty-title round-trip failed: %+v", evs)
+	}
+	evs = feedAll(t, notifyMarker(1000, "normal", "", "just a title", ""))
+	if len(evs) != 1 || evs[0].Title != "just a title" || evs[0].Text != "" {
+		t.Fatalf("empty-msg round-trip failed: %+v", evs)
+	}
+}
+
+func TestLogParserNotifySeverityClamp(t *testing.T) {
+	evs := feedAll(t, "[[notify]] 1000 urgent - -")
+	if len(evs) != 1 || evs[0].Severity != "normal" {
+		t.Fatalf("want clamped severity normal, got %+v", evs)
+	}
+}
+
+func TestLogParserNotifyMalformedSwallowed(t *testing.T) {
+	for _, line := range []string{
+		"[[notify]] 1000 high onlythree", // wrong field count
+		"[[notify]] notanumber high - -", // bad unix_ms
+		"[[notify]] 1000 high !!bad!! -", // bad base64
+		"[[notify]] ",                    // empty payload
+	} {
+		if evs := feedAll(t, line); len(evs) != 0 {
+			t.Fatalf("malformed %q produced events: %v", line, names(evs))
+		}
+	}
+}
+
+func TestLogParserNotifyInsideBlockIsBody(t *testing.T) {
+	marker := notifyMarker(1000, "high", "", "T", "M")
+	body := strings.Join([]string{
+		"[[tool_out_begin]]",
+		marker,
+		"[[tool_out_end]] 1",
+	}, "\n")
+	evs := feedAll(t, body)
+	for _, e := range evs {
+		if e.Event == "notification" {
+			t.Fatalf("marker inside tool_out block escaped as notification: %v", names(evs))
+		}
+	}
+	// The marker line must have been kept as block body.
+	last := evs[len(evs)-1]
+	if last.Event != "tool_result_done" || !strings.Contains(last.Body, "[[notify]]") {
+		t.Fatalf("marker not swallowed into body: %+v", last)
+	}
+}

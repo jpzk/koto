@@ -131,6 +131,12 @@ message Event {
   // by sending with SendReq.session. Stamped by the daemon's log parser
   // from the [[session]] turn markers, so live and History frames agree.
   string session    = 13;
+  // Notification payload (event == "notification"): severity is "high" |
+  // "normal" (daemon-clamped; clients treat unknown values as normal),
+  // title is the short headline. The message body rides the existing
+  // `text` field.
+  string severity   = 14;
+  string title      = 15;
 }
 
 message RunScriptReq {

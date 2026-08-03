@@ -1,0 +1,31 @@
+#!/bin/sh
+# cs-notify — raise an operator notification via the group ctl plane.
+#
+#   cs-notify [-s high|normal] <title> [message]
+#
+# The daemon appends a [[notify]] marker to the group's log, so the
+# notification shows as a banner in the operator's UI AND persists in the
+# group transcript/history. Severity defaults to normal; anything other
+# than "high" is treated as normal by the daemon. Title/message are
+# base64'd so arbitrary text (newlines, quotes, unicode) survives the
+# one-line JSON ctl framing. Bounded by timeout so a down ctl reader
+# (daemon stopped) can't hang the caller — best-effort by design.
+set -u
+
+sev=normal
+if [ "${1:-}" = "-s" ]; then
+  sev=${2:?severity value required after -s}
+  shift 2
+fi
+if [ -z "${1:-}" ] && [ -z "${2:-}" ]; then
+  echo "usage: cs-notify [-s high|normal] <title> [message]" >&2
+  exit 2
+fi
+
+t=$(printf '%s' "${1:-}" | base64 | tr -d '\n')
+b=$(printf '%s' "${2:-}" | base64 | tr -d '\n')
+# KOTO_SESSION attributes the notification to the chat session this turn
+# (or the job's launching turn) belongs to — same as cs-job's session file.
+printf '{"cmd":"notify","severity":"%s","title":"%s","msg":"%s","session":"%s"}\n' \
+  "$sev" "$t" "$b" "${KOTO_SESSION:-}" \
+  | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || true

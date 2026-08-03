@@ -26,12 +26,68 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
 )
+
+// truncateRunes clips s to at most max bytes without splitting a rune.
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
 
 const (
 	ctlMainGroup = "main"
 	ctlMaxSpawn  = 100 // cap of total registered groups; rejects further spawns from ctl
+
+	// Byte caps for the `notify` verb's decoded fields. Truncated, not
+	// rejected — a clipped notification beats an errored one.
+	notifyTitleMax = 200
+	notifyMsgMax   = 2000
+
+	// notify rate limit: a per-group token bucket. Bursts up to
+	// notifyRateBurst pass; sustained flow is one per notifyRateRefill.
+	// Bounds banner spam and transcript growth from a looping (or
+	// prompt-injected) agent — the operator-attention channel is worthless
+	// if it can be made to blink forever.
+	notifyRateBurst  = 5
+	notifyRateRefill = 15 * time.Second
 )
+
+// notifyAllow implements the notify verb's per-group token bucket.
+var (
+	notifyRateMu sync.Mutex
+	notifyRate   = map[string]*notifyBucket{}
+)
+
+type notifyBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func notifyAllow(g string) bool {
+	notifyRateMu.Lock()
+	defer notifyRateMu.Unlock()
+	now := time.Now()
+	b := notifyRate[g]
+	if b == nil {
+		b = &notifyBucket{tokens: notifyRateBurst, last: now}
+		notifyRate[g] = b
+	}
+	b.tokens = min(notifyRateBurst, b.tokens+now.Sub(b.last).Seconds()/notifyRateRefill.Seconds())
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
 
 // ctlGroupRE is the allowlist for group names ctl callers can spawn or
 // target. Same shape as skillNameRE: starts with [a-z0-9], then up to 31
@@ -267,6 +323,53 @@ func ctlDispatch(owner string, line []byte) any {
 		// Completion is the moment the tree wants fresh state — don't wait
 		// out the watch loop's TTL.
 		kickJobsRefresh(owner, true)
+		return baseResp{OK: true}
+
+	case "notify":
+		// Self-targeted, open to ALL groups (like job_done): any agent may
+		// raise an operator notification AS ITSELF — the originating group is
+		// the socket-derived owner, never the payload. The verb renders a
+		// [[notify]] marker for the group's host-side log; the shared log
+		// parser turns it into the `notification` event for both the live
+		// stream and History replay (single path, no direct emit). The
+		// marker is NOT appended here — the guest's log stream writes the
+		// same file, so it is queued for the tailer to deliver at a safe
+		// point (line boundary, outside blocks; see tryFlushNotify).
+		var req struct {
+			Severity string `json:"severity"`
+			Title    string `json:"title"`   // base64 (arbitrary bytes)
+			Msg      string `json:"msg"`     // base64
+			Session  string `json:"session"` // chat session raising it
+		}
+		_ = json.Unmarshal(line, &req)
+		title, _ := base64.StdEncoding.DecodeString(req.Title)
+		msg, _ := base64.StdEncoding.DecodeString(req.Msg)
+		sev := req.Severity
+		if sev != "high" {
+			sev = "normal" // clamp, never error
+		}
+		sess, serr := normalizeSession(req.Session)
+		if serr != nil {
+			sess = "" // malformed attribution → default session, never an error
+		}
+		// Flatten + truncate before encoding so the on-disk marker line
+		// stays bounded; the parser re-applies the same clamps on the way
+		// out (its copy also covers forged markers).
+		t := truncateRunes(flattenInline(string(title)), notifyTitleMax)
+		b := truncateRunes(flattenInline(string(msg)), notifyMsgMax)
+		if t == "" && b == "" {
+			return errResp("ctl: notify: empty title and message")
+		}
+		if !notifyAllow(owner) {
+			return errResp("ctl: notify: rate limited")
+		}
+		emitLogfG("ctl", owner, "info", "[%s] notify sev=%s session=%s title=%dB msg=%dB",
+			owner, sev, sessionMarkerName(sess), len(t), len(b))
+		if !queueNotify(owner, notifyMarker(time.Now().UnixMilli(), sev, sess, t, b)) {
+			return errResp("ctl: notify: backlog full")
+		}
+		// The tailer is the delivery vehicle — make sure one is running.
+		ensureTail(owner)
 		return baseResp{OK: true}
 
 	case "sched_add":

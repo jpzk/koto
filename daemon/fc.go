@@ -741,7 +741,11 @@ func fcSpliceToProxy(c net.Conn, proxyPort int) {
 // fcLogSink appends the guest's log stream to the HOST log file — the same
 // file tailLog tails and History reads, so every downstream consumer is
 // oblivious to the runtime. O_APPEND write semantics match the podman-era
-// multi-writer behavior (proxy notices, daemon markers).
+// multi-writer behavior (proxy notices, daemon markers). Each chunk is
+// written under the group's log write lock so the tailer's [[notify]] flush
+// (tryFlushNotify, logtail.go) can check the file tail and append atomically
+// against this stream — an unsynchronized marker append could land mid-line
+// and stop parsing as a marker.
 func fcLogSink(g string, c net.Conn) {
 	defer c.Close()
 	p := filepath.Join(vol(g), ".cs", "log")
@@ -752,7 +756,22 @@ func fcLogSink(g string, c net.Conn) {
 		return
 	}
 	defer f.Close()
-	_, _ = io.Copy(f, c)
+	mu := logWriteLock(g)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := c.Read(buf)
+		if n > 0 {
+			mu.Lock()
+			_, werr := f.Write(buf[:n])
+			mu.Unlock()
+			if werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // fcCtlConn serves the guest's ctl plane: JSON lines in, JSON lines out on

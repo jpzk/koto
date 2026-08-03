@@ -160,5 +160,7 @@ func sanitizeEvent(ev Event) Event {
 	ev.Name = sanitize(ev.Name)
 	ev.Input = sanitize(ev.Input)
 	ev.Body = sanitize(ev.Body)
+	ev.Severity = sanitize(ev.Severity)
+	ev.Title = sanitize(ev.Title)
 	return ev
 }

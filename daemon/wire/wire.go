@@ -42,6 +42,12 @@ type Event struct {
 	// session; see koto.proto Event.session). Stamped by the log parser
 	// from the [[session]] turn markers.
 	Session string `json:"session,omitempty"`
+	// Severity and Title carry the notification payload (event ==
+	// "notification"): severity is "high" | "normal" (clamped by the ctl
+	// verb; clients treat unknown as normal), title the short headline.
+	// The message body rides Text.
+	Severity string `json:"severity,omitempty"`
+	Title    string `json:"title,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
