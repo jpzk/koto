@@ -39,7 +39,10 @@ func TestLogParserBasicTurn(t *testing.T) {
 		"[[turn_end]]",
 	}, "\n")
 	evs := feedAll(t, body)
-	want := []string{"prompt", "thinking_begin", "thinking", "thinking_done", "tool", "tool_result", "tool_result_done", "done", "turn_end"}
+	// Both blocks are framed symmetrically: [[think_begin]] opens with
+	// thinking_begin, [[tool_out_begin]] with tool_result_begin (the TUI uses
+	// the latter to time an in-flight tool — see tui/model.go's toolBeginTs).
+	want := []string{"prompt", "thinking_begin", "thinking", "thinking_done", "tool", "tool_result_begin", "tool_result", "tool_result_done", "done", "turn_end"}
 	got := names(evs)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", got, want)
@@ -56,8 +59,13 @@ func TestLogParserBasicTurn(t *testing.T) {
 	if evs[4].Name != "Bash" || evs[4].Input != `{"command":"ls"}` {
 		t.Fatalf("tool = %+v", evs[4])
 	}
-	if evs[6].Body != "file1" {
-		t.Fatalf("tool_result_done body = %q", evs[6].Body)
+	// The streaming chunk carries Text; only the closing event carries the
+	// accumulated Body.
+	if evs[6].Event != "tool_result" || evs[6].Text != "file1" {
+		t.Fatalf("tool_result = %+v", evs[6])
+	}
+	if evs[7].Event != "tool_result_done" || evs[7].Body != "file1" {
+		t.Fatalf("tool_result_done = %+v", evs[7])
 	}
 }
 
