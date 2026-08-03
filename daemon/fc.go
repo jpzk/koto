@@ -620,6 +620,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		"op":    "init",
 		"ports": pubPorts,
 		"env":   env,
+		// Guest hostname becomes koto-vm-<group> (handleInit) so shell
+		// prompts identify which group's VM they're in.
+		"group": g,
 	}
 	if groupNetwork(g) != fcNetNone {
 		initReq["net"] = "l3"

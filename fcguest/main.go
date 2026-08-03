@@ -510,6 +510,7 @@ type agentReq struct {
 	Env           map[string]string `json:"env"`
 	Net           string            `json:"net"`     // "l3" → bring up the TAP (internet=full)
 	Root          bool              `json:"root"`    // true → writable-persistent root overlay + passwordless sudo for node (config root=yes)
+	Group         string            `json:"group"`   // init: owning group name → hostname koto-vm-<group>
 	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell); msg: chat session name ("" = default)
 	Cols          uint32            `json:"cols"`    // shell_attach: initial pty width
 	Rows          uint32            `json:"rows"`    // shell_attach: initial pty height
@@ -580,6 +581,15 @@ var (
 func handleInit(c *vconn, req *agentReq) {
 	initMu.Lock()
 	defer initMu.Unlock()
+	// Hostname carries the group identity (koto-vm-<group>) so shell
+	// prompts, tmux status lines, and anything else showing \h identify
+	// WHICH group's VM you're in — every guest otherwise looks like the
+	// boot-time default "koto-vm" (earlyInit). The name is daemon-validated
+	// ([a-z0-9][a-z0-9_-]{0,31}), so 8+32 bytes stays under the 64-byte
+	// kernel limit; idempotent across re-inits.
+	if req.Group != "" {
+		_ = unix.Sethostname([]byte("koto-vm-" + req.Group))
+	}
 	// internet=full: bring up the L3 TAP once, before the entrypoint starts,
 	// so the first turn already has a route.
 	if req.Net == "l3" && !netStarted {
