@@ -485,6 +485,7 @@ func pbToEvent(p *pb.Event) Event {
 		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
 		Historical: p.Historical, ID: p.Id, Seq: p.Seq, Session: p.Session,
+		Severity: p.Severity, Title: p.Title,
 	}
 }
 

@@ -29,6 +29,11 @@ type Event struct {
 	// session). Stamped by the daemon's log parser; pre-session daemons
 	// leave it empty, which reads as the default session.
 	Session string
+	// Severity ("high" | "normal"; unknown reads as normal) and Title carry
+	// the notification payload (event == "notification"); the message body
+	// rides Text.
+	Severity string
+	Title    string
 }
 
 // GroupInfo is one group's row in the WatchState / List snapshot.

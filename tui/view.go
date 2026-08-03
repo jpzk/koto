@@ -22,6 +22,7 @@ var (
 	cGray    = lipgloss.Color("8")
 	cBrWhite = lipgloss.Color("15")
 	cPink    = lipgloss.Color("205")
+	cEmerald = lipgloss.Color("42") // notification banner, normal severity (256-color #00d787)
 )
 
 // Powerline-ish glyphs. Same as the Ink TUI used.
@@ -194,7 +195,82 @@ func (m Model) View() string {
 	hint := m.renderHint()
 	metricsBar := m.renderMetricsBar()
 
-	return lipgloss.JoinVertical(lipgloss.Left, status, middle, input, hint, metricsBar)
+	parts := []string{status, middle, input, hint, metricsBar}
+	if m.bannerRows() > 0 {
+		parts = append([]string{m.renderNotifyBanner()}, parts...)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// --- notification banner -----------------------------------------------------
+
+// flattenBannerText collapses line/column control whitespace to spaces for
+// the one-row banner rendering (the chat transcript can wrap; this row
+// cannot grow).
+func flattenBannerText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// formatNotifyLine is the transcript (chat log) rendering of a notification.
+func formatNotifyLine(sev, title, msg string) string {
+	s := "🔔 [" + sev + "] " + title
+	if msg != "" {
+		if title != "" {
+			s += " — "
+		}
+		s += msg
+	}
+	return s
+}
+
+// renderNotifyBanner draws the stack of live notification rows shown above
+// the status bar: newest first, one row each, blinking on the shared spinner
+// tick. High severity is pink, normal emerald. The blink alternates a solid
+// background with a foreground-only phase so the text stays readable and the
+// row count (and thus the frame height) never changes mid-blink.
+func (m Model) renderNotifyBanner() string {
+	items := m.visibleNotifications()
+	rows := make([]string, 0, len(items))
+	on := (m.tick/notifyBlinkTicks)%2 == 0
+	for _, n := range items {
+		accent := cEmerald
+		if n.severity == "high" {
+			accent = cPink
+		}
+		base := lipgloss.NewStyle().Foreground(cBlack).Background(accent)
+		// Off-phase: drop the background and hide the bell (the icon swap is
+		// the same idiom as the job-row blink — visible even where color
+		// isn't, e.g. limited terminals).
+		icon := " 🔔 "
+		if !on {
+			base = lipgloss.NewStyle().Foreground(accent)
+			icon = "    "
+		}
+		// The daemon's parser flattens newlines out of title/msg, but this
+		// row's height invariant is ours to keep — one banner item must be
+		// exactly one terminal row or the frame outgrows m.height and
+		// Bubble Tea truncates it from the top. Flatten again locally.
+		title := flattenBannerText(n.title)
+		msg := flattenBannerText(n.msg)
+		line := base.Render(icon+n.group+" · ") +
+			base.Bold(true).Render(title)
+		if msg != "" {
+			sep := ""
+			if title != "" {
+				sep = " — "
+			}
+			line += base.Render(sep + msg)
+		}
+		line += base.Render(" ")
+		// One row, always: clip at the terminal edge like the status bar.
+		rows = append(rows, lipgloss.NewStyle().MaxWidth(m.width).Render(line))
+	}
+	return strings.Join(rows, "\n")
 }
 
 // --- status bar --------------------------------------------------------------
@@ -653,6 +729,9 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 // normal rule applies: tab toggles the tree in and out beside the split, and
 // tree navigation works as usual.
 func (m Model) treePaneW() int {
+	if m.fullscreen {
+		return 0 // fullscreen hides the tree no matter which pane owns it
+	}
 	if m.focus == focusTree {
 		return leftPaneWidth
 	}
@@ -1158,6 +1237,11 @@ func (m Model) renderHint() string {
 		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
 	}
 	parts = append(parts, shellHint)
+	fullHint := "^f full"
+	if m.fullscreen {
+		fullHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
+	}
+	parts = append(parts, fullHint)
 	if !m.vp.AtBottom() && m.focus == focusInput {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))

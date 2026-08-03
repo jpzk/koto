@@ -174,6 +174,24 @@ const (
 	jobBlinkTicks = 6
 )
 
+// notifyLingerMs is how long a notification banner row stays above the
+// status bar; notifyBlinkTicks is its blink half-period in spinner ticks
+// (matching jobBlinkTicks). notifyMaxRows caps the stack so a notification
+// burst can't eat the screen — overflow items still land in the transcript.
+const (
+	notifyLingerMs   = 10000
+	notifyBlinkTicks = 6
+	notifyMaxRows    = 4
+)
+
+// notifyItem is one live notification in the banner stack (event
+// "notification"). Visibility is a pure function of `at`, like jobDoneAt:
+// the row shows while time.Since(at) < notifyLingerMs.
+type notifyItem struct {
+	at                          time.Time
+	severity, title, msg, group string
+}
+
 type streamEventMsg Event
 type streamClosedMsg struct {
 	group string
@@ -445,6 +463,20 @@ type Model struct {
 	shellOpen     bool
 	shellChaseSeq int
 
+	// fullscreen zooms the active window to the whole frame (ctrl+f): with
+	// the chat side focused the tree and the shell split are hidden; with
+	// the pty focused the tree and the chat column are (shellChatW/treePaneW
+	// both key off this). Transient by design — any focus change (tab, esc,
+	// alt+←/→, ctrl+], ctrl+l, or a click that moves focus) drops back to
+	// the normal layout, so it is never persisted. preFullFocus mirrors
+	// preLogFocus/preShellFocus: entering from tree mode parks focus on the
+	// input (the tree is hidden, arrows must not drive an invisible cursor),
+	// and the ctrl+f exit restores tree mode from it — only the ctrl+f
+	// round-trip reads it; a focus-change exit already lands somewhere the
+	// user chose.
+	fullscreen   bool
+	preFullFocus focusZone
+
 	// promptHistory: per-group ring of the last N user prompts, oldest
 	// first. Populated from three independent sources — local sends
 	// (dispatchInput), live subscribe `prompt` events, and the per-group
@@ -482,6 +514,18 @@ type Model struct {
 	jobStatusSeen map[string]string
 	jobDoneAt     map[string]time.Time
 	jobsPrimed    map[string]bool
+
+	// Notification banner stack (event "notification"): each live
+	// notification gets its own row above the status bar for
+	// notifyLingerMs, newest on top, capped at notifyMaxRows.
+	//   notifications — arrival-ordered; expired entries are GC'd on the
+	//                   spinner tick.
+	//   bannerLast    — the row count the panes were last sized for, so
+	//                   show/expire transitions trigger exactly one
+	//                   viewport resize (the layout funcs subtract
+	//                   bannerRows live).
+	notifications []notifyItem
+	bannerLast    int
 
 	// peekJob is the background job whose live state the chat column shows
 	// while its tree row is hovered (focusTree only); zero when no job row
@@ -1117,6 +1161,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinTickMsg:
+		// Runs before the isAnimating gate so the tick that observes the last
+		// banner expiring still restores the pane geometry.
+		m.syncBannerRows()
 		if m.isAnimating() {
 			m.tick++
 			return m, tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
@@ -1274,6 +1321,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 			case "tool_result_done":
 				batch = append(batch, logLine{kind: "tool_out", group: msg.group, session: ev.Session, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
+			case "notification":
+				sev := ev.Severity
+				if sev != "high" {
+					sev = "normal"
+				}
+				batch = append(batch, logLine{kind: "sys", group: msg.group, session: ev.Session,
+					text: formatNotifyLine(sev, ev.Title, ev.Text), ts: int64(ev.Ts)})
 			}
 		}
 		// Track the smallest ts in this batch so the next older-page request
@@ -1606,6 +1660,19 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addLine(logLine{kind: "sys", group: ev.Group,
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
+		case "notification":
+			sev := ev.Severity
+			if sev != "high" {
+				sev = "normal"
+			}
+			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
+				text: formatNotifyLine(sev, ev.Title, ev.Text), ts: int64(ev.Ts)})
+			if !ev.Historical {
+				m.notifications = append(m.notifications, notifyItem{
+					at: time.Now(), severity: sev, title: ev.Title, msg: ev.Text, group: ev.Group,
+				})
+				m.syncBannerRows()
+			}
 		}
 		if !ev.Historical && m.plugin != nil {
 			m.plugin.push(ev)
@@ -1617,7 +1684,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// would turn every active sidecar pink. The pink dot should mean
 		// "there is a new model reply for you to read", not "this sidecar is
 		// busy."
-		if !ev.Historical && ev.Event == "done" && ev.Text != "" &&
+		if !ev.Historical && (ev.Event == "done" && ev.Text != "" || ev.Event == "notification") &&
 			(ev.Group != m.cur || ev.Session != m.activeSession(ev.Group)) {
 			m.markUnread(ev.Group, ev.Session)
 		}
@@ -1899,8 +1966,9 @@ func (m Model) logViewportSize() (int, int) {
 // grows as the value wraps (inputRows), so this shrinks with it — View() and
 // the viewport must agree on the number or the frame overflows the terminal.
 func (m Model) chatRows() int {
-	// status(1) + input borders(2) + hint(1) + metrics(1) = 5
-	return max(1, m.height-5-m.inputRows())
+	// status(1) + input borders(2) + hint(1) + metrics(1) = 5, plus any
+	// transient notification banner rows above the status bar.
+	return max(1, m.height-5-m.inputRows()-m.bannerRows())
 }
 
 // logContentCols returns the column width passed to glamour for response
@@ -2202,6 +2270,49 @@ func formatToolOutFullElapsed(body string, elapsedMs int64) string {
 	return summary + "\n" + body
 }
 
+// visibleNotifications returns the banner rows to draw: unexpired items,
+// newest first, capped at notifyMaxRows.
+func (m Model) visibleNotifications() []notifyItem {
+	out := make([]notifyItem, 0, notifyMaxRows)
+	for i := len(m.notifications) - 1; i >= 0 && len(out) < notifyMaxRows; i-- {
+		if time.Since(m.notifications[i].at) < notifyLingerMs*time.Millisecond {
+			out = append(out, m.notifications[i])
+		}
+	}
+	return out
+}
+
+// bannerRows is the transient height the notification stack steals from the
+// panes (chatRows / logPaneSize / shellPaneSize subtract it).
+func (m Model) bannerRows() int { return len(m.visibleNotifications()) }
+
+// syncBannerRows GCs expired entries and resizes the viewports when the
+// visible banner row count drifted from what the panes were last sized for
+// (a notification arrived or expired). The prune runs unconditionally —
+// gating it on a row-count change let sustained spam pin the visible count
+// at notifyMaxRows and grow the slice without bound until the stream went
+// quiet. Returns true if geometry changed.
+func (m *Model) syncBannerRows() bool {
+	kept := m.notifications[:0]
+	for _, n := range m.notifications {
+		if time.Since(n.at) < notifyLingerMs*time.Millisecond {
+			kept = append(kept, n)
+		}
+	}
+	m.notifications = kept
+	rows := m.bannerRows()
+	if rows == m.bannerLast {
+		return false
+	}
+	m.bannerLast = rows
+	m.resizeViewport()
+	if m.logVPReady {
+		m.resizeLogViewport()
+	}
+	m.refreshLog()
+	return true
+}
+
 func (m Model) isAnimating() bool {
 	// The shell pane's blinking cursor needs the tick chain even when the
 	// guest is silent (shell_view.go overlayShellCursor).
@@ -2227,6 +2338,11 @@ func (m Model) isAnimating() bool {
 		if time.Since(t) < jobLingerMs*time.Millisecond {
 			return true
 		}
+	}
+	// An active notification banner needs frames for its blink and for the
+	// render that finally hides it (no other event is guaranteed in time).
+	if m.bannerRows() > 0 {
+		return true
 	}
 	return false
 }
@@ -2413,7 +2529,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// bindings, ctrl+c in the shell hit the quit branch and killed the
 		// whole TUI. The reserved local keys: ctrl+] CLOSES the pane
 		// (closeShell, which hands focus back on the way out — an
-		// open/close toggle, never a focus toggle), alt+← moves focus
+		// open/close toggle, never a focus toggle), ctrl+f zooms the pane
+		// to the whole frame (fullscreen toggle), alt+← moves focus
 		// back to the tree/chat side (exitShell), leaving the pane open,
 		// and esc (== ctrl+[) toggles the tree column — see its case below.
 		// Tab is deliberately NOT reserved — it reaches the guest, so bash
@@ -2422,6 +2539,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch s {
 		case "ctrl+]":
 			m.closeShell()
+			return m, nil
+		case "ctrl+f":
+			// Zoom the pty to the whole frame (tree + chat column hidden);
+			// the same toggle the chat side has. Reserved locally like
+			// ctrl+] — the guest never sees ctrl+f (readline forward-char;
+			// the right-arrow key covers that use inside).
+			m.fullscreen = !m.fullscreen
+			m.resizeViewport()
+			m.refreshLog()
 			return m, nil
 		case "esc":
 			// esc and ctrl+[ are the same byte (0x1b) — this is the ctrl+[
@@ -2433,6 +2559,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// "tree visible ⇒ alt+← lands in the tree" consistent. The cost
 			// is a literal ESC no longer reaching the guest on this key —
 			// alt+esc (below) is the escape hatch for vim/less inside.
+			if m.fullscreen {
+				// Fullscreen hides the tree column entirely — the first esc
+				// restores the normal layout; the next one toggles the tree.
+				m.fullscreen = false
+				m.resizeViewport()
+				m.refreshLog()
+				return m, nil
+			}
 			if m.preShellFocus == focusTree {
 				m.preShellFocus = focusInput
 			} else {
@@ -2561,6 +2695,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// dropped on purpose so a stray keystroke doesn't end up in the
 		// chat input or in tree navigation.
 		return m.handleLogKey(msg)
+	}
+	if s == "ctrl+f" {
+		// Fullscreen toggle: zoom the active window to the whole frame.
+		// Entering hides the tree and any open-but-unfocused shell split;
+		// leaving — this key again, or any focus change — restores them.
+		// The pty side has its own reserved case in the shell-focus block.
+		if m.fullscreen {
+			m.fullscreen = false
+			if m.preFullFocus == focusTree {
+				// Entered from tree mode — put the tree back (enterTree also
+				// re-clears the flag; harmless).
+				m.enterTree()
+			}
+		} else {
+			m.preFullFocus = m.focus
+			if m.focus == focusTree {
+				m.exitTree() // the tree is hidden fullscreen — land in the input
+			}
+			m.fullscreen = true
+		}
+		m.resizeViewport()
+		m.refreshLog()
+		return m, nil
 	}
 	if s == "alt+right" {
 		// Focus the terminal pane. A pure focus move — nothing opens or
@@ -2916,6 +3073,7 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) enterTree() {
+	m.fullscreen = false // any focus change restores the normal layout
 	rows := m.treeRows()
 	idx := 0
 	active := m.activeSession(m.cur)
@@ -2940,6 +3098,7 @@ func (m *Model) enterTree() {
 // exitLog/exitShell with the textinput blurred. Callers that need the tree's
 // width change reflected get it here via resizeViewport.
 func (m *Model) exitTree() {
+	m.fullscreen = false // any focus change restores the normal layout
 	m.stopPeek()
 	m.peekJob = jobRef{}
 	m.focus = focusInput

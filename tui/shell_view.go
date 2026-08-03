@@ -239,6 +239,13 @@ func (m Model) shellChatW() int {
 	// with or without the tree column (which is reserved first, separator
 	// included). The shell used to take a fixed preferred width in the
 	// no-tree case, but that left a lopsided chat column; 50/50 everywhere.
+	if m.fullscreen {
+		// Fullscreen collapses the split: chat width 0 means the focused
+		// pane owns the frame — the pty when focus is on it (renderShellView
+		// falls into its no-split mode), the chat column otherwise
+		// (shellSplitVisible goes false and View() renders the plain chat).
+		return 0
+	}
 	avail := m.width
 	if tw := m.treePaneW(); tw > 0 {
 		avail -= tw + 1 // tree column + its separator
@@ -281,8 +288,9 @@ func (m Model) shellPaneSize() (int, int) {
 	// -3: status + hint + metrics. This makes the frame exactly m.height
 	// rows, same as the chat view — so the hint/metrics rows sit on the
 	// same terminal rows in both views and toggling the shell pane in and
-	// out (ctrl+]) doesn't make the bottom lines jump.
-	h := max(1, m.height-3)
+	// out (ctrl+]) doesn't make the bottom lines jump. Notification banner
+	// rows above the status bar transiently shrink it further.
+	h := max(1, m.height-3-m.bannerRows())
 	return w, h
 }
 
@@ -434,6 +442,7 @@ func (m *Model) enterShell(session string) {
 // touching the stream — enterShell's tail, and the in-grid click-to-focus
 // path (handleLeftClick).
 func (m *Model) focusShellPane() {
+	m.fullscreen = false // any focus change restores the normal layout
 	if m.focus != focusShell {
 		m.preShellFocus = m.focus
 	}
@@ -456,6 +465,7 @@ func (m *Model) focusShellPane() {
 // leaving the pane should not lose terminal state or force a redial; the
 // stream only tears down on group switch (enterShell) or TUI exit.
 func (m *Model) exitShell() {
+	m.fullscreen = false // any focus change restores the normal layout
 	target := m.preShellFocus
 	if target != focusInput && target != focusTree {
 		target = focusInput
@@ -509,6 +519,11 @@ func (m *Model) syncShellSize() {
 		return
 	}
 	if m.focus != focusShell && !m.shellOpen {
+		return
+	}
+	if m.fullscreen && m.focus != focusShell {
+		// Pane hidden behind the fullscreen chat — don't reflow the guest
+		// tmux to a full-width geometry nobody sees; it snaps back on exit.
 		return
 	}
 	if w, h := m.shellPaneSize(); w != m.shell.cols || h != m.shell.rows {
@@ -750,7 +765,11 @@ func (m Model) renderShellView() string {
 		hint = m.renderHint()
 	}
 	metricsBar := m.renderMetricsBar()
-	return lipgloss.JoinVertical(lipgloss.Left, status, body, hint, metricsBar)
+	parts := []string{status, body, hint, metricsBar}
+	if m.bannerRows() > 0 {
+		parts = append([]string{m.renderNotifyBanner()}, parts...)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // overlayShellCursor paints a block cursor into the emulator's rendered
@@ -810,6 +829,10 @@ func (m Model) renderShellHint() string {
 			parts = append(parts, red.Render(txt))
 		}
 	}
-	parts = append(parts, "⎋ tree", "⌥⎋ esc→guest", "ctrl+] close", "⌥← chat")
+	full := "^f full"
+	if m.fullscreen {
+		full = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
+	}
+	parts = append(parts, "⎋ tree", "⌥⎋ esc→guest", full, "ctrl+] close", "⌥← chat")
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }

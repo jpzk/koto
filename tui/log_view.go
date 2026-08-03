@@ -133,8 +133,9 @@ func (m Model) logPaneSize() (int, int) {
 	w := max(10, m.width-2-m.treePaneW()) // -1 left padding, -1 scrollbar
 	// -3: status + hint + metrics (no input bar in log view). Fills the
 	// frame to exactly m.height like the chat and shell views, keeping the
-	// bottom rows fixed across every view toggle.
-	h := max(1, m.height-3)
+	// bottom rows fixed across every view toggle. Notification banner rows
+	// above the status bar transiently shrink it further.
+	h := max(1, m.height-3-m.bannerRows())
 	return w, h
 }
 
@@ -253,7 +254,11 @@ func (m Model) renderLogView() string {
 
 	hint := m.renderLogHint()
 	metricsBar := m.renderMetricsBar()
-	return lipgloss.JoinVertical(lipgloss.Left, status, middle, hint, metricsBar)
+	parts := []string{status, middle, hint, metricsBar}
+	if m.bannerRows() > 0 {
+		parts = append([]string{m.renderNotifyBanner()}, parts...)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // renderLogScrollbar is a stripped copy of renderScrollbar tailored to
@@ -312,6 +317,7 @@ func (m Model) renderLogHint() string {
 // previous focus (input vs tree) is stashed in m.preLogFocus so exitLog
 // can put the user back where they were.
 func (m *Model) enterLog() {
+	m.fullscreen = false // any focus change restores the normal layout
 	if !m.logVPReady {
 		w, h := m.logPaneSize()
 		vp := viewport.New(w, h)
