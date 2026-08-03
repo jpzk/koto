@@ -55,6 +55,7 @@ const (
 	Koto_SchedDel_FullMethodName       = "/koto.Koto/SchedDel"
 	Koto_SchedToggle_FullMethodName    = "/koto.Koto/SchedToggle"
 	Koto_SchedRun_FullMethodName       = "/koto.Koto/SchedRun"
+	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
@@ -100,6 +101,22 @@ type KotoClient interface {
 	SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedToggle(ctx context.Context, in *SchedToggleReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// Resources reports host-side resource consumption for the whole fleet:
+	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
+	// plus a host rollup (filesystem free vs. what the images occupy vs. what
+	// the `size` presets have provisioned).
+	//
+	// GLOBAL and UNTARGETED by design — it is a cluster-wide rollup with no
+	// group field, so it is granted by verb alone and reads across every group
+	// (see targetOf in daemon/acl.go). The admin role has it via the hardcoded
+	// superuser rule; it is NOT in adminOnlyVerbs, so a read-only monitoring
+	// role can be granted `resources` through acl.json.
+	//
+	// Every figure is collected host-side (stat/statfs//proc) and never from a
+	// guest exec, so it stays truthful when a guest is wedged, read-only, or
+	// stopped — the failure mode where a guest's own `df` is actively
+	// misleading. See daemon/resources.go.
+	Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -385,6 +402,16 @@ func (c *kotoClient) SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.
 	return out, nil
 }
 
+func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResourcesResp)
+	err := c.cc.Invoke(ctx, Koto_Resources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
@@ -539,6 +566,22 @@ type KotoServer interface {
 	SchedDel(context.Context, *SchedIDReq) (*BaseResp, error)
 	SchedToggle(context.Context, *SchedToggleReq) (*BaseResp, error)
 	SchedRun(context.Context, *SchedIDReq) (*BaseResp, error)
+	// Resources reports host-side resource consumption for the whole fleet:
+	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
+	// plus a host rollup (filesystem free vs. what the images occupy vs. what
+	// the `size` presets have provisioned).
+	//
+	// GLOBAL and UNTARGETED by design — it is a cluster-wide rollup with no
+	// group field, so it is granted by verb alone and reads across every group
+	// (see targetOf in daemon/acl.go). The admin role has it via the hardcoded
+	// superuser rule; it is NOT in adminOnlyVerbs, so a read-only monitoring
+	// role can be granted `resources` through acl.json.
+	//
+	// Every figure is collected host-side (stat/statfs//proc) and never from a
+	// guest exec, so it stays truthful when a guest is wedged, read-only, or
+	// stopped — the failure mode where a guest's own `df` is actively
+	// misleading. See daemon/resources.go.
+	Resources(context.Context, *ResourcesReq) (*ResourcesResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -660,6 +703,9 @@ func (UnimplementedKotoServer) SchedToggle(context.Context, *SchedToggleReq) (*B
 }
 func (UnimplementedKotoServer) SchedRun(context.Context, *SchedIDReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedRun not implemented")
+}
+func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
 }
 func (UnimplementedKotoServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
@@ -1095,6 +1141,24 @@ func _Koto_SchedRun_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResourcesReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Resources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Resources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Resources(ctx, req.(*ResourcesReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclGetReq)
 	if err := dec(in); err != nil {
@@ -1290,6 +1354,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SchedRun",
 			Handler:    _Koto_SchedRun_Handler,
+		},
+		{
+			MethodName: "Resources",
+			Handler:    _Koto_Resources_Handler,
 		},
 		{
 			MethodName: "AclGet",

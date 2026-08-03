@@ -185,6 +185,9 @@ func daemonMain() {
 	loadSched()
 	go stateWatchLoop()
 	go cronLoop()
+	// Ungated by watchers on purpose: resource exhaustion has to be visible
+	// exactly when nobody is attached (see daemon/resources.go).
+	go resourcesLoop()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)

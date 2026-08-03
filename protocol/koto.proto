@@ -53,6 +53,23 @@ service Koto {
   rpc SchedToggle (SchedToggleReq) returns (BaseResp);
   rpc SchedRun    (SchedIDReq)     returns (BaseResp);
 
+  // Resources reports host-side resource consumption for the whole fleet:
+  // per-group workspace.img allocation + growth rate + FC process CPU/RSS,
+  // plus a host rollup (filesystem free vs. what the images occupy vs. what
+  // the `size` presets have provisioned).
+  //
+  // GLOBAL and UNTARGETED by design — it is a cluster-wide rollup with no
+  // group field, so it is granted by verb alone and reads across every group
+  // (see targetOf in daemon/acl.go). The admin role has it via the hardcoded
+  // superuser rule; it is NOT in adminOnlyVerbs, so a read-only monitoring
+  // role can be granted `resources` through acl.json.
+  //
+  // Every figure is collected host-side (stat/statfs//proc) and never from a
+  // guest exec, so it stays truthful when a guest is wedged, read-only, or
+  // stopped — the failure mode where a guest's own `df` is actively
+  // misleading. See daemon/resources.go.
+  rpc Resources   (ResourcesReq)   returns (ResourcesResp);
+
   // ---- ACL management (HARDCODED admin-only: these verbs can never be
   // granted via acl.json — a role granting itself acl_set_role would be
   // privilege escalation to full control; see daemon/acl.go) ----
@@ -439,6 +456,57 @@ message SchedAddResp { bool ok = 1; string error = 2; ScheduleItem item = 3; }
 message SchedListResp {
   bool ok = 1; string error = 2;
   repeated ScheduleItem schedules = 3;
+}
+
+// ---- Resources --------------------------------------------------------------
+// Host-side fleet resource accounting. No group field: the request is a
+// cluster-wide rollup, which is what makes the verb untargeted.
+message ResourcesReq {}
+
+message ResourcesResp {
+  bool ok = 1; string error = 2;
+  repeated GroupResources groups = 3;
+  HostResources host = 4;
+}
+
+// One group's host-side cost. Sizes are BYTES.
+message GroupResources {
+  string group  = 1;
+  bool   running = 2;
+  // alloc_bytes is the workspace image's ACTUAL allocation (st_blocks × 512).
+  // The images are sparse, so this is far below declared_bytes and is the
+  // only figure that reflects real host consumption.
+  int64  alloc_bytes = 3;
+  // declared_bytes is the ceiling from the group's `size` preset.
+  int64  declared_bytes = 4;
+  // growth_bytes_per_hour is measured across the collector's retained sample
+  // ring; growth_span_seconds says how long that window actually covers (0 =
+  // not enough samples yet). Because Firecracker's virtio-blk has no discard,
+  // allocation effectively never falls on its own, so a sustained positive
+  // rate is a genuine countdown to the ceiling.
+  int64  growth_bytes_per_hour = 5;
+  int64  growth_span_seconds   = 6;
+  // Firecracker VMM process cost. rss_bytes is the VMM's resident set (which
+  // includes the guest's backing memory); cpu_pct is percent of ONE core, so
+  // a 4-vCPU guest may legitimately exceed 100.
+  int64  rss_bytes = 7;
+  double cpu_pct   = 8;
+  int32  vcpus     = 9;
+  int32  mem_mib   = 10;
+}
+
+// Fleet-wide rollup for the filesystem the groups directory lives on.
+message HostResources {
+  int64 fs_total_bytes = 1;
+  int64 fs_free_bytes  = 2;
+  // alloc_total_bytes: what the workspace images occupy right now.
+  int64 alloc_total_bytes = 3;
+  // provisioned_bytes: the sum of every group's `size` preset — what the
+  // fleet could grow into. Intentionally allowed to exceed fs_total_bytes
+  // (sparse overcommit is the design); the point is that it be visible.
+  int64 provisioned_bytes = 4;
+  int32 groups         = 5;
+  int32 running_groups = 6;
 }
 
 // ---- ACL management ---------------------------------------------------------

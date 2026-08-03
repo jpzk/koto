@@ -306,6 +306,40 @@ func (s *kotoServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsRe
 	return out, nil
 }
 
+// Resources reports host-side fleet resource consumption. Unlike Jobs it
+// serves the collector's cached samples and never touches a guest, so it is
+// cheap, cannot block on a wedged VM, and stays truthful for groups that are
+// stopped or read-only. See daemon/resources.go.
+func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.ResourcesResp, error) {
+	groups, host := resourcesSnapshot()
+	out := &pb.ResourcesResp{
+		Ok: true,
+		Host: &pb.HostResources{
+			FsTotalBytes:     host.FSTotalBytes,
+			FsFreeBytes:      host.FSFreeBytes,
+			AllocTotalBytes:  host.AllocTotalBytes,
+			ProvisionedBytes: host.ProvisionedBytes,
+			Groups:           host.Groups,
+			RunningGroups:    host.RunningGroups,
+		},
+	}
+	for _, g := range groups {
+		out.Groups = append(out.Groups, &pb.GroupResources{
+			Group:              g.Group,
+			Running:            g.Running,
+			AllocBytes:         g.AllocBytes,
+			DeclaredBytes:      g.DeclaredBytes,
+			GrowthBytesPerHour: g.GrowthPerHour,
+			GrowthSpanSeconds:  g.GrowthSpanSecs,
+			RssBytes:           g.RSSBytes,
+			CpuPct:             g.CPUPct,
+			Vcpus:              g.Vcpus,
+			MemMib:             g.MemMiB,
+		})
+	}
+	return out, nil
+}
+
 // Jobs is the fresh "ls" of a group's background jobs — it re-reads the
 // guest (bounded by fcExec's timeout) rather than serving the watch-loop
 // mirror, so `koto ctl jobs` never shows stale state. Group "" sweeps every

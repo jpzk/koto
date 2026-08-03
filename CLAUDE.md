@@ -166,6 +166,26 @@ verb list.
   come back in-band as `{ok:false, error}` response fields; gRPC status codes
   are reserved for transport/auth faults. `Send` enqueues and returns
   immediately (turn lifecycle arrives over the subscribe stream).
+- **`Resources() → ResourcesResp`** — host-side resource accounting for the
+  whole fleet (`daemon/resources.go`): per group the workspace image's real
+  allocation (`st_blocks`, sparse-aware) vs its `size` preset, growth
+  bytes/hour, and the FC process's RSS + CPU%; plus a host rollup (filesystem
+  free, total allocation, and **provisioned** = the sum of all `size` presets,
+  i.e. the overcommit figure — 200 GiB on a 50 GiB disk is normal and fine,
+  invisible is not). **Every figure is host-side** (`stat`/`statfs`//proc),
+  never a guest exec: a guest's own `df` describes only its own filesystem and
+  is actively misleading during host exhaustion (2026-08-03: a group reported
+  "78%, 5.0G avail" while the host was at zero bytes and remounting guests
+  read-only). It therefore stays truthful for stopped/wedged groups, costs a
+  few syscalls per 30s tick, and — unlike the jobs mirror — runs **ungated by
+  watchers**, since exhaustion must be observable when nobody is attached.
+  Growth rate rather than level is the actionable signal: allocation is
+  monotonic because Firecracker's virtio-blk has no discard (`fstrim` in a
+  guest fails, so freed guest blocks are never returned — reclaim means an
+  offline `e2fsck` + `resize2fs -M` + `truncate`). The verb is **global and
+  untargeted** (no group field) and grantable: admin has it via the superuser
+  rule, and it is deliberately NOT in `adminOnlyVerbs`, so a read-only
+  monitoring role can be granted `resources` through acl.json.
 - **`SubscribeGroup(group, since_seq) → stream Event`** — the live event
   stream, fed by the daemon-side log tailer. Every frame carries a per-group
   monotonic `seq`. `since_seq=0` means live-only; `since_seq>0` makes the
@@ -345,10 +365,11 @@ the same mTLS + bearer token + role ACL every client goes through, so a verb
 the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
 and endpoint resolve from `KOTO_*` env (`KOTO_ADDR`, `KOTO_CREDS_DIR`,
 `KOTO_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `KOTO_SERVER_NAME`).
-Every gRPC RPC has a `ctl` verb (26/26). Group lifecycle
+Every gRPC RPC has a `ctl` verb (27/27). Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, skills (`skills`/`skill-new`/
-`skill-read`), streams (`metrics`, `tail`, `logs`, `watch`), `sched *`, and
+`skill-read`), streams (`metrics`, `tail`, `logs`, `watch`), `resources`
+(host-side fleet disk/mem/cpu — see below), `sched *`, and
 admin-only `acl get|set|del` + `runscript <group> <script>` (run a POSIX
 script in the group's microVM as `node`, output streamed raw to stdout,
 `"-"` = script from stdin).

@@ -86,6 +86,8 @@ skills
 
 streams
   metrics [group]
+  resources                                host-side disk/mem/cpu per group
+                                           + fleet rollup (admin)
   tail   [-since N] <group>                group event stream
   logs                                     daemon's own log stream
   watch                                    group-state snapshots on change
@@ -409,6 +411,16 @@ func ctlCliMain(args []string) {
 		ctx, cancel := ctlCtx()
 		defer cancel()
 		resp, err := cl.Metrics(ctx, &pb.MetricsReq{Group: g})
+		ctlPrint(resp, err)
+
+	case "resources":
+		if len(rest) != 0 {
+			ctlFatal(2, "usage: koto ctl resources")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Resources(ctx, &pb.ResourcesReq{})
 		ctlPrint(resp, err)
 
 	case "config":

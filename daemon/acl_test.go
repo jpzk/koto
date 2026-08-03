@@ -72,6 +72,7 @@ func TestTargetOf(t *testing.T) {
 		{&pb.RunScriptReq{Group: "dev"}, "dev", true},
 		{&pb.MetricsReq{}, "", true}, // global metrics = cross-group read
 		{&pb.ListReq{}, "", false},
+		{&pb.ResourcesReq{}, "", false}, // fleet rollup: global, untargeted
 		{&pb.SkillNewReq{Name: "x"}, "", false},
 		{&pb.SchedIDReq{Id: "abc"}, "", false},
 	}
@@ -313,5 +314,31 @@ func TestLoadACLFallback(t *testing.T) {
 	acl = loadACL()
 	if !roleAllowed(acl, "agent", "list", "", false) || !roleAllowed(acl, "agent", "send", "main", true) {
 		t.Error("verbs must be matched case/space-insensitively")
+	}
+}
+
+// resources is a GLOBAL admin verb: untargeted, and — because an unlisted
+// verb is denied by default — invisible to a role that wasn't granted it.
+// It is deliberately NOT in adminOnlyVerbs, so unlike acl_*/run_script it
+// CAN be delegated to a read-only monitoring role through acl.json.
+func TestResourcesVerbAuthorization(t *testing.T) {
+	acl := parseACL([]byte(`{
+		"agent":   {"list": "*", "send": ["main"]},
+		"monitor": {"resources": "*"}
+	}`))
+
+	if roleAllowed(acl, "agent", "resources", "", false) {
+		t.Error("agent role must NOT have resources (unlisted verb = denied)")
+	}
+	if !roleAllowed(acl, "monitor", "resources", "", false) {
+		t.Error("monitor role was granted resources and must have it")
+	}
+	// The hardcoded superuser has it without any acl.json entry.
+	if !roleAllowed(acl, defaultRole, "resources", "", false) {
+		t.Error("admin must have resources via the superuser rule")
+	}
+	// Not hardcoded-admin-only: a grant is honored, unlike run_script.
+	if adminOnlyVerbs["resources"] {
+		t.Error("resources must stay grantable (not in adminOnlyVerbs)")
 	}
 }
