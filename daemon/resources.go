@@ -29,6 +29,7 @@ package main
 // the per-group sample ring exists for.
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -157,12 +158,17 @@ func resSweep() {
 		resSampleGroup(g)
 	}
 	resMu.Lock()
+	gone := []string{}
 	for g := range resRing {
 		if _, ok := groups[g]; !ok {
 			delete(resRing, g)
+			gone = append(gone, g)
 		}
 	}
 	resMu.Unlock()
+	for _, g := range gone {
+		resForgetAlert(g)
+	}
 }
 
 // resourcesLoop is the collector goroutine, started once from daemonMain.
@@ -170,11 +176,171 @@ func resSweep() {
 // something to report rather than waiting out a full interval.
 func resourcesLoop() {
 	resSweep()
+	resCheckThresholds()
 	t := time.NewTicker(resSampleInterval)
 	defer t.Stop()
 	for range t.C {
 		resSweep()
+		resCheckThresholds()
 	}
+}
+
+// ---- Threshold alerting ----------------------------------------------------
+//
+// The collector is only half the fix: metrics nobody reads are how the
+// 2026-08-03 outage happened in the first place. These thresholds push,
+// hard-coded rather than configurable, because the failure they guard is
+// catastrophic and silent — the host filling makes every guest's filesystem
+// remount read-only, wedging agents with no error anywhere the operator
+// looks.
+//
+// Two subjects, because they fail differently:
+//
+//   - HOST filesystem: takes the whole fleet down at once.
+//   - Per-GROUP image vs. its `size` ceiling: wedges just that group. This
+//     is what actually happened to 9AZ, which sat at 98% of its own 24 GiB
+//     while the rest of the fleet looked fine.
+//
+// Alerts fire ONLY on an increase in level, and a level re-arms only after
+// the value falls a clear margin below its threshold. Without that, a value
+// parked at 80.1% would re-notify every sample interval and train the
+// operator to ignore the banner — the precise opposite of the point.
+
+const (
+	resWarnPct = 80.0 // → severity "normal"
+	resCritPct = 90.0 // → severity "high"
+	// resClearMargin is the hysteresis band: a level re-arms only once the
+	// value drops this far below the threshold that fired it.
+	resClearMargin = 5.0
+)
+
+var (
+	resAlertMu sync.Mutex
+	// resAlertLevel is the last level notified per subject ("host", or a
+	// group name). 0 = below warn, 1 = warn, 2 = critical.
+	resAlertLevel = map[string]int{}
+)
+
+// resLevel maps a percentage to an alert level.
+func resLevel(pct float64) int {
+	switch {
+	case pct >= resCritPct:
+		return 2
+	case pct >= resWarnPct:
+		return 1
+	}
+	return 0
+}
+
+// resAlertSeverity maps a level to the notification severity vocabulary.
+func resAlertSeverity(level int) string {
+	if level >= 2 {
+		return "high"
+	}
+	return "normal"
+}
+
+// resArmedLevel applies the hysteresis band to a raw level: while the value
+// sits inside the band just under a threshold it is treated as still at the
+// old level, so it neither re-fires nor re-arms.
+func resArmedLevel(pct float64, last int) int {
+	lvl := resLevel(pct)
+	if lvl >= last {
+		return lvl
+	}
+	// Falling: only step down once clear of the band.
+	switch last {
+	case 2:
+		if pct > resCritPct-resClearMargin {
+			return 2
+		}
+	case 1:
+		if pct > resWarnPct-resClearMargin {
+			return 1
+		}
+	}
+	return lvl
+}
+
+// resShouldFire records the new level for subject and reports whether this
+// transition warrants a notification (level increased). Pure state
+// transition — the caller does the emitting, so it is testable without
+// touching the log.
+func resShouldFire(subject string, pct float64) (fire bool, level int) {
+	resAlertMu.Lock()
+	defer resAlertMu.Unlock()
+	last := resAlertLevel[subject]
+	lvl := resArmedLevel(pct, last)
+	resAlertLevel[subject] = lvl
+	return lvl > last, lvl
+}
+
+// resForgetAlert drops a subject's alert state (a destroyed group), so a
+// later group of the same name starts clean rather than inheriting a level.
+func resForgetAlert(subject string) {
+	resAlertMu.Lock()
+	delete(resAlertLevel, subject)
+	resAlertMu.Unlock()
+}
+
+// resCheckThresholds evaluates the current snapshot and raises operator
+// notifications on threshold crossings.
+func resCheckThresholds() {
+	groups, host := resourcesSnapshot()
+
+	if host.FSTotalBytes > 0 {
+		used := float64(host.FSTotalBytes-host.FSFreeBytes) / float64(host.FSTotalBytes) * 100
+		if fire, lvl := resShouldFire("host", used); fire {
+			freeGiB := float64(host.FSFreeBytes) / (1 << 30)
+			resNotifyOperator(lvl,
+				fmt.Sprintf("Host disk %.0f%% full", used),
+				fmt.Sprintf("Host filesystem is %.1f%% used, %.1f GiB free; images occupy %.1f GiB. "+
+					"At 100%% every guest remounts read-only and all agents wedge. "+
+					"Reclaim space or stop a group.",
+					used, freeGiB, float64(host.AllocTotalBytes)/(1<<30)))
+		}
+	}
+
+	for _, g := range groups {
+		if g.DeclaredBytes <= 0 {
+			continue
+		}
+		pct := float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100
+		if fire, lvl := resShouldFire(g.Group, pct); fire {
+			resNotifyOperator(lvl,
+				fmt.Sprintf("Group %s disk %.0f%% full", g.Group, pct),
+				fmt.Sprintf("%s uses %.1f GiB of its %.1f GiB ceiling (%.1f%%). "+
+					"Guest disks never shrink on their own, so this only goes up: "+
+					"raise its size preset or reclaim the image offline.",
+					g.Group, float64(g.AllocBytes)/(1<<30),
+					float64(g.DeclaredBytes)/(1<<30), pct))
+		}
+	}
+}
+
+// resNotifyOperator raises one operator notification against main — the
+// operator's home group and, since it can now read `resources`, the
+// supervising agent's own inbox.
+//
+// It deliberately does NOT go through notifyAllow: that rate limit exists to
+// stop a chatty AGENT, whereas these are daemon-raised and already gated by
+// the hysteresis above. It is also emitted to the daemon log, so the alert
+// survives even if no tailer or client is attached to carry the banner.
+func resNotifyOperator(level int, title, msg string) {
+	sev := resAlertSeverity(level)
+	logLevel := "warn"
+	if level >= 2 {
+		logLevel = "error"
+	}
+	emitLogf("resources", logLevel, "%s — %s", title, msg)
+
+	t := truncateRunes(flattenInline(title), notifyTitleMax)
+	b := truncateRunes(flattenInline(msg), notifyMsgMax)
+	if !queueNotify(ctlMainGroup, notifyMarker(time.Now().UnixMilli(), sev, "", t, b)) {
+		emitLogf("resources", "warn", "notification backlog full, alert dropped: %s", title)
+		return
+	}
+	ensureTail(ctlMainGroup)
 }
 
 // resGrowth returns g's image growth in bytes/hour across the retained ring,

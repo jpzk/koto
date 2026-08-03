@@ -185,7 +185,23 @@ verb list.
   offline `e2fsck` + `resize2fs -M` + `truncate`). The verb is **global and
   untargeted** (no group field) and grantable: admin has it via the superuser
   rule, and it is deliberately NOT in `adminOnlyVerbs`, so a read-only
-  monitoring role can be granted `resources` through acl.json.
+  monitoring role can be granted `resources` through acl.json. `main` also
+  reads the same snapshot over the **in-guest ctl plane** (`{"cmd":"resources"}`,
+  main-only like `list` — a cross-group read, so peers are refused); both
+  planes render from one `resourcesSnapshot`, pinned by a test.
+  **The collector pushes, it doesn't only wait to be asked**: every sweep
+  checks two subjects against **hard-coded** thresholds — **80% → `normal`,
+  90% → `high`** — and raises an operator notification (the same
+  `[[notify]]`/`notification` path as `cs-notify`) against `main`, plus a
+  daemon-log line at warn/error so the alert survives with no client attached.
+  The subjects fail differently and are tracked separately: the **host
+  filesystem** (at 100% every guest remounts read-only and the whole fleet
+  wedges) and **each group's image vs. its `size` ceiling** (wedges just that
+  group — 9AZ sat at 98% of its own 24 GiB while the fleet looked fine).
+  Alerts fire only on a level *increase*, and a level re-arms only after the
+  value drops `resClearMargin` (5 points) below its threshold — without that
+  hysteresis a value parked at 80.1% re-notifies every interval and trains the
+  operator to ignore the banner.
 - **`SubscribeGroup(group, since_seq) → stream Event`** — the live event
   stream, fed by the daemon-side log tailer. Every frame carries a per-group
   monotonic `seq`. `since_seq=0` means live-only; `since_seq>0` makes the

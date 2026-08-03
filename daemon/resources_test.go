@@ -133,3 +133,107 @@ func TestResRingBounded(t *testing.T) {
 		t.Errorf("ring len = %d, want %d", n, resRingLen)
 	}
 }
+
+func TestResLevel(t *testing.T) {
+	cases := []struct {
+		pct  float64
+		want int
+	}{
+		{0, 0}, {79.9, 0}, {80, 1}, {85, 1}, {89.9, 1}, {90, 2}, {99.9, 2}, {100, 2},
+	}
+	for _, c := range cases {
+		if got := resLevel(c.pct); got != c.want {
+			t.Errorf("resLevel(%v) = %d, want %d", c.pct, got, c.want)
+		}
+	}
+	if resAlertSeverity(0) != "normal" || resAlertSeverity(1) != "normal" {
+		t.Error("levels 0/1 must map to normal severity")
+	}
+	if resAlertSeverity(2) != "high" {
+		t.Error("level 2 must map to high severity")
+	}
+}
+
+// The alert must fire on the way UP and stay quiet while parked, or an
+// operator learns to ignore the banner — which is worse than no alert.
+func TestResShouldFireHysteresis(t *testing.T) {
+	subj := "hysteresis-test"
+	resForgetAlert(subj)
+	t.Cleanup(func() { resForgetAlert(subj) })
+
+	steps := []struct {
+		pct       float64
+		wantFire  bool
+		wantLevel int
+		why       string
+	}{
+		{50, false, 0, "healthy"},
+		{79.9, false, 0, "just under warn"},
+		{80.0, true, 1, "crosses warn"},
+		{82, false, 1, "still warn, must not re-fire"},
+		{89.9, false, 1, "climbing but under crit"},
+		{90.0, true, 2, "crosses crit"},
+		{95, false, 2, "still crit, must not re-fire"},
+		{88, false, 2, "inside the clear band, stays crit"},
+		{86, false, 2, "still inside the band"},
+		{84, false, 1, "clears crit, falls to warn without firing"},
+		{92, true, 2, "re-crosses crit after clearing"},
+		{70, false, 0, "clears everything"},
+		{80, true, 1, "warn fires again after a full recovery"},
+	}
+	for i, s := range steps {
+		fire, lvl := resShouldFire(subj, s.pct)
+		if fire != s.wantFire || lvl != s.wantLevel {
+			t.Errorf("step %d (%.1f%%, %s): fire=%v level=%d, want fire=%v level=%d",
+				i, s.pct, s.why, fire, lvl, s.wantFire, s.wantLevel)
+		}
+	}
+}
+
+// A destroyed group must not leave its level behind for a later group that
+// reuses the name — that would suppress a real alert.
+func TestResForgetAlertResetsLevel(t *testing.T) {
+	subj := "recycled-name"
+	resForgetAlert(subj)
+	t.Cleanup(func() { resForgetAlert(subj) })
+
+	if fire, _ := resShouldFire(subj, 95); !fire {
+		t.Fatal("first crossing must fire")
+	}
+	if fire, _ := resShouldFire(subj, 95); fire {
+		t.Fatal("second sample at the same level must not re-fire")
+	}
+	resForgetAlert(subj)
+	if fire, lvl := resShouldFire(subj, 95); !fire || lvl != 2 {
+		t.Errorf("after forget, a fresh group must fire again (fire=%v level=%d)", fire, lvl)
+	}
+}
+
+// The alert must survive the whole delivery path — marker construction,
+// queueing, and the tailer's flush — and come back out as a `notification`
+// event with the right severity. The state machine being correct is no use
+// if the banner never reaches the operator.
+func TestResNotifyOperatorDelivers(t *testing.T) {
+	setupNotifyRoot(t, ctlMainGroup)
+
+	resNotifyOperator(2, "Host disk 91% full", "reclaim space now")
+	resNotifyOperator(1, "Group x disk 82% full", "watch this one")
+	deliverNotify(ctlMainGroup)
+
+	evs := readGroupLog(t, ctlMainGroup)
+	var notes []Event
+	for _, e := range evs {
+		if e.Event == "notification" {
+			notes = append(notes, e)
+		}
+	}
+	if len(notes) != 2 {
+		t.Fatalf("got %d notification events, want 2: %+v", len(notes), evs)
+	}
+	if notes[0].Severity != "high" || notes[0].Title != "Host disk 91% full" {
+		t.Errorf("critical alert = %+v, want high severity with its title", notes[0])
+	}
+	if notes[1].Severity != "normal" || notes[1].Title != "Group x disk 82% full" {
+		t.Errorf("warn alert = %+v, want normal severity", notes[1])
+	}
+}
