@@ -29,6 +29,7 @@ package main
 // the per-group sample ring exists for.
 
 import (
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -36,6 +37,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"koto/wire"
 )
 
 const (
@@ -257,6 +260,54 @@ type hostResources struct {
 	Groups           int32
 	RunningGroups    int32
 }
+
+// resourcesCtlResp renders the snapshot for the in-guest ctl plane (main's
+// `resources` verb). Both planes are built from the same resourcesSnapshot so
+// the operator and the supervising agent can never be looking at different
+// numbers — a disagreement there would be worse than no metrics at all.
+//
+// Percentages are precomputed here rather than left to the agent: the useful
+// judgements are ratios, and recomputing them from raw byte fields on every
+// turn is an easy thing to get subtly wrong.
+func resourcesCtlResp() resourcesResp {
+	groups, host := resourcesSnapshot()
+	out := resourcesResp{BaseResp: baseResp{OK: true}}
+	for _, g := range groups {
+		gr := wire.GroupResources{
+			Group:              g.Group,
+			Running:            g.Running,
+			AllocBytes:         g.AllocBytes,
+			DeclaredBytes:      g.DeclaredBytes,
+			GrowthBytesPerHour: g.GrowthPerHour,
+			GrowthSpanSeconds:  g.GrowthSpanSecs,
+			RSSBytes:           g.RSSBytes,
+			CPUPct:             roundPct(g.CPUPct),
+			Vcpus:              g.Vcpus,
+			MemMiB:             g.MemMiB,
+		}
+		if g.DeclaredBytes > 0 {
+			gr.AllocPct = roundPct(float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100)
+		}
+		out.Groups = append(out.Groups, gr)
+	}
+	out.Host = wire.HostResources{
+		FSTotalBytes:     host.FSTotalBytes,
+		FSFreeBytes:      host.FSFreeBytes,
+		AllocTotalBytes:  host.AllocTotalBytes,
+		ProvisionedBytes: host.ProvisionedBytes,
+		Groups:           host.Groups,
+		RunningGroups:    host.RunningGroups,
+	}
+	if host.FSTotalBytes > 0 {
+		used := host.FSTotalBytes - host.FSFreeBytes
+		out.Host.FSUsedPct = roundPct(float64(used) / float64(host.FSTotalBytes) * 100)
+	}
+	return out
+}
+
+// roundPct trims a percentage to one decimal — enough precision to act on,
+// short enough not to bloat the agent's context with noise digits.
+func roundPct(v float64) float64 { return math.Round(v*10) / 10 }
 
 // resourcesSnapshot builds the full report. Pure reads of cached samples plus
 // config lookups — it never touches a guest and never boots a VM.

@@ -226,6 +226,56 @@ type ConfigResp struct {
 	Config map[string]any `json:"config"`
 }
 
+// ResourcesResp is the ctl-plane view of the daemon's host-side resource
+// accounting (see daemon/resources.go). Shape mirrors the gRPC ResourcesResp
+// so the two planes stay legible together.
+//
+// Byte counts are raw so the agent can do its own arithmetic; the derived
+// percentages are included because the useful judgements ("how full is this
+// group", "how close is the host") are ratios, and making an agent recompute
+// them from four fields every turn is a reliable way to get them wrong.
+type ResourcesResp struct {
+	BaseResp
+	Groups []GroupResources `json:"groups"`
+	Host   HostResources    `json:"host"`
+}
+
+type GroupResources struct {
+	Group   string `json:"group"`
+	Running bool   `json:"running,omitempty"`
+	// AllocBytes is the workspace image's REAL host consumption; the images
+	// are sparse, so this is far below DeclaredBytes.
+	AllocBytes    int64 `json:"alloc_bytes"`
+	DeclaredBytes int64 `json:"declared_bytes"`
+	// AllocPct is AllocBytes as a percentage of DeclaredBytes — the group's
+	// distance from its own ceiling.
+	AllocPct float64 `json:"alloc_pct"`
+	// GrowthBytesPerHour is measured over GrowthSpanSeconds of samples.
+	// Allocation effectively never falls on its own (no discard in the
+	// guest's virtio-blk), so a sustained positive rate is a countdown.
+	GrowthBytesPerHour int64   `json:"growth_bytes_per_hour"`
+	GrowthSpanSeconds  int64   `json:"growth_span_seconds"`
+	RSSBytes           int64   `json:"rss_bytes,omitempty"`
+	CPUPct             float64 `json:"cpu_pct,omitempty"`
+	Vcpus              int32   `json:"vcpus,omitempty"`
+	MemMiB             int32   `json:"mem_mib,omitempty"`
+}
+
+type HostResources struct {
+	FSTotalBytes int64 `json:"fs_total_bytes"`
+	FSFreeBytes  int64 `json:"fs_free_bytes"`
+	// FSUsedPct is the host filesystem's fill level — the number that
+	// actually predicts a fleet-wide outage, and the one a guest's own `df`
+	// cannot see.
+	FSUsedPct       float64 `json:"fs_used_pct"`
+	AllocTotalBytes int64   `json:"alloc_total_bytes"`
+	// ProvisionedBytes is the sum of every group's size preset. Exceeding
+	// FSTotalBytes is normal (sparse overcommit by design).
+	ProvisionedBytes int64 `json:"provisioned_bytes"`
+	Groups           int32 `json:"groups"`
+	RunningGroups    int32 `json:"running_groups"`
+}
+
 type SkillsResp struct {
 	BaseResp
 	Skills []SkillItem `json:"skills"`

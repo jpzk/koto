@@ -46,6 +46,7 @@ type (
 	configReq      = wire.ConfigReq
 	configResp     = wire.ConfigResp
 	listResp       = wire.ListResp
+	resourcesResp  = wire.ResourcesResp
 	skillsResp     = wire.SkillsResp
 	skillListReq   = wire.SkillListReq
 	skillNewReq    = wire.SkillNewReq

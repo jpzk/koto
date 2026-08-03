@@ -260,3 +260,53 @@ func TestCtlNotifyRateLimited(t *testing.T) {
 	deliverNotify(g)
 	deliverNotify(other)
 }
+
+// TestCtlResourcesAuthorization: `resources` is a CROSS-GROUP read (every
+// peer's disk/mem/cpu), so it follows `list` — main only. A non-main group
+// getting it would be precisely the peer-visibility leak this plane exists
+// to prevent.
+func TestCtlResourcesAuthorization(t *testing.T) {
+	req, _ := json.Marshal(map[string]string{"cmd": "resources"})
+
+	got := ctlDispatch(ctlMainGroup, req)
+	rr, ok := got.(resourcesResp)
+	if !ok || !rr.OK {
+		t.Fatalf("main must be allowed resources, got %T %+v", got, got)
+	}
+
+	br, ok := ctlDispatch("peer", req).(baseResp)
+	if !ok || br.OK {
+		t.Fatal("non-main group must be denied resources")
+	}
+	if !strings.Contains(br.Error, "not allowed for non-main") {
+		t.Errorf("denial reason = %q, want the non-main refusal", br.Error)
+	}
+}
+
+// The two planes must never disagree: an operator reading `ctl resources`
+// over gRPC and main reading it over the ctl FIFO have to see the same
+// fleet, or a supervising agent will argue with its own logs.
+func TestCtlResourcesMatchesSnapshot(t *testing.T) {
+	snap, host := resourcesSnapshot()
+	resp := resourcesCtlResp()
+
+	if len(resp.Groups) != len(snap) {
+		t.Fatalf("ctl reported %d groups, snapshot has %d", len(resp.Groups), len(snap))
+	}
+	if resp.Host.ProvisionedBytes != host.ProvisionedBytes ||
+		resp.Host.FSTotalBytes != host.FSTotalBytes {
+		t.Errorf("host rollup diverged: ctl=%+v snapshot=%+v", resp.Host, host)
+	}
+	for i, g := range resp.Groups {
+		if g.Group != snap[i].Group || g.AllocBytes != snap[i].AllocBytes {
+			t.Errorf("group %d diverged: ctl=%+v snapshot=%+v", i, g, snap[i])
+		}
+		// alloc_pct is the derived field agents actually judge on.
+		if g.DeclaredBytes > 0 {
+			want := roundPct(float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100)
+			if g.AllocPct != want {
+				t.Errorf("%s alloc_pct = %v, want %v", g.Group, g.AllocPct, want)
+			}
+		}
+	}
+}

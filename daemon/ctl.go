@@ -10,7 +10,8 @@ package main
 //
 // Authorization is split on the owning group:
 //
-//   owner == "main"  → spawn / send / stop / list + sched_*  (cross-group)
+//   owner == "main"  → spawn / send / stop / list / resources + sched_*
+//                      (cross-group)
 //   owner != "main"  → sched_* only, self-target forced       (self-scheduling)
 //
 // Why restricted: a tier-3 sidecar gaining the full daemon socket would
@@ -210,6 +211,21 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: verb not allowed for non-main groups: list")
 		}
 		return listResp{BaseResp: baseResp{OK: true}, Groups: listGroups()}
+
+	case "resources":
+		// Main-only, like list: it is a cross-group read (every peer's disk,
+		// memory and CPU), so a non-main group asking would be exactly the
+		// peer-visibility leak this plane exists to prevent.
+		//
+		// READ-ONLY and host-derived. It grants no new authority: main can
+		// already stop/spawn/config_set its peers, so the only thing added is
+		// the ability to notice WHEN it should. Everything comes from the
+		// daemon's cached host-side samples, so this cannot touch a guest,
+		// boot a VM, or block on a wedged one.
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: resources")
+		}
+		return resourcesCtlResp()
 
 	// The three verbs below replace main's podman-era file-mount powers
 	// (rw /skills, rw /peers) under the firecracker runtime, where the only
