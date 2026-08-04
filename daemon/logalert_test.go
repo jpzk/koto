@@ -1,11 +1,11 @@
 package main
 
-// logalert.go tests — warn/error daemon-log lines must come back out of the
+// logalert.go tests — error daemon-log lines must come back out of the
 // full delivery path (emitLog → forwardLogAlert → queue → tailer flush →
-// parser) as high-severity notification events on main, while info lines,
-// quiet-variant lines, and rate-limited storms must not. Subsystem names are
-// unique per test because the token buckets are process-global, keyed by
-// (subsystem, group).
+// parser) as high-severity notification events on main, while warn lines,
+// info lines, quiet-variant lines, and rate-limited storms must not.
+// Subsystem names are unique per test because the token buckets are
+// process-global, keyed by (subsystem, group).
 
 import (
 	"strings"
@@ -23,10 +23,10 @@ func notificationEvents(t *testing.T, g string) []Event {
 	return notes
 }
 
-// A daemon-global warn and a group-attributed error both surface as
-// high-severity notifications against main, titled by level + subsystem
-// (+ group), with the log line as the message.
-func TestLogAlertForwardsWarnAndError(t *testing.T) {
+// A group-attributed error surfaces as a high-severity notification against
+// main, titled by level + subsystem (+ group), with the log line as the
+// message; a warn stays log-only.
+func TestLogAlertForwardsErrorOnly(t *testing.T) {
 	setupNotifyRoot(t, ctlMainGroup)
 
 	emitLog("la-global", "warn", "schedules file unreadable")
@@ -34,24 +34,21 @@ func TestLogAlertForwardsWarnAndError(t *testing.T) {
 	deliverNotify(ctlMainGroup)
 
 	notes := notificationEvents(t, ctlMainGroup)
-	if len(notes) != 2 {
-		t.Fatalf("got %d notification events, want 2: %+v", len(notes), notes)
+	if len(notes) != 1 {
+		t.Fatalf("got %d notification events, want 1 (warn must not forward): %+v", len(notes), notes)
 	}
-	if notes[0].Severity != "high" || notes[0].Title != "WARN la-global" ||
-		notes[0].Text != "schedules file unreadable" {
-		t.Errorf("warn alert = %+v, want high severity, level+subsystem title, line as text", notes[0])
-	}
-	if notes[1].Severity != "high" || notes[1].Title != "ERROR la-scoped [dev]" ||
-		notes[1].Text != "restart failed: boom" {
-		t.Errorf("error alert = %+v, want group-tagged title", notes[1])
+	if notes[0].Severity != "high" || notes[0].Title != "ERROR la-scoped [dev]" ||
+		notes[0].Text != "restart failed: boom" {
+		t.Errorf("error alert = %+v, want high severity, group-tagged title, line as text", notes[0])
 	}
 }
 
-// Info lines and the Quiet variant (the notification machinery logging about
-// itself) must not raise a banner.
-func TestLogAlertSkipsInfoAndQuiet(t *testing.T) {
+// Warn and info lines and the Quiet variant (the notification machinery
+// logging about itself) must not even queue a marker.
+func TestLogAlertSkipsWarnInfoAndQuiet(t *testing.T) {
 	setupNotifyRoot(t, ctlMainGroup)
 
+	emitLog("la-warn", "warn", "BLOCKED flow TCP 192.168.127.2 -> 10.0.0.1:22")
 	emitLog("la-info", "info", "routine chatter")
 	emitLogfQuiet("la-quiet", "error", "delivery failure inside the notify path")
 
@@ -69,7 +66,7 @@ func TestLogAlertRateLimit(t *testing.T) {
 	setupNotifyRoot(t, ctlMainGroup)
 
 	for i := 0; i < logAlertBurst+7; i++ {
-		emitLogfG("la-storm", "dev", "warn", "BLOCKED flow %d", i)
+		emitLogfG("la-storm", "dev", "error", "restart failed attempt %d", i)
 	}
 	emitLogfG("la-other", "dev", "error", "unrelated failure")
 	deliverNotify(ctlMainGroup)
@@ -78,7 +75,7 @@ func TestLogAlertRateLimit(t *testing.T) {
 	var storm, other int
 	for _, e := range notes {
 		switch {
-		case strings.HasPrefix(e.Title, "WARN la-storm"):
+		case strings.HasPrefix(e.Title, "ERROR la-storm"):
 			storm++
 		case strings.HasPrefix(e.Title, "ERROR la-other"):
 			other++

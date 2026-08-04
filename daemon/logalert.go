@@ -1,35 +1,35 @@
 package main
 
-// logalert.go — warn/error daemon-log lines double as operator alerts.
+// logalert.go — error daemon-log lines double as operator alerts.
 //
 // The daemon log is the only place many failures surface (a schedule that
-// stopped firing, a self-heal circuit breaker opening, an auth reject storm),
-// and nobody watches it continuously. So every warn/error line emitted
-// through emitLog/emitLogG — daemon-global or group-attributed — is also
-// forwarded as a HIGH-severity operator notification against `main`, riding
-// the same [[notify]]-marker path as cs-notify and the resource alerts: TUI
-// banner, OSC desktop notification, and the main event stream, no new
-// channel. Both levels map to "high" deliberately: the daemon's
-// informational tier is "info", so a warn already means something needs
-// eyes, and the notification exists to interrupt.
+// stopped firing, a self-heal circuit breaker opening), and nobody watches
+// it continuously. So every error line emitted through emitLog/emitLogG —
+// daemon-global or group-attributed — is also forwarded as a HIGH-severity
+// operator notification against `main`, riding the same [[notify]]-marker
+// path as cs-notify and the resource alerts: TUI banner, OSC desktop
+// notification, and the main event stream, no new channel. Warn lines stay
+// log-only (2026-08-04: warn is too chatty a tier to interrupt for —
+// BLOCKED-flow and auth-reject warns are per-event and attacker-
+// influenceable, and were burning the banner's signal; the log ring still
+// records them).
 //
 // Two hazards shape the code:
 //
-//   - Feedback: the forwarding path must never log at warn/error itself — a
-//     delivery failure that warned would re-enter the forwarder. Failures
+//   - Feedback: the forwarding path must never log at error itself — a
+//     delivery failure that errored would re-enter the forwarder. Failures
 //     are silent by design (the line being forwarded already reached the
 //     log ring and stderr; only the banner is lost). Lines emitted BY the
 //     notification machinery use emitLogfQuiet and skip forwarding —
 //     resNotifyOperator pairs its log line with its own queueNotify, and
-//     forwarding it too would banner one resource alert twice with
-//     contradictory severities (its 80% tier is "normal" by design).
+//     forwarding it too would banner one resource alert twice.
 //
-//   - Spam: some warn lines are per-event and attacker-influenceable (one
-//     line per BLOCKED egress flow, per rejected auth call). A per-
-//     (subsystem, group) token bucket caps sustained flow so a storm on one
-//     subsystem collapses without eliding an unrelated group's first error.
-//     Suppressed lines still reach the daemon log ring — only the banner is
-//     elided, and the operator-attention channel stays worth attending to.
+//   - Spam: error lines can repeat per-event (a crash-looping VM, a failing
+//     schedule firing every minute). A per-(subsystem, group) token bucket
+//     caps sustained flow so a storm on one subsystem collapses without
+//     eliding an unrelated group's first error. Suppressed lines still
+//     reach the daemon log ring — only the banner is elided, and the
+//     operator-attention channel stays worth attending to.
 
 import (
 	"strings"
@@ -64,7 +64,7 @@ func logAlertAllow(subsystem, group string) bool {
 }
 
 // logAlertTitle renders the notification title for a forwarded line:
-// "WARN egress [dev]", "ERROR daemon". The message carries the line itself.
+// "ERROR fc [dev]", "ERROR daemon". The message carries the line itself.
 func logAlertTitle(subsystem, group, level string) string {
 	t := strings.ToUpper(level) + " " + subsystem
 	if group != "" {
@@ -73,11 +73,11 @@ func logAlertTitle(subsystem, group, level string) string {
 	return t
 }
 
-// forwardLogAlert raises one high-severity operator notification for a
-// warn/error log line. Called from emitLogG on every line; anything below
-// warn returns immediately.
+// forwardLogAlert raises one high-severity operator notification for an
+// error log line. Called from emitLogG on every line; anything below error
+// (warn included) returns immediately.
 func forwardLogAlert(subsystem, group, level, msg string) {
-	if level != "warn" && level != "error" {
+	if level != "error" {
 		return
 	}
 	if !logAlertAllow(subsystem, group) {

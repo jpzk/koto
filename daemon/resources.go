@@ -328,8 +328,8 @@ func resCheckThresholds() {
 // survives even if no tailer or client is attached to carry the banner —
 // via the Quiet variant, because this function already queues its own
 // notification with the designed severity tier (80% = normal); letting the
-// warn/error forwarder (logalert.go) fire on the same line would banner the
-// alert twice, once at the wrong severity.
+// error forwarder (logalert.go) fire on the level≥2 line would banner the
+// alert twice.
 func resNotifyOperator(level int, title, msg string) {
 	sev := resAlertSeverity(level)
 	logLevel := "warn"

@@ -206,20 +206,21 @@ verb list.
   value drops `resClearMargin` (5 points) below its threshold — without that
   hysteresis a value parked at 80.1% re-notifies every interval and trains the
   operator to ignore the banner.
-- **Every warn/error daemon-log line is also a `high`-severity operator
+- **Every error-level daemon-log line is also a `high`-severity operator
   notification** (`daemon/logalert.go`). `emitLogG` is the single choke point
   for all daemon log lines — global and group-attributed — and forwards
-  warn/error through the same `[[notify]]` path against `main`, titled
-  `WARN <subsystem> [<group>]` with the line as the message. Both levels map
-  to `high` deliberately: the daemon's informational tier is `info`, so a warn
-  already needs eyes. Two guardrails: a per-(subsystem, group) token bucket
-  (burst 5, then 1/min — BLOCKED-flow and auth-reject warns are per-event and
-  attacker-influenceable; suppressed lines still reach the log ring, only the
-  banner is elided), and the notification machinery logs about itself via
-  `emitLogfQuiet` (skips forwarding — `resNotifyOperator` pairs its log line
-  with its own `queueNotify`, and forwarding it too would banner one resource
-  alert twice, once at the wrong severity). The forwarder never logs its own
-  failures — a warn on failure would re-enter it. The reverse mirror also
+  errors through the same `[[notify]]` path against `main`, titled
+  `ERROR <subsystem> [<group>]` with the line as the message. **Warn lines
+  stay log-only** (2026-08-04: warn is too chatty a tier to interrupt for —
+  BLOCKED-flow and auth-reject warns are per-event and attacker-influenceable
+  and were burning the banner's signal; the log ring still records them).
+  Two guardrails: a per-(subsystem, group) token bucket (burst 5, then 1/min
+  — suppressed lines still reach the log ring, only the banner is elided),
+  and the notification machinery logs about itself via `emitLogfQuiet`
+  (skips forwarding — `resNotifyOperator` pairs its log line with its own
+  `queueNotify`, and forwarding its level≥2 error line too would banner one
+  resource alert twice). The forwarder never logs its own failures — an
+  error on failure would re-enter it. The reverse mirror also
   holds: **every delivered notification — `cs-notify`, resource alert,
   forwarded log line — is recorded in the daemon log at `info`** with its
   full (sanitized) content (`notifyDeliver` in logtail.go, the one funnel all

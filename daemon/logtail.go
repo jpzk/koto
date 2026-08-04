@@ -73,7 +73,7 @@ func queueNotify(g, marker string) bool {
 // the full notification into the daemon log. The banner and the desktop
 // popup are transient, and the group-log marker they persist in is erased by
 // a later `/clear` — the info mirror is the record the operator checks
-// afterwards. info deliberately: warn/error would re-enter forwardLogAlert.
+// afterwards. info deliberately: error would re-enter forwardLogAlert.
 // title/msg are sanitized for the mirror because cs-notify text is
 // agent-controlled and the daemon log reaches stderr and the TUI log pane
 // unframed. False = backlog full, nothing queued or logged.
