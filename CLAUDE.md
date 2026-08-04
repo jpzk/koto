@@ -202,6 +202,26 @@ verb list.
   value drops `resClearMargin` (5 points) below its threshold — without that
   hysteresis a value parked at 80.1% re-notifies every interval and trains the
   operator to ignore the banner.
+- **A `notification` event also reaches the window manager, not just the TUI
+  banner** (`tui/notify_osc.go`). `cs_tui` runs `--network=none` with one
+  socket mounted — no D-Bus, no `notify-send` — so the only channel out is an
+  **OSC escape sequence written to stdout**, which the terminal turns into a
+  real desktop notification. Both severities pop; **`high` additionally emits a
+  bare BEL**, which is what window managers turn into the urgency hint. Only
+  live frames notify — history replay never pokes the WM — and the payload is
+  sanitized (control chars flattened, `;` escaped for OSC 777, truncated)
+  because it reaches the terminal outside the renderer's sanitizer. Terminals
+  disagree on the sequence, so the flavor is chosen by
+  `KOTO_TUI_NOTIFY=off|bell|osc9|osc777|osc99|all`, defaulting to sniffing
+  `KOTO_TUI_TERM`/`TERM_PROGRAM` (kitty→OSC 99, foot/urxvt→OSC 777, else OSC 9,
+  which non-supporting terminals ignore harmlessly). `KOTO_TUI_TERM` exists
+  because `podman run -t` overwrites `TERM` with `xterm` inside the container,
+  so the Makefile forwards the host's real `TERM` under its own name rather
+  than overriding the one bubbletea capability-detects on. Notifications are
+  suppressed when stdout isn't a character device (piped output, `go test`) —
+  an escape sequence with nobody to interpret it is just garbage in a log. A
+  multiplexer in the middle (zellij, tmux) may swallow the sequence; that's
+  what the in-TUI banner and `KOTO_TUI_NOTIFY=off` are for.
 - **`SubscribeGroup(group, since_seq) → stream Event`** — the live event
   stream, fed by the daemon-side log tailer. Every frame carries a per-group
   monotonic `seq`. `since_seq=0` means live-only; `since_seq>0` makes the

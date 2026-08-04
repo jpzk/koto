@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -527,6 +528,10 @@ type Model struct {
 	notifications []notifyItem
 	bannerLast    int
 
+	// notifyMode is the desktop-notification escape flavor this terminal
+	// gets (see notify_osc.go); resolved once at startup from the env.
+	notifyMode string
+
 	// peekJob is the background job whose live state the chat column shows
 	// while its tree row is hovered (focusTree only); zero when no job row
 	// is hovered. peekOut holds the last fetched output tail; peekTicking
@@ -660,6 +665,7 @@ func newModel(sock string, ctxWindow int) Model {
 	return Model{
 		sock:            sock,
 		ctxWindow:       ctxWindow,
+		notifyMode:      notifyModeForStdout(os.Getenv),
 		groups:          map[string]GroupInfo{},
 		subscribed:      map[string]bool{},
 		lastSeq:         map[string]uint64{},
@@ -1672,6 +1678,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					at: time.Now(), severity: sev, title: ev.Title, msg: ev.Text, group: ev.Group,
 				})
 				m.syncBannerRows()
+				// The in-TUI banner only helps someone who is looking at
+				// the TUI; hand the window manager a real notification too
+				// (both severities — "high" additionally rings the bell).
+				m.emitDesktopNotify(sev, ev.Group, ev.Title, ev.Text)
 			}
 		}
 		if !ev.Historical && m.plugin != nil {
@@ -2532,9 +2542,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// open/close toggle, never a focus toggle), ctrl+f zooms the pane
 		// to the whole frame (fullscreen toggle), alt+← moves focus
 		// back to the tree/chat side (exitShell), leaving the pane open,
-		// and esc (== ctrl+[) toggles the tree column — see its case below.
+		// and alt+esc toggles the tree column — see its case below.
 		// Tab is deliberately NOT reserved — it reaches the guest, so bash
 		// completion works inside the pane; alt+←/→ are the focus keys.
+		// Plain esc is NOT reserved either: it falls through to
+		// handleShellKey as a literal 0x1b, because vim/less inside the
+		// pane are unusable without the escape key (esc == ctrl+[, so both
+		// spellings reach the guest).
 		// Exiting the TUI from the shell is alt+← (or ctrl+]) then ctrl+c.
 		switch s {
 		case "ctrl+]":
@@ -2549,19 +2563,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.resizeViewport()
 			m.refreshLog()
 			return m, nil
-		case "esc":
-			// esc and ctrl+[ are the same byte (0x1b) — this is the ctrl+[
-			// binding, kept consistent with the rest of the focus keymap: it
-			// toggles the tree column open/closed beside the pane. The pty
+		case "alt+esc":
+			// Tree-column toggle beside the pane. This lived on plain esc
+			// once, but that starved vim/less inside the pane of the escape
+			// key — so the toggle moved here and plain esc forwards. The pty
 			// KEEPS focus — only the layout changes. treePaneW keys off
 			// preShellFocus while the shell is focused, and preShellFocus
 			// doubles as alt+←'s return target, so flipping it here keeps
-			// "tree visible ⇒ alt+← lands in the tree" consistent. The cost
-			// is a literal ESC no longer reaching the guest on this key —
-			// alt+esc (below) is the escape hatch for vim/less inside.
+			// "tree visible ⇒ alt+← lands in the tree" consistent.
 			if m.fullscreen {
-				// Fullscreen hides the tree column entirely — the first esc
-				// restores the normal layout; the next one toggles the tree.
+				// Fullscreen hides the tree column entirely — the first
+				// alt+esc restores the normal layout; the next one toggles
+				// the tree.
 				m.fullscreen = false
 				m.resizeViewport()
 				m.refreshLog()
@@ -2574,14 +2587,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.resizeViewport()
 			m.refreshLog()
-			return m, nil
-		case "alt+esc":
-			// Deliver a single literal ESC to the guest — plain esc is the
-			// tree toggle above, so this is the only way to feed the escape
-			// key to a full-screen guest app (vim, less).
-			if m.shell != nil {
-				m.shell.send([]byte{0x1b})
-			}
 			return m, nil
 		case "alt+left":
 			m.exitShell()

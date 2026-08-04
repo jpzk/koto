@@ -537,11 +537,12 @@ func (m *Model) syncShellSize() {
 // sent from Bubble Tea's parsed tea.KeyMsg, rather than interpreting it
 // semantically. The reserved local escapes — ctrl+] (close the pane,
 // mirroring telnet's convention and `koto ctl shell`'s — see ctl_cli.go),
-// alt+←/→ (move focus without closing anything), and esc/alt+esc (tree
-// toggle / literal-ESC hatch) — are handled in handleKey's shell-focus block
-// (model.go) before dispatch reaches here, so they never fall through to
-// this function. Tab is NOT reserved: it's forwarded like any other key, so
-// completion works in the guest shell.
+// alt+←/→ (move focus without closing anything), and alt+esc (tree
+// toggle) — are handled in handleKey's shell-focus block (model.go) before
+// dispatch reaches here, so they never fall through to this function. Tab
+// is NOT reserved: it's forwarded like any other key, so completion works
+// in the guest shell — and neither is plain esc, which arrives here as
+// KeyEsc and goes out as a literal 0x1b (vim/less need it).
 //
 // Known v1 gap, documented rather than silently missing: bracketed paste
 // is NOT translated — pasted text arrives as a plain rune burst (fine for

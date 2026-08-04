@@ -94,6 +94,9 @@ tui: $(BUILD)/koto-tui
 	    -v /etc/localtime:/etc/localtime:ro \
 	    -e KOTO_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
 	    -e KOTO_ENDPOINT=$(CS_HOST_NAME):8443 \
+	    -e TERM_PROGRAM="$$TERM_PROGRAM" \
+	    -e KOTO_TUI_TERM="$$TERM" \
+	    -e KOTO_TUI_NOTIFY="$$KOTO_TUI_NOTIFY" \
 	    koto-tui; ec=$$?; \
 	  [ $$ec -eq 75 ] || exit $$ec; \
 	  echo "/reload: rebuilding koto-tui…"; \

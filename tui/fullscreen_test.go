@@ -153,25 +153,32 @@ func TestFocusChangeExitsFullscreen(t *testing.T) {
 	}
 }
 
-// TestEscInPtyFullscreenRestoresFirst: esc while the pty is fullscreen exits
-// fullscreen without touching the tree toggle; the NEXT esc toggles the tree
-// as usual.
-func TestEscInPtyFullscreenRestoresFirst(t *testing.T) {
+// TestAltEscInPtyFullscreenRestoresFirst: alt+esc while the pty is
+// fullscreen exits fullscreen without touching the tree toggle; the NEXT
+// alt+esc toggles the tree as usual. Plain esc must NOT do either — it stays
+// a literal ESC to the guest even in fullscreen (a zoomed vim is exactly
+// where the escape key matters most).
+func TestAltEscInPtyFullscreenRestoresFirst(t *testing.T) {
 	m := splitShellModel(t)
 	m.focusShellPane()
 	m = pressCtrlF(t, m)
 	m = press(t, m, tea.KeyEsc)
+	if !m.fullscreen || m.focus != focusShell {
+		t.Fatalf("fullscreen=%v focus=%v after plain esc, want true/focusShell (esc forwards, never restores layout)",
+			m.fullscreen, m.focus)
+	}
+	m = pressAlt(t, m, tea.KeyEsc)
 	if m.fullscreen {
-		t.Fatal("esc did not exit pty fullscreen")
+		t.Fatal("alt+esc did not exit pty fullscreen")
 	}
 	if m.focus != focusShell {
-		t.Fatalf("focus = %v after esc, want focusShell (layout restore only)", m.focus)
+		t.Fatalf("focus = %v after alt+esc, want focusShell (layout restore only)", m.focus)
 	}
 	if m.preShellFocus != focusInput {
-		t.Fatalf("preShellFocus = %v after esc, want focusInput (tree untouched)", m.preShellFocus)
+		t.Fatalf("preShellFocus = %v after alt+esc, want focusInput (tree untouched)", m.preShellFocus)
 	}
-	m = press(t, m, tea.KeyEsc)
+	m = pressAlt(t, m, tea.KeyEsc)
 	if m.preShellFocus != focusTree {
-		t.Fatalf("preShellFocus = %v after second esc, want focusTree", m.preShellFocus)
+		t.Fatalf("preShellFocus = %v after second alt+esc, want focusTree", m.preShellFocus)
 	}
 }

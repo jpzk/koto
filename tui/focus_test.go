@@ -4,14 +4,16 @@ package main
 // open/closed (esc doubles as the interrupt mid-turn, tab always toggles),
 // ctrl+] opens/closes the terminal pane, and alt+←/→ move focus between the
 // tree/chat side and the terminal pane without opening or closing anything.
-// While the pty is focused tab is NOT reserved — it reaches the guest as a
-// completion key — but esc IS: it toggles the tree beside the pane (alt+esc
-// feeds the guest a literal ESC instead). Note esc and ctrl+[ are the same
-// byte (0x1b) — one binding, two names. See handleKey (model.go).
+// While the pty is focused NEITHER tab nor esc is reserved — tab reaches the
+// guest as a completion key and esc as a literal 0x1b (vim/less need it);
+// the tree toggle beside the pane lives on alt+esc. Note esc and ctrl+[ are
+// the same byte (0x1b) — one binding, two names. See handleKey (model.go).
 
 import (
 	"strings"
 	"testing"
+
+	"koto-protocol/pb"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -220,57 +222,82 @@ func TestTabTogglesTreeWhileBusy(t *testing.T) {
 	}
 }
 
-// TestEscInPtyTogglesTree: esc (== ctrl+[) IS reserved while the pty is
-// focused — it toggles the tree column beside the pane, both directions,
-// while the pty keeps focus. The flip goes through preShellFocus (what
-// treePaneW keys off while the shell is focused, and where alt+← returns
-// to). Guest apps get their literal ESC via alt+esc instead.
-func TestEscInPtyTogglesTree(t *testing.T) {
+// recordShellStream is a stub AttachShell client that records the data
+// frames send() writes, so a test can assert a key actually reached the
+// guest. Only Send is implemented — the embedded interface panics on
+// anything else, which is what we want from a stub.
+type recordShellStream struct {
+	pb.Koto_AttachShellClient
+	sent [][]byte
+}
+
+func (r *recordShellStream) Send(in *pb.ShellInput) error {
+	if d, ok := in.Input.(*pb.ShellInput_Data); ok {
+		r.sent = append(r.sent, d.Data)
+	}
+	return nil
+}
+
+// TestEscInPtyForwardsToGuest: esc (== ctrl+[) is NOT reserved while the pty
+// is focused — it goes to the guest as a literal 0x1b (vim/less are unusable
+// without it) and must not touch focus, the tree column, or the pane.
+func TestEscInPtyForwardsToGuest(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.cur = "main"
 	term := vt.NewEmulator(80, 20)
 	t.Cleanup(func() { _ = term.Close() })
-	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 80, rows: 20}
+	rec := &recordShellStream{}
+	m.shell = &shellSession{term: term, stream: rec, group: "main", session: "koto-shell", cols: 80, rows: 20}
 	m.shellOpen = true
 	m.preShellFocus = focusInput
 	m.focus = focusShell
 
 	m = press(t, m, tea.KeyEscape)
-	if m.focus != focusShell {
-		t.Fatalf("focus = %v after esc, want focusShell (only the tree toggles)", m.focus)
+	if m.focus != focusShell || m.treePaneW() != 0 || !m.shellOpen {
+		t.Fatalf("esc changed layout/focus (focus=%v treePaneW=%d shellOpen=%v) — it must only feed the guest",
+			m.focus, m.treePaneW(), m.shellOpen)
 	}
-	if m.treePaneW() == 0 {
-		t.Fatal("tree column not shown after esc in the pty")
-	}
-	m = press(t, m, tea.KeyEscape)
-	if m.focus != focusShell || m.treePaneW() != 0 {
-		t.Fatalf("focus = %v treePaneW = %d after second esc, want focusShell + tree hidden",
-			m.focus, m.treePaneW())
-	}
-	if !m.shellOpen {
-		t.Fatal("esc closed the pane — it must only toggle the tree")
+	if len(rec.sent) != 1 || string(rec.sent[0]) != "\x1b" {
+		t.Fatalf("guest received %q, want a single literal ESC", rec.sent)
 	}
 }
 
-// TestAltEscSendsLiteralEsc: alt+esc is the literal-ESC hatch — it stays in
-// the pty (no tree toggle, no focus move) so the byte can reach the guest.
-func TestAltEscSendsLiteralEsc(t *testing.T) {
+// TestAltEscInPtyTogglesTree: alt+esc is the reserved tree toggle while the
+// pty is focused (plain esc forwards) — it toggles the tree column beside
+// the pane, both directions, while the pty keeps focus. The flip goes
+// through preShellFocus (what treePaneW keys off while the shell is focused,
+// and where alt+← returns to).
+func TestAltEscInPtyTogglesTree(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.cur = "main"
 	term := vt.NewEmulator(80, 20)
 	t.Cleanup(func() { _ = term.Close() })
-	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 80, rows: 20}
+	rec := &recordShellStream{}
+	m.shell = &shellSession{term: term, stream: rec, group: "main", session: "koto-shell", cols: 80, rows: 20}
 	m.shellOpen = true
 	m.preShellFocus = focusInput
 	m.focus = focusShell
 
 	m = pressAlt(t, m, tea.KeyEscape)
-	if m.focus != focusShell || m.treePaneW() != 0 || !m.shellOpen {
-		t.Fatalf("alt+esc changed layout/focus (focus=%v treePaneW=%d shellOpen=%v) — it must only feed the guest",
-			m.focus, m.treePaneW(), m.shellOpen)
+	if m.focus != focusShell {
+		t.Fatalf("focus = %v after alt+esc, want focusShell (only the tree toggles)", m.focus)
+	}
+	if m.treePaneW() == 0 {
+		t.Fatal("tree column not shown after alt+esc in the pty")
+	}
+	m = pressAlt(t, m, tea.KeyEscape)
+	if m.focus != focusShell || m.treePaneW() != 0 {
+		t.Fatalf("focus = %v treePaneW = %d after second alt+esc, want focusShell + tree hidden",
+			m.focus, m.treePaneW())
+	}
+	if !m.shellOpen {
+		t.Fatal("alt+esc closed the pane — it must only toggle the tree")
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("alt+esc leaked bytes to the guest: %q", rec.sent)
 	}
 }
