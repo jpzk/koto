@@ -53,6 +53,21 @@ service Koto {
   rpc SchedToggle (SchedToggleReq) returns (BaseResp);
   rpc SchedRun    (SchedIDReq)     returns (BaseResp);
 
+  // ---- goal loop (daemon/goals.go) ----
+  // A goal is "iterate this group with fresh context until an independent
+  // judge accepts the acceptance criteria". At most one goal per group;
+  // approve/pause/resume/cancel therefore address by group. GoalApprove is
+  // the human-confirmation step for plan-first goals (status
+  // awaiting_approval → running); it is an ordinary grantable verb here but
+  // has deliberately NO ctl-plane counterpart — main can set a goal on a
+  // peer but cannot approve one.
+  rpc GoalSet     (GoalSetReq)     returns (GoalResp);
+  rpc GoalList    (GoalListReq)    returns (GoalListResp);
+  rpc GoalApprove (GoalGroupReq)   returns (GoalResp);
+  rpc GoalPause   (GoalGroupReq)   returns (GoalResp);
+  rpc GoalResume  (GoalGroupReq)   returns (GoalResp);
+  rpc GoalCancel  (GoalGroupReq)   returns (GoalResp);
+
   // Resources reports host-side resource consumption for the whole fleet:
   // per-group workspace.img allocation + growth rate + FC process CPU/RSS,
   // plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -415,6 +430,45 @@ message SchedAddReq    { string group = 1; string cron = 2; string msg = 3; }
 message SchedListReq   { string group = 1; }
 message SchedIDReq     { string id = 1; }
 message SchedToggleReq { string id = 1; bool enabled = 2; }
+
+// ---- goals ----
+
+// One goal (see the GoalSet rpc comment and daemon/goals.go). `iteration`
+// counts execution iterations only — the plan turn and judge turns are free.
+message GoalItem {
+  string id             = 1;
+  string group          = 2;
+  string text           = 3;  // the goal itself
+  string criteria       = 4;  // acceptance criteria the judge verifies
+  bool   plan           = 5;  // set plan-first (awaits human approval)
+  string status         = 6;  // planning | awaiting_approval | running | paused | met | cancelled
+  int32  iteration      = 7;
+  int32  max_iterations = 8;
+  string last_feedback  = 9;  // judge's failures from the last rejected done-claim
+  string done_note      = 10; // worker's evidence summary from the accepted claim
+  string paused_reason  = 11; // cap | stalled | judge | operator | stopped
+  double created_at     = 12; // unix seconds (ScheduleItem convention)
+  double updated_at     = 13;
+  double completed_at   = 14;
+}
+
+message GoalSetReq {
+  string group          = 1;
+  string text           = 2;
+  string criteria       = 3;
+  int32  max_iterations = 4; // 0 => default (20); clamped to [1,200]
+  // Plan-first: one planning turn, then wait for human approval before any
+  // execution iteration. Absent = true (plan-first is the default).
+  optional bool plan    = 5;
+}
+message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
+message GoalGroupReq { string group = 1; } // approve / pause / resume / cancel
+
+message GoalResp     { bool ok = 1; string error = 2; GoalItem item = 3; }
+message GoalListResp {
+  bool ok = 1; string error = 2;
+  repeated GoalItem goals = 3;
+}
 
 // ---- responses (ok/error flattened from the old BaseResp) ----
 

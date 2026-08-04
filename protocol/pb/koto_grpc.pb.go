@@ -55,6 +55,12 @@ const (
 	Koto_SchedDel_FullMethodName       = "/koto.Koto/SchedDel"
 	Koto_SchedToggle_FullMethodName    = "/koto.Koto/SchedToggle"
 	Koto_SchedRun_FullMethodName       = "/koto.Koto/SchedRun"
+	Koto_GoalSet_FullMethodName        = "/koto.Koto/GoalSet"
+	Koto_GoalList_FullMethodName       = "/koto.Koto/GoalList"
+	Koto_GoalApprove_FullMethodName    = "/koto.Koto/GoalApprove"
+	Koto_GoalPause_FullMethodName      = "/koto.Koto/GoalPause"
+	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
+	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
@@ -101,6 +107,20 @@ type KotoClient interface {
 	SchedDel(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedToggle(ctx context.Context, in *SchedToggleReq, opts ...grpc.CallOption) (*BaseResp, error)
 	SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// ---- goal loop (daemon/goals.go) ----
+	// A goal is "iterate this group with fresh context until an independent
+	// judge accepts the acceptance criteria". At most one goal per group;
+	// approve/pause/resume/cancel therefore address by group. GoalApprove is
+	// the human-confirmation step for plan-first goals (status
+	// awaiting_approval → running); it is an ordinary grantable verb here but
+	// has deliberately NO ctl-plane counterpart — main can set a goal on a
+	// peer but cannot approve one.
+	GoalSet(ctx context.Context, in *GoalSetReq, opts ...grpc.CallOption) (*GoalResp, error)
+	GoalList(ctx context.Context, in *GoalListReq, opts ...grpc.CallOption) (*GoalListResp, error)
+	GoalApprove(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
+	GoalPause(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
+	GoalResume(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
+	GoalCancel(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -402,6 +422,66 @@ func (c *kotoClient) SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.
 	return out, nil
 }
 
+func (c *kotoClient) GoalSet(ctx context.Context, in *GoalSetReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalSet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalList(ctx context.Context, in *GoalListReq, opts ...grpc.CallOption) (*GoalListResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalListResp)
+	err := c.cc.Invoke(ctx, Koto_GoalList_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalApprove(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalApprove_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalPause(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalPause_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalResume(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalResume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalCancel(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalCancel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResourcesResp)
@@ -566,6 +646,20 @@ type KotoServer interface {
 	SchedDel(context.Context, *SchedIDReq) (*BaseResp, error)
 	SchedToggle(context.Context, *SchedToggleReq) (*BaseResp, error)
 	SchedRun(context.Context, *SchedIDReq) (*BaseResp, error)
+	// ---- goal loop (daemon/goals.go) ----
+	// A goal is "iterate this group with fresh context until an independent
+	// judge accepts the acceptance criteria". At most one goal per group;
+	// approve/pause/resume/cancel therefore address by group. GoalApprove is
+	// the human-confirmation step for plan-first goals (status
+	// awaiting_approval → running); it is an ordinary grantable verb here but
+	// has deliberately NO ctl-plane counterpart — main can set a goal on a
+	// peer but cannot approve one.
+	GoalSet(context.Context, *GoalSetReq) (*GoalResp, error)
+	GoalList(context.Context, *GoalListReq) (*GoalListResp, error)
+	GoalApprove(context.Context, *GoalGroupReq) (*GoalResp, error)
+	GoalPause(context.Context, *GoalGroupReq) (*GoalResp, error)
+	GoalResume(context.Context, *GoalGroupReq) (*GoalResp, error)
+	GoalCancel(context.Context, *GoalGroupReq) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -703,6 +797,24 @@ func (UnimplementedKotoServer) SchedToggle(context.Context, *SchedToggleReq) (*B
 }
 func (UnimplementedKotoServer) SchedRun(context.Context, *SchedIDReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SchedRun not implemented")
+}
+func (UnimplementedKotoServer) GoalSet(context.Context, *GoalSetReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalSet not implemented")
+}
+func (UnimplementedKotoServer) GoalList(context.Context, *GoalListReq) (*GoalListResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalList not implemented")
+}
+func (UnimplementedKotoServer) GoalApprove(context.Context, *GoalGroupReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalApprove not implemented")
+}
+func (UnimplementedKotoServer) GoalPause(context.Context, *GoalGroupReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalPause not implemented")
+}
+func (UnimplementedKotoServer) GoalResume(context.Context, *GoalGroupReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalResume not implemented")
+}
+func (UnimplementedKotoServer) GoalCancel(context.Context, *GoalGroupReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalCancel not implemented")
 }
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
@@ -1141,6 +1253,114 @@ func _Koto_SchedRun_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_GoalSet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalSetReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalSet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalSet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalSet(ctx, req.(*GoalSetReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalListReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalList(ctx, req.(*GoalListReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalApprove_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalGroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalApprove(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalApprove_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalApprove(ctx, req.(*GoalGroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalPause_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalGroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalPause(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalPause_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalPause(ctx, req.(*GoalGroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalResume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalGroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalResume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalResume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalResume(ctx, req.(*GoalGroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalCancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalGroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalCancel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalCancel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalCancel(ctx, req.(*GoalGroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResourcesReq)
 	if err := dec(in); err != nil {
@@ -1354,6 +1574,30 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SchedRun",
 			Handler:    _Koto_SchedRun_Handler,
+		},
+		{
+			MethodName: "GoalSet",
+			Handler:    _Koto_GoalSet_Handler,
+		},
+		{
+			MethodName: "GoalList",
+			Handler:    _Koto_GoalList_Handler,
+		},
+		{
+			MethodName: "GoalApprove",
+			Handler:    _Koto_GoalApprove_Handler,
+		},
+		{
+			MethodName: "GoalPause",
+			Handler:    _Koto_GoalPause_Handler,
+		},
+		{
+			MethodName: "GoalResume",
+			Handler:    _Koto_GoalResume_Handler,
+		},
+		{
+			MethodName: "GoalCancel",
+			Handler:    _Koto_GoalCancel_Handler,
 		},
 		{
 			MethodName: "Resources",

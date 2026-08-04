@@ -344,3 +344,61 @@ type SchedToggleReq struct {
 	ID      string `json:"id"`
 	Enabled bool   `json:"enabled"`
 }
+
+// ---- goals ------------------------------------------------------------------
+
+// GoalItem is the persisted shape of one goal (goals.json; see daemon/goals.go).
+// At most one goal exists per group. Iteration counts execution iterations
+// only — the plan turn and judge turns are not charged against
+// MaxIterations. Timestamps are unix seconds (matches ScheduleItem).
+type GoalItem struct {
+	ID       string `json:"id"`
+	Group    string `json:"group"`
+	Text     string `json:"text"`
+	Criteria string `json:"criteria"`
+	// Plan records whether the goal was set plan-first (one planning turn,
+	// then awaiting_approval until a human approves).
+	Plan          bool   `json:"plan"`
+	Status        string `json:"status"` // planning | awaiting_approval | running | paused | met | cancelled
+	Iteration     int    `json:"iteration"`
+	MaxIterations int    `json:"max_iterations"`
+	// LastFeedback is the judge's per-criterion failure report from the most
+	// recently rejected done-claim; embedded into later iteration prompts.
+	LastFeedback string `json:"last_feedback,omitempty"`
+	// DoneNote is the worker's evidence summary from the accepted goal_done.
+	DoneNote     string  `json:"done_note,omitempty"`
+	PausedReason string  `json:"paused_reason,omitempty"` // cap | stalled | judge | operator | stopped
+	CreatedAt    float64 `json:"created_at"`
+	UpdatedAt    float64 `json:"updated_at,omitempty"`
+	CompletedAt  float64 `json:"completed_at,omitempty"`
+}
+
+type GoalSetReq struct {
+	Group         string `json:"group"`
+	Text          string `json:"text"`
+	Criteria      string `json:"criteria"`
+	MaxIterations int    `json:"max_iterations,omitempty"`
+	// Plan is tri-state on the ctl plane (absent = default true), matching
+	// the proto's optional bool.
+	Plan *bool `json:"plan,omitempty"`
+}
+
+// GoalGroupReq covers approve / pause / resume / cancel — the one-goal-per-
+// group invariant makes the group the natural address.
+type GoalGroupReq struct {
+	Group string `json:"group"`
+}
+
+type GoalListReq struct {
+	Group string `json:"group,omitempty"`
+}
+
+type GoalResp struct {
+	BaseResp
+	Item GoalItem `json:"item"`
+}
+
+type GoalListResp struct {
+	BaseResp
+	Goals []GoalItem `json:"goals"`
+}

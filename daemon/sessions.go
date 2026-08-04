@@ -37,6 +37,20 @@ import (
 // as the first space-delimited token of the FIFO line).
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
+// The goal loop (goals.go) owns two reserved sessions per group: the worker
+// iterates in goal-work, the acceptance judge reviews in goal-judge. Both are
+// cleared by the goal driver before every turn (fresh context is the design),
+// so clients and the ctl plane must not send into or clear them — the driver
+// bypasses the checks by calling enqueueSend/clearSession directly.
+const (
+	goalWorkSession  = "goal-work"
+	goalJudgeSession = "goal-judge"
+)
+
+func isReservedSession(s string) bool {
+	return s == goalWorkSession || s == goalJudgeSession
+}
+
 // normalizeSession maps the wire aliases of the default session ("", "-",
 // "default") to the canonical "" and validates named sessions.
 func normalizeSession(s string) (string, error) {

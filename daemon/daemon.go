@@ -61,6 +61,12 @@ type (
 	schedListResp  = wire.SchedListResp
 	schedIDReq     = wire.SchedIDReq
 	schedToggleReq = wire.SchedToggleReq
+	goalItem       = wire.GoalItem
+	goalSetReq     = wire.GoalSetReq
+	goalGroupReq   = wire.GoalGroupReq
+	goalListReq    = wire.GoalListReq
+	goalResp       = wire.GoalResp
+	goalListResp   = wire.GoalListResp
 )
 
 var errResp = wire.ErrResp
@@ -89,6 +95,7 @@ var (
 	SKILLS_DIR  string
 	GROUPS_FILE string
 	SCHED_FILE  string
+	GOALS_FILE  string
 	SOCK_DIR    string
 	METRICS     string
 	PORT_BASE   = 8787
@@ -100,6 +107,7 @@ func initPaths() {
 	SKILLS_DIR = filepath.Join(HERE, "skills")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
 	SCHED_FILE = filepath.Join(HERE, "schedules.json")
+	GOALS_FILE = filepath.Join(HERE, "goals.json")
 	SOCK_DIR = filepath.Join(HERE, "run")
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
 	if v := os.Getenv("PROXY_PORT"); v != "" {
@@ -184,6 +192,10 @@ func daemonMain() {
 	emitLogf("daemon", "info", "kotod ready grpc=%s (mTLS+token)", addr)
 
 	loadSched()
+	loadGoals()
+	// Backgrounded like autostartGroups: a resumed goal's first act is a VM
+	// turn, and nothing below should wait on one.
+	go resumeGoalDrivers()
 	go stateWatchLoop()
 	go cronLoop()
 	// Ungated by watchers on purpose: resource exhaustion has to be visible
