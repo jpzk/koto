@@ -257,14 +257,13 @@ func (m Model) shellChatW() int {
 	return chatW
 }
 
-// shellVSep draws the h-row vertical divider between the chat column and the
-// shell pane in split mode. Styled per-cell (not as one multi-line Render
-// call) to match renderScrollbar's pattern.
+// shellVSep fills the h-row divider column between panes in split mode with
+// blank cells — the one-column gap stays (shellChatW/shellPaneSize/
+// shellMouseOrigin all budget for it) but draws no line.
 func shellVSep(h int) string {
-	cell := lipgloss.NewStyle().Foreground(cGray).Render("│")
 	lines := make([]string, h)
 	for i := range lines {
-		lines[i] = cell
+		lines[i] = " "
 	}
 	return strings.Join(lines, "\n")
 }
