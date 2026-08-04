@@ -133,9 +133,8 @@ func (m Model) logPaneSize() (int, int) {
 	w := max(10, m.width-2-m.treePaneW()) // -1 left padding, -1 scrollbar
 	// -3: status + hint + metrics (no input bar in log view). Fills the
 	// frame to exactly m.height like the chat and shell views, keeping the
-	// bottom rows fixed across every view toggle. Notification banner rows
-	// above the status bar transiently shrink it further.
-	h := max(1, m.height-3-m.bannerRows())
+	// bottom rows fixed across every view toggle.
+	h := max(1, m.height-3)
 	return w, h
 }
 
@@ -255,9 +254,6 @@ func (m Model) renderLogView() string {
 	hint := m.renderLogHint()
 	metricsBar := m.renderMetricsBar()
 	parts := []string{status, middle, hint, metricsBar}
-	if m.bannerRows() > 0 {
-		parts = append([]string{m.renderNotifyBanner()}, parts...)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 

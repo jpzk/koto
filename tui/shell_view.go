@@ -287,9 +287,8 @@ func (m Model) shellPaneSize() (int, int) {
 	// -3: status + hint + metrics. This makes the frame exactly m.height
 	// rows, same as the chat view — so the hint/metrics rows sit on the
 	// same terminal rows in both views and toggling the shell pane in and
-	// out (ctrl+]) doesn't make the bottom lines jump. Notification banner
-	// rows above the status bar transiently shrink it further.
-	h := max(1, m.height-3-m.bannerRows())
+	// out (ctrl+]) doesn't make the bottom lines jump.
+	h := max(1, m.height-3)
 	return w, h
 }
 
@@ -766,9 +765,6 @@ func (m Model) renderShellView() string {
 	}
 	metricsBar := m.renderMetricsBar()
 	parts := []string{status, body, hint, metricsBar}
-	if m.bannerRows() > 0 {
-		parts = append([]string{m.renderNotifyBanner()}, parts...)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 

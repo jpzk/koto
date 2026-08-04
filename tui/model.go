@@ -175,18 +175,19 @@ const (
 	jobBlinkTicks = 6
 )
 
-// notifyLingerMs is how long a notification banner row stays above the
-// status bar; notifyBlinkTicks is its blink half-period in spinner ticks
-// (matching jobBlinkTicks). notifyMaxRows caps the stack so a notification
-// burst can't eat the screen — overflow items still land in the transcript.
+// notifyLingerMs is how long a notification stays live in the status bar's
+// inline segment; notifyBlinkTicks is its blink half-period in spinner ticks
+// (matching jobBlinkTicks). notifyMaxRows caps the live list (newest shows,
+// the rest count into the +N suffix) so a notification burst stays bounded —
+// overflow items still land in the transcript.
 const (
 	notifyLingerMs   = 10000
 	notifyBlinkTicks = 6
 	notifyMaxRows    = 4
 )
 
-// notifyItem is one live notification in the banner stack (event
-// "notification"). Visibility is a pure function of `at`, like jobDoneAt:
+// notifyItem is one live notification (event "notification").
+// Visibility is a pure function of `at`, like jobDoneAt:
 // the row shows while time.Since(at) < notifyLingerMs.
 type notifyItem struct {
 	at                          time.Time
@@ -526,17 +527,12 @@ type Model struct {
 	jobDoneAt     map[string]time.Time
 	jobsPrimed    map[string]bool
 
-	// Notification banner stack (event "notification"): each live
-	// notification gets its own row above the status bar for
-	// notifyLingerMs, newest on top, capped at notifyMaxRows.
-	//   notifications — arrival-ordered; expired entries are GC'd on the
-	//                   spinner tick.
-	//   bannerLast    — the row count the panes were last sized for, so
-	//                   show/expire transitions trigger exactly one
-	//                   viewport resize (the layout funcs subtract
-	//                   bannerRows live).
+	// Live notifications (event "notification"): rendered inline in the
+	// status-bar row (renderNotifyInline) for notifyLingerMs each, newest
+	// shown, extras collapsed into a +N suffix, visible list capped at
+	// notifyMaxRows. Arrival-ordered; expired entries are GC'd on the
+	// spinner tick.
 	notifications []notifyItem
-	bannerLast    int
 
 	// notifyMode is the desktop-notification escape flavor this terminal
 	// gets (see notify_osc.go); resolved once at startup from the env.
@@ -1178,9 +1174,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinTickMsg:
-		// Runs before the isAnimating gate so the tick that observes the last
-		// banner expiring still restores the pane geometry.
-		m.syncBannerRows()
+		// Runs before the isAnimating gate so expired notifications stop
+		// holding the tick chain (and the slice) alive.
+		m.pruneNotifications()
 		if m.isAnimating() {
 			m.tick++
 			return m, tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
@@ -1696,7 +1692,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.notifications = append(m.notifications, notifyItem{
 					at: time.Now(), severity: sev, title: ev.Title, msg: ev.Text, group: ev.Group,
 				})
-				m.syncBannerRows()
+				m.pruneNotifications()
 				// The in-TUI banner only helps someone who is looking at
 				// the TUI; hand the window manager a real notification too
 				// (both severities — "high" additionally rings the bell).
@@ -1995,9 +1991,8 @@ func (m Model) logViewportSize() (int, int) {
 // grows as the value wraps (inputRows), so this shrinks with it — View() and
 // the viewport must agree on the number or the frame overflows the terminal.
 func (m Model) chatRows() int {
-	// status(1) + input borders(2) + hint(1) + metrics(1) = 5, plus any
-	// transient notification banner rows above the status bar.
-	return max(1, m.height-5-m.inputRows()-m.bannerRows())
+	// status(1) + input borders(2) + hint(1) + metrics(1) = 5.
+	return max(1, m.height-5-m.inputRows())
 }
 
 // logContentCols returns the column width passed to glamour for response
@@ -2299,7 +2294,7 @@ func formatToolOutFullElapsed(body string, elapsedMs int64) string {
 	return summary + "\n" + body
 }
 
-// visibleNotifications returns the banner rows to draw: unexpired items,
+// visibleNotifications returns the live notifications: unexpired items,
 // newest first, capped at notifyMaxRows.
 func (m Model) visibleNotifications() []notifyItem {
 	out := make([]notifyItem, 0, notifyMaxRows)
@@ -2311,17 +2306,12 @@ func (m Model) visibleNotifications() []notifyItem {
 	return out
 }
 
-// bannerRows is the transient height the notification stack steals from the
-// panes (chatRows / logPaneSize / shellPaneSize subtract it).
-func (m Model) bannerRows() int { return len(m.visibleNotifications()) }
-
-// syncBannerRows GCs expired entries and resizes the viewports when the
-// visible banner row count drifted from what the panes were last sized for
-// (a notification arrived or expired). The prune runs unconditionally —
-// gating it on a row-count change let sustained spam pin the visible count
+// pruneNotifications GCs expired entries. Runs unconditionally on every tick —
+// gating it on a visible-count change let sustained spam pin the visible count
 // at notifyMaxRows and grow the slice without bound until the stream went
-// quiet. Returns true if geometry changed.
-func (m *Model) syncBannerRows() bool {
+// quiet. Notifications render inline in the status bar (renderNotifyInline),
+// so arrival/expiry never touches pane geometry.
+func (m *Model) pruneNotifications() {
 	kept := m.notifications[:0]
 	for _, n := range m.notifications {
 		if time.Since(n.at) < notifyLingerMs*time.Millisecond {
@@ -2329,17 +2319,6 @@ func (m *Model) syncBannerRows() bool {
 		}
 	}
 	m.notifications = kept
-	rows := m.bannerRows()
-	if rows == m.bannerLast {
-		return false
-	}
-	m.bannerLast = rows
-	m.resizeViewport()
-	if m.logVPReady {
-		m.resizeLogViewport()
-	}
-	m.refreshLog()
-	return true
 }
 
 func (m Model) isAnimating() bool {
@@ -2375,9 +2354,9 @@ func (m Model) isAnimating() bool {
 			return true
 		}
 	}
-	// An active notification banner needs frames for its blink and for the
+	// A live notification needs frames for its status-bar blink and for the
 	// render that finally hides it (no other event is guaranteed in time).
-	if m.bannerRows() > 0 {
+	if len(m.visibleNotifications()) > 0 {
 		return true
 	}
 	return false

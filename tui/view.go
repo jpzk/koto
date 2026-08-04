@@ -196,9 +196,6 @@ func (m Model) View() string {
 	metricsBar := m.renderMetricsBar()
 
 	parts := []string{status, middle, input, hint, metricsBar}
-	if m.bannerRows() > 0 {
-		parts = append([]string{m.renderNotifyBanner()}, parts...)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
@@ -228,49 +225,75 @@ func formatNotifyLine(sev, title, msg string) string {
 	return s
 }
 
-// renderNotifyBanner draws the stack of live notification rows shown above
-// the status bar: newest first, one row each, blinking on the shared spinner
-// tick. High severity is pink, normal emerald. The blink alternates a solid
-// background with a foreground-only phase so the text stays readable and the
-// row count (and thus the frame height) never changes mid-blink.
-func (m Model) renderNotifyBanner() string {
-	items := m.visibleNotifications()
-	rows := make([]string, 0, len(items))
-	on := (m.tick/notifyBlinkTicks)%2 == 0
-	for _, n := range items {
-		accent := cEmerald
-		if n.severity == "high" {
-			accent = cPink
+// notifyBarX is the status-bar column where the inline notification wants to
+// start: over the terminal pane's content when the shell view is on screen
+// (mirroring shellMouseOrigin's arithmetic), otherwise over the message
+// view's content (tree column + the chat pane's 1-col padding).
+func (m Model) notifyBarX() int {
+	tw := m.treePaneW()
+	if m.focus == focusShell || m.shellSplitVisible() {
+		x := 0
+		if tw > 0 {
+			x = tw + 1 // tree column + its separator
 		}
-		base := lipgloss.NewStyle().Foreground(cBlack).Background(accent)
-		// Off-phase: drop the background and hide the bell (the icon swap is
-		// the same idiom as the job-row blink — visible even where color
-		// isn't, e.g. limited terminals).
-		icon := " 🔔 "
-		if !on {
-			base = lipgloss.NewStyle().Foreground(accent)
-			icon = "    "
+		if cw := m.shellChatW(); cw > 0 {
+			x += cw // chat column incl. its separator
 		}
-		// The daemon's parser flattens newlines out of title/msg, but this
-		// row's height invariant is ours to keep — one banner item must be
-		// exactly one terminal row or the frame outgrows m.height and
-		// Bubble Tea truncates it from the top. Flatten again locally.
-		title := flattenBannerText(n.title)
-		msg := flattenBannerText(n.msg)
-		line := base.Render(icon+n.group+" · ") +
-			base.Bold(true).Render(title)
-		if msg != "" {
-			sep := ""
-			if title != "" {
-				sep = " — "
-			}
-			line += base.Render(sep + msg)
-		}
-		line += base.Render(" ")
-		// One row, always: clip at the terminal edge like the status bar.
-		rows = append(rows, lipgloss.NewStyle().MaxWidth(m.width).Render(line))
+		return x + 1 // shellBody's PaddingLeft
 	}
-	return strings.Join(rows, "\n")
+	return tw + 1 // logArea's PaddingLeft
+}
+
+// renderNotifyInline draws the newest live notification as a segment of the
+// status-bar row — same row as the progress indicator, so it can never change
+// the frame's height. It starts at notifyBarX (over the message view, or over
+// the terminal pane when that's open), clamped right of the bar's left
+// segments, and truncates to stop short of maxEnd (where the right side
+// begins). Extra live items collapse into a +N suffix; they all remain in
+// the transcript. Returns the left-padding + segment, or "" when there is no
+// live notification or no room. Blink alternates a solid background with a
+// foreground-only phase (icon swap doubles the signal for colorless
+// terminals), never changing the segment's presence mid-blink.
+func (m Model) renderNotifyInline(leftW, maxEnd int) string {
+	items := m.visibleNotifications()
+	if len(items) == 0 {
+		return ""
+	}
+	start := max(leftW, m.notifyBarX())
+	avail := maxEnd - start
+	if avail < 8 { // no room for anything legible
+		return ""
+	}
+	n := items[0]
+	accent := cEmerald
+	if n.severity == "high" {
+		accent = cPink
+	}
+	on := (m.tick/notifyBlinkTicks)%2 == 0
+	base := lipgloss.NewStyle().Foreground(cBlack).Background(accent)
+	icon := " 🔔 "
+	if !on {
+		base = lipgloss.NewStyle().Foreground(accent)
+		icon = "    "
+	}
+	// The daemon's parser flattens newlines out of title/msg, but this row's
+	// height invariant is ours to keep — flatten again locally.
+	title := flattenBannerText(n.title)
+	msg := flattenBannerText(n.msg)
+	line := base.Render(icon+n.group+" · ") + base.Bold(true).Render(title)
+	if msg != "" {
+		sep := ""
+		if title != "" {
+			sep = " — "
+		}
+		line += base.Render(sep + msg)
+	}
+	if len(items) > 1 {
+		line += base.Bold(true).Render(fmt.Sprintf(" +%d", len(items)-1))
+	}
+	line += base.Render(" ")
+	line = lipgloss.NewStyle().MaxWidth(avail).Render(line)
+	return strings.Repeat(" ", start-leftW) + line
 }
 
 // --- status bar --------------------------------------------------------------
@@ -287,9 +310,13 @@ func (m Model) renderStatusBar(spin string) string {
 	}
 	left := ldot + m.renderStatusLeft()
 	right := m.renderStatusRight(spin) + rdot
-	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
-	gap := m.width - leftW - rightW
+	// Live notification, inlaid into the gap between the left segments and
+	// the progress indicator — same row, so the frame's height never moves.
+	if seg := m.renderNotifyInline(lipgloss.Width(left), m.width-rightW); seg != "" {
+		left += seg
+	}
+	gap := m.width - lipgloss.Width(left) - rightW
 	if gap < 0 {
 		gap = 0
 	}
