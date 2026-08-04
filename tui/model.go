@@ -619,7 +619,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /stopvm  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -2447,7 +2447,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		return listCmd(m.sock)
 	case "stop":
 		if msg.err != nil {
-			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stopvm %s: %v", msg.group, msg.err)})
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stop %s: %v", msg.group, msg.err)})
 		} else {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("stopped %s's VM", msg.group)})
 		}
@@ -3677,15 +3677,17 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("restarting %s…", target)})
 		return daemonCmd(m.sock, "restart", target, nil)
 	}
-	if v == "/stop" {
+	if v == "/interrupt" {
+		// Kill the in-flight turn (same as Esc while a turn runs). This was
+		// /stop's meaning before /stop became the VM power-off.
 		return daemonCmd(m.sock, "interrupt", m.cur, nil)
 	}
-	if v == "/stopvm" || strings.HasPrefix(v, "/stopvm ") {
-		// Powers off the group's microVM (daemon `stop` verb). Distinct from
-		// /stop, which only interrupts the in-flight turn: the VM stays down
-		// until something needs it (a send, a schedule) or /restart. Frees the
+	if v == "/stop" || strings.HasPrefix(v, "/stop ") {
+		// Powers off the group's microVM (daemon `stop` verb). Interrupting
+		// the in-flight turn is Esc (or /interrupt): the VM stays down until
+		// something needs it (a send, a schedule) or /restart. Frees the
 		// VM's RAM/CPU; the workspace image and chat history persist.
-		target := strings.TrimSpace(strings.TrimPrefix(v, "/stopvm"))
+		target := strings.TrimSpace(strings.TrimPrefix(v, "/stop"))
 		if target == "" {
 			target = m.cur
 		}

@@ -112,10 +112,11 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #   /ls               -> refresh group list + re-subscribe to streams
 #   /runscript <file> -> run scripts/<file> in the focused group's microVM
 #                        (admin-only RunScript RPC), output streamed into chat
-#   /stopvm [g]       -> power off the group's microVM (daemon `stop` verb;
-#                        current group when no arg). NOT /stop, which only
-#                        interrupts the turn. VM boots again on next send
-#                        or /restart; workspace + history persist.
+#   /stop [g]         -> power off the group's microVM (daemon `stop` verb;
+#                        current group when no arg). VM boots again on next
+#                        send or /restart; workspace + history persist.
+#                        Interrupting the in-flight turn is Esc (or
+#                        /interrupt) — /stop no longer means that.
 ```
 
 ## Daemon protocol (gRPC over mTLS, `protocol/koto.proto`)
