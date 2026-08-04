@@ -148,6 +148,11 @@ exit 0`
 // message-B, and race on the shared turnDone channel.
 func sendNow(g, session, msg string) error {
 	emitLogfG("send", g, "info", "group=%s session=%s bytes=%d", g, sessionMarkerName(session), len(msg))
+	// Phase reporting for clients (activity.go). Opened before ensure() —
+	// booting a stopped microVM is several seconds with nothing else to show —
+	// and closed on every exit path, including the stall timeout.
+	activityTurnBegin(g, session)
+	defer activityTurnEnd(g)
 	if _, err := ensure(g, g == "main"); err != nil {
 		emitLogfG("send", g, "error", "ensure group=%s: %v", g, err)
 		return err
@@ -194,6 +199,7 @@ drain:
 	}
 	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
 	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
+	activityTurnDelivering(g)
 	if err := fcSendMsg(g, session, enc, sp, cfgB); err != nil {
 		return err
 	}

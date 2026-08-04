@@ -261,6 +261,39 @@ verb list.
   (256-frame buffer overflow) has its stream closed by the daemon rather than
   frames silently dropped; reconnect-with-`since_seq` recovers exactly the
   missed frames.
+- **The `activity` event reports what a turn is *waiting on*, and since when**
+  (`daemon/activity.go`). It rides the `SubscribeGroup` stream like any other
+  frame but carries no transcript content: `name` is the phase — `boot`
+  (ensure() bringing the microVM up) | `send` (turn handed to the guest) |
+  `llm` (request upstream, not one byte back) | `retry` (429/503/529 backoff) |
+  `stream` (response bytes flowing) | `work` (between upstream calls — the
+  guest is running a tool); empty = idle/turn over — `text` an optional detail
+  (which upstream status caused a retry), and **`ts` the phase's START, not the
+  frame's emit time**, so clients render an elapsed counter off their own clock
+  instead of the daemon emitting a frame per second. **One frame per
+  transition**, so a quiet turn costs a handful of events. It closes the window
+  between `prompt` and the first `stream` frame, which is not short — microVM
+  boot, the guest handshake, the upstream call itself, and above all a
+  `doWithRetry` backoff, which moves no bytes and writes no chat line at all.
+  Before this the operator could not tell "thinking" from "wedged". The
+  **proxy is the source of truth** for the LLM legs: it runs in the daemon
+  process with one listener per group (`proxyStart`), so it already knows
+  exactly when a request goes upstream, when the first SSE payload line comes
+  back (NOT when `client.Do` returns — headers precede the first token), and
+  when it retires; concurrent calls (cs-subagent fans out through the same
+  port) are refcounted, and `retry` outranks everything because it is the only
+  phase that explains a stall. Frames go through `emit()`, so they land in the
+  replay ring and a `since_seq` resume converges on the live phase; a client
+  attaching mid-turn is seeded with the current phase as a **synthetic seq-0
+  frame** (same convention as `gap`). The TUI (`tui/activity.go`) renders it in
+  three places and keeps **two clocks** — the phase clock (`since`) and a turn
+  clock it derives from the idle→busy edge, because a busy turn cycles phases
+  every couple of seconds and a phase clock alone reads "2s" however long the
+  group grinds: the **status bar** shows `waiting 1m04s ⠋` (phase + turn
+  clock), the **hint bar** above the message bar spells it out with both clocks
+  and the retry detail (`⠋ waiting for model… 12s · turn 1m04s`), and the
+  **tree** spins the group's dot and badges it with the turn clock so a
+  background group grinding away is visible without switching to it.
 - **`WatchState() → stream StateFrame`** — daemon-pushed group snapshots (the
   same map `List` returns), first frame immediately, then only on change
   (spawn/stop/stall/queue-depth/config). Replaces client-side `List` polling;

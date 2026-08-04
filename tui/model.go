@@ -303,6 +303,16 @@ type Model struct {
 	// the user has no in-band way to cancel.
 	busy map[string]bool
 
+	// activity is the daemon's phase report per group (daemon/activity.go):
+	// what the turn is waiting on right now — booting the VM, the upstream
+	// LLM call, a provider retry backoff, tokens arriving, a tool running.
+	// It exists because busy alone is a boolean: a turn that sits five
+	// minutes on the provider and a turn that is wedged look identical
+	// without it. Frames arrive on transitions only and carry the phase's
+	// start time, so elapsed is rendered from the local clock every tick
+	// rather than costing a frame per second.
+	activity map[string]activityInfo
+
 	input textinput.Model
 	focus focusZone
 
@@ -678,6 +688,7 @@ func newModel(sock string, ctxWindow int) Model {
 		toolOutBuf:      map[string]string{},
 		toolBeginTs:     map[string]int64{},
 		busy:            map[string]bool{},
+		activity:        map[string]activityInfo{},
 		toolOutTail:     map[string]string{},
 		unread:          map[string]bool{},
 		input:           ti,
@@ -1544,6 +1555,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.pageExhausted, ev.Group)
 			delete(m.streamBuf, ev.Group)
 			delete(m.busy, ev.Group)
+			delete(m.activity, ev.Group)
 			delete(m.thinkingBuf, ev.Group)
 			delete(m.thinkingTail, ev.Group)
 			delete(m.toolOutBuf, ev.Group)
@@ -1659,6 +1671,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				ts:      int64(ev.Ts),
 				expand:  expand,
 			})
+		case "activity":
+			// Phase report, not transcript content: it drives the status/hint
+			// bars and the tree spinner, and adds no line to the chat. Replayed
+			// frames are skipped — a phase from a past turn is not the live one.
+			if !ev.Historical {
+				m.applyActivity(ev)
+			}
 		case "sched_fired", "sched_run":
 			tag := "⏰"
 			if ev.Event == "sched_run" {
@@ -2333,6 +2352,13 @@ func (m Model) isAnimating() bool {
 		return true
 	}
 	if _, ok := m.thinkingBuf[m.cur]; ok {
+		return true
+	}
+	// A group mid-phase has a live elapsed counter (status/hint bars) and a
+	// spinning tree dot. Any group, not just m.cur: the tree shows them all,
+	// and a background group grinding away is exactly what the operator wants
+	// to see without switching to it.
+	if m.anyActivity() {
 		return true
 	}
 	if m.plugin != nil {

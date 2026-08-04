@@ -354,26 +354,34 @@ func (m Model) renderStatusRight(spin string) string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cMagenta).Background(cBlack).Bold(true).
 			Render(fmt.Sprintf("  ▶ /%s %s ", m.plugin.name, spin)))
 	}
-	streaming := ""
-	if _, ok := m.streamBuf[m.cur]; ok {
-		streaming = lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).
+	// Activity segment — the spelled-out progress line (phase, both clocks,
+	// retry detail), which used to live in the hint bar. The daemon's phase
+	// (activity.go) is authoritative when present — it covers the stretches
+	// with no chat output at all (VM boot, the upstream call, a provider
+	// retry backoff), which is precisely when "idle" was a lie. streamBuf is
+	// the fallback for a daemon too old to send activity frames.
+	var act string
+	if a, ok := m.activityFor(m.cur); ok {
+		txt := fmt.Sprintf("   %s %s… %s", spin, activityLabel(a.phase), fmtElapsed(time.Since(a.since)))
+		// Both clocks: how long on THIS phase, and how long the turn has run
+		// overall. Suppressed while they'd read the same (the turn's first
+		// phase) rather than printed twice.
+		if turn := time.Since(a.turnSince); turn-time.Since(a.since) >= time.Second {
+			txt += fmt.Sprintf(" · turn %s", fmtElapsed(turn))
+		}
+		if a.detail != "" {
+			txt += " (" + a.detail + ")"
+		}
+		act = lipgloss.NewStyle().Foreground(activityColor(a.phase)).Background(cBlack).
+			Render(txt + " ")
+	} else if _, ok := m.streamBuf[m.cur]; ok {
+		act = lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).
 			Render(fmt.Sprintf("   streaming %s ", spin))
 	} else {
-		streaming = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
+		act = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
 			Render("   idle ")
 	}
-	parts = append(parts, streaming)
-
-	count := 0
-	for _, l := range m.lines {
-		if l.group == m.cur {
-			count++
-		}
-	}
-	tail := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Render(pCurveR) +
-		lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-			Render(fmt.Sprintf("   %d  ", count))
-	parts = append(parts, tail)
+	parts = append(parts, act)
 
 	return strings.Join(parts, "")
 }
@@ -529,8 +537,22 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// the name field so the row never overflows the pane. Group-level (the
 	// daemon's queue is shared across sessions), so group rows only.
 	badge, badgeW := "", 0
+	badgeColor := cYellow
+	act, working := m.activityFor(r.group)
+	working = working && !isSession && !isJob
 	if queued > 0 && !isSession && !isJob {
 		badge = fmt.Sprintf(" ⏳%d", queued)
+	} else if working {
+		badgeColor = activityColor(act.phase)
+		// How long the whole turn has been going — the name gives up the width
+		// instead of the row growing. The point of the tree is to answer "is
+		// anything stuck?" for the groups you are NOT looking at, and that
+		// needs a number, not just a spinner. Turn clock, not phase clock: a
+		// busy turn cycles phases every couple of seconds, so a phase clock
+		// here would read 0s-2s forever however long the group grinds.
+		badge = " " + fmtElapsedShort(time.Since(act.turnSince))
+	}
+	if badge != "" {
 		badgeW = lipgloss.Width(badge)
 		w -= badgeW
 		if w < 1 {
@@ -542,6 +564,13 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if running {
 		dot = "● "
 		dotColor = cAmber
+	}
+	// A group mid-phase spins, so background work is visible without switching
+	// to the group. Placed before the stalled check: stalled means the daemon
+	// gave up waiting for turn_end, which outranks any phase we last heard.
+	if working {
+		dot = string(spinnerFrames[m.tick%len(spinnerFrames)]) + " "
+		dotColor = activityColor(act.phase)
 	}
 	// Stalled overrides running: the container is up but its FIFO loop is
 	// wedged (daemon saw no turn_end within turnWaitTimeout). Yellow ⚠ so it
@@ -590,7 +619,10 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// Unread output (only meaningful when the row isn't the current focus)
 	// overrides the dot to a pink filled marker and bolds the name. Pink
 	// (256-color 205) is far enough from green/yellow to read distinctly.
-	if unread && !isCur && !(stalled && !isSession && !isJob) {
+	// Not while the group is mid-phase: the spinner is the more perishable
+	// fact (it stops the moment the turn ends, the unread marker doesn't),
+	// and the bolded name still carries the unread signal either way.
+	if unread && !isCur && !working && !(stalled && !isSession && !isJob) {
 		dot = "● "
 		dotColor = cPink
 	}
@@ -611,7 +643,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	}
 	parts += style.Render(pad(name, w))
 	if badge != "" {
-		parts += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(badge)
+		parts += lipgloss.NewStyle().Foreground(badgeColor).Bold(true).Render(badge)
 	}
 	return parts
 }
@@ -1193,20 +1225,23 @@ func (m Model) renderHint() string {
 		if m.shellFocusable() {
 			left += " · ⌥→ term"
 		}
+		styled := dim.Render(left)
 		right := m.renderProviderModel()
-		leftW := lipgloss.Width(left)
+		leftW := lipgloss.Width(styled)
 		rightW := lipgloss.Width(right)
 		gap := m.width - leftW - rightW
 		if gap < 1 {
-			return dim.MaxWidth(m.width).Render(left)
+			return lipgloss.NewStyle().MaxWidth(m.width).Render(styled)
 		}
 		return lipgloss.NewStyle().MaxWidth(m.width).Render(
-			dim.Render(left) + strings.Repeat(" ", gap) + right + " ",
+			styled + strings.Repeat(" ", gap) + right + " ",
 		)
 	}
 	var parts []string
 	_, streaming := m.streamBuf[m.cur]
 	_, thinking := m.thinkingBuf[m.cur]
+	// The progress line lives in the status bar (renderStatusRight); the hint
+	// bar stays keyboard hints only.
 	if streaming || thinking {
 		parts = append(parts, " streaming…")
 	} else {

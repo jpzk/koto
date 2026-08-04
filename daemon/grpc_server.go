@@ -767,6 +767,16 @@ func (s *kotoServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Koto_Subscribe
 			return err
 		}
 	}
+	// A client attaching mid-turn (fresh launch, or a resume whose window the
+	// ring couldn't cover) has no way to learn the current phase — activity
+	// frames are transitions, and the next one may be minutes away. Seed it
+	// with the live phase as a synthetic seq-0 frame, same convention as `gap`
+	// so it never disturbs the resume cursor.
+	if a := activitySnapshot(g); a != nil {
+		if err := stream.Send(toPBEvent(sanitizeEvent(*a))); err != nil {
+			return err
+		}
+	}
 	ctx := stream.Context()
 	for {
 		select {

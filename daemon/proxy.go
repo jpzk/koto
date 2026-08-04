@@ -324,7 +324,14 @@ func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request,
 		resp.Body.Close()
 		emitLogfG("proxy", group, "info", "retry %d/%d for %s: upstream %d, waiting %s",
 			attempt+1, maxRetries, group, resp.StatusCode, delay)
+		// Surface the backoff as a phase (activity.go): this sleep is the one
+		// stall with no other outward sign at all — no log line reaches the
+		// group's chat, no bytes move — and it is the case the operator most
+		// needs to distinguish from a wedged turn.
+		activityRetry(group, fmt.Sprintf("upstream %d · retry %d/%d · %s",
+			resp.StatusCode, attempt+1, maxRetries, delay.Round(time.Second)))
 		time.Sleep(delay)
+		activityRetryDone(group)
 	}
 }
 
@@ -462,6 +469,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return req, nil
 	}
 
+	// The turn's LLM leg: everything from here to the last SSE line is dead
+	// air for the group's chat log, so report it as a phase (activity.go).
+	// Scoped to /v1/messages — count_tokens and friends are sub-second and
+	// would only make the indicator flicker.
+	var probe *llmProbe
+	if r.URL.Path == "/v1/messages" {
+		probe = activityLLMBegin(h.group)
+		defer probe.end()
+	}
 	client := &http.Client{Timeout: 600 * time.Second}
 	resp, err := doWithRetry(client, h.group, mkReq)
 	if err != nil {
@@ -503,6 +519,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(s, "data:") {
 				continue
 			}
+			// First payload line = the model has started answering. Headers
+			// come back earlier than this, so `client.Do` returning is NOT the
+			// end of the wait — this is.
+			probe.firstByte()
 			var ev map[string]any
 			if err := json.Unmarshal([]byte(strings.TrimSpace(s[5:])), &ev); err != nil {
 				continue
@@ -529,6 +549,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		data, _ := io.ReadAll(resp.Body)
+		probe.firstByte()
 		_, _ = w.Write(data)
 		var parsed map[string]any
 		if json.Unmarshal(data, &parsed) == nil {
@@ -597,6 +618,13 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		return req, nil
 	}
 
+	// Same phase reporting as the Anthropic leg (activity.go) — the sidecar's
+	// venice_stream.js posts every turn to /api/v1/chat/completions.
+	var probe *llmProbe
+	if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+		probe = activityLLMBegin(h.group)
+		defer probe.end()
+	}
 	client := &http.Client{Timeout: 600 * time.Second}
 	resp, err := doWithRetry(client, h.group, mkReq)
 	if err != nil {
@@ -637,6 +665,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(s, "data:") {
 				continue
 			}
+			probe.firstByte()
 			payload := strings.TrimSpace(s[5:])
 			if payload == "[DONE]" {
 				continue
@@ -653,6 +682,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		data, _ := io.ReadAll(resp.Body)
+		probe.firstByte()
 		_, _ = w.Write(data)
 		var parsed map[string]any
 		if json.Unmarshal(data, &parsed) == nil {
