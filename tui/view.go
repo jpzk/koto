@@ -22,7 +22,8 @@ var (
 	cGray    = lipgloss.Color("8")
 	cBrWhite = lipgloss.Color("15")
 	cPink    = lipgloss.Color("205")
-	cEmerald = lipgloss.Color("42") // notification banner, normal severity (256-color #00d787)
+	cEmerald = lipgloss.Color("42")  // notification banner, normal severity (256-color #00d787)
+	cRose    = lipgloss.Color("212") // over-threshold alert in the metrics bar (256-color #ff87d7)
 )
 
 // Powerline-ish glyphs. Same as the Ink TUI used.
@@ -32,15 +33,15 @@ const (
 	pCurveR = "" // U+E0BC
 )
 
-// pctColor picks a foreground color for a 0..1 utilization fraction.
+// pctColor picks a foreground color for a 0..1 utilization fraction. The
+// metrics bar is deliberately monochrome — white on black — with a single
+// rose (212) alert tier at ≥80% so color in the bottom row always means
+// "something needs attention", never decoration.
 func pctColor(frac float64) lipgloss.Color {
 	if frac >= 0.80 {
-		return cRed
+		return cRose
 	}
-	if frac >= 0.50 {
-		return cYellow
-	}
-	return cAmber
+	return cWhite
 }
 
 // renderBar draws a [████░░░░] style bar: full blocks in `fg` for the filled
@@ -68,7 +69,8 @@ func renderBar(frac float64, width int, fg lipgloss.Color) string {
 }
 
 // renderReset shows the 5h-window reset clock + remaining time, e.g.
-// "↻ 19:00 2h12m". Dimmed; turns yellow when <30m left.
+// "↻ 19:00 2h12m". Dimmed; turns rose when <30m left (>90% of the window
+// consumed — the same over-threshold tier as the percent chips).
 func renderReset(resetTs int64) string {
 	left := time.Until(time.Unix(resetTs, 0))
 	if left < 0 {
@@ -84,7 +86,7 @@ func renderReset(resetTs int64) string {
 	}
 	fg := cGray
 	if left < 30*time.Minute {
-		fg = cYellow
+		fg = cRose
 	}
 	t := time.Unix(resetTs, 0)
 	return lipgloss.NewStyle().Foreground(fg).Background(cBlack).
@@ -299,17 +301,11 @@ func (m Model) renderNotifyInline(leftW, maxEnd int) string {
 // --- status bar --------------------------------------------------------------
 
 func (m Model) renderStatusBar(spin string) string {
-	// Focus indicator: an amber dot pinned to the far edge of the bar —
-	// leftmost while the tree/chat side owns the keyboard, rightmost while
-	// the terminal pane does (alt+←/→ switches sides). Both cells are always
-	// reserved so the bar doesn't shift a column on focus changes.
-	dot := lipgloss.NewStyle().Foreground(cAmber).Render("●")
-	ldot, rdot := dot, " "
-	if m.focus == focusShell {
-		ldot, rdot = " ", dot
-	}
-	left := ldot + m.renderStatusLeft()
-	right := m.renderStatusRight(spin) + rdot
+	// The focus indicator dot lives in the metrics bar (bottom row), not
+	// here — see renderMetricsBar. No reserved edge cells: the koto banner
+	// sits flush against the left edge.
+	left := m.renderStatusLeft()
+	right := m.renderStatusRight(spin)
 	rightW := lipgloss.Width(right)
 	// Live notification, inlaid into the gap between the left segments and
 	// the progress indicator — same row, so the frame's height never moves.
@@ -328,7 +324,7 @@ func (m Model) renderStatusBar(spin string) string {
 }
 
 func (m Model) renderStatusLeft() string {
-	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render("  koto ")
+	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render(" koto ")
 	a1 := lipgloss.NewStyle().Foreground(cAmber).Background(cDkAmber).Render(pSep)
 	runDot := " "
 	if g, ok := m.groups[m.cur]; ok && g.Running {
@@ -402,7 +398,7 @@ func (m Model) renderStatusRight(spin string) string {
 		act = lipgloss.NewStyle().Foreground(activityColor(a.phase)).Background(cBlack).
 			Render(txt + " ")
 	} else if _, ok := m.streamBuf[m.cur]; ok {
-		act = lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).
+		act = lipgloss.NewStyle().Foreground(cAmber).Background(cBlack).
 			Render(fmt.Sprintf("   streaming %s ", spin))
 	} else {
 		act = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
@@ -413,10 +409,12 @@ func (m Model) renderStatusRight(spin string) string {
 	return strings.Join(parts, "")
 }
 
-// renderMetricsBar draws the bottom-most line: ctx/cache/5h/7d utilization,
-// right-aligned the same way the status bar's right side used to be. Split
-// out from renderStatusRight so the token/rate-limit metrics live below the
-// hint line instead of competing for space in the top status bar.
+// renderMetricsBar draws the bottom-most line: the focus indicator dot on
+// the far edge, the active group's cpu/mem/space bars on the left, and the
+// ctx/cache/5h/7d utilization chips right-aligned the same way the status
+// bar's right side used to be. Split out from renderStatusRight so the
+// token/rate-limit metrics live below the hint line instead of competing
+// for space in the top status bar.
 func (m Model) renderMetricsBar() string {
 	var parts []string
 
@@ -459,13 +457,60 @@ func (m Model) renderMetricsBar() string {
 		parts = append(parts, renderMetric("7d", u7d))
 	}
 
+	// Bottom-left: the active group's host-side cost (Resources RPC). CPU is
+	// normalized to the VM's whole vcpu allotment (cpu_pct is per-core),
+	// space is the workspace image's real allocation against its size
+	// ceiling. `rss` is the VMM process's resident set against the mem
+	// preset — labeled and colored for what it is, a HIGH-WATER MARK of
+	// every guest page ever touched (no balloon device, so any I/O-heavy
+	// turn parks it near 100% forever), not guest memory pressure. Hence
+	// fixed gray, not pctColor: a permanently rose chip would train the eye
+	// to ignore it. The truthful guest figure (guest /proc/meminfo) rides
+	// the same snapshot as guest_mem_* for ctl-plane consumers; it is
+	// deliberately NOT a fourth chip — four chips overflow the left side's
+	// width budget on ordinary terminals, and the renderer then drops the
+	// whole left side. A stopped VM legitimately reads cpu/rss 0% — space
+	// stays meaningful (images never shrink).
+	left := ""
+	if r, ok := m.resources[m.cur]; ok {
+		var lparts []string
+		if r.Vcpus > 0 {
+			lparts = append(lparts, renderMetric("cpu", r.CPUPct/100/float64(r.Vcpus)))
+		}
+		if r.MemMiB > 0 {
+			lparts = append(lparts, renderMetricColored("rss", float64(r.RSSBytes)/(float64(r.MemMiB)*(1<<20)), cGray))
+		}
+		if r.DeclaredBytes > 0 {
+			lparts = append(lparts, renderMetric("space", float64(r.AllocBytes)/float64(r.DeclaredBytes)))
+		}
+		left = strings.Join(lparts, "")
+	}
+
+	// Focus indicator: a dot pinned to the far edge of the bar — leftmost
+	// while the tree/chat side owns the keyboard, rightmost while the
+	// terminal pane does (alt+←/→ switches sides). Both cells are always
+	// reserved so the bar doesn't shift a column on focus changes. Bright
+	// white, not amber: the bottom row is monochrome by design (see
+	// pctColor).
+	dot := lipgloss.NewStyle().Foreground(cBrWhite).Render("●")
+	ldot, rdot := dot, " "
+	if m.focus == focusShell {
+		ldot, rdot = " ", dot
+	}
+
 	right := strings.Join(parts, "")
 	rightW := lipgloss.Width(right)
-	gap := m.width - rightW
+	leftW := lipgloss.Width(left)
+	if left != "" && leftW+rightW+2 > m.width {
+		// Too narrow for both sides: the account-wide chips keep priority.
+		left, leftW = "", 0
+	}
+	gap := m.width - leftW - rightW - 2
 	if gap < 0 {
 		gap = 0
 	}
-	return lipgloss.NewStyle().MaxWidth(m.width).Render(strings.Repeat(" ", gap) + right)
+	return lipgloss.NewStyle().MaxWidth(m.width).
+		Render(ldot + left + strings.Repeat(" ", gap) + right + rdot)
 }
 
 // --- tree pane ---------------------------------------------------------------
@@ -555,7 +600,10 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		}
 	}
 	contentW := leftPaneWidth - 2 // account for paddingX
-	w := contentW - len(r.branch) - 2
+	// Cell width, not len(): the branch glyphs ("├─ ") are 3 cells but 7
+	// bytes, and a byte count here shorts the name pad — visible as the
+	// cursor row's background ending early on session/job rows.
+	w := contentW - lipgloss.Width(r.branch) - 2
 	if w < 1 {
 		w = 1
 	}
@@ -654,10 +702,16 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		dotColor = cPink
 	}
 	if hov {
-		// highlight row with amber background, black foreground for the whole row
-		full := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-			Render(" " + r.branch + dot + pad(name, w) + badge)
-		return full
+		// Highlight row: amber background, black foreground. Padded to the
+		// same fixed width on every row — the background is the selection
+		// marker, and a width that varied with branch depth or badge glyphs
+		// read as a rendering glitch.
+		txt := " " + r.branch + dot + pad(name, w) + badge
+		if pw := lipgloss.Width(txt); pw < contentW+1 {
+			txt += strings.Repeat(" ", contentW+1-pw)
+		}
+		return lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
+			Render(txt)
 	}
 	parts := " "
 	if r.branch != "" {
@@ -1335,11 +1389,13 @@ func (m Model) renderHint() string {
 }
 
 // renderProviderModel formats the bottom-right "provider · model[ · effort]"
-// segment. claudesdk renders red to flag that the request will hit the
-// OAuth-credentialled Anthropic path (cost / rate-limit blast radius);
-// venice renders amber. Effort is only appended when set in config.json
-// (claudesdk-only knob; harmless but noisy on venice if shown by default).
-// Empty string when the current group isn't known yet (pre-first list).
+// segment. Monochrome like the rest of the bottom rows — bold white provider
+// over gray detail; it used to color-code claudesdk red / venice amber, but
+// a permanently red chip reads as a standing alarm, and which path a group
+// hits is already visible in the tree. Effort is only appended when set in
+// config.json (claudesdk-only knob; harmless but noisy on venice if shown by
+// default). Empty string when the current group isn't known yet (pre-first
+// list).
 func (m Model) renderProviderModel() string {
 	info, ok := m.groups[m.cur]
 	if !ok {
@@ -1353,11 +1409,7 @@ func (m Model) renderProviderModel() string {
 	if model == "" {
 		model = "(default)"
 	}
-	provColor := cAmber
-	if provider == "claudesdk" {
-		provColor = cRed
-	}
-	pStyle := lipgloss.NewStyle().Foreground(provColor).Bold(true)
+	pStyle := lipgloss.NewStyle().Foreground(cWhite).Bold(true)
 	mStyle := lipgloss.NewStyle().Foreground(cGray)
 	out := pStyle.Render(provider) + mStyle.Render(" · "+model)
 	if info.Effort != "" {

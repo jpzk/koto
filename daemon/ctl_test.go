@@ -314,5 +314,16 @@ func TestCtlResourcesMatchesSnapshot(t *testing.T) {
 				t.Errorf("%s alloc_pct = %v, want %v", g.Group, g.AllocPct, want)
 			}
 		}
+		// Same contract for the guest memory mirror and its derived pct.
+		if g.GuestMemTotalBytes != snap[i].GuestMemTotal || g.GuestMemAvailBytes != snap[i].GuestMemAvail {
+			t.Errorf("%s guest mem diverged: ctl=(%d,%d) snapshot=(%d,%d)", g.Group,
+				g.GuestMemTotalBytes, g.GuestMemAvailBytes, snap[i].GuestMemTotal, snap[i].GuestMemAvail)
+		}
+		if snap[i].GuestMemTotal > 0 {
+			want := roundPct(float64(snap[i].GuestMemTotal-snap[i].GuestMemAvail) / float64(snap[i].GuestMemTotal) * 100)
+			if g.GuestMemUsedPct != want {
+				t.Errorf("%s guest_mem_used_pct = %v, want %v", g.Group, g.GuestMemUsedPct, want)
+			}
+		}
 	}
 }

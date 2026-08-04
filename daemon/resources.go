@@ -27,6 +27,19 @@ package main
 // makes the GROWTH RATE the useful alert signal — "9AZ is at 60%" is weak,
 // "9AZ grew 2 GiB/h and hits its ceiling in 4h" is actionable. That is what
 // the per-group sample ring exists for.
+//
+// ONE deliberate exception to host-side-only: guest memory. The VMM's RSS is
+// the memory analogue of the sparse-image problem — with no balloon device,
+// every guest-physical page the guest kernel ever touched stays resident in
+// the FC process forever, so RSS ratchets to ~100% of mem_mib after any
+// I/O-heavy turn and never comes back (2026-08-04: one group read 94% host-side
+// while the guest had 805 of 987 MiB available — 572 MiB of it page cache).
+// The host has NO truthful view of guest-internal memory, so the sweep also
+// mirrors /proc/meminfo out of each RUNNING guest via a bounded agent exec:
+// best-effort, parallel, short-timeout, never boots a stopped VM, and
+// degrades to "unknown" (0) rather than ever going stale — exactly the
+// figure the host-side rule exists to protect stays host-side (disk, CPU,
+// RSS), and both numbers are reported so neither can masquerade as the other.
 
 import (
 	"fmt"
@@ -69,6 +82,81 @@ var (
 	resMu   sync.Mutex
 	resRing = map[string][]resSample{}
 )
+
+// resGuestMem is the latest guest-reported memory figure per group, present
+// only for groups whose agent answered on the last sweep. No ring: unlike
+// allocation there is no rate to derive, and a stale figure is worse than an
+// absent one — "unknown" renders as no data, a stale number reads as truth.
+type resGuestMem struct {
+	totalBytes int64
+	availBytes int64
+}
+
+var (
+	resGuestMu  sync.Mutex
+	resGuestMap = map[string]resGuestMem{}
+)
+
+// resGuestExecTimeout bounds each guest meminfo exec. The reads run in
+// parallel, so this caps the whole guest leg of a sweep, not per-VM × fleet.
+const resGuestExecTimeout = 5 * time.Second
+
+// resParseMemInfo extracts MemTotal and MemAvailable (bytes) from a
+// /proc/meminfo dump. MemAvailable rather than MemFree: the kernel's own
+// estimate of allocatable memory counts reclaimable page cache as free,
+// which is the entire point of mirroring this instead of trusting RSS.
+// Either field missing → (0, 0) = unknown.
+func resParseMemInfo(s string) (total, avail int64) {
+	for _, line := range strings.Split(s, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		kb, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch f[0] {
+		case "MemTotal:":
+			total = kb << 10
+		case "MemAvailable:":
+			avail = kb << 10
+		}
+	}
+	if total == 0 || avail == 0 {
+		return 0, 0
+	}
+	return total, avail
+}
+
+// resSweepGuestMem refreshes the guest memory mirror for every RUNNING group
+// in one parallel round of bounded agent execs. Groups that are stopped or
+// whose agent doesn't answer are dropped from the map — see resGuestMem for
+// why absence beats staleness. Never boots a VM: fcExec only dials, and the
+// running check filters the rest.
+func resSweepGuestMem(groups []string) {
+	var wg sync.WaitGroup
+	for _, g := range groups {
+		wg.Add(1)
+		go func(g string) {
+			defer wg.Done()
+			var total, avail int64
+			if fcRunning(g) {
+				if out, rc, err := fcExec(g, "cat /proc/meminfo", resGuestExecTimeout); err == nil && rc == 0 {
+					total, avail = resParseMemInfo(out)
+				}
+			}
+			resGuestMu.Lock()
+			if total > 0 {
+				resGuestMap[g] = resGuestMem{totalBytes: total, availBytes: avail}
+			} else {
+				delete(resGuestMap, g)
+			}
+			resGuestMu.Unlock()
+		}(g)
+	}
+	wg.Wait()
+}
 
 // statAllocBytes returns a file's allocated size — the blocks it actually
 // occupies on the host filesystem, which for a sparse image is the only
@@ -154,9 +242,12 @@ func resSampleGroup(g string) {
 // no longer exist so a destroyed group can't leak its history forever.
 func resSweep() {
 	groups := readGroups()
+	names := make([]string, 0, len(groups))
 	for g := range groups {
 		resSampleGroup(g)
+		names = append(names, g)
 	}
+	resSweepGuestMem(names)
 	resMu.Lock()
 	gone := []string{}
 	for g := range resRing {
@@ -166,6 +257,13 @@ func resSweep() {
 		}
 	}
 	resMu.Unlock()
+	resGuestMu.Lock()
+	for g := range resGuestMap {
+		if _, ok := groups[g]; !ok {
+			delete(resGuestMap, g)
+		}
+	}
+	resGuestMu.Unlock()
 	for _, g := range gone {
 		resForgetAlert(g)
 	}
@@ -410,6 +508,13 @@ type groupResources struct {
 	CPUPct         float64
 	Vcpus          int32
 	MemMiB         int32
+	// GuestMemTotal/GuestMemAvail are the guest kernel's own MemTotal /
+	// MemAvailable (bytes), mirrored by resSweepGuestMem. 0 = unknown
+	// (stopped VM, unreachable agent, or no sweep yet). RSSBytes is a
+	// high-water mark of touched pages (no balloon device), so these are
+	// the only figures that reflect real guest memory pressure.
+	GuestMemTotal int64
+	GuestMemAvail int64
 }
 
 // hostResources is the fleet-wide rollup.
@@ -450,9 +555,14 @@ func resourcesCtlResp() resourcesResp {
 			CPUPct:             roundPct(g.CPUPct),
 			Vcpus:              g.Vcpus,
 			MemMiB:             g.MemMiB,
+			GuestMemTotalBytes: g.GuestMemTotal,
+			GuestMemAvailBytes: g.GuestMemAvail,
 		}
 		if g.DeclaredBytes > 0 {
 			gr.AllocPct = roundPct(float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100)
+		}
+		if g.GuestMemTotal > 0 {
+			gr.GuestMemUsedPct = roundPct(float64(g.GuestMemTotal-g.GuestMemAvail) / float64(g.GuestMemTotal) * 100)
 		}
 		out.Groups = append(out.Groups, gr)
 	}
@@ -502,6 +612,11 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 			Vcpus:         int32(vcpus),
 			MemMiB:        int32(memMiB),
 		}
+		resGuestMu.Lock()
+		if gm, ok := resGuestMap[g]; ok && gr.Running {
+			gr.GuestMemTotal, gr.GuestMemAvail = gm.totalBytes, gm.availBytes
+		}
+		resGuestMu.Unlock()
 		if n := len(samples); n > 0 {
 			gr.AllocBytes = samples[n-1].allocBytes
 			gr.RSSBytes = samples[n-1].rssBytes

@@ -216,6 +216,13 @@ type metricsRespMsg struct {
 	metric, global map[string]any
 	err            error
 }
+// resourcesMsg carries the fleet resource snapshot (Resources RPC), polled on
+// the same tick as metrics. Whole-fleet rather than per-group: the RPC has no
+// group filter, and keeping every group lets a /sw show bars immediately.
+type resourcesMsg struct {
+	groups map[string]GroupRes
+	err    error
+}
 type pluginLogMsg struct {
 	group, kind, text string
 }
@@ -356,6 +363,10 @@ type Model struct {
 	// metricGroup is the group `metric` belongs to, so a group switch drops
 	// the retained usage rather than showing the previous group's.
 	metricGroup string
+	// resources is the last fleet resource snapshot (Resources RPC), keyed by
+	// group. Feeds the metrics bar's bottom-left cpu/mem/space bars for the
+	// active group.
+	resources map[string]GroupRes
 
 	plugin *pluginHandle
 
@@ -842,6 +853,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		listCmd(m.sock),
 		metricsCmd(m.sock, m.cur),
+		resourcesCmd(),
 		tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} }),
 	)
@@ -947,6 +959,19 @@ func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
 		}
 		more, _ := resp["more"].(bool)
 		return historyMsg{group: group, events: evs, more: more, before: before}
+	}
+}
+
+// resourcesCmd polls the fleet resource snapshot. Cheap on the daemon side
+// (pure reads of its cached 30s sample ring), so riding the 5s metrics tick
+// costs nothing and picks up new samples promptly.
+func resourcesCmd() tea.Cmd {
+	return func() tea.Msg {
+		groups, err := fetchResources()
+		if err != nil {
+			return resourcesMsg{err: err}
+		}
+		return resourcesMsg{groups: groups}
 	}
 }
 
@@ -1187,6 +1212,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case metricsTickMsg:
 		return m, tea.Batch(
 			metricsCmd(m.sock, m.cur),
+			resourcesCmd(),
 			tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		)
 
@@ -1207,6 +1233,14 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.metric, m.metricGroup = msg.metric, msg.group
 			}
 			m.globalMetric = mergeMetric(m.globalMetric, msg.global, "ratelimit")
+		}
+		return m, nil
+
+	case resourcesMsg:
+		// A failed poll keeps the last snapshot — 5s-stale bars beat a
+		// blinking bottom-left corner on one dropped RPC.
+		if msg.err == nil {
+			m.resources = msg.groups
 		}
 		return m, nil
 

@@ -211,6 +211,41 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }
 
+// fetchResources pulls the fleet resource snapshot (Resources RPC) and keys
+// it by group. Typed rather than routed through daemonCall's protojson map:
+// the int64 byte fields arrive as JSON strings there, and the metrics bar
+// wants numbers, not another asInt64 dance.
+func fetchResources() (map[string]GroupRes, error) {
+	cl, err := getClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := cl.Resources(ctx, &pb.ResourcesReq{})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.GetOk() {
+		return nil, fmt.Errorf("daemon: %s", resp.GetError())
+	}
+	out := make(map[string]GroupRes, len(resp.GetGroups()))
+	for _, g := range resp.GetGroups() {
+		out[g.GetGroup()] = GroupRes{
+			Running:       g.GetRunning(),
+			CPUPct:        g.GetCpuPct(),
+			Vcpus:         g.GetVcpus(),
+			MemMiB:        g.GetMemMib(),
+			RSSBytes:      g.GetRssBytes(),
+			AllocBytes:    g.GetAllocBytes(),
+			DeclaredBytes: g.GetDeclaredBytes(),
+			GuestMemTotal: g.GetGuestMemTotalBytes(),
+			GuestMemAvail: g.GetGuestMemAvailBytes(),
+		}
+	}
+	return out, nil
+}
+
 func asFloat(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:

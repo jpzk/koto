@@ -157,24 +157,29 @@ func TestCtrlRBesideOpenShell(t *testing.T) {
 }
 
 // TestStatusDotFollowsFocus: the amber dot sits at the far left of the
-// status bar while the tree/chat side has focus, and at the far right while
-// the terminal pane does.
+// metrics bar (bottom row) while the tree/chat side has focus, and at the
+// far right while the terminal pane does. The top status bar carries no dot.
 func TestStatusDotFollowsFocus(t *testing.T) {
 	m := splitShellModel(t)
-	bar := stripANSI(m.renderStatusBar(" "))
+	bar := stripANSI(m.renderMetricsBar())
 	if !strings.HasPrefix(bar, "●") {
-		t.Errorf("status bar %q — want the amber dot leftmost with chat-side focus", bar)
+		t.Errorf("metrics bar %q — want the amber dot leftmost with chat-side focus", bar)
 	}
-	if strings.HasSuffix(strings.TrimRight(bar, " "), "●") {
-		t.Errorf("status bar %q — right dot lit without terminal focus", bar)
+	// The right edge cell is always reserved, so the untrimmed suffix is
+	// the right dot's cell: a space means unlit.
+	if strings.HasSuffix(bar, "●") {
+		t.Errorf("metrics bar %q — right dot lit without terminal focus", bar)
+	}
+	if strings.Contains(stripANSI(m.renderStatusBar(" ")), "●") {
+		t.Errorf("status bar still carries a focus dot")
 	}
 	m.focusShellPane()
-	bar = stripANSI(m.renderStatusBar(" "))
+	bar = stripANSI(m.renderMetricsBar())
 	if strings.HasPrefix(bar, "●") {
-		t.Errorf("status bar %q — left dot lit with terminal focus", bar)
+		t.Errorf("metrics bar %q — left dot lit with terminal focus", bar)
 	}
 	if !strings.HasSuffix(bar, "●") {
-		t.Errorf("status bar %q — want the amber dot rightmost with terminal focus", bar)
+		t.Errorf("metrics bar %q — want the amber dot rightmost with terminal focus", bar)
 	}
 }
 

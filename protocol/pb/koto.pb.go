@@ -3344,12 +3344,24 @@ type GroupResources struct {
 	// Firecracker VMM process cost. rss_bytes is the VMM's resident set (which
 	// includes the guest's backing memory); cpu_pct is percent of ONE core, so
 	// a 4-vCPU guest may legitimately exceed 100.
-	RssBytes      int64   `protobuf:"varint,7,opt,name=rss_bytes,json=rssBytes,proto3" json:"rss_bytes,omitempty"`
-	CpuPct        float64 `protobuf:"fixed64,8,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`
-	Vcpus         int32   `protobuf:"varint,9,opt,name=vcpus,proto3" json:"vcpus,omitempty"`
-	MemMib        int32   `protobuf:"varint,10,opt,name=mem_mib,json=memMib,proto3" json:"mem_mib,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	//
+	// rss_bytes is a HIGH-WATER MARK, not current guest usage: there is no
+	// balloon device, so every guest-physical page the guest kernel ever
+	// touched (page cache above all) stays resident in the VMM forever. Any
+	// VM that has done real I/O reads ~100% of mem_mib here while idling.
+	RssBytes int64   `protobuf:"varint,7,opt,name=rss_bytes,json=rssBytes,proto3" json:"rss_bytes,omitempty"`
+	CpuPct   float64 `protobuf:"fixed64,8,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`
+	Vcpus    int32   `protobuf:"varint,9,opt,name=vcpus,proto3" json:"vcpus,omitempty"`
+	MemMib   int32   `protobuf:"varint,10,opt,name=mem_mib,json=memMib,proto3" json:"mem_mib,omitempty"`
+	// Guest-reported memory, mirrored from the guest's /proc/meminfo by a
+	// bounded agent exec each collector tick — the only truthful "how full is
+	// this VM really" figure (see rss_bytes). 0 = unknown: VM stopped, agent
+	// unreachable, or no tick yet. avail is the kernel's MemAvailable
+	// (reclaimable cache counted as free), so used = total - avail.
+	GuestMemTotalBytes int64 `protobuf:"varint,11,opt,name=guest_mem_total_bytes,json=guestMemTotalBytes,proto3" json:"guest_mem_total_bytes,omitempty"`
+	GuestMemAvailBytes int64 `protobuf:"varint,12,opt,name=guest_mem_avail_bytes,json=guestMemAvailBytes,proto3" json:"guest_mem_avail_bytes,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *GroupResources) Reset() {
@@ -3448,6 +3460,20 @@ func (x *GroupResources) GetVcpus() int32 {
 func (x *GroupResources) GetMemMib() int32 {
 	if x != nil {
 		return x.MemMib
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestMemTotalBytes() int64 {
+	if x != nil {
+		return x.GuestMemTotalBytes
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestMemAvailBytes() int64 {
+	if x != nil {
+		return x.GuestMemAvailBytes
 	}
 	return 0
 }
@@ -3998,7 +4024,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12,\n" +
 	"\x06groups\x18\x03 \x03(\v2\x14.koto.GroupResourcesR\x06groups\x12'\n" +
-	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xd0\x02\n" +
+	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xb6\x03\n" +
 	"\x0eGroupResources\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1f\n" +
@@ -4011,7 +4037,9 @@ const file_koto_proto_rawDesc = "" +
 	"\acpu_pct\x18\b \x01(\x01R\x06cpuPct\x12\x14\n" +
 	"\x05vcpus\x18\t \x01(\x05R\x05vcpus\x12\x17\n" +
 	"\amem_mib\x18\n" +
-	" \x01(\x05R\x06memMib\"\xf1\x01\n" +
+	" \x01(\x05R\x06memMib\x121\n" +
+	"\x15guest_mem_total_bytes\x18\v \x01(\x03R\x12guestMemTotalBytes\x121\n" +
+	"\x15guest_mem_avail_bytes\x18\f \x01(\x03R\x12guestMemAvailBytes\"\xf1\x01\n" +
 	"\rHostResources\x12$\n" +
 	"\x0efs_total_bytes\x18\x01 \x01(\x03R\ffsTotalBytes\x12\"\n" +
 	"\rfs_free_bytes\x18\x02 \x01(\x03R\vfsFreeBytes\x12*\n" +

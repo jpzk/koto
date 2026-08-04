@@ -65,6 +65,25 @@ type JobInfo struct {
 	OutSize int64
 }
 
+// GroupRes is one group's host-side resource snapshot (koto.proto
+// GroupResources), trimmed to what the metrics bar renders: CPU as a
+// fraction of the VM's vcpus, RSS against the mem preset, allocated image
+// bytes against the size preset's disk ceiling.
+type GroupRes struct {
+	Running       bool
+	CPUPct        float64 // percent of ONE core (4-vCPU VM may exceed 100)
+	Vcpus         int32
+	MemMiB        int32
+	RSSBytes      int64 // VMM RSS: high-water mark of guest-touched pages, not usage
+	AllocBytes    int64
+	DeclaredBytes int64
+	// Guest-reported memory (guest /proc/meminfo mirrored by the daemon);
+	// 0 = unknown (stopped VM or agent unreachable). The truthful pressure
+	// figure — RSSBytes ratchets to ~100% of the preset and stays there.
+	GuestMemTotal int64
+	GuestMemAvail int64
+}
+
 // LogEvent is one frame of the daemon's own log stream (SubscribeLogs).
 type LogEvent struct {
 	Event     string // always "log"

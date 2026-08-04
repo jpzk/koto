@@ -335,6 +335,8 @@ func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.Resou
 			CpuPct:             g.CPUPct,
 			Vcpus:              g.Vcpus,
 			MemMib:             g.MemMiB,
+			GuestMemTotalBytes: g.GuestMemTotal,
+			GuestMemAvailBytes: g.GuestMemAvail,
 		})
 	}
 	return out, nil

@@ -52,14 +52,16 @@ func activityLabel(phase string) string {
 	return phase
 }
 
-// activityColor picks the accent. Retry is red because it is the one phase
-// that means something went wrong upstream and the turn is stalled on a
-// backoff, not making progress.
+// activityColor picks the accent: the signature amber, matching the koto
+// banner and the running dot, so a busy indicator reads as normal life, not
+// a warning. Retry is the exception — it is the one phase that means
+// something went wrong upstream and the turn is stalled on a backoff, not
+// making progress.
 func activityColor(phase string) lipgloss.Color {
 	if phase == "retry" {
 		return cRed
 	}
-	return cYellow
+	return cAmber
 }
 
 // fmtElapsed renders a duration for a live counter: seconds under a minute,

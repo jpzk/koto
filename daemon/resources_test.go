@@ -134,6 +134,42 @@ func TestResRingBounded(t *testing.T) {
 	}
 }
 
+// The guest memory mirror exists because the VMM's RSS is a high-water mark
+// of touched pages (no balloon device): 2026-08-04, one group read 94% host-side
+// while the guest had 805 of 987 MiB available. resParseMemInfo turns the
+// guest's /proc/meminfo into the truthful figure.
+func TestResParseMemInfo(t *testing.T) {
+	total, avail := resParseMemInfo(`MemTotal:        1010896 kB
+MemFree:          380560 kB
+MemAvailable:     824464 kB
+Buffers:           60244 kB
+Cached:           498800 kB
+SwapCached:            0 kB
+`)
+	if total != 1010896<<10 {
+		t.Errorf("total = %d, want %d", total, 1010896<<10)
+	}
+	if avail != 824464<<10 {
+		t.Errorf("avail = %d, want %d", avail, 824464<<10)
+	}
+}
+
+// A dump missing either field (ancient kernel, truncated exec output) must
+// report unknown, not a half-figure — a total without avail would derive as
+// 100% used, which is precisely the false alarm the mirror exists to kill.
+func TestResParseMemInfoIncomplete(t *testing.T) {
+	for _, s := range []string{
+		"",
+		"MemTotal: 1010896 kB\n",
+		"MemAvailable: 824464 kB\n",
+		"MemTotal: garbage kB\nMemAvailable: 824464 kB\n",
+	} {
+		if total, avail := resParseMemInfo(s); total != 0 || avail != 0 {
+			t.Errorf("resParseMemInfo(%q) = (%d, %d), want (0, 0)", s, total, avail)
+		}
+	}
+}
+
 func TestResLevel(t *testing.T) {
 	cases := []struct {
 		pct  float64

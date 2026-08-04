@@ -259,6 +259,13 @@ type GroupResources struct {
 	CPUPct             float64 `json:"cpu_pct,omitempty"`
 	Vcpus              int32   `json:"vcpus,omitempty"`
 	MemMiB             int32   `json:"mem_mib,omitempty"`
+	// Guest-reported memory (guest /proc/meminfo, mirrored per sweep).
+	// RSSBytes is a high-water mark of guest-touched pages — no balloon
+	// device — so it reads ~100% of the preset on any VM that has done real
+	// I/O; these are the truthful pressure figures. 0/absent = unknown.
+	GuestMemTotalBytes int64   `json:"guest_mem_total_bytes,omitempty"`
+	GuestMemAvailBytes int64   `json:"guest_mem_avail_bytes,omitempty"`
+	GuestMemUsedPct    float64 `json:"guest_mem_used_pct,omitempty"`
 }
 
 type HostResources struct {

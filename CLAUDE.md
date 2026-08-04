@@ -177,13 +177,27 @@ verb list.
   bytes/hour, and the FC process's RSS + CPU%; plus a host rollup (filesystem
   free, total allocation, and **provisioned** = the sum of all `size` presets,
   i.e. the overcommit figure — 200 GiB on a 50 GiB disk is normal and fine,
-  invisible is not). **Every figure is host-side** (`stat`/`statfs`//proc),
-  never a guest exec: a guest's own `df` describes only its own filesystem and
-  is actively misleading during host exhaustion (2026-08-03: a group reported
-  "78%, 5.0G avail" while the host was at zero bytes and remounting guests
-  read-only). It therefore stays truthful for stopped/wedged groups, costs a
-  few syscalls per 30s tick, and — unlike the jobs mirror — runs **ungated by
-  watchers**, since exhaustion must be observable when nobody is attached.
+  invisible is not). **Every disk/CPU/RSS figure is host-side** (`stat`/
+  `statfs`//proc), never a guest exec: a guest's own `df` describes only its
+  own filesystem and is actively misleading during host exhaustion
+  (2026-08-03: a group reported "78%, 5.0G avail" while the host was at zero
+  bytes and remounting guests read-only). It therefore stays truthful for
+  stopped/wedged groups, costs a few syscalls per 30s tick, and — unlike the
+  jobs mirror — runs **ungated by watchers**, since exhaustion must be
+  observable when nobody is attached. **One deliberate exception: guest
+  memory.** The VMM's RSS is a *high-water mark* of guest-touched pages —
+  no balloon device, so page cache from any I/O-heavy turn parks RSS at
+  ~100% of `mem_mib` forever (2026-08-04: one group read 94% host-side with 805
+  of 987 MiB available inside). The host has no truthful view of
+  guest-internal memory, so each sweep also mirrors `/proc/meminfo` out of
+  every *running* guest (parallel bounded `fcExec`s, never boots a VM,
+  degrades to "unknown" rather than going stale) into
+  `guest_mem_total/avail_bytes`; both planes report RSS *and* the guest
+  figure. The TUI metrics bar shows only `rss` (gray — a cost figure, and a
+  chip that parks near 100% must not scream rose), labeled honestly rather
+  than "mem"; the guest figure stayed off the bar because a fourth chip
+  overflows the left side's width budget and the renderer then drops the
+  whole left side. Read the guest figure via `koto ctl resources`.
   Growth rate rather than level is the actionable signal: allocation is
   monotonic because Firecracker's virtio-blk has no discard (`fstrim` in a
   guest fails, so freed guest blocks are never returned — reclaim means an
