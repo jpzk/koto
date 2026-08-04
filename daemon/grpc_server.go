@@ -93,6 +93,25 @@ func toPBSkillItem(it skillItem) *pb.SkillItem {
 	return &pb.SkillItem{Name: it.Name, Description: it.Description, Path: it.Path, Enabled: it.Enabled}
 }
 
+func toPBGoalItem(it goalItem) *pb.GoalItem {
+	return &pb.GoalItem{
+		Id:            it.ID,
+		Group:         it.Group,
+		Text:          it.Text,
+		Criteria:      it.Criteria,
+		Plan:          it.Plan,
+		Status:        it.Status,
+		Iteration:     int32(it.Iteration),
+		MaxIterations: int32(it.MaxIterations),
+		LastFeedback:  it.LastFeedback,
+		DoneNote:      it.DoneNote,
+		PausedReason:  it.PausedReason,
+		CreatedAt:     it.CreatedAt,
+		UpdatedAt:     it.UpdatedAt,
+		CompletedAt:   it.CompletedAt,
+	}
+}
+
 func toPBScheduleItem(it scheduleItem) *pb.ScheduleItem {
 	return &pb.ScheduleItem{
 		Id:          it.ID,
@@ -212,6 +231,9 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	session, err := normalizeSession(r.Session)
 	if err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	if isReservedSession(session) {
+		return &pb.BaseResp{Error: "session " + session + " is reserved for the goal loop"}, nil
 	}
 	msg := r.Msg
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
@@ -467,6 +489,12 @@ func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, err
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
+	// A targeted clear of a goal session would race the driver's own
+	// fresh-context clears; the whole-group form ("" session) stays allowed —
+	// the next iteration simply rebuilds from the workspace files.
+	if isReservedSession(r.Session) {
+		return &pb.BaseResp{Error: "session " + r.Session + " is reserved for the goal loop"}, nil
+	}
 	br := clearCmd(groupReq{Group: r.Group, Session: r.Session})
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
@@ -535,6 +563,61 @@ func (s *kotoServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
+}
+
+// ---- goals ----------------------------------------------------------------
+
+func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.GoalResp{Error: "invalid group name"}, nil
+	}
+	plan := r.Plan == nil || r.GetPlan() // absent = plan-first default
+	it, err := goalSet(r.Group, r.Text, r.Criteria, int(r.MaxIterations), plan)
+	if err != nil {
+		return &pb.GoalResp{Error: err.Error()}, nil
+	}
+	return &pb.GoalResp{Ok: true, Item: toPBGoalItem(it)}, nil
+}
+
+func (s *kotoServer) GoalList(_ context.Context, r *pb.GoalListReq) (*pb.GoalListResp, error) {
+	if r.Group != "" && !validGroupName(r.Group) {
+		return &pb.GoalListResp{Error: "invalid group name"}, nil
+	}
+	items := goalList(r.Group)
+	out := make([]*pb.GoalItem, len(items))
+	for i := range items {
+		out[i] = toPBGoalItem(items[i])
+	}
+	return &pb.GoalListResp{Ok: true, Goals: out}, nil
+}
+
+// goalGroupRPC wraps the by-group goal transitions (approve/pause/resume/
+// cancel) — identical shape, different transition.
+func goalGroupRPC(group string, fn func(string) (goalItem, error)) (*pb.GoalResp, error) {
+	if !validGroupName(group) {
+		return &pb.GoalResp{Error: "invalid group name"}, nil
+	}
+	it, err := fn(group)
+	if err != nil {
+		return &pb.GoalResp{Error: err.Error()}, nil
+	}
+	return &pb.GoalResp{Ok: true, Item: toPBGoalItem(it)}, nil
+}
+
+func (s *kotoServer) GoalApprove(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
+	return goalGroupRPC(r.Group, goalApprove)
+}
+
+func (s *kotoServer) GoalPause(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
+	return goalGroupRPC(r.Group, goalPause)
+}
+
+func (s *kotoServer) GoalResume(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
+	return goalGroupRPC(r.Group, goalResume)
+}
+
+func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
+	return goalGroupRPC(r.Group, goalCancel)
 }
 
 // ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------

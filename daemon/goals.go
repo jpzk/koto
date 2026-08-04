@@ -90,10 +90,20 @@ type goalVerdict struct {
 	Reasons string
 }
 
-// clearGoalSessionFn resets one of the goal loop's reserved sessions before a
-// turn (fresh context per iteration). A var solely as a test seam —
-// clearSession boots VMs.
-var clearGoalSessionFn = func(g, sess string) {
+// clearGoalSessionFn, when non-nil, replaces clearSession as the pre-turn
+// session reset. Solely a test seam (clearSession boots VMs); nil in
+// production. Not initialized to a closure over clearSession directly — that
+// forms a static initialization cycle (clearSession → ensure → fcSpawn →
+// ctlDispatch → goalSet → … → this var), same trap turnFn documents.
+var clearGoalSessionFn func(g, sess string)
+
+// clearGoalSession resets one of the goal loop's reserved sessions before a
+// turn (fresh context per iteration).
+func clearGoalSession(g, sess string) {
+	if clearGoalSessionFn != nil {
+		clearGoalSessionFn(g, sess)
+		return
+	}
 	if r := clearSession(g, sess); !r.OK {
 		// Non-fatal: the subsequent turn still runs, just without the fresh-
 		// context guarantee (e.g. first iteration, where the session doesn't
@@ -477,7 +487,7 @@ func goalPlanPhase(g string) bool {
 	snap := *it
 	goalLock.Unlock()
 
-	clearGoalSessionFn(g, goalWorkSession)
+	clearGoalSession(g, goalWorkSession)
 	emit(g, Event{Event: "goal_plan", ID: snap.ID})
 	emitLogfG("goal", g, "info", "plan turn id=%s", snap.ID)
 	done, err := enqueueSend(g, goalWorkSession, goalPlanMsg(snap))
@@ -508,7 +518,7 @@ func goalPlanPhase(g string) bool {
 // goalWorkerTurn runs one execution iteration. Returns the worker's claim
 // (claimed + note) and ok=false when the driver must exit (pause applied).
 func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool) {
-	clearGoalSessionFn(g, goalWorkSession)
+	clearGoalSession(g, goalWorkSession)
 
 	goalLock.Lock()
 	goalDoneOpen[g] = snap.ID
@@ -556,7 +566,7 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 		}
 		goalLock.Unlock()
 
-		clearGoalSessionFn(g, goalJudgeSession)
+		clearGoalSession(g, goalJudgeSession)
 		goalLock.Lock()
 		goalVerdictOpen[g] = snap.ID
 		delete(goalVerdictMail, g)

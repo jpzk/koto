@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -383,6 +385,130 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ---- ctl plane --------------------------------------------------------------
+
+func ctlLine(t *testing.T, m map[string]any) []byte {
+	t.Helper()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestCtlGoalVerbAuthorization(t *testing.T) {
+	goalTestSetup(t)
+	// Orchestration verbs are main-only.
+	for _, verb := range []string{"goal_set", "goal_status", "goal_pause", "goal_resume", "goal_cancel"} {
+		br, ok := ctlDispatch("peer", ctlLine(t, map[string]any{"cmd": verb, "group": "other"})).(baseResp)
+		if !ok || br.OK || !strings.Contains(br.Error, "not allowed for non-main") {
+			t.Errorf("%s from non-main: got %+v, want non-main refusal", verb, br)
+		}
+	}
+	// goal_approve does not exist on the ctl plane at all — approval is the
+	// human's, not main's.
+	br, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_approve", "group": "peer"})).(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "verb not allowed: goal_approve") {
+		t.Fatalf("ctl goal_approve must not exist, got %+v", br)
+	}
+	// goal_set cannot target main.
+	br, ok = ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
+		"cmd": "goal_set", "group": "main", "text": "t", "criteria": "c"})).(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "cannot set a goal on main") {
+		t.Fatalf("goal_set on main must be refused, got %+v", br)
+	}
+}
+
+func TestCtlGoalSetAndStatusFromMain(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-ctlset1"
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		resp, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
+			"cmd": "goal_set", "group": g, "text": "build it", "criteria": "1. built",
+			"max_iterations": 1, "plan": false})).(goalResp)
+		if !ok || !resp.OK {
+			t.Fatalf("goal_set from main failed: %+v", resp)
+		}
+		if resp.Item.Group != g || resp.Item.Status != goalStatusRunning {
+			t.Fatalf("unexpected item: %+v", resp.Item)
+		}
+		waitGoal(t, g, goalStatusPaused) // cap=1, stub never claims
+
+		lst, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_status", "group": g})).(goalListResp)
+		if !ok || !lst.OK || len(lst.Goals) != 1 || lst.Goals[0].ID != resp.Item.ID {
+			t.Fatalf("goal_status: %+v", lst)
+		}
+		res, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_resume", "group": g})).(goalResp)
+		if !ok || !res.OK || res.Item.Iteration != 0 {
+			t.Fatalf("goal_resume: %+v", res)
+		}
+		waitGoal(t, g, goalStatusPaused)
+		can, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_cancel", "group": g})).(goalResp)
+		if !ok || !can.OK || can.Item.Status != goalStatusCancelled {
+			t.Fatalf("goal_cancel: %+v", can)
+		}
+	})
+}
+
+func TestCtlGoalDoneAndVerdictWindowGated(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-ctlwin1"
+	note := base64.StdEncoding.EncodeToString([]byte("evidence: ls passed"))
+
+	// Closed window → refused (this is what blocks a forged claim from an
+	// ordinary chat turn: the window only opens around goal turns).
+	br, ok := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_done", "note": note})).(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "no goal turn in flight") {
+		t.Fatalf("goal_done outside window: %+v", br)
+	}
+	br, ok = ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_verdict", "met": true})).(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "no goal review in flight") {
+		t.Fatalf("goal_verdict outside window: %+v", br)
+	}
+
+	// Open windows → recorded, self-targeted via the socket-derived owner.
+	goalLock.Lock()
+	goalDoneOpen[g] = "someid"
+	goalVerdictOpen[g] = "someid"
+	goalLock.Unlock()
+	t.Cleanup(func() {
+		goalLock.Lock()
+		delete(goalDoneOpen, g)
+		delete(goalDoneMail, g)
+		delete(goalVerdictOpen, g)
+		delete(goalVerdictMail, g)
+		goalLock.Unlock()
+	})
+	if br, _ := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_done", "note": note})).(baseResp); !br.OK {
+		t.Fatalf("goal_done inside window: %+v", br)
+	}
+	reasons := base64.StdEncoding.EncodeToString([]byte("criterion 1 FAIL"))
+	if br, _ := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_verdict", "met": false, "reasons": reasons})).(baseResp); !br.OK {
+		t.Fatalf("goal_verdict inside window: %+v", br)
+	}
+	goalLock.Lock()
+	gotNote := goalDoneMail[g]
+	gotV := goalVerdictMail[g]
+	goalLock.Unlock()
+	if gotNote != "evidence: ls passed" {
+		t.Fatalf("note = %q", gotNote)
+	}
+	if gotV.Met || gotV.Reasons != "criterion 1 FAIL" {
+		t.Fatalf("verdict = %+v", gotV)
+	}
+}
+
+func TestCtlSendReservedSessionRejected(t *testing.T) {
+	goalTestSetup(t)
+	for _, sess := range []string{goalWorkSession, goalJudgeSession} {
+		br, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
+			"cmd": "send", "group": "peer", "msg": "hi", "session": sess})).(baseResp)
+		if !ok || br.OK || !strings.Contains(br.Error, "reserved for the goal loop") {
+			t.Errorf("ctl send into %s: got %+v, want reserved-session refusal", sess, br)
+		}
+	}
 }
 
 func TestGoalLifecycleHooks(t *testing.T) {

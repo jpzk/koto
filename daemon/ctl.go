@@ -190,6 +190,9 @@ func ctlDispatch(owner string, line []byte) any {
 		if err != nil {
 			return errResp("ctl: " + err.Error())
 		}
+		if isReservedSession(sess) {
+			return errResp("ctl: session " + sess + " is reserved for the goal loop")
+		}
 		if _, err := enqueueSend(req.Group, sess, req.Msg); err != nil {
 			return errResp(err.Error())
 		}
@@ -393,6 +396,100 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: notify: backlog full")
 		}
 		return baseResp{OK: true}
+
+	case "goal_done":
+		// Self-targeted, open to ALL groups (like job_done): the goal WORKER
+		// reports its own completion claim. Accepted only while the group's
+		// goal-work turn is in flight (window-gated in goals.go), so a claim
+		// forged from an ordinary chat turn is refused.
+		var req struct {
+			Note string `json:"note"` // base64 evidence summary
+		}
+		_ = json.Unmarshal(line, &req)
+		note, _ := base64.StdEncoding.DecodeString(req.Note)
+		n := truncateRunes(string(note), goalNoteMax)
+		if err := recordGoalDone(owner, n); err != nil {
+			return errResp("ctl: goal_done: " + err.Error())
+		}
+		emitLogfG("goal", owner, "info", "[%s] goal_done claim (%d-byte note)", owner, len(n))
+		return baseResp{OK: true}
+
+	case "goal_verdict":
+		// Self-targeted, open to ALL groups: the acceptance JUDGE reports its
+		// verdict. Window-gated to the goal-judge turn, same as goal_done.
+		var req struct {
+			Met     bool   `json:"met"`
+			Reasons string `json:"reasons"` // base64 per-criterion failures
+		}
+		_ = json.Unmarshal(line, &req)
+		reasons, _ := base64.StdEncoding.DecodeString(req.Reasons)
+		r := truncateRunes(string(reasons), goalNoteMax)
+		if err := recordGoalVerdict(owner, req.Met, r); err != nil {
+			return errResp("ctl: goal_verdict: " + err.Error())
+		}
+		emitLogfG("goal", owner, "info", "[%s] goal_verdict met=%t (%d-byte reasons)", owner, req.Met, len(r))
+		return baseResp{OK: true}
+
+	// Goal orchestration is main-only, like spawn/send: main can set and
+	// steer a peer's goal. There is deliberately NO goal_approve here — a
+	// plan-first goal waits for a HUMAN (gRPC GoalApprove), and main must
+	// not be able to approve the plans it set itself.
+	case "goal_set":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: goal_set")
+		}
+		var req goalSetReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if req.Group == ctlMainGroup {
+			return errResp("ctl: cannot set a goal on main")
+		}
+		if !ctlGroupRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		plan := req.Plan == nil || *req.Plan
+		it, err := goalSet(req.Group, req.Text, req.Criteria, req.MaxIterations, plan)
+		if err != nil {
+			return errResp(err.Error())
+		}
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
+
+	case "goal_status":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: goal_status")
+		}
+		var req goalListReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		return goalListResp{BaseResp: baseResp{OK: true}, Goals: goalList(req.Group)}
+
+	case "goal_pause", "goal_resume", "goal_cancel":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: " + env.Cmd)
+		}
+		var req goalGroupReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !ctlGroupRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		var it goalItem
+		var err error
+		switch env.Cmd {
+		case "goal_pause":
+			it, err = goalPause(req.Group)
+		case "goal_resume":
+			it, err = goalResume(req.Group)
+		case "goal_cancel":
+			it, err = goalCancel(req.Group)
+		}
+		if err != nil {
+			return errResp(err.Error())
+		}
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "sched_add":
 		var req schedAddReq

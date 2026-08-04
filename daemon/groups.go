@@ -248,6 +248,9 @@ func armBootNotice(g string) bool {
 }
 
 func stopGroup(g string) {
+	// A running goal would silently re-boot the VM on its next iteration,
+	// overriding the operator's stop — pause it first (no-op otherwise).
+	goalPauseOnStop(g)
 	mu := groupOpMu(g)
 	mu.Lock()
 	defer mu.Unlock()
@@ -453,6 +456,10 @@ func destroy(g string) baseResp {
 		return errResp("invalid group name")
 	}
 	emitLogfG("group", g, "warn", "destroy group=%s (workspace will be deleted)", g)
+	// Cancel before stopGroup so the stop hook sees a terminal goal and
+	// doesn't raise a spurious "paused (group stopped), resume later" alert
+	// for a goal that is about to be deleted with its group.
+	goalCancelOnDestroy(g)
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()
