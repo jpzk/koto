@@ -619,7 +619,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /stopvm  /destroy  /clear  /config  /runscript  /shell  /reload  /stop  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -2445,6 +2445,13 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("restarted %s", msg.group)})
 		}
 		return listCmd(m.sock)
+	case "stop":
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stopvm %s: %v", msg.group, msg.err)})
+		} else {
+			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("stopped %s's VM", msg.group)})
+		}
+		return listCmd(m.sock) // refresh the tree's running marker promptly
 	case "interrupt":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stop: %v", msg.err)})
@@ -3672,6 +3679,18 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if v == "/stop" {
 		return daemonCmd(m.sock, "interrupt", m.cur, nil)
+	}
+	if v == "/stopvm" || strings.HasPrefix(v, "/stopvm ") {
+		// Powers off the group's microVM (daemon `stop` verb). Distinct from
+		// /stop, which only interrupts the in-flight turn: the VM stays down
+		// until something needs it (a send, a schedule) or /restart. Frees the
+		// VM's RAM/CPU; the workspace image and chat history persist.
+		target := strings.TrimSpace(strings.TrimPrefix(v, "/stopvm"))
+		if target == "" {
+			target = m.cur
+		}
+		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("stopping %s's VM… (boots again on next send; /restart %s to start it now)", target, target)})
+		return daemonCmd(m.sock, "stop", target, nil)
 	}
 	if v == "/repaint" {
 		// Force a full redraw: clear the alt-screen buffer, then re-run the
