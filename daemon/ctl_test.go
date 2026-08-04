@@ -36,6 +36,12 @@ func setupNotifyRoot(t *testing.T, g string) {
 		t.Fatal(err)
 	}
 	markTailed(g)
+	// Drop markers queued before this test: any warn/error log line an
+	// earlier test emitted incidentally queues a forwarded alert against
+	// main (logalert.go), and delivering it here would skew event counts.
+	notifyQueueMu.Lock()
+	delete(notifyQueue, g)
+	notifyQueueMu.Unlock()
 }
 
 // markTailed makes ensureTail a no-op for g: the verb under test would

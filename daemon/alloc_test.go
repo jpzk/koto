@@ -87,7 +87,15 @@ func TestAllocPortNoDupesOverChurn(t *testing.T) {
 // Belt-and-braces: t.TempDir() is per-test so HERE/GROUPS_FILE point at gone
 // dirs after each test. Real daemon code re-runs initPaths(), so this only
 // matters if another test in this package depends on the package-level vars.
+//
+// markTailed(main) up front because ANY test that emits a warn/error log
+// line now queues an operator notification against main (logalert.go), and
+// ensureTail would spawn a real tailLog goroutine that outlives its test,
+// chases ROOT into later tests' tempdirs, and races their cleanup (see
+// markTailed). Tests that assert on delivery play the tailer themselves via
+// deliverNotify.
 func TestMain(m *testing.M) {
+	markTailed(ctlMainGroup)
 	defer func() {
 		HERE = ""
 		GROUPS_FILE = ""

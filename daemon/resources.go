@@ -325,19 +325,23 @@ func resCheckThresholds() {
 // It deliberately does NOT go through notifyAllow: that rate limit exists to
 // stop a chatty AGENT, whereas these are daemon-raised and already gated by
 // the hysteresis above. It is also emitted to the daemon log, so the alert
-// survives even if no tailer or client is attached to carry the banner.
+// survives even if no tailer or client is attached to carry the banner —
+// via the Quiet variant, because this function already queues its own
+// notification with the designed severity tier (80% = normal); letting the
+// warn/error forwarder (logalert.go) fire on the same line would banner the
+// alert twice, once at the wrong severity.
 func resNotifyOperator(level int, title, msg string) {
 	sev := resAlertSeverity(level)
 	logLevel := "warn"
 	if level >= 2 {
 		logLevel = "error"
 	}
-	emitLogf("resources", logLevel, "%s — %s", title, msg)
+	emitLogfQuiet("resources", logLevel, "%s — %s", title, msg)
 
 	t := truncateRunes(flattenInline(title), notifyTitleMax)
 	b := truncateRunes(flattenInline(msg), notifyMsgMax)
 	if !queueNotify(ctlMainGroup, notifyMarker(time.Now().UnixMilli(), sev, "", t, b)) {
-		emitLogf("resources", "warn", "notification backlog full, alert dropped: %s", title)
+		emitLogfQuiet("resources", "warn", "notification backlog full, alert dropped: %s", title)
 		return
 	}
 	ensureTail(ctlMainGroup)

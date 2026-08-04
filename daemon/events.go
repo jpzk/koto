@@ -231,7 +231,27 @@ func emitLog(subsystem, level, msg string) {
 // The message text keeps its own "[g]"/"group=g" wording — the field is
 // structured metadata so clients can *scope* the log view to the group the
 // user is looking at without parsing prose.
+//
+// warn/error lines are additionally forwarded to the operator as a
+// high-severity notification (logalert.go); lines emitted BY the
+// notification path itself must use emitLogfQuiet or forwarding would
+// double-banner or recurse.
 func emitLogG(subsystem, group, level, msg string) {
+	logDeliver(subsystem, group, level, msg)
+	forwardLogAlert(subsystem, group, level, msg)
+}
+
+// emitLogfQuiet is emitLogf minus the warn/error→notification forwarding —
+// only for log lines the notification machinery emits about itself
+// (resNotifyOperator pairs its log line with its own queueNotify; delivery
+// failures must not re-enter the forwarder).
+func emitLogfQuiet(subsystem, level, format string, args ...any) {
+	logDeliver(subsystem, "", level, fmt.Sprintf(format, args...))
+}
+
+// logDeliver is the delivery half of emitLogG: stderr mirror, ring append,
+// subscriber fan-out.
+func logDeliver(subsystem, group, level, msg string) {
 	pbev := &pb.LogEvent{
 		Event:     "log",
 		Level:     level,

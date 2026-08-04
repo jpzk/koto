@@ -72,22 +72,29 @@ type notifyBucket struct {
 	last   time.Time
 }
 
-func notifyAllow(g string) bool {
-	notifyRateMu.Lock()
-	defer notifyRateMu.Unlock()
+// take is the token-bucket step shared by notifyAllow and logAlertAllow:
+// refill by elapsed time up to burst, then spend one token if available.
+// Caller holds the map's mutex.
+func (b *notifyBucket) take(burst float64, refill time.Duration) bool {
 	now := time.Now()
-	b := notifyRate[g]
-	if b == nil {
-		b = &notifyBucket{tokens: notifyRateBurst, last: now}
-		notifyRate[g] = b
-	}
-	b.tokens = min(notifyRateBurst, b.tokens+now.Sub(b.last).Seconds()/notifyRateRefill.Seconds())
+	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()/refill.Seconds())
 	b.last = now
 	if b.tokens < 1 {
 		return false
 	}
 	b.tokens--
 	return true
+}
+
+func notifyAllow(g string) bool {
+	notifyRateMu.Lock()
+	defer notifyRateMu.Unlock()
+	b := notifyRate[g]
+	if b == nil {
+		b = &notifyBucket{tokens: notifyRateBurst, last: time.Now()}
+		notifyRate[g] = b
+	}
+	return b.take(notifyRateBurst, notifyRateRefill)
 }
 
 // ctlGroupRE is the allowlist for group names ctl callers can spawn or
