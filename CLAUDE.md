@@ -215,7 +215,13 @@ verb list.
   `emitLogfQuiet` (skips forwarding — `resNotifyOperator` pairs its log line
   with its own `queueNotify`, and forwarding it too would banner one resource
   alert twice, once at the wrong severity). The forwarder never logs its own
-  failures — a warn on failure would re-enter it.
+  failures — a warn on failure would re-enter it. The reverse mirror also
+  holds: **every delivered notification — `cs-notify`, resource alert,
+  forwarded log line — is recorded in the daemon log at `info`** with its
+  full (sanitized) content (`notifyDeliver` in logtail.go, the one funnel all
+  producers go through), so a missed transient banner/desktop popup stays
+  checkable afterwards via `koto ctl logs`, even after a group `/clear`
+  erases the group-log marker it persisted in.
 - **A `notification` event also reaches the window manager, not just the TUI
   banner** (`tui/notify_osc.go`). `cs_tui` runs `--network=none` with one
   socket mounted — no D-Bus, no `notify-send` — so the only channel out is an

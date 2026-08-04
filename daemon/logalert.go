@@ -83,11 +83,8 @@ func forwardLogAlert(subsystem, group, level, msg string) {
 	if !logAlertAllow(subsystem, group) {
 		return
 	}
-	t := truncateRunes(flattenInline(logAlertTitle(subsystem, group, level)), notifyTitleMax)
-	b := truncateRunes(flattenInline(msg), notifyMsgMax)
 	// A full backlog drops the banner silently — logging it would re-enter
-	// this function against the same full queue.
-	if queueNotify(ctlMainGroup, notifyMarker(time.Now().UnixMilli(), "high", "", t, b)) {
-		ensureTail(ctlMainGroup)
-	}
+	// this function against the same full queue. notifyDeliver's info
+	// mirror is loop-safe (info is below the forwarding threshold).
+	notifyDeliver(ctlMainGroup, "high", "", logAlertTitle(subsystem, group, level), msg)
 }

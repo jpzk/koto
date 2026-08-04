@@ -67,6 +67,32 @@ func queueNotify(g, marker string) bool {
 	return true
 }
 
+// notifyDeliver is the one funnel every notification producer goes through
+// (ctl `notify` verb, resource alerts, forwarded log lines): flatten +
+// truncate, queue the [[notify]] marker, arm the group's tailer, and mirror
+// the full notification into the daemon log. The banner and the desktop
+// popup are transient, and the group-log marker they persist in is erased by
+// a later `/clear` — the info mirror is the record the operator checks
+// afterwards. info deliberately: warn/error would re-enter forwardLogAlert.
+// title/msg are sanitized for the mirror because cs-notify text is
+// agent-controlled and the daemon log reaches stderr and the TUI log pane
+// unframed. False = backlog full, nothing queued or logged.
+func notifyDeliver(g, sev, session, title, msg string) bool {
+	t := truncateRunes(flattenInline(title), notifyTitleMax)
+	b := truncateRunes(flattenInline(msg), notifyMsgMax)
+	if !queueNotify(g, notifyMarker(time.Now().UnixMilli(), sev, session, t, b)) {
+		return false
+	}
+	line := sanitize(t)
+	if b != "" {
+		line += " — " + sanitize(b)
+	}
+	emitLogfG("notify", g, "info", "[%s] %s notification session=%s: %s",
+		g, sev, sessionMarkerName(session), line)
+	ensureTail(g)
+	return true
+}
+
 // tryFlushNotify appends the group's queued markers if the tailer is at a
 // safe point: caught up to EOF with no partial line buffered (atBoundary)
 // and not inside a thinking/tool_out block. The write lock makes the

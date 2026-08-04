@@ -253,11 +253,19 @@ func TestFcFlowLoggerDedup(t *testing.T) {
 	if got := len(logRing) - n0; got != 2 {
 		t.Errorf("gw-subnet flow logged; %d lines, want 2", got)
 	}
-	// Blocked flow logs at warn with the profile in the message.
+	// Blocked flow logs at warn with the profile in the message. Search the
+	// tail rather than asserting on the last entry: a warn line is forwarded
+	// as an operator notification (logalert.go), whose info-level mirror
+	// lands in the ring right after it.
 	l.record(tcpFrame("192.168.1.5", 445, 0x02), fcNetWAN, false)
-	last := logRing[len(logRing)-1]
-	if last.Level != "warn" || last.Subsystem != "egress" ||
-		!bytes.Contains([]byte(last.Msg), []byte("BLOCKED flow TCP 192.168.127.2 -> 192.168.1.5:445")) {
-		t.Errorf("blocked flow line = %q level=%s sub=%s", last.Msg, last.Level, last.Subsystem)
+	var blocked bool
+	for _, le := range logRing[n0:] {
+		if le.Level == "warn" && le.Subsystem == "egress" &&
+			bytes.Contains([]byte(le.Msg), []byte("BLOCKED flow TCP 192.168.127.2 -> 192.168.1.5:445")) {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("no warn egress line for the blocked flow in ring tail")
 	}
 }

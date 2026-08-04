@@ -92,6 +92,31 @@ func TestLogAlertRateLimit(t *testing.T) {
 	}
 }
 
+// Every delivered notification is mirrored into the daemon log at info with
+// its CONTENT (not just sizes), so a missed transient banner stays checkable
+// afterwards — including across a group /clear, which erases the group-log
+// marker the banner persisted in.
+func TestNotifyDeliverMirrorsToDaemonLog(t *testing.T) {
+	setupNotifyRoot(t, ctlMainGroup)
+
+	if !notifyDeliver(ctlMainGroup, "high", "", "Deploy failed", "prod is down") {
+		t.Fatal("notifyDeliver rejected with an empty queue")
+	}
+
+	logSubsLock.Lock()
+	var found bool
+	for _, le := range logRing {
+		if le.Subsystem == "notify" && le.Level == "info" &&
+			strings.Contains(le.Msg, "Deploy failed") && strings.Contains(le.Msg, "prod is down") {
+			found = true
+		}
+	}
+	logSubsLock.Unlock()
+	if !found {
+		t.Fatal("no info-level daemon-log mirror carrying the notification content")
+	}
+}
+
 // resNotifyOperator's paired log line must not double-banner: one resource
 // alert = exactly one notification, at the tier's designed severity (level 1
 // = normal — the forwarder would have said high).

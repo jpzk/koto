@@ -338,13 +338,9 @@ func resNotifyOperator(level int, title, msg string) {
 	}
 	emitLogfQuiet("resources", logLevel, "%s — %s", title, msg)
 
-	t := truncateRunes(flattenInline(title), notifyTitleMax)
-	b := truncateRunes(flattenInline(msg), notifyMsgMax)
-	if !queueNotify(ctlMainGroup, notifyMarker(time.Now().UnixMilli(), sev, "", t, b)) {
+	if !notifyDeliver(ctlMainGroup, sev, "", title, msg) {
 		emitLogfQuiet("resources", "warn", "notification backlog full, alert dropped: %s", title)
-		return
 	}
-	ensureTail(ctlMainGroup)
 }
 
 // resGrowth returns g's image growth in bytes/hour across the retained ring,

@@ -386,13 +386,12 @@ func ctlDispatch(owner string, line []byte) any {
 		if !notifyAllow(owner) {
 			return errResp("ctl: notify: rate limited")
 		}
-		emitLogfG("ctl", owner, "info", "[%s] notify sev=%s session=%s title=%dB msg=%dB",
-			owner, sev, sessionMarkerName(sess), len(t), len(b))
-		if !queueNotify(owner, notifyMarker(time.Now().UnixMilli(), sev, sess, t, b)) {
+		// notifyDeliver queues the marker, arms the tailer, and mirrors the
+		// notification (content, not just sizes) into the daemon log so the
+		// operator can check a missed banner afterwards.
+		if !notifyDeliver(owner, sev, sess, t, b) {
 			return errResp("ctl: notify: backlog full")
 		}
-		// The tailer is the delivery vehicle — make sure one is running.
-		ensureTail(owner)
 		return baseResp{OK: true}
 
 	case "sched_add":
