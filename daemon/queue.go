@@ -34,12 +34,25 @@ const sendQueueDepth = 64
 type sendJob struct {
 	session string // "" = the group's default session
 	msg     string
+	notice  bool       // boot notice — see enqueueBootNotice
 	done    chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
 var (
 	queuesMu sync.Mutex
 	queues   = map[string]chan sendJob{}
+	// noticePending marks groups with a boot notice sitting undelivered in
+	// their queue; noticeInFlight marks a notice currently being delivered.
+	// Together they back bootNoticeActive — the delivery-layer guard on boot
+	// notices that armBootNotice's time window cannot provide: a notice can
+	// sit queued behind a long turn far past the window, at which point its
+	// delivery re-boots a stopped VM (ensure() inside sendNow) and, without
+	// this guard, arms the next notice — a queue-paced cascade of stale
+	// "your VM has just been restarted" turns (observed 2026-08-04: JAM got
+	// two notices, 6½ and 5¼ minutes late, each burning an agent turn on
+	// recovery it had already done).
+	noticePending  = map[string]bool{}
+	noticeInFlight = map[string]bool{}
 )
 
 // enqueueSend appends msg to g's queue for the given session ("" = default),
@@ -56,7 +69,32 @@ var (
 // future teardown; it never blocks because the channel is buffered and we fall
 // through to the overflow error when full.
 func enqueueSend(g, session, msg string) (<-chan error, error) {
-	done := make(chan error, 1)
+	return enqueue(g, sendJob{session: session, msg: msg})
+}
+
+// enqueueBootNotice queues g's boot notice into the default session. At most
+// one notice may be undelivered per group: a notice announces "this VM
+// booted, resurrect what should be running", and a second one queued behind
+// an undelivered first can only ever arrive as a stale duplicate — so it is
+// coalesced into the pending one rather than queued.
+func enqueueBootNotice(g, msg string) error {
+	_, err := enqueue(g, sendJob{msg: msg, notice: true})
+	return err
+}
+
+// bootNoticeActive reports whether g has a boot notice queued-undelivered or
+// mid-delivery. ensure() consults it (alongside armBootNotice's time window)
+// before arming a new notice, so a boot performed *while delivering* a
+// notice — the delivery itself re-boots a stopped VM — never chains into
+// another notice: the notice being delivered is the wake-up for that boot.
+func bootNoticeActive(g string) bool {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	return noticePending[g] || noticeInFlight[g]
+}
+
+func enqueue(g string, job sendJob) (<-chan error, error) {
+	job.done = make(chan error, 1)
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
 	q, ok := queues[g]
@@ -65,9 +103,17 @@ func enqueueSend(g, session, msg string) (<-chan error, error) {
 		queues[g] = q
 		go sendWorker(g, q)
 	}
+	if job.notice && noticePending[g] {
+		// Coalesced: the pending notice already covers "this VM booted".
+		job.done <- nil
+		return job.done, nil
+	}
 	select {
-	case q <- sendJob{session: session, msg: msg, done: done}:
-		return done, nil
+	case q <- job:
+		if job.notice {
+			noticePending[g] = true
+		}
+		return job.done, nil
 	default:
 		return nil, fmt.Errorf("group %q send queue full (%d pending); retry later", g, sendQueueDepth)
 	}
@@ -98,10 +144,23 @@ func queueDepth(g string) int {
 
 // sendWorker drains one group's queue, running each turn to completion before
 // starting the next. Single instance per group → the serialization invariant
-// sendNow depends on.
+// sendNow depends on. Notice jobs flip pending→inFlight for the duration of
+// their turn (one lock acquisition, so bootNoticeActive never observes the
+// gap between the two).
 func sendWorker(g string, q chan sendJob) {
 	for job := range q {
+		if job.notice {
+			queuesMu.Lock()
+			delete(noticePending, g)
+			noticeInFlight[g] = true
+			queuesMu.Unlock()
+		}
 		job.done <- runTurn(g, job.session, job.msg)
+		if job.notice {
+			queuesMu.Lock()
+			delete(noticeInFlight, g)
+			queuesMu.Unlock()
+		}
 	}
 }
 

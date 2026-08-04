@@ -182,6 +182,104 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 	})
 }
 
+// TestBootNoticeCoalesce: while one boot notice sits undelivered, further
+// notices for the same group coalesce into it — the queue never holds two.
+// This is half of the fix for the 2026-08-04 JAM cascade (stale duplicate
+// "your VM restarted" turns delivered minutes late).
+func TestBootNoticeCoalesce(t *testing.T) {
+	const g = "q-notice-dedup"
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var delivered []string
+
+	stub := func(_, _, msg string) error {
+		<-release // hold the worker so notices stack up behind this turn
+		mu.Lock()
+		delivered = append(delivered, msg)
+		mu.Unlock()
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		d0, err := enqueueSend(g, "", "blocker")
+		if err != nil {
+			t.Fatalf("enqueue blocker: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond) // worker picks blocker, buffer empty
+		for i := 0; i < 3; i++ {
+			if err := enqueueBootNotice(g, "notice"); err != nil {
+				t.Fatalf("enqueueBootNotice %d: %v", i, err)
+			}
+		}
+		if !bootNoticeActive(g) {
+			t.Fatal("notice queued but bootNoticeActive=false")
+		}
+		d1, err := enqueueSend(g, "", "after")
+		if err != nil {
+			t.Fatalf("enqueue after: %v", err)
+		}
+		close(release)
+		<-d0
+		<-d1
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"blocker", "notice", "after"}
+	if len(delivered) != len(want) {
+		t.Fatalf("delivered %v, want exactly one coalesced notice: %v", delivered, want)
+	}
+	for i := range want {
+		if delivered[i] != want[i] {
+			t.Fatalf("delivered %v, want %v", delivered, want)
+		}
+	}
+	if bootNoticeActive(g) {
+		t.Fatal("bootNoticeActive still true after the notice was delivered")
+	}
+}
+
+// TestBootNoticeActiveDuringDelivery: the guard must hold WHILE the notice's
+// turn runs — that is the window in which delivery re-boots a stopped VM and
+// ensure() must not arm another notice (the cascade's trigger).
+func TestBootNoticeActiveDuringDelivery(t *testing.T) {
+	const g = "q-notice-inflight"
+	inTurn := make(chan struct{})
+	release := make(chan struct{})
+
+	stub := func(_, _, msg string) error {
+		if msg == "notice" {
+			inTurn <- struct{}{}
+			<-release
+		}
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		if err := enqueueBootNotice(g, "notice"); err != nil {
+			t.Fatalf("enqueueBootNotice: %v", err)
+		}
+		select {
+		case <-inTurn:
+		case <-time.After(2 * time.Second):
+			t.Fatal("notice turn never started")
+		}
+		if !bootNoticeActive(g) {
+			t.Fatal("bootNoticeActive=false while the notice turn is mid-delivery")
+		}
+		close(release)
+		// The worker clears inFlight after runTurn returns; poll briefly.
+		deadline := time.After(2 * time.Second)
+		for bootNoticeActive(g) {
+			select {
+			case <-deadline:
+				t.Fatal("bootNoticeActive never cleared after delivery")
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	})
+}
+
 // TestQueueCrossGroupConcurrency: different groups run concurrently (one worker
 // each), so two groups can be mid-turn at the same time.
 func TestQueueCrossGroupConcurrency(t *testing.T) {

@@ -171,19 +171,27 @@ func ensureLocked(g string, isMain bool) (int, error) {
 		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
 		return 0, err
 	}
-	if restarted && armBootNotice(g) {
+	if restarted && !bootNoticeActive(g) && armBootNotice(g) {
 		// Boot notice: wake the agent (default session) so it can resurrect
 		// whatever should be running — the on-boot hook that makes services
 		// and watchdogs survive VM restarts. Queued like any other send, so
 		// when the boot was triggered by an inbound message (ensure() inside
 		// sendNow), that message's turn runs first and the notice follows.
 		// Fire-and-forget: a full queue just drops the notice.
+		//
+		// bootNoticeActive is checked FIRST (and before the window stamp is
+		// burned): if a notice is already queued or mid-delivery, this boot
+		// is covered by it. In particular, delivering a queued notice
+		// re-boots a stopped VM through this very path — without the guard
+		// that boot would arm the next notice whenever queue delay pushed
+		// delivery past armBootNotice's window, cascading stale duplicates
+		// (2026-08-04, JAM).
 		const bootMsg = "[koto] Your VM has just been restarted. Everything " +
 			"that was running inside it is gone: background jobs that were " +
 			"running are now marked orphaned (`cs-job list` to review — rerun " +
 			"what still matters) and any servers/processes you had started " +
 			"are down. Restart anything that should be running, then continue."
-		if _, err := enqueueSend(g, "", bootMsg); err != nil {
+		if err := enqueueBootNotice(g, bootMsg); err != nil {
 			emitLogfG("group", g, "warn", "boot notice for %s dropped: %v", g, err)
 		}
 	}
@@ -219,6 +227,9 @@ func autostartGroups() {
 // Without it a crash-looping VM would feed on its own notices: the notice
 // turn re-ensures the group, respawns the dying VM, and enqueues the next
 // notice — an unbounded spawn loop that a silent failing group never had.
+// The window measures ARM time, not delivery: a notice can sit queued
+// behind long turns far past it, which is why ensure() additionally gates
+// on bootNoticeActive (queue.go) — the delivery-layer half of the guard.
 const bootNoticeWindow = 5 * time.Minute
 
 var (
