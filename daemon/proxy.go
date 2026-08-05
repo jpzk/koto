@@ -726,7 +726,22 @@ func proxyListen(bind string, port int, group string) error {
 		emitLogfG("proxy", group, "error", "listen %s for %s: %v", addr, group, err)
 		return err
 	}
-	srv := &http.Server{Addr: addr, Handler: &handler{group: group}}
+	// IdleTimeout reaps keep-alive conns parked between requests. Without it
+	// every guest LLM request leaks its whole conn chain: the guest client
+	// closes, but Firecracker's hybrid vsock never surfaces that close to the
+	// daemon's splice, so the vsock UDS conn + both loopback TCP legs sit
+	// ESTABLISHED forever — and each one holds a slot in FC's 1023-conn vsock
+	// muxer until the VM refuses all host connections (jobs mirror, shell
+	// attach: "connection reset by peer"). Server-side close is the one end we
+	// control: it unwinds the splice, which closes the UDS, which lets FC reap
+	// the muxer slot. Idle time only ever ticks between requests, so streaming
+	// responses (SSE) are unaffected. ReadHeaderTimeout covers the fresh conn
+	// that never sends a request — IdleTimeout doesn't apply before the first
+	// request, so without it that conn would pin a muxer slot forever too.
+	srv := &http.Server{Addr: addr, Handler: &handler{group: group},
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	go func() { _ = srv.Serve(ln) }()
 
 	listLock.Lock()
