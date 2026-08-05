@@ -284,10 +284,13 @@ func TestPeekParsedFramesRenderAsChatBlocks(t *testing.T) {
 	if !m.peekFramed {
 		t.Fatal("peekFramed = false after framed events")
 	}
-	pane, ok := m.renderJobPeek(m.chatRows())
+	rawPane, ok := m.renderJobPeek(m.chatRows())
 	if !ok {
 		t.Fatal("renderJobPeek returned ok=false")
 	}
+	// Strip styling before matching: glamour splits the response text
+	// across ANSI spans, so Contains on the raw pane false-negatives.
+	pane := stripAnsi(rawPane)
 	for _, want := range []string{"Bash $ ls /tmp", "thought 2 words", "tool output 1 line", "the final answer"} {
 		if !strings.Contains(pane, want) {
 			t.Errorf("pane missing %q; pane:\n%s", want, pane)

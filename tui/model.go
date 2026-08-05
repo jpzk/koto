@@ -31,6 +31,8 @@ const (
 	leftPaneWidth    = 22
 	tickMs           = 80
 	metricsTickMs    = 5000
+	resizeDebounceMs = 120 // width-change quiet window before the styled re-render
+	contentFlushMs   = 16  // structural-repaint debounce (~1 frame at 60fps)
 	// maxLogLines caps the per-session daemon log buffer in the TUI. The
 	// daemon's own ring is logRingMax (200); we keep a deeper window here
 	// so the user can scroll back through what they've seen since opening
@@ -245,16 +247,35 @@ type reconnectAttemptMsg struct{}
 // logEventMsg / logSubClosedMsg are defined in log_view.go alongside the
 // subscribe goroutine — they're only used by the focusLog code path.
 
-// vpPrewarmMsg carries a fully-built viewport content entry for an
-// off-current group. The goroutine that produces it has already done the
-// allBlocks + buildLogContent work, so the Update handler just stores it
-// in m.vpCache (after a ver/gver staleness check) — the next tree-nav
-// into that group hits the cache immediately, no synchronous rebuild.
+// vpPrewarmMsg carries a fully-built viewport content entry produced on a
+// background goroutine. The goroutine has already done the allBlocks +
+// buildLogContent work (i.e. all the glamour rendering), so the Update
+// handler just stores it in m.vpCache (after a ver/gver staleness check).
+// For off-current groups the next tree-nav is then a cache hit; for the
+// current group the handler also repaints — the prewarm path is how EVERY
+// history page reaches the screen without a synchronous glamour pass
+// blocking the event loop.
 type vpPrewarmMsg struct {
 	group   string
 	entry   vpCacheEntry
 	mdItems map[string]string // markdown rendered along the way
+	// older: this prewarm renders an older-page prepend for the current
+	// group — on apply, anchor the scroll position instead of bottom-stick.
+	older bool
 }
+
+// resizeSettledMsg fires once a width-change burst has gone quiet. seq pins
+// it to the latest resize: a drag emits many WindowSizeMsg, each bumping
+// resizeSeq, and only the final timer's rebuild runs (the expensive part —
+// cache wipes + fleet-wide markdown prewarm — is paid once per settle, not
+// once per step).
+type resizeSettledMsg struct{ seq int }
+
+// contentFlushMsg fires the debounced structural repaint (markContentDirty).
+// A reconnect replay delivers up to a full ring (1024 frames) of prompt/
+// done/tool events back-to-back; repainting per frame is O(conversation)
+// each — the debounce turns the burst into one rebuild per ~frame interval.
+type contentFlushMsg struct{}
 
 // --- Model -------------------------------------------------------------------
 
@@ -422,15 +443,43 @@ type Model struct {
 
 	// loadedGroups tracks which groups have finished both history-load and
 	// render-pre-warm so the status bar can show a launch progress bar
-	// until everything is hot. Set on:
-	//   - historyMsg for the current group (refreshLog fills vpCache
-	//     synchronously, no prewarm goroutine fires)
-	//   - vpPrewarmMsg for off-current groups (only when the entry is
-	//     actually stored — staleness checks aside)
+	// until everything is hot. Set on vpPrewarmMsg — every history page
+	// (current group included) renders on a prewarm goroutine now, so the
+	// arrival of the prewarm result IS the load-complete signal.
 	// The bar disappears once len(loadedGroups) == len(m.groups). On
 	// listMsg's toReload pass, any reloading groups are removed so they
 	// re-enter the loading state.
 	loadedGroups map[string]bool
+
+	// prewarming counts prewarm goroutines in flight per group. While the
+	// CURRENT group has one, refreshLog must not fall back to a synchronous
+	// glamour pass on a cache miss — that would be the exact multi-second
+	// Update-loop stall the prewarm exists to avoid (a 1000-event history
+	// page at ~3ms/block). Instead it builds plain (markdown unrendered,
+	// uncached); the vpPrewarmMsg that drops the count repaints styled.
+	// A count, not a bool: a resize settle can stack a second prewarm on
+	// a group whose history prewarm hasn't landed yet.
+	prewarming map[string]int
+
+	// liveDirty coalesces live-overlay repaints. stream/thinking frames can
+	// arrive far faster than the eye needs and each repaint is a full
+	// buildLogContent pass over the conversation; instead of repainting per
+	// frame, the streamEventMsg handler sets this and the 80ms spin tick
+	// (already running whenever an overlay is live — see isAnimating) flushes
+	// it. Structural frames (prompt/done/tool/…) also set it but pair it
+	// with a guaranteed ~16ms one-shot flush (flushPending/contentFlushMsg)
+	// so a lone event paints imperceptibly fast while a reconnect-replay
+	// burst collapses into one rebuild per flush interval.
+	liveDirty    bool
+	flushPending bool
+
+	// resizeSeq stamps resizeSettledMsg timers; see that type. resizePending
+	// forces plain builds between the first width change of a burst and the
+	// settle (the moment prewarming[m.cur] takes over that job) — without it
+	// a stream frame landing mid-drag would glamour-render the whole
+	// conversation at the new width synchronously.
+	resizeSeq     int
+	resizePending bool
 
 	// Paging state for chat history. The TUI fetches only the tail
 	// historyPageSize events per group on startup; older pages are
@@ -725,6 +774,7 @@ func newModel(sock string, ctxWindow int) Model {
 		autoFollow:    true,
 		logAutoFollow: true,
 		loadedGroups:  map[string]bool{},
+		prewarming:    map[string]int{},
 		pageOldestTs:  map[string]float64{},
 		pageLoading:   map[string]bool{},
 		pageExhausted: map[string]bool{},
@@ -1031,14 +1081,17 @@ func mergeMetric(prev, next map[string]any, key string) map[string]any {
 	return merged
 }
 
-// prewarmGroupCmd does the full first-visit work for an off-current
-// group on a background goroutine: render every response's markdown
-// (populating an mdCache delta), then assemble the complete vpCache
-// content string for that group. Result lands in vpPrewarmMsg, which
-// the Update handler merges into m.mdCache + m.vpCache (staleness check
-// against current ver/gver). Once this runs for every group on history
-// load, tree navigation becomes pure cache-hit — no synchronous
-// rebuild on first hover.
+// prewarmGroupCmd does the full render work for a group on a background
+// goroutine: render every response's markdown (populating an mdCache
+// delta), then assemble the complete vpCache content string for that
+// group. Result lands in vpPrewarmMsg, which the Update handler merges
+// into m.mdCache + m.vpCache (staleness check against current ver/gver)
+// and, for the current group, repaints from the fresh cache entry. This
+// runs for EVERY history page — current group included — so no page ever
+// takes a synchronous glamour pass on the event loop, and once it runs
+// for every group tree navigation becomes pure cache-hit too. older
+// tags an older-page prepend so the apply anchors scroll instead of
+// bottom-sticking (only meaningful when group == m.cur at apply time).
 //
 // The goroutine works on snapshots so it can't race with the Update
 // goroutine's writes:
@@ -1051,7 +1104,7 @@ func mergeMetric(prev, next map[string]any, key string) map[string]any {
 // We construct a temporary Model with just the fields buildLogContent
 // reads, rather than refactoring buildLogContent into a free function —
 // less code to keep in sync with future changes to the assembler.
-func (m Model) prewarmGroupCmd(group string, cols int) tea.Cmd {
+func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 	if group == "" {
 		return nil
 	}
@@ -1081,7 +1134,7 @@ func (m Model) prewarmGroupCmd(group string, cols int) tea.Cmd {
 			expandedToolOuts: expTO,
 			mdCache:          mdSnap,
 		}
-		content := snap.buildLogContent(cols)
+		content := snap.buildLogContent(cols, false)
 
 		// Diff the post-build mdCache against the snapshot to extract
 		// only newly-rendered entries. The Update handler merges these
@@ -1101,8 +1154,20 @@ func (m Model) prewarmGroupCmd(group string, cols int) tea.Cmd {
 				expT: expT, expTO: expTO, content: content,
 			},
 			mdItems: newItems,
+			older:   older,
 		}
 	}
+}
+
+// startPrewarm marks the group as prewarm-in-flight and returns the cmd.
+// The mark is what keeps refreshLog off the synchronous-glamour path while
+// the goroutine runs; vpPrewarmMsg clears it.
+func (m *Model) startPrewarm(group string, cols int, older bool) tea.Cmd {
+	cmd := m.prewarmGroupCmd(group, cols, older)
+	if cmd != nil {
+		m.prewarming[group]++
+	}
+	return cmd
 }
 
 func daemonCmd(sock, op, group string, extra map[string]any) tea.Cmd {
@@ -1193,13 +1258,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := raw.(type) {
 
 	case tea.WindowSizeMsg:
-		if msg.Width != m.width {
-			invalidateMarkdownCache()
-			// Per-block render cache keys include width, so stale entries
-			// would never hit anyway — but they'd accumulate. Wipe on
-			// resize so memory tracks the active terminal width.
-			m.mdCache = map[string]string{}
-		}
+		widthChanged := msg.Width != m.width
 		m.width = msg.Width
 		m.height = msg.Height
 		// Only drives the placeholder's truncation now — the value is
@@ -1207,6 +1266,19 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = max(20, msg.Width-6)
 		m.resizeViewport()
 		m.refreshPeekVP()
+		var cmd tea.Cmd
+		if widthChanged && m.vpReady {
+			// A width change invalidates every rendered block, and a drag
+			// emits a WindowSizeMsg per step — re-running glamour over the
+			// whole conversation on each one froze the TUI for the whole
+			// drag. Debounce: paint plain at the new width immediately
+			// (resizePending forces the cheap build) and let the settle
+			// timer do the cache wipes + styled re-render once, off-loop.
+			m.resizePending = true
+			m.resizeSeq++
+			seq := m.resizeSeq
+			cmd = tea.Tick(resizeDebounceMs*time.Millisecond, func(time.Time) tea.Msg { return resizeSettledMsg{seq: seq} })
+		}
 		m.refreshLog()
 		m.vpReady = true
 		if m.logVPReady {
@@ -1215,7 +1287,38 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
+		return m, cmd
+
+	case contentFlushMsg:
+		m.flushPending = false
+		if m.liveDirty {
+			m.refreshLog()
+		}
 		return m, nil
+
+	case resizeSettledMsg:
+		if msg.seq != m.resizeSeq {
+			return m, nil // superseded by a later width change
+		}
+		m.resizePending = false
+		// Old-width entries would never hit again (width is in every key) —
+		// wipe so memory tracks the active terminal width.
+		invalidateMarkdownCache()
+		m.mdCache = map[string]string{}
+		m.vpCache = map[string]vpCacheEntry{}
+		// Re-render the fleet at the new width on background goroutines:
+		// the current group's prewarm repaints styled when it lands, the
+		// others make tree-nav a cache hit again. Until then refreshLog
+		// stays on the plain build (prewarming[m.cur] > 0).
+		cols := m.logContentCols()
+		cmds := []tea.Cmd{m.startPrewarm(m.cur, cols, false)}
+		for g := range m.loadedGroups {
+			if g != m.cur {
+				cmds = append(cmds, m.startPrewarm(g, cols, false))
+			}
+		}
+		m.refreshLog()
+		return m, tea.Batch(cmds...)
 
 	case spinTickMsg:
 		// Runs before the isAnimating gate so expired notifications stop
@@ -1223,7 +1326,20 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.pruneNotifications()
 		if m.isAnimating() {
 			m.tick++
+			// Flush coalesced live-overlay updates (liveDirty), and keep
+			// repainting while an overlay is visible so its spinner glyph
+			// (baked into the viewport content with m.tick) animates even
+			// between frames. This bounds streaming repaints to the tick
+			// rate instead of the frame rate.
+			if live, _ := m.liveOverlay(); m.liveDirty || live != "" {
+				m.refreshLog()
+			}
 			return m, tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
+		}
+		if m.liveDirty {
+			// Animation just ended with an unflushed overlay repaint —
+			// paint it before the chain stops (nothing else would).
+			m.refreshLog()
 		}
 		m.ticking = false
 		return m, nil
@@ -1443,16 +1559,21 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.groupVer[msg.group]++
 			if msg.group == m.cur {
+				// Styled render happens on a prewarm goroutine (older=true
+				// → the apply re-anchors). Paint the page plain right now so
+				// the user reading at the top isn't staring at a stall —
+				// the whole point of paging up.
+				cmd := m.startPrewarm(msg.group, m.logContentCols(), true)
 				oldTotal := m.vp.TotalLineCount()
 				m.refreshLog()
 				newTotal := m.vp.TotalLineCount()
 				m.vp.SetYOffset(m.vp.YOffset + (newTotal - oldTotal))
 				m.autoFollow = m.vp.AtBottom()
-			} else {
-				// Off-current: invalidate cache; the next switch into this
-				// group will rebuild on demand. Prewarm would race the
-				// next page request, so skip it here.
+				return m, cmd
 			}
+			// Off-current: invalidate cache; the next switch into this
+			// group will rebuild on demand. Prewarm would race the
+			// next page request, so skip it here.
 			return m, nil
 		}
 
@@ -1470,31 +1591,37 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// the version. The older-page branch already does this.
 		m.groupVer[msg.group]++
 		if msg.group == m.cur {
+			// Styled render on a prewarm goroutine — a tail page is up to
+			// historyPageSize events and a synchronous glamour pass here
+			// froze the whole TUI for seconds at startup. Paint plain now
+			// (instant, unstyled), swap in the styled build when the
+			// vpPrewarmMsg lands.
+			cmd := m.startPrewarm(msg.group, m.logContentCols(), false)
 			m.refreshLog()
 			m.refreshSuggestions()
-			// refreshLog populated vpCache synchronously, so the
-			// current group is fully loaded at this point. Off-current
-			// groups get marked when their vpPrewarmMsg lands.
-			m.loadedGroups[msg.group] = true
-			return m, nil
+			return m, cmd
 		}
 		// Off-current group: pre-build the full vpCache entry on a
 		// background goroutine so the first ↑/↓ tree-nav into this
 		// group is a cache hit (no synchronous allBlocks + glamour
 		// chain on the user's keypress).
-		return m, m.prewarmGroupCmd(msg.group, m.logContentCols())
+		return m, m.startPrewarm(msg.group, m.logContentCols(), false)
 
 	case vpPrewarmMsg:
 		// Merge any newly-rendered markdown so peer prewarms / future
-		// live renders can reuse them.
-		for k, v := range msg.mdItems {
-			if _, exists := m.mdCache[k]; exists {
-				continue
+		// live renders can reuse them. Skip when the prewarm ran at a
+		// superseded width — its keys embed the old cols and would only
+		// re-pollute a cache the resize settle just wiped.
+		if msg.entry.cols == m.logContentCols() {
+			for k, v := range msg.mdItems {
+				if _, exists := m.mdCache[k]; exists {
+					continue
+				}
+				if len(m.mdCache) >= mdCacheMax {
+					m.mdCache = map[string]string{}
+				}
+				m.mdCache[k] = v
 			}
-			if len(m.mdCache) >= mdCacheMax {
-				m.mdCache = map[string]string{}
-			}
-			m.mdCache[k] = v
 		}
 		// Staleness check: if events arrived for this group while the
 		// goroutine was running (groupVer bumped), the cached content
@@ -1509,6 +1636,30 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.vpCache[msg.group] = msg.entry
 		}
 		m.loadedGroups[msg.group] = true
+		if m.prewarming[msg.group] > 0 {
+			m.prewarming[msg.group]--
+			if m.prewarming[msg.group] == 0 {
+				delete(m.prewarming, msg.group)
+			}
+		}
+		// Current group: this prewarm carries the styled render its history
+		// page (or a resize settle) deferred — repaint from it. On a cache
+		// hit this is just SetContent; if the entry went stale, the rebuild
+		// runs with the merged mdItems, so it's still mostly cache-hits
+		// rather than a fresh glamour pass. Older pages re-anchor the
+		// scroll position by row delta (the plain paint already anchored
+		// once; styled row counts differ, so anchor again); tail pages
+		// keep refreshLog's bottom-stick.
+		if msg.group == m.cur {
+			if msg.older {
+				oldTotal := m.vp.TotalLineCount()
+				m.refreshLog()
+				m.vp.SetYOffset(m.vp.YOffset + (m.vp.TotalLineCount() - oldTotal))
+				m.autoFollow = m.vp.AtBottom()
+			} else {
+				m.refreshLog()
+			}
+		}
 		return m, nil
 
 	case jobTailMsg:
@@ -1773,10 +1924,33 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			(ev.Group != m.cur || ev.Session != m.activeSession(ev.Group)) {
 			m.markUnread(ev.Group, ev.Session)
 		}
+		var flushCmd tea.Cmd
 		if ev.Group == m.cur {
-			m.refreshLog()
+			switch ev.Event {
+			case "activity", "tool_result", "tool_result_stream", "tool_result_begin", "thinking_begin":
+				// Nothing in the viewport changed: activity drives the
+				// status/hint bars and tree (View reads that state
+				// directly), tool output buffers render only on _done,
+				// and the begin markers just reset buffers. A full
+				// buildLogContent pass here is pure waste — tool_result
+				// alone can arrive hundreds of times per turn.
+			case "stream", "thinking", "thinking_stream":
+				// Live-overlay text: coalesce onto the 80ms spin tick
+				// instead of rebuilding the whole conversation per frame —
+				// these arrive at whatever rate the model streams, and each
+				// repaint is O(conversation). The tick chain is guaranteed
+				// while an overlay is live (isAnimating checks the same
+				// buffers these frames just filled).
+				m.liveDirty = true
+			default:
+				// Structural change (prompt/done/tool/err/…): debounced
+				// repaint. One event paints within contentFlushMs; a
+				// reconnect-replay burst of hundreds collapses into a
+				// handful of rebuilds instead of one per frame.
+				flushCmd = m.markContentDirty()
+			}
 		}
-		return m, m.ensureTicking()
+		return m, tea.Batch(m.ensureTicking(), flushCmd)
 
 	case streamClosedMsg:
 		delete(m.subscribed, msg.group)
@@ -2151,10 +2325,15 @@ func (m *Model) maybePageOlder() tea.Cmd {
 
 // refreshLog rebuilds the viewport content from m.lines + live overlay.
 // Preserves "at bottom → stay at bottom" so streaming output naturally
-// follows the tail unless the user has scrolled up.
+// follows the tail unless the user has scrolled up. While a prewarm
+// goroutine is in flight for the current group, cache misses build plain
+// (raw markdown, uncached) instead of taking a synchronous glamour pass —
+// the prewarm's landing repaints styled.
 func (m *Model) refreshLog() {
+	m.liveDirty = false
 	wasAtBottom := !m.vpReady || m.autoFollow || m.vp.AtBottom()
 	cols := m.logContentCols()
+	plain := m.prewarming[m.cur] > 0 || m.resizePending
 
 	// Skip the cache when a live overlay is active — the overlay text changes
 	// on every stream event and must not be baked into a cached entry. Pending
@@ -2171,15 +2350,19 @@ func (m *Model) refreshLog() {
 			e.expT == m.expandedThoughts && e.expTO == m.expandedToolOuts {
 			content = e.content
 		} else {
-			content = m.buildLogContent(cols)
-			m.vpCache[m.cur] = vpCacheEntry{
-				ver: ver, globalVer: gver, cols: cols,
-				expT: m.expandedThoughts, expTO: m.expandedToolOuts,
-				content: content,
+			content = m.buildLogContent(cols, plain)
+			// A plain build must not be cached: it's a placeholder frame,
+			// and a cache hit on it would suppress the styled repaint.
+			if !plain {
+				m.vpCache[m.cur] = vpCacheEntry{
+					ver: ver, globalVer: gver, cols: cols,
+					expT: m.expandedThoughts, expTO: m.expandedToolOuts,
+					content: content,
+				}
 			}
 		}
 	} else {
-		content = m.buildLogContent(cols)
+		content = m.buildLogContent(cols, plain)
 	}
 
 	m.vp.SetContent(content)
@@ -2191,9 +2374,11 @@ func (m *Model) refreshLog() {
 
 // buildLogContent renders every visible block + the live overlay into one
 // big pre-wrapped string ready for viewport.SetContent. No vertical clipping
-// here — viewport handles it.
-func (m Model) buildLogContent(contentCols int) string {
-	blocks := m.allBlocks(contentCols)
+// here — viewport handles it. plain skips glamour on response blocks (raw
+// markdown text instead) — the cheap fallback used while a prewarm goroutine
+// owns the styled render, so the Update loop never blocks on chroma.
+func (m Model) buildLogContent(contentCols int, plain bool) string {
+	blocks := m.allBlocks(contentCols, plain)
 	out := []string{}
 	for i, b := range blocks {
 		if i > 0 {
@@ -2470,6 +2655,20 @@ func (m Model) isAnimating() bool {
 		return true
 	}
 	return false
+}
+
+// markContentDirty flags the viewport for a rebuild and returns a one-shot
+// flush timer unless one is already pending — the structural-repaint
+// counterpart to the peek pane's peekFlushCmd debounce. contentFlushMsg
+// repaints at most once per contentFlushMs regardless of how many events
+// land inside the window.
+func (m *Model) markContentDirty() tea.Cmd {
+	m.liveDirty = true
+	if m.flushPending {
+		return nil
+	}
+	m.flushPending = true
+	return tea.Tick(contentFlushMs*time.Millisecond, func(time.Time) tea.Msg { return contentFlushMsg{} })
 }
 
 // ensureTicking returns a tea.Tick cmd if animation just began and no tick
@@ -4029,7 +4228,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": m.activeSession(m.cur)})
 }
 
-func (m Model) allBlocks(contentCols int) []renderedBlock {
+func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
 	type src struct {
 		kind, group, text string
 		ts                int64
@@ -4076,12 +4275,16 @@ func (m Model) allBlocks(contentCols int) []renderedBlock {
 		}
 		if s.kind == "response" {
 			// Cache key embeds width: a resize wipes the whole map (see
-			// WindowSizeMsg) so the width prefix is belt-and-braces. The
+			// resizeSettledMsg) so the width prefix is belt-and-braces. The
 			// "\x00" separator can't appear in glamour input or terminal
 			// output, so collisions across (width, text) pairs are nil.
 			key := strconv.Itoa(contentCols) + "\x00" + s.text
 			if cached, ok := m.mdCache[key]; ok {
 				rendered = cached
+			} else if plain {
+				// A prewarm goroutine is producing the styled render; show
+				// the raw text now rather than block on glamour. Not cached
+				// — the styled render must not find a plain entry.
 			} else {
 				rendered = renderMarkdown(s.text, contentCols)
 				// Coarse bound: wipe on overflow rather than LRU. The
