@@ -627,6 +627,16 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		// here would read 0s-2s forever however long the group grinds.
 		badge = " " + fmtElapsedShort(time.Since(act.turnSince))
 	}
+	// Folded job rows (the default — enter on the row unfolds them) surface
+	// as a gray count right after the name — "ghost (2)" — so background
+	// work stays noticeable without a row per job. Unlike the badge, which
+	// is right-aligned, the count travels with the name.
+	cnt := ""
+	if !isJob {
+		if n := m.foldedJobs(r.group, r.session); n > 0 {
+			cnt = fmt.Sprintf(" (%d)", n)
+		}
+	}
 	if badge != "" {
 		badgeW = lipgloss.Width(badge)
 		w -= badgeW
@@ -701,12 +711,17 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		dot = "● "
 		dotColor = cPink
 	}
+	// One padded field holds name + count so the count sits right after the
+	// name (padding comes last); the byte split point lets the non-hover
+	// path gray just the count.
+	field := pad(name+cnt, w)
+	split := min(len(name), len(field))
 	if hov {
 		// Highlight row: amber background, black foreground. Padded to the
 		// same fixed width on every row — the background is the selection
 		// marker, and a width that varied with branch depth or badge glyphs
 		// read as a rendering glitch.
-		txt := " " + r.branch + dot + pad(name, w) + badge
+		txt := " " + r.branch + dot + field + badge
 		if pw := lipgloss.Width(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
@@ -722,7 +737,10 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if isCur || unread {
 		style = style.Bold(true)
 	}
-	parts += style.Render(pad(name, w))
+	parts += style.Render(field[:split])
+	if split < len(field) {
+		parts += lipgloss.NewStyle().Foreground(cGray).Render(field[split:])
+	}
 	if badge != "" {
 		parts += lipgloss.NewStyle().Foreground(badgeColor).Bold(true).Render(badge)
 	}

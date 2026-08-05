@@ -99,6 +99,7 @@ func shellViewModel(t *testing.T, jobs []JobInfo) Model {
 		"ghost": {Running: true, Jobs: jobs},
 	}
 	m.cur = "main"
+	m.jobsOpen[sessKey("ghost", "")] = true // job rows are folded by default
 	newTerm := func(cols, rows int) *vt.Emulator {
 		term := vt.NewEmulator(cols, rows)
 		t.Cleanup(func() { _ = term.Close() })

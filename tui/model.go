@@ -538,6 +538,13 @@ type Model struct {
 	jobDoneAt     map[string]time.Time
 	jobsPrimed    map[string]bool
 
+	// jobsOpen — conversations whose job rows are unfolded in the tree,
+	// keyed by sessKey(group, session). Absent = folded, the default: job
+	// rows stay hidden until the user opens the conversation row with
+	// enter (enter again folds it back). A folded row with jobs shows a
+	// ⚙N badge instead, so background work stays noticeable.
+	jobsOpen map[string]bool
+
 	// Live notifications (event "notification"): rendered inline in the
 	// status-bar row (renderNotifyInline) for notifyLingerMs each, newest
 	// shown, extras collapsed into a +N suffix, visible list capped at
@@ -729,6 +736,7 @@ func newModel(sock string, ctxWindow int) Model {
 		jobStatusSeen: map[string]string{},
 		jobDoneAt:     map[string]time.Time{},
 		jobsPrimed:    map[string]bool{},
+		jobsOpen:      map[string]bool{},
 	}
 }
 
@@ -2928,11 +2936,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while
-			// browsing the others. Empty enter exits tree mode (matches
-			// the old behaviour so it's not a worse default for someone
-			// who only entered tree to switch agents).
+			// browsing the others. Empty enter on a conversation with job
+			// rows toggles their fold (jobs are folded by default); with
+			// nothing to unfold it exits tree mode (matches the old
+			// behaviour so it's not a worse default for someone who only
+			// entered tree to switch agents).
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
+				if m.toggleJobFold() {
+					return m, nil
+				}
 				m.exitTree()
 				return m, nil
 			}
@@ -3238,6 +3251,10 @@ func (r treeRow) id() treeRow { return treeRow{group: r.group, session: r.sessio
 
 func jobKey(g, id string) string { return g + "\x00" + id }
 
+// sessKey identifies one conversation (group + session) — the unit job rows
+// fold under in the tree.
+func sessKey(g, sess string) string { return g + "\x00" + sess }
+
 // processJobTransitions diffs the incoming state frame's job lists against
 // what we last saw, opening a blink-linger window for each job observed
 // finishing. First sight of a group's list only primes the baseline — a
@@ -3298,6 +3315,13 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 			delete(m.jobDoneAt, k)
 		}
 	}
+	// Fold state follows the group's lifetime, like the tracking maps.
+	for k := range m.jobsOpen {
+		g, _, _ := strings.Cut(k, "\x00")
+		if _, ok := groups[g]; !ok {
+			delete(m.jobsOpen, k)
+		}
+	}
 }
 
 // jobVisible reports whether a job row belongs in the tree: running jobs
@@ -3317,6 +3341,49 @@ func (m Model) jobBlinking(g, id string) bool {
 	return ok && time.Since(t) < jobLingerMs*time.Millisecond
 }
 
+// foldedJobs reports how many job rows a folded conversation is hiding.
+// Zero for unfolded conversations — the rows themselves are visible then,
+// so there is nothing to badge.
+func (m Model) foldedJobs(g, sess string) (n int) {
+	if m.jobsOpen[sessKey(g, sess)] {
+		return 0
+	}
+	for _, j := range m.groups[g].Jobs {
+		if j.Session == sess && m.jobVisible(g, j) {
+			n++
+		}
+	}
+	return
+}
+
+// toggleJobFold handles empty-enter in the tree: unfold/fold the hovered
+// conversation's job rows. Enter on a job row folds the list it belongs to
+// and re-anchors the cursor on the conversation row. Returns false when the
+// hovered conversation has no job rows to unfold — the caller falls through
+// to enter's older meaning (exit tree mode).
+func (m *Model) toggleJobFold() bool {
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) {
+		return false
+	}
+	r := rows[m.treeIdx]
+	key := sessKey(r.group, r.session)
+	if r.job != "" {
+		delete(m.jobsOpen, key)
+		m.selectTreeRow(treeRow{group: r.group, session: r.session})
+		return true
+	}
+	if m.jobsOpen[key] {
+		delete(m.jobsOpen, key)
+		return true
+	}
+	if m.foldedJobs(r.group, r.session) == 0 {
+		return false
+	}
+	m.jobsOpen[key] = true
+	return true
+}
+
 // treeRows flattens the tree: main, then main's default-session jobs, named
 // sessions (each with its own jobs one level deeper), and the other groups
 // as main's children — each group repeating the same shape. Session lists
@@ -3326,7 +3393,12 @@ func (m Model) jobBlinking(g, id string) bool {
 func (m Model) treeRows() []treeRow {
 	order := m.treeOrder()
 	rows := []treeRow{}
+	// Job rows only exist while their conversation is unfolded (enter on
+	// the row toggles it); folded conversations render a ⚙N badge instead.
 	jobsOf := func(g, sess string) []JobInfo {
+		if !m.jobsOpen[sessKey(g, sess)] {
+			return nil
+		}
 		var out []JobInfo
 		for _, j := range m.groups[g].Jobs {
 			if j.Session == sess && m.jobVisible(g, j) {

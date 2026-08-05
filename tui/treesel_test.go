@@ -15,6 +15,10 @@ func treeModel(t *testing.T, groups map[string]GroupInfo, g, sess, job string) M
 	m.groups = groups
 	m.cur = g
 	m.focus = focusTree
+	if job != "" {
+		// Job rows are folded by default; unfold the target conversation.
+		m.jobsOpen[sessKey(g, sess)] = true
+	}
 	rows := m.treeRows()
 	idx := -1
 	for i, r := range rows {
@@ -55,6 +59,7 @@ func TestCursorSurvivesLingerExpiry(t *testing.T) {
 	}
 	m := treeModel(t, groups, "beta", "", "")
 	// Open alpha's linger window so its job row is in the tree, above beta.
+	m.jobsOpen[sessKey("alpha", "")] = true
 	m.jobDoneAt[jobKey("alpha", done.ID)] = time.Now()
 	m.normalizeTreeCursor()
 	if r := m.treeRows()[m.treeIdx]; r.group != "beta" {

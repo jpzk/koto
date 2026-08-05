@@ -18,6 +18,7 @@ func hoverJob(t *testing.T, g, id string) Model {
 	}
 	m.cur = g
 	m.focus = focusTree
+	m.jobsOpen[sessKey(g, "")] = true // job rows are folded by default
 	rows := m.treeRows()
 	idx := -1
 	for i, r := range rows {
