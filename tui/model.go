@@ -679,6 +679,15 @@ type Model struct {
 	// authoritative total, since ctl- and scheduler-enqueued prompts never
 	// pass through this client.
 	pending map[string][]pendingPrompt
+
+	// sendInFlight counts Send RPCs dispatched from this TUI but not yet
+	// acknowledged, per group, and sendAckAt is when the last one was
+	// acknowledged. Both exist only to gate reconcilePending: until the daemon
+	// has actually accepted a send, its Queued count cannot include it, and a
+	// state frame computed before the send would look like proof the pending
+	// row is a phantom. See reconcilePending.
+	sendInFlight map[string]int
+	sendAckAt    map[string]time.Time
 }
 
 // pendingPrompt is one queued-but-not-started send: the text plus the chat
@@ -789,6 +798,8 @@ func newModel(sock string, ctxWindow int) Model {
 		histNav:       map[string]int{},
 		histDraft:     map[string]string{},
 		pending:       map[string][]pendingPrompt{},
+		sendInFlight:  map[string]int{},
+		sendAckAt:     map[string]time.Time{},
 		session:       sessions,
 		turnSession:   map[string]string{},
 		peekVP:        pvp,
@@ -865,6 +876,63 @@ func (m *Model) popPending(g, session, msg string) {
 		return
 	}
 	m.pending[g] = p[1:]
+}
+
+// pendingGrace is how long after a Send is acknowledged reconcilePending keeps
+// its hands off that group. WatchState frames are recomputed at 1Hz, so one
+// computed just before our send can be delivered just after its ack; without
+// the grace window that stale frame would erase a legitimate ⏳ row for the
+// blink before the next frame restores it.
+const pendingGrace = 3 * time.Second
+
+// reconcilePending trims each group's optimistic ⏳ backlog down to the
+// daemon's authoritative Queued count.
+//
+// popPending alone is not enough to keep the two in sync. It pops only on an
+// exact (session, text) match at the head, and only when a `prompt` event
+// actually arrives — so any send that is enqueued and then never started
+// strands its row for the life of the process: a daemon restart (the send
+// queue in queue.go is in-memory and dies with it), a /stop or /restart while
+// something sat queued, a /clear. The row is unfalsifiable from the client
+// side; the daemon is the only thing that knows the queue is empty.
+//
+// Queued counts the waiting backlog from every source (ctl, scheduler, other
+// TUIs) and excludes the in-flight turn — the same thing pending tracks for
+// our own sends — so len(pending) > Queued means we are holding rows the
+// daemon does not have. Trim from the head: popPending consumes from the
+// front, so a stranded entry sits at the head and blocks every later pop
+// behind it, which is how one phantom turns into a stuck backlog.
+func (m *Model) reconcilePending(groups map[string]GroupInfo) bool {
+	changed := false
+	for g, p := range m.pending {
+		if len(p) == 0 {
+			delete(m.pending, g)
+			continue
+		}
+		// A send of ours is still in flight (or just landed): the daemon has
+		// not necessarily counted it yet, so its Queued is not yet evidence.
+		if m.sendInFlight[g] > 0 || time.Since(m.sendAckAt[g]) < pendingGrace {
+			continue
+		}
+		gi, ok := groups[g]
+		if !ok {
+			// Group is gone from the daemon's state entirely (destroyed
+			// elsewhere); nothing can ever start these turns.
+			delete(m.pending, g)
+			changed = true
+			continue
+		}
+		if len(p) <= gi.Queued {
+			continue
+		}
+		if gi.Queued == 0 {
+			delete(m.pending, g)
+		} else {
+			m.pending[g] = p[len(p)-gi.Queued:]
+		}
+		changed = true
+	}
+	return changed
 }
 
 // pushHistory appends msg to the per-group prompt ring used by the Ctrl+R
@@ -1398,6 +1466,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.groups = msg.groups
 		if msg.hasGlobalTok {
 			m.globalTokRate = msg.globalTok
+		}
+		// The daemon just told us what is actually queued; drop any optimistic
+		// ⏳ rows it doesn't account for (see reconcilePending).
+		if m.reconcilePending(msg.groups) {
+			m.refreshLog()
 		}
 		// The open shell pane may be waiting on this refresh: a chase that
 		// fired while the focused group's VM wasn't (yet) marked Running
@@ -2726,6 +2799,14 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		}
 		return listCmd(m.sock)
 	case "send":
+		// Ack (either way): the daemon has now seen this send, so its Queued
+		// count is authoritative again for this group.
+		if n := m.sendInFlight[msg.group]; n > 1 {
+			m.sendInFlight[msg.group] = n - 1
+		} else {
+			delete(m.sendInFlight, msg.group)
+		}
+		m.sendAckAt[msg.group] = time.Now()
 		if msg.err != nil {
 			// Enqueue was rejected (queue full) — the optimistic pending row we
 			// added never made it into the daemon's queue, so it'd never get a
@@ -4224,6 +4305,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// idle group this is a sub-second "sending…" flash; for a busy group it's
 	// the visible backlog of everything typed ahead.
 	m.pending[m.cur] = append(m.pending[m.cur], pendingPrompt{session: m.activeSession(m.cur), text: v})
+	m.sendInFlight[m.cur]++
 	m.refreshLog()
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": m.activeSession(m.cur)})
 }
