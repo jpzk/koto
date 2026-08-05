@@ -110,6 +110,38 @@ func TestResCPUPct(t *testing.T) {
 	}
 }
 
+// resLiveCPUPct is the per-call window behind the fleet view's live CPU
+// column: first call seeds and returns the fallback, later calls average
+// over the span since the previous call, sub-second re-reads return the
+// cached value, and a ticks reset (VM restart) reports 0, not a spike.
+func TestResLiveCPUPct(t *testing.T) {
+	g := "livetest"
+	resLiveForget(g)
+	defer resLiveForget(g)
+	base := time.Now()
+
+	if got := resLiveCPUPct(g, 1000, base, 42); got != 42 {
+		t.Errorf("first call = %v, want fallback 42", got)
+	}
+	// 500 ticks (5s of CPU at 100Hz) over 5s = 100% of one core.
+	if got := resLiveCPUPct(g, 1500, base.Add(5*time.Second), 42); got < 99 || got > 101 {
+		t.Errorf("second call = %v, want ~100", got)
+	}
+	// A lockstep re-read 200ms later must return the cached value, not a
+	// noise-dominated sub-second average.
+	if got := resLiveCPUPct(g, 1500, base.Add(5200*time.Millisecond), 42); got < 99 || got > 101 {
+		t.Errorf("sub-second re-read = %v, want the cached ~100", got)
+	}
+	// Counter reset (VMM restart): one window of 0, never negative.
+	if got := resLiveCPUPct(g, 10, base.Add(10*time.Second), 42); got != 0 {
+		t.Errorf("after counter reset = %v, want 0", got)
+	}
+	// And the window after the reset is live again: 100 ticks over 5s = 20%.
+	if got := resLiveCPUPct(g, 110, base.Add(15*time.Second), 42); got < 19 || got > 21 {
+		t.Errorf("post-reset window = %v, want ~20", got)
+	}
+}
+
 // The ring must stay bounded so a long-lived daemon cannot grow it without
 // limit, and must retain the NEWEST samples.
 func TestResRingBounded(t *testing.T) {

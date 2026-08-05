@@ -266,6 +266,7 @@ func resSweep() {
 	resGuestMu.Unlock()
 	for _, g := range gone {
 		resForgetAlert(g)
+		resLiveForget(g)
 	}
 }
 
@@ -464,6 +465,66 @@ func resGrowth(samples []resSample) (bytesPerHour int64, spanSeconds int64) {
 	return int64(float64(delta) / span * 3600), int64(span)
 }
 
+// ---- live CPU (per-call window) ---------------------------------------------
+
+// resLiveCPU is the last on-demand /proc reading per group, kept so
+// resourcesSnapshot can report CPU over the window since the PREVIOUS
+// snapshot call rather than the collector's 30s sweep. With the TUI polling
+// every 5s that makes the fleet view's CPU column behave like linux-top,
+// where the refresh interval IS the averaging window; before this, the
+// column lagged a busy VM by up to a sweep (a turn's whole burst showed up
+// half a minute late). The sweep ring stays authoritative for growth rate
+// and thresholds — this state only sharpens the snapshot's point-in-time
+// CPU/RSS figures, and every consumer of the snapshot (gRPC, ctl plane,
+// threshold check) shares it, so the window is "since anyone last looked".
+type resLiveCPU struct {
+	at    time.Time
+	ticks int64
+	pct   float64
+}
+
+var (
+	resLiveMu  sync.Mutex
+	resLiveMap = map[string]resLiveCPU{}
+)
+
+// resLiveCPUPct folds one fresh (ticks, now) reading into g's live state and
+// returns the CPU percentage (of ONE core) over the span since the previous
+// reading. First call has no span, so it seeds the state and returns
+// fallback (the ring's sweep-based average — the best answer available).
+// Sub-second re-reads (two clients polling in lockstep) return the cached
+// value rather than dividing by a noise-dominated span; a ticks reset (VM
+// restart) reports 0 for one window rather than a negative spike.
+func resLiveCPUPct(g string, ticks int64, now time.Time, fallback float64) float64 {
+	resLiveMu.Lock()
+	defer resLiveMu.Unlock()
+	prev, ok := resLiveMap[g]
+	if !ok {
+		resLiveMap[g] = resLiveCPU{at: now, ticks: ticks, pct: fallback}
+		return fallback
+	}
+	span := now.Sub(prev.at).Seconds()
+	if span < 1 {
+		return prev.pct
+	}
+	pct := 0.0
+	if dt := ticks - prev.ticks; dt >= 0 {
+		// _SC_CLK_TCK is 100 on every Linux/amd64 target this daemon runs on.
+		pct = float64(dt) / 100.0 / span * 100.0
+	}
+	resLiveMap[g] = resLiveCPU{at: now, ticks: ticks, pct: pct}
+	return pct
+}
+
+// resLiveForget drops a group's live-CPU state (destroyed group, or its VM
+// stopped — the next boot's ticks start from zero, and seeding fresh beats
+// one window of restart-suppressed 0).
+func resLiveForget(g string) {
+	resLiveMu.Lock()
+	delete(resLiveMap, g)
+	resLiveMu.Unlock()
+}
+
 // resCPUPct returns the FC process's CPU usage across the last two samples,
 // as a percentage of ONE core (so a 4-vCPU VM can legitimately report 400).
 // A restart resets the counter, so a negative delta reports 0 rather than a
@@ -585,8 +646,9 @@ func resourcesCtlResp() resourcesResp {
 // short enough not to bloat the agent's context with noise digits.
 func roundPct(v float64) float64 { return math.Round(v*10) / 10 }
 
-// resourcesSnapshot builds the full report. Pure reads of cached samples plus
-// config lookups — it never touches a guest and never boots a VM.
+// resourcesSnapshot builds the full report. Reads of cached samples, config
+// lookups, and (for running VMs) one fresh /proc read per group for live
+// CPU/RSS — all host-side; it never touches a guest and never boots a VM.
 func resourcesSnapshot() ([]groupResources, hostResources) {
 	names := []string{}
 	for g := range readGroups() {
@@ -627,6 +689,17 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 		}
 		gr.GrowthPerHour, gr.GrowthSpanSecs = resGrowth(samples)
 		gr.CPUPct = resCPUPct(samples)
+		// Live sharpening: with the VM up, read /proc now and report CPU over
+		// the since-last-call window (top semantics; see resLiveCPUPct) and
+		// the RSS of this instant instead of the last sweep's. Still strictly
+		// host-side — /proc/<pid> is the VMM process, never a guest exec.
+		if pid := fcPidOf(g); pid > 0 {
+			ticks, rss := procCPURSS(pid)
+			gr.RSSBytes = rss
+			gr.CPUPct = resLiveCPUPct(g, ticks, time.Now(), gr.CPUPct)
+		} else {
+			resLiveForget(g)
+		}
 
 		host.AllocTotalBytes += gr.AllocBytes
 		host.ProvisionedBytes += declared
