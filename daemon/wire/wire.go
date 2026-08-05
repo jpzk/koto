@@ -88,6 +88,9 @@ type GroupInfo struct {
 	// each attributed to the chat session that launched it. See koto.proto
 	// JobInfo and daemon/jobs.go.
 	Jobs []JobInfo `json:"jobs,omitempty"`
+	// TokPerSec is this group's output-token throughput over the daemon's
+	// trailing window (daemon/tokrate.go). 0 = idle.
+	TokPerSec float64 `json:"tok_per_sec,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors

@@ -105,6 +105,11 @@ type watchClosedMsg struct{ err error }
 type listMsg struct {
 	groups map[string]GroupInfo
 	err    error
+	// globalTok is the fleet-wide tok/s (StateFrame.global_tok_per_sec).
+	// Only WatchState frames carry it — hasGlobalTok gates the store so a
+	// List-sourced msg (no global field on ListResp) doesn't zero it.
+	globalTok    float64
+	hasGlobalTok bool
 }
 type historyMsg struct {
 	group  string
@@ -545,6 +550,11 @@ type Model struct {
 	// after its name instead, so background work stays noticeable.
 	jobsOpen map[string]bool
 
+	// globalTokRate is the fleet-wide tok/s pushed with every WatchState
+	// frame (per-group rates ride GroupInfo.TokPerSec). Rendered in the
+	// status bar's top-right chip alongside the current group's rate.
+	globalTokRate float64
+
 	// Live notifications (event "notification"): rendered inline in the
 	// status-bar row (renderNotifyInline) for notifyLingerMs each, newest
 	// shown, extras collapsed into a +N suffix, visible list capped at
@@ -920,7 +930,8 @@ func listCmd(sock string) tea.Cmd {
 					})
 				}
 			}
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs}
+			tokPS, _ := mp["tok_per_sec"].(float64)
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS}
 		}
 		return listMsg{groups: out}
 	}
@@ -1155,7 +1166,7 @@ func startWatchState() {
 				prog.Send(watchClosedMsg{err: err})
 				return
 			}
-			prog.Send(listMsg{groups: stateGroups(f)})
+			prog.Send(listMsg{groups: stateGroups(f), globalTok: f.GetGlobalTokPerSec(), hasGlobalTok: true})
 		}
 	}()
 }
@@ -1269,6 +1280,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.processJobTransitions(msg.groups)
 		m.groups = msg.groups
+		if msg.hasGlobalTok {
+			m.globalTokRate = msg.globalTok
+		}
 		// The open shell pane may be waiting on this refresh: a chase that
 		// fired while the focused group's VM wasn't (yet) marked Running
 		// dropped the pane rather than boot the VM (retargetShell) — e.g.

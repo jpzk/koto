@@ -367,15 +367,16 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 	out := map[string]GroupInfo{}
 	for g, gi := range f.GetGroups() {
 		out[g] = GroupInfo{
-			Port:     int(gi.GetPort()),
-			Running:  gi.GetRunning(),
-			Provider: gi.GetProvider(),
-			Model:    gi.GetModel(),
-			Effort:   gi.GetEffort(),
-			Stalled:  gi.GetStalled(),
-			Queued:   int(gi.GetQueued()),
-			Sessions: gi.GetSessions(),
-			Jobs:     pbToJobs(gi.GetJobs()),
+			Port:      int(gi.GetPort()),
+			Running:   gi.GetRunning(),
+			Provider:  gi.GetProvider(),
+			Model:     gi.GetModel(),
+			Effort:    gi.GetEffort(),
+			Stalled:   gi.GetStalled(),
+			Queued:    int(gi.GetQueued()),
+			Sessions:  gi.GetSessions(),
+			Jobs:      pbToJobs(gi.GetJobs()),
+			TokPerSec: gi.GetTokPerSec(),
 		}
 	}
 	return out

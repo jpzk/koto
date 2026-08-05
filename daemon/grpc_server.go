@@ -67,14 +67,15 @@ func toPBEvent(ev Event) *pb.Event {
 
 func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 	out := &pb.GroupInfo{
-		Port:     int32(gi.Port),
-		Running:  gi.Running,
-		Provider: gi.Provider,
-		Model:    gi.Model,
-		Effort:   gi.Effort,
-		Stalled:  gi.Stalled,
-		Queued:   int32(gi.Queued),
-		Sessions: gi.Sessions,
+		Port:      int32(gi.Port),
+		Running:   gi.Running,
+		Provider:  gi.Provider,
+		Model:     gi.Model,
+		Effort:    gi.Effort,
+		Stalled:   gi.Stalled,
+		Queued:    int32(gi.Queued),
+		Sessions:  gi.Sessions,
+		TokPerSec: gi.TokPerSec,
 	}
 	for _, j := range gi.Jobs {
 		out.Jobs = append(out.Jobs, toPBJobInfo(j))

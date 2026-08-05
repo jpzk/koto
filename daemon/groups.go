@@ -260,18 +260,20 @@ func stopGroup(g string) {
 // ---- list / destroy / restart --------------------------------------------
 
 func listGroups() map[string]GroupInfo {
+	rates, _ := tokRates()
 	out := map[string]GroupInfo{}
 	for g, p := range readGroups() {
 		out[g] = GroupInfo{
-			Port:     p,
-			Running:  fcRunning(g),
-			Provider: groupProviderName(g),
-			Model:    groupModelName(g),
-			Effort:   groupEffortName(g),
-			Stalled:  isStalled(g),
-			Queued:   queueDepth(g),
-			Sessions: listSessions(g),
-			Jobs:     jobsSnapshot(g),
+			Port:      p,
+			Running:   fcRunning(g),
+			Provider:  groupProviderName(g),
+			Model:     groupModelName(g),
+			Effort:    groupEffortName(g),
+			Stalled:   isStalled(g),
+			Queued:    queueDepth(g),
+			Sessions:  listSessions(g),
+			Jobs:      jobsSnapshot(g),
+			TokPerSec: rates[g],
 		}
 	}
 	return out

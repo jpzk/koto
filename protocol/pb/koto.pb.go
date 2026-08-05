@@ -749,7 +749,11 @@ type GroupInfo struct {
 	// daemon's periodically refreshed mirror (see daemon/jobs.go) — the tree's
 	// per-session job rows are driven by this. Meta only; output rides the
 	// JobLogs RPC.
-	Jobs          []*JobInfo `protobuf:"bytes,9,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	Jobs []*JobInfo `protobuf:"bytes,9,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	// Output-token throughput over the daemon's trailing window (currently
+	// 60s), measured daemon-side by the proxy as requests retire (see
+	// daemon/tokrate.go). 0 = idle.
+	TokPerSec     float64 `protobuf:"fixed64,10,opt,name=tok_per_sec,json=tokPerSec,proto3" json:"tok_per_sec,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -845,6 +849,13 @@ func (x *GroupInfo) GetJobs() []*JobInfo {
 		return x.Jobs
 	}
 	return nil
+}
+
+func (x *GroupInfo) GetTokPerSec() float64 {
+	if x != nil {
+		return x.TokPerSec
+	}
+	return 0
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -1529,11 +1540,15 @@ func (x *SubscribeReq) GetSinceSeq() uint64 {
 
 // One WatchState frame: the same groups map List returns, pushed on change.
 type StateFrame struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Groups        map[string]*GroupInfo  `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Ts            float64                `protobuf:"fixed64,2,opt,name=ts,proto3" json:"ts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Groups map[string]*GroupInfo  `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Ts     float64                `protobuf:"fixed64,2,opt,name=ts,proto3" json:"ts,omitempty"`
+	// Fleet-wide output-token throughput (same window as
+	// GroupInfo.tok_per_sec; ≈ the sum over groups, computed daemon-side
+	// from the same samples).
+	GlobalTokPerSec float64 `protobuf:"fixed64,3,opt,name=global_tok_per_sec,json=globalTokPerSec,proto3" json:"global_tok_per_sec,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *StateFrame) Reset() {
@@ -1576,6 +1591,13 @@ func (x *StateFrame) GetGroups() map[string]*GroupInfo {
 func (x *StateFrame) GetTs() float64 {
 	if x != nil {
 		return x.Ts
+	}
+	return 0
+}
+
+func (x *StateFrame) GetGlobalTokPerSec() float64 {
+	if x != nil {
+		return x.GlobalTokPerSec
 	}
 	return 0
 }
@@ -4258,7 +4280,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x03msg\x18\x03 \x01(\tR\x03msg\x12\x0e\n" +
 	"\x02ts\x18\x04 \x01(\x01R\x02ts\x12\x1c\n" +
 	"\tsubsystem\x18\x05 \x01(\tR\tsubsystem\x12\x14\n" +
-	"\x05group\x18\x06 \x01(\tR\x05group\"\xf4\x01\n" +
+	"\x05group\x18\x06 \x01(\tR\x05group\"\x94\x02\n" +
 	"\tGroupInfo\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1a\n" +
@@ -4268,7 +4290,9 @@ const file_koto_proto_rawDesc = "" +
 	"\astalled\x18\x06 \x01(\bR\astalled\x12\x16\n" +
 	"\x06queued\x18\a \x01(\x05R\x06queued\x12\x1a\n" +
 	"\bsessions\x18\b \x03(\tR\bsessions\x12!\n" +
-	"\x04jobs\x18\t \x03(\v2\r.koto.JobInfoR\x04jobs\"\xb8\x01\n" +
+	"\x04jobs\x18\t \x03(\v2\r.koto.JobInfoR\x04jobs\x12\x1e\n" +
+	"\vtok_per_sec\x18\n" +
+	" \x01(\x01R\ttokPerSec\"\xb8\x01\n" +
 	"\aJobInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\asession\x18\x02 \x01(\tR\asession\x12\x16\n" +
@@ -4318,11 +4342,12 @@ const file_koto_proto_rawDesc = "" +
 	"\bWatchReq\"A\n" +
 	"\fSubscribeReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x1b\n" +
-	"\tsince_seq\x18\x02 \x01(\x04R\bsinceSeq\"\x9e\x01\n" +
+	"\tsince_seq\x18\x02 \x01(\x04R\bsinceSeq\"\xcb\x01\n" +
 	"\n" +
 	"StateFrame\x124\n" +
 	"\x06groups\x18\x01 \x03(\v2\x1c.koto.StateFrame.GroupsEntryR\x06groups\x12\x0e\n" +
-	"\x02ts\x18\x02 \x01(\x01R\x02ts\x1aJ\n" +
+	"\x02ts\x18\x02 \x01(\x01R\x02ts\x12+\n" +
+	"\x12global_tok_per_sec\x18\x03 \x01(\x01R\x0fglobalTokPerSec\x1aJ\n" +
 	"\vGroupsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12%\n" +
 	"\x05value\x18\x02 \x01(\v2\x0f.koto.GroupInfoR\x05value:\x028\x01\"P\n" +

@@ -143,7 +143,9 @@ func stateHash(gs map[string]GroupInfo) string {
 	var b strings.Builder
 	for _, g := range names {
 		gi := gs[g]
-		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%s", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, strings.Join(gi.Sessions, ","))
+		// tok/s is hashed at integer resolution: enough for the display,
+		// while sub-token jitter doesn't push a frame every tick forever.
+		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%.0f|%s", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, gi.TokPerSec, strings.Join(gi.Sessions, ","))
 		for _, j := range gi.Jobs {
 			// id/status/rc/size cover every observable transition (a running
 			// job's growing output bumps size, so watchers see progress).
@@ -159,7 +161,8 @@ func toStateFrame(gs map[string]GroupInfo) *pb.StateFrame {
 	for g, gi := range gs {
 		groups[g] = toPBGroupInfo(gi)
 	}
-	return &pb.StateFrame{Groups: groups, Ts: float64(time.Now().UnixNano()) / 1e9}
+	_, global := tokRates()
+	return &pb.StateFrame{Groups: groups, Ts: float64(time.Now().UnixNano()) / 1e9, GlobalTokPerSec: global}
 }
 
 func stateWatchLoop() {

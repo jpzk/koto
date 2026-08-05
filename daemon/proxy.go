@@ -248,6 +248,13 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	if reqID == "" {
 		reqID = hdrs.Get("Request-Id")
 	}
+	// Feed the tok/s tracker: this is the one choke point every retired
+	// request passes (stream + non-stream, both providers — usage is
+	// already normalized to the Anthropic shape here).
+	if v, ok := anyAsInt(usage["output_tokens"]); ok && v > 0 {
+		now := time.Now()
+		tokRateAdd(group, now.Add(-dur), now, v)
+	}
 	rec := map[string]any{
 		"ts":         float64(time.Now().UnixNano()) / 1e9,
 		"dur_ms":     int(dur / time.Millisecond),

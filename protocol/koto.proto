@@ -271,6 +271,10 @@ message GroupInfo {
   // per-session job rows are driven by this. Meta only; output rides the
   // JobLogs RPC.
   repeated JobInfo jobs = 9;
+  // Output-token throughput over the daemon's trailing window (currently
+  // 60s), measured daemon-side by the proxy as requests retire (see
+  // daemon/tokrate.go). 0 = idle.
+  double tok_per_sec = 10;
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -360,6 +364,10 @@ message SubscribeReq {
 message StateFrame {
   map<string, GroupInfo> groups = 1;
   double ts                     = 2;
+  // Fleet-wide output-token throughput (same window as
+  // GroupInfo.tok_per_sec; ≈ the sum over groups, computed daemon-side
+  // from the same samples).
+  double global_tok_per_sec = 3;
 }
 
 message HistoryReq {

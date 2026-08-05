@@ -52,6 +52,9 @@ type GroupInfo struct {
 	// attributed to the chat session that launched each. Drives the tree's
 	// job rows and the hover peek pane.
 	Jobs []JobInfo
+	// TokPerSec is the group's output-token throughput over the daemon's
+	// trailing window, measured daemon-side (daemon/tokrate.go). 0 = idle.
+	TokPerSec float64
 }
 
 // JobInfo is one background job in a group's guest (koto.proto JobInfo).
