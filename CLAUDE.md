@@ -221,6 +221,7 @@ verb list.
   value drops `resClearMargin` (5 points) below its threshold — without that
   hysteresis a value parked at 80.1% re-notifies every interval and trains the
   operator to ignore the banner.
+- **tok/s is a daemon-measured throughput metric, per group and global** (`daemon/tokrate.go`). The proxy's `logMetric` — the one point every retired request passes, stream + non-stream, both providers — records each request's output tokens over its wall-clock span; rates are averaged over a trailing 60s window with each sample spread across its span (a long request reads as its true average rate, not a completion-time spike; the trade: tokens only land when the request retires, since Anthropic's SSE carries usage only at the end). Per-group on `GroupInfo.tok_per_sec` (List + WatchState), fleet-wide on `StateFrame.global_tok_per_sec`; `stateHash` quantizes the rate to integers so watchers get frames while it moves/decays but idle jitter pushes nothing. The TUI status bar's top right always shows both (`42 tok/s · Σ 100`, gray — ambient counter, not an alert).
 - **Every error-level daemon-log line is also a `high`-severity operator
   notification** (`daemon/logalert.go`). `emitLogG` is the single choke point
   for all daemon log lines — global and group-attributed — and forwards
