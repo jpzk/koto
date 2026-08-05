@@ -1,8 +1,9 @@
 package main
 
 // treefold_test.go — job rows are folded under their conversation by
-// default; empty enter on the row toggles the fold, and only falls through
-// to its old exit-tree meaning when there is nothing to unfold.
+// default; → on the row unfolds them, ← folds them (from a job row, ← folds
+// the list and re-anchors on the conversation). Enter keeps its old meaning
+// untouched: submit a draft, or exit tree mode when empty.
 
 import (
 	"strings"
@@ -11,9 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func pressEnter(t *testing.T, m Model) Model {
+func pressKey(t *testing.T, m Model, k tea.KeyType) Model {
 	t.Helper()
-	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm, _ := m.Update(tea.KeyMsg{Type: k})
 	return nm.(Model)
 }
 
@@ -67,37 +68,51 @@ func TestFoldedCountRendersNextToName(t *testing.T) {
 	}
 }
 
-// Enter on the conversation row unfolds its jobs, enter again folds them —
-// tree mode stays focused throughout (enter only exits with nothing to do).
-func TestEnterTogglesJobFold(t *testing.T) {
+// → on the conversation row unfolds its jobs, ← folds them back — tree mode
+// stays focused throughout.
+func TestArrowsFoldAndUnfoldJobs(t *testing.T) {
 	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
 	m := treeModel(t, map[string]GroupInfo{
 		"ghost": {Running: true, Jobs: []JobInfo{job}},
 	}, "ghost", "", "")
 
-	m = pressEnter(t, m)
+	m = pressKey(t, m, tea.KeyRight)
 	if n := jobRowCount(m); n != 1 {
 		t.Fatalf("%d job rows after unfold, want 1", n)
 	}
 	if m.focus != focusTree {
-		t.Fatal("unfold must not exit tree mode")
+		t.Fatal("unfold must not leave tree mode")
 	}
 	if n := m.foldedJobs("ghost", ""); n != 0 {
 		t.Fatalf("foldedJobs reports %d while unfolded, want 0 (count would double the rows)", n)
 	}
 
-	m = pressEnter(t, m)
+	m = pressKey(t, m, tea.KeyLeft)
 	if n := jobRowCount(m); n != 0 {
 		t.Fatalf("%d job rows after folding back, want 0", n)
 	}
 	if m.focus != focusTree {
-		t.Fatal("folding back must not exit tree mode")
+		t.Fatal("folding back must not leave tree mode")
 	}
 }
 
-// Enter on a job row folds the list it belongs to and re-anchors the cursor
-// on the conversation row (tearing down the peek pane with it).
-func TestEnterOnJobRowFoldsAndReanchors(t *testing.T) {
+// The arrows only fold with an empty draft — with text in the message bar
+// they keep meaning cursor movement in the input.
+func TestArrowsWithDraftDoNotFold(t *testing.T) {
+	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
+	m := treeModel(t, map[string]GroupInfo{
+		"ghost": {Running: true, Jobs: []JobInfo{job}},
+	}, "ghost", "", "")
+	m.input.SetValue("draft")
+	m = pressKey(t, m, tea.KeyRight)
+	if n := jobRowCount(m); n != 0 {
+		t.Fatalf("→ with a draft unfolded jobs (%d rows); it should move the cursor", n)
+	}
+}
+
+// ← on a job row folds the list it belongs to and re-anchors the cursor on
+// the conversation row (tearing down the peek pane with it).
+func TestLeftOnJobRowFoldsAndReanchors(t *testing.T) {
 	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
 	m := treeModel(t, map[string]GroupInfo{
 		"ghost": {Running: true, Jobs: []JobInfo{job}},
@@ -106,9 +121,9 @@ func TestEnterOnJobRowFoldsAndReanchors(t *testing.T) {
 		t.Fatalf("precondition: peek not armed on %s", job.ID)
 	}
 
-	m = pressEnter(t, m)
+	m = pressKey(t, m, tea.KeyLeft)
 	if n := jobRowCount(m); n != 0 {
-		t.Fatalf("%d job rows after enter on the job row, want 0", n)
+		t.Fatalf("%d job rows after ← on the job row, want 0", n)
 	}
 	rows := m.treeRows()
 	if m.treeIdx >= len(rows) {
@@ -121,18 +136,20 @@ func TestEnterOnJobRowFoldsAndReanchors(t *testing.T) {
 		t.Fatalf("peek still armed on %+v after folding", m.peekJob)
 	}
 	if m.focus != focusTree {
-		t.Fatal("folding from a job row must not exit tree mode")
+		t.Fatal("folding from a job row must not leave tree mode")
 	}
 }
 
-// With no jobs to unfold, empty enter keeps its old meaning: exit tree mode.
-func TestEnterWithoutJobsExitsTree(t *testing.T) {
+// Empty enter kept its old meaning — exit tree mode — even on a row with
+// folded jobs (the fold toggle lives on →/←, not enter).
+func TestEmptyEnterStillExitsTree(t *testing.T) {
+	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
 	m := treeModel(t, map[string]GroupInfo{
-		"ghost": {Running: true},
+		"ghost": {Running: true, Jobs: []JobInfo{job}},
 	}, "ghost", "", "")
-	m = pressEnter(t, m)
+	m = pressKey(t, m, tea.KeyEnter)
 	if m.focus == focusTree {
-		t.Fatal("empty enter on a jobless row should exit tree mode")
+		t.Fatal("empty enter should exit tree mode regardless of folded jobs")
 	}
 }
 

@@ -540,9 +540,9 @@ type Model struct {
 
 	// jobsOpen — conversations whose job rows are unfolded in the tree,
 	// keyed by sessKey(group, session). Absent = folded, the default: job
-	// rows stay hidden until the user opens the conversation row with
-	// enter (enter again folds it back). A folded row with jobs shows a
-	// ⚙N badge instead, so background work stays noticeable.
+	// rows stay hidden until the user opens the conversation row with →
+	// (← folds it back). A folded row with jobs shows a gray (N) count
+	// after its name instead, so background work stays noticeable.
 	jobsOpen map[string]bool
 
 	// Live notifications (event "notification"): rendered inline in the
@@ -2933,19 +2933,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// esc / ctrl+[ exits tree mode regardless of input contents — handled
 		// globally above (it doubles as the interrupt key), so there's no
 		// case for it here.
+		case "right", "left":
+			// Tree idiom: → unfolds the hovered conversation's job rows,
+			// ← folds them (from a job row, ← folds the list it's in and
+			// re-anchors on the conversation). Only with an empty draft —
+			// with text in the message bar the arrows keep meaning cursor
+			// movement and fall through to the input below. Enter stays
+			// out of this: it submits/exits, and ctrl+enter isn't an
+			// option — a terminal sends plain CR for it, so it can't be
+			// told apart from enter without the kitty keyboard protocol.
+			if strings.TrimSpace(m.input.Value()) == "" && m.setJobFold(s == "right") {
+				return m, nil
+			}
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while
-			// browsing the others. Empty enter on a conversation with job
-			// rows toggles their fold (jobs are folded by default); with
-			// nothing to unfold it exits tree mode (matches the old
-			// behaviour so it's not a worse default for someone who only
-			// entered tree to switch agents).
+			// browsing the others. Empty enter exits tree mode (matches
+			// the old behaviour so it's not a worse default for someone
+			// who only entered tree to switch agents).
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
-				if m.toggleJobFold() {
-					return m, nil
-				}
 				m.exitTree()
 				return m, nil
 			}
@@ -3356,31 +3363,34 @@ func (m Model) foldedJobs(g, sess string) (n int) {
 	return
 }
 
-// toggleJobFold handles empty-enter in the tree: unfold/fold the hovered
-// conversation's job rows. Enter on a job row folds the list it belongs to
-// and re-anchors the cursor on the conversation row. Returns false when the
-// hovered conversation has no job rows to unfold — the caller falls through
-// to enter's older meaning (exit tree mode).
-func (m *Model) toggleJobFold() bool {
+// setJobFold handles →/← in the tree: unfold (open=true) or fold the
+// hovered conversation's job rows. Folding from a job row folds the list it
+// belongs to and re-anchors the cursor on the conversation row. Returns
+// false when there is nothing to do — the caller lets the arrow fall
+// through to the input's cursor movement.
+func (m *Model) setJobFold(open bool) bool {
 	rows := m.treeRows()
 	if m.treeIdx >= len(rows) {
 		return false
 	}
 	r := rows[m.treeIdx]
 	key := sessKey(r.group, r.session)
+	if open {
+		if r.job != "" || m.jobsOpen[key] || m.foldedJobs(r.group, r.session) == 0 {
+			return false
+		}
+		m.jobsOpen[key] = true
+		return true
+	}
 	if r.job != "" {
 		delete(m.jobsOpen, key)
 		m.selectTreeRow(treeRow{group: r.group, session: r.session})
 		return true
 	}
-	if m.jobsOpen[key] {
-		delete(m.jobsOpen, key)
-		return true
-	}
-	if m.foldedJobs(r.group, r.session) == 0 {
+	if !m.jobsOpen[key] {
 		return false
 	}
-	m.jobsOpen[key] = true
+	delete(m.jobsOpen, key)
 	return true
 }
 
@@ -3393,8 +3403,8 @@ func (m *Model) toggleJobFold() bool {
 func (m Model) treeRows() []treeRow {
 	order := m.treeOrder()
 	rows := []treeRow{}
-	// Job rows only exist while their conversation is unfolded (enter on
-	// the row toggles it); folded conversations render a ⚙N badge instead.
+	// Job rows only exist while their conversation is unfolded (→ opens,
+	// ← folds); folded conversations render a gray (N) count instead.
 	jobsOf := func(g, sess string) []JobInfo {
 		if !m.jobsOpen[sessKey(g, sess)] {
 			return nil

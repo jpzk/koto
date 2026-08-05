@@ -607,18 +607,18 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if w < 1 {
 		w = 1
 	}
-	// Queue badge: pending (enqueued-but-not-started) message count. Shown as
-	// an amber "⏳N" pill, distinct from the stalled ⚠. Reserve its width out of
-	// the name field so the row never overflows the pane. Group-level (the
-	// daemon's queue is shared across sessions), so group rows only.
+	// Queue badge: pending (enqueued-but-not-started) message count, distinct
+	// from the stalled ⚠. Reserve its width out of the name field so the row
+	// never overflows the pane. Group-level (the daemon's queue is shared
+	// across sessions), so group rows only. Gray like the turn clock and the
+	// folded-jobs count: badges are ambient counters, the colored dot is the
+	// attention signal.
 	badge, badgeW := "", 0
-	badgeColor := cYellow
 	act, working := m.activityFor(r.group)
 	working = working && !isSession && !isJob
 	if queued > 0 && !isSession && !isJob {
 		badge = fmt.Sprintf(" ⏳%d", queued)
 	} else if working {
-		badgeColor = activityColor(act.phase)
 		// How long the whole turn has been going — the name gives up the width
 		// instead of the row growing. The point of the tree is to answer "is
 		// anything stuck?" for the groups you are NOT looking at, and that
@@ -627,7 +627,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		// here would read 0s-2s forever however long the group grinds.
 		badge = " " + fmtElapsedShort(time.Since(act.turnSince))
 	}
-	// Folded job rows (the default — enter on the row unfolds them) surface
+	// Folded job rows (the default — → on the row unfolds them) surface
 	// as a gray count right after the name — "ghost (2)" — so background
 	// work stays noticeable without a row per job. Unlike the badge, which
 	// is right-aligned, the count travels with the name.
@@ -742,7 +742,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(field[split:])
 	}
 	if badge != "" {
-		parts += lipgloss.NewStyle().Foreground(badgeColor).Bold(true).Render(badge)
+		parts += lipgloss.NewStyle().Foreground(cGray).Render(badge)
 	}
 	return parts
 }
