@@ -636,7 +636,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /skill  /prompt  /goal  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -1715,6 +1715,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addLine(logLine{kind: "sys", group: ev.Group,
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
+		case "goal_set", "goal_plan", "goal_awaiting", "goal_iter", "goal_judge",
+			"goal_verdict", "goal_met", "goal_paused", "goal_resumed", "goal_cancelled":
+			m.addLine(logLine{kind: "sys", group: ev.Group,
+				text: formatGoalEvent(ev), ts: int64(ev.Ts)})
 		case "notification":
 			sev := ev.Severity
 			if sev != "high" {
@@ -1891,6 +1895,56 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("/sched %s %s ok", msg.op, msg.id)})
+		return m, nil
+
+	case goalListMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goal list: %v", msg.err)})
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			scope := "any group"
+			if msg.filter != "" {
+				scope = msg.filter
+			}
+			m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("no goals for %s", scope)})
+			return m, nil
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "goals:"})
+		for _, it := range msg.items {
+			m.addLine(logLine{kind: "sys", group: m.cur, text: goalStatusLine(it)})
+			if it.Status == "paused" && it.LastFeedback != "" {
+				fb := it.LastFeedback
+				if len(fb) > 100 {
+					fb = fb[:97] + "…"
+				}
+				m.addLine(logLine{kind: "sys", group: m.cur, text: "      last feedback: " + fb})
+			}
+		}
+		return m, nil
+
+	case goalOpMsg:
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goal %s: %v", msg.op, msg.err)})
+			return m, nil
+		}
+		it := msg.item
+		var text string
+		switch msg.op {
+		case "set":
+			mode := "executing immediately"
+			if it.Plan {
+				mode = "planning first (approve with /goal approve once the plan is ready)"
+			}
+			text = fmt.Sprintf("goal %s set on %s, max %d iterations — %s", it.ID, it.Group, it.MaxIterations, mode)
+		case "approve":
+			text = fmt.Sprintf("goal %s approved — %s is executing", it.ID, it.Group)
+		case "resume":
+			text = fmt.Sprintf("goal %s resumed with a fresh %d-iteration budget", it.ID, it.MaxIterations)
+		default:
+			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
+		}
+		m.addLine(logLine{kind: "sys", group: msg.group, text: text})
 		return m, nil
 
 	case shellFrameMsg:
@@ -3624,6 +3678,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			rest = strings.TrimSpace(v[6:])
 		}
 		return m.handleSchedCmd(rest)
+	}
+	if v == "/goal" || strings.HasPrefix(v, "/goal ") {
+		rest := ""
+		if len(v) > 5 {
+			rest = strings.TrimSpace(v[5:])
+		}
+		return m.handleGoalCmd(rest)
 	}
 	if v == "/clear" || v == "/clear all" {
 		if v == "/clear all" {

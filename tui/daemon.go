@@ -207,6 +207,25 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.SchedToggle(ctx, r)
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
+	case "goal_set":
+		r := &pb.GoalSetReq{Group: s("group"), Text: s("text"), Criteria: s("criteria")}
+		if v, ok := asFloat(extra["max_iterations"]); ok {
+			r.MaxIterations = int32(v)
+		}
+		if b, ok := extra["plan"].(bool); ok {
+			r.Plan = &b
+		}
+		return cl.GoalSet(ctx, r)
+	case "goal_list":
+		return cl.GoalList(ctx, &pb.GoalListReq{Group: s("group")})
+	case "goal_approve":
+		return cl.GoalApprove(ctx, &pb.GoalGroupReq{Group: s("group")})
+	case "goal_pause":
+		return cl.GoalPause(ctx, &pb.GoalGroupReq{Group: s("group")})
+	case "goal_resume":
+		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group")})
+	case "goal_cancel":
+		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }

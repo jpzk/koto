@@ -96,6 +96,11 @@ streams
   job-logs [-tail N] <group> <id>          one job's metadata + output tail
   job-tail [-tail N] <group> <id>          follow a job's output live (^C stops)
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
+  goal set [-max N] [-plan=no] <group> <goal> :: <criteria>
+                                           set a goal (plan-first by default:
+                                           one planning turn, then waits for
+                                           "goal approve" before executing)
+  goal list [group] | approve|pause|resume|cancel <group>
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
@@ -481,6 +486,9 @@ func ctlCliMain(args []string) {
 
 	case "sched":
 		ctlSched(rest)
+
+	case "goal":
+		ctlGoal(rest)
 
 	case "runscript":
 		// Raw output on purpose — this verb is "run my script, show me its
@@ -942,5 +950,86 @@ func ctlSched(args []string) {
 
 	default:
 		ctlFatal(2, "unknown sched subcommand: %s", sub)
+	}
+}
+
+func ctlGoal(args []string) {
+	if len(args) < 1 {
+		ctlFatal(2, "usage: koto ctl goal set|list|approve|pause|resume|cancel ...")
+	}
+	sub, rest := args[0], args[1:]
+	cl := ctlClient()
+	ctx, cancel := ctlCtx()
+	defer cancel()
+
+	switch sub {
+	case "set":
+		fs := flag.NewFlagSet("goal set", flag.ExitOnError)
+		max := fs.Int("max", 0, "max iterations (0 = default)")
+		plan := fs.String("plan", "yes", "plan-first (yes|no)")
+		fs.Parse(rest)
+		const usage = "usage: koto ctl goal set [-max N] [-plan=no] <group> <goal> :: <criteria>"
+		words := fs.Args()
+		if len(words) < 2 {
+			ctlFatal(2, usage)
+		}
+		group, words := words[0], words[1:]
+		sep := -1
+		for i, w := range words {
+			if w == "::" {
+				sep = i
+				break
+			}
+		}
+		if sep <= 0 || sep == len(words)-1 {
+			ctlFatal(2, usage)
+		}
+		req := &pb.GoalSetReq{
+			Group:         group,
+			Text:          strings.Join(words[:sep], " "),
+			Criteria:      strings.Join(words[sep+1:], " "),
+			MaxIterations: int32(*max),
+		}
+		switch *plan {
+		case "yes":
+		case "no":
+			req.Plan = proto.Bool(false)
+		default:
+			ctlFatal(2, "goal set: -plan takes yes or no")
+		}
+		resp, err := cl.GoalSet(ctx, req)
+		ctlPrint(resp, err)
+
+	case "list":
+		g := ""
+		if len(rest) == 1 {
+			g = rest[0]
+		} else if len(rest) > 1 {
+			ctlFatal(2, "usage: koto ctl goal list [group]")
+		}
+		resp, err := cl.GoalList(ctx, &pb.GoalListReq{Group: g})
+		ctlPrint(resp, err)
+
+	case "approve", "pause", "resume", "cancel":
+		if len(rest) != 1 {
+			ctlFatal(2, "usage: koto ctl goal %s <group>", sub)
+		}
+		req := &pb.GoalGroupReq{Group: rest[0]}
+		var resp proto.Message
+		var err error
+		switch sub {
+		case "approve":
+			resp, err = cl.GoalApprove(ctx, req)
+		case "pause":
+			resp, err = cl.GoalPause(ctx, req)
+		case "resume":
+			resp, err = cl.GoalResume(ctx, req)
+		case "cancel":
+			resp, err = cl.GoalCancel(ctx, req)
+		}
+		ctlPrint(resp, err)
+
+	default:
+		ctlFatal(2, "unknown goal subcommand: %s", sub)
 	}
 }
