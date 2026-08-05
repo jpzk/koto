@@ -104,6 +104,34 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 # there is no `/config runtime=` — firecracker is the only backend surfaced.
 
 # inside the TUI:
+#   ctrl+p            -> command palette: every action in one fuzzy list, each
+#                        row carrying its keybinding or slash form (the
+#                        discoverability door for the keymap). Reuses the
+#                        ctrl+r picker overlay with a second mode. Entries do
+#                        one of three things: mutate the model directly (the
+#                        pane toggles, which have no slash form), dispatch a
+#                        no-arg slash command, or PREFILL one into the message
+#                        bar — the latter for verbs needing an argument
+#                        (/sw <g>) and for /destroy, where a second deliberate
+#                        Enter is the point. Works from EVERY focus, including
+#                        the focused terminal pane — it's reserved there next
+#                        to ctrl+] and ctrl+f (the guest loses readline's
+#                        previous-history; ↑ covers it), the picker block sits
+#                        above the shell block in handleKey so filter text
+#                        can't leak into the pty, and the log/fleet/shell views
+#                        composite the overlay themselves (withPicker) since
+#                        they return a whole frame rather than a middle
+#                        region. See tui/palette.go.
+#   ctrl+h            -> fleet (top) view: linux-top for the fleet — one row
+#                        per group with SPACE (image alloc vs size ceiling),
+#                        CPU, RSS, TOK/S, NET, ROOT, MODEL, sorted busiest-
+#                        first, plus a host rollup line (fs headroom / alloc /
+#                        provisioned). Joined client-side from WatchState
+#                        (network/root/model ride GroupInfo) + the Resources
+#                        poll; read-only, esc/ctrl+h closes. Opened from tree
+#                        mode the tree stays visible alongside (like the log
+#                        view) and ⇧↑↓ moves the group cursor. See
+#                        tui/top_view.go.
 #   any text          -> sends to current group (into its active session)
 #   /new <g>          -> spawn new group via daemon
 #   /sw  <g>          -> switch active group
@@ -184,7 +212,13 @@ verb list.
   bytes and remounting guests read-only). It therefore stays truthful for
   stopped/wedged groups, costs a few syscalls per 30s tick, and — unlike the
   jobs mirror — runs **ungated by watchers**, since exhaustion must be
-  observable when nobody is attached. **One deliberate exception: guest
+  observable when nobody is attached. **CPU/RSS are additionally live per
+  call**: `resourcesSnapshot` reads a running VM's `/proc` fresh and reports
+  CPU over the window since the *previous* snapshot call (`resLiveCPUPct` —
+  top semantics, the poll interval is the averaging window; the TUI's 5s poll
+  makes the fleet view's CPU column ~5s-live instead of the sweep's 30s
+  trailing average, which lagged a turn's burst by half a minute). The sweep
+  ring stays authoritative for growth rate and thresholds. **One deliberate exception: guest
   memory.** The VMM's RSS is a *high-water mark* of guest-touched pages —
   no balloon device, so page cache from any I/O-heavy turn parks RSS at
   ~100% of `mem_mib` forever (2026-08-04: one group read 94% host-side with 805

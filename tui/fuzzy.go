@@ -56,16 +56,16 @@ func fuzzyRank(query string, items []string, limit int) []fuzzyMatch {
 
 // scoreOne implements a two-tier scorer:
 //
-//   Tier 1 — case-insensitive contiguous substring. Massive base score so
-//   any substring hit outranks every subsequence hit, no matter the length
-//   of either. Earlier matches and word-boundary starts get small bumps so
-//   "story night" beats "a story" for query "story".
+//	Tier 1 — case-insensitive contiguous substring. Massive base score so
+//	any substring hit outranks every subsequence hit, no matter the length
+//	of either. Earlier matches and word-boundary starts get small bumps so
+//	"story night" beats "a story" for query "story".
 //
-//   Tier 2 — subsequence fallback with gap penalty. Each character skipped
-//   between two matched query characters costs 1 point; consecutive matches
-//   get a +12 bonus. A negative or zero total is rejected — that filters
-//   out the "loose noise" matches (e.g. "set tom oh really yes" matching
-//   "story") that pure subsequence scoring would surface.
+//	Tier 2 — subsequence fallback with gap penalty. Each character skipped
+//	between two matched query characters costs 1 point; consecutive matches
+//	get a +12 bonus. A negative or zero total is rejected — that filters
+//	out the "loose noise" matches (e.g. "set tom oh really yes" matching
+//	"story") that pure subsequence scoring would surface.
 //
 // The greedy left-to-right scan in tier 2 is suboptimal in the textbook
 // sense (it can pick a long-gap match when a tighter one exists later),

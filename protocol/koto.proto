@@ -275,6 +275,12 @@ message GroupInfo {
   // 60s), measured daemon-side by the proxy as requests retire (see
   // daemon/tokrate.go). 0 = idle.
   double tok_per_sec = 10;
+  // Effective egress profile (none|wan|lan|full) and root/sudo grant, read
+  // from config.json (daemon's groupNetwork/groupRoot, legacy `internet`
+  // already mapped). Exposed so clients can render a fleet overview without
+  // a per-group Config round-trip.
+  string network = 11;
+  bool   root    = 12;
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the

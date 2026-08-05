@@ -91,6 +91,12 @@ type GroupInfo struct {
 	// TokPerSec is this group's output-token throughput over the daemon's
 	// trailing window (daemon/tokrate.go). 0 = idle.
 	TokPerSec float64 `json:"tok_per_sec,omitempty"`
+	// Network is the effective egress profile (none|wan|lan|full) and Root
+	// the effective sudo grant, both read from config.json (groupNetwork /
+	// groupRoot — legacy `internet` already mapped). Exposed so clients can
+	// render a fleet overview without a per-group Config round-trip.
+	Network string `json:"network,omitempty"`
+	Root    bool   `json:"root,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors

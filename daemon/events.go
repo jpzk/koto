@@ -145,7 +145,7 @@ func stateHash(gs map[string]GroupInfo) string {
 		gi := gs[g]
 		// tok/s is hashed at integer resolution: enough for the display,
 		// while sub-token jitter doesn't push a frame every tick forever.
-		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%.0f|%s", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, gi.TokPerSec, strings.Join(gi.Sessions, ","))
+		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%.0f|%s|%s|%t", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, gi.TokPerSec, strings.Join(gi.Sessions, ","), gi.Network, gi.Root)
 		for _, j := range gi.Jobs {
 			// id/status/rc/size cover every observable transition (a running
 			// job's growing output bumps size, so watchers see progress).

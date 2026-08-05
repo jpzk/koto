@@ -76,6 +76,8 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		Queued:    int32(gi.Queued),
 		Sessions:  gi.Sessions,
 		TokPerSec: gi.TokPerSec,
+		Network:   gi.Network,
+		Root:      gi.Root,
 	}
 	for _, j := range gi.Jobs {
 		out.Jobs = append(out.Jobs, toPBJobInfo(j))

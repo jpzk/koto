@@ -122,4 +122,20 @@ func TestStateHashChangeDetection(t *testing.T) {
 	if stateHash(a) == stateHash(c) {
 		t.Fatal("queue-depth change must change the hash")
 	}
+	// network/root are config-derived but ride the state frame (the TUI's
+	// fleet view renders them live) — a /config flip must push a frame.
+	d := map[string]GroupInfo{
+		"main": {Port: 8788, Running: true, Network: "wan"},
+		"web":  {Port: 8790, Running: true, Queued: 2},
+	}
+	if stateHash(a) == stateHash(d) {
+		t.Fatal("network profile change must change the hash")
+	}
+	e := map[string]GroupInfo{
+		"main": {Port: 8788, Running: true, Root: true},
+		"web":  {Port: 8790, Running: true, Queued: 2},
+	}
+	if stateHash(a) == stateHash(e) {
+		t.Fatal("root profile change must change the hash")
+	}
 }

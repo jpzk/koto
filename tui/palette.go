@@ -1,0 +1,246 @@
+package main
+
+// palette.go — the ctrl+p command palette.
+//
+// Discoverability layer over the keymap and the slash commands: one fuzzy
+// list of every action the TUI can take, so nothing is reachable only by a
+// keybinding you have to already know. It reuses the ctrl+r picker overlay
+// (pickerState / fuzzyRank / renderPicker) with a second mode rather than
+// growing a parallel widget — the two differ only in what fills the list and
+// what Enter does with the pick.
+//
+// Three kinds of entry, because "run it" is wrong for a third of them:
+//   - act:  direct model mutation (the pane/view toggles, which have no
+//           slash form at all — ctrl+] and ctrl+l are their only other door)
+//   - run:  a slash command dispatched verbatim, for the no-argument verbs
+//   - edit: the slash command is PREFILLED into the message bar instead of
+//           run. Two reasons: the verb needs an argument the palette can't
+//           guess (/sw <group>), or it's destructive enough that a second
+//           deliberate Enter is the point (/destroy).
+//
+// Ctrl+P is free at the top level: bubbles' textinput binds it to
+// PrevSuggestion, but that binding is already neutralized in newModel (it
+// panicked on an empty match set — see the comment there). Inside the picker
+// ctrl+p keeps its readline meaning of "up", since the picker block in
+// handleKey returns before the opener is reached.
+
+import (
+	"strings"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// pickerMode selects which list the shared overlay is showing.
+type pickerMode int
+
+const (
+	pickerHistory pickerMode = iota // ctrl+r — this group's prompt history
+	pickerPalette                   // ctrl+p — the command palette
+)
+
+// paletteItem is one row. Exactly one of act / run is meaningful; edit only
+// applies to run.
+type paletteItem struct {
+	title string // what the row displays
+	hint  string // keybinding or argument shape, gray on the right
+	run   string // slash command (executed, or prefilled when edit)
+	edit  bool   // prefill run into the message bar instead of dispatching
+	act   func(m *Model) tea.Cmd
+}
+
+// searchKey is what the fuzzy matcher scores against — the title plus the
+// slash form and the keybinding, so "/clear" and "ctrl+]" both find their row
+// even though the display column shows the prose title.
+func (p paletteItem) searchKey() string {
+	key := p.title
+	if p.run != "" {
+		key += " " + p.run
+	}
+	if p.hint != "" {
+		key += " " + p.hint
+	}
+	return key
+}
+
+// paletteItems builds the palette for the current model state. Order is the
+// empty-query order (fuzzyRank preserves input order for a blank query), so
+// the two entries an operator reaches for most sit at the top; the toggles
+// name the direction they'd actually go rather than a static label.
+func (m Model) paletteItems() []paletteItem {
+	shellTitle := "open shared terminal"
+	if m.shellOpen {
+		shellTitle = "close shared terminal"
+	}
+	logTitle := "open daemon logs"
+	if m.focus == focusLog {
+		logTitle = "close daemon logs"
+	}
+	topTitle := "open fleet view"
+	if m.focus == focusTop {
+		topTitle = "close fleet view"
+	}
+
+	items := []paletteItem{
+		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
+		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
+		{title: topTitle, hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
+
+		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
+		{title: "switch group", hint: "/sw <group>", run: "/sw ", edit: true},
+		{title: "switch chat session", hint: "/session [name]", run: "/session ", edit: true},
+		{title: "new group", hint: "/new <group>", run: "/new ", edit: true},
+		{title: "refresh group list", hint: "/ls", run: "/ls"},
+
+		{title: "interrupt current turn", hint: "esc", run: "/interrupt"},
+		{title: "clear this session", hint: "/clear", run: "/clear"},
+		{title: "clear whole group", hint: "/clear all", run: "/clear all"},
+		{title: "restart group VM", hint: "/restart", run: "/restart"},
+		{title: "stop group VM", hint: "/stop", run: "/stop"},
+		{title: "destroy group", hint: "/destroy <group>", run: "/destroy ", edit: true},
+
+		{title: "show group config", hint: "/config", run: "/config"},
+		{title: "set config value", hint: "/config <k>=<v>", run: "/config ", edit: true},
+		{title: "run a script in the VM", hint: "/runscript <file>", run: "/runscript ", edit: true},
+		{title: "list skills", hint: "/skill", run: "/skill list"},
+		{title: "list schedules", hint: "/sched", run: "/sched list"},
+		{title: "list goals", hint: "/goal", run: "/goal list"},
+		{title: "fire a prompt file", hint: "/prompt <name>", run: "/prompt ", edit: true},
+
+		{title: "toggle thought bodies", hint: "ctrl+t", act: func(m *Model) tea.Cmd {
+			m.expandedThoughts = !m.expandedThoughts
+			m.refreshLog()
+			return nil
+		}},
+		{title: "toggle tool output", hint: "ctrl+d", act: func(m *Model) tea.Cmd {
+			m.expandedToolOuts = !m.expandedToolOuts
+			m.refreshLog()
+			return nil
+		}},
+		{title: "toggle fullscreen", hint: "ctrl+f", act: func(m *Model) tea.Cmd {
+			m.toggleFullscreen()
+			return nil
+		}},
+		{title: "toggle mouse select mode", hint: "ctrl+s", act: func(m *Model) tea.Cmd {
+			m.selectMode = !m.selectMode
+			if m.selectMode {
+				return tea.DisableMouse
+			}
+			return tea.EnableMouseCellMotion
+		}},
+
+		{title: "repaint screen", hint: "/repaint", run: "/repaint"},
+		{title: "reload TUI", hint: "ctrl+shift+r", run: "/reload"},
+		{title: "quit TUI", hint: "ctrl+c", run: "/quit"},
+	}
+
+	// Plugins are registered at init, so they belong in the list too —
+	// they're the one command family with no fixed membership.
+	for _, p := range plugins {
+		items = append(items, paletteItem{
+			title: p.desc,
+			hint:  "/" + p.name,
+			run:   "/" + p.name + " ",
+			edit:  true,
+		})
+	}
+	return items
+}
+
+// openPalette snapshots the palette into the shared picker overlay. Like
+// openPicker, items are frozen at open time so nothing reshuffles under the
+// user's fingers mid-filter.
+func (m *Model) openPalette() {
+	cmds := m.paletteItems()
+	items := make([]string, len(cmds))
+	for i, c := range cmds {
+		items[i] = c.searchKey()
+	}
+	ti := textinput.New()
+	ti.Placeholder = "type to filter (esc=close, ↑↓=pick, enter=run)"
+	ti.CharLimit = 0
+	ti.Width = 60
+	ti.Focus()
+	m.picker = pickerState{
+		open:    true,
+		mode:    pickerPalette,
+		input:   ti,
+		items:   items,
+		cmds:    cmds,
+		matches: fuzzyRank("", items, 0),
+		cursor:  0,
+	}
+	m.prePickerFocus = m.focus
+}
+
+// runPaletteItem closes the overlay and carries out the pick. closePicker
+// runs FIRST because it restores m.focus to prePickerFocus — an action that
+// sets focus itself (enterLog, the shell pane) would otherwise have it
+// stomped on the way out.
+func (m *Model) runPaletteItem(it paletteItem) tea.Cmd {
+	m.closePicker()
+	switch {
+	case it.act != nil:
+		return it.act(m)
+	case it.edit:
+		m.focus = focusInput
+		m.input.Focus()
+		m.input.SetValue(it.run)
+		m.input.CursorEnd()
+		m.refreshSuggestions()
+		return nil
+	case it.run != "":
+		return m.dispatchInput(it.run)
+	}
+	return nil
+}
+
+// withPicker composites the picker overlay onto a full-frame view (log,
+// fleet, shell). Those three return the whole terminal rather than a middle
+// region, so the chat layout's trick of swapping the picker in for `middle`
+// doesn't reach them — the box is spliced over their middle rows instead,
+// keeping the top status bar and the bottom row visible for orientation, the
+// same reason the chat view keeps its input and hint bars.
+//
+// Line-for-line replacement is safe because renderPicker ends in
+// lipgloss.Place(m.width, rows, …), so every line it returns is already
+// padded to the full frame width — no ANSI-aware column splicing needed.
+func (m Model) withPicker(base string) string {
+	if !m.picker.open {
+		return base
+	}
+	lines := strings.Split(base, "\n")
+	// Below 5 rows there's nothing left to preserve — the box IS the frame.
+	if len(lines) < 5 {
+		return m.renderPicker(max(1, len(lines)))
+	}
+	rows := len(lines) - 2 // keep line 0 (status) and the last line (chrome)
+	box := strings.Split(m.renderPicker(rows), "\n")
+	for i := 0; i < rows && i < len(box); i++ {
+		lines[1+i] = box[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// paletteRow formats one result row's body: title on the left, hint gray on
+// the right, padded to width. Returns the two pieces separately so the caller
+// keeps control of the selection styling on the title.
+func paletteRow(it paletteItem, width int) (title, pad, hint string) {
+	title, hint = it.title, it.hint
+	if width < 8 {
+		return truncRunes(title, width), "", ""
+	}
+	// Hint gets at most a third of the row; the title keeps the rest.
+	if len([]rune(hint)) > width/3 {
+		hint = truncRunes(hint, width/3)
+	}
+	maxTitle := width - len([]rune(hint)) - 1
+	if len([]rune(title)) > maxTitle {
+		title = truncRunes(title, maxTitle)
+	}
+	n := width - len([]rune(title)) - len([]rune(hint))
+	if n < 1 {
+		n = 1
+	}
+	return title, strings.Repeat(" ", n), hint
+}

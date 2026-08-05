@@ -274,6 +274,8 @@ func listGroups() map[string]GroupInfo {
 			Sessions:  listSessions(g),
 			Jobs:      jobsSnapshot(g),
 			TokPerSec: rates[g],
+			Network:   groupNetwork(g),
+			Root:      groupRoot(g),
 		}
 	}
 	return out

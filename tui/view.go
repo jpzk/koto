@@ -156,11 +156,20 @@ func (m Model) View() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
 	}
+	// The three full-frame views below return before the chat layout's own
+	// picker placement further down, so each composites the overlay itself —
+	// otherwise a palette opened from the log view, the fleet view or the
+	// terminal pane would take every key while drawing nothing.
 	if m.focus == focusLog {
 		// Log view replaces the entire chat middle pane. Renders the
 		// status bar (reused) + log viewport + log-specific hint; no
 		// input line, no tree, no scrollbar geometry from the chat vp.
-		return m.renderLogView()
+		return m.withPicker(m.renderLogView())
+	}
+	if m.focus == focusTop {
+		// Fleet (top) view: same full-frame replacement as the log view,
+		// one row per group (space/cpu/rss/tok/s/network/root/model).
+		return m.withPicker(m.renderTopView())
 	}
 	if m.focus == focusShell || m.shellSplitVisible() {
 		// Shared shell: fullscreen while focused on a narrow terminal, or
@@ -168,7 +177,7 @@ func (m Model) View() string {
 		// open (shellOpen) and the terminal is wide enough — including with
 		// focus on the input or tree, so the terminal stays on screen while
 		// the user types to the agent.
-		return m.renderShellView()
+		return m.withPicker(m.renderShellView())
 	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
@@ -883,6 +892,12 @@ func (m Model) treePaneW() int {
 	if m.focus == focusLog && m.preLogFocus == focusTree {
 		return leftPaneWidth
 	}
+	// And for the fleet view: the table lists every group, but the tree
+	// keeps the active-group cursor (shift+↑/↓ moves it) and the per-session
+	// unread markers visible alongside.
+	if m.focus == focusTop && m.preTopFocus == focusTree {
+		return leftPaneWidth
+	}
 	return 0
 }
 
@@ -1463,8 +1478,11 @@ func (m Model) renderPicker(rows int) string {
 		contentW = 10
 	}
 
-	header := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-		Render(fmt.Sprintf(" history · %s · %d/%d ", m.cur, len(m.picker.matches), len(m.picker.items)))
+	label := fmt.Sprintf(" history · %s · %d/%d ", m.cur, len(m.picker.matches), len(m.picker.items))
+	if m.picker.mode == pickerPalette {
+		label = fmt.Sprintf(" commands · %d/%d ", len(m.picker.matches), len(m.picker.items))
+	}
+	header := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render(label)
 
 	prefix := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 	inputLine := prefix + m.picker.input.View()
@@ -1495,21 +1513,31 @@ func (m Model) renderPicker(rows int) string {
 	resultLines := []string{}
 	for i := start; i < end; i++ {
 		idx := m.picker.matches[i].Idx
-		raw := m.picker.items[idx]
-		// Collapse newlines so multi-line prompts render as one row.
-		raw = strings.ReplaceAll(raw, "\n", " ⏎ ")
 		marker := "  "
 		style := lipgloss.NewStyle().Foreground(cWhite)
 		if i == m.picker.cursor {
 			marker = lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 			style = lipgloss.NewStyle().Foreground(cAmber).Bold(true)
 		}
-		body := truncRunes(raw, contentW-2)
-		resultLines = append(resultLines, marker+style.Render(body))
+		if m.picker.mode == pickerPalette {
+			// Two columns: prose title left, keybinding/slash form gray
+			// right. The hint is the discoverability payload — the point of
+			// the palette is that you leave it knowing the shortcut.
+			title, pad, hint := paletteRow(m.picker.cmds[idx], contentW-2)
+			resultLines = append(resultLines,
+				marker+style.Render(title)+pad+lipgloss.NewStyle().Foreground(cGray).Render(hint))
+			continue
+		}
+		// Collapse newlines so multi-line prompts render as one row.
+		raw := strings.ReplaceAll(m.picker.items[idx], "\n", " ⏎ ")
+		resultLines = append(resultLines, marker+style.Render(truncRunes(raw, contentW-2)))
 	}
 	if len(resultLines) == 0 {
-		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).
-			Render("  (no matches — type to filter, or send a prompt to seed history)"))
+		empty := "  (no matches — type to filter, or send a prompt to seed history)"
+		if m.picker.mode == pickerPalette {
+			empty = "  (no matching command)"
+		}
+		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).Render(empty))
 	}
 
 	innerParts := []string{header, inputLine, ""}

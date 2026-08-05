@@ -250,6 +250,13 @@ func (m Model) renderLogView() string {
 		_, h := m.logPaneSize()
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h), body, scrollbar)
 	}
+	if m.picker.open {
+		// The ctrl+r/ctrl+p overlay opens from any focus — draw it over the
+		// log area so it isn't capturing keys invisibly (the palette's
+		// close-daemon-logs entry is reachable from right here).
+		_, h := m.logPaneSize()
+		middle = m.renderPicker(h)
+	}
 
 	hint := m.renderLogHint()
 	metricsBar := m.renderMetricsBar()

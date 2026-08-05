@@ -753,7 +753,13 @@ type GroupInfo struct {
 	// Output-token throughput over the daemon's trailing window (currently
 	// 60s), measured daemon-side by the proxy as requests retire (see
 	// daemon/tokrate.go). 0 = idle.
-	TokPerSec     float64 `protobuf:"fixed64,10,opt,name=tok_per_sec,json=tokPerSec,proto3" json:"tok_per_sec,omitempty"`
+	TokPerSec float64 `protobuf:"fixed64,10,opt,name=tok_per_sec,json=tokPerSec,proto3" json:"tok_per_sec,omitempty"`
+	// Effective egress profile (none|wan|lan|full) and root/sudo grant, read
+	// from config.json (daemon's groupNetwork/groupRoot, legacy `internet`
+	// already mapped). Exposed so clients can render a fleet overview without
+	// a per-group Config round-trip.
+	Network       string `protobuf:"bytes,11,opt,name=network,proto3" json:"network,omitempty"`
+	Root          bool   `protobuf:"varint,12,opt,name=root,proto3" json:"root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -856,6 +862,20 @@ func (x *GroupInfo) GetTokPerSec() float64 {
 		return x.TokPerSec
 	}
 	return 0
+}
+
+func (x *GroupInfo) GetNetwork() string {
+	if x != nil {
+		return x.Network
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetRoot() bool {
+	if x != nil {
+		return x.Root
+	}
+	return false
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -4280,7 +4300,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x03msg\x18\x03 \x01(\tR\x03msg\x12\x0e\n" +
 	"\x02ts\x18\x04 \x01(\x01R\x02ts\x12\x1c\n" +
 	"\tsubsystem\x18\x05 \x01(\tR\tsubsystem\x12\x14\n" +
-	"\x05group\x18\x06 \x01(\tR\x05group\"\x94\x02\n" +
+	"\x05group\x18\x06 \x01(\tR\x05group\"\xc2\x02\n" +
 	"\tGroupInfo\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1a\n" +
@@ -4292,7 +4312,9 @@ const file_koto_proto_rawDesc = "" +
 	"\bsessions\x18\b \x03(\tR\bsessions\x12!\n" +
 	"\x04jobs\x18\t \x03(\v2\r.koto.JobInfoR\x04jobs\x12\x1e\n" +
 	"\vtok_per_sec\x18\n" +
-	" \x01(\x01R\ttokPerSec\"\xb8\x01\n" +
+	" \x01(\x01R\ttokPerSec\x12\x18\n" +
+	"\anetwork\x18\v \x01(\tR\anetwork\x12\x12\n" +
+	"\x04root\x18\f \x01(\bR\x04root\"\xb8\x01\n" +
 	"\aJobInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\asession\x18\x02 \x01(\tR\asession\x12\x16\n" +

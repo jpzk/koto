@@ -51,6 +51,11 @@ const (
 	// active the chat middle pane is hidden and key handling routes to
 	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
 	focusLog
+	// focusTop is the fleet (top) view, opened with ctrl+H: one row per
+	// group with its host-side cost (space/cpu/rss), throughput, and
+	// config profiles (network/root/model) — linux-top for the fleet.
+	// Read-only like focusLog; handled by handleTopKey (top_view.go).
+	focusTop
 	// focusShell is the shared-shell pane, opened with /shell or ctrl+]
 	// (see shell_view.go). Unlike focusLog it is NOT read-only: while
 	// focused, almost every keystroke round-trips as raw bytes to the
@@ -223,11 +228,13 @@ type metricsRespMsg struct {
 	metric, global map[string]any
 	err            error
 }
+
 // resourcesMsg carries the fleet resource snapshot (Resources RPC), polled on
 // the same tick as metrics. Whole-fleet rather than per-group: the RPC has no
 // group filter, and keeping every group lets a /sw show bars immediately.
 type resourcesMsg struct {
 	groups map[string]GroupRes
+	host   HostRes
 	err    error
 }
 type pluginLogMsg struct {
@@ -391,8 +398,10 @@ type Model struct {
 	metricGroup string
 	// resources is the last fleet resource snapshot (Resources RPC), keyed by
 	// group. Feeds the metrics bar's bottom-left cpu/mem/space bars for the
-	// active group.
+	// active group, and (with hostRes, the same RPC's fleet rollup) the top
+	// view's rows and summary line.
 	resources map[string]GroupRes
+	hostRes   HostRes
 
 	plugin *pluginHandle
 
@@ -522,6 +531,17 @@ type Model struct {
 	// focusInput. Without this, opening the log from tree-nav mode and
 	// closing it again silently collapsed the tree pane.
 	preLogFocus focusZone
+
+	// Fleet (top) view (focusTop / ctrl+H). No subscription of its own —
+	// the rows are joined from state the TUI already holds fresh: m.groups
+	// (WatchState push: model, tok/s, network, root) and m.resources +
+	// m.hostRes (Resources poll riding the 5s metrics tick: space, cpu,
+	// rss). The viewport exists only for scrolling a tall fleet;
+	// refreshTopViewport rebuilds its content on every resources poll and
+	// state frame while the view is open. preTopFocus mirrors preLogFocus.
+	topVP       viewport.Model
+	topVPReady  bool
+	preTopFocus focusZone
 
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see
@@ -699,10 +719,17 @@ type pendingPrompt struct {
 
 const promptHistoryMax = 200
 
+// pickerState backs both overlays: the ctrl+r prompt-history recall and the
+// ctrl+p command palette (mode selects which). items is what fuzzyRank scores
+// against in either mode; cmds is populated only in pickerPalette mode and is
+// indexed by the same match Idx, since the palette's display column and its
+// search key differ (see paletteItem.searchKey).
 type pickerState struct {
 	open    bool
+	mode    pickerMode
 	input   textinput.Model
 	items   []string
+	cmds    []paletteItem
 	matches []fuzzyMatch
 	cursor  int
 }
@@ -1049,7 +1076,11 @@ func listCmd(sock string) tea.Cmd {
 				}
 			}
 			tokPS, _ := mp["tok_per_sec"].(float64)
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS}
+			// network/root likewise ride every List frame — parsed here too so
+			// the top view survives the same wholesale replace.
+			network, _ := mp["network"].(string)
+			root, _ := mp["root"].(bool)
+			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root}
 		}
 		return listMsg{groups: out}
 	}
@@ -1104,11 +1135,11 @@ func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
 // costs nothing and picks up new samples promptly.
 func resourcesCmd() tea.Cmd {
 	return func() tea.Msg {
-		groups, err := fetchResources()
+		groups, host, err := fetchResources()
 		if err != nil {
 			return resourcesMsg{err: err}
 		}
-		return resourcesMsg{groups: groups}
+		return resourcesMsg{groups: groups, host: host}
 	}
 }
 
@@ -1353,6 +1384,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeLogViewport()
 			m.refreshLogViewport()
 		}
+		if m.topVPReady {
+			m.resizeTopViewport()
+			m.refreshTopViewport()
+		}
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
 		return m, cmd
@@ -1444,6 +1479,8 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// blinking bottom-left corner on one dropped RPC.
 		if msg.err == nil {
 			m.resources = msg.groups
+			m.hostRes = msg.host
+			m.refreshTopViewport()
 		}
 		return m, nil
 
@@ -1467,6 +1504,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.hasGlobalTok {
 			m.globalTokRate = msg.globalTok
 		}
+		m.refreshTopViewport()
 		// The daemon just told us what is actually queued; drop any optimistic
 		// ⏳ rows it doesn't account for (see reconcilePending).
 		if m.reconcilePending(msg.groups) {
@@ -2285,7 +2323,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// (handleLeftClick focuses the pane), not input for the guest.
 		// ctrl+s select-mode releases the mouse entirely, so no MouseMsg
 		// arrives here at all in that mode.
-		if m.shell != nil && !m.shell.ended {
+		if m.shell != nil && !m.shell.ended && !m.picker.open {
+			// !picker.open for the same reason the left-click branch below
+			// is gated: while the overlay covers the pane, its rows are what
+			// the pointer is over — forwarding them to the guest would scroll
+			// a pty the user can't see.
 			ev := tea.MouseEvent(msg)
 			if m.focus == focusShell || (m.shellSplitVisible() && ev.IsWheel()) {
 				if m.forwardShellMouse(ev) {
@@ -2305,6 +2347,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// the wheel buttons internally (MouseWheelEnabled defaults to true).
 		// Update autoFollow so the bottom-stick toggle matches keyboard scroll.
 		var cmd tea.Cmd
+		if m.focus == focusTop && m.topVPReady {
+			// Fleet view owns the middle pane — scroll its table, not the
+			// hidden chat viewport.
+			m.topVP, cmd = m.topVP.Update(msg)
+			return m, cmd
+		}
 		m.vp, cmd = m.vp.Update(msg)
 		m.autoFollow = m.vp.AtBottom()
 		return m, tea.Batch(cmd, m.maybePageOlder())
@@ -2933,6 +2981,18 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
+	if m.picker.open {
+		// The picker/palette overlay owns key input entirely until closed —
+		// ahead of even the shell-focus block below, which otherwise hands
+		// every key to the guest pty and would swallow the filter text of a
+		// palette opened from the terminal. Ctrl+C dismisses (matches fzf);
+		// no harness binding (ctrl+t / ctrl+d / ctrl+l) fires while it's up.
+		if s == "ctrl+c" {
+			m.closePicker()
+			return m, nil
+		}
+		return m.handlePickerKey(msg)
+	}
 	if m.focus == focusShell {
 		// Shell focus owns EVERY key before any chrome binding below gets a
 		// look — ctrl+c must reach the guest as SIGINT (job control), ctrl+r
@@ -2942,8 +3002,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// whole TUI. The reserved local keys: ctrl+] CLOSES the pane
 		// (closeShell, which hands focus back on the way out — an
 		// open/close toggle, never a focus toggle), ctrl+f zooms the pane
-		// to the whole frame (fullscreen toggle), alt+← moves focus
-		// back to the tree/chat side (exitShell), leaving the pane open,
+		// to the whole frame (fullscreen toggle), ctrl+p opens the command
+		// palette, alt+← moves focus back to the tree/chat side
+		// (exitShell), leaving the pane open,
 		// and alt+esc toggles the tree column — see its case below.
 		// Tab is deliberately NOT reserved — it reaches the guest, so bash
 		// completion works inside the pane; alt+←/→ are the focus keys.
@@ -2964,6 +3025,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.fullscreen = !m.fullscreen
 			m.resizeViewport()
 			m.refreshLog()
+			return m, nil
+		case "ctrl+p":
+			// Command palette, reserved here like ctrl+] and ctrl+f so the
+			// chrome stays reachable without first leaving the pane — it is
+			// the one door to every binding, and being stranded in the
+			// terminal is exactly when you want it. The guest loses ctrl+p
+			// (readline previous-history); the up-arrow key covers that use
+			// inside, the same trade ctrl+f makes against forward-char.
+			// Once open, the picker block at the top of handleKey takes
+			// every key, so the filter text never reaches the pty.
+			m.openPalette()
 			return m, nil
 		case "alt+esc":
 			// Tree-column toggle beside the pane. This lived on plain esc
@@ -3001,16 +3073,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleShellKey(msg)
 	}
-	if m.picker.open {
-		// Ctrl+C while the picker is open dismisses it (matches fzf). Any
-		// other harness-level binding (ctrl+t / ctrl+d / ctrl+l) is also
-		// suppressed — the picker owns key input entirely until closed.
-		if s == "ctrl+c" {
-			m.closePicker()
-			return m, nil
-		}
-		return m.handlePickerKey(msg)
-	}
 	if s == "ctrl+c" {
 		// Quit. Agent interrupt moved to Esc (see the esc handler below the
 		// log-view block), so ctrl+c is now an unconditional exit even mid-
@@ -3037,6 +3099,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// daemon's historyMsg replay lands (typically within a few ms on
 		// first attach).
 		m.openPicker()
+		return m, nil
+	}
+	if s == "ctrl+p" {
+		// Command palette. Every action the TUI can take in one fuzzy list —
+		// the discoverability door for the keymap, which is otherwise only
+		// reachable if you already know the binding. See palette.go.
+		m.openPalette()
 		return m, nil
 	}
 	if s == "ctrl+t" {
@@ -3067,34 +3136,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.EnableMouseCellMotion
 	}
 	if s == "ctrl+l" {
-		// Toggle the daemon log view. enterLog() is responsible for the
-		// lazy subscribe + viewport init; exitLog() just flips focus back.
-		if m.focus == focusLog {
-			m.exitLog()
-		} else {
-			m.enterLog()
-		}
+		m.toggleLogView()
+		return m, nil
+	}
+	if s == "ctrl+h" {
+		// Toggle the fleet (top) view, mirroring ctrl+l's shape. NOTE: this
+		// key used to clear the input line; the view won the binding. Modern
+		// terminals send 0x7f ("backspace") for the backspace key, so this
+		// only fires on a real ctrl+h (0x08) — a terminal configured for
+		// legacy ^H-backspace would land here, exactly as it hit the old
+		// clear-input binding.
+		m.toggleTopView()
 		return m, nil
 	}
 	if s == "ctrl+]" {
-		// Open/close the shared-shell pane, mirroring ctrl+l's shape for the
-		// log view. It toggles the PANE, not focus: an open-but-unfocused
-		// pane (split mode, typing in the message bar) closes here rather
-		// than stealing focus — use a click on the grid for that. The close
-		// half for a focused pty lives at the top of this function.
-		if m.shellOpen {
-			m.closeShell()
-			return m, nil
-		}
-		// enterShell("") targets the active chat session's own shell
-		// (shellSessionName — koto-shell[-<session>]), redialing if the pane
-		// was last attached to a different one, and focuses it — otherwise
-		// opening would leave the pty unreachable from the keyboard.
-		m.enterShell("")
-		// Kick the tick chain for the cursor blink; enterShell alone can't
-		// return a cmd (isAnimating is now true, but nothing restarts the
-		// chain until the next unrelated event otherwise).
-		return m, m.ensureTicking()
+		return m, m.toggleShellPane()
 	}
 	if m.focus == focusLog {
 		// Read-only mode while the log view is open. No textinput routing
@@ -3103,27 +3159,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// chat input or in tree navigation.
 		return m.handleLogKey(msg)
 	}
+	if m.focus == focusTop {
+		// Same read-only routing for the fleet view.
+		return m.handleTopKey(msg)
+	}
 	if s == "ctrl+f" {
-		// Fullscreen toggle: zoom the active window to the whole frame.
-		// Entering hides the tree and any open-but-unfocused shell split;
-		// leaving — this key again, or any focus change — restores them.
-		// The pty side has its own reserved case in the shell-focus block.
-		if m.fullscreen {
-			m.fullscreen = false
-			if m.preFullFocus == focusTree {
-				// Entered from tree mode — put the tree back (enterTree also
-				// re-clears the flag; harmless).
-				m.enterTree()
-			}
-		} else {
-			m.preFullFocus = m.focus
-			if m.focus == focusTree {
-				m.exitTree() // the tree is hidden fullscreen — land in the input
-			}
-			m.fullscreen = true
-		}
-		m.resizeViewport()
-		m.refreshLog()
+		m.toggleFullscreen()
 		return m, nil
 	}
 	if s == "alt+right" {
@@ -3346,12 +3387,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, tickCmd)
 	}
 
-	if s == "ctrl+h" {
-		m.input.SetValue("")
-		m.refreshSuggestions()
-		return m, nil
-	}
-
 	if s == "right" {
 		// zsh-autosuggestions-style accept: exactly the ghost the user can
 		// see (inputGhost is non-empty only at end-of-line with a matched
@@ -3446,6 +3481,7 @@ func (m *Model) openPicker() {
 	matches := fuzzyRank("", items, 0)
 	m.picker = pickerState{
 		open:    true,
+		mode:    pickerHistory,
 		input:   ti,
 		items:   items,
 		matches: matches,
@@ -3471,11 +3507,16 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	case "enter":
-		if len(m.picker.matches) > 0 {
-			pick := m.picker.items[m.picker.matches[m.picker.cursor].Idx]
-			m.input.SetValue(pick)
-			m.input.CursorEnd()
+		if len(m.picker.matches) == 0 {
+			m.closePicker()
+			return m, nil
 		}
+		idx := m.picker.matches[m.picker.cursor].Idx
+		if m.picker.mode == pickerPalette {
+			return m, m.runPaletteItem(m.picker.cmds[idx])
+		}
+		m.input.SetValue(m.picker.items[idx])
+		m.input.CursorEnd()
 		m.closePicker()
 		return m, nil
 	case "up", "ctrl+p":
@@ -3496,6 +3537,61 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.picker.cursor = max(0, len(m.picker.matches)-1)
 	}
 	return m, cmd
+}
+
+// toggleLogView flips the daemon log view (ctrl+l, and the palette's entry).
+// enterLog() is responsible for the lazy subscribe + viewport init; exitLog()
+// just flips focus back.
+func (m *Model) toggleLogView() {
+	if m.focus == focusLog {
+		m.exitLog()
+	} else {
+		m.enterLog()
+	}
+}
+
+// toggleShellPane opens/closes the shared-shell pane (ctrl+], and the
+// palette's entry), mirroring toggleLogView's shape. It toggles the PANE, not
+// focus: an open-but-unfocused pane (split mode, typing in the message bar)
+// closes here rather than stealing focus — use a click on the grid for that.
+// The close half for a focused pty lives at the top of handleKey.
+func (m *Model) toggleShellPane() tea.Cmd {
+	if m.shellOpen {
+		m.closeShell()
+		return nil
+	}
+	// enterShell("") targets the active chat session's own shell
+	// (shellSessionName — koto-shell[-<session>]), redialing if the pane was
+	// last attached to a different one, and focuses it — otherwise opening
+	// would leave the pty unreachable from the keyboard.
+	m.enterShell("")
+	// Kick the tick chain for the cursor blink; enterShell alone can't return
+	// a cmd (isAnimating is now true, but nothing restarts the chain until
+	// the next unrelated event otherwise).
+	return m.ensureTicking()
+}
+
+// toggleFullscreen zooms the active window to the whole frame (ctrl+f, and
+// the palette's entry). Entering hides the tree and any open-but-unfocused
+// shell split; leaving — this key again, or any focus change — restores them.
+// The pty side has its own reserved case in the shell-focus block.
+func (m *Model) toggleFullscreen() {
+	if m.fullscreen {
+		m.fullscreen = false
+		if m.preFullFocus == focusTree {
+			// Entered from tree mode — put the tree back (enterTree also
+			// re-clears the flag; harmless).
+			m.enterTree()
+		}
+	} else {
+		m.preFullFocus = m.focus
+		if m.focus == focusTree {
+			m.exitTree() // the tree is hidden fullscreen — land in the input
+		}
+		m.fullscreen = true
+	}
+	m.resizeViewport()
+	m.refreshLog()
 }
 
 func (m *Model) enterTree() {

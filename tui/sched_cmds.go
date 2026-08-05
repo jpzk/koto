@@ -19,9 +19,9 @@ type schedItem struct {
 }
 
 type schedListMsg struct {
-	filter    string
-	items     []schedItem
-	err       error
+	filter string
+	items  []schedItem
+	err    error
 }
 
 type schedAddMsg struct {

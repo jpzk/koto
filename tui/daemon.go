@@ -234,19 +234,19 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 // it by group. Typed rather than routed through daemonCall's protojson map:
 // the int64 byte fields arrive as JSON strings there, and the metrics bar
 // wants numbers, not another asInt64 dance.
-func fetchResources() (map[string]GroupRes, error) {
+func fetchResources() (map[string]GroupRes, HostRes, error) {
 	cl, err := getClient()
 	if err != nil {
-		return nil, err
+		return nil, HostRes{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := cl.Resources(ctx, &pb.ResourcesReq{})
 	if err != nil {
-		return nil, err
+		return nil, HostRes{}, err
 	}
 	if !resp.GetOk() {
-		return nil, fmt.Errorf("daemon: %s", resp.GetError())
+		return nil, HostRes{}, fmt.Errorf("daemon: %s", resp.GetError())
 	}
 	out := make(map[string]GroupRes, len(resp.GetGroups()))
 	for _, g := range resp.GetGroups() {
@@ -262,7 +262,16 @@ func fetchResources() (map[string]GroupRes, error) {
 			GuestMemAvail: g.GetGuestMemAvailBytes(),
 		}
 	}
-	return out, nil
+	h := resp.GetHost()
+	host := HostRes{
+		FsTotalBytes:     h.GetFsTotalBytes(),
+		FsFreeBytes:      h.GetFsFreeBytes(),
+		AllocTotalBytes:  h.GetAllocTotalBytes(),
+		ProvisionedBytes: h.GetProvisionedBytes(),
+		Groups:           h.GetGroups(),
+		RunningGroups:    h.GetRunningGroups(),
+	}
+	return out, host, nil
 }
 
 func asFloat(v any) (float64, bool) {
@@ -377,6 +386,8 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 			Sessions:  gi.GetSessions(),
 			Jobs:      pbToJobs(gi.GetJobs()),
 			TokPerSec: gi.GetTokPerSec(),
+			Network:   gi.GetNetwork(),
+			Root:      gi.GetRoot(),
 		}
 	}
 	return out

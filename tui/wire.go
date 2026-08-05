@@ -55,6 +55,11 @@ type GroupInfo struct {
 	// TokPerSec is the group's output-token throughput over the daemon's
 	// trailing window, measured daemon-side (daemon/tokrate.go). 0 = idle.
 	TokPerSec float64
+	// Network is the group's effective egress profile (none|wan|lan|full)
+	// and Root its sudo grant, read daemon-side from config.json. Rendered
+	// by the fleet (top) view; empty Network means an older daemon.
+	Network string
+	Root    bool
 }
 
 // JobInfo is one background job in a group's guest (koto.proto JobInfo).
@@ -85,6 +90,19 @@ type GroupRes struct {
 	// figure — RSSBytes ratchets to ~100% of the preset and stays there.
 	GuestMemTotal int64
 	GuestMemAvail int64
+}
+
+// HostRes is the fleet-wide rollup of the Resources RPC (koto.proto
+// HostResources): the daemon-side filesystem holding the workspace images,
+// total image allocation, and the provisioned (overcommit) sum of every
+// group's size preset. Rendered as the top view's summary line.
+type HostRes struct {
+	FsTotalBytes     int64
+	FsFreeBytes      int64
+	AllocTotalBytes  int64
+	ProvisionedBytes int64
+	Groups           int32
+	RunningGroups    int32
 }
 
 // LogEvent is one frame of the daemon's own log stream (SubscribeLogs).

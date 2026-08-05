@@ -116,17 +116,22 @@ func TestInputWrapCapped(t *testing.T) {
 	}
 }
 
-// TestInputCtrlPWithoutMatchesDoesNotPanic: bubbles v1.0.0's PrevSuggestion
-// (ctrl+p) wraps its suggestion index to -1 when nothing matches, and the
-// next View() indexed matchedSuggestions[-1] — a panic that killed the whole
-// TUI. The binding is now neutralized and inputGhost guards the index.
-func TestInputCtrlPWithoutMatchesDoesNotPanic(t *testing.T) {
+// TestInputCtrlNWithoutMatchesDoesNotPanic: bubbles v1.0.0's suggestion
+// cycling wraps its index to -1 when nothing matches, and the next View()
+// indexed matchedSuggestions[-1] — a panic that killed the whole TUI. The
+// bindings are now neutralized and inputGhost guards the index. Ctrl+N is the
+// surviving half of the original repro: ctrl+p is the command palette now
+// (palette.go) and never reaches the textinput.
+func TestInputCtrlNWithoutMatchesDoesNotPanic(t *testing.T) {
 	m := inputModel(t, "no history matches this")
-	for _, k := range []tea.KeyType{tea.KeyCtrlP, tea.KeyCtrlN} {
-		nm, _ := m.Update(tea.KeyMsg{Type: k})
-		m = nm.(Model)
-		_ = m.View()
-	}
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m = nm.(Model)
+	_ = m.View()
+	// The palette overlay renders over the same frame — make sure opening it
+	// with an unmatched draft in the bar doesn't hit the ghost path either.
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	_ = m.View()
 }
 
 // TestInputRowChangeResizesViewport: the growth has to reach the viewport
