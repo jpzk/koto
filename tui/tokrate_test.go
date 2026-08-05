@@ -14,14 +14,14 @@ func TestStatusBarShowsTokRates(t *testing.T) {
 	m.cur = "main"
 	m.globalTokRate = 99.6
 	right := m.renderStatusRight("⠋")
-	if !strings.Contains(right, "42 tok/s") || !strings.Contains(right, "Σ 100") {
-		t.Fatalf("status right missing tok/s chip (want \"42 tok/s\" and \"Σ 100\"):\n%q", right)
+	if !strings.Contains(right, "42 tok/s") || !strings.Contains(right, "Σ 100 tok/s") {
+		t.Fatalf("status right missing tok/s chip (want \"42 tok/s\" and \"Σ 100 tok/s\"):\n%q", right)
 	}
 
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.globalTokRate = 0
 	right = m.renderStatusRight("⠋")
-	if !strings.Contains(right, "0 tok/s") || !strings.Contains(right, "Σ 0") {
+	if !strings.Contains(right, "0 tok/s") || !strings.Contains(right, "Σ 0 tok/s") {
 		t.Fatalf("idle chip must still render zeros:\n%q", right)
 	}
 }

@@ -409,9 +409,9 @@ func (m Model) renderStatusRight(spin string) string {
 	// tok/s — daemon-measured output-token throughput over its trailing
 	// window: the focused group, then the fleet (Σ). Always shown, zeros
 	// included, so the chip is a fixture the eye can find rather than an
-	// element that pops in and out. Gray like the other ambient counters.
-	parts = append(parts, lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
-		Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
+	// element that pops in and out. Signature amber, matching the koto accent.
+	parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).Background(cBlack).
+		Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
 
 	return strings.Join(parts, "")
 }
