@@ -26,6 +26,11 @@ func main() {
 		}
 	}
 
+	// B/W mode is resolved before the first frame and never changes after —
+	// see mono.go. It reads KOTO_TUI_MONO, else the terminal type (vt100 and
+	// friends), so a monochrome terminal needs no flag.
+	initMono(os.Getenv)
+
 	m := newModel(sock, ctxWindow)
 	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := prog.Run()

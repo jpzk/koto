@@ -40,8 +40,19 @@ func getRenderer(width int) *glamour.TermRenderer {
 	}
 	// WithStandardStyle("dark") avoids tty-detection inside the container
 	// (no TERM, no isatty heuristics — predictable colors).
+	//
+	// B/W mode swaps in glamour's "ascii" style. monoFrame would strip the
+	// dark style's colors from the frame anyway, but that leaves headings,
+	// emphasis and code spans indistinguishable from body text — the ascii
+	// style marks them structurally instead ("# " prefixes, `**` around
+	// strong, backticks around code), which is the whole distinction a
+	// colorless terminal has left.
+	style := "dark"
+	if monoMode {
+		style = "ascii"
+	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStandardStyle(style),
 		glamour.WithWordWrap(width),
 		glamour.WithEmoji(),
 	)

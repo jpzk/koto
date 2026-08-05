@@ -48,6 +48,10 @@ func pctColor(frac float64) lipgloss.Color {
 // portion, light-gray full blocks for the remainder. Caller picks the color so
 // the bar can encode either "high = bad" (utilization) or "high = good" (cache
 // hit ratio).
+//
+// Both halves are the same glyph in different colors, so mono has to split
+// them by glyph instead — '#' filled, '-' empty — rather than letting the
+// ASCII fold turn the whole bar into one indistinguishable run of '#'.
 func renderBar(frac float64, width int, fg lipgloss.Color) string {
 	if frac < 0 {
 		frac = 0
@@ -59,10 +63,17 @@ func renderBar(frac float64, width int, fg lipgloss.Color) string {
 	if filled > width {
 		filled = width
 	}
+	onGlyph, offGlyph := "█", "█"
+	if monoMode {
+		onGlyph, offGlyph = "#", "-"
+	}
+	// No alertify() here: the caller underlines the chip's label and percentage
+	// for the alert tier, and running that rule under the fill too would just
+	// blur the one thing this glyph split exists to keep readable.
 	on := lipgloss.NewStyle().Foreground(fg).Background(cBlack).
-		Render(strings.Repeat("█", filled))
+		Render(strings.Repeat(onGlyph, filled))
 	off := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
-		Render(strings.Repeat("█", width-filled))
+		Render(strings.Repeat(offGlyph, width-filled))
 	bracketL := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).Render("[")
 	bracketR := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).Render("]")
 	return bracketL + on + off + bracketR
@@ -89,7 +100,7 @@ func renderReset(resetTs int64) string {
 		fg = cRose
 	}
 	t := time.Unix(resetTs, 0)
-	return lipgloss.NewStyle().Foreground(fg).Background(cBlack).
+	return alertify(lipgloss.NewStyle(), fg).Foreground(fg).Background(cBlack).
 		Render(fmt.Sprintf("  ↻ %02d:%02d %s ", t.Hour(), t.Minute(), rem))
 }
 
@@ -152,7 +163,15 @@ func cacheHitRatio(m map[string]any) float64 {
 	return read / denom
 }
 
-func (m Model) View() string {
+// View renders the frame. Everything below builds it in color; monoFrame is
+// the B/W mode's single choke point — on a monochrome terminal it strips the
+// color out of the finished frame and folds its glyphs to ASCII (mono.go).
+// Wrapping the whole frame rather than each renderer also catches the styling
+// we don't emit ourselves: glamour's markdown, the log view's level tags, and
+// the guest's own colors in the shell pane.
+func (m Model) View() string { return monoFrame(m.view()) }
+
+func (m Model) view() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
 	}
@@ -281,7 +300,7 @@ func (m Model) renderNotifyInline(leftW, maxEnd int) string {
 		accent = cPink
 	}
 	on := (m.tick/notifyBlinkTicks)%2 == 0
-	base := lipgloss.NewStyle().Foreground(cBlack).Background(accent)
+	base := inv(cBlack, accent)
 	icon := " 🔔 "
 	if !on {
 		base = lipgloss.NewStyle().Foreground(accent)
@@ -333,7 +352,11 @@ func (m Model) renderStatusBar(spin string) string {
 }
 
 func (m Model) renderStatusLeft() string {
-	app := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render(" koto ")
+	// The banner chip inverts; the group segment beside it stays plain bold in
+	// mono. Inverting both would fuse them into one unbroken reverse bar —
+	// there is no separator glyph between them to keep them apart (pSep is
+	// empty), only the two background colors the strip removes.
+	app := inv(cBlack, cAmber).Bold(true).Render(" koto ")
 	a1 := lipgloss.NewStyle().Foreground(cAmber).Background(cDkAmber).Render(pSep)
 	runDot := " "
 	if g, ok := m.groups[m.cur]; ok && g.Running {
@@ -441,7 +464,8 @@ func (m Model) renderMetricsBar() string {
 	// metrics (ctx, 5h, 7d) high = bad, so pctColor is used directly. For the
 	// cache hit ratio high = good, so we color by (1-frac) instead.
 	renderMetricColored := func(label string, frac float64, fracColor lipgloss.Color) string {
-		style := lipgloss.NewStyle().Foreground(fracColor).Background(cBlack).Bold(true)
+		style := alertify(lipgloss.NewStyle(), fracColor).
+			Foreground(fracColor).Background(cBlack).Bold(true)
 		if useBars {
 			return style.Render(fmt.Sprintf("  %s ", label)) +
 				renderBar(frac, barW, fracColor) +
@@ -534,7 +558,7 @@ func (m Model) renderMetricsBar() string {
 func (m Model) renderTree(rows int) string {
 	header := ""
 	if m.focus == focusTree {
-		header = lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
+		header = inv(cBlack, cAmber).Bold(true).
 			Render(" agents (tab back) ")
 	} else {
 		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
@@ -741,8 +765,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		if pw := lipgloss.Width(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
-		return lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).
-			Render(txt)
+		return inv(cBlack, cAmber).Bold(true).Render(txt)
 	}
 	parts := " "
 	if r.branch != "" {
@@ -1328,8 +1351,11 @@ func (m Model) renderInput() string {
 		}
 		body = strings.Join(rows, "\n")
 	}
+	// Focus is an amber-vs-gray border in color; in mono the border itself
+	// carries it (boxBorder: `=` rails focused, `-` unfocused), since the
+	// color is stripped and nothing else marks which box owns the keyboard.
 	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
+		BorderStyle(boxBorder(m.focus == focusInput)).
 		BorderForeground(borderColor).
 		Width(boxW - 2).
 		Render(body)
@@ -1342,9 +1368,13 @@ func (m Model) renderHint() string {
 	if m.focus == focusTree {
 		// ⇥ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
 		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
-		left := " ↑↓ switch · ^r prompts · ⇥/⎋ close"
+		// Key names are spelled out in mono rather than left to the ASCII
+		// fold: a width-preserving stand-in for ⇥/⎋/⌥ is a single cryptic
+		// letter, and this row is flow text that can afford the extra columns
+		// (it's chosen before layout, so the widths still add up).
+		left := gl(" ↑↓ switch · ^r prompts · ⇥/⎋ close", " up/dn switch . ^r prompts . tab/esc close")
 		if m.shellFocusable() {
-			left += " · ⌥→ term"
+			left += gl(" · ⌥→ term", " . alt-right term")
 		}
 		styled := dim.Render(left)
 		right := m.renderProviderModel()
@@ -1366,11 +1396,11 @@ func (m Model) renderHint() string {
 	if streaming || thinking {
 		parts = append(parts, " streaming…")
 	} else {
-		parts = append(parts, " ↩ send")
+		parts = append(parts, gl(" ↩ send", " enter send"))
 	}
-	parts = append(parts, "↑↓ scroll", "⇥/⎋ tree")
+	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⇥/⎋ tree", "tab/esc tree"))
 	if m.shellFocusable() {
-		parts = append(parts, "⌥→ term")
+		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}
 	thoughtsHint := "^t thoughts"
 	if m.expandedThoughts {
@@ -1411,7 +1441,7 @@ func (m Model) renderHint() string {
 			Render("◆ history start"))
 	}
 	if streaming || thinking || m.busy[m.cur] {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render("⎋ stop"))
+		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")))
 	}
 	parts = append(parts, "^c exit")
 	left := " " + strings.Join(parts, "  ·  ")
@@ -1482,7 +1512,7 @@ func (m Model) renderPicker(rows int) string {
 	if m.picker.mode == pickerPalette {
 		label = fmt.Sprintf(" commands · %d/%d ", len(m.picker.matches), len(m.picker.items))
 	}
-	header := lipgloss.NewStyle().Foreground(cBlack).Background(cAmber).Bold(true).Render(label)
+	header := inv(cBlack, cAmber).Bold(true).Render(label)
 
 	prefix := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 	inputLine := prefix + m.picker.input.View()
@@ -1545,7 +1575,7 @@ func (m Model) renderPicker(rows int) string {
 	inner := strings.Join(innerParts, "\n")
 
 	box := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
+		BorderStyle(boxBorder(true)). // the picker always owns the keyboard
 		BorderForeground(cAmber).
 		Width(boxW-2).
 		Padding(0, 1).

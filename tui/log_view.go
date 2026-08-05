@@ -305,7 +305,7 @@ func (m Model) renderLogHint() string {
 	if s := m.logScopeFor(); s != "" {
 		scope = " daemon log · " + s
 	}
-	parts := []string{scope, "↑↓ scroll", "⇧↑↓ group", "^l close"}
+	parts := []string{scope, gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ group", "shift-up/dn group"), "^l close"}
 	if m.logVPReady && !m.logVP.AtBottom() {
 		yellow := lipgloss.NewStyle().Foreground(cYellow)
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%",

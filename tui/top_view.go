@@ -110,10 +110,11 @@ func renderTopRow(r topRow) string {
 	white := lipgloss.NewStyle().Foreground(cWhite)
 
 	// GROUP: running groups bright, stopped gray — the same signal the
-	// tree's dot carries.
+	// tree's dot carries. That signal is color alone and this table has no
+	// dot beside the name, so mono bolds the running rows instead.
 	nameStyle := gray
 	if r.info.Running {
-		nameStyle = white
+		nameStyle = white.Bold(monoMode)
 	}
 	cells := []string{nameStyle.Render(topPad(r.group, topColumns[0].w))}
 
@@ -125,7 +126,8 @@ func renderTopRow(r topRow) string {
 	if r.hasRes && r.res.DeclaredBytes > 0 {
 		frac := float64(r.res.AllocBytes) / float64(r.res.DeclaredBytes)
 		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(r.res.AllocBytes), fmtGB(r.res.DeclaredBytes), int(frac*100))
-		cells = append(cells, lipgloss.NewStyle().Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
+		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
+			Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
 	} else {
 		cells = append(cells, dash(topColumns[1].w))
 	}
@@ -134,7 +136,8 @@ func renderTopRow(r topRow) string {
 	// per-core), matching the metrics bar.
 	if r.hasRes && r.res.Vcpus > 0 && r.res.Running {
 		frac := r.res.CPUPct / 100 / float64(r.res.Vcpus)
-		cells = append(cells, lipgloss.NewStyle().Foreground(pctColor(frac)).Render(topPad(fmt.Sprintf("%d%%", int(frac*100)), topColumns[2].w)))
+		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
+			Foreground(pctColor(frac)).Render(topPad(fmt.Sprintf("%d%%", int(frac*100)), topColumns[2].w)))
 	} else {
 		cells = append(cells, dash(topColumns[2].w))
 	}
@@ -199,7 +202,7 @@ func (m Model) renderTopSummary() string {
 	if h.FsTotalBytes > 0 {
 		frac = float64(used) / float64(h.FsTotalBytes)
 	}
-	fsStyle := lipgloss.NewStyle().Foreground(pctColor(frac))
+	fsStyle := alertify(lipgloss.NewStyle(), pctColor(frac)).Foreground(pctColor(frac))
 	gray := lipgloss.NewStyle().Foreground(cGray)
 	return gray.Render(fmt.Sprintf("groups %d (%d running) · host fs ", h.Groups, h.RunningGroups)) +
 		fsStyle.Render(fmt.Sprintf("%s/%s %d%%", fmtGB(used), fmtGB(h.FsTotalBytes), int(frac*100))) +
@@ -322,7 +325,7 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by cpu", "↑↓ scroll", "⇧↑↓ group", "^h close", "^c exit"}
+	parts := []string{" fleet · by cpu", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ group", "shift-up/dn group"), "^h close", "^c exit"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 

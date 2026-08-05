@@ -97,6 +97,7 @@ tui: $(BUILD)/koto-tui
 	    -e TERM_PROGRAM="$$TERM_PROGRAM" \
 	    -e KOTO_TUI_TERM="$$TERM" \
 	    -e KOTO_TUI_NOTIFY="$$KOTO_TUI_NOTIFY" \
+	    -e KOTO_TUI_MONO="$$KOTO_TUI_MONO" \
 	    koto-tui; ec=$$?; \
 	  [ $$ec -eq 75 ] || exit $$ec; \
 	  echo "/reload: rebuilding koto-tui…"; \

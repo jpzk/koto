@@ -829,6 +829,7 @@ func (m Model) renderShellHint() string {
 	if m.fullscreen {
 		full = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
 	}
-	parts = append(parts, "⎋ tree", "⌥⎋ esc→guest", full, "ctrl+] close", "⌥← chat")
+	parts = append(parts, gl("⎋ tree", "esc tree"), gl("⌥⎋ esc→guest", "alt-esc esc-to-guest"),
+		full, "ctrl+] close", gl("⌥← chat", "alt-left chat"))
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }

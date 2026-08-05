@@ -297,6 +297,35 @@ verb list.
   an escape sequence with nobody to interpret it is just garbage in a log. A
   multiplexer in the middle (zellij, tmux) may swallow the sequence; that's
   what the in-TUI banner and `KOTO_TUI_NOTIFY=off` are for.
+- **The TUI has a black-and-white mode for terminals that have no color**
+  (`tui/mono.go`), auto-enabled when the terminal type says so — `vt100` and
+  the rest of the VT family, `dumb`, and terminfo's monochrome variants
+  (`xterm-mono`, `linux-m`). Read from `KOTO_TUI_TERM` first for the same
+  reason the notify sniffing does (the container's own `TERM` is `xterm`);
+  `KOTO_TUI_MONO=on|off` forces it either way. **It is implemented as one
+  filter on the finished frame, not as a second palette**: `monoFrame` strips
+  the color parameters out of every SGR sequence in `View()`'s output and
+  leaves the attribute parameters, so bold/reverse/underline survive. That's
+  one choke point instead of ~160 call sites, and it also catches the color we
+  don't emit ourselves — glamour's markdown, the log view's level tags, an
+  ```ansi fence in a response, the guest's own colors in the shell pane.
+  **Dropping the BACKGROUND is what makes it correct on a white-background
+  terminal**: the color TUI paints its bars black-with-light-text, so removing
+  only the foreground would leave black on black; removing both leaves the
+  terminal's own pair, whichever way round it is — background-agnostic by
+  construction rather than by hard-coding a light palette. Note this is *not*
+  done by forcing termenv's `Ascii` profile, which drops the whole sequence,
+  attributes included (`termenv/style.go` `Styled()`) — mono pins the profile
+  to `ANSI` instead so the attributes are always emitted for us to keep. Where
+  color was the *only* signal it is re-expressed as an attribute: reverse video
+  for the bars and the tree's cursor row (`inv()`), underline for the
+  over-threshold metric tier (`alertify()`), bold for a running group in the
+  fleet table. Non-ASCII furniture folds to ASCII (`foldASCII`) since a VT100
+  is a 7-bit terminal — every substitution is the **same cell width** as the
+  glyph it replaces, because the fold runs after layout. Markdown switches to
+  glamour's `ascii` style so headings and emphasis stay marked structurally
+  once their color is gone. Pinned by `tui/mono_test.go`, which asserts a
+  rendered frame carries no color parameter and no non-ASCII byte.
 - **`SubscribeGroup(group, since_seq) → stream Event`** — the live event
   stream, fed by the daemon-side log tailer. Every frame carries a per-group
   monotonic `seq`. `since_seq=0` means live-only; `since_seq>0` makes the
