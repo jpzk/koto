@@ -2945,6 +2945,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.input.Value()) == "" && m.setJobFold(s == "right") {
 				return m, nil
 			}
+		case "ctrl+o":
+			// One-key fold toggle ("open"). Unlike the arrows it never
+			// collides with draft editing, so it works draft or not.
+			if !m.setJobFold(true) {
+				m.setJobFold(false)
+			}
+			return m, nil
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while

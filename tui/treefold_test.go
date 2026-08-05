@@ -110,6 +110,31 @@ func TestArrowsWithDraftDoNotFold(t *testing.T) {
 	}
 }
 
+// ctrl+o is the one-key toggle: unfold, fold, and — unlike the arrows — it
+// works with a draft in the message bar too.
+func TestCtrlOTogglesJobFold(t *testing.T) {
+	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
+	m := treeModel(t, map[string]GroupInfo{
+		"ghost": {Running: true, Jobs: []JobInfo{job}},
+	}, "ghost", "", "")
+	m.input.SetValue("draft")
+
+	m = pressKey(t, m, tea.KeyCtrlO)
+	if n := jobRowCount(m); n != 1 {
+		t.Fatalf("%d job rows after ctrl+o, want 1", n)
+	}
+	m = pressKey(t, m, tea.KeyCtrlO)
+	if n := jobRowCount(m); n != 0 {
+		t.Fatalf("%d job rows after second ctrl+o, want 0", n)
+	}
+	if m.focus != focusTree {
+		t.Fatal("ctrl+o must not leave tree mode")
+	}
+	if m.input.Value() != "draft" {
+		t.Fatalf("draft mangled by ctrl+o: %q", m.input.Value())
+	}
+}
+
 // ← on a job row folds the list it belongs to and re-anchors the cursor on
 // the conversation row (tearing down the peek pane with it).
 func TestLeftOnJobRowFoldsAndReanchors(t *testing.T) {
