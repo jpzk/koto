@@ -271,6 +271,14 @@ func stripSGRColor(s string) string {
 			b.WriteString(s[i:j])
 			i = j
 		default:
+			if s[i+1] == 0x1b {
+				// ESC aborted by another ESC: terminals drop the first and
+				// re-parse from the second — consuming both as one two-byte
+				// escape would let \x1b\x1b[31m smuggle a color through.
+				b.WriteByte(c)
+				i++
+				continue
+			}
 			b.WriteString(s[i : i+2])
 			i += 2
 		}
