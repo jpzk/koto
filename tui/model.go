@@ -6,15 +6,19 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -24,6 +28,12 @@ const (
 	// the global cap is a safety lid, not a normal-path concern anymore.
 	maxLines        = 50000
 	historyPageSize = 1000 // events per history page (initial + each older-page fetch)
+
+	// A failed INITIAL history page retries this many times, this far apart,
+	// before the group is marked loaded-without-transcript (see historyMsg's
+	// error path). Bounded so an ACL-denied History can't spam forever.
+	historyRetryMax   = 3
+	historyRetryDelay = 5 * time.Second
 	// pageTopThreshold is how close to the top (in viewport lines) we have to
 	// be before a scroll triggers an older-page fetch. Conservative so we
 	// don't fire while the user is just scanning the upper portion.
@@ -122,6 +132,11 @@ type listMsg struct {
 	globalTok    float64
 	hasGlobalTok bool
 }
+
+// historyRetryMsg re-fires the initial history fetch for a group whose
+// previous attempt failed (timer armed by historyMsg's error path).
+type historyRetryMsg struct{ group string }
+
 type historyMsg struct {
 	group  string
 	events []Event
@@ -221,6 +236,10 @@ type daemonRespMsg struct {
 	// it to scope the local line drop: "" = whole group, "-" = default
 	// session, name = that session).
 	session string
+	// msgText is the message a `send` carried — the error path uses it to
+	// drop the RIGHT optimistic ⏳ row (unary responses complete out of
+	// order, so "newest" may be someone else's healthy send).
+	msgText string
 	resp    map[string]any
 	err     error
 }
@@ -511,6 +530,9 @@ type Model struct {
 	pageOldestTs  map[string]float64
 	pageLoading   map[string]bool
 	pageExhausted map[string]bool
+	// historyRetries[g] counts failed initial-page fetches (bounded retry —
+	// see historyMsg's error path); cleared on the first success.
+	historyRetries map[string]int
 
 	// Daemon log view (focusLog / ctrl+L). The subscription is lazy: we
 	// only open `cmd:"logs"` on the first ctrl+L press to avoid a wasted
@@ -809,36 +831,37 @@ func newModel(sock string, ctxWindow int) Model {
 		// The textinput is still Focus()'d (above) so typing a draft
 		// continues to work — focusTree only routes ↑/↓/⏎ to tree
 		// navigation; everything else still falls through to the input.
-		focus:         focusTree,
-		vp:            vp,
-		autoFollow:    true,
-		logAutoFollow: true,
-		loadedGroups:  map[string]bool{},
-		prewarming:    map[string]int{},
-		pageOldestTs:  map[string]float64{},
-		pageLoading:   map[string]bool{},
-		pageExhausted: map[string]bool{},
-		connected:     true,
-		ticking:       true, // Init kicks the first tick
-		width:         80,
-		height:        24,
-		mdCache:       map[string]string{},
-		vpCache:       map[string]vpCacheEntry{},
-		groupVer:      map[string]int{},
-		promptHistory: map[string][]string{},
-		histNav:       map[string]int{},
-		histDraft:     map[string]string{},
-		pending:       map[string][]pendingPrompt{},
-		sendInFlight:  map[string]int{},
-		sendAckAt:     map[string]time.Time{},
-		session:       sessions,
-		turnSession:   map[string]string{},
-		peekVP:        pvp,
-		peekFollow:    true,
-		jobStatusSeen: map[string]string{},
-		jobDoneAt:     map[string]time.Time{},
-		jobsPrimed:    map[string]bool{},
-		jobsOpen:      map[string]bool{},
+		focus:          focusTree,
+		vp:             vp,
+		autoFollow:     true,
+		logAutoFollow:  true,
+		loadedGroups:   map[string]bool{},
+		prewarming:     map[string]int{},
+		pageOldestTs:   map[string]float64{},
+		pageLoading:    map[string]bool{},
+		historyRetries: map[string]int{},
+		pageExhausted:  map[string]bool{},
+		connected:      true,
+		ticking:        true, // Init kicks the first tick
+		width:          80,
+		height:         24,
+		mdCache:        map[string]string{},
+		vpCache:        map[string]vpCacheEntry{},
+		groupVer:       map[string]int{},
+		promptHistory:  map[string][]string{},
+		histNav:        map[string]int{},
+		histDraft:      map[string]string{},
+		pending:        map[string][]pendingPrompt{},
+		sendInFlight:   map[string]int{},
+		sendAckAt:      map[string]time.Time{},
+		session:        sessions,
+		turnSession:    map[string]string{},
+		peekVP:         pvp,
+		peekFollow:     true,
+		jobStatusSeen:  map[string]string{},
+		jobDoneAt:      map[string]time.Time{},
+		jobsPrimed:     map[string]bool{},
+		jobsOpen:       map[string]bool{},
 	}
 }
 
@@ -1285,8 +1308,9 @@ func daemonCmd(sock, op, group string, extra map[string]any) tea.Cmd {
 			extra["group"] = group
 		}
 		sess, _ := extra["session"].(string)
+		msgText, _ := extra["msg"].(string)
 		resp, err := daemonCall(sock, op, extra)
-		return daemonRespMsg{op: op, group: group, session: sess, resp: resp, err: err}
+		return daemonRespMsg{op: op, group: group, session: sess, msgText: msgText, resp: resp, err: err}
 	}
 }
 
@@ -1498,10 +1522,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.connected {
 			m.connected = true
-			m.reconnecting = false
-			m.reconnectAttempt = 0
 			m.addLine(logLine{kind: "sys", text: "reconnected to daemon"})
 		}
+		// Probe bookkeeping resets on ANY successful list — including the
+		// stream-death probes that never flipped m.connected — so the next
+		// backoff series starts from the bottom.
+		m.reconnecting = false
+		m.reconnectAttempt = 0
 		if !m.watching {
 			m.watching = true
 			startWatchState()
@@ -1520,6 +1547,23 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		for g := range m.busy {
 			if _, ok := msg.groups[g]; !ok {
 				delete(m.busy, g)
+			}
+		}
+		// Unread markers too: an entry surviving an external destroy
+		// resurrects as a phantom pink dot when a same-named group (or
+		// session) is created later, and the map otherwise grows without
+		// bound. Session entries are pruned against the group's current
+		// session list (sessions vanish only when their conversation is
+		// cleared, so a pending unread there is void by definition).
+		for k := range m.unread {
+			g, s, _ := strings.Cut(k, "\x00")
+			gi, ok := msg.groups[g]
+			if !ok {
+				delete(m.unread, k)
+				continue
+			}
+			if s != "" && !slices.Contains(gi.Sessions, s) && !goalSession(s) {
+				delete(m.unread, k)
 			}
 		}
 		m.groups = msg.groups
@@ -1596,12 +1640,39 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.ensureTicking())
 		return m, tea.Batch(cmds...)
 
+	case historyRetryMsg:
+		// Re-fire the initial page unless the group vanished or a later
+		// fetch already succeeded in the meantime.
+		if _, ok := m.groups[msg.group]; ok && !m.loadedGroups[msg.group] {
+			return m, historyCmd(m.sock, msg.group, 0, historyPageSize)
+		}
+		return m, nil
+
 	case historyMsg:
 		if msg.err != nil {
-			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("history: %v", msg.err)})
 			m.pageLoading[msg.group] = false
+			// A failed INITIAL page used to wedge the group for the life of
+			// the process: subscribed[g] is already true so listMsg never
+			// refetches, loadedGroups[g] never gets set, and the status bar
+			// renders "loading N/M" forever. Retry a few times, then give up
+			// visibly (mark loaded so the bar completes; /reload or a stream
+			// gap can still recover the transcript).
+			if msg.before == 0 && m.historyRetries[msg.group] < historyRetryMax {
+				m.historyRetries[msg.group]++
+				if m.historyRetries[msg.group] == 1 {
+					m.addLine(logLine{kind: "err", group: msg.group,
+						text: fmt.Sprintf("history: %v (retrying)", msg.err)})
+				}
+				g := msg.group
+				return m, tea.Tick(historyRetryDelay, func(time.Time) tea.Msg { return historyRetryMsg{group: g} })
+			}
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("history: %v", msg.err)})
+			if msg.before == 0 {
+				m.loadedGroups[msg.group] = true
+			}
 			return m, nil
 		}
+		delete(m.historyRetries, msg.group)
 		older := msg.before > 0
 		batch := make([]logLine, 0, len(msg.events))
 		for _, ev := range msg.events {
@@ -1677,23 +1748,33 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if older && len(batch) > 0 {
 			// Drop the re-fetched boundary-tie members we already hold: the
 			// trailing batch events inside the bias window just below this
-			// fetch's cursor, as many as are already in m.lines. Count-based
-			// — the daemon's slice is positional over the same log, so the
-			// newest k tied events of this response are exactly our k.
+			// fetch's cursor. Matched by CONTENT against the held window
+			// lines, not by blind count — the initial page's thinking-echo
+			// filter can skip an event the older page replays, and a count
+			// pop would then remove the wrong entry and re-prepend a held
+			// one. An unmatched trailing entry while held lines remain is
+			// exactly such a filtered echo: drop it the same way. Stop when
+			// the held set is exhausted — everything older is the new
+			// content the bias exists to reach.
 			lo := msg.before - 0.001
-			have := 0
+			var held []logLine
 			for _, l := range m.lines {
 				if l.group == msg.group && l.tsF > lo && l.tsF < msg.before {
-					have++
+					held = append(held, l)
 				}
 			}
-			for have > 0 && len(batch) > 0 {
+			for len(held) > 0 && len(batch) > 0 {
 				last := batch[len(batch)-1]
 				if last.tsF <= lo || last.tsF >= msg.before {
 					break
 				}
+				for i := len(held) - 1; i >= 0; i-- {
+					if held[i].kind == last.kind && held[i].session == last.session && held[i].text == last.text {
+						held = append(held[:i], held[i+1:]...)
+						break
+					}
+				}
 				batch = batch[:len(batch)-1]
-				have--
 			}
 			if len(batch) == 0 && msg.more {
 				// A tie longer than the page limit: every event this window
@@ -1756,8 +1837,51 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Initial (tail) page — original append path. No per-batch cap
-		// needed; the daemon already trimmed to historyPageSize.
+		// Initial (tail) page — append path. Live frames that arrived in the
+		// subscribe→historyMsg window (first attach, and the gap reload,
+		// which keeps the stream flowing while it refetches) are in BOTH
+		// m.lines and this page — drop the already-present copies before
+		// appending, or each renders twice until the next /clear. Existing
+		// lines for this group at tail-page time can only be that live
+		// window (toReload/gap dropped everything older), so matching by
+		// content against the fetched page is exact, and it also collapses
+		// the double-fetch case (gap racing a stream death) to one copy.
+		if len(batch) > 0 {
+			// tool_out live lines carry an elapsed suffix on the summary row
+			// that history replays lack — compare their bodies instead.
+			bodyOf := func(s string) (string, bool) { _, b, ok := strings.Cut(s, "\n"); return b, ok }
+			dup := func(l logLine) bool {
+				for i := len(batch) - 1; i >= 0; i-- {
+					b := batch[i]
+					if b.ts != l.ts || b.kind != l.kind || b.session != l.session {
+						continue
+					}
+					if b.text == l.text {
+						return true
+					}
+					if l.kind == "tool_out" {
+						lb, lok := bodyOf(l.text)
+						bb, bok := bodyOf(b.text)
+						if lok && bok && lb == bb {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			kept := m.lines[:0]
+			removed := false
+			for _, l := range m.lines {
+				if l.group == msg.group && dup(l) {
+					removed = true
+					continue
+				}
+				kept = append(kept, l)
+			}
+			if removed {
+				m.lines = kept
+			}
+		}
 		m.lines = append(m.lines, batch...)
 		if len(m.lines) > maxLines {
 			m.lines = m.lines[len(m.lines)-maxLines:]
@@ -1881,6 +2005,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					if i := strings.IndexByte(cut, '\n'); i >= 0 {
 						cut = cut[i+1:]
 					}
+					// No newline to realign on — at least don't lead the
+					// pane with the tail of a split UTF-8 rune.
+					for len(cut) > 0 && !utf8.RuneStart(cut[0]) {
+						cut = cut[1:]
+					}
 					m.peekOut = cut
 				}
 			}
@@ -1988,7 +2117,14 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// until its next turn. Flush leftover stream text like the
 			// prompt case does (it belongs to the turn that just ended).
 			if cur, ok := m.streamBuf[ev.Group]; ok {
-				m.addLine(logLine{kind: "response", group: ev.Group, session: m.turnSession[ev.Group], text: cur})
+				// The remnant belongs to the turn that just ended — the
+				// frame's own session stamp when present (a mid-turn attach
+				// has no turnSession entry yet), turnSession otherwise.
+				sess := ev.Session
+				if sess == "" {
+					sess = m.turnSession[ev.Group]
+				}
+				m.addLine(logLine{kind: "response", group: ev.Group, session: sess, text: cur})
 				delete(m.streamBuf, ev.Group)
 			}
 			delete(m.busy, ev.Group)
@@ -2152,7 +2288,23 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamClosedMsg:
 		delete(m.subscribed, msg.group)
-		return m, m.scheduleReconnect()
+		if status.Code(msg.err) == codes.PermissionDenied {
+			// A scoped role may hold list/watch_state but not
+			// subscribe_group for this group. Retrying is a permanent loop
+			// (probe succeeds → resubscribe → denied → probe …, one cycle
+			// per backoff forever). Say so once and leave it unsubscribed;
+			// an ACL edit + /ls picks it back up.
+			m.addLine(logLine{kind: "err", group: msg.group,
+				text: fmt.Sprintf("subscribe %s denied — no live stream for this group (%v)", msg.group, msg.err)})
+			return m, nil
+		}
+		// One group's stream dying (slow-subscriber kick, group destroyed by
+		// another client) is NOT a daemon-level disconnect — probe without
+		// flipping m.connected, so the status bar doesn't flash DISCONNECTED
+		// and the next listMsg doesn't print a spurious "reconnected to
+		// daemon". If the daemon really is down, the probe's error path
+		// escalates to the full reconnect.
+		return m, m.scheduleProbe()
 
 	case logEventMsg:
 		// formatLogLine uses charmbracelet/log to render the styled line;
@@ -2905,12 +3057,31 @@ func (m *Model) ensureTicking() tea.Cmd {
 	return tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
 }
 
+// scheduleReconnect declares the daemon unreachable (DISCONNECTED banner,
+// "reconnected" line on recovery) and arms the probe loop. For a single
+// stream death, use scheduleProbe — same loop, no disconnect declaration.
+// persistUIState snapshots what a future session restores (active
+// conversation, draft, per-group session targets). Called on EVERY exit
+// path — /reload, ctrl+shift+r, /quit, ctrl+c — not just the reload ones:
+// when only reloads saved, a normal quit left the file describing whatever
+// the last /reload saw, and weeks later a fresh start resurrected that
+// stale group + draft (and silently retargeted the first send).
+func (m *Model) persistUIState() {
+	saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
+}
+
 func (m *Model) scheduleReconnect() tea.Cmd {
+	m.connected = false
+	return m.scheduleProbe()
+}
+
+// scheduleProbe arms a backoff-delayed listCmd probe (single-flight); its
+// listMsg re-subscribes any group without a live stream.
+func (m *Model) scheduleProbe() tea.Cmd {
 	if m.reconnecting {
 		return nil
 	}
 	m.reconnecting = true
-	m.connected = false
 	m.reconnectAttempt++
 	// exponential backoff capped at 5s: 250ms, 500ms, 1s, 2s, 4s, 5s, 5s...
 	shift := m.reconnectAttempt - 1
@@ -2959,15 +3130,25 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		}
 		m.sendAckAt[msg.group] = time.Now()
 		if msg.err != nil {
-			// Enqueue was rejected (queue full) — the optimistic pending row we
-			// added never made it into the daemon's queue, so it'd never get a
-			// `prompt` event to pop it. Drop the newest pending entry (overflow
-			// rejects the latest send) to avoid a permanent phantom ⏳ row.
+			// Enqueue was rejected — the optimistic pending row we added
+			// never made it into the daemon's queue, so it'd never get a
+			// `prompt` event to pop it. Drop THIS send's entry, matched by
+			// content from the newest end: unary responses complete out of
+			// order, so blindly popping the newest could drop a healthy
+			// send's row and leave the failed one as a phantom ⏳ forever
+			// (well, until reconcilePending's grace window catches it).
 			if p := m.pending[msg.group]; len(p) > 0 {
+				idx := len(p) - 1
+				for i := len(p) - 1; i >= 0; i-- {
+					if p[i].text == msg.msgText && p[i].session == msg.session {
+						idx = i
+						break
+					}
+				}
 				if len(p) == 1 {
 					delete(m.pending, msg.group)
 				} else {
-					m.pending[msg.group] = p[:len(p)-1]
+					m.pending[msg.group] = append(p[:idx:idx], p[idx+1:]...)
 				}
 				if msg.group == m.cur {
 					m.refreshLog()
@@ -3184,6 +3365,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.plugin != nil {
 			m.plugin.abort()
 		}
+		m.persistUIState()
 		return m, tea.Quit
 	}
 	if s == "ctrl+shift+r" {
@@ -3192,7 +3374,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the input box as the draft (typing "/reload" would have
 		// overwritten it). Some terminals don't transmit shifted control
 		// keys distinctly — fall back to /reload if your terminal doesn't.
-		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
+		m.persistUIState()
 		m.reloadPending = true
 		return m, tea.Quit
 	}
@@ -4102,8 +4284,28 @@ func (m *Model) normalizeTreeCursor() {
 	case conv >= 0:
 		m.treeIdx = conv
 		m.treeSel = rows[conv].id()
-	case m.treeIdx >= len(rows):
-		m.treeIdx = len(rows) - 1
+	default:
+		// The anchored SESSION row itself vanished (per-session /clear from
+		// another client, a goal session ending): the conv fallback can
+		// never match — it looks for the same session — so without this the
+		// highlight clamps onto an arbitrary row while sends still target
+		// the dead session (for an ended goal session that's a lockout: the
+		// follow-only guard refuses sends until the user finds /session
+		// default). Retarget the conversation to the group's default
+		// session so highlight and send target agree again.
+		if m.treeSel.session != "" {
+			g := m.treeSel.group
+			for i, r := range rows {
+				if r.group == g && r.session == "" && r.job == "" {
+					m.treeIdx = i
+					m.selectTreeRow(r)
+					return
+				}
+			}
+		}
+		if m.treeIdx >= len(rows) {
+			m.treeIdx = len(rows) - 1
+		}
 	}
 	// The hovered row may have changed identity (a fallback above) — keep
 	// the live tail bound to what's actually under the cursor.
@@ -4256,6 +4458,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return listCmd(m.sock)
 	}
 	if v == "/quit" || v == "/exit" {
+		m.persistUIState()
 		return tea.Quit
 	}
 	if v == "/skill" || strings.HasPrefix(v, "/skill ") {
@@ -4413,7 +4616,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		)
 	}
 	if v == "/reload" {
-		saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
+		m.persistUIState()
 		m.reloadPending = true
 		return tea.Quit
 	}
