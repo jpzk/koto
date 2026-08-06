@@ -15,6 +15,7 @@ run/
 /koto-tui
 /tui/koto-tui
 schedules.json
+goals.json
 __pycache__/
 *.pyc
 tui/node_modules/

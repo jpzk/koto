@@ -13,6 +13,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// The goal loop's reserved sessions (mirrors the daemon's constants in
+// daemon/sessions.go — they never appear in GroupInfo.sessions, so the name
+// list can't be learned over the wire).
+func goalSession(s string) bool {
+	return s == "goal-work" || s == "goal-judge"
+}
+
 type goalItemT struct {
 	ID            string
 	Group         string
@@ -114,6 +121,7 @@ var goalHelpLines = []string{
 	"  /goal list [<group>]        goals and their status",
 	"  /goal approve [<group>]     approve a plan (awaiting_approval → running)",
 	"  /goal pause   [<group>]     pause at the next iteration boundary",
+	"  /goal interrupt [<group>]   pause NOW — aborts the in-flight goal turn",
 	"  /goal resume  [<group>]     resume a paused goal (fresh iteration budget)",
 	"  /goal cancel  [<group>]     cancel the goal",
 	"  /goal help                  this help",
@@ -199,7 +207,7 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 			return nil
 		}
 		return goalSetCmd(m.sock, group, text, criteria, maxIter, plan)
-	case "approve", "pause", "resume", "cancel":
+	case "approve", "pause", "interrupt", "resume", "cancel":
 		group := arg
 		if group == "" {
 			group = m.cur

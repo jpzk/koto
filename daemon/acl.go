@@ -263,7 +263,7 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalListReq: // "" = all groups → needs the "*" target
 		return r.Group, true
-	case *pb.GoalGroupReq: // GoalApprove, GoalPause, GoalResume, GoalCancel
+	case *pb.GoalGroupReq: // GoalApprove, GoalPause, GoalInterrupt, GoalResume, GoalCancel
 		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true

@@ -53,7 +53,23 @@ var (
 	// recovery it had already done).
 	noticePending  = map[string]bool{}
 	noticeInFlight = map[string]bool{}
+	// inFlightSess records the session of the turn each worker is currently
+	// running (absent = group idle). Consumers: goalInterrupt, which must
+	// know whether the running turn is the goal's own before signaling the
+	// agent process — the goal mailbox windows open before enqueue, so they
+	// also span time the goal turn sits queued behind operator chat.
+	inFlightSess = map[string]string{}
 )
+
+// inFlightSession returns the session of g's currently running turn, or
+// ok=false when no turn is in flight ("" is the default session, so presence
+// needs its own bool).
+func inFlightSession(g string) (string, bool) {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	s, ok := inFlightSess[g]
+	return s, ok
+}
 
 // enqueueSend appends msg to g's queue for the given session ("" = default),
 // starting the worker on first use. Returns a buffered channel that receives
@@ -149,18 +165,27 @@ func queueDepth(g string) int {
 // gap between the two).
 func sendWorker(g string, q chan sendJob) {
 	for job := range q {
+		// Reserved-session (goal) turns are re-checked at delivery: the goal
+		// may have been paused/interrupted/cancelled while this turn sat
+		// queued behind operator chat. See goalTurnShouldRun.
+		if isReservedSession(job.session) && !goalTurnShouldRun(g) {
+			job.done <- fmt.Errorf("goal turn skipped (goal no longer active)")
+			continue
+		}
+		queuesMu.Lock()
+		inFlightSess[g] = job.session
 		if job.notice {
-			queuesMu.Lock()
 			delete(noticePending, g)
 			noticeInFlight[g] = true
-			queuesMu.Unlock()
 		}
+		queuesMu.Unlock()
 		job.done <- runTurn(g, job.session, job.msg)
+		queuesMu.Lock()
+		delete(inFlightSess, g)
 		if job.notice {
-			queuesMu.Lock()
 			delete(noticeInFlight, g)
-			queuesMu.Unlock()
 		}
+		queuesMu.Unlock()
 	}
 }
 

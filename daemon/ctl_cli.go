@@ -100,7 +100,9 @@ streams
                                            set a goal (plan-first by default:
                                            one planning turn, then waits for
                                            "goal approve" before executing)
-  goal list [group] | approve|pause|resume|cancel <group>
+  goal list [group] | approve|pause|interrupt|resume|cancel <group>
+                                           (interrupt = pause now, aborting
+                                           the in-flight goal turn)
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
@@ -955,7 +957,7 @@ func ctlSched(args []string) {
 
 func ctlGoal(args []string) {
 	if len(args) < 1 {
-		ctlFatal(2, "usage: koto ctl goal set|list|approve|pause|resume|cancel ...")
+		ctlFatal(2, "usage: koto ctl goal set|list|approve|pause|interrupt|resume|cancel ...")
 	}
 	sub, rest := args[0], args[1:]
 	cl := ctlClient()
@@ -1010,7 +1012,7 @@ func ctlGoal(args []string) {
 		resp, err := cl.GoalList(ctx, &pb.GoalListReq{Group: g})
 		ctlPrint(resp, err)
 
-	case "approve", "pause", "resume", "cancel":
+	case "approve", "pause", "interrupt", "resume", "cancel":
 		if len(rest) != 1 {
 			ctlFatal(2, "usage: koto ctl goal %s <group>", sub)
 		}
@@ -1022,6 +1024,8 @@ func ctlGoal(args []string) {
 			resp, err = cl.GoalApprove(ctx, req)
 		case "pause":
 			resp, err = cl.GoalPause(ctx, req)
+		case "interrupt":
+			resp, err = cl.GoalInterrupt(ctx, req)
 		case "resume":
 			resp, err = cl.GoalResume(ctx, req)
 		case "cancel":

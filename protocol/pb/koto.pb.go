@@ -4577,7 +4577,7 @@ const file_koto_proto_rawDesc = "" +
 	"\aAclResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
-	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xee\r\n" +
+	"\x03acl\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x03acl2\xa3\x0e\n" +
 	"\x04Koto\x12(\n" +
 	"\x05Spawn\x12\x0e.koto.SpawnReq\x1a\x0f.koto.SpawnResp\x12%\n" +
 	"\x04Send\x12\r.koto.SendReq\x1a\x0e.koto.BaseResp\x12%\n" +
@@ -4604,7 +4604,8 @@ const file_koto_proto_rawDesc = "" +
 	"\aGoalSet\x12\x10.koto.GoalSetReq\x1a\x0e.koto.GoalResp\x121\n" +
 	"\bGoalList\x12\x11.koto.GoalListReq\x1a\x12.koto.GoalListResp\x121\n" +
 	"\vGoalApprove\x12\x12.koto.GoalGroupReq\x1a\x0e.koto.GoalResp\x12/\n" +
-	"\tGoalPause\x12\x12.koto.GoalGroupReq\x1a\x0e.koto.GoalResp\x120\n" +
+	"\tGoalPause\x12\x12.koto.GoalGroupReq\x1a\x0e.koto.GoalResp\x123\n" +
+	"\rGoalInterrupt\x12\x12.koto.GoalGroupReq\x1a\x0e.koto.GoalResp\x120\n" +
 	"\n" +
 	"GoalResume\x12\x12.koto.GoalGroupReq\x1a\x0e.koto.GoalResp\x120\n" +
 	"\n" +
@@ -4754,56 +4755,58 @@ var file_koto_proto_depIdxs = []int32{
 	38, // 48: koto.Koto.GoalList:input_type -> koto.GoalListReq
 	39, // 49: koto.Koto.GoalApprove:input_type -> koto.GoalGroupReq
 	39, // 50: koto.Koto.GoalPause:input_type -> koto.GoalGroupReq
-	39, // 51: koto.Koto.GoalResume:input_type -> koto.GoalGroupReq
-	39, // 52: koto.Koto.GoalCancel:input_type -> koto.GoalGroupReq
-	53, // 53: koto.Koto.Resources:input_type -> koto.ResourcesReq
-	57, // 54: koto.Koto.AclGet:input_type -> koto.AclGetReq
-	58, // 55: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
-	59, // 56: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
-	1,  // 57: koto.Koto.RunScript:input_type -> koto.RunScriptReq
-	3,  // 58: koto.Koto.AttachShell:input_type -> koto.ShellInput
-	18, // 59: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
-	16, // 60: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
-	17, // 61: koto.Koto.WatchState:input_type -> koto.WatchReq
-	43, // 62: koto.Koto.Spawn:output_type -> koto.SpawnResp
-	42, // 63: koto.Koto.Send:output_type -> koto.BaseResp
-	44, // 64: koto.Koto.List:output_type -> koto.ListResp
-	42, // 65: koto.Koto.Stop:output_type -> koto.BaseResp
-	42, // 66: koto.Koto.Interrupt:output_type -> koto.BaseResp
-	42, // 67: koto.Koto.Destroy:output_type -> koto.BaseResp
-	43, // 68: koto.Koto.Restart:output_type -> koto.SpawnResp
-	45, // 69: koto.Koto.History:output_type -> koto.HistoryResp
-	46, // 70: koto.Koto.Config:output_type -> koto.ConfigResp
-	47, // 71: koto.Koto.Metrics:output_type -> koto.MetricsResp
-	42, // 72: koto.Koto.Clear:output_type -> koto.BaseResp
-	48, // 73: koto.Koto.Skills:output_type -> koto.SkillsResp
-	49, // 74: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
-	50, // 75: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
-	24, // 76: koto.Koto.Jobs:output_type -> koto.JobsResp
-	27, // 77: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
-	2,  // 78: koto.Koto.JobTail:output_type -> koto.ScriptEvent
-	51, // 79: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
-	52, // 80: koto.Koto.SchedList:output_type -> koto.SchedListResp
-	42, // 81: koto.Koto.SchedDel:output_type -> koto.BaseResp
-	42, // 82: koto.Koto.SchedToggle:output_type -> koto.BaseResp
-	42, // 83: koto.Koto.SchedRun:output_type -> koto.BaseResp
-	40, // 84: koto.Koto.GoalSet:output_type -> koto.GoalResp
-	41, // 85: koto.Koto.GoalList:output_type -> koto.GoalListResp
-	40, // 86: koto.Koto.GoalApprove:output_type -> koto.GoalResp
-	40, // 87: koto.Koto.GoalPause:output_type -> koto.GoalResp
-	40, // 88: koto.Koto.GoalResume:output_type -> koto.GoalResp
-	40, // 89: koto.Koto.GoalCancel:output_type -> koto.GoalResp
-	54, // 90: koto.Koto.Resources:output_type -> koto.ResourcesResp
-	60, // 91: koto.Koto.AclGet:output_type -> koto.AclResp
-	60, // 92: koto.Koto.AclSetRole:output_type -> koto.AclResp
-	60, // 93: koto.Koto.AclDelRole:output_type -> koto.AclResp
-	2,  // 94: koto.Koto.RunScript:output_type -> koto.ScriptEvent
-	6,  // 95: koto.Koto.AttachShell:output_type -> koto.ShellFrame
-	0,  // 96: koto.Koto.SubscribeGroup:output_type -> koto.Event
-	7,  // 97: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
-	19, // 98: koto.Koto.WatchState:output_type -> koto.StateFrame
-	62, // [62:99] is the sub-list for method output_type
-	25, // [25:62] is the sub-list for method input_type
+	39, // 51: koto.Koto.GoalInterrupt:input_type -> koto.GoalGroupReq
+	39, // 52: koto.Koto.GoalResume:input_type -> koto.GoalGroupReq
+	39, // 53: koto.Koto.GoalCancel:input_type -> koto.GoalGroupReq
+	53, // 54: koto.Koto.Resources:input_type -> koto.ResourcesReq
+	57, // 55: koto.Koto.AclGet:input_type -> koto.AclGetReq
+	58, // 56: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
+	59, // 57: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
+	1,  // 58: koto.Koto.RunScript:input_type -> koto.RunScriptReq
+	3,  // 59: koto.Koto.AttachShell:input_type -> koto.ShellInput
+	18, // 60: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
+	16, // 61: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
+	17, // 62: koto.Koto.WatchState:input_type -> koto.WatchReq
+	43, // 63: koto.Koto.Spawn:output_type -> koto.SpawnResp
+	42, // 64: koto.Koto.Send:output_type -> koto.BaseResp
+	44, // 65: koto.Koto.List:output_type -> koto.ListResp
+	42, // 66: koto.Koto.Stop:output_type -> koto.BaseResp
+	42, // 67: koto.Koto.Interrupt:output_type -> koto.BaseResp
+	42, // 68: koto.Koto.Destroy:output_type -> koto.BaseResp
+	43, // 69: koto.Koto.Restart:output_type -> koto.SpawnResp
+	45, // 70: koto.Koto.History:output_type -> koto.HistoryResp
+	46, // 71: koto.Koto.Config:output_type -> koto.ConfigResp
+	47, // 72: koto.Koto.Metrics:output_type -> koto.MetricsResp
+	42, // 73: koto.Koto.Clear:output_type -> koto.BaseResp
+	48, // 74: koto.Koto.Skills:output_type -> koto.SkillsResp
+	49, // 75: koto.Koto.SkillNew:output_type -> koto.SkillNewResp
+	50, // 76: koto.Koto.SkillRead:output_type -> koto.SkillReadResp
+	24, // 77: koto.Koto.Jobs:output_type -> koto.JobsResp
+	27, // 78: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
+	2,  // 79: koto.Koto.JobTail:output_type -> koto.ScriptEvent
+	51, // 80: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
+	52, // 81: koto.Koto.SchedList:output_type -> koto.SchedListResp
+	42, // 82: koto.Koto.SchedDel:output_type -> koto.BaseResp
+	42, // 83: koto.Koto.SchedToggle:output_type -> koto.BaseResp
+	42, // 84: koto.Koto.SchedRun:output_type -> koto.BaseResp
+	40, // 85: koto.Koto.GoalSet:output_type -> koto.GoalResp
+	41, // 86: koto.Koto.GoalList:output_type -> koto.GoalListResp
+	40, // 87: koto.Koto.GoalApprove:output_type -> koto.GoalResp
+	40, // 88: koto.Koto.GoalPause:output_type -> koto.GoalResp
+	40, // 89: koto.Koto.GoalInterrupt:output_type -> koto.GoalResp
+	40, // 90: koto.Koto.GoalResume:output_type -> koto.GoalResp
+	40, // 91: koto.Koto.GoalCancel:output_type -> koto.GoalResp
+	54, // 92: koto.Koto.Resources:output_type -> koto.ResourcesResp
+	60, // 93: koto.Koto.AclGet:output_type -> koto.AclResp
+	60, // 94: koto.Koto.AclSetRole:output_type -> koto.AclResp
+	60, // 95: koto.Koto.AclDelRole:output_type -> koto.AclResp
+	2,  // 96: koto.Koto.RunScript:output_type -> koto.ScriptEvent
+	6,  // 97: koto.Koto.AttachShell:output_type -> koto.ShellFrame
+	0,  // 98: koto.Koto.SubscribeGroup:output_type -> koto.Event
+	7,  // 99: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
+	19, // 100: koto.Koto.WatchState:output_type -> koto.StateFrame
+	63, // [63:101] is the sub-list for method output_type
+	25, // [25:63] is the sub-list for method input_type
 	25, // [25:25] is the sub-list for extension type_name
 	25, // [25:25] is the sub-list for extension extendee
 	0,  // [0:25] is the sub-list for field type_name

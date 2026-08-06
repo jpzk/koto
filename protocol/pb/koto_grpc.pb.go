@@ -59,6 +59,7 @@ const (
 	Koto_GoalList_FullMethodName       = "/koto.Koto/GoalList"
 	Koto_GoalApprove_FullMethodName    = "/koto.Koto/GoalApprove"
 	Koto_GoalPause_FullMethodName      = "/koto.Koto/GoalPause"
+	Koto_GoalInterrupt_FullMethodName  = "/koto.Koto/GoalInterrupt"
 	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
@@ -115,10 +116,16 @@ type KotoClient interface {
 	// awaiting_approval → running); it is an ordinary grantable verb here but
 	// has deliberately NO ctl-plane counterpart — main can set a goal on a
 	// peer but cannot approve one.
+	// GoalInterrupt is GoalPause NOW: pause the goal (reason "interrupted")
+	// and SIGINT the in-flight worker/judge turn — but only when the turn
+	// currently running actually belongs to the goal loop (a goal turn queued
+	// behind operator chat must not get the operator's turn killed). Resume
+	// with GoalResume like any pause.
 	GoalSet(ctx context.Context, in *GoalSetReq, opts ...grpc.CallOption) (*GoalResp, error)
 	GoalList(ctx context.Context, in *GoalListReq, opts ...grpc.CallOption) (*GoalListResp, error)
 	GoalApprove(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
 	GoalPause(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
+	GoalInterrupt(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
 	GoalResume(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
 	GoalCancel(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
@@ -462,6 +469,16 @@ func (c *kotoClient) GoalPause(ctx context.Context, in *GoalGroupReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) GoalInterrupt(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalInterrupt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) GoalResume(ctx context.Context, in *GoalGroupReq, opts ...grpc.CallOption) (*GoalResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GoalResp)
@@ -654,10 +671,16 @@ type KotoServer interface {
 	// awaiting_approval → running); it is an ordinary grantable verb here but
 	// has deliberately NO ctl-plane counterpart — main can set a goal on a
 	// peer but cannot approve one.
+	// GoalInterrupt is GoalPause NOW: pause the goal (reason "interrupted")
+	// and SIGINT the in-flight worker/judge turn — but only when the turn
+	// currently running actually belongs to the goal loop (a goal turn queued
+	// behind operator chat must not get the operator's turn killed). Resume
+	// with GoalResume like any pause.
 	GoalSet(context.Context, *GoalSetReq) (*GoalResp, error)
 	GoalList(context.Context, *GoalListReq) (*GoalListResp, error)
 	GoalApprove(context.Context, *GoalGroupReq) (*GoalResp, error)
 	GoalPause(context.Context, *GoalGroupReq) (*GoalResp, error)
+	GoalInterrupt(context.Context, *GoalGroupReq) (*GoalResp, error)
 	GoalResume(context.Context, *GoalGroupReq) (*GoalResp, error)
 	GoalCancel(context.Context, *GoalGroupReq) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
@@ -809,6 +832,9 @@ func (UnimplementedKotoServer) GoalApprove(context.Context, *GoalGroupReq) (*Goa
 }
 func (UnimplementedKotoServer) GoalPause(context.Context, *GoalGroupReq) (*GoalResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GoalPause not implemented")
+}
+func (UnimplementedKotoServer) GoalInterrupt(context.Context, *GoalGroupReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalInterrupt not implemented")
 }
 func (UnimplementedKotoServer) GoalResume(context.Context, *GoalGroupReq) (*GoalResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GoalResume not implemented")
@@ -1325,6 +1351,24 @@ func _Koto_GoalPause_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_GoalInterrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalGroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalInterrupt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalInterrupt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalInterrupt(ctx, req.(*GoalGroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_GoalResume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GoalGroupReq)
 	if err := dec(in); err != nil {
@@ -1590,6 +1634,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GoalPause",
 			Handler:    _Koto_GoalPause_Handler,
+		},
+		{
+			MethodName: "GoalInterrupt",
+			Handler:    _Koto_GoalInterrupt_Handler,
 		},
 		{
 			MethodName: "GoalResume",

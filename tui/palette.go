@@ -105,6 +105,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "list skills", hint: "/skill", run: "/skill list"},
 		{title: "list schedules", hint: "/sched", run: "/sched list"},
 		{title: "list goals", hint: "/goal", run: "/goal list"},
+		{title: "interrupt goal (pause now)", hint: "/goal interrupt", run: "/goal interrupt"},
 		{title: "fire a prompt file", hint: "/prompt <name>", run: "/prompt ", edit: true},
 
 		{title: "toggle thought bodies", hint: "ctrl+t", act: func(m *Model) tea.Cmd {

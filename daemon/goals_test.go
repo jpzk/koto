@@ -536,3 +536,145 @@ func TestGoalLifecycleHooks(t *testing.T) {
 		goalCancelOnDestroy(g) // idempotent on terminal goals
 	})
 }
+
+// TestGoalInterruptAbortsInFlightTurn: goalInterrupt pauses with reason
+// "interrupted" and SIGINTs the agent — but only when the running turn is a
+// reserved goal session's; with no goal turn in flight the pause stands alone.
+func TestGoalInterruptAbortsInFlightTurn(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-int1"
+	interrupted := make(chan string, 1)
+	prevInt := goalInterruptTurnFn
+	goalInterruptTurnFn = func(gg string) error {
+		interrupted <- gg
+		return nil
+	}
+	t.Cleanup(func() { goalInterruptTurnFn = prevInt })
+
+	turnStarted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	withTurnFn(func(_, session, _ string) error {
+		if session == goalWorkSession {
+			once.Do(func() { close(turnStarted) })
+			<-release
+		}
+		return nil
+	}, func() {
+		if _, err := goalSet(g, "long haul", "1. done", 0, false); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		<-turnStarted // worker turn is now in flight (inFlightSess = goal-work)
+		it, err := goalInterrupt(g)
+		if err != nil {
+			t.Fatalf("interrupt: %v", err)
+		}
+		if it.Status != goalStatusPaused || it.PausedReason != "interrupted" {
+			t.Fatalf("status=%q reason=%q, want paused/interrupted", it.Status, it.PausedReason)
+		}
+		select {
+		case gg := <-interrupted:
+			if gg != g {
+				t.Fatalf("interrupted group %q, want %q", gg, g)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("interruptAgent was not called for the in-flight goal turn")
+		}
+		close(release)
+		waitGoal(t, g, goalStatusPaused) // driver exits at the loop-top pause check
+
+		// A second interrupt on the now-paused goal is a status error.
+		if _, err := goalInterrupt(g); err == nil {
+			t.Fatal("interrupt of a paused goal should fail")
+		}
+
+		// With the goal running but NO turn in flight, interrupt pauses
+		// without signaling the agent.
+		if _, err := goalTransition(g, []string{goalStatusPaused}, func(it *goalItem) {
+			it.Status = goalStatusRunning
+		}); err != nil {
+			t.Fatalf("re-arm running: %v", err)
+		}
+		if _, err := goalInterrupt(g); err != nil {
+			t.Fatalf("second interrupt: %v", err)
+		}
+		select {
+		case <-interrupted:
+			t.Fatal("interruptAgent called with no goal turn in flight")
+		default:
+		}
+	})
+}
+
+// TestGoalQueuedTurnSkippedAfterCancel: a goal turn enqueued behind operator
+// chat is NOT delivered once the goal stops being active — the delivery-layer
+// guard (sendWorker → goalTurnShouldRun) drops it instead of grinding a stray
+// iteration for a dead goal (observed 2026-08-05: CHAT's resumed goal turn sat
+// queued behind a boot notice; interrupt+cancel landed; the iteration ran
+// anyway when the notice finished).
+func TestGoalQueuedTurnSkippedAfterCancel(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-skip1"
+	chatStarted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	rec := &turnRec{}
+	withTurnFn(func(_, session, msg string) error {
+		rec.add(session, msg)
+		if session == "" {
+			once.Do(func() { close(chatStarted) })
+			<-release // hold the queue slot so the goal turn stays queued
+		}
+		return nil
+	}, func() {
+		if _, err := enqueueSend(g, "", "operator chat"); err != nil {
+			t.Fatalf("enqueue chat: %v", err)
+		}
+		<-chatStarted
+		if _, err := goalSet(g, "build", "1. built", 0, false); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		// Wait for the driver to enqueue its worker turn behind the chat
+		// turn, then cancel the goal while that turn is still queued.
+		deadline := time.Now().Add(5 * time.Second)
+		for queueDepth(g) == 0 && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Millisecond)
+		}
+		if queueDepth(g) == 0 {
+			t.Fatal("goal turn never queued")
+		}
+		if _, err := goalCancel(g); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		close(release)
+		waitGoal(t, g, goalStatusCancelled)
+		if turns := rec.bySession(goalWorkSession); len(turns) != 0 {
+			t.Fatalf("cancelled goal's queued turn was delivered anyway: %v", turns)
+		}
+	})
+}
+
+// TestGoalLiveSessionsLeaf: the worker session is listed for clients (the
+// TUI's tree leaf) exactly while a non-terminal goal exists.
+func TestGoalLiveSessionsLeaf(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-leaf1"
+	if got := goalLiveSessions(g); got != nil {
+		t.Fatalf("no goal: sessions = %v, want none", got)
+	}
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		if _, err := goalSet(g, "build", "1. built", 0, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusAwaiting)
+		if got := goalLiveSessions(g); len(got) != 1 || got[0] != goalWorkSession {
+			t.Fatalf("live goal: sessions = %v, want [%s]", got, goalWorkSession)
+		}
+		if _, err := goalCancel(g); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		if got := goalLiveSessions(g); got != nil {
+			t.Fatalf("terminal goal: sessions = %v, want none", got)
+		}
+	})
+}

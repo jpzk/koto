@@ -222,6 +222,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalApprove(ctx, &pb.GoalGroupReq{Group: s("group")})
 	case "goal_pause":
 		return cl.GoalPause(ctx, &pb.GoalGroupReq{Group: s("group")})
+	case "goal_interrupt":
+		return cl.GoalInterrupt(ctx, &pb.GoalGroupReq{Group: s("group")})
 	case "goal_resume":
 		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group")})
 	case "goal_cancel":

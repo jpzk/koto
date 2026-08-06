@@ -615,6 +615,10 @@ func (s *kotoServer) GoalPause(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalR
 	return goalGroupRPC(r.Group, goalPause)
 }
 
+func (s *kotoServer) GoalInterrupt(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
+	return goalGroupRPC(r.Group, goalInterrupt)
+}
+
 func (s *kotoServer) GoalResume(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
 	return goalGroupRPC(r.Group, goalResume)
 }

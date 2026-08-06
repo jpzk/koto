@@ -465,7 +465,7 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		return goalListResp{BaseResp: baseResp{OK: true}, Goals: goalList(req.Group)}
 
-	case "goal_pause", "goal_resume", "goal_cancel":
+	case "goal_pause", "goal_interrupt", "goal_resume", "goal_cancel":
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: " + env.Cmd)
 		}
@@ -481,6 +481,8 @@ func ctlDispatch(owner string, line []byte) any {
 		switch env.Cmd {
 		case "goal_pause":
 			it, err = goalPause(req.Group)
+		case "goal_interrupt":
+			it, err = goalInterrupt(req.Group)
 		case "goal_resume":
 			it, err = goalResume(req.Group)
 		case "goal_cancel":

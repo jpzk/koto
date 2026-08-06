@@ -159,6 +159,37 @@ func goalTerminal(status string) bool {
 	return status == goalStatusMet || status == goalStatusCancelled
 }
 
+// goalLiveSessions returns the goal loop's reserved sessions that should be
+// SHOWN for g — the worker session while a non-terminal goal exists, so
+// clients get a navigable tree leaf to follow the work from (the sessions
+// stay out of the on-disk registry: they are not sendable, and the leaf
+// should vanish when the goal ends, not linger like a chat session). The
+// judge session is deliberately not listed — its verdicts surface as
+// goal_verdict events; the transcript stays reachable via /session
+// goal-judge for the curious.
+func goalLiveSessions(g string) []string {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	if it := findGoalLocked(g); it != nil && !goalTerminal(it.Status) {
+		return []string{goalWorkSession}
+	}
+	return nil
+}
+
+// goalTurnShouldRun is the delivery-layer guard on queued goal turns
+// (sendWorker consults it before running a reserved-session job): the driver
+// enqueues while the goal is active, but a pause/interrupt/cancel can land
+// while the turn still sits queued behind operator chat — without this check
+// the dead goal grinds one full stray iteration anyway. Best-effort by
+// design: a status change after delivery starts doesn't abort the turn
+// (that's goalInterrupt's SIGINT path).
+func goalTurnShouldRun(g string) bool {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	it := findGoalLocked(g)
+	return it != nil && (it.Status == goalStatusRunning || it.Status == goalStatusPlanning)
+}
+
 // ---- verbs ------------------------------------------------------------------
 
 func goalSet(group, text, criteria string, maxIter int, plan bool) (goalItem, error) {
@@ -272,6 +303,43 @@ func goalPause(g string) (goalItem, error) {
 	}
 	emitLogfG("goal", g, "info", "pause id=%s (operator)", it.ID)
 	emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "operator"})
+	return it, nil
+}
+
+// goalInterruptTurnFn, when non-nil, replaces interruptAgent for tests
+// (interruptAgent execs into a live VM). Same seam pattern as
+// clearGoalSessionFn.
+var goalInterruptTurnFn func(g string) error
+
+// goalInterrupt is goalPause NOW: pause the goal and abort the in-flight
+// worker/judge turn instead of letting it finish the iteration. The SIGINT
+// is sent only when the turn currently RUNNING belongs to a reserved goal
+// session — the goal's mailbox windows open before enqueue, so "goal turn in
+// flight" per the mailbox can still mean "queued behind operator chat", and
+// interruptAgent kills whatever agent process is running. In that queued
+// case the pause alone suffices: the stray iteration runs, then the driver
+// sees paused at the loop top and exits (its claim, if any, is discarded by
+// the same status check in goalJudgeCheck).
+func goalInterrupt(g string) (goalItem, error) {
+	it, err := goalTransition(g, []string{goalStatusRunning}, func(it *goalItem) {
+		it.Status = goalStatusPaused
+		it.PausedReason = "interrupted"
+	})
+	if err != nil {
+		return it, err
+	}
+	emitLogfG("goal", g, "info", "interrupt id=%s", it.ID)
+	emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "interrupted"})
+	if sess, ok := inFlightSession(g); ok && isReservedSession(sess) {
+		fn := goalInterruptTurnFn
+		if fn == nil {
+			fn = interruptAgent
+		}
+		if ierr := fn(g); ierr != nil {
+			// Non-fatal: the pause already holds; the turn just runs out.
+			emitLogfG("goal", g, "warn", "interrupt turn: %v", ierr)
+		}
+	}
 	return it, nil
 }
 

@@ -61,12 +61,18 @@ service Koto {
   // awaiting_approval → running); it is an ordinary grantable verb here but
   // has deliberately NO ctl-plane counterpart — main can set a goal on a
   // peer but cannot approve one.
-  rpc GoalSet     (GoalSetReq)     returns (GoalResp);
-  rpc GoalList    (GoalListReq)    returns (GoalListResp);
-  rpc GoalApprove (GoalGroupReq)   returns (GoalResp);
-  rpc GoalPause   (GoalGroupReq)   returns (GoalResp);
-  rpc GoalResume  (GoalGroupReq)   returns (GoalResp);
-  rpc GoalCancel  (GoalGroupReq)   returns (GoalResp);
+  // GoalInterrupt is GoalPause NOW: pause the goal (reason "interrupted")
+  // and SIGINT the in-flight worker/judge turn — but only when the turn
+  // currently running actually belongs to the goal loop (a goal turn queued
+  // behind operator chat must not get the operator's turn killed). Resume
+  // with GoalResume like any pause.
+  rpc GoalSet       (GoalSetReq)   returns (GoalResp);
+  rpc GoalList      (GoalListReq)  returns (GoalListResp);
+  rpc GoalApprove   (GoalGroupReq) returns (GoalResp);
+  rpc GoalPause     (GoalGroupReq) returns (GoalResp);
+  rpc GoalInterrupt (GoalGroupReq) returns (GoalResp);
+  rpc GoalResume    (GoalGroupReq) returns (GoalResp);
+  rpc GoalCancel    (GoalGroupReq) returns (GoalResp);
 
   // Resources reports host-side resource consumption for the whole fleet:
   // per-group workspace.img allocation + growth rate + FC process CPU/RSS,

@@ -628,6 +628,11 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	isJob := r.job != ""
 	if isSession {
 		name = r.session
+		// The goal worker's leaf (daemon-listed while a goal is live) gets
+		// the goal glyph so it reads as the loop's session, not a chat.
+		if goalSession(r.session) {
+			name = "◎ " + r.session
+		}
 	}
 	var job *JobInfo
 	if isJob {

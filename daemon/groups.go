@@ -271,7 +271,7 @@ func listGroups() map[string]GroupInfo {
 			Effort:    groupEffortName(g),
 			Stalled:   isStalled(g),
 			Queued:    queueDepth(g),
-			Sessions:  listSessions(g),
+			Sessions:  append(listSessions(g), goalLiveSessions(g)...),
 			Jobs:      jobsSnapshot(g),
 			TokPerSec: rates[g],
 			Network:   groupNetwork(g),

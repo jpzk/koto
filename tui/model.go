@@ -879,6 +879,10 @@ func chatKind(k string) bool {
 }
 
 // lineInSession reports whether a line is visible in the given session view.
+// Strictly per-session for chat kinds — the goal loop's worker session is NOT
+// blended into the default view: it has its own tree leaf (the daemon lists
+// goal-work in GroupInfo.sessions while a goal is live), so the operator
+// follows the work there and the default session stays free for chat.
 func lineInSession(l logLine, active string) bool {
 	return !chatKind(l.kind) || l.session == active
 }
@@ -2248,6 +2252,8 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			text = fmt.Sprintf("goal %s approved — %s is executing", it.ID, it.Group)
 		case "resume":
 			text = fmt.Sprintf("goal %s resumed with a fresh %d-iteration budget", it.ID, it.MaxIterations)
+		case "interrupt":
+			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goal resume to continue)", it.ID)
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -4395,6 +4401,15 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return nil
 	}
 	m.pushHistory(m.cur, v)
+	// Goal sessions are follow-only: the daemon refuses sends into them (the
+	// driver clears the session before every iteration, so an injected
+	// message would be wiped anyway). Say so locally instead of bouncing the
+	// server's reserved-session error.
+	if goalSession(m.activeSession(m.cur)) {
+		m.addLine(logLine{kind: "err", group: m.cur,
+			text: "goal sessions are follow-only — chat in the default session, or /goal interrupt to take over"})
+		return nil
+	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row
 	// at the bottom of the chat until the daemon starts the turn (the matching
 	// `prompt` event pops it and the real prompt line takes its place). For an
