@@ -38,7 +38,6 @@ type Event struct {
 
 // GroupInfo is one group's row in the WatchState / List snapshot.
 type GroupInfo struct {
-	Port     int
 	Running  bool
 	Provider string
 	Model    string
