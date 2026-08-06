@@ -129,6 +129,19 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 
 	id := sess.id
 	go func() {
+		// However the stream ends — clean "end", error frame, or transport
+		// failure — release the session's resources on the way out: cancel
+		// the stream ctx and close the emulator pipe so the drain goroutine
+		// below exits. Without this, an ended session left on screen (the
+		// "/shell to reattach" hint state) held its stream, emulator pipe,
+		// and drain goroutine until the next reattach or group switch.
+		// shellSession.close() running later is a harmless double-cancel/
+		// double-close, and a late term.Write from a queued shellFrameMsg is
+		// fine — the emulator's auto-response writes all ignore pipe errors.
+		defer func() {
+			cancel()
+			closeEmulator(sess.term)
+		}()
 		for {
 			frame, err := stream.Recv()
 			if err != nil {
@@ -605,10 +618,29 @@ func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil // unmapped (function/media keys, etc.) — v1 gap
 	}
 	if msg.Alt {
-		b = append([]byte{0x1b}, b...)
+		b = altEncode(b)
 	}
 	m.shell.send(b)
 	return m, nil
+}
+
+// altEncode applies the Alt modifier to an already-encoded key: the classic
+// ESC prefix for plain runes and C0 bytes (the meta convention), but the
+// xterm modifier parameter for CSI-encoded specials — ESC[A → ESC[1;3A,
+// ESC[5~ → ESC[5;3~. A bare ESC prefix on a CSI sequence would instead read
+// in the guest as two keys: a lone Esc, then the unmodified special.
+func altEncode(b []byte) []byte {
+	if len(b) >= 3 && b[0] == 0x1b && b[1] == '[' {
+		params, final := string(b[2:len(b)-1]), b[len(b)-1]
+		if final == '~' {
+			return []byte("\x1b[" + params + ";3~")
+		}
+		if params == "" {
+			params = "1"
+		}
+		return []byte("\x1b[" + params + ";3" + string(final))
+	}
+	return append([]byte{0x1b}, b...)
 }
 
 // shellMouseOrigin returns the terminal-screen cell where the emulator
@@ -846,7 +878,9 @@ func (m Model) renderShellHint() string {
 	if m.fullscreen {
 		full = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
 	}
-	parts = append(parts, gl("⎋ tree", "esc tree"), gl("⌥⎋ esc→guest", "alt-esc esc-to-guest"),
+	// alt+esc toggles the tree; plain esc forwards to the guest (vim/less
+	// need it) — see the shell-focus block in handleKey.
+	parts = append(parts, gl("⌥⎋ tree", "alt-esc tree"), gl("⎋ esc→guest", "esc esc-to-guest"),
 		full, "ctrl+] close", gl("⌥← chat", "alt-left chat"))
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
