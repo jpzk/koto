@@ -43,7 +43,10 @@ func (m Model) treeBodyRows() int {
 	case m.focus == focusTop:
 		_, h := m.topPaneSize()
 		return h + 2
-	case m.shellSplitVisible():
+	case m.focus == focusShell || m.shellSplitVisible():
+		// Both shell layouts — split AND fullscreen-with-tree (narrow
+		// terminal, preShellFocus == focusTree) — hand renderTree the
+		// shellPaneSize height.
 		_, h := m.shellPaneSize()
 		return h
 	default:
