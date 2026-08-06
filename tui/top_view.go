@@ -296,30 +296,7 @@ func (m Model) renderTopView() string {
 // renderTopScrollbar mirrors renderLogScrollbar against the top viewport.
 func (m Model) renderTopScrollbar() string {
 	_, h := m.topPaneSize()
-	if !m.topVPReady || h <= 0 {
-		return " "
-	}
-	total := m.topVP.TotalLineCount()
-	visible := m.topVP.Height
-	if total <= visible {
-		return " "
-	}
-	thumbH := max(1, visible*visible/total)
-	scroll := m.topVP.YOffset
-	maxScroll := total - visible
-	pos := 0
-	if maxScroll > 0 {
-		pos = scroll * (visible - thumbH) / maxScroll
-	}
-	col := make([]string, visible)
-	for i := range col {
-		if i >= pos && i < pos+thumbH {
-			col[i] = lipgloss.NewStyle().Foreground(cAmber).Render("▐")
-		} else {
-			col[i] = lipgloss.NewStyle().Foreground(cGray).Render("│")
-		}
-	}
-	return strings.Join(col, "\n")
+	return renderVPScrollbar(m.topVP, m.topVPReady, h)
 }
 
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
@@ -359,18 +336,10 @@ func (m *Model) enterTop() {
 	m.refreshTopViewport()
 }
 
-// exitTop returns to whichever focus the user was in before opening the
-// view; same input-refocus and chat-geometry restoration as exitLog (the
-// chat vp may be stale after a resize while the fleet view was open).
+// exitTop returns to the pre-open focus — see restoreChatFocus for the
+// input-refocus and chat-geometry restoration rationale.
 func (m *Model) exitTop() {
-	target := m.preTopFocus
-	if target != focusInput && target != focusTree {
-		target = focusInput
-	}
-	m.focus = target
-	m.input.Focus()
-	m.resizeViewport()
-	m.refreshLog()
+	m.restoreChatFocus(m.preTopFocus)
 }
 
 // handleTopKey routes keys while the fleet view is focused. Esc / ctrl+H
@@ -384,14 +353,7 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Move the tree cursor without leaving the view (same binding as the
 		// log view): the table isn't scoped by it, but the active group —
 		// status bar, metrics bar, and where you land on close — follows.
-		rows := m.treeRows()
-		if s == "shift+up" && m.treeIdx > 0 && m.treeIdx-1 < len(rows) {
-			m.treeIdx--
-			m.selectTreeRow(rows[m.treeIdx])
-		} else if s == "shift+down" && m.treeIdx < len(rows)-1 {
-			m.treeIdx++
-			m.selectTreeRow(rows[m.treeIdx])
-		}
+		m.retargetTreeCursor(s == "shift+up")
 		return m, nil
 	case "up":
 		m.topVP.ScrollUp(1)
@@ -402,7 +364,7 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgup":
 		m.topVP.HalfPageUp()
 		return m, nil
-	case "pgdown", "pgdn":
+	case "pgdown":
 		m.topVP.HalfPageDown()
 		return m, nil
 	case "home":

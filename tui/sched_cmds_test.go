@@ -44,7 +44,7 @@ func TestParseSchedAdd(t *testing.T) {
 		},
 		{rest: "", wantErr: true},
 		{rest: "@daily", wantErr: true},
-		{rest: "main * * * *", wantErr: true},         // 4 cron fields + 0 msg → 4 toks after group
+		{rest: "main * * * *", wantErr: true},          // 4 cron fields + 0 msg → 4 toks after group
 		{rest: "ghost @daily check in", wantErr: true}, // unknown group, not cron-shaped
 	}
 	for _, c := range cases {

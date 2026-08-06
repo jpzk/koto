@@ -245,10 +245,12 @@ func (m Model) renderLogView() string {
 			Render("connecting to daemon log…")
 	}
 	scrollbar := m.renderLogScrollbar()
-	middle := lipgloss.JoinHorizontal(lipgloss.Top, body, scrollbar)
+	var middle string
 	if m.treePaneW() > 0 {
 		_, h := m.logPaneSize()
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h), body, scrollbar)
+	} else {
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, body, scrollbar)
 	}
 	if m.picker.open {
 		// The ctrl+r/ctrl+p overlay opens from any focus — draw it over the
@@ -264,25 +266,25 @@ func (m Model) renderLogView() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// renderLogScrollbar is a stripped copy of renderScrollbar tailored to
-// logPaneSize. Kept separate so the log view doesn't have to round-trip
-// through the chat-vp scroll math.
-func (m Model) renderLogScrollbar() string {
-	_, h := m.logPaneSize()
-	if !m.logVPReady || h <= 0 {
-		return strings.Repeat(" ", 1)
+// renderVPScrollbar draws the 1-col amber-thumb scrollbar the full-frame
+// views share (log, fleet) — same thumb math as the chat view's
+// renderScrollbar, parameterized on the viewport instead of round-tripping
+// through the chat-vp scroll state. ready gates a not-yet-created viewport;
+// h is the pane height the view budgeted.
+func renderVPScrollbar(vp viewport.Model, ready bool, h int) string {
+	if !ready || h <= 0 {
+		return " "
 	}
-	total := m.logVP.TotalLineCount()
-	visible := m.logVP.Height
+	total := vp.TotalLineCount()
+	visible := vp.Height
 	if total <= visible {
-		return strings.Repeat(" ", 1) // no overflow → no bar
+		return " " // no overflow → no bar
 	}
 	thumbH := max(1, visible*visible/total)
-	scroll := m.logVP.YOffset
 	maxScroll := total - visible
 	pos := 0
 	if maxScroll > 0 {
-		pos = scroll * (visible - thumbH) / maxScroll
+		pos = vp.YOffset * (visible - thumbH) / maxScroll
 	}
 	col := make([]string, visible)
 	for i := range col {
@@ -293,6 +295,47 @@ func (m Model) renderLogScrollbar() string {
 		}
 	}
 	return strings.Join(col, "\n")
+}
+
+func (m Model) renderLogScrollbar() string {
+	_, h := m.logPaneSize()
+	return renderVPScrollbar(m.logVP, m.logVPReady, h)
+}
+
+// retargetTreeCursor moves the tree cursor one row without leaving a
+// full-frame view — the shared body of the log and fleet views' shift+↑/↓
+// bindings (selectTreeRow re-scopes the log pane / retargets the active
+// group as each view needs).
+func (m *Model) retargetTreeCursor(up bool) {
+	rows := m.treeRows()
+	if up && m.treeIdx > 0 && m.treeIdx-1 < len(rows) {
+		m.treeIdx--
+		m.selectTreeRow(rows[m.treeIdx])
+	} else if !up && m.treeIdx < len(rows)-1 {
+		m.treeIdx++
+		m.selectTreeRow(rows[m.treeIdx])
+	}
+}
+
+// restoreChatFocus returns from a full-frame view (log, fleet) to whichever
+// focus the user was in before it opened (input by default if we somehow
+// have no record). The chat viewport's width depends on tree visibility,
+// which depends on focus — and the view may have been resized while open —
+// so the chat vp must resize+refresh here or it renders mis-wrapped.
+// Re-focusing the textinput applies to BOTH chat focuses, not just
+// focusInput: tree mode deliberately routes typing into the input ("keep
+// typing while browsing"), and restoring focusTree with a blurred input
+// made every subsequent keystroke vanish silently — a ctrl+c in that state
+// quits the TUI, which is how this was found (E2E sweep: log view → esc →
+// typed commands dead).
+func (m *Model) restoreChatFocus(prev focusZone) {
+	if prev != focusInput && prev != focusTree {
+		prev = focusInput
+	}
+	m.focus = prev
+	m.input.Focus()
+	m.resizeViewport()
+	m.refreshLog()
 }
 
 // renderLogHint mirrors renderHint but with log-specific bindings.
@@ -349,27 +392,10 @@ func (m *Model) enterLog() {
 	m.logAutoFollow = true
 }
 
-// exitLog returns from the log view to whichever focus the user was in
-// before opening it (input by default if we somehow have no record). The
-// chat viewport's width depends on tree visibility, which depends on
-// focus — and the log view may have been resized while open — so we
-// must resize+refresh the chat vp here, otherwise the chat content keeps
-// the log-view geometry and renders mis-wrapped or clipped.
+// exitLog returns from the log view to the pre-open focus — see
+// restoreChatFocus for the geometry/input-refocus rationale.
 func (m *Model) exitLog() {
-	target := m.preLogFocus
-	if target != focusInput && target != focusTree {
-		target = focusInput
-	}
-	m.focus = target
-	// Re-focus the textinput for BOTH chat focuses, not just focusInput:
-	// tree mode deliberately routes typing into the input ("keep typing
-	// while browsing", see the tree enter handler). Restoring focusTree
-	// with a blurred input made every subsequent keystroke vanish silently
-	// — and a ctrl+c in that state quits the TUI, which is how this was
-	// found (E2E sweep: log view → esc → typed commands dead).
-	m.input.Focus()
-	m.resizeViewport()
-	m.refreshLog()
+	m.restoreChatFocus(m.preLogFocus)
 }
 
 // handleLogKey routes keys when focus == focusLog. Esc / ctrl+L close,
@@ -386,14 +412,7 @@ func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// cursor (same rows/selection path as tree-mode ↑/↓), and
 		// selectTreeRow's syncLogScope re-filters the pane. Plain ↑/↓ stay
 		// bound to scrolling — this view is read-mostly.
-		rows := m.treeRows()
-		if s == "shift+up" && m.treeIdx > 0 && m.treeIdx-1 < len(rows) {
-			m.treeIdx--
-			m.selectTreeRow(rows[m.treeIdx])
-		} else if s == "shift+down" && m.treeIdx < len(rows)-1 {
-			m.treeIdx++
-			m.selectTreeRow(rows[m.treeIdx])
-		}
+		m.retargetTreeCursor(s == "shift+up")
 		return m, nil
 	case "up":
 		m.logVP.ScrollUp(1)
@@ -407,7 +426,7 @@ func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logVP.HalfPageUp()
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil
-	case "pgdown", "pgdn":
+	case "pgdown":
 		m.logVP.HalfPageDown()
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil

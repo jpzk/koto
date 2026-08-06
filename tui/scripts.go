@@ -17,25 +17,25 @@ func scriptsDir() string {
 	return "/koto-scripts"
 }
 
-// loadScript resolves a /runscript argument to (displayName, scriptText). The
-// name must be a bare filename living directly in scriptsDir — no path
-// separators, no "..", no absolute paths — so a malicious/typo'd name can't
-// read outside the mounted library. The ".sh" suffix is optional: "diag" and
-// "diag.sh" both resolve to diag.sh (with a fallback to the exact name for
-// scripts without the suffix).
-func loadScript(arg string) (name, script string, err error) {
+// loadLibraryFile resolves a bare filename against a read-only mounted
+// library directory — the shared body of loadScript and loadPrompt. The name
+// must be a bare filename living directly in dir: no path separators, no
+// leading dot (which also covers ".."), so a malicious/typo'd name can't
+// read outside the mount. suffix is optional on the argument: "diag" and
+// "diag.sh" both resolve to diag.sh, with a fallback to the exact name for
+// files without the suffix.
+func loadLibraryFile(kind, lib, dir, suffix, arg string) (name, content string, err error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
-		return "", "", fmt.Errorf("no script name")
+		return "", "", fmt.Errorf("no %s name", kind)
 	}
 	if strings.ContainsAny(arg, "/\\") || strings.HasPrefix(arg, ".") {
-		return "", "", fmt.Errorf("invalid script name %q (bare filename from scripts/ only)", arg)
+		return "", "", fmt.Errorf("invalid %s name %q (bare filename from %s only)", kind, arg, lib)
 	}
-	dir := scriptsDir()
-	// Prefer the name as given; else try with .sh appended.
+	// Prefer the name as given; else try with the suffix appended.
 	candidates := []string{arg}
-	if !strings.HasSuffix(arg, ".sh") {
-		candidates = append(candidates, arg+".sh")
+	if !strings.HasSuffix(arg, suffix) {
+		candidates = append(candidates, arg+suffix)
 	}
 	for _, c := range candidates {
 		p := filepath.Join(dir, c)
@@ -50,5 +50,10 @@ func loadScript(arg string) (name, script string, err error) {
 			return "", "", fmt.Errorf("read %s: %w", c, rerr)
 		}
 	}
-	return "", "", fmt.Errorf("no such script %q in %s", arg, dir)
+	return "", "", fmt.Errorf("no such %s %q in %s", kind, arg, dir)
+}
+
+// loadScript resolves a /runscript argument to (displayName, scriptText).
+func loadScript(arg string) (name, script string, err error) {
+	return loadLibraryFile("script", "scripts/", scriptsDir(), ".sh", arg)
 }
