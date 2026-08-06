@@ -80,6 +80,9 @@ func init() {
 // startSubscribe (per-group stream) — a single goroutine, no return value,
 // terminates by sending logSubClosedMsg.
 func startLogSubscribe(sock string) {
+	if prog == nil {
+		return // no program to push frames into (tests) — see startJobTail
+	}
 	go func() {
 		stream, cancel, err := openLogStream()
 		if err != nil {
@@ -252,13 +255,9 @@ func (m Model) renderLogView() string {
 	} else {
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, body, scrollbar)
 	}
-	if m.picker.open {
-		// The ctrl+r/ctrl+p overlay opens from any focus — draw it over the
-		// log area so it isn't capturing keys invisibly (the palette's
-		// close-daemon-logs entry is reachable from right here).
-		_, h := m.logPaneSize()
-		middle = m.renderPicker(h)
-	}
+	// The ctrl+r/ctrl+p overlay is composited by View()'s withPicker wrap —
+	// rendering it here too drew a second box with different geometry
+	// underneath the spliced one, every frame.
 
 	hint := m.renderLogHint()
 	metricsBar := m.renderMetricsBar()

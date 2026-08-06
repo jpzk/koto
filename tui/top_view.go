@@ -281,12 +281,8 @@ func (m Model) renderTopView() string {
 	if m.treePaneW() > 0 {
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h+2), right)
 	}
-	if m.picker.open {
-		// The ctrl+r/ctrl+p overlay opens from any focus — draw it over the
-		// table area so it isn't capturing keys invisibly. +2: the overlay
-		// replaces the summary/header rows too, keeping the frame height.
-		middle = m.renderPicker(h + 2)
-	}
+	// The ctrl+r/ctrl+p overlay is composited by View()'s withPicker wrap —
+	// rendering it here too drew a second box underneath the spliced one.
 
 	hint := m.renderTopHint()
 	metricsBar := m.renderMetricsBar()

@@ -119,6 +119,15 @@ func (m Model) paletteItems() []paletteItem {
 			return nil
 		}},
 		{title: "toggle fullscreen", hint: "ctrl+f", act: func(m *Model) tea.Cmd {
+			// The palette opens from EVERY focus, including the log/fleet
+			// views where the direct ctrl+f binding is deliberately
+			// unreachable (their key handlers run first). Toggling there
+			// sets a flag those views ignore — invisible now, and the user
+			// lands in an unrequested fullscreen when they later exit the
+			// view (restoreChatFocus doesn't clear it).
+			if m.focus == focusLog || m.focus == focusTop {
+				return nil
+			}
 			m.toggleFullscreen()
 			return nil
 		}},

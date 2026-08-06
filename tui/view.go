@@ -170,7 +170,19 @@ func cacheHitRatio(m map[string]any) float64 {
 func (m Model) View() string { return monoFrame(m.view()) }
 
 func (m Model) view() string {
-	if m.width < 10 || m.height < 5 {
+	// The real floors, not token ones: with the tree visible the middle
+	// pane's hard minimum is leftPaneWidth(22) + 1 padding + the viewport's
+	// max(10,…) floor + 1 scrollbar = 34 cols, and vertically status +
+	// 3-row input box + hint + metrics + 1 chat row = 7. Below either,
+	// JoinHorizontal produces lines wider/taller than the terminal, every
+	// line wraps, and the whole layout shatters — which is exactly what
+	// this guard exists to prevent (and focusTree is the STARTUP focus, so
+	// a narrow tmux pane hit it on frame one).
+	minW := 12
+	if m.treePaneW() > 0 {
+		minW = leftPaneWidth + 12
+	}
+	if m.width < minW || m.height < 7 {
 		return "terminal too small"
 	}
 	// The three full-frame views below return before the chat layout's own
@@ -458,6 +470,13 @@ func (m Model) renderMetricsBar() string {
 	// metrics (ctx, 5h, 7d) high = bad, so pctColor is used directly. For the
 	// cache hit ratio high = good, so we color by (1-frac) instead.
 	renderMetricColored := func(label string, frac float64, fracColor lipgloss.Color) string {
+		// Same NaN/Inf guard as renderBar: int(NaN*100) is MinInt64 and the
+		// label would render "-9223372036854775808%", blowing the row.
+		if !(frac >= 0) {
+			frac = 0
+		} else if frac > 10 {
+			frac = 10 // 1000% — anything above is garbage data, not signal
+		}
 		style := alertify(lipgloss.NewStyle(), fracColor).
 			Foreground(fracColor).Background(cBlack).Bold(true)
 		if useBars {
@@ -860,7 +879,12 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 	lines = append(lines, head.Render(meta))
 	cmdLine := ""
 	if job.Cmd != "" {
-		cmdLine = dim.Render("$ " + job.Cmd)
+		// One visual row, guaranteed: Cmd is guest/agent-controlled and may
+		// carry newlines — embedded verbatim they inflate the pane past its
+		// row budget (the clamp below counts slice elements, not visual
+		// rows) and desync the JoinHorizontal geometry.
+		c := strings.NewReplacer("\n", " ", "\r", " ").Replace(job.Cmd)
+		cmdLine = dim.MaxWidth(w).Render("$ " + c)
 	}
 	lines = append(lines, cmdLine)
 	lines = append(lines, dim.Render(strings.Repeat("─", max(1, w-2))))
@@ -1576,8 +1600,12 @@ func (m Model) renderPicker(rows int) string {
 			continue
 		}
 		// Collapse newlines so multi-line prompts render as one row.
+		// truncWidth, not truncRunes: a CJK/emoji prompt is ~2 cells per
+		// rune, and a rune-counted row up to 2× the content width gets
+		// WRAPPED by the box style below — one wide history item grew the
+		// box a row per match and overflowed the frame.
 		raw := strings.ReplaceAll(m.picker.items[idx], "\n", " ⏎ ")
-		resultLines = append(resultLines, marker+style.Render(truncRunes(raw, contentW-2)))
+		resultLines = append(resultLines, marker+style.Render(truncWidth(raw, contentW-2)))
 	}
 	if len(resultLines) == 0 {
 		empty := "  (no matches — type to filter, or send a prompt to seed history)"
@@ -1598,6 +1626,13 @@ func (m Model) renderPicker(rows int) string {
 		Padding(0, 1).
 		Render(inner)
 
+	// The box has a ~6-row minimum (header, input, spacer, 1 result, 2
+	// border) but the budget can be smaller on a very short terminal —
+	// lipgloss.Place does NOT clip content taller than rows, so trim the
+	// box's bottom lines or the frame grows past m.height.
+	if lines := strings.Split(box, "\n"); len(lines) > rows {
+		box = strings.Join(lines[:rows], "\n")
+	}
 	// Place the box centered horizontally and top-aligned vertically inside
 	// the middle area. Top-aligned (not centered) keeps the box anchored
 	// to the status bar so growing the result count doesn't make the input
