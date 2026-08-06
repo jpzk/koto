@@ -25,7 +25,6 @@ import (
 type activityInfo struct {
 	phase     string
 	detail    string
-	session   string
 	since     time.Time
 	turnSince time.Time
 }
@@ -145,7 +144,6 @@ func (m *Model) applyActivity(ev Event) {
 	m.activity[ev.Group] = activityInfo{
 		phase:     ev.Name,
 		detail:    ev.Text,
-		session:   ev.Session,
 		since:     since,
 		turnSince: turnSince,
 	}

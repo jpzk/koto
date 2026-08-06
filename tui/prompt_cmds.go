@@ -33,11 +33,13 @@ func stripFrontmatter(txt string) string {
 }
 
 // promptFireCmd resolves <name> to a skill's body or a prompts/ template and
-// sends it verbatim as a chat message to group. Skills take priority (via
-// the existing skill_read RPC); "no such skill" falls through to the
-// prompts/ library mounted into cs_tui. Two sequential daemon round-trips
-// inside one Cmd, same shape as skillToggleCmd.
-func promptFireCmd(sock, group, name string) tea.Cmd {
+// sends it verbatim as a chat message to group's active session — session
+// threaded through so the fired turn lands in the conversation the operator
+// is looking at, not the group default. Skills take priority (via the
+// existing skill_read RPC); "no such skill" falls through to the prompts/
+// library mounted into cs_tui. Two sequential daemon round-trips inside one
+// Cmd, same shape as skillToggleCmd.
+func promptFireCmd(sock, group, session, name string) tea.Cmd {
 	return func() tea.Msg {
 		var content, source string
 
@@ -61,7 +63,7 @@ func promptFireCmd(sock, group, name string) tea.Cmd {
 		if strings.TrimSpace(content) == "" {
 			return promptFireMsg{group: group, name: name, source: source, err: fmt.Errorf("%s %q is empty", source, name)}
 		}
-		if _, err := daemonCall(sock, "send", map[string]any{"group": group, "msg": content}); err != nil {
+		if _, err := daemonCall(sock, "send", map[string]any{"group": group, "msg": content, "session": session}); err != nil {
 			return promptFireMsg{group: group, name: name, source: source, err: err}
 		}
 		return promptFireMsg{group: group, name: name, source: source}

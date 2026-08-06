@@ -16,18 +16,39 @@ const treeRowYOffset = 3
 
 // treeRowAt hit-tests a screen cell against the visible tree pane's
 // navigable rows, returning the treeRows index or -1. The tree column is
-// always leftmost when visible (cols [0, leftPaneWidth)); rows beyond the
-// pane's height are never hit because y is bounded by the body's on-screen
-// rows, which is exactly the height renderTree truncates to.
+// always leftmost when visible (cols [0, leftPaneWidth)). Bounded by BOTH
+// the row count and the pane's rendered height: renderTree truncates to the
+// pane height, so with more rows than fit (a big fleet on a short terminal)
+// a click below the pane — the prompt box, hint, metrics rows — must not
+// select an invisible, truncated row.
 func (m Model) treeRowAt(x, y int) int {
 	if m.treePaneW() == 0 || x < 0 || x >= leftPaneWidth {
 		return -1
 	}
 	i := y - treeRowYOffset
-	if i < 0 || i >= len(m.treeRows()) {
+	// -2: renderTree's lines slice spends its first two rows on the header
+	// and spacer before the first navigable row.
+	if i < 0 || i >= len(m.treeRows()) || i >= m.treeBodyRows()-2 {
 		return -1
 	}
 	return i
+}
+
+// treeBodyRows mirrors the height each View() composition hands renderTree.
+func (m Model) treeBodyRows() int {
+	switch {
+	case m.focus == focusLog:
+		_, h := m.logPaneSize()
+		return h
+	case m.focus == focusTop:
+		_, h := m.topPaneSize()
+		return h + 2
+	case m.shellSplitVisible():
+		_, h := m.shellPaneSize()
+		return h
+	default:
+		return m.chatRows()
+	}
 }
 
 // handleLeftClick routes a left-button press. Returns true when the click

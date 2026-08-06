@@ -77,6 +77,11 @@ type logLine struct {
 	session string
 	text    string
 	ts      int64
+	// tsF is the event's full-precision ts (ms fraction included) — set on
+	// history-page lines only, where the older-page cursor needs it: ts is
+	// truncated to whole seconds, and paging on the truncated value dropped
+	// every event sharing the boundary second. See the historyMsg handler.
+	tsF float64
 	// expand forces this block to render its full body even when the
 	// per-kind collapse toggle (expandedThoughts / expandedToolOuts) is
 	// off. Set for tool_out blocks whose run time exceeded the elapsed
@@ -1037,7 +1042,6 @@ func listCmd(sock string) tea.Cmd {
 		out := map[string]GroupInfo{}
 		for k, v := range raw {
 			mp, _ := v.(map[string]any)
-			port, _ := mp["port"].(float64)
 			running, _ := mp["running"].(bool)
 			provider, _ := mp["provider"].(string)
 			model, _ := mp["model"].(string)
@@ -1083,7 +1087,7 @@ func listCmd(sock string) tea.Cmd {
 			// the top view survives the same wholesale replace.
 			network, _ := mp["network"].(string)
 			root, _ := mp["root"].(bool)
-			out[k] = GroupInfo{Port: int(port), Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root}
+			out[k] = GroupInfo{Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root}
 		}
 		return listMsg{groups: out}
 	}
@@ -1503,6 +1507,21 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			startWatchState()
 		}
 		m.processJobTransitions(msg.groups)
+		// Prune per-group live state for groups that no longer exist (a
+		// /destroy from another client never sends us an idle activity
+		// frame — its stream just dies). A stale activity entry alone keeps
+		// anyActivity() true, which pins the 80ms spinner tick chain on
+		// forever.
+		for g := range m.activity {
+			if _, ok := msg.groups[g]; !ok {
+				delete(m.activity, g)
+			}
+		}
+		for g := range m.busy {
+			if _, ok := msg.groups[g]; !ok {
+				delete(m.busy, g)
+			}
+		}
 		m.groups = msg.groups
 		if msg.hasGlobalTok {
 			m.globalTokRate = msg.globalTok
@@ -1596,17 +1615,17 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					delete(m.lastThoughtBody, msg.group)
 					m.pushHistory(msg.group, ev.Msg)
 				}
-				batch = append(batch, logLine{kind: "prompt", group: msg.group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "prompt", group: msg.group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts), tsF: ev.Ts})
 			case "done":
 				if ev.Text != "" {
-					batch = append(batch, logLine{kind: "response", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
+					batch = append(batch, logLine{kind: "response", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts), tsF: ev.Ts})
 				}
 			case "tool":
-				batch = append(batch, logLine{kind: "tool", group: msg.group, session: ev.Session, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "tool", group: msg.group, session: ev.Session, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "err":
-				batch = append(batch, logLine{kind: "err", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "err", group: msg.group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts), tsF: ev.Ts})
 			case "bg":
-				batch = append(batch, logLine{kind: "bg", group: msg.group, session: ev.Session, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "bg", group: msg.group, session: ev.Session, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts), tsF: ev.Ts})
 			case "thinking_done":
 				if !older {
 					// Same rationale: only the initial tail page mutates the
@@ -1617,34 +1636,72 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.lastThoughtBody[msg.group] = ev.Body
 				}
-				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "tool_result_done":
-				batch = append(batch, logLine{kind: "tool_out", group: msg.group, session: ev.Session, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts)})
+				batch = append(batch, logLine{kind: "tool_out", group: msg.group, session: ev.Session, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "notification":
 				sev := ev.Severity
 				if sev != "high" {
 					sev = "normal"
 				}
 				batch = append(batch, logLine{kind: "sys", group: msg.group, session: ev.Session,
-					text: formatNotifyLine(sev, ev.Title, ev.Text), ts: int64(ev.Ts)})
+					text: formatNotifyLine(sev, ev.Title, ev.Text), ts: int64(ev.Ts), tsF: ev.Ts})
 			}
 		}
-		// Track the smallest ts in this batch so the next older-page request
-		// can use it as the strict upper bound. -0.0005s bias is a safety
-		// margin against ties: the daemon parser emits multiple events with
-		// identical ts (e.g. tool + tool_out in one exchange) and `before`
-		// is strict `<`, so without the bias we'd drop the tied peer.
-		if len(batch) > 0 {
-			minTs := batch[0].ts
-			for _, l := range batch[1:] {
-				if l.ts < minTs {
-					minTs = l.ts
+		// The next older-page cursor is the oldest FULL-PRECISION event ts in
+		// this response, plus a +0.0005 bias. Full precision because
+		// logLine.ts is truncated to whole seconds — a truncated cursor
+		// silently excluded every event sharing the boundary second. The
+		// bias reaches INTO the boundary tie on purpose: ties are the norm
+		// (the daemon stamps one [ts:N] per turn, so a whole turn's events
+		// share one ts), readHistory cuts at the first event with
+		// ts >= before, and a cursor at the exact tie value would drop the
+		// tie's not-yet-fetched older members — a page boundary landing
+		// mid-turn used to lose the rest of that turn from back-scroll
+		// permanently. The duplicates the bias re-fetches are dropped below.
+		var minF float64
+		if len(msg.events) > 0 {
+			minF = msg.events[0].Ts
+			for _, ev := range msg.events[1:] {
+				if ev.Ts < minF {
+					minF = ev.Ts
 				}
 			}
-			next := float64(minTs) - 0.0005
+			next := minF + 0.0005
 			cur, ok := m.pageOldestTs[msg.group]
 			if !ok || next < cur {
 				m.pageOldestTs[msg.group] = next
+			}
+		}
+
+		if older && len(batch) > 0 {
+			// Drop the re-fetched boundary-tie members we already hold: the
+			// trailing batch events inside the bias window just below this
+			// fetch's cursor, as many as are already in m.lines. Count-based
+			// — the daemon's slice is positional over the same log, so the
+			// newest k tied events of this response are exactly our k.
+			lo := msg.before - 0.001
+			have := 0
+			for _, l := range m.lines {
+				if l.group == msg.group && l.tsF > lo && l.tsF < msg.before {
+					have++
+				}
+			}
+			for have > 0 && len(batch) > 0 {
+				last := batch[len(batch)-1]
+				if last.tsF <= lo || last.tsF >= msg.before {
+					break
+				}
+				batch = batch[:len(batch)-1]
+				have--
+			}
+			if len(batch) == 0 && msg.more {
+				// A tie longer than the page limit: every event this window
+				// can return is already held, and the cursor didn't move —
+				// the next fetch would loop. Step the cursor to the exact
+				// tie value (strict >= then excludes the whole tie); the
+				// tie's unreachable head is the cost of a ts-based cursor.
+				m.pageOldestTs[msg.group] = minF
 			}
 		}
 		m.pageExhausted[msg.group] = !msg.more
@@ -1657,6 +1714,14 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// via groupVer; the chat scroll position is anchored by the
 			// post-refresh TotalLineCount delta below.
 			if len(batch) == 0 {
+				return m, nil
+			}
+			if len(m.lines) >= maxLines {
+				// At the global line cap the trim below would immediately
+				// discard the prepended page while the cursor kept advancing
+				// — endless fetch churn with nothing ever appearing. Stop
+				// paging this group instead.
+				m.pageExhausted[msg.group] = true
 				return m, nil
 			}
 			combined := make([]logLine, 0, len(batch)+len(m.lines))
@@ -1696,6 +1761,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.lines = append(m.lines, batch...)
 		if len(m.lines) > maxLines {
 			m.lines = m.lines[len(m.lines)-maxLines:]
+			// Same rationale as addLine and the older-page trim: a global
+			// trim evicts other groups' lines without touching their
+			// groupVer, so stale vpCache entries would keep rendering them.
+			m.vpCache = map[string]vpCacheEntry{}
+			m.groupVer = map[string]int{}
 		}
 		// Bump groupVer to invalidate any stale vpCache entry built before
 		// this history page landed. Without this, an earlier refreshLog
@@ -1908,6 +1978,20 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			if ev.Text != "" {
 				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 			}
+		case "turn_end":
+			// The turn boundary. Normally `done` already cleared the busy
+			// flag, but done-less turns are real — a timeout-budget kill
+			// writes [[err]] + [[turn_end]] with no response line, and an
+			// interrupt issued by ANOTHER client acks only on that client's
+			// stream. Without this, busy stuck on: Esc fired a spurious
+			// Interrupt RPC and the hint bar reported the group as working
+			// until its next turn. Flush leftover stream text like the
+			// prompt case does (it belongs to the turn that just ended).
+			if cur, ok := m.streamBuf[ev.Group]; ok {
+				m.addLine(logLine{kind: "response", group: ev.Group, session: m.turnSession[ev.Group], text: cur})
+				delete(m.streamBuf, ev.Group)
+			}
+			delete(m.busy, ev.Group)
 		case "tool":
 			// Tool calls arrive between prompt and done; flush any in-flight
 			// stream buffer first so order is preserved in the view.
@@ -2356,6 +2440,22 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Fleet view owns the middle pane — scroll its table, not the
 			// hidden chat viewport.
 			m.topVP, cmd = m.topVP.Update(msg)
+			return m, cmd
+		}
+		if m.focus == focusLog && m.logVPReady {
+			// Daemon-log view: same reason. Without this the wheel scrolled
+			// the invisible chat viewport — the log pane stayed put while
+			// autoFollow flipped and maybePageOlder could fire chat-history
+			// fetches for a pane the user wasn't looking at.
+			m.logVP, cmd = m.logVP.Update(msg)
+			m.logAutoFollow = m.logVP.AtBottom()
+			return m, cmd
+		}
+		if m.peekActive() {
+			// Job peek pane replaces the chat column while a job row is
+			// hovered — mirror the keyboard routing (pgup/pgdn above).
+			m.peekVP, cmd = m.peekVP.Update(msg)
+			m.peekFollow = m.peekVP.AtBottom()
 			return m, cmd
 		}
 		m.vp, cmd = m.vp.Update(msg)
@@ -3314,7 +3414,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.vp.PageUp()
 			m.autoFollow = m.vp.AtBottom()
 			return m, m.maybePageOlder()
-		case "pgdown", "pgdn":
+		case "pgdown":
 			if m.peekActive() {
 				m.peekVP.PageDown()
 				m.peekFollow = m.peekVP.AtBottom()
@@ -3438,7 +3538,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp.PageUp()
 		m.autoFollow = m.vp.AtBottom()
 		return m, m.maybePageOlder()
-	case "pgdown", "pgdn":
+	case "pgdown":
 		m.vp.PageDown()
 		m.autoFollow = m.vp.AtBottom()
 		return m, nil
@@ -4023,7 +4123,18 @@ func (m *Model) syncPeekToHover() {
 		}
 		return
 	}
-	r := m.treeRows()[m.treeIdx]
+	// Re-check bounds against a fresh treeRows(): jobVisible is time-based,
+	// so a finished job's linger window can expire between peekActive()'s
+	// slice and this one — never index past the slice (the render path's
+	// rule, view.go).
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) || rows[m.treeIdx].job == "" {
+		if m.peekJob.id != "" {
+			m.clearPeek()
+		}
+		return
+	}
+	r := rows[m.treeIdx]
 	m.armPeek(r.group, r.job)
 }
 
@@ -4239,6 +4350,19 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		delete(m.thinkingBuf, target)
 		delete(m.thinkingTail, target)
 		delete(m.lastThoughtBody, target)
+		delete(m.toolOutBuf, target)
+		delete(m.toolOutTail, target)
+		delete(m.toolBeginTs, target)
+		delete(m.busy, target)
+		// activity especially: the stream dies before any idle frame can
+		// arrive, and a stale mid-phase entry keeps anyActivity() true —
+		// which pins the 80ms spinner tick chain on for the rest of the
+		// process with nothing animating.
+		delete(m.activity, target)
+		delete(m.loadedGroups, target)
+		delete(m.pageOldestTs, target)
+		delete(m.pageLoading, target)
+		delete(m.pageExhausted, target)
 		m.clearGroupUnread(target)
 		delete(m.pending, target)
 		filtered := m.lines[:0]
@@ -4374,7 +4498,15 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/prompt: no group in focus"})
 			return nil
 		}
-		return promptFireCmd(m.sock, m.cur, arg)
+		sess := m.activeSession(m.cur)
+		// Same follow-only rule as typed sends below — a goal session's turn
+		// would be wiped by the driver's pre-iteration clear anyway.
+		if goalSession(sess) {
+			m.addLine(logLine{kind: "err", group: m.cur,
+				text: "goal sessions are follow-only — chat in the default session, or /goal interrupt to take over"})
+			return nil
+		}
+		return promptFireCmd(m.sock, m.cur, sess, arg)
 	}
 	if strings.HasPrefix(v, "/") {
 		space := strings.IndexByte(v, ' ')
@@ -4485,8 +4617,15 @@ func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
 				// without bound. Re-rendering 100 visible blocks after
 				// a wipe is ~300ms once; LRU would buy smoother but
 				// isn't worth the code.
+				// clear(), NOT a fresh-map assignment: allBlocks has a
+				// value receiver and doesn't return m, so reassigning
+				// the field only rebinds this copy — the model kept the
+				// full map, every write below went into the discarded
+				// one, and caching silently turned off for good once the
+				// cap was reached (glamour re-ran per uncached block on
+				// every repaint).
 				if len(m.mdCache) >= mdCacheMax {
-					m.mdCache = map[string]string{}
+					clear(m.mdCache)
 				}
 				m.mdCache[key] = rendered
 			}

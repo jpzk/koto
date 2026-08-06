@@ -471,14 +471,21 @@ func (m Model) renderMetricsBar() string {
 		return renderMetricColored(label, frac, pctColor(frac))
 	}
 
-	if ctx := sumCtxTokens(m.metric); ctx > 0 {
+	// The retained usage snapshot is per-group; right after a group switch it
+	// still belongs to the PREVIOUS group until the 5s poll catches up —
+	// blank chips for a beat beat wrong attribution.
+	groupMetric := m.metric
+	if m.metricGroup != m.cur {
+		groupMetric = nil
+	}
+	if ctx := sumCtxTokens(groupMetric); ctx > 0 {
 		frac := 0.0
 		if m.ctxWindow > 0 {
 			frac = float64(ctx) / float64(m.ctxWindow)
 		}
 		parts = append(parts, renderMetric("ctx", frac))
 	}
-	if hit := cacheHitRatio(m.metric); hit >= 0 {
+	if hit := cacheHitRatio(groupMetric); hit >= 0 {
 		parts = append(parts, renderMetricColored("cache", hit, pctColor(1-hit)))
 	}
 	if u5h := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-utilization"); u5h >= 0 {
