@@ -29,7 +29,7 @@ func splitShellModel(t *testing.T) Model {
 	m.input.Focus()
 	m.input.Width = max(20, m.width-6)
 	term := vt.NewEmulator(10, 5)
-	t.Cleanup(func() { _ = term.Close() })
+	t.Cleanup(func() { closeEmulator(term) })
 	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 10, rows: 5}
 	m.shellOpen = true
 	m.preShellFocus = focusInput

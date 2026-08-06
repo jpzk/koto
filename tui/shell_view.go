@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -160,7 +161,7 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 	// the fix: continuously drain Read() and relay those bytes to the
 	// guest exactly like real keystrokes (the remote tmux is genuinely
 	// waiting for these answers, same as a real terminal would provide
-	// them). Ends when term.Close() unblocks it (see shellSession.close).
+	// them). Ends when the pipe close unblocks it (see shellSession.close).
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -218,7 +219,23 @@ func (s *shellSession) resize(cols, rows int) {
 // auto-response drain goroutine (startShellAttach) exits instead of leaking.
 func (s *shellSession) close() {
 	s.cancel()
-	_ = s.term.Close()
+	closeEmulator(s.term)
+}
+
+// closeEmulator unblocks term's drain goroutine by closing the internal pipe
+// directly instead of calling Emulator.Close: Close also flips an
+// unsynchronized bool that Read checks concurrently — a data race under
+// -race (emulator.go Read/Close on e.closed). The pipe close alone is the
+// part that matters (io.Pipe is internally locked, and CloseWithError(EOF)
+// is exactly what Close does to it); the skipped flag only short-circuits
+// later Read/Write calls, which never happen — the session is discarded
+// right after, and stale shellFrameMsg writes are dropped by the id check.
+func closeEmulator(term *vt.Emulator) {
+	if pw, ok := term.InputPipe().(*io.PipeWriter); ok {
+		_ = pw.CloseWithError(io.EOF)
+		return
+	}
+	_ = term.Close() // vt changed InputPipe's concrete type; accept the race
 }
 
 // shellSplitChatMinW is the least width the read-only chat column needs to

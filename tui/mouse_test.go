@@ -102,7 +102,7 @@ func shellViewModel(t *testing.T, jobs []JobInfo) Model {
 	m.jobsOpen[sessKey("ghost", "")] = true // job rows are folded by default
 	newTerm := func(cols, rows int) *vt.Emulator {
 		term := vt.NewEmulator(cols, rows)
-		t.Cleanup(func() { _ = term.Close() })
+		t.Cleanup(func() { closeEmulator(term) })
 		return term
 	}
 	prev := shellAttach
@@ -165,7 +165,7 @@ func TestClickChatColumnDetachesShell(t *testing.T) {
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.cur = "main"
 	term := vt.NewEmulator(80, 20)
-	t.Cleanup(func() { _ = term.Close() })
+	t.Cleanup(func() { closeEmulator(term) })
 	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 80, rows: 20}
 	m.preShellFocus = focusInput
 	m.focus = focusShell

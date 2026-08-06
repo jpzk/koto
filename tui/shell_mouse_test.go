@@ -25,7 +25,7 @@ func shellMouseModel(t *testing.T) (Model, <-chan string) {
 	m.cur = "main"
 	m.focus = focusShell
 	term := vt.NewEmulator(40, 10)
-	t.Cleanup(func() { _ = term.Close() })
+	t.Cleanup(func() { closeEmulator(term) })
 	m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 40, rows: 10}
 	ch := make(chan string, 16)
 	go func() {

@@ -31,7 +31,7 @@ func chaseShellModel(t *testing.T) (Model, *[]string, *[]int) {
 	prevAttach := shellAttach
 	shellAttach = func(group, session string, cols, rows int) (*shellSession, error) {
 		term := vt.NewEmulator(cols, rows)
-		t.Cleanup(func() { _ = term.Close() })
+		t.Cleanup(func() { closeEmulator(term) })
 		*attached = append(*attached, group+"/"+session)
 		return &shellSession{
 			term: term, cancel: func() {},

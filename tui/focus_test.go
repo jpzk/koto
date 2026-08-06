@@ -252,7 +252,7 @@ func TestEscInPtyForwardsToGuest(t *testing.T) {
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.cur = "main"
 	term := vt.NewEmulator(80, 20)
-	t.Cleanup(func() { _ = term.Close() })
+	t.Cleanup(func() { closeEmulator(term) })
 	rec := &recordShellStream{}
 	m.shell = &shellSession{term: term, stream: rec, group: "main", session: "koto-shell", cols: 80, rows: 20}
 	m.shellOpen = true
@@ -280,7 +280,7 @@ func TestAltEscInPtyTogglesTree(t *testing.T) {
 	m.groups = map[string]GroupInfo{"main": {Running: true}}
 	m.cur = "main"
 	term := vt.NewEmulator(80, 20)
-	t.Cleanup(func() { _ = term.Close() })
+	t.Cleanup(func() { closeEmulator(term) })
 	rec := &recordShellStream{}
 	m.shell = &shellSession{term: term, stream: rec, group: "main", session: "koto-shell", cols: 80, rows: 20}
 	m.shellOpen = true
