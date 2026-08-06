@@ -7,6 +7,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func envMap(kv map[string]string) func(string) string {
@@ -93,6 +94,22 @@ func TestNotifyEscapeSanitizes(t *testing.T) {
 	long := notifyEscape("osc9", "normal", "main", strings.Repeat("x", 500), "")
 	if len(long) > notifyTitleMax+64 {
 		t.Fatalf("title not truncated: %d bytes", len(long))
+	}
+
+	// C1 controls must flatten even though the daemon's sanitizer would
+	// normally have stripped them: U+009C is ST on C1-interpreting terminals
+	// (terminates the OSC early), U+009B is CSI. Bidi overrides (Cf) go too.
+	c1 := notifyEscape("osc9", "normal", "main", "a\u009bb\u009cc\u202ed", "")
+	for _, r := range []string{"\u009b", "\u009c", "\u202e"} {
+		if strings.Contains(c1, r) {
+			t.Fatalf("C1/bidi rune %q survived: %q", r, c1)
+		}
+	}
+
+	// Truncation counts runes: a multi-byte title cut must stay valid UTF-8.
+	wide := notifyEscape("osc9", "normal", "main", strings.Repeat("ü", notifyTitleMax+10), "")
+	if !utf8.ValidString(wide) {
+		t.Fatalf("rune-splitting truncation: %q", wide)
 	}
 }
 

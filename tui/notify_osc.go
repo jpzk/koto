@@ -29,6 +29,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"unicode"
 )
 
 // notifyOut is the sink for escape sequences — stdout in production, a buffer
@@ -112,17 +113,23 @@ func autoNotifyMode(term, prog string) string {
 
 // sanitizeNotify flattens control characters (the payload reaches the terminal
 // raw — a stray ESC would let a notification body inject its own escape
-// sequence) and truncates.
+// sequence) and truncates. C0, DEL, and the C1 range all flatten: on
+// C1-interpreting terminals (xterm in UTF-8 mode) U+009C is ST — it would
+// terminate the OSC early — and U+009B is CSI. Unicode format characters
+// (bidi overrides etc., category Cf) go too, mirroring the daemon's
+// sanitizer; this function must stand alone because the payload bypasses the
+// renderer's sanitized path. Truncation counts runes, not bytes, so a cut
+// never splits a UTF-8 sequence.
 func sanitizeNotify(s string, max int) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
 			return ' '
 		}
 		return r
 	}, s)
 	s = strings.TrimSpace(s)
-	if len(s) > max {
-		s = s[:max-1] + "…"
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max-1]) + "…"
 	}
 	return s
 }
