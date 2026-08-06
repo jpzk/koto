@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -153,8 +154,8 @@ var schedHelpLines = []string{
 }
 
 // looksLikeCronField returns true if the token resembles the start of a
-// cron expression (alias, `*`, or a digit) so /sched add can decide
-// whether the first arg is a group name or part of the cron expression.
+// cron expression (alias, `*`, or a digit) — used only to word the error
+// for a first token that is neither a known group nor plausibly cron.
 func looksLikeCronField(s string) bool {
 	if s == "" {
 		return false
@@ -163,23 +164,47 @@ func looksLikeCronField(s string) bool {
 	return c == '*' || c == '@' || (c >= '0' && c <= '9')
 }
 
+// cutFields returns s with its first n whitespace-separated fields (and the
+// whitespace around them) removed, the remainder verbatim — so a message
+// containing runs of spaces survives where Join(Fields(…)) would collapse
+// them to single spaces.
+func cutFields(s string, n int) string {
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	for ; n > 0; n-- {
+		i := strings.IndexFunc(s, unicode.IsSpace)
+		if i < 0 {
+			return ""
+		}
+		s = strings.TrimLeftFunc(s[i:], unicode.IsSpace)
+	}
+	return s
+}
+
 // parseSchedAdd splits the args of `/sched add ...` into group, cron, msg.
 // Grammar:
 //
 //	[<group>] @alias              <msg...>
 //	[<group>] <m> <h> <dom> <mon> <dow> <msg...>
 //
-// `<group>` is detected by the first token NOT looking like a cron field.
-// curGroup is used when no explicit group is given.
-func parseSchedAdd(rest, curGroup string) (group, cron, msg string, err error) {
+// The first token is a group when it names a group known to the TUI (the
+// same rule parseGoalSet uses) — membership, not shape, so digit-leading
+// group names (daemon charset allows them) stay addressable and a typo'd
+// group errors out instead of silently parsing as cron. curGroup is used
+// when no explicit group is given.
+func parseSchedAdd(rest, curGroup string, isGroup func(string) bool) (group, cron, msg string, err error) {
 	toks := strings.Fields(rest)
 	if len(toks) == 0 {
 		return "", "", "", fmt.Errorf("usage: /sched add [<group>] (<m> <h> <dom> <mon> <dow> | @alias) <msg...>")
 	}
 	group = curGroup
-	if !looksLikeCronField(toks[0]) {
+	consumed := 0
+	switch {
+	case isGroup(toks[0]):
 		group = toks[0]
 		toks = toks[1:]
+		consumed = 1
+	case !looksLikeCronField(toks[0]):
+		return "", "", "", fmt.Errorf("no group named %q (and it doesn't look like a cron field)", toks[0])
 	}
 	if len(toks) == 0 {
 		return "", "", "", fmt.Errorf("missing cron expression")
@@ -189,14 +214,14 @@ func parseSchedAdd(rest, curGroup string) (group, cron, msg string, err error) {
 			return "", "", "", fmt.Errorf("missing message after alias %s", toks[0])
 		}
 		cron = toks[0]
-		msg = strings.Join(toks[1:], " ")
+		msg = cutFields(rest, consumed+1)
 		return group, cron, msg, nil
 	}
 	if len(toks) < 6 {
 		return "", "", "", fmt.Errorf("expected 5 cron fields + message, got %d tokens", len(toks))
 	}
 	cron = strings.Join(toks[:5], " ")
-	msg = strings.Join(toks[5:], " ")
+	msg = cutFields(rest, consumed+5)
 	return group, cron, msg, nil
 }
 
@@ -221,7 +246,10 @@ func (m *Model) handleSchedCmd(rest string) tea.Cmd {
 	case "list":
 		return schedListCmd(m.sock, arg)
 	case "add":
-		group, cron, msg, err := parseSchedAdd(arg, m.cur)
+		group, cron, msg, err := parseSchedAdd(arg, m.cur, func(g string) bool {
+			_, known := m.groups[g]
+			return known
+		})
 		if err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/sched add: " + err.Error()})
 			return nil

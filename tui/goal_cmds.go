@@ -41,7 +41,7 @@ type goalListMsg struct {
 }
 
 type goalOpMsg struct {
-	op    string // "set" | "approve" | "pause" | "resume" | "cancel"
+	op    string // "set" | "approve" | "pause" | "interrupt" | "resume" | "cancel"
 	group string
 	item  goalItemT
 	err   error
@@ -168,7 +168,11 @@ prefix:
 		}
 		i++
 	}
-	body := strings.Join(toks[i:], " ")
+	// cutFields, not Join(toks[i:], " "): the goal text and criteria are free
+	// text, and the criteria convention is a numbered list separated by runs
+	// of spaces (the /goal help example uses two) — a Fields/Join round-trip
+	// would collapse exactly the separators the judge is told to look for.
+	body := cutFields(rest, i)
 	goalText, crit, found := strings.Cut(body, " :: ")
 	if !found {
 		return "", "", "", 0, false, fmt.Errorf("missing ` :: ` between goal text and acceptance criteria")
@@ -236,11 +240,7 @@ func formatGoalEvent(ev Event) string {
 		if ev.Name == "met" {
 			return fmt.Sprintf("⚖ goal %s: verdict MET", ev.ID)
 		}
-		reasons := ev.Text
-		if len(reasons) > 120 {
-			reasons = reasons[:117] + "…"
-		}
-		return fmt.Sprintf("⚖ goal %s: verdict unmet — %s", ev.ID, reasons)
+		return fmt.Sprintf("⚖ goal %s: verdict unmet — %s", ev.ID, truncRunes(ev.Text, 120))
 	case "goal_met":
 		return fmt.Sprintf("✅ goal %s MET", ev.ID)
 	case "goal_paused":
@@ -265,9 +265,5 @@ func goalStatusLine(it goalItemT) string {
 	case "running":
 		extra = fmt.Sprintf(" %d/%d", it.Iteration, it.MaxIterations)
 	}
-	preview := it.Text
-	if len(preview) > 48 {
-		preview = preview[:45] + "…"
-	}
-	return fmt.Sprintf("  %s %-15s %-18s %s", it.ID, it.Group, it.Status+extra, preview)
+	return fmt.Sprintf("  %s %-15s %-18s %s", it.ID, it.Group, it.Status+extra, truncRunes(it.Text, 48))
 }
