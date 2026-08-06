@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -69,39 +71,44 @@ func clientTLS() (*tls.Config, error) {
 }
 
 var (
-	clientOnce sync.Once
-	client     pb.KotoClient
-	clientErr  error
+	clientMu sync.Mutex
+	client   pb.KotoClient
 )
 
+// getClient builds the shared gRPC client on first use. Failures are NOT
+// cached (this was a sync.Once once): a cred file that is momentarily
+// unreadable at startup would otherwise pin every future call — including
+// the 5s reconnect loop's — to the same stale error until process restart.
+// grpc.NewClient doesn't dial, so the success path still runs exactly once.
 func getClient() (pb.KotoClient, error) {
-	clientOnce.Do(func() {
-		tcfg, err := clientTLS()
-		if err != nil {
-			clientErr = err
-			return
-		}
-		ep := envOr("KOTO_ENDPOINT", "127.0.0.1:8443")
-		cc, err := grpc.NewClient(ep,
-			grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
-			grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("KOTO_TOKEN")}),
-			// Transport keepalive replaces the daemon's old app-level `ping`
-			// frames: HTTP/2 pings detect a dead link under the long-lived
-			// Subscribe/Watch streams, which would otherwise block in Recv
-			// forever. Time must stay >= the server's enforcement MinTime (10s).
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second,
-				Timeout:             10 * time.Second,
-				PermitWithoutStream: true,
-			}),
-		)
-		if err != nil {
-			clientErr = err
-			return
-		}
-		client = pb.NewKotoClient(cc)
-	})
-	return client, clientErr
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	if client != nil {
+		return client, nil
+	}
+	tcfg, err := clientTLS()
+	if err != nil {
+		return nil, err
+	}
+	ep := envOr("KOTO_ENDPOINT", "127.0.0.1:8443")
+	cc, err := grpc.NewClient(ep,
+		grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
+		grpc.WithPerRPCCredentials(tokenCreds{os.Getenv("KOTO_TOKEN")}),
+		// Transport keepalive replaces the daemon's old app-level `ping`
+		// frames: HTTP/2 pings detect a dead link under the long-lived
+		// Subscribe/Watch streams, which would otherwise block in Recv
+		// forever. Time must stay >= the server's enforcement MinTime (10s).
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	client = pb.NewKotoClient(cc)
+	return client, nil
 }
 
 func envOr(k, def string) string {
@@ -415,6 +422,9 @@ func openLogStream() (grpc.ServerStreamingClient[pb.LogEvent], context.CancelFun
 // emitting one message per complete line (the trailing partial flushes when
 // the stream ends). Mirrors startSubscribe's goroutine+prog.Send shape.
 func startRunScript(group, name, script string) {
+	if prog == nil {
+		return // no program to push output into (tests)
+	}
 	go func() {
 		cl, err := getClient()
 		if err != nil {
@@ -479,6 +489,10 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 		return cancel // no program to push frames into (tests)
 	}
 	go func() {
+		// Release the stream's resources as soon as the tail is over — the
+		// model's peekCancel (stored from the return value) may not fire
+		// until the next hover change; double-cancel is harmless.
+		defer cancel()
 		cl, err := getClient()
 		if err != nil {
 			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
@@ -493,8 +507,15 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 		for {
 			ev, rerr := stream.Recv()
 			if rerr != nil {
-				if ctx.Err() == nil {
+				switch {
+				case ctx.Err() != nil:
+					// Hover moved on; cancellation is not an error.
+				case errors.Is(rerr, io.EOF):
 					prog.Send(jobTailMsg{sid: sid, end: true})
+				default:
+					// A transport failure mid-tail is not a clean end —
+					// surface it so the peek pane says so.
+					prog.Send(jobTailMsg{sid: sid, errText: rerr.Error()})
 				}
 				return
 			}
