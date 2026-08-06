@@ -753,21 +753,16 @@ func fcLogSink(g string, c net.Conn) {
 	defer c.Close()
 	p := filepath.Join(vol(g), ".cs", "log")
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		emitLogfG("fc", g, "error", "[%s] log sink open: %v", g, err)
-		return
-	}
-	defer f.Close()
 	mu := logWriteLock(g)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := c.Read(buf)
 		if n > 0 {
 			mu.Lock()
-			_, werr := f.Write(buf[:n])
+			werr := logSinkAppend(p, buf[:n])
 			mu.Unlock()
 			if werr != nil {
+				emitLogfG("fc", g, "error", "[%s] log sink append: %v", g, werr)
 				return
 			}
 		}
@@ -775,6 +770,24 @@ func fcLogSink(g string, c net.Conn) {
 			return
 		}
 	}
+}
+
+// logSinkAppend opens-appends-closes PER CHUNK, like logAppend, rather than
+// holding one fd for the VM's lifetime. Deliberate: filterLogSession (the
+// per-session clear — which the goal driver runs before EVERY iteration)
+// replaces the log via tmp+rename, and a held fd keeps appending to the
+// orphaned inode — every guest byte silently lost until the next VM boot
+// (observed 2026-08-05: CHAT's goal-work transcript vanished while host-side
+// markers, whose writers open per append, kept landing). Chunk rates are
+// chat-log rates, so the extra open/close is noise.
+func logSinkAppend(p string, b []byte) error {
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(b)
+	return err
 }
 
 // fcCtlConn serves the guest's ctl plane: JSON lines in, JSON lines out on
