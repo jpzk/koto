@@ -87,6 +87,7 @@ func getClient() (pb.KotoClient, error) {
 	}
 	tcfg, err := clientTLS()
 	if err != nil {
+		logErr("grpc", "client TLS setup failed: %v", err)
 		return nil, err
 	}
 	ep := envOr("KOTO_ENDPOINT", "127.0.0.1:8443")
@@ -104,8 +105,10 @@ func getClient() (pb.KotoClient, error) {
 		}),
 	)
 	if err != nil {
+		logErr("grpc", "client construction for %s failed: %v", ep, err)
 		return nil, err
 	}
+	logInfo("grpc", "client created: endpoint=%s server_name=%q", ep, os.Getenv("KOTO_SERVER_NAME"))
 	client = pb.NewKotoClient(cc)
 	return client, nil
 }
@@ -132,24 +135,39 @@ func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, err
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// One log line per unary RPC — the single choke point every command,
+	// send, and poll goes through. Message bodies are logged as lengths, not
+	// content (chat text doesn't belong in a debug log by default).
+	group, _ := extra["group"].(string)
+	msgLen := len(s2(extra["msg"]))
+	t0 := time.Now()
 	msg, err := callRPC(ctx, cl, cmd, extra)
 	if err != nil {
+		logWarn("rpc", "%s group=%q transport error after %s: %v", cmd, group, sinceMs(t0), err)
 		return nil, err
 	}
 	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(msg)
 	if err != nil {
+		logErr("rpc", "%s group=%q response marshal failed: %v", cmd, group, err)
 		return nil, err
 	}
 	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
+		logErr("rpc", "%s group=%q response unmarshal failed: %v", cmd, group, err)
 		return nil, err
 	}
 	if ok, _ := out["ok"].(bool); !ok {
 		es, _ := out["error"].(string)
+		logWarn("rpc", "%s group=%q daemon error after %s: %s", cmd, group, sinceMs(t0), es)
 		return out, fmt.Errorf("daemon: %s", es)
 	}
+	logDbg("rpc", "%s group=%q msg_len=%d ok in %s", cmd, group, msgLen, sinceMs(t0))
 	return out, nil
 }
+
+func s2(v any) string { s, _ := v.(string); return s }
+
+func sinceMs(t0 time.Time) time.Duration { return time.Since(t0).Round(time.Millisecond) }
 
 func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string]any) (proto.Message, error) {
 	s := func(k string) string { v, _ := extra[k].(string); return v }
@@ -245,9 +263,11 @@ func fetchResources() (map[string]GroupRes, HostRes, error) {
 	defer cancel()
 	resp, err := cl.Resources(ctx, &pb.ResourcesReq{})
 	if err != nil {
+		logWarn("rpc", "resources transport error: %v", err)
 		return nil, HostRes{}, err
 	}
 	if !resp.GetOk() {
+		logWarn("rpc", "resources daemon error: %s", resp.GetError())
 		return nil, HostRes{}, fmt.Errorf("daemon: %s", resp.GetError())
 	}
 	out := make(map[string]GroupRes, len(resp.GetGroups()))
@@ -406,9 +426,11 @@ func startRunScript(group, name, script string) {
 		defer cancel()
 		stream, err := cl.RunScript(ctx, &pb.RunScriptReq{Group: group, Script: script})
 		if err != nil {
+			logWarn("script", "runscript %s on %s failed to open: %v", name, group, err)
 			prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + err.Error()})
 			return
 		}
+		logInfo("script", "runscript %s on %s: stream open (%d bytes)", name, group, len(script))
 		prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ▶ " + name})
 		var buf []byte
 		flush := func(final bool) {
@@ -429,6 +451,7 @@ func startRunScript(group, name, script string) {
 			ev, err := stream.Recv()
 			if err != nil {
 				flush(true)
+				logWarn("script", "runscript %s on %s: stream broke: %v", name, group, err)
 				prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + err.Error()})
 				return
 			}
@@ -438,10 +461,12 @@ func startRunScript(group, name, script string) {
 				flush(false)
 			case "error":
 				flush(true)
+				logWarn("script", "runscript %s on %s: daemon error: %s", name, group, ev.Error)
 				prog.Send(scriptLogMsg{group: group, kind: "err", text: "runscript: " + ev.Error})
 				return
 			case "end":
 				flush(true)
+				logInfo("script", "runscript %s on %s: done", name, group)
 				prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ✓ " + name})
 				return
 			}
@@ -471,9 +496,11 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 		}
 		stream, err := cl.JobTail(ctx, &pb.JobTailReq{Group: group, Id: id, Tail: jobPeekTailBytes, Parsed: true})
 		if err != nil {
+			logWarn("jobtail", "open group=%s id=%s failed: %v", group, id, err)
 			prog.Send(jobTailMsg{sid: sid, errText: err.Error()})
 			return
 		}
+		logDbg("jobtail", "open group=%s id=%s sid=%d", group, id, sid)
 		prog.Send(jobTailMsg{sid: sid, opened: true})
 		for {
 			ev, rerr := stream.Recv()
@@ -481,11 +508,13 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 				switch {
 				case ctx.Err() != nil:
 					// Hover moved on; cancellation is not an error.
+					logDbg("jobtail", "group=%s id=%s cancelled (hover moved)", group, id)
 				case errors.Is(rerr, io.EOF):
 					prog.Send(jobTailMsg{sid: sid, end: true})
 				default:
 					// A transport failure mid-tail is not a clean end —
 					// surface it so the peek pane says so.
+					logWarn("jobtail", "group=%s id=%s stream broke: %v", group, id, rerr)
 					prog.Send(jobTailMsg{sid: sid, errText: rerr.Error()})
 				}
 				return

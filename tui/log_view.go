@@ -86,13 +86,16 @@ func startLogSubscribe(sock string) {
 	go func() {
 		stream, cancel, err := openLogStream()
 		if err != nil {
+			logWarn("daemonlog", "subscribe failed to open: %v", err)
 			prog.Send(logSubClosedMsg{err: err})
 			return
 		}
+		logDbg("daemonlog", "subscribed")
 		defer cancel()
 		for {
 			pev, err := stream.Recv()
 			if err != nil {
+				logWarn("daemonlog", "subscribe closed: %v", err)
 				prog.Send(logSubClosedMsg{err: err})
 				return
 			}

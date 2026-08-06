@@ -1323,18 +1323,28 @@ func startSubscribe(sock, group string, since uint64) {
 	go func() {
 		stream, cancel, err := openGroupStream(group, since)
 		if err != nil {
+			logWarn("stream", "subscribe group=%s since=%d failed to open: %v", group, since, err)
 			prog.Send(streamClosedMsg{group: group, err: err})
 			return
 		}
+		logDbg("stream", "subscribed group=%s since=%d", group, since)
 		defer cancel()
 		for {
 			pev, err := stream.Recv()
 			if err != nil {
+				logWarn("stream", "subscribe group=%s closed: %v", group, err)
 				prog.Send(streamClosedMsg{group: group, err: err})
 				return
 			}
 			if pev.Event == "" || pev.Event == "ping" {
 				continue
+			}
+			// `stream` frames arrive per token-batch — logging each would put
+			// the whole conversation in the debug log at firehose rate. Every
+			// other event type is one-per-transition and worth a line.
+			if pev.Event != "stream" {
+				logDbg("event", "group=%s %s seq=%d session=%q name=%q len=%d",
+					group, pev.Event, pev.Seq, pev.Session, pev.Name, len(pev.Text)+len(pev.Msg))
 			}
 			prog.Send(streamEventMsg(pbToEvent(pev)))
 		}
@@ -1351,16 +1361,20 @@ func startWatchState() {
 	go func() {
 		stream, cancel, err := openStateStream()
 		if err != nil {
+			logWarn("state", "watch failed to open: %v", err)
 			prog.Send(watchClosedMsg{err: err})
 			return
 		}
+		logDbg("state", "watch stream open")
 		defer cancel()
 		for {
 			f, err := stream.Recv()
 			if err != nil {
+				logWarn("state", "watch closed: %v", err)
 				prog.Send(watchClosedMsg{err: err})
 				return
 			}
+			logDbg("state", "frame: groups=%d tok/s=%d", len(f.GetGroups()), int(f.GetGlobalTokPerSec()))
 			prog.Send(listMsg{groups: stateGroups(f), globalTok: f.GetGlobalTokPerSec(), hasGlobalTok: true})
 		}
 	}()
@@ -1388,6 +1402,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := raw.(type) {
 
 	case tea.WindowSizeMsg:
+		logDbg("ui", "resize %dx%d", msg.Width, msg.Height)
 		widthChanged := msg.Width != m.width
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1522,6 +1537,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.connected {
 			m.connected = true
+			logInfo("conn", "reconnected to daemon after %d attempts", m.reconnectAttempt)
 			m.addLine(logLine{kind: "sys", text: "reconnected to daemon"})
 		}
 		// Probe bookkeeping resets on ANY successful list — including the
@@ -2057,6 +2073,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// refetch the tail history page. Live frames keep flowing on this
 			// same stream; lastSeq resets so their fresh (possibly smaller)
 			// seq values are accepted.
+			logWarn("stream", "gap group=%s — dropping view, refetching history", ev.Group)
 			m.lastSeq[ev.Group] = 0
 			filtered := m.lines[:0]
 			for _, l := range m.lines {
@@ -2564,6 +2581,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) addLine(l logLine) {
+	// Every user-visible error line doubles as a debug-log entry — the chat
+	// pane scrolls away, the file doesn't.
+	if l.kind == "err" {
+		logWarn("ui", "error line (group=%q): %s", l.group, l.text)
+	}
 	m.lines = append(m.lines, l)
 	if len(m.lines) > maxLines {
 		m.lines = m.lines[len(m.lines)-maxLines:]
@@ -3017,6 +3039,9 @@ func (m *Model) persistUIState() {
 }
 
 func (m *Model) scheduleReconnect() tea.Cmd {
+	if m.connected {
+		logWarn("conn", "daemon unreachable — starting reconnect probes")
+	}
 	m.connected = false
 	return m.scheduleProbe()
 }
@@ -3038,6 +3063,7 @@ func (m *Model) scheduleProbe() tea.Cmd {
 	if delayMs > 5000 {
 		delayMs = 5000
 	}
+	logDbg("conn", "probe %d armed in %dms (connected=%v)", m.reconnectAttempt, delayMs, m.connected)
 	tickCmd := m.ensureTicking()
 	reconCmd := tea.Tick(time.Duration(delayMs)*time.Millisecond, func(time.Time) tea.Msg { return reconnectAttemptMsg{} })
 	return tea.Batch(tickCmd, reconCmd)
@@ -4349,6 +4375,12 @@ func (m Model) treeOrder() []string {
 }
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
+	// Slash commands are operator intent — log them verbatim. Plain chat text
+	// is NOT logged here; its send surfaces as the rpc-layer line (length
+	// only), keeping conversation content out of the debug log.
+	if strings.HasPrefix(v, "/") {
+		logDbg("cmd", "%s", v)
+	}
 	if strings.HasPrefix(v, "/new ") {
 		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"
 		extra := map[string]any{}

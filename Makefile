@@ -79,11 +79,17 @@ login: $(BUILD)/koto-host
 host-run: $(BUILD)/koto-host
 	KOTO_INSTANCE=$(INSTANCE) ./host/run-host.sh
 
+# run/tui is the TUI's one writable mount (at /koto-run): tui-state.json
+# (survives /reload now that the dir persists) and tui.log, the DEBUG-default
+# development log (tail -f run/tui/tui.log; KOTO_TUI_LOG / KOTO_TUI_LOG_LEVEL
+# override path/verbosity — see tui/debuglog.go). Nothing daemon-owned lives
+# there, so the sock-only isolation story is unchanged.
 # The /reload inner loop re-invokes `$(MAKE) tui-build` so the same sentinel
 # logic kicks in: if the user edited any tui/*.go before pressing /reload,
 # Make rebuilds; otherwise it's a no-op and the TUI just respawns.
 tui: $(BUILD)/koto-tui
 	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`make pki-init && make pki-client NAME=tui\`"; exit 1; }
+	@mkdir -p run/tui
 	@while :; do \
 	  podman run --rm -it \
 	    --network koto-net \
@@ -91,6 +97,7 @@ tui: $(BUILD)/koto-tui
 	    -v $(PWD)/creds:/koto-creds:ro \
 	    -v $(PWD)/scripts:/koto-scripts:ro \
 	    -v $(PWD)/prompts:/koto-prompts:ro \
+	    -v $(PWD)/run/tui:/koto-run \
 	    -v /etc/localtime:/etc/localtime:ro \
 	    -e KOTO_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
 	    -e KOTO_ENDPOINT=$(CS_HOST_NAME):8443 \
@@ -98,6 +105,8 @@ tui: $(BUILD)/koto-tui
 	    -e KOTO_TUI_TERM="$$TERM" \
 	    -e KOTO_TUI_NOTIFY="$$KOTO_TUI_NOTIFY" \
 	    -e KOTO_TUI_MONO="$$KOTO_TUI_MONO" \
+	    -e KOTO_TUI_LOG="$$KOTO_TUI_LOG" \
+	    -e KOTO_TUI_LOG_LEVEL="$$KOTO_TUI_LOG_LEVEL" \
 	    koto-tui; ec=$$?; \
 	  [ $$ec -eq 75 ] || exit $$ec; \
 	  echo "/reload: rebuilding koto-tui…"; \

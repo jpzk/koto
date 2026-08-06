@@ -30,17 +30,24 @@ func main() {
 	// see mono.go. It reads KOTO_TUI_MONO, else the terminal type (vt100 and
 	// friends), so a monochrome terminal needs no flag.
 	initMono(os.Getenv)
+	initDebugLog(os.Getenv, sock)
+	logInfo("main", "koto-tui starting: endpoint=%s sock=%s term=%q term_program=%q mono=%v ctx_window=%d",
+		envOr("KOTO_ENDPOINT", "127.0.0.1:8443"), sock,
+		os.Getenv("KOTO_TUI_TERM"), os.Getenv("TERM_PROGRAM"), monoMode, ctxWindow)
 
 	m := newModel(sock, ctxWindow)
 	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	final, err := prog.Run()
 	if err != nil {
+		logErr("main", "program exited with error: %v", err)
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		os.Exit(1)
 	}
 	// /reload exits with code 75 (EX_TEMPFAIL); the Makefile's tui loop
 	// respawns us on this exact code. Any other exit is treated as final.
 	if fm, ok := final.(Model); ok && fm.reloadPending {
+		logInfo("main", "exiting for /reload (code 75)")
 		os.Exit(75)
 	}
+	logInfo("main", "exiting cleanly")
 }

@@ -30,9 +30,13 @@ func loadState(sock string) persistedState {
 	var s persistedState
 	b, err := os.ReadFile(statePath(sock))
 	if err != nil {
+		logDbg("persist", "no state file (%v) — fresh defaults", err)
 		return s
 	}
-	_ = json.Unmarshal(b, &s)
+	if err := json.Unmarshal(b, &s); err != nil {
+		logWarn("persist", "state file unparseable: %v", err)
+	}
+	logDbg("persist", "loaded state: cur=%q draft_len=%d sessions=%d", s.Cur, len(s.Draft), len(s.Sessions))
 	return s
 }
 
@@ -41,5 +45,7 @@ func saveState(sock string, s persistedState) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(statePath(sock), b, 0o600)
+	if err := os.WriteFile(statePath(sock), b, 0o600); err != nil {
+		logWarn("persist", "state save failed: %v", err)
+	}
 }

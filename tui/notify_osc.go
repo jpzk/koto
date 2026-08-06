@@ -185,6 +185,7 @@ func notifyEscape(mode, sev, group, title, msg string) string {
 // emitDesktopNotify writes the sequence for a live notification event.
 func (m Model) emitDesktopNotify(sev, group, title, msg string) {
 	if s := notifyEscape(m.notifyMode, sev, group, title, msg); s != "" {
+		logDbg("notify", "desktop notify: mode=%s sev=%s group=%s title=%q", m.notifyMode, sev, group, title)
 		io.WriteString(notifyOut, s)
 	}
 }
