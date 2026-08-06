@@ -394,16 +394,16 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "up":
-		m.topVP.LineUp(1)
+		m.topVP.ScrollUp(1)
 		return m, nil
 	case "down":
-		m.topVP.LineDown(1)
+		m.topVP.ScrollDown(1)
 		return m, nil
 	case "pgup":
-		m.topVP.HalfViewUp()
+		m.topVP.HalfPageUp()
 		return m, nil
 	case "pgdown", "pgdn":
-		m.topVP.HalfViewDown()
+		m.topVP.HalfPageDown()
 		return m, nil
 	case "home":
 		m.topVP.GotoTop()

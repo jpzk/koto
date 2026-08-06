@@ -3310,38 +3310,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, tickCmd)
 		case "pgup":
 			if m.peekActive() {
-				m.peekVP.ViewUp()
+				m.peekVP.PageUp()
 				m.peekFollow = m.peekVP.AtBottom()
 				return m, nil
 			}
-			m.vp.ViewUp()
+			m.vp.PageUp()
 			m.autoFollow = m.vp.AtBottom()
 			return m, m.maybePageOlder()
 		case "pgdown", "pgdn":
 			if m.peekActive() {
-				m.peekVP.ViewDown()
+				m.peekVP.PageDown()
 				m.peekFollow = m.peekVP.AtBottom()
 				return m, nil
 			}
-			m.vp.ViewDown()
+			m.vp.PageDown()
 			m.autoFollow = m.vp.AtBottom()
 			return m, nil
 		case "shift+up":
 			if m.peekActive() {
-				m.peekVP.LineUp(1)
+				m.peekVP.ScrollUp(1)
 				m.peekFollow = m.peekVP.AtBottom()
 				return m, nil
 			}
-			m.vp.LineUp(1)
+			m.vp.ScrollUp(1)
 			m.autoFollow = m.vp.AtBottom()
 			return m, m.maybePageOlder()
 		case "shift+down":
 			if m.peekActive() {
-				m.peekVP.LineDown(1)
+				m.peekVP.ScrollDown(1)
 				m.peekFollow = m.peekVP.AtBottom()
 				return m, nil
 			}
-			m.vp.LineDown(1)
+			m.vp.ScrollDown(1)
 			m.autoFollow = m.vp.AtBottom()
 			return m, nil
 		case "home":
@@ -3438,19 +3438,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "pgup":
-		m.vp.ViewUp()
+		m.vp.PageUp()
 		m.autoFollow = m.vp.AtBottom()
 		return m, m.maybePageOlder()
 	case "pgdown", "pgdn":
-		m.vp.ViewDown()
+		m.vp.PageDown()
 		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "shift+up":
-		m.vp.LineUp(1)
+		m.vp.ScrollUp(1)
 		m.autoFollow = m.vp.AtBottom()
 		return m, m.maybePageOlder()
 	case "shift+down":
-		m.vp.LineDown(1)
+		m.vp.ScrollDown(1)
 		m.autoFollow = m.vp.AtBottom()
 		return m, nil
 	case "home":

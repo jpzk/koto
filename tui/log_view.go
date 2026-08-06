@@ -396,19 +396,19 @@ func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "up":
-		m.logVP.LineUp(1)
+		m.logVP.ScrollUp(1)
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil
 	case "down":
-		m.logVP.LineDown(1)
+		m.logVP.ScrollDown(1)
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil
 	case "pgup":
-		m.logVP.HalfViewUp()
+		m.logVP.HalfPageUp()
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil
 	case "pgdown", "pgdn":
-		m.logVP.HalfViewDown()
+		m.logVP.HalfPageDown()
 		m.logAutoFollow = m.logVP.AtBottom()
 		return m, nil
 	case "home":
