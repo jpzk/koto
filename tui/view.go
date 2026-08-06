@@ -26,13 +26,6 @@ var (
 	cRose    = lipgloss.Color("212") // over-threshold alert in the metrics bar (256-color #ff87d7)
 )
 
-// Powerline-ish glyphs. Same as the Ink TUI used.
-const (
-	pSep    = "" // U+E0B0
-	pCurve  = "" // U+E0BE (top-left curve)
-	pCurveR = "" // U+E0BC
-)
-
 // pctColor picks a foreground color for a 0..1 utilization fraction. The
 // metrics bar is deliberately monochrome — white on black — with a single
 // rose (212) alert tier at ≥80% so color in the bottom row always means
@@ -53,7 +46,12 @@ func pctColor(frac float64) lipgloss.Color {
 // them by glyph instead — '#' filled, '-' empty — rather than letting the
 // ASCII fold turn the whole bar into one indistinguishable run of '#'.
 func renderBar(frac float64, width int, fg lipgloss.Color) string {
-	if frac < 0 {
+	// !(>= 0), not (< 0): NaN fails both ordered comparisons, and an
+	// unclamped NaN turns int(frac*width+0.5) into a huge negative count —
+	// strings.Repeat panics and takes the whole TUI down. Reachable via
+	// readRLFloat (ParseFloat accepts "NaN" from a relayed ratelimit header)
+	// or a NaN CPUPct from the daemon.
+	if !(frac >= 0) {
 		frac = 0
 	}
 	if frac > 1 {
@@ -354,21 +352,17 @@ func (m Model) renderStatusBar(spin string) string {
 func (m Model) renderStatusLeft() string {
 	// The banner chip inverts; the group segment beside it stays plain bold in
 	// mono. Inverting both would fuse them into one unbroken reverse bar —
-	// there is no separator glyph between them to keep them apart (pSep is
-	// empty), only the two background colors the strip removes.
+	// there is no separator glyph between them to keep them apart, only the
+	// two background colors the strip removes. (The powerline pSep/pCurve
+	// glyphs the Ink TUI used were carried over as empty strings for a while
+	// — U+E0B0 got stripped somewhere along the way — and have been removed.)
 	app := inv(cBlack, cAmber).Bold(true).Render(" koto ")
-	a1 := lipgloss.NewStyle().Foreground(cAmber).Background(cDkAmber).Render(pSep)
-	runDot := " "
-	if g, ok := m.groups[m.cur]; ok && g.Running {
-		runDot = " "
-	}
 	cur := m.cur
 	if s := m.activeSession(m.cur); s != "" {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
-	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + cur + runDot + " ")
-	a2 := lipgloss.NewStyle().Foreground(cDkAmber).Background(cBlack).Render(pSep)
-	return app + a1 + grp + a2 + m.renderLoadingSegment()
+	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
+	return app + grp + m.renderLoadingSegment()
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
@@ -570,10 +564,15 @@ func (m Model) renderTree(rows int) string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(cGray).Render(" (none)"))
 	} else {
 		pad := func(s string, w int) string {
-			if len(s) >= w {
-				return s[:w]
+			// Cell width, not len(): goal-session names carry a "◎ " prefix
+			// (4 bytes, 2 cells) — a byte count would pad them 2 cells short
+			// and a byte slice could cut mid-rune.
+			sw := lipgloss.Width(s)
+			if sw > w {
+				s = truncWidth(s, w)
+				sw = lipgloss.Width(s)
 			}
-			return s + strings.Repeat(" ", w-len(s))
+			return s + strings.Repeat(" ", w-sw)
 		}
 		active := m.activeSession(m.cur)
 		treeLive := m.treeCursorLive()
@@ -797,10 +796,10 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 const jobPeekHeaderRows = 3
 
 // renderJobPeek builds the chat-column replacement shown while a job row is
-// hovered in the tree (focusTree only): the job's metadata plus a tail of
-// its combined output (fetched via the JobLogs RPC, refreshed on a 2s tick
-// while the hover lasts — see jobPeekTickMsg). Returns ok=false when no job
-// row is hovered, keeping the normal chat viewport.
+// hovered in the tree (focusTree only): the job's metadata plus a live tail
+// of its combined output (one JobTail server-stream per hover — see
+// startJobTail / jobTailMsg). Returns ok=false when no job row is hovered,
+// keeping the normal chat viewport.
 func (m Model) renderJobPeek(rows int) (string, bool) {
 	if m.focus != focusTree {
 		return "", false
@@ -1005,10 +1004,6 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 	indent := strings.Repeat(" ", len(stamp)+1)
 
 	out := []string{}
-	if b.truncated {
-		out = append(out, lipgloss.NewStyle().Foreground(cGray).Render(indent+"… (truncated)"))
-	}
-
 	srcLines := strings.Split(b.rendered, "\n")
 
 	switch b.kind {
@@ -1449,17 +1444,27 @@ func (m Model) renderHint() string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")))
 	}
 	parts = append(parts, "^c exit")
-	left := " " + strings.Join(parts, "  ·  ")
+	// Dim each still-plain part individually rather than wrapping the joined
+	// row in one dim.Render: the already-styled parts (magenta toggles,
+	// yellow ⎋ stop) end in a full SGR reset, which would terminate the
+	// outer gray and leave every hint after the first active toggle in the
+	// terminal's default foreground.
+	for i, p := range parts {
+		if !strings.Contains(p, "\x1b") {
+			parts[i] = dim.Render(p)
+		}
+	}
+	left := " " + strings.Join(parts, dim.Render("  ·  "))
 	right := m.renderProviderModel()
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
 	gap := m.width - leftW - rightW
 	if gap < 1 {
 		// Not enough room: drop the right side rather than wrapping.
-		return dim.MaxWidth(m.width).Render(left)
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(left)
 	}
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(
-		dim.Render(left) + strings.Repeat(" ", gap) + right + " ",
+		left + strings.Repeat(" ", gap) + right + " ",
 	)
 }
 
@@ -1592,6 +1597,26 @@ func (m Model) renderPicker(rows int) string {
 	// line jump around between renders.
 	return lipgloss.Place(m.width, rows, lipgloss.Center, lipgloss.Top, box,
 		lipgloss.WithWhitespaceChars(" "))
+}
+
+// truncWidth clamps plain (ANSI-free) text to at most w display cells,
+// cutting on rune boundaries; the result can be a cell short when a wide
+// rune straddles the limit.
+func truncWidth(s string, w int) string {
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	var b strings.Builder
+	cw := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cw+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		cw += rw
+	}
+	return b.String()
 }
 
 // truncRunes clamps a string to n runes, appending "…" when it had to cut.

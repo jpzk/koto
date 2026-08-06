@@ -30,7 +30,7 @@ func loadPrompt(arg string) (name, content string, err error) {
 	if arg == "" {
 		return "", "", fmt.Errorf("no prompt name")
 	}
-	if strings.ContainsAny(arg, "/\\") || arg == ".." || strings.HasPrefix(arg, ".") {
+	if strings.ContainsAny(arg, "/\\") || strings.HasPrefix(arg, ".") {
 		return "", "", fmt.Errorf("invalid prompt name %q (bare filename from prompts/ only)", arg)
 	}
 	bare := strings.TrimSuffix(arg, ".md")

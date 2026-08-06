@@ -92,12 +92,11 @@ type vpCacheEntry struct {
 }
 
 type renderedBlock struct {
-	kind      string
-	group     string
-	ts        int64
-	rendered  string
-	rows      int
-	truncated bool
+	kind     string
+	group    string
+	ts       int64
+	rendered string
+	rows     int
 }
 
 // --- Bubble Tea messages -----------------------------------------------------
@@ -2660,10 +2659,8 @@ func formatToolOut(body string) string {
 	}
 	n := strings.Count(body, "\n") + 1
 	if strings.HasSuffix(body, "\n") {
+		// A trailing newline means Count >= 1, so n stays >= 1.
 		n--
-	}
-	if n < 1 {
-		n = 1
 	}
 	suffix := "lines"
 	if n == 1 {

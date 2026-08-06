@@ -244,7 +244,12 @@ func stripSGRColor(s string) string {
 				i = len(s)
 				continue
 			}
-			if s[j] == 'm' {
+			// Private-parameter sequences (CSI > … m is xterm modifyOtherKeys,
+			// CSI ? … m exists too) are NOT SGR despite the final byte —
+			// filterSGR would drop the private prefix as garbage and turn
+			// e.g. \x1b[>4;2m into \x1b[2m (faint). Pass them through.
+			private := i+2 < len(s) && (s[i+2] == '?' || s[i+2] == '>' || s[i+2] == '<' || s[i+2] == '=')
+			if s[j] == 'm' && !private {
 				b.WriteString(filterSGR(s[i+2 : j]))
 			} else {
 				b.WriteString(s[i : j+1])

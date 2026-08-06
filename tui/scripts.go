@@ -28,7 +28,7 @@ func loadScript(arg string) (name, script string, err error) {
 	if arg == "" {
 		return "", "", fmt.Errorf("no script name")
 	}
-	if strings.ContainsAny(arg, "/\\") || arg == ".." || strings.HasPrefix(arg, ".") {
+	if strings.ContainsAny(arg, "/\\") || strings.HasPrefix(arg, ".") {
 		return "", "", fmt.Errorf("invalid script name %q (bare filename from scripts/ only)", arg)
 	}
 	dir := scriptsDir()

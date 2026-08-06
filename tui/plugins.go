@@ -38,11 +38,9 @@ type pluginHandle struct {
 func (h *pluginHandle) abort() { h.cancel() }
 
 // push delivers a live event to the plugin's queue, dropping on overflow
-// so a runaway producer can't block the model goroutine.
+// so a runaway producer can't block the model goroutine. The caller filters
+// historical frames (model.go's subscribe handler pushes live events only).
 func (h *pluginHandle) push(ev Event) {
-	if ev.Group != "" && h != nil && ev.Historical {
-		return
-	}
 	select {
 	case h.events <- ev:
 	default:
