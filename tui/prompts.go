@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// promptsDir is where /prompt looks for a fallback template when no skill
-// matches. The cs_tui container mounts the host prompts/ read-only here;
+// promptsDir is where /prompt looks for templates.
+// The cs_tui container mounts the host prompts/ read-only here;
 // KOTO_PROMPTS_DIR overrides it for a bare-host TUI run (make tui-local /
 // dev). Mirrors scriptsDir in scripts.go.
 func promptsDir() string {
@@ -17,7 +17,7 @@ func promptsDir() string {
 	return "/koto-prompts"
 }
 
-// loadPrompt resolves a /prompt fallback argument to (displayName, content)
+// loadPrompt resolves a /prompt argument to (displayName, content)
 // via the shared library loader (see loadLibraryFile for the bare-filename
 // rule). "global" is reserved — it's the harness-controlled system prompt
 // injected into every group, not a fireable template, and living in the

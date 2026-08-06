@@ -35,11 +35,11 @@ a VM escape. This is the Nitro-Enclave shape: the host mediates every byte.
 We audited every daemon/proxy read+write under `groups/<g>/` and confirmed
 nothing requires a shared mutable filesystem, given main's raw `/peers` RW
 mount is dropped (decided: yes). `main` keeps spawn/send/stop/sched via the
-ctl plane, skill authoring via the SkillNew RPC, peer skill toggling via the
-Config RPC; it loses direct reads/writes of peer workspace *files*.
-Consequence: no Kata/virtio-fs needed. Skills are pulled on demand over the
-ctl plane (`skill_list` / `skill_read`, see below) instead of pushed as a
-tarball at init. Config/prompt/log are host-authoritative.
+ctl plane and peer config via the Config RPC; it loses direct reads/writes
+of peer workspace *files*. Consequence: no Kata/virtio-fs needed.
+Config/prompt/log are host-authoritative. (The skills feature — a host-side
+catalog pulled on demand over the ctl plane — has since been removed
+entirely; per-group prompt.md + /runscript cover its use cases.)
 
 ## Port map (single vsock device, demuxed by port — as built)
 
@@ -47,7 +47,7 @@ tarball at init. Config/prompt/log are host-authoritative.
 |--------------|------:|----------------------------------------|---------------------------|
 | guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
 | guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
-| guest → host | 9002  | ctl plane (JSON lines, replies inline) — also `skill_list`/`skill_read` | `.cs/ctl` + `.cs/ctl.out` |
+| guest → host | 9002  | ctl plane (JSON lines, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
 | guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`network` ≠ `none`**) | a real NIC |
 | host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/shutdown) | `.cs/in` FIFO + `podman exec` |
 
@@ -136,8 +136,7 @@ fcassets/             (gitignored) firecracker binary, vmlinux, rootfs.img
 ```
 
 RAM/vCPU state is ephemeral (no snapshots in v1). Rootfs is read-only and
-shared by all VMs. Skills are pulled on demand over the ctl plane, not
-pushed at init and not mounted.
+shared by all VMs.
 
 ## Build & run
 
@@ -158,8 +157,8 @@ one ergonomic regression vs podman's hot-reload mounts).
 
 - `/workspace` must be baked into the (read-only) rootfs as a mount point.
   (Earlier versions also baked in `/skills` + a tmpfs for an init-time
-  tarball; superseded by the on-demand ctl-plane pull below — no guest-side
-  mount needed for skills at all now.)
+  tarball; superseded first by an on-demand ctl-plane pull, then removed
+  with the skills feature itself.)
 - PID 1 starts with an empty environment — set PATH before any exec.
 - FC has no ACPI: guest poweroff is a no-op; graceful exit is
   `reboot(RESTART)` + `reboot=k` (i8042 reset, FC catches it and exits).
@@ -180,13 +179,10 @@ one ergonomic regression vs podman's hot-reload mounts).
    *L3-native inbound is still a follow-up (see that section).*
 3. **`pip` (podman-in-podman) and Chrome groups** stay on the podman runtime
    (not in the minimal rootfs).
-4. **main on firecracker**: works protocol-wise (ctl over vsock), but skill
-   *authoring* via the rw /skills mount doesn't exist there — main keeps
-   using the SkillNew RPC path, or stays on podman.
-5. ~~**skills refresh** for a running FC group needs /restart (tar is pushed
-   at init).~~ **DONE** — skills are pulled on demand over the ctl plane
-   (`skill_list`/`skill_read`, `daemon/ctl.go`), so a `config_set skills=`
-   toggle is live on the guest's very next turn, no /restart needed.
+4. ~~**main on firecracker**: skill authoring via the rw /skills mount
+   doesn't exist there.~~ Moot — the skills feature was removed entirely.
+5. ~~**skills refresh** for a running FC group needs /restart.~~ Moot —
+   the skills feature was removed entirely.
 6. **Migrating an existing podman group** doesn't move its workspace files
    into workspace.img; fresh workspace (or copy offline while stopped).
 

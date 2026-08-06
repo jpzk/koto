@@ -187,7 +187,7 @@ pki-init:
 	  '{' \
 	  '  "agent": {' \
 	  '    "list": "*", "send": "*", "history": "*", "metrics": "*",' \
-	  '    "skills": "*", "skill_read": "*", "sched_list": "*",' \
+	  '    "sched_list": "*",' \
 	  '    "subscribe_group": "*", "watch_state": "*"' \
 	  '  }' \
 	  '}' > creds/acl.json

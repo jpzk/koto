@@ -148,16 +148,6 @@ func TestCtlCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("skills-list-ok", func(t *testing.T) {
-		stdout, stderr, err := run("tui", "skills")
-		if err != nil {
-			t.Fatalf("skills failed: %v\nstderr: %s", err, stderr)
-		}
-		if !strings.Contains(stdout, `"ok":true`) {
-			t.Fatalf("expected ok:true, got: %s", stdout)
-		}
-	})
-
 	t.Run("bad-token-fails", func(t *testing.T) {
 		cmd := exec.Command(bin, "ctl", "list")
 		cmd.Env = append(os.Environ(),

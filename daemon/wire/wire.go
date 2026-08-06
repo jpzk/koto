@@ -112,14 +112,6 @@ type JobInfo struct {
 	Group   string `json:"group,omitempty"` // set in JobsResp entries
 }
 
-// SkillItem describes one skill in SkillsResp.
-type SkillItem struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Path        string `json:"path"`
-	Enabled     bool   `json:"enabled,omitempty"`
-}
-
 // ---- Request envelopes ----------------------------------------------------
 
 // CmdEnvelope is the dispatch peek — every request is unmarshalled into this
@@ -159,7 +151,6 @@ type ConfigReq struct {
 	Group    string          `json:"group"`
 	Model    json.RawMessage `json:"model,omitempty"`
 	Effort   json.RawMessage `json:"effort,omitempty"`
-	Skills   json.RawMessage `json:"skills,omitempty"`
 	Ports    json.RawMessage `json:"ports,omitempty"`
 	Provider json.RawMessage `json:"provider,omitempty"`
 	// Network is the group's egress profile: "none" (default — the guest has
@@ -182,18 +173,6 @@ type ConfigReq struct {
 	// the daemon starts, instead of lazily on its first message. Read only at
 	// daemon startup, so setting it takes effect on the next daemon restart.
 	Autostart json.RawMessage `json:"autostart,omitempty"`
-}
-
-type SkillListReq struct {
-	Group string `json:"group,omitempty"`
-}
-
-type SkillNewReq struct {
-	Name string `json:"name"`
-}
-
-type SkillReadReq struct {
-	Name string `json:"name"`
 }
 
 // LogEvent is the streaming frame the daemon pushes to log subscribers.
@@ -290,22 +269,6 @@ type HostResources struct {
 	ProvisionedBytes int64 `json:"provisioned_bytes"`
 	Groups           int32 `json:"groups"`
 	RunningGroups    int32 `json:"running_groups"`
-}
-
-type SkillsResp struct {
-	BaseResp
-	Skills []SkillItem `json:"skills"`
-}
-
-type SkillNewResp struct {
-	BaseResp
-	Path string `json:"path,omitempty"`
-}
-
-type SkillReadResp struct {
-	BaseResp
-	Name    string `json:"name,omitempty"`
-	Content string `json:"content,omitempty"`
 }
 
 // ---- schedules ------------------------------------------------------------

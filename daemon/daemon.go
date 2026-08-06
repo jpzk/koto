@@ -36,7 +36,6 @@ type (
 	Event          = wire.Event
 	GroupInfo      = wire.GroupInfo
 	JobInfo        = wire.JobInfo
-	skillItem      = wire.SkillItem
 	baseResp       = wire.BaseResp
 	cmdEnvelope    = wire.CmdEnvelope
 	spawnReq       = wire.SpawnReq
@@ -47,12 +46,6 @@ type (
 	configResp     = wire.ConfigResp
 	listResp       = wire.ListResp
 	resourcesResp  = wire.ResourcesResp
-	skillsResp     = wire.SkillsResp
-	skillListReq   = wire.SkillListReq
-	skillNewReq    = wire.SkillNewReq
-	skillNewResp   = wire.SkillNewResp
-	skillReadReq   = wire.SkillReadReq
-	skillReadResp  = wire.SkillReadResp
 	LogEvent       = wire.LogEvent
 	scheduleItem   = wire.ScheduleItem
 	schedAddReq    = wire.SchedAddReq
@@ -92,7 +85,6 @@ func here() string {
 var (
 	HERE        string
 	ROOT        string
-	SKILLS_DIR  string
 	GROUPS_FILE string
 	SCHED_FILE  string
 	GOALS_FILE  string
@@ -104,7 +96,6 @@ var (
 func initPaths() {
 	HERE = here()
 	ROOT = filepath.Join(HERE, "groups")
-	SKILLS_DIR = filepath.Join(HERE, "skills")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
 	SCHED_FILE = filepath.Join(HERE, "schedules.json")
 	GOALS_FILE = filepath.Join(HERE, "goals.json")

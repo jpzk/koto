@@ -36,7 +36,7 @@ you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
   single vsock device; `entrypoint.sh` runs the message loop as uid 1000.
 - **Orchestration is verb-based**: no shared filesystem anywhere. `main`
   drives peers via ctl verbs (`spawn`/`send`/`stop`/`list`/`sched_*`/
-  `config_set`/`skill_write`/`tail`); non-main groups get only self-scheduling
+  `config_set`/`tail`); non-main groups get only self-scheduling
   verbs, force-scoped to themselves.
 
 ## Data flow

@@ -71,7 +71,7 @@ while IFS= read -r line <&3; do
   # System prompt is composed by the daemon (composeSystemPrompt in daemon.go)
   # and written to /workspace/.cs/system-prompt.md immediately before each
   # FIFO write. We just cat it. Centralizing assembly in the daemon keeps the
-  # global/per-group/skills/memory layering testable and lets us evolve it
+  # global/per-group/memory layering testable and lets us evolve it
   # without touching this shell loop.
   APPEND=""
   [ -f /workspace/.cs/system-prompt.md ] && APPEND=$(cat /workspace/.cs/system-prompt.md)

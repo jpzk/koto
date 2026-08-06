@@ -568,7 +568,7 @@ func agentServer() {
 	})
 }
 
-// ---- init: skills + ports + entrypoint --------------------------------------
+// ---- init: ports + entrypoint -----------------------------------------------
 
 var (
 	initMu       sync.Mutex
@@ -703,7 +703,7 @@ func overlayRootDirs() error {
 }
 
 // untarInto extracts a base64 tarball under dest. chownWorker hands the tree
-// to the uid-1000 worker (uploads); skills stay root-owned + a+rX.
+// to the uid-1000 worker (uploads); false keeps it root-owned + a+rX.
 func untarInto(b64, dest string, chownWorker bool) error {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {

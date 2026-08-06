@@ -48,7 +48,6 @@ func TestParseTokens(t *testing.T) {
 func TestVerbFromMethod(t *testing.T) {
 	cases := map[string]string{
 		"/koto.Koto/Spawn":          "spawn",
-		"/koto.Koto/SkillNew":       "skill_new",
 		"/koto.Koto/SchedToggle":    "sched_toggle",
 		"/koto.Koto/SubscribeGroup": "subscribe_group",
 		"/koto.Koto/List":           "list",
@@ -73,7 +72,6 @@ func TestTargetOf(t *testing.T) {
 		{&pb.MetricsReq{}, "", true}, // global metrics = cross-group read
 		{&pb.ListReq{}, "", false},
 		{&pb.ResourcesReq{}, "", false}, // fleet rollup: global, untargeted
-		{&pb.SkillNewReq{Name: "x"}, "", false},
 		{&pb.SchedIDReq{Id: "abc"}, "", false},
 	}
 	for _, c := range cases {

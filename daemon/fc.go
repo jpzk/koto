@@ -16,9 +16,6 @@ package main
 //           /clear truncation, proxy logAppend, `>>>` markers all unchanged).
 //     9002  ctl plane: JSON lines → ctlDispatch(g, line), response written
 //           back on the same connection (agent routes it to .cs/ctl.out).
-//           Also how the guest self-serves skills now: skill_list /
-//           skill_read, no shared filesystem, no boot-time tarball — see
-//           daemon/skills.go's enabledSkillCatalog.
 //
 //   host → guest  (daemon connects to "<uds>", sends "CONNECT 10000\n")
 //     10000 agent RPC — ops:
@@ -595,7 +592,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		abortInflightTurn(g)
 	}()
 
-	// Wait for the guest agent, then push init (skills + ports + env). The
+	// Wait for the guest agent, then push init (ports + env). The
 	// agent starts entrypoint.sh only after init, so a turn can't race an
 	// unconfigured guest.
 	env := map[string]string{

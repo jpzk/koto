@@ -98,7 +98,7 @@ func notifyAllow(g string) bool {
 }
 
 // ctlGroupRE is the allowlist for group names ctl callers can spawn or
-// target. Same shape as skillNameRE: starts with [a-z0-9], then up to 31
+// target. Starts with [a-z0-9], then up to 31
 // of [a-z0-9_-]. This blocks path traversal (`../foo`), shell-special
 // chars, slashes, and uppercase — all of which would either escape the
 // groups/ directory under filepath.Join, produce malformed container
@@ -237,40 +237,10 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		return resourcesCtlResp()
 
-	// The three verbs below replace main's podman-era file-mount powers
-	// (rw /skills, rw /peers) under the firecracker runtime, where the only
-	// channel is this ctl plane. Main-only; same authority it already had
-	// via mounts, now mediated + validated by the daemon.
-	case "skill_write":
-		if !isMain {
-			return errResp("ctl: verb not allowed for non-main groups: skill_write")
-		}
-		var req struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return skillWriteCmd(req.Name, req.Content)
-
-	// skill_list / skill_read are self-service and open to every group (main
-	// or not) — no shared filesystem means this is the guest's only way to
-	// discover and load skill content, replacing the old boot-time tarball
-	// (which pre-populated a guest /skills tmpfs and went stale until
-	// /restart). skill_list mirrors composeSystemPrompt's own catalog filter
-	// exactly (enabledSkillCatalog), so what a group sees here always matches
-	// what its system prompt already told it was available.
-	case "skill_list":
-		return skillsResp{BaseResp: baseResp{OK: true}, Skills: enabledSkillCatalog(owner)}
-
-	case "skill_read":
-		var req skillReadReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		return skillReadCmd(req)
-
+	// config_set replaces main's podman-era file-mount powers (rw /peers)
+	// under the firecracker runtime, where the only channel is this ctl
+	// plane. Main-only; same authority it already had via mounts, now
+	// mediated + validated by the daemon.
 	case "config_set":
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: config_set")

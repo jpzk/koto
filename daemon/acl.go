@@ -28,9 +28,9 @@ package main
 //                 Legacy deployments (bare-hash tokens = admin, no acl.json)
 //                 therefore keep full access unchanged.
 //
-// Verbs are the snake_case form of the gRPC method names (SkillNew →
-// skill_new, SubscribeGroup → subscribe_group), the same vocabulary the
-// in-guest ctl plane already uses (sched_add, skill_write, …). The mapping is
+// Verbs are the snake_case form of the gRPC method names (SchedAdd →
+// sched_add, SubscribeGroup → subscribe_group), the same vocabulary the
+// in-guest ctl plane already uses (sched_add, config_set, …). The mapping is
 // mechanical, so future RPCs get a verb automatically — and because an
 // unlisted verb is denied, a new RPC is *denied by default* for every role
 // without a "*" verb until the operator grants it. Unknown role, role absent
@@ -38,11 +38,11 @@ package main
 //
 // TARGETS apply only to verbs whose request carries a group (targetOf):
 // spawn, send, stop, interrupt, destroy, restart, clear, history, config,
-// metrics, skills, sched_add, sched_list, subscribe_group, attach_shell
+// metrics, sched_add, sched_list, subscribe_group, attach_shell
 // (every ShellInput message repeats `group` — see koto.proto's AttachShell
 // comment for why the target check must ride every message, not just the
 // first). The rest (list,
-// watch_state, subscribe_logs, skill_new, skill_read, sched_del/toggle/run)
+// watch_state, subscribe_logs, sched_del/toggle/run)
 // are verb-only — a grant's target set is ignored for them. A group-scoped
 // request that *omits* the group (global metrics, unfiltered sched_list)
 // reads across every group, so it requires the "*" target grant.
@@ -208,7 +208,7 @@ func loadACL() aclTable {
 }
 
 // verbFromMethod maps a gRPC full method name to its ACL verb:
-// "/koto.Koto/SkillNew" → "skill_new".
+// "/koto.Koto/SchedAdd" → "sched_add".
 func verbFromMethod(fullMethod string) string {
 	name := fullMethod
 	if i := strings.LastIndexByte(name, '/'); i >= 0 {
@@ -228,7 +228,7 @@ func verbFromMethod(fullMethod string) string {
 }
 
 // targetOf extracts the group target from a request message. targeted=false
-// means the verb has no target dimension (list, skill_new, sched_del, …) and
+// means the verb has no target dimension (list, sched_del, …) and
 // is authorized by verb alone. A targeted request with an empty group (global
 // metrics, unfiltered sched_list) reads across all groups and so needs the
 // "*" grant — roleAllowed handles that by matching "" against names[""],
@@ -252,8 +252,6 @@ func targetOf(req any) (target string, targeted bool) {
 	case *pb.JobLogsReq:
 		return r.Group, true
 	case *pb.JobTailReq:
-		return r.Group, true
-	case *pb.SkillListReq:
 		return r.Group, true
 	case *pb.SchedAddReq:
 		return r.Group, true

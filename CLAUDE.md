@@ -16,11 +16,11 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
 - `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `koto-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
 - **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `koto-tui`, built as a static binary into `scratch`). It mounts only `koto.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; Ctrl+C disconnects without affecting the daemon, proxy, or sidecars. Multiple TUIs can attach concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
-- **Orchestration is verb-based, not file-based.** [podman] `main` also has `/peers` mounted RW (can read+write any group's workspace directly). [firecracker] there is **no shared filesystem** — a microVM group has no `/peers`, so `main` orchestrates peers purely through ctl-plane verbs: `spawn`/`send`/`stop`/`list`/`sched_*` plus `skill_write` (author a `skills/<name>/SKILL.md`), `config_set` (edit any group's config), and `tail` (one-shot last-N lines of a peer's log). Since firecracker is the default, treat the verb path as the primary one; the `/peers` mount is a podman-only convenience.
+- **Orchestration is verb-based, not file-based.** [podman] `main` also has `/peers` mounted RW (can read+write any group's workspace directly). [firecracker] there is **no shared filesystem** — a microVM group has no `/peers`, so `main` orchestrates peers purely through ctl-plane verbs: `spawn`/`send`/`stop`/`list`/`sched_*` plus `config_set` (edit any group's config) and `tail` (one-shot last-N lines of a peer's log). Since firecracker is the default, treat the verb path as the primary one; the `/peers` mount is a podman-only convenience.
 - **Every group has a control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails one FIFO per group and authorizes by source group identity. `main` gets the full set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`, plus all `sched_*` verbs against any group. Non-main groups get **only** `sched_add` / `sched_list` / `sched_del` / `sched_toggle` / `sched_run`, with the target group force-overwritten to self — they can self-schedule but cannot reach peers, send arbitrary messages, or escalate. See `prompts/global.md` for the agent-facing docs.
 - Groups can publish TCP ports by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`); range 1024–65535; changes require `/restart <g>`. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly. [podman] the daemon appends `-p 127.0.0.1:P:P` so the port lands on the host loopback. [firecracker] the daemon runs a vsock↔TCP bridge per port that binds **inside `cs_host`** (reachable on `koto-net` as `cs_host_go:<port>`, not the host loopback — host publishing would need a `-p` on `cs_host` itself).
 - **Provider per group, mandatory in config.json.** `groups/<g>/.cs/config.json` `"provider"` selects the LLM backend: `"venice"` (Venice API; key at `creds/venice.key`, injected by the proxy on a per-request basis) or `"claudesdk"` (Anthropic OAuth via the credential-injecting proxy). The daemon's `ensureProviderConfig` writes `provider=claudesdk` (the default) into any group whose config is missing or invalid on the first `ensure()` call (every spawn / send), so every running group always has an explicit provider — the proxy, sidecar entrypoint, and TUI tree marker can rely on the field being set. Default models when config.json has no `model`: `claude-sonnet-5` for claudesdk, `kimi-k2.5` for venice (single source of truth: `defaultClaudeModel` / `defaultVeniceModel` in `groups.go`, injected into the guest as `KOTO_DEFAULT_CLAUDE_MODEL` / `KOTO_DEFAULT_VENICE_MODEL` and applied by `sidecar/entrypoint.sh` when `model` is unset; `groupModelName` reports the same values so the TUI always shows the effective model). We deliberately don't seed `model` into config.json, so flipping a group's provider doesn't leave the other provider's model string lying around to be rejected. Provider is read by the proxy on every request and by the sidecar entrypoint on every message — no `/restart` needed to flip it.
-  - **Venice path is stateless on the API side**, so the sidecar maintains conversation history in `/workspace/.cs/venice-history.json` and replays the whole transcript per turn (including any `tool_calls`/`role:"tool"` entries from prior turns). `/clear` wipes it (extended in `clearCmd`). Skills are not wired in for Venice; the system prompt (`composeSystemPrompt`) is composed and sent as the first message in the chat array.
+  - **Venice path is stateless on the API side**, so the sidecar maintains conversation history in `/workspace/.cs/venice-history.json` and replays the whole transcript per turn (including any `tool_calls`/`role:"tool"` entries from prior turns). `/clear` wipes it (extended in `clearCmd`). The system prompt (`composeSystemPrompt`) is composed and sent as the first message in the chat array.
   - **Venice has tool use**: `bash` (runs `bash -lc <cmd>` in `/workspace`, 30s timeout, 1MB stdout+stderr cap) and `file` (`op=read|write|edit`, 1MB read cap, edit requires the `old` string to appear exactly once). Tools are advertised on every request via the OpenAI `tools` field; `venice_stream.js` accumulates `delta.tool_calls` chunks, executes each, appends `role:"tool"` messages, and re-calls Venice. Loop is hard-capped at 25 tool calls per user message — beyond that the script writes `[[err]] venice: tool-call budget exhausted` and exits, leaving the user to send another message. Same blast radius as the claude path's bash (runs as uid 1000 `node` inside the sidecar container; container is the trust boundary). Tool calls render in the TUI using the existing `[[tool]]` / `[[tool_out_begin]]…[[tool_out_end]] N` framing so claudesdk and venice groups display identically.
   - **Streaming format is shared between providers.** `sidecar/venice_stream.js` parses Venice's OpenAI-shape SSE deltas and writes them to `/workspace/.cs/log` in the same `[ts:N]\n<text>\n` framing that `stream_filter.js` produces from Claude's stream-json — so the daemon's `tailLog` parses both identically (partial buffer → `stream` event, `\n`-terminated line → `done`).
   - **Trust boundary unchanged.** Venice sidecars get `ANTHROPIC_API_KEY=proxied` (sentinel) like Claude sidecars; the real key only exists in `creds/venice.key` and inside the proxy's process memory. A compromised Venice sidecar can talk to the proxy but cannot exfiltrate the key.
@@ -43,7 +43,7 @@ daemon/              the daemon Go module (module `koto`):
   events.go            event fan-out: subscriber registry + replay ring, state-watch push, daemon log ring
   logtail.go           per-group log tailer (live) + readHistory (replay parser) — the [[marker]] framing parser
   config.go            config.json command handling (applyConfig validation per key)
-  skills.go            skill catalog + composeSystemPrompt + skill_* commands
+  prompt.go            composeSystemPrompt (global.md + per-group prompt.md + memory)
   metrics.go           metrics.jsonl tail + <koto-context> block injected into prompts
   queue.go             per-group single-flight send queue
   cron.go / schedules.go  cron parser + schedule store/loop
@@ -164,11 +164,11 @@ roles' grants.** A tokens.json clientid carries one or more roles
 (`make pki-client NAME=x ROLE=reader,operator`; single `"role"` and legacy
 bare-hash entries (= `admin`) still parse).
 `creds/acl.json` maps role → {verb → targets}: verbs are snake_case RPC names
-(`stop`, `skill_new`, `subscribe_group`, …; `"*"` = every verb), targets are
+(`stop`, `sched_add`, `subscribe_group`, …; `"*"` = every verb), targets are
 group names (`"*"` = any; e.g. `"send": ["main"]` confines an agent to one
 group). Targets apply only to group-scoped verbs (spawn/send/stop/…/
 subscribe_group — `targetOf` in acl.go is the authority); untargeted verbs
-(`list`, `watch_state`, `skill_new`, `sched_del`, …) are granted by verb
+(`list`, `watch_state`, `sched_del`, …) are granted by verb
 alone, and a group-scoped request that omits the group (global metrics,
 unfiltered sched_list) reads across all groups so it needs the `"*"` target.
 Enforced in both interceptors as `PermissionDenied` (streaming targets are
@@ -195,7 +195,7 @@ verb list.
 
 - **Unary RPCs** map 1:1 to the old JSON verbs: `Spawn`, `Send`, `List`,
   `Stop`, `Interrupt`, `Destroy`, `Restart`, `Clear`, `History`, `Config`,
-  `Metrics`, `Skills`/`SkillNew`/`SkillRead`, `Sched*`. Application failures
+  `Metrics`, `Sched*`. Application failures
   come back in-band as `{ok:false, error}` response fields; gRPC status codes
   are reserved for transport/auth faults. `Send` enqueues and returns
   immediately (turn lifecycle arrives over the subscribe stream).
@@ -538,10 +538,9 @@ the same mTLS + bearer token + role ACL every client goes through, so a verb
 the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
 and endpoint resolve from `KOTO_*` env (`KOTO_ADDR`, `KOTO_CREDS_DIR`,
 `KOTO_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `KOTO_SERVER_NAME`).
-Every gRPC RPC has a `ctl` verb (27/27). Group lifecycle
+Every gRPC RPC has a `ctl` verb. Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
-(`send`, `ask`, `history`), `config`, skills (`skills`/`skill-new`/
-`skill-read`), streams (`metrics`, `tail`, `logs`, `watch`), `resources`
+(`send`, `ask`, `history`), `config`, streams (`metrics`, `tail`, `logs`, `watch`), `resources`
 (host-side fleet disk/mem/cpu — see below), `sched *`, and
 admin-only `acl get|set|del` + `runscript <group> <script>` (run a POSIX
 script in the group's microVM as `node`, output streamed raw to stdout,

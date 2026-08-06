@@ -19,7 +19,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // The wire contract shared with the daemon is the proto alone (generated
@@ -194,12 +193,6 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.JobLogs(ctx, r)
 	case "config":
 		return cl.Config(ctx, buildConfigReq(extra))
-	case "skills":
-		return cl.Skills(ctx, &pb.SkillListReq{Group: s("group")})
-	case "skill_new":
-		return cl.SkillNew(ctx, &pb.SkillNewReq{Name: s("name")})
-	case "skill_read":
-		return cl.SkillRead(ctx, &pb.SkillReadReq{Name: s("name")})
 	case "sched_add":
 		return cl.SchedAdd(ctx, &pb.SchedAddReq{Group: s("group"), Cron: s("cron"), Msg: s("msg")})
 	case "sched_list":
@@ -297,9 +290,6 @@ func asFloat(v any) (float64, bool) {
 
 // buildConfigReq encodes the absent/clear/set tri-state. Scalar config values
 // arrive as strings (present => set, "" => clear, absent key => leave unset).
-// skills arrives as a []string (set) or "" (clear) from skillToggleCmd; a bare
-// non-empty string for skills is a no-op (matches the daemon's reject-non-list
-// behavior).
 func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	r := &pb.ConfigReq{}
 	if g, ok := extra["group"].(string); ok {
@@ -322,24 +312,6 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("size", &r.Size)
 	setOpt("root", &r.Root)
 	setOpt("autostart", &r.Autostart)
-	if sk, ok := extra["skills"]; ok {
-		switch v := sk.(type) {
-		case []string:
-			r.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: v}}
-		case []any:
-			items := make([]string, 0, len(v))
-			for _, e := range v {
-				if str, ok := e.(string); ok {
-					items = append(items, str)
-				}
-			}
-			r.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: items}}
-		case string:
-			if v == "" {
-				r.SkillsAction = &pb.ConfigReq_SkillsClear{SkillsClear: &emptypb.Empty{}}
-			}
-		}
-	}
 	return r
 }
 

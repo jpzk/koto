@@ -29,22 +29,6 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		delete(cfg, key)
 		return
 	}
-	if key == "skills" {
-		var arr []string
-		if err := json.Unmarshal(raw, &arr); err != nil {
-			return // reject non-list silently, matching Python
-		}
-		seen := map[string]bool{}
-		out := []string{}
-		for _, s := range arr {
-			if s != "" && !seen[s] {
-				seen[s] = true
-				out = append(out, s)
-			}
-		}
-		cfg[key] = out
-		return
-	}
 	if key == "provider" {
 		// Only "claudesdk" (default) and "venice" are supported. Anything else
 		// is silently rejected so a typo doesn't silently swap providers — the
@@ -196,7 +180,6 @@ func configCmd(req configReq) configResp {
 
 	applyConfig(cfg, "model", req.Model)
 	applyConfig(cfg, "effort", req.Effort)
-	applyConfig(cfg, "skills", req.Skills)
 	applyConfig(cfg, "ports", req.Ports)
 	applyConfig(cfg, "provider", req.Provider)
 	// Legacy key first, explicit "network" second — a request carrying both

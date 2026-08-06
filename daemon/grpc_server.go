@@ -92,10 +92,6 @@ func toPBJobInfo(j JobInfo) *pb.JobInfo {
 	}
 }
 
-func toPBSkillItem(it skillItem) *pb.SkillItem {
-	return &pb.SkillItem{Name: it.Name, Description: it.Description, Path: it.Path, Enabled: it.Enabled}
-}
-
 func toPBGoalItem(it goalItem) *pb.GoalItem {
 	return &pb.GoalItem{
 		Id:            it.ID,
@@ -130,7 +126,7 @@ func toPBScheduleItem(it scheduleItem) *pb.ScheduleItem {
 
 // fromPBConfigReq re-synthesizes the json.RawMessage tri-state (absent / clear /
 // set) the existing applyConfig/isClear logic expects, from the protobuf
-// presence (optional scalars) + oneof (skills). Absent => nil; clear => an
+// presence (optional scalars). Absent => nil; clear => an
 // empty value isClear() recognizes; set => the JSON-encoded value.
 func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out := configReq{Group: r.GetGroup()}
@@ -150,19 +146,12 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Size = optRaw(r.Size)
 	out.Root = optRaw(r.Root)
 	out.Autostart = optRaw(r.Autostart)
-	switch r.GetSkillsAction().(type) {
-	case *pb.ConfigReq_SkillsClear:
-		out.Skills = json.RawMessage("[]") // isClear -> delete key
-	case *pb.ConfigReq_SkillsSet:
-		b, _ := json.Marshal(r.GetSkillsSet().GetItems())
-		out.Skills = b
-	}
 	return out
 }
 
 // toStruct converts a map[string]any to a protobuf Struct. It JSON-normalizes
 // first because the config map carries native Go slices (applyConfig writes
-// []string for skills, []int for ports) that structpb.NewStruct rejects — the
+// []int for ports) that structpb.NewStruct rejects — the
 // round-trip coerces them to the []any / float64 forms structpb accepts (and
 // that the TUI already expects on the wire).
 func toStruct(m map[string]any) *structpb.Struct {
@@ -500,28 +489,6 @@ func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, err
 	}
 	br := clearCmd(groupReq{Group: r.Group, Session: r.Session})
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
-}
-
-func (s *kotoServer) Skills(_ context.Context, r *pb.SkillListReq) (*pb.SkillsResp, error) {
-	if r.Group != "" && !validGroupName(r.Group) {
-		return &pb.SkillsResp{Error: "invalid group name"}, nil
-	}
-	resp := skillListCmd(skillListReq{Group: r.Group})
-	out := make([]*pb.SkillItem, len(resp.Skills))
-	for i := range resp.Skills {
-		out[i] = toPBSkillItem(resp.Skills[i])
-	}
-	return &pb.SkillsResp{Ok: resp.OK, Error: resp.Error, Skills: out}, nil
-}
-
-func (s *kotoServer) SkillNew(_ context.Context, r *pb.SkillNewReq) (*pb.SkillNewResp, error) {
-	resp := skillNewCmd(skillNewReq{Name: r.Name})
-	return &pb.SkillNewResp{Ok: resp.OK, Error: resp.Error, Path: resp.Path}, nil
-}
-
-func (s *kotoServer) SkillRead(_ context.Context, r *pb.SkillReadReq) (*pb.SkillReadResp, error) {
-	resp := skillReadCmd(skillReadReq{Name: r.Name})
-	return &pb.SkillReadResp{Ok: resp.OK, Error: resp.Error, Name: resp.Name, Content: resp.Content}, nil
 }
 
 func (s *kotoServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {

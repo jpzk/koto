@@ -55,7 +55,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -76,13 +75,8 @@ config
   config <group>                           print effective config (no flags = read)
   config <group> [-model M] [-provider P] [-network none|wan|lan|full]
          [-size small|medium|large|xlarge] [-root yes|no] [-effort E] [-ports P]
-         [-autostart yes|no] [-skills a,b,c | -skills-clear]
+         [-autostart yes|no]
                                            set keys ("" clears a key)
-
-skills
-  skills [group]                           catalog + a group's enabled set
-  skill-new <name>                         scaffold skills/<name>/SKILL.md
-  skill-read <name>                        print a skill's SKILL.md
 
 streams
   metrics [group]
@@ -433,39 +427,6 @@ func ctlCliMain(args []string) {
 	case "config":
 		ctlConfig(rest)
 
-	case "skills":
-		g := ""
-		if len(rest) == 1 {
-			g = rest[0]
-		} else if len(rest) > 1 {
-			ctlFatal(2, "usage: koto ctl skills [group]")
-		}
-		cl := ctlClient()
-		ctx, cancel := ctlCtx()
-		defer cancel()
-		resp, err := cl.Skills(ctx, &pb.SkillListReq{Group: g})
-		ctlPrint(resp, err)
-
-	case "skill-new":
-		if len(rest) != 1 {
-			ctlFatal(2, "usage: koto ctl skill-new <name>")
-		}
-		cl := ctlClient()
-		ctx, cancel := ctlCtx()
-		defer cancel()
-		resp, err := cl.SkillNew(ctx, &pb.SkillNewReq{Name: rest[0]})
-		ctlPrint(resp, err)
-
-	case "skill-read":
-		if len(rest) != 1 {
-			ctlFatal(2, "usage: koto ctl skill-read <name>")
-		}
-		cl := ctlClient()
-		ctx, cancel := ctlCtx()
-		defer cancel()
-		resp, err := cl.SkillRead(ctx, &pb.SkillReadReq{Name: rest[0]})
-		ctlPrint(resp, err)
-
 	case "logs":
 		if len(rest) != 0 {
 			ctlFatal(2, "usage: koto ctl logs")
@@ -757,7 +718,7 @@ func ctlConfig(args []string) {
 	// Go's flag package stops at the first non-flag token, so the group must
 	// lead — parse everything after it as flags.
 	if len(args) < 1 {
-		ctlFatal(2, "usage: koto ctl config <group> [-model M] [-network none|wan|lan|full] [-skills a,b|-skills-clear] ...")
+		ctlFatal(2, "usage: koto ctl config <group> [-model M] [-network none|wan|lan|full] ...")
 	}
 	group, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("config", flag.ExitOnError)
@@ -769,8 +730,6 @@ func ctlConfig(args []string) {
 	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
-	skills := fs.String("skills", "", "enabled skills (comma list)")
-	skillsClear := fs.Bool("skills-clear", false, "clear the enabled-skills list")
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -802,17 +761,6 @@ func ctlConfig(args []string) {
 	}
 	if seen["autostart"] {
 		req.Autostart = autostart
-	}
-	if seen["skills-clear"] && *skillsClear {
-		req.SkillsAction = &pb.ConfigReq_SkillsClear{SkillsClear: &emptypb.Empty{}}
-	} else if seen["skills"] {
-		var items []string
-		for _, s := range strings.Split(*skills, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				items = append(items, s)
-			}
-		}
-		req.SkillsAction = &pb.ConfigReq_SkillsSet{SkillsSet: &pb.SkillList{Items: items}}
 	}
 
 	cl := ctlClient()

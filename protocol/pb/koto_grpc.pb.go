@@ -44,9 +44,6 @@ const (
 	Koto_Config_FullMethodName         = "/koto.Koto/Config"
 	Koto_Metrics_FullMethodName        = "/koto.Koto/Metrics"
 	Koto_Clear_FullMethodName          = "/koto.Koto/Clear"
-	Koto_Skills_FullMethodName         = "/koto.Koto/Skills"
-	Koto_SkillNew_FullMethodName       = "/koto.Koto/SkillNew"
-	Koto_SkillRead_FullMethodName      = "/koto.Koto/SkillRead"
 	Koto_Jobs_FullMethodName           = "/koto.Koto/Jobs"
 	Koto_JobLogs_FullMethodName        = "/koto.Koto/JobLogs"
 	Koto_JobTail_FullMethodName        = "/koto.Koto/JobTail"
@@ -89,9 +86,6 @@ type KotoClient interface {
 	Config(ctx context.Context, in *ConfigReq, opts ...grpc.CallOption) (*ConfigResp, error)
 	Metrics(ctx context.Context, in *MetricsReq, opts ...grpc.CallOption) (*MetricsResp, error)
 	Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
-	Skills(ctx context.Context, in *SkillListReq, opts ...grpc.CallOption) (*SkillsResp, error)
-	SkillNew(ctx context.Context, in *SkillNewReq, opts ...grpc.CallOption) (*SkillNewResp, error)
-	SkillRead(ctx context.Context, in *SkillReadReq, opts ...grpc.CallOption) (*SkillReadResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -304,36 +298,6 @@ func (c *kotoClient) Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallO
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
 	err := c.cc.Invoke(ctx, Koto_Clear_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *kotoClient) Skills(ctx context.Context, in *SkillListReq, opts ...grpc.CallOption) (*SkillsResp, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SkillsResp)
-	err := c.cc.Invoke(ctx, Koto_Skills_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *kotoClient) SkillNew(ctx context.Context, in *SkillNewReq, opts ...grpc.CallOption) (*SkillNewResp, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SkillNewResp)
-	err := c.cc.Invoke(ctx, Koto_SkillNew_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *kotoClient) SkillRead(ctx context.Context, in *SkillReadReq, opts ...grpc.CallOption) (*SkillReadResp, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SkillReadResp)
-	err := c.cc.Invoke(ctx, Koto_SkillRead_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -644,9 +608,6 @@ type KotoServer interface {
 	Config(context.Context, *ConfigReq) (*ConfigResp, error)
 	Metrics(context.Context, *MetricsReq) (*MetricsResp, error)
 	Clear(context.Context, *GroupReq) (*BaseResp, error)
-	Skills(context.Context, *SkillListReq) (*SkillsResp, error)
-	SkillNew(context.Context, *SkillNewReq) (*SkillNewResp, error)
-	SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -787,15 +748,6 @@ func (UnimplementedKotoServer) Metrics(context.Context, *MetricsReq) (*MetricsRe
 }
 func (UnimplementedKotoServer) Clear(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Clear not implemented")
-}
-func (UnimplementedKotoServer) Skills(context.Context, *SkillListReq) (*SkillsResp, error) {
-	return nil, status.Error(codes.Unimplemented, "method Skills not implemented")
-}
-func (UnimplementedKotoServer) SkillNew(context.Context, *SkillNewReq) (*SkillNewResp, error) {
-	return nil, status.Error(codes.Unimplemented, "method SkillNew not implemented")
-}
-func (UnimplementedKotoServer) SkillRead(context.Context, *SkillReadReq) (*SkillReadResp, error) {
-	return nil, status.Error(codes.Unimplemented, "method SkillRead not implemented")
 }
 func (UnimplementedKotoServer) Jobs(context.Context, *JobsReq) (*JobsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Jobs not implemented")
@@ -1084,60 +1036,6 @@ func _Koto_Clear_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).Clear(ctx, req.(*GroupReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Koto_Skills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SkillListReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(KotoServer).Skills(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Koto_Skills_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KotoServer).Skills(ctx, req.(*SkillListReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Koto_SkillNew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SkillNewReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(KotoServer).SkillNew(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Koto_SkillNew_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KotoServer).SkillNew(ctx, req.(*SkillNewReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Koto_SkillRead_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SkillReadReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(KotoServer).SkillRead(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Koto_SkillRead_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(KotoServer).SkillRead(ctx, req.(*SkillReadReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1578,18 +1476,6 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Clear",
 			Handler:    _Koto_Clear_Handler,
-		},
-		{
-			MethodName: "Skills",
-			Handler:    _Koto_Skills_Handler,
-		},
-		{
-			MethodName: "SkillNew",
-			Handler:    _Koto_SkillNew_Handler,
-		},
-		{
-			MethodName: "SkillRead",
-			Handler:    _Koto_SkillRead_Handler,
 		},
 		{
 			MethodName: "Jobs",
