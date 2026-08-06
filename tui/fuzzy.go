@@ -4,22 +4,21 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // fuzzyMatch is one ranked result. Idx points back into the source slice
-// passed to fuzzyRank; Indices lists the rune positions in the source string
-// that matched (kept for future highlight rendering, unused by v1 view).
+// passed to fuzzyRank.
 type fuzzyMatch struct {
-	Idx     int
-	Score   int
-	Indices []int
+	Idx   int
+	Score int
 }
 
 // fuzzyRank returns subsequence-matched items ordered best-first. Scoring
 // rewards matches at the start of the string, after a word boundary, and in
 // runs of consecutive characters — same broad strokes as fzf's v1 scorer.
-// Case-insensitive. Empty query returns every item in reverse-input order
-// (caller passes items newest-first so this matches shell Ctrl+R recall).
+// Case-insensitive. Empty query returns every item in input order (the
+// caller passes items newest-first so this matches shell Ctrl+R recall).
 func fuzzyRank(query string, items []string, limit int) []fuzzyMatch {
 	if limit <= 0 {
 		limit = len(items)
@@ -81,20 +80,19 @@ func scoreOne(q []rune, s string) (fuzzyMatch, bool) {
 		score -= idx
 		if idx == 0 {
 			score += 500
-		} else if isBoundary(rune(sLower[idx-1])) {
+		} else if prev, _ := utf8.DecodeLastRuneInString(sLower[:idx]); isBoundary(prev) {
+			// DecodeLastRune, not sLower[idx-1]: the byte before the match
+			// can be a UTF-8 continuation byte, and a raw cast would turn
+			// e.g. 0x9C into U+009C — a control rune that counts as a
+			// boundary and hands out a spurious +200.
 			score += 200
 		}
 		score -= len(s) / 10
-		indices := make([]int, len(q))
-		for i := range q {
-			indices[i] = idx + i
-		}
-		return fuzzyMatch{Score: score, Indices: indices}, true
+		return fuzzyMatch{Score: score}, true
 	}
 
 	// Tier 2: subsequence with gap penalty.
 	runes := []rune(s)
-	idxs := make([]int, 0, len(q))
 	score := 0
 	qi := 0
 	lastMatch := -1
@@ -124,7 +122,6 @@ func scoreOne(q []rune, s string) (fuzzyMatch, bool) {
 			bonus -= 2 * gap
 		}
 		score += bonus
-		idxs = append(idxs, i)
 		lastMatch = i
 		qi++
 	}
@@ -134,7 +131,7 @@ func scoreOne(q []rune, s string) (fuzzyMatch, bool) {
 	if score <= 0 {
 		return fuzzyMatch{}, false
 	}
-	return fuzzyMatch{Score: score, Indices: idxs}, true
+	return fuzzyMatch{Score: score}, true
 }
 
 func isBoundary(r rune) bool {
