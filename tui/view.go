@@ -889,12 +889,15 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 	lines = append(lines, cmdLine)
 	lines = append(lines, dim.Render(strings.Repeat("─", max(1, w-2))))
 	switch {
-	case armed && m.peekHasContent() && !m.peekPrimed:
+	case armed && m.peekHasContent() && !m.peekPrimed && !m.peekStaleView:
 		// Backlog still arriving. Showing it now would render the replay as
 		// it streams in — the pane scrolling through scrollback on every
 		// hover. Hold one placeholder frame; flushPeek paints it at EOF.
 		lines = append(lines, dim.Render("(loading tail…)"))
-	case armed && m.peekHasContent():
+	case armed && (m.peekHasContent() || m.peekStaleView):
+		// peekStaleView: the viewport still shows this job's cached output
+		// from a previous hover — keep it up while the fresh stream's replay
+		// accumulates behind it, instead of any placeholder.
 		// Output we already hold wins over any terminal status: the tail is
 		// what the row was hovered for, and a stream that ended or errored
 		// after delivering it must not blank the pane. The viewport owns

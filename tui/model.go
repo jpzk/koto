@@ -150,6 +150,26 @@ type historyMsg struct {
 // jobRef identifies one background job for the peek pane.
 type jobRef struct{ group, id string }
 
+// peekSnap is one peekCache entry: the content fields of a fully painted
+// peek pane, saved when the hover leaves the job (snapshotPeek) and restored
+// by the next armPeek of the same job. Slices are shared with the live
+// fields, never mutated in place — every fold path replaces them with fresh
+// slices (armPeek reset / peekStaleBuf wipe) before appending.
+type peekSnap struct {
+	out      string
+	lines    []logLine
+	open     []string
+	openKind string
+	framed   bool
+	ended    bool
+	savedAt  time.Time
+}
+
+// peekCacheCap bounds peekCache: beyond it, snapshotPeek evicts the entry
+// least recently saved. Finished jobs hide from the tree after their linger
+// window, so stale entries stop being reachable long before they matter.
+const peekCacheCap = 16
+
 // peekFlushMsg fires the coalesced peek repaint. sid pins it to one stream
 // and seq to one debounce window — a frame that landed after this timer was
 // armed bumps seq, so the stale timer drops instead of repainting mid-burst.
@@ -701,6 +721,23 @@ type Model struct {
 	// output arrives, release when the user scrolls up.
 	peekVP     viewport.Model
 	peekFollow bool
+	// peekCache keeps the last painted output per job, so re-hovering a row
+	// repaints instantly (the chat views' "switching back is instant" rule)
+	// instead of holding a placeholder while JobTail replays its window. On
+	// a cache hit armPeek restores the snapshot into the content fields and
+	// still reopens the stream — except for a finished job whose stream had
+	// ended, whose output is immutable and is served purely from cache.
+	//   peekStaleView — the viewport shows a previous hover's cached
+	//                   content; render keeps showing it (never a loading
+	//                   placeholder) until the fresh stream's first flush
+	//                   repaints. Cleared in flushPeek.
+	//   peekStaleBuf  — the content fields still hold that cache; wiped
+	//                   before the fresh stream's first frame folds in (the
+	//                   replay window resends everything they hold, so
+	//                   folding on top would duplicate).
+	peekCache     map[jobRef]*peekSnap
+	peekStaleView bool
+	peekStaleBuf  bool
 
 	// session is the per-group active chat session the user is viewing and
 	// sending into ("" or missing key = the default session). Switched with
@@ -858,6 +895,7 @@ func newModel(sock string, ctxWindow int) Model {
 		turnSession:    map[string]string{},
 		peekVP:         pvp,
 		peekFollow:     true,
+		peekCache:      map[jobRef]*peekSnap{},
 		jobStatusSeen:  map[string]string{},
 		jobDoneAt:      map[string]time.Time{},
 		jobsPrimed:     map[string]bool{},
@@ -1993,7 +2031,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if m.peekJob.id == "" || m.focus != focusTree {
 			// Hover is gone but the stream outlived it (left the tree via a
 			// path without an explicit stop) — self-heal by cancelling.
-			m.stopPeek()
+			// clearPeek also snapshots and forgets the job, so returning to
+			// the row re-arms a live stream from cache instead of no-opping
+			// against this dead one.
+			m.clearPeek()
 			return m, nil
 		}
 		switch {
@@ -2012,6 +2053,15 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.opened:
 			m.peekFetched = true
 		default:
+			if m.peekStaleBuf {
+				// First frame of the fresh stream: drop the restored cache
+				// from the fields — the replay window resends everything
+				// they hold, so folding on top would duplicate. The viewport
+				// keeps showing the cached paint until this stream's first
+				// flush (peekStaleView).
+				m.peekOut, m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = "", nil, nil, "", false
+				m.peekStaleBuf = false
+			}
 			if msg.ev != nil {
 				m.applyPeekEvent(*msg.ev)
 			} else {
@@ -3878,8 +3928,7 @@ func (m *Model) enterTree() {
 // width change reflected get it here via resizeViewport.
 func (m *Model) exitTree() {
 	m.fullscreen = false // any focus change restores the normal layout
-	m.stopPeek()
-	m.peekJob = jobRef{}
+	m.clearPeek()
 	m.focus = focusInput
 	m.input.Focus()
 	m.resizeViewport()
@@ -3961,7 +4010,7 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 		m.jobsPrimed[g] = true
 	}
 	for k := range m.jobStatusSeen {
-		g, _, _ := strings.Cut(k, "\x00")
+		g, id, _ := strings.Cut(k, "\x00")
 		_, stillAGroup := groups[g]
 		// Drop tracking when the group itself is gone (destroyed), or when a
 		// frame that did carry the group's list no longer lists the job
@@ -3969,6 +4018,7 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 		if !stillAGroup || (authoritative[g] && !live[k]) {
 			delete(m.jobStatusSeen, k)
 			delete(m.jobDoneAt, k)
+			delete(m.peekCache, jobRef{group: g, id: id})
 		}
 	}
 	for k, t := range m.jobDoneAt {
@@ -4177,24 +4227,81 @@ func (m *Model) selectTreeRow(r treeRow) {
 	m.chaseShell()
 }
 
-// armPeek points the peek pane at one job: drops any previous stream, clears
-// the buffer, re-arms bottom-follow, and opens a fresh JobTail. Re-arming on
-// the job already shown is a no-op, so a scrolled-back reader keeps their
-// position until they hover something else.
+// armPeek points the peek pane at one job: snapshots the outgoing job's
+// output into peekCache, drops any previous stream, re-arms bottom-follow,
+// and opens a fresh JobTail. A cache hit repaints the last hover's content
+// immediately instead of a placeholder; the stream's replay then replaces it
+// in one flush (see peekStaleView/peekStaleBuf), and a finished job whose
+// stream had already ended is served purely from cache — its output is
+// immutable, so no guest tail is respawned. Re-arming on the job already
+// shown is a no-op, so a scrolled-back reader keeps their position until
+// they hover something else.
 func (m *Model) armPeek(g, id string) {
 	if m.peekJob == (jobRef{group: g, id: id}) {
 		return
 	}
+	m.snapshotPeek()
 	m.stopPeek()
 	m.peekJob = jobRef{group: g, id: id}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
 	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
 	m.peekDirty, m.peekPrimed = false, false
+	m.peekStaleView, m.peekStaleBuf = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Now(), time.Time{}
 	m.peekFollow = true
-	m.refreshPeekVP()
 	m.peekSID++
+	if snap := m.peekCache[m.peekJob]; snap != nil {
+		m.peekOut, m.peekLines, m.peekOpen, m.peekOpenKind = snap.out, snap.lines, snap.open, snap.openKind
+		m.peekFramed = snap.framed
+		if snap.ended && m.jobFinished(g, id) {
+			m.peekFetched, m.peekEnded, m.peekPrimed = true, true, true
+			m.refreshPeekVP()
+			return
+		}
+		m.peekStaleView, m.peekStaleBuf = true, true
+	}
+	m.refreshPeekVP()
 	m.peekCancel = startJobTail(m.peekSID, g, id)
+}
+
+// snapshotPeek saves the hovered job's painted output into peekCache for the
+// next hover of the same row. Only a primed pane is saved — mid-replay state
+// would overwrite a complete snapshot with a truncated one, so an unprimed
+// leave keeps whatever the previous full paint stored.
+func (m *Model) snapshotPeek() {
+	if m.peekJob.id == "" || !m.peekPrimed || !m.peekHasContent() {
+		return
+	}
+	m.peekCache[m.peekJob] = &peekSnap{
+		out: m.peekOut, lines: m.peekLines, open: m.peekOpen,
+		openKind: m.peekOpenKind, framed: m.peekFramed, ended: m.peekEnded,
+		savedAt: time.Now(),
+	}
+	if len(m.peekCache) <= peekCacheCap {
+		return
+	}
+	oldest, oldestAt := jobRef{}, time.Time{}
+	for k, s := range m.peekCache {
+		if k == m.peekJob {
+			continue
+		}
+		if oldest == (jobRef{}) || s.savedAt.Before(oldestAt) {
+			oldest, oldestAt = k, s.savedAt
+		}
+	}
+	delete(m.peekCache, oldest)
+}
+
+// jobFinished reports whether the daemon's last state frame shows the job as
+// no longer running — the gate for serving a cached tail without re-opening
+// a stream (a finished job's output is immutable).
+func (m Model) jobFinished(g, id string) bool {
+	for _, j := range m.groups[g].Jobs {
+		if j.ID == id {
+			return j.Status != "running"
+		}
+	}
+	return false
 }
 
 // flushPeek rebuilds the viewport from the accumulated buffer and marks the
@@ -4204,17 +4311,20 @@ func (m *Model) flushPeek() {
 	m.refreshPeekVP()
 	m.peekDirty = false
 	m.peekPrimed = true
+	m.peekStaleView = false // the viewport now shows this stream's own state
 	m.peekPaintedAt = time.Now()
 }
 
-// clearPeek tears the stream down and forgets the job — the pane is not
-// showing a job row any more.
+// clearPeek snapshots the output for re-hover, tears the stream down and
+// forgets the job — the pane is not showing a job row any more.
 func (m *Model) clearPeek() {
+	m.snapshotPeek()
 	m.stopPeek()
 	m.peekJob = jobRef{}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
 	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
 	m.peekDirty, m.peekPrimed = false, false
+	m.peekStaleView, m.peekStaleBuf = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Time{}, time.Time{}
 }
 

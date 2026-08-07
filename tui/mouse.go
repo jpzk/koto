@@ -122,8 +122,7 @@ func (m *Model) handleLeftClick(x, y int) bool {
 		}
 		// Prompt box / hint / metrics rows → focus the input, mirroring the
 		// "tab" branch (keeps any draft; drops the job peek with the tree).
-		m.stopPeek()
-		m.peekJob = jobRef{}
+		m.clearPeek()
 		m.focus = focusInput
 		m.input.Focus()
 		m.resizeViewport()

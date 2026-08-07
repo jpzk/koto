@@ -263,6 +263,106 @@ func feedEv(m Model, ev Event) Model {
 	return feed(m, jobTailMsg{sid: m.peekSID, ev: &ev})
 }
 
+// TestPeekRehoverServesCacheInstantly: leaving a job row and coming back must
+// repaint the last output immediately from cache — like every other message
+// view — not hold a "(fetching output…)" placeholder while JobTail replays.
+func TestPeekRehoverServesCacheInstantly(t *testing.T) {
+	m := hoverJob(t, "9AZ", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	m = feedLines(m, 50, "output line %d")
+	// Leave the row (any path out snapshots via clearPeek) and come back.
+	m.clearPeek()
+	startPeek(&m, "9AZ", "abc123")
+
+	pane, ok := m.renderJobPeek(m.chatRows())
+	if !ok {
+		t.Fatal("peek pane inactive after re-hover")
+	}
+	if !strings.Contains(pane, "output line 50") {
+		t.Errorf("cached output not shown instantly on re-hover:\n%s", pane)
+	}
+	if strings.Contains(pane, "fetching output") || strings.Contains(pane, "loading tail") {
+		t.Errorf("placeholder shown despite cached output:\n%s", pane)
+	}
+
+	// The fresh stream replays its window; mid-replay the pane must keep the
+	// cached view, and the settled paint must hold the replay ONCE — the
+	// cached copy is replaced, not appended to.
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	for i := 1; i <= 60; i++ {
+		m = feed(m, jobTailMsg{sid: m.peekSID, line: fmt.Sprintf("output line %d", i)})
+		if i == 30 {
+			mid, _ := m.renderJobPeek(m.chatRows())
+			if !strings.Contains(mid, "output line 50") {
+				t.Errorf("cached view dropped mid-replay:\n%s", mid)
+			}
+		}
+	}
+	m = settle(m)
+	if got := strings.Count(m.peekOut, "output line 50\n"); got != 1 {
+		t.Errorf("replayed line held %d times after settle, want 1 (cache must be replaced, not duplicated)", got)
+	}
+	pane, _ = m.renderJobPeek(m.chatRows())
+	if !strings.Contains(pane, "output line 60") {
+		t.Errorf("settled pane missing fresh tail:\n%s", pane)
+	}
+}
+
+// TestPeekFinishedJobServedFromCache: a finished job's output is immutable —
+// re-hovering it must serve the cached tail without respawning a guest-side
+// tail stream.
+func TestPeekFinishedJobServedFromCache(t *testing.T) {
+	m := hoverJob(t, "9AZ", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	m = feedLines(m, 20, "output line %d")
+	m = feed(m, jobTailMsg{sid: m.peekSID, end: true}) // job finished, tail closed
+	m.clearPeek()
+	// Deliver the finish the way the daemon does — a running frame then a
+	// done frame — so the row gets its linger window and stays hoverable.
+	m.processJobTransitions(map[string]GroupInfo{"9AZ": m.groups["9AZ"]})
+	gi := m.groups["9AZ"]
+	gi.Jobs = []JobInfo{{ID: "abc123", Status: "done", RC: "0", Cmd: "bash run.sh", Started: 1785251419}}
+	m.groups["9AZ"] = gi
+	m.processJobTransitions(map[string]GroupInfo{"9AZ": gi})
+
+	startPeek(&m, "9AZ", "abc123")
+	if m.peekCancel != nil {
+		t.Error("a new JobTail stream was opened for a finished job with a complete cached tail")
+	}
+	if !m.peekPrimed || !m.peekEnded || !m.peekFetched {
+		t.Errorf("cache-served pane not marked painted/ended: primed=%v ended=%v fetched=%v",
+			m.peekPrimed, m.peekEnded, m.peekFetched)
+	}
+	pane, ok := m.renderJobPeek(m.chatRows())
+	if !ok {
+		t.Fatal("peek pane inactive")
+	}
+	if !strings.Contains(pane, "output line 20") {
+		t.Errorf("cached output missing from cache-served pane:\n%s", pane)
+	}
+}
+
+// TestPeekCachePrunedWithJob: when an authoritative state frame no longer
+// lists the job (cs-job rm), its cache entry goes with the tracking maps.
+func TestPeekCachePrunedWithJob(t *testing.T) {
+	m := hoverJob(t, "9AZ", "abc123")
+	m = feed(m, jobTailMsg{sid: m.peekSID, opened: true})
+	m = feedLines(m, 5, "output line %d")
+	m.clearPeek()
+	if m.peekCache[jobRef{group: "9AZ", id: "abc123"}] == nil {
+		t.Fatal("snapshot not saved on clearPeek")
+	}
+	// Seed the tracking maps (a hoverable job always arrived via a state
+	// frame), then deliver the frame that no longer lists it.
+	m.processJobTransitions(map[string]GroupInfo{"9AZ": m.groups["9AZ"]})
+	m.processJobTransitions(map[string]GroupInfo{
+		"9AZ": {Running: true, Jobs: []JobInfo{{ID: "other", Status: "running"}}},
+	})
+	if m.peekCache[jobRef{group: "9AZ", id: "abc123"}] != nil {
+		t.Error("cache entry survived its job's removal")
+	}
+}
+
 // TestPeekParsedFramesRenderAsChatBlocks drives the parsed JobTail path (the
 // daemon-side logParser events) and expects chat-style blocks: tool glyph
 // line, collapsed tool output summary, thought summary, response text — no
