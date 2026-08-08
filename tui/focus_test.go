@@ -216,6 +216,23 @@ func TestEscInterruptsWhileBusy(t *testing.T) {
 	}
 }
 
+// TestEscInterruptsOnActivityPhase: a TUI that attached mid-turn never saw
+// the prompt frame (busy unset) and may have no stream/thinking bytes yet —
+// but the daemon's synthetic activity frame says a turn is in flight, and
+// esc must honor that signal too.
+func TestEscInterruptsOnActivityPhase(t *testing.T) {
+	m := focusModel(t)
+	m.activity = map[string]activityInfo{"main": {phase: "llm"}}
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = nm.(Model)
+	if cmd == nil {
+		t.Fatal("esc during an activity phase should issue the interrupt command")
+	}
+	if m.focus != focusInput {
+		t.Fatalf("focus = %v — esc must not toggle the tree while a turn runs", m.focus)
+	}
+}
+
 // TestTabTogglesTreeWhileBusy: tab has no interrupt meaning, so it reaches
 // the tree even mid-turn (that's its role vs esc).
 func TestTabTogglesTreeWhileBusy(t *testing.T) {

@@ -59,6 +59,42 @@ func TestStopResponseRenders(t *testing.T) {
 	}
 }
 
+// Interrupt is idempotent from the UI's side: the daemon saying "nothing to
+// interrupt" (esc pressed again after the turn already died, or fired off
+// stale state) renders NO error line and instead drops the stale turn-in-
+// flight state, so the next esc reaches the tree toggle. Real failures still
+// render.
+func TestInterruptNoopIsSilent(t *testing.T) {
+	m := inputModel(t, "")
+	m.busy = map[string]bool{"main": true}
+	m.activity = map[string]activityInfo{"main": {phase: "llm"}}
+
+	before := len(m.lines)
+	m.handleDaemonResp(daemonRespMsg{op: "interrupt", group: "main",
+		err: errors.New("no running agent process in group 'main'")})
+	if len(m.lines) != before {
+		t.Fatalf("no-op interrupt rendered a line: %q", m.lines[len(m.lines)-1].text)
+	}
+	if m.busy["main"] {
+		t.Fatal("stale busy flag survived a no-op interrupt")
+	}
+	if _, ok := m.activity["main"]; ok {
+		t.Fatal("stale activity phase survived a no-op interrupt — esc would loop on interrupt")
+	}
+
+	m.handleDaemonResp(daemonRespMsg{op: "interrupt", group: "main",
+		err: errors.New("group 'main' is not running")})
+	if len(m.lines) != before {
+		t.Fatalf("VM-down interrupt rendered a line: %q", m.lines[len(m.lines)-1].text)
+	}
+
+	m.handleDaemonResp(daemonRespMsg{op: "interrupt", group: "main",
+		err: errors.New("permission denied")})
+	if txt := lastLineText(t, m, "err"); !strings.Contains(txt, "permission denied") {
+		t.Fatalf("real interrupt failure line = %q, want it rendered", txt)
+	}
+}
+
 // /interrupt keeps the old turn-kill behavior reachable as a command (Esc is
 // the primary gesture) — and must NOT stop the VM.
 func TestInterruptCommand(t *testing.T) {

@@ -956,6 +956,23 @@ func lineInSession(l logLine, active string) bool {
 // rejected locally with a usable message instead of a daemon round-trip.
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
+// dropTurnState forgets everything that marks g as mid-turn: the live
+// stream/thinking/tool buffers, the busy flag, and the activity phase. Called
+// when an interrupt lands — or when the daemon reports there was nothing to
+// interrupt, which means this state was stale. Clearing activity matters for
+// esc: it is one of the "turn in flight" triggers, so leaving a stale phase
+// behind would make every following esc fire another no-op interrupt instead
+// of reaching the tree toggle.
+func (m *Model) dropTurnState(g string) {
+	delete(m.streamBuf, g)
+	delete(m.thinkingBuf, g)
+	delete(m.thinkingTail, g)
+	delete(m.toolOutBuf, g)
+	delete(m.toolOutTail, g)
+	delete(m.busy, g)
+	delete(m.activity, g)
+}
+
 // popPending drops the head of g's pending queue when it matches the just-
 // started turn's (session, msg). Match-on-head rather than unconditional pop
 // so a `prompt` event for an externally-enqueued message (ctl / scheduler /
@@ -3203,17 +3220,27 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		return listCmd(m.sock) // refresh the tree's running marker promptly
 	case "interrupt":
 		if msg.err != nil {
-			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("stop: %v", msg.err)})
+			// Interrupt is idempotent: "nothing to interrupt" (no agent
+			// process, or the VM isn't even running) is success from the
+			// caller's point of view — esc pressed again after the turn died,
+			// or fired off stale turn-in-flight state. The daemon just told us
+			// nothing is running, so drop that stale state silently instead of
+			// rendering an error; the next esc reaches the tree toggle. Real
+			// failures (permission, transport) still surface.
+			e := msg.err.Error()
+			if strings.Contains(e, "no running agent process") || strings.Contains(e, "is not running") {
+				m.dropTurnState(msg.group)
+				if msg.group == m.cur {
+					m.refreshLog()
+				}
+				return nil
+			}
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("interrupt: %v", msg.err)})
 			return nil
 		}
 		// Drop any in-flight stream/thinking state so the spinner stops
 		// immediately rather than waiting for the daemon's next emit.
-		delete(m.streamBuf, msg.group)
-		delete(m.thinkingBuf, msg.group)
-		delete(m.thinkingTail, msg.group)
-		delete(m.toolOutBuf, msg.group)
-		delete(m.toolOutTail, msg.group)
-		delete(m.busy, msg.group)
+		m.dropTurnState(msg.group)
 		m.addLine(logLine{kind: "sys", group: msg.group, text: "stopped agent"})
 		if msg.group == m.cur {
 			m.refreshLog()
@@ -3497,7 +3524,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// (moved here from ctrl+c). busy is set on the `prompt` event and
 		// cleared on `done`; streamBuf/thinkingBuf cover the cases where the
 		// prompt event didn't reach us (initial replay, daemon reconnect mid-
-		// stream), so a stuck tool call is still cancellable in-band.
+		// stream), so a stuck tool call is still cancellable in-band. The
+		// activity phase covers the remaining hole: a live-only attach mid-turn
+		// sees no prompt frame and — during llm/retry/work — no stream bytes
+		// either, but the daemon seeds every subscriber with the current phase,
+		// so it is the one signal that's always present while a turn runs.
 		if m.busy[m.cur] {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
@@ -3505,6 +3536,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
 		if _, thinking := m.thinkingBuf[m.cur]; thinking {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		}
+		if _, midTurn := m.activityFor(m.cur); midTurn {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
 		}
 		// Second meaning, with no turn to stop: the message-bar ↔ tree
