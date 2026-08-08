@@ -7,11 +7,14 @@ package main
 // Crashers land in testdata/fuzz/ only on failure.
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
 )
 
 func FuzzMonoFrame(f *testing.F) {
@@ -198,6 +201,172 @@ func FuzzFuzzyRank(f *testing.F) {
 			if m.Idx < 0 || m.Idx >= len(items) {
 				t.Fatalf("Idx %d out of range %d", m.Idx, len(items))
 			}
+		}
+	})
+}
+
+// checkFrame asserts the layout invariants every finished View() frame must
+// hold, whatever bytes the guest pty fed the emulator:
+//   - exactly `height` rows: Bubble Tea truncates overheight frames from the
+//     TOP, so one extra row eats the status bar and jumps the whole UI (the
+//     failure renderShellView's MaxWidth comment describes);
+//   - no line wider than `width` cells;
+//   - nothing terminal-hostile in the frame text. View()'s output is written
+//     verbatim to the real terminal, so the only escape allowed through is a
+//     pure SGR (ESC [ params m — colors/attributes); any other C0/C1 control,
+//     cursor motion, OSC/DCS, charset shift, or bidi/format rune is a way for
+//     guest output to reprogram or reorder the operator's terminal.
+func checkFrame(t *testing.T, frame string, width, height int) {
+	t.Helper()
+	if frame == "terminal too small" {
+		return // view()'s designed floor for sub-minimum geometry — 1 row by contract
+	}
+	if got := lipgloss.Height(frame); got != height {
+		t.Fatalf("frame is %d rows, want exactly %d", got, height)
+	}
+	for i, line := range strings.Split(frame, "\n") {
+		if w := ansi.StringWidth(line); w > width {
+			t.Fatalf("row %d is %d cells wide, budget %d: %q", i, w, width, line)
+		}
+	}
+	rs := []rune(frame)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case r == '\n':
+		case r == 0x1b:
+			j := i + 1
+			if j >= len(rs) || rs[j] != '[' {
+				t.Fatalf("non-CSI escape (ESC %q) in frame at %d", string(rs[j:min(j+1, len(rs))]), i)
+			}
+			for j++; j < len(rs) && (rs[j] == ';' || rs[j] == ':' || (rs[j] >= '0' && rs[j] <= '9')); j++ {
+			}
+			if j >= len(rs) || rs[j] != 'm' {
+				t.Fatalf("non-SGR CSI sequence %q in frame at %d", string(rs[i:min(j+1, len(rs))]), i)
+			}
+			i = j
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+			t.Fatalf("control rune %U in frame at %d", r, i)
+		case r == 0x200b || r == 0x200e || r == 0x200f ||
+			(r >= 0x202a && r <= 0x202e) || r == 0x2060 ||
+			(r >= 0x2066 && r <= 0x2069) || r == 0x061c || r == 0xfeff ||
+			r == 0x2028 || r == 0x2029:
+			t.Fatalf("bidi/format rune %U in frame at %d", r, i)
+		}
+	}
+}
+
+// FuzzShellVTFrame drives the real guest-output path end to end: arbitrary
+// bytes into the shell pane's vt emulator (in two chunks, because AttachShell
+// frames split anywhere — mid-CSI included), then the full Model.View(), then
+// checkFrame. This is the "no output from the VT can break the terminal
+// layout" property: the emulator is the sanitizer for the shared-shell pane
+// (shell_view.go's package doc), so whatever its Render() emits must stay
+// inside the frame's geometry and carry nothing but SGR styling.
+func FuzzShellVTFrame(f *testing.F) {
+	f.Add([]byte("plain text\r\nsecond line"), uint8(120), uint8(24), uint8(1))
+	f.Add([]byte("\x1b[31mred\x1b[0m nostr: ‮gnihsihp‬ 🤙🏿👩‍👩‍👦"), uint8(200), uint8(30), uint8(0))
+	f.Add([]byte("\x1b[?1049h\x1bc\x1b]0;title\a\x1b]8;;http://x\a\x1bP+q\x1b\\"), uint8(80), uint8(24), uint8(2))
+	f.Add([]byte("\x0eline drawing\x0f\x1b(0lqqqk\x1b(B"), uint8(60), uint8(10), uint8(1))
+	f.Add([]byte("\x1b[c\x1b[>c\x1b[6n\x1b]10;?\a\x1b]11;?\a"), uint8(120), uint8(24), uint8(1)) // auto-response floods
+	f.Add([]byte("\x1b[9999;9999H*\x1b[1;1Hx\x1b[2J\x1b[3J"), uint8(40), uint8(8), uint8(2))
+	f.Add([]byte("\x9b31mC1-CSI\x85NEL\xc2\x9b"), uint8(120), uint8(24), uint8(0))
+	f.Add([]byte(strings.Repeat("あ日本語テキスト🔥", 40)), uint8(33), uint8(9), uint8(1))
+	f.Add([]byte("\ttabs\tand\rCR\x07bell\x08BS"), uint8(90), uint8(20), uint8(0))
+	f.Add([]byte("\x1b[31m日本語 nostr 🔥\x1b[0m"), uint8(200), uint8(30), uint8(129)) // mono + focusShell
+	f.Fuzz(func(t *testing.T, data []byte, wb, hb, mode uint8) {
+		if len(data) > 4096 {
+			t.Skip()
+		}
+		width := 10 + int(wb)%191 // 10..200 — spans no-split and split layouts
+		height := 5 + int(hb)%36  // 5..40
+
+		m := newModel("", 200000)
+		m.width, m.height = width, height
+		m.groups = map[string]GroupInfo{"main": {Running: true}}
+		m.cur = "main"
+		m.input.Width = max(20, m.width-6)
+		term := vt.NewEmulator(10, 5)
+		defer closeEmulator(term)
+		// The emulator answers DA1/DSR/OSC-color queries by writing into its
+		// internal pipe; production drains that pipe back to the guest
+		// (startShellAttach's reader goroutine). Without a drain the first
+		// query's write blocks forever inside term.Write.
+		go func() { _, _ = io.Copy(io.Discard, term) }()
+		m.shell = &shellSession{term: term, group: "main", session: "koto-shell", cols: 10, rows: 5}
+		m.shellOpen = true
+		m.preShellFocus = focusInput
+		// Odd high bit: render through the mono fold too — it runs AFTER the
+		// scrub on the finished frame (View → monoFrame), and guest content on
+		// a monochrome terminal is a case mono.go explicitly signs up for.
+		prevMono := monoMode
+		monoMode = mode >= 128
+		defer func() { monoMode = prevMono }()
+		switch mode % 3 {
+		case 0: // split with focus on the message bar
+			m.focus = focusInput
+			m.input.Focus()
+		case 1: // split with focus on the pty (blink-on tick → cursor overlay)
+			m.focus = focusShell
+		case 2: // fullscreen pty
+			m.focus = focusShell
+			m.fullscreen = true
+		}
+		m.resizeViewport()
+		m.refreshLog()
+
+		half := len(data) / 2
+		_, _ = term.Write(data[:half])
+		checkFrame(t, m.View(), width, height)
+		_, _ = term.Write(data[half:])
+		checkFrame(t, m.View(), width, height)
+	})
+}
+
+// FuzzScrubVT hits the shell-pane scrub directly — same safety property as
+// the end-to-end FuzzShellVTFrame's byte scan, at pure-function speed. Also
+// pins idempotence: what one pass lets through, a second pass must too (a
+// non-idempotent scrub would mean dropping a sequence can splice a NEW
+// hostile sequence together out of the surrounding bytes).
+func FuzzScrubVT(f *testing.F) {
+	f.Add("plain \x1b[31;1mred\x1b[m")
+	f.Add("\x1b]0;t\a\x1b[2Jx\x9b31m\u202e\ufeff")
+	f.Add("\x1b[38;5;212mX\x1b[48:2:1:2:3mY")
+	f.Add("\x1b\x1b[31m")
+	f.Add("\x1b[")
+	f.Add("\x1b](){}\x1b\\after")
+	f.Fuzz(func(t *testing.T, s string) {
+		if len(s) > 8192 {
+			t.Skip()
+		}
+		out := scrubVT(s)
+		if utf8.ValidString(s) && !utf8.ValidString(out) {
+			t.Fatalf("broke UTF-8: %q -> %q", s, out)
+		}
+		rs := []rune(out)
+		for i := 0; i < len(rs); i++ {
+			r := rs[i]
+			switch {
+			case r == '\n':
+			case r == 0x1b:
+				j := i + 1
+				if j >= len(rs) || rs[j] != '[' {
+					t.Fatalf("non-CSI escape survived scrub at %d: %q -> %q", i, s, out)
+				}
+				for j++; j < len(rs) && (rs[j] == ';' || rs[j] == ':' || (rs[j] >= '0' && rs[j] <= '9')); j++ {
+				}
+				if j >= len(rs) || rs[j] != 'm' {
+					t.Fatalf("non-SGR CSI survived scrub at %d: %q -> %q", i, s, out)
+				}
+				i = j
+			case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+				t.Fatalf("control rune %U survived scrub: %q -> %q", r, s, out)
+			case isHostileFormat(r):
+				t.Fatalf("format rune %U survived scrub: %q -> %q", r, s, out)
+			}
+		}
+		if again := scrubVT(out); again != out {
+			t.Fatalf("not idempotent: %q -> %q -> %q", s, out, again)
 		}
 	})
 }

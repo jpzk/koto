@@ -757,7 +757,10 @@ func (m Model) renderShellView() string {
 		shellBody = lipgloss.NewStyle().PaddingLeft(1).Foreground(cGray).
 			Render("no shared shell attached")
 	} else {
-		screen := lipgloss.NewStyle().MaxWidth(w).Render(m.shell.term.Render())
+		// scrubVT: the emulator contains guest escapes to its virtual screen,
+		// but whatever it renders is embedded in this frame verbatim — the
+		// scrub guarantees only SGR styling survives (see vt_scrub.go).
+		screen := lipgloss.NewStyle().MaxWidth(w).Render(scrubVT(m.shell.term.Render()))
 		lines := strings.Split(screen, "\n")
 		for len(lines) < h {
 			lines = append(lines, "")
@@ -837,7 +840,11 @@ func (m Model) overlayShellCursor(lines []string) []string {
 	}
 	ch, cw := " ", 1
 	if c := m.shell.term.CellAt(x, y); c != nil && c.Content != "" {
-		ch = c.Content
+		// Same scrub as the screen itself — this cell is spliced into the
+		// frame after the Render() pass, so it needs its own gate.
+		if ch = scrubVT(c.Content); ch == "" {
+			ch = " "
+		}
 		if c.Width > 1 {
 			cw = c.Width
 		}
