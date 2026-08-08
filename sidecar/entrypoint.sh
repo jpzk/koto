@@ -26,6 +26,18 @@ done
 # instead of freezing the group. Generous default covers long claude reasoning
 # and venice's 25×30s tool loop; the daemon's send() wait sits above this.
 TURN_TIMEOUT="${TURN_TIMEOUT:-1200}"
+# Markers are line-framed: the daemon's parser only recognizes `[[turn_end]]`
+# as a complete line. An interrupted worker (SIGINT via the Interrupt RPC, or
+# the KILL timeout above) can die mid-line, leaving the log without a trailing
+# newline — a marker appended then glues onto the partial line, the tailer
+# never sees the turn boundary, and the daemon's send() blocks for the full
+# stall timeout with every queued message stuck behind it. Called after every
+# worker exit, before any marker write. ($(tail -c 1) strips a trailing
+# newline, so it is empty exactly when the log already ends on one.)
+ensure_log_nl() {
+  [ -s "$D/log" ] || return 0
+  [ -z "$(tail -c 1 "$D/log")" ] || printf '\n' >> "$D/log"
+}
 # Do NOT truncate .cs/log — it must persist across sidecar restarts so the
 # TUI can replay the conversation on attach (matches claude's session.jsonl
 # which also persists). >> below creates the file if missing.
@@ -114,6 +126,7 @@ while IFS= read -r line <&3; do
       MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" KOTO_VH_FILE="$VH_FILE" \
         timeout -s KILL -k 10 "$TURN_TIMEOUT" \
         node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || vrc=$?
+      ensure_log_nl
       if [ "$vrc" = "124" ] || [ "$vrc" = "137" ]; then
         printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
       fi
@@ -140,6 +153,7 @@ while IFS= read -r line <&3; do
 
       { printf '%s' "$msg" | timeout -s KILL -k 10 "$TURN_TIMEOUT" "$@" 2>>"$D/log"; echo $? >"$D/.turn_rc"; } \
           | KOTO_SESSION_ID_FILE="$IDF" node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
+      ensure_log_nl
       crc=$(cat "$D/.turn_rc" 2>/dev/null)
       if [ "$crc" = "124" ] || [ "$crc" = "137" ]; then
         printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
