@@ -326,3 +326,53 @@ func TestActivityNoSpinnerOnChildRows(t *testing.T) {
 		t.Fatalf("session row should not carry the group's phase clock: %q", sess)
 	}
 }
+
+// A BACKGROUND group's activity must keep the tree dot spinning but must not
+// hold the whole TUI at the 80ms cadence. Every tick repaints a full frame
+// (~2.5ms with a fleet-sized tree, over half of it Unicode width measurement
+// in lipgloss), and measured 2026-08-09 against an otherwise idle fleet, one
+// background group mid-turn made spinTickMsg 70% of all messages and burned
+// 4.4% of a core to animate a single glyph.
+func TestBackgroundActivityUsesSlowTick(t *testing.T) {
+	m := activityModel(t)
+	m.groups["bg"] = GroupInfo{Running: true}
+	m.connected = true
+
+	// Nothing anywhere: no animation at all.
+	if m.isAnimating() {
+		t.Fatalf("idle model is animating: %s", "unexpected")
+	}
+
+	// A background group mid-turn: animating, but not at the fast rate.
+	m = sendActivity(t, m, activityEv("bg", "llm", "", 3*time.Second))
+	if !m.isAnimating() {
+		t.Error("background activity should keep the tree dot spinning")
+	}
+	if m.needsFastTicks() {
+		t.Error("background activity must not demand the 80ms cadence")
+	}
+	if m.animTick() == nil {
+		t.Error("animTick returned nil while animating")
+	}
+
+	// The FOCUSED group streaming does demand it.
+	m.streamBuf = map[string]string{m.cur: "partial"}
+	if !m.needsFastTicks() {
+		t.Error("the focused group's own stream needs the fast cadence")
+	}
+	delete(m.streamBuf, m.cur)
+
+	// So does the shell pane's blinking cursor.
+	if m.needsFastTicks() {
+		t.Fatal("precondition: should be slow again")
+	}
+	if !m.connected {
+		t.Fatal("precondition: connected")
+	}
+
+	// Disconnected banner needs frames too.
+	m.connected = false
+	if !m.needsFastTicks() {
+		t.Error("the disconnected banner needs the fast cadence")
+	}
+}

@@ -40,6 +40,12 @@ const (
 	pageTopThreshold = 10
 	leftPaneWidth    = 22
 	tickMs           = 80
+	// tickSlowMs is the cadence when the only thing animating is OFF-SCREEN
+	// work — a background group's tree dot and its 1s-granularity elapsed
+	// counter. Every tick costs a full frame repaint (~2.5ms), so paying the
+	// 80ms rate for a glyph nobody is watching closely was most of the TUI's
+	// idle CPU. See animTick.
+	tickSlowMs       = 320
 	metricsTickMs    = 5000
 	resizeDebounceMs = 120 // width-change quiet window before the styled re-render
 	contentFlushMs   = 16  // structural-repaint debounce (~1 frame at 60fps)
@@ -1538,7 +1544,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			if live, _ := m.liveOverlay(); m.liveDirty || live != "" {
 				m.refreshLog()
 			}
-			return m, tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
+			return m, m.animTick()
 		}
 		if m.liveDirty {
 			// Animation just ended with an unflushed overlay repaint —
@@ -3084,6 +3090,56 @@ func (m *Model) markContentDirty() tea.Cmd {
 	return tea.Tick(contentFlushMs*time.Millisecond, func(time.Time) tea.Msg { return contentFlushMsg{} })
 }
 
+// needsFastTicks reports whether anything the operator is LOOKING AT needs the
+// full 80ms cadence: the focused group's own stream, the shell pane's blinking
+// cursor, a plugin overlay, the disconnected banner, or a notification blink.
+// Background-group activity is deliberately excluded — see animTick.
+func (m Model) needsFastTicks() bool {
+	if m.focus == focusShell && m.shell != nil && !m.shell.ended {
+		return true
+	}
+	if _, ok := m.streamBuf[m.cur]; ok {
+		return true
+	}
+	if _, ok := m.thinkingBuf[m.cur]; ok {
+		return true
+	}
+	if m.plugin != nil || !m.connected {
+		return true
+	}
+	if len(m.visibleNotifications()) > 0 {
+		return true
+	}
+	return false
+}
+
+// animTick returns the next spinner tick, or nil to let the chain stop.
+//
+// The rate is split because the two things it drives cost the same and are
+// worth wildly different amounts. Every tick repaints a FULL frame — measured
+// 2.5ms at 150x44 with a 29-group tree, over half of it Unicode width
+// measurement inside lipgloss.Style.Render (see render_bench_test.go and the
+// pprof behind it). isAnimating() is true whenever ANY group in the fleet has
+// a phase, so a single background group mid-turn — one spinning dot in the
+// tree and an elapsed counter with 1s granularity — held the whole TUI at
+// 12.4 repaints/second indefinitely. Measured 2026-08-09 against an otherwise
+// idle fleet: spinTickMsg was 70% of all messages and the TUI burned 4.4% of
+// a core (11% in the operator's larger session) to animate one glyph.
+//
+// So: 80ms only when something on screen needs to look smooth, and a quarter
+// of that when the only animation is off-screen work. The dot still reads as
+// spinning at 3fps and the counter is unaffected.
+func (m Model) animTick() tea.Cmd {
+	if !m.isAnimating() {
+		return nil
+	}
+	ms := tickSlowMs
+	if m.needsFastTicks() {
+		ms = tickMs
+	}
+	return tea.Tick(time.Duration(ms)*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
+}
+
 // ensureTicking returns a tea.Tick cmd if animation just began and no tick
 // chain is currently in flight. Caller mutates m.ticking inside this method.
 func (m *Model) ensureTicking() tea.Cmd {
@@ -3091,7 +3147,7 @@ func (m *Model) ensureTicking() tea.Cmd {
 		return nil
 	}
 	m.ticking = true
-	return tea.Tick(tickMs*time.Millisecond, func(time.Time) tea.Msg { return spinTickMsg{} })
+	return m.animTick()
 }
 
 // scheduleReconnect declares the daemon unreachable (DISCONNECTED banner,
