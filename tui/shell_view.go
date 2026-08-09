@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -572,16 +573,27 @@ func (m *Model) syncShellSize() {
 // in the guest shell — and neither is plain esc, which arrives here as
 // KeyEsc and goes out as a literal 0x1b (vim/less need it).
 //
-// Known v1 gap, documented rather than silently missing: bracketed paste
-// is NOT translated — pasted text arrives as a plain rune burst (fine for
-// a shell prompt, occasionally wrong for e.g. vim's autoindent). Mouse
-// events, by contrast, ARE forwarded — see forwardShellMouse below.
+// Mouse events are forwarded too — see forwardShellMouse below — and so is
+// bracketed paste, via the emulator (the Paste case below).
 func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.shell == nil {
 		return m, nil
 	}
 	var b []byte
+	var mod int
 	switch {
+	case msg.Type == tea.KeyRunes && msg.Paste:
+		// A paste is not a rune burst: the guest needs the ESC[200~/201~
+		// brackets so bash/vim can tell pasted text from typing — without
+		// them a multi-line paste at a shell prompt EXECUTES each line as it
+		// arrives, and vim re-indents every one. Whether to bracket is the
+		// guest's call (DECSET 2004, which it sets in-band), so this goes
+		// through the emulator, which tracks that mode from the output
+		// stream and brackets only when it's on — the same delegation
+		// forwardShellMouse makes for mouse reporting, landing in the same
+		// internal pipe the drain goroutine relays to the pty.
+		m.shell.term.Paste(string(msg.Runes))
+		return m, nil
 	case msg.Type == tea.KeyRunes:
 		b = []byte(string(msg.Runes))
 	case msg.Type == tea.KeySpace:
@@ -592,55 +604,125 @@ func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// wire byte a real terminal would send, no per-key table needed.
 	case msg.Type >= 0 && msg.Type <= 31 || msg.Type == 127:
 		b = []byte{byte(msg.Type)}
-	case msg.Type == tea.KeyUp:
-		b = []byte("\x1b[A")
-	case msg.Type == tea.KeyDown:
-		b = []byte("\x1b[B")
-	case msg.Type == tea.KeyRight:
-		b = []byte("\x1b[C")
-	case msg.Type == tea.KeyLeft:
-		b = []byte("\x1b[D")
-	case msg.Type == tea.KeyHome:
-		b = []byte("\x1b[H")
-	case msg.Type == tea.KeyEnd:
-		b = []byte("\x1b[F")
-	case msg.Type == tea.KeyPgUp:
-		b = []byte("\x1b[5~")
-	case msg.Type == tea.KeyPgDown:
-		b = []byte("\x1b[6~")
-	case msg.Type == tea.KeyDelete:
-		b = []byte("\x1b[3~")
-	case msg.Type == tea.KeyInsert:
-		b = []byte("\x1b[2~")
-	case msg.Type == tea.KeyShiftTab:
-		b = []byte("\x1b[Z")
 	default:
-		return m, nil // unmapped (function/media keys, etc.) — v1 gap
+		sp, ok := shellSpecialKeys[msg.Type]
+		if !ok {
+			return m, nil // unmapped (media/browser keys)
+		}
+		b, mod = []byte(sp.seq), sp.mod
 	}
 	if msg.Alt {
-		b = altEncode(b)
+		mod |= modAlt
+	}
+	if mod != 0 {
+		b = modEncode(b, mod)
 	}
 	m.shell.send(b)
 	return m, nil
 }
 
-// altEncode applies the Alt modifier to an already-encoded key: the classic
-// ESC prefix for plain runes and C0 bytes (the meta convention), but the
-// xterm modifier parameter for CSI-encoded specials — ESC[A → ESC[1;3A,
-// ESC[5~ → ESC[5;3~. A bare ESC prefix on a CSI sequence would instead read
-// in the guest as two keys: a lone Esc, then the unmodified special.
-func altEncode(b []byte) []byte {
-	if len(b) >= 3 && b[0] == 0x1b && b[1] == '[' {
+// xterm modifier bits. The wire encoding is the CSI parameter 1+sum, so
+// shift = ";2", alt = ";3", ctrl = ";5", ctrl+shift = ";6", alt+ctrl = ";7".
+const (
+	modShift = 1
+	modAlt   = 2
+	modCtrl  = 4
+)
+
+// shellSpecialKeys maps a Bubble Tea special key to the sequence a real
+// terminal sends for it, split into an unmodified base sequence plus the
+// modifier bits that key type already implies.
+//
+// The split exists because Bubble Tea carries only Alt as a flag on
+// tea.KeyMsg — every OTHER modifier combination gets its own KeyType, so
+// ctrl+← arrives as tea.KeyCtrlLeft rather than tea.KeyLeft with a ctrl
+// bit. Encoding those was the gap that made ctrl+←/→ (readline's word jump)
+// silently do nothing inside the pane: they matched none of the plain-arrow
+// cases above and fell out of the switch unsent.
+//
+// F1–F4 are SS3 (ESC O P..S) unmodified but CSI once a modifier is applied
+// (ESC[1;3P) — modEncode handles that rewrite, so the base stays SS3 here.
+var shellSpecialKeys = map[tea.KeyType]struct {
+	seq string
+	mod int
+}{
+	tea.KeyUp:       {"\x1b[A", 0},
+	tea.KeyDown:     {"\x1b[B", 0},
+	tea.KeyRight:    {"\x1b[C", 0},
+	tea.KeyLeft:     {"\x1b[D", 0},
+	tea.KeyHome:     {"\x1b[H", 0},
+	tea.KeyEnd:      {"\x1b[F", 0},
+	tea.KeyPgUp:     {"\x1b[5~", 0},
+	tea.KeyPgDown:   {"\x1b[6~", 0},
+	tea.KeyDelete:   {"\x1b[3~", 0},
+	tea.KeyInsert:   {"\x1b[2~", 0},
+	tea.KeyShiftTab: {"\x1b[Z", 0}, // already the shifted form; no parameter
+
+	tea.KeyCtrlUp:     {"\x1b[A", modCtrl},
+	tea.KeyCtrlDown:   {"\x1b[B", modCtrl},
+	tea.KeyCtrlRight:  {"\x1b[C", modCtrl},
+	tea.KeyCtrlLeft:   {"\x1b[D", modCtrl},
+	tea.KeyCtrlHome:   {"\x1b[H", modCtrl},
+	tea.KeyCtrlEnd:    {"\x1b[F", modCtrl},
+	tea.KeyCtrlPgUp:   {"\x1b[5~", modCtrl},
+	tea.KeyCtrlPgDown: {"\x1b[6~", modCtrl},
+
+	tea.KeyShiftUp:    {"\x1b[A", modShift},
+	tea.KeyShiftDown:  {"\x1b[B", modShift},
+	tea.KeyShiftRight: {"\x1b[C", modShift},
+	tea.KeyShiftLeft:  {"\x1b[D", modShift},
+	tea.KeyShiftHome:  {"\x1b[H", modShift},
+	tea.KeyShiftEnd:   {"\x1b[F", modShift},
+
+	tea.KeyCtrlShiftUp:    {"\x1b[A", modCtrl | modShift},
+	tea.KeyCtrlShiftDown:  {"\x1b[B", modCtrl | modShift},
+	tea.KeyCtrlShiftRight: {"\x1b[C", modCtrl | modShift},
+	tea.KeyCtrlShiftLeft:  {"\x1b[D", modCtrl | modShift},
+	tea.KeyCtrlShiftHome:  {"\x1b[H", modCtrl | modShift},
+	tea.KeyCtrlShiftEnd:   {"\x1b[F", modCtrl | modShift},
+
+	tea.KeyF1:  {"\x1bOP", 0},
+	tea.KeyF2:  {"\x1bOQ", 0},
+	tea.KeyF3:  {"\x1bOR", 0},
+	tea.KeyF4:  {"\x1bOS", 0},
+	tea.KeyF5:  {"\x1b[15~", 0},
+	tea.KeyF6:  {"\x1b[17~", 0},
+	tea.KeyF7:  {"\x1b[18~", 0},
+	tea.KeyF8:  {"\x1b[19~", 0},
+	tea.KeyF9:  {"\x1b[20~", 0},
+	tea.KeyF10: {"\x1b[21~", 0},
+	tea.KeyF11: {"\x1b[23~", 0},
+	tea.KeyF12: {"\x1b[24~", 0},
+	tea.KeyF13: {"\x1b[25~", 0},
+	tea.KeyF14: {"\x1b[26~", 0},
+	tea.KeyF15: {"\x1b[28~", 0},
+	tea.KeyF16: {"\x1b[29~", 0},
+	tea.KeyF17: {"\x1b[31~", 0},
+	tea.KeyF18: {"\x1b[32~", 0},
+	tea.KeyF19: {"\x1b[33~", 0},
+	tea.KeyF20: {"\x1b[34~", 0},
+}
+
+// modEncode applies xterm modifier bits to an already-encoded key: the
+// classic ESC prefix for plain runes and C0 bytes (the meta convention,
+// which can only express Alt), but the CSI modifier parameter for the
+// specials — ESC[A → ESC[1;5A for ctrl, ESC[5~ → ESC[5;3~ for alt. A bare
+// ESC prefix on a CSI sequence would instead read in the guest as two keys:
+// a lone Esc, then the unmodified special. SS3 keys (F1–F4, ESC O P) are
+// rewritten to their CSI form, since SS3 has no parameter slot to carry a
+// modifier.
+func modEncode(b []byte, mod int) []byte {
+	if len(b) >= 3 && b[0] == 0x1b && (b[1] == '[' || b[1] == 'O') {
 		params, final := string(b[2:len(b)-1]), b[len(b)-1]
-		if final == '~' {
-			return []byte("\x1b[" + params + ";3~")
-		}
 		if params == "" {
 			params = "1"
 		}
-		return []byte("\x1b[" + params + ";3" + string(final))
+		return []byte("\x1b[" + params + ";" + strconv.Itoa(1+mod) + string(final))
 	}
-	return append([]byte{0x1b}, b...)
+	if mod&modAlt != 0 {
+		return append([]byte{0x1b}, b...)
+	}
+	return b
 }
 
 // shellMouseOrigin returns the terminal-screen cell where the emulator
