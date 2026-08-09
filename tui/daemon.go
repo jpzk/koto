@@ -273,15 +273,18 @@ func fetchResources() (map[string]GroupRes, HostRes, error) {
 	out := make(map[string]GroupRes, len(resp.GetGroups()))
 	for _, g := range resp.GetGroups() {
 		out[g.GetGroup()] = GroupRes{
-			Running:       g.GetRunning(),
-			CPUPct:        g.GetCpuPct(),
-			Vcpus:         g.GetVcpus(),
-			MemMiB:        g.GetMemMib(),
-			RSSBytes:      g.GetRssBytes(),
-			AllocBytes:    g.GetAllocBytes(),
-			DeclaredBytes: g.GetDeclaredBytes(),
-			GuestMemTotal: g.GetGuestMemTotalBytes(),
-			GuestMemAvail: g.GetGuestMemAvailBytes(),
+			Running:        g.GetRunning(),
+			CPUPct:         g.GetCpuPct(),
+			Vcpus:          g.GetVcpus(),
+			MemMiB:         g.GetMemMib(),
+			RSSBytes:       g.GetRssBytes(),
+			AllocBytes:     g.GetAllocBytes(),
+			DeclaredBytes:  g.GetDeclaredBytes(),
+			GuestMemTotal:  g.GetGuestMemTotalBytes(),
+			GuestMemAvail:  g.GetGuestMemAvailBytes(),
+			GuestDiskTotal: g.GetGuestDiskTotalBytes(),
+			GuestDiskAvail: g.GetGuestDiskAvailBytes(),
+			GuestDiskUsed:  g.GetGuestDiskUsedBytes(),
 		}
 	}
 	h := resp.GetHost()

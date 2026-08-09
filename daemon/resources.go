@@ -102,7 +102,21 @@ var (
 type resGuestMem struct {
 	totalBytes int64
 	availBytes int64
-	at         time.Time
+	// diskTotal/diskAvail are the guest's /workspace filesystem. They ride the
+	// same mirror as memory because they exist for the identical reason:
+	// AllocBytes is to disk exactly what RSSBytes is to memory — a high-water
+	// mark of every block the guest has ever touched, since virtio-blk has no
+	// discard and freed guest blocks are never returned to the host. Under
+	// churn the two diverge without limit: measured 2026-08-09, `main` had
+	// allocated 1.62 GiB (20% of its ceiling) while its filesystem held
+	// 6.5 MB, and one group read 89% host-side — loud enough to be firing a
+	// disk-full alert — with 4.1 GB free inside. A guest wedges when ITS
+	// filesystem fills, so this is the figure that answers the question the
+	// per-group alert is actually asking.
+	diskTotal int64
+	diskAvail int64
+	diskUsed  int64
+	at        time.Time
 }
 
 // resGuestMaxAge is how long a guest memory reading survives failed refreshes
@@ -118,6 +132,55 @@ var (
 // resGuestExecTimeout bounds each guest meminfo exec. The reads run in
 // parallel, so this caps the whole guest leg of a sweep, not per-VM × fleet.
 const resGuestExecTimeout = 5 * time.Second
+
+// resGuestProbe is the single command the mirror runs in each guest. One exec
+// for both figures keeps the sweep's guest leg exactly as expensive as it was
+// when it only fetched memory. `stat -f` rather than `df` because its output
+// is a fixed field shape rather than a column layout that varies with
+// mount-point width.
+//
+// The filesystem line carries its own tag rather than the two halves being
+// split on a separator line: an `echo ---` between them did not survive the
+// exec path (memory parsed, the filesystem half came back empty), and a probe
+// whose two halves can silently decouple is not worth debugging twice. Each
+// parser now finds its own data anywhere in the output, in any order.
+const resGuestProbeTag = "KOTOFS"
+
+const resGuestProbe = `stat -f -c '` + resGuestProbeTag + ` %S %b %f %a' /workspace; cat /proc/meminfo`
+
+// resParseGuestFS pulls the guest /workspace filesystem out of the probe
+// output: the tagged line is block size, total blocks, FREE blocks, and blocks
+// AVAILABLE to unprivileged users. All three counts, because used is not
+// total-minus-available: ext4 reserves ~5% of the filesystem for root, which
+// is neither used nor available to the agent. Deriving used from the other two
+// counts that reserve as occupied — measured 2026-08-09, it made `main` read
+// 431 MB used where the guest's own df said 6.4 MB, i.e. 5% full on an empty
+// disk. used = (blocks - free) and fullness = used/(used+avail), exactly what
+// df prints, so the figure matches whatever anyone checks it against inside
+// the guest.
+//
+// Scans for its tagged line rather than assuming a position, so nothing else
+// the probe prints can break it. Missing or unparseable → zeros = unknown.
+func resParseGuestFS(s string) (total, avail, used int64) {
+	for _, line := range strings.Split(s, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[0] != resGuestProbeTag {
+			continue
+		}
+		bs, err1 := strconv.ParseInt(f[1], 10, 64)
+		blocks, err2 := strconv.ParseInt(f[2], 10, 64)
+		freeBlocks, err3 := strconv.ParseInt(f[3], 10, 64)
+		availBlocks, err4 := strconv.ParseInt(f[4], 10, 64)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || bs <= 0 || blocks <= 0 {
+			return 0, 0, 0
+		}
+		if freeBlocks > blocks {
+			return 0, 0, 0
+		}
+		return bs * blocks, bs * availBlocks, bs * (blocks - freeBlocks)
+	}
+	return 0, 0, 0
+}
 
 // resParseMemInfo extracts MemTotal and MemAvailable (bytes) from a
 // /proc/meminfo dump. MemAvailable rather than MemFree: the kernel's own
@@ -161,16 +224,19 @@ func resSweepGuestMem(groups []string) {
 		go func(g string) {
 			defer wg.Done()
 			running := fcRunning(g)
-			var total, avail int64
+			var total, avail, dTotal, dAvail, dUsed int64
 			if running {
-				if out, rc, err := fcExec(g, "cat /proc/meminfo", resGuestExecTimeout); err == nil && rc == 0 {
+				if out, rc, err := fcExec(g, resGuestProbe, resGuestExecTimeout); err == nil && rc == 0 {
 					total, avail = resParseMemInfo(out)
+					dTotal, dAvail, dUsed = resParseGuestFS(out)
 				}
 			}
 			resGuestMu.Lock()
 			defer resGuestMu.Unlock()
 			prev, had := resGuestMap[g]
-			if next, keep := resGuestRetain(prev, had, running, total, avail, now); keep {
+			fresh := resGuestMem{totalBytes: total, availBytes: avail,
+				diskTotal: dTotal, diskAvail: dAvail, diskUsed: dUsed}
+			if next, keep := resGuestRetain(prev, had, running, fresh, now); keep {
 				resGuestMap[g] = next
 			} else {
 				delete(resGuestMap, g)
@@ -186,9 +252,10 @@ func resSweepGuestMem(groups []string) {
 // running VM that simply didn't answer keeps what it had until
 // resGuestMaxAge. Pure, so the policy is pinned by a test rather than by a
 // live guest.
-func resGuestRetain(prev resGuestMem, hasPrev, running bool, total, avail int64, now time.Time) (resGuestMem, bool) {
-	if total > 0 {
-		return resGuestMem{totalBytes: total, availBytes: avail, at: now}, true
+func resGuestRetain(prev resGuestMem, hasPrev, running bool, fresh resGuestMem, now time.Time) (resGuestMem, bool) {
+	if fresh.totalBytes > 0 {
+		fresh.at = now
+		return fresh, true
 	}
 	if !running || !hasPrev || now.Sub(prev.at) > resGuestMaxAge {
 		return resGuestMem{}, false
@@ -444,18 +511,34 @@ func resCheckThresholds() {
 	}
 
 	for _, g := range groups {
-		if g.DeclaredBytes <= 0 {
+		// The per-group disk alert fires on the GUEST's filesystem, not on
+		// host allocation. Allocation is a high-water mark of every block the
+		// guest has ever touched (no discard in virtio-blk), so under churn it
+		// climbs toward the ceiling while the guest stays half empty — and
+		// hitting the ceiling that way is benign: the image is preallocated to
+		// its declared size, so "every block touched once" costs the guest
+		// nothing. Measured 2026-08-09, one group was banner-alerting at 89%
+		// host-side with 4.1 GB free inside, and `main` read 20% while its
+		// filesystem held 6.5 MB. A group wedges when ITS filesystem fills;
+		// that is the only per-group disk condition worth waking anyone for.
+		//
+		// A stopped or unreachable guest therefore raises nothing: it has no
+		// filesystem to fill and no turn to wedge. Host-side exhaustion is a
+		// separate subject, already checked above and still host-measured.
+		if g.GuestDiskTotal <= 0 {
 			continue
 		}
-		pct := float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100
+		used := g.GuestDiskUsed
+		pct := resGuestDiskPct(used, g.GuestDiskAvail)
 		if fire, lvl := resShouldFire(g.Group, pct); fire {
 			resNotifyOperator(lvl,
 				fmt.Sprintf("Group %s disk %.0f%% full", g.Group, pct),
-				fmt.Sprintf("%s uses %.1f GiB of its %.1f GiB ceiling (%.1f%%). "+
-					"Guest disks never shrink on their own, so this only goes up: "+
-					"raise its size preset or reclaim the image offline.",
-					g.Group, float64(g.AllocBytes)/(1<<30),
-					float64(g.DeclaredBytes)/(1<<30), pct))
+				fmt.Sprintf("%s has used %.1f GiB of its %.1f GiB workspace (%.1f%%), "+
+					"%.1f GiB free. At 100%% its filesystem goes read-only and the "+
+					"agent wedges: reclaim inside the guest, or raise its size preset.",
+					g.Group, float64(used)/(1<<30),
+					float64(g.GuestDiskTotal)/(1<<30), pct,
+					float64(g.GuestDiskAvail)/(1<<30)))
 		}
 	}
 
@@ -748,6 +831,13 @@ type groupResources struct {
 	// the only figures that reflect real guest memory pressure.
 	GuestMemTotal int64
 	GuestMemAvail int64
+	// GuestDiskTotal/GuestDiskAvail are the guest's own /workspace filesystem.
+	// AllocBytes is the host's cost for this group; THESE are how full the
+	// disk actually is. See resGuestMem for why they cannot be derived from
+	// each other. 0 = unknown (stopped, unreachable, or no sweep yet).
+	GuestDiskTotal int64
+	GuestDiskAvail int64
+	GuestDiskUsed  int64
 }
 
 // hostResources is the fleet-wide rollup.
@@ -778,24 +868,30 @@ func resourcesCtlResp() resourcesResp {
 	out := resourcesResp{BaseResp: baseResp{OK: true}}
 	for _, g := range groups {
 		gr := wire.GroupResources{
-			Group:              g.Group,
-			Running:            g.Running,
-			AllocBytes:         g.AllocBytes,
-			DeclaredBytes:      g.DeclaredBytes,
-			GrowthBytesPerHour: g.GrowthPerHour,
-			GrowthSpanSeconds:  g.GrowthSpanSecs,
-			RSSBytes:           g.RSSBytes,
-			CPUPct:             roundPct(g.CPUPct),
-			Vcpus:              g.Vcpus,
-			MemMiB:             g.MemMiB,
-			GuestMemTotalBytes: g.GuestMemTotal,
-			GuestMemAvailBytes: g.GuestMemAvail,
+			Group:               g.Group,
+			Running:             g.Running,
+			AllocBytes:          g.AllocBytes,
+			DeclaredBytes:       g.DeclaredBytes,
+			GrowthBytesPerHour:  g.GrowthPerHour,
+			GrowthSpanSeconds:   g.GrowthSpanSecs,
+			RSSBytes:            g.RSSBytes,
+			CPUPct:              roundPct(g.CPUPct),
+			Vcpus:               g.Vcpus,
+			MemMiB:              g.MemMiB,
+			GuestMemTotalBytes:  g.GuestMemTotal,
+			GuestMemAvailBytes:  g.GuestMemAvail,
+			GuestDiskTotalBytes: g.GuestDiskTotal,
+			GuestDiskAvailBytes: g.GuestDiskAvail,
+			GuestDiskUsedBytes:  g.GuestDiskUsed,
 		}
 		if g.DeclaredBytes > 0 {
 			gr.AllocPct = roundPct(float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100)
 		}
 		if g.GuestMemTotal > 0 {
 			gr.GuestMemUsedPct = roundPct(float64(g.GuestMemTotal-g.GuestMemAvail) / float64(g.GuestMemTotal) * 100)
+		}
+		if g.GuestDiskTotal > 0 {
+			gr.GuestDiskUsedPct = roundPct(resGuestDiskPct(g.GuestDiskUsed, g.GuestDiskAvail))
 		}
 		out.Groups = append(out.Groups, gr)
 	}
@@ -812,6 +908,18 @@ func resourcesCtlResp() resourcesResp {
 		out.Host.FSUsedPct = roundPct(float64(used) / float64(host.FSTotalBytes) * 100)
 	}
 	return out
+}
+
+// resGuestDiskPct is the guest filesystem's fullness the way df computes it:
+// used over (used + available), NOT over the filesystem's size. The gap is
+// ext4's root reserve, which belongs to neither term — counting it as used
+// puts an empty workspace at ~5%.
+func resGuestDiskPct(used, avail int64) float64 {
+	den := used + avail
+	if den <= 0 {
+		return 0
+	}
+	return float64(used) / float64(den) * 100
 }
 
 // roundPct trims a percentage to one decimal — enough precision to act on,
@@ -852,6 +960,8 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 		// hanging out its timeout) must not serve an unbounded-old figure.
 		if gm, ok := resGuestMap[g]; ok && gr.Running && time.Since(gm.at) <= resGuestMaxAge {
 			gr.GuestMemTotal, gr.GuestMemAvail = gm.totalBytes, gm.availBytes
+			gr.GuestDiskTotal, gr.GuestDiskAvail = gm.diskTotal, gm.diskAvail
+			gr.GuestDiskUsed = gm.diskUsed
 		}
 		resGuestMu.Unlock()
 		// Allocation is read LIVE, never from the ring. The ring lags by up to

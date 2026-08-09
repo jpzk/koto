@@ -123,12 +123,24 @@ func renderTopRow(r topRow) string {
 	// SPACE: alloc/ceiling + utilization, colored by pctColor so an image
 	// nearing its size preset shows rose — the per-group half of the disk
 	// alert the daemon raises at 80/90%.
-	if r.hasRes && r.res.DeclaredBytes > 0 {
+	// SPACE is the GUEST filesystem's fullness, not the image's host
+	// allocation. Allocation counts every block the guest has ever touched
+	// (no discard in virtio-blk), so it is a high-water mark that drifts far
+	// above real usage under churn — 2026-08-09, `main` read 20% here with
+	// 6.5 MB in its filesystem. A stopped guest has nothing to ask, so it
+	// falls back to allocation, which is at least an upper bound.
+	used, total, frac, haveGuest := guestDiskUsage(r.res)
+	switch {
+	case r.hasRes && haveGuest:
+		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(used), fmtGB(total), int(frac*100))
+		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
+			Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
+	case r.hasRes && r.res.DeclaredBytes > 0:
 		frac := float64(r.res.AllocBytes) / float64(r.res.DeclaredBytes)
 		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(r.res.AllocBytes), fmtGB(r.res.DeclaredBytes), int(frac*100))
 		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
 			Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
-	} else {
+	default:
 		cells = append(cells, dash(topColumns[1].w))
 	}
 

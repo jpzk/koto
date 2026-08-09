@@ -554,7 +554,21 @@ func (m Model) renderMetricsBar() string {
 		if r.MemMiB > 0 {
 			lparts = append(lparts, renderMetricColored("rss", float64(r.RSSBytes)/(float64(r.MemMiB)*(1<<20)), cGray))
 		}
-		if r.DeclaredBytes > 0 {
+		// `space` is how full the guest's own filesystem is — what decides
+		// whether the agent can still write. It is NOT the workspace image's
+		// host allocation, which this chip used to show: allocation counts
+		// every block the guest has ever touched (virtio-blk has no discard,
+		// so freed blocks never come back), making it the disk analogue of
+		// rss. The two diverge without limit under churn — measured
+		// 2026-08-09, `main` showed 20% here while its filesystem held 6.5 MB,
+		// and one group showed 89% with 4.1 GB free. Host allocation is still
+		// reported by the Resources RPC and still drives the host-side
+		// rollup; it just isn't the answer to "how full is this disk".
+		if _, _, frac, ok := guestDiskUsage(r); ok {
+			lparts = append(lparts, renderMetric("space", frac))
+		} else if r.DeclaredBytes > 0 {
+			// Stopped or unreachable guest: allocation is all that is knowable,
+			// and as a high-water mark it is at least an upper bound.
 			lparts = append(lparts, renderMetric("space", float64(r.AllocBytes)/float64(r.DeclaredBytes)))
 		}
 		left = strings.Join(lparts, "")

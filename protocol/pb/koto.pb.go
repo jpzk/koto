@@ -3357,8 +3357,34 @@ type GroupResources struct {
 	// (reclaimable cache counted as free), so used = total - avail.
 	GuestMemTotalBytes int64 `protobuf:"varint,11,opt,name=guest_mem_total_bytes,json=guestMemTotalBytes,proto3" json:"guest_mem_total_bytes,omitempty"`
 	GuestMemAvailBytes int64 `protobuf:"varint,12,opt,name=guest_mem_avail_bytes,json=guestMemAvailBytes,proto3" json:"guest_mem_avail_bytes,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Guest-reported /workspace filesystem, mirrored the same way and for the
+	// same reason: alloc_bytes is to disk what rss_bytes is to memory, a
+	// high-water mark of every block the guest has EVER touched. Firecracker's
+	// virtio-blk has no discard, so blocks a guest frees are never returned to
+	// the host and allocation only ever climbs. The two diverge without limit
+	// under churn — measured 2026-08-09, `main` had allocated 1.62 GiB (20% of
+	// its ceiling) while its filesystem held 6.5 MB, and one group read 89% host-side
+	// with 4.1 GB free inside.
+	//
+	// THESE are the figures that answer "is this group about to run out of
+	// disk", because a guest wedges when ITS filesystem fills. alloc_bytes
+	// answers a different and also-real question — how much host disk this
+	// group has consumed against what it was provisioned — and the host rollup
+	// needs it. Neither substitutes for the other. 0 = unknown (VM stopped,
+	// agent unreachable, or no tick yet).
+	// total is the filesystem's size, avail what an unprivileged writer may
+	// still use, and used what the files actually occupy. All three, because
+	// used != total - avail: ext4 reserves ~5% for root, which is neither used
+	// nor available. Deriving used from the other two counts that reserve as
+	// occupied and reads ~5% full on an empty disk — which is precisely the
+	// kind of "the number looks wrong" this whole field exists to end.
+	// Fullness is used/(used+avail), the same ratio `df` prints, so the figure
+	// matches what anyone checks it against inside the guest.
+	GuestDiskTotalBytes int64 `protobuf:"varint,13,opt,name=guest_disk_total_bytes,json=guestDiskTotalBytes,proto3" json:"guest_disk_total_bytes,omitempty"`
+	GuestDiskAvailBytes int64 `protobuf:"varint,14,opt,name=guest_disk_avail_bytes,json=guestDiskAvailBytes,proto3" json:"guest_disk_avail_bytes,omitempty"`
+	GuestDiskUsedBytes  int64 `protobuf:"varint,15,opt,name=guest_disk_used_bytes,json=guestDiskUsedBytes,proto3" json:"guest_disk_used_bytes,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *GroupResources) Reset() {
@@ -3471,6 +3497,27 @@ func (x *GroupResources) GetGuestMemTotalBytes() int64 {
 func (x *GroupResources) GetGuestMemAvailBytes() int64 {
 	if x != nil {
 		return x.GuestMemAvailBytes
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestDiskTotalBytes() int64 {
+	if x != nil {
+		return x.GuestDiskTotalBytes
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestDiskAvailBytes() int64 {
+	if x != nil {
+		return x.GuestDiskAvailBytes
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestDiskUsedBytes() int64 {
+	if x != nil {
+		return x.GuestDiskUsedBytes
 	}
 	return 0
 }
@@ -4033,7 +4080,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12,\n" +
 	"\x06groups\x18\x03 \x03(\v2\x14.koto.GroupResourcesR\x06groups\x12'\n" +
-	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xb6\x03\n" +
+	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xd3\x04\n" +
 	"\x0eGroupResources\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1f\n" +
@@ -4048,7 +4095,10 @@ const file_koto_proto_rawDesc = "" +
 	"\amem_mib\x18\n" +
 	" \x01(\x05R\x06memMib\x121\n" +
 	"\x15guest_mem_total_bytes\x18\v \x01(\x03R\x12guestMemTotalBytes\x121\n" +
-	"\x15guest_mem_avail_bytes\x18\f \x01(\x03R\x12guestMemAvailBytes\"\xf1\x01\n" +
+	"\x15guest_mem_avail_bytes\x18\f \x01(\x03R\x12guestMemAvailBytes\x123\n" +
+	"\x16guest_disk_total_bytes\x18\r \x01(\x03R\x13guestDiskTotalBytes\x123\n" +
+	"\x16guest_disk_avail_bytes\x18\x0e \x01(\x03R\x13guestDiskAvailBytes\x121\n" +
+	"\x15guest_disk_used_bytes\x18\x0f \x01(\x03R\x12guestDiskUsedBytes\"\xf1\x01\n" +
 	"\rHostResources\x12$\n" +
 	"\x0efs_total_bytes\x18\x01 \x01(\x03R\ffsTotalBytes\x12\"\n" +
 	"\rfs_free_bytes\x18\x02 \x01(\x03R\vfsFreeBytes\x12*\n" +

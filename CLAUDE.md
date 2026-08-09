@@ -243,6 +243,25 @@ verb list.
   than "mem"; the guest figure stayed off the bar because a fourth chip
   overflows the left side's width budget and the renderer then drops the
   whole left side. Read the guest figure via `koto ctl resources`.
+  **`alloc_bytes` is a HIGH-WATER MARK, and is NOT "how full the disk is".**
+  It is the disk twin of `rss_bytes`: virtio-blk has no discard, so a block
+  the guest frees is never returned and allocation counts every block ever
+  touched. The two diverge without limit under churn — measured 2026-08-09 on
+  a group that wrote and deleted 1 GiB repeatedly, allocation reached 73% of
+  its ceiling while the filesystem held 11% and the guest kept writing at
+  68 MB/s. Reaching the ceiling that way is *benign*: the image is
+  preallocated to its declared size, so "every block touched once" costs the
+  guest nothing. Hence the guest's own filesystem is mirrored too
+  (`guest_disk_total/avail/used_bytes`, same sweep and staleness rules as
+  guest memory), and **that** is what the TUI's `space` chip, the fleet
+  `SPACE` column, and the per-group disk alert all read. Fullness is
+  `used/(used+avail)` — df's ratio, not `used/size`: ext4 reserves ~5% for
+  root, which belongs to neither term, and charging it to the group puts an
+  empty workspace at 5%. `used` is read from the guest rather than derived as
+  `total-avail` for exactly that reason. A stopped guest has nothing to ask,
+  so `space` falls back to allocation (an upper bound) and raises no alert —
+  a stopped group cannot wedge. `alloc_bytes` keeps its own job: host cost,
+  the host rollup, and the growth rate.
   Growth rate rather than level is the actionable signal: allocation is
   monotonic because Firecracker's virtio-blk has no discard (`fstrim` in a
   guest fails, so freed guest blocks are never returned — reclaim means an
@@ -268,8 +287,11 @@ verb list.
   daemon-log line at warn/error so the alert survives with no client attached.
   The subjects fail differently and are tracked separately: the **host
   filesystem** (at 100% every guest remounts read-only and the whole fleet
-  wedges) and **each group's image vs. its `size` ceiling** (wedges just that
-  group — 9AZ sat at 98% of its own 24 GiB while the fleet looked fine).
+  wedges) and **each group's GUEST FILESYSTEM** (at 100% that one guest goes
+  read-only and its agent wedges). The per-group subject used to be the
+  image's allocation against its `size` ceiling, which is a different and
+  non-failing condition — see the `space` bullet below; it had one group
+  banner-alerting at 89% with 4.1 GB free inside.
   Alerts fire only on a level *increase*, and a level re-arms only after the
   value drops `resClearMargin` (5 points) below its threshold — without that
   hysteresis a value parked at 80.1% re-notifies every interval and trains the

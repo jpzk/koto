@@ -339,18 +339,21 @@ func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.Resou
 	}
 	for _, g := range groups {
 		out.Groups = append(out.Groups, &pb.GroupResources{
-			Group:              g.Group,
-			Running:            g.Running,
-			AllocBytes:         g.AllocBytes,
-			DeclaredBytes:      g.DeclaredBytes,
-			GrowthBytesPerHour: g.GrowthPerHour,
-			GrowthSpanSeconds:  g.GrowthSpanSecs,
-			RssBytes:           g.RSSBytes,
-			CpuPct:             g.CPUPct,
-			Vcpus:              g.Vcpus,
-			MemMib:             g.MemMiB,
-			GuestMemTotalBytes: g.GuestMemTotal,
-			GuestMemAvailBytes: g.GuestMemAvail,
+			Group:               g.Group,
+			Running:             g.Running,
+			AllocBytes:          g.AllocBytes,
+			DeclaredBytes:       g.DeclaredBytes,
+			GrowthBytesPerHour:  g.GrowthPerHour,
+			GrowthSpanSeconds:   g.GrowthSpanSecs,
+			RssBytes:            g.RSSBytes,
+			CpuPct:              g.CPUPct,
+			Vcpus:               g.Vcpus,
+			MemMib:              g.MemMiB,
+			GuestMemTotalBytes:  g.GuestMemTotal,
+			GuestMemAvailBytes:  g.GuestMemAvail,
+			GuestDiskTotalBytes: g.GuestDiskTotal,
+			GuestDiskAvailBytes: g.GuestDiskAvail,
+			GuestDiskUsedBytes:  g.GuestDiskUsed,
 		})
 	}
 	return out, nil

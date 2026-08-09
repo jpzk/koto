@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -318,28 +319,33 @@ SwapCached:            0 kB
 // outlasts resGuestMaxAge, still must.
 func TestResGuestRetain(t *testing.T) {
 	now := time.Now()
-	fresh := resGuestMem{totalBytes: 1 << 30, availBytes: 800 << 20, at: now.Add(-resSampleInterval)}
-	stale := resGuestMem{totalBytes: 1 << 30, availBytes: 800 << 20, at: now.Add(-resGuestMaxAge - time.Second)}
+	fresh := resGuestMem{totalBytes: 1 << 30, availBytes: 800 << 20,
+		diskTotal: 8 << 30, diskAvail: 6 << 30, diskUsed: 1 << 30, at: now.Add(-resSampleInterval)}
+	stale := fresh
+	stale.at = now.Add(-resGuestMaxAge - time.Second)
+	none := resGuestMem{}
 
-	// A successful read always wins, and re-stamps the age.
-	got, keep := resGuestRetain(fresh, true, true, 2<<30, 1<<30, now)
-	if !keep || got.totalBytes != 2<<30 || !got.at.Equal(now) {
-		t.Errorf("successful read = (%+v, %v), want the new figure stamped now", got, keep)
+	// A successful read always wins, re-stamps the age, and carries BOTH
+	// figures — memory and the guest filesystem ride the same mirror.
+	read := resGuestMem{totalBytes: 2 << 30, availBytes: 1 << 30, diskTotal: 16 << 30, diskAvail: 2 << 30}
+	got, keep := resGuestRetain(fresh, true, true, read, now)
+	if !keep || got.totalBytes != 2<<30 || got.diskTotal != 16<<30 || !got.at.Equal(now) {
+		t.Errorf("successful read = (%+v, %v), want the new figures stamped now", got, keep)
 	}
 	// Running but unanswered, reading still young: hold it.
-	if got, keep = resGuestRetain(fresh, true, true, 0, 0, now); !keep || got != fresh {
+	if got, keep = resGuestRetain(fresh, true, true, none, now); !keep || got != fresh {
 		t.Errorf("one lost exec = (%+v, %v), want the previous reading held", got, keep)
 	}
 	// Running but unanswered too long: drop to unknown.
-	if _, keep = resGuestRetain(stale, true, true, 0, 0, now); keep {
+	if _, keep = resGuestRetain(stale, true, true, none, now); keep {
 		t.Error("silence past resGuestMaxAge kept the reading, want unknown")
 	}
 	// Stopped VM: drop immediately, however fresh the reading was.
-	if _, keep = resGuestRetain(fresh, true, false, 0, 0, now); keep {
+	if _, keep = resGuestRetain(fresh, true, false, none, now); keep {
 		t.Error("stopped VM kept its reading, want unknown")
 	}
 	// Nothing cached and nothing read: unknown.
-	if _, keep = resGuestRetain(resGuestMem{}, false, true, 0, 0, now); keep {
+	if _, keep = resGuestRetain(none, false, true, none, now); keep {
 		t.Error("no prior reading kept something, want unknown")
 	}
 }
@@ -589,5 +595,72 @@ func TestResourcesSnapshotStoppedGroupHasNoCPUOrRSS(t *testing.T) {
 	// Disk is the exception: the image outlives the VM and stays meaningful.
 	if got.AllocBytes == 0 {
 		t.Error("stopped group alloc = 0, want the image's real allocation")
+	}
+}
+
+// The guest filesystem probe. `stat -f -c '%S %b %a'` is block size, total
+// blocks, blocks available to unprivileged users — available rather than
+// free, so the figure matches the guest's own `df` and what an agent can
+// actually write.
+func TestResParseGuestFS(t *testing.T) {
+	// blocks=2038452, free=1715000, avail=1613017 — free > avail by ext4's
+	// root reserve, which is the whole reason `used` is read rather than
+	// derived.
+	total, avail, used := resParseGuestFS("MemTotal: 1 kB\nKOTOFS 4096 2038452 1715000 1613017\nMemAvailable: 1 kB\n")
+	if want := int64(4096 * 2038452); total != want {
+		t.Errorf("total = %d, want %d", total, want)
+	}
+	if want := int64(4096 * 1613017); avail != want {
+		t.Errorf("avail = %d, want %d", avail, want)
+	}
+	if want := int64(4096 * (2038452 - 1715000)); used != want {
+		t.Errorf("used = %d, want %d", used, want)
+	}
+	// Derived-from-total-minus-avail would have counted the reserve:
+	if total-avail == used {
+		t.Error("used equals total-avail; the root reserve is being counted as used")
+	}
+	for _, s := range []string{"", "KOTOFS", "KOTOFS 4096", "KOTOFS 4096 2038452 1715000",
+		"KOTOFS w x y z", "KOTOFS 0 100 90 50", "KOTOFS 4096 0 0 0",
+		"KOTOFS 4096 100 200 50", // free > blocks: nonsense
+		"4096 2038452 1715000 1613017"} {
+		if tot, av, us := resParseGuestFS(s); tot != 0 || av != 0 || us != 0 {
+			t.Errorf("resParseGuestFS(%q) = (%d, %d, %d), want zeros", s, tot, av, us)
+		}
+	}
+}
+
+// Fullness must be df's ratio — used/(used+avail) — not used/size. An empty
+// ext4 filesystem has ~5% reserved for root; charging that to the group made
+// an empty workspace read 5% full.
+func TestResGuestDiskPctMatchesDf(t *testing.T) {
+	// main, measured 2026-08-09: 6.4 MB used, 7.4 GiB available in a 7.8 GiB
+	// filesystem. df says 1%; used/size would say 5%.
+	if got := resGuestDiskPct(6<<20, 7400<<20); got > 1 {
+		t.Errorf("near-empty disk = %.2f%%, want <1%% (df's ratio)", got)
+	}
+	if got := resGuestDiskPct(1<<30, 1<<30); got < 49 || got > 51 {
+		t.Errorf("half full = %.2f%%, want ~50", got)
+	}
+	if got := resGuestDiskPct(0, 0); got != 0 {
+		t.Errorf("unknown = %.2f%%, want 0", got)
+	}
+}
+
+// The probe fetches memory and the filesystem in ONE exec, so the sweep's
+// guest leg costs exactly what it did when it only fetched memory. Both
+// halves must survive the split.
+func TestResGuestProbeParsesBothHalves(t *testing.T) {
+	// Both parsers read the SAME output and find their own data — the halves
+	// cannot silently decouple the way a separator-split probe did.
+	out := "KOTOFS 4096 2038452 1715000 1613017\nMemTotal:        1010896 kB\nMemAvailable:     824464 kB\n"
+	if total, avail := resParseMemInfo(out); total == 0 || avail == 0 {
+		t.Errorf("memory half unparsed: (%d, %d)", total, avail)
+	}
+	if total, avail, used := resParseGuestFS(out); total == 0 || avail == 0 || used == 0 {
+		t.Errorf("filesystem half unparsed: (%d, %d, %d)", total, avail, used)
+	}
+	if !strings.Contains(resGuestProbe, resGuestProbeTag) {
+		t.Error("probe command does not emit its own tag")
 	}
 }

@@ -89,6 +89,17 @@ type GroupRes struct {
 	// figure — RSSBytes ratchets to ~100% of the preset and stays there.
 	GuestMemTotal int64
 	GuestMemAvail int64
+	// GuestDiskTotal/GuestDiskAvail are the guest's own /workspace filesystem
+	// — how full the disk actually is. AllocBytes is the host's cost for this
+	// group and is a high-water mark of every block ever touched, so the two
+	// diverge without limit under churn. 0 = unknown (VM stopped or
+	// unreachable).
+	GuestDiskTotal int64
+	GuestDiskAvail int64
+	// GuestDiskUsed is read from the guest, not derived: ext4 reserves ~5%
+	// for root, which is neither used nor available, so total-minus-avail
+	// charges that reserve to the group and puts an empty workspace at 5%.
+	GuestDiskUsed int64
 }
 
 // HostRes is the fleet-wide rollup of the Resources RPC (koto.proto
@@ -112,4 +123,25 @@ type LogEvent struct {
 	Ts        float64
 	Subsystem string // emitting subsystem (acl, fc, egress, ...); may be empty from older daemons
 	Group     string // owning group for group-scoped lines; "" = daemon-wide
+}
+
+// guestDiskUsage returns the guest filesystem's used and total bytes, and
+// whether they are known. This is the honest "how full is this disk" pair:
+// GroupRes.AllocBytes is the host's cost for the group and ratchets upward
+// with every block ever touched, so it answers a different question. Unknown
+// (a stopped or unreachable guest) is reported rather than approximated, so
+// callers choose their own fallback instead of silently mixing the two.
+// The reported fraction is df's — used/(used+avail), NOT used/size — so the
+// chip agrees with what `df` prints inside the guest. `total` is returned
+// separately because the fleet table shows the filesystem's real size beside
+// the fraction, exactly as `df -h` does.
+func guestDiskUsage(r GroupRes) (used, total int64, frac float64, ok bool) {
+	if r.GuestDiskTotal <= 0 {
+		return 0, 0, 0, false
+	}
+	den := r.GuestDiskUsed + r.GuestDiskAvail
+	if den <= 0 {
+		return 0, 0, 0, false
+	}
+	return r.GuestDiskUsed, r.GuestDiskTotal, float64(r.GuestDiskUsed) / float64(den), true
 }

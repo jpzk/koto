@@ -251,6 +251,13 @@ type GroupResources struct {
 	// RSSBytes is a high-water mark of guest-touched pages — no balloon
 	// device — so it reads ~100% of the preset on any VM that has done real
 	// I/O; these are the truthful pressure figures. 0/absent = unknown.
+	GuestDiskTotalBytes int64 `json:"guest_disk_total_bytes,omitempty"`
+	GuestDiskAvailBytes int64 `json:"guest_disk_avail_bytes,omitempty"`
+	GuestDiskUsedBytes  int64 `json:"guest_disk_used_bytes,omitempty"`
+	// GuestDiskUsedPct is the guest filesystem's own fullness — the figure
+	// that answers "is this group about to wedge". AllocPct answers a
+	// different question (host cost against what was provisioned).
+	GuestDiskUsedPct   float64 `json:"guest_disk_used_pct,omitempty"`
 	GuestMemTotalBytes int64   `json:"guest_mem_total_bytes,omitempty"`
 	GuestMemAvailBytes int64   `json:"guest_mem_avail_bytes,omitempty"`
 	GuestMemUsedPct    float64 `json:"guest_mem_used_pct,omitempty"`

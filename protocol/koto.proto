@@ -551,6 +551,32 @@ message GroupResources {
   // (reclaimable cache counted as free), so used = total - avail.
   int64  guest_mem_total_bytes = 11;
   int64  guest_mem_avail_bytes = 12;
+  // Guest-reported /workspace filesystem, mirrored the same way and for the
+  // same reason: alloc_bytes is to disk what rss_bytes is to memory, a
+  // high-water mark of every block the guest has EVER touched. Firecracker's
+  // virtio-blk has no discard, so blocks a guest frees are never returned to
+  // the host and allocation only ever climbs. The two diverge without limit
+  // under churn — measured 2026-08-09, `main` had allocated 1.62 GiB (20% of
+  // its ceiling) while its filesystem held 6.5 MB, and one group read 89% host-side
+  // with 4.1 GB free inside.
+  //
+  // THESE are the figures that answer "is this group about to run out of
+  // disk", because a guest wedges when ITS filesystem fills. alloc_bytes
+  // answers a different and also-real question — how much host disk this
+  // group has consumed against what it was provisioned — and the host rollup
+  // needs it. Neither substitutes for the other. 0 = unknown (VM stopped,
+  // agent unreachable, or no tick yet).
+  // total is the filesystem's size, avail what an unprivileged writer may
+  // still use, and used what the files actually occupy. All three, because
+  // used != total - avail: ext4 reserves ~5% for root, which is neither used
+  // nor available. Deriving used from the other two counts that reserve as
+  // occupied and reads ~5% full on an empty disk — which is precisely the
+  // kind of "the number looks wrong" this whole field exists to end.
+  // Fullness is used/(used+avail), the same ratio `df` prints, so the figure
+  // matches what anyone checks it against inside the guest.
+  int64  guest_disk_total_bytes = 13;
+  int64  guest_disk_avail_bytes = 14;
+  int64  guest_disk_used_bytes  = 15;
 }
 
 // Fleet-wide rollup for the filesystem the groups directory lives on.
