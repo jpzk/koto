@@ -61,6 +61,10 @@ type shellSession struct {
 	ended   bool
 	errText string
 
+	// panics counts emulator panics recovered by feed — only to keep the
+	// log line to one per session (see feed).
+	panics int
+
 	// sendMu serializes stream.Send calls: the Update goroutine sends
 	// keystrokes/resizes, while a separate goroutine (started in
 	// startShellAttach) drains term.Read() and sends those bytes too — see
@@ -206,6 +210,60 @@ func (s *shellSession) send(b []byte) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	_ = s.stream.Send(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Data{Data: b}})
+}
+
+// feed parses one chunk of raw guest pty output into the local emulator —
+// the ONLY place untrusted guest bytes reach it — and never lets that parse
+// take the whole TUI down with it.
+//
+// The emulator does not treat its input as adversarial: a guest can drive it
+// into a state where its own screen operations index out of bounds, and the
+// panic unwinds through Update() straight out of bubbletea's event loop,
+// killing the operator's TUI. The observed case (2026-08-09) is the scroll
+// region outliving the geometry it was set for. The guest sets DECSTBM
+// (`CSI 1;80r`) for the size IT believes the terminal is; vt stores the
+// bottom margin unclamped (handlers.go's 'r' handler), and Screen.DeleteLine
+// then shifts lines up to that margin. Both agree until the two sizes
+// diverge — which they routinely do here, because this pane is one client of
+// a SHARED tmux session: resizing the operator's terminal shrinks the local
+// emulator immediately while the guest keeps painting the old geometry until
+// its SIGWINCH lands, and tmux (window-size=latest) sizes the window to
+// whichever client attached last, which may be the group's own agent. So a
+// pane of 79 rows receives `CSI 1;80r` + `CSI 14S` and indexes row 79 of a
+// 79-row buffer. Nothing about that is exotic, and a hostile guest can
+// produce it deliberately — which makes crashing on it a guest-controlled
+// kill of the operator's UI, not just a cosmetic bug.
+//
+// Recovering is enough because the damage is bounded: line lengths are never
+// changed by the operations that panic, so the buffer stays rectangular and
+// Render() stays safe. The repair is a resize to the size we already believe
+// (Screen.Resize unconditionally resets the scroll region to the buffer's
+// bounds, whether or not the dimensions changed) plus the same geometry
+// re-announced to the guest, which is exactly the disagreement that caused
+// this. The rest of the panicking chunk is dropped — the parser aborted
+// mid-buffer and there is no way to tell how far it got — so the pane can be
+// briefly garbled until the guest's next repaint.
+func (s *shellSession) feed(data []byte) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		s.panics++
+		// Local repair on every panic; the log line and the re-announcement
+		// to the guest only on the first, so a guest looping on this can
+		// neither fill the log nor make us flood its stream with resizes
+		// (it is told our geometry by every real resize anyway).
+		if s.panics == 1 {
+			logWarn("shell", "emulator panic on guest output (%s/%s, %dx%d): %v — resetting pane",
+				s.group, s.session, s.cols, s.rows, r)
+			s.resize(s.cols, s.rows)
+			return
+		}
+		logDbg("shell", "emulator panic #%d (%s/%s): %v", s.panics, s.group, s.session, r)
+		s.term.Resize(s.cols, s.rows)
+	}()
+	_, _ = s.term.Write(data)
 }
 
 // resize updates the local emulator's grid AND tells the guest, so tmux's

@@ -273,7 +273,8 @@ func FuzzShellVTFrame(f *testing.F) {
 	f.Add([]byte("\x9b31mC1-CSI\x85NEL\xc2\x9b"), uint8(120), uint8(24), uint8(0))
 	f.Add([]byte(strings.Repeat("あ日本語テキスト🔥", 40)), uint8(33), uint8(9), uint8(1))
 	f.Add([]byte("\ttabs\tand\rCR\x07bell\x08BS"), uint8(90), uint8(20), uint8(0))
-	f.Add([]byte("\x1b[31m日本語 nostr 🔥\x1b[0m"), uint8(200), uint8(30), uint8(129)) // mono + focusShell
+	f.Add([]byte("\x1b[31m日本語 nostr 🔥\x1b[0m"), uint8(200), uint8(30), uint8(129))                // mono + focusShell
+	f.Add([]byte("\x1b[1;40r\x1b[14S\x1b[?69h\x1b[1;100s\x1b[9L"), uint8(30), uint8(3), uint8(1)) // margins past the pane (panicked vt)
 	f.Fuzz(func(t *testing.T, data []byte, wb, hb, mode uint8) {
 		if len(data) > 4096 {
 			t.Skip()
@@ -315,10 +316,14 @@ func FuzzShellVTFrame(f *testing.F) {
 		m.resizeViewport()
 		m.refreshLog()
 
+		// feed, not term.Write: the production path guards the parse against
+		// emulator panics on guest bytes (shell_view.go), and the fuzzer is
+		// modelling exactly that path — the frame checks below still hold it
+		// to a sane render afterwards.
 		half := len(data) / 2
-		_, _ = term.Write(data[:half])
+		m.shell.feed(data[:half])
 		checkFrame(t, m.View(), width, height)
-		_, _ = term.Write(data[half:])
+		m.shell.feed(data[half:])
 		checkFrame(t, m.View(), width, height)
 	})
 }

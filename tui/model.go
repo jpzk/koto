@@ -2532,7 +2532,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(msg.data) > 0 {
-			_, _ = m.shell.term.Write(msg.data)
+			// feed, not term.Write: guest bytes can panic the emulator, and
+			// that unwinds out of the event loop (shell_view.go).
+			m.shell.feed(msg.data)
 		}
 		if msg.end || msg.errText != "" {
 			m.shell.ended = true
