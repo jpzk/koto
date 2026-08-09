@@ -65,10 +65,24 @@ func renderBar(frac float64, width int, fg lipgloss.Color) string {
 	if monoMode {
 		onGlyph, offGlyph = "#", "-"
 	}
+	// In colour mode the two halves are the SAME glyph told apart only by
+	// colour, so a caller asking for the empty half's own colour collapses the
+	// bar into one indistinguishable run. The rss chip did exactly that: it
+	// passes cGray deliberately — it must never scream rose, since with no
+	// balloon device it parks near 100% forever — and the result was eight
+	// gray blocks at every value, a bar that had stopped encoding anything.
+	// "Ambient, not an alert" should cost the chip its colour, not its
+	// meaning, so the fill falls back to the neutral tone; the caller's gray
+	// still governs the label and percentage. Mono is unaffected — it splits
+	// by glyph, which is why that split exists.
+	fillFg := fg
+	if fillFg == cGray {
+		fillFg = cWhite
+	}
 	// No alertify() here: the caller underlines the chip's label and percentage
 	// for the alert tier, and running that rule under the fill too would just
 	// blur the one thing this glyph split exists to keep readable.
-	on := lipgloss.NewStyle().Foreground(fg).Background(cBlack).
+	on := lipgloss.NewStyle().Foreground(fillFg).Background(cBlack).
 		Render(strings.Repeat(onGlyph, filled))
 	off := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
 		Render(strings.Repeat(offGlyph, width-filled))

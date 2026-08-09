@@ -5,8 +5,12 @@ package main
 // priority when the terminal is too narrow for both.
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // resModel: wide chat view with a resource snapshot for the active group.
@@ -95,5 +99,89 @@ func TestMetricsBarDropsLeftWhenNarrow(t *testing.T) {
 	}
 	if strings.Contains(bar, "cpu") {
 		t.Fatalf("narrow metrics bar kept the left side: %q", bar)
+	}
+}
+
+// barCells renders a bar and returns one entry per visible cell: the glyph
+// paired with the SGR foreground in force for it. Comparing STRINGS is not
+// enough — the filled and empty runs are emitted as two separate styled
+// spans, so their escape sequences differ even when both runs paint the same
+// colour and the bar is visually uniform. What the eye sees is the cell list.
+func barCells(s string) []string {
+	var out []string
+	fg := ""
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' && s[j] != 'H' && s[j] != 'K' {
+				j++
+			}
+			if j < len(s) && s[j] == 'm' {
+				params := s[i+2 : j]
+				for _, p := range strings.Split(params, ";") {
+					if n, err := strconv.Atoi(p); err == nil {
+						if (n >= 30 && n <= 37) || (n >= 90 && n <= 97) {
+							fg = p
+						} else if n == 0 {
+							fg = ""
+						}
+					}
+				}
+				if strings.Contains(params, "38;5;") {
+					fg = params[strings.Index(params, "38;5;"):]
+				}
+			}
+			i = j + 1
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == '\u2588' || r == '#' || r == '-' {
+			out = append(out, string(r)+"/"+fg)
+		}
+		i += size
+	}
+	return out
+}
+
+// A bar must encode its fill level at every colour a caller may ask for.
+// The rss chip passes cGray on purpose — it must never scream rose, since the
+// VMM's RSS parks near 100% forever with no balloon device — and cGray is also
+// renderBar's colour for the EMPTY half, so every cell came out identical:
+// eight gray blocks whether the group was at 5% or 95%. Colour mode tells the
+// halves apart by colour alone, so "same colour" means "no bar".
+func TestRenderBarFillVisibleAtEveryColor(t *testing.T) {
+	withColor(t)
+	for _, fg := range []lipgloss.Color{cWhite, cRose, cGray} {
+		cells := barCells(renderBar(0.5, 8, fg))
+		if len(cells) != 8 {
+			t.Fatalf("fg %v: got %d cells, want 8 (%q)", fg, len(cells), cells)
+		}
+		distinct := map[string]int{}
+		for _, c := range cells {
+			distinct[c]++
+		}
+		if len(distinct) < 2 {
+			t.Errorf("fg %v: half-full bar is visually uniform (%v) — fill level invisible", fg, distinct)
+		}
+		if distinct[cells[0]] != 4 {
+			t.Errorf("fg %v: filled run is %d cells, want 4 (%v)", fg, distinct[cells[0]], cells)
+		}
+	}
+}
+
+// The neutral fallback must not leak into the chip's LABEL: renderBar only
+// promotes the fill, and an empty or full bar stays a single uniform run
+// because there is genuinely only one run to draw.
+func TestRenderBarDegenerateFillsAreUniform(t *testing.T) {
+	withColor(t)
+	for _, frac := range []float64{0, 1} {
+		cells := barCells(renderBar(frac, 8, cGray))
+		distinct := map[string]bool{}
+		for _, c := range cells {
+			distinct[c] = true
+		}
+		if len(distinct) != 1 {
+			t.Errorf("frac %v: want one uniform run, got %v", frac, distinct)
+		}
 	}
 }
