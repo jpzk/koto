@@ -86,6 +86,82 @@ func TestResGrowth(t *testing.T) {
 	}
 }
 
+// Growth is a rate over a bounded recent window, not an average since the
+// ring began. Measured 2026-08-09 under the old whole-ring form: one 1 GiB
+// write into a four-minute-old ring reported 16.1 GB/h and was still claiming
+// 7.6 GB/h five minutes after the write finished — a "time to full"
+// projection built on either number is fiction. Here a single 1 GiB burst
+// sits at the head of an hour-long ring: it must age out of the window, not
+// smear across it.
+func TestResGrowthUsesTrailingWindow(t *testing.T) {
+	base := time.Now()
+	var samples []resSample
+	// One hour of 30s samples. A 1 GiB burst lands at t+1m, nothing after.
+	for i := 0; i <= 120; i++ {
+		at := base.Add(time.Duration(i) * resSampleInterval)
+		alloc := int64(1 << 30)
+		if at.After(base.Add(time.Minute)) {
+			alloc = 2 << 30
+		}
+		samples = append(samples, resSample{at: at, allocBytes: alloc})
+	}
+	rate, span := resGrowth(samples)
+	if rate != 0 {
+		t.Errorf("rate = %d, want 0 — the burst is far outside the window", rate)
+	}
+	if want := int64(resGrowthWindow.Seconds()); span != want {
+		t.Errorf("span = %d, want %d (the window, not the whole ring)", span, want)
+	}
+
+	// The same burst INSIDE the window does show up, at the window's rate:
+	// 1 GiB over 10 minutes = 6 GiB/h.
+	n := len(samples)
+	samples[n-2].allocBytes = 1 << 30
+	samples[n-1].allocBytes = 2 << 30
+	for i := 0; i < n-2; i++ {
+		samples[i].allocBytes = 1 << 30
+	}
+	rate, _ = resGrowth(samples)
+	if want := int64(6 << 30); rate != want {
+		t.Errorf("rate = %d, want %d (1 GiB across the %v window)", rate, want, resGrowthWindow)
+	}
+}
+
+// A ring that doesn't reach back a full window reports "not yet known"
+// rather than dividing by whatever span it has. Observed 2026-08-09 without
+// this: one 1.5 GiB write into a young ring read 35 GiB/h and then decayed
+// through 25 / 19.5 / 16 / 13.5 / 11.7 across eight minutes of total disk
+// idleness, purely because the denominator was growing.
+func TestResGrowthYoungRingIsUnknown(t *testing.T) {
+	base := time.Now()
+	var samples []resSample
+	// A burst, then idle — but the ring stops one sample short of the window.
+	for at := time.Duration(0); at < resGrowthWindow; at += resSampleInterval {
+		alloc := int64(1 << 30)
+		if at > 0 {
+			alloc = 2 << 30
+		}
+		samples = append(samples, resSample{at: base.Add(at), allocBytes: alloc})
+	}
+	if rate, span := resGrowth(samples); rate != 0 || span != 0 {
+		t.Errorf("resGrowth on a sub-window ring = (%d, %d), want (0, 0)", rate, span)
+	}
+	// One more sample and the ring spans the window, so it reports. The
+	// pre-burst sample is still exactly on the cutoff, so the burst is still
+	// inside: 1 GiB across the window = 6 GiB/h.
+	samples = append(samples, resSample{at: base.Add(resGrowthWindow), allocBytes: 2 << 30})
+	if rate, span := resGrowth(samples); rate != 6<<30 || span != int64(resGrowthWindow.Seconds()) {
+		t.Errorf("resGrowth at exactly one window = (%d, %d), want (%d, %d)",
+			rate, span, int64(6<<30), int64(resGrowthWindow.Seconds()))
+	}
+	// A sample later the burst has aged out of the window entirely, and an
+	// idle disk reads as what it is: flat.
+	samples = append(samples, resSample{at: base.Add(resGrowthWindow + resSampleInterval), allocBytes: 2 << 30})
+	if rate, _ := resGrowth(samples); rate != 0 {
+		t.Errorf("resGrowth once the burst aged out = %d, want 0", rate)
+	}
+}
+
 func TestResCPUPct(t *testing.T) {
 	base := time.Now()
 	// 1000 ticks (10s of CPU at 100Hz) over a 10s span = 100% of one core.
@@ -110,10 +186,9 @@ func TestResCPUPct(t *testing.T) {
 	}
 }
 
-// resLiveCPUPct is the per-call window behind the fleet view's live CPU
-// column: first call seeds and returns the fallback, later calls average
-// over the span since the previous call, sub-second re-reads return the
-// cached value, and a ticks reset (VM restart) reports 0, not a spike.
+// resLiveCPUPct is the trailing window behind the fleet view's live CPU
+// column: the first call seeds and returns the fallback, later calls measure
+// over ~resLiveWindow, and a ticks reset (VM restart) reports 0, not a spike.
 func TestResLiveCPUPct(t *testing.T) {
 	g := "livetest"
 	resLiveForget(g)
@@ -127,11 +202,6 @@ func TestResLiveCPUPct(t *testing.T) {
 	if got := resLiveCPUPct(g, 1500, base.Add(5*time.Second), 42); got < 99 || got > 101 {
 		t.Errorf("second call = %v, want ~100", got)
 	}
-	// A lockstep re-read 200ms later must return the cached value, not a
-	// noise-dominated sub-second average.
-	if got := resLiveCPUPct(g, 1500, base.Add(5200*time.Millisecond), 42); got < 99 || got > 101 {
-		t.Errorf("sub-second re-read = %v, want the cached ~100", got)
-	}
 	// Counter reset (VMM restart): one window of 0, never negative.
 	if got := resLiveCPUPct(g, 10, base.Add(10*time.Second), 42); got != 0 {
 		t.Errorf("after counter reset = %v, want 0", got)
@@ -139,6 +209,61 @@ func TestResLiveCPUPct(t *testing.T) {
 	// And the window after the reset is live again: 100 ticks over 5s = 20%.
 	if got := resLiveCPUPct(g, 110, base.Add(15*time.Second), 42); got < 19 || got > 21 {
 		t.Errorf("post-reset window = %v, want ~20", got)
+	}
+}
+
+// The figure must describe the VM, not the observers. Every consumer of the
+// snapshot shares this state — the TUI's 5s poll, any number of `koto ctl
+// resources` callers, the 30s threshold sweep — and under the previous
+// single-cursor scheme each caller measured "since whoever last looked", so
+// two interleaved pollers turned a VM pinned at a true 50% into a 33/56/39/52
+// sawtooth (observed 2026-08-09). Here two pollers interleave at 5s each,
+// 2.5s out of phase, against a VM burning exactly one core: every reading
+// either poller gets must be ~100%.
+func TestResLiveCPUPctStableAcrossPollers(t *testing.T) {
+	g := "livemulti"
+	resLiveForget(g)
+	defer resLiveForget(g)
+	base := time.Now()
+
+	// 100 ticks per second of wall clock = 100% of one core, exactly.
+	ticksAt := func(d time.Duration) int64 { return int64(d.Seconds() * 100) }
+
+	// Seed both pollers, then interleave for a minute.
+	resLiveCPUPct(g, ticksAt(0), base, 0)
+	resLiveCPUPct(g, ticksAt(2500*time.Millisecond), base.Add(2500*time.Millisecond), 0)
+	for at := 5 * time.Second; at <= 60*time.Second; at += 2500 * time.Millisecond {
+		got := resLiveCPUPct(g, ticksAt(at), base.Add(at), 0)
+		if got < 99 || got > 101 {
+			t.Fatalf("poll at %v = %v%%, want ~100 regardless of poller count", at, got)
+		}
+	}
+}
+
+// A caller polling far faster than the window must still get the window's
+// rate, not a sub-second sample amplified into a spike.
+func TestResLiveCPUPctSubSecondPolling(t *testing.T) {
+	g := "livefast"
+	resLiveForget(g)
+	defer resLiveForget(g)
+	base := time.Now()
+
+	// Steady 50% of one core: 50 ticks per second.
+	for i := 0; i <= 200; i++ {
+		at := time.Duration(i) * 100 * time.Millisecond
+		got := resLiveCPUPct(g, int64(at.Seconds()*50), base.Add(at), 0)
+		// Below one window of history the answer is the seed/short-span
+		// approximation; past it, it must be the real rate.
+		if at >= resLiveWindow && (got < 49 || got > 51) {
+			t.Fatalf("poll at %v = %v%%, want ~50", at, got)
+		}
+	}
+	// The trail stays bounded under that hammering.
+	resLiveMu.Lock()
+	n := len(resLiveMap[g])
+	resLiveMu.Unlock()
+	if n > resLiveKeep {
+		t.Errorf("trail len = %d, want <= %d", n, resLiveKeep)
 	}
 }
 
@@ -183,6 +308,39 @@ SwapCached:            0 kB
 	}
 	if avail != 824464<<10 {
 		t.Errorf("avail = %d, want %d", avail, 824464<<10)
+	}
+}
+
+// The guest leg is a 5s exec into a VM that may be busy, and on an
+// oversubscribed host it loses often enough that a healthy group's memory
+// figure blinked out of the snapshot every few sweeps (observed 2026-08-09).
+// One lost exec must not blank the figure; a stopped VM, or a silence that
+// outlasts resGuestMaxAge, still must.
+func TestResGuestRetain(t *testing.T) {
+	now := time.Now()
+	fresh := resGuestMem{totalBytes: 1 << 30, availBytes: 800 << 20, at: now.Add(-resSampleInterval)}
+	stale := resGuestMem{totalBytes: 1 << 30, availBytes: 800 << 20, at: now.Add(-resGuestMaxAge - time.Second)}
+
+	// A successful read always wins, and re-stamps the age.
+	got, keep := resGuestRetain(fresh, true, true, 2<<30, 1<<30, now)
+	if !keep || got.totalBytes != 2<<30 || !got.at.Equal(now) {
+		t.Errorf("successful read = (%+v, %v), want the new figure stamped now", got, keep)
+	}
+	// Running but unanswered, reading still young: hold it.
+	if got, keep = resGuestRetain(fresh, true, true, 0, 0, now); !keep || got != fresh {
+		t.Errorf("one lost exec = (%+v, %v), want the previous reading held", got, keep)
+	}
+	// Running but unanswered too long: drop to unknown.
+	if _, keep = resGuestRetain(stale, true, true, 0, 0, now); keep {
+		t.Error("silence past resGuestMaxAge kept the reading, want unknown")
+	}
+	// Stopped VM: drop immediately, however fresh the reading was.
+	if _, keep = resGuestRetain(fresh, true, false, 0, 0, now); keep {
+		t.Error("stopped VM kept its reading, want unknown")
+	}
+	// Nothing cached and nothing read: unknown.
+	if _, keep = resGuestRetain(resGuestMem{}, false, true, 0, 0, now); keep {
+		t.Error("no prior reading kept something, want unknown")
 	}
 }
 

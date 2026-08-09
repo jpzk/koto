@@ -212,21 +212,32 @@ verb list.
   bytes and remounting guests read-only). It therefore stays truthful for
   stopped/wedged groups, costs a few syscalls per 30s tick, and — unlike the
   jobs mirror — runs **ungated by watchers**, since exhaustion must be
-  observable when nobody is attached. **CPU/RSS are additionally live per
-  call**: `resourcesSnapshot` reads a running VM's `/proc` fresh and reports
-  CPU over the window since the *previous* snapshot call (`resLiveCPUPct` —
-  top semantics, the poll interval is the averaging window; the TUI's 5s poll
-  makes the fleet view's CPU column ~5s-live instead of the sweep's 30s
-  trailing average, which lagged a turn's burst by half a minute). The sweep
-  ring stays authoritative for growth rate and thresholds. **One deliberate exception: guest
+  observable when nobody is attached. **Disk/CPU/RSS are all read LIVE per
+  call, never served from the sweep ring**: `resourcesSnapshot` stats the
+  image and reads a running VM's `/proc` fresh on every call. Allocation used
+  to come from the ring and so lagged up to a full sweep — measured
+  2026-08-09, a group that had just written 1 GiB reported 191 MB for 16
+  seconds, a 6× understatement on the one number this collector exists for,
+  across exactly the window a runaway writer would be caught in; the fix is
+  one extra `stat(2)`. CPU is measured over a **fixed ~5s trailing window**
+  (`resLiveCPUPct`, top semantics) held as a short per-group trail of
+  readings, *not* as a single cursor: every consumer shares this state (the
+  TUI's 5s poll, any number of `koto ctl resources` callers, the 30s
+  threshold sweep), and a single cursor made each caller's window "since
+  whoever last looked" — two interleaved pollers turned a VM at a true ~50%
+  into a 33/56/39/52 sawtooth. The ring stays authoritative for growth rate
+  and the sustained-CPU threshold. **One deliberate exception: guest
   memory.** The VMM's RSS is a *high-water mark* of guest-touched pages —
   no balloon device, so page cache from any I/O-heavy turn parks RSS at
   ~100% of `mem_mib` forever (2026-08-04: one group read 94% host-side with 805
   of 987 MiB available inside). The host has no truthful view of
   guest-internal memory, so each sweep also mirrors `/proc/meminfo` out of
-  every *running* guest (parallel bounded `fcExec`s, never boots a VM,
-  degrades to "unknown" rather than going stale) into
-  `guest_mem_total/avail_bytes`; both planes report RSS *and* the guest
+  every *running* guest (parallel bounded `fcExec`s, never boots a VM) into
+  `guest_mem_total/avail_bytes`; a reading is held for **at most 3 sweeps**
+  and then reported as "unknown" — a stopped VM drops immediately, but one
+  lost exec no longer blanks the figure (the 5s guest exec loses often enough
+  on a loaded host that healthy groups' memory blinked out every few sweeps).
+  Both planes report RSS *and* the guest
   figure. The TUI metrics bar shows only `rss` (gray — a cost figure, and a
   chip that parks near 100% must not scream rose), labeled honestly rather
   than "mem"; the guest figure stayed off the bar because a fourth chip
@@ -235,7 +246,15 @@ verb list.
   Growth rate rather than level is the actionable signal: allocation is
   monotonic because Firecracker's virtio-blk has no discard (`fstrim` in a
   guest fails, so freed guest blocks are never returned — reclaim means an
-  offline `e2fsck` + `resize2fs -M` + `truncate`). The verb is **global and
+  offline `e2fsck` + `resize2fs -M` + `truncate`). **Growth is measured over
+  a fixed 10-minute trailing window, and reports 0 = "not yet known" until
+  the ring reaches back that far** (so ~10 min of blindness after a daemon
+  restart). It used to be the average across the whole retained ring, which
+  is not a rate: measured 2026-08-09, one 1.5 GiB write into a young ring
+  read 35 GiB/h and then decayed through 25 / 19.5 / 16 / 13.5 / 11.7 across
+  eight minutes of total disk idleness, purely because the denominator was
+  growing. Verified end-to-end against a guest writing a known 7.03 GiB/h:
+  reported 7.03 GiB/h vs a host-measured 6.95 GiB/h. The verb is **global and
   untargeted** (no group field) and grantable: admin has it via the superuser
   rule, and it is deliberately NOT in `adminOnlyVerbs`, so a read-only
   monitoring role can be granted `resources` through acl.json. `main` also

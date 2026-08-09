@@ -83,14 +83,32 @@ var (
 	resRing = map[string][]resSample{}
 )
 
-// resGuestMem is the latest guest-reported memory figure per group, present
-// only for groups whose agent answered on the last sweep. No ring: unlike
-// allocation there is no rate to derive, and a stale figure is worse than an
-// absent one — "unknown" renders as no data, a stale number reads as truth.
+// resGuestMem is the latest guest-reported memory figure per group. No ring:
+// unlike allocation there is no rate to derive, and an indefinitely stale
+// figure is worse than an absent one — "unknown" renders as no data, a stale
+// number reads as truth.
+//
+// It is retained for a bounded time rather than dropped the instant one exec
+// misses, because "never stale" and "flaps" turned out to be the same thing
+// in practice: the guest leg is a 5s exec into a VM that may be busy, and on
+// an oversubscribed host it loses often enough that a running group's memory
+// figure blinked out of the snapshot every few sweeps (measured 2026-08-09 —
+// BRAVO and crackcup each vanished for a sweep or two while perfectly
+// healthy). A figure a minute old still answers "is this guest under memory
+// pressure"; a column that empties at random answers nothing. The `at` stamp
+// is what keeps the original guarantee: past resGuestMaxAge it is dropped,
+// so a stopped or wedged VM still reports unknown rather than its last
+// healthy reading forever.
 type resGuestMem struct {
 	totalBytes int64
 	availBytes int64
+	at         time.Time
 }
+
+// resGuestMaxAge is how long a guest memory reading survives failed refreshes
+// — three sweeps, so a single lost exec is invisible but a genuinely
+// unreachable guest goes unknown promptly.
+const resGuestMaxAge = 3 * resSampleInterval
 
 var (
 	resGuestMu  sync.Mutex
@@ -130,32 +148,52 @@ func resParseMemInfo(s string) (total, avail int64) {
 }
 
 // resSweepGuestMem refreshes the guest memory mirror for every RUNNING group
-// in one parallel round of bounded agent execs. Groups that are stopped or
-// whose agent doesn't answer are dropped from the map — see resGuestMem for
-// why absence beats staleness. Never boots a VM: fcExec only dials, and the
-// running check filters the rest.
+// in one parallel round of bounded agent execs. A group that is stopped drops
+// immediately (its figure cannot be true any more); one whose agent simply
+// didn't answer in time keeps its last reading until resGuestMaxAge — see
+// resGuestMem for why bounded staleness beats a flapping column. Never boots
+// a VM: fcExec only dials, and the running check filters the rest.
 func resSweepGuestMem(groups []string) {
+	now := time.Now()
 	var wg sync.WaitGroup
 	for _, g := range groups {
 		wg.Add(1)
 		go func(g string) {
 			defer wg.Done()
+			running := fcRunning(g)
 			var total, avail int64
-			if fcRunning(g) {
+			if running {
 				if out, rc, err := fcExec(g, "cat /proc/meminfo", resGuestExecTimeout); err == nil && rc == 0 {
 					total, avail = resParseMemInfo(out)
 				}
 			}
 			resGuestMu.Lock()
-			if total > 0 {
-				resGuestMap[g] = resGuestMem{totalBytes: total, availBytes: avail}
+			defer resGuestMu.Unlock()
+			prev, had := resGuestMap[g]
+			if next, keep := resGuestRetain(prev, had, running, total, avail, now); keep {
+				resGuestMap[g] = next
 			} else {
 				delete(resGuestMap, g)
 			}
-			resGuestMu.Unlock()
 		}(g)
 	}
 	wg.Wait()
+}
+
+// resGuestRetain is the staleness policy for one group's cached guest-memory
+// reading after a refresh attempt: a fresh reading always wins, a VM that is
+// no longer running always drops (its figure cannot be true any more), and a
+// running VM that simply didn't answer keeps what it had until
+// resGuestMaxAge. Pure, so the policy is pinned by a test rather than by a
+// live guest.
+func resGuestRetain(prev resGuestMem, hasPrev, running bool, total, avail int64, now time.Time) (resGuestMem, bool) {
+	if total > 0 {
+		return resGuestMem{totalBytes: total, availBytes: avail, at: now}, true
+	}
+	if !running || !hasPrev || now.Sub(prev.at) > resGuestMaxAge {
+		return resGuestMem{}, false
+	}
+	return prev, true
 }
 
 // statAllocBytes returns a file's allocated size — the blocks it actually
@@ -473,9 +511,30 @@ func resNotifyOperator(level int, title, msg string) {
 	}
 }
 
-// resGrowth returns g's image growth in bytes/hour across the retained ring,
-// plus the span it was measured over. Fewer than two samples (or a zero span)
-// → 0, meaning "not yet known" rather than "flat".
+// resGrowthWindow bounds how far back growth is measured. It used to be the
+// whole retained ring (an hour), which made the figure "average since the
+// ring began" rather than a rate — and that reads wrong in both directions.
+// Measured on 2026-08-09: a single 1 GiB write into a four-minute-old ring
+// reported 16.1 GB/h, and was still claiming 7.6 GB/h five minutes after the
+// write finished, decaying only as the ring aged toward its full hour. Any
+// "hits its ceiling in N minutes" projection built on that is fiction. A
+// fixed trailing window instead means a burst ages out predictably, and a
+// sustained writer — the case the alert exists for — reads the same whether
+// the daemon started an hour ago or ten minutes ago.
+const resGrowthWindow = 10 * time.Minute
+
+// resGrowth returns g's image growth in bytes/hour over the trailing
+// resGrowthWindow, plus the span it was actually measured over. A ring that
+// does not yet REACH BACK a full window reports 0 = "not yet known", rather
+// than dividing by whatever short span it happens to have: measured
+// 2026-08-09 against a ring younger than the window, one 1.5 GiB write read
+// 35 GiB/h and then decayed — 25, 19.5, 16, 13.5, 11.7 — through eight
+// minutes of complete disk idleness. Every one of those numbers is
+// arithmetically true of its own span and every one of them is useless; a
+// figure that means the same thing on every call is worth more than a figure
+// that is always available. The cost is a blind window after a daemon
+// restart, which is the right way round: growth drives a projection, and no
+// projection beats a wrong one.
 //
 // Growth is clamped at zero on the low side: allocation only falls when an
 // operator shrinks an image offline, and reporting a negative rate would
@@ -484,8 +543,22 @@ func resGrowth(samples []resSample) (bytesPerHour int64, spanSeconds int64) {
 	if len(samples) < 2 {
 		return 0, 0
 	}
-	first, last := samples[0], samples[len(samples)-1]
-	span := last.at.Sub(first.at).Seconds()
+	last := samples[len(samples)-1]
+	if last.at.Sub(samples[0].at) < resGrowthWindow {
+		return 0, 0
+	}
+	// Oldest sample still inside the window; falls back to the immediately
+	// preceding one when the ring is sparser than the window (samples further
+	// apart than resGrowthWindow), so two distant points still yield a rate.
+	first := samples[len(samples)-2]
+	cutoff := last.at.Add(-resGrowthWindow)
+	for i := len(samples) - 2; i >= 0; i-- {
+		if samples[i].at.Before(cutoff) {
+			break
+		}
+		first = samples[i]
+	}
+	span := last.at.Sub(first.at)
 	if span <= 0 {
 		return 0, 0
 	}
@@ -493,61 +566,101 @@ func resGrowth(samples []resSample) (bytesPerHour int64, spanSeconds int64) {
 	if delta < 0 {
 		delta = 0
 	}
-	return int64(float64(delta) / span * 3600), int64(span)
+	return int64(float64(delta) / span.Seconds() * 3600), int64(span.Seconds())
 }
 
 // ---- live CPU (per-call window) ---------------------------------------------
 
-// resLiveCPU is the last on-demand /proc reading per group, kept so
-// resourcesSnapshot can report CPU over the window since the PREVIOUS
-// snapshot call rather than the collector's 30s sweep. With the TUI polling
-// every 5s that makes the fleet view's CPU column behave like linux-top,
-// where the refresh interval IS the averaging window; before this, the
-// column lagged a busy VM by up to a sweep (a turn's whole burst showed up
-// half a minute late). The sweep ring stays authoritative for growth rate
-// and thresholds — this state only sharpens the snapshot's point-in-time
-// CPU/RSS figures, and every consumer of the snapshot (gRPC, ctl plane,
-// threshold check) shares it, so the window is "since anyone last looked".
-type resLiveCPU struct {
+// resLive is a short trail of on-demand /proc readings per group, kept so
+// resourcesSnapshot can report CPU over a FIXED recent window rather than the
+// collector's 30s sweep. With the TUI polling every 5s that makes the fleet
+// view's CPU column behave like linux-top; before any of this, the column
+// lagged a busy VM by up to a sweep (a turn's whole burst showed up half a
+// minute late). The sweep ring stays authoritative for growth rate and
+// thresholds — this state only sharpens the snapshot's point-in-time CPU
+// figure.
+//
+// It is a TRAIL, not a single cursor, because every consumer of the snapshot
+// shares this state: the TUI's 5s poll, any number of `koto ctl resources`
+// callers, and the 30s threshold sweep. A single cursor made each caller's
+// window "since whoever last looked" — so with two pollers interleaving, a
+// steady load measured 33 / 56 / 39 / 52% on consecutive samples (measured
+// 2026-08-09 against a VM pinned at a true ~50%), and a caller arriving just
+// after another was handed that other caller's number outright. Reading
+// against a reading ~resLiveWindow old instead makes the answer depend only
+// on the VM, not on how many clients happen to be watching it.
+type resLiveReading struct {
 	at    time.Time
 	ticks int64
-	pct   float64
 }
+
+const (
+	// resLiveWindow is the trailing span the live figure is measured over —
+	// long enough to average out scheduler noise, short enough to still be
+	// "now" next to the 30s sweep.
+	resLiveWindow = 5 * time.Second
+	// resLiveMaxAge drops readings that have aged out, so a group nobody has
+	// polled for a while answers from the ring's average rather than from
+	// ancient history.
+	resLiveMaxAge = 60 * time.Second
+	// resLiveKeep bounds the trail per group: a pathological poller (many
+	// clients, sub-second interval) must not grow it without limit.
+	resLiveKeep = 64
+)
 
 var (
 	resLiveMu  sync.Mutex
-	resLiveMap = map[string]resLiveCPU{}
+	resLiveMap = map[string][]resLiveReading{}
 )
 
-// resLiveCPUPct folds one fresh (ticks, now) reading into g's live state and
-// returns the CPU percentage (of ONE core) over the span since the previous
-// reading. First call has no span, so it seeds the state and returns
-// fallback (the ring's sweep-based average — the best answer available).
-// Sub-second re-reads (two clients polling in lockstep) return the cached
-// value rather than dividing by a noise-dominated span; a ticks reset (VM
-// restart) reports 0 for one window rather than a negative spike.
+// resLiveCPUPct folds one fresh (ticks, now) reading into g's trail and
+// returns the CPU percentage (of ONE core) over the trailing resLiveWindow.
+// With no reading that old yet it measures against the oldest it has; with no
+// prior reading at all it returns fallback (the ring's sweep-based average —
+// the best answer available). A ticks reset (VM restart) reports 0 for one
+// window rather than a negative spike.
 func resLiveCPUPct(g string, ticks int64, now time.Time, fallback float64) float64 {
 	resLiveMu.Lock()
 	defer resLiveMu.Unlock()
-	prev, ok := resLiveMap[g]
-	if !ok {
-		resLiveMap[g] = resLiveCPU{at: now, ticks: ticks, pct: fallback}
+
+	trail := resLiveMap[g]
+	// Prune aged-out readings, then append this one.
+	cut := now.Add(-resLiveMaxAge)
+	drop := 0
+	for drop < len(trail) && trail[drop].at.Before(cut) {
+		drop++
+	}
+	trail = append(append([]resLiveReading(nil), trail[drop:]...), resLiveReading{at: now, ticks: ticks})
+	if len(trail) > resLiveKeep {
+		trail = trail[len(trail)-resLiveKeep:]
+	}
+	resLiveMap[g] = trail
+
+	if len(trail) < 2 {
 		return fallback
 	}
-	span := now.Sub(prev.at).Seconds()
-	if span < 1 {
-		return prev.pct
+	// Base: the NEWEST reading at least a window old, so the measured span is
+	// never shorter than resLiveWindow; the oldest available otherwise.
+	base := trail[0]
+	for i := len(trail) - 2; i >= 0; i-- {
+		if now.Sub(trail[i].at) >= resLiveWindow {
+			base = trail[i]
+			break
+		}
 	}
-	pct := 0.0
-	if dt := ticks - prev.ticks; dt >= 0 {
-		// _SC_CLK_TCK is 100 on every Linux/amd64 target this daemon runs on.
-		pct = float64(dt) / 100.0 / span * 100.0
+	span := now.Sub(base.at).Seconds()
+	if span <= 0 {
+		return fallback
 	}
-	resLiveMap[g] = resLiveCPU{at: now, ticks: ticks, pct: pct}
-	return pct
+	dt := ticks - base.ticks
+	if dt < 0 {
+		return 0
+	}
+	// _SC_CLK_TCK is 100 on every Linux/amd64 target this daemon runs on.
+	return float64(dt) / 100.0 / span * 100.0
 }
 
-// resLiveForget drops a group's live-CPU state (destroyed group, or its VM
+// resLiveForget drops a group's live-CPU trail (destroyed group, or its VM
 // stopped — the next boot's ticks start from zero, and seeding fresh beats
 // one window of restart-suppressed 0).
 func resLiveForget(g string) {
@@ -734,17 +847,25 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 			MemMiB:        int32(memMiB),
 		}
 		resGuestMu.Lock()
-		if gm, ok := resGuestMap[g]; ok && gr.Running {
+		// The age check is the read-side half of resGuestMaxAge: the sweep
+		// prunes, but a snapshot taken while the sweep is wedged (a guest exec
+		// hanging out its timeout) must not serve an unbounded-old figure.
+		if gm, ok := resGuestMap[g]; ok && gr.Running && time.Since(gm.at) <= resGuestMaxAge {
 			gr.GuestMemTotal, gr.GuestMemAvail = gm.totalBytes, gm.availBytes
 		}
 		resGuestMu.Unlock()
+		// Allocation is read LIVE, never from the ring. The ring lags by up to
+		// a full sweep, and a group filling its disk is exactly the moment the
+		// lag costs the most: measured on 2026-08-09, a group that had just
+		// written 1 GiB reported 191 MB for 16 seconds while the image was
+		// already at 1.15 GiB — a 6× understatement, on the one number this
+		// whole file exists to make visible, held right through the window a
+		// runaway writer would be caught in. The fix is one stat(2), cheaper
+		// than the /proc read this loop already does live below. The ring
+		// keeps its job — growth rate, which needs history by definition.
+		gr.AllocBytes, _ = statAllocBytes(fcWorkspaceImg(g))
 		if n := len(samples); n > 0 {
-			gr.AllocBytes = samples[n-1].allocBytes
 			gr.RSSBytes = samples[n-1].rssBytes
-		} else {
-			// No tick yet (RPC raced the first sweep) — stat directly so a
-			// caller never sees a bogus zero for a real image.
-			gr.AllocBytes, _ = statAllocBytes(fcWorkspaceImg(g))
 		}
 		gr.GrowthPerHour, gr.GrowthSpanSecs = resGrowth(samples)
 		gr.CPUPct = resCPUPct(samples)
