@@ -523,3 +523,71 @@ func TestResCPUAlertSubjectIndependent(t *testing.T) {
 		t.Fatal("cpu subject should fire fresh after forget")
 	}
 }
+
+// A stopped VM must report zero CPU and RSS, not the last sweep's numbers.
+// Measured 2026-08-09: a group reported running=false alongside 712 MB of RSS
+// (and a nonzero CPU) for the rest of the sweep after being stopped, because
+// both were seeded from the ring before the live /proc read. Disk is the only
+// figure that legitimately outlives the VM — the image is still on the host.
+func TestResourcesSnapshotStoppedGroupHasNoCPUOrRSS(t *testing.T) {
+	g := "stoppedres"
+	dir := t.TempDir()
+	oldRoot, oldGroupsFile := ROOT, GROUPS_FILE
+	ROOT = filepath.Join(dir, "groups")
+	GROUPS_FILE = filepath.Join(dir, "groups.json")
+	t.Cleanup(func() { ROOT, GROUPS_FILE = oldRoot, oldGroupsFile })
+
+	// A group with an image on disk but no VM process.
+	if err := os.MkdirAll(filepath.Join(ROOT, g), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(fcWorkspaceImg(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.WriteFile(GROUPS_FILE, []byte(`{"`+g+`":9999}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A ring carrying numbers from when it WAS running.
+	resMu.Lock()
+	resRing[g] = []resSample{
+		{at: time.Now().Add(-resSampleInterval), cpuTicks: 1000, rssBytes: 712 << 20, allocBytes: 1 << 20},
+		{at: time.Now(), cpuTicks: 3000, rssBytes: 712 << 20, allocBytes: 1 << 20},
+	}
+	resMu.Unlock()
+	t.Cleanup(func() {
+		resMu.Lock()
+		delete(resRing, g)
+		resMu.Unlock()
+		resLiveForget(g)
+	})
+
+	groups, _ := resourcesSnapshot()
+	var got *groupResources
+	for i := range groups {
+		if groups[i].Group == g {
+			got = &groups[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("group %q missing from snapshot", g)
+	}
+	if got.Running {
+		t.Fatalf("group reported running with no VM process")
+	}
+	if got.RSSBytes != 0 {
+		t.Errorf("stopped group RSS = %d, want 0", got.RSSBytes)
+	}
+	if got.CPUPct != 0 {
+		t.Errorf("stopped group CPU = %v, want 0", got.CPUPct)
+	}
+	// Disk is the exception: the image outlives the VM and stays meaningful.
+	if got.AllocBytes == 0 {
+		t.Error("stopped group alloc = 0, want the image's real allocation")
+	}
+}

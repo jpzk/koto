@@ -864,19 +864,22 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 		// than the /proc read this loop already does live below. The ring
 		// keeps its job — growth rate, which needs history by definition.
 		gr.AllocBytes, _ = statAllocBytes(fcWorkspaceImg(g))
-		if n := len(samples); n > 0 {
-			gr.RSSBytes = samples[n-1].rssBytes
-		}
 		gr.GrowthPerHour, gr.GrowthSpanSecs = resGrowth(samples)
-		gr.CPUPct = resCPUPct(samples)
-		// Live sharpening: with the VM up, read /proc now and report CPU over
-		// the since-last-call window (top semantics; see resLiveCPUPct) and
-		// the RSS of this instant instead of the last sweep's. Still strictly
+		// CPU and RSS come from the LIVE process or not at all. With the VM up,
+		// /proc is read now and CPU reported over the trailing window (top
+		// semantics; see resLiveCPUPct). With it down, both are zero — a
+		// process that does not exist has no resident set and burns no CPU,
+		// and that is a fact, not a gap to paper over with the last sweep's
+		// numbers. Seeding them from the ring meant a group reported
+		// running=false alongside 712 MB of RSS for up to a sweep after being
+		// stopped (measured 2026-08-09). The TUI hides that by rendering "-"
+		// for stopped rows, but the RPC is consumed by agents too, and disk is
+		// the only figure that legitimately outlives the VM. Still strictly
 		// host-side — /proc/<pid> is the VMM process, never a guest exec.
 		if pid := fcPidOf(g); pid > 0 {
 			ticks, rss := procCPURSS(pid)
 			gr.RSSBytes = rss
-			gr.CPUPct = resLiveCPUPct(g, ticks, time.Now(), gr.CPUPct)
+			gr.CPUPct = resLiveCPUPct(g, ticks, time.Now(), resCPUPct(samples))
 		} else {
 			resLiveForget(g)
 		}
