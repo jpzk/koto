@@ -305,3 +305,63 @@ func TestResNotifyOperatorDelivers(t *testing.T) {
 		t.Errorf("warn alert = %+v, want normal severity", notes[1])
 	}
 }
+
+// resCPUAvgPct backs the sustained-CPU alert: it must demand a FULL window
+// (a fresh VM's first minutes never fire), read ~0 for an idle window, and
+// treat a tick reset (VM restart) or a stop/start edge as "not sustained".
+func TestResCPUAvgPct(t *testing.T) {
+	base := time.Now()
+	mk := func(n int, ticksPerSample int64) []resSample {
+		s := make([]resSample, n)
+		for i := range s {
+			s[i] = resSample{at: base.Add(time.Duration(i) * 30 * time.Second), cpuTicks: 1000 + int64(i)*ticksPerSample}
+		}
+		return s
+	}
+	// 3000 ticks per 30s sample at 100Hz = one fully busy core.
+	if got := resCPUAvgPct(mk(10, 3000), 10); got < 99 || got > 101 {
+		t.Errorf("busy window = %v, want ~100", got)
+	}
+	// Short window: never fires, whatever the load.
+	if got := resCPUAvgPct(mk(5, 3000), 10); got != 0 {
+		t.Errorf("short window = %v, want 0", got)
+	}
+	// Edge sample with zero ticks (VM stopped or started mid-window).
+	s := mk(10, 3000)
+	s[0].cpuTicks = 0
+	if got := resCPUAvgPct(s, 10); got != 0 {
+		t.Errorf("zero-tick edge = %v, want 0", got)
+	}
+	// Tick reset (restart): negative delta reads 0, not a spike.
+	s = mk(10, 3000)
+	s[len(s)-1].cpuTicks = 5
+	if got := resCPUAvgPct(s, 10); got != 0 {
+		t.Errorf("tick reset = %v, want 0", got)
+	}
+}
+
+// The CPU subject ("cpu:<g>") must keep its alert state separate from the
+// disk subject (bare group name) and be dropped alongside it on destroy.
+func TestResCPUAlertSubjectIndependent(t *testing.T) {
+	g := "cputest"
+	resForgetAlert(g)
+	resForgetAlert("cpu:" + g)
+	defer resForgetAlert(g)
+	defer resForgetAlert("cpu:" + g)
+
+	if fire, lvl := resShouldFire(g, 85); !fire || lvl != 1 {
+		t.Fatalf("disk subject first crossing: fire=%v lvl=%d", fire, lvl)
+	}
+	// Disk at warn must not pre-arm the CPU subject.
+	if fire, lvl := resShouldFire("cpu:"+g, 85); !fire || lvl != 1 {
+		t.Fatalf("cpu subject first crossing: fire=%v lvl=%d", fire, lvl)
+	}
+	// And forgetting one leaves the other armed.
+	resForgetAlert("cpu:" + g)
+	if fire, _ := resShouldFire(g, 85); fire {
+		t.Fatal("disk subject re-fired after cpu forget")
+	}
+	if fire, _ := resShouldFire("cpu:"+g, 85); !fire {
+		t.Fatal("cpu subject should fire fresh after forget")
+	}
+}

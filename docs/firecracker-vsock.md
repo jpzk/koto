@@ -349,6 +349,70 @@ disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
   the resolved preset (clamped 1–32 and 128–65536 MiB), so any hand-tuned group
   keeps working. There is no raw disk-size override — disk follows the preset.
 
+## Host resource limits (IO rate limiter · niceness · per-VM cgroups)
+
+Motivation (TODO: "one firecracker vm can bring down the whole host"): the
+`size` preset bounds what the *guest* sees (vCPUs, RAM), but before this
+stack, nothing bounded what the VMM cost the *host* — a guest hammering
+virtio-blk could saturate the host disk for the whole fleet, and a guest
+spinning all its vCPUs competed with the daemon at equal priority. Four
+layers, all defaults, no new user-facing knobs:
+
+1. **Virtio-blk rate limiter** (`fcVMConfig`, `fc.go`) — Firecracker token
+   buckets on **both** drives (the rootfs is read-only but `dd if=/dev/vda`
+   still generates host reads), sized by the `size` preset:
+
+   | preset | bandwidth | ops/s | one-time burst |
+   |--------|-----------|-------|----------------|
+   | small  | 100 MiB/s | 15000 | 256 MiB |
+   | medium | 150 MiB/s | 22500 | 256 MiB |
+   | large  | 200 MiB/s | 30000 | 256 MiB |
+   | xlarge | 250 MiB/s | 37500 | 256 MiB |
+
+   The burst keeps short legitimate spikes (git checkout, npm install unpack)
+   snappy; only *sustained* IO is throttled. The ops bucket guards
+   fsync/small-random-IO storms that saturate a disk far below its bandwidth
+   ceiling — it is sized at 150 ops per MiB/s because the guest kernel splits
+   sequential IO into ~8 KiB virtio requests (measured: at 2000 ops/s a
+   dd bs=1M ran at 15 MB/s, ops-bound), so a much lower ops budget silently
+   becomes the bandwidth cap. Raw `io_mbps` / `io_ops` config keys layer on the preset
+   (clamped 10–4000 / 100–100000; same escape-hatch pattern as
+   `vcpus`/`mem_mib`) for the rare legitimately IO-heavy group; `/config`
+   shows the resolved values as a display-only `io` field. Applies on
+   `/restart` (`fcResolveIO`). This is the **only** IO lever available:
+   rootless delegation excludes the cgroup `io` controller, and `network`
+   egress is a vsock channel, not a virtio device.
+2. **`nice=10` on the VMM process** — the jail shim renices itself before the
+   uid drop (`fcjailMain`; the unjailed path renices post-`Start`), so the
+   daemon/proxy at nice 0 always preempt runaway VMs. CPU *capacity* is
+   already bounded by `vcpu_count`; this fixes *priority*.
+3. **Per-VM cgroups** (`fccgroup.go`) — probed once at startup; when cs_host
+   has a writable cgroup tree (see below), every VM is placed at clone time
+   (clone3 `CLONE_INTO_CGROUP`) into `<scope>/vms/<g>` with `cpu.weight=50`
+   (half the daemon's default 100) and `memory.high = mem_mib + 512 MiB` — a
+   soft throttle, deliberately **never `memory.max`**: OOM-killing the VMM
+   hard-kills the VM with a dirty ext4, and the guest's real ceiling is
+   `mem_size_mib` anyway. Unavailable → one info log line and `cgroup=off`
+   in the spawn log; nothing else changes. Enablement is
+   `--cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw` in
+   `host/run-host.sh` (the daemon evacuates its scope into a `main/` leaf to
+   satisfy cgroup v2's no-internal-process rule, then enables `+cpu +memory`
+   on the scope). The jailed VMM never sees the mount — the jail unshares
+   `CLONE_NEWCGROUP`.
+4. **Sustained-CPU alert** (`resources.go`) — subject `cpu:<g>` beside the
+   host-fs and per-group-disk subjects: the 30s sweep's trailing 5-minute
+   average, expressed as a percent of the group's *own* vCPU entitlement
+   (size-independent thresholds), through the same 80/90 + hysteresis
+   notify path. Alert-only; layers 1–3 do the enforcing.
+
+Fleet-wide: `KOTO_HOST_CPUS=<n>` (opt-in, `run-host.sh`) passes `--cpus` to
+the cs_host container — a hard ceiling on daemon + proxy + all VMs together
+(`nproc - 1` keeps the host responsive no matter what). No `--memory`
+equivalent on purpose: OOM-killing the daemon is a fleet outage.
+
+The spawn log line records what was applied:
+`microVM up pid=… vcpus=… mem=…MiB io=…MiB/s,…ops nice=10 cgroup=on|off`.
+
 ## Root / sudo profile (`root`: `yes` | `no`)
 
 Per-group config key granting the guest's `node` user (uid 1000, the account
@@ -491,11 +555,16 @@ subuids), so later resize/migration still works.
 absolute-path config at `<g>.cfg.json` (the pre-jailer behavior) — for
 environments that can't create nested user namespaces, or for debugging.
 
-**Not (yet) covered.** cgroup resource caps — upstream's jailer sets them, but
-rootless cgroup-v2 delegation is unreliable and the machine-config already
-bounds vCPU + RAM. The e2fsck/resize2fs host-side parse of the guest-writable
-`workspace.img` (trust-model gap #2) also still runs unjailed; that's a
-separate follow-up.
+**Resource caps.** Upstream's jailer also manages cgroups; our equivalent
+lives in `fccgroup.go` — per-VM `cpu.weight`/`memory.high` applied at clone
+time when cs_host has a writable cgroup tree, degrading to log-only when it
+doesn't (see "Host resource limits" above). The jail contributes
+`CLONE_NEWCGROUP` (the VMM can't see the host hierarchy) and the shim's
+`nice=10`.
+
+**Not (yet) covered.** The e2fsck/resize2fs host-side parse of the
+guest-writable `workspace.img` (trust-model gap #2) still runs unjailed;
+that's a separate follow-up.
 
 ## Containers (rootless podman in the guest)
 

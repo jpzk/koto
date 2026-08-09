@@ -83,6 +83,7 @@ type fcJailSpec struct {
 	Chroot string   `json:"chroot"`
 	UID    int      `json:"uid"`
 	GID    int      `json:"gid"`
+	Nice   int      `json:"nice"`
 	Binds  []fcBind `json:"binds"`
 	Argv   []string `json:"argv"`
 }
@@ -150,6 +151,7 @@ func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
 		Chroot: root,
 		UID:    uid,
 		GID:    uid,
+		Nice:   fcVMNice,
 		Binds: []fcBind{
 			{Src: fcBinPath(), Dst: "/firecracker", RO: true},
 			{Src: fcKernelPath(), Dst: "/a/vmlinux", RO: true},
@@ -197,9 +199,13 @@ func fcJailCommand(spec fcJailSpec) (*exec.Cmd, error) {
 	// into a process whose whole point is to be the least-trusted host process.
 	cmd.Env = []string{}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
+		// CLONE_NEWCGROUP hides the host cgroup hierarchy from the VMM — with
+		// the cgroup2 fs now mounted rw in cs_host (per-VM caps, fccgroup.go)
+		// the jailed process must not see it.
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS |
 			syscall.CLONE_NEWPID | syscall.CLONE_NEWNET |
-			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS |
+			syscall.CLONE_NEWCGROUP,
 		UidMappings: []syscall.SysProcIDMap{
 			{ContainerID: 0, HostID: 0, Size: 1},
 			{ContainerID: spec.UID, HostID: spec.UID, Size: 1},
@@ -262,6 +268,15 @@ func fcjailMain() {
 	// and suspenders atop the empty chroot (which has no setuid binaries).
 	if _, _, e := syscall.Syscall6(syscall.SYS_PRCTL, 38, 1, 0, 0, 0, 0); e != 0 {
 		die(fmt.Errorf("no_new_privs: %v", e))
+	}
+	// Deprioritize before the uid drop (raising nice needs no privilege and
+	// survives setuid+exec): the VMM runs behind the daemon/proxy so a guest
+	// spinning all its vCPUs can't starve the control plane.
+	if spec.Nice > 0 {
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, 0, spec.Nice); err != nil {
+			// Non-fatal: an unniced VM is degraded, not broken.
+			fmt.Fprintf(os.Stderr, "fcjail: setpriority %d: %v\n", spec.Nice, err)
+		}
 	}
 	// Drop to the unprivileged VM uid. Order matters: gid before uid, since
 	// after setuid we no longer hold the privilege to setgid. We skip

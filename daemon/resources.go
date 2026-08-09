@@ -266,6 +266,7 @@ func resSweep() {
 	resGuestMu.Unlock()
 	for _, g := range gone {
 		resForgetAlert(g)
+		resForgetAlert("cpu:" + g)
 		resLiveForget(g)
 	}
 }
@@ -293,12 +294,16 @@ func resourcesLoop() {
 // remount read-only, wedging agents with no error anywhere the operator
 // looks.
 //
-// Two subjects, because they fail differently:
+// Three subjects, because they fail differently:
 //
 //   - HOST filesystem: takes the whole fleet down at once.
 //   - Per-GROUP image vs. its `size` ceiling: wedges just that group. This
 //     is what actually happened to 9AZ, which sat at 98% of its own 24 GiB
 //     while the rest of the fleet looked fine.
+//   - Per-GROUP sustained CPU vs. its vCPU entitlement (subject "cpu:<g>"):
+//     a runaway loop grinding all vCPUs for 5+ minutes. Enforcement is
+//     elsewhere (vcpu bound, nice, per-VM cgroup weight) — this is the
+//     "go look at it" signal.
 //
 // Alerts fire ONLY on an increase in level, and a level re-arms only after
 // the value falls a clear margin below its threshold. Without that, a value
@@ -415,6 +420,32 @@ func resCheckThresholds() {
 					float64(g.DeclaredBytes)/(1<<30), pct))
 		}
 	}
+
+	// Sustained CPU: average over the trailing window, expressed as a percent
+	// of the group's OWN vCPU entitlement so the 80/90 thresholds are
+	// size-independent (an xlarge grinding 7 of 8 vCPUs and a small grinding
+	// both of 2 read the same). A stopped VM's window carries zero ticks and
+	// reads 0, so the armed level decays through the hysteresis on its own.
+	resMu.Lock()
+	rings := make(map[string][]resSample, len(resRing))
+	for g, r := range resRing {
+		rings[g] = append([]resSample(nil), r...)
+	}
+	resMu.Unlock()
+	for _, g := range groups {
+		if g.Vcpus <= 0 {
+			continue
+		}
+		avg := resCPUAvgPct(rings[g.Group], resCPUAvgWindow)
+		pct := avg / (float64(g.Vcpus) * 100) * 100
+		if fire, lvl := resShouldFire("cpu:"+g.Group, pct); fire {
+			resNotifyOperator(lvl,
+				fmt.Sprintf("Group %s CPU %.0f%% sustained", g.Group, pct),
+				fmt.Sprintf("%s has averaged %.0f%% of its %d vCPUs for 5+ minutes — "+
+					"runaway loop? nice=%d keeps the host responsive; /stop halts it.",
+					g.Group, pct, g.Vcpus, fcVMNice))
+		}
+	}
 }
 
 // resNotifyOperator raises one operator notification against main — the
@@ -523,6 +554,34 @@ func resLiveForget(g string) {
 	resLiveMu.Lock()
 	delete(resLiveMap, g)
 	resLiveMu.Unlock()
+}
+
+// resCPUAvgWindow is how many trailing ring samples the sustained-CPU alert
+// averages over — 10 × the 30s sweep ≈ 5 minutes. A turn's legitimate burst
+// is shorter; a runaway loop is not.
+const resCPUAvgWindow = 10
+
+// resCPUAvgPct returns the FC process's average CPU (percent of ONE core,
+// like resCPUPct) across the last n ring samples. It demands a FULL window of
+// valid ticks: fewer than n samples, a zero tick at either edge (VM stopped
+// or started mid-window), or a tick reset (restart) all return 0 — the alert
+// must mean "sustained", never a fresh VM's first minute.
+func resCPUAvgPct(samples []resSample, n int) float64 {
+	if len(samples) < n || n < 2 {
+		return 0
+	}
+	samples = samples[len(samples)-n:]
+	first, last := samples[0], samples[len(samples)-1]
+	span := last.at.Sub(first.at).Seconds()
+	if span <= 0 || first.cpuTicks == 0 || last.cpuTicks == 0 {
+		return 0
+	}
+	dt := last.cpuTicks - first.cpuTicks
+	if dt < 0 {
+		return 0
+	}
+	// _SC_CLK_TCK is 100 on every Linux/amd64 target this daemon runs on.
+	return float64(dt) / 100.0 / span * 100.0
 }
 
 // resCPUPct returns the FC process's CPU usage across the last two samples,

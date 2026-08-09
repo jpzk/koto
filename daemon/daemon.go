@@ -120,6 +120,9 @@ func daemonMain() {
 	// daemon run are stale by construction (VMs die with the daemon) and a
 	// recycled pid would read as a live VM. See fcClearStalePids.
 	fcClearStalePids()
+	// Probe for writable cgroups before the first ensure(): VM placement
+	// happens at clone time, so the tree must be staged before any VM boots.
+	fcCgroupInit()
 	allocPort("main")
 
 	// Proxy runs in-process as goroutines (one per listener). Brings up

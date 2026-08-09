@@ -87,31 +87,52 @@ const (
 	fcWorkerGID = 1000
 )
 
-// fcSize is one named machine preset: guest vCPU count, RAM, and workspace
-// disk size. Selected per group via config.json "size" (default: small).
+// fcSize is one named machine preset: guest vCPU count, RAM, workspace disk
+// size, and the virtio-blk rate limit (sustained bandwidth + ops/s applied to
+// both drives). Selected per group via config.json "size" (default: small).
 type fcSize struct {
 	vcpus     int
 	memMiB    int
 	diskBytes int64
+	ioBwMiBps int
+	ioOps     int
 }
 
 // fcSizePresets maps a size name to its machine shape. "small" is the default
 // and equals the fcDefault* constants above; larger presets trade the host's
 // scarce RAM for headroom. Disk grows with the preset but never shrinks (see
-// fcEnsureWorkspaceImg). Keep in sync with the Spawn RPC validator and the
-// TUI /new + /config help.
+// fcEnsureWorkspaceImg). The IO columns keep any single VM well under the
+// host disk's throughput so one guest hammering virtio-blk can't wedge the
+// fleet; the ops bucket guards against fsync/small-random-IO storms that
+// saturate a disk far below its bandwidth ceiling. Ops are sized at 150 per
+// MiB/s of bandwidth: the guest kernel splits sequential IO into ~8 KiB
+// virtio requests (measured — dd bs=1M direct ran ops-bound at 2000/s,
+// ~15 MB/s), so the bandwidth budget needs ~128 ops per MiB/s to be
+// reachable; anything much lower makes the ops bucket the accidental
+// bandwidth cap. Keep in sync with the Spawn RPC validator and the TUI
+// /new + /config help.
 var fcSizePresets = map[string]fcSize{
-	"small":  {fcDefaultVcpus, fcDefaultMemMiB, fcWorkspaceBytes},
-	"medium": {2, 2048, 12 << 30},
-	"large":  {4, 4096, 16 << 30},
-	"xlarge": {8, 8192, 24 << 30},
+	"small":  {fcDefaultVcpus, fcDefaultMemMiB, fcWorkspaceBytes, 100, 15000},
+	"medium": {2, 2048, 12 << 30, 150, 22500},
+	"large":  {4, 4096, 16 << 30, 200, 30000},
+	"xlarge": {8, 8192, 24 << 30, 250, 37500},
 }
 
-func fcAssetsDir() string            { return filepath.Join(HERE, "fcassets") }
-func fcBinPath() string              { return filepath.Join(fcAssetsDir(), "firecracker") }
-func fcKernelPath() string           { return filepath.Join(fcAssetsDir(), "vmlinux") }
-func fcRootfsPath() string           { return filepath.Join(fcAssetsDir(), "rootfs.img") }
-func fcRunDir() string               { return filepath.Join(SOCK_DIR, "fc") }
+// fcIOBurstBytes is the one-time token-bucket burst granted to every VM
+// regardless of preset: short legitimate spikes (git checkout, npm install
+// unpack) stay snappy; only sustained IO is throttled to the preset rate.
+const fcIOBurstBytes = 256 << 20
+
+// fcVMNice is the nice value the Firecracker VMM process runs at. The daemon
+// and proxy stay at 0, so a guest spinning all its vCPUs is always preempted
+// by the control plane — CPU starvation softening without a hard cap.
+const fcVMNice = 10
+
+func fcAssetsDir() string  { return filepath.Join(HERE, "fcassets") }
+func fcBinPath() string    { return filepath.Join(fcAssetsDir(), "firecracker") }
+func fcKernelPath() string { return filepath.Join(fcAssetsDir(), "vmlinux") }
+func fcRootfsPath() string { return filepath.Join(fcAssetsDir(), "rootfs.img") }
+func fcRunDir() string     { return filepath.Join(SOCK_DIR, "fc") }
 
 // fcSockDir holds this group's vsock sockets in a dedicated directory so the
 // jailer can bind-mount exactly this VM's sockets (and nothing else) into its
@@ -404,10 +425,72 @@ func fcMachineCfg(g string) (vcpus, memMiB int) {
 	return
 }
 
+// fcResolveIO resolves a group's virtio-blk rate limit: the size preset's
+// bandwidth/ops columns, then optional raw "io_mbps"/"io_ops" config.json
+// overrides layered on top (same escape-hatch pattern as vcpus/mem_mib —
+// clamped 10–4000 MiB/s and 100–100000 ops/s). Returns bandwidth in bytes/s.
+func fcResolveIO(g string) (bwBytes, ops int64) {
+	def := fcSizePresets["small"]
+	bwMiBps, opsN := def.ioBwMiBps, def.ioOps
+	if b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json")); err == nil {
+		var cfg map[string]any
+		if json.Unmarshal(b, &cfg) == nil {
+			if s, ok := cfg["size"].(string); ok {
+				if p, ok := fcSizePresets[strings.ToLower(strings.TrimSpace(s))]; ok {
+					bwMiBps, opsN = p.ioBwMiBps, p.ioOps
+				}
+			}
+			if n, ok := anyAsInt(cfg["io_mbps"]); ok && n >= 10 && n <= 4000 {
+				bwMiBps = int(n)
+			}
+			if n, ok := anyAsInt(cfg["io_ops"]); ok && n >= 100 && n <= 100000 {
+				opsN = int(n)
+			}
+		}
+	}
+	return int64(bwMiBps) << 20, int64(opsN)
+}
+
 // fcWorkspaceDiskBytes returns the resolved workspace.img size for group g.
 func fcWorkspaceDiskBytes(g string) int64 {
 	_, _, disk := fcResolveSize(g)
 	return disk
+}
+
+// fcVMConfig builds the static --config-file blob for group g. Paths are the
+// caller's problem (chroot-relative under the jail, absolute host paths
+// unjailed). Both drives carry the group's resolved rate limiter — the rootfs
+// is read-only but `dd if=/dev/vda` still generates host reads, so it gets
+// the same buckets as the workspace drive.
+func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string) []byte {
+	vcpus, memMiB := fcMachineCfg(g)
+	bwBytes, ops := fcResolveIO(g)
+	rateLimiter := func() map[string]any {
+		return map[string]any{
+			"bandwidth": map[string]any{"size": bwBytes, "one_time_burst": fcIOBurstBytes, "refill_time": 1000},
+			"ops":       map[string]any{"size": ops, "refill_time": 1000},
+		}
+	}
+	cfg := map[string]any{
+		"boot-source": map[string]any{
+			"kernel_image_path": kernelPath,
+			// ACPI on: our vmlinux is built from the Amazon Linux tree (like
+			// FC's own kernels — see build-kernel.sh), which parses FC's ACPI
+			// tables. That brings up the local APIC + LAPIC timer, so the guest
+			// idles at ~0% CPU (a vanilla kernel needs acpi=off, which leaves no
+			// LAPIC timer → every idle VM busy-polls a full CPU; see
+			// docs/kernel-amzn-vs-vanilla.md).
+			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
+		},
+		"drives": []map[string]any{
+			{"drive_id": "rootfs", "path_on_host": rootfsPath, "is_root_device": true, "is_read_only": true, "rate_limiter": rateLimiter()},
+			{"drive_id": "workspace", "path_on_host": wsPath, "is_root_device": false, "is_read_only": false, "rate_limiter": rateLimiter()},
+		},
+		"machine-config": map[string]any{"vcpu_count": vcpus, "smt": false, "mem_size_mib": memMiB},
+		"vsock":          map[string]any{"guest_cid": 3, "uds_path": udsPath},
+	}
+	cb, _ := json.Marshal(cfg)
+	return cb
 }
 
 // fcSpawn boots the microVM for group g and wires all host-side plumbing.
@@ -437,6 +520,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// socket dir fresh.
 	_ = os.RemoveAll(fcSockDir(g))
 	_ = os.RemoveAll(fcJailDir(g))
+	fcCgroupRemove(g)
 	if err := os.MkdirAll(fcSockDir(g), 0o755); err != nil {
 		return err
 	}
@@ -526,25 +610,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		kernelPath, rootfsPath, wsPath, udsPath = "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v"
 	}
 	vcpus, memMiB := fcMachineCfg(g)
-	cfg := map[string]any{
-		"boot-source": map[string]any{
-			"kernel_image_path": kernelPath,
-			// ACPI on: our vmlinux is built from the Amazon Linux tree (like
-			// FC's own kernels — see build-kernel.sh), which parses FC's ACPI
-			// tables. That brings up the local APIC + LAPIC timer, so the guest
-			// idles at ~0% CPU (a vanilla kernel needs acpi=off, which leaves no
-			// LAPIC timer → every idle VM busy-polls a full CPU; see
-			// docs/kernel-amzn-vs-vanilla.md).
-			"boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/usr/local/bin/fc-agent",
-		},
-		"drives": []map[string]any{
-			{"drive_id": "rootfs", "path_on_host": rootfsPath, "is_root_device": true, "is_read_only": true},
-			{"drive_id": "workspace", "path_on_host": wsPath, "is_root_device": false, "is_read_only": false},
-		},
-		"machine-config": map[string]any{"vcpu_count": vcpus, "smt": false, "mem_size_mib": memMiB},
-		"vsock":          map[string]any{"guest_cid": 3, "uds_path": udsPath},
-	}
-	cb, _ := json.Marshal(cfg)
+	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath)
 
 	console, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -573,12 +639,35 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	cmd.Stdout = console
 	cmd.Stderr = console
+	// Place the VM in its per-group cgroup at clone time (CLONE_INTO_CGROUP)
+	// when the tree is available — race-free, and the jail child needs no
+	// cgroup write access since placement is inherited through exec. A create
+	// failure degrades to an unplaced spawn: the cap is defense in depth, not
+	// worth refusing to boot over.
+	if cgfd, cgerr := fcCgroupCreate(g, memMiB); cgerr != nil {
+		emitLogfG("fc", g, "warn", "[%s] cgroup create: %v (spawning unplaced)", g, cgerr)
+	} else if cgfd >= 0 {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = cgfd
+		defer syscall.Close(cgfd)
+	}
 	if err := cmd.Start(); err != nil {
 		console.Close()
 		return fail(fmt.Errorf("firecracker start: %w", err))
 	}
 	console.Close()
 	vm.pid = cmd.Process.Pid
+	if !jailed {
+		// Jailed VMs renice themselves in the shim (fcjailMain); the unjailed
+		// path runs as the daemon uid, so renice from outside. Same-uid raise
+		// is unprivileged; failure degrades, never blocks the spawn.
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, vm.pid, fcVMNice); err != nil {
+			emitLogfG("fc", g, "warn", "[%s] setpriority nice=%d: %v", g, fcVMNice, err)
+		}
+	}
 	_ = os.WriteFile(fcPidPath(g), []byte(fmt.Sprintf("%d\n", vm.pid)), 0o644)
 	// Reap on exit so a crashed/stopped VM doesn't linger as a zombie and
 	// fcRunning flips promptly.
@@ -664,7 +753,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	fcMu.Lock()
 	fcVMs[g] = vm
 	fcMu.Unlock()
-	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB ports=%v", g, vm.pid, vcpus, memMiB, pubPorts)
+	bwBytes, ioOps := fcResolveIO(g)
+	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB io=%dMiB/s,%dops nice=%d cgroup=%s ports=%v",
+		g, vm.pid, vcpus, memMiB, bwBytes>>20, ioOps, fcVMNice, fcCgroupState(), pubPorts)
 	return nil
 }
 
@@ -687,6 +778,7 @@ func fcStop(g string) {
 		_ = os.Remove(fcPidPath(g))
 		_ = os.RemoveAll(fcSockDir(g))
 		_ = os.RemoveAll(fcJailDir(g))
+		fcCgroupRemove(g)
 		return
 	}
 	_, _ = fcAgentCall(g, map[string]any{"op": "shutdown"}, 3*time.Second)
@@ -707,6 +799,7 @@ func fcStop(g string) {
 	_ = os.Remove(fcPidPath(g))
 	_ = os.RemoveAll(fcSockDir(g))
 	_ = os.RemoveAll(fcJailDir(g))
+	fcCgroupRemove(g)
 	emitLogfG("fc", g, "info", "[%s] stopped", g)
 }
 

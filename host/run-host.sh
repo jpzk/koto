@@ -57,6 +57,25 @@ PUBLISH_ARG=""
 # still run fine; the fc runtime just fails its preflight with a clear error.
 KVM_ARG=""
 [ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm"
+# KOTO_HOST_CPUS (opt-in): fleet-wide CPU ceiling on cs_host — daemon, proxy
+# and every microVM together can never exceed this many host cores (podman
+# --cpus = cgroup cpu.max on the container scope; cpu is delegated rootless).
+# Unset = unlimited. `nproc - 1` is the sensible value when you want the host
+# itself to stay responsive no matter what the fleet does. Deliberately no
+# --memory equivalent: OOM-killing the daemon takes the whole fleet down,
+# and each VM's real memory ceiling is its machine-config mem_size_mib.
+CPUS_ARG=""
+[ -n "${KOTO_HOST_CPUS:-}" ] && CPUS_ARG="--cpus $KOTO_HOST_CPUS"
+# Writable cgroup tree for per-VM caps (daemon/fccgroup.go): the host view is
+# mounted rw and the cgroup namespace stays the host's, so the daemon can find
+# its own scope (delegated to this user by systemd, hence writable rootless),
+# evacuate itself into a leaf, and place each Firecracker process in a
+# vms/<group> child with cpu.weight + memory.high at clone time. The VMM
+# itself never sees this mount — the jail unshares CLONE_NEWCGROUP and
+# chroots to an empty tree. If the mount is rejected or delegation is absent
+# the daemon's startup probe degrades to cgroup=off; removing these two args
+# is the supported off-switch.
+CGROUP_ARGS="--cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw"
 podman rm -f "$CS_HOST_NAME" >/dev/null 2>&1 || true
 # .gocache is a persistent Go build cache. Without it, the first compile
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon
@@ -72,6 +91,8 @@ podman run -d --rm \
   --name "$CS_HOST_NAME" --network koto-net \
   $PUBLISH_ARG \
   $KVM_ARG \
+  $CPUS_ARG \
+  $CGROUP_ARGS \
   --security-opt label=disable \
   -v "$HERE:$HERE" \
   -v "$HERE/creds:/root/.claude" \

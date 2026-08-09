@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,18 @@ func TestFcJailBootsReal(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	time.Sleep(4 * time.Second)
+	// The shim renices itself before exec, and exec keeps the pid — so the
+	// host-visible process must be firecracker running at fcVMNice. Field 19
+	// of /proc/<pid>/stat is nice; after the ") " split that's index 16.
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(cmd.Process.Pid) + "/stat"); err == nil {
+		s := string(b)
+		if i := strings.LastIndex(s, ")"); i >= 0 {
+			f := strings.Fields(s[i+2:])
+			if len(f) > 16 && f[16] != strconv.Itoa(fcVMNice) {
+				t.Errorf("VMM nice = %s, want %d", f[16], fcVMNice)
+			}
+		}
+	}
 	_ = cmd.Process.Kill()
 	_, _ = cmd.Process.Wait()
 	cf.Close()

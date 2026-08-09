@@ -443,3 +443,86 @@ func TestFcClearStalePids(t *testing.T) {
 		t.Fatalf("non-pid file was swept: %v", err)
 	}
 }
+
+// TestFcVMConfigRateLimiter: every preset's config blob carries the preset's
+// token buckets on BOTH drives (the rootfs is read-only but `dd if=/dev/vda`
+// still generates host reads) with the shared burst and 1s refill window —
+// the enforcement layer that keeps one guest from saturating the host disk.
+func TestFcVMConfigRateLimiter(t *testing.T) {
+	fcHarness(t)
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	for name, p := range fcSizePresets {
+		os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"size":"`+name+`"}`), 0o644)
+		var cfg struct {
+			Drives []struct {
+				DriveID     string `json:"drive_id"`
+				RateLimiter struct {
+					Bandwidth struct {
+						Size         int64 `json:"size"`
+						OneTimeBurst int64 `json:"one_time_burst"`
+						RefillTime   int64 `json:"refill_time"`
+					} `json:"bandwidth"`
+					Ops struct {
+						Size       int64 `json:"size"`
+						RefillTime int64 `json:"refill_time"`
+					} `json:"ops"`
+				} `json:"rate_limiter"`
+			} `json:"drives"`
+		}
+		if err := json.Unmarshal(fcVMConfig("tg", "/k", "/r", "/w", "/v"), &cfg); err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		if len(cfg.Drives) != 2 {
+			t.Fatalf("%s: got %d drives, want 2", name, len(cfg.Drives))
+		}
+		for _, drv := range cfg.Drives {
+			rl := drv.RateLimiter
+			if rl.Bandwidth.Size != int64(p.ioBwMiBps)<<20 {
+				t.Errorf("%s/%s: bandwidth %d, want %d MiB/s", name, drv.DriveID, rl.Bandwidth.Size, p.ioBwMiBps)
+			}
+			if rl.Bandwidth.OneTimeBurst != fcIOBurstBytes {
+				t.Errorf("%s/%s: burst %d, want %d", name, drv.DriveID, rl.Bandwidth.OneTimeBurst, int64(fcIOBurstBytes))
+			}
+			if rl.Ops.Size != int64(p.ioOps) {
+				t.Errorf("%s/%s: ops %d, want %d", name, drv.DriveID, rl.Ops.Size, p.ioOps)
+			}
+			if rl.Bandwidth.RefillTime != 1000 || rl.Ops.RefillTime != 1000 {
+				t.Errorf("%s/%s: refill_time %d/%d, want 1000", name, drv.DriveID, rl.Bandwidth.RefillTime, rl.Ops.RefillTime)
+			}
+		}
+	}
+}
+
+// TestFcResolveIO: preset value by default; raw io_mbps/io_ops overrides
+// layer on top like vcpus/mem_mib; out-of-clamp values are ignored,
+// preserving the preset.
+func TestFcResolveIO(t *testing.T) {
+	fcHarness(t)
+	small := fcSizePresets["small"]
+	if bw, ops := fcResolveIO("nope"); bw != int64(small.ioBwMiBps)<<20 || ops != int64(small.ioOps) {
+		t.Fatalf("missing config: got %d/%d, want small preset", bw, ops)
+	}
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	write := func(s string) { os.WriteFile(filepath.Join(d, "config.json"), []byte(s), 0o644) }
+
+	write(`{"size":"large"}`)
+	large := fcSizePresets["large"]
+	if bw, ops := fcResolveIO("tg"); bw != int64(large.ioBwMiBps)<<20 || ops != int64(large.ioOps) {
+		t.Fatalf("size=large: got %d/%d, want large preset", bw, ops)
+	}
+	write(`{"size":"large","io_mbps":500,"io_ops":10000}`)
+	if bw, ops := fcResolveIO("tg"); bw != 500<<20 || ops != 10000 {
+		t.Fatalf("overrides: got %d/%d, want 500MiB/10000", bw, ops)
+	}
+	// Out-of-clamp values ignored — preset survives.
+	write(`{"io_mbps":5,"io_ops":50}`)
+	if bw, ops := fcResolveIO("tg"); bw != int64(small.ioBwMiBps)<<20 || ops != int64(small.ioOps) {
+		t.Fatalf("under-clamp: got %d/%d, want small preset", bw, ops)
+	}
+	write(`{"io_mbps":9999,"io_ops":999999}`)
+	if bw, ops := fcResolveIO("tg"); bw != int64(small.ioBwMiBps)<<20 || ops != int64(small.ioOps) {
+		t.Fatalf("over-clamp: got %d/%d, want small preset", bw, ops)
+	}
+}

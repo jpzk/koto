@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -228,6 +229,8 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 		}
 	}
 	eff["size"] = size
+	bwBytes, ioOps := fcResolveIO(g)
+	eff["io"] = fmt.Sprintf("%dMiB/s / %dops", bwBytes>>20, ioOps)
 	if _, ok := eff["effort"]; !ok {
 		eff["effort"] = "(default)"
 	}
