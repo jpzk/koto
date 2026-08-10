@@ -813,6 +813,28 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		dot = "● "
 		dotColor = cPink
 	}
+	// Everything above this point is cheap branching on model state. Everything
+	// below measures Unicode widths and builds styled spans, and that is where
+	// the frame's time actually goes: pprof puts ~52% of a full render inside
+	// lipgloss.Style.Render -> ansi.stringWidth -> grapheme iteration, with
+	// renderTree at 33% of the whole frame. The tree is rebuilt on EVERY
+	// message — every stream chunk from any of ~29 subscribed groups — while
+	// its rows are, frame to frame, almost entirely identical.
+	//
+	// So the styled output is memoized on exactly the values that determine it,
+	// computed above. m.tick is in the key only through `dot`, so a row with no
+	// spinner and no blink is stable across ticks and hits the cache; an
+	// animating row misses once per spinner frame, which is the work actually
+	// worth doing.
+	rowKey := strings.Join([]string{
+		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge,
+		strconv.Itoa(w), strconv.FormatBool(isCur), strconv.FormatBool(hov),
+		strconv.FormatBool(unread),
+	}, "\x00")
+	if s, ok := m.treeRowCache[rowKey]; ok {
+		return s
+	}
+
 	// One padded field holds name + count so the count sits right after the
 	// name (padding comes last); the byte split point lets the non-hover
 	// path gray just the count.
@@ -827,7 +849,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		if pw := lipgloss.Width(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
-		return inv(cBlack, cAmber).Bold(true).Render(txt)
+		return m.cacheTreeRow(rowKey, inv(cBlack, cAmber).Bold(true).Render(txt))
 	}
 	parts := " "
 	if r.branch != "" {
@@ -845,7 +867,25 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if badge != "" {
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(badge)
 	}
-	return parts
+	return m.cacheTreeRow(rowKey, parts)
+}
+
+// treeRowCacheMax bounds the memo. Keys carry the spinner glyph and the
+// elapsed badge, so a long-lived session mints new ones steadily; the cache is
+// dropped wholesale rather than evicted per entry because it is a pure
+// function of visible state — losing it costs one uncached frame, and the
+// alternative is an LRU nobody needs at this size.
+const treeRowCacheMax = 4096
+
+func (m Model) cacheTreeRow(key, rendered string) string {
+	if m.treeRowCache == nil {
+		return rendered
+	}
+	if len(m.treeRowCache) >= treeRowCacheMax {
+		clear(m.treeRowCache)
+	}
+	m.treeRowCache[key] = rendered
+	return rendered
 }
 
 // jobPeekHeaderRows is the fixed header height of the peek pane (meta line,

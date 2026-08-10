@@ -599,6 +599,12 @@ type Model struct {
 	preTopFocus focusZone
 	topSort     topSortKey
 
+	// treeRowCache memoizes rendered tree rows (see renderTreeRow): the
+	// tree is rebuilt on every message but its rows rarely change, and
+	// building them is dominated by Unicode width measurement inside
+	// lipgloss. Keyed on every value that determines a row's output.
+	treeRowCache map[string]string
+
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see
 	// exitShell in shell_view.go) so returning to the pane doesn't lose
@@ -893,6 +899,7 @@ func newModel(sock string, ctxWindow int) Model {
 		width:          80,
 		height:         24,
 		mdCache:        map[string]string{},
+		treeRowCache:   map[string]string{},
 		vpCache:        map[string]vpCacheEntry{},
 		groupVer:       map[string]int{},
 		promptHistory:  map[string][]string{},
