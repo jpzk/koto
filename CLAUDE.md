@@ -128,10 +128,27 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        first, plus a host rollup line (fs headroom / alloc /
 #                        provisioned). Joined client-side from WatchState
 #                        (network/root/model ride GroupInfo) + the Resources
-#                        poll; read-only, esc/ctrl+h closes. Opened from tree
+#                        poll; read-only, esc/ctrl+h closes. **s / c / m / t
+#                        re-sort by SPACE / CPU / RSS / TOK/S** (heaviest
+#                        first, name as tiebreak; underlined header marks the
+#                        active column, hint bar names it, choice survives
+#                        reopen). Each key sorts by the value the CELL SHOWS —
+#                        CPU normalized to the VM's vCPU allotment, RSS to its
+#                        mem preset, SPACE the guest filesystem's fullness
+#                        (allocation only as the stopped-VM fallback) — not
+#                        the raw field, so the order is explained by what's on
+#                        screen. `m` therefore orders the RSS high-water mark,
+#                        not guest pressure (that figure has no column; `koto
+#                        ctl resources` has it). Opened from tree
 #                        mode the tree stays visible alongside (like the log
-#                        view) and ⇧↑↓ moves the group cursor. See
-#                        tui/top_view.go.
+#                        view); **tab toggles that pane from either entry**,
+#                        ⇧↑↓ moves the tree cursor, and the selected group's
+#                        row in the table wears the tree cursor's own
+#                        amber bar (name cell only — inverting the row would
+#                        erase the threshold colors) and scrolls itself into
+#                        view. Selecting a session or job sub-row marks its
+#                        parent group: per-group is the only granularity the
+#                        resource collector has. See tui/top_view.go.
 #   any text          -> sends to current group (into its active session)
 #   /new <g>          -> spawn new group via daemon
 #   /sw  <g>          -> switch active group

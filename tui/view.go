@@ -663,13 +663,17 @@ func (m Model) renderTree(rows int) string {
 // amber-background highlight: the tree focused directly, or visible alongside
 // the log view where shift+↑/↓ still moves it (the cursor picks the log
 // scope, so hiding the marker would hide what the pane is filtered to), or
-// alongside the focused shell pane. There the keys go raw to the guest pty so
-// the cursor isn't movable — but it still marks the active conversation (the
-// one the shell belongs to and the message bar targets), and dropping the
-// highlight on a mere focus toggle read as the selection getting lost.
+// alongside the fleet view, where it likewise still moves and now also picks
+// out the highlighted table row (a movable cursor with no marker reads as a
+// tree you can't select in), or alongside the focused shell pane. There the
+// keys go raw to the guest pty so the cursor isn't movable — but it still
+// marks the active conversation (the one the shell belongs to and the message
+// bar targets), and dropping the highlight on a mere focus toggle read as the
+// selection getting lost.
 func (m Model) treeCursorLive() bool {
 	return m.focus == focusTree ||
 		(m.focus == focusLog && m.preLogFocus == focusTree) ||
+		(m.focus == focusTop && m.preTopFocus == focusTree) ||
 		(m.focus == focusShell && m.preShellFocus == focusTree)
 }
 

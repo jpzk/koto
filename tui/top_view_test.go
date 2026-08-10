@@ -6,6 +6,7 @@ package main
 // See top_view.go.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -147,6 +148,136 @@ func TestTopViewTreeAlongside(t *testing.T) {
 	m2 = press(t, m2, tea.KeyCtrlH)
 	if m2.treePaneW() != 0 {
 		t.Error("tree pane visible in fleet view opened from the input")
+	}
+}
+
+// TestTopSortKeys: c/m/t re-sort the table by the CPU, RSS and TOK/S columns,
+// each heaviest-first, and the hint bar names the active one. The fixture is
+// rigged so the three keys produce three different orders.
+func TestTopSortKeys(t *testing.T) {
+	m := topModel(t)
+	// main: low cpu, high rss%, all the tokens. web: high cpu, low rss%, idle.
+	main := m.resources["main"]
+	main.RSSBytes = 900 << 20 // 88% of 1024 MiB
+	m.resources["main"] = main
+	m = press(t, m, tea.KeyCtrlH)
+
+	order := func() []string {
+		rows := m.topRows()
+		got := make([]string, len(rows))
+		for i, r := range rows {
+			got[i] = r.group
+		}
+		return got
+	}
+	key := func(s string) {
+		nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+		m = nm.(Model)
+	}
+	check := func(what string, want ...string) {
+		t.Helper()
+		got := order()
+		if len(got) != len(want) {
+			t.Fatalf("%s: %d rows, want %d", what, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s order = %v, want %v", what, got, want)
+				return
+			}
+		}
+		if hint := stripANSI(m.renderTopHint()); !strings.Contains(hint, "by "+what) {
+			t.Errorf("hint %q does not name the active sort %q", hint, what)
+		}
+	}
+
+	check("cpu", "web", "main") // default: 37% vs 5% of entitlement
+	key("m")
+	check("rss", "main", "web") // 88% vs 50% of the preset
+	key("t")
+	check("tok/s", "main", "web") // 42 vs 0
+	key("s")
+	check("space", "web", "main") // 75% vs 12% of the ceiling
+	key("c")
+	check("cpu", "web", "main") // back to the default
+
+	// The sort survives closing and reopening the view.
+	key("m")
+	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlH)
+	if m.topSort != topSortMem {
+		t.Errorf("topSort = %v after reopen, want topSortMem", m.topSort)
+	}
+
+	// Space sorts on the GUEST filesystem when it's known, not on the image's
+	// host allocation: main's disk is 87% full inside but its image has only
+	// ever touched 12% of its ceiling, and the fuller guest must win.
+	key("s")
+	check("space", "web", "main")
+	main = m.resources["main"]
+	main.GuestDiskTotal, main.GuestDiskUsed, main.GuestDiskAvail = 8<<30, 7<<30, 1<<30
+	m.resources["main"] = main
+	m.refreshTopViewport()
+	check("space", "main", "web")
+}
+
+// TestTopViewSelectionFollowsTree: the tree cursor stays live and movable
+// beside the fleet table, the selected group's row is marked (styling only,
+// no layout change), tab toggles the tree pane, and a selection off-screen
+// scrolls itself into view.
+func TestTopViewSelectionFollowsTree(t *testing.T) {
+	m := topModel(t)
+	m = press(t, m, tea.KeyTab) // tree mode, then the fleet view
+	m = press(t, m, tea.KeyCtrlH)
+	if !m.treeCursorLive() {
+		t.Error("tree cursor went dark in the fleet view — the selection keys move an invisible cursor")
+	}
+
+	// The marked row differs from an unmarked one only in styling. Needs a
+	// real color profile — under `go test` termenv sniffs Ascii and lipgloss
+	// emits no escapes at all, which would make the comparison vacuous.
+	withColor(t)
+	row := m.topRows()[0]
+	plain, marked := renderTopRow(row, false), renderTopRow(row, true)
+	if plain == marked {
+		t.Error("selected row renders identically to an unselected one")
+	}
+	if stripANSI(plain) != stripANSI(marked) {
+		t.Errorf("selection changed the row's text/width:\n%q\n%q", stripANSI(plain), stripANSI(marked))
+	}
+
+	// tab hides the tree (and with it the return-to-tree focus), tab restores.
+	m = press(t, m, tea.KeyTab)
+	if m.treePaneW() != 0 {
+		t.Error("tab did not hide the tree pane")
+	}
+	m = press(t, m, tea.KeyTab)
+	if m.treePaneW() == 0 {
+		t.Error("tab did not bring the tree pane back")
+	}
+
+	// A tall fleet: selecting a group below the fold scrolls it into view.
+	m2 := topModel(t)
+	for i := 0; i < 40; i++ {
+		g := fmt.Sprintf("g%02d", i)
+		m2.groups[g] = GroupInfo{Running: true, Model: "claude-sonnet-5"}
+		m2.resources[g] = GroupRes{Running: true, Vcpus: 2, MemMiB: 1024}
+	}
+	m2.cur = "g39" // idle, so it sorts to the bottom of the cpu-ordered table
+	m2 = press(t, m2, tea.KeyCtrlH)
+	if m2.topVP.YOffset == 0 {
+		t.Errorf("fleet table did not scroll to the selected row (offset 0, height %d, %d rows)",
+			m2.topVP.Height, len(m2.topRows()))
+	}
+	idx := -1
+	for i, r := range m2.topRows() {
+		if r.group == "g39" {
+			idx = i
+		}
+	}
+	if idx < m2.topVP.YOffset || idx >= m2.topVP.YOffset+m2.topVP.Height {
+		t.Errorf("selected row %d outside the visible window [%d,%d)",
+			idx, m2.topVP.YOffset, m2.topVP.YOffset+m2.topVP.Height)
 	}
 }
 

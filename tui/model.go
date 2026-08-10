@@ -591,9 +591,13 @@ type Model struct {
 	// rss). The viewport exists only for scrolling a tall fleet;
 	// refreshTopViewport rebuilds its content on every resources poll and
 	// state frame while the view is open. preTopFocus mirrors preLogFocus.
+	// topSort is which column the table is ordered by (c/m/t in the view);
+	// it survives a close/reopen so an operator watching one dimension keeps
+	// it. Defaults to CPU — the zero value, like top's own default.
 	topVP       viewport.Model
 	topVPReady  bool
 	preTopFocus focusZone
+	topSort     topSortKey
 
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see

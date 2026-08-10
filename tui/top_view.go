@@ -31,9 +31,107 @@ type topRow struct {
 	hasRes bool
 }
 
+// topSortKey is the column the table is ordered by, switched with s/c/m/t
+// while the view is focused. CPU is the zero value (top's own default).
+type topSortKey int
+
+const (
+	topSortCPU topSortKey = iota
+	topSortMem
+	topSortTok
+	topSortSpace
+)
+
+func (k topSortKey) String() string {
+	switch k {
+	case topSortMem:
+		return "rss"
+	case topSortTok:
+		return "tok/s"
+	case topSortSpace:
+		return "space"
+	default:
+		return "cpu"
+	}
+}
+
+// col is the table column this sort key orders, so the header can mark it.
+func (k topSortKey) col() int {
+	switch k {
+	case topSortMem:
+		return 3 // RSS
+	case topSortTok:
+		return 4 // TOK/S
+	case topSortSpace:
+		return 1 // SPACE
+	default:
+		return 2 // CPU
+	}
+}
+
+// topSpace is the SPACE cell's numbers: the guest filesystem's own
+// used/total/fullness, falling back to the image's host allocation against
+// its size ceiling when the guest can't be asked (stopped or unreachable) —
+// an upper bound, and all a stopped group has. ok=false renders a dash.
+// Shared by the cell and the sort so the two can't drift apart.
+func topSpace(r topRow) (used, total int64, frac float64, ok bool) {
+	if !r.hasRes {
+		return 0, 0, 0, false
+	}
+	if u, t, f, ok := guestDiskUsage(r.res); ok {
+		return u, t, f, true
+	}
+	if r.res.DeclaredBytes > 0 {
+		return r.res.AllocBytes, r.res.DeclaredBytes,
+			float64(r.res.AllocBytes) / float64(r.res.DeclaredBytes), true
+	}
+	return 0, 0, 0, false
+}
+
+// topSortVal is the row's value under a sort key. It deliberately returns
+// what the CELL DISPLAYS rather than the raw field: CPU is normalized to the
+// VM's whole vCPU allotment and RSS to its memory preset, exactly as
+// renderTopRow renders them. Sorting by the raw per-core CPU or by absolute
+// bytes would order the rows by a number that isn't on screen — a 4-vCPU VM
+// at 40% of its entitlement would outrank a 2-vCPU one pinned at 90%.
+// A row with no resources reading (or a stopped VM, whose cells are dashes)
+// sorts as 0, i.e. to the bottom.
+//
+// Note the memory key orders the RSS column, which is a high-water mark of
+// guest-touched pages, not guest memory pressure — the truthful figure
+// (guest_mem_*) isn't a column here, and sorting by an invisible number is
+// worse than sorting by a visible imperfect one. Read `koto ctl resources`
+// for real pressure. Space, by contrast, IS the truthful figure: the cell
+// shows the guest filesystem's fullness (allocation only as a stopped-VM
+// fallback), so sorting by it ranks groups by how close they are to going
+// read-only — the fraction, not the byte count, since a full 8 GiB workspace
+// wedges its agent exactly like a full 24 GiB one.
+func topSortVal(r topRow, k topSortKey) float64 {
+	switch k {
+	case topSortSpace:
+		_, _, f, ok := topSpace(r)
+		if !ok {
+			return 0
+		}
+		return f
+	case topSortMem:
+		if r.hasRes && r.res.Running && r.res.MemMiB > 0 {
+			return float64(r.res.RSSBytes) / (float64(r.res.MemMiB) * (1 << 20))
+		}
+		return 0
+	case topSortTok:
+		return r.info.TokPerSec
+	default:
+		if r.hasRes && r.res.Running && r.res.Vcpus > 0 {
+			return r.res.CPUPct / 100 / float64(r.res.Vcpus)
+		}
+		return 0
+	}
+}
+
 // topRows joins the two maps over the union of their keys, sorted like top:
-// busiest first (CPU desc), name as the tiebreak so idle groups keep a
-// stable, scannable order.
+// heaviest first on the active column (m.topSort), name as the tiebreak so
+// idle groups keep a stable, scannable order.
 func (m Model) topRows() []topRow {
 	seen := map[string]bool{}
 	rows := []topRow{}
@@ -51,8 +149,9 @@ func (m Model) topRows() []topRow {
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].res.CPUPct != rows[j].res.CPUPct {
-			return rows[i].res.CPUPct > rows[j].res.CPUPct
+		a, b := topSortVal(rows[i], m.topSort), topSortVal(rows[j], m.topSort)
+		if a != b {
+			return a > b
 		}
 		return rows[i].group < rows[j].group
 	})
@@ -104,17 +203,26 @@ var topColumns = []struct {
 
 // renderTopRow renders one group's data cells, styled per column. The row is
 // built cell by cell — pad first, then style — so ANSI escapes never count
-// against the column width.
-func renderTopRow(r topRow) string {
+// against the column width. sel marks the group the tree cursor is on.
+func renderTopRow(r topRow, sel bool) string {
 	gray := lipgloss.NewStyle().Foreground(cGray)
 	white := lipgloss.NewStyle().Foreground(cWhite)
 
 	// GROUP: running groups bright, stopped gray — the same signal the
 	// tree's dot carries. That signal is color alone and this table has no
 	// dot beside the name, so mono bolds the running rows instead.
+	//
+	// The selected group wears the tree cursor's own amber-on-black bar, so
+	// the two panes visibly agree on what's selected. Only this cell, not the
+	// whole row: every other column is colored by threshold (pctColor,
+	// alertify), and inverting the row would erase precisely the signal the
+	// table exists for.
 	nameStyle := gray
 	if r.info.Running {
 		nameStyle = white.Bold(monoMode)
+	}
+	if sel {
+		nameStyle = inv(cBlack, cAmber).Bold(true)
 	}
 	cells := []string{nameStyle.Render(topPad(r.group, topColumns[0].w))}
 
@@ -129,18 +237,11 @@ func renderTopRow(r topRow) string {
 	// above real usage under churn — 2026-08-09, `main` read 20% here with
 	// 6.5 MB in its filesystem. A stopped guest has nothing to ask, so it
 	// falls back to allocation, which is at least an upper bound.
-	used, total, frac, haveGuest := guestDiskUsage(r.res)
-	switch {
-	case r.hasRes && haveGuest:
+	if used, total, frac, ok := topSpace(r); ok {
 		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(used), fmtGB(total), int(frac*100))
 		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
 			Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
-	case r.hasRes && r.res.DeclaredBytes > 0:
-		frac := float64(r.res.AllocBytes) / float64(r.res.DeclaredBytes)
-		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(r.res.AllocBytes), fmtGB(r.res.DeclaredBytes), int(frac*100))
-		cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
-			Foreground(pctColor(frac)).Render(topPad(txt, topColumns[1].w)))
-	default:
+	} else {
 		cells = append(cells, dash(topColumns[1].w))
 	}
 
@@ -248,13 +349,40 @@ func (m *Model) refreshTopViewport() {
 	rows := m.topRows()
 	lines := make([]string, 0, len(rows))
 	for _, r := range rows {
-		lines = append(lines, renderTopRow(r))
+		lines = append(lines, renderTopRow(r, r.group == m.cur))
 	}
 	content := strings.Join(lines, "\n")
 	if len(rows) == 0 {
 		content = lipgloss.NewStyle().Foreground(cGray).Render("no groups")
 	}
 	m.topVP.SetContent(content)
+}
+
+// followTopSel scrolls the selected group's row into view, and only then —
+// never from refreshTopViewport, which runs on every resources poll and state
+// frame. Yanking the viewport back every 5s would fight an operator who
+// scrolled the table deliberately; a selection change is the one moment they
+// asked to be taken somewhere.
+func (m *Model) followTopSel() {
+	if !m.topVPReady || m.topVP.Height <= 0 {
+		return
+	}
+	idx := -1
+	for i, r := range m.topRows() {
+		if r.group == m.cur {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	switch off := m.topVP.YOffset; {
+	case idx < off:
+		m.topVP.SetYOffset(idx)
+	case idx >= off+m.topVP.Height:
+		m.topVP.SetYOffset(idx - m.topVP.Height + 1)
+	}
 }
 
 // renderTopView draws the full fleet-view UI: status bar (reused), host
@@ -270,12 +398,21 @@ func (m Model) renderTopView() string {
 	pad := lipgloss.NewStyle().PaddingLeft(1)
 	summary := pad.MaxWidth(w + 2).Render(m.renderTopSummary())
 
+	// The header marks the column the rows are ordered by. Underline, not a
+	// brighter color or a ▾ glyph: color alone would vanish in mono mode, and
+	// a glyph would have to fit inside the fixed column width.
 	hdrCells := make([]string, 0, len(topColumns))
-	for _, c := range topColumns {
-		hdrCells = append(hdrCells, topPad(c.label, c.w))
+	hdrStyle := lipgloss.NewStyle().Foreground(cDkAmber).Bold(true)
+	for i, c := range topColumns {
+		cell := topPad(c.label, c.w)
+		if i == m.topSort.col() {
+			cell = hdrStyle.Underline(true).Render(cell)
+		} else {
+			cell = hdrStyle.Render(cell)
+		}
+		hdrCells = append(hdrCells, cell)
 	}
-	header := pad.MaxWidth(w + 2).Render(
-		lipgloss.NewStyle().Foreground(cDkAmber).Bold(true).Render(strings.Join(hdrCells, " ")))
+	header := pad.MaxWidth(w + 2).Render(strings.Join(hdrCells, " "))
 
 	var body string
 	if m.topVPReady {
@@ -310,7 +447,7 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by cpu", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ group", "shift-up/dn group"), "^h close", "^c exit"}
+	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ select", "shift-up/dn select"), "tab tree", "^h close", "^c exit"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
@@ -342,6 +479,7 @@ func (m *Model) enterTop() {
 	m.input.Blur()
 	m.resizeTopViewport()
 	m.refreshTopViewport()
+	m.followTopSel()
 }
 
 // exitTop returns to the pre-open focus — see restoreChatFocus for the
@@ -351,17 +489,56 @@ func (m *Model) exitTop() {
 }
 
 // handleTopKey routes keys while the fleet view is focused. Esc / ctrl+H
-// close, arrows scroll, everything else is dropped (read-only view).
+// close, arrows scroll, s/c/m/t re-sort, everything else is dropped (read-only
+// view — bare letters are free here precisely because nothing types).
 func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s := msg.String(); s {
 	case "esc", "ctrl+h":
 		m.exitTop()
 		return m, nil
+	case "s", "c", "m", "t":
+		// Re-sorting scrolls back to the top: the interesting rows are the
+		// heavy ones and they're now at the head of the table.
+		switch s {
+		case "s":
+			m.topSort = topSortSpace
+		case "c":
+			m.topSort = topSortCPU
+		case "m":
+			m.topSort = topSortMem
+		case "t":
+			m.topSort = topSortTok
+		}
+		m.refreshTopViewport()
+		m.topVP.GotoTop()
+		return m, nil
+	case "tab":
+		// Show/hide the tree beside the table without leaving the view.
+		// Tree visibility here is preTopFocus (the log view's convention),
+		// so this doubles as where esc lands you — which is the honest
+		// outcome: having browsed the tree, that's where you want to be back.
+		// Without it, a fleet view opened from the message bar had no tree at
+		// all and the selection keys below moved an invisible cursor.
+		if m.preTopFocus == focusTree {
+			m.preTopFocus = focusInput
+		} else {
+			m.preTopFocus = focusTree
+		}
+		m.resizeTopViewport() // the tree column changes the table's width
+		m.refreshTopViewport()
+		m.followTopSel()
+		return m, nil
 	case "shift+up", "shift+down":
 		// Move the tree cursor without leaving the view (same binding as the
 		// log view): the table isn't scoped by it, but the active group —
-		// status bar, metrics bar, and where you land on close — follows.
+		// status bar, metrics bar, and where you land on close — follows,
+		// and so does the highlighted table row. Sub-rows (a session or a
+		// job) resolve to their group, which is the only granularity the
+		// resource collector has: selectTreeRow sets m.cur from any row type,
+		// so the table needs no special case for them.
 		m.retargetTreeCursor(s == "shift+up")
+		m.refreshTopViewport()
+		m.followTopSel()
 		return m, nil
 	case "up":
 		m.topVP.ScrollUp(1)
