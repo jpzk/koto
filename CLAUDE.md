@@ -149,6 +149,24 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        view. Selecting a session or job sub-row marks its
 #                        parent group: per-group is the only granularity the
 #                        resource collector has. See tui/top_view.go.
+#   ctrl+]            -> shared terminal (/shell): the group's tmux session in
+#                        a pane beside the conversation. **The split follows
+#                        the terminal's ORIENTATION**: landscape splits into
+#                        columns (chat left, terminal right, 50/50), portrait
+#                        stacks them (chat + message bar on top, terminal
+#                        underneath, 50/50 of the rows). Portrait is measured
+#                        visually, not in cells — a cell is ~2:1 tall, so the
+#                        test is width < height*2 and 80x24 is landscape.
+#                        Orientation picks the AXIS even when the columns
+#                        would fit, since stacking gives both halves the full
+#                        width; under 101 cols (125 with the tree) the columns
+#                        don't fit at all, which is most portrait frames.
+#                        Too small for either axis -> the pre-split fullscreen
+#                        pane, as before. The stacked boundary is fixed at
+#                        half the body: the prompt box grows into the
+#                        transcript above it, never into the terminal, so a
+#                        wrapping draft can't reflow the guest's tmux on every
+#                        keystroke. See tui/shell_view.go shellSplitMode.
 #   any text          -> sends to current group (into its active session)
 #   /new <g>          -> spawn new group via daemon
 #   /sw  <g>          -> switch active group

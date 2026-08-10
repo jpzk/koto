@@ -2690,12 +2690,12 @@ func (m *Model) addLine(l logLine) {
 func (m Model) logViewportSize() (int, int) {
 	if m.shellSplitVisible() {
 		// Split-shell mode (shell_view.go): the viewport becomes the chat
-		// column to the left of the shell pane, sized to match
+		// half beside (or above) the shell pane, sized to match
 		// renderShellView's chat block exactly (-2: 1 padding-left, 1
 		// spare). Height is chatRows — the message bar stays visible below
 		// the viewport in split mode regardless of which pane is focused,
 		// so the budget matches the normal chat view's.
-		return max(10, m.shellChatW()-2), m.chatRows()
+		return max(10, m.shellChatBlockW()-2), m.chatRows()
 	}
 	treeW := m.treePaneW()
 	w := max(10, m.width-treeW-2) // -1 padding-left, -1 scrollbar
@@ -2707,6 +2707,12 @@ func (m Model) logViewportSize() (int, int) {
 // grows as the value wraps (inputRows), so this shrinks with it — View() and
 // the viewport must agree on the number or the frame overflows the terminal.
 func (m Model) chatRows() int {
+	if ch := m.shellChatBlockH(); ch > 0 {
+		// Stacked shell split: the transcript is budgeted against the chat
+		// half's own height, not the frame's — the terminal pane below owns
+		// the rest and must not move when the prompt box grows.
+		return max(1, ch-2-m.inputRows())
+	}
 	// status(1) + input borders(2) + hint(1) + metrics(1) = 5.
 	return max(1, m.height-5-m.inputRows())
 }

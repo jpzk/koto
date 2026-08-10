@@ -311,39 +311,120 @@ func closeEmulator(term *vt.Emulator) {
 }
 
 // shellSplitChatMinW is the least width the read-only chat column needs to
-// stay legible; below it, splitting would make both halves worse than a
-// fullscreen shell.
+// stay legible; below it, splitting side by side would make both halves worse
+// than a fullscreen shell.
 const shellSplitChatMinW = 50
 
-// shellChatW returns the width of the read-only chat/log column shown to the
-// left of the shell pane, or 0 when the terminal isn't wide enough to split
-// — callers should fall back to the pre-split fullscreen shell pane in that
-// case. Checked fresh on every render/resize, so growing a narrow terminal
-// (or widening a tmux pane) picks up the split without a reattach. Reserves
-// the tree column (treePaneW) first when it's showing alongside the shell —
-// see treePaneW's doc comment — so the chat column shrinks (or drops) before
-// the tree does.
-func (m Model) shellChatW() int {
-	// The chat column and the shell pane split the available width evenly —
-	// with or without the tree column (which is reserved first, separator
-	// included). The shell used to take a fixed preferred width in the
-	// no-tree case, but that left a lopsided chat column; 50/50 everywhere.
+// shellStackChatMinH / shellStackPtyMinH are the same floor for the stacked
+// split, in rows: a 3-row prompt box plus one line of transcript above, and
+// enough rows below for a prompt and a couple of lines of output. Under their
+// sum there is nothing to stack and the pane goes fullscreen as before.
+const (
+	shellStackChatMinH = 4
+	shellStackPtyMinH  = 5
+)
+
+// shellSplit is which way the chat half and the terminal half divide the
+// frame — see shellSplitMode.
+type shellSplit int
+
+const (
+	shellSplitNone shellSplit = iota // no split: the focused pane owns the frame
+	shellSplitCols                   // chat left, terminal right
+	shellSplitRows                   // chat on top, terminal underneath
+)
+
+// portrait reports whether the terminal is taller than it is wide VISUALLY,
+// which is not the same as in cells: a text cell is about twice as tall as it
+// is wide, so the familiar 80x24 — a landscape box on screen — is 80 cells
+// against 24*2 = 48. A pane split down the middle of a tall monitor, say
+// 70x60, is 70 against 120: portrait, and precisely the shape that has no
+// width left to give a side-by-side split.
+func (m Model) portrait() bool { return m.width < m.height*2 }
+
+// shellSplitMode picks the split from the terminal's shape alone. Deliberately
+// free of shell state (m.shell, shellOpen): enterShell sizes the guest pty via
+// shellPaneSize BEFORE the session exists, so the geometry helpers have to
+// answer for a pane that isn't open yet — shellSplitVisible is where the state
+// checks live. Checked fresh on every render/resize, so growing a narrow
+// terminal (or rotating a tmux pane) picks up the split without a reattach.
+//
+// Orientation decides the axis, not merely whether the columns fit: a portrait
+// terminal wide enough for two 50-col columns still reads better stacked,
+// because the halves keep the full width for wrapped prose and guest output.
+// It's also the only layout that survives the shape at all — under 101 cols
+// (125 with the tree showing) the side-by-side split drops the chat column
+// entirely, and a portrait terminal is usually under that.
+func (m Model) shellSplitMode() shellSplit {
 	if m.fullscreen {
-		// Fullscreen collapses the split: chat width 0 means the focused
-		// pane owns the frame — the pty when focus is on it (renderShellView
-		// falls into its no-split mode), the chat column otherwise
-		// (shellSplitVisible goes false and View() renders the plain chat).
-		return 0
+		// Fullscreen collapses the split: the focused pane owns the frame —
+		// the pty when focus is on it (renderShellView falls into its
+		// no-split mode), the chat column otherwise (shellSplitVisible goes
+		// false and View() renders the plain chat).
+		return shellSplitNone
 	}
-	avail := m.width
+	if m.portrait() && m.shellBodyRows() >= shellStackChatMinH+shellStackPtyMinH {
+		return shellSplitRows
+	}
+	if (m.shellAvailW()-1)/2 >= shellSplitChatMinW { // -1: the separator column
+		return shellSplitCols
+	}
+	return shellSplitNone
+}
+
+// shellAvailW is the width the shell view's own panes share: the frame minus
+// the tree column when it's showing alongside (treePaneW — see its doc
+// comment), so the chat column shrinks, or the split collapses, before the
+// tree does.
+func (m Model) shellAvailW() int {
+	w := m.width
 	if tw := m.treePaneW(); tw > 0 {
-		avail -= tw + 1 // tree column + its separator
+		w -= tw + 1 // tree column + its separator
 	}
-	chatW := (avail - 1) / 2 // -1: the vertical separator column
-	if chatW < shellSplitChatMinW {
+	return w
+}
+
+// shellBodyRows is the height the tree, the chat half and the terminal pane
+// share: the frame minus the status bar and the hint + metrics rows.
+func (m Model) shellBodyRows() int { return max(1, m.height-3) }
+
+// shellChatW returns the width of the read-only chat/log column shown to the
+// LEFT of the shell pane, or 0 in any other layout. The chat column and the
+// shell pane split the available width evenly — with or without the tree
+// column. The shell used to take a fixed preferred width in the no-tree case,
+// but that left a lopsided chat column; 50/50 everywhere.
+func (m Model) shellChatW() int {
+	if m.shellSplitMode() != shellSplitCols {
 		return 0
 	}
-	return chatW
+	return (m.shellAvailW() - 1) / 2
+}
+
+// shellChatBlockH is the height the chat half owns when stacked (viewport +
+// prompt box), 0 in every other layout. Half the body, clamped so neither half
+// falls under its floor.
+//
+// Deliberately independent of inputRows, which is what keeps the guest tmux
+// still: the prompt box grows as a draft wraps, and if that moved the boundary
+// the pty below would be resized — a guest-side reflow per keystroke. Instead
+// the box grows into the transcript above it, exactly as it does in the normal
+// chat view, and maxInputRows caps it so the half can always hold both.
+func (m Model) shellChatBlockH() int {
+	if m.shellSplitMode() != shellSplitRows {
+		return 0
+	}
+	body := m.shellBodyRows()
+	return min(max(body/2, shellStackChatMinH), body-shellStackPtyMinH)
+}
+
+// shellChatBlockW is the chat half's total width in whichever split is on
+// screen: the full frame (less the tree) when stacked, the left column when
+// side by side, 0 when there is no split.
+func (m Model) shellChatBlockW() int {
+	if m.shellSplitMode() == shellSplitRows {
+		return m.shellAvailW()
+	}
+	return m.shellChatW()
 }
 
 // shellVSep fills the h-row divider column between panes in split mode with
@@ -359,25 +440,23 @@ func shellVSep(h int) string {
 
 // shellPaneSize mirrors logPaneSize but for the shell pane: no scrollbar
 // column (the pty's own screen buffer, and tmux's scrollback via its own
-// prefix key, both make a koto-side scrollbar unnecessary). When split
-// (shellChatW > 0) and/or the tree is showing alongside it (treePaneW > 0),
-// the pty only gets what's left after those columns and their separators —
-// the guest's tmux session is resized to match, so what the operator sees on
-// the right is the session's real geometry, not a cropped view of a wider one.
+// prefix key, both make a koto-side scrollbar unnecessary). Whatever the
+// other panes take, the pty gets the rest — the chat column and the tree
+// column with their separators horizontally, the stacked chat half
+// vertically. The guest's tmux session is resized to match, so what the
+// operator sees is the session's real geometry, not a cropped view of a
+// larger one.
 func (m Model) shellPaneSize() (int, int) {
-	total := m.width
-	if tw := m.treePaneW(); tw > 0 {
-		total -= tw + 1
-	}
+	total := m.shellAvailW()
 	if chatW := m.shellChatW(); chatW > 0 {
 		total -= chatW + 1
 	}
 	w := max(10, total-2)
-	// -3: status + hint + metrics. This makes the frame exactly m.height
-	// rows, same as the chat view — so the hint/metrics rows sit on the
-	// same terminal rows in both views and toggling the shell pane in and
-	// out (ctrl+]) doesn't make the bottom lines jump.
-	h := max(1, m.height-3)
+	// shellBodyRows makes the frame exactly m.height rows, same as the chat
+	// view — so the hint/metrics rows sit on the same terminal rows in both
+	// views and toggling the shell pane in and out (ctrl+]) doesn't make the
+	// bottom lines jump.
+	h := max(1, m.shellBodyRows()-m.shellChatBlockH())
 	return w, h
 }
 
@@ -581,10 +660,10 @@ func (m *Model) closeShell() {
 }
 
 // shellSplitVisible reports whether the shell pane is on screen alongside the
-// chat column + message bar (renderShellView's split mode). False when the
-// pane is closed, when the log view covers everything, and when the terminal
-// is too narrow to split (there the pane only shows fullscreen, while
-// focused).
+// chat column + message bar (renderShellView's split modes, either axis).
+// False when the pane is closed, when the log view covers everything, and when
+// the terminal is too small to split at all (there the pane only shows
+// fullscreen, while focused).
 func (m Model) shellSplitVisible() bool {
 	if m.shell == nil || m.focus == focusLog {
 		return false
@@ -592,7 +671,7 @@ func (m Model) shellSplitVisible() bool {
 	if m.focus != focusShell && !m.shellOpen {
 		return false
 	}
-	return m.shellChatW() > 0
+	return m.shellSplitMode() != shellSplitNone
 }
 
 // syncShellSize brings the guest pty's geometry in line with the pane's
@@ -788,7 +867,8 @@ func modEncode(b []byte, mod int) []byte {
 // row 0 is the status bar, and the grid is preceded horizontally by the
 // optional tree column (+separator), the optional chat column (its logArea
 // block is chatW-1 wide, +1 separator = chatW), and shellBody's own
-// 1-col PaddingLeft.
+// 1-col PaddingLeft — and vertically by the stacked chat half, when the split
+// runs that way instead.
 func (m Model) shellMouseOrigin() (int, int) {
 	x := 0
 	if tw := m.treePaneW(); tw > 0 {
@@ -797,7 +877,7 @@ func (m Model) shellMouseOrigin() (int, int) {
 	if chatW := m.shellChatW(); chatW > 0 {
 		x += chatW
 	}
-	return x + 1, 1
+	return x + 1, 1 + m.shellChatBlockH()
 }
 
 // shellMouseButtons maps Bubble Tea's parsed button back to the X11 button
@@ -869,12 +949,13 @@ func (m Model) forwardShellMouse(ev tea.MouseEvent) bool {
 // live screen rendered via vt.Emulator.Render() (already ANSI-styled —
 // colors/attributes the guest app set are preserved, just never
 // interpreted as commands to the REAL terminal, see the package doc
-// comment above), and a hint line. On a wide-enough terminal (shellChatW >
-// 0) the shell pane splits to the right of the chat column instead of
-// replacing it — and the chat column keeps its message bar, so the operator
-// can toggle focus between typing to the agent and driving the shared shell
-// (ctrl+]) with both panes staying on screen; narrower terminals fall back
-// to the prior fullscreen behavior, mirroring renderLogView.
+// comment above), and a hint line. Where the terminal has room the shell pane
+// splits against the chat column instead of replacing it (shellSplitMode: to
+// its right on a landscape terminal, below it on a portrait one) — and the
+// chat half keeps its message bar, so the operator can toggle focus between
+// typing to the agent and driving the shared shell (ctrl+]) with both panes
+// staying on screen; terminals too small for either axis fall back to the
+// prior fullscreen behavior, mirroring renderLogView.
 func (m Model) renderShellView() string {
 	if m.width < 10 || m.height < 5 {
 		return "terminal too small"
@@ -918,11 +999,12 @@ func (m Model) renderShellView() string {
 	}
 
 	body := shellBody
-	if chatW := m.shellChatW(); chatW > 0 {
-		// Split mode: the chat column keeps its message bar underneath the
+	bodyH := m.shellBodyRows()
+	if chatW := m.shellChatBlockW(); chatW > 0 {
+		// Split mode: the chat half keeps its message bar underneath the
 		// viewport — same vertical budget as the normal chat view (chatRows
-		// + input box = h), so both panes stay open and focusable side by
-		// side and moving focus between them (a click either way) moves
+		// + input box = the half's height), so both panes stay open and
+		// focusable and moving focus between them (a click either way) moves
 		// nothing on screen.
 		rows := m.chatRows()
 		var chatArea string
@@ -943,10 +1025,23 @@ func (m Model) renderShellView() string {
 		}
 		chatArea = lipgloss.NewStyle().Height(rows).MaxHeight(rows).Render(chatArea)
 		chatCol := lipgloss.JoinVertical(lipgloss.Left, chatArea, m.renderInput())
-		body = lipgloss.JoinHorizontal(lipgloss.Top, chatCol, shellVSep(h), shellBody)
+		if m.shellSplitMode() == shellSplitRows {
+			// Stacked: the conversation stays on top, where the eye already
+			// looks for it and where it sits in the plain chat view, with the
+			// message bar in its usual place directly under the transcript.
+			// The terminal takes the bottom half. No separator row — the
+			// prompt box's own border already draws the boundary, and a row
+			// is worth more than a rule on the terminal shape that has the
+			// least of them.
+			body = lipgloss.JoinVertical(lipgloss.Left, chatCol, shellBody)
+		} else {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, chatCol, shellVSep(bodyH), shellBody)
+		}
 	}
 	if treeW := m.treePaneW(); treeW > 0 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h), shellVSep(h), body)
+		// The tree spans the whole body in either split — both halves are to
+		// its right, stacked or not.
+		body = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(bodyH), shellVSep(bodyH), body)
 	}
 
 	// Bottom hint follows the focused pane: pty key bindings while the shell

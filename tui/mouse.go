@@ -44,11 +44,10 @@ func (m Model) treeBodyRows() int {
 		_, h := m.topPaneSize()
 		return h + 2
 	case m.focus == focusShell || m.shellSplitVisible():
-		// Both shell layouts — split AND fullscreen-with-tree (narrow
-		// terminal, preShellFocus == focusTree) — hand renderTree the
-		// shellPaneSize height.
-		_, h := m.shellPaneSize()
-		return h
+		// Every shell layout — either split axis AND fullscreen-with-tree
+		// (small terminal, preShellFocus == focusTree) — hands renderTree the
+		// whole body height; the tree stands beside both halves.
+		return m.shellBodyRows()
 	default:
 		return m.chatRows()
 	}
@@ -132,12 +131,19 @@ func (m *Model) handleLeftClick(x, y int) bool {
 		if m.treePaneW() > 0 && x < leftPaneWidth {
 			return true // tree furniture — inert, same as above
 		}
-		// Left of the pty grid in split mode is the read-only chat column:
-		// clicking it detaches back to chat focus with the pane still open
-		// (the mouse is the only way to move focus off the pty — ctrl+]
-		// closes the terminal outright). Grid clicks were already offered to
-		// the guest; status/hint/metrics rows stay inert.
-		if ox, _ := m.shellMouseOrigin(); x < ox {
+		// Off the pty grid but inside the split is the read-only chat half —
+		// left of the grid side by side, above it when stacked: clicking it
+		// detaches back to chat focus with the pane still open (the mouse is
+		// the only way to move focus off the pty — ctrl+] closes the terminal
+		// outright). Grid clicks were already offered to the guest;
+		// status/hint/metrics rows stay inert.
+		ox, oy := m.shellMouseOrigin()
+		if m.shellSplitMode() == shellSplitRows {
+			if y >= 1 && y < oy {
+				m.exitShell()
+				return true
+			}
+		} else if x < ox {
 			if _, h := m.shellPaneSize(); y >= 1 && y <= h {
 				m.exitShell()
 				return true

@@ -1259,12 +1259,13 @@ func (m Model) renderScrollbar(rows int) string {
 // --- input -------------------------------------------------------------------
 
 // inputBoxW is the total width budget of the prompt box (borders included):
-// the full terminal normally, the chat column when the shell split is on
-// screen (renderShellView stacks the box under the viewport there, matching
-// its Width(chatW-1) chat block).
+// the full terminal normally, the chat half when the shell split is on screen
+// (renderShellView stacks the box under the viewport there, matching its
+// Width(chatW-1) chat block — the left column side by side, the full width
+// less the tree when stacked).
 func (m Model) inputBoxW() int {
 	if m.shellSplitVisible() {
-		return m.shellChatW() - 1
+		return m.shellChatBlockW() - 1
 	}
 	return m.width
 }
@@ -1284,7 +1285,17 @@ func (m Model) inputPromptW() int {
 // scrolls inside the box (renderInputLines keeps the cursor row visible)
 // rather than swallowing the chat pane — a pasted paragraph shouldn't push
 // the conversation off-screen.
-func (m Model) maxInputRows() int { return max(1, min(10, m.height-8)) }
+// maxInputRows caps how tall the prompt box may grow. In the stacked shell
+// split it is capped against the chat half rather than the frame (-3: the
+// box's two borders and one surviving row of transcript), because there the
+// rest of the frame belongs to the terminal pane: an uncapped box would eat
+// past its own half and push the frame taller than the terminal.
+func (m Model) maxInputRows() int {
+	if ch := m.shellChatBlockH(); ch > 0 {
+		return max(1, min(10, ch-3))
+	}
+	return max(1, min(10, m.height-8))
+}
 
 // inputRows reports how many text rows the prompt box occupies right now.
 // View() and logViewportSize() budget the chat pane around it, so this must
