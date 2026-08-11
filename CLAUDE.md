@@ -122,6 +122,22 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        composite the overlay themselves (withPicker) since
 #                        they return a whole frame rather than a middle
 #                        region. See tui/palette.go.
+#   ctrl+t            -> group/session jump: a fuzzy list of every
+#                        CONVERSATION — each group plus its named sessions as
+#                        `group:session` — in the tree's own order, Enter
+#                        switching to the picked one. A session row moves both
+#                        group and session in one jump (jumpConversation
+#                        dispatches /sw then /session, so the unread clear,
+#                        log rescope and shell chase come along rather than
+#                        being reimplemented). Third mode of the same picker
+#                        overlay; unlike the palette its search corpus is the
+#                        NAME ALONE — the hint column says running/stopped/
+#                        current, and folding that in would make "run" match
+#                        every running group. **This key used to toggle
+#                        thought bodies; that moved to alt+t** (a switcher is
+#                        reached far more often than a display toggle, and
+#                        ctrl+t is fzf's own "pick a thing" key). Tool-output
+#                        expansion keeps ctrl+d. See tui/palette.go.
 #   ctrl+h            -> fleet (top) view: linux-top for the fleet — one row
 #                        per group with SPACE (image alloc vs size ceiling),
 #                        CPU, RSS, TOK/S, NET, ROOT, MODEL, sorted busiest-

@@ -37,6 +37,7 @@ type pickerMode int
 const (
 	pickerHistory pickerMode = iota // ctrl+r — this group's prompt history
 	pickerPalette                   // ctrl+p — the command palette
+	pickerGroups                    // ctrl+t — jump to a group/session
 )
 
 // paletteItem is one row. Exactly one of act / run is meaningful; edit only
@@ -87,6 +88,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: topTitle, hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
+		{title: "jump to group/session", hint: "ctrl+t", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},
 		{title: "switch group", hint: "/sw <group>", run: "/sw ", edit: true},
 		{title: "switch chat session", hint: "/session [name]", run: "/session ", edit: true},
 		{title: "new group", hint: "/new <group>", run: "/new ", edit: true},
@@ -107,7 +109,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "interrupt goal (pause now)", hint: "/goal interrupt", run: "/goal interrupt"},
 		{title: "fire a prompt file", hint: "/prompt <name>", run: "/prompt ", edit: true},
 
-		{title: "toggle thought bodies", hint: "ctrl+t", act: func(m *Model) tea.Cmd {
+		{title: "toggle thought bodies", hint: "alt+t", act: func(m *Model) tea.Cmd {
 			m.expandedThoughts = !m.expandedThoughts
 			m.refreshLog()
 			return nil
@@ -202,6 +204,82 @@ func (m *Model) runPaletteItem(it paletteItem) tea.Cmd {
 		return m.dispatchInput(it.run)
 	}
 	return nil
+}
+
+// --- group/session picker (ctrl+t) -------------------------------------------
+
+// groupItems builds one row per CONVERSATION — every group, plus each of its
+// named sessions — in treeOrder (main, then running, then stopped), so the
+// empty-query list reads like the tree this is a shortcut for.
+//
+// Unlike the palette, the search corpus is the NAME ALONE, not the row's
+// searchKey: the hint column carries words like "running" and "current", and
+// folding those into the corpus would make a two-letter filter match every
+// running group instead of the one whose name you typed.
+func (m Model) groupItems() (keys []string, items []paletteItem) {
+	add := func(g, sess string) {
+		name := g
+		if sess != "" {
+			name = g + ":" + sess
+		}
+		hint := "stopped"
+		if m.groups[g].Running {
+			hint = "running"
+		}
+		if m.isUnread(g, sess) {
+			hint = "● " + hint
+		}
+		if g == m.cur && sess == m.activeSession(g) {
+			hint = "current · " + hint
+		}
+		keys = append(keys, name)
+		items = append(items, paletteItem{title: name, hint: hint,
+			act: func(m *Model) tea.Cmd { return m.jumpConversation(g, sess) }})
+	}
+	for _, g := range m.treeOrder() {
+		add(g, "")
+		for _, s := range m.groups[g].Sessions {
+			add(g, s)
+		}
+	}
+	return keys, items
+}
+
+// openGroupPicker snapshots the conversation list into the shared overlay.
+// Same freeze-at-open rule as the other two modes — a WatchState frame
+// landing mid-filter must not reshuffle the list under the user's fingers.
+func (m *Model) openGroupPicker() {
+	keys, cmds := m.groupItems()
+	ti := textinput.New()
+	ti.Placeholder = "type to filter (esc=close, ↑↓=pick, enter=switch)"
+	ti.CharLimit = 0
+	ti.Width = 60
+	ti.Focus()
+	m.picker = pickerState{
+		open:    true,
+		mode:    pickerGroups,
+		input:   ti,
+		items:   keys,
+		cmds:    cmds,
+		matches: fuzzyRank("", keys, 0),
+		cursor:  0,
+	}
+	m.prePickerFocus = m.focus
+}
+
+// jumpConversation is what Enter does in group mode: switch to <g>, and to
+// <sess> as well when the pick was a session row. Both halves go through the
+// existing /sw and /session dispatch rather than reimplementing the switch —
+// that path carries the unread clear, the log rescope, the shell chase and
+// the "session →" notice, and there is no second copy to drift.
+func (m *Model) jumpConversation(g, sess string) tea.Cmd {
+	cmd := m.dispatchInput("/sw " + g)
+	// Guarded: /session on the session you're already in logs a needless
+	// "already on session x".
+	if m.activeSession(g) != sess {
+		return tea.Batch(cmd, m.dispatchInput("/session "+sessionDisplay(sess)))
+	}
+	return cmd
 }
 
 // withPicker composites the picker overlay onto a full-frame view (log,

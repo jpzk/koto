@@ -1671,8 +1671,11 @@ func (m Model) renderPicker(rows int) string {
 	}
 
 	label := fmt.Sprintf(" history · %s · %d/%d ", m.cur, len(m.picker.matches), len(m.picker.items))
-	if m.picker.mode == pickerPalette {
+	switch m.picker.mode {
+	case pickerPalette:
 		label = fmt.Sprintf(" commands · %d/%d ", len(m.picker.matches), len(m.picker.items))
+	case pickerGroups:
+		label = fmt.Sprintf(" groups · %d/%d ", len(m.picker.matches), len(m.picker.items))
 	}
 	header := inv(cBlack, cAmber).Bold(true).Render(label)
 
@@ -1711,10 +1714,12 @@ func (m Model) renderPicker(rows int) string {
 			marker = lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 			style = lipgloss.NewStyle().Foreground(cAmber).Bold(true)
 		}
-		if m.picker.mode == pickerPalette {
+		if m.picker.mode != pickerHistory {
 			// Two columns: prose title left, keybinding/slash form gray
 			// right. The hint is the discoverability payload — the point of
-			// the palette is that you leave it knowing the shortcut.
+			// the palette is that you leave it knowing the shortcut. Group
+			// mode reuses the same shape, its hint being the group's state
+			// (running/stopped, unread, current) rather than a binding.
 			title, pad, hint := paletteRow(m.picker.cmds[idx], contentW-2)
 			resultLines = append(resultLines,
 				marker+style.Render(title)+pad+lipgloss.NewStyle().Foreground(cGray).Render(hint))
@@ -1730,8 +1735,11 @@ func (m Model) renderPicker(rows int) string {
 	}
 	if len(resultLines) == 0 {
 		empty := "  (no matches — type to filter, or send a prompt to seed history)"
-		if m.picker.mode == pickerPalette {
+		switch m.picker.mode {
+		case pickerPalette:
 			empty = "  (no matching command)"
+		case pickerGroups:
+			empty = "  (no matching group or session)"
 		}
 		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).Render(empty))
 	}

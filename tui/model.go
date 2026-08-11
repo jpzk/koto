@@ -376,7 +376,7 @@ type Model struct {
 	// while a tool_result block is in flight, plus an in-flight tail that
 	// holds the last partial line. Cleared on tool_result_done, replaced
 	// in m.lines with a condensed `📤 N lines` entry that expands under
-	// ctrl+d (mirrors ctrl+t for thinking).
+	// ctrl+d (mirrors alt+t for thinking).
 	toolOutBuf  map[string]string
 	toolOutTail map[string]string
 	// toolBeginTs records the timestamp of each in-flight tool_result_begin
@@ -460,7 +460,7 @@ type Model struct {
 
 	// expandedThoughts: when true, thought blocks render their full body
 	// (the entire thinking transcript) under the "thought N words" summary.
-	// Toggled with ctrl+t. Bodies live in the same logLine.text but the
+	// Toggled with alt+t. Bodies live in the same logLine.text but the
 	// renderer slices to the first line when this is false.
 	expandedThoughts bool
 
@@ -798,11 +798,12 @@ type pendingPrompt struct {
 
 const promptHistoryMax = 200
 
-// pickerState backs both overlays: the ctrl+r prompt-history recall and the
-// ctrl+p command palette (mode selects which). items is what fuzzyRank scores
-// against in either mode; cmds is populated only in pickerPalette mode and is
-// indexed by the same match Idx, since the palette's display column and its
-// search key differ (see paletteItem.searchKey).
+// pickerState backs all three overlays: ctrl+r prompt-history recall, the
+// ctrl+p command palette, and the ctrl+t group/session jump (mode selects
+// which). items is what fuzzyRank scores against in every mode; cmds is
+// populated in the two palette-shaped modes and is indexed by the same match
+// Idx, since their display column and their search corpus differ (see
+// paletteItem.searchKey and groupItems).
 type pickerState struct {
 	open    bool
 	mode    pickerMode
@@ -3520,6 +3521,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+t" {
+		// Fuzzy jump to any conversation — every group plus its named
+		// sessions in one list, the fzf-for-tabs shape (ctrl+t is fzf's own
+		// "pick a thing" key). Third mode of the shared picker overlay; see
+		// palette.go. This key used to toggle thought bodies, which moved to
+		// alt+t: a switcher is reached far more often than a display toggle,
+		// so it gets the ctrl-tier binding.
+		m.openGroupPicker()
+		return m, nil
+	}
+	if s == "alt+t" {
 		// Toggle thought-body expansion globally. Thought blocks render
 		// either as `🧠 thought N words` (collapsed) or that line plus the
 		// full thinking transcript indented underneath (expanded).
@@ -3528,7 +3539,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+d" {
-		// Mirror of ctrl+t for tool output: collapsed shows
+		// Mirror of alt+t for tool output: collapsed shows
 		// `📤 tool output N lines`, expanded shows the full body indented.
 		m.expandedToolOuts = !m.expandedToolOuts
 		m.refreshLog()
@@ -3930,7 +3941,9 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		idx := m.picker.matches[m.picker.cursor].Idx
-		if m.picker.mode == pickerPalette {
+		// Both cmds-backed modes (palette, groups) carry out their pick the
+		// same way — an act func. Only history inserts a string.
+		if m.picker.mode != pickerHistory {
 			return m, m.runPaletteItem(m.picker.cmds[idx])
 		}
 		m.input.SetValue(m.picker.items[idx])
