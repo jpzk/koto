@@ -166,7 +166,19 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        half the body: the prompt box grows into the
 #                        transcript above it, never into the terminal, so a
 #                        wrapping draft can't reflow the guest's tmux on every
-#                        keystroke. See tui/shell_view.go shellSplitMode.
+#                        keystroke. Stacking costs ROWS ONLY: the terminal
+#                        pane, the transcript and the message bar all span the
+#                        frame edge to edge (the 1-col inset the panes carry
+#                        side by side pays for the separator column, which the
+#                        stacked layout has none of). And it happens only
+#                        while the pane is actually OPEN — shellSplitMode
+#                        answers from geometry alone, because enterShell sizes
+#                        the guest pty before the session exists, so the row
+#                        budget reads it through the state-aware
+#                        shellStackChatH; without that a portrait terminal
+#                        reserved the bottom half of the frame for a terminal
+#                        nobody had opened (70x60 gave the transcript 25 rows
+#                        of 54). See tui/shell_view.go shellSplitMode.
 #   any text          -> sends to current group (into its active session)
 #   /new <g>          -> spawn new group via daemon
 #   /sw  <g>          -> switch active group

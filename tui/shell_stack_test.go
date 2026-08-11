@@ -111,10 +111,10 @@ func TestShellStackedLayout(t *testing.T) {
 			chat, box, pty)
 	}
 
-	// Both halves get the full width (less the pane's own padding), which is
-	// the whole point of stacking rather than columning a narrow frame.
-	if w, _ := m.shellPaneSize(); w != m.width-2 {
-		t.Errorf("pty width = %d, want the full frame less padding (%d)", w, m.width-2)
+	// Both halves get the full width, which is the whole point of stacking
+	// rather than columning a narrow frame.
+	if w, _ := m.shellPaneSize(); w != m.width {
+		t.Errorf("pty width = %d, want the full frame (%d)", w, m.width)
 	}
 	if m.shellChatW() != 0 {
 		t.Errorf("shellChatW = %d in stacked mode, want 0 (no chat COLUMN)", m.shellChatW())
@@ -148,9 +148,9 @@ func TestShellStackedRowBudget(t *testing.T) {
 		if got := lipgloss.Height(m.View()); got != m.height {
 			t.Errorf("tree=%v: view is %d rows tall, want %d", tree, got, m.height)
 		}
-		wantW := m.width - 2
+		wantW := m.width
 		if tree {
-			wantW = m.width - leftPaneWidth - 1 - 2
+			wantW = m.width - leftPaneWidth - 1
 		}
 		if w, _ := m.shellPaneSize(); w != wantW {
 			t.Errorf("tree=%v: pty width = %d, want %d", tree, w, wantW)
@@ -196,6 +196,98 @@ func TestShellStackedDraftKeepsPtySize(t *testing.T) {
 	}
 }
 
+// TestShellStackedClosedReservesNothing: the stacked split is a property of the
+// shell being OPEN, not of the terminal being portrait. shellChatBlockH answers
+// from geometry alone (enterShell sizes the guest pty before the session
+// exists), so chatRows/maxInputRows have to read it through shellStackChatH —
+// otherwise every portrait terminal hands the bottom half of the frame to a
+// terminal nobody opened. stackShellModel sets shellOpen = true, which is why
+// the closed case went uncovered.
+func TestShellStackedClosedReservesNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		detach bool // never attached, vs. attached-then-closed (closeShell)
+	}{
+		{"never attached", true},
+		{"attached but closed", false},
+	}
+	for _, c := range cases {
+		m := stackShellModel(t)
+		if c.detach {
+			m.shell = nil
+		}
+		m.shellOpen = false
+		m.resizeViewport()
+
+		if m.shellSplitVisible() || m.shellViewActive() {
+			t.Fatalf("%s: precondition — the pane counts as on screen", c.name)
+		}
+		if m.shellSplitMode() != shellSplitRows {
+			t.Fatalf("%s: precondition — 70x60 should still WANT to stack", c.name)
+		}
+		if got, want := m.chatRows(), m.height-5-m.inputRows(); got != want {
+			t.Errorf("%s: chatRows = %d with the pane closed, want the whole frame (%d)",
+				c.name, got, want)
+		}
+		if got, want := m.maxInputRows(), min(10, m.height-8); got != want {
+			t.Errorf("%s: maxInputRows = %d, want %d", c.name, got, want)
+		}
+
+		view := m.View()
+		if got := lipgloss.Height(view); got != m.height {
+			t.Errorf("%s: view is %d rows tall, want %d", c.name, got, m.height)
+		}
+		// The transcript must reach all the way down to the message box: its
+		// top border sits directly under the last chat row, with no blank half
+		// below it.
+		lines := strings.Split(stripANSI(view), "\n")
+		box := -1
+		for i, l := range lines {
+			if strings.Contains(l, "╭") {
+				box = i
+				break
+			}
+		}
+		if want := 1 + m.chatRows(); box != want {
+			t.Errorf("%s: message box top border on row %d, want %d (status + the full transcript)",
+				c.name, box, want)
+		}
+	}
+}
+
+// TestShellStackedFullWidth: stacking changes the vertical budget and nothing
+// else — the terminal pane spans the frame edge to edge, exactly like the
+// message bar above it. The 1-col inset the pane carries side by side pays for
+// the separator column, which the stacked layout doesn't have.
+func TestShellStackedFullWidth(t *testing.T) {
+	m := stackShellModel(t)
+	if m.treePaneW() != 0 {
+		t.Fatalf("precondition: no tree column in this case (got %d)", m.treePaneW())
+	}
+	if w, _ := m.shellPaneSize(); w != m.shellAvailW() {
+		t.Errorf("pty width = %d, want every available column (%d)", w, m.shellAvailW())
+	}
+	if got, want := m.inputBoxW(), m.shellChatBlockW(); got != want {
+		t.Errorf("message bar width = %d, want the chat half's full width %d", got, want)
+	}
+	if got := m.inputBoxW(); got != m.width {
+		t.Errorf("message bar width = %d, want the frame's %d — same as the plain chat view",
+			got, m.width)
+	}
+
+	_, _ = m.shell.term.Write([]byte("PTYMARKER"))
+	lines := strings.Split(stripANSI(m.View()), "\n")
+	_, oy := m.shellMouseOrigin()
+	if oy >= len(lines) {
+		t.Fatalf("grid origin row %d past the frame (%d rows)", oy, len(lines))
+	}
+	// The guest's first column lands on the frame's first column: the pane's
+	// left edge lines up with the message box's border directly above it.
+	if !strings.HasPrefix(lines[oy], "PTYMARKER") {
+		t.Errorf("pty row is inset from the frame edge: %q", lines[oy])
+	}
+}
+
 // TestShellStackedMouse: the pty grid's origin moves DOWN by the chat half, so
 // a click lands where the guest thinks it did; clicking the chat half above
 // the grid detaches focus, exactly as clicking the chat column does side by
@@ -206,8 +298,8 @@ func TestShellStackedMouse(t *testing.T) {
 	if want := 1 + m.shellChatBlockH(); oy != want {
 		t.Errorf("grid origin row = %d, want %d (below the chat half)", oy, want)
 	}
-	if ox != 1 {
-		t.Errorf("grid origin col = %d, want 1 (the pane's padding only)", ox)
+	if ox != 0 {
+		t.Errorf("grid origin col = %d, want 0 (stacked, flush with the frame)", ox)
 	}
 
 	if !m.handleLeftClick(ox+3, oy+2) {

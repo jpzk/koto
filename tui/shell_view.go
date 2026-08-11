@@ -446,12 +446,21 @@ func shellVSep(h int) string {
 // vertically. The guest's tmux session is resized to match, so what the
 // operator sees is the session's real geometry, not a cropped view of a
 // larger one.
+//
+// The 2-col inset is a SIDE-BY-SIDE cost: the pane's own PaddingLeft, which
+// holds it off the separator column, plus one spare so a full-width guest row
+// can't touch the frame's edge. Stacked there is no separator and no column to
+// the right, so the pane takes the full width — flush with the message box's
+// border, which is what "the terminal spans the frame" means to the eye.
 func (m Model) shellPaneSize() (int, int) {
 	total := m.shellAvailW()
 	if chatW := m.shellChatW(); chatW > 0 {
 		total -= chatW + 1
 	}
-	w := max(10, total-2)
+	if m.shellSplitMode() != shellSplitRows {
+		total -= 2
+	}
+	w := max(10, total)
 	// shellBodyRows makes the frame exactly m.height rows, same as the chat
 	// view — so the hint/metrics rows sit on the same terminal rows in both
 	// views and toggling the shell pane in and out (ctrl+]) doesn't make the
@@ -674,6 +683,35 @@ func (m Model) shellSplitVisible() bool {
 	return m.shellSplitMode() != shellSplitNone
 }
 
+// shellViewActive reports whether View() is rendering the shell view at all —
+// either split axis, or the fullscreen pane on a terminal too small to split.
+// Exactly view()'s dispatch condition, named so the row-budget helpers can key
+// off the same thing the renderer does. It is deliberately WIDER than
+// shellSplitVisible: view() dispatches on focusShell alone, so the defensive
+// "no shared shell attached" pane (m.shell == nil) renders through
+// renderShellView while shellSplitVisible says false — budgeting that frame
+// against the plain chat view's rows would over-run the terminal height.
+func (m Model) shellViewActive() bool {
+	return m.focus == focusShell || m.shellSplitVisible()
+}
+
+// shellStackChatH is shellChatBlockH's state-aware twin: the rows the stacked
+// chat half owns when that split is ACTUALLY on screen, 0 otherwise.
+//
+// shellChatBlockH itself has to stay state-free (enterShell sizes the guest pty
+// through shellPaneSize before the session exists — see shellSplitMode), but a
+// caller budgeting the NORMAL chat view must see 0. It didn't: chatRows and
+// maxInputRows read the raw geometry, so on any portrait terminal the plain
+// chat view reserved the bottom half of the frame for a terminal nobody had
+// opened — 70x60 gave the transcript 25 rows instead of 54 and left the rest
+// blank.
+func (m Model) shellStackChatH() int {
+	if !m.shellViewActive() {
+		return 0
+	}
+	return m.shellChatBlockH()
+}
+
 // syncShellSize brings the guest pty's geometry in line with the pane's
 // current on-screen size. Called from resizeViewport — the choke point every
 // layout change (window resize, focus/tree toggles, pane open/close) already
@@ -869,6 +907,10 @@ func modEncode(b []byte, mod int) []byte {
 // block is chatW-1 wide, +1 separator = chatW), and shellBody's own
 // 1-col PaddingLeft — and vertically by the stacked chat half, when the split
 // runs that way instead.
+//
+// The padding is side-by-side only (see shellPaneSize), so the stacked grid
+// starts flush against whatever is to its left: column 0, or the tree's
+// separator.
 func (m Model) shellMouseOrigin() (int, int) {
 	x := 0
 	if tw := m.treePaneW(); tw > 0 {
@@ -877,7 +919,10 @@ func (m Model) shellMouseOrigin() (int, int) {
 	if chatW := m.shellChatW(); chatW > 0 {
 		x += chatW
 	}
-	return x + 1, 1 + m.shellChatBlockH()
+	if m.shellSplitMode() != shellSplitRows {
+		x++ // shellBody's PaddingLeft
+	}
+	return x, 1 + m.shellChatBlockH()
 }
 
 // shellMouseButtons maps Bubble Tea's parsed button back to the X11 button
@@ -972,10 +1017,19 @@ func (m Model) renderShellView() string {
 	// Tea's renderer truncates overheight frames from the TOP — eating the
 	// status bar and jumping the whole UI up a row per full-width line.
 	// MaxWidth clips without wrapping; padding without Width never wraps.
+	//
+	// The pane's 1-col left inset is side-by-side only: stacked it sits flush
+	// against the frame's edge (or the tree's separator), lining its left edge
+	// up with the message box's border directly above — see shellPaneSize.
+	stacked := m.shellSplitMode() == shellSplitRows
+	pad := 1
+	if stacked {
+		pad = 0
+	}
 	var shellBody string
 	w, h := m.shellPaneSize()
 	if m.shell == nil {
-		shellBody = lipgloss.NewStyle().PaddingLeft(1).Foreground(cGray).
+		shellBody = lipgloss.NewStyle().PaddingLeft(pad).Foreground(cGray).
 			Render("no shared shell attached")
 	} else {
 		// scrubVT: the emulator contains guest escapes to its virtual screen,
@@ -995,7 +1049,7 @@ func (m Model) renderShellView() string {
 		if m.focus == focusShell && !m.shell.ended && (m.tick/shellCursorBlinkTicks)%2 == 0 {
 			lines = m.overlayShellCursor(lines)
 		}
-		shellBody = lipgloss.NewStyle().PaddingLeft(1).Render(strings.Join(lines, "\n"))
+		shellBody = lipgloss.NewStyle().PaddingLeft(pad).Render(strings.Join(lines, "\n"))
 	}
 
 	body := shellBody
@@ -1007,25 +1061,33 @@ func (m Model) renderShellView() string {
 		// focusable and moving focus between them (a click either way) moves
 		// nothing on screen.
 		rows := m.chatRows()
+		// blockW is the chat half's rendered width: one short of its budget
+		// side by side, where the last column is the separator, and the whole
+		// of it when stacked — there is nothing to its right there, so the
+		// half spans the frame exactly as the message bar under it does.
+		blockW := chatW - 1
+		if stacked {
+			blockW = chatW
+		}
 		var chatArea string
 		if peek, ok := m.renderJobPeek(rows); ok {
 			// Hovering a job row in tree focus swaps the chat column for the
 			// live peek pane, exactly like the normal view. Clip-then-pad so
 			// the separator column can't wobble or rewrap (see below).
-			clipped := lipgloss.NewStyle().MaxWidth(chatW - 1).Render(peek)
-			chatArea = lipgloss.NewStyle().Width(chatW - 1).Render(clipped)
+			clipped := lipgloss.NewStyle().MaxWidth(blockW).Render(peek)
+			chatArea = lipgloss.NewStyle().Width(blockW).Render(clipped)
 		} else {
 			// Clip to the viewport width first (defense against any cached
 			// markdown wrapped at a stale width), then pad to a fixed block
 			// width so the separator column doesn't wobble with content. The
-			// Width(chatW-1) block wraps only content wider than chatW-2,
+			// Width(blockW) block wraps only content wider than blockW-1,
 			// which the MaxWidth clip has just made impossible.
 			clipped := lipgloss.NewStyle().MaxWidth(chatW - 2).Render(m.vp.View())
-			chatArea = lipgloss.NewStyle().Width(chatW - 1).PaddingLeft(1).Render(clipped)
+			chatArea = lipgloss.NewStyle().Width(blockW).PaddingLeft(1).Render(clipped)
 		}
 		chatArea = lipgloss.NewStyle().Height(rows).MaxHeight(rows).Render(chatArea)
 		chatCol := lipgloss.JoinVertical(lipgloss.Left, chatArea, m.renderInput())
-		if m.shellSplitMode() == shellSplitRows {
+		if stacked {
 			// Stacked: the conversation stays on top, where the eye already
 			// looks for it and where it sits in the plain chat view, with the
 			// message bar in its usual place directly under the transcript.

@@ -214,7 +214,7 @@ func (m Model) view() string {
 		// one row per group (space/cpu/rss/tok/s/network/root/model).
 		return m.withPicker(m.renderTopView())
 	}
-	if m.focus == focusShell || m.shellSplitVisible() {
+	if m.shellViewActive() {
 		// Shared shell: fullscreen while focused on a narrow terminal, or
 		// the chat-column + message-bar + pty split whenever the pane is
 		// open (shellOpen) and the terminal is wide enough — including with
@@ -280,20 +280,17 @@ func formatNotifyLine(sev, title, msg string) string {
 }
 
 // notifyBarX is the status-bar column where the inline notification wants to
-// start: over the terminal pane's content when the shell view is on screen
-// (mirroring shellMouseOrigin's arithmetic), otherwise over the message
-// view's content (tree column + the chat pane's 1-col padding).
+// start: over the terminal pane's content when the shell view is on screen,
+// otherwise over the message view's content (tree column + the chat pane's
+// 1-col padding).
 func (m Model) notifyBarX() int {
 	tw := m.treePaneW()
-	if m.focus == focusShell || m.shellSplitVisible() {
-		x := 0
-		if tw > 0 {
-			x = tw + 1 // tree column + its separator
-		}
-		if cw := m.shellChatW(); cw > 0 {
-			x += cw // chat column incl. its separator
-		}
-		return x + 1 // shellBody's PaddingLeft
+	if m.shellViewActive() {
+		// The pane's own grid origin — shared with the mouse router rather
+		// than re-derived, so the two can't drift when the pane's padding
+		// changes (it does: the stacked split has none, see shellMouseOrigin).
+		x, _ := m.shellMouseOrigin()
+		return x
 	}
 	return tw + 1 // logArea's PaddingLeft
 }
@@ -1260,11 +1257,18 @@ func (m Model) renderScrollbar(rows int) string {
 
 // inputBoxW is the total width budget of the prompt box (borders included):
 // the full terminal normally, the chat half when the shell split is on screen
-// (renderShellView stacks the box under the viewport there, matching its
-// Width(chatW-1) chat block — the left column side by side, the full width
+// (renderShellView stacks the box under the viewport there, matching that
+// half's rendered block width — the left column side by side, the full width
 // less the tree when stacked).
+//
+// The -1 is the separator column, which only the side-by-side split pays for.
+// Stacked the box keeps the full width it has in the plain chat view, so
+// opening the terminal pane doesn't narrow the bar the operator is typing in.
 func (m Model) inputBoxW() int {
 	if m.shellSplitVisible() {
+		if m.shellSplitMode() == shellSplitRows {
+			return m.shellChatBlockW()
+		}
 		return m.shellChatBlockW() - 1
 	}
 	return m.width
@@ -1291,7 +1295,7 @@ func (m Model) inputPromptW() int {
 // rest of the frame belongs to the terminal pane: an uncapped box would eat
 // past its own half and push the frame taller than the terminal.
 func (m Model) maxInputRows() int {
-	if ch := m.shellChatBlockH(); ch > 0 {
+	if ch := m.shellStackChatH(); ch > 0 {
 		return max(1, min(10, ch-3))
 	}
 	return max(1, min(10, m.height-8))

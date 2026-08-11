@@ -2707,10 +2707,12 @@ func (m Model) logViewportSize() (int, int) {
 // grows as the value wraps (inputRows), so this shrinks with it — View() and
 // the viewport must agree on the number or the frame overflows the terminal.
 func (m Model) chatRows() int {
-	if ch := m.shellChatBlockH(); ch > 0 {
+	if ch := m.shellStackChatH(); ch > 0 {
 		// Stacked shell split: the transcript is budgeted against the chat
 		// half's own height, not the frame's — the terminal pane below owns
-		// the rest and must not move when the prompt box grows.
+		// the rest and must not move when the prompt box grows. State-aware
+		// (shellStackChatH, not the raw geometry): with the pane closed the
+		// frame is all ours, portrait or not.
 		return max(1, ch-2-m.inputRows())
 	}
 	// status(1) + input borders(2) + hint(1) + metrics(1) = 5.
