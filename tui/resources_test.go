@@ -56,9 +56,11 @@ func TestMetricsBarShowsActiveGroupResources(t *testing.T) {
 
 // TestMetricsBarNoGuestMemChip: the guest-reported memory figure rides the
 // snapshot for ctl-plane consumers but is deliberately not a bar chip — a
-// fourth chip overflows the left side's width budget on ordinary terminals,
-// and the renderer then drops the whole left side (the "bar not working"
-// regression of 2026-08-04).
+// fourth chip overflows the left side's width budget on ordinary terminals
+// (the "bar not working" regression of 2026-08-04). The overflow is no longer
+// paid for by dropping the whole left side — the row sheds its fill bars first,
+// see TestMetricsBarDropsBarsBeforeChips — but four chips still crowd the row
+// into its degraded form on terminals where three fit comfortably.
 func TestMetricsBarNoGuestMemChip(t *testing.T) {
 	m := resModel(t)
 	bar := stripANSI(m.renderMetricsBar())
@@ -99,6 +101,58 @@ func TestMetricsBarDropsLeftWhenNarrow(t *testing.T) {
 	}
 	if strings.Contains(bar, "cpu") {
 		t.Fatalf("narrow metrics bar kept the left side: %q", bar)
+	}
+}
+
+// TestMetricsBarDropsBarsBeforeChips: the row degrades by FIDELITY before it
+// degrades by CONTENT. At a width too tight for the fill bars but wide enough
+// for the numbers, every chip stays on screen with its percentage and the bars
+// are what goes — the number beside each bar already carries the value.
+//
+// The bars used to be gated on a static `m.width >= 110`, and the overflow they
+// caused was paid for by dropping the whole left side: a terminal a column over
+// that threshold lost cpu/rss/space to keep bars it had no room for.
+func TestMetricsBarDropsBarsBeforeChips(t *testing.T) {
+	m := resModel(t)
+	m.ctxWindow = 200000
+	m.metricGroup = "main"
+	m.metric = map[string]any{"usage": map[string]any{
+		"input_tokens":                float64(100000),
+		"cache_read_input_tokens":     float64(100000),
+		"cache_creation_input_tokens": float64(0),
+	}}
+	m.globalMetric = map[string]any{"ratelimit": map[string]any{
+		"anthropic-ratelimit-unified-5h-utilization": "0.42",
+		"anthropic-ratelimit-unified-7d-utilization": "0.13",
+	}}
+
+	barsL, barsR := m.metricsChips(true)
+	bareL, bareR := m.metricsChips(false)
+	wide := lipgloss.Width(barsL) + lipgloss.Width(barsR) + 2
+	narrow := lipgloss.Width(bareL) + lipgloss.Width(bareR) + 2
+	if narrow >= wide {
+		t.Fatalf("precondition: dropping the bars must narrow the row (%d vs %d)", narrow, wide)
+	}
+
+	// Exactly the numbers-only width: too tight for bars, roomy for chips.
+	m.width = narrow
+	bar := stripANSI(m.renderMetricsBar())
+	if strings.Contains(bar, "█") {
+		t.Errorf("bars survived at a width that cannot hold them: %q", bar)
+	}
+	for _, want := range []string{"cpu", "50%", "rss", "95%", "space", "25%", "ctx", "cache", "5h", "42%", "7d", "13%"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("chip %q dropped at a width its number fits: %q", want, bar)
+		}
+	}
+	if got := lipgloss.Width(bar); got > m.width {
+		t.Errorf("row is %d cols wide, terminal is %d: %q", got, m.width, bar)
+	}
+
+	// And the rich form is still chosen the moment it fits.
+	m.width = wide
+	if !strings.Contains(stripANSI(m.renderMetricsBar()), "█") {
+		t.Error("bars dropped at a width that fits them")
 	}
 }
 

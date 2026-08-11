@@ -472,9 +472,33 @@ func (m Model) renderStatusRight(spin string) string {
 // token/rate-limit metrics live below the hint line instead of competing
 // for space in the top status bar.
 func (m Model) renderMetricsBar() string {
+	// Fidelity ladder, richest first: bars beside their numbers, then the
+	// numbers alone, then the account-wide right side by itself. The bars go
+	// FIRST because each one is redundant with the number printed next to it —
+	// it only makes the value glanceable — whereas the step after it loses
+	// cpu/rss/space outright.
+	//
+	// Measured, not guessed. This used to be a static `m.width >= 110`, which
+	// got both ends wrong. A full row of chips needs ~150 cols with bars, so
+	// every width from 110 to 150 drew bars it had no room for and then paid
+	// for them by dropping the whole left side — the operator lost cpu/rss/
+	// space to buy fill bars for the account chips. Below 110 the reverse: a
+	// terminal carrying only two chips went bare with room to spare.
+	// Rendering twice costs nothing at one row per frame.
+	left, right := m.metricsChips(true)
+	if lipgloss.Width(left)+lipgloss.Width(right)+2 > m.width {
+		left, right = m.metricsChips(false)
+	}
+	return m.composeMetricsBar(left, right)
+}
+
+// metricsChips builds the bar's two sides at a given fidelity: with useBars the
+// chips carry an 8-cell fill bar between label and percentage, without it they
+// are label + percentage alone. Split out from renderMetricsBar so the row can
+// be measured at both fidelities and the widest fitting one kept.
+func (m Model) metricsChips(useBars bool) (left, right string) {
 	var parts []string
 
-	useBars := m.width >= 110
 	barW := 8
 
 	// fracColor lets the caller invert the threshold scale. For utilization
@@ -539,10 +563,11 @@ func (m Model) renderMetricsBar() string {
 	// to ignore it. The truthful guest figure (guest /proc/meminfo) rides
 	// the same snapshot as guest_mem_* for ctl-plane consumers; it is
 	// deliberately NOT a fourth chip — four chips overflow the left side's
-	// width budget on ordinary terminals, and the renderer then drops the
-	// whole left side. A stopped VM legitimately reads cpu/rss 0% — space
-	// stays meaningful (images never shrink).
-	left := ""
+	// width budget on ordinary terminals, which now costs the row its fill
+	// bars (the ladder in renderMetricsBar) rather than the whole left side,
+	// but still degrades a row three chips fit comfortably. A stopped VM
+	// legitimately reads cpu/rss 0% — space stays meaningful (images never
+	// shrink).
 	if r, ok := m.resources[m.cur]; ok {
 		var lparts []string
 		if r.Vcpus > 0 {
@@ -571,6 +596,12 @@ func (m Model) renderMetricsBar() string {
 		left = strings.Join(lparts, "")
 	}
 
+	return left, strings.Join(parts, "")
+}
+
+// composeMetricsBar lays the two sides out across the row: left side flush
+// left, right side flush right, focus dot pinned to each far edge.
+func (m Model) composeMetricsBar(left, right string) string {
 	// Focus indicator: a dot pinned to the far edge of the bar — leftmost
 	// while the tree/chat side owns the keyboard, rightmost while the
 	// terminal pane does (alt+←/→ switches sides). Both cells are always
@@ -583,11 +614,11 @@ func (m Model) renderMetricsBar() string {
 		ldot, rdot = " ", dot
 	}
 
-	right := strings.Join(parts, "")
 	rightW := lipgloss.Width(right)
 	leftW := lipgloss.Width(left)
 	if left != "" && leftW+rightW+2 > m.width {
-		// Too narrow for both sides: the account-wide chips keep priority.
+		// Still too narrow with the bars already dropped: the account-wide
+		// chips keep priority.
 		left, leftW = "", 0
 	}
 	gap := m.width - leftW - rightW - 2

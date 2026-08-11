@@ -287,9 +287,17 @@ verb list.
   Both planes report RSS *and* the guest
   figure. The TUI metrics bar shows only `rss` (gray — a cost figure, and a
   chip that parks near 100% must not scream rose), labeled honestly rather
-  than "mem"; the guest figure stayed off the bar because a fourth chip
-  overflows the left side's width budget and the renderer then drops the
-  whole left side. Read the guest figure via `koto ctl resources`.
+  than "mem"; the guest figure stays off the bar because a fourth chip
+  overflows the left side's width budget on ordinary terminals. (The
+  consequence has since softened: the bar degrades by **fidelity before
+  content** — `metricsChips(useBars)` is rendered at both fidelities and the
+  widest fitting one kept, so an overflowing row drops the 8-cell fill bars and
+  keeps every chip as `label N%`, and only a row too narrow even for that
+  drops the whole left side. It used to gate the bars on a static
+  `m.width >= 110` and pay for the resulting overflow by dropping cpu/rss/space
+  outright, so every width from 110 up to the ~150 the bars actually need lost
+  the left side to keep bars there was no room for.) Read the guest figure via
+  `koto ctl resources`.
   **`alloc_bytes` is a HIGH-WATER MARK, and is NOT "how full the disk is".**
   It is the disk twin of `rss_bytes`: virtio-blk has no discard, so a block
   the guest frees is never returned and allocation counts every block ever
