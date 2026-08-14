@@ -996,3 +996,29 @@ func TestGoalLegacyRecordKeepsIDSessions(t *testing.T) {
 		t.Errorf("named slug = %q, want the name", got)
 	}
 }
+
+// TestCtlGoalSelfSetUppercaseGroup: the self-targeted goal verbs validate an
+// EXISTING group's name, which may be uppercase (ALPHA, BRAVO) — ctlGroupRE's
+// lowercase-only shape is for newly spawned peers. Regression: 2026-08-14,
+// ALPHA's coordinator was told its own socket-derived name was invalid.
+func TestCtlGoalSelfSetUppercaseGroup(t *testing.T) {
+	goalTestSetup(t)
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		r, ok := ctlDispatch("ALPHA", ctlLine(t, map[string]any{
+			"cmd": "goal_set", "name": "papertrade", "text": "build it", "criteria": "1. built", "plan": false,
+		})).(goalResp)
+		if !ok || !r.OK {
+			t.Fatalf("uppercase group's self goal_set refused: %+v", r)
+		}
+		if r.Item.Group != "ALPHA" {
+			t.Fatalf("goal landed on %q", r.Item.Group)
+		}
+		if br, ok := ctlDispatch("ALPHA", ctlLine(t, map[string]any{"cmd": "goal_pause"})).(goalResp); !ok || !br.OK {
+			t.Errorf("uppercase group's self goal_pause refused: %+v", br)
+		}
+		if _, err := goalCancel("ALPHA"); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		waitGoal(t, "ALPHA", goalStatusCancelled)
+	})
+}

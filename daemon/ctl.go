@@ -435,7 +435,14 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot set a goal on main")
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		// groupNameRE, not ctlGroupRE: the lowercase-only regex is the shape
+		// rule for NEW peer names at spawn; this is a reference to an
+		// EXISTING group, which may be uppercase (ALPHA, BRAVO — pre-dating
+		// ctl validation). It bit hardest after goal_set opened to every
+		// group: the target is the caller's own socket-derived name, and an
+		// uppercase group's coordinator was told its own name was invalid
+		// (observed 2026-08-14, ALPHA).
+		if !groupNameRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")
 		}
 		plan := req.Plan == nil || *req.Plan
@@ -484,7 +491,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group == "" {
 			req.Group = owner
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
 		var it goalItem
