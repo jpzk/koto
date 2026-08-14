@@ -122,9 +122,13 @@ func goalSetCmd(sock, group, name, text, criteria string, maxIter int, plan bool
 	}
 }
 
-func goalOpCmd(sock, op, group string) tea.Cmd {
+func goalOpCmd(sock, op, group, name string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := daemonCall(sock, "goal_"+op, map[string]any{"group": group})
+		args := map[string]any{"group": group}
+		if name != "" {
+			args["name"] = name
+		}
+		resp, err := daemonCall(sock, "goal_"+op, args)
 		if err != nil {
 			return goalOpMsg{op: op, group: group, err: err}
 		}
@@ -139,18 +143,21 @@ var goalHelpLines = []string{
 	"run one planning turn, then wait for YOUR /goal approve before executing.",
 	"",
 	"  /goal set [<group>] [max=N] [plan=no] <goal> :: <criteria>   set a goal",
-	"  /goal list [<group>]        goals and their status",
-	"  /goal approve [<group>]     approve a plan (awaiting_approval → running)",
-	"  /goal pause   [<group>]     pause at the next iteration boundary",
-	"  /goal interrupt [<group>]   pause NOW — aborts the in-flight goal turn",
-	"  /goal resume  [<group>]     resume a paused goal (fresh iteration budget)",
-	"  /goal cancel  [<group>]     cancel the goal",
-	"  /goal help                  this help",
+	"  /goal list [<group>]              goals and their status",
+	"  /goal approve [<group>] [<name>]  approve a plan (awaiting_approval → running)",
+	"  /goal pause   [<group>] [<name>]  pause at the next iteration boundary",
+	"  /goal interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
+	"  /goal resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
+	"  /goal cancel  [<group>] [<name>]  cancel the goal",
+	"  /goal help                        this help",
 	"",
-	"<group> defaults to the current group. ` :: ` separates the goal text from",
-	"the acceptance criteria; write criteria as a numbered list of individually",
-	"verifiable checks. max=N caps execution iterations (default 20); plan=no",
-	"skips the plan/approval phase and starts iterating immediately.",
+	"<group> defaults to the current group. A group can run SEVERAL goals at",
+	"once — each in its own goal-<name> session pair; <name> picks one when",
+	"several are active (a bare token that isn't a known group is read as the",
+	"name). ` :: ` separates the goal text from the acceptance criteria; write",
+	"criteria as a numbered list of individually verifiable checks. max=N caps",
+	"execution iterations (default 20); plan=no skips the plan/approval phase",
+	"and starts iterating immediately.",
 	"",
 	"example:",
 	"  /goal set name=weather max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
@@ -239,11 +246,28 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 		}
 		return goalSetCmd(m.sock, group, name, text, criteria, maxIter, plan)
 	case "approve", "pause", "interrupt", "resume", "cancel":
-		group := arg
-		if group == "" {
-			group = m.cur
+		// Args: [<group>] [<name>] — goals run concurrently, so a name picks
+		// one of the group's runs. A single token is a group only when it
+		// names one the TUI knows (same convention as parseGoalSet);
+		// otherwise it is the run name within the current group.
+		group, name := m.cur, ""
+		toks := strings.Fields(arg)
+		switch len(toks) {
+		case 0:
+		case 1:
+			if _, known := m.groups[toks[0]]; known {
+				group = toks[0]
+			} else {
+				name = toks[0]
+			}
+		case 2:
+			group, name = toks[0], toks[1]
+		default:
+			m.addLine(logLine{kind: "err", group: m.cur,
+				text: fmt.Sprintf("usage: /goal %s [<group>] [<name>]", sub)})
+			return nil
 		}
-		return goalOpCmd(m.sock, sub, group)
+		return goalOpCmd(m.sock, sub, group, name)
 	}
 	m.addLine(logLine{kind: "err", group: m.cur,
 		text: fmt.Sprintf("/goal: unknown subcommand %q (try /goal help)", sub)})

@@ -369,16 +369,20 @@ func ctlDispatch(owner string, line []byte) any {
 
 	case "goal_done":
 		// Self-targeted, open to ALL groups (like job_done): the goal WORKER
-		// reports its own completion claim. Accepted only while the group's
-		// goal-work turn is in flight (window-gated in goals.go), so a claim
-		// forged from an ordinary chat turn is refused.
+		// reports its own completion claim. Accepted only while that goal's
+		// work turn is in flight (window-gated in goals.go), so a claim
+		// forged from an ordinary chat turn is refused. `id` names the goal
+		// (the prompt template embeds it); an id-less claim resolves only
+		// while exactly one goal turn is open in the group — with concurrent
+		// goals an ambiguous claim is refused rather than guessed.
 		var req struct {
+			ID   string `json:"id"`   // goal id, from the prompt template
 			Note string `json:"note"` // base64 evidence summary
 		}
 		_ = json.Unmarshal(line, &req)
 		note, _ := base64.StdEncoding.DecodeString(req.Note)
 		n := truncateRunes(string(note), goalNoteMax)
-		if err := recordGoalDone(owner, n); err != nil {
+		if err := recordGoalDone(owner, req.ID, n); err != nil {
 			return errResp("ctl: goal_done: " + err.Error())
 		}
 		emitLogfG("goal", owner, "info", "[%s] goal_done claim (%d-byte note)", owner, len(n))
@@ -386,15 +390,17 @@ func ctlDispatch(owner string, line []byte) any {
 
 	case "goal_verdict":
 		// Self-targeted, open to ALL groups: the acceptance JUDGE reports its
-		// verdict. Window-gated to the goal-judge turn, same as goal_done.
+		// verdict. Window-gated to the goal-judge turn, same as goal_done
+		// (including the id routing).
 		var req struct {
+			ID      string `json:"id"`
 			Met     bool   `json:"met"`
 			Reasons string `json:"reasons"` // base64 per-criterion failures
 		}
 		_ = json.Unmarshal(line, &req)
 		reasons, _ := base64.StdEncoding.DecodeString(req.Reasons)
 		r := truncateRunes(string(reasons), goalNoteMax)
-		if err := recordGoalVerdict(owner, req.Met, r); err != nil {
+		if err := recordGoalVerdict(owner, req.ID, req.Met, r); err != nil {
 			return errResp("ctl: goal_verdict: " + err.Error())
 		}
 		emitLogfG("goal", owner, "info", "[%s] goal_verdict met=%t (%d-byte reasons)", owner, req.Met, len(r))
@@ -464,7 +470,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group != "" && req.Group != owner {
 			return errResp("ctl: goal_approve is self-only (a plan set on a peer needs a human)")
 		}
-		it, err := goalApprove(owner)
+		it, err := goalApprove(owner, req.Name)
 		if err != nil {
 			return errResp(err.Error())
 		}
@@ -498,13 +504,13 @@ func ctlDispatch(owner string, line []byte) any {
 		var err error
 		switch env.Cmd {
 		case "goal_pause":
-			it, err = goalPause(req.Group)
+			it, err = goalPause(req.Group, req.Name)
 		case "goal_interrupt":
-			it, err = goalInterrupt(req.Group)
+			it, err = goalInterrupt(req.Group, req.Name)
 		case "goal_resume":
-			it, err = goalResume(req.Group)
+			it, err = goalResume(req.Group, req.Name)
 		case "goal_cancel":
-			it, err = goalCancel(req.Group)
+			it, err = goalCancel(req.Group, req.Name)
 		}
 		if err != nil {
 			return errResp(err.Error())

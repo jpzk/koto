@@ -51,8 +51,10 @@ service Koto {
 
   // ---- goal loop (daemon/goals.go) ----
   // A goal is "iterate this group with fresh context until an independent
-  // judge accepts the acceptance criteria". At most one goal per group;
-  // approve/pause/resume/cancel therefore address by group. GoalApprove is
+  // judge accepts the acceptance criteria". A group runs several goals
+  // CONCURRENTLY (each in its own session pair); approve/pause/resume/cancel
+  // address by group plus an optional goal name, which resolves to the sole
+  // candidate when omitted and errors when ambiguous. GoalApprove is
   // the human-confirmation step for plan-first goals (status
   // awaiting_approval → running); it is an ordinary grantable verb here but
   // has deliberately NO ctl-plane counterpart — main can set a goal on a
@@ -469,7 +471,12 @@ message GoalSetReq {
   string name           = 6;
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
-message GoalGroupReq { string group = 1; } // approve / pause / resume / cancel
+message GoalGroupReq {                     // approve / pause / interrupt / resume / cancel
+  string group = 1;
+  // Which of the group's goals (run name or id). "" = the sole candidate;
+  // an ambiguous "" (several concurrent goals qualify) is an error.
+  string name  = 2;
+}
 
 message GoalResp     { bool ok = 1; string error = 2; GoalItem item = 3; }
 message GoalListResp {

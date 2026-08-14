@@ -2583,8 +2583,11 @@ func (x *GoalListReq) GetGroup() string {
 }
 
 type GoalGroupReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Group string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	// Which of the group's goals (run name or id). "" = the sole candidate;
+	// an ambiguous "" (several concurrent goals qualify) is an error.
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2622,6 +2625,13 @@ func (*GoalGroupReq) Descriptor() ([]byte, []int) {
 func (x *GoalGroupReq) GetGroup() string {
 	if x != nil {
 		return x.Group
+	}
+	return ""
+}
+
+func (x *GoalGroupReq) GetName() string {
+	if x != nil {
+		return x.Name
 	}
 	return ""
 }
@@ -4050,9 +4060,10 @@ const file_koto_proto_rawDesc = "" +
 	"\x04name\x18\x06 \x01(\tR\x04nameB\a\n" +
 	"\x05_plan\"#\n" +
 	"\vGoalListReq\x12\x14\n" +
-	"\x05group\x18\x01 \x01(\tR\x05group\"$\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\"8\n" +
 	"\fGoalGroupReq\x12\x14\n" +
-	"\x05group\x18\x01 \x01(\tR\x05group\"T\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"T\n" +
 	"\bGoalResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\"\n" +

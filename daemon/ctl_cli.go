@@ -963,10 +963,15 @@ func ctlGoal(args []string) {
 		ctlPrint(resp, err)
 
 	case "approve", "pause", "interrupt", "resume", "cancel":
-		if len(rest) != 1 {
-			ctlFatal(2, "usage: koto ctl goal %s <group>", sub)
+		// The optional name picks one of the group's CONCURRENT goals; with
+		// exactly one candidate it may be omitted.
+		if len(rest) != 1 && len(rest) != 2 {
+			ctlFatal(2, "usage: koto ctl goal %s <group> [name]", sub)
 		}
 		req := &pb.GoalGroupReq{Group: rest[0]}
+		if len(rest) == 2 {
+			req.Name = rest[1]
+		}
 		var resp proto.Message
 		var err error
 		switch sub {

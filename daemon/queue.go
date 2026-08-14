@@ -345,7 +345,7 @@ func sendWorker(g, session string, q chan sendJob) {
 		// Reserved-session (goal) turns are re-checked at delivery: the goal
 		// may have been paused/interrupted/cancelled while this turn sat
 		// queued behind operator chat. See goalTurnShouldRun.
-		if isReservedSession(job.session) && !goalTurnShouldRun(g) {
+		if isReservedSession(job.session) && !goalTurnShouldRun(g, job.session) {
 			job.done <- fmt.Errorf("goal turn skipped (goal no longer active)")
 			continue
 		}

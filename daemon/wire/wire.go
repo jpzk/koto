@@ -370,10 +370,13 @@ type GoalSetReq struct {
 	Name string `json:"name,omitempty"`
 }
 
-// GoalGroupReq covers approve / pause / resume / cancel — the one-goal-per-
-// group invariant makes the group the natural address.
+// GoalGroupReq covers approve / pause / interrupt / resume / cancel. Name
+// addresses one of the group's goals (run name or id); empty resolves to the
+// sole candidate and errors when several goals are active (goals run
+// concurrently, so guessing would steer the wrong run).
 type GoalGroupReq struct {
 	Group string `json:"group"`
+	Name  string `json:"name,omitempty"`
 }
 
 type GoalListReq struct {

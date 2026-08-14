@@ -580,13 +580,14 @@ func (s *kotoServer) GoalList(_ context.Context, r *pb.GoalListReq) (*pb.GoalLis
 	return &pb.GoalListResp{Ok: true, Goals: out}, nil
 }
 
-// goalGroupRPC wraps the by-group goal transitions (approve/pause/resume/
-// cancel) — identical shape, different transition.
-func goalGroupRPC(group string, fn func(string) (goalItem, error)) (*pb.GoalResp, error) {
+// goalGroupRPC wraps the goal transitions (approve/pause/interrupt/resume/
+// cancel) — identical shape, different transition. `name` picks the goal
+// when the group runs several concurrently.
+func goalGroupRPC(group, name string, fn func(string, string) (goalItem, error)) (*pb.GoalResp, error) {
 	if !validGroupName(group) {
 		return &pb.GoalResp{Error: "invalid group name"}, nil
 	}
-	it, err := fn(group)
+	it, err := fn(group, name)
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}
@@ -594,23 +595,23 @@ func goalGroupRPC(group string, fn func(string) (goalItem, error)) (*pb.GoalResp
 }
 
 func (s *kotoServer) GoalApprove(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
-	return goalGroupRPC(r.Group, goalApprove)
+	return goalGroupRPC(r.Group, r.Name, goalApprove)
 }
 
 func (s *kotoServer) GoalPause(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
-	return goalGroupRPC(r.Group, goalPause)
+	return goalGroupRPC(r.Group, r.Name, goalPause)
 }
 
 func (s *kotoServer) GoalInterrupt(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
-	return goalGroupRPC(r.Group, goalInterrupt)
+	return goalGroupRPC(r.Group, r.Name, goalInterrupt)
 }
 
 func (s *kotoServer) GoalResume(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
-	return goalGroupRPC(r.Group, goalResume)
+	return goalGroupRPC(r.Group, r.Name, goalResume)
 }
 
 func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
-	return goalGroupRPC(r.Group, goalCancel)
+	return goalGroupRPC(r.Group, r.Name, goalCancel)
 }
 
 // ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------

@@ -104,8 +104,10 @@ type KotoClient interface {
 	SchedRun(ctx context.Context, in *SchedIDReq, opts ...grpc.CallOption) (*BaseResp, error)
 	// ---- goal loop (daemon/goals.go) ----
 	// A goal is "iterate this group with fresh context until an independent
-	// judge accepts the acceptance criteria". At most one goal per group;
-	// approve/pause/resume/cancel therefore address by group. GoalApprove is
+	// judge accepts the acceptance criteria". A group runs several goals
+	// CONCURRENTLY (each in its own session pair); approve/pause/resume/cancel
+	// address by group plus an optional goal name, which resolves to the sole
+	// candidate when omitted and errors when ambiguous. GoalApprove is
 	// the human-confirmation step for plan-first goals (status
 	// awaiting_approval → running); it is an ordinary grantable verb here but
 	// has deliberately NO ctl-plane counterpart — main can set a goal on a
@@ -626,8 +628,10 @@ type KotoServer interface {
 	SchedRun(context.Context, *SchedIDReq) (*BaseResp, error)
 	// ---- goal loop (daemon/goals.go) ----
 	// A goal is "iterate this group with fresh context until an independent
-	// judge accepts the acceptance criteria". At most one goal per group;
-	// approve/pause/resume/cancel therefore address by group. GoalApprove is
+	// judge accepts the acceptance criteria". A group runs several goals
+	// CONCURRENTLY (each in its own session pair); approve/pause/resume/cancel
+	// address by group plus an optional goal name, which resolves to the sole
+	// candidate when omitted and errors when ambiguous. GoalApprove is
 	// the human-confirmation step for plan-first goals (status
 	// awaiting_approval → running); it is an ordinary grantable verb here but
 	// has deliberately NO ctl-plane counterpart — main can set a goal on a

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,8 +32,20 @@ func goalTestSetup(t *testing.T) {
 	})
 }
 
-// waitGoal blocks until g's goal reaches status `want` AND its driver has
-// exited, so the caller may safely restore seams afterwards.
+// soleGoalLocked returns the group's first goal record — the old
+// one-goal-per-group accessor, kept for the many tests that run exactly one
+// goal per group. Caller holds goalLock.
+func soleGoalLocked(g string) *goalItem {
+	for i := range goals {
+		if goals[i].Group == g {
+			return &goals[i]
+		}
+	}
+	return nil
+}
+
+// waitGoal blocks until g's (sole) goal reaches status `want` AND its driver
+// has exited, so the caller may safely restore seams afterwards.
 func waitGoal(t *testing.T, g, want string) goalItem {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -40,10 +53,10 @@ func waitGoal(t *testing.T, g, want string) goalItem {
 		goalLock.Lock()
 		var snap goalItem
 		found := false
-		if it := findGoalLocked(g); it != nil {
+		if it := soleGoalLocked(g); it != nil {
 			snap, found = *it, true
 		}
-		driver := goalDrivers[g]
+		driver := found && goalDrivers[snap.ID]
 		goalLock.Unlock()
 		if found && snap.Status == want && !driver {
 			return snap
@@ -51,7 +64,7 @@ func waitGoal(t *testing.T, g, want string) goalItem {
 		time.Sleep(2 * time.Millisecond)
 	}
 	goalLock.Lock()
-	it := findGoalLocked(g)
+	it := soleGoalLocked(g)
 	var got string
 	if it != nil {
 		got = it.Status
@@ -125,13 +138,13 @@ func TestGoalPlanFirstAwaitsApproval(t *testing.T) {
 		// Approval from the wrong status errors; from awaiting it runs. The
 		// worker never claims, so the cap (default 20) is not hit within this
 		// stub — instead pause it via cancel to end the test deterministically.
-		if _, err := goalApprove(g); err != nil {
+		if _, err := goalApprove(g, ""); err != nil {
 			t.Fatalf("approve: %v", err)
 		}
-		if _, err := goalApprove(g); err == nil {
+		if _, err := goalApprove(g, ""); err == nil {
 			t.Fatal("second approve should fail (goal is running)")
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		waitGoal(t, g, goalStatusCancelled)
@@ -146,11 +159,11 @@ func TestGoalNoPlanMeetsOnAcceptedClaim(t *testing.T) {
 		rec.add(session, msg)
 		switch goalRole(session) {
 		case roleWork:
-			if err := recordGoalDone(gg, "criterion 1: verified"); err != nil {
+			if err := recordGoalDone(gg, "", "criterion 1: verified"); err != nil {
 				t.Errorf("recordGoalDone during turn: %v", err)
 			}
 		case roleJudge:
-			if err := recordGoalVerdict(gg, true, ""); err != nil {
+			if err := recordGoalVerdict(gg, "", true, ""); err != nil {
 				t.Errorf("recordGoalVerdict during turn: %v", err)
 			}
 		}
@@ -186,16 +199,16 @@ func TestGoalRejectedClaimFeedsFeedback(t *testing.T) {
 		rec.add(session, msg)
 		switch goalRole(session) {
 		case roleWork:
-			_ = recordGoalDone(gg, "done i say")
+			_ = recordGoalDone(gg, "", "done i say")
 		case roleJudge:
 			mu.Lock()
 			judgeCalls++
 			first := judgeCalls == 1
 			mu.Unlock()
 			if first {
-				_ = recordGoalVerdict(gg, false, "criterion 2 FAIL: tests are red")
+				_ = recordGoalVerdict(gg, "", false, "criterion 2 FAIL: tests are red")
 			} else {
-				_ = recordGoalVerdict(gg, true, "")
+				_ = recordGoalVerdict(gg, "", true, "")
 			}
 		}
 		return nil
@@ -246,7 +259,7 @@ func TestGoalCapPausesAndResumeResets(t *testing.T) {
 			t.Fatalf("no cap notification, got %v", notified)
 		}
 		// Resume grants a fresh budget and runs back to the cap.
-		it2, err := goalResume(g)
+		it2, err := goalResume(g, "")
 		if err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -267,7 +280,7 @@ func TestGoalSilentJudgePauses(t *testing.T) {
 	withTurnFn(func(gg, session, msg string) error {
 		rec.add(session, msg)
 		if goalRole(session) == roleWork {
-			_ = recordGoalDone(gg, "claimed")
+			_ = recordGoalDone(gg, "", "claimed")
 		}
 		// judge stays silent: no verdict ever recorded
 		return nil
@@ -309,10 +322,10 @@ func TestGoalStallPauses(t *testing.T) {
 
 func TestGoalMailboxWindowGating(t *testing.T) {
 	goalTestSetup(t)
-	if err := recordGoalDone("goal-nowin", "x"); err == nil {
+	if err := recordGoalDone("goal-nowin", "", "x"); err == nil {
 		t.Fatal("goal_done outside a turn window must be rejected")
 	}
-	if err := recordGoalVerdict("goal-nowin", true, ""); err == nil {
+	if err := recordGoalVerdict("goal-nowin", "", true, ""); err == nil {
 		t.Fatal("goal_verdict outside a judge window must be rejected")
 	}
 }
@@ -327,23 +340,174 @@ func TestGoalSetConflictsAndValidation(t *testing.T) {
 		if _, err := goalSet(g, "t", "", "", 0, false); err == nil {
 			t.Fatal("empty criteria must be rejected")
 		}
-		if _, err := goalSet(g, "build", "1. built", "", 1, false); err != nil {
+		first, err := goalSet(g, "build", "1. built", "", 1, false)
+		if err != nil {
 			t.Fatalf("goalSet: %v", err)
 		}
-		if _, err := goalSet(g, "another", "1. other", "", 1, false); err == nil {
-			t.Fatal("second goal on an active group must be rejected")
+		// Goals run CONCURRENTLY: a second set on an active group starts a
+		// second run with its own session pair.
+		second, err := goalSet(g, "another", "1. other", "", 1, false)
+		if err != nil {
+			t.Fatalf("second concurrent goal refused: %v", err)
 		}
-		waitGoal(t, g, goalStatusPaused) // cap=1, stub never claims
-		if _, err := goalSet(g, "third", "1. third", "", 1, false); err == nil {
-			t.Fatal("paused is non-terminal; goal_set must still be rejected")
+		if second.Name == first.Name {
+			t.Fatalf("both runs share name %q — their transcripts would blend", first.Name)
 		}
-		if _, err := goalCancel(g); err != nil {
-			t.Fatalf("cancel: %v", err)
+		// Both run out their cap independently (cap=1, stub never claims).
+		waitGoalByID(t, first.ID, goalStatusPaused)
+		waitGoalByID(t, second.ID, goalStatusPaused)
+		// A name-less verb is ambiguous with two candidates; naming works,
+		// and the id addresses too.
+		if _, err := goalResume(g, ""); err == nil || !strings.Contains(err.Error(), "name one of") {
+			t.Fatalf("ambiguous name-less resume not refused: %v", err)
 		}
-		if _, err := goalSet(g, "fresh", "1. fresh", "", 1, false); err != nil {
-			t.Fatalf("goal_set after terminal goal should succeed: %v", err)
+		if _, err := goalCancel(g, first.Name); err != nil {
+			t.Fatalf("cancel by name: %v", err)
 		}
-		waitGoal(t, g, goalStatusPaused)
+		if _, err := goalCancel(g, second.ID); err != nil {
+			t.Fatalf("cancel by id: %v", err)
+		}
+		// A fresh set retires the terminal records.
+		fresh, err := goalSet(g, "fresh", "1. fresh", "", 1, false)
+		if err != nil {
+			t.Fatalf("goal_set after terminal goals should succeed: %v", err)
+		}
+		goalLock.Lock()
+		n := 0
+		for _, it := range goals {
+			if it.Group == g {
+				n++
+			}
+		}
+		goalLock.Unlock()
+		if n != 1 {
+			t.Fatalf("records after fresh set = %d, want 1 (terminals retired)", n)
+		}
+		waitGoalByID(t, fresh.ID, goalStatusPaused)
+	})
+}
+
+// waitGoalByID is waitGoal for groups running several goals at once.
+func waitGoalByID(t *testing.T, id, want string) goalItem {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		goalLock.Lock()
+		var snap goalItem
+		found := false
+		if it := findGoalByIDLocked(id); it != nil {
+			snap, found = *it, true
+		}
+		driver := goalDrivers[id]
+		goalLock.Unlock()
+		if found && snap.Status == want && !driver {
+			return snap
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("goal %s never reached %q", id, want)
+	return goalItem{}
+}
+
+// goalIDFromMsg extracts the goal id a worker/judge prompt names — how a
+// concurrent-goals test (and a well-behaved agent) attributes its turn.
+func goalIDFromMsg(msg string) string {
+	if rest, ok := strings.CutPrefix(msg, "[koto goal review — goal "); ok {
+		if c := strings.IndexByte(rest, ','); c > 0 {
+			return rest[:c]
+		}
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(msg, "[koto goal "); ok {
+		if sp := strings.IndexByte(rest, ' '); sp > 0 {
+			return rest[:sp]
+		}
+	}
+	return ""
+}
+
+// TestGoalConcurrentGoalsRunIndependently: two goals on one group iterate AT
+// THE SAME TIME — both worker turns in flight together, claims and verdicts
+// routed by goal id, both runs' session pairs listed as tree leaves, and an
+// id-less claim refused while it is ambiguous.
+func TestGoalConcurrentGoalsRunIndependently(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-conc1"
+	started := make(chan string, 8)
+	release := make(chan struct{})
+	withTurnFn(func(gg, session, msg string) error {
+		id := goalIDFromMsg(msg)
+		switch goalRole(session) {
+		case roleWork:
+			started <- id
+			<-release
+			if err := recordGoalDone(gg, id, "verified for "+id); err != nil {
+				t.Errorf("recordGoalDone(%s): %v", id, err)
+			}
+		case roleJudge:
+			if err := recordGoalVerdict(gg, id, true, ""); err != nil {
+				t.Errorf("recordGoalVerdict(%s): %v", id, err)
+			}
+		}
+		return nil
+	}, func() {
+		a, err := goalSet(g, "build thing one", "1. built", "one", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet a: %v", err)
+		}
+		b, err := goalSet(g, "build thing two", "1. built", "two", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet b: %v", err)
+		}
+		inFlight := map[string]bool{}
+		for i := 0; i < 2; i++ {
+			select {
+			case id := <-started:
+				inFlight[id] = true
+			case <-time.After(5 * time.Second):
+				t.Fatalf("only %v started — concurrent goals are serialized", inFlight)
+			}
+		}
+		if !inFlight[a.ID] || !inFlight[b.ID] {
+			t.Fatalf("in-flight ids = %v, want both %s and %s", inFlight, a.ID, b.ID)
+		}
+		// Both runs contribute their session pairs while live.
+		if got := goalLiveSessions(g); len(got) != 4 {
+			t.Fatalf("live sessions = %v, want both runs' pairs", got)
+		}
+		// Two done-windows are open: an id-less claim is ambiguous, refused.
+		if err := recordGoalDone(g, "", "x"); err == nil || !strings.Contains(err.Error(), "include the goal") {
+			t.Fatalf("ambiguous id-less claim not refused: %v", err)
+		}
+		close(release)
+		wa := waitGoalByID(t, a.ID, goalStatusMet)
+		wb := waitGoalByID(t, b.ID, goalStatusMet)
+		if wa.DoneNote != "verified for "+a.ID || wb.DoneNote != "verified for "+b.ID {
+			t.Fatalf("claims crossed runs: a=%q b=%q", wa.DoneNote, wb.DoneNote)
+		}
+	})
+}
+
+// TestGoalMaxActiveCap: the per-group concurrency cap bounds driver minting.
+func TestGoalMaxActiveCap(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-conc-cap"
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		var ids []string
+		for i := 0; i < goalMaxActive; i++ {
+			it, err := goalSet(g, "plan a thing", "1. planned", fmt.Sprintf("g%d", i), 0, true)
+			if err != nil {
+				t.Fatalf("set #%d: %v", i, err)
+			}
+			ids = append(ids, it.ID)
+		}
+		if _, err := goalSet(g, "one too many", "1. x", "over", 0, true); err == nil {
+			t.Fatal("active-goal cap not enforced")
+		}
+		// Join every driver (plan turn → awaiting) before the seam restores.
+		for _, id := range ids {
+			waitGoalByID(t, id, goalStatusAwaiting)
+		}
 	})
 }
 
@@ -361,7 +525,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 		goalLock.Unlock()
 		loadGoals()
 		goalLock.Lock()
-		it := findGoalLocked(g)
+		it := soleGoalLocked(g)
 		var got goalItem
 		if it != nil {
 			got = *it
@@ -393,7 +557,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 			t.Fatal("running goal was not re-driven")
 		}
 		goalLock.Lock()
-		wait := findGoalLocked("goal-resume-wait")
+		wait := soleGoalLocked("goal-resume-wait")
 		st := wait.Status
 		goalLock.Unlock()
 		if st != goalStatusAwaiting {
@@ -453,7 +617,7 @@ func TestCtlGoalVerbAuthorization(t *testing.T) {
 
 		// A plan-first goal it set on itself, it may approve itself — that is
 		// how a coordinator starts autonomously.
-		if _, err := goalCancel("peer"); err != nil {
+		if _, err := goalCancel("peer", ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		if _, err := goalSet("peer", "plan first", "1. done", "", 0, true); err != nil {
@@ -479,7 +643,7 @@ func TestCtlGoalVerbAuthorization(t *testing.T) {
 		}
 
 		for _, g := range []string{"peer", "elsewhere"} {
-			_, _ = goalCancel(g)
+			_, _ = goalCancel(g, "")
 			waitGoal(t, g, goalStatusCancelled)
 		}
 	})
@@ -532,29 +696,38 @@ func TestCtlGoalDoneAndVerdictWindowGated(t *testing.T) {
 		t.Fatalf("goal_verdict outside window: %+v", br)
 	}
 
-	// Open windows → recorded, self-targeted via the socket-derived owner.
+	// Open windows (keyed by goal id, valued by owning group) → recorded,
+	// self-targeted via the socket-derived owner. The id-less form resolves
+	// because exactly one window is open for the group.
+	const gid = "someid"
 	goalLock.Lock()
-	goalDoneOpen[g] = "someid"
-	goalVerdictOpen[g] = "someid"
+	goalDoneOpen[gid] = g
+	goalVerdictOpen[gid] = g
 	goalLock.Unlock()
 	t.Cleanup(func() {
 		goalLock.Lock()
-		delete(goalDoneOpen, g)
-		delete(goalDoneMail, g)
-		delete(goalVerdictOpen, g)
-		delete(goalVerdictMail, g)
+		delete(goalDoneOpen, gid)
+		delete(goalDoneMail, gid)
+		delete(goalVerdictOpen, gid)
+		delete(goalVerdictMail, gid)
 		goalLock.Unlock()
 	})
 	if br, _ := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_done", "note": note})).(baseResp); !br.OK {
 		t.Fatalf("goal_done inside window: %+v", br)
 	}
+	// A claim naming a DIFFERENT goal misses the window even though one is
+	// open — the id must match, not just the group.
+	br, ok = ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_done", "id": "otherid", "note": note})).(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "no goal turn in flight") {
+		t.Fatalf("goal_done with wrong id: %+v", br)
+	}
 	reasons := base64.StdEncoding.EncodeToString([]byte("criterion 1 FAIL"))
-	if br, _ := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_verdict", "met": false, "reasons": reasons})).(baseResp); !br.OK {
+	if br, _ := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "goal_verdict", "id": gid, "met": false, "reasons": reasons})).(baseResp); !br.OK {
 		t.Fatalf("goal_verdict inside window: %+v", br)
 	}
 	goalLock.Lock()
-	gotNote := goalDoneMail[g]
-	gotV := goalVerdictMail[g]
+	gotNote := goalDoneMail[gid]
+	gotV := goalVerdictMail[gid]
 	goalLock.Unlock()
 	if gotNote != "evidence: ls passed" {
 		t.Fatalf("note = %q", gotNote)
@@ -639,7 +812,7 @@ func TestGoalInterruptAbortsInFlightTurn(t *testing.T) {
 			t.Fatalf("goalSet: %v", err)
 		}
 		<-turnStarted // worker turn is now in flight in the goal lane
-		it, err := goalInterrupt(g)
+		it, err := goalInterrupt(g, "")
 		if err != nil {
 			t.Fatalf("interrupt: %v", err)
 		}
@@ -658,18 +831,18 @@ func TestGoalInterruptAbortsInFlightTurn(t *testing.T) {
 		waitGoal(t, g, goalStatusPaused) // driver exits at the loop-top pause check
 
 		// A second interrupt on the now-paused goal is a status error.
-		if _, err := goalInterrupt(g); err == nil {
+		if _, err := goalInterrupt(g, ""); err == nil {
 			t.Fatal("interrupt of a paused goal should fail")
 		}
 
 		// With the goal running but NO turn in flight, interrupt pauses
 		// without signaling the agent.
-		if _, err := goalTransition(g, []string{goalStatusPaused}, func(it *goalItem) {
+		if _, err := goalTransition(g, "", []string{goalStatusPaused}, func(it *goalItem) {
 			it.Status = goalStatusRunning
 		}); err != nil {
 			t.Fatalf("re-arm running: %v", err)
 		}
-		if _, err := goalInterrupt(g); err != nil {
+		if _, err := goalInterrupt(g, ""); err != nil {
 			t.Fatalf("second interrupt: %v", err)
 		}
 		select {
@@ -718,7 +891,7 @@ func TestGoalQueuedTurnSkippedAfterCancel(t *testing.T) {
 		if sessionDepth(g, goalWorkSessionFor(it.Name)) == 0 {
 			t.Fatal("stray goal turn did not queue")
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		close(release)
@@ -792,7 +965,7 @@ func TestGoalAndChatRunConcurrently(t *testing.T) {
 		// is covered by TestSlotPool*; turnFn replaces sendNow here, and
 		// slots are acquired inside it.)
 		close(release)
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		waitGoal(t, g, goalStatusCancelled)
@@ -818,7 +991,7 @@ func TestGoalLiveSessionsLeaf(t *testing.T) {
 		if got := goalLiveSessions(g); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 			t.Fatalf("live goal: sessions = %v, want %v", got, want)
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		if got := goalLiveSessions(g); got != nil {
@@ -870,9 +1043,9 @@ func TestGoalEventsCarryTheGoalSession(t *testing.T) {
 	withTurnFn(func(gg, session, msg string) error {
 		switch goalRole(session) {
 		case roleWork:
-			_ = recordGoalDone(gg, "criterion 1: verified")
+			_ = recordGoalDone(gg, "", "criterion 1: verified")
 		case roleJudge:
-			_ = recordGoalVerdict(gg, true, "")
+			_ = recordGoalVerdict(gg, "", true, "")
 		}
 		return nil
 	}, func() {
@@ -944,7 +1117,7 @@ func TestGoalNameUniqueWithinGroup(t *testing.T) {
 		if first.Name != "fix-flaky-tests" {
 			t.Fatalf("name = %q, want the slug", first.Name)
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		second, err := goalSet(g, "fix the flaky tests", "1. green", "", 0, false)
@@ -954,7 +1127,7 @@ func TestGoalNameUniqueWithinGroup(t *testing.T) {
 		if second.Name == first.Name {
 			t.Fatalf("second run reused %q — the two transcripts would merge", second.Name)
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel 2: %v", err)
 		}
 	})
@@ -976,7 +1149,7 @@ func TestGoalExplicitNameWins(t *testing.T) {
 		if got := goalWorkSessionFor(it.Name); got != "goal-wx" {
 			t.Errorf("worker session = %q", got)
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 	})
@@ -1018,7 +1191,7 @@ func TestCtlGoalSelfSetUppercaseGroup(t *testing.T) {
 		if br, ok := ctlDispatch("ALPHA", ctlLine(t, map[string]any{"cmd": "goal_pause"})).(goalResp); !ok || !br.OK {
 			t.Errorf("uppercase group's self goal_pause refused: %+v", br)
 		}
-		if _, err := goalCancel("ALPHA"); err != nil {
+		if _, err := goalCancel("ALPHA", ""); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
 		waitGoal(t, "ALPHA", goalStatusCancelled)
@@ -1050,7 +1223,7 @@ func TestGoalReplacedWhileDriverParked(t *testing.T) {
 			t.Fatalf("goalSet probe: %v", err)
 		}
 		<-planIn
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel probe: %v", err)
 		}
 		real, err := goalSet(g, "the real work", "1. done", "real", 0, false)
@@ -1082,7 +1255,7 @@ func TestGoalReplacedWhileDriverParked(t *testing.T) {
 		if !found {
 			t.Fatal("replacement goal was never driven — driver died with the old goal")
 		}
-		if _, err := goalCancel(g); err != nil {
+		if _, err := goalCancel(g, ""); err != nil {
 			t.Fatalf("cancel real: %v", err)
 		}
 		waitGoal(t, g, goalStatusCancelled)

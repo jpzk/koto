@@ -33,30 +33,37 @@ package main
 //     counterpart — main can set a peer's goal but not approve one).
 //   - max_iterations (execution turns only) bounds a loop that never
 //     converges: hitting the cap pauses the goal and notifies the operator.
+//   - A group runs SEVERAL goals at once — that is what the multi-session
+//     machinery exists for. Each run owns its session pair, driver goroutine
+//     and mailbox windows; turns from different goals interleave through the
+//     group's slot pool like any other concurrent sessions (sharing one
+//     workspace, so goals that fight over the same files are the caller's
+//     problem, same as two chat sessions editing one repo). Verbs
+//     (approve/pause/interrupt/resume/cancel) take an optional NAME and
+//     resolve to the sole matching goal when it is omitted.
 //
-// One driver goroutine per active goal is the sole producer of goal turns: it
-// enqueues onto the group's ordinary send queue and waits on the per-job done
-// channel, so goal turns serialize naturally with operator chat on the same
-// group and completion attribution is exact (the channel is per-job). The
-// driver holds goalLock only for state snapshots/mutations, never across a
-// turn.
+// One driver goroutine per active goal (keyed by goal ID) is the sole
+// producer of that goal's turns: it enqueues onto the group's ordinary send
+// queue and waits on the per-job done channel, so goal turns serialize
+// naturally with operator chat and each other, and completion attribution is
+// exact (the channel is per-job). The driver holds goalLock only for state
+// snapshots/mutations, never across a turn.
 //
-// Verdict/claim delivery is a per-group mailbox with an open/close window:
+// Verdict/claim delivery is a per-GOAL mailbox with an open/close window:
 // the ctl verbs are accepted only while the corresponding turn is in flight
-// (first write wins).
+// (first write wins). The claim carries the goal id — the prompt templates
+// embed it — and an id-less claim is accepted only while it is unambiguous
+// (exactly one window open in the group), so concurrent goals cannot eat each
+// other's verdicts.
 //
-// That window used to be sufficient BY ITSELF, because a group ran one turn at
-// a time: only the goal's own turn could be running while a window was open.
-// Concurrent turns (queue.go's slot pool) removed that argument. Any session
-// running at the same time can now write a claim the window accepts — the ctl
-// plane's session field is self-declared by the guest, and every session in a
-// group shares one uid, one workspace and one ctl FIFO.
-//
-// This widens an already-accepted risk rather than opening a new class: a
+// The window is authorization against ACCIDENT, not against malice: the ctl
+// plane's session identity is self-declared by the guest, and every session
+// in a group shares one uid, one workspace and one ctl FIFO — any in-flight
+// turn could write a claim naming any open goal. That is an accepted risk: a
 // worker staging artifacts to fool the same-VM judge was always possible.
-// The rule it makes explicit is that session separation INSIDE a group is
-// organizational, not enforceable — the microVM is the boundary. Use a
-// separate group when the separation has to hold against a hostile agent.
+// Session separation INSIDE a group is organizational, not enforceable — the
+// microVM is the boundary. Use a separate group when the separation has to
+// hold against a hostile agent.
 
 import (
 	"encoding/json"
@@ -78,6 +85,12 @@ const (
 
 	goalDefaultMaxIter = 20
 	goalMaxIterCeil    = 200
+
+	// goalMaxActive caps how many goals may run CONCURRENTLY in one group.
+	// Each active goal is one driver goroutine and at most one in-flight
+	// turn, so the real thrash limit is the group's turn slot pool; this cap
+	// just keeps a looping agent from minting drivers without bound.
+	goalMaxActive = 8
 
 	// goalNoteMax caps the decoded goal_done note / goal_verdict reasons —
 	// both agent-authored, both persisted into goals.json and (for reasons)
@@ -101,13 +114,17 @@ var (
 var (
 	goalLock    sync.Mutex
 	goals       []goalItem
-	goalDrivers = map[string]bool{}
+	goalDrivers = map[string]bool{} // keyed by goal ID — one driver per run, not per group
 
-	// Mailboxes (guarded by goalLock). *Open maps group → goal id while the
-	// corresponding turn is in flight; the ctl verbs refuse when closed.
-	goalDoneOpen    = map[string]string{}
-	goalDoneMail    = map[string]string{} // worker's evidence note
-	goalVerdictOpen = map[string]string{}
+	// Mailboxes (guarded by goalLock), keyed by GOAL ID — several goals can
+	// have turns in flight in one group at once. *Open maps goal id → owning
+	// group while the corresponding turn is in flight; the ctl verbs refuse
+	// when closed, and use the group value to authorize the caller and to
+	// resolve id-less claims (accepted only while exactly one window is open
+	// in the group).
+	goalDoneOpen    = map[string]string{} // goal id → group
+	goalDoneMail    = map[string]string{} // goal id → worker's evidence note
+	goalVerdictOpen = map[string]string{} // goal id → group
 	goalVerdictMail = map[string]goalVerdict{}
 )
 
@@ -179,15 +196,88 @@ func saveGoalsLocked() {
 	}
 }
 
-// findGoalLocked returns a pointer into the goals slice for g's goal, or nil.
-// Caller holds goalLock; the pointer is invalid once the lock is released.
-func findGoalLocked(g string) *goalItem {
+// findGoalByIDLocked returns a pointer into the goals slice for the goal with
+// this id, or nil. Caller holds goalLock; the pointer is invalid once the
+// lock is released.
+func findGoalByIDLocked(id string) *goalItem {
 	for i := range goals {
-		if goals[i].Group == g {
+		if goals[i].ID == id {
 			return &goals[i]
 		}
 	}
 	return nil
+}
+
+// activeGoalsLocked returns pointers to g's non-terminal goals, in slice
+// (creation) order. Caller holds goalLock.
+func activeGoalsLocked(g string) []*goalItem {
+	var out []*goalItem
+	for i := range goals {
+		if goals[i].Group == g && !goalTerminal(goals[i].Status) {
+			out = append(out, &goals[i])
+		}
+	}
+	return out
+}
+
+// resolveGoalLocked picks the goal a group-scoped verb addresses. `name`
+// matches the run's Name or ID; empty means "the obvious one": the sole goal
+// in one of the `from` statuses (nil from = any status). Ambiguity is an
+// error naming the candidates — with concurrent goals, guessing would steer
+// the wrong run. Caller holds goalLock.
+func resolveGoalLocked(g, name string, from []string) (*goalItem, error) {
+	inFrom := func(s string) bool {
+		if from == nil {
+			return true
+		}
+		for _, f := range from {
+			if s == f {
+				return true
+			}
+		}
+		return false
+	}
+	if name != "" {
+		for i := range goals {
+			if goals[i].Group == g && (goals[i].Name == name || goals[i].ID == name) {
+				if !inFrom(goals[i].Status) {
+					return nil, fmt.Errorf("goal %s is %s", goals[i].ID, goals[i].Status)
+				}
+				return &goals[i], nil
+			}
+		}
+		return nil, fmt.Errorf("group %q has no goal named %q", g, name)
+	}
+	var cand []*goalItem
+	var nonTerminal []*goalItem
+	for i := range goals {
+		if goals[i].Group != g {
+			continue
+		}
+		if !goalTerminal(goals[i].Status) {
+			nonTerminal = append(nonTerminal, &goals[i])
+		}
+		if inFrom(goals[i].Status) {
+			cand = append(cand, &goals[i])
+		}
+	}
+	switch len(cand) {
+	case 1:
+		return cand[0], nil
+	case 0:
+		// The old single-goal error texts, kept for the common shapes: a
+		// group with exactly one goal in the wrong state reports that state.
+		if len(nonTerminal) == 1 {
+			return nil, fmt.Errorf("goal %s is %s", nonTerminal[0].ID, nonTerminal[0].Status)
+		}
+		return nil, fmt.Errorf("group %q has no goal", g)
+	default:
+		names := make([]string, len(cand))
+		for i, it := range cand {
+			names[i] = goalSessionSlug(*it)
+		}
+		return nil, fmt.Errorf("group %q has %d goals — name one of: %s", g, len(cand), strings.Join(names, ", "))
+	}
 }
 
 func goalTerminal(status string) bool {
@@ -195,38 +285,48 @@ func goalTerminal(status string) bool {
 }
 
 // goalLiveSessions returns the goal loop's reserved sessions that should be
-// SHOWN for g — the worker AND judge sessions while a non-terminal goal
-// exists, so clients get navigable tree leaves to follow the run from (the
-// sessions stay out of the on-disk registry: they are not sendable, and the
-// leaves should vanish when the goal ends, not linger like chat sessions).
-// The judge used to be unlisted on the theory that its verdicts (goal_verdict
-// events) were all that mattered — but a verdict without its reasoning is
-// exactly the review process the operator most wants to audit, and a session
+// SHOWN for g — the worker AND judge sessions of every non-terminal goal, so
+// clients get navigable tree leaves to follow each run from (the sessions
+// stay out of the on-disk registry: they are not sendable, and the leaves
+// should vanish when a run ends, not linger like chat sessions). The judge
+// used to be unlisted on the theory that its verdicts (goal_verdict events)
+// were all that mattered — but a verdict without its reasoning is exactly
+// the review process the operator most wants to audit, and a session
 // reachable only by hand-typing /session goal-<name>-judge is not visible.
-// The leaf is listed for the whole run, not just while a review is in flight:
-// a rejection's transcript matters most AFTER the judge turn ends.
+// The leaves are listed for the whole run, not just while turns are in
+// flight: a rejection's transcript matters most AFTER the judge turn ends.
 func goalLiveSessions(g string) []string {
 	goalLock.Lock()
 	defer goalLock.Unlock()
-	if it := findGoalLocked(g); it != nil && !goalTerminal(it.Status) {
+	var out []string
+	for _, it := range activeGoalsLocked(g) {
 		slug := goalSessionSlug(*it)
-		return []string{goalWorkSessionFor(slug), goalJudgeSessionFor(slug)}
+		out = append(out, goalWorkSessionFor(slug), goalJudgeSessionFor(slug))
 	}
-	return nil
+	return out
 }
 
 // goalTurnShouldRun is the delivery-layer guard on queued goal turns
 // (sendWorker consults it before running a reserved-session job): the driver
-// enqueues while the goal is active, but a pause/interrupt/cancel can land
+// enqueues while its goal is active, but a pause/interrupt/cancel can land
 // while the turn still sits queued behind operator chat — without this check
-// the dead goal grinds one full stray iteration anyway. Best-effort by
-// design: a status change after delivery starts doesn't abort the turn
-// (that's goalInterrupt's SIGINT path).
-func goalTurnShouldRun(g string) bool {
+// the dead goal grinds one full stray iteration anyway. The session names
+// the run, so the check is against THAT goal — a peer goal's state is
+// irrelevant. Best-effort by design: a status change after delivery starts
+// doesn't abort the turn (that's goalInterrupt's SIGINT path).
+func goalTurnShouldRun(g, session string) bool {
 	goalLock.Lock()
 	defer goalLock.Unlock()
-	it := findGoalLocked(g)
-	return it != nil && (it.Status == goalStatusRunning || it.Status == goalStatusPlanning)
+	for i := range goals {
+		if goals[i].Group != g {
+			continue
+		}
+		slug := goalSessionSlug(goals[i])
+		if session == goalWorkSessionFor(slug) || session == goalJudgeSessionFor(slug) {
+			return goals[i].Status == goalStatusRunning || goals[i].Status == goalStatusPlanning
+		}
+	}
+	return false
 }
 
 // ---- verbs ------------------------------------------------------------------
@@ -389,21 +489,27 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 		CreatedAt:     goalNow(),
 	}
 	goalLock.Lock()
-	if cur := findGoalLocked(group); cur != nil {
-		if !goalTerminal(cur.Status) {
-			goalLock.Unlock()
-			return goalItem{}, fmt.Errorf("group %q already has a goal (%s, %s); cancel it first", group, cur.ID, cur.Status)
-		}
-		// Replace the terminal goal in place.
-		*cur = it
-	} else {
-		goals = append(goals, it)
+	if n := len(activeGoalsLocked(group)); n >= goalMaxActive {
+		goalLock.Unlock()
+		return goalItem{}, fmt.Errorf("group %q already has %d active goals; finish or cancel one first", group, n)
 	}
+	// Setting a new goal retires the group's terminal records (the
+	// generalization of the old replace-in-place): outcomes stay listed
+	// until fresh work starts, and goals.json stays bounded at the actives
+	// plus the last batch of results.
+	kept := goals[:0]
+	for _, old := range goals {
+		if old.Group == group && goalTerminal(old.Status) {
+			continue
+		}
+		kept = append(kept, old)
+	}
+	goals = append(kept, it)
 	saveGoalsLocked()
 	goalLock.Unlock()
 	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s plan=%t max=%d", it.ID, it.Name, group, plan, maxIter)
 	emit(group, Event{Event: "goal_set", ID: it.ID, Text: text, Session: goalWorkSessionFor(it.Name)})
-	startGoalDriver(group)
+	startGoalDriver(group, it.ID)
 	return it, nil
 }
 
@@ -422,23 +528,15 @@ func goalList(filter string) []goalItem {
 }
 
 // goalTransition applies a status change under goalLock and returns the
-// updated item. `from` lists the statuses the change is valid from.
-func goalTransition(g string, from []string, apply func(*goalItem)) (goalItem, error) {
+// updated item. `name` addresses the goal (Name/ID; "" = the sole candidate
+// — see resolveGoalLocked); `from` lists the statuses the change is valid
+// from.
+func goalTransition(g, name string, from []string, apply func(*goalItem)) (goalItem, error) {
 	goalLock.Lock()
 	defer goalLock.Unlock()
-	it := findGoalLocked(g)
-	if it == nil {
-		return goalItem{}, fmt.Errorf("group %q has no goal", g)
-	}
-	ok := false
-	for _, s := range from {
-		if it.Status == s {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		return goalItem{}, fmt.Errorf("goal %s is %s", it.ID, it.Status)
+	it, err := resolveGoalLocked(g, name, from)
+	if err != nil {
+		return goalItem{}, err
 	}
 	apply(it)
 	it.UpdatedAt = goalNow()
@@ -446,8 +544,8 @@ func goalTransition(g string, from []string, apply func(*goalItem)) (goalItem, e
 	return *it, nil
 }
 
-func goalApprove(g string) (goalItem, error) {
-	it, err := goalTransition(g, []string{goalStatusAwaiting}, func(it *goalItem) {
+func goalApprove(g, name string) (goalItem, error) {
+	it, err := goalTransition(g, name, []string{goalStatusAwaiting}, func(it *goalItem) {
 		it.Status = goalStatusRunning
 	})
 	if err != nil {
@@ -455,12 +553,12 @@ func goalApprove(g string) (goalItem, error) {
 	}
 	emitLogfG("goal", g, "info", "approve id=%s", it.ID)
 	emit(g, Event{Event: "goal_resumed", ID: it.ID, Text: "approved", Session: goalWorkSessionFor(goalSessionSlug(it))})
-	startGoalDriver(g)
+	startGoalDriver(g, it.ID)
 	return it, nil
 }
 
-func goalPause(g string) (goalItem, error) {
-	it, err := goalTransition(g, []string{goalStatusRunning}, func(it *goalItem) {
+func goalPause(g, name string) (goalItem, error) {
+	it, err := goalTransition(g, name, []string{goalStatusRunning}, func(it *goalItem) {
 		it.Status = goalStatusPaused
 		it.PausedReason = "operator"
 	})
@@ -486,8 +584,8 @@ var goalInterruptTurnFn func(g, sess string) error
 // case the pause alone suffices: the stray iteration runs, then the driver
 // sees paused at the loop top and exits (its claim, if any, is discarded by
 // the same status check in goalJudgeCheck).
-func goalInterrupt(g string) (goalItem, error) {
-	it, err := goalTransition(g, []string{goalStatusRunning}, func(it *goalItem) {
+func goalInterrupt(g, name string) (goalItem, error) {
+	it, err := goalTransition(g, name, []string{goalStatusRunning}, func(it *goalItem) {
 		it.Status = goalStatusPaused
 		it.PausedReason = "interrupted"
 	})
@@ -513,8 +611,8 @@ func goalInterrupt(g string) (goalItem, error) {
 }
 
 // goalResume restarts a paused goal with a fresh iteration budget.
-func goalResume(g string) (goalItem, error) {
-	it, err := goalTransition(g, []string{goalStatusPaused}, func(it *goalItem) {
+func goalResume(g, name string) (goalItem, error) {
+	it, err := goalTransition(g, name, []string{goalStatusPaused}, func(it *goalItem) {
 		it.Status = goalStatusRunning
 		it.PausedReason = ""
 		it.Iteration = 0
@@ -524,12 +622,12 @@ func goalResume(g string) (goalItem, error) {
 	}
 	emitLogfG("goal", g, "info", "resume id=%s", it.ID)
 	emit(g, Event{Event: "goal_resumed", ID: it.ID, Session: goalWorkSessionFor(goalSessionSlug(it))})
-	startGoalDriver(g)
+	startGoalDriver(g, it.ID)
 	return it, nil
 }
 
-func goalCancel(g string) (goalItem, error) {
-	it, err := goalTransition(g,
+func goalCancel(g, name string) (goalItem, error) {
+	it, err := goalTransition(g, name,
 		[]string{goalStatusPlanning, goalStatusAwaiting, goalStatusRunning, goalStatusPaused},
 		func(it *goalItem) {
 			it.Status = goalStatusCancelled
@@ -543,59 +641,115 @@ func goalCancel(g string) (goalItem, error) {
 	return it, nil
 }
 
-// goalCancelOnDestroy silently cancels any non-terminal goal when its group is
-// destroyed. Unlike goalCancel it is a no-op (not an error) without one.
+// goalCancelOnDestroy silently cancels every non-terminal goal when its
+// group is destroyed. Unlike goalCancel it is a no-op (not an error) when
+// there are none.
 func goalCancelOnDestroy(g string) {
-	if _, err := goalCancel(g); err == nil {
-		emitLogfG("goal", g, "info", "cancelled by destroy group=%s", g)
+	goalLock.Lock()
+	var cancelled []goalItem
+	for i := range goals {
+		if goals[i].Group == g && !goalTerminal(goals[i].Status) {
+			goals[i].Status = goalStatusCancelled
+			goals[i].CompletedAt = goalNow()
+			goals[i].UpdatedAt = goalNow()
+			cancelled = append(cancelled, goals[i])
+		}
+	}
+	if len(cancelled) > 0 {
+		saveGoalsLocked()
+	}
+	goalLock.Unlock()
+	for _, it := range cancelled {
+		emit(g, Event{Event: "goal_cancelled", ID: it.ID, Session: goalWorkSessionFor(goalSessionSlug(it))})
+		emitLogfG("goal", g, "info", "cancelled by destroy id=%s group=%s", it.ID, g)
 	}
 }
 
-// goalPauseOnStop pauses a running goal when the operator stops its group —
-// otherwise the driver's next enqueue would silently re-boot the VM the
-// operator just powered off. No-op for any other status (a terminal or
+// goalPauseOnStop pauses every running goal when the operator stops its
+// group — otherwise a driver's next enqueue would silently re-boot the VM
+// the operator just powered off. Other statuses are untouched (a terminal or
 // already-paused goal, or a planning turn — the human approval gate already
 // stands between a truncated plan and execution).
 func goalPauseOnStop(g string) {
-	it, err := goalTransition(g, []string{goalStatusRunning}, func(it *goalItem) {
-		it.Status = goalStatusPaused
-		it.PausedReason = "stopped"
-	})
-	if err != nil {
-		return
+	goalLock.Lock()
+	var paused []goalItem
+	for i := range goals {
+		if goals[i].Group == g && goals[i].Status == goalStatusRunning {
+			goals[i].Status = goalStatusPaused
+			goals[i].PausedReason = "stopped"
+			goals[i].UpdatedAt = goalNow()
+			paused = append(paused, goals[i])
+		}
 	}
-	emitLogfG("goal", g, "warn", "pause id=%s (group stopped)", it.ID)
-	emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "stopped", Session: goalWorkSessionFor(goalSessionSlug(it))})
-	goalNotify(g, "high", "goal paused (group stopped)",
-		fmt.Sprintf("goal %s paused at iteration %d/%d; /goal resume after restarting the group", it.ID, it.Iteration, it.MaxIterations))
+	if len(paused) > 0 {
+		saveGoalsLocked()
+	}
+	goalLock.Unlock()
+	for _, it := range paused {
+		emitLogfG("goal", g, "warn", "pause id=%s (group stopped)", it.ID)
+		emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "stopped", Session: goalWorkSessionFor(goalSessionSlug(it))})
+		goalNotify(g, "high", "goal paused (group stopped)",
+			fmt.Sprintf("goal %s (%s) paused at iteration %d/%d; /goal resume after restarting the group",
+				it.ID, goalSessionSlug(it), it.Iteration, it.MaxIterations))
+	}
 }
 
 // ---- mailboxes (ctl plane → driver) ----------------------------------------
 
+// resolveGoalWindowLocked maps a ctl claim to its open window. The claim's
+// `id` (embedded in the prompt templates) names the goal directly; an id-less
+// claim — older prompts, or an agent that trimmed the template — is accepted
+// only while it is unambiguous, i.e. exactly one window is open in the owning
+// group. Caller holds goalLock.
+func resolveGoalWindowLocked(open map[string]string, owner, id, what string) (string, error) {
+	if id != "" {
+		if open[id] != owner {
+			return "", fmt.Errorf("no %s in flight for %q (goal %s)", what, owner, id)
+		}
+		return id, nil
+	}
+	var ids []string
+	for gid, grp := range open {
+		if grp == owner {
+			ids = append(ids, gid)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("no %s in flight for %q", what, owner)
+	case 1:
+		return ids[0], nil
+	default:
+		return "", fmt.Errorf("%d %ss in flight for %q — include the goal \"id\"", len(ids), what, owner)
+	}
+}
+
 // recordGoalDone accepts the worker's completion claim, only while its turn
 // is in flight (first write wins; a duplicate in the same window is ignored).
-func recordGoalDone(owner, note string) error {
+func recordGoalDone(owner, id, note string) error {
 	goalLock.Lock()
 	defer goalLock.Unlock()
-	if goalDoneOpen[owner] == "" {
-		return fmt.Errorf("no goal turn in flight for %q", owner)
+	gid, err := resolveGoalWindowLocked(goalDoneOpen, owner, id, "goal turn")
+	if err != nil {
+		return err
 	}
-	if _, dup := goalDoneMail[owner]; !dup {
-		goalDoneMail[owner] = note
+	if _, dup := goalDoneMail[gid]; !dup {
+		goalDoneMail[gid] = note
 	}
 	return nil
 }
 
 // recordGoalVerdict accepts the judge's verdict, only while a judge turn is
 // in flight (first write wins).
-func recordGoalVerdict(owner string, met bool, reasons string) error {
+func recordGoalVerdict(owner, id string, met bool, reasons string) error {
 	goalLock.Lock()
 	defer goalLock.Unlock()
-	if goalVerdictOpen[owner] == "" {
-		return fmt.Errorf("no goal review in flight for %q", owner)
+	gid, err := resolveGoalWindowLocked(goalVerdictOpen, owner, id, "goal review")
+	if err != nil {
+		return err
 	}
-	if _, dup := goalVerdictMail[owner]; !dup {
-		goalVerdictMail[owner] = goalVerdict{Met: met, Reasons: reasons}
+	if _, dup := goalVerdictMail[gid]; !dup {
+		goalVerdictMail[gid] = goalVerdict{Met: met, Reasons: reasons}
 	}
 	return nil
 }
@@ -608,86 +762,70 @@ func recordGoalVerdict(owner string, met bool, reasons string) error {
 // turn, awaiting_approval keeps waiting for the human.
 func resumeGoalDrivers() {
 	goalLock.Lock()
-	var resume []string
+	var resume []goalItem
 	for _, it := range goals {
 		if it.Status == goalStatusRunning || it.Status == goalStatusPlanning {
-			resume = append(resume, it.Group)
+			resume = append(resume, it)
 		}
 	}
 	goalLock.Unlock()
-	for _, g := range resume {
-		emitLogfG("goal", g, "info", "resuming driver group=%s after daemon start", g)
-		startGoalDriver(g)
+	for _, it := range resume {
+		emitLogfG("goal", it.Group, "info", "resuming driver id=%s group=%s after daemon start", it.ID, it.Group)
+		startGoalDriver(it.Group, it.ID)
 	}
 }
 
-// startGoalDriver spawns g's driver goroutine unless one is already live.
-// The driver map is the single-flight guard: the driver is the sole producer
-// of goal turns, so no queue-level coalescing is needed.
-func startGoalDriver(g string) {
+// startGoalDriver spawns the goal's driver goroutine unless one is already
+// live. Keyed by goal ID — a group runs one driver PER ACTIVE GOAL, and the
+// per-id key is also what killed the replaced-goal hazard (a per-group key
+// let a new goal's startGoalDriver see the old goal's driver alive and do
+// nothing, stranding the new goal — observed 2026-08-14 on ALPHA). The
+// driver map is the single-flight guard: the driver is the sole producer of
+// its goal's turns, so no queue-level coalescing is needed.
+func startGoalDriver(g, id string) {
 	goalLock.Lock()
-	if goalDrivers[g] {
+	if goalDrivers[id] {
 		goalLock.Unlock()
 		return
 	}
-	it := findGoalLocked(g)
-	if it == nil || (it.Status != goalStatusRunning && it.Status != goalStatusPlanning) {
+	it := findGoalByIDLocked(id)
+	if it == nil || it.Group != g ||
+		(it.Status != goalStatusRunning && it.Status != goalStatusPlanning) {
 		goalLock.Unlock()
 		return
 	}
-	goalDrivers[g] = true
+	goalDrivers[id] = true
 	goalLock.Unlock()
-	go goalDriver(g)
+	go goalDriver(g, id)
 }
 
-func goalDriver(g string) {
+func goalDriver(g, id string) {
 	defer func() {
 		goalLock.Lock()
-		delete(goalDrivers, g)
+		delete(goalDrivers, id)
 		goalLock.Unlock()
 	}()
-	for {
-		goalDriveOnce(g)
-		// The driver is per GROUP, but every exit path inside goalDriveOnce
-		// reasons about one goal — and a goalSet can REPLACE a terminal goal
-		// while the driver is parked in a turn of the previous one. That
-		// goalSet's startGoalDriver saw this driver alive and did nothing;
-		// exiting here would strand the new goal at running/iteration 0 with
-		// nothing driving it (observed 2026-08-14: ALPHA's agent test-fired a
-		// junk goal, cancelled it mid-plan-turn, and set the real one — which
-		// then sat idle). So before dying, re-check for a driveable goal; a
-		// hot loop is impossible because every other exit leaves the status
-		// non-driveable (paused/awaiting/met/cancelled/absent).
-		goalLock.Lock()
-		it := findGoalLocked(g)
-		again := it != nil && (it.Status == goalStatusRunning || it.Status == goalStatusPlanning)
-		goalLock.Unlock()
-		if !again {
-			return
-		}
-		emitLogfG("goal", g, "info", "driver re-driving replacement goal id=%s", it.ID)
-	}
+	goalDriveOnce(g, id)
 }
 
-// goalDriveOnce runs the plan phase and iteration loop for the group's
-// CURRENT goal until an exit condition (see goalDriver for why exits are
-// re-checked rather than final).
-func goalDriveOnce(g string) {
-	if !goalPlanPhase(g) {
+// goalDriveOnce runs the plan phase and iteration loop for ONE goal until an
+// exit condition (pause, cancel, cap, met, record gone).
+func goalDriveOnce(g, id string) {
+	if !goalPlanPhase(g, id) {
 		return
 	}
 	silentJudge := 0
 	for {
 		// Loop top: snapshot state, honor pause/cancel, enforce the cap.
 		goalLock.Lock()
-		it := findGoalLocked(g)
+		it := findGoalByIDLocked(id)
 		if it == nil || it.Status != goalStatusRunning {
 			goalLock.Unlock()
 			return
 		}
 		if it.Iteration >= it.MaxIterations {
 			goalLock.Unlock()
-			goalPauseWith(g, "cap", fmt.Sprintf("no accepted completion after %d iterations", it.MaxIterations))
+			goalPauseWith(g, id, "cap", fmt.Sprintf("no accepted completion after %d iterations", it.MaxIterations))
 			return
 		}
 		// iteration++ persists BEFORE the enqueue: a daemon crash mid-turn
@@ -714,15 +852,15 @@ func goalDriveOnce(g string) {
 		if !got {
 			silentJudge++
 			if silentJudge >= goalSilentJudgeMax {
-				goalPauseWith(g, "judge", fmt.Sprintf("%d consecutive reviews produced no verdict", silentJudge))
+				goalPauseWith(g, id, "judge", fmt.Sprintf("%d consecutive reviews produced no verdict", silentJudge))
 				return
 			}
-			goalSetFeedback(g, "the reviewer produced no verdict; treat the previous completion claim as unverified and continue")
+			goalSetFeedback(id, "the reviewer produced no verdict; treat the previous completion claim as unverified and continue")
 			continue
 		}
 		silentJudge = 0
 		if !verdict.Met {
-			goalSetFeedback(g, verdict.Reasons)
+			goalSetFeedback(id, verdict.Reasons)
 			emit(g, Event{Event: "goal_verdict", ID: snap.ID, Name: "unmet", Text: verdict.Reasons, Session: goalWorkSessionFor(goalSessionSlug(snap))})
 			emitLogfG("goal", g, "info", "verdict id=%s unmet (iteration %d/%d)", snap.ID, snap.Iteration, snap.MaxIterations)
 			continue
@@ -736,9 +874,9 @@ func goalDriveOnce(g string) {
 // Returns true when the driver should continue into the execution loop
 // (either no plan phase was needed, or — never — a plan phase flows straight
 // through: approval always goes through a fresh driver).
-func goalPlanPhase(g string) bool {
+func goalPlanPhase(g, id string) bool {
 	goalLock.Lock()
-	it := findGoalLocked(g)
+	it := findGoalByIDLocked(id)
 	if it == nil {
 		goalLock.Unlock()
 		return false
@@ -757,18 +895,18 @@ func goalPlanPhase(g string) bool {
 	emitLogfG("goal", g, "info", "plan turn id=%s", snap.ID)
 	done, err := enqueueSend(g, work, goalPlanMsg(snap))
 	if err != nil {
-		goalPauseWith(g, "stalled", "plan turn could not be enqueued: "+err.Error())
+		goalPauseWith(g, id, "stalled", "plan turn could not be enqueued: "+err.Error())
 		return false
 	}
 	if terr := <-done; terr != nil {
-		goalPauseWith(g, "stalled", "plan turn failed: "+terr.Error())
+		goalPauseWith(g, id, "stalled", "plan turn failed: "+terr.Error())
 		return false
 	}
 	if isStalled(g, work) {
-		goalPauseWith(g, "stalled", "plan turn produced no turn_end (session stalled)")
+		goalPauseWith(g, id, "stalled", "plan turn produced no turn_end (session stalled)")
 		return false
 	}
-	if _, err := goalTransition(g, []string{goalStatusPlanning}, func(it *goalItem) {
+	if _, err := goalTransition(g, id, []string{goalStatusPlanning}, func(it *goalItem) {
 		it.Status = goalStatusAwaiting
 	}); err != nil {
 		return false // cancelled mid-turn
@@ -776,7 +914,8 @@ func goalPlanPhase(g string) bool {
 	emit(g, Event{Event: "goal_awaiting", ID: snap.ID, Session: goalWorkSessionFor(goalSessionSlug(snap))})
 	emitLogfG("goal", g, "info", "plan ready id=%s — awaiting approval", snap.ID)
 	goalNotify(g, "normal", "goal plan ready for review",
-		fmt.Sprintf("goal %s: review the plan in the goal-work session, then /goal approve %s (or /goal cancel)", snap.ID, g))
+		fmt.Sprintf("goal %s (%s): review the plan in its goal session, then /goal approve %s %s (or /goal cancel)",
+			snap.ID, goalSessionSlug(snap), g, goalSessionSlug(snap)))
 	return false
 }
 
@@ -787,16 +926,16 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 	clearGoalSession(g, work)
 
 	goalLock.Lock()
-	goalDoneOpen[g] = snap.ID
-	delete(goalDoneMail, g)
+	goalDoneOpen[snap.ID] = g
+	delete(goalDoneMail, snap.ID)
 	goalLock.Unlock()
 	defer func() {
 		goalLock.Lock()
-		delete(goalDoneOpen, g)
-		if n, has := goalDoneMail[g]; has {
+		delete(goalDoneOpen, snap.ID)
+		if n, has := goalDoneMail[snap.ID]; has {
 			claimed, note = true, n
 		}
-		delete(goalDoneMail, g)
+		delete(goalDoneMail, snap.ID)
 		goalLock.Unlock()
 	}()
 
@@ -805,15 +944,15 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 
 	done, err := goalEnqueue(g, work, goalWorkerMsg(snap))
 	if err != nil {
-		goalPauseWith(g, "stalled", "iteration could not be enqueued: "+err.Error())
+		goalPauseWith(g, snap.ID, "stalled", "iteration could not be enqueued: "+err.Error())
 		return false, "", false
 	}
 	if terr := <-done; terr != nil {
-		goalPauseWith(g, "stalled", "iteration failed: "+terr.Error())
+		goalPauseWith(g, snap.ID, "stalled", "iteration failed: "+terr.Error())
 		return false, "", false
 	}
 	if isStalled(g, work) {
-		goalPauseWith(g, "stalled", "no turn_end within the wait window (session stalled; self-heal owns the restart)")
+		goalPauseWith(g, snap.ID, "stalled", "no turn_end within the wait window (session stalled; self-heal owns the restart)")
 		return false, "", false
 	}
 	return false, "", true // claim, if any, is filled in by the deferred mailbox read
@@ -826,8 +965,8 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 	judge := goalJudgeSessionFor(goalSessionSlug(snap))
 	for attempt := 0; attempt < 2; attempt++ {
 		goalLock.Lock()
-		it := findGoalLocked(g)
-		if it == nil || it.Status != goalStatusRunning || it.ID != snap.ID {
+		it := findGoalByIDLocked(snap.ID)
+		if it == nil || it.Status != goalStatusRunning {
 			goalLock.Unlock()
 			return goalVerdict{}, false, false
 		}
@@ -835,8 +974,8 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 
 		clearGoalSession(g, judge)
 		goalLock.Lock()
-		goalVerdictOpen[g] = snap.ID
-		delete(goalVerdictMail, g)
+		goalVerdictOpen[snap.ID] = g
+		delete(goalVerdictMail, snap.ID)
 		goalLock.Unlock()
 
 		emit(g, Event{Event: "goal_judge", ID: snap.ID, Session: goalWorkSessionFor(goalSessionSlug(snap))})
@@ -848,20 +987,20 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 			terr = <-done
 		}
 		goalLock.Lock()
-		delete(goalVerdictOpen, g)
-		verdict, has := goalVerdictMail[g]
-		delete(goalVerdictMail, g)
+		delete(goalVerdictOpen, snap.ID)
+		verdict, has := goalVerdictMail[snap.ID]
+		delete(goalVerdictMail, snap.ID)
 		goalLock.Unlock()
 		if err != nil {
-			goalPauseWith(g, "stalled", "judge turn could not be enqueued: "+err.Error())
+			goalPauseWith(g, snap.ID, "stalled", "judge turn could not be enqueued: "+err.Error())
 			return goalVerdict{}, false, false
 		}
 		if terr != nil {
-			goalPauseWith(g, "stalled", "judge turn failed: "+terr.Error())
+			goalPauseWith(g, snap.ID, "stalled", "judge turn failed: "+terr.Error())
 			return goalVerdict{}, false, false
 		}
 		if isStalled(g, judge) {
-			goalPauseWith(g, "stalled", "judge turn produced no turn_end (session stalled)")
+			goalPauseWith(g, snap.ID, "stalled", "judge turn produced no turn_end (session stalled)")
 			return goalVerdict{}, false, false
 		}
 		if has {
@@ -886,9 +1025,9 @@ func goalEnqueue(g, session, msg string) (<-chan error, error) {
 	return nil, lastErr
 }
 
-func goalSetFeedback(g, feedback string) {
+func goalSetFeedback(id, feedback string) {
 	goalLock.Lock()
-	if it := findGoalLocked(g); it != nil {
+	if it := findGoalByIDLocked(id); it != nil {
 		it.LastFeedback = truncateRunes(feedback, goalNoteMax)
 		it.UpdatedAt = goalNow()
 		saveGoalsLocked()
@@ -897,7 +1036,7 @@ func goalSetFeedback(g, feedback string) {
 }
 
 func goalMarkMet(g string, snap goalItem, note string) {
-	if _, err := goalTransition(g, []string{goalStatusRunning}, func(it *goalItem) {
+	if _, err := goalTransition(g, snap.ID, []string{goalStatusRunning}, func(it *goalItem) {
 		it.Status = goalStatusMet
 		it.DoneNote = note
 		it.LastFeedback = ""
@@ -914,8 +1053,8 @@ func goalMarkMet(g string, snap goalItem, note string) {
 
 // goalPauseWith pauses an active goal with a reason and alerts the operator.
 // No-op if the goal moved to a terminal/paused state meanwhile.
-func goalPauseWith(g, reason, detail string) {
-	it, err := goalTransition(g, []string{goalStatusRunning, goalStatusPlanning}, func(it *goalItem) {
+func goalPauseWith(g, id, reason, detail string) {
+	it, err := goalTransition(g, id, []string{goalStatusRunning, goalStatusPlanning}, func(it *goalItem) {
 		it.Status = goalStatusPaused
 		it.PausedReason = reason
 	})
@@ -925,7 +1064,8 @@ func goalPauseWith(g, reason, detail string) {
 	emit(g, Event{Event: "goal_paused", ID: it.ID, Text: reason, Session: goalWorkSessionFor(goalSessionSlug(it))})
 	emitLogfG("goal", g, "warn", "paused id=%s reason=%s: %s", it.ID, reason, detail)
 	goalNotify(g, "high", "goal paused ("+reason+")",
-		fmt.Sprintf("goal %s at iteration %d/%d: %s — /goal resume %s to continue", it.ID, it.Iteration, it.MaxIterations, detail, g))
+		fmt.Sprintf("goal %s (%s) at iteration %d/%d: %s — /goal resume %s %s to continue",
+			it.ID, goalSessionSlug(it), it.Iteration, it.MaxIterations, detail, g, goalSessionSlug(it)))
 }
 
 // goalNotify raises an operator notification against the goal's group. A var
@@ -991,10 +1131,10 @@ by actually running the relevant commands (claims are not verification), then
 report completion (an independent reviewer will verify before the goal
 closes; put a short evidence summary in R):
   R="criterion 1: <command> passed; criterion 2: ..."
-  printf '{"cmd":"goal_done","note":"%%s"}\n' \
+  printf '{"cmd":"goal_done","id":"%s","note":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, feedback, it.Text, it.Criteria)
+		it.ID, it.Iteration, it.MaxIterations, feedback, it.Text, it.Criteria, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {
@@ -1019,10 +1159,10 @@ ACCEPTANCE CRITERIA:
 
 Report the verdict by running EXACTLY one of these (mandatory — a review
 without a verdict is discarded):
-  printf '{"cmd":"goal_verdict","met":true,"reasons":""}\n' > /workspace/.cs/ctl
+  printf '{"cmd":"goal_verdict","id":"%s","met":true,"reasons":""}\n' > /workspace/.cs/ctl
   # or, unmet — put the per-criterion failures in R first:
   R="criterion 2 FAIL: observed ...; acceptable would be ..."
-  printf '{"cmd":"goal_verdict","met":false,"reasons":"%%s"}\n' \
+  printf '{"cmd":"goal_verdict","id":"%s","met":false,"reasons":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl`,
-		it.ID, it.Iteration, it.MaxIterations, it.Text, it.Criteria)
+		it.ID, it.Iteration, it.MaxIterations, it.Text, it.Criteria, it.ID, it.ID)
 }
