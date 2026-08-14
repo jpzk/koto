@@ -642,6 +642,33 @@ func goalDriver(g string) {
 		delete(goalDrivers, g)
 		goalLock.Unlock()
 	}()
+	for {
+		goalDriveOnce(g)
+		// The driver is per GROUP, but every exit path inside goalDriveOnce
+		// reasons about one goal — and a goalSet can REPLACE a terminal goal
+		// while the driver is parked in a turn of the previous one. That
+		// goalSet's startGoalDriver saw this driver alive and did nothing;
+		// exiting here would strand the new goal at running/iteration 0 with
+		// nothing driving it (observed 2026-08-14: ALPHA's agent test-fired a
+		// junk goal, cancelled it mid-plan-turn, and set the real one — which
+		// then sat idle). So before dying, re-check for a driveable goal; a
+		// hot loop is impossible because every other exit leaves the status
+		// non-driveable (paused/awaiting/met/cancelled/absent).
+		goalLock.Lock()
+		it := findGoalLocked(g)
+		again := it != nil && (it.Status == goalStatusRunning || it.Status == goalStatusPlanning)
+		goalLock.Unlock()
+		if !again {
+			return
+		}
+		emitLogfG("goal", g, "info", "driver re-driving replacement goal id=%s", it.ID)
+	}
+}
+
+// goalDriveOnce runs the plan phase and iteration loop for the group's
+// CURRENT goal until an exit condition (see goalDriver for why exits are
+// re-checked rather than final).
+func goalDriveOnce(g string) {
 	if !goalPlanPhase(g) {
 		return
 	}

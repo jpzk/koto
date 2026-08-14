@@ -1022,3 +1022,67 @@ func TestCtlGoalSelfSetUppercaseGroup(t *testing.T) {
 		waitGoal(t, "ALPHA", goalStatusCancelled)
 	})
 }
+
+// TestGoalReplacedWhileDriverParked: a goalSet that replaces a terminal goal
+// while the OLD goal's driver is still parked in one of its turns must not
+// strand the new goal — startGoalDriver sees a live driver and no-ops, so the
+// driver itself must re-drive rather than exit (observed 2026-08-14: ALPHA's
+// probe goal was cancelled mid-plan-turn; the real goal sat at
+// running/iteration 0 with no driver).
+func TestGoalReplacedWhileDriverParked(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-replace1"
+	planIn := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	rec := &turnRec{}
+	withTurnFn(func(_, session, msg string) error {
+		rec.add(session, msg)
+		if strings.Contains(msg, "PLAN") {
+			once.Do(func() { close(planIn) })
+			<-release // park the old goal's driver inside its plan turn
+		}
+		return nil
+	}, func() {
+		if _, err := goalSet(g, "junk probe", "1. n/a", "probe", 0, true); err != nil {
+			t.Fatalf("goalSet probe: %v", err)
+		}
+		<-planIn
+		if _, err := goalCancel(g); err != nil {
+			t.Fatalf("cancel probe: %v", err)
+		}
+		real, err := goalSet(g, "the real work", "1. done", "real", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet real: %v", err)
+		}
+		close(release) // old driver's plan turn returns; its transition fails
+
+		// The new goal must get driven: wait for a worker turn in ITS session.
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			hit := false
+			for _, m := range rec.byRole(roleWork) {
+				if strings.Contains(m, real.ID) {
+					hit = true
+				}
+			}
+			if hit {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		found := false
+		for _, m := range rec.byRole(roleWork) {
+			if strings.Contains(m, real.ID) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("replacement goal was never driven — driver died with the old goal")
+		}
+		if _, err := goalCancel(g); err != nil {
+			t.Fatalf("cancel real: %v", err)
+		}
+		waitGoal(t, g, goalStatusCancelled)
+	})
+}
