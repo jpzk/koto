@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"koto-protocol/pb"
 )
 
 // TestInjectThinkingDisplay: display="summarized" is added only when thinking
@@ -48,17 +50,24 @@ func TestInjectThinkingDisplay(t *testing.T) {
 }
 
 func TestLlmFlowLogDedup(t *testing.T) {
-	n0 := len(logRing)
+	// Asserts on the ring's TAIL, not on len() deltas: the ring caps at
+	// logRingMax, so once the rest of the suite has filled it an append no
+	// longer changes the length — but it always changes the tail.
+	tail := func() *pb.LogEvent { return logRing[len(logRing)-1] }
 	llmFlowLog("llmtest-a", "POST", "https://api.anthropic.com", "/v1/messages")
+	first := tail()
+	if !strings.Contains(first.Msg, "[llmtest-a] flow POST api.anthropic.com/v1/messages") {
+		t.Errorf("llm flow line = %q", first.Msg)
+	}
 	llmFlowLog("llmtest-a", "POST", "https://api.anthropic.com", "/v1/messages") // same tuple — deduped
-	if got := len(logRing) - n0; got != 1 {
-		t.Errorf("same tuple logged %d times, want 1", got)
+	if tail() != first {
+		t.Errorf("same tuple appended again: %q", tail().Msg)
 	}
 	llmFlowLog("llmtest-b", "POST", "https://api.venice.ai", "/api/v1/chat/completions")
-	if got := len(logRing) - n0; got != 2 {
-		t.Errorf("distinct tuple: %d lines, want 2", got)
+	last := tail()
+	if last == first {
+		t.Error("distinct tuple was not logged")
 	}
-	last := logRing[len(logRing)-1]
 	if last.Subsystem != "llm" || last.Level != "info" ||
 		!strings.Contains(last.Msg, "[llmtest-b] flow POST api.venice.ai/api/v1/chat/completions") {
 		t.Errorf("llm flow line = %q level=%s sub=%s", last.Msg, last.Level, last.Subsystem)
