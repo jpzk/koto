@@ -332,3 +332,33 @@ func TestCtlResourcesMatchesSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// TestCtlUppercaseGroupReferences: the ctl verbs that REFERENCE an existing
+// group validate with groupNameRE, not ctlGroupRE — a pre-validation group's
+// name may be uppercase (ALPHA, BRAVO), and for the self-targeted verbs the
+// target is the caller's own socket-derived name. 4a9804c fixed the goal
+// verbs; sched_add (and send/stop/config/tail) had the same bug — ALPHA's
+// agent reported sched_add bouncing with "invalid group name" on 2026-08-14.
+func TestCtlUppercaseGroupReferences(t *testing.T) {
+	prev := SCHED_FILE
+	SCHED_FILE = filepath.Join(t.TempDir(), "schedules.json")
+	t.Cleanup(func() { SCHED_FILE = prev })
+	r, ok := ctlDispatch("ALPHA", ctlLine(t, map[string]any{
+		"cmd": "sched_add", "cron": "*/15 * * * *", "msg": "status?",
+	})).(schedAddResp)
+	if !ok || !r.OK {
+		t.Fatalf("uppercase group's self sched_add refused: %+v", r)
+	}
+	if r.Item.Group != "ALPHA" {
+		t.Fatalf("schedule landed on group %q, want ALPHA", r.Item.Group)
+	}
+	if err := delSched(r.Item.ID); err != nil {
+		t.Fatalf("cleanup delSched: %v", err)
+	}
+	// Spawn keeps the STRICT shape rule — it mints a NEW name.
+	if br, _ := ctlDispatch("main", ctlLine(t, map[string]any{
+		"cmd": "spawn", "group": "ALPHA2",
+	})).(baseResp); br.OK || !strings.Contains(br.Error, "invalid group name") {
+		t.Fatalf("uppercase spawn should stay refused: %+v", br)
+	}
+}

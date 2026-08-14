@@ -174,7 +174,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot send to self")
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
 		// Enqueue onto the target's send queue and ack immediately. The queue
@@ -210,7 +210,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot stop 'main'")
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
 		stopGroup(req.Group)
@@ -252,7 +252,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group == "" {
 			req.Group = owner
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
 		return configCmd(req)
@@ -272,7 +272,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
 		if req.N <= 0 {
@@ -530,7 +530,13 @@ func ctlDispatch(owner string, line []byte) any {
 		} else if req.Group == "" {
 			req.Group = ctlMainGroup
 		}
-		if !ctlGroupRE.MatchString(req.Group) {
+		// groupNameRE, not ctlGroupRE: same existing-group rule as goal_set.
+		// For a non-main caller the target is its OWN socket-derived name,
+		// which may be uppercase (ALPHA) — the 4a9804c fix covered the goal
+		// verbs and missed this one; ALPHA's agent reported sched_add
+		// bouncing with "invalid group name" on 2026-08-14 and fell back to
+		// a polling job for its wake-ups.
+		if !groupNameRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")
 		}
 		it, err := addSched(req.Group, req.Cron, req.Msg)
