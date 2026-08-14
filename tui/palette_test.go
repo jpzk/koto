@@ -261,3 +261,93 @@ func TestCtrlPInPickerIsUp(t *testing.T) {
 		t.Fatalf("cursor = %d after ctrl+p, want 0 (ctrl+p is up inside the picker)", m.picker.cursor)
 	}
 }
+
+// --- overlay geometry --------------------------------------------------------
+
+// pickerBand returns the frame's line indices spanned by the picker box (its
+// top and bottom border rows), plus the frame's lines.
+func pickerBand(t *testing.T, m Model) (lines []string, top, bottom int) {
+	t.Helper()
+	lines = strings.Split(stripANSI(m.View()), "\n")
+	top, bottom = -1, -1
+	for i, l := range lines {
+		if !strings.Contains(l, "╭") {
+			continue
+		}
+		// The box is the bordered block containing the picker header.
+		for j := i + 1; j < len(lines); j++ {
+			if strings.Contains(lines[j], "╰") {
+				if strings.Contains(lines[i+1], "·") &&
+					(strings.Contains(lines[i+1], "commands") ||
+						strings.Contains(lines[i+1], "groups") ||
+						strings.Contains(lines[i+1], "history")) {
+					return lines, i, j
+				}
+				break
+			}
+		}
+	}
+	t.Fatalf("no picker box in frame:\n%s", strings.Join(lines, "\n"))
+	return
+}
+
+// TestPickerOverlayIsAQuarterAtTheBottom: the picker is an overlay, not a
+// takeover. It covers roughly the bottom quarter of the chat area and leaves
+// the transcript above it readable — opening the palette to look up a
+// keybinding must not blank the conversation you wanted it for.
+func TestPickerOverlayIsAQuarterAtTheBottom(t *testing.T) {
+	m := focusModel(t)
+	m.height = 40
+	m.vp.SetContent(strings.Repeat("keep-me\n", 30))
+	m = press(t, m, tea.KeyCtrlP)
+
+	lines, top, bottom := pickerBand(t, m)
+	if got, want := bottom-top+1, m.pickerRows(m.height); got != want {
+		t.Errorf("picker box is %d rows of a %d-row frame, want %d (a quarter, floored at %d)",
+			got, m.height, want, pickerMinRows)
+	}
+	// Anchored at the bottom: only the input box + hint + metrics rows below.
+	if n := len(lines) - 1 - bottom; n > 5 {
+		t.Errorf("picker bottom is %d rows above the frame bottom, want it flush with the message bar", n)
+	}
+	// And the transcript above it survives.
+	if !strings.Contains(strings.Join(lines[:top], "\n"), "keep-me") {
+		t.Errorf("transcript hidden above the overlay:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestPickerOverlayInputRowIsStable: the box keeps its height as the match
+// count falls under typing, so its input line doesn't walk down the screen
+// keystroke by keystroke.
+func TestPickerOverlayInputRowIsStable(t *testing.T) {
+	m := focusModel(t)
+	m.height = 40
+	m = press(t, m, tea.KeyCtrlP)
+	_, top0, bottom0 := pickerBand(t, m)
+
+	for _, r := range "restart" {
+		nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = nm.(Model)
+	}
+	if len(m.picker.matches) == 0 {
+		t.Fatal("filter matched nothing — pick another query")
+	}
+	_, top1, bottom1 := pickerBand(t, m)
+	if top0 != top1 || bottom0 != bottom1 {
+		t.Errorf("box moved from rows %d-%d to %d-%d while filtering", top0, bottom0, top1, bottom1)
+	}
+}
+
+// TestPickerOverlayOverLogViewKeepsContent: same overlay shape on the
+// full-frame views — the log stays visible above the box.
+func TestPickerOverlayOverLogViewKeepsContent(t *testing.T) {
+	m := logModel(t, "main")
+	m = press(t, m, tea.KeyCtrlT)
+	_, top, bottom := pickerBand(t, m)
+	if got, want := bottom-top+1, m.pickerRows(m.height); got != want {
+		t.Errorf("picker box is %d rows of a %d-row frame, want %d", got, m.height, want)
+	}
+	if top < 2 {
+		t.Errorf("picker box starts at row %d — nothing of the log view left above it", top)
+	}
+}

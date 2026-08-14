@@ -242,7 +242,9 @@ func (m Model) view() string {
 		middle = lipgloss.JoinHorizontal(lipgloss.Top, logArea, scrollbar)
 	}
 	if m.picker.open {
-		middle = m.renderPicker(logRows)
+		// Overlaid over the bottom of the chat area rather than replacing it,
+		// so the transcript (and the tree) stay readable above the list.
+		middle = m.overlayPicker(middle, logRows)
 	}
 
 	input := m.renderInput()
@@ -1554,9 +1556,10 @@ func (m Model) renderHint() string {
 	if m.shellFocusable() {
 		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}
-	thoughtsHint := "^t thoughts"
+	// alt+t, not ^t: ctrl+t is the group/session jump now.
+	thoughtsHint := gl("⌥t thoughts", "alt-t thoughts")
 	if m.expandedThoughts {
-		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^t hide")
+		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render(gl("⌥t hide", "alt-t hide"))
 	}
 	parts = append(parts, thoughtsHint)
 	toolOutsHint := "^d output"
@@ -1658,13 +1661,12 @@ func (m Model) renderProviderModel() string {
 // stay visible so the user retains orientation. Sized to fill the middle
 // area exactly to keep the View()'s JoinVertical layout stable.
 func (m Model) renderPicker(rows int) string {
+	// Full width, flush left: the box is a band across the bottom of the
+	// frame, not a floating dialog. A centered 100-col box on a wide terminal
+	// put the result list somewhere in the middle of the screen, away from
+	// both the message bar's left edge and the tree — the eye had to travel to
+	// find text that has no reason not to start where every other row does.
 	boxW := m.width
-	if boxW > 100 {
-		boxW = 100
-	}
-	if boxW < 20 {
-		boxW = m.width
-	}
 	contentW := boxW - 4
 	if contentW < 10 {
 		contentW = 10
@@ -1686,10 +1688,11 @@ func (m Model) renderPicker(rows int) string {
 	// Reserve header(1) + input(1) + spacer(1) inside the box. The rest is
 	// for result rows. Subtract 2 more for the rounded border the outer
 	// style adds top+bottom.
-	maxResultRows := rows - 5
-	if maxResultRows < 1 {
-		maxResultRows = 1
+	capacity := rows - 5
+	if capacity < 1 {
+		capacity = 1
 	}
+	maxResultRows := capacity
 	if maxResultRows > len(m.picker.matches) {
 		maxResultRows = len(m.picker.matches)
 	}
@@ -1743,6 +1746,15 @@ func (m Model) renderPicker(rows int) string {
 		}
 		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).Render(empty))
 	}
+	// Pad the result area out to the full budget so the box is always exactly
+	// `rows` tall. Two reasons, both about the box being bottom-anchored now:
+	// it stays flush against the message bar instead of floating a few rows
+	// above it, and — the important one — its input line keeps the same screen
+	// row as the match count shrinks under typing. A box that grew from its
+	// own content would walk downward keystroke by keystroke.
+	for len(resultLines) < capacity {
+		resultLines = append(resultLines, "")
+	}
 
 	innerParts := []string{header, inputLine, ""}
 	innerParts = append(innerParts, resultLines...)
@@ -1762,11 +1774,11 @@ func (m Model) renderPicker(rows int) string {
 	if lines := strings.Split(box, "\n"); len(lines) > rows {
 		box = strings.Join(lines[:rows], "\n")
 	}
-	// Place the box centered horizontally and top-aligned vertically inside
-	// the middle area. Top-aligned (not centered) keeps the box anchored
-	// to the status bar so growing the result count doesn't make the input
-	// line jump around between renders.
-	return lipgloss.Place(m.width, rows, lipgloss.Center, lipgloss.Top, box,
+	// Place is now only padding the band out to (m.width, rows) — the box
+	// already spans the full width, and its height is padded to the budget
+	// above — but it stays as the one place that guarantees both, so a short
+	// terminal or a trimmed box can't leave the caller with ragged lines.
+	return lipgloss.Place(m.width, rows, lipgloss.Left, lipgloss.Top, box,
 		lipgloss.WithWhitespaceChars(" "))
 }
 

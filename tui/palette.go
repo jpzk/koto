@@ -282,16 +282,62 @@ func (m *Model) jumpConversation(g, sess string) tea.Cmd {
 	return cmd
 }
 
-// withPicker composites the picker overlay onto a full-frame view (log,
-// fleet, shell). Those three return the whole terminal rather than a middle
-// region, so the chat layout's trick of swapping the picker in for `middle`
-// doesn't reach them — the box is spliced over their middle rows instead,
-// keeping the top status bar and the bottom row visible for orientation, the
-// same reason the chat view keeps its input and hint bars.
+// pickerMinRows is the box's own floor: 2 border + header + input + spacer +
+// 5 result rows. Below that the list stops being a list — and a quarter of an
+// ordinary 24–30 row terminal lands under it, so this floor, not the fraction,
+// is what most frames get.
+const pickerMinRows = 10
+
+// pickerRows sizes the overlay: about a quarter of the frame, anchored to the
+// bottom. The picker used to take the whole region it was drawn into, which
+// meant opening it to check a keybinding blanked the conversation you were
+// consulting it about — and on a tall terminal it spent 40 rows of chrome on
+// a 12-item list. A quarter is enough for the box plus ~7 results while the
+// transcript (or the log, or the pty) stays readable above it. `avail` is the
+// region's own height, which wins on short terminals: the box may be all
+// there is, but it may never be more.
+func (m Model) pickerRows(avail int) int {
+	rows := m.height / 4
+	if rows < pickerMinRows {
+		rows = pickerMinRows
+	}
+	if rows > avail {
+		rows = avail
+	}
+	return max(1, rows)
+}
+
+// overlayPicker splices the box over the BOTTOM rows of a region, leaving the
+// rows above it on screen. Bottom-anchored because that's where the box's
+// input line wants to be — next to the message bar the user's hands are
+// already on, fzf-style — and because the rows a transcript can most afford
+// to lose are the ones the box covers either way.
 //
 // Line-for-line replacement is safe because renderPicker ends in
 // lipgloss.Place(m.width, rows, …), so every line it returns is already
 // padded to the full frame width — no ANSI-aware column splicing needed.
+// The region's own line count is authoritative: `rows` sizes the box, the
+// splice never adds or drops a line, so the caller's layout height is stable.
+func (m Model) overlayPicker(region string, rows int) string {
+	lines := strings.Split(region, "\n")
+	h := m.pickerRows(min(rows, len(lines)))
+	box := strings.Split(m.renderPicker(h), "\n")
+	top := len(lines) - h
+	if top < 0 {
+		top = 0
+	}
+	for i := 0; i < h && top+i < len(lines) && i < len(box); i++ {
+		lines[top+i] = box[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// withPicker composites the picker overlay onto a full-frame view (log,
+// fleet, shell). Those three return the whole terminal rather than a middle
+// region, so the chat layout's trick of overlaying `middle` doesn't reach
+// them — the box is spliced over their bottom rows instead, keeping the top
+// status bar and the bottom row visible for orientation, the same reason the
+// chat view keeps its input and hint bars.
 func (m Model) withPicker(base string) string {
 	if !m.picker.open {
 		return base
@@ -301,12 +347,10 @@ func (m Model) withPicker(base string) string {
 	if len(lines) < 5 {
 		return m.renderPicker(max(1, len(lines)))
 	}
-	rows := len(lines) - 2 // keep line 0 (status) and the last line (chrome)
-	box := strings.Split(m.renderPicker(rows), "\n")
-	for i := 0; i < rows && i < len(box); i++ {
-		lines[1+i] = box[i]
-	}
-	return strings.Join(lines, "\n")
+	// Keep line 0 (status) and the last line (chrome): overlay the band
+	// between them, bottom-anchored against the chrome row.
+	body := m.overlayPicker(strings.Join(lines[1:len(lines)-1], "\n"), len(lines)-2)
+	return lines[0] + "\n" + body + "\n" + lines[len(lines)-1]
 }
 
 // paletteRow formats one result row's body: title on the left, hint gray on
