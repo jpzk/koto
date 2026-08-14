@@ -761,11 +761,6 @@ type Model struct {
 	// the viewport (lineInSession) but stay in m.lines, so switching back
 	// is instant.
 	session map[string]string
-	// turnSession is the session of each group's in-flight turn, set by its
-	// `prompt` event. Gates the live overlay (streamBuf/thinkingBuf) so a
-	// turn running in another session doesn't bleed into the current view.
-	turnSession map[string]string
-
 	// pending holds prompts the local TUI has sent that the daemon has not
 	// yet started (they're sitting in the group's send queue behind an
 	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
@@ -910,7 +905,6 @@ func newModel(sock string, ctxWindow int) Model {
 		sendInFlight:   map[string]int{},
 		sendAckAt:      map[string]time.Time{},
 		session:        sessions,
-		turnSession:    map[string]string{},
 		peekVP:         pvp,
 		peekFollow:     true,
 		peekCache:      map[jobRef]*peekSnap{},
@@ -962,32 +956,79 @@ func chatKind(k string) bool {
 }
 
 // lineInSession reports whether a line is visible in the given session view.
-// Strictly per-session for chat kinds — the goal loop's worker session is NOT
+// Chat kinds are strictly per-session — the goal loop's worker session is NOT
 // blended into the default view: it has its own tree leaf (the daemon lists
-// goal-work in GroupInfo.sessions while a goal is live), so the operator
+// goal-<id> in GroupInfo.sessions while a goal is live), so the operator
 // follows the work there and the default session stays free for chat.
+//
+// Other kinds (sys/err/notification) are global UNLESS the daemon attributed
+// them to a session, which it does for the goal lifecycle frames and for
+// per-session notifications: those belong to the view they name, for the same
+// reason — a goal grinding through 20 iterations must not narrate itself into
+// the conversation the operator is having.
+// turnKey keys per-turn live state (stream/thinking/tool buffers, busy) by
+// CONVERSATION. It was keyed by group until the daemon started running turns
+// concurrently (up to groupSlots per group): with one key per group, two
+// in-flight turns interleave their partial text into one buffer, one's `done`
+// clears the other's busy flag, and a tool event flushes a remnant under the
+// wrong session. Every live frame carries its session, so the composite key
+// restores exactly the isolation the per-slot log streams provide server-side.
+func turnKey(g, sess string) string { return g + "\x00" + sess }
+
+// curKey is the live-state key of the conversation on screen.
+func (m *Model) curKey() string { return turnKey(m.cur, m.activeSession(m.cur)) }
+
+// dropGroupLiveState forgets every session's live-turn state for g — the
+// group-wide reset used by gap recovery and /clear all.
+func (m *Model) dropGroupLiveState(g string) {
+	pre := g + "\x00"
+	for _, mp := range []map[string]string{m.streamBuf, m.thinkingBuf, m.thinkingTail, m.lastThoughtBody, m.toolOutBuf, m.toolOutTail} {
+		for k := range mp {
+			if strings.HasPrefix(k, pre) {
+				delete(mp, k)
+			}
+		}
+	}
+	for k := range m.busy {
+		if strings.HasPrefix(k, pre) {
+			delete(m.busy, k)
+		}
+	}
+	for k := range m.toolBeginTs {
+		if strings.HasPrefix(k, pre) {
+			delete(m.toolBeginTs, k)
+		}
+	}
+}
+
 func lineInSession(l logLine, active string) bool {
-	return !chatKind(l.kind) || l.session == active
+	if chatKind(l.kind) {
+		return l.session == active
+	}
+	return l.session == "" || l.session == active
 }
 
 // sessionNameRE mirrors the daemon's session-name allowlist so bad names are
 // rejected locally with a usable message instead of a daemon round-trip.
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
-// dropTurnState forgets everything that marks g as mid-turn: the live
-// stream/thinking/tool buffers, the busy flag, and the activity phase. Called
-// when an interrupt lands — or when the daemon reports there was nothing to
-// interrupt, which means this state was stale. Clearing activity matters for
-// esc: it is one of the "turn in flight" triggers, so leaving a stale phase
-// behind would make every following esc fire another no-op interrupt instead
-// of reaching the tree toggle.
+// dropTurnState forgets everything that marks g's ACTIVE session as mid-turn:
+// the live stream/thinking/tool buffers, the busy flag, and the group's
+// activity phase. Called when an interrupt lands — or when the daemon reports
+// there was nothing to interrupt, which means this state was stale. Session-
+// scoped because the interrupt is: aborting your chat turn must not blank the
+// live state of the goal iteration running beside it. Clearing activity
+// matters for esc: it is one of the "turn in flight" triggers, so leaving a
+// stale phase behind would make every following esc fire another no-op
+// interrupt instead of reaching the tree toggle.
 func (m *Model) dropTurnState(g string) {
-	delete(m.streamBuf, g)
-	delete(m.thinkingBuf, g)
-	delete(m.thinkingTail, g)
-	delete(m.toolOutBuf, g)
-	delete(m.toolOutTail, g)
-	delete(m.busy, g)
+	k := turnKey(g, m.activeSession(g))
+	delete(m.streamBuf, k)
+	delete(m.thinkingBuf, k)
+	delete(m.thinkingTail, k)
+	delete(m.toolOutBuf, k)
+	delete(m.toolOutTail, k)
+	delete(m.busy, k)
 	delete(m.activity, g)
 }
 
@@ -1772,7 +1813,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					// per group so live thinking_done frames can drop empty
 					// echoes. Older-page replays must not touch this state —
 					// they describe earlier moments in the conversation.
-					delete(m.lastThoughtBody, msg.group)
+					delete(m.lastThoughtBody, turnKey(msg.group, ev.Session))
 					m.pushHistory(msg.group, ev.Msg)
 				}
 				batch = append(batch, logLine{kind: "prompt", group: msg.group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts), tsF: ev.Ts})
@@ -1791,10 +1832,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					// Same rationale: only the initial tail page mutates the
 					// live dedup state. Older replays just emit all events
 					// without filtering — they're historical context only.
-					if _, hadOne := m.lastThoughtBody[msg.group]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[msg.group]) {
+					if _, hadOne := m.lastThoughtBody[turnKey(msg.group, ev.Session)]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[turnKey(msg.group, ev.Session)]) {
 						continue
 					}
-					m.lastThoughtBody[msg.group] = ev.Body
+					m.lastThoughtBody[turnKey(msg.group, ev.Session)] = ev.Body
 				}
 				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "tool_result_done":
@@ -2171,30 +2212,22 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.pageOldestTs, ev.Group)
 			delete(m.pageLoading, ev.Group)
 			delete(m.pageExhausted, ev.Group)
-			delete(m.streamBuf, ev.Group)
-			delete(m.busy, ev.Group)
+			m.dropGroupLiveState(ev.Group)
 			delete(m.activity, ev.Group)
-			delete(m.thinkingBuf, ev.Group)
-			delete(m.thinkingTail, ev.Group)
-			delete(m.toolOutBuf, ev.Group)
-			delete(m.toolOutTail, ev.Group)
-			delete(m.turnSession, ev.Group)
 			m.refreshLog()
 			return m, historyCmd(m.sock, ev.Group, 0, historyPageSize)
 		case "prompt":
-			if cur, ok := m.streamBuf[ev.Group]; ok {
-				// Leftover stream text belongs to the PREVIOUS turn — tag it
-				// with that turn's session, not this prompt's.
-				m.addLine(logLine{kind: "response", group: ev.Group, session: m.turnSession[ev.Group], text: cur})
-				delete(m.streamBuf, ev.Group)
+			evk := turnKey(ev.Group, ev.Session)
+			if cur, ok := m.streamBuf[evk]; ok {
+				// Leftover stream text belongs to this conversation's
+				// PREVIOUS turn — same session by construction (the key), a
+				// session's turns are serialized.
+				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
+				delete(m.streamBuf, evk)
 			}
-			// Every frame of the turn that follows carries this session; track
-			// it so live buffers (which are keyed per group only) can be
-			// attributed and the overlay gated per session.
-			m.turnSession[ev.Group] = ev.Session
 			// Dedup state is per-turn: a fresh user prompt starts a new turn.
-			delete(m.lastThoughtBody, ev.Group)
-			m.busy[ev.Group] = true
+			delete(m.lastThoughtBody, evk)
+			m.busy[evk] = true
 			// This turn just started → it's no longer queued. Drop the matching
 			// head from our local pending backlog (no-op for prompts we didn't
 			// originate, e.g. ctl/scheduler fires).
@@ -2202,10 +2235,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.addLine(logLine{kind: "prompt", group: ev.Group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts)})
 			m.pushHistory(ev.Group, ev.Msg)
 		case "stream":
-			m.streamBuf[ev.Group] = ev.Text
+			m.streamBuf[turnKey(ev.Group, ev.Session)] = ev.Text
 		case "done":
-			delete(m.streamBuf, ev.Group)
-			delete(m.busy, ev.Group)
+			delete(m.streamBuf, turnKey(ev.Group, ev.Session))
+			delete(m.busy, turnKey(ev.Group, ev.Session))
 			if ev.Text != "" {
 				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 			}
@@ -2218,32 +2251,27 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Interrupt RPC and the hint bar reported the group as working
 			// until its next turn. Flush leftover stream text like the
 			// prompt case does (it belongs to the turn that just ended).
-			if cur, ok := m.streamBuf[ev.Group]; ok {
-				// The remnant belongs to the turn that just ended — the
-				// frame's own session stamp when present (a mid-turn attach
-				// has no turnSession entry yet), turnSession otherwise.
-				sess := ev.Session
-				if sess == "" {
-					sess = m.turnSession[ev.Group]
-				}
-				m.addLine(logLine{kind: "response", group: ev.Group, session: sess, text: cur})
-				delete(m.streamBuf, ev.Group)
+			if cur, ok := m.streamBuf[turnKey(ev.Group, ev.Session)]; ok {
+				// The remnant belongs to the turn that just ended, in the
+				// frame's own session — its stream stamps every frame.
+				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
+				delete(m.streamBuf, turnKey(ev.Group, ev.Session))
 			}
-			delete(m.busy, ev.Group)
+			delete(m.busy, turnKey(ev.Group, ev.Session))
 		case "tool":
 			// Tool calls arrive between prompt and done; flush any in-flight
 			// stream buffer first so order is preserved in the view.
-			if cur, ok := m.streamBuf[ev.Group]; ok {
+			if cur, ok := m.streamBuf[turnKey(ev.Group, ev.Session)]; ok {
 				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
-				delete(m.streamBuf, ev.Group)
+				delete(m.streamBuf, turnKey(ev.Group, ev.Session))
 			}
 			m.addLine(logLine{kind: "tool", group: ev.Group, session: ev.Session, text: formatTool(ev.Name, ev.Input), ts: int64(ev.Ts)})
 		case "err":
 			// Harness-injected error notice (proxy 5xx, etc.). Render with
 			// the red err glyph so the user can tell it's not the model.
-			if cur, ok := m.streamBuf[ev.Group]; ok {
+			if cur, ok := m.streamBuf[turnKey(ev.Group, ev.Session)]; ok {
 				m.addLine(logLine{kind: "response", group: ev.Group, session: ev.Session, text: cur})
-				delete(m.streamBuf, ev.Group)
+				delete(m.streamBuf, turnKey(ev.Group, ev.Session))
 			}
 			m.addLine(logLine{kind: "err", group: ev.Group, session: ev.Session, text: ev.Text, ts: int64(ev.Ts)})
 		case "bg":
@@ -2254,52 +2282,52 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// block by passing ev.Name as the group-discriminator suffix.
 			m.addLine(logLine{kind: "bg", group: ev.Group, session: ev.Session, text: "[" + ev.Name + "] " + ev.Text, ts: int64(ev.Ts)})
 		case "thinking_begin":
-			m.thinkingBuf[ev.Group] = ""
-			delete(m.thinkingTail, ev.Group)
+			m.thinkingBuf[turnKey(ev.Group, ev.Session)] = ""
+			delete(m.thinkingTail, turnKey(ev.Group, ev.Session))
 		case "thinking":
 			// A complete thinking line. Append to buf, drop the in-flight tail.
-			cur := m.thinkingBuf[ev.Group]
+			cur := m.thinkingBuf[turnKey(ev.Group, ev.Session)]
 			if cur != "" {
 				cur += "\n"
 			}
-			m.thinkingBuf[ev.Group] = cur + ev.Text
-			delete(m.thinkingTail, ev.Group)
+			m.thinkingBuf[turnKey(ev.Group, ev.Session)] = cur + ev.Text
+			delete(m.thinkingTail, turnKey(ev.Group, ev.Session))
 		case "thinking_stream":
 			// Daemon re-emits the entire in-flight partial line on each
 			// chunk read; replace, don't append.
-			m.thinkingTail[ev.Group] = ev.Text
+			m.thinkingTail[turnKey(ev.Group, ev.Session)] = ev.Text
 		case "thinking_done":
-			delete(m.thinkingBuf, ev.Group)
-			delete(m.thinkingTail, ev.Group)
+			delete(m.thinkingBuf, turnKey(ev.Group, ev.Session))
+			delete(m.thinkingTail, turnKey(ev.Group, ev.Session))
 			// Dedup: skip stray empty-body thinking_done after we just emitted
 			// a real one (claude-code's two-stream-into-one-log race), or an
 			// exact body match (legitimate dupe within the same turn).
-			if _, hadOne := m.lastThoughtBody[ev.Group]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[ev.Group]) {
+			if _, hadOne := m.lastThoughtBody[turnKey(ev.Group, ev.Session)]; hadOne && (ev.Body == "" || ev.Body == m.lastThoughtBody[turnKey(ev.Group, ev.Session)]) {
 				break
 			}
-			m.lastThoughtBody[ev.Group] = ev.Body
+			m.lastThoughtBody[turnKey(ev.Group, ev.Session)] = ev.Body
 			m.addLine(logLine{kind: "thought", group: ev.Group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts)})
 		case "tool_result_begin":
-			m.toolOutBuf[ev.Group] = ""
-			delete(m.toolOutTail, ev.Group)
-			m.toolBeginTs[ev.Group] = int64(ev.Ts)
+			m.toolOutBuf[turnKey(ev.Group, ev.Session)] = ""
+			delete(m.toolOutTail, turnKey(ev.Group, ev.Session))
+			m.toolBeginTs[turnKey(ev.Group, ev.Session)] = int64(ev.Ts)
 		case "tool_result":
-			cur := m.toolOutBuf[ev.Group]
+			cur := m.toolOutBuf[turnKey(ev.Group, ev.Session)]
 			if cur != "" {
 				cur += "\n"
 			}
-			m.toolOutBuf[ev.Group] = cur + ev.Text
-			delete(m.toolOutTail, ev.Group)
+			m.toolOutBuf[turnKey(ev.Group, ev.Session)] = cur + ev.Text
+			delete(m.toolOutTail, turnKey(ev.Group, ev.Session))
 		case "tool_result_stream":
 			// In-flight partial line, re-emitted whole on each chunk.
-			m.toolOutTail[ev.Group] = ev.Text
+			m.toolOutTail[turnKey(ev.Group, ev.Session)] = ev.Text
 		case "tool_result_done":
-			delete(m.toolOutBuf, ev.Group)
-			delete(m.toolOutTail, ev.Group)
+			delete(m.toolOutBuf, turnKey(ev.Group, ev.Session))
+			delete(m.toolOutTail, turnKey(ev.Group, ev.Session))
 			elapsedMs := int64(0)
-			if begin, ok := m.toolBeginTs[ev.Group]; ok && begin > 0 {
+			if begin, ok := m.toolBeginTs[turnKey(ev.Group, ev.Session)]; ok && begin > 0 {
 				elapsedMs = int64(ev.Ts) - begin
-				delete(m.toolBeginTs, ev.Group)
+				delete(m.toolBeginTs, turnKey(ev.Group, ev.Session))
 			}
 			expand := elapsedMs >= longToolThresholdMs
 			m.addLine(logLine{
@@ -2326,7 +2354,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
 		case "goal_set", "goal_plan", "goal_awaiting", "goal_iter", "goal_judge",
 			"goal_verdict", "goal_met", "goal_paused", "goal_resumed", "goal_cancelled":
-			m.addLine(logLine{kind: "sys", group: ev.Group,
+			// Stamped with the run's session by the daemon, so the lifecycle
+			// renders inside the goal's tree item and leaves the operator's
+			// chat alone. What genuinely needs a human (plan ready, cap
+			// reached, met) also arrives as a notification, which is
+			// session-blind.
+			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
 				text: formatGoalEvent(ev), ts: int64(ev.Ts)})
 		case "notification":
 			sev := ev.Severity
@@ -2869,14 +2902,13 @@ func (m Model) pendingForView() []string {
 // group plus a tag ("thinking"|"stream"|"") so the renderer knows whether
 // to prefix it with the brain glyph or the spinner.
 func (m Model) liveOverlay() (string, string) {
-	// A turn streaming in a different session of this group is not part of
-	// this view; its completed lines land session-tagged and stay hidden.
-	if m.turnSession[m.cur] != m.activeSession(m.cur) {
-		return "", ""
-	}
-	if t, ok := m.thinkingBuf[m.cur]; ok {
+	// Per-conversation keys (turnKey) make cross-session isolation
+	// structural: a turn streaming in a different session of this group
+	// lives under a different key and simply isn't found here — the explicit
+	// turnSession gate this function used to open with is gone with the map.
+	if t, ok := m.thinkingBuf[m.curKey()]; ok {
 		full := t
-		if tail := m.thinkingTail[m.cur]; tail != "" {
+		if tail := m.thinkingTail[m.curKey()]; tail != "" {
 			if full != "" {
 				full += "\n"
 			}
@@ -2884,7 +2916,7 @@ func (m Model) liveOverlay() (string, string) {
 		}
 		return full, "thinking"
 	}
-	if s, ok := m.streamBuf[m.cur]; ok {
+	if s, ok := m.streamBuf[m.curKey()]; ok {
 		return s, "stream"
 	}
 	return "", ""
@@ -3061,10 +3093,10 @@ func (m Model) isAnimating() bool {
 	if m.focus == focusShell && m.shell != nil && !m.shell.ended {
 		return true
 	}
-	if _, ok := m.streamBuf[m.cur]; ok {
+	if _, ok := m.streamBuf[m.curKey()]; ok {
 		return true
 	}
-	if _, ok := m.thinkingBuf[m.cur]; ok {
+	if _, ok := m.thinkingBuf[m.curKey()]; ok {
 		return true
 	}
 	// A group mid-phase has a live elapsed counter (status/hint bars) and a
@@ -3118,10 +3150,10 @@ func (m Model) needsFastTicks() bool {
 	if m.focus == focusShell && m.shell != nil && !m.shell.ended {
 		return true
 	}
-	if _, ok := m.streamBuf[m.cur]; ok {
+	if _, ok := m.streamBuf[m.curKey()]; ok {
 		return true
 	}
-	if _, ok := m.thinkingBuf[m.cur]; ok {
+	if _, ok := m.thinkingBuf[m.curKey()]; ok {
 		return true
 	}
 	if m.plugin != nil || !m.connected {
@@ -3350,10 +3382,11 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			}
 		}
 		m.lines = out
-		delete(m.streamBuf, msg.group)
 		if all {
+			m.dropGroupLiveState(msg.group)
 			delete(m.session, msg.group)
-			delete(m.turnSession, msg.group)
+		} else {
+			delete(m.streamBuf, turnKey(msg.group, target))
 		}
 		m.groupVer[msg.group]++
 		m.refreshLog()
@@ -3617,17 +3650,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// sees no prompt frame and — during llm/retry/work — no stream bytes
 		// either, but the daemon seeds every subscriber with the current phase,
 		// so it is the one signal that's always present while a turn runs.
-		if m.busy[m.cur] {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		if m.busy[m.curKey()] {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
-		if _, streaming := m.streamBuf[m.cur]; streaming {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		if _, streaming := m.streamBuf[m.curKey()]; streaming {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
-		if _, thinking := m.thinkingBuf[m.cur]; thinking {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+		if _, thinking := m.thinkingBuf[m.curKey()]; thinking {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
 		if _, midTurn := m.activityFor(m.cur); midTurn {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, nil)
+			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
 		// Second meaning, with no turn to stop: the message-bar ↔ tree
 		// toggle. Tab is the same toggle and keeps working mid-turn (while
@@ -4753,14 +4786,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		// the same name starts clean.
 		delete(m.subscribed, target)
 		delete(m.session, target)
-		delete(m.turnSession, target)
-		delete(m.streamBuf, target)
-		delete(m.thinkingBuf, target)
-		delete(m.thinkingTail, target)
-		delete(m.lastThoughtBody, target)
-		delete(m.toolOutBuf, target)
-		delete(m.toolOutTail, target)
-		delete(m.toolBeginTs, target)
+		m.dropGroupLiveState(target)
 		delete(m.busy, target)
 		// activity especially: the stream dies before any idle frame can
 		// arrive, and a stale mid-phase entry keeps anyActivity() true —
@@ -4792,9 +4818,12 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return daemonCmd(m.sock, "restart", target, nil)
 	}
 	if v == "/interrupt" {
-		// Kill the in-flight turn (same as Esc while a turn runs). This was
-		// /stop's meaning before /stop became the VM power-off.
-		return daemonCmd(m.sock, "interrupt", m.cur, nil)
+		// Kill the ACTIVE SESSION's in-flight turn (same as Esc while a turn
+		// runs). This was /stop's meaning before /stop became the VM
+		// power-off. Session-scoped because a group runs several turns at
+		// once — see the Interrupt RPC.
+		return daemonCmd(m.sock, "interrupt", m.cur,
+			map[string]any{"session": m.activeSession(m.cur)})
 	}
 	if v == "/stop" || strings.HasPrefix(v, "/stop ") {
 		// Powers off the group's microVM (daemon `stop` verb). Interrupting

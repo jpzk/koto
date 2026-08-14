@@ -331,8 +331,14 @@ type SchedToggleReq struct {
 // only — the plan turn and judge turns are not charged against
 // MaxIterations. Timestamps are unix seconds (matches ScheduleItem).
 type GoalItem struct {
-	ID       string `json:"id"`
-	Group    string `json:"group"`
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	// Name is the run's short human-readable handle AND its session name in
+	// the group ("goal-<name>"), so it is what the tree row, /session, the
+	// jump picker and the ctl plane all show. Slugged from Text when the
+	// caller supplies none. Empty on records written before names existed —
+	// those fall back to the ID (goals.go goalSessionSlug).
+	Name     string `json:"name,omitempty"`
 	Text     string `json:"text"`
 	Criteria string `json:"criteria"`
 	// Plan records whether the goal was set plan-first (one planning turn,
@@ -360,6 +366,8 @@ type GoalSetReq struct {
 	// Plan is tri-state on the ctl plane (absent = default true), matching
 	// the proto's optional bool.
 	Plan *bool `json:"plan,omitempty"`
+	// Name is the run's short handle; empty => slugged from Text.
+	Name string `json:"name,omitempty"`
 }
 
 // GoalGroupReq covers approve / pause / resume / cancel — the one-goal-per-

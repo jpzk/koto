@@ -448,7 +448,7 @@ func (m Model) renderStatusRight(spin string) string {
 		}
 		act = lipgloss.NewStyle().Foreground(activityColor(a.phase)).Background(cBlack).
 			Render(txt + " ")
-	} else if _, ok := m.streamBuf[m.cur]; ok {
+	} else if _, ok := m.streamBuf[m.curKey()]; ok {
 		act = lipgloss.NewStyle().Foreground(cAmber).Background(cBlack).
 			Render(fmt.Sprintf("   streaming %s ", spin))
 	} else {
@@ -716,9 +716,10 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if isSession {
 		name = r.session
 		// The goal worker's leaf (daemon-listed while a goal is live) gets
-		// the goal glyph so it reads as the loop's session, not a chat.
+		// the goal glyph so it reads as the loop's session, not a chat, and
+		// shows the run id alone — see goalRunID.
 		if goalSession(r.session) {
-			name = "◎ " + r.session
+			name = "◎ " + goalRunID(r.session)
 		}
 	}
 	var job *JobInfo
@@ -1543,8 +1544,8 @@ func (m Model) renderHint() string {
 		)
 	}
 	var parts []string
-	_, streaming := m.streamBuf[m.cur]
-	_, thinking := m.thinkingBuf[m.cur]
+	_, streaming := m.streamBuf[m.curKey()]
+	_, thinking := m.thinkingBuf[m.curKey()]
 	// The progress line lives in the status bar (renderStatusRight); the hint
 	// bar stays keyboard hints only.
 	if streaming || thinking {
@@ -1595,7 +1596,7 @@ func (m Model) renderHint() string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cGray).
 			Render("◆ history start"))
 	}
-	if streaming || thinking || m.busy[m.cur] {
+	if streaming || thinking || m.busy[m.curKey()] {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")))
 	}
 	parts = append(parts, "^c exit")

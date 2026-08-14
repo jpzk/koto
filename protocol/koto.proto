@@ -450,6 +450,10 @@ message GoalItem {
   double created_at     = 12; // unix seconds (ScheduleItem convention)
   double updated_at     = 13;
   double completed_at   = 14;
+  // Human-readable run name. Also the goal's SESSION name in the group
+  // ("goal-<name>"), so it is what the tree row, /session and the ctl plane
+  // all show. Defaults to a slug of `text` when the caller supplies none.
+  string name           = 15;
 }
 
 message GoalSetReq {
@@ -460,6 +464,9 @@ message GoalSetReq {
   // Plan-first: one planning turn, then wait for human approval before any
   // execution iteration. Absent = true (plan-first is the default).
   optional bool plan    = 5;
+  // Run name (see GoalItem.name). Empty => slugged from `text`. Must be free
+  // as a session name in the group.
+  string name           = 6;
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
 message GoalGroupReq { string group = 1; } // approve / pause / resume / cancel

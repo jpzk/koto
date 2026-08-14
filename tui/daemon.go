@@ -185,7 +185,10 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "stop":
 		return cl.Stop(ctx, &pb.GroupReq{Group: s("group")})
 	case "interrupt":
-		return cl.Interrupt(ctx, &pb.GroupReq{Group: s("group")})
+		// Session-scoped: a group runs several turns at once, so esc must
+		// abort the conversation on screen, not whichever one the daemon
+		// would have picked.
+		return cl.Interrupt(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "destroy":
 		return cl.Destroy(ctx, &pb.GroupReq{Group: s("group")})
 	case "restart":
@@ -226,7 +229,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			r.MaxIterations = int32(v)
 		}

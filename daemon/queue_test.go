@@ -134,7 +134,7 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 	drain:
 		for {
 			select {
-			case <-turnDoneCh(g):
+			case <-turnDoneCh(g, ""):
 			default:
 				break drain
 			}
@@ -142,7 +142,7 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 		if msg == "hang" {
 			started <- struct{}{}
 			select {
-			case <-turnDoneCh(g):
+			case <-turnDoneCh(g, ""):
 			case <-time.After(fallback):
 				t.Errorf("turn %q not woken within %s — abort wake never fired", msg, fallback)
 			}

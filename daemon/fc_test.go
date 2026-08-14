@@ -167,10 +167,15 @@ func TestFcAgentCall(t *testing.T) {
 		if req["op"] != "msg" {
 			t.Errorf("op = %v", req["op"])
 		}
+		// The slot rides every msg: it names the log stream the turn writes
+		// to, which is what keeps concurrent turns parseable.
+		if got, ok := req["slot"].(float64); !ok || int(got) != 3 {
+			t.Errorf("slot = %v (ok=%v), want 3", req["slot"], ok)
+		}
 		fmt.Fprintf(c, `{"ok":true}`+"\n")
 	})
 	defer ln.Close()
-	if err := fcSendMsg("tg", "", "aGk=", "system prompt", []byte(`{"provider":"venice"}`)); err != nil {
+	if err := fcSendMsg("tg", "", 3, "aGk=", "system prompt", []byte(`{"provider":"venice"}`)); err != nil {
 		t.Fatalf("fcSendMsg: %v", err)
 	}
 }

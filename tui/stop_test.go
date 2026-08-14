@@ -66,7 +66,7 @@ func TestStopResponseRenders(t *testing.T) {
 // render.
 func TestInterruptNoopIsSilent(t *testing.T) {
 	m := inputModel(t, "")
-	m.busy = map[string]bool{"main": true}
+	m.busy = map[string]bool{turnKey("main", ""): true}
 	m.activity = map[string]activityInfo{"main": {phase: "llm"}}
 
 	before := len(m.lines)
@@ -75,7 +75,7 @@ func TestInterruptNoopIsSilent(t *testing.T) {
 	if len(m.lines) != before {
 		t.Fatalf("no-op interrupt rendered a line: %q", m.lines[len(m.lines)-1].text)
 	}
-	if m.busy["main"] {
+	if m.busy[turnKey("main", "")] {
 		t.Fatal("stale busy flag survived a no-op interrupt")
 	}
 	if _, ok := m.activity["main"]; ok {

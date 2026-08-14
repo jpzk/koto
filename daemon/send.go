@@ -36,7 +36,7 @@ var (
 // returns and the goroutine exits. We deliberately don't try to detect
 // "task finished" — claude code surfaces that via a regular tool_result
 // in a later turn, and stale tailers are bounded by the time cap.
-func tailBackgroundTask(g, id, path string) {
+func tailBackgroundTask(g, streamPath, id, path string) {
 	key := g + "\x00" + id
 	bgActiveLock.Lock()
 	if bgActive[key] {
@@ -72,7 +72,9 @@ func tailBackgroundTask(g, id, path string) {
 		line := sc.Text()
 		// Strip the path's prefix from anything that quotes it back, just
 		// to keep the chat readable.
-		logAppend(g, []byte("[[bg]] "+id+" "+line+"\n"))
+		// Into the stream whose turn spawned the task, so a background job's
+		// output stays in that conversation rather than surfacing in another.
+		streamLogAppend(streamPath, []byte("[[bg]] "+id+" "+line+"\n"))
 	}
 	wait()
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
@@ -91,19 +93,29 @@ func tailBackgroundTask(g, id, path string) {
 // alone. Adding a provider = add its worker's exe/argv marker here (one place).
 const agentWorkerPattern = `claude-code|venice_stream\.js`
 
-// interruptAgent sends SIGINT to the running turn worker inside the sidecar
+// interruptAgent sends SIGINT to a running turn worker inside the guest
 // without killing the entrypoint shell, so the FIFO `read` loop survives and
-// the next inbound message still works. We walk /proc in the container and
-// signal any non-PID-1 process whose resolved exe path OR argv matches
+// the next inbound message still works. We walk /proc in the guest and signal
+// any non-PID-1 process whose resolved exe path OR argv matches
 // agentWorkerPattern. The worker aborts the turn on SIGINT; stream_filter
 // (claude path) exits on SIGPIPE once the worker's stdout closes, and the
 // per-turn `timeout` wrapper exits once its child dies — so we don't signal
 // them explicitly.
 //
-// procps (pkill/pgrep) isn't installed in the slim sidecar, so the /proc walk
-// is done in plain POSIX sh. readlink(exe) + cmdline both run as uid 1000
-// (same user as the worker), so /proc reads are permitted.
-func interruptAgent(g string) error {
+// `sess` NARROWS the kill to one conversation's worker, which is mandatory now
+// that a group runs two turns at once (queue.go lanes): a pattern-only match
+// would take the operator's turn down with the goal's, and vice versa. The
+// filter is the worker's own environment — entrypoint.sh exports KOTO_SESSION
+// per turn and claude/venice inherit it — so it needs nothing recorded on the
+// side that could go stale. There is deliberately no "signal them all" mode:
+// every caller knows which lane it means, and a group-wide kill is exactly the
+// bug this parameter exists to prevent ("" here is the DEFAULT session, not a
+// wildcard).
+//
+// procps (pkill/pgrep) isn't installed in the slim guest, so the /proc walk is
+// done in plain POSIX sh. exe/cmdline read as uid 1000 (same user as the
+// worker); environ needs root, which is what fcExec runs as (agent is PID 1).
+func interruptAgent(g, sess string) error {
 	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
@@ -112,13 +124,15 @@ func interruptAgent(g string) error {
 	// would SIGINT itself. The real worker gets killed first (lower pid,
 	// iterated earlier), but the self-suicide makes the exec exit 130,
 	// surfacing in the TUI as `exit status 130` even though it succeeded.
-	script := `hit=0
+	script := `WANT='` + sessionMarkerName(sess) + `'
+hit=0
 for d in /proc/[0-9]*; do
   p=${d##*/}
   [ "$p" = 1 ] && continue
   [ "$p" = "$$" ] && continue
   { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
     | grep -aqE '` + agentWorkerPattern + `' || continue
+  tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
   kill -INT "$p" 2>/dev/null && hit=1
 done
 [ "$hit" = 1 ] || echo no-agent-process >&2
@@ -131,7 +145,8 @@ exit 0`
 	}
 	out := []byte(s)
 	if strings.Contains(string(out), "no-agent-process") {
-		return fmt.Errorf("no running agent process in group '%s'", g)
+		return fmt.Errorf("no running agent process for session %q in group '%s'",
+			sessionMarkerName(sess), g)
 	}
 	return nil
 }
@@ -139,31 +154,53 @@ exit 0`
 // ---- send -----------------------------------------------------------------
 
 // sendNow performs one message turn for group g in the given session ("" =
-// default): compose the system prompt, write the FIFO, and block until
-// [[turn_end]] (or turnWaitTimeout). It is NOT safe to call concurrently for
-// the same group — serialization is provided by the per-group queue worker
-// (queue.go), its sole caller. Two concurrent turns would interleave a
-// non-atomic sequence (log marker → system-prompt.md → encode → FIFO write),
-// let the sidecar run message-A under the system prompt prepared for
-// message-B, and race on the shared turnDone channel.
+// default): compose the system prompt, deliver it, and block until
+// [[turn_end]] (or turnWaitTimeout).
+//
+// It is NOT safe to call concurrently for the same SESSION — serialization is
+// provided by that session's queue worker (queue.go), its sole caller. Across
+// sessions it IS concurrent, up to groupSlots turns per group, which is why
+// every piece of turn state it touches is keyed by session (completion
+// channel, stall flag) or by the SLOT it acquires (the guest log stream it
+// writes its prompt marker into, and the stream the guest writes the response
+// to). Two turns sharing any of those would interleave a non-atomic sequence,
+// mix their frames into one unparseable stream, and race on each other's
+// completion signal.
 func sendNow(g, session, msg string) error {
 	emitLogfG("send", g, "info", "group=%s session=%s bytes=%d", g, sessionMarkerName(session), len(msg))
 	// Phase reporting for clients (activity.go). Opened before ensure() —
 	// booting a stopped microVM is several seconds with nothing else to show —
-	// and closed on every exit path, including the stall timeout.
-	activityTurnBegin(g, session)
-	defer activityTurnEnd(g)
+	// and closed on every exit path, including the stall timeout. Goal turns
+	// are excluded: the phase is a group-scoped clock describing the
+	// conversation the operator is waiting on, and an unattended iteration
+	// cycling llm→work→stream every few seconds would overwrite it. Goal
+	// progress surfaces as goal_* events in the goal's own session instead.
+	if !isReservedSession(session) {
+		activityTurnBegin(g, session)
+		defer activityTurnEnd(g)
+	}
 	if _, err := ensure(g, g == "main"); err != nil {
 		emitLogfG("send", g, "error", "ensure group=%s: %v", g, err)
 		return err
 	}
+
+	// A slot is this turn's private log stream, held for the turn's whole
+	// life. Acquired AFTER ensure() so a boot doesn't occupy one, and released
+	// on every exit path. Blocks while all groupSlots are busy, which is the
+	// concurrency cap doing its job — the queue worker for this session is the
+	// only thing waiting.
+	slot := acquireSlot(g, session)
+	defer releaseSlot(g, slot) // no-op if the stall path quarantined it below
+	ensureSlotTail(g, slot)
+
 	v := vol(g)
-	logPath := filepath.Join(v, ".cs", "log")
+	logPath := slotLogPath(g, slot)
 
 	// The [[session]] marker attributes everything from here to the next
-	// marker to this turn's session — both in the live tailer and in History
-	// replay. Written unconditionally (default = "-") so a default turn after
-	// a named one resets the attribution.
+	// marker in THIS stream to this turn's session — both in the live tailer
+	// and in History replay. Written unconditionally (default = "-") so a
+	// default turn after a named one resets the attribution. The slot is what
+	// makes the sticky marker safe again: no other turn writes here.
 	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), msg)
 		f.Close()
@@ -175,19 +212,20 @@ func sendNow(g, session, msg string) error {
 		augmented = contextBlock(m) + "\n\n" + msg
 	}
 
-	// microVM delivery: the guest agent materializes system-prompt.md +
-	// config.json in the guest workspace and writes the b64 line to the
-	// in-guest FIFO — entrypoint.sh runs unchanged. Turn completion arrives as
-	// [[turn_end]] via the vsock log sink → host log → tailLog, which drives
-	// the wait below.
-	//   1. ensureTail — tailLog must run to observe [[turn_end]]. Idempotent.
-	//   2. drain — discard stale turn_end tokens from prior messages.
-	//   3. fcSendMsg — deliver the turn; the guest eventually emits [[turn_end]].
-	//   4. wait — block until tailLog sees our completion, bounded by
-	//      turnWaitTimeout (a wedged guest loop is flagged stalled, not blocking
-	//      the queue worker forever).
+	// microVM delivery: the guest agent materializes the per-session
+	// system-prompt + config.json in the guest workspace and writes the
+	// "<session> <slot> <b64>" line to the in-guest FIFO. Turn completion
+	// arrives as [[turn_end]] on this slot's stream → host file → its tailer,
+	// which drives the wait below.
+	//   1. ensureTail — the group stream's tailer (slot's was started above).
+	//   2. drain — discard stale turn_end tokens from prior turns of this
+	//      session.
+	//   3. fcSendMsg — deliver; the guest eventually emits [[turn_end]].
+	//   4. wait — block until the tailer sees our completion, bounded by
+	//      turnWaitTimeout (a wedged guest loop is flagged stalled, not
+	//      blocking this session's queue worker forever).
 	ensureTail(g)
-	doneC := turnDoneCh(g)
+	doneC := turnDoneCh(g, session)
 drain:
 	for {
 		select {
@@ -199,16 +237,24 @@ drain:
 	}
 	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
 	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
-	activityTurnDelivering(g)
-	if err := fcSendMsg(g, session, enc, sp, cfgB); err != nil {
+	if !isReservedSession(session) {
+		activityTurnDelivering(g)
+	}
+	if err := fcSendMsg(g, session, slot, enc, sp, cfgB); err != nil {
 		return err
 	}
 	select {
 	case <-doneC:
 		return nil
 	case <-time.After(turnWaitTimeout):
-		setStalled(g, true)
-		emitLogfG("send", g, "warn", "group=%s: no turn_end within %s; group STALLED (guest loop wedged?), advancing queue", g, turnWaitTimeout)
+		setStalled(g, session, true)
+		// The guest side of this turn may still be alive and writing into the
+		// slot's stream, so the slot must NOT return to the pool — quarantine
+		// it (the deferred releaseSlot sees the flag and no-ops). It frees on
+		// VM death or a successful self-heal restart.
+		quarantineSlot(g, slot)
+		emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
+			g, sessionMarkerName(session), turnWaitTimeout)
 		selfHeal(g, time.Now())
 		return nil
 	}
@@ -222,47 +268,94 @@ const turnWaitTimeout = 25 * time.Minute
 // emit fans an Event out to all subscribers of `g`. The caller supplies
 // the variant-specific fields (Msg, Text, Name/Input, Words/Body, …); we
 // set Group and Ts (defaulting Ts to now if the caller left it zero).
-// turnDone is an internal per-group signal used by send() to block until
-// the sidecar has finished writing the response. emit() pushes a token on
-// every "turn_end" event; send() drains stale tokens before queuing and
-// then waits for the next one. Buffered so emit() never blocks even if no
+// turnDone is an internal per-(group, LANE) signal used by sendNow to block
+// until the guest has finished writing the response. emit() pushes a token on
+// every "turn_end" event, onto the lane of the session that event is
+// attributed to; sendNow drains stale tokens before delivering and then waits
+// for the next one on its own lane. Buffered so emit() never blocks even if no
 // sender is currently waiting (the standard case — TUI subscribers consume
-// turn_end via the socket, the channel is for in-process callers only).
+// turn_end via the stream, the channel is for in-process callers only).
+//
+// Per SESSION, not per group: up to groupSlots turns are in flight at once
+// now, and a single channel would let one conversation's turn_end retire
+// another's — the queue worker would advance onto the next message while the
+// guest was still writing the previous response. Session granularity is exact
+// because a session is single-flight, and it is why each concurrent turn needs
+// its own guest log stream: turn_end must be attributed to the session that
+// produced it, not to whatever the sticky marker last named.
 var (
 	turnDoneMu sync.Mutex
 	turnDone   = map[string]chan struct{}{}
 )
 
-func turnDoneCh(g string) chan struct{} {
+func turnDoneCh(g, session string) chan struct{} {
 	turnDoneMu.Lock()
 	defer turnDoneMu.Unlock()
-	c, ok := turnDone[g]
+	k := sessKey(g, session)
+	c, ok := turnDone[k]
 	if !ok {
 		c = make(chan struct{}, 16)
-		turnDone[g] = c
+		turnDone[k] = c
 	}
 	return c
 }
 
-// stalledG tracks groups whose sidecar FIFO loop appears wedged: a message was
-// delivered but no [[turn_end]] arrived within turnWaitTimeout. Set by send()
-// on that timeout, cleared by notifyTurnDone the instant any turn completes.
-// Surfaced via listGroups → GroupInfo.Stalled so the TUI can flag it.
+// stalledG tracks CONVERSATIONS whose turn appears wedged: a message was
+// delivered but no [[turn_end]] arrived within turnWaitTimeout. Set by sendNow
+// on that timeout, cleared by notifyTurnDone the instant that session's turn
+// completes. Per session because one conversation grinding into its 25-minute
+// timeout says nothing about the nine others that may be running — and
+// isStalled is what the goal driver reads to decide whether its own iteration
+// actually ran.
+//
+// GroupInfo.Stalled stays a per-GROUP flag (groupStalled): to a client, "this
+// group is wedged" is the useful signal, and either lane hanging qualifies.
 var (
 	stallMu  sync.Mutex
 	stalledG = map[string]bool{}
 )
 
-func setStalled(g string, v bool) {
+func setStalled(g, session string, v bool) {
 	stallMu.Lock()
-	stalledG[g] = v
+	stalledG[sessKey(g, session)] = v
 	stallMu.Unlock()
 }
 
-func isStalled(g string) bool {
+// isStalled reports the stall state of one conversation.
+// clearGroupStalls drops every stall flag in g — used after a restart, which
+// replaces the whole guest loop and so invalidates any per-conversation
+// verdict about it.
+func clearGroupStalls(g string) {
 	stallMu.Lock()
 	defer stallMu.Unlock()
-	return stalledG[g]
+	for k := range stalledG {
+		if gg, _, ok := splitSessKey(k); ok && gg == g {
+			delete(stalledG, k)
+		}
+	}
+}
+
+func isStalled(g, session string) bool {
+	stallMu.Lock()
+	defer stallMu.Unlock()
+	return stalledG[sessKey(g, session)]
+}
+
+// groupStalled is the client-facing rollup: any wedged conversation flags the
+// group, which is the signal a client actually wants ("something in here is
+// stuck").
+func groupStalled(g string) bool {
+	stallMu.Lock()
+	defer stallMu.Unlock()
+	for k, v := range stalledG {
+		if !v {
+			continue
+		}
+		if gg, _, ok := splitSessKey(k); ok && gg == g {
+			return true
+		}
+	}
+	return false
 }
 
 // Self-heal: when send() declares a group stalled (sidecar loop wedged, not
@@ -317,14 +410,20 @@ func selfHeal(g string, now time.Time) bool {
 		emitLogfG("selfheal", g, "error", "group=%s: restart failed: %v", g, err)
 		return false
 	}
-	setStalled(g, false) // fresh loop is live; next turn_end would re-confirm
+	clearGroupStalls(g)       // fresh loop is live; the next turn_end re-confirms
+	releaseGroupQuarantine(g) // the restart killed any writer a stalled turn left behind
 	emitLogfG("selfheal", g, "info", "group=%s: sidecar restarted; loop restored", g)
 	return true
 }
 
-func notifyTurnDone(g string) {
-	setStalled(g, false) // a turn completed → the loop is alive
-	c := turnDoneCh(g)
+// notifyTurnDone retires `sess`'s in-flight turn. The session comes from the
+// turn_end event's own attribution, which is exact because each concurrent
+// turn has its own log stream (fcSlotLogSink) — an event's session is set by
+// the [[session]] marker at the head of that stream, not by whichever turn
+// wrote last.
+func notifyTurnDone(g, sess string) {
+	setStalled(g, sess, false) // a turn completed → that conversation is alive
+	c := turnDoneCh(g, sess)
 	select {
 	case c <- struct{}{}:
 	default:
@@ -343,9 +442,12 @@ func notifyTurnDone(g string) {
 // queue advances onto the freshly (re)started VM. A spurious token pushed when
 // no turn is in flight is drained by the next sendNow's pre-wait drain loop.
 func abortInflightTurn(g string) {
-	c := turnDoneCh(g)
-	select {
-	case c <- struct{}{}:
-	default:
+	// Every running conversation: the VM took all of them down with it.
+	for _, sess := range inFlightSessions(g) {
+		c := turnDoneCh(g, sess)
+		select {
+		case c <- struct{}{}:
+		default:
+		}
 	}
 }

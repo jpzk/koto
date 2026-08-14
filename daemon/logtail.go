@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,20 +39,27 @@ var (
 	notifyQueueMu sync.Mutex
 	notifyQueue   = map[string][]string{}
 
-	// logWriteLocks serializes appends to a group's host log file between
-	// fcLogSink (the guest stream) and the tailer's marker flush, so the
-	// boundary check and the append are atomic against the sink.
+	// logWriteLocks serializes appends to ONE host log FILE between its guest
+	// stream sink and the tailer's marker flush, so the boundary check and the
+	// append are atomic against the sink.
+	//
+	// Keyed by path, not by group: a group now has one stream per concurrency
+	// slot plus the group stream, and they are independent files. A per-group
+	// lock made every slot's chunk append wait on every other slot's — with
+	// ten turns streaming at once that is pure false sharing, and each critical
+	// section holds an open/write/close (logSinkAppend opens per chunk by
+	// design, see its comment).
 	logWriteLocks   = map[string]*sync.Mutex{}
 	logWriteLocksMu sync.Mutex
 )
 
-func logWriteLock(g string) *sync.Mutex {
+func logWriteLock(path string) *sync.Mutex {
 	logWriteLocksMu.Lock()
 	defer logWriteLocksMu.Unlock()
-	mu := logWriteLocks[g]
+	mu := logWriteLocks[path]
 	if mu == nil {
 		mu = &sync.Mutex{}
-		logWriteLocks[g] = mu
+		logWriteLocks[path] = mu
 	}
 	return mu
 }
@@ -111,7 +120,7 @@ func tryFlushNotify(g string, lp *logParser, atBoundary bool) {
 	delete(notifyQueue, g)
 	notifyQueueMu.Unlock()
 
-	mu := logWriteLock(g)
+	mu := logWriteLock(groupLogPath(g))
 	mu.Lock()
 	defer mu.Unlock()
 	if !logAtLineBoundary(g) {
@@ -172,8 +181,44 @@ func inode(path string) uint64 {
 	return sys.Ino
 }
 
-func tailLog(g string) {
-	p := filepath.Join(vol(g), ".cs", "log")
+// A group's frames live in several files host-side:
+//
+//	.cs/log      the GROUP stream: everything the host writes about the group
+//	             rather than about one turn — proxy error lines, delivered
+//	             [[notify]] markers — plus every turn from before slots
+//	             existed, which is why it keeps the historical name.
+//	.cs/log.<n>  one per concurrency slot (queue.go), carrying the turns that
+//	             ran in that slot.
+//
+// Separate FILES, not one file with per-line tags, because the marker grammar
+// is a block state machine ([[think_begin]]…[[think_end]], tool_out, and the
+// sticky [[session]] attribution): two turns writing into one stream would
+// interleave mid-block with no way to reassemble them. One stream per slot
+// keeps each parse exactly as it was when a group ran one turn at a time.
+//
+// Which slot a turn used carries no meaning — attribution rides in the
+// [[session]] marker at the head of each turn, and History merges every stream
+// on ts.
+func groupLogPath(g string) string { return filepath.Join(vol(g), ".cs", "log") }
+
+func slotLogPath(g string, slot int) string {
+	return filepath.Join(vol(g), ".cs", fmt.Sprintf("log.%d", slot))
+}
+
+// logPaths is every stream that belongs to g, group stream first.
+func logPaths(g string) []string {
+	out := []string{groupLogPath(g)}
+	for i := 0; i < groupSlots; i++ {
+		out = append(out, slotLogPath(g, i))
+	}
+	return out
+}
+
+func tailLog(g string) { tailFile(g, groupLogPath(g), true) }
+
+// tailFile tails one stream. isGroup marks the group stream, which is the only
+// one host-side notification delivery writes into.
+func tailFile(g, p string, isGroup bool) {
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND, 0o644); err == nil {
 		f.Close()
@@ -233,7 +278,13 @@ func tailLog(g string) {
 			// the file's true tail, so this is the safe point to deliver
 			// queued [[notify]] markers (they're read back and parsed on
 			// the next iteration like any other line).
-			tryFlushNotify(g, &lp, buf == "")
+			// Notifications are group-level and flush into the group stream,
+			// never into a turn's: the deferral rule (no marker inside an
+			// open think/tool_out block) is about the stream being written,
+			// and the group stream has no turns in it to be inside of.
+			if isGroup {
+				tryFlushNotify(g, &lp, buf == "")
+			}
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
@@ -255,7 +306,9 @@ func tailLog(g string) {
 					// real output as it accumulates, not just the "you will be
 					// notified" stub.
 					if m := bgTaskRE.FindStringSubmatch(ev.Text); m != nil {
-						go tailBackgroundTask(g, m[1], m[2])
+						// Into the same stream as the turn that spawned it, so
+						// the [[bg]] lines stay in that conversation.
+						go tailBackgroundTask(g, p, m[1], m[2])
 					}
 				}
 				emit(g, ev)
@@ -275,35 +328,91 @@ func tailLog(g string) {
 	}
 }
 
+// ensureTail starts the group stream's tailer. Slot streams get theirs from
+// ensureSlotTail when a turn actually claims that slot — a group that never
+// runs concurrent turns only ever uses slot 0, and the other nine cost nothing
+// rather than nine polling goroutines each.
 func ensureTail(g string) {
-	subsLock.Lock()
-	if tails[g] {
-		subsLock.Unlock()
-		return
+	if markTail(groupLogPath(g)) {
+		go tailLog(g)
 	}
-	tails[g] = true
-	subsLock.Unlock()
-	go tailLog(g)
 }
 
-// readHistory parses the group's log into events, then applies paging:
+// ensureSlotTail starts the tailer for one slot's stream. Idempotent.
+func ensureSlotTail(g string, slot int) {
+	p := slotLogPath(g, slot)
+	if markTail(p) {
+		go tailFile(g, p, false)
+	}
+}
+
+// markTail claims a stream for tailing, reporting whether the caller is the
+// one that must start it.
+func markTail(p string) bool {
+	subsLock.Lock()
+	defer subsLock.Unlock()
+	if tails[p] {
+		return false
+	}
+	tails[p] = true
+	return true
+}
+
+// readHistory parses the group's logs into events, then applies paging:
 // drop events with ts >= before (when before > 0), keep the tail `limit`
 // (default 1000), and report whether older events were trimmed via
 // the second return value. The parser is stateful (think_begin/end,
 // tool_out_begin/end blocks) so it has to scan from the start — paging
 // is applied to the resulting slice, not to the file read.
+//
+// Every stream is read and merged on ts: concurrent turns write separate
+// files, but a client asks for "this group's history" once and filters by
+// session itself. Merge is stable, so within a stream the file order always
+// survives.
 func readHistory(g string, limit int, before float64) ([]Event, bool) {
-	p := filepath.Join(vol(g), ".cs", "log")
+	events := []Event{}
+	for _, p := range logPaths(g) {
+		events = append(events, readStreamHistory(g, p)...)
+	}
+	sort.SliceStable(events, func(i, j int) bool { return events[i].Ts < events[j].Ts })
+	// Apply paging filter: drop events at or after `before`, then keep the
+	// tail `limit`. `more` tells the client whether older events were
+	// trimmed so it can decide if back-scroll should fetch again.
+	if before > 0 {
+		cut := len(events)
+		for i, ev := range events {
+			if ev.Ts >= before {
+				cut = i
+				break
+			}
+		}
+		events = events[:cut]
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	more := false
+	if len(events) > limit {
+		more = true
+		events = events[len(events)-limit:]
+	}
+	return events, more
+}
+
+// readStreamHistory parses one stream file. Returns nothing when the file has
+// never been written (a group that has never run concurrent turns has no
+// log.3).
+func readStreamHistory(g, p string) []Event {
 	st, err := os.Stat(p)
 	if err != nil {
-		return []Event{}, false
+		return nil
 	}
 	fallbackTS := float64(st.ModTime().UnixNano()) / 1e9
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return []Event{}, false
+		return nil
 	}
-	events := []Event{}
+	var events []Event
 	// Same grammar as the live tailer (logParser); replay differs only in
 	// that it (a) skips blank lines entirely — historical behavior, which
 	// also drops them from block bodies, (b) keeps only terminal events
@@ -328,26 +437,5 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 			events = append(events, ev)
 		}
 	}
-	// Apply paging filter: drop events at or after `before`, then keep the
-	// tail `limit`. `more` tells the client whether older events were
-	// trimmed so it can decide if back-scroll should fetch again.
-	if before > 0 {
-		cut := len(events)
-		for i, ev := range events {
-			if ev.Ts >= before {
-				cut = i
-				break
-			}
-		}
-		events = events[:cut]
-	}
-	if limit <= 0 {
-		limit = 1000
-	}
-	more := false
-	if len(events) > limit {
-		more = true
-		events = events[len(events)-limit:]
-	}
-	return events, more
+	return events
 }

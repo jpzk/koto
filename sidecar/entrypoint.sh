@@ -35,21 +35,30 @@ TURN_TIMEOUT="${TURN_TIMEOUT:-1200}"
 # worker exit, before any marker write. ($(tail -c 1) strips a trailing
 # newline, so it is empty exactly when the log already ends on one.)
 ensure_log_nl() {
-  [ -s "$D/log" ] || return 0
-  [ -z "$(tail -c 1 "$D/log")" ] || printf '\n' >> "$D/log"
+  [ -s "$1" ] || return 0
+  [ -z "$(tail -c 1 "$1")" ] || printf '\n' >> "$1"
 }
 # Do NOT truncate .cs/log — it must persist across sidecar restarts so the
 # TUI can replay the conversation on attach (matches claude's session.jsonl
 # which also persists). >> below creates the file if missing.
 exec 3<> "$D/in"
 while IFS= read -r line <&3; do
-  # FIFO line framing: `<b64>` targets the default session; `<session> <b64>`
-  # targets a named one (fcguest handleMsg adds the prefix; names are
-  # daemon-validated [A-Za-z0-9][A-Za-z0-9_-]*, so the first space is an
-  # unambiguous separator — base64 -w0 output never contains one).
+  # FIFO line framing: `<session> <slot> <b64>`, or a bare `<b64>` from a
+  # pre-slot caller (default session, slot 0). fcguest handleMsg builds the
+  # line; session names are daemon-validated [A-Za-z0-9][A-Za-z0-9_-]* and
+  # base64 -w0 output never contains a space, so the two spaces are
+  # unambiguous separators.
+  SLOT=0
   case "$line" in
-    *' '*) SESS=${line%% *}; b64=${line#* } ;;
-    *)     SESS=default;     b64=$line ;;
+    *' '*' '*) SESS=${line%% *}; rest=${line#* }; SLOT=${rest%% *}; b64=${rest#* } ;;
+    *' '*)     SESS=${line%% *}; b64=${line#* } ;;
+    *)         SESS=default;     b64=$line ;;
+  esac
+  # A non-numeric or out-of-range slot would send this turn's frames into a
+  # stream the daemon is not reading — drop to 0 rather than go silent.
+  case "$SLOT" in
+    ''|*[!0-9]*) SLOT=0 ;;
+    *) [ "$SLOT" -ge 10 ] && SLOT=0 ;;
   esac
   msg=$(printf '%s' "$b64" | base64 -d) || continue
   # NOTE: the daemon writes the `>>> <original msg>` marker before delivering
@@ -80,13 +89,39 @@ while IFS= read -r line <&3; do
   [ "$SESS" != default ] && SHELL_SESS="koto-shell-$SESS"
   export KOTO_SESSION="$SESS" KOTO_SHELL_SESSION="$SHELL_SESS"
 
+  # EVERY turn runs in the background and writes to its slot's own log FIFO,
+  # which fc-agent forwards to the daemon on vsock 9004 (fcguest
+  # logForwardSlot). Two reasons this loop must not run turns inline:
+  #
+  #   - a turn takes minutes, and blocking here means the whole GROUP is
+  #     frozen — one conversation's long turn locked the operator out of every
+  #     other session in the VM;
+  #   - concurrency is the daemon's to bound (groupSlots, daemon/queue.go), not
+  #     this loop's. It serializes per session and allocates the slot, so a
+  #     slot arriving here is already cleared to run.
+  #
+  # The separate stream per slot is what makes concurrency SAFE rather than
+  # merely fast: the marker grammar is a block state machine, so two turns
+  # writing one stream would interleave mid-block with no way to reassemble
+  # them.
+  LOG="$D/log.$SLOT"
+  # Per-turn scratch is per slot too, or concurrent turns clobber each other's
+  # exit status.
+  RC_FILE="$D/.turn_rc.$SLOT"
+
   # System prompt is composed by the daemon (composeSystemPrompt in daemon.go)
   # and written to /workspace/.cs/system-prompt.md immediately before each
   # FIFO write. We just cat it. Centralizing assembly in the daemon keeps the
   # global/per-group/memory layering testable and lets us evolve it
   # without touching this shell loop.
+  # Per-session file (fc-agent handleMsg): a single shared system-prompt.md
+  # is racy once two turns are delivered concurrently — the later delivery
+  # overwrites a prompt the earlier turn has not read yet. Legacy path is the
+  # fallback for a workspace written by an older agent.
   APPEND=""
-  [ -f /workspace/.cs/system-prompt.md ] && APPEND=$(cat /workspace/.cs/system-prompt.md)
+  SP_FILE="$D/system-prompt-$SESS.md"
+  [ -f "$SP_FILE" ] || SP_FILE="$D/system-prompt.md"
+  [ -f "$SP_FILE" ] && APPEND=$(cat "$SP_FILE")
 
   # Per-group config (model / effort / provider) lives in
   # /workspace/.cs/config.json. Read via node since the image has it; jq
@@ -105,61 +140,74 @@ while IFS= read -r line <&3; do
     [ -n "$P" ] && PROVIDER="$P"
   fi
 
-  case "$PROVIDER" in
-    venice)
-      # Venice path: stateless API, so we maintain conversation history
-      # ourselves in /workspace/.cs/venice-history.json. /clear wipes it
-      # via the daemon's clearCmd. Streaming SSE deltas are written
-      # directly to the log in the same `[ts:N]\n<text>\n` format the
-      # tailer expects from the Claude path.
-      VENICE_MODEL="$MODEL"
-      [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
-      # Per-session venice history: the default session keeps the historical
-      # filename, named sessions get their own file (wiped by per-session
-      # clear — see daemon clearSession).
-      VH_FILE="$D/venice-history.json"
-      [ "$SESS" != default ] && VH_FILE="$D/venice-history-$SESS.json"
-      MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
-      SP_B64=""
-      [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
-      vrc=0
-      MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" KOTO_VH_FILE="$VH_FILE" \
-        timeout -s KILL -k 10 "$TURN_TIMEOUT" \
-        node /sidecar/venice_stream.js >> "$D/log" 2>>"$D/log" || vrc=$?
-      ensure_log_nl
-      if [ "$vrc" = "124" ] || [ "$vrc" = "137" ]; then
-        printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
-      fi
-      # Strict-ordering completion marker — daemon's send() holds sendLock
-      # until tailLog observes this line, so rapid sends serialize end-to-end
-      # rather than interleaving prompts with prior responses.
-      printf '[[turn_end]]\n' >> "$D/log"
-      ;;
-    *)
-      set -- claude -p --bare --dangerously-skip-permissions \
-        --output-format stream-json --include-partial-messages --verbose
-      # Session selection: a captured id resumes that exact conversation;
-      # no id + migration shim continues the pre-sessions thread once;
-      # otherwise this is the session's first turn and starts fresh.
-      if [ -s "$IDF" ]; then
-        set -- "$@" --resume "$(cat "$IDF")"
-      elif [ "$MIGRATE_CONTINUE" = 1 ]; then
-        set -- "$@" --continue
-      fi
-      [ -n "$APPEND" ] && set -- "$@" --append-system-prompt "$APPEND"
-      [ -z "$MODEL" ] && MODEL="${KOTO_DEFAULT_CLAUDE_MODEL:-}"
-      [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
-      [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
+  # The turn body is a function so it can be launched into the background:
+  # `run_turn &` forks with a COPY of the loop variables set above ($msg,
+  # $SESS, $SLOT, $LOG, $IDF, $APPEND, …), so the next FIFO line may overwrite
+  # them while this turn keeps running against its own copies. KOTO_SESSION and
+  # KOTO_SHELL_SESSION are exported before the fork, so each turn's agent — and
+  # every bash subprocess it starts — lands in the tmux terminal belonging to
+  # ITS conversation, which is what keeps per-session VTs correct under
+  # concurrency.
+  run_turn() {
+    case "$PROVIDER" in
+      venice)
+        # Venice path: stateless API, so we maintain conversation history
+        # ourselves in /workspace/.cs/venice-history.json. /clear wipes it
+        # via the daemon's clearCmd. Streaming SSE deltas are written
+        # directly to the log in the same `[ts:N]\n<text>\n` format the
+        # tailer expects from the Claude path.
+        VENICE_MODEL="$MODEL"
+        [ -z "$VENICE_MODEL" ] && VENICE_MODEL="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+        # Per-session venice history: the default session keeps the historical
+        # filename, named sessions get their own file (wiped by per-session
+        # clear — see daemon clearSession).
+        VH_FILE="$D/venice-history.json"
+        [ "$SESS" != default ] && VH_FILE="$D/venice-history-$SESS.json"
+        MSG_B64=$(printf '%s' "$msg" | base64 -w 0)
+        SP_B64=""
+        [ -n "$APPEND" ] && SP_B64=$(printf '%s' "$APPEND" | base64 -w 0)
+        vrc=0
+        MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VENICE_MODEL" KOTO_VH_FILE="$VH_FILE" \
+          timeout -s KILL -k 10 "$TURN_TIMEOUT" \
+          node /sidecar/venice_stream.js >> "$LOG" 2>>"$LOG" || vrc=$?
+        ensure_log_nl "$LOG"
+        if [ "$vrc" = "124" ] || [ "$vrc" = "137" ]; then
+          printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$LOG"
+        fi
+        # Strict-ordering completion marker — the daemon's turn wait is per lane
+        # and keys off this line arriving on THIS lane's stream, so rapid sends
+        # serialize end-to-end within the lane rather than interleaving prompts
+        # with prior responses.
+        printf '[[turn_end]]\n' >> "$LOG"
+        ;;
+      *)
+        set -- claude -p --bare --dangerously-skip-permissions \
+          --output-format stream-json --include-partial-messages --verbose
+        # Session selection: a captured id resumes that exact conversation;
+        # no id + migration shim continues the pre-sessions thread once;
+        # otherwise this is the session's first turn and starts fresh.
+        if [ -s "$IDF" ]; then
+          set -- "$@" --resume "$(cat "$IDF")"
+        elif [ "$MIGRATE_CONTINUE" = 1 ]; then
+          set -- "$@" --continue
+        fi
+        [ -n "$APPEND" ] && set -- "$@" --append-system-prompt "$APPEND"
+        [ -z "$MODEL" ] && MODEL="${KOTO_DEFAULT_CLAUDE_MODEL:-}"
+        [ -n "$MODEL" ]  && set -- "$@" --model "$MODEL"
+        [ -n "$EFFORT" ] && set -- "$@" --effort "$EFFORT"
 
-      { printf '%s' "$msg" | timeout -s KILL -k 10 "$TURN_TIMEOUT" "$@" 2>>"$D/log"; echo $? >"$D/.turn_rc"; } \
-          | KOTO_SESSION_ID_FILE="$IDF" node /sidecar/stream_filter.js >> "$D/log" 2>&1 || true
-      ensure_log_nl
-      crc=$(cat "$D/.turn_rc" 2>/dev/null)
-      if [ "$crc" = "124" ] || [ "$crc" = "137" ]; then
-        printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$D/log"
-      fi
-      # Strict-ordering completion marker (see venice branch comment).
-      printf '[[turn_end]]\n' >> "$D/log"
-      ;;
-  esac
+        { printf '%s' "$msg" | timeout -s KILL -k 10 "$TURN_TIMEOUT" "$@" 2>>"$LOG"; echo $? >"$RC_FILE"; } \
+            | KOTO_SESSION_ID_FILE="$IDF" node /sidecar/stream_filter.js >> "$LOG" 2>&1 || true
+        ensure_log_nl "$LOG"
+        crc=$(cat "$RC_FILE" 2>/dev/null)
+        if [ "$crc" = "124" ] || [ "$crc" = "137" ]; then
+          printf '[[err]] turn exceeded %ss budget — killed\n' "$TURN_TIMEOUT" >> "$LOG"
+        fi
+        # Strict-ordering completion marker (see venice branch comment).
+        printf '[[turn_end]]\n' >> "$LOG"
+        ;;
+    esac
+  }
+
+  run_turn &
 done

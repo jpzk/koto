@@ -13,16 +13,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// The goal loop's reserved sessions (mirrors the daemon's constants in
-// daemon/sessions.go — they never appear in GroupInfo.sessions, so the name
-// list can't be learned over the wire).
+// The goal loop reserves the whole "goal-" namespace: each run's sessions are
+// named after its generated id (goal-<id>, goal-<id>-judge). Mirrors the
+// daemon's rule in daemon/sessions.go — the judge session never appears in
+// GroupInfo.sessions, so the name list can't be learned over the wire.
 func goalSession(s string) bool {
-	return s == "goal-work" || s == "goal-judge"
+	return strings.HasPrefix(s, "goal-")
+}
+
+// goalRunID is the display name of a goal session: the run id alone. The tree
+// puts a ◎ in front of it, so repeating "goal-" there would spend the narrow
+// name column on the half that never varies.
+func goalRunID(s string) string {
+	return strings.TrimPrefix(s, "goal-")
 }
 
 type goalItemT struct {
 	ID            string
 	Group         string
+	Name          string
 	Text          string
 	Criteria      string
 	Plan          bool
@@ -52,6 +61,7 @@ func goalFromMap(v any) goalItemT {
 	it := goalItemT{}
 	it.ID, _ = mp["id"].(string)
 	it.Group, _ = mp["group"].(string)
+	it.Name, _ = mp["name"].(string)
 	it.Text, _ = mp["text"].(string)
 	it.Criteria, _ = mp["criteria"].(string)
 	it.Plan, _ = mp["plan"].(bool)
@@ -87,10 +97,10 @@ func goalListCmd(sock, filter string) tea.Cmd {
 	}
 }
 
-func goalSetCmd(sock, group, text, criteria string, maxIter int, plan bool) tea.Cmd {
+func goalSetCmd(sock, group, name, text, criteria string, maxIter int, plan bool) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := daemonCall(sock, "goal_set", map[string]any{
-			"group": group, "text": text, "criteria": criteria,
+			"group": group, "name": name, "text": text, "criteria": criteria,
 			"max_iterations": maxIter, "plan": plan,
 		})
 		if err != nil {
@@ -132,13 +142,14 @@ var goalHelpLines = []string{
 	"skips the plan/approval phase and starts iterating immediately.",
 	"",
 	"example:",
-	"  /goal set max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
+	"  /goal set name=weather max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
 }
 
-// parseGoalSet splits `/goal set` args: [<group>] [max=N] [plan=no] <text> :: <criteria>.
+// parseGoalSet splits `/goal set` args:
+// [<group>] [name=x] [max=N] [plan=no] <text> :: <criteria>.
 // The first token is a group only when it names a group known to the TUI —
 // goal text is free text, so there is no syntactic marker like cron's.
-func (m *Model) parseGoalSet(rest string) (group, text, criteria string, maxIter int, plan bool, err error) {
+func (m *Model) parseGoalSet(rest string) (group, name, text, criteria string, maxIter int, plan bool, err error) {
 	plan = true
 	toks := strings.Fields(rest)
 	group = m.cur
@@ -148,10 +159,15 @@ prefix:
 	for i < len(toks) {
 		t := toks[i]
 		switch {
+		case strings.HasPrefix(t, "name="):
+			name = strings.TrimPrefix(t, "name=")
+			if name == "" {
+				return "", "", "", "", 0, false, fmt.Errorf("name= needs a value")
+			}
 		case strings.HasPrefix(t, "max="):
 			n, aerr := strconv.Atoi(strings.TrimPrefix(t, "max="))
 			if aerr != nil || n <= 0 {
-				return "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
+				return "", "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
 			}
 			maxIter = n
 		case t == "plan=no" || t == "plan=false":
@@ -175,13 +191,13 @@ prefix:
 	body := cutFields(rest, i)
 	goalText, crit, found := strings.Cut(body, " :: ")
 	if !found {
-		return "", "", "", 0, false, fmt.Errorf("missing ` :: ` between goal text and acceptance criteria")
+		return "", "", "", "", 0, false, fmt.Errorf("missing ` :: ` between goal text and acceptance criteria")
 	}
 	goalText, crit = strings.TrimSpace(goalText), strings.TrimSpace(crit)
 	if goalText == "" || crit == "" {
-		return "", "", "", 0, false, fmt.Errorf("goal text and criteria must both be non-empty")
+		return "", "", "", "", 0, false, fmt.Errorf("goal text and criteria must both be non-empty")
 	}
-	return group, goalText, crit, maxIter, plan, nil
+	return group, name, goalText, crit, maxIter, plan, nil
 }
 
 // handleGoalCmd routes `/goal ...`. Returns the tea.Cmd to dispatch, or nil
@@ -205,12 +221,12 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 	case "list":
 		return goalListCmd(m.sock, arg)
 	case "set":
-		group, text, criteria, maxIter, plan, err := m.parseGoalSet(arg)
+		group, name, text, criteria, maxIter, plan, err := m.parseGoalSet(arg)
 		if err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/goal set: " + err.Error()})
 			return nil
 		}
-		return goalSetCmd(m.sock, group, text, criteria, maxIter, plan)
+		return goalSetCmd(m.sock, group, name, text, criteria, maxIter, plan)
 	case "approve", "pause", "interrupt", "resume", "cancel":
 		group := arg
 		if group == "" {
@@ -265,5 +281,13 @@ func goalStatusLine(it goalItemT) string {
 	case "running":
 		extra = fmt.Sprintf(" %d/%d", it.Iteration, it.MaxIterations)
 	}
-	return fmt.Sprintf("  %s %-15s %-18s %s", it.ID, it.Group, it.Status+extra, truncRunes(it.Text, 48))
+	// The NAME leads, not the id: it is the run's session (goal-<name>), so
+	// it is what /session and the ctrl+t jump take, and what the tree shows.
+	// Records from before names existed fall back to the id, which is what
+	// their session is called too.
+	handle := it.Name
+	if handle == "" {
+		handle = it.ID
+	}
+	return fmt.Sprintf("  %-16s %-12s %-18s %s", handle, it.Group, it.Status+extra, truncRunes(it.Text, 44))
 }

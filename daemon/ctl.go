@@ -400,17 +400,37 @@ func ctlDispatch(owner string, line []byte) any {
 		emitLogfG("goal", owner, "info", "[%s] goal_verdict met=%t (%d-byte reasons)", owner, req.Met, len(r))
 		return baseResp{OK: true}
 
-	// Goal orchestration is main-only, like spawn/send: main can set and
-	// steer a peer's goal. There is deliberately NO goal_approve here — a
-	// plan-first goal waits for a HUMAN (gRPC GoalApprove), and main must
-	// not be able to approve the plans it set itself.
+	// Goal orchestration comes in two flavors, and the split is the whole
+	// authorization story:
+	//
+	//   SELF-targeted (any group, target forced to the caller): a group puts
+	//   ITSELF on autopilot. This escalates nothing — the group already runs
+	//   arbitrary code in its own VM, and a self-set goal is just a loop over
+	//   its own turns inside its own blast radius. It runs without a human,
+	//   which is the point: the coordinator session is meant to start work
+	//   autonomously.
+	//
+	//   PEER-targeted (main only): main sets a goal on another group. That is
+	//   one agent directing another, so the plan-first human gate stays —
+	//   there is deliberately no way for main to approve a plan it set on a
+	//   peer (goal_approve below refuses anything but self).
+	//
+	// Which SESSION inside the group called this is self-declared and
+	// therefore advisory (see the goals.go header): sessions share a uid, a
+	// workspace and this FIFO. "The coordinator starts goals" is a convention;
+	// the microVM is the boundary. The recursion brake is structural instead —
+	// one non-terminal goal per group, enforced in goalSet — so a goal's own
+	// worker cannot start another goal while it runs.
 	case "goal_set":
-		if !isMain {
-			return errResp("ctl: verb not allowed for non-main groups: goal_set")
-		}
 		var req goalSetReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
+		}
+		if !isMain {
+			req.Group = owner // self-targeted; peers are main's business
+		}
+		if req.Group == "" {
+			req.Group = owner
 		}
 		if req.Group == ctlMainGroup {
 			return errResp("ctl: cannot set a goal on main")
@@ -419,29 +439,50 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: invalid group name")
 		}
 		plan := req.Plan == nil || *req.Plan
-		it, err := goalSet(req.Group, req.Text, req.Criteria, req.MaxIterations, plan)
+		it, err := goalSet(req.Group, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		if err != nil {
+			return errResp(err.Error())
+		}
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
+
+	// goal_approve is SELF-ONLY, for both roles: a group may approve the plan
+	// of the goal it set on itself (that is how a coordinator starts
+	// plan-first work autonomously), and main may not approve a plan it set on
+	// a peer — the rule the original design was built around.
+	case "goal_approve":
+		var req goalGroupReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if req.Group != "" && req.Group != owner {
+			return errResp("ctl: goal_approve is self-only (a plan set on a peer needs a human)")
+		}
+		it, err := goalApprove(owner)
 		if err != nil {
 			return errResp(err.Error())
 		}
 		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "goal_status":
-		if !isMain {
-			return errResp("ctl: verb not allowed for non-main groups: goal_status")
-		}
 		var req goalListReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
 		}
+		if !isMain {
+			req.Group = owner // a peer sees its own goal, not the fleet's
+		}
 		return goalListResp{BaseResp: baseResp{OK: true}, Goals: goalList(req.Group)}
 
 	case "goal_pause", "goal_interrupt", "goal_resume", "goal_cancel":
-		if !isMain {
-			return errResp("ctl: verb not allowed for non-main groups: " + env.Cmd)
-		}
 		var req goalGroupReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
+		}
+		if !isMain {
+			req.Group = owner // steer your own goal; main steers anyone's
+		}
+		if req.Group == "" {
+			req.Group = owner
 		}
 		if !ctlGroupRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")

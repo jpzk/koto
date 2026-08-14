@@ -49,9 +49,14 @@ func setupNotifyRoot(t *testing.T, g string) {
 // the process-global ROOT into later tests' tempdirs, and races their
 // cleanup (logAppend O_CREATEs the file back mid-RemoveAll). The tests play
 // the tailer's role themselves via deliverNotify.
+// markTailed pretends every one of g's stream tailers is already running, so
+// ensureTail/ensureSlotTail start no real goroutine: a live tailer would
+// create the stream files and race the assertions about what the log contains.
 func markTailed(g string) {
 	subsLock.Lock()
-	tails[g] = true
+	for _, p := range logPaths(g) {
+		tails[p] = true
+	}
 	subsLock.Unlock()
 }
 

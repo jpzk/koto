@@ -269,7 +269,7 @@ func listGroups() map[string]GroupInfo {
 			Provider:  groupProviderName(g),
 			Model:     groupModelName(g),
 			Effort:    groupEffortName(g),
-			Stalled:   isStalled(g),
+			Stalled:   groupStalled(g),
 			Queued:    queueDepth(g),
 			Sessions:  append(listSessions(g), goalLiveSessions(g)...),
 			Jobs:      jobsSnapshot(g),
@@ -533,7 +533,6 @@ func clearCmd(req groupReq) baseResp {
 		}
 		return clearSession(req.Group, sess)
 	}
-	v := vol(req.Group)
 	// Session state lives inside workspace.img, which the host must not touch
 	// while (or whether) the VM runs — clear it in-guest via the agent (the
 	// .claude session dir, the per-session id pointers, and venice's
@@ -547,9 +546,12 @@ func clearCmd(req groupReq) baseResp {
 		return errResp("clear: " + err.Error())
 	}
 	clearSessionReg(req.Group)
-	logPath := filepath.Join(v, ".cs", "log")
-	if _, err := os.Stat(logPath); err == nil {
-		_ = os.WriteFile(logPath, nil, 0o644)
+	// Every stream: a group-wide clear means the whole transcript, and a slot
+	// file left behind would replay a cleared group's work on the next attach.
+	for _, p := range logPaths(req.Group) {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.WriteFile(p, nil, 0o644)
+		}
 	}
 	return baseResp{OK: true}
 }
@@ -561,7 +563,16 @@ func clearCmd(req groupReq) baseResp {
 // name from the registry. The guest's sessions/ dir is deliberately left in
 // place — its existence is what keeps entrypoint.sh's one-time `--continue`
 // migration shim from resurrecting a cleared default session.
-func clearSession(g, sess string) baseResp {
+// clearSessionContext drops one session's GUEST-side conversation state — the
+// pinned claude session id, its transcript file, and any venice history — so
+// the next turn in that session starts cold. It does not touch the host log or
+// the session registry.
+//
+// Split out of clearSession because the goal loop needs exactly this half: it
+// resets the worker's context before every iteration (fresh context is the
+// design), but the host-side transcript is the operator's only window onto a
+// session nobody is allowed to type into. See clearGoalSession.
+func clearSessionContext(g, sess string) baseResp {
 	if _, err := ensure(g, g == "main"); err != nil {
 		return errResp("clear: " + err.Error())
 	}
@@ -577,8 +588,23 @@ true`
 	if _, _, err := fcExec(g, script, 15*time.Second); err != nil {
 		return errResp("clear: " + err.Error())
 	}
-	if err := filterLogSession(filepath.Join(vol(g), ".cs", "log"), sess); err != nil {
-		return errResp("clear: " + err.Error())
+	return baseResp{OK: true}
+}
+
+// clearSession is the operator-facing /clear for one session: forget the
+// conversation AND its transcript, and drop the session from the registry.
+func clearSession(g, sess string) baseResp {
+	if r := clearSessionContext(g, sess); !r.OK {
+		return r
+	}
+	// A session's turns may have run in any slot, so every stream is filtered.
+	for _, p := range logPaths(g) {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if err := filterLogSession(p, sess); err != nil {
+			return errResp("clear: " + err.Error())
+		}
 	}
 	removeSession(g, sess)
 	return baseResp{OK: true}

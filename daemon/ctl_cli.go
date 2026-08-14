@@ -90,7 +90,7 @@ streams
   job-logs [-tail N] <group> <id>          one job's metadata + output tail
   job-tail [-tail N] <group> <id>          follow a job's output live (^C stops)
   sched list [group] | add <group> <cron...> <msg...> | del|on|off|run <id>
-  goal set [-max N] [-plan=no] <group> <goal> :: <criteria>
+  goal set [-max N] [-plan=no] [-name x] <group> <goal> :: <criteria>
                                            set a goal (plan-first by default:
                                            one planning turn, then waits for
                                            "goal approve" before executing)
@@ -917,8 +917,9 @@ func ctlGoal(args []string) {
 		fs := flag.NewFlagSet("goal set", flag.ExitOnError)
 		max := fs.Int("max", 0, "max iterations (0 = default)")
 		plan := fs.String("plan", "yes", "plan-first (yes|no)")
+		name := fs.String("name", "", "short run name (also its session name); default: slugged from the goal")
 		fs.Parse(rest)
-		const usage = "usage: koto ctl goal set [-max N] [-plan=no] <group> <goal> :: <criteria>"
+		const usage = "usage: koto ctl goal set [-max N] [-plan=no] [-name x] <group> <goal> :: <criteria>"
 		words := fs.Args()
 		if len(words) < 2 {
 			ctlFatal(2, usage)
@@ -936,6 +937,7 @@ func ctlGoal(args []string) {
 		}
 		req := &pb.GoalSetReq{
 			Group:         group,
+			Name:          *name,
 			Text:          strings.Join(words[:sep], " "),
 			Criteria:      strings.Join(words[sep+1:], " "),
 			MaxIterations: int32(*max),

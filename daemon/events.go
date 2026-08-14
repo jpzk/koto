@@ -90,7 +90,7 @@ func emit(g string, ev Event) {
 		ev.Ts = float64(time.Now().UnixNano()) / 1e9
 	}
 	if ev.Event == "turn_end" {
-		notifyTurnDone(g)
+		notifyTurnDone(g, ev.Session)
 	}
 	ev = sanitizeEvent(ev)
 	pbev := toPBEvent(ev)

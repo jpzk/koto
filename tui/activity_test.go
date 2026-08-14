@@ -356,11 +356,11 @@ func TestBackgroundActivityUsesSlowTick(t *testing.T) {
 	}
 
 	// The FOCUSED group streaming does demand it.
-	m.streamBuf = map[string]string{m.cur: "partial"}
+	m.streamBuf = map[string]string{m.curKey(): "partial"}
 	if !m.needsFastTicks() {
 		t.Error("the focused group's own stream needs the fast cadence")
 	}
-	delete(m.streamBuf, m.cur)
+	delete(m.streamBuf, m.curKey())
 
 	// So does the shell pane's blinking cursor.
 	if m.needsFastTicks() {

@@ -16,6 +16,12 @@ package main
 //           /clear truncation, proxy logAppend, `>>>` markers all unchanged).
 //     9002  ctl plane: JSON lines → ctlDispatch(g, line), response written
 //           back on the same connection (agent routes it to .cs/ctl.out).
+//     9004  slot log streams: one connection per concurrency slot (queue.go),
+//           opening with a header line "<slot>\n" and then behaving exactly
+//           like 9001. The header multiplexes because the slot count is a
+//           constant the guest and host share, and ten more listeners would
+//           be ten more of everything for no gain. The daemon appends each
+//           connection's bytes to HOST .cs/log.<slot>.
 //
 //   host → guest  (daemon connects to "<uds>", sends "CONNECT 10000\n")
 //     10000 agent RPC — ops:
@@ -50,6 +56,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -60,6 +67,8 @@ const (
 	fcPortProxy = 9000
 	fcPortLog   = 9001
 	fcPortCtl   = 9002
+	// fcPortLogSlot carries the per-slot turn streams — see the port map above.
+	fcPortLogSlot = 9004
 	// fcPortNet carries L3 ethernet frames (Qemu-framed) to the group's gVisor
 	// gateway — attached only for internet=full (see fcnet.go). A `none` group
 	// never opens this listener, so no route exists.
@@ -555,6 +564,13 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.listeners = append(vm.listeners, lnLog)
 	go fcAcceptLoop(lnLog, func(c net.Conn) { fcLogSink(g, c) })
 
+	lnLogSlot, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortLogSlot))
+	if err != nil {
+		return fail(err)
+	}
+	vm.listeners = append(vm.listeners, lnLogSlot)
+	go fcAcceptLoop(lnLogSlot, func(c net.Conn) { fcSlotLogSink(g, c) })
+
 	lnCtl, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortCtl))
 	if err != nil {
 		return fail(err)
@@ -679,6 +695,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		// queue worker block for the full turnWaitTimeout — otherwise a crash or
 		// /restart mid-turn hangs every message queued behind it (see queue.go).
 		abortInflightTurn(g)
+		// Any slot quarantined by a stalled turn is safe to free now: its
+		// guest-side writer died with the VM — and the wedge the stall flags
+		// described died with it too. Without this, a session that stalled
+		// and never runs another turn (a cancelled goal's worker, a one-off
+		// session) leaves its flag set forever, and groupStalled keeps the
+		// whole group marked STALLED across restarts.
+		releaseGroupQuarantine(g)
+		clearGroupStalls(g)
 	}()
 
 	// Wait for the guest agent, then push init (ports + env). The
@@ -839,14 +863,40 @@ func fcSpliceToProxy(c net.Conn, proxyPort int) {
 // (tryFlushNotify, logtail.go) can check the file tail and append atomically
 // against this stream — an unsynchronized marker append could land mid-line
 // and stop parsing as a marker.
-func fcLogSink(g string, c net.Conn) {
+func fcLogSink(g string, c net.Conn) { fcStreamLogSink(g, groupLogPath(g), c) }
+
+// fcSlotLogSink reads the connection's one-line slot header and then streams
+// that slot's bytes into its host file. An unparseable or out-of-range header
+// drops the connection rather than guessing: writing a turn's frames into the
+// wrong stream would misattribute the turn, and the guest redials.
+func fcSlotLogSink(g string, c net.Conn) {
+	br := bufio.NewReader(c)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		c.Close()
+		return
+	}
+	slot, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || slot < 0 || slot >= groupSlots {
+		emitLogfG("fc", g, "warn", "[%s] slot log header %q rejected", g, strings.TrimSpace(line))
+		c.Close()
+		return
+	}
+	ensureSlotTail(g, slot)
+	fcStreamLogSinkReader(g, slotLogPath(g, slot), br, c)
+}
+
+func fcStreamLogSink(g, p string, c net.Conn) {
+	fcStreamLogSinkReader(g, p, c, c)
+}
+
+func fcStreamLogSinkReader(g, p string, r io.Reader, c net.Conn) {
 	defer c.Close()
-	p := filepath.Join(vol(g), ".cs", "log")
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	mu := logWriteLock(g)
+	mu := logWriteLock(p)
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := c.Read(buf)
+		n, err := r.Read(buf)
 		if n > 0 {
 			mu.Lock()
 			werr := logSinkAppend(p, buf[:n])
@@ -997,11 +1047,15 @@ func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentR
 // newer than the last synced watermark rides along in the envelope and the
 // agent untars it into the guest workspace before the FIFO write. The
 // watermark is a host file so a daemon restart doesn't re-push history.
-func fcSendMsg(g, session, b64msg, systemPrompt string, cfgJSON []byte) error {
+func fcSendMsg(g, session string, slot int, b64msg, systemPrompt string, cfgJSON []byte) error {
 	req := map[string]any{
 		"op":     "msg",
 		"b64":    b64msg,
 		"sp_b64": base64.StdEncoding.EncodeToString([]byte(systemPrompt)),
+		// The slot tells the guest which log stream this turn writes to, and
+		// is the reason concurrent turns stay parseable. Always sent: the
+		// default session runs in a slot like everything else.
+		"slot": slot,
 	}
 	// Named session: the guest agent prefixes the FIFO line with the name so
 	// entrypoint.sh pins the turn to that claude conversation. Absent for the

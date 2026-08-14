@@ -143,11 +143,17 @@ func authHeaders() (map[string]string, error) {
 	}, nil
 }
 
+// logAppend appends to the GROUP stream — what every host-side writer (proxy
+// error lines, notifications) means when it says "the group's log". Turn
+// frames live in the per-slot streams instead (logtail.go).
 func logAppend(group string, data []byte) {
 	if group == "" {
 		return
 	}
-	p := filepath.Join(ROOT, group, ".cs", "log")
+	streamLogAppend(groupLogPath(group), data)
+}
+
+func streamLogAppend(p string, data []byte) {
 	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return

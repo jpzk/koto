@@ -205,7 +205,7 @@ func TestEscTogglesTree(t *testing.T) {
 // meaning and does NOT move focus (tab is the way to the tree mid-turn).
 func TestEscInterruptsWhileBusy(t *testing.T) {
 	m := focusModel(t)
-	m.busy = map[string]bool{"main": true}
+	m.busy = map[string]bool{turnKey("main", ""): true}
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m = nm.(Model)
 	if cmd == nil {

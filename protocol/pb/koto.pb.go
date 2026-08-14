@@ -2307,6 +2307,10 @@ type GoalItem struct {
 	CreatedAt     float64                `protobuf:"fixed64,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`        // unix seconds (ScheduleItem convention)
 	UpdatedAt     float64                `protobuf:"fixed64,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	CompletedAt   float64                `protobuf:"fixed64,14,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	// Human-readable run name. Also the goal's SESSION name in the group
+	// ("goal-<name>"), so it is what the tree row, /session and the ctl plane
+	// all show. Defaults to a slug of `text` when the caller supplies none.
+	Name          string `protobuf:"bytes,15,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2439,6 +2443,13 @@ func (x *GoalItem) GetCompletedAt() float64 {
 	return 0
 }
 
+func (x *GoalItem) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 type GoalSetReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
@@ -2447,7 +2458,10 @@ type GoalSetReq struct {
 	MaxIterations int32                  `protobuf:"varint,4,opt,name=max_iterations,json=maxIterations,proto3" json:"max_iterations,omitempty"` // 0 => default (20); clamped to [1,200]
 	// Plan-first: one planning turn, then wait for human approval before any
 	// execution iteration. Absent = true (plan-first is the default).
-	Plan          *bool `protobuf:"varint,5,opt,name=plan,proto3,oneof" json:"plan,omitempty"`
+	Plan *bool `protobuf:"varint,5,opt,name=plan,proto3,oneof" json:"plan,omitempty"`
+	// Run name (see GoalItem.name). Empty => slugged from `text`. Must be free
+	// as a session name in the group.
+	Name          string `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2515,6 +2529,13 @@ func (x *GoalSetReq) GetPlan() bool {
 		return *x.Plan
 	}
 	return false
+}
+
+func (x *GoalSetReq) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 type GoalListReq struct {
@@ -3999,7 +4020,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\":\n" +
 	"\x0eSchedToggleReq\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
-	"\aenabled\x18\x02 \x01(\bR\aenabled\"\x99\x03\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\"\xad\x03\n" +
 	"\bGoalItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x12\n" +
@@ -4017,14 +4038,16 @@ const file_koto_proto_rawDesc = "" +
 	"created_at\x18\f \x01(\x01R\tcreatedAt\x12\x1d\n" +
 	"\n" +
 	"updated_at\x18\r \x01(\x01R\tupdatedAt\x12!\n" +
-	"\fcompleted_at\x18\x0e \x01(\x01R\vcompletedAt\"\x9b\x01\n" +
+	"\fcompleted_at\x18\x0e \x01(\x01R\vcompletedAt\x12\x12\n" +
+	"\x04name\x18\x0f \x01(\tR\x04name\"\xaf\x01\n" +
 	"\n" +
 	"GoalSetReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1a\n" +
 	"\bcriteria\x18\x03 \x01(\tR\bcriteria\x12%\n" +
 	"\x0emax_iterations\x18\x04 \x01(\x05R\rmaxIterations\x12\x17\n" +
-	"\x04plan\x18\x05 \x01(\bH\x00R\x04plan\x88\x01\x01B\a\n" +
+	"\x04plan\x18\x05 \x01(\bH\x00R\x04plan\x88\x01\x01\x12\x12\n" +
+	"\x04name\x18\x06 \x01(\tR\x04nameB\a\n" +
 	"\x05_plan\"#\n" +
 	"\vGoalListReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"$\n" +

@@ -49,10 +49,19 @@ import (
 )
 
 const (
-	hostCID       = 2
-	portProxy     = 9000
-	portLog       = 9001
-	portCtl       = 9002
+	hostCID   = 2
+	portProxy = 9000
+	portLog   = 9001
+	portCtl   = 9002
+	// portLogSlot carries the per-slot turn streams. A group runs up to
+	// groupSlots turns at once and the marker grammar is a block state
+	// machine, so each concurrent turn needs its own stream or their frames
+	// interleave mid-block. One connection per slot, each opening with a
+	// "<slot>\n" header line.
+	portLogSlot = 9004
+	// guestSlots must equal the daemon's groupSlots (daemon/queue.go): the
+	// daemon picks the slot, this side owns the FIFO it names.
+	guestSlots    = 10
 	portAgent     = 10000
 	guestProxyTCP = 18888
 
@@ -86,6 +95,9 @@ func main() {
 	loopbackUp()
 	go proxyBridge()
 	go logForward()
+	for i := 0; i < guestSlots; i++ {
+		go logForwardSlot(i)
+	}
 	go ctlForward()
 	agentServer() // blocks
 }
@@ -171,14 +183,18 @@ func mountWorkspace() error {
 	return nil
 }
 
-// setupCS creates the .cs control files. `log` and `in` and `ctl` are FIFOs
-// here (consume-once transport; durable copies live host-side). A stale
-// regular `log` file — e.g. a workspace image migrated from the podman
-// runtime — is replaced.
+// setupCS creates the .cs control files. `log`, the per-slot `log.<n>`, `in`
+// and `ctl` are FIFOs here (consume-once transport; durable copies live
+// host-side). A stale regular `log` file — e.g. a workspace image migrated
+// from the podman runtime — is replaced.
 func setupCS() {
 	_ = os.MkdirAll(csDir, 0o755)
 	_ = os.Chown(csDir, workerUID, workerGID)
-	for _, name := range []string{"in", "log", "ctl"} {
+	names := []string{"in", "log", "ctl"}
+	for i := 0; i < guestSlots; i++ {
+		names = append(names, fmt.Sprintf("log.%d", i))
+	}
+	for _, name := range names {
 		p := filepath.Join(csDir, name)
 		if st, err := os.Stat(p); err == nil && st.Mode()&os.ModeNamedPipe == 0 {
 			_ = os.Remove(p)
@@ -405,21 +421,40 @@ func spliceRW(a io.ReadWriteCloser, b io.ReadWriteCloser) {
 	<-done
 }
 
-// logForward pumps the log FIFO to host vsock 9001. O_RDWR keeps a writer
-// reference so entrypoint's `>>` appends never block on a missing reader and
-// the FIFO never EOFs. On a dropped vsock conn the current chunk is carried
-// over and resent after redial.
-func logForward() {
-	fd, err := unix.Open(filepath.Join(csDir, "log"), unix.O_RDWR, 0)
+// logForward pumps the group log FIFO to host vsock 9001.
+func logForward() { logForwardStream("log", portLog, "") }
+
+// logForwardSlot pumps one slot's turn stream to host vsock 9004, announcing
+// which slot it is so the daemon can file the bytes. Every slot's forwarder
+// runs from boot: a FIFO with no data blocks in read(2) and costs a parked
+// goroutine, which is cheaper than discovering FIFOs at runtime.
+func logForwardSlot(slot int) {
+	name := fmt.Sprintf("log.%d", slot)
+	logForwardStream(name, portLogSlot, fmt.Sprintf("%d\n", slot))
+}
+
+// logForwardStream pumps one log FIFO to its host vsock port, sending `header`
+// (when non-empty) on every fresh connection so a multiplexed port knows which
+// stream this is. O_RDWR keeps a writer reference so entrypoint's `>>` appends
+// never block on a missing reader and the FIFO never EOFs. On a dropped vsock
+// conn the current chunk is carried over and resent after redial.
+func logForwardStream(name string, port uint32, header string) {
+	fd, err := unix.Open(filepath.Join(csDir, name), unix.O_RDWR, 0)
 	if err != nil {
-		logf("log fifo open: %v", err)
+		logf("%s fifo open: %v", name, err)
 		return
 	}
-	fifo := os.NewFile(uintptr(fd), "log-fifo")
+	fifo := os.NewFile(uintptr(fd), name+"-fifo")
 	buf := make([]byte, 64*1024)
 	var pending []byte
 	for {
-		conn := dialRetry(portLog)
+		conn := dialRetry(port)
+		if header != "" {
+			if _, err := conn.Write([]byte(header)); err != nil {
+				conn.Close()
+				continue
+			}
+		}
 		for {
 			if len(pending) > 0 {
 				if _, err := conn.Write(pending); err != nil {
@@ -512,6 +547,7 @@ type agentReq struct {
 	Root          bool              `json:"root"`    // true → writable-persistent root overlay + passwordless sudo for node (config root=yes)
 	Group         string            `json:"group"`   // init: owning group name → hostname koto-vm-<group>
 	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell); msg: chat session name ("" = default)
+	Slot          int               `json:"slot"`    // msg: concurrency slot → which log.<n> stream this turn writes to
 	Cols          uint32            `json:"cols"`    // shell_attach: initial pty width
 	Rows          uint32            `json:"rows"`    // shell_attach: initial pty height
 }
@@ -804,13 +840,26 @@ func entrypointEnviron(env map[string]string) []string {
 
 // ---- msg: one turn -----------------------------------------------------------
 
+// msgMu serializes the delivery half of handleMsg. Two turns can now be in
+// flight in one group (the chat lane and the goal lane, see daemon/queue.go),
+// and the agent server handles each RPC in its own goroutine, so without this
+// two deliveries interleave on the shared `in` FIFO handle — a base64 message
+// is routinely larger than PIPE_BUF, so the atomicity a short write would have
+// given us does not apply, and both lines arrive spliced and undecodable.
+var msgMu sync.Mutex
+
 func handleMsg(c *vconn, req *agentReq) {
 	sp, err := base64.StdEncoding.DecodeString(req.SPB64)
 	if err != nil {
 		replyErr(c, fmt.Errorf("sp_b64: %w", err))
 		return
 	}
-	writeWorkerFile(filepath.Join(csDir, "system-prompt.md"), sp)
+	// The system prompt is PER SESSION on disk: it is composed per turn, and
+	// with concurrent turns a single shared file lets the later delivery
+	// overwrite a prompt the earlier turn has not read yet — that turn would
+	// then run under the other conversation's prompt. entrypoint.sh reads the
+	// per-session file (falling back to the legacy path).
+	writeWorkerFile(filepath.Join(csDir, "system-prompt-"+sessionFileName(req.Session)+".md"), sp)
 	if req.CfgB64 != "" {
 		if cfg, err := base64.StdEncoding.DecodeString(req.CfgB64); err == nil {
 			writeWorkerFile(filepath.Join(csDir, "config.json"), cfg)
@@ -831,13 +880,20 @@ func handleMsg(c *vconn, req *agentReq) {
 		replyErr(c, fmt.Errorf("in fifo unavailable"))
 		return
 	}
+	msgMu.Lock()
+	defer msgMu.Unlock()
 	// Named chat session: prefix the FIFO line with the session name (one
 	// space-delimited token; the daemon validated the charset) so
 	// entrypoint.sh pins the turn to that claude conversation. The default
 	// session stays the bare-b64 line for compat with older entrypoints.
+	// FIFO line framing: "<session> <slot> <b64>". The slot names the log
+	// stream this turn writes to — with concurrent turns the guest cannot
+	// derive it, since it is the daemon that allocates them. A session is
+	// always present on this path; the bare-b64 form remains only for
+	// pre-session callers.
 	line := req.B64
-	if req.Session != "" {
-		line = req.Session + " " + req.B64
+	if req.Session != "" || req.Slot > 0 {
+		line = fmt.Sprintf("%s %d %s", sessionFileName(req.Session), req.Slot, req.B64)
 	}
 	if _, err := inFIFO.Write([]byte(line + "\n")); err != nil {
 		replyErr(c, err)
@@ -846,9 +902,28 @@ func handleMsg(c *vconn, req *agentReq) {
 	reply(c, map[string]any{"ok": true})
 }
 
+// writeWorkerFile writes atomically (tmp + rename) so a reader in the guest
+// never observes the truncated middle of a rewrite — reachable now that two
+// turns are delivered concurrently and both rewrite these files.
 func writeWorkerFile(path string, data []byte) {
-	_ = os.WriteFile(path, data, 0o644)
-	_ = os.Chown(path, workerUID, workerGID)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	_ = os.Chown(tmp, workerUID, workerGID)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
+// sessionFileName is the guest-side filename token for a session: the daemon's
+// "" default becomes "default", matching entrypoint.sh's own $SESS and the
+// sessions/<name>.id convention.
+func sessionFileName(sess string) string {
+	if sess == "" {
+		return "default"
+	}
+	return sess
 }
 
 // ---- exec / exec_stream --------------------------------------------------------

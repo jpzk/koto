@@ -1,35 +1,71 @@
 package main
 
-// queue.go — per-group send queue.
+// queue.go — per-session send queues and the per-group slot pool.
 //
-// Each group has one bounded FIFO channel drained by a single worker
-// goroutine. The worker is the *only* caller of sendNow, so it is the
-// serialization point that guarantees one turn in flight per group, in
-// arrival order. It replaces two earlier mechanisms:
+// A group used to run exactly ONE turn at a time. That made the group, not the
+// session, the unit of contention: a goal iteration grinding for twenty
+// minutes locked the operator out of a group whose goal session they were
+// never allowed to type into anyway. Now:
 //
-//   - the per-group sendLock mutex, which gave single-flight but, being a
-//     sync.Mutex, made no ordering promise — concurrent senders (two TUIs, a
-//     scheduled fire racing a manual send) could be delivered out of order
-//     into a --continue conversation thread;
-//   - the ad-hoc `go send()` goroutines on the ctl path, which were unbounded
-//     (a runaway main could pile up goroutines all blocked on the same group).
+//   - Each SESSION has its own bounded FIFO channel drained by a single worker
+//     goroutine. Within a conversation, turns stay strictly ordered and
+//     single-flight — a claude conversation is sequential, and two turns of one
+//     session at once would interleave into the same --resume thread. Between
+//     conversations there is no ordering relationship and no head-of-line
+//     blocking: a busy session never delays another one's queue.
+//   - Concurrency is capped per GROUP by a pool of `groupSlots` slots. A turn
+//     acquires a slot before delivery and releases it when the turn retires, so
+//     at most that many turns are in flight in one microVM regardless of how
+//     many sessions are waiting. The cap exists because the guest is a small VM
+//     (2 vCPU by default) running a full agent per turn, and because every
+//     concurrent turn needs its own log stream (below).
 //
-// All three producers — socket dispatch, the ctl plane, and the scheduler —
-// enqueue and return immediately; none blocks behind another group's turn.
-// Different groups still run concurrently (one worker each). Overflow is
-// rejected (backpressure) so a producer cannot OOM the daemon.
+// A SLOT is also the transport lane. The log marker grammar is a block state
+// machine ([[think_begin]]…[[think_end]], tool_out, and the sticky [[session]]
+// attribution), so two turns writing one stream interleave mid-block with no
+// way to reassemble them. Each slot therefore owns a log FIFO in the guest, its
+// own vsock connection, and its own host-side file + tailer + parser — which is
+// exactly the old "one turn per group" world, replicated `groupSlots` times.
+// Everything that used to be keyed per group and assumed single-flight is keyed
+// per (group, slot): the completion channel (send.go turnDoneCh), the stall
+// flag, and the log path (logtail.go slotLogPath).
 //
-// Workers are never torn down: a destroyed-then-respawned group reuses its
-// queue, and a destroyed-and-never-respawned group leaves one idle goroutine
-// blocked on an empty channel (a few KB, bounded by ctlMaxSpawn). Deliberately
-// not reclaimed — racey teardown (close vs. concurrent enqueue) isn't worth it.
+// Slots are assigned per TURN, not per session: a session's frames may land in
+// different slot files across turns, which is harmless because attribution
+// rides in the [[session]] marker at the head of each turn and History merges
+// every stream on ts.
+//
+// The workspace is NOT partitioned. Concurrent turns can edit and commit the
+// same files; single-flight used to prevent that, and nothing replaces it.
+//
+// Producers — socket dispatch, the ctl plane, the scheduler, the goal driver —
+// enqueue and return immediately. Overflow is rejected (backpressure) so a
+// producer cannot OOM the daemon. Workers are never torn down: a
+// destroyed-then-respawned group reuses its queues, and an idle worker is a
+// goroutine blocked on an empty channel (a few KB).
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 )
 
 const sendQueueDepth = 64
+
+// groupSlots is the number of turns one group may run at once. Fixed rather
+// than configurable: it bounds guest CPU/RAM contention, the number of log
+// streams the transport has to carry, and the host-side tailers — all three
+// have to agree, so one constant owns the decision. Slot 0 behaves exactly
+// like the old single-flight group.
+const groupSlots = 10
+
+// slotKey is the map key for per-(group, slot) state.
+func slotKey(g string, slot int) string { return fmt.Sprintf("%s\x00%d", g, slot) }
+
+// sessKey is the map key for per-(group, session) state. Session names are
+// validated (no NUL), so the join is unambiguous.
+func sessKey(g, session string) string { return g + "\x00" + session }
 
 type sendJob struct {
 	session string // "" = the group's default session
@@ -38,9 +74,109 @@ type sendJob struct {
 	done    chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
+// ---- slot pool --------------------------------------------------------------
+
+var (
+	slotMu    sync.Mutex
+	slotCond  = sync.NewCond(&slotMu)
+	slotBusy  = map[string]bool{} // slotKey → in use
+	slotOwner = map[string]string{}
+	// slotQuarantined marks slots whose turn STALLED: the daemon stopped
+	// waiting, but the guest side may still be alive and writing into that
+	// slot's log FIFO. Releasing such a slot back into the pool would hand a
+	// new turn a stream that still has a writer — two turns interleaving on
+	// one stream is the exact corruption the slots exist to prevent. A
+	// quarantined slot stays busy until the VM process is known dead
+	// (releaseGroupQuarantine, called from the VM-exit reaper and after a
+	// successful self-heal restart).
+	slotQuarantined = map[string]bool{}
+)
+
+// acquireSlot blocks until one of g's slots is free and returns its index. The
+// LOWEST free index is chosen so a group that never runs concurrent turns only
+// ever touches slot 0 — its log stream, tailer and guest FIFO are the only ones
+// that ever come alive, and the other nine cost nothing.
+func acquireSlot(g, session string) int {
+	slotMu.Lock()
+	defer slotMu.Unlock()
+	for {
+		for i := 0; i < groupSlots; i++ {
+			k := slotKey(g, i)
+			if !slotBusy[k] {
+				slotBusy[k] = true
+				slotOwner[k] = session
+				return i
+			}
+		}
+		slotCond.Wait()
+	}
+}
+
+func releaseSlot(g string, slot int) {
+	slotMu.Lock()
+	k := slotKey(g, slot)
+	// A quarantined slot does not free on release: its guest writer may still
+	// be alive (see slotQuarantined). Enforced here, in the pool, so the
+	// invariant holds regardless of caller discipline — sendNow's deferred
+	// release runs on every exit path, including the stall one that
+	// quarantined the slot a moment earlier.
+	if !slotQuarantined[k] {
+		delete(slotBusy, k)
+		delete(slotOwner, k)
+		slotCond.Broadcast()
+	}
+	slotMu.Unlock()
+}
+
+// quarantineSlot takes a stalled turn's slot out of circulation WITHOUT
+// freeing it — see slotQuarantined. Called instead of releaseSlot on the
+// stall path.
+func quarantineSlot(g string, slot int) {
+	slotMu.Lock()
+	slotQuarantined[slotKey(g, slot)] = true
+	slotMu.Unlock()
+}
+
+// releaseGroupQuarantine frees every quarantined slot of g. Callers must know
+// the guest has no surviving writers — the VM process exited, or a restart
+// replaced it.
+func releaseGroupQuarantine(g string) {
+	slotMu.Lock()
+	freed := false
+	for i := 0; i < groupSlots; i++ {
+		k := slotKey(g, i)
+		if slotQuarantined[k] {
+			delete(slotQuarantined, k)
+			delete(slotBusy, k)
+			delete(slotOwner, k)
+			freed = true
+		}
+	}
+	if freed {
+		slotCond.Broadcast()
+	}
+	slotMu.Unlock()
+}
+
+// activeSlots reports how many of g's slots are currently running a turn.
+func activeSlots(g string) int {
+	slotMu.Lock()
+	defer slotMu.Unlock()
+	n := 0
+	for i := 0; i < groupSlots; i++ {
+		if slotBusy[slotKey(g, i)] {
+			n++
+		}
+	}
+	return n
+}
+
+// ---- per-session queues ------------------------------------------------------
+
 var (
 	queuesMu sync.Mutex
-	queues   = map[string]chan sendJob{}
+	// Keyed by sessKey(group, session) — one worker per conversation.
+	queues = map[string]chan sendJob{}
 	// noticePending marks groups with a boot notice sitting undelivered in
 	// their queue; noticeInFlight marks a notice currently being delivered.
 	// Together they back bootNoticeActive — the delivery-layer guard on boot
@@ -53,22 +189,47 @@ var (
 	// recovery it had already done).
 	noticePending  = map[string]bool{}
 	noticeInFlight = map[string]bool{}
-	// inFlightSess records the session of the turn each worker is currently
-	// running (absent = group idle). Consumers: goalInterrupt, which must
-	// know whether the running turn is the goal's own before signaling the
-	// agent process — the goal mailbox windows open before enqueue, so they
-	// also span time the goal turn sits queued behind operator chat.
-	inFlightSess = map[string]string{}
+	// inFlightSess marks the sessions whose turn is currently running, keyed
+	// by sessKey. Consumers: goalInterrupt, which must know whether the goal's
+	// own turn is actually running before signaling its worker — the goal
+	// mailbox windows open before enqueue, so they also span time the goal
+	// turn sits queued.
+	inFlightSess = map[string]bool{}
 )
 
-// inFlightSession returns the session of g's currently running turn, or
-// ok=false when no turn is in flight ("" is the default session, so presence
-// needs its own bool).
-func inFlightSession(g string) (string, bool) {
+// sessionBusy reports whether g's given session has a turn in flight.
+func sessionBusy(g, session string) bool {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
-	s, ok := inFlightSess[g]
-	return s, ok
+	return inFlightSess[sessKey(g, session)]
+}
+
+// inFlightSessions lists the sessions of g's currently running turns. Used by
+// the interrupt paths, which signal a named conversation's worker rather than
+// every agent process in the VM.
+func inFlightSessions(g string) []string {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	var out []string
+	for k, busy := range inFlightSess {
+		if !busy {
+			continue
+		}
+		gg, sess, ok := splitSessKey(k)
+		if ok && gg == g {
+			out = append(out, sess)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func splitSessKey(k string) (g, session string, ok bool) {
+	i := strings.IndexByte(k, 0)
+	if i < 0 {
+		return "", "", false
+	}
+	return k[:i], k[i+1:], true
 }
 
 // enqueueSend appends msg to g's queue for the given session ("" = default),
@@ -77,9 +238,9 @@ func inFlightSession(g string) (string, bool) {
 // if the queue is full. Fire-and-forget callers (ctl, scheduler) ignore the
 // returned channel; send() waits on it.
 //
-// Sessions share the group's single queue on purpose: one turn in flight per
-// group is the invariant sendNow depends on (shared log file, shared VM), so
-// sessions interleave rather than run concurrently.
+// Each session gets its own queue and worker, so conversations proceed
+// independently; the per-group slot pool is what bounds how many of them run
+// at once.
 //
 // The non-blocking channel send happens under queuesMu so it can never race a
 // future teardown; it never blocks because the channel is buffered and we fall
@@ -113,11 +274,12 @@ func enqueue(g string, job sendJob) (<-chan error, error) {
 	job.done = make(chan error, 1)
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
-	q, ok := queues[g]
+	k := sessKey(g, job.session)
+	q, ok := queues[k]
 	if !ok {
 		q = make(chan sendJob, sendQueueDepth)
-		queues[g] = q
-		go sendWorker(g, q)
+		queues[k] = q
+		go sendWorker(g, job.session, q)
 	}
 	if job.notice && noticePending[g] {
 		// Coalesced: the pending notice already covers "this VM booted".
@@ -149,21 +311,36 @@ func runTurn(g, session, msg string) error {
 }
 
 // queueDepth reports how many messages are buffered (enqueued, not yet
-// started) for g. The in-flight turn the worker is currently running is not
-// in the channel, so it isn't counted — this is the waiting backlog. Returns 0
+// started) for g across all of its sessions. In-flight turns are not in the
+// channels, so they aren't counted — this is the waiting backlog. Returns 0
 // for a group that has never been enqueued (no queue yet).
 func queueDepth(g string) int {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
-	return len(queues[g])
+	n := 0
+	for k, q := range queues {
+		if gg, _, ok := splitSessKey(k); ok && gg == g {
+			n += len(q)
+		}
+	}
+	return n
 }
 
-// sendWorker drains one group's queue, running each turn to completion before
-// starting the next. Single instance per group → the serialization invariant
-// sendNow depends on. Notice jobs flip pending→inFlight for the duration of
-// their turn (one lock acquisition, so bootNoticeActive never observes the
-// gap between the two).
-func sendWorker(g string, q chan sendJob) {
+// sessionDepth is queueDepth for one conversation.
+func sessionDepth(g, session string) int {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	return len(queues[sessKey(g, session)])
+}
+
+// sendWorker drains one SESSION's queue, running each of its turns to
+// completion before starting the next. One instance per (group, session) →
+// order and single-flight within a conversation. How many workers may be
+// mid-turn at once is the slot pool's business, not this loop's: sendNow
+// blocks on acquireSlot. Notice jobs flip pending→inFlight for the duration of
+// their turn (one lock acquisition, so bootNoticeActive never observes the gap
+// between the two).
+func sendWorker(g, session string, q chan sendJob) {
 	for job := range q {
 		// Reserved-session (goal) turns are re-checked at delivery: the goal
 		// may have been paused/interrupted/cancelled while this turn sat
@@ -173,7 +350,7 @@ func sendWorker(g string, q chan sendJob) {
 			continue
 		}
 		queuesMu.Lock()
-		inFlightSess[g] = job.session
+		inFlightSess[sessKey(g, job.session)] = true
 		if job.notice {
 			delete(noticePending, g)
 			noticeInFlight[g] = true
@@ -181,7 +358,7 @@ func sendWorker(g string, q chan sendJob) {
 		queuesMu.Unlock()
 		job.done <- runTurn(g, job.session, job.msg)
 		queuesMu.Lock()
-		delete(inFlightSess, g)
+		delete(inFlightSess, sessKey(g, job.session))
 		if job.notice {
 			delete(noticeInFlight, g)
 		}

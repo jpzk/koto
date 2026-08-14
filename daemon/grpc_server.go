@@ -96,6 +96,7 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 	return &pb.GoalItem{
 		Id:            it.ID,
 		Group:         it.Group,
+		Name:          it.Name,
 		Text:          it.Text,
 		Criteria:      it.Criteria,
 		Plan:          it.Plan,
@@ -260,11 +261,26 @@ func (s *kotoServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, erro
 	return &pb.BaseResp{Ok: true}, nil
 }
 
+// Interrupt aborts one CONVERSATION's turn — by default the caller's session.
+// It deliberately cannot signal the whole group: up to groupSlots turns run at
+// once, and esc in the TUI means "stop answering me", not "abort everything
+// running in this VM". Goal sessions are excluded outright; abandoning an
+// iteration is /goal interrupt, which pauses the goal as well as signaling it.
 func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
-	if err := interruptAgent(r.Group); err != nil {
+	session, err := normalizeSession(r.Session)
+	if err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	if isReservedSession(session) {
+		return &pb.BaseResp{Error: "goal sessions are follow-only — use /goal interrupt"}, nil
+	}
+	if !sessionBusy(r.Group, session) {
+		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil
+	}
+	if err := interruptAgent(r.Group, session); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
@@ -545,7 +561,7 @@ func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp,
 		return &pb.GoalResp{Error: "invalid group name"}, nil
 	}
 	plan := r.Plan == nil || r.GetPlan() // absent = plan-first default
-	it, err := goalSet(r.Group, r.Text, r.Criteria, int(r.MaxIterations), plan)
+	it, err := goalSet(r.Group, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}

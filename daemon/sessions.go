@@ -18,8 +18,8 @@ package main
 //
 // Wire convention: session "" is the group's default session — the one every
 // pre-session client implicitly talks to. "default" and "-" normalize to "".
-// Turns are still serialized per group by the send queue (queue.go): sessions
-// interleave turn-by-turn, they never run concurrently inside one VM.
+// Turns are serialized WITHIN a session (its queue worker, queue.go) but run
+// concurrently across sessions, up to groupSlots at a time per VM.
 
 import (
 	"encoding/json"
@@ -37,18 +37,25 @@ import (
 // as the first space-delimited token of the FIFO line).
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
-// The goal loop (goals.go) owns two reserved sessions per group: the worker
-// iterates in goal-work, the acceptance judge reviews in goal-judge. Both are
-// cleared by the goal driver before every turn (fresh context is the design),
-// so clients and the ctl plane must not send into or clear them — the driver
-// bypasses the checks by calling enqueueSend/clearSession directly.
-const (
-	goalWorkSession  = "goal-work"
-	goalJudgeSession = "goal-judge"
-)
+// The goal loop (goals.go) reserves the whole "goal-" NAMESPACE. Each goal
+// run gets its own pair of sessions named after the run's short name (see
+// goals.go resolveGoalName; pre-name records fall back to the id) — the
+// worker iterates in goal-<name>, the acceptance judge reviews in
+// goal-<name>-judge — so successive goals on one group never share a
+// transcript and the session name says which run you are looking at.
+//
+// They are non-interactive: clients and the ctl plane must not send into or
+// clear them (the driver bypasses the checks by calling enqueueSend and
+// clearSessionContext directly). Reservation is by prefix rather than by
+// exact name, which also keeps the pre-per-id sessions (goal-work,
+// goal-judge, left behind by goals that ran before this change) follow-only.
+const goalSessionPrefix = "goal-"
+
+func goalWorkSessionFor(id string) string  { return goalSessionPrefix + id }
+func goalJudgeSessionFor(id string) string { return goalSessionPrefix + id + "-judge" }
 
 func isReservedSession(s string) bool {
-	return s == goalWorkSession || s == goalJudgeSession
+	return strings.HasPrefix(s, goalSessionPrefix)
 }
 
 // normalizeSession maps the wire aliases of the default session ("", "-",
@@ -104,8 +111,15 @@ func listSessions(g string) []string {
 
 // registerSession records a named session in the group's registry. The
 // default session ("") is implicit and never listed.
+//
+// Goal sessions are excluded on principle: their leaf comes from
+// goalLiveSessions, which shows it exactly while the run is live and drops it
+// when the goal ends. A registry entry would outlive the run and read as an
+// ordinary chat session — one the operator cannot type into. Today's ingress
+// paths refuse the reserved namespace before reaching here; this makes a
+// future one unable to leak it.
 func registerSession(g, s string) {
-	if s == "" {
+	if s == "" || isReservedSession(s) {
 		return
 	}
 	sessRegMu.Lock()
@@ -220,6 +234,16 @@ func filterLogSession(path, s string) error {
 	// the next appended line starts fresh.
 	if content != "" && !strings.HasSuffix(content, "\n") {
 		content += "\n"
+	}
+	// Nothing dropped → do not rewrite. The rename bumps the inode, which
+	// makes every live tailer of this file reopen at EOF — bytes landing in
+	// the gap (including a [[turn_end]]) are lost to the live view, stalling
+	// a healthy turn for the full wait window. A per-session clear sweeps all
+	// of the group's streams, and a session's segments live in only a few of
+	// them; the rest must pass through untouched, especially the ones an
+	// ACTIVE turn is writing this instant.
+	if content == string(b) {
+		return nil
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
