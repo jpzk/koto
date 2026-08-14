@@ -14,18 +14,29 @@ import (
 )
 
 // The goal loop reserves the whole "goal-" namespace: each run's sessions are
-// named after its generated id (goal-<id>, goal-<id>-judge). Mirrors the
-// daemon's rule in daemon/sessions.go — the judge session never appears in
-// GroupInfo.sessions, so the name list can't be learned over the wire.
+// named after its run name (goal-<name>, goal-<name>-judge). Mirrors the
+// daemon's rule in daemon/sessions.go — both leaves ride GroupInfo.sessions
+// while the goal is live.
 func goalSession(s string) bool {
 	return strings.HasPrefix(s, "goal-")
 }
 
-// goalRunID is the display name of a goal session: the run id alone. The tree
-// puts a ◎ in front of it, so repeating "goal-" there would spend the narrow
-// name column on the half that never varies.
+// goalJudgeSession says whether a reserved session is the run's acceptance
+// judge. Suffix match so the legacy fixed name ("goal-judge") counts too.
+func goalJudgeSession(s string) bool {
+	return goalSession(s) && strings.HasSuffix(s, "-judge")
+}
+
+// goalRunID is the display name of a goal session: the run name alone. The
+// tree puts a role glyph in front of it (◎ worker, ⚖ judge), so repeating
+// "goal-" — or, on a judge row, "-judge" — there would spend the narrow name
+// column on the half the glyph already says.
 func goalRunID(s string) string {
-	return strings.TrimPrefix(s, "goal-")
+	s = strings.TrimPrefix(s, "goal-")
+	if trimmed := strings.TrimSuffix(s, "-judge"); trimmed != "" {
+		return trimmed
+	}
+	return s
 }
 
 type goalItemT struct {

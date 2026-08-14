@@ -78,6 +78,55 @@ func TestGoalSessionNaming(t *testing.T) {
 	if got := goalRunID(goalSess); got != "398bb7f1c95b" {
 		t.Errorf("goalRunID = %q, want the run id alone", got)
 	}
+	// The judge row's glyph says "judge", so the label drops both halves the
+	// name column doesn't need — the shared prefix and the role suffix.
+	if got := goalRunID(goalSess + "-judge"); got != "398bb7f1c95b" {
+		t.Errorf("goalRunID(judge) = %q, want the run id alone", got)
+	}
+	if got := goalRunID("goal-judge"); got != "judge" {
+		t.Errorf("goalRunID(legacy judge) = %q, want %q", got, "judge")
+	}
+	for _, c := range []struct {
+		s     string
+		judge bool
+	}{
+		{goalSess, false}, {goalSess + "-judge", true},
+		{"goal-work", false}, {"goal-judge", true},
+	} {
+		if goalJudgeSession(c.s) != c.judge {
+			t.Errorf("goalJudgeSession(%q) = %v, want %v", c.s, !c.judge, c.judge)
+		}
+	}
+}
+
+// TestGoalJudgeRowShowsScales: the judge's leaf (daemon-listed while a goal is
+// live, so the review process is followable in the TUI) wears the ⚖ the
+// verdict chat lines wear, and identifies the run without the -judge suffix
+// the glyph already expresses.
+func TestGoalJudgeRowShowsScales(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 200, 30
+	judge := goalSess + "-judge"
+	m.groups = map[string]GroupInfo{"work": {Running: true, Sessions: []string{goalSess, judge}}}
+	m.cur = "work"
+	var row string
+	for _, r := range m.treeRows() {
+		if r.session == judge && r.job == "" {
+			row = stripANSI(m.renderTreeRow(r, false, false, false, func(s string, n int) string { return s }))
+		}
+	}
+	if row == "" {
+		t.Fatal("no judge row rendered")
+	}
+	if !strings.Contains(row, "⚖") {
+		t.Errorf("judge row lost its glyph: %q", row)
+	}
+	if !strings.Contains(row, "398bb7f1") {
+		t.Errorf("judge row does not identify the run: %q", row)
+	}
+	if strings.Contains(row, "-judge") {
+		t.Errorf("judge row repeats the role the glyph states: %q", row)
+	}
 }
 
 // TestGoalRowShowsRunID: the tree row is the goal's item — glyph plus run id,

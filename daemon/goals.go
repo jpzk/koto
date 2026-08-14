@@ -195,18 +195,22 @@ func goalTerminal(status string) bool {
 }
 
 // goalLiveSessions returns the goal loop's reserved sessions that should be
-// SHOWN for g — the worker session while a non-terminal goal exists, so
-// clients get a navigable tree leaf to follow the work from (the sessions
-// stay out of the on-disk registry: they are not sendable, and the leaf
-// should vanish when the goal ends, not linger like a chat session). The
-// judge session is deliberately not listed — its verdicts surface as
-// goal_verdict events; the transcript stays reachable via /session
-// goal-judge for the curious.
+// SHOWN for g — the worker AND judge sessions while a non-terminal goal
+// exists, so clients get navigable tree leaves to follow the run from (the
+// sessions stay out of the on-disk registry: they are not sendable, and the
+// leaves should vanish when the goal ends, not linger like chat sessions).
+// The judge used to be unlisted on the theory that its verdicts (goal_verdict
+// events) were all that mattered — but a verdict without its reasoning is
+// exactly the review process the operator most wants to audit, and a session
+// reachable only by hand-typing /session goal-<name>-judge is not visible.
+// The leaf is listed for the whole run, not just while a review is in flight:
+// a rejection's transcript matters most AFTER the judge turn ends.
 func goalLiveSessions(g string) []string {
 	goalLock.Lock()
 	defer goalLock.Unlock()
 	if it := findGoalLocked(g); it != nil && !goalTerminal(it.Status) {
-		return []string{goalWorkSessionFor(goalSessionSlug(*it))}
+		slug := goalSessionSlug(*it)
+		return []string{goalWorkSessionFor(slug), goalJudgeSessionFor(slug)}
 	}
 	return nil
 }

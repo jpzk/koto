@@ -715,11 +715,17 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	isJob := r.job != ""
 	if isSession {
 		name = r.session
-		// The goal worker's leaf (daemon-listed while a goal is live) gets
-		// the goal glyph so it reads as the loop's session, not a chat, and
-		// shows the run id alone — see goalRunID.
+		// The goal run's leaves (daemon-listed while a goal is live) get a
+		// role glyph so they read as the loop's sessions, not chats — ◎ for
+		// the worker, ⚖ for the acceptance judge (the same scales the
+		// goal_judge/goal_verdict chat lines wear) — and show the run name
+		// alone; see goalRunID.
 		if goalSession(r.session) {
-			name = "◎ " + goalRunID(r.session)
+			glyph := "◎ "
+			if goalJudgeSession(r.session) {
+				glyph = "⚖ "
+			}
+			name = glyph + goalRunID(r.session)
 		}
 	}
 	var job *JobInfo

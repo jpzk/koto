@@ -799,8 +799,10 @@ func TestGoalAndChatRunConcurrently(t *testing.T) {
 	})
 }
 
-// TestGoalLiveSessionsLeaf: the worker session is listed for clients (the
-// TUI's tree leaf) exactly while a non-terminal goal exists.
+// TestGoalLiveSessionsLeaf: the worker and judge sessions are listed for
+// clients (the TUI's tree leaves) exactly while a non-terminal goal exists —
+// the judge included, so the review process is followable, not just its
+// verdict.
 func TestGoalLiveSessionsLeaf(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-leaf1"
@@ -812,9 +814,9 @@ func TestGoalLiveSessionsLeaf(t *testing.T) {
 			t.Fatalf("goalSet: %v", err)
 		}
 		it := waitGoal(t, g, goalStatusAwaiting)
-		want := goalWorkSessionFor(it.Name)
-		if got := goalLiveSessions(g); len(got) != 1 || got[0] != want {
-			t.Fatalf("live goal: sessions = %v, want [%s]", got, want)
+		want := []string{goalWorkSessionFor(it.Name), goalJudgeSessionFor(it.Name)}
+		if got := goalLiveSessions(g); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("live goal: sessions = %v, want %v", got, want)
 		}
 		if _, err := goalCancel(g); err != nil {
 			t.Fatalf("cancel: %v", err)
