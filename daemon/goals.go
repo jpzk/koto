@@ -689,7 +689,7 @@ func goalPauseOnStop(g string) {
 		emitLogfG("goal", g, "warn", "pause id=%s (group stopped)", it.ID)
 		emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "stopped", Session: goalWorkSessionFor(goalSessionSlug(it))})
 		goalNotify(g, "high", "goal paused (group stopped)",
-			fmt.Sprintf("goal %s (%s) paused at iteration %d/%d; /goal resume after restarting the group",
+			fmt.Sprintf("goal %s (%s) paused at iteration %d/%d; /goals resume after restarting the group",
 				it.ID, goalSessionSlug(it), it.Iteration, it.MaxIterations))
 	}
 }
@@ -914,7 +914,7 @@ func goalPlanPhase(g, id string) bool {
 	emit(g, Event{Event: "goal_awaiting", ID: snap.ID, Session: goalWorkSessionFor(goalSessionSlug(snap))})
 	emitLogfG("goal", g, "info", "plan ready id=%s — awaiting approval", snap.ID)
 	goalNotify(g, "normal", "goal plan ready for review",
-		fmt.Sprintf("goal %s (%s): review the plan in its goal session, then /goal approve %s %s (or /goal cancel)",
+		fmt.Sprintf("goal %s (%s): review the plan in its goal session, then /goals approve %s %s (or /goals cancel)",
 			snap.ID, goalSessionSlug(snap), g, goalSessionSlug(snap)))
 	return false
 }
@@ -1064,7 +1064,7 @@ func goalPauseWith(g, id, reason, detail string) {
 	emit(g, Event{Event: "goal_paused", ID: it.ID, Text: reason, Session: goalWorkSessionFor(goalSessionSlug(it))})
 	emitLogfG("goal", g, "warn", "paused id=%s reason=%s: %s", it.ID, reason, detail)
 	goalNotify(g, "high", "goal paused ("+reason+")",
-		fmt.Sprintf("goal %s (%s) at iteration %d/%d: %s — /goal resume %s %s to continue",
+		fmt.Sprintf("goal %s (%s) at iteration %d/%d: %s — /goals resume %s %s to continue",
 			it.ID, goalSessionSlug(it), it.Iteration, it.MaxIterations, detail, g, goalSessionSlug(it)))
 }
 

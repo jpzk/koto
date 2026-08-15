@@ -16,7 +16,7 @@ func TestParseSchedAdd(t *testing.T) {
 		{
 			rest: "0 9 * * 1-5 morning standup", curGroup: "main",
 			// "0" names a known group, so membership wins over cron shape —
-			// the ambiguity is inherent; known-group-first matches /goal set.
+			// the ambiguity is inherent; known-group-first matches /goals set.
 			group: "0", cron: "9 * * 1-5 morning", msg: "standup",
 		},
 		{

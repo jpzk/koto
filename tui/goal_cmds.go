@@ -1,6 +1,6 @@
 package main
 
-// /goal — drive the daemon's goal loop (daemon/goals.go): set a goal +
+// /goals — drive the daemon's goal loop (daemon/goals.go): set a goal +
 // acceptance criteria on a group, review/approve plan-first goals, and
 // pause/resume/cancel. Mirrors sched_cmds.go's shape: one tea.Cmd factory
 // per verb, typed result messages rendered in model.go.
@@ -138,18 +138,18 @@ func goalOpCmd(sock, op, group, name string) tea.Cmd {
 }
 
 var goalHelpLines = []string{
-	"/goal — daemon-side goal loop: the group iterates with fresh context until",
+	"/goals — daemon-side goal loop: the group iterates with fresh context until",
 	"an independent in-VM judge accepts the acceptance criteria. Plan-first goals",
-	"run one planning turn, then wait for YOUR /goal approve before executing.",
+	"run one planning turn, then wait for YOUR /goals approve before executing.",
 	"",
-	"  /goal set [<group>] [max=N] [plan=no] <goal> :: <criteria>   set a goal",
-	"  /goal list [<group>]              goals and their status",
-	"  /goal approve [<group>] [<name>]  approve a plan (awaiting_approval → running)",
-	"  /goal pause   [<group>] [<name>]  pause at the next iteration boundary",
-	"  /goal interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
-	"  /goal resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
-	"  /goal cancel  [<group>] [<name>]  cancel the goal",
-	"  /goal help                        this help",
+	"  /goals set [<group>] [max=N] [plan=no] <goal> :: <criteria>   set a goal",
+	"  /goals list [<group>]              goals and their status",
+	"  /goals approve [<group>] [<name>]  approve a plan (awaiting_approval → running)",
+	"  /goals pause   [<group>] [<name>]  pause at the next iteration boundary",
+	"  /goals interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
+	"  /goals resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
+	"  /goals cancel  [<group>] [<name>]  cancel the goal",
+	"  /goals help                        this help",
 	"",
 	"<group> defaults to the current group. A group can run SEVERAL goals at",
 	"once — each in its own goal-<name> session pair; <name> picks one when",
@@ -160,10 +160,10 @@ var goalHelpLines = []string{
 	"and starts iterating immediately.",
 	"",
 	"example:",
-	"  /goal set name=weather max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
+	"  /goals set name=weather max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
 }
 
-// parseGoalSet splits `/goal set` args:
+// parseGoalSet splits `/goals set` args:
 // [<group>] [name=x] [max=N] [plan=no] <text> :: <criteria>.
 // The first token is a group only when it names a group known to the TUI —
 // goal text is free text, so there is no syntactic marker like cron's.
@@ -204,7 +204,7 @@ prefix:
 	}
 	// cutFields, not Join(toks[i:], " "): the goal text and criteria are free
 	// text, and the criteria convention is a numbered list separated by runs
-	// of spaces (the /goal help example uses two) — a Fields/Join round-trip
+	// of spaces (the /goals help example uses two) — a Fields/Join round-trip
 	// would collapse exactly the separators the judge is told to look for.
 	body := cutFields(rest, i)
 	goalText, crit, found := strings.Cut(body, " :: ")
@@ -218,7 +218,8 @@ prefix:
 	return group, name, goalText, crit, maxIter, plan, nil
 }
 
-// handleGoalCmd routes `/goal ...`. Returns the tea.Cmd to dispatch, or nil
+// handleGoalCmd routes `/goals ...` (and its `/goal` alias). Returns the
+// tea.Cmd to dispatch, or nil
 // if a usage error was surfaced on the model.
 func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 	rest = strings.TrimSpace(rest)
@@ -241,7 +242,7 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 	case "set":
 		group, name, text, criteria, maxIter, plan, err := m.parseGoalSet(arg)
 		if err != nil {
-			m.addLine(logLine{kind: "err", group: m.cur, text: "/goal set: " + err.Error()})
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals set: " + err.Error()})
 			return nil
 		}
 		return goalSetCmd(m.sock, group, name, text, criteria, maxIter, plan)
@@ -264,13 +265,13 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 			group, name = toks[0], toks[1]
 		default:
 			m.addLine(logLine{kind: "err", group: m.cur,
-				text: fmt.Sprintf("usage: /goal %s [<group>] [<name>]", sub)})
+				text: fmt.Sprintf("usage: /goals %s [<group>] [<name>]", sub)})
 			return nil
 		}
 		return goalOpCmd(m.sock, sub, group, name)
 	}
 	m.addLine(logLine{kind: "err", group: m.cur,
-		text: fmt.Sprintf("/goal: unknown subcommand %q (try /goal help)", sub)})
+		text: fmt.Sprintf("/goals: unknown subcommand %q (try /goals help)", sub)})
 	return nil
 }
 
@@ -282,7 +283,7 @@ func formatGoalEvent(ev Event) string {
 	case "goal_plan":
 		return fmt.Sprintf("◎ goal %s: planning", ev.ID)
 	case "goal_awaiting":
-		return fmt.Sprintf("◎ goal %s: plan ready — /goal approve to start", ev.ID)
+		return fmt.Sprintf("◎ goal %s: plan ready — /goals approve to start", ev.ID)
 	case "goal_iter":
 		return fmt.Sprintf("◎ goal %s: iteration %s", ev.ID, ev.Text)
 	case "goal_judge":
@@ -307,7 +308,7 @@ func formatGoalEvent(ev Event) string {
 	return "goal event: " + ev.Event
 }
 
-// goalStatusLine renders one goal for /goal list.
+// goalStatusLine renders one goal for /goals list.
 func goalStatusLine(it goalItemT) string {
 	extra := ""
 	switch it.Status {

@@ -813,7 +813,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goal  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -2526,7 +2526,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case goalListMsg:
 		if msg.err != nil {
-			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goal list: %v", msg.err)})
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goals list: %v", msg.err)})
 			return m, nil
 		}
 		if len(msg.items) == 0 {
@@ -2552,7 +2552,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case goalOpMsg:
 		if msg.err != nil {
-			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goal %s: %v", msg.op, msg.err)})
+			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goals %s: %v", msg.op, msg.err)})
 			return m, nil
 		}
 		it := msg.item
@@ -2561,7 +2561,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case "set":
 			mode := "executing immediately"
 			if it.Plan {
-				mode = "planning first (approve with /goal approve once the plan is ready)"
+				mode = "planning first (approve with /goals approve once the plan is ready)"
 			}
 			text = fmt.Sprintf("goal %s set on %s, max %d iterations — %s", it.ID, it.Group, it.MaxIterations, mode)
 		case "approve":
@@ -2569,7 +2569,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		case "resume":
 			text = fmt.Sprintf("goal %s resumed with a fresh %d-iteration budget", it.ID, it.MaxIterations)
 		case "interrupt":
-			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goal resume to continue)", it.ID)
+			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goals resume to continue)", it.ID)
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -4713,11 +4713,10 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		return m.handleSchedCmd(rest)
 	}
-	if v == "/goal" || strings.HasPrefix(v, "/goal ") {
-		rest := ""
-		if len(v) > 5 {
-			rest = strings.TrimSpace(v[5:])
-		}
+	// /goals is the command (a group runs several at once); bare /goal stays
+	// accepted as a silent alias.
+	if v == "/goals" || strings.HasPrefix(v, "/goals ") || v == "/goal" || strings.HasPrefix(v, "/goal ") {
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/goals"), "/goal"))
 		return m.handleGoalCmd(rest)
 	}
 	if v == "/clear" || v == "/clear all" {
@@ -4940,7 +4939,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		// would be wiped by the driver's pre-iteration clear anyway.
 		if goalSession(sess) {
 			m.addLine(logLine{kind: "err", group: m.cur,
-				text: "goal sessions are follow-only — chat in the default session, or /goal interrupt to take over"})
+				text: "goal sessions are follow-only — chat in the default session, or /goals interrupt to take over"})
 			return nil
 		}
 		return promptFireCmd(m.sock, m.cur, sess, arg)
@@ -4973,7 +4972,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// server's reserved-session error.
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
-			text: "goal sessions are follow-only — chat in the default session, or /goal interrupt to take over"})
+			text: "goal sessions are follow-only — chat in the default session, or /goals interrupt to take over"})
 		return nil
 	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row

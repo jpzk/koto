@@ -265,7 +265,7 @@ func (s *kotoServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, erro
 // It deliberately cannot signal the whole group: up to groupSlots turns run at
 // once, and esc in the TUI means "stop answering me", not "abort everything
 // running in this VM". Goal sessions are excluded outright; abandoning an
-// iteration is /goal interrupt, which pauses the goal as well as signaling it.
+// iteration is /goals interrupt, which pauses the goal as well as signaling it.
 func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
@@ -275,7 +275,7 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	if isReservedSession(session) {
-		return &pb.BaseResp{Error: "goal sessions are follow-only — use /goal interrupt"}, nil
+		return &pb.BaseResp{Error: "goal sessions are follow-only — use /goals interrupt"}, nil
 	}
 	if !sessionBusy(r.Group, session) {
 		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil

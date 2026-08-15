@@ -164,7 +164,7 @@ func overageStatus(m map[string]any) string {
 
 var burnPlugin = plugin{
 	name: "burn",
-	desc: "pump the agent on a goal until 5h budget is exhausted (client-side; see /goal for the daemon-side gated loop)",
+	desc: "pump the agent on a goal until 5h budget is exhausted (client-side; see /goals for the daemon-side gated loop)",
 	run: func(pctx *pluginRunCtx) {
 		goal := strings.TrimSpace(pctx.args)
 		if goal == "" {
