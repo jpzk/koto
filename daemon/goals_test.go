@@ -471,9 +471,10 @@ func TestGoalConcurrentGoalsRunIndependently(t *testing.T) {
 		if !inFlight[a.ID] || !inFlight[b.ID] {
 			t.Fatalf("in-flight ids = %v, want both %s and %s", inFlight, a.ID, b.ID)
 		}
-		// Both runs contribute their session pairs while live.
-		if got := goalLiveSessions(g); len(got) != 4 {
-			t.Fatalf("live sessions = %v, want both runs' pairs", got)
+		// Both runs contribute their worker leaf while live (no judge has
+		// run yet, so no judge leaves).
+		if got := goalLiveSessions(g); len(got) != 2 {
+			t.Fatalf("live sessions = %v, want both runs' worker leaves", got)
 		}
 		// Two done-windows are open: an id-less claim is ambiguous, refused.
 		if err := recordGoalDone(g, "", "x"); err == nil || !strings.Contains(err.Error(), "include the goal") {
@@ -972,10 +973,10 @@ func TestGoalAndChatRunConcurrently(t *testing.T) {
 	})
 }
 
-// TestGoalLiveSessionsLeaf: the worker and judge sessions are listed for
-// clients (the TUI's tree leaves) exactly while a non-terminal goal exists —
-// the judge included, so the review process is followable, not just its
-// verdict.
+// TestGoalLiveSessionsLeaf: the worker session is listed for clients (the
+// TUI's tree leaves) exactly while a non-terminal goal exists. The judge
+// leaf is absent before any review runs (see
+// TestGoalJudgeLeafAppearsWithJudging for its half of the rule).
 func TestGoalLiveSessionsLeaf(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-leaf1"
@@ -987,8 +988,8 @@ func TestGoalLiveSessionsLeaf(t *testing.T) {
 			t.Fatalf("goalSet: %v", err)
 		}
 		it := waitGoal(t, g, goalStatusAwaiting)
-		want := []string{goalWorkSessionFor(it.Name), goalJudgeSessionFor(it.Name)}
-		if got := goalLiveSessions(g); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		want := []string{goalWorkSessionFor(it.Name)}
+		if got := goalLiveSessions(g); len(got) != 1 || got[0] != want[0] {
 			t.Fatalf("live goal: sessions = %v, want %v", got, want)
 		}
 		if _, err := goalCancel(g, ""); err != nil {
@@ -996,6 +997,55 @@ func TestGoalLiveSessionsLeaf(t *testing.T) {
 		}
 		if got := goalLiveSessions(g); got != nil {
 			t.Fatalf("terminal goal: sessions = %v, want none", got)
+		}
+	})
+}
+
+// TestGoalJudgeLeafAppearsWithJudging: the judge session is NOT listed
+// before the first judge turn — a ⚖ leaf for a review that hasn't happened
+// reads as if one had — and is listed from the moment judging starts, so
+// the review is followable live and its transcript stays reachable after a
+// rejection.
+func TestGoalJudgeLeafAppearsWithJudging(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-leaf2"
+	rec := &turnRec{}
+	judgeCalls := 0
+	var mu sync.Mutex
+	inJudge := make(chan []string, 2)
+	withTurnFn(func(gg, session, msg string) error {
+		rec.add(session, msg)
+		switch goalRole(session) {
+		case roleWork:
+			_ = recordGoalDone(gg, "", "done i say")
+		case roleJudge:
+			inJudge <- goalLiveSessions(gg)
+			mu.Lock()
+			judgeCalls++
+			first := judgeCalls == 1
+			mu.Unlock()
+			if first {
+				_ = recordGoalVerdict(gg, "", false, "criterion 1 FAIL")
+			} else {
+				_ = recordGoalVerdict(gg, "", true, "")
+			}
+		}
+		return nil
+	}, func() {
+		it, err := goalSet(g, "build", "1. built", "", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusMet)
+		want := []string{goalWorkSessionFor(it.Name), goalJudgeSessionFor(it.Name)}
+		// During the first judge turn the leaf is already up (the operator
+		// follows the review live), and it survives the rejection into
+		// iteration 2's judge turn.
+		for i := 0; i < 2; i++ {
+			got := <-inJudge
+			if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+				t.Fatalf("sessions during judge turn %d = %v, want %v", i+1, got, want)
+			}
 		}
 	})
 }

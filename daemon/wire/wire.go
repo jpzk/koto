@@ -350,6 +350,10 @@ type GoalItem struct {
 	// LastFeedback is the judge's per-criterion failure report from the most
 	// recently rejected done-claim; embedded into later iteration prompts.
 	LastFeedback string `json:"last_feedback,omitempty"`
+	// Judged records that at least one judge turn has started. The TUI's
+	// judge leaf is listed only from then on (goals.go goalLiveSessions) —
+	// before the first review the session has no transcript to follow.
+	Judged bool `json:"judged,omitempty"`
 	// DoneNote is the worker's evidence summary from the accepted goal_done.
 	DoneNote     string  `json:"done_note,omitempty"`
 	PausedReason string  `json:"paused_reason,omitempty"` // cap | stalled | judge | operator | stopped

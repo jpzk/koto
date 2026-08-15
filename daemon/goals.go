@@ -285,23 +285,29 @@ func goalTerminal(status string) bool {
 }
 
 // goalLiveSessions returns the goal loop's reserved sessions that should be
-// SHOWN for g — the worker AND judge sessions of every non-terminal goal, so
-// clients get navigable tree leaves to follow each run from (the sessions
+// SHOWN for g — tree leaves clients can follow each run from (the sessions
 // stay out of the on-disk registry: they are not sendable, and the leaves
-// should vanish when a run ends, not linger like chat sessions). The judge
-// used to be unlisted on the theory that its verdicts (goal_verdict events)
+// should vanish when a run ends, not linger like chat sessions). The worker
+// is listed for the whole run; the judge only from its FIRST review turn
+// (Judged) — before that the session has no transcript, and a ⚖ leaf for a
+// review that hasn't happened reads as if one had. The judge used to be
+// unlisted entirely on the theory that its verdicts (goal_verdict events)
 // were all that mattered — but a verdict without its reasoning is exactly
 // the review process the operator most wants to audit, and a session
 // reachable only by hand-typing /session goal-<name>-judge is not visible.
-// The leaves are listed for the whole run, not just while turns are in
-// flight: a rejection's transcript matters most AFTER the judge turn ends.
+// Once judging starts the leaf stays for the rest of the run, not just while
+// turns are in flight: a rejection's transcript matters most AFTER the judge
+// turn ends.
 func goalLiveSessions(g string) []string {
 	goalLock.Lock()
 	defer goalLock.Unlock()
 	var out []string
 	for _, it := range activeGoalsLocked(g) {
 		slug := goalSessionSlug(*it)
-		out = append(out, goalWorkSessionFor(slug), goalJudgeSessionFor(slug))
+		out = append(out, goalWorkSessionFor(slug))
+		if it.Judged {
+			out = append(out, goalJudgeSessionFor(slug))
+		}
 	}
 	return out
 }
@@ -969,6 +975,14 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 		if it == nil || it.Status != goalStatusRunning {
 			goalLock.Unlock()
 			return goalVerdict{}, false, false
+		}
+		// First review of this run: from here the judge session exists as a
+		// tree leaf (goalLiveSessions). Persisted so the leaf survives a
+		// daemon restart for as long as the run does.
+		if !it.Judged {
+			it.Judged = true
+			it.UpdatedAt = goalNow()
+			saveGoalsLocked()
 		}
 		goalLock.Unlock()
 
