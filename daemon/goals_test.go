@@ -189,6 +189,48 @@ func TestGoalNoPlanMeetsOnAcceptedClaim(t *testing.T) {
 	})
 }
 
+// TestGoalMetInformsCoordinator: an accepted goal wakes the group's
+// coordinator — a normal turn into the group's OWN default session tasking
+// it with a TLDR of the outcome — carrying the goal, its criteria and the
+// worker's evidence note.
+func TestGoalMetInformsCoordinator(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-coord1"
+	coord := make(chan string, 1)
+	withTurnFn(func(gg, session, msg string) error {
+		switch goalRole(session) {
+		case roleWork:
+			_ = recordGoalDone(gg, "", "shipped the thing")
+		case roleJudge:
+			_ = recordGoalVerdict(gg, "", true, "")
+		default:
+			if gg == g && session == "" {
+				coord <- msg
+			}
+		}
+		return nil
+	}, func() {
+		it, err := goalSet(g, "build the widget", "1. widget builds", "", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusMet)
+		select {
+		case msg := <-coord:
+			for _, want := range []string{
+				"goal finished", it.Name, "build the widget",
+				"1. widget builds", "shipped the thing", "TLDR",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("coordinator turn missing %q:\n%s", want, msg)
+				}
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("goal met but no coordinator turn arrived on the group's default session")
+		}
+	})
+}
+
 func TestGoalRejectedClaimFeedsFeedback(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-rej1"

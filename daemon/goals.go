@@ -1050,12 +1050,13 @@ func goalSetFeedback(id, feedback string) {
 }
 
 func goalMarkMet(g string, snap goalItem, note string) {
-	if _, err := goalTransition(g, snap.ID, []string{goalStatusRunning}, func(it *goalItem) {
+	it, err := goalTransition(g, snap.ID, []string{goalStatusRunning}, func(it *goalItem) {
 		it.Status = goalStatusMet
 		it.DoneNote = note
 		it.LastFeedback = ""
 		it.CompletedAt = goalNow()
-	}); err != nil {
+	})
+	if err != nil {
 		return
 	}
 	emit(g, Event{Event: "goal_verdict", ID: snap.ID, Name: "met", Session: goalWorkSessionFor(goalSessionSlug(snap))})
@@ -1063,6 +1064,30 @@ func goalMarkMet(g string, snap goalItem, note string) {
 	emitLogfG("goal", g, "info", "MET id=%s after %d iteration(s)", snap.ID, snap.Iteration)
 	goalNotify(g, "normal", "goal met",
 		fmt.Sprintf("goal %s accepted by the reviewer after %d iteration(s)", snap.ID, snap.Iteration))
+	goalInformCoordinator(g, it)
+}
+
+// goalInformCoordinator wakes the group's coordinator — its own DEFAULT
+// session, the conversation the goal was set from — when one of its goals
+// finishes: a normal turn, not a notification, because the coordinator is
+// TASKED with digesting the outcome into a TLDR for the operator (a banner
+// can only repeat the done note; the summary needs an agent, and the group's
+// own agent has the run's artifacts on its filesystem). Enqueue and forget:
+// the goal is already terminal, so a failure here costs the summary
+// (warn-logged), never the verdict.
+func goalInformCoordinator(g string, it goalItem) {
+	msg := fmt.Sprintf(
+		"[koto] goal finished: run %q was accepted by the reviewer after %d iteration(s).\n"+
+			"goal: %s\n"+
+			"acceptance criteria: %s\n"+
+			"worker's evidence note: %s\n"+
+			"Give the operator a short TLDR now: what the goal was and what was accomplished, in a "+
+			"few sentences. The run's artifacts are on your filesystem (/workspace/goal/, its "+
+			"ledger.json and progress.md, and whatever it built) if the note is not enough.",
+		goalSessionSlug(it), it.Iteration, it.Text, it.Criteria, it.DoneNote)
+	if _, err := enqueueSend(g, "", msg); err != nil {
+		emitLogfG("goal", g, "warn", "coordinator notice for goal %s dropped: %v", it.ID, err)
+	}
 }
 
 // goalPauseWith pauses an active goal with a reason and alerts the operator.
