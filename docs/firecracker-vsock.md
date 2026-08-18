@@ -388,8 +388,13 @@ layers, all defaults, no new user-facing knobs:
    already bounded by `vcpu_count`; this fixes *priority*.
 3. **Per-VM cgroups** (`fccgroup.go`) — probed once at startup; when cs_host
    has a writable cgroup tree (see below), every VM is placed at clone time
-   (clone3 `CLONE_INTO_CGROUP`) into `<scope>/vms/<g>` with `cpu.weight=50`
-   (half the daemon's default 100) and `memory.high = mem_mib + 512 MiB` — a
+   (clone3 `CLONE_INTO_CGROUP`) into `<scope>/vms/<g>` with
+   `cpu.weight = 50 × vcpus` — scaled by the size preset's vCPU count so under
+   host CPU contention an xlarge (weight 400) gets 4× a small's (weight 100)
+   share; per-VM weights compete only among siblings under `vms/`, while the
+   daemon+proxy in `main/` are protected by the `main/`-vs-`vms/` split (100
+   vs 100 → the control plane keeps half the host under full contention,
+   whatever the VM weights sum to) — and `memory.high = mem_mib + 512 MiB` — a
    soft throttle, deliberately **never `memory.max`**: OOM-killing the VMM
    hard-kills the VM with a dirty ext4, and the guest's real ceiling is
    `mem_size_mib` anyway. Unavailable → one info log line and `cgroup=off`

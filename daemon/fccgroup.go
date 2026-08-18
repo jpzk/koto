@@ -4,9 +4,11 @@ package main
 //
 // Enforcement layer 3 of the resource-constraint stack (after the FC drive
 // rate limiter and nice=10 — see docs/firecracker-vsock.md → "Host resource
-// limits"): each VM is placed in its own cgroup with cpu.weight=50 (half the
-// daemon's default 100, so under host CPU contention the control plane always
-// wins) and memory.high = mem_mib + margin (a SOFT throttle — deliberately
+// limits"): each VM is placed in its own cgroup with cpu.weight scaled by its
+// vCPU count (so under host CPU contention an xlarge outranks a small in
+// proportion to what its size preset promises — the control plane is protected
+// separately, see fcCgroupWeightPerVCPU) and memory.high = mem_mib + margin (a
+// SOFT throttle — deliberately
 // never memory.max, because OOM-killing the VMM hard-kills the VM with a
 // dirty ext4; the guest's real ceiling is machine-config's mem_size_mib, and
 // memory.high only reins in pathological VMM-side overhead).
@@ -39,10 +41,20 @@ import (
 
 const fcCgroupMount = "/sys/fs/cgroup"
 
-// fcCgroupWeight is every VM cgroup's cpu.weight. The default weight is 100,
-// so at 50 the daemon+proxy (which stay in main/ at 100) get twice a VM's
-// share under contention — same intent as nice, enforced at the cgroup layer.
-const fcCgroupWeight = 50
+// fcCgroupWeightPerVCPU scales a VM cgroup's cpu.weight by its vCPU count, so
+// under host CPU contention the size presets keep their meaning: an xlarge
+// (8 vCPU, weight 400) gets 4× a small's (2 vCPU, weight 100) share instead of
+// the same slice (observed 2026-08-18: on a saturated host every busy VM got
+// ~0.25 cores regardless of preset, making size=xlarge buy nothing). vCPUs are
+// clamped 1–32 upstream, so the weight stays in cgroup v2's [1, 10000].
+//
+// This cannot starve the control plane: per-VM weights compete only among
+// SIBLINGS under vms/, while the daemon+proxy live in main/ — and main/ (100)
+// vs vms/ (100, default) split contention 50/50 at the scope level no matter
+// what the VMs' own weights sum to. (The old flat weight of 50 claimed to give
+// the daemon 2× a VM's share; the hierarchy meant it was really a no-op among
+// equal siblings, with main/-vs-vms/ plus nice doing the actual protecting.)
+const fcCgroupWeightPerVCPU = 50
 
 // fcCgroupMemMarginMiB is added to a VM's mem_mib for memory.high: the VMM
 // process's own overhead (device model, vsock buffers) on top of guest RAM.
@@ -144,7 +156,7 @@ func fcCgroupInit() {
 		off("probe mkdir: %v", err)
 		return
 	}
-	werr := os.WriteFile(filepath.Join(probe, "cpu.weight"), []byte(fmt.Sprint(fcCgroupWeight)), 0o644)
+	werr := os.WriteFile(filepath.Join(probe, "cpu.weight"), []byte(fmt.Sprint(fcCgroupWeightPerVCPU)), 0o644)
 	merr := os.WriteFile(filepath.Join(probe, "memory.high"), []byte("1G"), 0o644)
 	_ = syscall.Rmdir(probe)
 	if werr != nil || merr != nil {
@@ -154,15 +166,15 @@ func fcCgroupInit() {
 
 	fcCgroupVMs = vms
 	fcCgroupOn = true
-	emitLogf("fc", "info", "per-VM cgroup caps enabled (cpu.weight=%d, memory.high=mem+%dMiB) at %s",
-		fcCgroupWeight, fcCgroupMemMarginMiB, vms)
+	emitLogf("fc", "info", "per-VM cgroup caps enabled (cpu.weight=%d/vcpu, memory.high=mem+%dMiB) at %s",
+		fcCgroupWeightPerVCPU, fcCgroupMemMarginMiB, vms)
 }
 
 // fcCgroupCreate makes (or refreshes) group g's VM cgroup and returns an open
 // directory fd for clone3 CLONE_INTO_CGROUP placement (caller closes it after
 // Start). Returns fd -1 with nil error when cgroups are off — the caller
 // spawns unplaced, exactly the pre-cgroup behavior.
-func fcCgroupCreate(g string, memMiB int) (int, error) {
+func fcCgroupCreate(g string, vcpus, memMiB int) (int, error) {
 	if !fcCgroupOn {
 		return -1, nil
 	}
@@ -170,7 +182,10 @@ func fcCgroupCreate(g string, memMiB int) (int, error) {
 	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
 		return -1, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(fmt.Sprint(fcCgroupWeight)), 0o644); err != nil {
+	if vcpus < 1 {
+		vcpus = 1
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(fmt.Sprint(vcpus*fcCgroupWeightPerVCPU)), 0o644); err != nil {
 		return -1, err
 	}
 	high := int64(memMiB+fcCgroupMemMarginMiB) << 20

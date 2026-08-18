@@ -660,7 +660,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// cgroup write access since placement is inherited through exec. A create
 	// failure degrades to an unplaced spawn: the cap is defense in depth, not
 	// worth refusing to boot over.
-	if cgfd, cgerr := fcCgroupCreate(g, memMiB); cgerr != nil {
+	if cgfd, cgerr := fcCgroupCreate(g, vcpus, memMiB); cgerr != nil {
 		emitLogfG("fc", g, "warn", "[%s] cgroup create: %v (spawning unplaced)", g, cgerr)
 	} else if cgfd >= 0 {
 		if cmd.SysProcAttr == nil {
