@@ -1253,6 +1253,30 @@ func TestGoalExplicitNameWins(t *testing.T) {
 
 // TestGoalLegacyRecordKeepsIDSessions: goals written before names existed have
 // their transcripts on disk under goal-<id>; they must keep resolving there.
+// TestGoalArtifactDirsArePerRun: concurrent goals must not share a ledger.
+// Regression: every prompt pointed at the flat /workspace/goal/ledger.json,
+// so two runs in one group ate each other's decomposition — each worker's
+// "create the ledger if it doesn't exist" check saw the peer's file.
+func TestGoalArtifactDirsArePerRun(t *testing.T) {
+	a := goalItem{ID: "id-a", Name: "alpha", Group: "g", MaxIterations: 5, Iteration: 1}
+	b := goalItem{ID: "id-b", Name: "beta", Group: "g", MaxIterations: 5, Iteration: 1}
+	if goalDirFor(a) == goalDirFor(b) {
+		t.Fatalf("two runs share an artifact dir: %s", goalDirFor(a))
+	}
+	legacy := goalItem{ID: "398bb7f1c95b", Group: "g"}
+	if got, want := goalDirFor(legacy), "/workspace/goal/398bb7f1c95b"; got != want {
+		t.Errorf("legacy dir = %q, want %q (id-keyed like its sessions)", got, want)
+	}
+	for _, msg := range []string{goalPlanMsg(a), goalWorkerMsg(a), goalJudgeMsg(a), goalInformCoordinatorMsg(a)} {
+		if !strings.Contains(msg, goalDirFor(a)) {
+			t.Errorf("prompt does not name the run's own dir %s:\n%s", goalDirFor(a), msg)
+		}
+		if strings.Contains(msg, "/workspace/goal/ledger.json") {
+			t.Errorf("prompt still names the shared flat ledger:\n%s", msg)
+		}
+	}
+}
+
 func TestGoalLegacyRecordKeepsIDSessions(t *testing.T) {
 	legacy := goalItem{ID: "398bb7f1c95b", Group: "g", Text: "old"}
 	if got := goalSessionSlug(legacy); got != "398bb7f1c95b" {

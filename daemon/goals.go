@@ -38,7 +38,9 @@ package main
 //     and mailbox windows; turns from different goals interleave through the
 //     group's slot pool like any other concurrent sessions (sharing one
 //     workspace, so goals that fight over the same files are the caller's
-//     problem, same as two chat sessions editing one repo). Verbs
+//     problem, same as two chat sessions editing one repo — except the
+//     harness's own artifacts: each run's ledger/progress live in its private
+//     goalDirFor directory, never a shared path). Verbs
 //     (approve/pause/interrupt/resume/cancel) take an optional NAME and
 //     resolve to the sole matching goal when it is omitted.
 //
@@ -1076,18 +1078,21 @@ func goalMarkMet(g string, snap goalItem, note string) {
 // the goal is already terminal, so a failure here costs the summary
 // (warn-logged), never the verdict.
 func goalInformCoordinator(g string, it goalItem) {
-	msg := fmt.Sprintf(
+	if _, err := enqueueSend(g, "", goalInformCoordinatorMsg(it)); err != nil {
+		emitLogfG("goal", g, "warn", "coordinator notice for goal %s dropped: %v", it.ID, err)
+	}
+}
+
+func goalInformCoordinatorMsg(it goalItem) string {
+	return fmt.Sprintf(
 		"[koto] goal finished: run %q was accepted by the reviewer after %d iteration(s).\n"+
 			"goal: %s\n"+
 			"acceptance criteria: %s\n"+
 			"worker's evidence note: %s\n"+
 			"Give the operator a short TLDR now: what the goal was and what was accomplished, in a "+
-			"few sentences. The run's artifacts are on your filesystem (/workspace/goal/, its "+
+			"few sentences. The run's artifacts are on your filesystem (%s/, its "+
 			"ledger.json and progress.md, and whatever it built) if the note is not enough.",
-		goalSessionSlug(it), it.Iteration, it.Text, it.Criteria, it.DoneNote)
-	if _, err := enqueueSend(g, "", msg); err != nil {
-		emitLogfG("goal", g, "warn", "coordinator notice for goal %s dropped: %v", it.ID, err)
-	}
+		goalSessionSlug(it), it.Iteration, it.Text, it.Criteria, it.DoneNote, goalDirFor(it))
 }
 
 // goalPauseWith pauses an active goal with a reason and alerts the operator.
@@ -1119,13 +1124,31 @@ var goalNotify = func(g, sev, title, msg string) {
 // (evidence-before-verdict, artifacts-not-claims, one item per iteration,
 // feedback shape) are research-backed — see docs/goal-loop.md.
 
+// goalDirFor is the run's private artifact directory (ledger + progress).
+// Per RUN, not per group: goals run concurrently in one workspace, and a
+// shared /workspace/goal/ledger.json had concurrent runs eating each other's
+// decomposition — each worker's "create the ledger if it doesn't exist" check
+// saw a PEER goal's ledger and either skipped its own or overwrote the
+// peer's. Keyed by the same slug as the run's sessions (group-unique via
+// resolveGoalName while the record lives; a name reused after its record is
+// retired inherits the dir, same accepted staleness as the session
+// transcript — the judge never takes the ledger as evidence, so a stale
+// ledger costs iterations, not correctness). Old flat-path artifacts from
+// before this split are left in place: they cannot be attributed to a run
+// (that ambiguity is the bug), and the worker prompt rebuilds a missing
+// ledger from the filesystem + git anyway.
+func goalDirFor(it goalItem) string {
+	return "/workspace/goal/" + goalSessionSlug(it)
+}
+
 func goalPlanMsg(it goalItem) string {
+	dir := goalDirFor(it)
 	return fmt.Sprintf(`[koto goal %s — PLAN]
 You have been given a goal. This turn, plan only — do not start implementing:
-1. mkdir -p /workspace/goal. Decompose the goal into concrete work items in
-   /workspace/goal/ledger.json: [{"id":1,"item":"...","done":false}, ...].
+1. mkdir -p %s. Decompose the goal into concrete work items in
+   %s/ledger.json: [{"id":1,"item":"...","done":false}, ...].
    Items must be individually verifiable.
-2. Note key decisions and risks in /workspace/goal/progress.md.
+2. Note key decisions and risks in %s/progress.md.
 3. If /workspace should be a git repo and is not one yet, git init and commit.
 4. End your reply with a concise summary of the plan — a human reviews it and
    must approve before execution starts.
@@ -1135,7 +1158,7 @@ GOAL:
 
 ACCEPTANCE CRITERIA (an independent reviewer will verify these against
 artifacts before the goal can close):
-%s`, it.ID, it.Text, it.Criteria)
+%s`, it.ID, dir, dir, dir, it.Text, it.Criteria)
 }
 
 func goalWorkerMsg(it goalItem) string {
@@ -1146,13 +1169,16 @@ REVIEWER FEEDBACK (your last completion claim was rejected — address this firs
 %s
 `, it.LastFeedback)
 	}
+	dir := goalDirFor(it)
 	return fmt.Sprintf(`[koto goal %s — iteration %d/%d]
 You are working toward a goal. Your context is fresh; your memory is the
 filesystem. Startup ritual, in order:
-1. Read /workspace/goal/ledger.json and /workspace/goal/progress.md; run
+1. Read %s/ledger.json and %s/progress.md; run
    git log --oneline -20. If the ledger does not exist yet, create it now
-   (mkdir -p /workspace/goal; decompose the goal into individually verifiable
-   items with "done": false) before doing anything else.
+   (mkdir -p %s; decompose the goal into individually verifiable
+   items with "done": false) before doing anything else. That directory is
+   THIS run's alone — other goals may be working in sibling directories under
+   /workspace/goal/; leave their ledgers untouched.
 2. Verify the current state still works before building on it.
 3. Pick ONE unfinished ledger item (prioritize the reviewer feedback, if any)
    and complete it.
@@ -1173,7 +1199,7 @@ closes; put a short evidence summary in R):
   printf '{"cmd":"goal_done","id":"%s","note":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, feedback, it.Text, it.Criteria, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, it.Text, it.Criteria, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {
@@ -1184,7 +1210,9 @@ acceptance criterion is met:
 - For EACH criterion, FIRST write down what concrete evidence (command
   output, file content) would prove it — before inspecting anything.
 - Then verify by running commands and reading artifacts yourself.
-- The worker's notes, ledger, and claims are orientation, NEVER evidence.
+- The worker's notes and ledger for THIS run are in %s/
+  (other goals may have sibling directories under /workspace/goal/ — ignore
+  them). They are orientation, NEVER evidence.
   Unproven = FAIL. Do not fix anything.
 - Verdict per criterion: PASS with the evidence you observed, or FAIL with
   three parts: what failed, what you observed, and what would be acceptable.
@@ -1203,5 +1231,5 @@ without a verdict is discarded):
   R="criterion 2 FAIL: observed ...; acceptable would be ..."
   printf '{"cmd":"goal_verdict","id":"%s","met":false,"reasons":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl`,
-		it.ID, it.Iteration, it.MaxIterations, it.Text, it.Criteria, it.ID, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, goalDirFor(it), it.Text, it.Criteria, it.ID, it.ID)
 }
