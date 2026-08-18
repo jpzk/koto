@@ -14,8 +14,12 @@ package main
 //     keeps successive goals' transcripts apart and puts the run's identity
 //     in the session name.
 //   - The worker's CONTEXT is reset before every turn — each iteration starts
-//     fresh with the filesystem as its only memory (ledger + progress files +
-//     git history, all agent-maintained; the daemon never parses them). The
+//     fresh with the filesystem as its memory (ledger + progress files + git
+//     history, all agent-maintained; the daemon never parses them), plus one
+//     daemon-carried thread: every plan/worker turn's closing report is
+//     captured from the transcript (goalSaveHandoff) and embedded into the
+//     next iteration's prompt, so each iteration leaves an entry the next one
+//     picks up from even when the worker skipped its progress.md append. The
 //     TRANSCRIPT is not: clearGoalSession resets the guest conversation and
 //     leaves the host log alone, because the transcript is the only way to
 //     watch a session nobody may talk to.
@@ -133,6 +137,74 @@ var (
 type goalVerdict struct {
 	Met     bool
 	Reasons string
+}
+
+// goalHandoffFn, when non-nil, replaces the readHistory-backed capture in
+// goalCaptureHandoff. Solely a test seam (the real one reads host log files);
+// nil in production.
+var goalHandoffFn func(g, sess string) string
+
+// goalCaptureHandoff returns the closing report of sess's most recent turn:
+// the last non-empty response in the session's transcript. This parses no
+// agent-maintained file — the filesystem stays the worker's only memory of
+// its own making; the daemon merely carries how the last turn ENDED across
+// the context reset, from the transcript it already owns (History serves
+// from the same parse).
+func goalCaptureHandoff(g, sess string) string {
+	if goalHandoffFn != nil {
+		return goalHandoffFn(g, sess)
+	}
+	evs, _ := readHistory(g, 0, 0)
+	// A reply is one done event PER LINE in the replay grammar, so the
+	// closing report is every done line since the session's last prompt —
+	// keeping only the final event would truncate a multi-line handoff to
+	// its last line.
+	var b strings.Builder
+	for _, ev := range evs {
+		if ev.Session != sess {
+			continue
+		}
+		switch ev.Event {
+		case "prompt":
+			b.Reset()
+		case "done":
+			if ev.Text != "" {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(ev.Text)
+			}
+		}
+	}
+	s := strings.TrimSpace(b.String())
+	// Cap like the other agent-authored prompt embeds (goalNoteMax), but keep
+	// the TAIL: the pickup note is the reply's ENDING — head-truncation would
+	// cut exactly the handoff off a long turn.
+	if r := []rune(s); len(r) > goalNoteMax {
+		s = string(r[len(r)-goalNoteMax:])
+	}
+	return s
+}
+
+// goalSaveHandoff persists the turn's closing report so the NEXT iteration's
+// prompt can embed it — every iteration leaves an entry for the next to pick
+// up from, whether or not the worker performed its progress.md append.
+// Best-effort: an empty capture (turn produced no text, log rotated away)
+// keeps the previous handoff rather than blanking it — a stale pickup note
+// beats none, and the prompt tells the worker the filesystem wins on
+// disagreement.
+func goalSaveHandoff(g, id, sess string) {
+	h := goalCaptureHandoff(g, sess)
+	if h == "" {
+		return
+	}
+	goalLock.Lock()
+	if it := findGoalByIDLocked(id); it != nil {
+		it.LastHandoff = h
+		it.UpdatedAt = goalNow()
+		saveGoalsLocked()
+	}
+	goalLock.Unlock()
 }
 
 // clearGoalSessionFn, when non-nil, replaces clearSessionContext as the
@@ -914,6 +986,8 @@ func goalPlanPhase(g, id string) bool {
 		goalPauseWith(g, id, "stalled", "plan turn produced no turn_end (session stalled)")
 		return false
 	}
+	// The plan's closing summary is iteration 1's pickup entry.
+	goalSaveHandoff(g, id, work)
 	if _, err := goalTransition(g, id, []string{goalStatusPlanning}, func(it *goalItem) {
 		it.Status = goalStatusAwaiting
 	}); err != nil {
@@ -963,6 +1037,10 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 		goalPauseWith(g, snap.ID, "stalled", "no turn_end within the wait window (session stalled; self-heal owns the restart)")
 		return false, "", false
 	}
+	// Persist this iteration's closing report for the next one to pick up —
+	// also on a done-claim: a rejected claim's next iteration gets both the
+	// judge's feedback and how this turn ended.
+	goalSaveHandoff(g, snap.ID, work)
 	return false, "", true // claim, if any, is filled in by the deferred mailbox read
 }
 
@@ -1056,6 +1134,7 @@ func goalMarkMet(g string, snap goalItem, note string) {
 		it.Status = goalStatusMet
 		it.DoneNote = note
 		it.LastFeedback = ""
+		it.LastHandoff = ""
 		it.CompletedAt = goalNow()
 	})
 	if err != nil {
@@ -1169,6 +1248,14 @@ REVIEWER FEEDBACK (your last completion claim was rejected — address this firs
 %s
 `, it.LastFeedback)
 	}
+	handoff := ""
+	if it.LastHandoff != "" {
+		handoff = fmt.Sprintf(`
+PREVIOUS TURN'S CLOSING REPORT (how the last turn of this goal ended — pick up
+from here; when it disagrees with the filesystem, the filesystem wins):
+%s
+`, it.LastHandoff)
+	}
 	dir := goalDirFor(it)
 	return fmt.Sprintf(`[koto goal %s — iteration %d/%d]
 You are working toward a goal. Your context is fresh; your memory is the
@@ -1184,7 +1271,10 @@ filesystem. Startup ritual, in order:
    and complete it.
 4. Verify what you did, mark the item done in the ledger, append what you did
    and decided to progress.md, and git commit at a good state.
-%s
+5. End your reply with a short handoff for the next iteration: what you
+   completed, what is unfinished, and the immediate next step — the next
+   iteration starts context-fresh and is shown your closing report verbatim.
+%s%s
 GOAL:
 %s
 
@@ -1199,7 +1289,7 @@ closes; put a short evidence summary in R):
   printf '{"cmd":"goal_done","id":"%s","note":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, it.Text, it.Criteria, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, handoff, it.Text, it.Criteria, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {

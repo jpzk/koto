@@ -350,6 +350,14 @@ type GoalItem struct {
 	// LastFeedback is the judge's per-criterion failure report from the most
 	// recently rejected done-claim; embedded into later iteration prompts.
 	LastFeedback string `json:"last_feedback,omitempty"`
+	// LastHandoff is how the run's previous turn ENDED — the closing report
+	// of the last plan/worker turn, captured from the session transcript by
+	// the daemon and embedded into the next iteration's prompt, so every
+	// context-fresh iteration picks up where the last one left off even when
+	// the worker skipped its progress.md append. Loop-internal: persisted for
+	// crash/pause resume, deliberately not surfaced over the pb conversions
+	// (the transcript already shows it).
+	LastHandoff string `json:"last_handoff,omitempty"`
 	// Judged records that at least one judge turn has started. The TUI's
 	// judge leaf is listed only from then on (goals.go goalLiveSessions) —
 	// before the first review the session has no transcript to follow.

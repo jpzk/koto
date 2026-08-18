@@ -23,12 +23,13 @@ func goalTestSetup(t *testing.T) {
 	goals = nil
 	goalLock.Unlock()
 	GOALS_FILE = filepath.Join(t.TempDir(), "goals.json")
-	prevClear, prevNotify, prevSleep := clearGoalSessionFn, goalNotify, goalRetrySleep
+	prevClear, prevNotify, prevSleep, prevHandoff := clearGoalSessionFn, goalNotify, goalRetrySleep, goalHandoffFn
 	goalRetrySleep = time.Millisecond
 	clearGoalSessionFn = func(g, sess string) {}
 	goalNotify = func(g, sev, title, msg string) {}
+	goalHandoffFn = func(g, sess string) string { return "" }
 	t.Cleanup(func() {
-		clearGoalSessionFn, goalNotify, goalRetrySleep = prevClear, prevNotify, prevSleep
+		clearGoalSessionFn, goalNotify, goalRetrySleep, goalHandoffFn = prevClear, prevNotify, prevSleep, prevHandoff
 	})
 }
 
@@ -229,6 +230,79 @@ func TestGoalMetInformsCoordinator(t *testing.T) {
 			t.Fatal("goal met but no coordinator turn arrived on the group's default session")
 		}
 	})
+}
+
+// TestGoalIterationHandoffChains: every plan/worker turn leaves an entry the
+// next iteration picks up from — the turn's closing report is captured after
+// the turn, persisted on the record, and embedded into the following worker
+// prompt. An empty capture keeps the previous entry rather than blanking it.
+func TestGoalIterationHandoffChains(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-hand1"
+	rec := &turnRec{}
+	var mu sync.Mutex
+	captures := 0
+	goalHandoffFn = func(gg, sess string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		captures++
+		if captures == 3 {
+			return "" // the last iteration's turn yields no text
+		}
+		return fmt.Sprintf("closing report %d", captures)
+	}
+	withTurnFn(func(_, session, msg string) error {
+		rec.add(session, msg)
+		return nil // worker never claims; loop runs to the cap
+	}, func() {
+		if _, err := goalSet(g, "build the thing", "1. it exists", "", 2, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		it := waitGoal(t, g, goalStatusAwaiting)
+		if it.LastHandoff != "closing report 1" {
+			t.Fatalf("plan handoff = %q, want the plan turn's closing report", it.LastHandoff)
+		}
+		if _, err := goalApprove(g, ""); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+		it = waitGoal(t, g, goalStatusPaused)
+
+		w := rec.byRole(roleWork)
+		if len(w) != 3 { // plan + 2 iterations
+			t.Fatalf("worker turns = %d, want 3:\n%v", len(w), w)
+		}
+		if strings.Contains(w[0], "CLOSING REPORT") {
+			t.Errorf("plan prompt carries a handoff before any turn ran:\n%s", w[0])
+		}
+		if !strings.Contains(w[1], "PREVIOUS TURN'S CLOSING REPORT") || !strings.Contains(w[1], "closing report 1") {
+			t.Errorf("iteration 1 prompt does not pick up the plan's handoff:\n%s", w[1])
+		}
+		if !strings.Contains(w[2], "closing report 2") {
+			t.Errorf("iteration 2 prompt does not pick up iteration 1's handoff:\n%s", w[2])
+		}
+		// Iteration 2's capture was empty — the previous entry survives.
+		if it.LastHandoff != "closing report 2" {
+			t.Errorf("empty capture blanked the handoff: %q", it.LastHandoff)
+		}
+	})
+}
+
+// TestGoalCaptureHandoffReadsTranscript: the production capture (no seam)
+// returns the full closing report of the session's LAST turn — every response
+// line since the last prompt, that session only.
+func TestGoalCaptureHandoffReadsTranscript(t *testing.T) {
+	prev := goalHandoffFn
+	goalHandoffFn = nil
+	t.Cleanup(func() { goalHandoffFn = prev })
+	log := "[ts:900]\n>>> chat prompt\ndefault-session reply\n[[turn_end]]\n" +
+		"[[session]] goal-x\n[ts:1000]\n>>> iter 1\nearly reply\n[[turn_end]]\n" +
+		"[ts:2000]\n>>> iter 2\nwork happened.\nHANDOFF: item 3 done, start item 4\n[[turn_end]]\n"
+	writeTestLog(t, "goal-hand-hist", log)
+	got := goalCaptureHandoff("goal-hand-hist", "goal-x")
+	want := "work happened.\nHANDOFF: item 3 done, start item 4"
+	if got != want {
+		t.Errorf("capture = %q, want %q", got, want)
+	}
 }
 
 func TestGoalRejectedClaimFeedsFeedback(t *testing.T) {
