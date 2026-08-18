@@ -648,9 +648,9 @@ func (m Model) renderTree(rows int) string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(cGray).Render(" (none)"))
 	} else {
 		pad := func(s string, w int) string {
-			// Cell width, not len(): goal-session names carry a "◎ " prefix
-			// (4 bytes, 2 cells) — a byte count would pad them 2 cells short
-			// and a byte slice could cut mid-rune.
+			// Cell width, not len(): row names can carry multi-byte glyphs
+			// (branch marks, unicode session names) — a byte count would pad
+			// them short and a byte slice could cut mid-rune.
 			sw := lipgloss.Width(s)
 			if sw > w {
 				s = truncWidth(s, w)
@@ -715,17 +715,17 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	isJob := r.job != ""
 	if isSession {
 		name = r.session
-		// The goal run's leaves (daemon-listed while a goal is live) get a
-		// role glyph so they read as the loop's sessions, not chats — ◎ for
-		// the worker, ⚖ for the acceptance judge (the same scales the
-		// goal_judge/goal_verdict chat lines wear) — and show the run name
-		// alone; see goalRunID.
+		// The goal run's leaves (daemon-listed while a goal is live) show the
+		// bare run name: the shared "goal-" prefix would spend the narrow
+		// name column on what the tree position already says, while the
+		// judge keeps its "-judge" suffix to stay tellable from the worker.
+		// No role glyph before the name — stacked with the session marker it
+		// read as a garbled double prefix, and goal rows stay quiet by
+		// design: the group row carries the spinner while a goal grinds, and
+		// the coordinator chat gets the report (and the unread badge) when
+		// the goal lands.
 		if goalSession(r.session) {
-			glyph := "◎ "
-			if goalJudgeSession(r.session) {
-				glyph = "⚖ "
-			}
-			name = glyph + goalRunID(r.session)
+			name = strings.TrimPrefix(r.session, "goal-")
 		}
 	}
 	var job *JobInfo

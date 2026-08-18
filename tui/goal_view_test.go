@@ -99,11 +99,10 @@ func TestGoalSessionNaming(t *testing.T) {
 	}
 }
 
-// TestGoalJudgeRowShowsScales: the judge's leaf (daemon-listed while a goal is
-// live, so the review process is followable in the TUI) wears the ⚖ the
-// verdict chat lines wear, and identifies the run without the -judge suffix
-// the glyph already expresses.
-func TestGoalJudgeRowShowsScales(t *testing.T) {
+// TestGoalJudgeRowKeepsSuffix: with the role glyphs gone from the tree
+// (stacked with the session marker they read as a garbled double prefix), the
+// "-judge" suffix is what tells the judge's leaf from the worker's.
+func TestGoalJudgeRowKeepsSuffix(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
 	judge := goalSess + "-judge"
@@ -118,19 +117,16 @@ func TestGoalJudgeRowShowsScales(t *testing.T) {
 	if row == "" {
 		t.Fatal("no judge row rendered")
 	}
-	if !strings.Contains(row, "⚖") {
-		t.Errorf("judge row lost its glyph: %q", row)
+	if strings.Contains(row, "⚖") || strings.Contains(row, "◎") {
+		t.Errorf("judge row carries a role glyph (double prefix with the session marker): %q", row)
 	}
-	if !strings.Contains(row, "398bb7f1") {
-		t.Errorf("judge row does not identify the run: %q", row)
-	}
-	if strings.Contains(row, "-judge") {
-		t.Errorf("judge row repeats the role the glyph states: %q", row)
+	if !strings.Contains(row, "398bb7f1c95b-judge") {
+		t.Errorf("judge row does not identify the run and role: %q", row)
 	}
 }
 
-// TestGoalRowShowsRunID: the tree row is the goal's item — glyph plus run id,
-// inside the narrow name column.
+// TestGoalRowShowsRunID: the tree row shows the bare run name — no role
+// glyph (the session marker ◦ is the only prefix), no shared "goal-" prefix.
 func TestGoalRowShowsRunID(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
@@ -145,11 +141,44 @@ func TestGoalRowShowsRunID(t *testing.T) {
 	if row == "" {
 		t.Fatal("no goal row rendered")
 	}
-	if !strings.Contains(row, "◎") {
-		t.Errorf("goal row lost its glyph: %q", row)
+	if strings.Contains(row, "◎") {
+		t.Errorf("goal row carries a role glyph (double prefix with the session marker): %q", row)
 	}
 	if !strings.Contains(row, "398bb7f1") {
 		t.Errorf("goal row does not identify the run: %q", row)
+	}
+	if strings.Contains(row, "goal-") {
+		t.Errorf("goal row spends the name column on the shared prefix: %q", row)
+	}
+}
+
+// TestGoalSessionNeverUnread: a goal session's output never badges its tree
+// row — the loop reports into the group's default chat (the coordinator) when
+// the goal lands, and that conversation is where the highlight belongs. An
+// ordinary named session still badges, pinning that the suppression is
+// goal-scoped, not session-wide.
+func TestGoalSessionNeverUnread(t *testing.T) {
+	m := focusModel(t)
+	m.cur = "main" // events target an off-screen group below
+	feed := func(e Event) {
+		nm, _ := m.Update(streamEventMsg(e))
+		m = nm.(Model)
+	}
+	feed(Event{Event: "done", Group: "work", Session: goalSess, Text: "iteration output"})
+	if m.isUnread("work", goalSess) {
+		t.Error("goal session marked unread — highlights belong to the coordinator chat")
+	}
+	feed(Event{Event: "notification", Group: "work", Session: goalSess, Text: "plan ready"})
+	if m.isUnread("work", goalSess) {
+		t.Error("goal-session notification marked unread")
+	}
+	feed(Event{Event: "done", Group: "work", Session: "review", Text: "reply"})
+	if !m.isUnread("work", "review") {
+		t.Error("ordinary session no longer badges — suppression overshot goal sessions")
+	}
+	feed(Event{Event: "done", Group: "work", Session: "", Text: "goal met tldr"})
+	if !m.isUnread("work", "") {
+		t.Error("coordinator (default session) must still badge — it is the one highlight the operator wants")
 	}
 }
 

@@ -27,10 +27,13 @@ func goalJudgeSession(s string) bool {
 	return goalSession(s) && strings.HasSuffix(s, "-judge")
 }
 
-// goalRunID is the display name of a goal session: the run name alone. The
-// tree puts a role glyph in front of it (◎ worker, ⚖ judge), so repeating
-// "goal-" — or, on a judge row, "-judge" — there would spend the narrow name
-// column on the half the glyph already says.
+// goalRunID is the display name of a goal run: the run name alone. Used by
+// the goal lifecycle chat lines, which carry their own ◎/⚖ glyph, so
+// repeating "goal-" or "-judge" would spend width on what the glyph already
+// says. The TREE no longer uses it — its rows show the session name with only
+// the shared "goal-" prefix dropped, keeping "-judge" visible, because the
+// rows carry no glyph there (stacked with the session marker it read as a
+// garbled double prefix).
 func goalRunID(s string) string {
 	s = strings.TrimPrefix(s, "goal-")
 	if trimmed := strings.TrimSuffix(s, "-judge"); trimmed != "" {

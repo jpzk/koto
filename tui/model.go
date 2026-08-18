@@ -2388,8 +2388,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// times per turn while the agent is just working, so badging on them
 		// would turn every active sidecar pink. The pink dot should mean
 		// "there is a new model reply for you to read", not "this sidecar is
-		// busy."
+		// busy." Goal sessions never badge for the same reason: their output
+		// is the loop grinding, and the loop reports into the group's default
+		// chat when the goal lands — that conversation (the coordinator) is
+		// where the highlight belongs. Suppressed here at the mark, not in the
+		// tree render, so ctrl+@ unread-cycling agrees with what's shown.
 		if !ev.Historical && (ev.Event == "done" && ev.Text != "" || ev.Event == "notification") &&
+			!goalSession(ev.Session) &&
 			(ev.Group != m.cur || ev.Session != m.activeSession(ev.Group)) {
 			m.markUnread(ev.Group, ev.Session)
 		}
