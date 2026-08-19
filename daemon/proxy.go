@@ -292,8 +292,8 @@ func retryableStatus(code int) bool {
 
 // retryDelay computes the wait before the next attempt. Honors an upstream
 // Retry-After header (seconds form, clamped to a sane 0–30s) when present;
-// otherwise exponential backoff 1s,2s,4s capped at 8s. attempt is the 0-based
-// index of the just-failed attempt.
+// otherwise exponential backoff 1s,2s,4s,8s,16s capped at 30s. attempt is the
+// 0-based index of the just-failed attempt.
 func retryDelay(h http.Header, attempt int) time.Duration {
 	if ra := strings.TrimSpace(h.Get("Retry-After")); ra != "" {
 		if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 && secs <= 30 {
@@ -301,8 +301,8 @@ func retryDelay(h http.Header, attempt int) time.Duration {
 		}
 	}
 	d := time.Duration(1<<attempt) * time.Second
-	if d > 8*time.Second {
-		d = 8 * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
 	}
 	return d
 }
@@ -315,10 +315,14 @@ func retryDelay(h http.Header, attempt int) time.Duration {
 // safe — a 529 arrives as a buffered JSON error, never mid-stream. On the
 // terminal attempt we return whatever we got (possibly still a 529) so the
 // caller forwards it verbatim and logProxyError still surfaces it. The whole
-// budget (worst case ~7s of sleeps + request times) sits far inside both the
-// 600s client timeout and the 1200s per-turn sidecar watchdog.
+// budget (worst case ~61s of sleeps + request times: 1+2+4+8+16+30) sits far
+// inside both the 600s client timeout and the 1200s per-turn sidecar watchdog.
+// Sized to ride out an Anthropic 529 "Overloaded" burst, which is provider-side
+// fleet weather (independent of our own concurrency/quota) and empirically
+// resolves within ~1–2 min — so a longer budget converts what were terminal
+// 529s into slightly-delayed successes rather than dead turns.
 func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request, error)) (*http.Response, error) {
-	const maxRetries = 3
+	const maxRetries = 6
 	for attempt := 0; ; attempt++ {
 		req, err := mkReq()
 		if err != nil {
