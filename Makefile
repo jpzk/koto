@@ -114,6 +114,13 @@ tui: $(BUILD)/koto-tui
 	done
 
 stop:
+	# Graceful first: SIGTERM reaches the daemon (PID 1 — see host/Dockerfile
+	# ENTRYPOINT), which stops every microVM so guests sync+umount their
+	# workspace images. rm -f alone SIGKILLs the VMMs and leaves every
+	# running workspace.img dirty. -t 15 sits above the daemon's own 12s
+	# shutdown bound; the container runs --rm, so the follow-up rm -f is
+	# only the already-dead/wedged fallback.
+	-podman stop -t 15 $(CS_HOST_NAME) 2>/dev/null
 	-podman rm -f $(CS_HOST_NAME)
 	# Sweep leftover podman-era sidecar containers (cs_<group>_go, from the
 	# retired group-podman runtime) — NOT daemon containers: cs_host_go and

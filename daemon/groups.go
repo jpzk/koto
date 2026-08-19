@@ -99,6 +99,12 @@ func ensure(g string, isMain bool) (int, error) {
 // same-group operations serialize behind it, and "second caller waits for the
 // boot, then sees fcRunning and returns" is exactly the wanted semantics.
 func ensureLocked(g string, isMain bool) (int, error) {
+	// Refuse to boot anything once the shutdown handler is stopping VMs — a
+	// queued turn or cron fire racing fcStopAll would re-boot the VM it just
+	// synced down, and the boot would die dirty with the container.
+	if shuttingDown.Load() {
+		return 0, fmt.Errorf("daemon is shutting down")
+	}
 	if !validGroupName(g) {
 		// vol(g) == filepath.Join(ROOT, g); an empty g resolves to ROOT
 		// itself (filepath.Join drops the empty element), and a g containing

@@ -827,6 +827,34 @@ func fcStop(g string) {
 	emitLogfG("fc", g, "info", "[%s] stopped", g)
 }
 
+// fcStopAll stops every running microVM in parallel — the daemon shutdown
+// path (daemonMain's signal handler), so each guest gets its sync+umount
+// window rather than dying with the container. Bounded because fcStop is
+// (agent call 3s + exit wait 5s, per group, in parallel). Groups whose boot
+// is still in flight (not yet in fcVMs) are left to the pidfile fallback of
+// a future stop — nothing has run in them, so there is nothing to lose.
+func fcStopAll() {
+	fcMu.Lock()
+	gs := make([]string, 0, len(fcVMs))
+	for g := range fcVMs {
+		gs = append(gs, g)
+	}
+	fcMu.Unlock()
+	if len(gs) == 0 {
+		return
+	}
+	emitLogf("fc", "info", "shutdown: stopping %d microVM(s)", len(gs))
+	var wg sync.WaitGroup
+	for _, g := range gs {
+		wg.Add(1)
+		go func(g string) {
+			defer wg.Done()
+			fcStop(g)
+		}(g)
+	}
+	wg.Wait()
+}
+
 // ---- guest→host connection handlers ----------------------------------------
 
 func listenUnix(path string) (net.Listener, error) {

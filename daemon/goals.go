@@ -1177,6 +1177,14 @@ func goalInformCoordinatorMsg(it goalItem) string {
 // goalPauseWith pauses an active goal with a reason and alerts the operator.
 // No-op if the goal moved to a terminal/paused state meanwhile.
 func goalPauseWith(g, id, reason, detail string) {
+	// During daemon shutdown the driver's turn dies with its VM and the
+	// enqueue path starts refusing (ensureLocked) — that failure is the
+	// shutdown, not the goal. Persisting `paused` here would cost the goal
+	// its automatic restart at the next daemon start: resumeGoalDrivers
+	// re-drives running/planning goals only.
+	if shuttingDown.Load() {
+		return
+	}
 	it, err := goalTransition(g, id, []string{goalStatusRunning, goalStatusPlanning}, func(it *goalItem) {
 		it.Status = goalStatusPaused
 		it.PausedReason = reason

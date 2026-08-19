@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +25,14 @@ import (
 	// mTLS+token-authenticated allowlisted peers reach the server.
 	_ "google.golang.org/grpc/encoding/gzip"
 )
+
+// shuttingDown flips when the daemon receives SIGTERM/SIGINT. ensureLocked
+// refuses new VM boots past it, so a queued turn, cron fire, or goal
+// iteration can't re-boot a VM the shutdown path is busy stopping; and
+// goalPauseWith skips the pause a shutdown-failed turn would otherwise
+// persist (a goal must stay `running` to be resumed by resumeGoalDrivers at
+// the next daemon start).
+var shuttingDown atomic.Bool
 
 // ---- wire-type aliases ---------------------------------------------------
 
@@ -199,8 +208,23 @@ func daemonMain() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
-		<-sig
-		srv.GracefulStop()
+		s := <-sig
+		emitLogf("daemon", "info", "%v: shutting down", s)
+		shuttingDown.Store(true)
+		// Hard bound UNDER podman stop's grace window (Makefile/run-host.sh
+		// use -t 15): a wedged agent call in one group's fcStop must not turn
+		// the whole container's stop into a SIGKILL for every other group.
+		time.AfterFunc(12*time.Second, func() { os.Exit(1) })
+		// Stop, not GracefulStop: graceful waits for active RPCs, and the
+		// subscribe/watch streams stay open for as long as a TUI is attached
+		// — the handler would hang there and the VMs would die dirty with the
+		// container. Dropped clients reconnect on the next run.
+		srv.Stop()
+		// The reason this handler exists: give every guest its sync+umount
+		// window (fcStop) so the workspace ext4 images land clean instead of
+		// being left to journal replay — the VMMs are container children and
+		// die with the daemon otherwise.
+		fcStopAll()
 		os.Exit(0)
 	}()
 

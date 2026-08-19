@@ -1,4 +1,4 @@
-# cs_host: runs the daemon + proxy via `go run` over bind-mounted source.
+# cs_host: builds + runs the daemon + proxy from bind-mounted source.
 #
 # Runtime is the golang toolchain image (not a minimal alpine) so we can
 # recompile on every cs_host start without an image rebuild. This trades
@@ -27,4 +27,11 @@ RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
 # go run never needs to rewrite go.mod here anyway.
 ENV GOFLAGS=""
 ENV BIND=0.0.0.0 NC_NETWORK=koto-net PROXY_HOST=cs_host_go
-ENTRYPOINT ["go","run","./daemon","daemon"]
+# Build-then-EXEC rather than `go run`: the daemon binary must be PID 1 so
+# `podman stop`'s SIGTERM reaches its shutdown handler (which stops every
+# microVM so guests sync+umount their workspace images). `go run` does NOT
+# forward SIGTERM to its child — verified: the go tool dies, the daemon
+# lingers orphaned until podman's SIGKILL, and every running workspace.img is
+# left dirty. Same recompile-on-start ergonomics (same mounted build cache);
+# the binary lands in /tmp, outside the source bind mount.
+ENTRYPOINT ["sh","-c","go build -o /tmp/kotod ./daemon && exec /tmp/kotod daemon"]

@@ -76,6 +76,11 @@ CPUS_ARG=""
 # the daemon's startup probe degrades to cgroup=off; removing these two args
 # is the supported off-switch.
 CGROUP_ARGS="--cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw"
+# Graceful replacement: a running daemon gets to stop its VMs (guests
+# sync+umount their workspace images) before the container goes away — rm -f
+# alone SIGKILLs the VMMs mid-write. No-VM daemons exit in well under a
+# second, so the dev edit-restart loop doesn't feel the -t 15 ceiling.
+podman stop -t 15 "$CS_HOST_NAME" >/dev/null 2>&1 || true
 podman rm -f "$CS_HOST_NAME" >/dev/null 2>&1 || true
 # .gocache is a persistent Go build cache. Without it, the first compile
 # inside cs_host_go takes ~10-15s; with it, incremental rebuilds after a daemon

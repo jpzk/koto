@@ -436,6 +436,43 @@ func TestGoalStallPauses(t *testing.T) {
 	})
 }
 
+// TestGoalShutdownSkipsPause pins the shutdown guard in goalPauseWith: a turn
+// that fails because the daemon is going down (its VM died with the container,
+// ensureLocked refusing boots) must not persist `paused` — the goal has to
+// still read `running` at the next daemon start, where resumeGoalDrivers
+// re-drives running goals only.
+func TestGoalShutdownSkipsPause(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-shut1"
+	withTurnFn(func(_, _, _ string) error { return fmt.Errorf("daemon is shutting down") }, func() {
+		shuttingDown.Store(true)
+		defer shuttingDown.Store(false)
+		it, err := goalSet(g, "build", "1. built", "", 0, false)
+		if err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		// The driver exits WITHOUT a status change, so join on the driver
+		// map rather than waitGoal (which waits for a transition).
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			goalLock.Lock()
+			alive := goalDrivers[it.ID]
+			goalLock.Unlock()
+			if !alive {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		goalLock.Lock()
+		got := soleGoalLocked(g).Status
+		goalLock.Unlock()
+		if got != goalStatusRunning {
+			t.Fatalf("status = %q after shutdown-time turn failure, want %q (auto-resume at next start depends on it)",
+				got, goalStatusRunning)
+		}
+	})
+}
+
 func TestGoalMailboxWindowGating(t *testing.T) {
 	goalTestSetup(t)
 	if err := recordGoalDone("goal-nowin", "", "x"); err == nil {
