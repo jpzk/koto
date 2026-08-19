@@ -1256,8 +1256,18 @@ You have been given a goal. This turn, plan only — do not start implementing:
    Items must be individually verifiable.
 2. Note key decisions and risks in %s/progress.md.
 3. If /workspace should be a git repo and is not one yet, git init and commit.
-4. End your reply with a concise summary of the plan — a human reviews it and
-   must approve before execution starts.
+4. End your reply with EXACTLY this template and nothing after it — the reply
+   is the review surface: a human reads it in this goal's session and
+   approves or rejects on it alone, without opening your files:
+
+TLDR: <2-3 sentences: what will be built, the approach, the main risk>
+
+PLAN (mirrors ledger.json):
+1. [ ] <item — its individually verifiable outcome>
+2. [ ] <item>
+<...one line per ledger item, in order>
+
+VERIFY: <per acceptance criterion, the command or artifact that will prove it>
 
 GOAL:
 %s
@@ -1298,9 +1308,19 @@ filesystem. Startup ritual, in order:
    and complete it.
 4. Verify what you did, mark the item done in the ledger, append what you did
    and decided to progress.md, and git commit at a good state.
-5. End your reply with a short handoff for the next iteration: what you
-   completed, what is unfinished, and the immediate next step — the next
-   iteration starts context-fresh and is shown your closing report verbatim.
+5. End your reply with EXACTLY this template and nothing after it — it is
+   both the next iteration's pickup note (it starts context-fresh and is
+   shown your closing report verbatim) and what the operator reads in this
+   session to follow the run:
+
+DONE: <what this iteration completed, and the verification you ran>
+
+LEDGER:
+1. [x] <item>
+2. [ ] <item>
+<...every ledger item, in order, [x] done / [ ] open>
+
+NEXT: <the immediate next step>
 %s%s
 GOAL:
 %s
