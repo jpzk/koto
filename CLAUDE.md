@@ -692,7 +692,7 @@ missed, and exits at `turn_end`.
 - The TUI is Go (Bubble Tea); all other host-side code is Python stdlib. Don't add a JS/TS runtime to the project — the prior Ink TUI's npm tree is the reason we rewrote it.
 - For Go deps in `tui/`: every direct + indirect entry in `go.mod` must be ≥6 weeks old. After `go mod tidy`, verify each pin via `curl -s https://proxy.golang.org/<mod>/@v/<ver>.info` and compare its `Time` to today minus 6 weeks.
 - When adding a sidecar feature, audit its blast radius: can it read `/peers` (main only)? does it have outbound network beyond the proxy? does it run as root?
-- `make clean` is SAFE (stop + runtime droppings only: logs, metrics, `run/`, sentinels) — group workspaces survive. The destructive wipe is `make clean-groups` (deletes `groups/` + `groups.json` + `schedules.json` — all sessions, prompts, schedules; confirmation-prompted, `FORCE=1` to skip). Split after a `make clean` irrecoverably deleted five groups' state.
+- `make clean` is SAFE (stop + runtime droppings only: logs, metrics, `run/`, sentinels) — group workspaces survive. The destructive wipe is `make clean-groups` (deletes `groups/` + `groups.json` + `schedules.json` + `goals.json` — all sessions, prompts, schedules, goals; confirmation-prompted, `FORCE=1` to skip). Split after a `make clean` irrecoverably deleted five groups' state.
 
 ## Iterating
 

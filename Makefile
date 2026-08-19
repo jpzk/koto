@@ -271,15 +271,18 @@ clean: stop
 
 # clean-groups PERMANENTLY DELETES all group state: groups/ (each group's
 # workspace.img = sessions, prompts, files), groups.json (port allocations),
-# and schedules.json (schedules reference groups; wiping one without the
-# other leaves orphans that fire into freshly-respawned empty groups).
+# schedules.json, and goals.json (both reference groups; wiping one without
+# the others leaves orphans — a surviving `running` goal is re-driven by
+# resumeGoalDrivers at the next daemon start, which respawns its deleted
+# group as a fresh empty VM and burns iterations against a blank workspace,
+# same failure shape that got schedules.json included here).
 # Prompts for confirmation; FORCE=1 skips it for scripts.
 clean-groups: stop
 	@if [ "$(FORCE)" != "1" ]; then \
-	  printf 'This PERMANENTLY deletes ALL group workspaces, sessions, and schedules\n(groups/ + groups.json + schedules.json). There is no undo.\nType "yes" to continue: '; \
+	  printf 'This PERMANENTLY deletes ALL group workspaces, sessions, schedules, and goals\n(groups/ + groups.json + schedules.json + goals.json). There is no undo.\nType "yes" to continue: '; \
 	  read ans && [ "$$ans" = "yes" ] || { echo "aborted — nothing deleted"; exit 1; }; \
 	fi
-	rm -rf groups groups.json schedules.json
+	rm -rf groups groups.json schedules.json goals.json
 
 clean-creds:
 	rm -rf creds
