@@ -639,6 +639,7 @@ func goalApprove(g, name string) (goalItem, error) {
 
 func goalPause(g, name string) (goalItem, error) {
 	it, err := goalTransition(g, name, []string{goalStatusRunning}, func(it *goalItem) {
+		it.PausedFrom = it.Status
 		it.Status = goalStatusPaused
 		it.PausedReason = "operator"
 	})
@@ -666,6 +667,7 @@ var goalInterruptTurnFn func(g, sess string) error
 // the same status check in goalJudgeCheck).
 func goalInterrupt(g, name string) (goalItem, error) {
 	it, err := goalTransition(g, name, []string{goalStatusRunning}, func(it *goalItem) {
+		it.PausedFrom = it.Status
 		it.Status = goalStatusPaused
 		it.PausedReason = "interrupted"
 	})
@@ -690,10 +692,19 @@ func goalInterrupt(g, name string) (goalItem, error) {
 	return it, nil
 }
 
-// goalResume restarts a paused goal with a fresh iteration budget.
+// goalResume restarts a paused goal with a fresh iteration budget, back into
+// the PHASE the pause interrupted: a pause that landed during the plan turn
+// (group stopped, plan turn stalled) resumes into `planning` — the driver
+// re-runs the plan and parks at awaiting_approval, same as a daemon restart
+// would. Resuming to `running` unconditionally skipped both the plan and the
+// human approval gate.
 func goalResume(g, name string) (goalItem, error) {
 	it, err := goalTransition(g, name, []string{goalStatusPaused}, func(it *goalItem) {
 		it.Status = goalStatusRunning
+		if it.PausedFrom == goalStatusPlanning {
+			it.Status = goalStatusPlanning
+		}
+		it.PausedFrom = ""
 		it.PausedReason = ""
 		it.Iteration = 0
 	})
@@ -745,16 +756,23 @@ func goalCancelOnDestroy(g string) {
 	}
 }
 
-// goalPauseOnStop pauses every running goal when the operator stops its
-// group — otherwise a driver's next enqueue would silently re-boot the VM
-// the operator just powered off. Other statuses are untouched (a terminal or
-// already-paused goal, or a planning turn — the human approval gate already
-// stands between a truncated plan and execution).
+// goalPauseOnStop pauses every running AND planning goal when the operator
+// stops its group — otherwise a driver's next enqueue would silently re-boot
+// the VM the operator just powered off. Planning used to be exempt on the
+// theory that the approval gate stands between a truncated plan and
+// execution — but the stop kills the plan turn mid-flight, the aborted turn
+// completes with a nil error (abortInflightTurn), and goalPlanPhase flipped
+// the goal to awaiting_approval with a false "plan ready for review"
+// notification. Pausing first makes that transition fail instead; resume
+// restores `planning` (PausedFrom) and re-runs the plan. Terminal and
+// already-paused goals are untouched.
 func goalPauseOnStop(g string) {
 	goalLock.Lock()
 	var paused []goalItem
 	for i := range goals {
-		if goals[i].Group == g && goals[i].Status == goalStatusRunning {
+		if goals[i].Group == g &&
+			(goals[i].Status == goalStatusRunning || goals[i].Status == goalStatusPlanning) {
+			goals[i].PausedFrom = goals[i].Status
 			goals[i].Status = goalStatusPaused
 			goals[i].PausedReason = "stopped"
 			goals[i].UpdatedAt = goalNow()
@@ -1186,6 +1204,7 @@ func goalPauseWith(g, id, reason, detail string) {
 		return
 	}
 	it, err := goalTransition(g, id, []string{goalStatusRunning, goalStatusPlanning}, func(it *goalItem) {
+		it.PausedFrom = it.Status
 		it.Status = goalStatusPaused
 		it.PausedReason = reason
 	})

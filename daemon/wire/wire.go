@@ -376,8 +376,14 @@ type GoalItem struct {
 	Judged bool `json:"judged,omitempty"`
 	// DoneNote is the worker's evidence summary from the accepted goal_done.
 	DoneNote     string  `json:"done_note,omitempty"`
-	PausedReason string  `json:"paused_reason,omitempty"` // cap | stalled | judge | operator | stopped
-	CreatedAt    float64 `json:"created_at"`
+	PausedReason string `json:"paused_reason,omitempty"` // cap | stalled | judge | operator | stopped
+	// PausedFrom is the status the pause interrupted (running | planning) —
+	// loop-internal like LastHandoff, not surfaced over pb. goalResume
+	// restores it: a goal paused out of its PLAN phase must resume back into
+	// planning (re-running the plan turn), because resuming to `running`
+	// unconditionally would skip both the plan and the human approval gate.
+	PausedFrom string  `json:"paused_from,omitempty"`
+	CreatedAt  float64 `json:"created_at"`
 	UpdatedAt    float64 `json:"updated_at,omitempty"`
 	CompletedAt  float64 `json:"completed_at,omitempty"`
 }

@@ -933,6 +933,54 @@ func TestGoalLifecycleHooks(t *testing.T) {
 	})
 }
 
+// TestGoalStopDuringPlanPausesAndResumesPlanning: stopping the group while
+// the PLAN turn is in flight pauses the goal instead of letting the chopped
+// turn (aborted with a nil error by abortInflightTurn) flip it to
+// awaiting_approval with a false "plan ready" notification — and resume goes
+// back into the plan phase, not the execution loop, so the plan re-runs and
+// the human approval gate is preserved.
+func TestGoalStopDuringPlanPausesAndResumesPlanning(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-planstop1"
+	rec := &turnRec{}
+	block := make(chan struct{})
+	var once sync.Once
+	withTurnFn(func(_, session, msg string) error {
+		rec.add(session, msg)
+		first := false
+		once.Do(func() { first = true })
+		if first {
+			<-block // hold the plan turn in flight while the operator stops
+		}
+		return nil // an aborted turn returns nil, same as a completed one
+	}, func() {
+		if _, err := goalSet(g, "plan me", "1. planned", "", 0, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) && len(rec.byRole(roleWork)) == 0 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		goalPauseOnStop(g) // operator /stop mid-plan-turn
+		close(block)       // the VM dies; the aborted plan turn returns
+		it := waitGoal(t, g, goalStatusPaused)
+		if it.PausedReason != "stopped" || it.PausedFrom != goalStatusPlanning {
+			t.Fatalf("paused reason/from = %q/%q, want stopped/planning", it.PausedReason, it.PausedFrom)
+		}
+		if _, err := goalResume(g, ""); err != nil {
+			t.Fatalf("goalResume: %v", err)
+		}
+		it2 := waitGoal(t, g, goalStatusAwaiting)
+		if it2.PausedFrom != "" {
+			t.Fatalf("PausedFrom not cleared on resume: %q", it2.PausedFrom)
+		}
+		plans := rec.byRole(roleWork)
+		if len(plans) != 2 || !strings.Contains(plans[1], "PLAN]") {
+			t.Fatalf("resume must re-run the plan turn; work turns = %d, last = %.60q", len(plans), plans[len(plans)-1])
+		}
+	})
+}
+
 // TestGoalInterruptAbortsInFlightTurn: goalInterrupt pauses with reason
 // "interrupted" and SIGINTs the agent — but only when the running turn is a
 // reserved goal session's; with no goal turn in flight the pause stands alone.
