@@ -134,6 +134,18 @@ type SendReq struct {
 	// Session to deliver the turn into ("" = default; see koto.proto
 	// SendReq.session).
 	Session string `json:"session,omitempty"`
+	// Reply (ctl plane, main only) arms a one-shot report window on the
+	// target group: it may answer back ONCE via the `report` verb, delivered
+	// to main as a turn when the group says the task is complete — this
+	// turn or several turns later (see daemon/report.go). Without an armed
+	// window a group's report is refused, so the "non-main groups cannot
+	// push to main" invariant holds: callbacks are solicited, not a channel.
+	Reply bool `json:"reply,omitempty"`
+	// FromSession is the delegating session inside MAIN ("" = default) that
+	// the report should wake. Advisory attribution (main's sessions share
+	// one uid, like job_done's session field): malformed or reserved values
+	// degrade to the default session, never error.
+	FromSession string `json:"from_session,omitempty"`
 }
 
 // GroupReq covers stop / destroy / restart / clear — all take `group`.

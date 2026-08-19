@@ -193,7 +193,23 @@ func ctlDispatch(owner string, line []byte) any {
 		if isReservedSession(sess) {
 			return errResp("ctl: session " + sess + " is reserved for the goal loop")
 		}
-		if _, err := enqueueSend(req.Group, sess, req.Msg); err != nil {
+		if req.Reply {
+			// Solicited callback (report.go): tell the peer a reply is
+			// expected and arm the target's one-shot report window, atomic
+			// with the enqueue — a failed enqueue arms nothing and leaves any
+			// earlier delegation's window intact. from_session says which of
+			// main's conversations gets the report — advisory attribution
+			// like job_done's session field, so malformed (or reserved: a
+			// goal session must not receive injected turns) degrades to the
+			// default session, never errors.
+			from, ferr := normalizeSession(req.FromSession)
+			if ferr != nil || isReservedSession(from) {
+				from = ""
+			}
+			if err := armReportAndEnqueue(req.Group, sess, req.Msg+reportRequestNote, from); err != nil {
+				return errResp(err.Error())
+			}
+		} else if _, err := enqueueSend(req.Group, sess, req.Msg); err != nil {
 			return errResp(err.Error())
 		}
 		registerSession(req.Group, sess)
@@ -364,6 +380,43 @@ func ctlDispatch(owner string, line []byte) any {
 		// operator can check a missed banner afterwards.
 		if !notifyDeliver(owner, sev, sess, t, b) {
 			return errResp("ctl: notify: backlog full")
+		}
+		return baseResp{OK: true}
+
+	case "report":
+		// Self-attributed like notify/job_done: the group answers a
+		// delegation main sent with reply:true. SOLICITED-ONLY — without an
+		// armed window the report is refused (deliverReport), preserving the
+		// deliberate invariant that non-main groups cannot push turns into
+		// main: reply:true is main opting in to exactly one callback for
+		// exactly this delegation. No extra rate limit needed — the window
+		// consumption IS the bound (one main turn per main-initiated ask).
+		if owner == ctlMainGroup {
+			return errResp("ctl: main has no delegator to report to")
+		}
+		var req struct {
+			Msg string `json:"msg"` // base64 (arbitrary bytes)
+		}
+		_ = json.Unmarshal(line, &req)
+		msg, _ := base64.StdEncoding.DecodeString(req.Msg)
+		// sanitize() HERE, not only at the client-facing event boundary: the
+		// body also travels raw into main's log file and main's guest turn.
+		// Bare \r could visually overwrite the "> " quote fence wherever the
+		// bytes bypass the event sanitizer, a NUL can truncate strings in the
+		// guest-side delivery pipeline (clipping the framing trailer off the
+		// turn), and bidi overrides can reorder what main's operator reads.
+		// Same tier-3→tier-2 scrub every other sidecar byte gets.
+		full := strings.TrimSpace(sanitize(string(msg)))
+		if full == "" {
+			return errResp("ctl: report: empty message")
+		}
+		m := truncateRunes(full, reportMsgMax)
+		truncated := 0
+		if len(m) < len(full) {
+			truncated = len(full)
+		}
+		if err := deliverReport(owner, m, truncated); err != nil {
+			return errResp("ctl: report: " + err.Error())
 		}
 		return baseResp{OK: true}
 
