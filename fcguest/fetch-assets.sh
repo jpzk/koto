@@ -12,7 +12,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$HERE/fcassets"
 mkdir -p "$OUT"
 
-FC_VERSION="${FC_VERSION:-v1.11.0}"   # 2025-05; >6 weeks old
+FC_VERSION="${FC_VERSION:-v1.16.1}"   # 2026-07-02; >6 weeks old
 ARCH=$(uname -m)                       # x86_64
 
 if [ ! -x "$OUT/firecracker" ]; then

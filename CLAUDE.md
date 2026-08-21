@@ -88,7 +88,7 @@ proxy.log            proxy stdout when launched by daemon (gitignored)
 
 ```sh
 make host-build    # builds koto + koto-host images
-make fc-assets     # fetch firecracker (pinned v1.11.0) + CI kernel + build golden rootfs.img
+make fc-assets     # fetch firecracker (pinned v1.16.1) + CI kernel + build golden rootfs.img
                    #   REQUIRED for the default (firecracker) runtime; rebuild the rootfs
                    #   (`make fc-rootfs`) after editing sidecar/*.{sh,js} or fcguest/ —
                    #   microVMs have no live bind mounts (the one ergonomic regression vs podman)

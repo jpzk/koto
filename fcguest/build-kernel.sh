@@ -29,7 +29,7 @@ KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.170-31.327.amzn2023}"
 # The commit the annotated tag dereferences to (git checkout resolves HEAD to
 # this, not the f3ba04a… tag-object sha from `git ls-remote refs/tags/…`).
 KERNEL_COMMIT="${KERNEL_COMMIT:-520092c86b24c7a66d6957cbec0d8f20f60f9be7}"
-FC_VERSION="${FC_VERSION:-v1.11.0}"                          # guest-config source tag
+FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
 BUILDER="${BUILDER:-docker.io/library/ubuntu:24.04}"        # Firecracker's CI build OS
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 

@@ -135,7 +135,7 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 
 | component | pin | where |
 |-----------|-----|-------|
-| Firecracker VMM | v1.11.0 (static musl, GitHub release) | `fcguest/fetch-assets.sh` |
+| Firecracker VMM | v1.16.1 (static musl, GitHub release) | `fcguest/fetch-assets.sh` |
 | guest kernel | `amazonlinux/linux` tag `microvm-kernel-6.1.170-31.327.amzn2023`, verified against a pinned commit sha | `fcguest/build-kernel.sh` |
 | protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
 

@@ -141,7 +141,7 @@ shared by all VMs.
 ## Build & run
 
 ```sh
-make fc-assets    # fetch firecracker (pinned v1.11.0) + CI kernel (6.1)
+make fc-assets    # fetch firecracker (pinned v1.16.1) + CI kernel (6.1)
                   #   + build golden rootfs (fedora + node + claude-code +
                   #     sidecar/ + fc-agent; no chrome, no podman)
 make host-build   # once: host image now includes e2fsprogs + tar
@@ -509,7 +509,8 @@ a `jailer` binary for exactly this, but it assumes real root — it `mknod`s
 needs `CAP_MKNOD` in the **initial** user namespace, which a rootless
 `cs_host` container does not have. So `fcjail.go` implements the same model
 with primitives that work rootless (verified: real Firecracker v1.11 boots the
-real kernel to `Hypervisor detected: KVM` inside the jail).
+real kernel to `Hypervisor detected: KVM` inside the jail; re-verified on the
+v1.16.1 upgrade, 2026-08-21 — full fleet boot, vsock exec, wan gateway).
 
 **Mechanism.** `fcSpawn` re-execs the daemon binary as `koto fcjail <spec>`
 with `CLONE_NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS` and a uid/gid map of
