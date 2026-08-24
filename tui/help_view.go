@@ -78,9 +78,11 @@ func helpSections() []helpSection {
 			{"", "every other key goes raw to the guest terminal"},
 		}},
 		{"FLEET VIEW (ctrl+k)", []helpEntry{
+			{"up/down", "move the selection (tree cursor follows)"},
 			{"s / c / m / t", "sort by space / cpu / rss / tok-s"},
 			{"tab", "toggle the tree pane alongside"},
-			{"shift+up/down", "move the tree cursor (also in the log view)"},
+			{"shift+up/down", "move the tree cursor row-by-row (also in the log view)"},
+			{"pgup/pgdn", "scroll the table"},
 			{"esc / ctrl+k", "close"},
 		}},
 		{"SLASH COMMANDS", []helpEntry{

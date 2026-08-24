@@ -281,6 +281,39 @@ func TestTopViewSelectionFollowsTree(t *testing.T) {
 	}
 }
 
+// TestTopViewArrowSelection: plain ↑/↓ move the selection through the table's
+// sort order (not the viewport), and the tree cursor follows — both panes
+// agree on the selected group, whether or not the tree pane is showing.
+func TestTopViewArrowSelection(t *testing.T) {
+	m := topModel(t)
+	m = press(t, m, tea.KeyTab) // tree mode, so the sync is observable
+	m = press(t, m, tea.KeyCtrlK)
+	// cpu order: web, main. Cursor starts on main (row 1); up selects web.
+	if m.cur != "main" {
+		t.Fatalf("cur = %q at open, want main", m.cur)
+	}
+	m = press(t, m, tea.KeyUp)
+	if m.cur != "web" {
+		t.Fatalf("cur = %q after up, want web (the table's row above)", m.cur)
+	}
+	if trows := m.treeRows(); m.treeIdx >= len(trows) || trows[m.treeIdx].group != "web" {
+		t.Errorf("tree cursor did not follow the table selection to web")
+	}
+	// Down walks back; another down at the bottom row is a no-op.
+	m = press(t, m, tea.KeyDown)
+	m = press(t, m, tea.KeyDown)
+	if m.cur != "main" {
+		t.Errorf("cur = %q after down/down, want main (bottom row clamps)", m.cur)
+	}
+	// Without the tree pane the arrows still move the selection.
+	m2 := topModel(t)
+	m2 = press(t, m2, tea.KeyCtrlK)
+	m2 = press(t, m2, tea.KeyUp)
+	if m2.cur != "web" {
+		t.Errorf("cur = %q after up without tree pane, want web", m2.cur)
+	}
+}
+
 // TestTopViewIgnoresTyping: the view is read-only — printable keys must not
 // leak into the (blurred) message bar behind it.
 func TestTopViewIgnoresTyping(t *testing.T) {

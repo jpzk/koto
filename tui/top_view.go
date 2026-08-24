@@ -359,6 +359,54 @@ func (m *Model) refreshTopViewport() {
 	m.topVP.SetContent(content)
 }
 
+// moveTopSel moves the fleet selection one row through the TABLE's own sort
+// order (plain ↑/↓ — the keys a top-alike is expected to answer). Selection
+// here IS the active group, so the move is routed through the tree cursor:
+// selectTreeRow on the group's own tree row keeps the tree pane, status bar,
+// log scope and where-esc-lands in agreement with the highlighted table row,
+// whether or not the tree is currently showing. A group the tree doesn't know
+// (a resources-only row for a destroyed group) just becomes m.cur directly.
+// A selection not in the table (shouldn't happen — the table is the union of
+// both sources) restarts at the top row.
+func (m *Model) moveTopSel(up bool) {
+	rows := m.topRows()
+	if len(rows) == 0 {
+		return
+	}
+	idx := -1
+	for i, r := range rows {
+		if r.group == m.cur {
+			idx = i
+			break
+		}
+	}
+	switch {
+	case idx < 0:
+		idx = 0
+	case up && idx > 0:
+		idx--
+	case !up && idx < len(rows)-1:
+		idx++
+	default:
+		return
+	}
+	g := rows[idx].group
+	synced := false
+	for i, r := range m.treeRows() {
+		if r.group == g && r.session == "" && r.job == "" {
+			m.treeIdx = i
+			m.selectTreeRow(r)
+			synced = true
+			break
+		}
+	}
+	if !synced {
+		m.cur = g
+	}
+	m.refreshTopViewport()
+	m.followTopSel()
+}
+
 // followTopSel scrolls the selected group's row into view, and only then —
 // never from refreshTopViewport, which runs on every resources poll and state
 // frame. Yanking the viewport back every 5s would fight an operator who
@@ -448,7 +496,7 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ select", "shift-up/dn select"), "tab tree", "^k close", "^c exit"}
+	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ select", "up/dn select"), gl("⇧↑↓ tree", "shift-up/dn tree"), "pgup/dn scroll", "tab tree", "^k close", "^c exit"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
@@ -490,8 +538,9 @@ func (m *Model) exitTop() {
 }
 
 // handleTopKey routes keys while the fleet view is focused. Esc / ctrl+K
-// close, arrows scroll, s/c/m/t re-sort, everything else is dropped (read-only
-// view — bare letters are free here precisely because nothing types).
+// close, arrows move the selection (pgup/pgdn scroll), s/c/m/t re-sort,
+// everything else is dropped (read-only view — bare letters are free here
+// precisely because nothing types).
 func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s := msg.String(); s {
 	case "esc", "ctrl+k":
@@ -530,8 +579,11 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.followTopSel()
 		return m, nil
 	case "shift+up", "shift+down":
-		// Move the tree cursor without leaving the view (same binding as the
-		// log view): the table isn't scoped by it, but the active group —
+		// Move the tree cursor ROW-BY-ROW without leaving the view (same
+		// binding as the log view) — the fine-grained variant of the plain
+		// arrows above: it walks the tree's order including session/job
+		// sub-rows, where ↑/↓ walk the table's sort order group-by-group.
+		// The table isn't scoped by it, but the active group —
 		// status bar, metrics bar, and where you land on close — follows,
 		// and so does the highlighted table row. Sub-rows (a session or a
 		// job) resolve to their group, which is the only granularity the
@@ -541,11 +593,13 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshTopViewport()
 		m.followTopSel()
 		return m, nil
-	case "up":
-		m.topVP.ScrollUp(1)
-		return m, nil
-	case "down":
-		m.topVP.ScrollDown(1)
+	case "up", "down":
+		// Plain arrows move the SELECTION through the table's own sort order
+		// (and the tree cursor with it — moveTopSel routes through
+		// selectTreeRow so the two panes can't disagree). Scrolling without
+		// moving the selection stays on pgup/pgdn/home/end and the wheel;
+		// followTopSel keeps the moving selection in view either way.
+		m.moveTopSel(s == "up")
 		return m, nil
 	case "pgup":
 		m.topVP.HalfPageUp()
