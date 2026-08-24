@@ -1078,8 +1078,11 @@ func (m Model) treePaneW() int {
 }
 
 // renderLiveLines formats the in-flight thinking/stream overlay for inclusion
-// in the viewport content. Called from model.buildLogContent.
-func renderLiveLines(liveText, liveKind string, tick int) []string {
+// in the viewport content. Called from model.buildLogContent. Lines are
+// wrapped to contentCols like every other raw-text block — live thinking
+// streams as long paragraphs with few newlines, and unwrapped they ran past
+// the viewport edge and were clipped.
+func renderLiveLines(liveText, liveKind string, tick, contentCols int) []string {
 	if liveText == "" {
 		return nil
 	}
@@ -1096,11 +1099,15 @@ func renderLiveLines(liveText, liveKind string, tick int) []string {
 	indent := "   "
 	stLines := strings.Split(liveText, "\n")
 	out := make([]string, 0, len(stLines))
-	for i, ln := range stLines {
-		if i == 0 {
-			out = append(out, head+bodyStyle.Render(ln))
-		} else {
-			out = append(out, indent+bodyStyle.Render(ln))
+	first := true
+	for _, ln := range stLines {
+		for _, seg := range wrapLine(ln, contentCols) {
+			if first {
+				out = append(out, head+bodyStyle.Render(seg))
+				first = false
+			} else {
+				out = append(out, indent+bodyStyle.Render(seg))
+			}
 		}
 	}
 	return out
@@ -1247,7 +1254,11 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		// away by allBlocks when expandedThoughts is false).
 		out = append(out, stampStr+glyph+summaryStyle.Render(srcLines[0]))
 		for _, ln := range srcLines[1:] {
-			out = append(out, indent+"   "+bodyStyle.Render(ln))
+			// Wrap like tool_out below: thinking is raw text, not glamour
+			// output, and its paragraphs arrive as single long lines.
+			for _, seg := range wrapLine(ln, contentCols) {
+				out = append(out, indent+"   "+bodyStyle.Render(seg))
+			}
 		}
 	case "tool_out":
 		// Same shape as "thought": first line is the summary, rest is the

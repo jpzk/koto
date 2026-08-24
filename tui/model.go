@@ -2922,7 +2922,7 @@ func (m Model) buildLogContent(contentCols int, plain bool) string {
 				out = append(out, "")
 			}
 		}
-		out = append(out, renderLiveLines(liveText, liveKind, m.tick)...)
+		out = append(out, renderLiveLines(liveText, liveKind, m.tick, contentCols)...)
 	}
 	// Queued-but-not-started prompts render last — below the in-flight turn's
 	// output, since they're waiting for it to finish.
