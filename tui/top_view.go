@@ -1,6 +1,7 @@
 package main
 
-// The fleet (top) view: linux-top for the group fleet, opened with ctrl+H.
+// The fleet (top) view: linux-top for the group fleet, opened with ctrl+K
+// (moved off ctrl+H, which now opens the cheatsheet modal — help_view.go).
 // One row per group — host-side cost (SPACE / CPU / RSS), throughput
 // (TOK/S), and the config profiles that shape its blast radius (NET / ROOT /
 // MODEL) — plus a host summary line, so the operator sees the whole fleet
@@ -447,11 +448,11 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ select", "shift-up/dn select"), "tab tree", "^h close", "^c exit"}
+	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ scroll", "up/dn scroll"), gl("⇧↑↓ select", "shift-up/dn select"), "tab tree", "^k close", "^c exit"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
-// toggleTopView opens/closes the fleet view (ctrl+H), mirroring
+// toggleTopView opens/closes the fleet view (ctrl+K), mirroring
 // toggleLogView's shape.
 func (m *Model) toggleTopView() {
 	if m.focus == focusTop {
@@ -488,12 +489,12 @@ func (m *Model) exitTop() {
 	m.restoreChatFocus(m.preTopFocus)
 }
 
-// handleTopKey routes keys while the fleet view is focused. Esc / ctrl+H
+// handleTopKey routes keys while the fleet view is focused. Esc / ctrl+K
 // close, arrows scroll, s/c/m/t re-sort, everything else is dropped (read-only
 // view — bare letters are free here precisely because nothing types).
 func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch s := msg.String(); s {
-	case "esc", "ctrl+h":
+	case "esc", "ctrl+k":
 		m.exitTop()
 		return m, nil
 	case "s", "c", "m", "t":

@@ -199,6 +199,12 @@ func (m Model) view() string {
 	if m.width < minW || m.height < 7 {
 		return "terminal too small"
 	}
+	if m.helpOpen {
+		// Cheatsheet modal (ctrl+h): paints the whole frame, whatever view is
+		// underneath — its key block in handleKey owns input the same way, so
+		// the frame and the routing can't disagree about who's on top.
+		return m.renderHelpView()
+	}
 	// The three full-frame views below return before the chat layout's own
 	// picker placement further down, so each composites the overlay itself —
 	// otherwise a palette opened from the log view, the fleet view or the

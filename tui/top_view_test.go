@@ -1,6 +1,6 @@
 package main
 
-// top_view_test.go — the fleet (top) view: ctrl+h toggles it, rows join
+// top_view_test.go — the fleet (top) view: ctrl+k toggles it, rows join
 // m.groups (model/tok-s/network/root) with m.resources (space/cpu/rss)
 // sorted busiest-first, and the table re-renders as either source updates.
 // See top_view.go.
@@ -32,23 +32,23 @@ func topModel(t *testing.T) Model {
 	return m
 }
 
-// TestCtrlHTogglesTopView: ctrl+h opens the fleet view from the input, a
-// second ctrl+h (or esc) closes it and restores the focus it was opened from.
-func TestCtrlHTogglesTopView(t *testing.T) {
+// TestCtrlKTogglesTopView: ctrl+k opens the fleet view from the input, a
+// second ctrl+k (or esc) closes it and restores the focus it was opened from.
+func TestCtrlKTogglesTopView(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	if m.focus != focusTop {
-		t.Fatalf("focus = %v after ctrl+h, want focusTop", m.focus)
+		t.Fatalf("focus = %v after ctrl+k, want focusTop", m.focus)
 	}
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	if m.focus != focusInput {
-		t.Fatalf("focus = %v after second ctrl+h, want focusInput", m.focus)
+		t.Fatalf("focus = %v after second ctrl+k, want focusInput", m.focus)
 	}
 	// From tree mode, esc lands back in tree mode.
 	m = press(t, m, tea.KeyTab)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	if m.focus != focusTop {
-		t.Fatalf("focus = %v after ctrl+h from tree, want focusTop", m.focus)
+		t.Fatalf("focus = %v after ctrl+k from tree, want focusTop", m.focus)
 	}
 	m = press(t, m, tea.KeyEsc)
 	if m.focus != focusTree {
@@ -80,7 +80,7 @@ func TestTopRowsSortByCPU(t *testing.T) {
 // profiles — plus the host summary line.
 func TestTopViewRendersColumns(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	out := stripANSI(m.View())
 	for _, want := range []string{
 		"GROUP", "SPACE", "CPU", "RSS", "TOK/S", "NET", "ROOT", "MODEL", // header
@@ -108,7 +108,7 @@ func TestTopViewRendersColumns(t *testing.T) {
 // view is open re-renders the table (the view has no poll of its own).
 func TestTopViewRefreshesOnListMsg(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	groups := map[string]GroupInfo{
 		"fresh": {Running: true, Model: "kimi-k2.5", Network: "lan"},
 	}
@@ -126,7 +126,7 @@ func TestTopViewRefreshesOnListMsg(t *testing.T) {
 func TestTopViewTreeAlongside(t *testing.T) {
 	m := topModel(t)
 	m = press(t, m, tea.KeyTab) // into tree mode
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	if m.treePaneW() == 0 {
 		t.Fatal("tree pane hidden in fleet view opened from tree mode")
 	}
@@ -145,7 +145,7 @@ func TestTopViewTreeAlongside(t *testing.T) {
 	}
 	// From the input, no tree.
 	m2 := topModel(t)
-	m2 = press(t, m2, tea.KeyCtrlH)
+	m2 = press(t, m2, tea.KeyCtrlK)
 	if m2.treePaneW() != 0 {
 		t.Error("tree pane visible in fleet view opened from the input")
 	}
@@ -160,7 +160,7 @@ func TestTopSortKeys(t *testing.T) {
 	main := m.resources["main"]
 	main.RSSBytes = 900 << 20 // 88% of 1024 MiB
 	m.resources["main"] = main
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 
 	order := func() []string {
 		rows := m.topRows()
@@ -203,8 +203,8 @@ func TestTopSortKeys(t *testing.T) {
 
 	// The sort survives closing and reopening the view.
 	key("m")
-	m = press(t, m, tea.KeyCtrlH)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
+	m = press(t, m, tea.KeyCtrlK)
 	if m.topSort != topSortMem {
 		t.Errorf("topSort = %v after reopen, want topSortMem", m.topSort)
 	}
@@ -228,7 +228,7 @@ func TestTopSortKeys(t *testing.T) {
 func TestTopViewSelectionFollowsTree(t *testing.T) {
 	m := topModel(t)
 	m = press(t, m, tea.KeyTab) // tree mode, then the fleet view
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	if !m.treeCursorLive() {
 		t.Error("tree cursor went dark in the fleet view — the selection keys move an invisible cursor")
 	}
@@ -264,7 +264,7 @@ func TestTopViewSelectionFollowsTree(t *testing.T) {
 		m2.resources[g] = GroupRes{Running: true, Vcpus: 2, MemMiB: 1024}
 	}
 	m2.cur = "g39" // idle, so it sorts to the bottom of the cpu-ordered table
-	m2 = press(t, m2, tea.KeyCtrlH)
+	m2 = press(t, m2, tea.KeyCtrlK)
 	if m2.topVP.YOffset == 0 {
 		t.Errorf("fleet table did not scroll to the selected row (offset 0, height %d, %d rows)",
 			m2.topVP.Height, len(m2.topRows()))
@@ -285,7 +285,7 @@ func TestTopViewSelectionFollowsTree(t *testing.T) {
 // leak into the (blurred) message bar behind it.
 func TestTopViewIgnoresTyping(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyCtrlH)
+	m = press(t, m, tea.KeyCtrlK)
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
 	m = nm.(Model)
 	if got := m.input.Value(); got != "" {

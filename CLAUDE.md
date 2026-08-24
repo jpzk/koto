@@ -138,13 +138,24 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        reached far more often than a display toggle, and
 #                        ctrl+t is fzf's own "pick a thing" key). Tool-output
 #                        expansion keeps ctrl+d. See tui/palette.go.
-#   ctrl+h            -> fleet (top) view: linux-top for the fleet — one row
+#   ctrl+h            -> cheatsheet modal: a near-fullscreen overlay listing
+#                        every keybinding and slash command, grouped by
+#                        context (global / chat+tree / terminal pane / fleet
+#                        view / slash commands). NOT a focus zone — focus
+#                        stays where it was; the modal just owns key routing
+#                        while open (esc/ctrl+h/q/enter close, arrows scroll
+#                        on short terminals, everything else swallowed).
+#                        This key used to open the fleet view (now ctrl+k):
+#                        ^h is the binding people guess, and a guessed key
+#                        should land somewhere that explains all the others.
+#                        See tui/help_view.go.
+#   ctrl+k            -> fleet (top) view: linux-top for the fleet — one row
 #                        per group with SPACE (image alloc vs size ceiling),
 #                        CPU, RSS, TOK/S, NET, ROOT, MODEL, sorted busiest-
 #                        first, plus a host rollup line (fs headroom / alloc /
 #                        provisioned). Joined client-side from WatchState
 #                        (network/root/model ride GroupInfo) + the Resources
-#                        poll; read-only, esc/ctrl+h closes. **s / c / m / t
+#                        poll; read-only, esc/ctrl+k closes. **s / c / m / t
 #                        re-sort by SPACE / CPU / RSS / TOK/S** (heaviest
 #                        first, name as tiebreak; underlined header marks the
 #                        active column, hint bar names it, choice survives

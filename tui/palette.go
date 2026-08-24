@@ -85,7 +85,8 @@ func (m Model) paletteItems() []paletteItem {
 	items := []paletteItem{
 		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
 		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
-		{title: topTitle, hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
+		{title: topTitle, hint: "ctrl+k", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
+		{title: "cheatsheet (keys + commands)", hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleHelp(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
 		{title: "jump to group/session", hint: "ctrl+t", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},

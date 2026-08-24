@@ -67,7 +67,7 @@ const (
 	// active the chat middle pane is hidden and key handling routes to
 	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
 	focusLog
-	// focusTop is the fleet (top) view, opened with ctrl+H: one row per
+	// focusTop is the fleet (top) view, opened with ctrl+K: one row per
 	// group with its host-side cost (space/cpu/rss), throughput, and
 	// config profiles (network/root/model) — linux-top for the fleet.
 	// Read-only like focusLog; handled by handleTopKey (top_view.go).
@@ -584,7 +584,15 @@ type Model struct {
 	// closing it again silently collapsed the tree pane.
 	preLogFocus focusZone
 
-	// Fleet (top) view (focusTop / ctrl+H). No subscription of its own —
+	// Cheatsheet modal (ctrl+h — see help_view.go). Not a focus zone: focus
+	// stays where it was, the modal just owns key routing while open and
+	// paints over the whole frame; the viewport scrolls the content on
+	// terminals shorter than the sheet.
+	helpOpen    bool
+	helpVP      viewport.Model
+	helpVPReady bool
+
+	// Fleet (top) view (focusTop / ctrl+K). No subscription of its own —
 	// the rows are joined from state the TUI already holds fresh: m.groups
 	// (WatchState push: model, tok/s, network, root) and m.resources +
 	// m.hostRes (Resources poll riding the 5s metrics tick: space, cpu,
@@ -1548,6 +1556,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeTopViewport()
 			m.refreshTopViewport()
 		}
+		m.resizeHelpViewport()
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
 		return m, cmd
@@ -2643,6 +2652,17 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return nm, cmd
 
 	case tea.MouseMsg:
+		// Cheatsheet modal: it covers the whole frame, so the wheel scrolls
+		// its content and clicks are swallowed — same reasoning as the
+		// picker gates below (the panes under the pointer aren't visible).
+		if m.helpOpen {
+			if m.helpVPReady {
+				var cmd tea.Cmd
+				m.helpVP, cmd = m.helpVP.Update(msg)
+				return m, cmd
+			}
+			return m, nil
+		}
 		// Shell pane: events over the pty grid go to the guest as terminal
 		// mouse reporting (tmux scrollback via wheel, clicks in htop, …) —
 		// see forwardShellMouse (shell_view.go). Events outside the grid
@@ -3442,6 +3462,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handlePickerKey(msg)
 	}
+	if m.helpOpen {
+		// The cheatsheet modal owns keys like the picker does — ahead of the
+		// shell block too, since the palette can open it from the terminal
+		// pane and a modal covering the screen must not feed the pty behind
+		// it. Close keys, scroll keys, ctrl+c; everything else swallowed.
+		return m.handleHelpKey(msg)
+	}
 	if m.focus == focusShell {
 		// Shell focus owns EVERY key before any chrome binding below gets a
 		// look — ctrl+c must reach the guest as SIGINT (job control), ctrl+r
@@ -3600,12 +3627,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+h" {
-		// Toggle the fleet (top) view, mirroring ctrl+l's shape. NOTE: this
-		// key used to clear the input line; the view won the binding. Modern
-		// terminals send 0x7f ("backspace") for the backspace key, so this
-		// only fires on a real ctrl+h (0x08) — a terminal configured for
-		// legacy ^H-backspace would land here, exactly as it hit the old
-		// clear-input binding.
+		// The cheatsheet modal (help_view.go). This key carried the fleet
+		// view (and before that, clear-input); help won it because ^h is the
+		// binding people GUESS, and a guessed key should land somewhere that
+		// explains all the others. Modern terminals send 0x7f ("backspace")
+		// for the backspace key, so this only fires on a real ctrl+h (0x08) —
+		// a terminal configured for legacy ^H-backspace lands in an esc-
+		// dismissable cheatsheet, the gentlest of the three keys that have
+		// lived here.
+		m.toggleHelp()
+		return m, nil
+	}
+	if s == "ctrl+k" {
+		// Toggle the fleet (top) view, mirroring ctrl+l's shape (moved off
+		// ctrl+h, which the cheatsheet took). The message bar loses bubbles'
+		// default kill-to-end-of-line — an unadvertised readline gesture,
+		// judged worth less than a reachable fleet view.
 		m.toggleTopView()
 		return m, nil
 	}
