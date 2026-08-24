@@ -53,7 +53,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 )
 
@@ -280,7 +279,7 @@ func themeFrame(s string, width int) string {
 		// the cursor between lines and we don't want to depend on that.
 		b.WriteString(set)
 		b.WriteString(reassertBg(line, set))
-		if pad := width - ansi.StringWidth(line); pad > 0 {
+		if pad := width - cellWidth(line); pad > 0 {
 			b.WriteString(strings.Repeat(" ", pad))
 		}
 		b.WriteString("\x1b[0m")

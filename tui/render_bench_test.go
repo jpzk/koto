@@ -9,6 +9,9 @@ package main
 import (
 	"fmt"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // benchModel builds a model shaped like a real attached session: a fleet-sized
@@ -96,5 +99,48 @@ func BenchmarkRenderTree(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = m.renderTree(m.height - 3)
+	}
+}
+
+// The same frame under a theme: themeFrame's post-pass (ground re-assertion
+// and padding on every line) is on top of everything above.
+func BenchmarkViewFullFrameThemed(b *testing.B) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	b.Cleanup(func() { lipgloss.SetColorProfile(prev); resetTheme() })
+	p, err := loadTheme("", "apollo")
+	if err != nil {
+		b.Fatal(err)
+	}
+	applyTheme(p)
+	m := benchModel(b, 29, 40)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.View()
+	}
+}
+
+func BenchmarkThemeFrameOnly(b *testing.B) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	b.Cleanup(func() { lipgloss.SetColorProfile(prev); resetTheme() })
+	p, _ := loadTheme("", "apollo")
+	applyTheme(p)
+	m := benchModel(b, 29, 40)
+	frame := m.view()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = themeFrame(frame, m.width)
+	}
+}
+
+// Streaming: what one contentFlush costs while the focused group has a live
+// overlay (the vpCache is bypassed, buildLogContent runs every flush).
+func BenchmarkRefreshLogStreaming(b *testing.B) {
+	m := benchModel(b, 29, 40)
+	m.streamBuf[m.curKey()] = "partial answer being streamed right now, a few words"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.refreshLog()
 	}
 }

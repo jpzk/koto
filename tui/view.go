@@ -272,18 +272,25 @@ func (m Model) view() string {
 	logRows := m.chatRows()
 	treeW := m.treePaneW()
 
-	logArea := lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
+	// The chat column is assembled by hand rather than through lipgloss:
+	// its lines were wrapped to width when they were built, so the only work
+	// left is slicing the visible window and padding — see renderChatLines
+	// and joinCols. Every column's width is known up front (the tree is
+	// leftPaneWidth, the log area is the viewport plus its one-cell inset,
+	// the scrollbar is one cell), which is what lets the join skip measuring.
+	logW, sbW := m.vp.Width+1, 1
+	logArea := m.renderChatLines(logRows)
 	scrollbar := m.renderScrollbar(logRows)
 	if peek, ok := m.renderJobPeek(logRows); ok {
-		logArea = peek
-		scrollbar = ""
+		// The peek pane spans the scrollbar column too.
+		logArea, scrollbar = peek, ""
+		logW, sbW = logW+1, 0
 	}
 	var middle string
 	if treeW > 0 {
-		tree := m.renderTree(logRows)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, tree, logArea, scrollbar)
+		middle = joinCols(logRows, []int{leftPaneWidth, logW, sbW}, m.renderTree(logRows), logArea, scrollbar)
 	} else {
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, logArea, scrollbar)
+		middle = joinCols(logRows, []int{logW, sbW}, logArea, scrollbar)
 	}
 	if m.picker.open {
 		// Overlaid over the bottom of the chat area rather than replacing it,
@@ -295,8 +302,52 @@ func (m Model) view() string {
 	hint := m.renderHint()
 	metricsBar := m.renderMetricsBar()
 
-	parts := []string{status, middle, input, hint, metricsBar}
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	// A plain join, not lipgloss.JoinVertical: that pads every line to the
+	// widest, which means measuring every line, and the padding buys
+	// nothing — bubbletea's renderer clears each line's tail itself
+	// (standard_renderer.go, EraseLineRight for any line short of the
+	// width) and themeFrame pads to the terminal when a theme is on.
+	return status + "\n" + middle + "\n" + input + "\n" + hint + "\n" + metricsBar
+}
+
+// renderChatLines is the chat pane's viewport window: the lines under
+// m.vp's scroll offset, each behind the one-cell inset the pane has always
+// had, padded to logRows. It replaces `PaddingLeft(1).Render(m.vp.View())`,
+// which cost two full passes of width measurement over forty rows — one
+// inside viewport.View (Width/Height/MaxWidth/MaxHeight on the joined
+// window) and one for the padding — to reproduce lines that buildLogContent
+// had already wrapped to fit. m.vpLines is the same content the viewport
+// holds, kept as a slice so the window is a subslice rather than a split.
+// The viewport keeps doing what it is for: scroll state, key handling,
+// AtBottom/GotoBottom — only its View() is bypassed.
+func (m Model) renderChatLines(logRows int) string {
+	if len(m.vpLines) != m.vp.TotalLineCount() {
+		// The slice and the viewport disagree, so content reached the
+		// viewport without going through refreshLog (tests do this; nothing
+		// else should). Render the viewport's own view rather than a stale
+		// or empty window — the slow path, but a correct one.
+		return lipgloss.NewStyle().PaddingLeft(1).Render(m.vp.View())
+	}
+	off := m.vp.YOffset
+	if off < 0 {
+		off = 0
+	}
+	if off > len(m.vpLines) {
+		off = len(m.vpLines)
+	}
+	end := min(len(m.vpLines), off+logRows)
+	var sb strings.Builder
+	sb.Grow((m.vp.Width + 2) * logRows)
+	for i := 0; i < logRows; i++ {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteByte(' ')
+		if off+i < end {
+			sb.WriteString(m.vpLines[off+i])
+		}
+	}
+	return sb.String()
 }
 
 // --- notification banner -----------------------------------------------------
@@ -690,10 +741,10 @@ func (m Model) renderTree(rows int) string {
 			// Cell width, not len(): row names can carry multi-byte glyphs
 			// (branch marks, unicode session names) — a byte count would pad
 			// them short and a byte slice could cut mid-rune.
-			sw := lipgloss.Width(s)
+			sw := cellWidth(s)
 			if sw > w {
 				s = truncWidth(s, w)
-				sw = lipgloss.Width(s)
+				sw = cellWidth(s)
 			}
 			return s + strings.Repeat(" ", w-sw)
 		}
@@ -716,16 +767,26 @@ func (m Model) renderTree(rows int) string {
 		}
 	}
 
-	// Pad to `rows` height so the column has consistent height for JoinHorizontal.
-	for len(lines) < rows {
-		lines = append(lines, "")
-	}
+	// Exactly `rows` lines of exactly leftPaneWidth cells — the column's
+	// contract with whichever join sits beside it. Padded by hand: the
+	// lipgloss Width/Height render this replaces measured every row again
+	// after renderTreeRow had already sized each one to the pane.
 	if len(lines) > rows {
 		lines = lines[:rows]
 	}
-	// Box with paddingX=1 and fixed width.
-	col := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().Width(leftPaneWidth).Height(rows).Render(col)
+	var sb strings.Builder
+	sb.Grow((leftPaneWidth + 1) * rows)
+	for i := 0; i < rows; i++ {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		if i < len(lines) {
+			sb.WriteString(padCells(lines[i], leftPaneWidth))
+		} else {
+			sb.WriteString(strings.Repeat(" ", leftPaneWidth))
+		}
+	}
+	return sb.String()
 }
 
 // treeCursorLive reports whether the tree cursor row should carry its
@@ -781,7 +842,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// Cell width, not len(): the branch glyphs ("├─ ") are 3 cells but 7
 	// bytes, and a byte count here shorts the name pad — visible as the
 	// cursor row's background ending early on session/job rows.
-	w := contentW - lipgloss.Width(r.branch) - 2
+	w := contentW - cellWidth(r.branch) - 2
 	if w < 1 {
 		w = 1
 	}
@@ -816,7 +877,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		}
 	}
 	if badge != "" {
-		badgeW = lipgloss.Width(badge)
+		badgeW = cellWidth(badge)
 		w -= badgeW
 		if w < 1 {
 			w = 1
@@ -922,7 +983,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		// marker, and a width that varied with branch depth or badge glyphs
 		// read as a rendering glitch.
 		txt := " " + r.branch + dot + field + badge
-		if pw := lipgloss.Width(txt); pw < contentW+1 {
+		if pw := cellWidth(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
 		return m.cacheTreeRow(rowKey, inv(cFgInv, cAmber).Bold(true).Render(txt))

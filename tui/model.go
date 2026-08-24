@@ -601,6 +601,11 @@ type Model struct {
 	preTopFocus focusZone
 	topSort     topSortKey
 
+	// vpLines is the chat viewport's content as the slice it was built from
+	// — the same lines m.vp holds after SetContent, kept here so the visible
+	// window is a subslice (renderChatLines) instead of a re-split and a
+	// re-measure of forty rows per frame.
+	vpLines []string
 	// treeRowCache memoizes rendered tree rows (see renderTreeRow): the
 	// tree is rebuilt on every message but its rows rarely change, and
 	// building them is dominated by Unicode width measurement inside
@@ -2880,6 +2885,7 @@ func (m *Model) refreshLog() {
 	}
 
 	m.vp.SetContent(content)
+	m.vpLines = strings.Split(content, "\n")
 	if wasAtBottom {
 		m.vp.GotoBottom()
 		m.autoFollow = true
