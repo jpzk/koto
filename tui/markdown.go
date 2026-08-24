@@ -47,9 +47,18 @@ func getRenderer(width int) *glamour.TermRenderer {
 	// style marks them structurally instead ("# " prefixes, `**` around
 	// strong, backticks around code), which is the whole distinction a
 	// colorless terminal has left.
+	//
+	// A light THEME swaps in glamour's "light" style for the same reason it
+	// can't just be left alone: markdown is the one region of the frame whose
+	// colors we don't pick, so it is also the one that doesn't follow the
+	// palette vars. glamour's dark style writes near-white body text, which on
+	// tape's #dad7cd ground is invisible.
 	style := "dark"
-	if monoMode {
+	switch {
+	case monoMode:
 		style = "ascii"
+	case themeLight:
+		style = "light"
 	}
 	r, err := glamour.NewTermRenderer(
 		glamour.WithStandardStyle(style),

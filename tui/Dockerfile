@@ -22,6 +22,10 @@ COPY protocol/ /src/protocol/
 COPY tui/go.mod tui/go.sum* ./
 RUN go mod download
 COPY tui/*.go ./
+# The bundled color palettes, embedded by theme.go's go:embed. Copied as a
+# directory of its own because go:embed reads the real filesystem at compile
+# time — a pattern with nothing behind it is a build error, not an empty FS.
+COPY tui/themes/ ./themes/
 # -trimpath: strip absolute paths from the binary
 # -ldflags '-s -w': drop debug + symbol tables (~30% smaller)
 # CGO_ENABLED=0: pure-Go build, statically linked, no libc dep

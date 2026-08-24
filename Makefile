@@ -105,6 +105,8 @@ tui: $(BUILD)/koto-tui
 	    -e KOTO_TUI_TERM="$$TERM" \
 	    -e KOTO_TUI_NOTIFY="$$KOTO_TUI_NOTIFY" \
 	    -e KOTO_TUI_MONO="$$KOTO_TUI_MONO" \
+	    -e KOTO_TUI_THEME="$$KOTO_TUI_THEME" \
+	    -e COLORTERM="$$COLORTERM" \
 	    -e KOTO_TUI_LOG="$$KOTO_TUI_LOG" \
 	    -e KOTO_TUI_LOG_LEVEL="$$KOTO_TUI_LOG_LEVEL" \
 	    koto-tui; ec=$$?; \

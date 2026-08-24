@@ -245,7 +245,7 @@ func renderTopRow(r topRow, sel bool) string {
 		nameStyle = white.Bold(monoMode)
 	}
 	if sel {
-		nameStyle = inv(cBlack, cAmber).Bold(true)
+		nameStyle = inv(cFgInv, cAmber).Bold(true)
 	}
 	cells := []string{nameStyle.Render(topPad(r.group, topColumns[0].w))}
 

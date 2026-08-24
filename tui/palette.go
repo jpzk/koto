@@ -38,6 +38,7 @@ const (
 	pickerHistory pickerMode = iota // ctrl+r — this group's prompt history
 	pickerPalette                   // ctrl+p — the command palette
 	pickerGroups                    // ctrl+t — jump to a group/session
+	pickerThemes                    // /themes — pick a color palette, live-previewed
 )
 
 // paletteItem is one row. Exactly one of act / run is meaningful; edit only
@@ -140,6 +141,9 @@ func (m Model) paletteItems() []paletteItem {
 			}
 			return tea.EnableMouseCellMotion
 		}},
+
+		{title: "color theme (live preview)", hint: "/themes", act: func(m *Model) tea.Cmd { m.openThemePicker(); return nil }},
+		{title: "list color themes", hint: "/themes list", run: "/themes list"},
 
 		{title: "repaint screen", hint: "/repaint", run: "/repaint"},
 		{title: "reload TUI", hint: "ctrl+shift+r", run: "/reload"},

@@ -11,6 +11,29 @@ import (
 )
 
 // Color palette — 256-color codes that work in any modern terminal.
+//
+// These are the ONLY color values in the TUI: every one of the ~150 styled
+// call sites reads one of them, which is what makes a theme an assignment to
+// this block and nothing more (theme.go). They are therefore vars, not consts,
+// and must be read at render time — a package-level style that captured one at
+// init would not follow a /themes switch.
+//
+// The names describe the DEFAULT hue, but the role is what a theme preserves.
+// Structural, and replaced wholesale by a theme's palette roles:
+//
+//	cBlack   the ground the bars/banners/chips paint on   → background
+//	cBrWhite brightest text                               → f_high
+//	cWhite   normal text                                  → f_med
+//	cGray    dim text (57 sites — the workhorse)          → f_low
+//	cFgInv   text drawn ON the accent                     → f_inv
+//	cAmber   the signature accent                         → b_inv
+//	cDkAmber the second accent tier                       → b_high
+//
+// Semantic, and kept hue-stable across themes (only the shade tracks the
+// theme's ground — see theme.go's "THE SIX STATUS HUES ARE NOT THEMED"):
+//
+//	cRed error · cYellow working · cMagenta thinking/keys
+//	cPink high-severity · cEmerald normal-severity · cRose over-threshold
 var (
 	cBlack   = lipgloss.Color("0")
 	cRed     = lipgloss.Color("1")
@@ -24,6 +47,11 @@ var (
 	cPink    = lipgloss.Color("205")
 	cEmerald = lipgloss.Color("42")  // notification banner, normal severity (256-color #00d787)
 	cRose    = lipgloss.Color("212") // over-threshold alert in the metrics bar (256-color #ff87d7)
+	// cFgInv is the text drawn on top of cAmber. It is black in the built-in
+	// palette — same value cBlack has — but the two roles come apart under a
+	// theme: cBlack becomes the page ground (which may be light) while cFgInv
+	// becomes f_inv, the color the palette's author chose to sit on the accent.
+	cFgInv = lipgloss.Color("0")
 )
 
 // pctColor picks a foreground color for a 0..1 utilization fraction. The
@@ -175,13 +203,22 @@ func cacheHitRatio(m map[string]any) float64 {
 	return read / denom
 }
 
-// View renders the frame. Everything below builds it in color; monoFrame is
-// the B/W mode's single choke point — on a monochrome terminal it strips the
-// color out of the finished frame and folds its glyphs to ASCII (mono.go).
+// View renders the frame through the two whole-frame filters, in this order:
+//
+//   - themeFrame paints the page ground when a theme is active (theme.go).
+//     Nothing below sets a background on the transcript — it has always been
+//     whatever the terminal's is — so a theme's `background` role would
+//     otherwise be the one color that never appeared on screen.
+//   - monoFrame is the B/W mode's single choke point: on a monochrome terminal
+//     it strips the color out of the finished frame and folds its glyphs to
+//     ASCII (mono.go). It runs LAST so it also removes the ground themeFrame
+//     just painted — mono and themes are mutually exclusive by construction,
+//     but the ordering makes that true rather than merely intended.
+//
 // Wrapping the whole frame rather than each renderer also catches the styling
 // we don't emit ourselves: glamour's markdown, the log view's level tags, and
 // the guest's own colors in the shell pane.
-func (m Model) View() string { return monoFrame(m.view()) }
+func (m Model) View() string { return monoFrame(themeFrame(m.view(), m.width)) }
 
 func (m Model) view() string {
 	// The real floors, not token ones: with the tree visible the middle
@@ -329,7 +366,7 @@ func (m Model) renderNotifyInline(leftW, maxEnd int) string {
 		accent = cPink
 	}
 	on := (m.tick/notifyBlinkTicks)%2 == 0
-	base := inv(cBlack, accent)
+	base := inv(fgOn(accent, cBlack), accent)
 	icon := " 🔔 "
 	if !on {
 		base = lipgloss.NewStyle().Foreground(accent)
@@ -387,12 +424,12 @@ func (m Model) renderStatusLeft() string {
 	// two background colors the strip removes. (The powerline pSep/pCurve
 	// glyphs the Ink TUI used were carried over as empty strings for a while
 	// — U+E0B0 got stripped somewhere along the way — and have been removed.)
-	app := inv(cBlack, cAmber).Bold(true).Render(" koto ")
+	app := inv(cFgInv, cAmber).Bold(true).Render(" koto ")
 	cur := m.cur
 	if s := m.activeSession(m.cur); s != "" {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
-	grp := lipgloss.NewStyle().Foreground(cBrWhite).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
+	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
 	return app + grp + m.renderLoadingSegment()
 }
 
@@ -641,7 +678,7 @@ func (m Model) composeMetricsBar(left, right string) string {
 func (m Model) renderTree(rows int) string {
 	header := ""
 	if m.focus == focusTree {
-		header = inv(cBlack, cAmber).Bold(true).
+		header = inv(cFgInv, cAmber).Bold(true).
 			Render(" agents (tab back) ")
 	} else {
 		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
@@ -891,7 +928,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		if pw := lipgloss.Width(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
-		return m.cacheTreeRow(rowKey, inv(cBlack, cAmber).Bold(true).Render(txt))
+		return m.cacheTreeRow(rowKey, inv(cFgInv, cAmber).Bold(true).Render(txt))
 	}
 	parts := " "
 	if r.branch != "" {
@@ -1701,8 +1738,10 @@ func (m Model) renderPicker(rows int) string {
 		label = fmt.Sprintf(" commands · %d/%d ", len(m.picker.matches), len(m.picker.items))
 	case pickerGroups:
 		label = fmt.Sprintf(" groups · %d/%d ", len(m.picker.matches), len(m.picker.items))
+	case pickerThemes:
+		label = fmt.Sprintf(" themes · %d/%d · live preview ", len(m.picker.matches), len(m.picker.items))
 	}
-	header := inv(cBlack, cAmber).Bold(true).Render(label)
+	header := inv(cFgInv, cAmber).Bold(true).Render(label)
 
 	prefix := lipgloss.NewStyle().Foreground(cAmber).Bold(true).Render("❯ ")
 	inputLine := prefix + m.picker.input.View()
@@ -1766,6 +1805,8 @@ func (m Model) renderPicker(rows int) string {
 			empty = "  (no matching command)"
 		case pickerGroups:
 			empty = "  (no matching group or session)"
+		case pickerThemes:
+			empty = "  (no matching theme — esc restores the one you came in with)"
 		}
 		resultLines = append(resultLines, lipgloss.NewStyle().Foreground(cGray).Italic(true).Render(empty))
 	}

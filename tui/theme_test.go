@@ -1,0 +1,494 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+// withBuiltinPalette restores the untuned palette after a test that applies a
+// theme. The palette is package state and the whole suite renders against it,
+// so a leaked theme would fail unrelated tests (mono_test asserts on exact
+// frames) in whatever order the runner happened to pick.
+func withBuiltinPalette(t *testing.T) {
+	t.Helper()
+	t.Cleanup(resetTheme)
+}
+
+// --- parsing -----------------------------------------------------------------
+
+// Every bundled palette must parse. This is the guard on dropping a new SVG
+// into themes/ — a file that doesn't carry the nine roles fails here rather
+// than at the user's first /themes.
+func TestBundledThemesParse(t *testing.T) {
+	names := themeNames("/nonexistent/koto.sock")
+	if len(names) < 40 {
+		t.Fatalf("expected the bundled Hundred Rabbits set, got %d themes", len(names))
+	}
+	for _, n := range names {
+		p, err := loadTheme("/nonexistent/koto.sock", n)
+		if err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+		for role, got := range map[string]string{
+			"background": p.Background, "f_high": p.FHigh, "f_med": p.FMed,
+			"f_low": p.FLow, "f_inv": p.FInv, "b_high": p.BHigh,
+			"b_med": p.BMed, "b_low": p.BLow, "b_inv": p.BInv,
+		} {
+			if len(got) != 7 || got[0] != '#' {
+				t.Errorf("%s: role %s = %q, want #rrggbb", n, role, got)
+			}
+		}
+	}
+}
+
+// Upstream files disagree on attribute order and quote style — nord writes
+// fill before id in double quotes, noir writes id before fill in single ones.
+// Both have to work, and so does #rgb shorthand.
+func TestParseThemeAttributeForms(t *testing.T) {
+	src := `<svg version="1.1">
+	  <rect fill="#102030" id="background"></rect>
+	  <circle id='f_high' fill='#fff'></circle>
+	  <circle fill="#CCCCCC" id="f_med"></circle>
+	  <circle id='f_low' fill='#999999'></circle>
+	  <circle id='f_inv' fill='#000000'></circle>
+	  <circle id='b_high' fill='#888888'></circle>
+	  <circle id='b_med' fill='#666666'></circle>
+	  <circle id='b_low' fill='#444444'></circle>
+	  <circle id='b_inv' fill='#eb3f48'></circle>
+	  <circle id='tape_done' fill='#123456'></circle>
+	</svg>`
+	p, err := parseTheme("x", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Background != "#102030" {
+		t.Errorf("background = %q", p.Background)
+	}
+	if p.FHigh != "#ffffff" {
+		t.Errorf("#rgb shorthand not expanded: %q", p.FHigh)
+	}
+	if p.FMed != "#cccccc" {
+		t.Errorf("hex not lowercased: %q", p.FMed)
+	}
+}
+
+func TestParseThemeMissingRole(t *testing.T) {
+	if _, err := parseTheme("x", `<svg><rect id="background" fill="#000000"/></svg>`); err == nil {
+		t.Fatal("expected an error for a palette missing eight roles")
+	}
+}
+
+// A fill the parser can't read (pywal's {placeholder}, a gradient url, "none")
+// must be skipped, not half-parsed into a broken color.
+func TestParseThemeRejectsNonHexFill(t *testing.T) {
+	src := `<svg><rect id='background' fill='{background}'></rect>
+	  <circle id='f_high' fill='#ffffff'></circle></svg>`
+	if _, err := parseTheme("pywal", src); err == nil {
+		t.Fatal("expected a template palette to be rejected")
+	}
+}
+
+// --- name validation ---------------------------------------------------------
+
+// A theme name becomes a path component under the drop-in directory, so it
+// carries the same traversal guard every other user-supplied name in this
+// codebase does.
+func TestLoadThemeRejectsBadNames(t *testing.T) {
+	for _, bad := range []string{
+		"../../etc/passwd", "a/b", "..", ".hidden", "", "with space",
+		strings.Repeat("x", 70),
+	} {
+		if _, err := loadTheme("/nonexistent/koto.sock", bad); err == nil {
+			t.Errorf("loadTheme(%q) succeeded, want rejection", bad)
+		}
+	}
+	// The one dot-bearing name upstream actually ships must still load.
+	if _, err := loadTheme("/nonexistent/koto.sock", "solarised.dark"); err != nil {
+		t.Errorf("solarised.dark: %v", err)
+	}
+}
+
+// A file in the drop-in directory is loadable and shadows a bundled name, so
+// an operator can override a palette without rebuilding the image.
+func TestUserThemeDirShadowsBundled(t *testing.T) {
+	withBuiltinPalette(t)
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "koto.sock")
+	if err := os.MkdirAll(userThemeDir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	svg := `<svg><rect id='background' fill='#010203'></rect>
+	  <circle id='f_high' fill='#ffffff'></circle><circle id='f_med' fill='#dddddd'></circle>
+	  <circle id='f_low' fill='#999999'></circle><circle id='f_inv' fill='#000000'></circle>
+	  <circle id='b_high' fill='#886600'></circle><circle id='b_med' fill='#444444'></circle>
+	  <circle id='b_low' fill='#222222'></circle><circle id='b_inv' fill='#ffaa00'></circle></svg>`
+	if err := os.WriteFile(filepath.Join(userThemeDir(sock), "noir.svg"), []byte(svg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadTheme(sock, "noir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Background != "#010203" {
+		t.Errorf("bundled noir won over the drop-in file: %q", p.Background)
+	}
+	names := themeNames(sock)
+	seen := 0
+	for _, n := range names {
+		if n == "noir" {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("noir listed %d times, want 1", seen)
+	}
+}
+
+// --- apply / reset -----------------------------------------------------------
+
+// resetTheme must restore the built-in palette EXACTLY. Anything less and a
+// /themes off leaves the TUI in a third state that is neither themed nor the
+// rendering every other test in this package asserts against.
+func TestResetThemeRestoresExactly(t *testing.T) {
+	withBuiltinPalette(t)
+	before := []lipgloss.Color{cBlack, cRed, cYellow, cMagenta, cAmber, cDkAmber,
+		cWhite, cGray, cBrWhite, cPink, cEmerald, cRose, cFgInv}
+
+	p, err := loadTheme("/nonexistent/koto.sock", "nord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTheme(p)
+	if activeTheme != "nord" {
+		t.Fatalf("activeTheme = %q", activeTheme)
+	}
+	if cAmber == before[4] {
+		t.Error("applyTheme left the accent untouched")
+	}
+
+	resetTheme()
+	after := []lipgloss.Color{cBlack, cRed, cYellow, cMagenta, cAmber, cDkAmber,
+		cWhite, cGray, cBrWhite, cPink, cEmerald, cRose, cFgInv}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("palette slot %d: %q -> %q after reset", i, before[i], after[i])
+		}
+	}
+	if activeTheme != "" || themeLight {
+		t.Errorf("reset left activeTheme=%q themeLight=%v", activeTheme, themeLight)
+	}
+}
+
+// The status hues carry meaning, so they must stay distinct from each other
+// and from the structural roles under every bundled theme — otherwise "error"
+// and "dim text" render identically and the color stops saying anything.
+func TestStatusHuesStayDistinct(t *testing.T) {
+	withBuiltinPalette(t)
+	for _, n := range themeNames("/nonexistent/koto.sock") {
+		p, err := loadTheme("/nonexistent/koto.sock", n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyTheme(p)
+		seen := map[lipgloss.Color]string{}
+		for name, c := range map[string]lipgloss.Color{
+			"red": cRed, "yellow": cYellow, "magenta": cMagenta,
+			"pink": cPink, "emerald": cEmerald, "rose": cRose,
+		} {
+			if prev, dup := seen[c]; dup {
+				t.Errorf("%s: %s and %s are both %q", n, prev, name, c)
+			}
+			seen[c] = name
+		}
+	}
+}
+
+// The light status set is chosen by the theme's ground, not by its name.
+func TestLightThemeGetsDarkStatusHues(t *testing.T) {
+	withBuiltinPalette(t)
+	p, err := loadTheme("/nonexistent/koto.sock", "tape") // #dad7cd ground
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTheme(p)
+	if !themeLight {
+		t.Fatal("tape should read as a light theme")
+	}
+	if string(cRed) != statusOnLight.red {
+		t.Errorf("cRed = %q, want the light-ground set %q", cRed, statusOnLight.red)
+	}
+	if l, _ := hexLum(string(cRed)); l > 0.5 {
+		t.Errorf("light-ground red is too bright to read: luma %.2f", l)
+	}
+}
+
+// --- contrast ----------------------------------------------------------------
+
+// contrastEps absorbs 8-bit quantization: mixHex rounds each channel to an
+// integer, which moves the result by up to ~0.004 luma from the exact
+// solution contrastFix computes.
+const contrastEps = 0.01
+
+// THE test for this feature. Applied literally, several upstream palettes are
+// unreadable in this TUI — tape draws f_med as pure white on a light ground,
+// sonicpi draws f_high and background at the same luma, berry's accent sits
+// one hundredth off its background. The roles are a palette author's
+// vocabulary, not a promise about legibility against `background`, so
+// applyTheme repairs what falls under the floor. If a future palette or a
+// change to the repair breaks that, this fails.
+func TestEveryThemeIsLegible(t *testing.T) {
+	withBuiltinPalette(t)
+	lum := func(c lipgloss.Color) float64 {
+		l, ok := hexLum(string(c))
+		if !ok {
+			t.Fatalf("not a hex color: %q", c)
+		}
+		return l
+	}
+	for _, n := range themeNames("/nonexistent/koto.sock") {
+		p, err := loadTheme("/nonexistent/koto.sock", n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyTheme(p)
+
+		// Text is drawn on the page ground and on the bar ground (cBlack),
+		// so the floor has to hold against the worse of the two.
+		gPage, _ := hexLum(p.Background)
+		gBar := lum(cBlack)
+		worst := func(c lipgloss.Color) float64 {
+			l := lum(c)
+			a, b := abs(l-gPage), abs(l-gBar)
+			if b < a {
+				return b
+			}
+			return a
+		}
+		check := func(role string, c lipgloss.Color, min float64) {
+			if got := worst(c); got < min-contrastEps {
+				t.Errorf("%s: %s (%s) has luma distance %.3f from its ground, want >= %.2f",
+					n, role, c, got, min)
+			}
+		}
+		check("f_high", cBrWhite, minLumHigh)
+		check("f_med", cWhite, minLumMed)
+		check("f_low", cGray, minLumLow)
+		check("b_inv/accent", cAmber, minLumAccent)
+		check("b_high", cDkAmber, minLumAccent)
+
+		// f_inv is defined against the accent, not the page.
+		if d := abs(lum(cFgInv) - lum(cAmber)); d < minLumOnInv-contrastEps {
+			t.Errorf("%s: f_inv on the accent has luma distance %.3f, want >= %.2f",
+				n, d, minLumOnInv)
+		}
+	}
+}
+
+// A color that already clears the floor must pass through untouched — the
+// repair exists to rescue unreadable palettes, not to repaint legible ones.
+func TestContrastFixLeavesLegibleColorsAlone(t *testing.T) {
+	if got := contrastFix("#ffffff", "#000000", 0.35); got != "#ffffff" {
+		t.Errorf("white on black was rewritten to %q", got)
+	}
+	if got := contrastFix("#000000", "#ffffff", 0.35); got != "#000000" {
+		t.Errorf("black on white was rewritten to %q", got)
+	}
+}
+
+func TestContrastFixDirection(t *testing.T) {
+	// Dark ground: push toward white.
+	got := contrastFix("#303030", "#222222", 0.35)
+	if l, _ := hexLum(got); l < 0.35 {
+		t.Errorf("on a dark ground the repair went the wrong way: %q (luma %.2f)", got, l)
+	}
+	// Light ground: push toward black.
+	got = contrastFix("#e0e0e0", "#f0f0f0", 0.35)
+	if l, _ := hexLum(got); l > 0.60 {
+		t.Errorf("on a light ground the repair went the wrong way: %q (luma %.2f)", got, l)
+	}
+}
+
+// Non-hex colors are the built-in palette's ANSI/256 indices, whose real value
+// belongs to the user's terminal. Nothing may be measured or rewritten there.
+func TestContrastFixIgnoresIndexedColors(t *testing.T) {
+	if got := contrastFix("8", "0", 0.35); got != "8" {
+		t.Errorf("indexed color rewritten to %q", got)
+	}
+	if got := fgOn(lipgloss.Color("42"), cBrWhite); got != cBrWhite {
+		t.Errorf("fgOn on an indexed background = %q, want the caller's default", got)
+	}
+}
+
+func TestFgOnPicksReadableInk(t *testing.T) {
+	if got := fgOn(lipgloss.Color("#00d787"), cBlack); got != lipgloss.Color("#000000") {
+		t.Errorf("fgOn(bright emerald) = %q, want black", got)
+	}
+	if got := fgOn(lipgloss.Color("#00875f"), cBlack); got != lipgloss.Color("#ffffff") {
+		t.Errorf("fgOn(dark emerald) = %q, want white", got)
+	}
+}
+
+// --- mode resolution ---------------------------------------------------------
+
+// Mono strips color from the finished frame, so a theme there is work with no
+// output — and it would fight applyMonoProfile over lipgloss's color profile.
+func TestInitThemeSkippedInMono(t *testing.T) {
+	withBuiltinPalette(t)
+	defer func(prev bool) { monoMode = prev }(monoMode)
+	monoMode = true
+	name, err := initTheme(func(string) string { return "nord" }, "/nonexistent/koto.sock", "")
+	if err != nil || name != "" {
+		t.Fatalf("initTheme under mono = (%q, %v), want (\"\", nil)", name, err)
+	}
+	if activeTheme != "" {
+		t.Errorf("mono applied theme %q", activeTheme)
+	}
+}
+
+// The environment overrides the persisted choice; a bad name is reported and
+// leaves the built-in palette in place rather than stopping startup.
+func TestInitThemePrecedenceAndFailure(t *testing.T) {
+	withBuiltinPalette(t)
+	defer func(prev bool) { monoMode = prev }(monoMode)
+	monoMode = false
+
+	env := func(k string) string {
+		if k == "KOTO_TUI_THEME" {
+			return "noir"
+		}
+		return ""
+	}
+	name, err := initTheme(env, "/nonexistent/koto.sock", "nord")
+	if err != nil || name != "noir" {
+		t.Fatalf("env should win over the persisted name: (%q, %v)", name, err)
+	}
+
+	resetTheme()
+	name, err = initTheme(func(string) string { return "" }, "/nonexistent/koto.sock", "no-such-theme")
+	if err == nil {
+		t.Error("a missing theme should be reported")
+	}
+	if name != "" || activeTheme != "" {
+		t.Errorf("a failed load left theme %q applied", activeTheme)
+	}
+}
+
+func TestIsThemeOff(t *testing.T) {
+	for _, s := range []string{"off", "none", "default", "builtin", "Built-In", " OFF "} {
+		if !isThemeOff(s) {
+			t.Errorf("isThemeOff(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"nord", "noir", "offbeat"} {
+		if isThemeOff(s) {
+			t.Errorf("isThemeOff(%q) = true", s)
+		}
+	}
+}
+
+// --- painting the page ground ------------------------------------------------
+
+// The frame filter is a no-op without a theme, so the built-in rendering — and
+// every other render test in this package — is untouched.
+func TestThemeFrameNoopWithoutTheme(t *testing.T) {
+	withBuiltinPalette(t)
+	in := "hello\x1b[0m world"
+	if got := themeFrame(in, 40); got != in {
+		t.Errorf("themeFrame rewrote an unthemed frame:\n%q", got)
+	}
+}
+
+// The point of the filter: a theme's `background` role reaches the screen, and
+// keeps reaching it after every SGR reset inside the frame. lipgloss ends most
+// styled spans with ESC[0m, so without the re-assertion the ground would
+// survive only as far as the first styled word.
+func TestThemeFramePaintsGroundAfterResets(t *testing.T) {
+	withBuiltinPalette(t)
+	p, err := loadTheme("/nonexistent/koto.sock", "nord") // #2e3440
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTheme(p)
+
+	set := bgSeq(themePageBg)
+	if set != "\x1b[48;2;46;52;64m" {
+		t.Fatalf("bgSeq = %q", set)
+	}
+	out := themeFrame("ab\x1b[0mcd", 10)
+	if n := strings.Count(out, set); n < 2 {
+		t.Errorf("ground asserted %d times, want it re-emitted after the reset:\n%q", n, out)
+	}
+	if !strings.HasPrefix(out, set) {
+		t.Errorf("line does not start on the ground: %q", out)
+	}
+	// Padded to the terminal width, or the ground stops at the last glyph and
+	// every short line ends in a strip of the terminal's own background.
+	if w := lipgloss.Width(out); w != 10 {
+		t.Errorf("line width = %d, want the full 10", w)
+	}
+}
+
+// A span that sets its OWN background — the bars, the accent chips, the tree
+// cursor — must not have the page ground stamped over it.
+func TestThemeFrameLeavesExplicitBackgroundsAlone(t *testing.T) {
+	withBuiltinPalette(t)
+	p, err := loadTheme("/nonexistent/koto.sock", "nord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTheme(p)
+	set := bgSeq(themePageBg)
+
+	// lipgloss's own shape: reset-then-set, in one sequence.
+	out := reassertBg("\x1b[0;48;2;1;2;3mchip", set)
+	if strings.Contains(out, set) {
+		t.Errorf("page ground clobbered an explicit background: %q", out)
+	}
+	// And the plain reset that ends it does bring the ground back.
+	out = reassertBg("\x1b[48;2;1;2;3mchip\x1b[0m", set)
+	if !strings.HasSuffix(out, set) {
+		t.Errorf("ground not restored after the chip: %q", out)
+	}
+}
+
+func TestSGRClearsBg(t *testing.T) {
+	for params, want := range map[string]bool{
+		"":                true, // bare ESC[m is a reset
+		"0":               true,
+		"49":              true,
+		"1;38;5;214":      false, // fg only — background untouched
+		"38;2;1;2;3":      false, // truecolor fg, args consumed
+		"48;2;1;2;3":      false, // sets a background
+		"0;48;2;1;2;3":    false, // reset then set — the set wins
+		"48;2;1;2;3;0":    true,  // set then reset — the reset wins
+		"7":               false, // reverse video — not a background op
+		"41":              false,
+		"101":             false,
+		"38;5;214;48;5;0": false,
+	} {
+		if got := sgrClearsBg(params); got != want {
+			t.Errorf("sgrClearsBg(%q) = %v, want %v", params, got, want)
+		}
+	}
+}
+
+// Mono strips color from the finished frame, so painting a ground under it
+// would be work with no output — and View() runs monoFrame last precisely so
+// this can't leak through.
+func TestThemeFrameSkippedInMono(t *testing.T) {
+	withBuiltinPalette(t)
+	defer func(prev bool) { monoMode = prev }(monoMode)
+	p, err := loadTheme("/nonexistent/koto.sock", "nord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyTheme(p)
+	monoMode = true
+	if got := themeFrame("x", 10); got != "x" {
+		t.Errorf("themeFrame painted under mono: %q", got)
+	}
+}

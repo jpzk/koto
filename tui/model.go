@@ -815,13 +815,19 @@ type pickerState struct {
 	cmds    []paletteItem
 	matches []fuzzyMatch
 	cursor  int
+	// themeBefore is the theme active when a pickerThemes overlay opened,
+	// so esc can put it back. The theme picker applies each row as the
+	// cursor reaches it — the preview IS the frame — which means there is
+	// no "not yet applied" state to abandon on cancel, only a previous one
+	// to restore.
+	themeBefore string
 }
 
 const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /exit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /themes  /reload  /interrupt  /exit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -3263,7 +3269,7 @@ func (m *Model) ensureTicking() tea.Cmd {
 // the last /reload saw, and weeks later a fresh start resurrected that
 // stale group + draft (and silently retargeted the first send).
 func (m *Model) persistUIState() {
-	saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session})
+	saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session, Theme: activeTheme})
 }
 
 func (m *Model) scheduleReconnect() tea.Cmd {
@@ -4030,9 +4036,20 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
 	switch s {
 	case "esc", "ctrl+g":
+		// Theme mode has already CHANGED the frame by the time esc is
+		// pressed — the preview is the display — so cancelling means putting
+		// the previous palette back, not merely closing the box.
+		if m.picker.mode == pickerThemes {
+			m.cancelThemePick()
+			return m, nil
+		}
 		m.closePicker()
 		return m, nil
 	case "enter":
+		if m.picker.mode == pickerThemes {
+			m.commitThemePick()
+			return m, nil
+		}
 		if len(m.picker.matches) == 0 {
 			m.closePicker()
 			return m, nil
@@ -4051,11 +4068,13 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.picker.cursor > 0 {
 			m.picker.cursor--
 		}
+		m.previewPickedTheme()
 		return m, nil
 	case "down", "ctrl+n":
 		if m.picker.cursor < len(m.picker.matches)-1 {
 			m.picker.cursor++
 		}
+		m.previewPickedTheme()
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -4064,6 +4083,10 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.picker.cursor >= len(m.picker.matches) {
 		m.picker.cursor = max(0, len(m.picker.matches)-1)
 	}
+	// Typing moves the cursor onto a different row just as the arrows do, so
+	// the preview has to follow the filter too — otherwise narrowing the list
+	// to one theme would leave the previous one on screen.
+	m.previewPickedTheme()
 	return m, cmd
 }
 
@@ -4917,6 +4940,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			tea.ClearScreen,
 			func() tea.Msg { return tea.WindowSizeMsg{Width: w, Height: h} },
 		)
+	}
+	// /themes is the command (there are 45 of them, and the bare verb opens
+	// the list); bare /theme stays accepted as a silent alias, same as
+	// /goal is for /goals.
+	if v == "/themes" || strings.HasPrefix(v, "/themes ") || v == "/theme" || strings.HasPrefix(v, "/theme ") {
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/themes"), "/theme"))
+		return m.handleThemeCmd(rest)
 	}
 	if v == "/reload" {
 		m.persistUIState()

@@ -41,7 +41,15 @@ func init() {
 	logRenderer.SetReportCaller(false)
 	logRenderer.SetTimeFormat("15:04:05")
 	logRenderer.SetLevel(log.DebugLevel)
+	applyLogStyles()
+}
 
+// applyLogStyles (re)builds the level/timestamp/prefix styles from the palette
+// vars. Split out of init() because a /themes switch has to run it again — the
+// styles capture color VALUES, so unlike the rest of the TUI (which reads the
+// vars at render time) this pane would otherwise keep the palette that was in
+// force when the process started.
+func applyLogStyles() {
 	// Per-level colors keyed off the existing cGray/cBlue/cYellow/cRed
 	// palette so the log view fits the rest of the TUI. Bold + uppercase
 	// 4-char fixed-width tag (e.g. "INFO", "WARN") so columns line up
@@ -72,7 +80,16 @@ func init() {
 	// real terminal that the TUI is rendered into will interpret them.
 	// TrueColor would also work but ANSI256 is enough for our 4-color
 	// palette and renders identically on every terminal we care about.
-	logRenderer.SetColorProfile(termenv.ANSI256)
+	//
+	// A THEME does need TrueColor: its colors are 24-bit hex, and quantizing
+	// them onto the 256-cube here while the rest of the frame renders them
+	// exactly would leave this pane a half-step off the palette it is meant
+	// to match. Themes are off by default, so the default path is unchanged.
+	profile := termenv.ANSI256
+	if activeTheme != "" {
+		profile = termenv.TrueColor
+	}
+	logRenderer.SetColorProfile(profile)
 }
 
 // startLogSubscribe opens a `cmd:"logs"` connection to the daemon and
@@ -159,6 +176,22 @@ func (m *Model) resizeLogViewport() {
 type logEntry struct {
 	group    string
 	rendered string
+	// ev is kept so the line can be RE-rendered when the palette changes
+	// (/themes). Every other pane re-renders from model state on demand; this
+	// one formats once at arrival, which is the right trade for a 2000-line
+	// ring on a live stream but leaves nothing to repaint from.
+	ev LogEvent
+}
+
+// restyleLogEntries re-renders the whole buffered ring after a palette change.
+// 2000 short lines through charmbracelet/log is a few milliseconds, paid once
+// per theme switch — and the theme picker previews on every keystroke, which
+// is why it is a plain loop and not a rebuild of the subscription.
+func (m *Model) restyleLogEntries() {
+	applyLogStyles()
+	for i := range m.logEntries {
+		m.logEntries[i].rendered = formatLogLine(m.logEntries[i].ev)
+	}
 }
 
 // logScopeFor maps the current tree position onto a log filter. main is the
@@ -182,6 +215,7 @@ func (m *Model) appendLogEvent(ev LogEvent) {
 	m.logEntries = append(m.logEntries, logEntry{
 		group:    ev.Group,
 		rendered: formatLogLine(ev),
+		ev:       ev,
 	})
 	if len(m.logEntries) > maxLogLines {
 		m.logEntries = m.logEntries[len(m.logEntries)-maxLogLines:]
