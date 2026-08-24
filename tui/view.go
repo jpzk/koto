@@ -1598,20 +1598,27 @@ func (m Model) renderInput() string {
 	}
 	prefix := lipgloss.NewStyle().Foreground(prefixColor).Bold(true).Render(" ")
 	boxW := m.inputBoxW()
-	// Clip each row before the border styling so an over-wide cell (the
-	// suggestion ghost, a wide rune straddling the last column) can't wrap
-	// into an unbudgeted extra row and push the hint off-screen.
-	clip := lipgloss.NewStyle().MaxWidth(boxW - 4)
+	// Clip each row before the border so an over-wide cell (the suggestion
+	// ghost, a wide rune straddling the last column) can't wrap into an
+	// unbudgeted extra row and push the hint off-screen. The interior is
+	// boxW-2 cells; rows are cut at boxW-4, leaving the two cells of slack
+	// the old MaxWidth(boxW-4)-inside-Width(boxW-2) pairing had.
+	clip := func(s string) string {
+		if cellWidth(s) > boxW-4 {
+			return ansi.Truncate(s, boxW-4, "")
+		}
+		return s
+	}
 
-	var body string
+	var rows []string
 	if m.input.Value() == "" {
 		// Placeholder path: one line, never wrapped. It used to carry the
 		// whole slash-command list, which bubbles truncated to input.Width —
 		// so what an empty box actually showed was an arbitrary prefix of it.
 		// It now points at ctrl+h instead (see newModel).
-		body = clip.Render(prefix + " " + m.input.View())
+		rows = []string{clip(prefix + " " + m.input.View())}
 	} else {
-		rows := m.renderInputLines(m.inputTextCols())
+		rows = m.renderInputLines(m.inputTextCols())
 		// Continuations align under the first row's text — the glyph, the
 		// space and the textinput prompt are all first-row-only.
 		cont := strings.Repeat(" ", 2+m.inputPromptW())
@@ -1620,18 +1627,38 @@ func (m Model) renderInput() string {
 			if i == 0 {
 				pfx = prefix + " " + m.input.PromptStyle.Render(m.input.Prompt)
 			}
-			rows[i] = clip.Render(pfx + row)
+			rows[i] = clip(pfx + row)
 		}
-		body = strings.Join(rows, "\n")
 	}
 	// Focus is an amber-vs-gray border in color; in mono the border itself
 	// carries it (boxBorder: `=` rails focused, `-` unfocused), since the
 	// color is stripped and nothing else marks which box owns the keyboard.
-	return lipgloss.NewStyle().
-		BorderStyle(boxBorder(m.focus == focusInput)).
-		BorderForeground(borderColor).
-		Width(boxW - 2).
-		Render(body)
+	//
+	// Drawn by hand rather than through lipgloss's BorderStyle+Width render,
+	// which measured every row three times over (clip, align, border) —
+	// 18% of the frame for a three-row box. The rails are the border's own
+	// glyphs, the interior is each row padded to boxW-2, and the result is
+	// glyph-for-glyph what lipgloss drew (TestInputBoxMatchesLipgloss).
+	return drawBox(boxBorder(m.focus == focusInput), borderColor, boxW-2, rows)
+}
+
+// drawBox frames rows in border b, each row padded (or cut) to w cells, the
+// border glyphs in color fg. The box's outer width is w+2.
+func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string {
+	edge := lipgloss.NewStyle().Foreground(fg)
+	left, right := edge.Render(b.Left), edge.Render(b.Right)
+	var sb strings.Builder
+	sb.Grow((w + 24) * (len(rows) + 2))
+	sb.WriteString(edge.Render(b.TopLeft + strings.Repeat(b.Top, w) + b.TopRight))
+	for _, r := range rows {
+		sb.WriteByte('\n')
+		sb.WriteString(left)
+		sb.WriteString(padCells(r, w))
+		sb.WriteString(right)
+	}
+	sb.WriteByte('\n')
+	sb.WriteString(edge.Render(b.BottomLeft + strings.Repeat(b.Bottom, w) + b.BottomRight))
+	return sb.String()
 }
 
 // --- hint --------------------------------------------------------------------
