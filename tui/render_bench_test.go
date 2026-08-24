@@ -138,6 +138,9 @@ func BenchmarkThemeFrameOnly(b *testing.B) {
 // overlay (the vpCache is bypassed, buildLogContent runs every flush).
 func BenchmarkRefreshLogStreaming(b *testing.B) {
 	m := benchModel(b, 29, 40)
+	// benchModel's history load leaves a prewarm marked in flight (its cmd
+	// never runs here), which would keep refreshLog on the uncached build.
+	delete(m.prewarming, m.cur)
 	m.streamBuf[m.curKey()] = "partial answer being streamed right now, a few words"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

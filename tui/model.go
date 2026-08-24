@@ -109,7 +109,14 @@ type vpCacheEntry struct {
 	ver, globalVer int
 	cols           int
 	expT, expTO    bool
-	content        string
+	// lines is the rendered transcript — every block, no live overlay and no
+	// queued prompts — and lastKind the kind of its last block, which decides
+	// whether the overlay gets a blank line above it. The overlay and the
+	// backlog change on every stream chunk; the blocks change on every
+	// event. Caching the blocks alone is what makes a streaming flush cost
+	// the overlay's few lines instead of the whole transcript.
+	lines    []string
+	lastKind string
 }
 
 type renderedBlock struct {
@@ -1422,7 +1429,7 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 			expandedToolOuts: expTO,
 			mdCache:          mdSnap,
 		}
-		content := snap.buildLogContent(cols, false)
+		lines, lastKind := snap.buildStaticLines(cols, false)
 
 		// Diff the post-build mdCache against the snapshot to extract
 		// only newly-rendered entries. The Update handler merges these
@@ -1439,7 +1446,7 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 			group: group,
 			entry: vpCacheEntry{
 				ver: ver, globalVer: gver, cols: cols,
-				expT: expT, expTO: expTO, content: content,
+				expT: expT, expTO: expTO, lines: lines, lastKind: lastKind,
 			},
 			mdItems: newItems,
 			older:   older,
@@ -2854,38 +2861,36 @@ func (m *Model) refreshLog() {
 	cols := m.logContentCols()
 	plain := m.prewarming[m.cur] > 0 || m.resizePending
 
-	// Skip the cache when a live overlay is active — the overlay text changes
-	// on every stream event and must not be baked into a cached entry. Pending
-	// (queued) rows are likewise ephemeral and not keyed into vpCache, so a
-	// non-empty backlog also bypasses the cache.
-	liveText, _ := m.liveOverlay()
-	var content string
-	if liveText == "" && len(m.pendingForView()) == 0 {
-		ver := m.groupVer[m.cur]
-		gver := m.groupVer[""]
-		if e, ok := m.vpCache[m.cur]; ok &&
-			e.ver == ver && e.globalVer == gver &&
-			e.cols == cols &&
-			e.expT == m.expandedThoughts && e.expTO == m.expandedToolOuts {
-			content = e.content
-		} else {
-			content = m.buildLogContent(cols, plain)
-			// A plain build must not be cached: it's a placeholder frame,
-			// and a cache hit on it would suppress the styled repaint.
-			if !plain {
-				m.vpCache[m.cur] = vpCacheEntry{
-					ver: ver, globalVer: gver, cols: cols,
-					expT: m.expandedThoughts, expTO: m.expandedToolOuts,
-					content: content,
-				}
+	// The blocks come from the cache whenever it is current; the live
+	// overlay and the queued prompts are appended fresh every time. The cache
+	// used to be bypassed outright while an overlay was up, which meant every
+	// stream chunk re-rendered the entire transcript to change its last few
+	// lines — the whole time the focused group was streaming.
+	ver := m.groupVer[m.cur]
+	gver := m.groupVer[""]
+	var static []string
+	var lastKind string
+	if e, ok := m.vpCache[m.cur]; ok &&
+		e.ver == ver && e.globalVer == gver &&
+		e.cols == cols &&
+		e.expT == m.expandedThoughts && e.expTO == m.expandedToolOuts {
+		static, lastKind = e.lines, e.lastKind
+	} else {
+		static, lastKind = m.buildStaticLines(cols, plain)
+		// A plain build must not be cached: it's a placeholder frame,
+		// and a cache hit on it would suppress the styled repaint.
+		if !plain {
+			m.vpCache[m.cur] = vpCacheEntry{
+				ver: ver, globalVer: gver, cols: cols,
+				expT: m.expandedThoughts, expTO: m.expandedToolOuts,
+				lines: static, lastKind: lastKind,
 			}
 		}
-	} else {
-		content = m.buildLogContent(cols, plain)
 	}
+	lines := m.assembleLog(static, lastKind, cols)
 
-	m.vp.SetContent(content)
-	m.vpLines = strings.Split(content, "\n")
+	m.vp.SetContent(strings.Join(lines, "\n"))
+	m.vpLines = lines
 	if wasAtBottom {
 		m.vp.GotoBottom()
 		m.autoFollow = true
@@ -2898,6 +2903,15 @@ func (m *Model) refreshLog() {
 // markdown text instead) — the cheap fallback used while a prewarm goroutine
 // owns the styled render, so the Update loop never blocks on chroma.
 func (m Model) buildLogContent(contentCols int, plain bool) string {
+	static, lastKind := m.buildStaticLines(contentCols, plain)
+	return strings.Join(m.assembleLog(static, lastKind, contentCols), "\n")
+}
+
+// buildStaticLines renders the transcript's blocks — the part of the
+// viewport that only changes when an event lands, and so the part
+// refreshLog caches (vpCacheEntry). Returns the lines and the kind of the
+// last block, which assembleLog needs for the overlay's spacing.
+func (m Model) buildStaticLines(contentCols int, plain bool) ([]string, string) {
 	blocks := m.allBlocks(contentCols, plain)
 	out := []string{}
 	for i, b := range blocks {
@@ -2906,28 +2920,40 @@ func (m Model) buildLogContent(contentCols int, plain bool) string {
 		}
 		out = append(out, renderBlockLines(b, contentCols)...)
 	}
+	lastKind := ""
+	if len(blocks) > 0 {
+		lastKind = blocks[len(blocks)-1].kind
+	}
+	return out, lastKind
+}
+
+// assembleLog appends the live overlay and the queued prompts under the
+// static lines. Always returns a fresh slice when it adds anything: `static`
+// may be the cached entry's own backing array, which must not grow under an
+// append.
+func (m Model) assembleLog(static []string, lastKind string, contentCols int) []string {
 	liveText, liveKind := m.liveOverlay()
+	pend := m.pendingForView()
+	if liveText == "" && len(pend) == 0 {
+		return static
+	}
+	out := make([]string, len(static), len(static)+16)
+	copy(out, static)
 	if liveText != "" {
-		if len(out) > 0 {
-			lastKind := ""
-			if len(blocks) > 0 {
-				lastKind = blocks[len(blocks)-1].kind
-			}
-			if lastKind != "response" || liveKind != "stream" {
-				out = append(out, "")
-			}
+		if len(out) > 0 && (lastKind != "response" || liveKind != "stream") {
+			out = append(out, "")
 		}
 		out = append(out, renderLiveLines(liveText, liveKind, m.tick, contentCols)...)
 	}
 	// Queued-but-not-started prompts render last — below the in-flight turn's
 	// output, since they're waiting for it to finish.
-	if pend := m.pendingForView(); len(pend) > 0 {
+	if len(pend) > 0 {
 		if len(out) > 0 {
 			out = append(out, "")
 		}
 		out = append(out, renderPendingLines(pend, contentCols)...)
 	}
-	return strings.Join(out, "\n")
+	return out
 }
 
 // pendingForView returns the queued prompt texts for the current group's
