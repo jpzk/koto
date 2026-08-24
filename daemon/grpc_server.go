@@ -280,8 +280,19 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 	if !sessionBusy(r.Group, session) {
 		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil
 	}
+	// Arm the discard FIRST: from this point the turn is dead even if its
+	// worker hasn't spawned yet (VM booting, delivery in flight) — sendNow
+	// aborts a pre-delivery turn and keeps re-signaling a delivered one until
+	// it dies (send.go abort loop), then the queue advances to the next
+	// prompt. The immediate SIGINT below is just the fast path for the common
+	// case; "no agent process yet" is no longer a failed interrupt.
+	if !requestTurnCancel(r.Group, session) {
+		// The turn retired between the busy check and here.
+		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil
+	}
 	if err := interruptAgent(r.Group, session); err != nil {
-		return &pb.BaseResp{Error: err.Error()}, nil
+		emitLogfG("send", r.Group, "info", "interrupt group=%s session=%s: %v (cancel armed; abort loop takes over)",
+			r.Group, sessionMarkerName(session), err)
 	}
 	return &pb.BaseResp{Ok: true}, nil
 }

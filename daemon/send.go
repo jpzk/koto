@@ -115,7 +115,15 @@ const agentWorkerPattern = `claude-code|venice_stream\.js`
 // procps (pkill/pgrep) isn't installed in the slim guest, so the /proc walk is
 // done in plain POSIX sh. exe/cmdline read as uid 1000 (same user as the
 // worker); environ needs root, which is what fcExec runs as (agent is PID 1).
-func interruptAgent(g, sess string) error {
+func interruptAgent(g, sess string) error { return signalAgent(g, sess, "INT") }
+
+// signalAgent is interruptAgent with the signal as a parameter — the
+// post-cancel abort loop in sendNow escalates to KILL when repeated SIGINTs
+// don't take a worker down (a claude wedged in a hung tool subprocess can sit
+// on SIGINT indefinitely). SIGKILL still yields a clean [[turn_end]]: the
+// entrypoint's run_turn writes it when the worker's pipeline exits, however
+// it exits. sig is a caller-supplied constant ("INT"/"KILL"), never user input.
+func signalAgent(g, sess, sig string) error {
 	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
@@ -133,7 +141,7 @@ for d in /proc/[0-9]*; do
   { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
     | grep -aqE '` + agentWorkerPattern + `' || continue
   tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
-  kill -INT "$p" 2>/dev/null && hit=1
+  kill -` + sig + ` "$p" 2>/dev/null && hit=1
 done
 [ "$hit" = 1 ] || echo no-agent-process >&2
 exit 0`
@@ -179,9 +187,21 @@ func sendNow(g, session, msg string) error {
 		activityTurnBegin(g, session)
 		defer activityTurnEnd(g)
 	}
+	// The turn's cancel channel (armed by sendWorker, closed by the Interrupt
+	// RPC). An interrupt that lands while the VM is still booting or while
+	// this turn waits for a slot has no guest process to signal — the channel
+	// is how it still takes effect: the prompt is discarded before it is ever
+	// delivered. Checked after both potentially long waits (ensure, slot
+	// acquisition); once delivered, the abort loop in the wait below owns it.
+	cancelC := turnCancelCh(g, session)
+
 	if _, err := ensure(g, g == "main"); err != nil {
 		emitLogfG("send", g, "error", "ensure group=%s: %v", g, err)
 		return err
+	}
+	if turnCanceled(cancelC) {
+		emitLogfG("send", g, "info", "group=%s session=%s: turn canceled during boot; prompt discarded", g, sessionMarkerName(session))
+		return nil
 	}
 
 	// A slot is this turn's private log stream, held for the turn's whole
@@ -192,6 +212,10 @@ func sendNow(g, session, msg string) error {
 	slot := acquireSlot(g, session)
 	defer releaseSlot(g, slot) // no-op if the stall path quarantined it below
 	ensureSlotTail(g, slot)
+	if turnCanceled(cancelC) {
+		emitLogfG("send", g, "info", "group=%s session=%s: turn canceled before delivery; prompt discarded", g, sessionMarkerName(session))
+		return nil
+	}
 
 	v := vol(g)
 	logPath := slotLogPath(g, slot)
@@ -243,22 +267,67 @@ drain:
 	if err := fcSendMsg(g, session, slot, enc, sp, cfgB); err != nil {
 		return err
 	}
-	select {
-	case <-doneC:
-		return nil
-	case <-time.After(turnWaitTimeout):
-		setStalled(g, session, true)
-		// The guest side of this turn may still be alive and writing into the
-		// slot's stream, so the slot must NOT return to the pool — quarantine
-		// it (the deferred releaseSlot sees the flag and no-ops). It frees on
-		// VM death or a successful self-heal restart.
-		quarantineSlot(g, slot)
-		emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
-			g, sessionMarkerName(session), turnWaitTimeout)
-		selfHeal(g, time.Now())
-		return nil
+	stall := time.After(turnWaitTimeout)
+	var retry <-chan time.Time
+	sigAttempts := 0
+	for {
+		select {
+		case <-doneC:
+			return nil
+		case <-cancelC:
+			// Interrupt requested mid-turn. The RPC already fired one
+			// best-effort SIGINT; from here this turn owns making the abort
+			// stick — a worker that hadn't spawned yet when the RPC looked
+			// (delivery still in flight in the guest) or one that ignores
+			// SIGINT is re-signaled every interruptRetryDelay, escalating to
+			// SIGKILL after interruptKillAfter attempts. [[turn_end]] still
+			// arrives through the normal path (run_turn writes it when the
+			// worker dies), so the queue advances to the next prompt exactly
+			// as after a completed turn.
+			cancelC = nil // closed channel is always ready; don't spin
+			retry = time.After(interruptRetryDelay)
+		case <-retry:
+			sig := "INT"
+			if sigAttempts++; sigAttempts >= interruptKillAfter {
+				sig = "KILL"
+			}
+			if err := signalAgent(g, session, sig); err != nil {
+				emitLogfG("send", g, "info", "group=%s session=%s: interrupt SIG%s: %v", g, sessionMarkerName(session), sig, err)
+			}
+			retry = time.After(interruptRetryDelay)
+		case <-stall:
+			setStalled(g, session, true)
+			// The guest side of this turn may still be alive and writing into
+			// the slot's stream, so the slot must NOT return to the pool —
+			// quarantine it (the deferred releaseSlot sees the flag and
+			// no-ops). It frees on VM death or a successful self-heal restart.
+			quarantineSlot(g, slot)
+			emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
+				g, sessionMarkerName(session), turnWaitTimeout)
+			selfHeal(g, time.Now())
+			return nil
+		}
 	}
 }
+
+// turnCanceled is a non-blocking poll of a turn's cancel channel (nil-safe:
+// a nil channel — no turn armed — reads as not canceled).
+func turnCanceled(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
+// interruptRetryDelay / interruptKillAfter govern the post-cancel abort loop
+// in sendNow: re-signal the worker every retry tick, switching from SIGINT to
+// SIGKILL once interruptKillAfter attempts didn't take it down.
+const (
+	interruptRetryDelay = 2 * time.Second
+	interruptKillAfter  = 3
+)
 
 // turnWaitTimeout is how long send() waits for a turn's [[turn_end]] before
 // declaring the group stalled. Must exceed entrypoint.sh's TURN_TIMEOUT so a

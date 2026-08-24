@@ -182,6 +182,16 @@ var (
 	// mailbox windows open before enqueue, so they also span time the goal
 	// turn sits queued.
 	inFlightSess = map[string]bool{}
+	// turnCancels holds one cancel channel per in-flight turn, keyed by
+	// sessKey and armed/disarmed by sendWorker around runTurn. Closing it
+	// (requestTurnCancel) tells that turn's sendNow to DISCARD the prompt:
+	// pre-delivery the turn aborts before it ever reaches the guest,
+	// post-delivery sendNow keeps signaling the guest worker (SIGINT, then
+	// SIGKILL) until [[turn_end]] arrives — see the abort loop in send.go.
+	// Lives here rather than in send.go because arming must be atomic with
+	// inFlightSess: the Interrupt RPC checks sessionBusy and then cancels,
+	// and a gap between the two would drop the cancel on the floor.
+	turnCancels = map[string]chan struct{}{}
 )
 
 // sessionBusy reports whether g's given session has a turn in flight.
@@ -189,6 +199,32 @@ func sessionBusy(g, session string) bool {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
 	return inFlightSess[sessKey(g, session)]
+}
+
+// turnCancelCh returns the cancel channel of g/session's in-flight turn, or
+// nil when no turn is running. A nil channel blocks forever in select, which
+// is exactly the "no cancel can come" behavior sendNow wants.
+func turnCancelCh(g, session string) <-chan struct{} {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	return turnCancels[sessKey(g, session)]
+}
+
+// requestTurnCancel marks g/session's in-flight turn for discard (see
+// turnCancels). Idempotent; returns false when no turn is in flight.
+func requestTurnCancel(g, session string) bool {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	c, ok := turnCancels[sessKey(g, session)]
+	if !ok {
+		return false
+	}
+	select {
+	case <-c: // already canceled
+	default:
+		close(c)
+	}
+	return true
 }
 
 // inFlightSessions lists the sessions of g's currently running turns. Used by
@@ -305,12 +341,15 @@ func sendWorker(g, session string, q chan sendJob) {
 			job.done <- fmt.Errorf("goal turn skipped (goal no longer active)")
 			continue
 		}
+		k := sessKey(g, job.session)
 		queuesMu.Lock()
-		inFlightSess[sessKey(g, job.session)] = true
+		inFlightSess[k] = true
+		turnCancels[k] = make(chan struct{})
 		queuesMu.Unlock()
 		job.done <- runTurn(g, job.session, job.msg)
 		queuesMu.Lock()
-		delete(inFlightSess, sessKey(g, job.session))
+		delete(inFlightSess, k)
+		delete(turnCancels, k)
 		queuesMu.Unlock()
 	}
 }

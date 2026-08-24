@@ -821,7 +821,7 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /quit  /burn <goal>)"
+	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /reload  /interrupt  /exit  /burn <goal>)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
@@ -1038,6 +1038,32 @@ func (m *Model) dropTurnState(g string) {
 	delete(m.toolOutTail, k)
 	delete(m.busy, k)
 	delete(m.activity, g)
+}
+
+// turnInterruptible reports whether the current conversation looks mid-turn —
+// the trigger for ctrl+c and esc to fire an interrupt. Four signals, because
+// no single one is always present: busy is set on the `prompt` event and
+// cleared on `done`; streamBuf/thinkingBuf cover the cases where the prompt
+// event didn't reach us (initial replay, daemon reconnect mid-stream), so a
+// stuck tool call is still cancellable in-band; and the activity phase covers
+// the remaining hole — a live-only attach mid-turn sees no prompt frame and,
+// during llm/retry/work, no stream bytes either, but the daemon seeds every
+// subscriber with the current phase, so it is the one signal that's always
+// present while a turn runs.
+func (m *Model) turnInterruptible() bool {
+	if m.busy[m.curKey()] {
+		return true
+	}
+	if _, streaming := m.streamBuf[m.curKey()]; streaming {
+		return true
+	}
+	if _, thinking := m.thinkingBuf[m.curKey()]; thinking {
+		return true
+	}
+	if _, midTurn := m.activityFor(m.cur); midTurn {
+		return true
+	}
+	return false
 }
 
 // popPending drops the head of g's pending queue when it matches the just-
@@ -3232,7 +3258,7 @@ func (m *Model) ensureTicking() tea.Cmd {
 // stream death, use scheduleProbe — same loop, no disconnect declaration.
 // persistUIState snapshots what a future session restores (active
 // conversation, draft, per-group session targets). Called on EVERY exit
-// path — /reload, ctrl+shift+r, /quit, ctrl+c — not just the reload ones:
+// path — /reload, ctrl+shift+r, /exit, /quit — not just the reload ones:
 // when only reloads saved, a normal quit left the file describing whatever
 // the last /reload saw, and weeks later a fresh start resurrected that
 // stale group + draft (and silently retargeted the first send).
@@ -3363,7 +3389,8 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			// rendering an error; the next esc reaches the tree toggle. Real
 			// failures (permission, transport) still surface.
 			e := msg.err.Error()
-			if strings.Contains(e, "no running agent process") || strings.Contains(e, "is not running") {
+			if strings.Contains(e, "no running agent process") || strings.Contains(e, "is not running") ||
+				strings.Contains(e, "no turn in flight") {
 				m.dropTurnState(msg.group)
 				if msg.group == m.cur {
 					m.refreshLog()
@@ -3488,7 +3515,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// handleShellKey as a literal 0x1b, because vim/less inside the
 		// pane are unusable without the escape key (esc == ctrl+[, so both
 		// spellings reach the guest).
-		// Exiting the TUI from the shell is alt+← (or ctrl+]) then ctrl+c.
+		// Exiting the TUI from the shell is alt+← (or ctrl+]) then /exit.
 		switch s {
 		case "ctrl+]":
 			m.closeShell()
@@ -3550,15 +3577,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleShellKey(msg)
 	}
 	if s == "ctrl+c" {
-		// Quit. Agent interrupt moved to Esc (see the esc handler below the
-		// log-view block), so ctrl+c is now an unconditional exit even mid-
-		// turn — the daemon and the in-flight turn keep running; we're just
-		// detaching this client. A running plugin is aborted on the way out.
+		// Interrupt, not quit (quitting the TUI is /exit or /quit): ctrl+c is
+		// the key every terminal user reaches for to stop a running thing, and
+		// here the running thing is the agent's turn — stop it, discard the
+		// prompt it was working on, and let the session's queued prompts
+		// proceed (the daemon's queue worker advances on its own once the
+		// aborted turn retires). A running TUI-side plugin counts as the
+		// running thing too. Esc keeps its interrupt meaning as well; ctrl+c
+		// is the same action minus esc's tree-toggle second meaning. With
+		// nothing to interrupt it prints a hint instead of silently doing
+		// nothing, because fingers trained on the old binding expect an exit.
 		if m.plugin != nil {
 			m.plugin.abort()
+			return m, nil
 		}
-		m.persistUIState()
-		return m, tea.Quit
+		if m.turnInterruptible() {
+			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
+		}
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "nothing to interrupt — /exit quits the TUI"})
+		return m, nil
 	}
 	if s == "ctrl+shift+r" {
 		// Reload TUI (was ctrl+r, moved to free up the shell-style ctrl+r
@@ -3684,24 +3721,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// one handler is the ctrl+[ binding too.
 		//
 		// First meaning: interrupt the in-flight turn for the current group
-		// (moved here from ctrl+c). busy is set on the `prompt` event and
-		// cleared on `done`; streamBuf/thinkingBuf cover the cases where the
-		// prompt event didn't reach us (initial replay, daemon reconnect mid-
-		// stream), so a stuck tool call is still cancellable in-band. The
-		// activity phase covers the remaining hole: a live-only attach mid-turn
-		// sees no prompt frame and — during llm/retry/work — no stream bytes
-		// either, but the daemon seeds every subscriber with the current phase,
-		// so it is the one signal that's always present while a turn runs.
-		if m.busy[m.curKey()] {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
-		}
-		if _, streaming := m.streamBuf[m.curKey()]; streaming {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
-		}
-		if _, thinking := m.thinkingBuf[m.curKey()]; thinking {
-			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
-		}
-		if _, midTurn := m.activityFor(m.cur); midTurn {
+		// (shared with ctrl+c — see turnInterruptible for which signals count
+		// as "a turn is running").
+		if m.turnInterruptible() {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
 		// Second meaning, with no turn to stop: the message-bar ↔ tree
@@ -4745,6 +4767,12 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return listCmd(m.sock)
 	}
 	if v == "/quit" || v == "/exit" {
+		// The exit path (ctrl+c interrupts the agent now, it doesn't quit).
+		// A running plugin is aborted on the way out — this used to live in
+		// the ctrl+c handler.
+		if m.plugin != nil {
+			m.plugin.abort()
+		}
 		m.persistUIState()
 		return tea.Quit
 	}

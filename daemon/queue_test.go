@@ -182,6 +182,91 @@ func TestAbortInflightTurnAdvancesQueue(t *testing.T) {
 	})
 }
 
+// TestInterruptCancelDiscardsAndAdvances pins the Interrupt semantics: a
+// cancel requested against the IN-FLIGHT turn closes that turn's cancel
+// channel (which sendNow reads to discard the prompt — pre-delivery outright,
+// post-delivery via the signal-retry abort loop), and once the canceled turn
+// retires, the worker advances to the next queued prompt as after any
+// completed turn. With no turn in flight there is nothing to cancel.
+func TestInterruptCancelDiscardsAndAdvances(t *testing.T) {
+	const g = "q-cancel"
+
+	if requestTurnCancel(g, "") {
+		t.Fatal("requestTurnCancel with no turn in flight returned true")
+	}
+	if turnCancelCh(g, "") != nil {
+		t.Fatal("turnCancelCh non-nil with no turn in flight")
+	}
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	processed := make(chan string, 2)
+
+	// stub mirrors sendNow's cancel discipline: fetch this turn's channel and,
+	// for the "work" message, block until the cancel lands (a real turn would
+	// be aborted by the signal loop; here observing the close stands in for
+	// the discard). It then holds until release so the test can probe the
+	// still-in-flight state without racing the turn's retirement.
+	stub := func(g, session, msg string) error {
+		c := turnCancelCh(g, session)
+		if c == nil {
+			t.Errorf("turn %q: no cancel channel armed", msg)
+			processed <- msg
+			return nil
+		}
+		if msg == "work" {
+			started <- struct{}{}
+			select {
+			case <-c:
+				// canceled — the prompt is discarded, the turn retires
+			case <-time.After(5 * time.Second):
+				t.Errorf("turn %q: cancel never landed", msg)
+			}
+			<-release
+		} else if turnCanceled(c) {
+			// The previous turn's cancel must not leak into this one.
+			t.Errorf("turn %q: started already-canceled", msg)
+		}
+		processed <- msg
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		if _, err := enqueueSend(g, "", "work"); err != nil {
+			t.Fatalf("enqueue work: %v", err)
+		}
+		if _, err := enqueueSend(g, "", "next"); err != nil {
+			t.Fatalf("enqueue next: %v", err)
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("work turn never started")
+		}
+		if !requestTurnCancel(g, "") {
+			t.Fatal("requestTurnCancel found no in-flight turn")
+		}
+		if !requestTurnCancel(g, "") {
+			t.Fatal("requestTurnCancel not idempotent while the turn drains")
+		}
+		close(release)
+		for i, w := range []string{"work", "next"} {
+			select {
+			case got := <-processed:
+				if got != w {
+					t.Fatalf("processed[%d]=%q, want %q", i, got, w)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for %q — queue did not advance past the canceled turn", w)
+			}
+		}
+	})
+
+	if requestTurnCancel(g, "") {
+		t.Fatal("cancel channel leaked past the turn's retirement")
+	}
+}
+
 // TestQueueCrossGroupConcurrency: different groups run concurrently (one worker
 // each), so two groups can be mid-turn at the same time.
 func TestQueueCrossGroupConcurrency(t *testing.T) {

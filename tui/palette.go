@@ -95,7 +95,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "new group", hint: "/new <group>", run: "/new ", edit: true},
 		{title: "refresh group list", hint: "/ls", run: "/ls"},
 
-		{title: "interrupt current turn", hint: "esc", run: "/interrupt"},
+		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},
 		{title: "clear this session", hint: "/clear", run: "/clear"},
 		{title: "clear whole group", hint: "/clear all", run: "/clear all"},
 		{title: "restart group VM", hint: "/restart", run: "/restart"},
@@ -143,7 +143,7 @@ func (m Model) paletteItems() []paletteItem {
 
 		{title: "repaint screen", hint: "/repaint", run: "/repaint"},
 		{title: "reload TUI", hint: "ctrl+shift+r", run: "/reload"},
-		{title: "quit TUI", hint: "ctrl+c", run: "/quit"},
+		{title: "quit TUI", hint: "/exit", run: "/exit"},
 	}
 
 	// Plugins are registered at init, so they belong in the list too —

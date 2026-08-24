@@ -58,7 +58,7 @@ func helpSections() []helpSection {
 			{"alt+t", "expand/collapse thought bodies"},
 			{"esc", "interrupt the in-flight turn / close view / close tree"},
 			{"ctrl+shift+r", "reload the TUI (keeps the draft)"},
-			{"ctrl+c", "quit the TUI (daemon and groups keep running)"},
+			{"ctrl+c", "interrupt the agent's turn (discard it; queued prompts continue)"},
 		}},
 		{"CHAT + TREE", []helpEntry{
 			{"enter", "send message; in the tree: back to the message bar"},
@@ -94,7 +94,7 @@ func helpSections() []helpSection {
 			{"/stop [g]", "power off the group's VM (boots again on next send)"},
 			{"/restart [g]", "restart the VM (applies network/size/root config)"},
 			{"/destroy <g>", "destroy the group and its workspace"},
-			{"/interrupt", "interrupt the in-flight turn (same as esc)"},
+			{"/interrupt", "interrupt the in-flight turn (same as ctrl+c / esc)"},
 			{"/config [k=v ..]", "show or set group config (network, size, root, ports, ..)"},
 			{"/sched ...", "schedules: list / add <cron> <msg> / on / off / del / run"},
 			{"/goals ...", "goals: list / interrupt / .."},
@@ -103,7 +103,7 @@ func helpSections() []helpSection {
 			{"/shell", "open the shared terminal (same as ctrl+])"},
 			{"/repaint", "force a full redraw"},
 			{"/reload", "reload the TUI"},
-			{"/quit", "exit the TUI"},
+			{"/exit", "exit the TUI (alias /quit; daemon and groups keep running)"},
 		}},
 	}
 }
@@ -197,13 +197,11 @@ func (m *Model) resizeHelpViewport() {
 // land in the message bar or the tree underneath).
 func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+h", "q", "enter":
+	case "esc", "ctrl+h", "q", "enter", "ctrl+c":
+		// ctrl+c dismisses like the picker overlay does (it's the interrupt
+		// key now, not the exit key — quitting is /exit).
 		m.helpOpen = false
 		return m, nil
-	case "ctrl+c":
-		// Quit still works — the modal must never trap the exit key.
-		m.persistUIState()
-		return m, tea.Quit
 	case "up":
 		m.helpVP.ScrollUp(1)
 	case "down":
