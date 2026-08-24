@@ -39,7 +39,7 @@ func (m *Model) handleThemeCmd(rest string) tea.Cmd {
 
 	if isThemeOff(arg) {
 		resetTheme()
-		m.repaintForTheme(true)
+		m.repaintForTheme()
 		m.addLine(logLine{kind: "sys", text: "theme: built-in palette"})
 		m.persistUIState()
 		return nil
@@ -52,7 +52,7 @@ func (m *Model) handleThemeCmd(rest string) tea.Cmd {
 	}
 	applyThemeProfile(os.Getenv)
 	applyTheme(p)
-	m.repaintForTheme(true)
+	m.repaintForTheme()
 	ground := "dark"
 	if themeLight {
 		ground = "light"
@@ -162,7 +162,6 @@ func (m *Model) applyThemeByName(name string) {
 	if name == activeTheme || (isThemeOff(name) && activeTheme == "") {
 		return // already showing it; skip the repaint
 	}
-	wasLight := themeLight
 	if isThemeOff(name) {
 		resetTheme()
 	} else {
@@ -174,7 +173,7 @@ func (m *Model) applyThemeByName(name string) {
 		applyThemeProfile(os.Getenv)
 		applyTheme(p)
 	}
-	m.repaintForTheme(wasLight != themeLight)
+	m.repaintForTheme()
 }
 
 // commitThemePick is Enter: keep what is on screen. The palette is already
@@ -215,18 +214,21 @@ func (m *Model) cancelThemePick() {
 // happened to change afterwards, since those caches store finished escape
 // sequences.
 //
-// `full` also drops the glamour renderers and the per-block markdown cache.
-// That is the expensive half (chroma + a re-render of every visible response),
-// and it is only needed when the theme's GROUND flips light↔dark, because
-// markdown is the one region whose colors we don't choose: glamour's standard
-// style is picked by ground, not by palette. Scrubbing the picker through 45
-// dark themes therefore costs one cheap repaint per keypress, not 45 markdown
-// re-renders.
-func (m *Model) repaintForTheme(full bool) {
-	if full {
-		invalidateMarkdownCache()
-		m.mdCache = map[string]string{}
-	}
+// The per-block markdown cache goes with them, on EVERY theme change rather
+// than only on a light↔dark flip. Markdown used to be the one region whose
+// colors we didn't choose — glamour's standard style, picked by ground — so a
+// dark→dark switch could leave it alone. Headings now take the palette's
+// f_high (see mdHeadingColor), so a same-ground switch does change the
+// rendered bytes, and a preserved cache would leave every heading in the
+// previous theme's color.
+//
+// The glamour RENDERERS are not dropped here: getRenderer keys them by width,
+// base style and heading color, so a theme switch reaches a different entry on
+// its own and scrubbing the picker back over a palette already seen at this
+// width costs nothing. Only invalidateMarkdownCache (resize) clears them, and
+// only to bound the map.
+func (m *Model) repaintForTheme() {
+	m.mdCache = map[string]string{}
 	m.vpCache = map[string]vpCacheEntry{}
 	m.treeRowCache = map[string]string{}
 	m.restyleLogEntries()

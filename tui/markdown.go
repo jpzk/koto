@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -15,8 +18,13 @@ import (
 // frame. Cache is rebuilt on resize.
 
 var (
-	mdMu      sync.Mutex
-	mdCache   = map[int]*glamour.TermRenderer{}
+	mdMu sync.Mutex
+	// Keyed by width + base style + heading color — everything getRenderer
+	// bakes into a renderer. The heading color is part of the style config, so
+	// a /themes switch has to reach a different entry rather than a stale one,
+	// and scrubbing the picker back over a palette already seen at this width
+	// is then free.
+	mdCache   = map[string]*glamour.TermRenderer{}
 	ansiFence = regexp.MustCompile("(?s)```ansi\\r?\\n(.*?)\\r?\\n```")
 	// renderMu serializes calls to glamour.TermRenderer.Render. Glamour's
 	// renderer is not goroutine-safe, and we now call renderMarkdown from
@@ -29,17 +37,56 @@ var (
 	renderMu sync.Mutex
 )
 
+// mdHeadingColor is the color glamour's Heading block is repointed to: the
+// palette's brightest text tier (f_high under a theme, bright white in the
+// built-in palette). Empty in mono, where the ascii style carries no color at
+// all and monoFrame would strip one anyway.
+//
+// Headings are the one markdown element with a strong claim on the palette.
+// Glamour's standard styles hard-code them — "39" in dark, "27" in light, a
+// fixed ANSI blue either way — so `## Heading` came out the same blue against
+// every one of the 40 palettes, the only text on screen that ignored the
+// theme. f_high is what the rest of the TUI uses for its brightest text, which
+// is what a heading is.
+//
+// Scope is glamour's Heading BLOCK, which H2 through H5 inherit. H1 keeps its
+// own #228-on-#63 badge and H6 its own green — both set those explicitly, and
+// neither is what was reported.
+func mdHeadingColor() string {
+	if monoMode {
+		return ""
+	}
+	return string(cBrWhite)
+}
+
 func getRenderer(width int) *glamour.TermRenderer {
 	if width < 20 {
 		width = 20
 	}
+	// The key carries everything baked into the renderer: the wrap width, the
+	// base style, and the heading color. Base style AND color both, because
+	// they don't determine each other — a dark theme and a light one can share
+	// f_high (#ffffff is the commonest value in the collection), so keying on
+	// the color alone would hand a light-ground palette the dark base style.
+	head := mdHeadingColor()
+	base := "dark"
+	switch {
+	case monoMode:
+		base = "ascii"
+	case themeLight:
+		base = "light"
+	}
+	key := fmt.Sprintf("%d\x00%s\x00%s", width, base, head)
 	mdMu.Lock()
 	defer mdMu.Unlock()
-	if r, ok := mdCache[width]; ok {
+	if r, ok := mdCache[key]; ok {
 		return r
 	}
-	// WithStandardStyle("dark") avoids tty-detection inside the container
-	// (no TERM, no isatty heuristics — predictable colors).
+	// A standard style rather than tty detection inside the container (no
+	// TERM, no isatty heuristics — predictable colors), taken as a VALUE so
+	// the heading override below can't scribble on the package's own config.
+	// StyleConfig's fields are values with pointer colors, so replacing one
+	// pointer in the copy leaves glamour's original untouched.
 	//
 	// B/W mode swaps in glamour's "ascii" style. monoFrame would strip the
 	// dark style's colors from the frame anyway, but that leaves headings,
@@ -53,22 +100,27 @@ func getRenderer(width int) *glamour.TermRenderer {
 	// colors we don't pick, so it is also the one that doesn't follow the
 	// palette vars. glamour's dark style writes near-white body text, which on
 	// tape's #dad7cd ground is invisible.
-	style := "dark"
-	switch {
-	case monoMode:
-		style = "ascii"
-	case themeLight:
-		style = "light"
+	var cfg ansi.StyleConfig
+	switch base {
+	case "ascii":
+		cfg = styles.ASCIIStyleConfig
+	case "light":
+		cfg = styles.LightStyleConfig
+	default:
+		cfg = styles.DarkStyleConfig
+	}
+	if head != "" {
+		cfg.Heading.Color = &head
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(style),
+		glamour.WithStyles(cfg),
 		glamour.WithWordWrap(width),
 		glamour.WithEmoji(),
 	)
 	if err != nil {
 		return nil
 	}
-	mdCache[width] = r
+	mdCache[key] = r
 	return r
 }
 
@@ -76,7 +128,7 @@ func getRenderer(width int) *glamour.TermRenderer {
 func invalidateMarkdownCache() {
 	mdMu.Lock()
 	defer mdMu.Unlock()
-	mdCache = map[int]*glamour.TermRenderer{}
+	mdCache = map[string]*glamour.TermRenderer{}
 }
 
 // renderMarkdown renders src to ANSI for a given column width.

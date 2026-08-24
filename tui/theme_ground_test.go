@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,4 +60,70 @@ func TestMetricsBarPaintsNoGround(t *testing.T) {
 				tc.name, strings.ReplaceAll(tc.row, "\x1b", "ESC"))
 		}
 	}
+}
+
+// TestMarkdownHeadingFollowsPalette: `##` through `#####` render in the
+// palette's f_high, not glamour's hard-coded ANSI blue ("39" dark / "27"
+// light) — headings were the only text on screen that ignored the theme.
+//
+// Also pins the cache key. The renderer bakes the heading color in, so two
+// themes sharing an f_high (#ffffff is the commonest value in the collection)
+// must still get their own entry when their GROUND differs, or a light palette
+// is served the dark base style.
+func TestMarkdownHeadingFollowsPalette(t *testing.T) {
+	withBuiltinPalette(t)
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+	invalidateMarkdownCache()
+	t.Cleanup(invalidateMarkdownCache)
+
+	// headingSGR returns the escape sequence introducing the rendered heading.
+	headingSGR := func(t *testing.T) string {
+		t.Helper()
+		out := renderMarkdown("## Heading\n", 60)
+		i := strings.Index(out, "Heading")
+		if i < 0 {
+			t.Fatalf("no heading in rendered output: %q", out)
+		}
+		j := strings.LastIndex(out[:i], "\x1b[")
+		if j < 0 {
+			t.Fatalf("heading carries no SGR sequence: %q", out)
+		}
+		return out[j:i]
+	}
+
+	if got := headingSGR(t); strings.Contains(got, "38;5;39") || strings.Contains(got, "38;5;27") {
+		t.Errorf("built-in palette still renders glamour's stock heading blue: %q", got)
+	}
+
+	for _, name := range []string{"apollo", "teletext", "tape"} {
+		p, err := loadTheme("/nonexistent/koto.sock", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applyTheme(p)
+		want := hexSGR(string(cBrWhite))
+		if want == "" {
+			t.Fatalf("%s: f_high %q is not a hex color", name, cBrWhite)
+		}
+		if got := headingSGR(t); !strings.Contains(got, want) {
+			t.Errorf("%s: heading is %q, want f_high %s (%s)", name, got, cBrWhite, want)
+		}
+	}
+}
+
+// hexSGR renders "#rrggbb" as the truecolor foreground parameter glamour emits
+// for it. Returns "" for anything that isn't a hex color (every color in the
+// built-in palette is an ANSI index, which has no such form).
+func hexSGR(hex string) string {
+	h, ok := normHex(hex)
+	if !ok {
+		return ""
+	}
+	v, err := strconv.ParseUint(h[1:], 16, 32)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("38;2;%d;%d;%d", (v>>16)&0xff, (v>>8)&0xff, v&0xff)
 }
