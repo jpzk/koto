@@ -27,8 +27,8 @@ package main
 // consumed window stays closed until main delegates with reply:true again.
 //
 // The window is in-memory: a daemon restart drops pending windows (it also
-// kills every microVM, so the delegated work restarts from its boot notice
-// anyway). Re-delegating re-arms.
+// kills every microVM, so the delegated work is gone with them anyway).
+// Re-delegating re-arms.
 
 import (
 	"fmt"

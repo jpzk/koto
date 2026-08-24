@@ -165,41 +165,10 @@ func ensureLocked(g string, isMain bool) (int, error) {
 		}
 	}
 	emitLogfG("group", g, "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
-	// A pre-existing workspace.img means this is a REstart: the agent had
-	// state running in the old VM that is now gone. A fresh group's first
-	// boot has lost nothing and gets no notice.
-	restarted := false
-	if _, err := os.Stat(fcWorkspaceImg(g)); err == nil {
-		restarted = true
-	}
 	if err := fcSpawn(g, port, pubPorts); err != nil {
 		proxyUnlisten(port)
 		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
 		return 0, err
-	}
-	if restarted && !bootNoticeActive(g) && armBootNotice(g) {
-		// Boot notice: wake the agent (default session) so it can resurrect
-		// whatever should be running — the on-boot hook that makes services
-		// and watchdogs survive VM restarts. Queued like any other send, so
-		// when the boot was triggered by an inbound message (ensure() inside
-		// sendNow), that message's turn runs first and the notice follows.
-		// Fire-and-forget: a full queue just drops the notice.
-		//
-		// bootNoticeActive is checked FIRST (and before the window stamp is
-		// burned): if a notice is already queued or mid-delivery, this boot
-		// is covered by it. In particular, delivering a queued notice
-		// re-boots a stopped VM through this very path — without the guard
-		// that boot would arm the next notice whenever queue delay pushed
-		// delivery past armBootNotice's window, cascading stale duplicates
-		// (2026-08-04, JAM).
-		const bootMsg = "[koto] Your VM has just been restarted. Everything " +
-			"that was running inside it is gone: background jobs that were " +
-			"running are now marked orphaned (`cs-job list` to review — rerun " +
-			"what still matters) and any servers/processes you had started " +
-			"are down. Restart anything that should be running, then continue."
-		if err := enqueueBootNotice(g, bootMsg); err != nil {
-			emitLogfG("group", g, "warn", "boot notice for %s dropped: %v", g, err)
-		}
 	}
 	return port, nil
 }
@@ -208,9 +177,7 @@ func ensureLocked(g string, isMain bool) (int, error) {
 // Called once from daemonMain, in a goroutine: fcSpawn takes seconds per VM,
 // and a slow (or failing) group boot must not hold up the gRPC listener.
 // Sequential, so a fleet of autostart groups doesn't contend for KVM and RAM
-// all at once; each group's boot notice (ensure() → armBootNotice) fires as it
-// would for any other restart, which is exactly the wake-up an autostarted
-// agent wants. "main" is skipped — daemonMain ensures it unconditionally.
+// all at once. "main" is skipped — daemonMain ensures it unconditionally.
 // Sorted for a deterministic boot order (readGroups returns a map).
 func autostartGroups() {
 	var names []string
@@ -227,30 +194,6 @@ func autostartGroups() {
 		}
 		emitLogfG("group", g, "info", "autostart %s: up", g)
 	}
-}
-
-// armBootNotice rate-limits restart notices to one per group per window.
-// Without it a crash-looping VM would feed on its own notices: the notice
-// turn re-ensures the group, respawns the dying VM, and enqueues the next
-// notice — an unbounded spawn loop that a silent failing group never had.
-// The window measures ARM time, not delivery: a notice can sit queued
-// behind long turns far past it, which is why ensure() additionally gates
-// on bootNoticeActive (queue.go) — the delivery-layer half of the guard.
-const bootNoticeWindow = 5 * time.Minute
-
-var (
-	bootNoticeMu   sync.Mutex
-	bootNoticeLast = map[string]time.Time{}
-)
-
-func armBootNotice(g string) bool {
-	bootNoticeMu.Lock()
-	defer bootNoticeMu.Unlock()
-	if time.Since(bootNoticeLast[g]) < bootNoticeWindow {
-		return false
-	}
-	bootNoticeLast[g] = time.Now()
-	return true
 }
 
 func stopGroup(g string) {

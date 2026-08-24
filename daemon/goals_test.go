@@ -1062,8 +1062,8 @@ func TestGoalInterruptAbortsInFlightTurn(t *testing.T) {
 // queued behind a boot notice; interrupt+cancel landed; the iteration ran
 // anyway when the notice finished).
 //
-// That original incident can no longer happen — the boot notice goes to the
-// chat lane and no longer blocks goal turns at all — so the queued turn here
+// That original incident can no longer happen — boot notices were removed
+// entirely — so the queued turn here
 // is staged directly in the goal lane, which is the window that remains: the
 // gap between the driver's enqueue and the worker picking the job up.
 func TestGoalQueuedTurnSkippedAfterCancel(t *testing.T) {

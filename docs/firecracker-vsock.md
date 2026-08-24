@@ -492,10 +492,10 @@ daemon does.
   daemon comes up. Setting it takes effect on the next daemon start; to get the
   VM up right now, just send the group a message (or `/restart` it), which boots
   it the ordinary way.
-- **Boot notice still fires.** An autostarted group goes through the same
-  `ensure()` path as any other boot, so a group with an existing `workspace.img`
-  gets the `[koto]` restart notice (rate-limited by `armBootNotice`) — the
-  autostarted agent wakes up knowing its VM is fresh and can resurrect services.
+- **No turn is enqueued by the boot.** Booting (autostart or otherwise) does
+  not wake the agent — the VM just comes up and waits for its next message. An
+  agent that needs to resurrect services after a restart does so on its next
+  turn (`cs-job list` shows orphaned jobs).
 - **Failures are logged, not fatal.** A group that fails to boot logs at `error`
   on its own group subsystem and the loop continues to the next one.
 
