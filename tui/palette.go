@@ -150,16 +150,6 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "quit TUI", hint: "/exit", run: "/exit"},
 	}
 
-	// Plugins are registered at init, so they belong in the list too —
-	// they're the one command family with no fixed membership.
-	for _, p := range plugins {
-		items = append(items, paletteItem{
-			title: p.desc,
-			hint:  "/" + p.name,
-			run:   "/" + p.name + " ",
-			edit:  true,
-		})
-	}
 	return items
 }
 

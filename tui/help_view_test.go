@@ -145,24 +145,15 @@ func TestPlaceholderPointsAtCheatsheet(t *testing.T) {
 }
 
 // Since the placeholder now names ctrl+h as THE door, the cheatsheet has to
-// cover everything a user can type — including the plugin verbs, which have no
-// fixed membership and so are read from the registry rather than transcribed.
-func TestCheatsheetCoversPlugins(t *testing.T) {
+// cover every verb dispatchInput accepts — anything else it sees is reported as
+// unknown, so a verb missing here is a verb with no documentation at all.
+func TestCheatsheetCoversEveryVerb(t *testing.T) {
 	body := helpContent(200)
-	if !strings.Contains(body, "PLUGINS") {
-		t.Fatal("no plugins section in the cheatsheet")
-	}
-	for _, p := range plugins {
-		if !strings.Contains(body, "/"+p.name) {
-			t.Errorf("plugin /%s missing from the cheatsheet", p.name)
-		}
-	}
-	// The verbs the placeholder used to advertise must all still be findable.
 	for _, v := range []string{"/new", "/sw", "/ls", "/session", "/prompt", "/goals",
 		"/sched", "/restart", "/stop", "/destroy", "/clear", "/config",
 		"/runscript", "/shell", "/themes", "/reload", "/interrupt", "/exit"} {
 		if !strings.Contains(body, v) {
-			t.Errorf("%s was in the old placeholder but is not in the cheatsheet", v)
+			t.Errorf("%s is dispatchable but is not in the cheatsheet", v)
 		}
 	}
 }

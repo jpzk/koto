@@ -9,7 +9,8 @@ import (
 )
 
 // prog is the package-level program reference used by goroutines (subscribe
-// loops, plugin runtime) to inject Msgs back into the model via prog.Send.
+// loops, the log stream, job tails) to inject Msgs back into the model via
+// prog.Send.
 // Bubble Tea's model values flow through Update; a global ref is the
 // idiomatic way to push from a goroutine that doesn't own its own Cmd chain.
 var prog *tea.Program

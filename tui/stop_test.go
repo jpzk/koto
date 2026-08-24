@@ -109,13 +109,24 @@ func TestInterruptCommand(t *testing.T) {
 	}
 }
 
-// /stop-plugin must not be shadowed by the /stop prefix match.
-func TestStopPluginNotShadowed(t *testing.T) {
+// The /stop matcher requires an exact match or a trailing space, so a longer
+// verb sharing its prefix is not swallowed by it. This used to guard the
+// /stop-plugin verb; the plugin runtime is gone, but the property it pinned is
+// the matcher's, not the plugin's — a future /stop-something would inherit the
+// same trap. An unmatched verb is now reported as unknown, never sent.
+func TestStopPrefixDoesNotShadowLongerVerbs(t *testing.T) {
 	m := inputModel(t, "")
 	m.dispatchInput("/stop-plugin nope")
+	saw := false
 	for _, l := range m.lines {
 		if strings.Contains(l.text, "VM") {
 			t.Fatalf("/stop-plugin fell through to the VM stop: %q", l.text)
 		}
+		if l.kind == "err" && strings.Contains(l.text, "unknown command: /stop-plugin") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Error("an unmatched /stop-prefixed verb was not reported as unknown")
 	}
 }

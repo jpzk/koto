@@ -286,10 +286,6 @@ type resourcesMsg struct {
 	host   HostRes
 	err    error
 }
-type pluginLogMsg struct {
-	group, kind, text string
-}
-type pluginDoneMsg struct{ name string }
 
 // scriptLogMsg carries one line of a /runscript stream (RunScript RPC) into
 // the Update loop; kind distinguishes normal output ("script") from a
@@ -451,8 +447,6 @@ type Model struct {
 	// view's rows and summary line.
 	resources map[string]GroupRes
 	hostRes   HostRes
-
-	plugin *pluginHandle
 
 	// reloadPending: /reload sets this then quits. main() inspects the final
 	// model and exits with code 75 so the Makefile's tui loop respawns us.
@@ -2426,9 +2420,6 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.emitDesktopNotify(sev, ev.Group, ev.Title, ev.Text)
 			}
 		}
-		if !ev.Historical && m.plugin != nil {
-			m.plugin.push(ev)
-		}
 		// Mark the group unread only when an off-screen group emits a real
 		// response line (`done` with non-empty text). Thinking, tool calls,
 		// and tool results are noisy intermediate signals — they fire many
@@ -2654,24 +2645,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case pluginLogMsg:
-		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
-		if msg.group == m.cur {
-			m.refreshLog()
-		}
-		return m, nil
-
 	case scriptLogMsg:
 		m.addLine(logLine{kind: msg.kind, group: msg.group, text: msg.text})
 		if msg.group == m.cur {
 			m.refreshLog()
-		}
-		return m, nil
-
-	case pluginDoneMsg:
-		if m.plugin != nil && m.plugin.name == msg.name {
-			m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("/%s finished", msg.name)})
-			m.plugin = nil
 		}
 		return m, nil
 
@@ -3169,9 +3146,6 @@ func (m Model) isAnimating() bool {
 	if m.anyActivity() {
 		return true
 	}
-	if m.plugin != nil {
-		return true
-	}
 	if !m.connected {
 		return true
 	}
@@ -3207,7 +3181,7 @@ func (m *Model) markContentDirty() tea.Cmd {
 
 // needsFastTicks reports whether anything the operator is LOOKING AT needs the
 // full 80ms cadence: the focused group's own stream, the shell pane's blinking
-// cursor, a plugin overlay, the disconnected banner, or a notification blink.
+// cursor, the disconnected banner, or a notification blink.
 // Background-group activity is deliberately excluded — see animTick.
 func (m Model) needsFastTicks() bool {
 	if m.focus == focusShell && m.shell != nil && !m.shell.ended {
@@ -3219,7 +3193,7 @@ func (m Model) needsFastTicks() bool {
 	if _, ok := m.thinkingBuf[m.curKey()]; ok {
 		return true
 	}
-	if m.plugin != nil || !m.connected {
+	if !m.connected {
 		return true
 	}
 	if len(m.visibleNotifications()) > 0 {
@@ -3594,15 +3568,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// here the running thing is the agent's turn — stop it, discard the
 		// prompt it was working on, and let the session's queued prompts
 		// proceed (the daemon's queue worker advances on its own once the
-		// aborted turn retires). A running TUI-side plugin counts as the
-		// running thing too. Esc keeps its interrupt meaning as well; ctrl+c
-		// is the same action minus esc's tree-toggle second meaning. With
-		// nothing to interrupt it prints a hint instead of silently doing
-		// nothing, because fingers trained on the old binding expect an exit.
-		if m.plugin != nil {
-			m.plugin.abort()
-			return m, nil
-		}
+		// aborted turn retires). Esc keeps its interrupt meaning as well;
+		// ctrl+c is the same action minus esc's tree-toggle second meaning.
+		// With nothing to interrupt it prints a hint instead of silently
+		// doing nothing, because fingers trained on the old binding expect
+		// an exit.
 		if m.turnInterruptible() {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
@@ -4797,11 +4767,6 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	}
 	if v == "/quit" || v == "/exit" {
 		// The exit path (ctrl+c interrupts the agent now, it doesn't quit).
-		// A running plugin is aborted on the way out — this used to live in
-		// the ctrl+c handler.
-		if m.plugin != nil {
-			m.plugin.abort()
-		}
 		m.persistUIState()
 		return tea.Quit
 	}
@@ -4959,27 +4924,6 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		m.reloadPending = true
 		return tea.Quit
 	}
-	if v == "/stop-plugin" || strings.HasPrefix(v, "/stop-plugin ") {
-		target := ""
-		if len(v) > 12 {
-			target = strings.TrimSpace(v[13:])
-		}
-		if target == "" {
-			m.addLine(logLine{kind: "err", group: m.cur, text: "usage: /stop-plugin <name>"})
-			return nil
-		}
-		if m.plugin == nil {
-			m.addLine(logLine{kind: "sys", group: m.cur, text: "no plugin running"})
-			return nil
-		}
-		if m.plugin.name != target {
-			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("active plugin is /%s, not /%s", m.plugin.name, target)})
-			return nil
-		}
-		m.plugin.abort()
-		m.addLine(logLine{kind: "sys", text: fmt.Sprintf("stopped /%s", m.plugin.name)})
-		return nil
-	}
 	if v == "/config" || strings.HasPrefix(v, "/config ") {
 		args := ""
 		if len(v) > 7 {
@@ -5050,25 +4994,16 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		return promptFireCmd(m.sock, m.cur, sess, arg)
 	}
+	// Anything still starting with "/" reached the end of the verb table.
+	// Reported rather than sent: a mistyped verb going to the agent as a
+	// chat message is a turn spent on a typo.
 	if strings.HasPrefix(v, "/") {
-		space := strings.IndexByte(v, ' ')
 		name := v[1:]
-		args := ""
-		if space > 0 {
+		if space := strings.IndexByte(v, ' '); space > 0 {
 			name = v[1:space]
-			args = v[space+1:]
 		}
-		p, ok := pluginsByName[name]
-		if !ok {
-			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("unknown command: /%s", name)})
-			return nil
-		}
-		if m.plugin != nil {
-			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("already running /%s", m.plugin.name)})
-			return nil
-		}
-		m.plugin = startPlugin(p, args, m.cur, m.sock)
-		m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("started /%s", p.name)})
+		m.addLine(logLine{kind: "err", group: m.cur,
+			text: fmt.Sprintf("unknown command: /%s (ctrl+h for the cheatsheet)", name)})
 		return nil
 	}
 	m.pushHistory(m.cur, v)

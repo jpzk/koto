@@ -467,10 +467,6 @@ func (m Model) renderStatusRight(spin string) string {
 		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Background(cBlack).Bold(true).
 			Render(fmt.Sprintf("  reconnecting %s ", spin)))
 	}
-	if m.plugin != nil {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cMagenta).Background(cBlack).Bold(true).
-			Render(fmt.Sprintf("  ▶ /%s %s ", m.plugin.name, spin)))
-	}
 	// Activity segment — the spelled-out progress line (phase, both clocks,
 	// retry detail), which used to live in the hint bar. The daemon's phase
 	// (activity.go) is authoritative when present — it covers the stretches
