@@ -72,10 +72,11 @@ type JobInfo struct {
 	OutSize int64
 }
 
-// GroupRes is one group's host-side resource snapshot (koto.proto
-// GroupResources), trimmed to what the metrics bar renders: CPU as a
-// fraction of the VM's vcpus, RSS against the mem preset, allocated image
-// bytes against the size preset's disk ceiling.
+// GroupRes is one group's resource snapshot (koto.proto GroupResources),
+// trimmed to what the metrics bar renders: CPU as a fraction of the VM's
+// vcpus, guest memory fullness (RSS against the mem preset as the fallback),
+// guest disk fullness (image allocation against the size ceiling as the
+// fallback).
 type GroupRes struct {
 	Running       bool
 	CPUPct        float64 // percent of ONE core (4-vCPU VM may exceed 100)
@@ -144,4 +145,21 @@ func guestDiskUsage(r GroupRes) (used, total int64, frac float64, ok bool) {
 		return 0, 0, 0, false
 	}
 	return r.GuestDiskUsed, r.GuestDiskTotal, float64(r.GuestDiskUsed) / float64(den), true
+}
+
+// guestMemUsage is guestDiskUsage's memory twin: the guest's own used and
+// total bytes (used = MemTotal - MemAvailable, the kernel's estimate that
+// counts reclaimable cache as free), and whether they are known. This is the
+// honest "how full is this VM" pair: GroupRes.RSSBytes is the VMM's resident
+// set, a high-water mark of every guest page ever touched (no balloon
+// device), which any I/O-heavy turn parks near 100% forever. Unknown (a
+// stopped or unreachable guest — the daemon zeroes both fields) is reported
+// rather than approximated, so callers choose their own fallback instead of
+// silently mixing the two figures.
+func guestMemUsage(r GroupRes) (used, total int64, frac float64, ok bool) {
+	if r.GuestMemTotal <= 0 || r.GuestMemAvail <= 0 || r.GuestMemAvail > r.GuestMemTotal {
+		return 0, 0, 0, false
+	}
+	used = r.GuestMemTotal - r.GuestMemAvail
+	return used, r.GuestMemTotal, float64(used) / float64(r.GuestMemTotal), true
 }

@@ -151,23 +151,23 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        should land somewhere that explains all the others.
 #                        See tui/help_view.go.
 #   ctrl+k            -> fleet (top) view: linux-top for the fleet — one row
-#                        per group with SPACE (image alloc vs size ceiling),
-#                        CPU, RSS, TOK/S, NET, ROOT, MODEL, sorted busiest-
-#                        first, plus a host rollup line (fs headroom / alloc /
-#                        provisioned). Joined client-side from WatchState
-#                        (network/root/model ride GroupInfo) + the Resources
-#                        poll; read-only, esc/ctrl+k closes. **s / c / m / t
-#                        re-sort by SPACE / CPU / RSS / TOK/S** (heaviest
-#                        first, name as tiebreak; underlined header marks the
-#                        active column, hint bar names it, choice survives
-#                        reopen). Each key sorts by the value the CELL SHOWS —
-#                        CPU normalized to the VM's vCPU allotment, RSS to its
-#                        mem preset, SPACE the guest filesystem's fullness
-#                        (allocation only as the stopped-VM fallback) — not
-#                        the raw field, so the order is explained by what's on
-#                        screen. `m` therefore orders the RSS high-water mark,
-#                        not guest pressure (that figure has no column; `koto
-#                        ctl resources` has it). Opened from tree
+#                        per group with SPACE (guest fs fullness), CPU, MEM
+#                        (guest memory fullness), TOK/S, NET, ROOT, MODEL,
+#                        sorted busiest-first, plus a host rollup line (fs
+#                        headroom / alloc / provisioned). Joined client-side
+#                        from WatchState (network/root/model ride GroupInfo) +
+#                        the Resources poll; read-only, esc/ctrl+k closes.
+#                        **s / c / m / t re-sort by SPACE / CPU / MEM /
+#                        TOK/S** (heaviest first, name as tiebreak; underlined
+#                        header marks the active column, hint bar names it,
+#                        choice survives reopen). Each key sorts by the value
+#                        the CELL SHOWS — CPU normalized to the VM's vCPU
+#                        allotment, MEM the guest's own memory fullness (guest
+#                        /proc/meminfo; the gray RSS-vs-preset high-water mark
+#                        only as the can't-ask fallback), SPACE the guest
+#                        filesystem's fullness (allocation only as the
+#                        stopped-VM fallback) — not the raw field, so the
+#                        order is explained by what's on screen. Opened from tree
 #                        mode the tree stays visible alongside (like the log
 #                        view); **tab toggles that pane from either entry**,
 #                        ⇧↑↓ moves the tree cursor, and the selected group's
@@ -318,9 +318,13 @@ verb list.
   lost exec no longer blanks the figure (the 5s guest exec loses often enough
   on a loaded host that healthy groups' memory blinked out every few sweeps).
   Both planes report RSS *and* the guest
-  figure. The TUI metrics bar shows only `rss` (gray — a cost figure, and a
-  chip that parks near 100% must not scream rose), labeled honestly rather
-  than "mem"; the guest figure stays off the bar because a fourth chip
+  figure. The TUI's memory chip (bar and fleet MEM column alike) shows the
+  GUEST figure — `mem`, used/total from the mirrored meminfo, threshold-
+  colored because it is real pressure (verified byte-accurate against
+  in-guest ground truth 2026-08-24) — and only falls back to `rss` (gray — a
+  cost figure, and a chip that parks near 100% must not scream rose) when the
+  guest can't be asked: stopped VM, unreachable agent, or no sweep tick yet.
+  Still one chip, never two — a fourth chip
   overflows the left side's width budget on ordinary terminals. (The
   consequence has since softened: the bar degrades by **fidelity before
   content** — `metricsChips(useBars)` is rendered at both fidelities and the

@@ -36,36 +36,57 @@ func resModel(t *testing.T) Model {
 	return m
 }
 
-// TestMetricsBarShowsActiveGroupResources: cpu/rss/space chips render with
-// percentages normalized to the group's presets. The memory chip is labeled
-// `rss` — the VMM's resident set is a high-water mark of touched pages, not
-// guest usage, and the label must not pretend otherwise.
+// TestMetricsBarShowsActiveGroupResources: cpu/mem/space chips render with
+// percentages normalized to the group's presets. The memory chip is the
+// GUEST's own figure (used/total from the mirrored /proc/meminfo) — the
+// fixture's VMM RSS sits at 95% of the preset while the guest is 20% full,
+// and 20% is what the operator must see (verified against in-guest ground
+// truth 2026-08-24).
 func TestMetricsBarShowsActiveGroupResources(t *testing.T) {
 	m := resModel(t)
 	bar := stripANSI(m.renderMetricsBar())
-	for _, want := range []string{"cpu", "50%", "rss", "95%", "space", "25%"} {
+	for _, want := range []string{"cpu", "50%", "mem", "20%", "space", "25%"} {
 		if !strings.Contains(bar, want) {
 			t.Fatalf("metrics bar missing %q: %q", want, bar)
 		}
 	}
-	if strings.Index(bar, "cpu") > strings.Index(bar, "rss") ||
-		strings.Index(bar, "rss") > strings.Index(bar, "space") {
+	if strings.Index(bar, "cpu") > strings.Index(bar, "mem") ||
+		strings.Index(bar, "mem") > strings.Index(bar, "space") {
 		t.Fatalf("resource chips out of order: %q", bar)
 	}
 }
 
-// TestMetricsBarNoGuestMemChip: the guest-reported memory figure rides the
-// snapshot for ctl-plane consumers but is deliberately not a bar chip — a
-// fourth chip overflows the left side's width budget on ordinary terminals
-// (the "bar not working" regression of 2026-08-04). The overflow is no longer
-// paid for by dropping the whole left side — the row sheds its fill bars first,
-// see TestMetricsBarDropsBarsBeforeChips — but four chips still crowd the row
-// into its degraded form on terminals where three fit comfortably.
-func TestMetricsBarNoGuestMemChip(t *testing.T) {
+// TestMetricsBarMemIsGuestFigure: when the guest figure is known, the memory
+// chip is `mem` (guest pressure) and the RSS high-water mark does not render
+// at all — one memory chip, the truthful one. The fixture makes the two
+// wildly disagree (RSS 95%, guest 20%) so a chip wired to the wrong field
+// can't pass by coincidence.
+func TestMetricsBarMemIsGuestFigure(t *testing.T) {
 	m := resModel(t)
 	bar := stripANSI(m.renderMetricsBar())
+	if !strings.Contains(bar, "mem") {
+		t.Fatalf("guest mem chip missing: %q", bar)
+	}
+	if strings.Contains(bar, "rss") {
+		t.Fatalf("rss chip rendered alongside guest mem: %q", bar)
+	}
+}
+
+// TestMetricsBarMemFallsBackToRSS: a guest that can't be asked (stopped,
+// unreachable, no sweep tick yet — the daemon zeroes guest_mem_*) falls back
+// to the VMM's RSS, labeled `rss` for what it is: a high-water mark, an
+// upper bound, not pressure. No `mem` chip fabricated from nothing.
+func TestMetricsBarMemFallsBackToRSS(t *testing.T) {
+	m := resModel(t)
+	r := m.resources["main"]
+	r.GuestMemTotal, r.GuestMemAvail = 0, 0
+	m.resources["main"] = r
+	bar := stripANSI(m.renderMetricsBar())
+	if !strings.Contains(bar, "rss") || !strings.Contains(bar, "95%") {
+		t.Fatalf("rss fallback missing: %q", bar)
+	}
 	if strings.Contains(bar, "mem") {
-		t.Fatalf("guest mem chip rendered: %q", bar)
+		t.Fatalf("mem chip rendered without a guest figure: %q", bar)
 	}
 }
 
@@ -140,7 +161,7 @@ func TestMetricsBarDropsBarsBeforeChips(t *testing.T) {
 	if strings.Contains(bar, "█") {
 		t.Errorf("bars survived at a width that cannot hold them: %q", bar)
 	}
-	for _, want := range []string{"cpu", "50%", "rss", "95%", "space", "25%", "ctx", "cache", "5h", "42%", "7d", "13%"} {
+	for _, want := range []string{"cpu", "50%", "mem", "20%", "space", "25%", "ctx", "cache", "5h", "42%", "7d", "13%"} {
 		if !strings.Contains(bar, want) {
 			t.Errorf("chip %q dropped at a width its number fits: %q", want, bar)
 		}
@@ -253,7 +274,7 @@ func chipBars(bar string) map[string]struct {
 		pct   int
 	}{}
 	plain := stripANSI(bar)
-	for _, label := range []string{"cpu", "rss", "space", "ctx", "cache", "5h", "7d"} {
+	for _, label := range []string{"cpu", "mem", "rss", "space", "ctx", "cache", "5h", "7d"} {
 		// Locate the chip in the PLAIN text to read its percentage, then the
 		// same span in the styled text to read its cells.
 		li := strings.Index(plain, " "+label+" ")
@@ -323,9 +344,9 @@ func TestMetricsBarEveryChipFillMatchesItsPercentage(t *testing.T) {
 	for _, frac := range []float64{0.25, 0.5, 0.75} {
 		m := resModel(t)
 		r := m.resources["main"]
-		r.CPUPct = frac * 100 * float64(r.Vcpus)                 // per-core pct
-		r.RSSBytes = int64(frac * float64(r.MemMiB) * (1 << 20)) // of the preset
-		r.AllocBytes = int64(frac * float64(r.DeclaredBytes))    // of the ceiling
+		r.CPUPct = frac * 100 * float64(r.Vcpus)                       // per-core pct
+		r.GuestMemAvail = int64((1 - frac) * float64(r.GuestMemTotal)) // guest fullness
+		r.AllocBytes = int64(frac * float64(r.DeclaredBytes))          // of the ceiling
 		m.resources["main"] = r
 
 		m.ctxWindow = 200000
@@ -343,7 +364,7 @@ func TestMetricsBarEveryChipFillMatchesItsPercentage(t *testing.T) {
 		chips := chipBars(m.renderMetricsBar())
 		// Assert the audit actually reached every chip — a silently-empty
 		// sweep would "pass" while checking nothing.
-		for _, want := range []string{"cpu", "rss", "space", "ctx", "cache", "5h", "7d"} {
+		for _, want := range []string{"cpu", "mem", "space", "ctx", "cache", "5h", "7d"} {
 			if _, ok := chips[want]; !ok {
 				t.Fatalf("frac %v: chip %q not rendered; audit covered %d chips", frac, want, len(chips))
 			}

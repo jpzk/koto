@@ -68,7 +68,7 @@ const (
 	// handleLogKey (read-only — esc/ctrl+L close, arrows scroll).
 	focusLog
 	// focusTop is the fleet (top) view, opened with ctrl+K: one row per
-	// group with its host-side cost (space/cpu/rss), throughput, and
+	// group with its utilization (space/cpu/mem), throughput, and
 	// config profiles (network/root/model) — linux-top for the fleet.
 	// Read-only like focusLog; handled by handleTopKey (top_view.go).
 	focusTop
@@ -596,7 +596,7 @@ type Model struct {
 	// the rows are joined from state the TUI already holds fresh: m.groups
 	// (WatchState push: model, tok/s, network, root) and m.resources +
 	// m.hostRes (Resources poll riding the 5s metrics tick: space, cpu,
-	// rss). The viewport exists only for scrolling a tall fleet;
+	// mem). The viewport exists only for scrolling a tall fleet;
 	// refreshTopViewport rebuilds its content on every resources poll and
 	// state frame while the view is open. preTopFocus mirrors preLogFocus.
 	// topSort is which column the table is ordered by (c/m/t in the view);

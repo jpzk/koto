@@ -2,7 +2,7 @@ package main
 
 // The fleet (top) view: linux-top for the group fleet, opened with ctrl+K
 // (moved off ctrl+H, which now opens the cheatsheet modal — help_view.go).
-// One row per group — host-side cost (SPACE / CPU / RSS), throughput
+// One row per group — utilization (SPACE / CPU / MEM), throughput
 // (TOK/S), and the config profiles that shape its blast radius (NET / ROOT /
 // MODEL) — plus a host summary line, so the operator sees the whole fleet
 // without cycling the tree. Read-only, modeled on log_view.go; unlike it
@@ -21,7 +21,7 @@ import (
 )
 
 // topRow is one group's joined snapshot, assembled by topRows from m.groups
-// (model/tok-s/network/root) and m.resources (space/cpu/rss).
+// (model/tok-s/network/root) and m.resources (space/cpu/mem).
 type topRow struct {
 	group string
 	info  GroupInfo
@@ -46,7 +46,7 @@ const (
 func (k topSortKey) String() string {
 	switch k {
 	case topSortMem:
-		return "rss"
+		return "mem"
 	case topSortTok:
 		return "tok/s"
 	case topSortSpace:
@@ -60,7 +60,7 @@ func (k topSortKey) String() string {
 func (k topSortKey) col() int {
 	switch k {
 	case topSortMem:
-		return 3 // RSS
+		return 3 // MEM
 	case topSortTok:
 		return 4 // TOK/S
 	case topSortSpace:
@@ -89,20 +89,41 @@ func topSpace(r topRow) (used, total int64, frac float64, ok bool) {
 	return 0, 0, 0, false
 }
 
+// topMem is the MEM cell's numbers: the guest's own used/total/fullness
+// (guest /proc/meminfo mirrored by the daemon — the truthful pressure
+// figure), falling back to the VMM's RSS against the mem preset when the
+// guest can't be asked (stopped, unreachable, or no sweep tick yet). hw=true
+// marks that fallback so the cell can color it as what it is — a high-water
+// mark of guest-touched pages, an upper bound, not pressure. Shared by the
+// cell and the sort so the two can't drift apart.
+func topMem(r topRow) (used, total int64, frac float64, hw, ok bool) {
+	if !r.hasRes {
+		return 0, 0, 0, false, false
+	}
+	if u, t, f, ok := guestMemUsage(r.res); ok {
+		return u, t, f, false, true
+	}
+	if r.res.Running && r.res.MemMiB > 0 {
+		total = int64(r.res.MemMiB) * (1 << 20)
+		return r.res.RSSBytes, total, float64(r.res.RSSBytes) / float64(total), true, true
+	}
+	return 0, 0, 0, false, false
+}
+
 // topSortVal is the row's value under a sort key. It deliberately returns
 // what the CELL DISPLAYS rather than the raw field: CPU is normalized to the
-// VM's whole vCPU allotment and RSS to its memory preset, exactly as
+// VM's whole vCPU allotment and MEM is the guest's own fullness, exactly as
 // renderTopRow renders them. Sorting by the raw per-core CPU or by absolute
 // bytes would order the rows by a number that isn't on screen — a 4-vCPU VM
 // at 40% of its entitlement would outrank a 2-vCPU one pinned at 90%.
 // A row with no resources reading (or a stopped VM, whose cells are dashes)
 // sorts as 0, i.e. to the bottom.
 //
-// Note the memory key orders the RSS column, which is a high-water mark of
-// guest-touched pages, not guest memory pressure — the truthful figure
-// (guest_mem_*) isn't a column here, and sorting by an invisible number is
-// worse than sorting by a visible imperfect one. Read `koto ctl resources`
-// for real pressure. Space, by contrast, IS the truthful figure: the cell
+// The memory key orders the MEM column, which — like SPACE — shows the
+// guest's own figure (guest_mem_* fullness) when the guest can answer, and
+// only falls back to the RSS high-water mark for a guest that can't be
+// asked; topMem is the shared source, so the sort ranks exactly what the
+// cell shows. Space works the same way: the cell
 // shows the guest filesystem's fullness (allocation only as a stopped-VM
 // fallback), so sorting by it ranks groups by how close they are to going
 // read-only — the fraction, not the byte count, since a full 8 GiB workspace
@@ -116,10 +137,11 @@ func topSortVal(r topRow, k topSortKey) float64 {
 		}
 		return f
 	case topSortMem:
-		if r.hasRes && r.res.Running && r.res.MemMiB > 0 {
-			return float64(r.res.RSSBytes) / (float64(r.res.MemMiB) * (1 << 20))
+		_, _, f, _, ok := topMem(r)
+		if !ok {
+			return 0
 		}
-		return 0
+		return f
 	case topSortTok:
 		return r.info.TokPerSec
 	default:
@@ -195,7 +217,7 @@ var topColumns = []struct {
 	{"GROUP", 14},
 	{"SPACE", 15}, // "1.2G/8.0G 15%"
 	{"CPU", 5},    // "042%"
-	{"RSS", 10},   // "842M 82%"
+	{"MEM", 10},   // "842M 82%"
 	{"TOK/S", 6},
 	{"NET", 5},  // none|wan|lan|full
 	{"ROOT", 5}, // yes|no
@@ -256,12 +278,21 @@ func renderTopRow(r topRow, sel bool) string {
 		cells = append(cells, dash(topColumns[2].w))
 	}
 
-	// RSS: fixed gray like the metrics bar chip — a HIGH-WATER MARK of
-	// guest-touched pages (no balloon device), not memory pressure; a
-	// permanently rose column would train the eye to ignore it.
-	if r.hasRes && r.res.MemMiB > 0 && r.res.Running {
-		frac := float64(r.res.RSSBytes) / (float64(r.res.MemMiB) * (1 << 20))
-		cells = append(cells, gray.Render(topPad(fmt.Sprintf("%s %d%%", fmtGB(r.res.RSSBytes), int(frac*100)), topColumns[3].w)))
+	// MEM: the guest's own memory pressure (guest /proc/meminfo, used/total
+	// with reclaimable cache counted as free), threshold-colored like SPACE —
+	// this figure genuinely means "this VM is running out", so rose at 80% is
+	// signal. Only the fallback for a guest that can't be asked is the VMM's
+	// RSS, and that stays fixed gray: it is a HIGH-WATER MARK of guest-touched
+	// pages (no balloon device), not pressure, and a permanently rose column
+	// would train the eye to ignore it.
+	if used, _, frac, hw, ok := topMem(r); ok {
+		txt := fmt.Sprintf("%s %d%%", fmtGB(used), int(frac*100))
+		if hw {
+			cells = append(cells, gray.Render(topPad(txt, topColumns[3].w)))
+		} else {
+			cells = append(cells, alertify(lipgloss.NewStyle(), pctColor(frac)).
+				Foreground(pctColor(frac)).Render(topPad(txt, topColumns[3].w)))
+		}
 	} else {
 		cells = append(cells, dash(topColumns[3].w))
 	}

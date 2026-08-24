@@ -217,7 +217,7 @@ func (m Model) view() string {
 	}
 	if m.focus == focusTop {
 		// Fleet (top) view: same full-frame replacement as the log view,
-		// one row per group (space/cpu/rss/tok/s/network/root/model).
+		// one row per group (space/cpu/mem/tok/s/network/root/model).
 		return m.withPicker(m.renderTopView())
 	}
 	if m.shellViewActive() {
@@ -484,12 +484,12 @@ func (m Model) renderMetricsBar() string {
 	// numbers alone, then the account-wide right side by itself. The bars go
 	// FIRST because each one is redundant with the number printed next to it —
 	// it only makes the value glanceable — whereas the step after it loses
-	// cpu/rss/space outright.
+	// cpu/mem/space outright.
 	//
 	// Measured, not guessed. This used to be a static `m.width >= 110`, which
 	// got both ends wrong. A full row of chips needs ~150 cols with bars, so
 	// every width from 110 to 150 drew bars it had no room for and then paid
-	// for them by dropping the whole left side — the operator lost cpu/rss/
+	// for them by dropping the whole left side — the operator lost cpu/mem/
 	// space to buy fill bars for the account chips. Below 110 the reverse: a
 	// terminal carrying only two chips went bare with room to spare.
 	// Rendering twice costs nothing at one row per frame.
@@ -560,28 +560,27 @@ func (m Model) metricsChips(useBars bool) (left, right string) {
 		parts = append(parts, renderMetric("7d", u7d))
 	}
 
-	// Bottom-left: the active group's host-side cost (Resources RPC). CPU is
-	// normalized to the VM's whole vcpu allotment (cpu_pct is per-core),
-	// space is the workspace image's real allocation against its size
-	// ceiling. `rss` is the VMM process's resident set against the mem
-	// preset — labeled and colored for what it is, a HIGH-WATER MARK of
-	// every guest page ever touched (no balloon device, so any I/O-heavy
-	// turn parks it near 100% forever), not guest memory pressure. Hence
-	// fixed gray, not pctColor: a permanently rose chip would train the eye
-	// to ignore it. The truthful guest figure (guest /proc/meminfo) rides
-	// the same snapshot as guest_mem_* for ctl-plane consumers; it is
-	// deliberately NOT a fourth chip — four chips overflow the left side's
-	// width budget on ordinary terminals, which now costs the row its fill
-	// bars (the ladder in renderMetricsBar) rather than the whole left side,
-	// but still degrades a row three chips fit comfortably. A stopped VM
-	// legitimately reads cpu/rss 0% — space stays meaningful (images never
-	// shrink).
+	// Bottom-left: the active group's cost (Resources RPC). CPU is
+	// normalized to the VM's whole vcpu allotment (cpu_pct is per-core).
+	// `mem` is the GUEST's own memory pressure (guest /proc/meminfo mirrored
+	// by the daemon: used/total, cache counted as free) — real pressure, so
+	// it earns pctColor's rose tier, unlike the VMM RSS it replaced, which
+	// is a high-water mark of every guest page ever touched (no balloon
+	// device) and parks near 100% after any I/O-heavy turn. Verified against
+	// in-guest ground truth 2026-08-24: guest_mem matched /proc/meminfo
+	// within 1 MB while RSS read 967 MB on a VM using ~160 MB. The guest
+	// can't always be asked (stopped VM, agent unreachable, no sweep tick
+	// yet), so the chip falls back to `rss` — labeled and colored for what
+	// it is: gray, an upper bound, never an alert. A stopped VM legitimately
+	// reads cpu 0% / rss 0% — space stays meaningful (images never shrink).
 	if r, ok := m.resources[m.cur]; ok {
 		var lparts []string
 		if r.Vcpus > 0 {
 			lparts = append(lparts, renderMetric("cpu", r.CPUPct/100/float64(r.Vcpus)))
 		}
-		if r.MemMiB > 0 {
+		if _, _, frac, ok := guestMemUsage(r); ok {
+			lparts = append(lparts, renderMetric("mem", frac))
+		} else if r.MemMiB > 0 {
 			lparts = append(lparts, renderMetricColored("rss", float64(r.RSSBytes)/(float64(r.MemMiB)*(1<<20)), cGray))
 		}
 		// `space` is how full the guest's own filesystem is — what decides

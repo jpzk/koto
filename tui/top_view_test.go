@@ -1,7 +1,7 @@
 package main
 
 // top_view_test.go — the fleet (top) view: ctrl+k toggles it, rows join
-// m.groups (model/tok-s/network/root) with m.resources (space/cpu/rss)
+// m.groups (model/tok-s/network/root) with m.resources (space/cpu/mem)
 // sorted busiest-first, and the table re-renders as either source updates.
 // See top_view.go.
 
@@ -21,9 +21,13 @@ func topModel(t *testing.T) Model {
 		"main": {Running: true, Model: "claude-sonnet-5", Network: "none", TokPerSec: 42},
 		"web":  {Running: true, Model: "claude-opus-5", Network: "full", Root: true},
 	}
+	// main reports a guest memory figure (200 of 1000 MiB used → 20%); web
+	// does not, so its MEM cell falls back to the RSS high-water mark
+	// (2 GiB of the 4096 MiB preset → 50%) — one fixture, both paths.
 	m.resources = map[string]GroupRes{
 		"main": {Running: true, CPUPct: 10, Vcpus: 2, MemMiB: 1024,
-			RSSBytes: 512 << 20, AllocBytes: 1 << 30, DeclaredBytes: 8 << 30},
+			RSSBytes: 512 << 20, GuestMemTotal: 1000 << 20, GuestMemAvail: 800 << 20,
+			AllocBytes: 1 << 30, DeclaredBytes: 8 << 30},
 		"web": {Running: true, CPUPct: 150, Vcpus: 4, MemMiB: 4096,
 			RSSBytes: 2 << 30, AllocBytes: 12 << 30, DeclaredBytes: 16 << 30},
 	}
@@ -76,17 +80,18 @@ func TestTopRowsSortByCPU(t *testing.T) {
 }
 
 // TestTopViewRendersColumns: the rendered frame carries every column the
-// view promises — space/cpu/rss figures, tok/s, and the network/root/model
+// view promises — space/cpu/mem figures, tok/s, and the network/root/model
 // profiles — plus the host summary line.
 func TestTopViewRendersColumns(t *testing.T) {
 	m := topModel(t)
 	m = press(t, m, tea.KeyCtrlK)
 	out := stripANSI(m.View())
 	for _, want := range []string{
-		"GROUP", "SPACE", "CPU", "RSS", "TOK/S", "NET", "ROOT", "MODEL", // header
+		"GROUP", "SPACE", "CPU", "MEM", "TOK/S", "NET", "ROOT", "MODEL", // header
 		"1.0G/8.0G 12%", // main's space
 		"12G/16G 75%",   // web's space
-		"512M 50%",      // main's rss vs 1024 MiB
+		"200M 20%",      // main's mem: the guest figure, NOT its 512M RSS
+		"2.0G 50%",      // web's mem: RSS fallback (no guest figure)
 		"42",            // main's tok/s
 		"full",          // web's network profile
 		"none",          // main's network profile
@@ -151,14 +156,15 @@ func TestTopViewTreeAlongside(t *testing.T) {
 	}
 }
 
-// TestTopSortKeys: c/m/t re-sort the table by the CPU, RSS and TOK/S columns,
+// TestTopSortKeys: c/m/t re-sort the table by the CPU, MEM and TOK/S columns,
 // each heaviest-first, and the hint bar names the active one. The fixture is
 // rigged so the three keys produce three different orders.
 func TestTopSortKeys(t *testing.T) {
 	m := topModel(t)
-	// main: low cpu, high rss%, all the tokens. web: high cpu, low rss%, idle.
+	// main: low cpu, high guest-mem%, all the tokens. web: high cpu, low
+	// mem% (RSS fallback), idle.
 	main := m.resources["main"]
-	main.RSSBytes = 900 << 20 // 88% of 1024 MiB
+	main.GuestMemAvail = 120 << 20 // 880 of 1000 MiB used → 88%
 	m.resources["main"] = main
 	m = press(t, m, tea.KeyCtrlK)
 
@@ -193,7 +199,7 @@ func TestTopSortKeys(t *testing.T) {
 
 	check("cpu", "web", "main") // default: 37% vs 5% of entitlement
 	key("m")
-	check("rss", "main", "web") // 88% vs 50% of the preset
+	check("mem", "main", "web") // 88% guest vs 50% RSS fallback
 	key("t")
 	check("tok/s", "main", "web") // 42 vs 0
 	key("s")

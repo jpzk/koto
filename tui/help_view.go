@@ -48,7 +48,7 @@ func helpSections() []helpSection {
 			{"ctrl+t", "jump to any group/session (fuzzy)"},
 			{"ctrl+r", "recall prompt history for the current group"},
 			{"ctrl+h", "this cheatsheet"},
-			{"ctrl+k", "fleet view - space/cpu/rss/tok-s per group"},
+			{"ctrl+k", "fleet view - space/cpu/mem/tok-s per group"},
 			{"ctrl+l", "daemon log view"},
 			{"ctrl+]", "shared terminal (tmux) for the active session"},
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
@@ -79,7 +79,7 @@ func helpSections() []helpSection {
 		}},
 		{"FLEET VIEW (ctrl+k)", []helpEntry{
 			{"up/down", "move the selection (tree cursor follows)"},
-			{"s / c / m / t", "sort by space / cpu / rss / tok-s"},
+			{"s / c / m / t", "sort by space / cpu / mem / tok-s"},
 			{"tab", "toggle the tree pane alongside"},
 			{"shift+up/down", "move the tree cursor row-by-row (also in the log view)"},
 			{"pgup/pgdn", "scroll the table"},
