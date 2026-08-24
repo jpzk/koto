@@ -217,7 +217,7 @@ var topColumns = []struct {
 	{"GROUP", 14},
 	{"SPACE", 15}, // "1.2G/8.0G 15%"
 	{"CPU", 5},    // "042%"
-	{"MEM", 10},   // "842M 82%"
+	{"MEM", 15},   // "842M/1.0G 82%"
 	{"TOK/S", 6},
 	{"NET", 5},  // none|wan|lan|full
 	{"ROOT", 5}, // yes|no
@@ -281,12 +281,15 @@ func renderTopRow(r topRow, sel bool) string {
 	// MEM: the guest's own memory pressure (guest /proc/meminfo, used/total
 	// with reclaimable cache counted as free), threshold-colored like SPACE —
 	// this figure genuinely means "this VM is running out", so rose at 80% is
-	// signal. Only the fallback for a guest that can't be asked is the VMM's
-	// RSS, and that stays fixed gray: it is a HIGH-WATER MARK of guest-touched
-	// pages (no balloon device), not pressure, and a permanently rose column
-	// would train the eye to ignore it.
-	if used, _, frac, hw, ok := topMem(r); ok {
-		txt := fmt.Sprintf("%s %d%%", fmtGB(used), int(frac*100))
+	// signal. used/total like the SPACE cell, so what's still available reads
+	// off the row directly (for the guest figure avail is exactly the
+	// difference: used is defined as MemTotal - MemAvailable). Only the
+	// fallback for a guest that can't be asked is the VMM's RSS against the
+	// preset, and that stays fixed gray: it is a HIGH-WATER MARK of
+	// guest-touched pages (no balloon device), not pressure, and a
+	// permanently rose column would train the eye to ignore it.
+	if used, total, frac, hw, ok := topMem(r); ok {
+		txt := fmt.Sprintf("%s/%s %d%%", fmtGB(used), fmtGB(total), int(frac*100))
 		if hw {
 			cells = append(cells, gray.Render(topPad(txt, topColumns[3].w)))
 		} else {
