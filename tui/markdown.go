@@ -158,7 +158,12 @@ func renderMarkdown(src string, width int) string {
 		}
 		// Glamour pads both sides with blank lines. Strip both — caller
 		// controls vertical spacing between blocks via separator rows.
-		sb.WriteString(strings.Trim(out, "\n"))
+		for i, line := range strings.Split(strings.Trim(out, "\n"), "\n") {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(trimStyledTail(line))
+		}
 		sb.WriteByte('\n')
 	}
 	for _, m := range idx {
@@ -190,4 +195,85 @@ func visualRows(s string, cols int) int {
 		}
 	}
 	return rows
+}
+
+// trimStyledTail drops the padding glamour appends to every line: spaces
+// carried to the wrap width, each one wrapped in its own foreground SGR
+// pair. Measured on a 40-turn transcript at 150 columns, that padding was
+// 94% of the rendered bytes (414KB of content holding 26KB of text) — bytes
+// that every downstream step then paid for: the join into the viewport, the
+// viewport's own split, themeFrame's re-assertion scan, the mdCache and
+// vpCache holding a copy per group. A foreground on a space paints nothing,
+// and the frame pads and clears line tails itself (joinCols, themeFrame,
+// bubbletea's EraseLineRight), so the padding is invisible by construction.
+//
+// A tail that sets a BACKGROUND or reverse video is kept whole: those spaces
+// are the visible ground of an inline code span or a chroma token, and
+// cutting them would shorten the box. The decision is made on the SGR
+// parameters, not on which style produced them, so it holds for any theme.
+func trimStyledTail(line string) string {
+	// Walk back over spaces and SGR sequences. Every SGR met on the way
+	// must be foreground-only: the state a padding space is painted in is
+	// whatever the nearest SGR before it set, so one background sequence in
+	// the tail means the spaces after it are a visible box — abort, keep the
+	// line whole. The walk stops at the first byte that is neither.
+	end := len(line)
+	sawSGR := false
+	for end > 0 {
+		if line[end-1] == ' ' {
+			end--
+			continue
+		}
+		if line[end-1] != 'm' {
+			break
+		}
+		start := strings.LastIndex(line[:end], "\x1b[")
+		if start < 0 {
+			break
+		}
+		if !fgOnlySGR(line[start+2 : end-1]) {
+			return line
+		}
+		sawSGR = true
+		end = start
+	}
+	out := line[:end]
+	// The walk may have taken the reset that closed the last text span.
+	// Close it again, so the line leaves the terminal in the state it found
+	// it — a foreground left open would bleed into whatever pads the line.
+	if sawSGR && strings.Contains(out, "\x1b[") && !strings.HasSuffix(out, "\x1b[0m") {
+		out += "\x1b[0m"
+	}
+	return out
+}
+
+// fgOnlySGR reports whether an SGR parameter string sets only foreground
+// color, reset, or the attributes that leave a blank cell blank (bold,
+// faint, italic, and their offs). Anything else — background, reverse,
+// underline, unknown — is treated as visible.
+func fgOnlySGR(params string) bool {
+	toks := strings.Split(params, ";")
+	for i := 0; i < len(toks); i++ {
+		switch toks[i] {
+		case "", "0", "1", "2", "3", "22", "23", "39":
+		case "38":
+			if i+1 >= len(toks) {
+				return false
+			}
+			switch toks[i+1] {
+			case "5":
+				i += 2
+			case "2":
+				i += 4
+			default:
+				return false
+			}
+			if i >= len(toks) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
