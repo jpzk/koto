@@ -3403,7 +3403,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		// Drop any in-flight stream/thinking state so the spinner stops
 		// immediately rather than waiting for the daemon's next emit.
 		m.dropTurnState(msg.group)
-		m.addLine(logLine{kind: "sys", group: msg.group, text: "stopped agent"})
+		m.addLine(logLine{kind: "sys", group: msg.group, text: "cancelled prompt"})
 		if msg.group == m.cur {
 			m.refreshLog()
 		}
