@@ -1547,9 +1547,10 @@ func (m Model) renderInput() string {
 
 	var body string
 	if m.input.Value() == "" {
-		// Placeholder path: bubbles truncates the cheatsheet to input.Width
-		// itself. Deliberately not wrapped — an empty box would otherwise
-		// open as a half-screen wall of command names.
+		// Placeholder path: one line, never wrapped. It used to carry the
+		// whole slash-command list, which bubbles truncated to input.Width —
+		// so what an empty box actually showed was an arbitrary prefix of it.
+		// It now points at ctrl+h instead (see newModel).
 		body = clip.Render(prefix + " " + m.input.View())
 	} else {
 		rows := m.renderInputLines(m.inputTextCols())

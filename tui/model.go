@@ -827,7 +827,13 @@ const mdCacheMax = 1024
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
-	ti.Placeholder = "ask anything   (/new [provider] [model]  /sw  /ls  /session  /prompt  /goals  /sched  /restart  /stop [g]  /destroy  /clear  /config  /runscript  /shell  /themes  /reload  /interrupt  /exit  /burn <goal>)"
+	// One pointer, not the whole verb list. The list was ~180 columns of
+	// command names that bubbles then truncated to the box width, so on any
+	// ordinary terminal it was an arbitrary prefix of the alphabet-soup — and
+	// it went stale every time a verb was added. ctrl+h is the cheatsheet
+	// that has room to explain all of them (help_view.go), which is exactly
+	// what a discoverability hint should point at.
+	ti.Placeholder = "ask anything   (ctrl+h for the cheatsheet)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80

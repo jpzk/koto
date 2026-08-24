@@ -37,12 +37,17 @@ type helpSection struct {
 	entries []helpEntry
 }
 
-// helpSections is the cheatsheet's content. Static — the keymap doesn't
-// change at runtime — and deliberately ASCII-only: monoFrame's fold is
-// width-preserving per glyph, but spelled-out key names read better than any
-// stand-in on both kinds of terminal.
+// helpSections is the cheatsheet's content. Fixed at startup — the keymap
+// doesn't change at runtime and plugins register at init — and deliberately
+// ASCII-only: monoFrame's fold is width-preserving per glyph, but spelled-out
+// key names read better than any stand-in on both kinds of terminal.
+//
+// It has to be COMPLETE, because it is the only door the empty message bar
+// points at: the placeholder used to list every slash command and now says
+// "ctrl+h for the cheatsheet" instead (see newModel). That is why the plugin
+// verbs are appended below rather than left to the ctrl+p palette alone.
 func helpSections() []helpSection {
-	return []helpSection{
+	sections := []helpSection{
 		{"GLOBAL KEYS", []helpEntry{
 			{"ctrl+p", "command palette - every action in one fuzzy list"},
 			{"ctrl+t", "jump to any group/session (fuzzy)"},
@@ -107,6 +112,17 @@ func helpSections() []helpSection {
 			{"/exit", "exit the TUI (alias /quit; daemon and groups keep running)"},
 		}},
 	}
+	// Plugins are the one command family with no fixed membership, so they
+	// are read from the registry rather than transcribed — same reason
+	// paletteItems does it.
+	if len(plugins) > 0 {
+		var entries []helpEntry
+		for _, p := range plugins {
+			entries = append(entries, helpEntry{"/" + p.name, p.desc})
+		}
+		sections = append(sections, helpSection{"PLUGINS", entries})
+	}
+	return sections
 }
 
 // helpContent renders the sections into viewport lines at a given width.

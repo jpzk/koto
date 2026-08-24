@@ -124,3 +124,45 @@ func TestHelpOverFleetView(t *testing.T) {
 		t.Errorf("after close: helpOpen=%v focus=%v, want closed + focusTop", m.helpOpen, m.focus)
 	}
 }
+
+// The empty message bar points at ctrl+h instead of listing every slash
+// command. The list was ~180 columns that bubbles truncated to the box width,
+// so what an 80-column terminal actually showed was an arbitrary prefix of it.
+func TestPlaceholderPointsAtCheatsheet(t *testing.T) {
+	m := focusModel(t)
+	m.width, m.height = 80, 24
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "ctrl+h for the cheatsheet") {
+		t.Error("the empty message bar does not point at the cheatsheet")
+	}
+	if strings.Contains(out, "/runscript") || strings.Contains(out, "/destroy") {
+		t.Error("the placeholder is still listing slash commands")
+	}
+	// And it fits: the hint is worthless truncated, which is what it replaced.
+	if !strings.Contains(out, "(ctrl+h for the cheatsheet)") {
+		t.Error("the hint was truncated at 80 columns")
+	}
+}
+
+// Since the placeholder now names ctrl+h as THE door, the cheatsheet has to
+// cover everything a user can type — including the plugin verbs, which have no
+// fixed membership and so are read from the registry rather than transcribed.
+func TestCheatsheetCoversPlugins(t *testing.T) {
+	body := helpContent(200)
+	if !strings.Contains(body, "PLUGINS") {
+		t.Fatal("no plugins section in the cheatsheet")
+	}
+	for _, p := range plugins {
+		if !strings.Contains(body, "/"+p.name) {
+			t.Errorf("plugin /%s missing from the cheatsheet", p.name)
+		}
+	}
+	// The verbs the placeholder used to advertise must all still be findable.
+	for _, v := range []string{"/new", "/sw", "/ls", "/session", "/prompt", "/goals",
+		"/sched", "/restart", "/stop", "/destroy", "/clear", "/config",
+		"/runscript", "/shell", "/themes", "/reload", "/interrupt", "/exit"} {
+		if !strings.Contains(body, v) {
+			t.Errorf("%s was in the old placeholder but is not in the cheatsheet", v)
+		}
+	}
+}
