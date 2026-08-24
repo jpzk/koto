@@ -90,12 +90,11 @@ var activeTheme string
 var themeLight bool
 
 // themePageBg is the active theme's `background` role as "#rrggbb", "" for the
-// built-in palette. It is NOT one of the palette vars: nothing in the TUI
-// paints the page: the transcript, the tree and the empty rows have always been
-// whatever the terminal's own background is, and the styled call sites only
-// ever set a background for bar furniture (cBlack, which takes b_low). A theme
-// therefore has to paint the ground from OUTSIDE the render path, which is
-// what themeFrame does.
+// built-in palette. It is NOT one of the palette vars: NO styled call site in
+// the TUI paints the page — the transcript, the tree, the status and metrics
+// rows and the empty rows are all whatever lies behind them. A theme therefore
+// has to paint the ground from OUTSIDE the render path, which is what
+// themeFrame does, and that one ground is the only one there is.
 var themePageBg string
 
 // --- the color-var defaults --------------------------------------------------
@@ -169,16 +168,20 @@ const (
 // WHY THE MAPPING ISN'T THE OBVIOUS ONE. Two of the nine roles do a different
 // job here than their names suggest, and one of them matters:
 //
-//   - cBlack takes b_low, NOT background. Every `.Background(cBlack)` site in
-//     the TUI is bar furniture — the metrics chips, the activity segment, the
-//     meter troughs — so b_low is exactly right for it: the subtlest panel
-//     tier, one step off the ground. `background` is painted separately, by
-//     themeFrame, because no styled call site paints the page at all. Putting
-//     the ground in cBlack instead would leave the two the same color and
-//     dissolve the bottom bars into the transcript.
-//   - b_med has no counterpart and is unused. The TUI has three grounds in its
-//     vocabulary — the page, the bar furniture, and the accent/chip pair — and
-//     b_med sits between two of them without a widget of its own.
+//   - cBlack is no longer a ground at all, and takes b_low only so the var has
+//     a defined value. The bottom two rows used to paint it as a second panel
+//     tier, but they painted it on their SEGMENTS ONLY — the focus dot, the
+//     gap between the two sides and the status bar's middle set no background,
+//     so themeFrame filled those with the page ground. The row came out as
+//     colored islands floating in the page: measured under teletext
+//     (background #000000, b_low #0000ff), the metrics row ran 3 cells
+//     unpainted, 63 blue, 34 unpainted. One ground for the whole frame is the
+//     fix — the bars now sit on the page like the transcript does. cBlack
+//     survives as fgOn's built-in-palette fallback (view.go's notification
+//     banner), where it means literal black and never reaches a theme.
+//   - b_low and b_med therefore have no counterpart and are unused. The TUI
+//     has two grounds in its vocabulary — the page, and the accent/chip pair —
+//     and neither of those tiers has a widget of its own.
 //
 // WHY THE CONTRAST PASS. The roles are a palette author's vocabulary, not a
 // contract about legibility against `background` — several upstream themes put
@@ -189,7 +192,7 @@ const (
 // so a theme that was already legible passes through byte-for-byte.
 func applyTheme(p *themePalette) {
 	ground := p.Background
-	bar := p.BLow // what cBlack becomes — the second ground text sits on
+	bar := p.BLow // cBlack's value; not painted anywhere (see the note above)
 
 	// Text is drawn on BOTH grounds — the transcript on `background`, the
 	// bottom bars on b_low — so the repair has to clear the floor against

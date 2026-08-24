@@ -21,7 +21,7 @@ import (
 // The names describe the DEFAULT hue, but the role is what a theme preserves.
 // Structural, and replaced wholesale by a theme's palette roles:
 //
-//	cBlack   the ground the bars/banners/chips paint on   → background
+//	cBlack   fgOn's fallback only, never a ground          → b_low
 //	cBrWhite brightest text                               → f_high
 //	cWhite   normal text                                  → f_med
 //	cGray    dim text (57 sites — the workhorse)          → f_low
@@ -49,8 +49,9 @@ var (
 	cRose    = lipgloss.Color("212") // over-threshold alert in the metrics bar (256-color #ff87d7)
 	// cFgInv is the text drawn on top of cAmber. It is black in the built-in
 	// palette — same value cBlack has — but the two roles come apart under a
-	// theme: cBlack becomes the page ground (which may be light) while cFgInv
-	// becomes f_inv, the color the palette's author chose to sit on the accent.
+	// theme: cBlack becomes b_low (a panel tier nothing paints any more, kept
+	// as fgOn's fallback) while cFgInv becomes f_inv, the color the palette's
+	// author chose to sit on the accent.
 	cFgInv = lipgloss.Color("0")
 )
 
@@ -110,12 +111,12 @@ func renderBar(frac float64, width int, fg lipgloss.Color) string {
 	// No alertify() here: the caller underlines the chip's label and percentage
 	// for the alert tier, and running that rule under the fill too would just
 	// blur the one thing this glyph split exists to keep readable.
-	on := lipgloss.NewStyle().Foreground(fillFg).Background(cBlack).
+	on := lipgloss.NewStyle().Foreground(fillFg).
 		Render(strings.Repeat(onGlyph, filled))
-	off := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
+	off := lipgloss.NewStyle().Foreground(cGray).
 		Render(strings.Repeat(offGlyph, width-filled))
-	bracketL := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).Render("[")
-	bracketR := lipgloss.NewStyle().Foreground(cGray).Background(cBlack).Render("]")
+	bracketL := lipgloss.NewStyle().Foreground(cGray).Render("[")
+	bracketR := lipgloss.NewStyle().Foreground(cGray).Render("]")
 	return bracketL + on + off + bracketR
 }
 
@@ -140,7 +141,7 @@ func renderReset(resetTs int64) string {
 		fg = cRose
 	}
 	t := time.Unix(resetTs, 0)
-	return alertify(lipgloss.NewStyle(), fg).Foreground(fg).Background(cBlack).
+	return alertify(lipgloss.NewStyle(), fg).Foreground(fg).
 		Render(fmt.Sprintf("  ↻ %02d:%02d %s ", t.Hour(), t.Minute(), rem))
 }
 
@@ -452,7 +453,7 @@ func (m Model) renderLoadingSegment() string {
 		return ""
 	}
 	frac := float64(done) / float64(total)
-	style := lipgloss.NewStyle().Foreground(cYellow).Background(cBlack).Bold(true)
+	style := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	label := style.Render(fmt.Sprintf("  loading %d/%d ", done, total))
 	if m.width >= 110 {
 		return label + renderBar(frac, 8, cYellow) + style.Render(" ")
@@ -464,7 +465,7 @@ func (m Model) renderStatusRight(spin string) string {
 	var parts []string
 
 	if !m.connected {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Background(cBlack).Bold(true).
+		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).
 			Render(fmt.Sprintf("  reconnecting %s ", spin)))
 	}
 	// Activity segment — the spelled-out progress line (phase, both clocks,
@@ -485,13 +486,13 @@ func (m Model) renderStatusRight(spin string) string {
 		if a.detail != "" {
 			txt += " (" + a.detail + ")"
 		}
-		act = lipgloss.NewStyle().Foreground(activityColor(a.phase)).Background(cBlack).
+		act = lipgloss.NewStyle().Foreground(activityColor(a.phase)).
 			Render(txt + " ")
 	} else if _, ok := m.streamBuf[m.curKey()]; ok {
-		act = lipgloss.NewStyle().Foreground(cAmber).Background(cBlack).
+		act = lipgloss.NewStyle().Foreground(cAmber).
 			Render(fmt.Sprintf("   streaming %s ", spin))
 	} else {
-		act = lipgloss.NewStyle().Foreground(cGray).Background(cBlack).
+		act = lipgloss.NewStyle().Foreground(cGray).
 			Render("   idle ")
 	}
 	parts = append(parts, act)
@@ -500,7 +501,7 @@ func (m Model) renderStatusRight(spin string) string {
 	// window: the focused group, then the fleet (Σ). Always shown, zeros
 	// included, so the chip is a fixture the eye can find rather than an
 	// element that pops in and out. Signature amber, matching the koto accent.
-	parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).Background(cBlack).
+	parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).
 		Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
 
 	return strings.Join(parts, "")
@@ -554,7 +555,7 @@ func (m Model) metricsChips(useBars bool) (left, right string) {
 			frac = 10 // 1000% — anything above is garbage data, not signal
 		}
 		style := alertify(lipgloss.NewStyle(), fracColor).
-			Foreground(fracColor).Background(cBlack).Bold(true)
+			Foreground(fracColor).Bold(true)
 		if useBars {
 			return style.Render(fmt.Sprintf("  %s ", label)) +
 				renderBar(frac, barW, fracColor) +
