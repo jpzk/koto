@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+// activeSlots reports how many of g's slots are currently running a turn.
+// Test-only: production code never asks — acquireSlot/releaseSlot are the
+// whole interface, and the pool's occupancy is only interesting to assert on.
+func activeSlots(g string) int {
+	slotMu.Lock()
+	defer slotMu.Unlock()
+	n := 0
+	for i := 0; i < groupSlots; i++ {
+		if slotBusy[slotKey(g, i)] {
+			n++
+		}
+	}
+	return n
+}
+
 // writeStream seeds one of g's log streams.
 func writeStream(t *testing.T, p, body string) {
 	t.Helper()

@@ -60,13 +60,17 @@ const (
 	// fast enough that a runaway writer is visible within a couple of
 	// samples.
 	resSampleInterval = 30 * time.Second
-	// resRingLen bounds the per-group history (30s × 120 = 1h). The rate is
-	// computed across the whole retained span, so this also sets how much
-	// short-term noise gets smoothed out.
+	// resRingLen bounds the per-group history (30s × 120 = 1h). The growth
+	// rate reads back only resGrowthWindow of it (resGrowth); the rest of the
+	// span is headroom for a sparse ring after a daemon restart.
 	resRingLen = 120
 )
 
 // resSample is one point-in-time observation of a group's host-side cost.
+//
+// There is deliberately no RSS field: that figure is read LIVE per call (the
+// resLive /proc pass), never served from this ring, so a copy recorded every
+// sweep would only ever be written.
 type resSample struct {
 	at time.Time
 	// allocBytes is the image's ACTUAL host consumption (st_blocks × 512),
@@ -75,7 +79,6 @@ type resSample struct {
 	allocBytes int64
 	// cpuTicks is the FC process's utime+stime; a rate needs two samples.
 	cpuTicks int64
-	rssBytes int64
 }
 
 var (
@@ -328,11 +331,11 @@ func fcPidOf(g string) int {
 // resSampleGroup takes one observation for g and appends it to the ring.
 func resSampleGroup(g string) {
 	alloc, _ := statAllocBytes(fcWorkspaceImg(g))
-	var cpu, rss int64
+	var cpu int64
 	if pid := fcPidOf(g); pid > 0 {
-		cpu, rss = procCPURSS(pid)
+		cpu, _ = procCPURSS(pid)
 	}
-	s := resSample{at: time.Now(), allocBytes: alloc, cpuTicks: cpu, rssBytes: rss}
+	s := resSample{at: time.Now(), allocBytes: alloc, cpuTicks: cpu}
 
 	resMu.Lock()
 	r := append(resRing[g], s)

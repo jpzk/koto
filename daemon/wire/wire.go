@@ -120,12 +120,14 @@ type CmdEnvelope struct {
 	Cmd string `json:"cmd"`
 }
 
+// SpawnReq is the ctl plane's spawn verb (main only). Group is the whole
+// payload: the gRPC SpawnReq's provider/model/size have no counterpart here —
+// ctl.go calls ensure() directly, so any such key would decode and then be
+// silently dropped. A ctl spawn takes the group's config.json defaults; set
+// the knobs afterwards with config_set. `main` is likewise absent: ctl.go
+// forces main:false regardless of what is sent.
 type SpawnReq struct {
-	Group    string `json:"group"`
-	Main     bool   `json:"main,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Size     string `json:"size,omitempty"`
+	Group string `json:"group"`
 }
 
 type SendReq struct {
@@ -185,17 +187,6 @@ type ConfigReq struct {
 	// the daemon starts, instead of lazily on its first message. Read only at
 	// daemon startup, so setting it takes effect on the next daemon restart.
 	Autostart json.RawMessage `json:"autostart,omitempty"`
-}
-
-// LogEvent is the streaming frame the daemon pushes to log subscribers.
-// Distinct from Event because daemon logs aren't keyed by group and carry
-// a level. Ts matches Event's float-seconds convention.
-type LogEvent struct {
-	Event     string  `json:"event"` // always "log"
-	Level     string  `json:"level"` // info | warn | error | debug
-	Msg       string  `json:"msg"`
-	Ts        float64 `json:"ts"`
-	Subsystem string  `json:"subsystem,omitempty"` // acl | auth | fc | egress | sched | ...
 }
 
 // ---- Response envelopes ---------------------------------------------------

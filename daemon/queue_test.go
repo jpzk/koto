@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// sessionDepth is queueDepth for one conversation. Test-only: the wire
+// carries per-GROUP backlog (GroupInfo.Queued → queueDepth), so nothing in
+// production needs the per-session split.
+func sessionDepth(g, session string) int {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	return len(queues[sessKey(g, session)])
+}
+
 // withTurnFn swaps the worker's turn function for the duration of fn and
 // restores it after. Tests use unique group names so their dedicated workers
 // never read turnFn concurrently with the swap (each read is ordered after the

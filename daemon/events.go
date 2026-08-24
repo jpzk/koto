@@ -219,7 +219,7 @@ var (
 	logRing     []*pb.LogEvent // recent frames, replayed to fresh subscribers
 )
 
-// emitLog formats a LogEvent, mirrors it to stderr (so `make host-run`
+// emitLog formats a pb.LogEvent, mirrors it to stderr (so `make host-run`
 // stays useful for tail -F debugging), appends to the ring, and broadcasts
 // to all log subscribers. Dead subscribers are pruned in a second pass —
 // same dead-conn pattern as emit(). subsystem names the emitting area

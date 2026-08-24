@@ -55,7 +55,6 @@ type (
 	configResp     = wire.ConfigResp
 	listResp       = wire.ListResp
 	resourcesResp  = wire.ResourcesResp
-	LogEvent       = wire.LogEvent
 	scheduleItem   = wire.ScheduleItem
 	schedAddReq    = wire.SchedAddReq
 	schedAddResp   = wire.SchedAddResp

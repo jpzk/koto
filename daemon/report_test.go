@@ -15,6 +15,18 @@ import (
 	"unicode/utf8"
 )
 
+// armReport is armLocked behind the mutex — the direct entry for tests, which
+// need a window open without a delegation to open it. Production always arms
+// through armReportAndEnqueue, which holds reportMu across the enqueue too.
+func armReport(g, mainSession string) {
+	reportMu.Lock()
+	had := armLocked(g, mainSession)
+	reportMu.Unlock()
+	if had {
+		emitLogfG("report", g, "info", "[%s] reply window re-armed (previous delegation unanswered — latest wins)", g)
+	}
+}
+
 // reportRoot points ROOT at a tempdir: successful delivery registers the
 // receiving main session (registerSession), which writes under vol("main").
 func reportRoot(t *testing.T) {

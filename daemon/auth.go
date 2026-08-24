@@ -123,7 +123,7 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 	return id, nil
 }
 
-// aclLogGroup maps a group-scoped verb's target onto the LogEvent.group
+// aclLogGroup maps a group-scoped verb's target onto the pb.LogEvent.group
 // field. A concrete group name attributes the decision to that group's log;
 // the "*" wildcard (a request that reads across every group, e.g. unfiltered
 // metrics) is daemon-wide, so it stays unattributed.

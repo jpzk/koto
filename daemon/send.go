@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,16 +25,16 @@ var (
 	bgActiveLock sync.Mutex
 )
 
-// tailBackgroundTask runs `podman exec <sidecar> tail -F -n 0 <path>` and
+// tailBackgroundTask runs `tail -F -n 0 <path>` inside the group's guest and
 // streams each line into the group's chat log framed as `[[bg]] <id> <line>`.
 // The daemon's live tailer + history parser turn that into a `bg` event;
 // the TUI renders with a distinct glyph so the operator can tell the
 // content came from a backgrounded shell, not from the model.
 //
-// Lifecycle: capped at 10 min total. If the sidecar dies the podman exec
-// returns and the goroutine exits. We deliberately don't try to detect
-// "task finished" — claude code surfaces that via a regular tool_result
-// in a later turn, and stale tailers are bounded by the time cap.
+// Lifecycle: capped at 10 min total. If the VM dies the exec stream returns
+// and the goroutine exits. We deliberately don't try to detect "task
+// finished" — claude code surfaces that via a regular tool_result in a later
+// turn, and stale tailers are bounded by the time cap.
 func tailBackgroundTask(g, streamPath, id, path string) {
 	key := g + "\x00" + id
 	bgActiveLock.Lock()
@@ -63,10 +62,8 @@ func tailBackgroundTask(g, streamPath, id, path string) {
 	}
 	timer := time.AfterFunc(10*time.Minute, func() { _ = rc.Close() })
 	defer func() { timer.Stop(); _ = rc.Close() }()
-	var stdout io.Reader = rc
-	wait := func() {}
 	emitLogfG("send", g, "info", "bg-tail start group=%s id=%s path=%s", g, id, path)
-	sc := bufio.NewScanner(stdout)
+	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
@@ -76,7 +73,6 @@ func tailBackgroundTask(g, streamPath, id, path string) {
 		// output stays in that conversation rather than surfacing in another.
 		streamLogAppend(streamPath, []byte("[[bg]] "+id+" "+line+"\n"))
 	}
-	wait()
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }
 

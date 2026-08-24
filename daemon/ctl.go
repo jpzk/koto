@@ -156,7 +156,8 @@ func ctlDispatch(owner string, line []byte) any {
 		if _, already := existing[req.Group]; !already && len(existing) >= ctlMaxSpawn {
 			return errResp(fmt.Sprintf("ctl: spawn cap reached (%d groups)", ctlMaxSpawn))
 		}
-		// Force main:false regardless of what was sent.
+		// Always main:false — the ctl plane cannot mint a second main
+		// (see wire.SpawnReq: the key isn't even decoded).
 		port, err := ensure(req.Group, false)
 		if err != nil {
 			return errResp(err.Error())

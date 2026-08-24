@@ -544,7 +544,7 @@ TUI driving (all phrased as one shell-style line so cron fields don't need quoti
 
 ## Non-obvious decisions (don't undo without reason)
 
-- **Pasta networking, not slirp4netns.** Fedora 44+ ships pasta as the rootless default; slirp4netns isn't installed. `PROXY_HOST=host.containers.internal` works under pasta.
+- **Pasta networking, not slirp4netns.** Fedora 44+ ships pasta as the rootless default; slirp4netns isn't installed. (The `PROXY_HOST=host.containers.internal` this used to note was the podman sidecars' proxy base URL; the env var was removed with the podman group runtime — a microVM group reaches the proxy over vsock 9000, not by hostname.)
 - **Sidecar runs as `node` user (uid 1000), not root.** `claude --dangerously-skip-permissions` refuses to run as root. The container is the security boundary; running as a non-root user inside it is fine.
 - **`--userns=keep-id` on sidecars.** Maps container `node` (uid 1000) to host user (uid 1000) so the bind-mounted workspace is writable.
 - **`HOME=/workspace` in sidecars.** Claude stores session state in `$HOME/.claude/projects/...`. Default `$HOME=/home/node` is inside the container and lost on `--rm`. Pointing `HOME` at the bind-mounted workspace persists sessions on the real host across container restarts.

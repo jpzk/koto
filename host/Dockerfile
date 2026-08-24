@@ -26,7 +26,11 @@ RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
 # ("-mod may only be set to readonly or vendor when in workspace mode").
 # go run never needs to rewrite go.mod here anyway.
 ENV GOFLAGS=""
-ENV BIND=0.0.0.0 NC_NETWORK=koto-net PROXY_HOST=cs_host_go
+# BIND is the proxy's listen address (daemonMain). NC_NETWORK/PROXY_HOST used
+# to live here too — they named the podman bridge the sidecars sat on and the
+# proxy host they dialed; both died with the podman group runtime and nothing
+# has read them since.
+ENV BIND=0.0.0.0
 # Build-then-EXEC rather than `go run`: the daemon binary must be PID 1 so
 # `podman stop`'s SIGTERM reaches its shutdown handler (which stops every
 # microVM so guests sync+umount their workspace images). `go run` does NOT

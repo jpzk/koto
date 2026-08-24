@@ -157,19 +157,6 @@ func releaseGroupQuarantine(g string) {
 	slotMu.Unlock()
 }
 
-// activeSlots reports how many of g's slots are currently running a turn.
-func activeSlots(g string) int {
-	slotMu.Lock()
-	defer slotMu.Unlock()
-	n := 0
-	for i := 0; i < groupSlots; i++ {
-		if slotBusy[slotKey(g, i)] {
-			n++
-		}
-	}
-	return n
-}
-
 // ---- per-session queues ------------------------------------------------------
 
 var (
@@ -318,13 +305,6 @@ func queueDepth(g string) int {
 		}
 	}
 	return n
-}
-
-// sessionDepth is queueDepth for one conversation.
-func sessionDepth(g, session string) int {
-	queuesMu.Lock()
-	defer queuesMu.Unlock()
-	return len(queues[sessKey(g, session)])
 }
 
 // sendWorker drains one SESSION's queue, running each of its turns to

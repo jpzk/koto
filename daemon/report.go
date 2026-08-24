@@ -53,7 +53,7 @@ const (
 
 // pendingReport is one armed window: which of main's sessions asked, and
 // when. Keyed by target group — one window per peer, latest delegation wins
-// (arming while armed overwrites, logged in armReport).
+// (arming while armed overwrites, logged by the caller).
 type pendingReport struct {
 	mainSession string
 	armed       time.Time
@@ -82,16 +82,6 @@ func armLocked(g, mainSession string) bool {
 	_, had := reportPending[g]
 	reportPending[g] = pendingReport{mainSession: mainSession, armed: now}
 	return had
-}
-
-// armReport is armLocked behind the mutex — the direct entry for tests.
-func armReport(g, mainSession string) {
-	reportMu.Lock()
-	had := armLocked(g, mainSession)
-	reportMu.Unlock()
-	if had {
-		emitLogfG("report", g, "info", "[%s] reply window re-armed (previous delegation unanswered — latest wins)", g)
-	}
 }
 
 // armReportAndEnqueue enqueues a reply-requesting delegation and arms the

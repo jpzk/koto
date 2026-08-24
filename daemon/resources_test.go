@@ -562,8 +562,8 @@ func TestResourcesSnapshotStoppedGroupHasNoCPUOrRSS(t *testing.T) {
 	// A ring carrying numbers from when it WAS running.
 	resMu.Lock()
 	resRing[g] = []resSample{
-		{at: time.Now().Add(-resSampleInterval), cpuTicks: 1000, rssBytes: 712 << 20, allocBytes: 1 << 20},
-		{at: time.Now(), cpuTicks: 3000, rssBytes: 712 << 20, allocBytes: 1 << 20},
+		{at: time.Now().Add(-resSampleInterval), cpuTicks: 1000, allocBytes: 1 << 20},
+		{at: time.Now(), cpuTicks: 3000, allocBytes: 1 << 20},
 	}
 	resMu.Unlock()
 	t.Cleanup(func() {
