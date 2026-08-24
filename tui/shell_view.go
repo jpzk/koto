@@ -1077,13 +1077,14 @@ func (m Model) renderShellView() string {
 			clipped := lipgloss.NewStyle().MaxWidth(blockW).Render(peek)
 			chatArea = lipgloss.NewStyle().Width(blockW).Render(clipped)
 		} else {
-			// Clip to the viewport width first (defense against any cached
-			// markdown wrapped at a stale width), then pad to a fixed block
-			// width so the separator column doesn't wobble with content. The
-			// Width(blockW) block wraps only content wider than blockW-1,
-			// which the MaxWidth clip has just made impossible.
-			clipped := lipgloss.NewStyle().MaxWidth(chatW - 2).Render(m.vp.View())
-			chatArea = lipgloss.NewStyle().Width(blockW).PaddingLeft(1).Render(clipped)
+			// The viewport window at a fixed block width, so the separator
+			// column doesn't wobble with content: renderChatLines gives
+			// exactly `rows` inset lines, and joinCols cuts any wider than
+			// the block (defense against cached markdown wrapped at a stale
+			// width) and pads the rest. Same hand layout as the chat view,
+			// for the same reason — the lipgloss chain this replaces measured
+			// every visible row three times over.
+			chatArea = joinCols(rows, []int{blockW}, m.renderChatLines(rows))
 		}
 		chatArea = lipgloss.NewStyle().Height(rows).MaxHeight(rows).Render(chatArea)
 		chatCol := lipgloss.JoinVertical(lipgloss.Left, chatArea, m.renderInput())
