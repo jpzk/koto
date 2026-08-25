@@ -307,6 +307,8 @@ func formatGoalEvent(ev Event) string {
 		return fmt.Sprintf("▶ goal %s resumed", ev.ID)
 	case "goal_cancelled":
 		return fmt.Sprintf("✗ goal %s cancelled", ev.ID)
+	case "goal_exhausted":
+		return fmt.Sprintf("✗ goal %s exhausted — hit its iteration cap without completing, handed to the coordinator", ev.ID)
 	}
 	return "goal event: " + ev.Event
 }
@@ -319,6 +321,8 @@ func goalStatusLine(it goalItemT) string {
 		extra = " (" + it.PausedReason + ")"
 	case "running":
 		extra = fmt.Sprintf(" %d/%d", it.Iteration, it.MaxIterations)
+	case "exhausted":
+		extra = fmt.Sprintf(" (cap %d/%d)", it.Iteration, it.MaxIterations)
 	}
 	// The NAME leads, not the id: it is the run's session (goal-<name>), so
 	// it is what /session and the ctrl+t jump take, and what the tree shows.

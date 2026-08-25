@@ -2298,7 +2298,7 @@ type GoalItem struct {
 	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`         // the goal itself
 	Criteria      string                 `protobuf:"bytes,4,opt,name=criteria,proto3" json:"criteria,omitempty"` // acceptance criteria the judge verifies
 	Plan          bool                   `protobuf:"varint,5,opt,name=plan,proto3" json:"plan,omitempty"`        // set plan-first (awaits human approval)
-	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`     // planning | awaiting_approval | running | paused | met | cancelled
+	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`     // planning | awaiting_approval | running | paused | met | cancelled | exhausted
 	Iteration     int32                  `protobuf:"varint,7,opt,name=iteration,proto3" json:"iteration,omitempty"`
 	MaxIterations int32                  `protobuf:"varint,8,opt,name=max_iterations,json=maxIterations,proto3" json:"max_iterations,omitempty"`
 	LastFeedback  string                 `protobuf:"bytes,9,opt,name=last_feedback,json=lastFeedback,proto3" json:"last_feedback,omitempty"`  // judge's failures from the last rejected done-claim

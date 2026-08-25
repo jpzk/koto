@@ -443,7 +443,7 @@ message GoalItem {
   string text           = 3;  // the goal itself
   string criteria       = 4;  // acceptance criteria the judge verifies
   bool   plan           = 5;  // set plan-first (awaits human approval)
-  string status         = 6;  // planning | awaiting_approval | running | paused | met | cancelled
+  string status         = 6;  // planning | awaiting_approval | running | paused | met | cancelled | exhausted
   int32  iteration      = 7;
   int32  max_iterations = 8;
   string last_feedback  = 9;  // judge's failures from the last rejected done-claim

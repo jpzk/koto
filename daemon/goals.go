@@ -36,7 +36,11 @@ package main
 //     awaiting_approval until a HUMAN approves (GoalApprove has no ctl-plane
 //     counterpart — main can set a peer's goal but not approve one).
 //   - max_iterations (execution turns only) bounds a loop that never
-//     converges: hitting the cap pauses the goal and notifies the operator.
+//     converges: hitting the cap TERMINATES the goal (goalMarkExhausted, a
+//     terminal status, not a resumable pause) and hands the outcome back to
+//     the group's coordinator — a normal turn into the default session, like
+//     the met path — so a non-converging run is digested and closed rather
+//     than left as a paused zombie. The operator is also notified.
 //   - A group runs SEVERAL goals at once — that is what the multi-session
 //     machinery exists for. Each run owns its session pair, driver goroutine
 //     and mailbox windows; turns from different goals interleave through the
@@ -88,6 +92,7 @@ const (
 	goalStatusPaused    = "paused"
 	goalStatusMet       = "met"
 	goalStatusCancelled = "cancelled"
+	goalStatusExhausted = "exhausted"
 
 	goalDefaultMaxIter = 20
 	goalMaxIterCeil    = 200
@@ -355,7 +360,7 @@ func resolveGoalLocked(g, name string, from []string) (*goalItem, error) {
 }
 
 func goalTerminal(status string) bool {
-	return status == goalStatusMet || status == goalStatusCancelled
+	return status == goalStatusMet || status == goalStatusCancelled || status == goalStatusExhausted
 }
 
 // goalLiveSessions returns the goal loop's reserved sessions that should be
@@ -923,7 +928,7 @@ func goalDriveOnce(g, id string) {
 		}
 		if it.Iteration >= it.MaxIterations {
 			goalLock.Unlock()
-			goalPauseWith(g, id, "cap", fmt.Sprintf("no accepted completion after %d iterations", it.MaxIterations))
+			goalMarkExhausted(g, id, fmt.Sprintf("no accepted completion after %d iterations", it.MaxIterations))
 			return
 		}
 		// iteration++ persists BEFORE the enqueue: a daemon crash mid-turn
@@ -1190,6 +1195,76 @@ func goalInformCoordinatorMsg(it goalItem) string {
 			"few sentences. The run's artifacts are on your filesystem (%s/, its "+
 			"ledger.json and progress.md, and whatever it built) if the note is not enough.",
 		goalSessionSlug(it), it.Iteration, it.Text, it.Criteria, it.DoneNote, goalDirFor(it))
+}
+
+// goalMarkExhausted TERMINATES a goal that ran its whole iteration budget
+// without the judge ever accepting a completion, then hands the outcome back
+// to the group's coordinator. This is the cap case, and it is deliberately
+// NOT a pause: operator/stalled/interrupted pauses are "come back and resume"
+// states, but the cap means the loop tried MaxIterations times and did not
+// converge — leaving it as a paused item just accrues zombies nobody resumes.
+// So the goal moves to a TERMINAL status and the group's own default session
+// (the coordinator, the conversation the goal was set from) is tasked with a
+// normal turn — exactly like goalMarkMet — to digest what got done, what is
+// still missing, and decide what to do next (re-goal with a bigger budget or
+// a narrower scope, or drop it). An exhausted goal does not auto-resume and
+// is not revived by resumeGoalDrivers; continuing means a fresh goal.
+func goalMarkExhausted(g, id, detail string) {
+	// Same rationale as goalPauseWith: if the cap check fires only because the
+	// driver's turn died during daemon shutdown, do not burn the goal — leave
+	// it running so resumeGoalDrivers re-drives it at the next start, hits the
+	// cap cleanly, and terminates then.
+	if shuttingDown.Load() {
+		return
+	}
+	it, err := goalTransition(g, id, []string{goalStatusRunning}, func(it *goalItem) {
+		it.Status = goalStatusExhausted
+		it.PausedFrom = ""
+		it.PausedReason = ""
+		it.CompletedAt = goalNow()
+		// LastHandoff / LastFeedback are deliberately PRESERVED (unlike the
+		// met path, which clears them): a run that failed to converge is worth
+		// inspecting, and the coordinator handoff quotes the last handoff.
+	})
+	if err != nil {
+		return
+	}
+	emit(g, Event{Event: "goal_exhausted", ID: it.ID, Text: detail, Session: goalWorkSessionFor(goalSessionSlug(it))})
+	emitLogfG("goal", g, "warn", "EXHAUSTED id=%s after %d iteration(s): %s", it.ID, it.Iteration, detail)
+	goalNotify(g, "high", "goal exhausted",
+		fmt.Sprintf("goal %s (%s) hit its %d-iteration cap without completing (%s) — terminated and handed back to %s's coordinator",
+			it.ID, goalSessionSlug(it), it.MaxIterations, detail, g))
+	goalInformCoordinatorExhausted(g, it, detail)
+}
+
+// goalInformCoordinatorExhausted wakes the group's coordinator after a cap
+// termination — a normal turn into the group's DEFAULT session, the same
+// enqueue-and-forget contract as goalInformCoordinator: the goal is already
+// terminal, so a dropped enqueue costs the summary (warn-logged), never the
+// termination.
+func goalInformCoordinatorExhausted(g string, it goalItem, detail string) {
+	if _, err := enqueueSend(g, "", goalCoordinatorExhaustedMsg(it, detail)); err != nil {
+		emitLogfG("goal", g, "warn", "coordinator notice for exhausted goal %s dropped: %v", it.ID, err)
+	}
+}
+
+func goalCoordinatorExhaustedMsg(it goalItem, detail string) string {
+	handoff := it.LastHandoff
+	if strings.TrimSpace(handoff) == "" {
+		handoff = "(none recorded)"
+	}
+	return fmt.Sprintf(
+		"[koto] goal ended WITHOUT completing: run %q ran its full budget of %d iteration(s) "+
+			"and the reviewer never accepted it (%s).\n"+
+			"goal: %s\n"+
+			"acceptance criteria: %s\n"+
+			"last worker handoff: %s\n"+
+			"The run is now TERMINATED — it will not resume on its own. You are the coordinator: "+
+			"give the operator a short TLDR now (what the goal was, how far it got, what is still "+
+			"missing), then decide what to do next — set a fresh goal with a larger budget or a "+
+			"narrower scope, or leave it. The run's artifacts are on your filesystem (%s/, its "+
+			"ledger.json and progress.md, and whatever it built).",
+		goalSessionSlug(it), it.MaxIterations, detail, it.Text, it.Criteria, handoff, goalDirFor(it))
 }
 
 // goalPauseWith pauses an active goal with a reason and alerts the operator.

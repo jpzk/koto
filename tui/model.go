@@ -2406,7 +2406,8 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.addLine(logLine{kind: "sys", group: ev.Group,
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
 		case "goal_set", "goal_plan", "goal_awaiting", "goal_iter", "goal_judge",
-			"goal_verdict", "goal_met", "goal_paused", "goal_resumed", "goal_cancelled":
+			"goal_verdict", "goal_met", "goal_paused", "goal_resumed", "goal_cancelled",
+			"goal_exhausted":
 			// Stamped with the run's session by the daemon, so the lifecycle
 			// renders inside the goal's tree item and leaves the operator's
 			// chat alone. What genuinely needs a human (plan ready, cap
