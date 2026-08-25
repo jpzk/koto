@@ -209,7 +209,8 @@ tuning (`--security-opt label=disable` is set on every podman run).
 ```sh
 make host-build   # cs_host image
 make fc-assets    # firecracker binary + kernel + golden rootfs (required)
-make login        # one-time OAuth into ./creds/
+make login        # one-time subscription OAuth into ./creds/ — OR export
+                  # ANTHROPIC_API_KEY before host-run (recommended, see below)
 make host-run     # start daemon (+ main group)
 make tui          # attach the TUI (Ctrl+C detaches; daemon keeps running)
 make stop         # tear down
@@ -218,6 +219,44 @@ make stop         # tear down
 Guest-side code (`sidecar/`, `fcguest/`) is baked into the rootfs: rebuild
 with `make fc-rootfs` + `/restart <g>`. Host-side Go is live (`go run` in
 cs_host) — edit and `make host-run`.
+
+## Credentials and Anthropic's terms
+
+koto runs the **unmodified** `claude` binary and never hands a real credential
+to a guest: the proxy injects one of two things on the host side
+(`daemon/proxy.go` `authHeaders`):
+
+1. **An API key** — `export ANTHROPIC_API_KEY=sk-ant-…` before `make host-run`.
+   **Recommended.** Anthropic's guidance is that developers building agent
+   systems on Claude Code / the Agent SDK use API-key authentication; `claude
+   -p --bare` (what every group runs) is documented as an API-key mode; and
+   API traffic falls under the Commercial Terms, so business use is fine.
+   Billing is per token to the key owner.
+2. **A Claude subscription login** — `make login` runs `claude auth login`
+   (Anthropic's own flow) and the proxy forwards the resulting OAuth token,
+   refreshing it via `claude` itself. **This works, but read the fine print
+   before relying on it:**
+   - OAuth is "intended exclusively for purchasers of … subscription plans
+     and designed to support ordinary use of Claude Code"; advertised Pro/Max
+     limits "assume ordinary, individual usage". A fleet of scheduled,
+     autonomous agents is a stretch of "ordinary individual usage", and
+     Anthropic "reserves the right to take measures to enforce these
+     restrictions … without prior notice".
+   - The Consumer Terms (Free/Pro/Max) allow **personal, non-commercial use
+     only**. Commercial work belongs on an API key or a Team/Enterprise plan.
+   - Anthropic prohibits developers from collecting, storing, or
+     intermediating Claude.ai credentials **on behalf of other users**. koto
+     is a single-operator tool: the credential is yours, the agents are
+     yours. **Do not run koto as a shared or hosted service on a subscription
+     login** — that is exactly the pattern the clause forbids.
+
+Sources: [Claude Code legal & compliance](https://code.claude.com/docs/en/legal-and-compliance)
+(authentication and credential use, running Claude Code in agent
+infrastructure), [Consumer Terms](https://www.anthropic.com/legal/consumer-terms),
+[Commercial Terms](https://www.anthropic.com/legal/commercial-terms),
+[Usage Policy](https://www.anthropic.com/legal/aup). This is a summary, not
+legal advice; the linked documents govern. The Venice provider is unaffected
+by any of this (`creds/venice.key`, Venice's own terms).
 
 ## Further reading
 
