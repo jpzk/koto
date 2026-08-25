@@ -109,6 +109,7 @@ podman run -d --rm \
   -e KOTO_PORT="$KOTO_PORT" \
   -e TERM="${TERM:-xterm-256color}" \
   ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \
+  ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"} \
   -w "$HERE" \
   koto-host >/dev/null
 INSTANCE_ARG=""
