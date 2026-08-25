@@ -445,7 +445,7 @@ func isThemeOff(name string) bool {
 //
 // COLORTERM is the signal, and it has to be forwarded into the container
 // explicitly — `podman run` passes no host environment, and cs_tui's own TERM
-// is pinned to xterm-256color by the Dockerfile. KOTO_TUI_COLORTERM is the
+// is pinned to tmux-256color by the Dockerfile. KOTO_TUI_COLORTERM is the
 // override for a terminal that supports truecolor without advertising it.
 func applyThemeProfile(env func(string) string) {
 	v := env("KOTO_TUI_COLORTERM")

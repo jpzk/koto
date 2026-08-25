@@ -37,9 +37,23 @@ FROM scratch
 COPY --from=builder /out/koto-tui /koto-tui
 # TERM tells lipgloss/glamour we're on a 256-color terminal; without this
 # they fall back to no-color since scratch has no terminfo db.
-# Cred paths default into /koto-creds (mounted ro by `make tui`); the
-# endpoint, server name, and token are overridden per deployment.
-ENV TERM=xterm-256color \
+#
+# It is the tmux flavour, not xterm-256color, ON PURPOSE. bubbletea v1's
+# package init() (tea_init.go) calls lipgloss.HasDarkBackground() before
+# main runs, which makes termenv write an OSC 11 + CSI 6n query and then
+# read stdin for up to 5s waiting for the reply — discarding every byte
+# that isn't the start of one (termenv_unix.go readNextResponse). When the
+# reply doesn't make it back through the attach chain the TUI sits blank
+# for the full 5s and any key typed meanwhile is eaten (measured 2026-08-25
+# in a headless pty: query at 1.7s, first frame at 6.7s). termenv skips the
+# query entirely when TERM starts with screen/tmux/dumb (a multiplexer may
+# front several terminals), and koto never uses the answer anyway — the
+# theme paints its own ground, and mono/notify sniff the host's real
+# terminal via KOTO_TUI_TERM. tmux-256color keeps the same ANSI256 profile
+# (COLORTERM still promotes to truecolor). bubbletea v2 drops the init hack.
+# (Not the cause of "ctrl+p needs two presses" — that was podman's detach
+# chord; see the Makefile's tui target.)
+ENV TERM=tmux-256color \
     KOTO_CA=/koto-creds/ca.crt \
     KOTO_CERT=/koto-creds/client-tui.crt \
     KOTO_KEY=/koto-creds/client-tui.key \
