@@ -14,12 +14,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	upstream        = "https://api.anthropic.com"
-	veniceUpstream  = "https://api.venice.ai"
+	upstream       = "https://api.anthropic.com"
+	veniceUpstream = "https://api.venice.ai"
 )
 
 var (
@@ -111,6 +112,49 @@ func refresh() {
 	}
 }
 
+// refreshMu single-flights token refreshes. credLock now guards ONLY the
+// (fast) credentials-file read+parse — the up-to-25s refresh subprocess used
+// to run while authHeaders held credLock, which stalled every group's LLM
+// leg fleet-wide once per token lifetime. refreshKicked gates the background
+// spawn so a burst of requests inside the pre-expiry window starts one
+// refresh goroutine, not hundreds parked on refreshMu.
+var (
+	refreshMu     sync.Mutex
+	refreshKicked atomic.Bool
+)
+
+func readCreds() (credsFile, error) {
+	credLock.Lock()
+	defer credLock.Unlock()
+	var c credsFile
+	b, err := os.ReadFile(credPath)
+	if err != nil {
+		return c, fmt.Errorf("no credentials: set ANTHROPIC_API_KEY or run `claude /login`")
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// credTTL is the token's remaining validity in seconds.
+func credTTL(c credsFile) float64 {
+	return c.ClaudeAiOauth.ExpiresAt/1000 - float64(time.Now().Unix())
+}
+
+// refreshOnce runs one token refresh, JOINING an in-flight one rather than
+// duplicating it: after acquiring the flight it re-checks freshness, so a
+// caller that waited behind the actual refresher returns without spawning a
+// second subprocess.
+func refreshOnce() {
+	refreshMu.Lock()
+	defer refreshMu.Unlock()
+	if c, err := readCreds(); err == nil && credTTL(c) >= 60 {
+		return // the flight we joined already refreshed
+	}
+	refresh()
+}
+
 func authHeaders() (map[string]string, error) {
 	if apiKey != "" {
 		return map[string]string{
@@ -118,23 +162,30 @@ func authHeaders() (map[string]string, error) {
 			"anthropic-version": "2023-06-01",
 		}, nil
 	}
-	credLock.Lock()
-	defer credLock.Unlock()
-	b, err := os.ReadFile(credPath)
+	c, err := readCreds()
 	if err != nil {
-		return nil, fmt.Errorf("no credentials: set ANTHROPIC_API_KEY or run `claude /login`")
-	}
-	var c credsFile
-	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
-	if c.ClaudeAiOauth.ExpiresAt/1000-float64(time.Now().Unix()) < 60 {
-		refresh()
-		b, err = os.ReadFile(credPath)
-		if err != nil {
-			return nil, err
+	if ttl := credTTL(c); ttl < 60 {
+		if ttl > 0 {
+			// Still valid (the 60s window exists precisely so the old token
+			// keeps working during the refresh): kick a background
+			// single-flight refresh and serve THIS request on the current
+			// token instead of blocking behind the subprocess.
+			if refreshKicked.CompareAndSwap(false, true) {
+				go func() {
+					defer refreshKicked.Store(false)
+					refreshOnce()
+				}()
+			}
+		} else {
+			// Actually expired: this request cannot succeed without a
+			// refresh, so join the single-flight and re-read.
+			refreshOnce()
+			if c2, err2 := readCreds(); err2 == nil {
+				c = c2
+			}
 		}
-		_ = json.Unmarshal(b, &c)
 	}
 	return map[string]string{
 		"authorization":     "Bearer " + c.ClaudeAiOauth.AccessToken,
@@ -357,13 +408,13 @@ type handler struct {
 }
 
 var hopByHop = map[string]bool{
-	"authorization":   true,
-	"x-api-key":       true,
-	"host":            true,
-	"content-length":  true,
-	"connection":      true,
+	"authorization":     true,
+	"x-api-key":         true,
+	"host":              true,
+	"content-length":    true,
+	"connection":        true,
 	"transfer-encoding": true,
-	"accept-encoding": true,
+	"accept-encoding":   true,
 }
 
 // injectThinkingDisplay sets thinking.display="summarized" on a /v1/messages
@@ -532,16 +583,25 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if flusher != nil {
 				flusher.Flush()
 			}
-			s := strings.TrimSpace(string(line))
-			if !strings.HasPrefix(s, "data:") {
+			s := bytes.TrimSpace(line)
+			if !bytes.HasPrefix(s, []byte("data:")) {
 				continue
 			}
 			// First payload line = the model has started answering. Headers
 			// come back earlier than this, so `client.Do` returning is NOT the
 			// end of the wait — this is.
 			probe.firstByte()
+			// Only ~2 lines of a response carry usage (message_start /
+			// message_delta); unmarshalling EVERY delta chunk into a fresh
+			// map was the dominant per-frame CPU+GC cost of a streaming
+			// fleet. The substring gate picks out the candidates — a body
+			// line that merely CONTAINS "usage" costs one wasted parse,
+			// never correctness.
+			if !bytes.Contains(s, []byte(`"usage"`)) {
+				continue
+			}
 			var ev map[string]any
-			if err := json.Unmarshal([]byte(strings.TrimSpace(s[5:])), &ev); err != nil {
+			if err := json.Unmarshal(bytes.TrimSpace(s[5:]), &ev); err != nil {
 				continue
 			}
 			for _, u := range []any{ev["usage"], func() any {
@@ -678,17 +738,18 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 			if flusher != nil {
 				flusher.Flush()
 			}
-			s := strings.TrimSpace(string(line))
-			if !strings.HasPrefix(s, "data:") {
+			s := bytes.TrimSpace(line)
+			if !bytes.HasPrefix(s, []byte("data:")) {
 				continue
 			}
 			probe.firstByte()
-			payload := strings.TrimSpace(s[5:])
-			if payload == "[DONE]" {
+			// Venice emits usage only on the final chunk — same gate as the
+			// Anthropic loop, which also skips "[DONE]" for free.
+			if !bytes.Contains(s, []byte(`"usage"`)) {
 				continue
 			}
 			var ev map[string]any
-			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			if err := json.Unmarshal(bytes.TrimSpace(s[5:]), &ev); err != nil {
 				continue
 			}
 			// Venice emits the OpenAI-shape usage block on the final chunk

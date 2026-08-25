@@ -775,8 +775,9 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 			{ID: "bbbbbbbbbbbb", Group: "goal-resume-wait", Text: "t", Criteria: "c",
 				Status: goalStatusAwaiting, Plan: true, MaxIterations: 1, CreatedAt: goalNow()},
 		}
-		saveGoalsLocked()
+		snap := snapshotGoalsLocked()
 		goalLock.Unlock()
+		snap.write()
 		resumeGoalDrivers()
 		waitGoal(t, "goal-resume-run", goalStatusExhausted) // cap=1
 		if len(rec.turns) == 0 {
@@ -907,8 +908,9 @@ func TestCtlGoalSetAndStatusFromMain(t *testing.T) {
 		goals = []goalItem{{ID: "cccccccccccc", Group: g, Name: "resumeme", Text: "t", Criteria: "c",
 			Status: goalStatusPaused, PausedFrom: goalStatusRunning, PausedReason: "operator",
 			MaxIterations: 1, Iteration: 1, CreatedAt: goalNow()}}
-		saveGoalsLocked()
+		snap := snapshotGoalsLocked()
 		goalLock.Unlock()
+		snap.write()
 		res, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_resume", "group": g})).(goalResp)
 		if !ok || !res.OK || res.Item.Iteration != 0 {
 			t.Fatalf("goal_resume: %+v", res)
