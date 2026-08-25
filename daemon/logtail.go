@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -402,15 +403,40 @@ func readHistory(g string, limit int, before float64) ([]Event, bool) {
 // readStreamHistory parses one stream file. Returns nothing when the file has
 // never been written (a group that has never run concurrent turns has no
 // log.3).
+// historyTailCap bounds how much of one stream file readStreamHistory
+// reads: the last 4 MiB. History used to os.ReadFile the WHOLE file — the
+// parser is stateful from the start, so paging could not shrink the read —
+// which made every History call O(total log bytes): a busy group's tens of
+// MB of streams were read, split and parsed to return the last screenful,
+// on every TUI attach and every scroll-back page. Bounded-tail instead:
+// read the cap, then resync the parser at the first [[turn_end]] line — the
+// one marker that is always genuine and always top-level (entrypoint.sh
+// writes it directly; stream_filter escapes literal occurrences inside
+// block bodies) — so a window that opens mid-block can't misparse a block
+// body as top-level frames. The boundary turn's fragment before the resync
+// is dropped, and post-resync events that never saw a [ts:] marker are
+// dropped too instead of taking the file-mtime fallback, which would sort
+// the window's OLDEST fragment to the newest position. Scroll-back past the
+// cap simply ends (empty page → the client stops paging).
+const historyTailCap = 4 << 20
+
 func readStreamHistory(g, p string) []Event {
 	st, err := os.Stat(p)
 	if err != nil {
 		return nil
 	}
 	fallbackTS := float64(st.ModTime().UnixNano()) / 1e9
-	b, err := os.ReadFile(p)
+	b, err := readTail(p, historyTailCap)
 	if err != nil {
 		return nil
+	}
+	truncated := st.Size() > int64(historyTailCap)
+	if truncated {
+		i := bytes.Index(b, []byte("\n[[turn_end]]\n"))
+		if i < 0 {
+			return nil // no turn boundary inside the window: nothing safely parseable
+		}
+		b = b[i+1:]
 	}
 	var events []Event
 	// Same grammar as the live tailer (logParser); replay differs only in
@@ -428,6 +454,9 @@ func readStreamHistory(g, p string) []Event {
 			switch ev.Event {
 			case "thinking", "tool_result", "thinking_begin", "tool_result_begin", "turn_end":
 				continue
+			}
+			if truncated && ev.Ts == 0 {
+				continue // boundary-turn fragment; mtime-stamping it would missort it
 			}
 			ev.Group = g
 			ev.Historical = true

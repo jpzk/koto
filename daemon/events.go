@@ -184,11 +184,17 @@ func stateWatchLoop() {
 			}
 		}
 		hash := stateHash(gs)
-		frame := toStateFrame(gs)
+		// The pb frame is built lazily, only when some watcher actually
+		// needs it — on an idle fleet every tick used to allocate a full
+		// StateFrame conversion and then throw it away on the hash check.
+		var frame *pb.StateFrame
 		stateSubsLock.Lock()
 		for _, w := range stateSubs {
 			if w.lastSent == hash {
 				continue
+			}
+			if frame == nil {
+				frame = toStateFrame(gs)
 			}
 			select {
 			case w.ch <- frame:

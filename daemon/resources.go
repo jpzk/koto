@@ -136,6 +136,15 @@ var (
 // parallel, so this caps the whole guest leg of a sweep, not per-VM × fleet.
 const resGuestExecTimeout = 5 * time.Second
 
+// resGuestExecPar bounds how many guest probes one sweep runs CONCURRENTLY.
+// The sweep used to launch one goroutine per running group with no bound —
+// 30 running VMs meant 30 simultaneous vsock dial+exec round-trips every
+// 30s, exactly the burst that makes probes time out on a loaded host (the
+// "guest memory blinks out" flapping). 8 keeps a large fleet's sweep under
+// the tick (worst case ceil(R/8) x 5s) while spreading the load; a stopped
+// group never takes a slot.
+const resGuestExecPar = 8
+
 // resGuestProbe is the single command the mirror runs in each guest. One exec
 // for both figures keeps the sweep's guest leg exactly as expensive as it was
 // when it only fetched memory. `stat -f` rather than `df` because its output
@@ -222,6 +231,7 @@ func resParseMemInfo(s string) (total, avail int64) {
 func resSweepGuestMem(groups []string) {
 	now := time.Now()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, resGuestExecPar)
 	for _, g := range groups {
 		wg.Add(1)
 		go func(g string) {
@@ -229,7 +239,10 @@ func resSweepGuestMem(groups []string) {
 			running := fcRunning(g)
 			var total, avail, dTotal, dAvail, dUsed int64
 			if running {
-				if out, rc, err := fcExec(g, resGuestProbe, resGuestExecTimeout); err == nil && rc == 0 {
+				sem <- struct{}{} // bound concurrent probes (resGuestExecPar)
+				out, rc, err := fcExec(g, resGuestProbe, resGuestExecTimeout)
+				<-sem
+				if err == nil && rc == 0 {
 					total, avail = resParseMemInfo(out)
 					dTotal, dAvail, dUsed = resParseGuestFS(out)
 				}

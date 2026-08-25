@@ -212,19 +212,20 @@ func listGroups() map[string]GroupInfo {
 	rates, _ := tokRates()
 	out := map[string]GroupInfo{}
 	for g, p := range readGroups() {
+		cfg := loadGroupConfig(g) // ONE read+parse for all five config knobs
 		out[g] = GroupInfo{
 			Port:      p,
 			Running:   fcRunning(g),
-			Provider:  groupProviderName(g),
-			Model:     groupModelName(g),
-			Effort:    groupEffortName(g),
+			Provider:  cfg.provider(),
+			Model:     cfg.model(),
+			Effort:    cfg.effort(),
 			Stalled:   groupStalled(g),
 			Queued:    queueDepth(g),
 			Sessions:  append(listSessions(g), goalLiveSessions(g)...),
 			Jobs:      jobsSnapshot(g),
 			TokPerSec: rates[g],
-			Network:   groupNetwork(g),
-			Root:      groupRoot(g),
+			Network:   cfg.network(),
+			Root:      cfg.root(),
 		}
 	}
 	return out
@@ -308,25 +309,91 @@ func seedSpawnConfig(g, provider, model, size string) error {
 	return os.WriteFile(p, newB, 0o644)
 }
 
+// groupConfig is one group's parsed config.json snapshot. loadGroupConfig
+// reads and parses the file ONCE; the accessors derive every per-group knob
+// from that single snapshot. Callers that need several knobs at once —
+// listGroups builds provider+model+effort+network+root for every group on
+// the 1 Hz WatchState tick — previously called the per-knob helpers below,
+// each of which re-read and re-parsed the same file: 5-6 reads per group per
+// second while a TUI is attached. A nil groupConfig (missing or corrupt
+// file) yields every accessor's fail-safe default, exactly matching the old
+// helpers' error paths (a nil map reads as empty in Go).
+type groupConfig map[string]any
+
+func loadGroupConfig(g string) groupConfig {
+	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
+	if err != nil {
+		return nil
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return nil
+	}
+	return cfg
+}
+
+func (c groupConfig) str(key string) string {
+	s, _ := c[key].(string)
+	return s
+}
+
+// boolYes: "yes" (or a hand-edited real JSON bool) is true; anything else —
+// absent, unparseable, other strings — is false. These knobs grant
+// capability, so they fail closed.
+func (c groupConfig) boolYes(key string) bool {
+	switch v := c[key].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.ToLower(strings.TrimSpace(v)) == "yes"
+	}
+	return false
+}
+
+func (c groupConfig) provider() string {
+	if s := c.str("provider"); s == "claudesdk" || s == "venice" {
+		return s
+	}
+	return defaultProvider
+}
+
+// model reports the EFFECTIVE model (see groupModelName's comment).
+func (c groupConfig) model() string {
+	if m := c.str("model"); m != "" {
+		return m
+	}
+	if c.provider() == "venice" {
+		return defaultVeniceModel
+	}
+	return defaultClaudeModel
+}
+
+func (c groupConfig) effort() string { return c.str("effort") }
+
+func (c groupConfig) root() bool { return c.boolYes("root") }
+
+// network resolves the egress profile, including the legacy "internet" key
+// (see groupNetwork's comment in fc.go for the migration semantics).
+func (c groupConfig) network() string {
+	if s, ok := c["network"].(string); ok {
+		switch s {
+		case fcNetWAN, fcNetLAN, fcNetFull:
+			return s
+		}
+		return fcNetNone
+	}
+	if s, ok := c["internet"].(string); ok && s == "full" {
+		return fcNetWAN
+	}
+	return fcNetNone
+}
+
 // groupProviderName reads the provider field from a group's config.json.
 // ensureProviderConfig guarantees the field is present and valid on every
 // running group, so this returns the on-disk value verbatim — the only
 // time the fallback fires is a brief window during initial ensure() or if
 // a user has hand-edited config.json into an invalid state.
-func groupProviderName(g string) string {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return defaultProvider
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return defaultProvider
-	}
-	if s, ok := cfg["provider"].(string); ok && (s == "claudesdk" || s == "venice") {
-		return s
-	}
-	return defaultProvider
-}
+func groupProviderName(g string) string { return loadGroupConfig(g).provider() }
 
 // groupModelName reads the model field from a group's config.json. Returns
 // "" when unset — callers (TUI) render that as the provider's default. We
@@ -338,21 +405,11 @@ func groupProviderName(g string) string {
 // (what entrypoint.sh actually applies), while a claudesdk group returns ""
 // (the claude CLI picks its own default; koto doesn't set or know it, so
 // the TUI renders "(default)" there).
-func groupModelName(g string) string {
-	if m := groupConfigString(g, "model"); m != "" {
-		return m
-	}
-	if groupProviderName(g) == "venice" {
-		return defaultVeniceModel
-	}
-	return defaultClaudeModel
-}
+func groupModelName(g string) string { return loadGroupConfig(g).model() }
 
 // groupEffortName reads the reasoning-effort knob from config.json. Empty
 // when unset. Only meaningful for claudesdk; the venice path ignores it.
-func groupEffortName(g string) string {
-	return groupConfigString(g, "effort")
-}
+func groupEffortName(g string) string { return loadGroupConfig(g).effort() }
 
 // groupAutostart reads config.json's "autostart" profile: "yes" boots the
 // group's microVM as soon as the daemon starts, anything else (including
@@ -365,38 +422,9 @@ func groupAutostart(g string) bool { return groupConfigBool(g, "autostart") }
 // groupConfigBool reads a yes/no knob from a group's config.json. Absent,
 // unparseable, or any other value is false — these knobs grant capability, so
 // they fail closed. A real JSON bool is accepted too, for a hand-edited config.
-func groupConfigBool(g, key string) bool {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return false
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return false
-	}
-	switch v := cfg[key].(type) {
-	case bool:
-		return v
-	case string:
-		return strings.ToLower(strings.TrimSpace(v)) == "yes"
-	}
-	return false
-}
+func groupConfigBool(g, key string) bool { return loadGroupConfig(g).boolYes(key) }
 
-func groupConfigString(g, key string) string {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return ""
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return ""
-	}
-	if s, ok := cfg[key].(string); ok {
-		return s
-	}
-	return ""
-}
+func groupConfigString(g, key string) string { return loadGroupConfig(g).str(key) }
 
 func destroy(g string) baseResp {
 	if g == "main" {

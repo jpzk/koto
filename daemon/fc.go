@@ -173,27 +173,7 @@ func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.i
 // host LAN. Groups that genuinely need LAN opt in explicitly with
 // network=lan or network=full. An explicit "network" key always wins; writes
 // via /config migrate the old key away (see applyConfig).
-func groupNetwork(g string) string {
-	b, err := os.ReadFile(filepath.Join(vol(g), ".cs", "config.json"))
-	if err != nil {
-		return fcNetNone
-	}
-	var cfg map[string]any
-	if json.Unmarshal(b, &cfg) != nil {
-		return fcNetNone
-	}
-	if s, ok := cfg["network"].(string); ok {
-		switch s {
-		case fcNetWAN, fcNetLAN, fcNetFull:
-			return s
-		}
-		return fcNetNone
-	}
-	if s, ok := cfg["internet"].(string); ok && s == "full" {
-		return fcNetWAN
-	}
-	return fcNetNone
-}
+func groupNetwork(g string) string { return loadGroupConfig(g).network() }
 
 // groupRoot reads config.json's "root" profile: "yes" grants the guest's node
 // user passwordless sudo plus a writable-persistent root overlay, anything else

@@ -203,13 +203,15 @@ func goalSaveHandoff(g, id, sess string) {
 	if h == "" {
 		return
 	}
+	var snap goalSnap
 	goalLock.Lock()
 	if it := findGoalByIDLocked(id); it != nil {
 		it.LastHandoff = h
 		it.UpdatedAt = goalNow()
-		saveGoalsLocked()
+		snap = snapshotGoalsLocked()
 	}
 	goalLock.Unlock()
+	snap.write()
 }
 
 // clearGoalSessionFn, when non-nil, replaces clearSessionContext as the
@@ -262,14 +264,52 @@ func loadGoals() {
 	goals = items
 }
 
-// saveGoalsLocked serializes the goal slice. Caller MUST hold goalLock (same
-// contract as saveSched).
-func saveGoalsLocked() {
-	b, err := json.MarshalIndent(goals, "", "  ")
+// goalSnap is a to-be-persisted image of the goal slice, taken under
+// goalLock and WRITTEN AFTER the lock is released — goals.json disk I/O used
+// to happen inside a save helper while the caller held the one global
+// goalLock, so every goal iteration's marshal+WriteFile stalled every other
+// group's goal driver AND the 1 Hz WatchState tick (goalLiveSessions takes
+// the same lock). seq is assigned under goalLock, i.e. in mutation order, and
+// write() drops a snapshot that lost the race to a newer one, so out-of-order
+// writers can never regress the file. write() is synchronous for its caller:
+// the "iteration persists BEFORE the enqueue" crash invariant in
+// goalDriveOnce still holds — only the LOCK no longer covers the I/O.
+type goalSnap struct {
+	seq   uint64
+	items []goalItem
+}
+
+var (
+	goalSnapSeq  uint64     // guarded by goalLock
+	goalWriteMu  sync.Mutex // serializes goals.json writes
+	goalWriteSeq uint64     // guarded by goalWriteMu
+)
+
+// snapshotGoalsLocked copies the goal slice (structs by value — later
+// in-place mutations through *goalItem pointers don't reach the copy).
+// Caller MUST hold goalLock; call the returned snapshot's write() after
+// releasing it. The zero goalSnap (seq 0) writes nothing, so a conditional
+// save can stay one unconditional write() after the unlock.
+func snapshotGoalsLocked() goalSnap {
+	goalSnapSeq++
+	return goalSnap{seq: goalSnapSeq, items: append([]goalItem(nil), goals...)}
+}
+
+func (s goalSnap) write() {
+	if s.seq == 0 {
+		return
+	}
+	b, err := json.MarshalIndent(s.items, "", "  ")
 	if err != nil {
 		emitLogf("goal", "error", "save marshal: %v", err)
 		return
 	}
+	goalWriteMu.Lock()
+	defer goalWriteMu.Unlock()
+	if s.seq <= goalWriteSeq {
+		return // a newer snapshot already reached the file
+	}
+	goalWriteSeq = s.seq
 	if err := os.WriteFile(GOALS_FILE, b, 0o644); err != nil {
 		emitLogf("goal", "error", "save write: %v", err)
 	}
@@ -590,8 +630,9 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 		kept = append(kept, old)
 	}
 	goals = append(kept, it)
-	saveGoalsLocked()
+	snap := snapshotGoalsLocked()
 	goalLock.Unlock()
+	snap.write()
 	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s plan=%t max=%d", it.ID, it.Name, group, plan, maxIter)
 	emit(group, Event{Event: "goal_set", ID: it.ID, Text: text, Session: goalWorkSessionFor(it.Name)})
 	startGoalDriver(group, it.ID)
@@ -618,15 +659,18 @@ func goalList(filter string) []goalItem {
 // from.
 func goalTransition(g, name string, from []string, apply func(*goalItem)) (goalItem, error) {
 	goalLock.Lock()
-	defer goalLock.Unlock()
 	it, err := resolveGoalLocked(g, name, from)
 	if err != nil {
+		goalLock.Unlock()
 		return goalItem{}, err
 	}
 	apply(it)
 	it.UpdatedAt = goalNow()
-	saveGoalsLocked()
-	return *it, nil
+	snap := snapshotGoalsLocked()
+	out := *it
+	goalLock.Unlock()
+	snap.write()
+	return out, nil
 }
 
 func goalApprove(g, name string) (goalItem, error) {
@@ -751,10 +795,12 @@ func goalCancelOnDestroy(g string) {
 			cancelled = append(cancelled, goals[i])
 		}
 	}
+	var snap goalSnap
 	if len(cancelled) > 0 {
-		saveGoalsLocked()
+		snap = snapshotGoalsLocked()
 	}
 	goalLock.Unlock()
+	snap.write()
 	for _, it := range cancelled {
 		emit(g, Event{Event: "goal_cancelled", ID: it.ID, Session: goalWorkSessionFor(goalSessionSlug(it))})
 		emitLogfG("goal", g, "info", "cancelled by destroy id=%s group=%s", it.ID, g)
@@ -784,10 +830,12 @@ func goalPauseOnStop(g string) {
 			paused = append(paused, goals[i])
 		}
 	}
+	var snap goalSnap
 	if len(paused) > 0 {
-		saveGoalsLocked()
+		snap = snapshotGoalsLocked()
 	}
 	goalLock.Unlock()
+	snap.write()
 	for _, it := range paused {
 		emitLogfG("goal", g, "warn", "pause id=%s (group stopped)", it.ID)
 		emit(g, Event{Event: "goal_paused", ID: it.ID, Text: "stopped", Session: goalWorkSessionFor(goalSessionSlug(it))})
@@ -933,12 +981,14 @@ func goalDriveOnce(g, id string) {
 		}
 		// iteration++ persists BEFORE the enqueue: a daemon crash mid-turn
 		// must not reset the count — the monotonic iteration is what bounds
-		// crash-restart loops at the cap.
+		// crash-restart loops at the cap. save.write() below is synchronous,
+		// so the invariant survives the write moving out from under goalLock.
 		it.Iteration++
 		it.UpdatedAt = goalNow()
-		saveGoalsLocked()
+		save := snapshotGoalsLocked()
 		snap := *it
 		goalLock.Unlock()
+		save.write()
 
 		claimed, note, ok := goalWorkerTurn(g, snap)
 		if !ok {
@@ -1082,12 +1132,14 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 		// First review of this run: from here the judge session exists as a
 		// tree leaf (goalLiveSessions). Persisted so the leaf survives a
 		// daemon restart for as long as the run does.
+		var save goalSnap
 		if !it.Judged {
 			it.Judged = true
 			it.UpdatedAt = goalNow()
-			saveGoalsLocked()
+			save = snapshotGoalsLocked()
 		}
 		goalLock.Unlock()
+		save.write()
 
 		clearGoalSession(g, judge)
 		goalLock.Lock()
@@ -1143,13 +1195,15 @@ func goalEnqueue(g, session, msg string) (<-chan error, error) {
 }
 
 func goalSetFeedback(id, feedback string) {
+	var snap goalSnap
 	goalLock.Lock()
 	if it := findGoalByIDLocked(id); it != nil {
 		it.LastFeedback = truncateRunes(feedback, goalNoteMax)
 		it.UpdatedAt = goalNow()
-		saveGoalsLocked()
+		snap = snapshotGoalsLocked()
 	}
 	goalLock.Unlock()
+	snap.write()
 }
 
 func goalMarkMet(g string, snap goalItem, note string) {
