@@ -61,8 +61,7 @@ daemon/              the daemon Go module (module `koto`):
 fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
-protocol/            the cross-project contract: koto.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import koto-protocol/pb; android/ Wire-generates Kotlin from koto.proto
-android/             Kotlin/Compose app (Gradle project; builds standalone — Wire reads ../protocol/koto.proto)
+protocol/            the cross-project contract: koto.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import koto-protocol/pb; the Android app (maintained out of tree) Wire-generates Kotlin from koto.proto
 sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-subagent (baked into the fc rootfs)
 host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
