@@ -75,6 +75,30 @@ func waitGoal(t *testing.T, g, want string) goalItem {
 	return goalItem{}
 }
 
+// waitGoalTerminal blocks until g's (sole) goal reaches ANY terminal status
+// (met / cancelled / exhausted) with its driver gone. For cleanup paths that
+// don't care which terminal outcome won a race.
+func waitGoalTerminal(t *testing.T, g string) goalItem {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		goalLock.Lock()
+		var snap goalItem
+		found := false
+		if it := soleGoalLocked(g); it != nil {
+			snap, found = *it, true
+		}
+		driver := found && goalDrivers[snap.ID]
+		goalLock.Unlock()
+		if found && goalTerminal(snap.Status) && !driver {
+			return snap
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("goal for %q never reached a terminal status", g)
+	return goalItem{}
+}
+
 // Goal sessions are named after the goal's generated id (goal-<id>, and
 // goal-<id>-judge for the acceptance review), so tests classify a turn by its
 // ROLE instead of matching a fixed session name.
@@ -232,6 +256,54 @@ func TestGoalMetInformsCoordinator(t *testing.T) {
 	})
 }
 
+// TestGoalCapExhaustsAndInformsCoordinator: a goal whose worker never claims
+// completion runs its whole iteration budget, then TERMINATES as `exhausted`
+// (not a resumable pause) and hands the outcome back to the group's default
+// session — the same coordinator handoff the met path performs.
+func TestGoalCapExhaustsAndInformsCoordinator(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-exhaust1"
+	coord := make(chan string, 1)
+	withTurnFn(func(gg, session, msg string) error {
+		switch goalRole(session) {
+		case roleWork:
+			// never claim done — force the loop to the cap
+		case roleJudge:
+			t.Errorf("judge ran though no completion was ever claimed")
+		default:
+			if gg == g && session == "" {
+				coord <- msg
+			}
+		}
+		return nil
+	}, func() {
+		it, err := goalSet(g, "reach the moon", "1. on the moon", "", 2, false)
+		if err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		got := waitGoal(t, g, goalStatusExhausted)
+		if got.CompletedAt == 0 {
+			t.Errorf("exhausted goal has no CompletedAt")
+		}
+		if got.Iteration != 2 {
+			t.Errorf("expected exhaustion at iteration 2, got %d", got.Iteration)
+		}
+		select {
+		case msg := <-coord:
+			for _, want := range []string{
+				"ended WITHOUT completing", it.Name, "reach the moon",
+				"1. on the moon", "TERMINATED", "coordinator",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("coordinator turn missing %q:\n%s", want, msg)
+				}
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("goal exhausted but no coordinator turn arrived on the default session")
+		}
+	})
+}
+
 // TestGoalIterationHandoffChains: every plan/worker turn leaves an entry the
 // next iteration picks up from — the turn's closing report is captured after
 // the turn, persisted on the record, and embedded into the following worker
@@ -265,7 +337,7 @@ func TestGoalIterationHandoffChains(t *testing.T) {
 		if _, err := goalApprove(g, ""); err != nil {
 			t.Fatalf("approve: %v", err)
 		}
-		it = waitGoal(t, g, goalStatusPaused)
+		it = waitGoal(t, g, goalStatusExhausted)
 
 		w := rec.byRole(roleWork)
 		if len(w) != 3 { // plan + 2 iterations
@@ -352,7 +424,7 @@ func TestGoalRejectedClaimFeedsFeedback(t *testing.T) {
 	})
 }
 
-func TestGoalCapPausesAndResumeResets(t *testing.T) {
+func TestGoalCapExhaustsAndCannotResume(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-cap1"
 	var notified []string
@@ -361,30 +433,29 @@ func TestGoalCapPausesAndResumeResets(t *testing.T) {
 		if _, err := goalSet(g, "impossible", "1. magic", "", 2, false); err != nil {
 			t.Fatalf("goalSet: %v", err)
 		}
-		it := waitGoal(t, g, goalStatusPaused)
-		if it.PausedReason != "cap" || it.Iteration != 2 {
-			t.Fatalf("paused=%q iteration=%d, want cap/2", it.PausedReason, it.Iteration)
+		// Hitting the cap TERMINATES the goal as exhausted, not paused.
+		it := waitGoal(t, g, goalStatusExhausted)
+		if it.Iteration != 2 {
+			t.Fatalf("exhausted iteration=%d, want 2", it.Iteration)
+		}
+		if it.CompletedAt == 0 {
+			t.Fatalf("exhausted goal has no CompletedAt")
+		}
+		if !goalTerminal(it.Status) {
+			t.Fatalf("exhausted must be terminal, got %q", it.Status)
 		}
 		found := false
 		for _, n := range notified {
-			if strings.HasPrefix(n, "high:goal paused (cap)") {
+			if strings.HasPrefix(n, "high:goal exhausted") {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("no cap notification, got %v", notified)
+			t.Fatalf("no exhausted notification, got %v", notified)
 		}
-		// Resume grants a fresh budget and runs back to the cap.
-		it2, err := goalResume(g, "")
-		if err != nil {
-			t.Fatalf("resume: %v", err)
-		}
-		if it2.Iteration != 0 {
-			t.Fatalf("resume did not reset iteration: %d", it2.Iteration)
-		}
-		it3 := waitGoal(t, g, goalStatusPaused)
-		if it3.Iteration != 2 {
-			t.Fatalf("iteration after resumed run = %d, want 2", it3.Iteration)
+		// A terminated goal is NOT resumable — continuing means a fresh goal.
+		if _, err := goalResume(g, ""); err == nil {
+			t.Fatalf("resume of an exhausted goal should be refused")
 		}
 	})
 }
@@ -493,26 +564,27 @@ func TestGoalSetConflictsAndValidation(t *testing.T) {
 		if _, err := goalSet(g, "t", "", "", 0, false); err == nil {
 			t.Fatal("empty criteria must be rejected")
 		}
-		first, err := goalSet(g, "build", "1. built", "", 1, false)
+		first, err := goalSet(g, "build", "1. built", "", 1, true)
 		if err != nil {
 			t.Fatalf("goalSet: %v", err)
 		}
 		// Goals run CONCURRENTLY: a second set on an active group starts a
-		// second run with its own session pair.
-		second, err := goalSet(g, "another", "1. other", "", 1, false)
+		// second run with its own session pair. Plan-first so both park at
+		// awaiting_approval (a stable, driver-less, resolvable state) instead
+		// of racing to the iteration cap, which now terminates the run.
+		second, err := goalSet(g, "another", "1. other", "", 1, true)
 		if err != nil {
 			t.Fatalf("second concurrent goal refused: %v", err)
 		}
 		if second.Name == first.Name {
 			t.Fatalf("both runs share name %q — their transcripts would blend", first.Name)
 		}
-		// Both run out their cap independently (cap=1, stub never claims).
-		waitGoalByID(t, first.ID, goalStatusPaused)
-		waitGoalByID(t, second.ID, goalStatusPaused)
+		waitGoalByID(t, first.ID, goalStatusAwaiting)
+		waitGoalByID(t, second.ID, goalStatusAwaiting)
 		// A name-less verb is ambiguous with two candidates; naming works,
 		// and the id addresses too.
-		if _, err := goalResume(g, ""); err == nil || !strings.Contains(err.Error(), "name one of") {
-			t.Fatalf("ambiguous name-less resume not refused: %v", err)
+		if _, err := goalCancel(g, ""); err == nil || !strings.Contains(err.Error(), "name one of") {
+			t.Fatalf("ambiguous name-less cancel not refused: %v", err)
 		}
 		if _, err := goalCancel(g, first.Name); err != nil {
 			t.Fatalf("cancel by name: %v", err)
@@ -521,7 +593,7 @@ func TestGoalSetConflictsAndValidation(t *testing.T) {
 			t.Fatalf("cancel by id: %v", err)
 		}
 		// A fresh set retires the terminal records.
-		fresh, err := goalSet(g, "fresh", "1. fresh", "", 1, false)
+		fresh, err := goalSet(g, "fresh", "1. fresh", "", 1, true)
 		if err != nil {
 			t.Fatalf("goal_set after terminal goals should succeed: %v", err)
 		}
@@ -536,7 +608,7 @@ func TestGoalSetConflictsAndValidation(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("records after fresh set = %d, want 1 (terminals retired)", n)
 		}
-		waitGoalByID(t, fresh.ID, goalStatusPaused)
+		waitGoalByID(t, fresh.ID, goalStatusAwaiting)
 	})
 }
 
@@ -672,7 +744,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 		if _, err := goalSet(g, "persist me", "1. saved", "", 1, false); err != nil {
 			t.Fatalf("goalSet: %v", err)
 		}
-		want := waitGoal(t, g, goalStatusPaused)
+		want := waitGoal(t, g, goalStatusExhausted)
 
 		goalLock.Lock()
 		goals = nil
@@ -706,7 +778,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 		saveGoalsLocked()
 		goalLock.Unlock()
 		resumeGoalDrivers()
-		waitGoal(t, "goal-resume-run", goalStatusPaused) // cap=1
+		waitGoal(t, "goal-resume-run", goalStatusExhausted) // cap=1
 		if len(rec.turns) == 0 {
 			t.Fatal("running goal was not re-driven")
 		}
@@ -749,6 +821,7 @@ func TestCtlGoalVerbAuthorization(t *testing.T) {
 		// A non-main group setting a goal gets ITSELF, whatever group it names.
 		r, ok := ctlDispatch("peer", ctlLine(t, map[string]any{
 			"cmd": "goal_set", "group": "other", "text": "ship it", "criteria": "1. shipped",
+			"plan": true,
 		})).(goalResp)
 		if !ok || !r.OK {
 			t.Fatalf("self-targeted goal_set refused: %+v", r)
@@ -797,8 +870,8 @@ func TestCtlGoalVerbAuthorization(t *testing.T) {
 		}
 
 		for _, g := range []string{"peer", "elsewhere"} {
-			_, _ = goalCancel(g, "")
-			waitGoal(t, g, goalStatusCancelled)
+			_, _ = goalCancel(g, "") // may already be terminal (exhausted at the cap)
+			waitGoalTerminal(t, g)
 		}
 	})
 }
@@ -807,26 +880,48 @@ func TestCtlGoalSetAndStatusFromMain(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-ctlset1"
 	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		// goal_set + goal_status via ctl from main. Plan-first so the goal
+		// parks at awaiting_approval deterministically instead of racing to
+		// its iteration cap (which now TERMINATES the run as exhausted).
 		resp, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
 			"cmd": "goal_set", "group": g, "text": "build it", "criteria": "1. built",
-			"max_iterations": 1, "plan": false})).(goalResp)
+			"max_iterations": 1, "plan": true})).(goalResp)
 		if !ok || !resp.OK {
 			t.Fatalf("goal_set from main failed: %+v", resp)
 		}
-		if resp.Item.Group != g || resp.Item.Status != goalStatusRunning {
+		if resp.Item.Group != g || resp.Item.Status != goalStatusPlanning {
 			t.Fatalf("unexpected item: %+v", resp.Item)
 		}
-		waitGoal(t, g, goalStatusPaused) // cap=1, stub never claims
+		waitGoal(t, g, goalStatusAwaiting)
 
 		lst, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_status", "group": g})).(goalListResp)
 		if !ok || !lst.OK || len(lst.Goals) != 1 || lst.Goals[0].ID != resp.Item.ID {
 			t.Fatalf("goal_status: %+v", lst)
 		}
+
+		// goal_resume via ctl from main: seed a genuinely PAUSED goal (operator
+		// pause, the only resumable state — the cap no longer produces one) and
+		// resume it, which grants a fresh budget (iteration reset to 0). The
+		// resumed run then spends that budget and terminates as exhausted.
+		goalLock.Lock()
+		goals = []goalItem{{ID: "cccccccccccc", Group: g, Name: "resumeme", Text: "t", Criteria: "c",
+			Status: goalStatusPaused, PausedFrom: goalStatusRunning, PausedReason: "operator",
+			MaxIterations: 1, Iteration: 1, CreatedAt: goalNow()}}
+		saveGoalsLocked()
+		goalLock.Unlock()
 		res, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_resume", "group": g})).(goalResp)
 		if !ok || !res.OK || res.Item.Iteration != 0 {
 			t.Fatalf("goal_resume: %+v", res)
 		}
-		waitGoal(t, g, goalStatusPaused)
+		waitGoal(t, g, goalStatusExhausted)
+
+		// goal_cancel via ctl from main, on a fresh plan-first goal.
+		cs, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
+			"cmd": "goal_set", "group": g, "text": "cancel me", "criteria": "1. x", "plan": true})).(goalResp)
+		if !ok || !cs.OK {
+			t.Fatalf("goal_set (cancel target): %+v", cs)
+		}
+		waitGoal(t, g, goalStatusAwaiting)
 		can, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{"cmd": "goal_cancel", "group": g})).(goalResp)
 		if !ok || !can.OK || can.Item.Status != goalStatusCancelled {
 			t.Fatalf("goal_cancel: %+v", can)
@@ -1530,9 +1625,11 @@ func TestGoalReplacedWhileDriverParked(t *testing.T) {
 		if !found {
 			t.Fatal("replacement goal was never driven — driver died with the old goal")
 		}
-		if _, err := goalCancel(g, ""); err != nil {
-			t.Fatalf("cancel real: %v", err)
-		}
-		waitGoal(t, g, goalStatusCancelled)
+		// The no-op turn never claims done, so the replacement may reach its
+		// iteration cap and self-terminate (exhausted) before we cancel it.
+		// This test's point is only that the replacement got DRIVEN; either a
+		// clean cancel or a cap self-termination is an acceptable terminal end.
+		_, _ = goalCancel(g, "") // may fail if already terminal — fine
+		waitGoalTerminal(t, g)
 	})
 }
