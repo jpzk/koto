@@ -50,12 +50,16 @@ exits with "terminal too small"):
 ```python
 m, s = pty.openpty()
 fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
-subprocess.Popen(["podman","run","--rm","-it","--name","cs_tui_verify",
+subprocess.Popen(["podman","run","--rm","-it","--detach-keys=","--name","cs_tui_verify",
   "--network","koto-net","--security-opt","label=disable",
   "-v", HERE+"/creds:/koto-creds:ro","-e","TERM=xterm-256color",
   "-e","KOTO_TOKEN="+token, "koto-tui"], stdin=s, stdout=s, stderr=s)
 # read from m in a select loop into a raw file; os.write(m, b"/sw g\r") to type
 ```
+
+`--detach-keys=` matters: podman's default chord is ctrl-p,ctrl-q, so without
+it a lone ctrl+p is held in the attach relay until the next byte (the TUI
+sees both at once and a following esc closes the palette before it draws).
 
 Render the raw capture with a minimal ANSI screen model (apply `ESC[r;cH`,
 `ESC[K`, `ESC[2J`; drop SGR) — grep the final 140x40 dump for expected lines

@@ -87,11 +87,19 @@ host-run: $(BUILD)/koto-host
 # The /reload inner loop re-invokes `$(MAKE) tui-build` so the same sentinel
 # logic kicks in: if the user edited any tui/*.go before pressing /reload,
 # Make rebuilds; otherwise it's a no-op and the TUI just respawns.
+# --detach-keys="": podman's default detach chord is ctrl-p,ctrl-q, so the
+# attach relay HOLDS a ctrl+p until the next key arrives to see whether it is
+# ctrl+q — the TUI's command palette opened only on the second keypress (the
+# first was released into the pty together with the second, and esc/enter
+# closed the box before a frame drew). Measured 2026-08-25: a lone 0x10 sat
+# in the relay 2s until the next byte; a plain pty delivered it at once. An
+# empty chord disables detaching, which is fine — /exit is how you leave.
 tui: $(BUILD)/koto-tui
 	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`make pki-init && make pki-client NAME=tui\`"; exit 1; }
 	@mkdir -p run/tui
 	@while :; do \
 	  podman run --rm -it \
+	    --detach-keys="" \
 	    --network koto-net \
 	    --security-opt label=disable \
 	    -v $(PWD)/creds:/koto-creds:ro \
