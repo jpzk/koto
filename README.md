@@ -273,6 +273,36 @@ infrastructure), [Consumer Terms](https://www.anthropic.com/legal/consumer-terms
 legal advice; the linked documents govern. The Venice provider is unaffected
 by any of this (`creds/venice.key`, Venice's own terms).
 
+## AI disclosure
+
+koto was built predominantly with AI models. Nearly all of the code, the
+design docs, and this README were written by Claude (Anthropic's models, via
+Claude Code) working from prompts, reviews, and corrections by a single human
+maintainer. The human decided *what* to build and what the trust model must
+guarantee, read and pushed back on the output, and ran it; the models wrote
+most of the lines. Commit messages record the design rationale in the same
+way — many were drafted by the model and edited by the maintainer.
+
+What that means for you as a reader or user:
+
+- **Review it like code from a fast, confident contractor you don't know.**
+  The isolation claims (KVM boundary, no-NIC default, jailed VMM, credential
+  proxy) were verified by running them, and the security-relevant parts have
+  been audited more than once (`docs/history/` holds the dated audits), but
+  no part of this repository has been reviewed line-by-line by a second
+  human. Treat it as unaudited from a third-party standpoint.
+- **Prose may overstate.** Model-written docs tend toward completeness and
+  certainty; where the README or `CLAUDE.md` and the code disagree, the code
+  is right and a doc fix is welcome.
+- **Dependencies were still chosen deliberately.** The ≥6-week pin rule and
+  the small dependency tree (see [SBOM](#sbom-supply-chain)) were human
+  constraints, not model defaults.
+- **Licensing.** AI-generated code has an unsettled copyright status in some
+  jurisdictions; if that matters to you, factor it in.
+
+If you contribute with AI assistance, that is fine — say so in the commit
+message or PR so the provenance stays visible.
+
 ## Further reading
 
 - `docs/firecracker-vsock.md` — authoritative microVM runtime design
