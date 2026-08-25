@@ -9,7 +9,7 @@ network-isolated TUI container speaking gRPC over mTLS.
 ## Architecture
 
 ```
-you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
+you ──▶ cs_tui (Go/BubbleTea, scratch image, on koto-net; creds ro)
              │ gRPC over mTLS + bearer token (:8443)
              ▼
         cs_host ─ daemon (Go) + credential-injecting proxy
@@ -26,18 +26,19 @@ you ──▶ cs_tui (Go/BubbleTea, --network=none, sock-only)
 
 - **Daemon** (`daemon/`; entry in `daemon.go`, VM runtime in `fc.go`, one
   topic per file — see CLAUDE.md → Layout): boots/supervises microVMs, serializes one
-  `claude -p --continue` turn per inbound message, tails each group's log and
-  fans events out to subscribers, runs the cron scheduler and the ctl verb
-  plane.
+  `claude -p --bare --resume <session>` turn per inbound message, tails each
+  group's log and fans events out to subscribers, runs the cron scheduler,
+  the goal loop (`goals.go`) and the ctl verb plane.
 - **Proxy** (`proxy.go`): one listener port per group (attribution), injects
   the real credential per request, records per-request token metrics. Guests
   authenticate with a sentinel (`ANTHROPIC_API_KEY=proxied`).
 - **Guest** (`fcguest/`, `sidecar/`): a PID-1 agent bridges everything over a
   single vsock device; `entrypoint.sh` runs the message loop as uid 1000.
 - **Orchestration is verb-based**: no shared filesystem anywhere. `main`
-  drives peers via ctl verbs (`spawn`/`send`/`stop`/`list`/`sched_*`/
-  `config_set`/`tail`); non-main groups get only self-scheduling
-  verbs, force-scoped to themselves.
+  drives peers via ctl verbs (`spawn`/`send`/`stop`/`list`/`resources`/
+  `sched_*`/`config_set`/`tail`); non-main groups get only self-targeted
+  verbs (`sched_*`, `goal_*`, `notify`, `job_done`, and a solicited one-shot
+  `report` back to main), force-scoped to themselves.
 
 ## Data flow
 
@@ -51,14 +52,16 @@ daemon log tailer → parsed frames with per-group monotonic `seq` → in-memory
 ring (1024/group) → `SubscribeGroup` streams (gapless resume via `since_seq`;
 explicit `gap` event when the ring can't cover).
 
-**Vsock port map** (single device, demuxed by port; guest→host only):
+**Vsock port map** (single device, demuxed by port):
 
-| port | purpose |
-|------|---------|
-| 9000 | LLM API egress → per-group proxy port (credential injection) |
-| 9001 | log stream (host file is the source of truth) |
-| 9002 | ctl plane (JSON lines) |
-| 9003 | L3 ethernet frames → gVisor gateway (`network` ≠ `none`) |
+| dir | port | purpose |
+|-----|------|---------|
+| guest→host | 9000 | LLM API egress → per-group proxy port (credential injection) |
+| guest→host | 9001 | group log stream (host file is the source of truth) |
+| guest→host | 9002 | ctl plane (JSON lines) |
+| guest→host | 9003 | L3 ethernet frames → gVisor gateway (`network` ≠ `none`) |
+| guest→host | 9004 | per-slot turn streams (one per concurrent turn) |
+| host→guest | 10000 | agent RPC (init / msg / exec / exec_stream / shutdown) |
 
 ## Threat model
 
@@ -74,7 +77,9 @@ tier 2   cs_host              daemon + proxy; vetted code, pinned deps
   │      blast radius: koto OAuth token + workspaces — no path to host podman
   │  boundary: KVM + jailer; vsock-only IPC; no shared FS; verb authorization
 tier 3   microVM groups       untrusted; own kernel, no NIC, sentinel creds
-tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch image
+tier 2.5 cs_tui               gRPC client on koto-net (mTLS to cs_host:8443 only —
+                              the proxy binds 127.0.0.1 inside cs_host); scratch
+                              image; mounts creds/ ro, scripts/ + prompts/ ro, run/tui rw
 ```
 
 **Security architecture — the load-bearing decisions:**
@@ -107,9 +112,13 @@ tier 2.5 cs_tui               sock-only gRPC relay; --network=none, scratch imag
 - **Control-plane transport is mTLS + bearer** (private CA, client-cert
   fingerprint allowlist, per-RPC token — `auth.go`). No anonymous endpoint.
 - **The UI is below the daemon in privilege.** `cs_tui` is a static Go binary
-  on `scratch` with `--network=none` and a single socket mount: a compromised
-  TUI dependency yields a command relay the daemon still authorizes, not
-  workspace or network access.
+  on `scratch` joined to `koto-net` with the client PKI material mounted
+  read-only: a compromised TUI dependency yields a gRPC client the daemon
+  still authorizes per verb (role ACL), not workspace access. It has no
+  shell, no ca-certs, and the only reachable service is the daemon — the
+  proxy listens on cs_host's loopback. Caveat: `creds/` is mounted whole
+  (ro), so the TUI *can* read the OAuth token / Venice key file; narrowing
+  that mount to the client cert/key/CA is on the release todo.
 - **No Docker-out-of-Docker.** cs_host holds no podman socket (removed with
   the whisper container, its last user); a tier-2 compromise cannot spawn
   containers or mount host paths. Podman exists only *inside* guests,
@@ -126,9 +135,9 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 
 | module | direct deps | indirect |
 |--------|-------------|----------|
-| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | ~21 |
+| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `golang.org/x/sys`, `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | 19 |
 | `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
-| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | ~35 |
+| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` / `x/ansi` / `x/vt` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | 38 |
 | `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
 
 **Pinned non-Go components:**
@@ -140,9 +149,10 @@ proxy.golang.org before adoption — see CLAUDE.md → Conventions).
 | protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
 
 **Container images:** cs_host = `golang:1.24-alpine` + nodejs/npm/
-e2fsprogs/tar; TUI runtime = `scratch` (one static binary, no shell, no
-ca-certs); guest rootfs = `fedora:44` + ~25 dnf packages (podman, crun,
-conmon, fuse-overlayfs, passt, nodejs, python3, git, ripgrep, sudo, …);
+e2fsprogs(+extra)/tar + claude-code; TUI runtime = `scratch` (one static
+binary, no shell, no ca-certs); guest rootfs = `fedora:44` + 27 dnf packages
+(podman, crun, conmon, fuse-overlayfs, passt, nodejs, python3, git, ripgrep,
+tmux, sudo, …) + claude-code;
 build-only = `ubuntu:24.04` (kernel) and `golang:1.24-alpine` (protoc,
 fc-agent).
 
@@ -157,10 +167,12 @@ claude-code layers are the accepted moving parts.
 
 | key | values | applies |
 |-----|--------|---------|
-| `provider` | `venice` (default) \| `claudesdk` | next message |
+| `provider` | `claudesdk` (default) \| `venice` | next message |
+| `model` | provider model id (default `claude-sonnet-5` / `kimi-k2.5`) | next message |
 | `network` | `none` (default) \| `wan` \| `lan` \| `full` | `/restart` |
 | `size` | `small` (default) \| `medium` \| `large` \| `xlarge` | `/restart` |
 | `root` | `no` (default) \| `yes` | `/restart` |
+| `autostart` | `no` (default) \| `yes` — boot with the daemon | daemon start |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `koto-net` | `/restart` |
 
 ## Host requirements
@@ -195,7 +207,7 @@ configured into the host system itself. What the host must provide:
   pinned Firecracker release, clones the Amazon Linux kernel tree, and
   compiles the guest kernel inside an Ubuntu container (a few GiB of disk
   under `.kernelcache/`, minutes of CPU). At runtime each group reserves
-  1–4 GiB RAM and an 8–16 GiB workspace image per its `size` preset.
+  1–8 GiB RAM and an 8–24 GiB workspace image per its `size` preset.
 
 Deliberate **non**-requirements: no root (all rootless), no `vhost_vsock`
 module (Firecracker's hybrid vsock is unix-socket-backed), no host
@@ -209,10 +221,13 @@ tuning (`--security-opt label=disable` is set on every podman run).
 ```sh
 make host-build   # cs_host image
 make fc-assets    # firecracker binary + kernel + golden rootfs (required)
+make pki-init && make pki-client NAME=tui   # private CA + the TUI's client cert
 make login        # one-time subscription OAuth into ./creds/ — OR export
                   # ANTHROPIC_API_KEY before host-run (recommended, see below)
 make host-run     # start daemon (+ main group)
-make tui          # attach the TUI (Ctrl+C detaches; daemon keeps running)
+make tui-build    # TUI image (first time, and after editing tui/*.go)
+make tui          # attach the TUI (/exit detaches; daemon keeps running;
+                  # Ctrl+C interrupts the agent's turn)
 make stop         # tear down
 ```
 
