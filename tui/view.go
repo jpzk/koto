@@ -514,11 +514,6 @@ func (m Model) renderLoadingSegment() string {
 
 func (m Model) renderStatusRight(spin string) string {
 	var parts []string
-
-	if !m.connected {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).
-			Render(fmt.Sprintf("  reconnecting %s ", spin)))
-	}
 	// Activity segment — the spelled-out progress line (phase, both clocks,
 	// retry detail), which used to live in the hint bar. The daemon's phase
 	// (activity.go) is authoritative when present — it covers the stretches
@@ -548,12 +543,30 @@ func (m Model) renderStatusRight(spin string) string {
 	}
 	parts = append(parts, act)
 
-	// tok/s — daemon-measured output-token throughput over its trailing
-	// window: the focused group, then the fleet (Σ). Always shown, zeros
-	// included, so the chip is a fixture the eye can find rather than an
-	// element that pops in and out. Signature amber, matching the koto accent.
-	parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).
-		Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
+	// Top-right corner: normally the tok/s chip — daemon-measured
+	// output-token throughput over its trailing window: the focused group,
+	// then the fleet (Σ). Always shown, zeros included, so the chip is a
+	// fixture the eye can find rather than an element that pops in and out.
+	// Signature amber, matching the koto accent. While the daemon is
+	// UNREACHABLE the corner swaps to the RPC error instead (red — this IS
+	// an alert): the probe loop is retrying, so a stale tok/s figure would
+	// be a lie, and the corner is the one fixed spot the eye already
+	// checks. The chip carries the compacted error (rpcErrShort), the
+	// retry count, and the spinner; the full error is in the chat as an
+	// err line. (This replaces the old "reconnecting" chip that sat left
+	// of the activity segment.) Bold so mono terminals keep the emphasis
+	// once the strip removes the red.
+	if !m.connected {
+		msg := "rpc error"
+		if m.lastRPCErr != "" {
+			msg += ": " + m.lastRPCErr
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).
+			Render(fmt.Sprintf("  %s · retry %d %s ", msg, m.reconnectAttempt, spin)))
+	} else {
+		parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).
+			Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
+	}
 
 	return strings.Join(parts, "")
 }

@@ -433,6 +433,10 @@ type Model struct {
 	ticking          bool
 	reconnecting     bool
 	reconnectAttempt int
+	// lastRPCErr is the compacted error of the most recent failed daemon
+	// probe (rpcErrShort), shown red in the status bar's top-right corner
+	// while the reconnect loop retries; "" once a probe succeeds.
+	lastRPCErr string
 
 	// metric / globalMetric are the *best known* metric maps, not verbatim
 	// the last poll: their "usage" / "ratelimit" sub-maps survive a poll that
@@ -1699,6 +1703,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case listMsg:
 		if msg.err != nil {
+			m.lastRPCErr = rpcErrShort(msg.err)
 			m.addLine(logLine{kind: "err", text: fmt.Sprintf("daemon: %v", msg.err)})
 			return m, m.scheduleReconnect()
 		}
@@ -1712,6 +1717,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// backoff series starts from the bottom.
 		m.reconnecting = false
 		m.reconnectAttempt = 0
+		m.lastRPCErr = ""
 		if !m.watching {
 			m.watching = true
 			startWatchState()
@@ -3283,6 +3289,26 @@ func (m *Model) ensureTicking() tea.Cmd {
 // stale group + draft (and silently retargeted the first send).
 func (m *Model) persistUIState() {
 	saveState(m.sock, persistedState{Cur: m.cur, Draft: m.input.Value(), Sessions: m.session, Theme: activeTheme})
+}
+
+// rpcErrShort compacts a probe error for the status bar's corner chip: the
+// gRPC status code alone ("unavailable", "deadline exceeded") — the full
+// error is already printed into the chat as an err line, and the corner has
+// ~20 cells, not a paragraph. Unknown-code errors (a dial error wrapped
+// outside gRPC) fall back to a truncated err string.
+func rpcErrShort(err error) string {
+	if err == nil {
+		return ""
+	}
+	if c := status.Code(err); c != codes.Unknown {
+		return strings.ToLower(c.String())
+	}
+	s := err.Error()
+	s = strings.TrimPrefix(s, "rpc error: ")
+	if len(s) > 24 {
+		s = s[:24] + "…"
+	}
+	return s
 }
 
 func (m *Model) scheduleReconnect() tea.Cmd {
