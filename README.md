@@ -103,7 +103,16 @@ tier 2.5 cs_tui               gRPC client on koto-net (mTLS to cs_host:8443 only
   by destination class — `wan` = public internet only, `lan` = host LAN only,
   `full` = both. The guest can never reach loopback/link-local/cs_host itself (the
   control plane stays unreachable); general HTTPS then bypasses proxy audit —
-  that's the documented tradeoff.
+  that's the documented tradeoff. **Performance caveat:** the gateway is a
+  userspace netstack running *inside the daemon process* — every packet of a
+  networked guest costs daemon CPU (~a core around 1 Gbps, per busy guest).
+  The VMMs run niced and cgrouped so the daemon always preempts them, but the
+  gateway is daemon-side, so this is the one path where guest load is *not*
+  contained by that budget: a guest saturating its NIC (large `git clone`,
+  `podman pull`, bulk ingest) competes directly with the proxy, event streams
+  and gRPC for daemon cycles. Fine for API-scale traffic; if the fleet feels
+  laggy while a networked group downloads, this is why. `network=none` groups
+  are unaffected (no NIC at all).
 - **No shared mutable filesystem.** Workspaces are per-group ext4 images;
   there is no `/peers`, no bind mounts into guests. Cross-group interaction
   exists only as authorized ctl verbs, checked against source-group identity
