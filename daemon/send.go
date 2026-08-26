@@ -157,6 +157,29 @@ exit 0`
 
 // ---- send -----------------------------------------------------------------
 
+// fencePromptEcho neutralizes marker forgery in the `>>> ` prompt echo. The
+// echo is written raw into the host log, where every continuation line of a
+// multi-line message is parsed by the shared marker grammar — so a message
+// body carrying "\n[[turn_end]]" or "\n[[notify]] …" would end the turn or
+// banner the operator. Message text is not always operator-typed: job_done
+// output (flushNotify), main's ctl `send`, and delegation reports all reach
+// here. Continuation lines that would parse as a marker get the same leading
+// backslash stream_filter.js uses for close markers in tool output: the
+// parser then sees plain text, and the reader sees the literal line.
+func fencePromptEcho(msg string) string {
+	if !strings.Contains(msg, "\n") {
+		return msg
+	}
+	lines := strings.Split(msg, "\n")
+	for i := 1; i < len(lines); i++ {
+		l := lines[i]
+		if strings.HasPrefix(l, "[[") || strings.HasPrefix(l, "[ts:") || strings.HasPrefix(l, ">>> ") {
+			lines[i] = "\\" + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // sendNow performs one message turn for group g in the given session ("" =
 // default): compose the system prompt, deliver it, and block until
 // [[turn_end]] (or turnWaitTimeout).
@@ -222,7 +245,7 @@ func sendNow(g, session, msg string) error {
 	// default turn after a named one resets the attribution. The slot is what
 	// makes the sticky marker safe again: no other turn writes here.
 	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), msg)
+		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), fencePromptEcho(msg))
 		f.Close()
 	}
 

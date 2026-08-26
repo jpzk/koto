@@ -261,6 +261,10 @@ func emitLogfQuiet(subsystem, level, format string, args ...any) {
 // logDeliver is the delivery half of emitLogG: stderr mirror, ring append,
 // subscriber fan-out.
 func logDeliver(subsystem, group, level, msg string) {
+	// Log lines quote guest-authored bytes (ctl JSON, job_done fields, exec
+	// output) and reach stderr and the TUI log pane unframed — scrub them
+	// here, the one funnel, rather than at every emit site.
+	msg = sanitize(msg)
 	pbev := &pb.LogEvent{
 		Event:     "log",
 		Level:     level,
