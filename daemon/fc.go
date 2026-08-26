@@ -898,14 +898,76 @@ func fcStreamLogSink(g, p string, c net.Conn) {
 	fcStreamLogSinkReader(g, p, c, c)
 }
 
+// The 9001 stream is the one channel through which a guest writes into the
+// HOST filesystem, and it used to be unmetered: a guest looping output into
+// its log FIFO could fill the host disk (the fleet-wide EROFS failure) with
+// only the 80/90% alert as a brake. Two guards, per group:
+//
+//   - a byte-rate token bucket that SLEEPS rather than drops (backpressure —
+//     the guest's FIFO forwarder blocks, its writer blocks behind it, nothing
+//     is lost). Chat-log rates are KB/s; the budget is far above any
+//     legitimate turn and bounds a hostile writer to ~GB/hour, well inside
+//     the alert's reaction window.
+//   - a hard per-file ceiling past which chunks are dropped with one error
+//     line per connection, so a stalled operator still can't lose the host.
+const (
+	fcLogSinkRateBytes  = 1 << 20        // 1 MiB/s sustained
+	fcLogSinkBurstBytes = 8 << 20        // 8 MiB burst
+	fcLogSinkMaxBytes   = int64(1) << 30 // 1 GiB per log file
+)
+
+var (
+	fcLogSinkRateMu sync.Mutex
+	fcLogSinkRate   = map[string]*fcByteBucket{}
+)
+
+type fcByteBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+// fcLogSinkWait charges n bytes to g's bucket and returns how long the caller
+// must sleep before writing so the sustained rate holds.
+func fcLogSinkWait(g string, n int) time.Duration {
+	fcLogSinkRateMu.Lock()
+	defer fcLogSinkRateMu.Unlock()
+	b := fcLogSinkRate[g]
+	now := time.Now()
+	if b == nil {
+		b = &fcByteBucket{tokens: fcLogSinkBurstBytes, last: now}
+		fcLogSinkRate[g] = b
+	}
+	b.tokens = min(fcLogSinkBurstBytes, b.tokens+now.Sub(b.last).Seconds()*fcLogSinkRateBytes)
+	b.last = now
+	b.tokens -= float64(n)
+	if b.tokens >= 0 {
+		return 0
+	}
+	return time.Duration(-b.tokens / fcLogSinkRateBytes * float64(time.Second))
+}
+
 func fcStreamLogSinkReader(g, p string, r io.Reader, c net.Conn) {
 	defer c.Close()
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	mu := logWriteLock(p)
 	buf := make([]byte, 32*1024)
+	capped := false
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			if d := fcLogSinkWait(g, n); d > 0 {
+				time.Sleep(d)
+			}
+			if st, serr := os.Stat(p); serr == nil && st.Size() >= fcLogSinkMaxBytes {
+				if !capped {
+					capped = true
+					emitLogfG("fc", g, "error", "[%s] log sink: %s at %d bytes ceiling, dropping guest log output", g, filepath.Base(p), st.Size())
+				}
+				if err != nil {
+					return
+				}
+				continue
+			}
 			mu.Lock()
 			werr := logSinkAppend(p, buf[:n])
 			mu.Unlock()
@@ -1012,6 +1074,9 @@ func readLineByte(c net.Conn) (string, error) {
 	}
 }
 
+// fcAgentRespMax bounds one agent RPC response line (see fcAgentCall).
+const fcAgentRespMax = 16 << 20
+
 type fcAgentResp struct {
 	OK     bool   `json:"ok"`
 	Error  string `json:"error,omitempty"`
@@ -1031,7 +1096,11 @@ func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentR
 	if _, err := c.Write(append(b, '\n')); err != nil {
 		return nil, err
 	}
-	line, err := bufio.NewReader(c).ReadString('\n')
+	// Bounded: the guest agent authors this line, and ReadString grows
+	// without limit until '\n' — an unbounded reader is a daemon-memory
+	// lever for a hostile guest. Exec output is base64 inside one line, so
+	// the bound is also the exec output cap.
+	line, err := bufio.NewReader(io.LimitReader(c, fcAgentRespMax)).ReadString('\n')
 	if err != nil {
 		return nil, err
 	}

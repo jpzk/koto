@@ -116,7 +116,11 @@ func flushNotify(group, session string) {
 		if rc == "" {
 			rc = "?"
 		}
-		fmt.Fprintf(&b, "\n[job %s rc=%s]\n%s\n", r.ID, rc, strings.TrimRight(r.Out, "\n"))
+		// Out is guest-authored bytes straight off the ctl plane: scrub
+		// terminal escapes/bidi (it travels into the host log and back into
+		// the guest's own turn) and quote-fence it like a delegation report
+		// so its lines can never parse as log markers or fake the framing.
+		fmt.Fprintf(&b, "\n[job %s rc=%s]\n%s\n", r.ID, rc, reportQuoteBody(strings.TrimRight(sanitize(r.Out), "\n")))
 		if r.Total > int64(len(r.Out)) {
 			fmt.Fprintf(&b, "(...truncated; %d bytes total — `cs-job logs %s` for all)\n", r.Total, r.ID)
 		}

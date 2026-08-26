@@ -190,7 +190,15 @@ func parseSessionMarker(line string) (string, bool) {
 	if name == "-" {
 		return "", true
 	}
-	return name, true
+	// The guest writes the same log file over vsock 9001, so the name is
+	// attacker-influenceable: canonicalize through the one session-name
+	// validator, and attribute junk to the default session rather than
+	// carrying an arbitrary string to every client.
+	s, err := normalizeSession(name)
+	if err != nil {
+		return "", true
+	}
+	return s, true
 }
 
 // filterLogSession rewrites the group's host-side chat log in place (atomic

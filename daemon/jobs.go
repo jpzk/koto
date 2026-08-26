@@ -94,9 +94,11 @@ func parseJobsTSV(out string) []JobInfo {
 		}
 		started, _ := strconv.ParseInt(strings.TrimSpace(f[4]), 10, 64)
 		size, _ := strconv.ParseInt(strings.TrimSpace(f[5]), 10, 64)
+		// status/rc/cmd are agent-writable files rendered verbatim in the
+		// TUI tree; scrub escapes/bidi here, not per client.
 		jobs = append(jobs, JobInfo{
-			ID: f[0], Status: f[1], RC: f[2], Session: sess,
-			Started: started, OutSize: size, Cmd: strings.TrimSpace(f[6]),
+			ID: f[0], Status: sanitize(f[1]), RC: sanitize(f[2]), Session: sess,
+			Started: started, OutSize: size, Cmd: sanitize(strings.TrimSpace(f[6])),
 		})
 	}
 	sort.Slice(jobs, func(i, j int) bool {
@@ -233,8 +235,8 @@ true`
 	}
 	return &jobLogsResult{
 		Job: JobInfo{
-			ID: id, Status: f[0], RC: f[1], Session: sess,
-			Started: started, OutSize: size, Cmd: strings.TrimSpace(f[5]),
+			ID: id, Status: sanitize(f[0]), RC: sanitize(f[1]), Session: sess,
+			Started: started, OutSize: size, Cmd: sanitize(strings.TrimSpace(f[5])),
 		},
 		Output:    body,
 		Truncated: size > int64(len(body)),

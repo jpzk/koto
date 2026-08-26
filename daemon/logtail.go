@@ -132,8 +132,48 @@ func tryFlushNotify(g string, lp *logParser, atBoundary bool) {
 		return
 	}
 	for _, m := range pending {
+		notifyExpect(g, m)
 		logAppend(g, []byte(m+"\n"))
 	}
+}
+
+// notifyExpected is the live tailer's allowlist of [[notify]] lines: only a
+// marker the daemon itself appended (tryFlushNotify) may become a live
+// `notification` event. The guest writes the same file over vsock 9001, so a
+// forged marker there — or one smuggled in through a prompt echo — would
+// otherwise banner/BEL the operator with no rate limit at all (the ctl
+// `notify` verb's notifyAllow bucket only guards the verb). Counted, not a
+// set, so two identical legitimate markers both pass and a verbatim replay
+// after consumption does not. History replay is unaffected: replayed
+// notifications never pop the WM or the banner.
+var (
+	notifyExpectMu sync.Mutex
+	notifyExpectN  = map[string]map[string]int{}
+)
+
+func notifyExpect(g, marker string) {
+	notifyExpectMu.Lock()
+	defer notifyExpectMu.Unlock()
+	m := notifyExpectN[g]
+	if m == nil {
+		m = map[string]int{}
+		notifyExpectN[g] = m
+	}
+	m[marker]++
+}
+
+func notifyExpected(g, marker string) bool {
+	notifyExpectMu.Lock()
+	defer notifyExpectMu.Unlock()
+	m := notifyExpectN[g]
+	if m[marker] == 0 {
+		return false
+	}
+	m[marker]--
+	if m[marker] == 0 {
+		delete(m, marker)
+	}
+	return true
 }
 
 // logAtLineBoundary reports whether the group's log file currently ends at a
@@ -299,6 +339,10 @@ func tailFile(g, p string, isGroup bool) {
 			}
 			buf += chunk[i : i+j]
 			for _, ev := range lp.feedLine(buf) {
+				if ev.Event == "notification" && !notifyExpected(g, buf) {
+					emitLogfG("notify", g, "warn", "[%s] dropped forged [[notify]] marker from guest log stream", g)
+					continue
+				}
 				if ev.Event == "tool_result" {
 					// Claude code backgrounds a long Bash and emits a tool_result
 					// of the form: "Command running in background with ID: X.
