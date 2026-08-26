@@ -1298,13 +1298,21 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 			}
 		}
 	case "sys":
+		// Wrapped like the prompt/tool cases: sys lines are raw text, not
+		// glamour output, and some are long single lines — /config prints the
+		// whole key=value set on one row — which would otherwise run past the
+		// viewport edge and be clipped.
 		body := lipgloss.NewStyle().Foreground(cGray)
-		for i, ln := range srcLines {
-			prefix := stampStr + body.Render("·  ")
-			if i > 0 {
-				prefix = indent + "   "
+		first := true
+		for _, ln := range srcLines {
+			for _, seg := range wrapLine(ln, contentCols) {
+				prefix := indent + "   "
+				if first {
+					prefix = stampStr + body.Render("·  ")
+					first = false
+				}
+				out = append(out, prefix+body.Render(seg))
 			}
-			out = append(out, prefix+body.Render(ln))
 		}
 	case "tool":
 		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("⚙  ")

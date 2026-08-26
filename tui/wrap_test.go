@@ -63,3 +63,31 @@ func TestPendingPromptWraps(t *testing.T) {
 		t.Error("first row lost the queued glyph")
 	}
 }
+
+// TestSysWrapsToContentCols: /config prints its whole key=value set as one
+// long sys line, so sys blocks must wrap like prompts rather than be clipped
+// at the pane edge.
+func TestSysWrapsToContentCols(t *testing.T) {
+	const cols = 40
+	long := "config[main]: " + strings.TrimSpace(strings.Repeat("network=wan size=large root=yes ", 6))
+	lines := renderBlockLines(renderedBlock{kind: "sys", ts: 1754000000, rendered: long}, cols)
+	if len(lines) < 2 {
+		t.Fatalf("long sys line rendered as %d row(s) — it must wrap", len(lines))
+	}
+	joined := ""
+	for i, ln := range lines {
+		if w := ansi.StringWidth(ln); w > cols+promptPrefixW {
+			t.Errorf("row %d is %d cells wide, budget is %d — would be clipped", i, w, cols+promptPrefixW)
+		}
+		joined += ansi.Strip(ln)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(joined), " "), "config[main]: network=wan") {
+		t.Error("wrapped rows lost sys text")
+	}
+	if !strings.Contains(lines[0], "·") {
+		t.Error("first row lost the sys glyph")
+	}
+	if strings.Contains(lines[1], "·") {
+		t.Error("continuation row must not repeat the sys glyph")
+	}
+}
