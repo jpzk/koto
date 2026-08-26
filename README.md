@@ -21,14 +21,14 @@ network-isolated TUI container speaking gRPC over mTLS.
   `model`) applied by `/restart`; per-VM cgroups and IO budgets with
   disk/CPU/memory alerts; per-group token metrics and tok/s
 - **Access** — mTLS gRPC with role-based ACL, one proto for TUI, `koto ctl`
-  and Android; Anthropic (OAuth) or Venice per group, switchable live
+  and Android
 
 ## Architecture
 
 ```
 ╔═ TIER 1 · host user (full authority) ═══════════════════════════════════════╗
 ║  gRPC clients: cs_tui (tier 2.5, koto-net) · koto ctl · Android             ║
-║  creds/: OAuth token · venice.key · PKI (ca, client-*, tokens) · acl.json   ║
+║  creds/: OAuth token · PKI (ca, client-*, tokens) · acl.json                ║
 ╚═══════════════╤═══════════════════════════════════════════╤═════════════════╝
                 │ gRPC :8443  (mTLS + bearer token)         │ read per request
                 ▼                                           ▼ (proxy memory only)
@@ -90,7 +90,7 @@ adds a filtered NIC via the gateway on vsock 9003.
 | Multi-agent | `main` orchestrates peers over a verb control plane; no shared FS | agent groups per channel | limited | agents spawn panes, prompt each other via socket API | subagents / agent teams in-process |
 | Interface | TUI, `koto ctl`, Android (one gRPC proto) | WhatsApp/Telegram/Slack/… | messaging channels, web UI, CLI, TUI | terminal multiplexer | terminal |
 | Scheduling / jobs | cron, goals, background jobs with callbacks | recurring jobs | — | — | — |
-| Providers | Anthropic (OAuth), Venice | Anthropic (Agent SDK) | many, incl. local | any CLI agent | Anthropic |
+| Providers | Anthropic (OAuth) | Anthropic (Agent SDK) | many, incl. local | any CLI agent | Anthropic |
 
 koto is for running **untrusted, long-lived agents** where a compromised agent
 must not reach your network, your credentials, or its siblings — the
@@ -236,8 +236,8 @@ tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
   user/mount/pid/net/ipc/uts namespaces, per-VM chroot with only what FC
   needs, distinct unprivileged uid, `no_new_privs`, FC seccomp on. A virtio
   device-model bug lands as nobody-in-an-empty-chroot, not as cs_host.
-- **Credentials never enter a guest.** The proxy holds the real OAuth token /
-  Venice key in process memory and injects per request; guests get a sentinel
+- **Credentials never enter a guest.** The proxy holds the real OAuth token
+  in process memory and injects per request; guests get a sentinel
   and a `ANTHROPIC_BASE_URL` pointing at vsock 9000. A compromised guest can
   *use* the proxy, not steal from it.
 - **Egress is a per-group profile.** `network=none` (default): no NIC, no
@@ -269,7 +269,7 @@ tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
   read-only: a compromised TUI dependency yields a gRPC client the daemon
   still authorizes per verb (role ACL). It has no shell and no ca-certs.
   Two caveats, both on the release todo: `creds/` is mounted **whole** (ro),
-  so the TUI can read the OAuth token, the Venice key and the private CA key;
+  so the TUI can read the OAuth token and the private CA key;
   and the credential-injecting proxy does **not** listen on loopback —
   `host/Dockerfile` sets `BIND=0.0.0.0`, so every per-group proxy port is
   reachable from anything on `koto-net`, `cs_tui` included.
@@ -321,8 +321,7 @@ claude-code layers are the accepted moving parts.
 
 | key | values | applies |
 |-----|--------|---------|
-| `provider` | `claudesdk` (default) \| `venice` | next message |
-| `model` | provider model id (default `claude-sonnet-5` / `kimi-k2.5`) | next message |
+| `model` | model id (default `claude-sonnet-5`) | next message |
 | `network` | `none` (default) \| `wan` \| `lan` \| `full` | `/restart` |
 | `size` | `small` (default) \| `medium` \| `large` \| `xlarge` | `/restart` |
 | `root` | `no` (default) \| `yes` | `/restart` |
@@ -383,8 +382,7 @@ Sources: [Claude Code legal & compliance](https://code.claude.com/docs/en/legal-
 infrastructure), [Consumer Terms](https://www.anthropic.com/legal/consumer-terms),
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms),
 [Usage Policy](https://www.anthropic.com/legal/aup). This is a summary, not
-legal advice; the linked documents govern. The Venice provider is unaffected
-by any of this (`creds/venice.key`, Venice's own terms).
+legal advice; the linked documents govern.
 
 ## AI disclosure
 
