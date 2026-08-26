@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -692,7 +691,7 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 		c.Close()
 	}()
 	for {
-		typ, payload, err := fcReadScriptFrame(c)
+		f, err := fcReadAgentFrame(c)
 		if err != nil {
 			// Frame read failed: either the client cancelled (ctx.Done closed
 			// c out from under us) or the VM died mid-run. The former is not
@@ -704,17 +703,17 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 			emitLogfG("exec", r.Group, "warn", "[%s] runscript transport: %v", r.Group, err)
 			return fail("guest connection lost: " + err.Error())
 		}
-		switch typ {
-		case 'D':
-			if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: payload}); serr != nil {
+		switch k := f.Kind.(type) {
+		case *pb.AgentFrame_Data:
+			if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: k.Data}); serr != nil {
 				return serr
 			}
-		case 'E':
+		case *pb.AgentFrame_End:
 			emitLogfG("exec", r.Group, "info", "[%s] runscript end", r.Group)
 			return stream.Send(&pb.ScriptEvent{Event: "end"})
-		case 'X':
-			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, string(payload))
-			return fail(string(payload))
+		case *pb.AgentFrame_Error:
+			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, k.Error)
+			return fail(k.Error)
 		}
 	}
 }
@@ -774,22 +773,22 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 	// guest -> client: pty output / end / error frames.
 	go func() {
 		for {
-			typ, payload, ferr := fcReadShellFrame(c)
+			f, ferr := fcReadAgentFrame(c)
 			if ferr != nil {
 				return
 			}
-			switch typ {
-			case 'D':
-				if stream.Send(&pb.ShellFrame{Event: "data", Chunk: payload}) != nil {
+			switch k := f.Kind.(type) {
+			case *pb.AgentFrame_Data:
+				if stream.Send(&pb.ShellFrame{Event: "data", Chunk: k.Data}) != nil {
 					return
 				}
-			case 'E':
+			case *pb.AgentFrame_End:
 				emitLogfG("shell", group, "info", "[%s] session=%s detached", group, session)
 				_ = stream.Send(&pb.ShellFrame{Event: "end"})
 				return
-			case 'X':
-				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, string(payload))
-				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: string(payload)})
+			case *pb.AgentFrame_Error:
+				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, k.Error)
+				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: k.Error})
 				return
 			}
 		}
@@ -808,14 +807,11 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 		}
 		switch v := in.Input.(type) {
 		case *pb.ShellInput_Data:
-			if fcWriteShellFrame(c, 'I', v.Data) != nil {
+			if fcWriteFrame(c, &pb.AgentFrame{Kind: &pb.AgentFrame_Input{Input: v.Data}}) != nil {
 				return nil
 			}
 		case *pb.ShellInput_Resize:
-			payload := make([]byte, 4)
-			binary.BigEndian.PutUint16(payload[0:2], uint16(v.Resize.Cols))
-			binary.BigEndian.PutUint16(payload[2:4], uint16(v.Resize.Rows))
-			if fcWriteShellFrame(c, 'R', payload) != nil {
+			if fcWriteFrame(c, &pb.AgentFrame{Kind: &pb.AgentFrame_Resize{Resize: v.Resize}}) != nil {
 				return nil
 			}
 		case *pb.ShellInput_Close:

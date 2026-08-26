@@ -47,10 +47,29 @@ entirely; per-group prompt.md + /runscript cover its use cases.)
 |--------------|------:|----------------------------------------|---------------------------|
 | guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
 | guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
-| guest → host | 9002  | ctl plane (JSON lines, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
+| guest → host | 9002  | ctl plane (framed protobuf `CtlRequest`/`CtlResponse`, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
 | guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`network` ≠ `none`**) | a real NIC |
 | guest → host | 9004  | per-slot turn streams (one per concurrent turn) | — (new: 10 slots) |
-| host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/run_script/shell_attach/shutdown) | `.cs/in` FIFO + `podman exec` |
+| host → guest | 10000 | agent RPC (framed protobuf `AgentRequest`/`AgentResponse`; ops init/msg/exec/exec_stream/run_script/shell_attach/shutdown) | `.cs/in` FIFO + `podman exec` |
+
+**9002 and 10000 speak protobuf (`protocol/guest.proto`), not JSON lines.**
+Every message is one `uint32` big-endian length + one serialized message,
+with a per-channel maximum enforced on the length *before* the payload is
+allocated (`daemon/fcframe.go`, `fcguest/frame.go`): 1 MiB for a ctl request,
+16 MiB for anything the guest sends on 10000, 64 MiB host→guest (attachments
+ride in `MsgReq`). The verb/op set is a `oneof`, so an unknown verb is
+unrepresentable and every field is typed at decode; binary payloads (job
+output, notify/report bodies, exec output) are `bytes`, never base64-in-JSON.
+The guest-facing interface is unchanged: the shell tools still write one JSON
+line to `.cs/ctl` and read a flat JSON reply from `.cs/ctl.out` — `fc-agent`
+(`fcguest/ctl.go`) converts the line with *strict* protojson (unknown field,
+wrong type or unknown verb is refused in the guest with an `{"ok":false}`
+reply and never framed) and flattens the typed `CtlResponse` back into the
+documented `{"ok":true,"port":…}` shape. Host-side, `ctlDispatchPB`
+(`daemon/ctlpb.go`) adapts the decoded request onto `ctlDispatch`'s verb
+handlers. 9001 (the log stream) is still the `[[marker]]` text stream —
+typed frames there are the next step. Guest and daemon must move together
+(`make fc-rootfs` + `/restart` every group).
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
 on, exactly like the per-group proxy TCP port does today.
@@ -75,7 +94,8 @@ recreating its environment inside the VM:
   unchanged; the agent holds the FIFOs open O_RDWR so nothing blocks or EOFs.
 - bridges: TCP `127.0.0.1:18888` → vsock 9000 (`ANTHROPIC_BASE_URL` points
   here); log FIFO → vsock 9001 (reconnect with carry buffer); ctl FIFO line →
-  vsock 9002 → response line → `ctl.out`.
+  vsock 9002 (strict protojson → framed `CtlRequest`) → framed `CtlResponse`
+  → flattened JSON line → `ctl.out`.
 - agent RPC (vsock 10000): `init` (published ports + env; starts
   entrypoint.sh as uid 1000 afterwards, restart-with-backoff), `msg` (writes
   system-prompt.md + config.json into the guest workspace, then the b64 line

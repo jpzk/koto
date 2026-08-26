@@ -17,11 +17,17 @@ mkdir -p "$HERE/fcassets"
 command -v mkfs.ext4 >/dev/null || { echo "need e2fsprogs (mkfs.ext4) on the host"; exit 1; }
 
 echo "==> building fc-agent (static)"
+mkdir -p "$HERE/.gocache/mod"
+# The whole repo is mounted (not just fcguest/) because the agent imports
+# koto-protocol (protocol/guest.proto's generated code) via a path replace;
+# GOWORK=off keeps the build in module mode so the root go.work can't pull the
+# daemon's or TUI's dependency graph into the guest binary.
 podman run --rm --security-opt label=disable \
-  -v "$HERE/fcguest:/src" -w /src \
+  -v "$HERE:/src" -w /src/fcguest \
   -v "$HERE/.gocache:/root/.cache/go-build" \
+  -v "$HERE/.gocache/mod:/go/pkg/mod" \
   docker.io/library/golang:1.24-alpine \
-  sh -c 'CGO_ENABLED=0 go build -ldflags="-s -w" -o fc-agent .'
+  sh -c 'GOWORK=off CGO_ENABLED=0 go build -ldflags="-s -w" -o fc-agent .'
 
 echo "==> building rootfs image"
 podman build -t koto-fcrootfs -f "$HERE/fcguest/Dockerfile.rootfs" "$HERE"

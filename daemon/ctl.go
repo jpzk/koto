@@ -109,6 +109,12 @@ var ctlGroupRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 // the daemon (fcCtlConn in fc.go), which calls ctlDispatch and writes the reply
 // back on the same connection. There are no host-side ctl FIFOs.
 
+// ctlTailResp is the `tail` verb's answer (named so ctlpb.go can map it).
+type ctlTailResp struct {
+	baseResp
+	Text string `json:"text"`
+}
+
 // ownsSched returns true iff a schedule with id exists AND belongs to
 // owner. Used to gate del/toggle/run on the non-main ctl path. Returns
 // true when id is missing so the underlying call's "no schedule with
@@ -306,10 +312,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if len(lines) > req.N {
 			lines = lines[len(lines)-req.N:]
 		}
-		return struct {
-			baseResp
-			Text string `json:"text"`
-		}{baseResp{OK: true}, strings.Join(lines, "\n")}
+		return ctlTailResp{baseResp{OK: true}, strings.Join(lines, "\n")}
 
 	case "job_done":
 		// Self-targeted (like sched_*): any group may signal completion of its

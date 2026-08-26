@@ -63,7 +63,7 @@ host-build: $(BUILD)/koto-host
 # Build context stays at project root so the Dockerfile's `COPY protocol/`
 # and `COPY tui/...` paths resolve. Inputs cover the actual sources COPYed.
 TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
-PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto
+PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto protocol/guest.proto
 $(BUILD)/koto-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
 	podman build -t koto-tui -f tui/Dockerfile .
 	$(prune-dangling)
@@ -171,7 +171,7 @@ proto-gen:
 	    protoc -I . -I /usr/include \
 	      --go_out=. --go_opt=module=koto-protocol \
 	      --go-grpc_out=. --go-grpc_opt=module=koto-protocol \
-	      koto.proto'
+	      koto.proto guest.proto'
 
 # CI drift guard: regenerate and fail if the committed output differs.
 proto-verify: proto-gen
