@@ -80,6 +80,48 @@ adds a filtered NIC via the gateway on vsock 9003.
   verbs (`sched_*`, `goal_*`, `notify`, `job_done`, and a solicited one-shot
   `report` back to main), force-scoped to themselves.
 
+## Guest kernel
+
+Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh`
+(containerized, no host toolchain). **No patches**: the source is a pristine
+`amazonlinux/linux` clone at a pinned tag with its commit sha asserted before
+the build; everything koto adds is `.config`.
+
+**Amazon Linux tree, not vanilla.** It is the tree Firecracker builds its own
+guest kernels from. A vanilla kernel cannot parse Firecracker's ACPI tables
+and needs `acpi=off` — which removes the LAPIC timer, so **every idle microVM
+busy-polls a full host CPU**. The amzn tree boots with ACPI and idles at ~0%.
+See `docs/kernel-amzn-vs-vanilla.md`.
+
+The base `.config` is Firecracker's own CI guest config plus, all built-in
+(the guest has no module loader):
+
+| enabled | why |
+|---|---|
+| `TUN` | the `network=wan\|lan\|full` gateway: the guest's TAP (`eth0`) talks L3 to the gVisor gateway over vsock; also what pasta needs for rootless podman |
+| `FUSE_FS` | fuse-overlayfs, the storage driver for rootless podman in the guest |
+| `NF_TABLES` + `NFT_*` / `NF_CONNTRACK` / `NF_NAT` | the NAT stack netavark needs for bridged podman networking |
+| `IKCONFIG_PROC` | `zcat /proc/config.gz` in a guest shows what was actually built |
+
+That is the whole delta: network egress and in-guest containers. Symbols
+outside that list arrive via Kconfig `select` closure or as defaults
+`olddefconfig` fills in for options Firecracker's older config never named
+(e.g. the newer CPU mitigations) — harmless, but not chosen.
+
+**Caveats:**
+
+- The **shipped `vmlinux` predates the script's pin**: it was built against
+  Firecracker v1.11.0's base config, the script now pins v1.16.1 (~312 config
+  lines apart, notably `CONFIG_PCI` on). Nothing is broken — the guest boots
+  `pci=off` on virtio-MMIO — but `make fc-kernel` produces a different kernel
+  from the one running today.
+- `TUN` is a capability, not just a device. A `network=wan` group can bring up
+  its own overlay (WireGuard, tailscale) whose outer packets are ordinary
+  public UDP, so the frame-layer egress filter cannot see inside it. Verified:
+  a `network=wan` guest running `tailscaled` reached the host's tailnet via a
+  DERP relay despite `100.64/10` being classed as LAN. The filter blocks the
+  direct peer path, not the relayed one.
+
 ## Host requirements
 
 Everything runs rootless as the host user; nothing is installed on or
@@ -139,48 +181,6 @@ must not reach your network, your credentials, or its siblings — the
 messaging-channel breadth of NanoClaw/OpenClaw and the terminal ergonomics of
 herdr are not its focus. If you want an assistant on WhatsApp, use those; if you
 want a fleet of agents behind a hardware boundary, this is it.
-
-## Guest kernel
-
-Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh`
-(containerized, no host toolchain). **No patches**: the source is a pristine
-`amazonlinux/linux` clone at a pinned tag with its commit sha asserted before
-the build; everything koto adds is `.config`.
-
-**Amazon Linux tree, not vanilla.** It is the tree Firecracker builds its own
-guest kernels from. A vanilla kernel cannot parse Firecracker's ACPI tables
-and needs `acpi=off` — which removes the LAPIC timer, so **every idle microVM
-busy-polls a full host CPU**. The amzn tree boots with ACPI and idles at ~0%.
-See `docs/kernel-amzn-vs-vanilla.md`.
-
-The base `.config` is Firecracker's own CI guest config plus, all built-in
-(the guest has no module loader):
-
-| enabled | why |
-|---|---|
-| `TUN` | the `network=wan\|lan\|full` gateway: the guest's TAP (`eth0`) talks L3 to the gVisor gateway over vsock; also what pasta needs for rootless podman |
-| `FUSE_FS` | fuse-overlayfs, the storage driver for rootless podman in the guest |
-| `NF_TABLES` + `NFT_*` / `NF_CONNTRACK` / `NF_NAT` | the NAT stack netavark needs for bridged podman networking |
-| `IKCONFIG_PROC` | `zcat /proc/config.gz` in a guest shows what was actually built |
-
-That is the whole delta: network egress and in-guest containers. Symbols
-outside that list arrive via Kconfig `select` closure or as defaults
-`olddefconfig` fills in for options Firecracker's older config never named
-(e.g. the newer CPU mitigations) — harmless, but not chosen.
-
-**Caveats:**
-
-- The **shipped `vmlinux` predates the script's pin**: it was built against
-  Firecracker v1.11.0's base config, the script now pins v1.16.1 (~312 config
-  lines apart, notably `CONFIG_PCI` on). Nothing is broken — the guest boots
-  `pci=off` on virtio-MMIO — but `make fc-kernel` produces a different kernel
-  from the one running today.
-- `TUN` is a capability, not just a device. A `network=wan` group can bring up
-  its own overlay (WireGuard, tailscale) whose outer packets are ordinary
-  public UDP, so the frame-layer egress filter cannot see inside it. Verified:
-  a `network=wan` guest running `tailscaled` reached the host's tailnet via a
-  DERP relay despite `100.64/10` being classed as LAN. The filter blocks the
-  direct peer path, not the relayed one.
 
 ## Data flow
 
