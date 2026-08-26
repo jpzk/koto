@@ -4,15 +4,15 @@ Status: **implemented and verified end-to-end** (2026-07-08): real Venice
 turns with in-guest tool execution through the vsock proxy path, correct
 per-group metrics attribution, no-NIC isolation confirmed from inside the
 guest (lo only, curl fails, no DNS), graceful stop via guest reset, and
-conversation history persisting across VM + daemon restarts. Opt-in per
-group via config.json `"runtime": "firecracker"`; default remains podman,
-both runtimes coexist.
+conversation history persisting across VM + daemon restarts. **Every group is
+a microVM — this is the only runtime.** The podman group runtime has been
+retired; there is no `runtime` config key and no way back to it.
 Code: `fc.go` (daemon side), `fcguest/` (guest agent + rootfs build),
 `fc_test.go` (wire-logic smoke tests against a fake FC endpoint).
 
 ## Why vsock at all
 
-Under podman, all host↔group IPC is host files under a bind mount:
+Under the retired podman runtime, all host↔group IPC WAS host files under a bind mount:
 `.cs/in` (FIFO), `.cs/ctl`/`.cs/ctl.out`, `.cs/log`, plus
 `ANTHROPIC_BASE_URL` pointing at the proxy over the bridge network.
 A Firecracker microVM has **no shared filesystem** (no virtio-fs) and — by
@@ -49,7 +49,8 @@ entirely; per-group prompt.md + /runscript cover its use cases.)
 | guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
 | guest → host | 9002  | ctl plane (JSON lines, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
 | guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`network` ≠ `none`**) | a real NIC |
-| host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/shutdown) | `.cs/in` FIFO + `podman exec` |
+| guest → host | 9004  | per-slot turn streams (one per concurrent turn) | — (new: 10 slots) |
+| host → guest | 10000 | agent RPC (init/msg/exec/exec_stream/run_script/shell_attach/shutdown) | `.cs/in` FIFO + `podman exec` |
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
 on, exactly like the per-group proxy TCP port does today.
@@ -84,19 +85,16 @@ recreating its environment inside the VM:
   `/workspace/.cs/sessions/`, `--resume`d on later turns; a bare b64 line is
   the default session), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
   analogue used by interrupt + /clear), `exec_stream` (raw streamed output,
-  peer-close kills the child — used by background-job tailing; the admin-only
-  RunScript RPC rides this op with `user:true`, which demotes the child from
-  the agent's root to node/uid 1000 with HOME=/workspace — daemon-internal
-  callers keep agent authority), `shutdown`
+  peer-close kills the child — used by background-job tailing), `run_script`
+  (its OWN op, backing the admin-only RunScript RPC: framed streaming exec as
+  the worker user node/uid 1000 with HOME=/workspace, rather than the agent's
+  root), `shell_attach` (bidi tmux attach behind `/shell`), `shutdown`
   (sync + umount + poweroff — dirty-ext4 protection for workspace.img).
 - PID-1 zombie reaping via a central wait4(-1) loop with a tracked-pid table
   (the catatonit role), children in their own process groups.
 
 ## Daemon side (`fc.go` + call sites in `groups.go`/`send.go`)
 
-- `groupRuntime(g)`: config.json `"runtime"`; anything but "firecracker" →
-  podman. Branch points: `ensure()` (spawn), `sendNow()` (delivery),
-  `stopGroup`, `listGroups` (via `groupRunning`), `interruptAgent`,
   `tailBackgroundTask`, `clearCmd`, `destroy` (fc droppings sweep).
 - `fcSpawn`: preflight (/dev/kvm + assets), workspace.img create (sparse 8G +
   host mkfs.ext4), UDS listeners **before** boot, static `--no-api`
@@ -107,10 +105,9 @@ recreating its environment inside the VM:
 - vcpus/mem/disk per group: config.json `size` preset (default `small` =
   2 vCPU / 1024 MiB / 8 GiB). See "VM size profile" below. Raw `vcpus` /
   `mem_mib` keys still override the preset (legacy escape hatch).
-- turn lifecycle is **shared**: `[[turn_end]]` arrives via vsock → host log →
-  tailLog → `notifyTurnDone`, so sendNow's wait/stall/selfHeal logic is the
-  same code path for both runtimes (restart() = stopGroup + ensure is already
-  runtime-agnostic).
+- turn lifecycle: `[[turn_end]]` arrives via vsock → host log → tailLog →
+  `notifyTurnDone`, feeding sendNow's wait/stall/selfHeal logic
+  (restart() = stopGroup + ensure).
 
 ## Where per-VM state lives (host layout)
 
@@ -141,12 +138,14 @@ shared by all VMs.
 ## Build & run
 
 ```sh
-make fc-assets    # fetch firecracker (pinned v1.16.1) + CI kernel (6.1)
-                  #   + build golden rootfs (fedora + node + claude-code +
-                  #     sidecar/ + fc-agent; no chrome, no podman)
-make host-build   # once: host image now includes e2fsprogs + tar
+make fc-assets    # = fc-fetch + fc-kernel + fc-rootfs:
+                  #   fetch firecracker (pinned v1.16.1), BUILD the guest
+                  #   kernel (FC's CI vmlinux lacks CONFIG_TUN, so we compile
+                  #   the Amazon Linux tree — see build-kernel.sh), and build
+                  #   the golden rootfs (fedora + node + claude-code +
+                  #   sidecar/ + fc-agent + rootless podman; no chrome)
+make host-build   # once: host image includes e2fsprogs + tar
 make host-run     # run-host.sh passes --device /dev/kvm when present
-# then per group:  /config runtime=firecracker  +  /restart <g>
 ```
 
 Rootfs rebuild (`make fc-rootfs`) is required after editing
@@ -177,14 +176,10 @@ one ergonomic regression vs podman's hot-reload mounts).
    egress-filtered at the frame layer by destination class); `none` stays
    NIC-less. See "Network egress profile" below.
    *L3-native inbound is still a follow-up (see that section).*
-3. **`pip` (podman-in-podman) and Chrome groups** stay on the podman runtime
-   (not in the minimal rootfs).
 4. ~~**main on firecracker**: skill authoring via the rw /skills mount
    doesn't exist there.~~ Moot — the skills feature was removed entirely.
 5. ~~**skills refresh** for a running FC group needs /restart.~~ Moot —
    the skills feature was removed entirely.
-6. **Migrating an existing podman group** doesn't move its workspace files
-   into workspace.img; fresh workspace (or copy offline while stopped).
 
 ## Network egress profile (`network`: `none` | `wan` | `lan` | `full`)
 
@@ -301,7 +296,7 @@ always wins over a legacy `internet` key.
   delivered to the guest's loopback services — independent of L3. L3-native
   inbound (the guest accepting on `192.168.127.2` via gateway forwards) is a
   follow-up.
-- **Kernel:** `full` needs `CONFIG_TUN`, which FC's CI vmlinux lacks — so the
+- **Kernel:** any networked profile (`wan`/`lan`/`full`) needs `CONFIG_TUN`, which FC's CI vmlinux lacks — so the
   guest kernel is built (`build-kernel.sh`, `make fc-kernel`), not fetched.
   - **Source = the Amazon Linux tree, like FC itself.** `build-kernel.sh` does
     what FC's `resources/rebuild.sh` does: `git clone github.com/amazonlinux/linux`
@@ -317,11 +312,9 @@ always wins over a legacy `internet` key.
   - **DNS/resolv.conf.** The rootfs is read-only, so `/etc/resolv.conf` is a
     symlink to `/run/resolv.conf` (a tmpfs), set up in `build-rootfs.sh`'s
     staging tree (a Dockerfile `RUN` can't, since podman bind-mounts
-    resolv.conf during build). fc-agent's `netUp` writes the target on `full`;
-    `none` leaves it dangling — no DNS, as intended.
-- **podman groups**: the profile is a firecracker feature. A podman group has
-  a real NIC and full internet regardless; `network=none` is not enforced
-  there (would need `--internal` networking).
+    resolv.conf during build). fc-agent's `netUp` writes the target on
+    every networked profile (`wan`/`lan`/`full`); `none` never calls `netUp`,
+    so it is left dangling — no DNS, as intended.
 
 ## VM size profile (`size`: `small` | `medium` | `large` | `xlarge`)
 

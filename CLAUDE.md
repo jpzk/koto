@@ -11,13 +11,13 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
 - **[firecracker] Passwordless sudo is a per-group profile: `config.json` `"root"` = `"no"` (default) | `"yes"`.** `yes` grants the guest's `node` user (uid 1000, which the entrypoint + `claude` + all bash run as) passwordless sudo; `no`/absent means no path to root. **Safe to grant because the microVM's KVM boundary is the security boundary** — root *inside* the guest is still contained by the VM, so unlike host-side sudo this doesn't widen the host blast radius. Set via `/config root=yes` (or `config_set` from `main`); **applies on `/restart`**. `sudo` ships in the golden rootfs unconditionally; only the grant is runtime-gated — the root drive stays read-only (shared golden image), so `fc-agent`'s `enableRoot` (`handleInit`, gated by `groupRoot` in `fc.go`) mounts a **persistent overlayfs** on `/usr` `/etc` `/var` `/opt` with the upper layer on the workspace disk (`/workspace/.rootovl`, root-owned) and writes the NOPASSWD grant through it. **`sudo dnf install` (and `npm i -g`, `/etc` edits) works and persists across `/restart`** — installs consume workspace disk (`size` preset), need repo egress (`network=wan`/`full`), and upper entries shadow later rootfs rebuilds until `.rootovl` is reset. Tmpfs-sudoers fallback if the overlay can't mount (stale kernel). See `docs/firecracker-vsock.md` → "Root / sudo profile".
 - **[firecracker] VM boot timing is a per-group profile: `config.json` `"autostart"` = `"no"` (default) | `"yes"`.** `no` = the group's microVM boots lazily, on the first thing that needs it (a send, a spawn, a `/restart`, a schedule firing), so a daemon start brings up only `main`. `yes` boots the group with the daemon — for groups that must be up before anyone talks to them (publishing a `ports` service, or doing purely scheduled work). Set via `/config autostart=yes` (or `config_set` from `main`); **read only at daemon start — unlike every other spawn-time knob, `/restart` does NOT apply it**. `autostartGroups` (`groups.go`) runs once from `daemonMain` in a goroutine, sequentially over the yes-groups in sorted order (no KVM/RAM thundering herd, and the gRPC listener never waits on a VM boot); `main` is skipped since it's ensured unconditionally. Boots go through the normal `ensure()` path. See `docs/firecracker-vsock.md` → "Autostart profile".
 - Each "group" is a long-lived worker running `claude` in a FIFO loop. One `claude -p` invocation per inbound message, threaded onto its conversation via a per-session id file (`--resume`; session files persist in the workspace — [podman] a bind mount; [firecracker] `groups/<g>/workspace.img`, an ext4 virtio-block image).
-- **A group multiplexes any number of independent chat sessions** (one VM/workspace, many conversations; serialized turn-by-turn on the group's send queue — never concurrent). The wire default session is `""` (aliases `-`/`default`); named sessions are created by the first `Send` carrying `session:"<name>"` (same charset as group names). Mechanics: the FIFO line becomes `<session> <b64>`; entrypoint.sh pins each session's claude conversation id in `/workspace/.cs/sessions/<name>.id` (captured from stream-json by `stream_filter.js`, `--resume`d on later turns; a one-shot `--continue` shim migrates pre-session workspaces — the sessions/ dir's existence is its off-switch); venice gets `venice-history-<name>.json` per session. Attribution: `sendNow` writes a `[[session]] <name|->` marker before each turn; the tailer/history parser stamps every `Event.session` from it, so live and replayed frames agree. `GroupInfo.sessions` lists named sessions (host-side registry `groups/<g>/.cs/sessions.json`). `Clear` scopes by `GroupReq.session`: `""` = whole group (legacy), `-`/`default` = default session, name = that session (per-session clear rewrites the host log dropping that session's segments — `filterLogSession` — and the tailer reopens at EOF on the inode change so subscribers aren't flooded). TUI: `/session [name]` switches (status bar shows `group:session`), named sessions render as child rows under their group in the tree (navigable with ↑/↓, per-row unread markers, ctrl+@ cycles unread across sessions too), sends target the active session, chat lines filter client-side, `/clear` clears the active session, `/clear all` the group. `koto ctl send/ask/clear -session S`. **Each chat session has its own shared terminal**: `/shell` (and ctrl+]) attaches tmux session `koto-shell` for the default chat session, `koto-shell-<name>` for a named one; the turn env exports `KOTO_SESSION` + `KOTO_SHELL_SESSION` so the agent joins the shell of the conversation it's in (documented in `prompts/global.md`). See `daemon/sessions.go`.
+- **A group multiplexes any number of independent chat sessions** (one VM/workspace, many conversations; each session has its OWN FIFO queue and worker, so turns are strictly ordered *within* a conversation but run CONCURRENTLY across them — capped per group by a pool of `groupSlots` = 10 slots, each slot owning its own guest log stream. The old "one turn per group, never concurrent" rule is gone; see `daemon/queue.go`). The wire default session is `""` (aliases `-`/`default`); named sessions are created by the first `Send` carrying `session:"<name>"` (same charset as group names). Mechanics: the FIFO line becomes `<session> <b64>`; entrypoint.sh pins each session's claude conversation id in `/workspace/.cs/sessions/<name>.id` (captured from stream-json by `stream_filter.js`, `--resume`d on later turns; a one-shot `--continue` shim migrates pre-session workspaces — the sessions/ dir's existence is its off-switch); venice gets `venice-history-<name>.json` per session. Attribution: `sendNow` writes a `[[session]] <name|->` marker before each turn; the tailer/history parser stamps every `Event.session` from it, so live and replayed frames agree. `GroupInfo.sessions` lists named sessions (host-side registry `groups/<g>/.cs/sessions.json`). `Clear` scopes by `GroupReq.session`: `""` = whole group (legacy), `-`/`default` = default session, name = that session (per-session clear rewrites the host log dropping that session's segments — `filterLogSession` — and the tailer reopens at EOF on the inode change so subscribers aren't flooded). TUI: `/session [name]` switches (status bar shows `group:session`), named sessions render as child rows under their group in the tree (navigable with ↑/↓, per-row unread markers, ctrl+@ cycles unread across sessions too), sends target the active session, chat lines filter client-side, `/clear` clears the active session, `/clear all` the group. `koto ctl send/ask/clear -session S`. **Each chat session has its own shared terminal**: `/shell` (and ctrl+]) attaches tmux session `koto-shell` for the default chat session, `koto-shell-<name>` for a named one; the turn env exports `KOTO_SESSION` + `KOTO_SHELL_SESSION` so the agent joins the shell of the conversation it's in (documented in `prompts/global.md`). See `daemon/sessions.go`.
 - **Background jobs are observable per session (group → session → job).** `cs-job` records `$KOTO_SESSION` into each job dir at mint; the daemon mirrors job state host-side via bounded guest execs (`daemon/jobs.go`: TTL-refreshed while WatchState watchers exist, force-refreshed on `job_done`, never boots a stopped VM) and exposes it as `GroupInfo.jobs` plus three RPCs — `Jobs` (fresh ls; group `""` = all, needs the `"*"` ACL target), `JobLogs` (meta + sanitized output tail), and `JobTail` (server-streaming live follow: guest `tail -c -f` over the agent's exec_stream, line-buffered + sanitized; client cancel kills the guest tail). `koto ctl jobs [group]` / `job-logs [-tail N] <group> <id>` / `job-tail <group> <id>`. The TUI nests job rows under their session in the tree, **folded by default** — a folded conversation shows a gray `(N)` count after its name; with an empty message bar, `→` on the row unfolds and `←` folds (`←` on a job row folds and re-anchors on the conversation; with a draft the arrows stay cursor movement); `ctrl+o` is the one-key toggle and works draft or not. Enter is untouched: submit draft / exit tree. Unfolded rows: ⚙ running yellow / ✓ done / ✗ rc≠0 / ⚠ orphaned — finished rows blink ~10s then hide; running jobs newest-first. Hovering a job row swaps the chat column for a live peek pane fed by one JobTail stream per hover (scrollable: PgUp/PgDn, shift+↑/↓, Home/End; bottom-follow until scrolled up). `job_done` notifications wake the session that launched the job, not the group default (`notify.go` keys its debounce per group+session). **Jobs call back by default**: `cs-job run`/`spawn` set the notify marker unless `--no-notify`; `cs-job wait` is the explicit blocking join and removes the marker (the caller consumes the result in-turn, so no duplicate wake-up). **The guest-side non-blocking look at a still-running job is `cs-job peek [-n LINES|-new] <id>`** — a status header (`<id> <status> rc= bytes= age=`) plus a bounded slice of the output, returning immediately; `-new` prints only what was appended since that job's previous peek, using a byte cursor at `<job>/peek` that persists across turns, and every peek is capped at `CS_PEEK_MAX` bytes (default 8000) so an output firehose can't blow the turn's context. It is the counterpart to the host-side `JobTail` stream: agents poll with `peek`, operators follow with the TUI's hover pane. A group still cannot see a *peer's* jobs — the ctl plane has no jobs verb (only the guest→daemon `job_done`). **VM restarts do NOT notify the agent** (the boot-notice feature was removed 2026-08-24): booting a group enqueues no turn. Orphaned jobs surface via `cs-job list` on the agent's next turn.
-- `cs_host` runs **`nc.py` (the daemon)** + a stdlib HTTP proxy. Daemon owns sidecar lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over the unix socket. Sidecars are siblings on `koto-net`, talk to the proxy via `http://cs_host:<port>` (one port per group, for attribution).
-- **`cs_tui` is a separate, network-isolated container** (Go / Bubble Tea, image `koto-tui`, built as a static binary into `scratch`). It mounts only `koto.sock` and runs with `--network=none` — no filesystem snooping, no DNS, no outbound. Attach with `make tui`; `/exit` disconnects without affecting the daemon, proxy, or sidecars (Ctrl+C interrupts the agent's turn instead). Multiple TUIs can attach concurrently.
+- `cs_host` runs **the Go daemon (`daemon/*.go`)** with the credential-injecting proxy as an in-process goroutine (`proxyStart`, one listener per group for attribution). The daemon owns group lifecycle (spawn / send / list / stop) **and tails group log files**, fanning streaming events out to subscribers over gRPC/mTLS on TCP `:8443`. A microVM guest reaches its proxy port over **vsock 9000**, not by hostname.
+- **`cs_tui` is a separate container** (Go / Bubble Tea, image `koto-tui`, static binary into `scratch` — no shell, no toolchain, no ca-certs). **It is NOT network-isolated any more**: the gRPC/mTLS transport means it runs on `--network koto-net` and mounts `creds/` ro (see the trust-model addendum — `tui/Dockerfile` points here). Attach with `make tui`; `/exit` disconnects without affecting the daemon, proxy, or groups (Ctrl+C interrupts the agent's turn instead). Multiple TUIs can attach concurrently.
 - Sidecars never see real credentials. They get `ANTHROPIC_API_KEY=proxied` (sentinel) + `ANTHROPIC_BASE_URL` pointing at the proxy.
 - **Orchestration is verb-based, not file-based.** [podman] `main` also has `/peers` mounted RW (can read+write any group's workspace directly). [firecracker] there is **no shared filesystem** — a microVM group has no `/peers`, so `main` orchestrates peers purely through ctl-plane verbs: `spawn`/`send`/`stop`/`list`/`sched_*` plus `config_set` (edit any group's config) and `tail` (one-shot last-N lines of a peer's log). Since firecracker is the default, treat the verb path as the primary one; the `/peers` mount is a podman-only convenience.
-- **Every group has a control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails one FIFO per group and authorizes by source group identity. `main` gets the full set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`, plus all `sched_*` verbs against any group. Non-main groups get **only** `sched_add` / `sched_list` / `sched_del` / `sched_toggle` / `sched_run`, with the target group force-overwritten to self — they can self-schedule but cannot reach peers, send arbitrary messages, or escalate. See `prompts/global.md` for the agent-facing docs. **Delegation callbacks are solicited-only** (`daemon/report.go`): main's `send` with `"reply":true` arms a ONE-SHOT report window on the target; the group's self-attributed `report` verb (any group, like `notify`/`job_done`) then delivers ~4KB back into main's delegating session as a queued turn — whenever the group decides the task is complete, this turn or many turns/background jobs later. Unsolicited reports are refused and the window is consumed on delivery, so a group can push at most one turn into main per turn main pushed into it — the group→main restriction stays intact; a report that can't enqueue (main backlogged) re-arms the window for retry. Windows are in-memory (daemon restart drops them, along with the VMs) and expire after 24h.
+- **Every group has a control plane** at `/workspace/.cs/ctl` (FIFO) + `/workspace/.cs/ctl.out` (responses). Daemon (`ctl.go`) tails one FIFO per group and authorizes by source group identity. `main` gets the full set — `spawn` (forced `main:false`), `send`, `stop` (cannot target `main`), `list`, plus all `sched_*` verbs against any group. Non-main groups get the `sched_*` set with the target group force-overwritten to self, plus the self-attributed verbs (`job_done`, `notify`, `report`, `goal_done`, `goal_verdict`) and the self-scoped `goal_*` control verbs — they can self-schedule but cannot reach peers, send arbitrary messages, or escalate. See `prompts/global.md` for the agent-facing docs. **Delegation callbacks are solicited-only** (`daemon/report.go`): main's `send` with `"reply":true` arms a ONE-SHOT report window on the target; the group's self-attributed `report` verb (any group, like `notify`/`job_done`) then delivers ~4KB back into main's delegating session as a queued turn — whenever the group decides the task is complete, this turn or many turns/background jobs later. Unsolicited reports are refused and the window is consumed on delivery, so a group can push at most one turn into main per turn main pushed into it — the group→main restriction stays intact; a report that can't enqueue (main backlogged) re-arms the window for retry. Windows are in-memory (daemon restart drops them, along with the VMs) and expire after 24h.
 - Groups can publish TCP ports by listing them in `groups/<g>/.cs/config.json`'s `"ports"` field (e.g. `[8080]`); range 1024–65535; changes require `/restart <g>`. Set via TUI `/config ports=8080,3000` (accepts comma-list as string or JSON int-array) or by editing the file directly. [podman] the daemon appends `-p 127.0.0.1:P:P` so the port lands on the host loopback. [firecracker] the daemon runs a vsock↔TCP bridge per port that binds **inside `cs_host`** (reachable on `koto-net` as `cs_host_go:<port>`, not the host loopback — host publishing would need a `-p` on `cs_host` itself).
 - **Provider per group, mandatory in config.json.** `groups/<g>/.cs/config.json` `"provider"` selects the LLM backend: `"venice"` (Venice API; key at `creds/venice.key`, injected by the proxy on a per-request basis) or `"claudesdk"` (Anthropic OAuth via the credential-injecting proxy). The daemon's `ensureProviderConfig` writes `provider=claudesdk` (the default) into any group whose config is missing or invalid on the first `ensure()` call (every spawn / send), so every running group always has an explicit provider — the proxy, sidecar entrypoint, and TUI tree marker can rely on the field being set. Default models when config.json has no `model`: `claude-sonnet-5` for claudesdk, `kimi-k2.5` for venice (single source of truth: `defaultClaudeModel` / `defaultVeniceModel` in `groups.go`, injected into the guest as `KOTO_DEFAULT_CLAUDE_MODEL` / `KOTO_DEFAULT_VENICE_MODEL` and applied by `sidecar/entrypoint.sh` when `model` is unset; `groupModelName` reports the same values so the TUI always shows the effective model). We deliberately don't seed `model` into config.json, so flipping a group's provider doesn't leave the other provider's model string lying around to be rejected. Provider is read by the proxy on every request and by the sidecar entrypoint on every message — no `/restart` needed to flip it.
   - **Venice path is stateless on the API side**, so the sidecar maintains conversation history in `/workspace/.cs/venice-history.json` and replays the whole transcript per turn (including any `tool_calls`/`role:"tool"` entries from prior turns). `/clear` wipes it (extended in `clearCmd`). The system prompt (`composeSystemPrompt`) is composed and sent as the first message in the chat array.
@@ -36,7 +36,7 @@ relative to cwd, which stays the repo root.
 ```
 go.work              workspace: daemon + fcguest + protocol + tui (plus the genproto pin — see its comment)
 daemon/              the daemon Go module (module `koto`):
-  main.go              entry point dispatching `daemon` / `proxy` / `fcjail` subcommands
+  main.go              entry point dispatching `daemon` / `fcjail` / `ctl` subcommands
   daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
   groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
   send.go              turn delivery: sendNow, turn-done/stall tracking, self-heal, interruptAgent, bg-task tailer
@@ -45,11 +45,23 @@ daemon/              the daemon Go module (module `koto`):
   config.go            config.json command handling (applyConfig validation per key)
   prompt.go            composeSystemPrompt (global.md + per-group prompt.md + memory)
   metrics.go           metrics.jsonl tail + <koto-context> block injected into prompts
-  queue.go             per-group single-flight send queue
+  queue.go             per-SESSION send queues + the per-group slot pool (groupSlots=10 concurrent turns)
   cron.go / schedules.go  cron parser + schedule store/loop
   ctl.go               in-guest control plane (FIFO verbs, per-group authorization)
-  notify.go            job_done → ntfy push
+  notify.go            job_done → debounced, coalesced self-send back into the group
   auth.go              gRPC mTLS + bearer-token layers
+  acl.go               role→verb→target authorization (adminOnlyVerbs, targetOf)
+  goals.go             the goal/autopilot loop: plan → iterate → judge, goals.json
+  report.go            solicited one-shot delegation callbacks (main↔group)
+  sessions.go          named chat sessions: registry, normalize, per-session clear
+  jobs.go              host-side mirror of guest background jobs (Jobs/JobLogs/JobTail)
+  resources.go         host-side fleet disk/mem/cpu + threshold alerts
+  activity.go          per-turn phase reporting (boot/send/llm/retry/stream/work)
+  tokrate.go           tok/s throughput, per group and fleet-wide
+  logalert.go          error-level daemon log lines → operator notifications
+  logparse.go          the [[marker]] grammar, shared by the tailer and History
+  fccgroup.go          per-VM cgroup probing/limits
+  ctl_cli.go           the `koto ctl` client subcommand
   sanitize.go          terminal-escape/bidi scrubbing of streamed events
   attachments.go       inbound attachment staging
   grpc_server.go       gRPC service methods (thin wrappers over the funcs above)
@@ -58,21 +70,21 @@ daemon/              the daemon Go module (module `koto`):
   fcjail.go            host-side jail for the FC VMM process (userns/chroot re-exec)
   fcnet.go             network=wan|lan|full gateway: gVisor L3 over vsock + frame-layer egress filter (fcClassifyDst)
   wire/                daemon-internal JSON wire types (ctl FIFO plane + pb conversion shapes; moved out of protocol/)
-fcguest/             guest agent module — main.go (PID-1 agent), Dockerfile.rootfs, build-rootfs.sh, fetch-assets.sh
+fcguest/             guest agent module — main.go (PID-1 agent), net.go, Dockerfile.rootfs, build-rootfs.sh, build-kernel.sh, fetch-assets.sh
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
 protocol/            the cross-project contract: koto.proto + committed generated pb ONLY (no hand-written code). Daemon + TUI import koto-protocol/pb; the Android app (maintained out of tree) Wire-generates Kotlin from koto.proto
-sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-subagent (baked into the fc rootfs)
+sidecar/             group worker bits — entrypoint.sh, stream_filter.js, venice_stream.js, cs-job, cs-notify, cs-subagent (baked into the fc rootfs)
 host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
 prompts/             harness-controlled system prompts (global.md delivered into every group)
-groups/<g>/prompt.md per-group system prompt (lives in the workspace, group-writable)
+groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
-Makefile             sentinel-driven: build / login / host-run / tui-build / tui / stop / metrics / clean (safe) / clean-groups (destructive, prompted) / fc-assets
+Makefile             sentinel-driven: host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / fc-assets (= fc-fetch + fc-kernel + fc-rootfs)
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
                      into cs_tui at /koto-scripts; run in the focused group's
                      microVM as node via the admin-only RunScript RPC)
-creds/               OAuth credentials (gitignored, owned by you)
+creds/               OAuth credentials + the whole PKI/authz surface — ca.*, server.*, client-*.{crt,key}, token-*, tokens.json, clients.allow, acl.json, venice.key (gitignored, owned by you)
 groups/              per-group workspaces (gitignored)
 groups.json          {group: port} for proxy listener allocation (gitignored)
 fcassets/            firecracker binary + vmlinux + rootfs.img (gitignored; `make fc-assets`)
@@ -80,14 +92,14 @@ fcassets/            firecracker binary + vmlinux + rootfs.img (gitignored; `mak
 .build/              Makefile sentinels (gitignored)
 run/                 daemon runtime droppings (gitignored); run/fc/ holds per-VM vsock/cfg/pid/console
 metrics.jsonl        per-request metric line (gitignored)
-proxy.log            proxy stdout when launched by daemon (gitignored)
 ```
 
 ## Build & run
 
 ```sh
-make host-build    # builds koto + koto-host images
-make fc-assets     # fetch firecracker (pinned v1.16.1) + CI kernel + build golden rootfs.img
+make host-build    # builds the koto-host image (cs_host_go)
+make fc-assets     # fetch firecracker (pinned v1.16.1) + BUILD the guest kernel (fc-kernel;
+                   #   FC's CI vmlinux lacks CONFIG_TUN) + build golden rootfs.img
                    #   REQUIRED for the default (firecracker) runtime; rebuild the rootfs
                    #   (`make fc-rootfs`) after editing sidecar/*.{sh,js} or fcguest/ —
                    #   microVMs have no live bind mounts (the one ergonomic regression vs podman)
@@ -557,17 +569,15 @@ TUI driving (all phrased as one shell-style line so cron fields don't need quoti
 
 - **Pasta networking, not slirp4netns.** Fedora 44+ ships pasta as the rootless default; slirp4netns isn't installed. (The `PROXY_HOST=host.containers.internal` this used to note was the podman sidecars' proxy base URL; the env var was removed with the podman group runtime — a microVM group reaches the proxy over vsock 9000, not by hostname.)
 - **Sidecar runs as `node` user (uid 1000), not root.** `claude --dangerously-skip-permissions` refuses to run as root. The container is the security boundary; running as a non-root user inside it is fine.
-- **`--userns=keep-id` on sidecars.** Maps container `node` (uid 1000) to host user (uid 1000) so the bind-mounted workspace is writable.
 - **`HOME=/workspace` in sidecars.** Claude stores session state in `$HOME/.claude/projects/...`. Default `$HOME=/home/node` is inside the container and lost on `--rm`. Pointing `HOME` at the bind-mounted workspace persists sessions on the real host across container restarts.
 - **Proxy merges `anthropic-beta` headers.** Claude code sends a beta list including `context-management-*`. Overwriting that with only `oauth-2025-04-20` makes the API return `400 "Extra inputs are not permitted"`. The proxy now appends our oauth beta to whatever the client sent.
-- **Proxy stdout redirected to file.** Proxy goes to `proxy.log` so it never corrupts a foreground TUI's escape sequences. `podman run` calls in `nc.py` use `capture_output=True` for the same reason.
-- **Streaming events come from a daemon-side log tailer, not from the TUI.** `nc.py` runs one `_tail_log(g)` thread per group with at least one subscriber; it parses lines (`>>> ` = prompt, otherwise = response) and fans out JSON event frames to all subscribers. Trade-off vs. the old approach: the daemon does more work, but `cs_tui` no longer needs filesystem access — it can run with `--network=none` and a single bind-mounted socket.
-- **`cs_tui` runs with `--network=none` and only `koto.sock` mounted.** The TUI is a Go (Bubble Tea) static binary on `scratch` — 4 direct deps (`bubbletea`/`bubbles`/`lipgloss`/`glamour`, all charmbracelet org) plus ~30 indirect, every one pinned and >6 weeks old per the supply-chain rule. The runtime image has no shell, no toolchain, no ca-certs, just the binary. A compromised TUI cannot reach the proxy, the API, or other sidecars.
-- **`claude -p --bare` for sidecars.** `--bare` disables CLAUDE.md auto-discovery, hooks, plugin sync, auto-memory, background prefetch, and keychain reads. We want the harness to be the only source of context — no surprise pickup of files inside the workspace. Tools (bash/edit/read) and the default tool-describing system prompt remain. Combined with `--append-system-prompt` reading from `prompts/global.md` + `/workspace/prompt.md`, this gives us two-tier prompt control without claude code's discovery surface.
-- **Per-group prompts live inside the sidecar's writable workspace.** `groups/<g>/prompt.md` is read on every message via the existing workspace mount; the sidecar can rewrite it (only affecting its own future invocations). Accepted trade-off vs. moving per-group prompts to a host-only `prompts/<g>.md` and ro-mounting them — co-location with the workspace was the priority.
-- **TUI maintains one subscribe connection per group + ad-hoc one-shots for commands.** Subscribe is the only long-lived verb in the protocol; everything else is request/response/close. The `subscribe` handler in `serve()` returns early to skip the connection-close in the `finally` clause, transferring writer ownership to the `SUBS` registry.
+- **Streaming events come from a daemon-side log tailer, not from the TUI.** The daemon runs one `tailLog(g)` per group with at least one subscriber (`logtail.go`); it parses the marker grammar (`>>> ` = prompt, otherwise = response) and fans event frames out to all subscribers. The TUI therefore needs no filesystem access to a group's workspace.
+- **`cs_tui` is a static Go binary on `scratch`** — 10 direct deps (the four charmbracelet UI libs plus `charmbracelet/x/{ansi,vt}`, `charmbracelet/log`, `muesli/termenv`, `grpc`, `protobuf`) and ~37 indirect, every one pinned and >6 weeks old per the supply-chain rule. The runtime image has no shell, no toolchain, no ca-certs, just the binary. **Its containment is much weaker than it used to be — see the trust-model addendum.**
+- **`claude -p --bare` for sidecars.** `--bare` disables CLAUDE.md auto-discovery, hooks, plugin sync, auto-memory, background prefetch, and keychain reads. We want the harness to be the only source of context — no surprise pickup of files inside the workspace. Tools (bash/edit/read) and the default tool-describing system prompt remain. Combined with `--append-system-prompt` reading the host-composed prompt (`prompts/global.md` + `groups/<g>/prompt.md`), this gives us two-tier prompt control without claude code's discovery surface.
+- **Per-group prompts are HOST-side.** `composeSystemPrompt` reads `groups/<g>/prompt.md` from the host on every turn (`prompt.go`) and pushes the composed result into the guest one-way. Under Firecracker there is no shared FS, so the guest cannot rewrite its own prompt — the opposite of the podman-era arrangement this bullet used to describe.
+- **TUI maintains one subscribe connection per group + ad-hoc one-shots for commands.** There are six streaming RPCs in total (`SubscribeGroup`, `SubscribeLogs`, `WatchState`, `JobTail`, `RunScript`, and the bidi `AttachShell`); everything else is unary request/response.
 - **Matching-path bind mount in `host/run-host.sh`** (`-v "$HERE:$HERE"`). Originally required because podman-era sidecars were spawned via the outer podman socket, which resolved `-v` paths against the *real host* filesystem — so the project had to sit at the same absolute path inside `cs_host_go`. That socket is now gone (no DooD); Firecracker resolves asset/workspace paths directly inside `cs_host`, so the *matching* aspect is vestigial. The mount itself stays — it's how the source reaches `cs_host` for `go run` — and keeping it path-matched costs nothing.
-- **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the koto token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `pathlib.Path.home() / ".claude/.credentials.json"`. Bare-host mode points there via `CRED_PATH` env.
+- **`creds/` is dedicated, not `~/.claude`.** Compromise of `cs_host` can only steal the koto token, not your personal claude session. Bind-mounted at `/root/.claude` inside `cs_host`; proxy reads it via `CRED_PATH`, defaulting to `~/.claude/.credentials.json` (`proxy.go`). Bare-host mode points there via `CRED_PATH` env.
 - **`--security-opt label=disable` on every podman run.** Fedora SELinux policy denies container access to user-owned bind mounts unless this is set or `:Z` relabeling is used. We pick `label=disable` because the trust model already accepts that; `:Z` would relabel the user's home dir.
 
 ## Trust model
@@ -580,7 +590,7 @@ tier 1: HOST USER         you, run-host.sh, real podman daemon
    |
    | enforced by: dedicated creds dir, no ~/.claude mount
    v
-tier 2: cs_host           nc.py + proxy.py + claude-for-refresh
+tier 2: cs_host           the Go daemon + in-process proxy + claude-for-refresh
                           (semi-trusted; vetted code + pinned deps)
                           blast radius: koto OAuth token + workspaces.
                           NO podman socket — the DooD mount was removed
@@ -596,10 +606,9 @@ tier 3: sidecars          cs_main_go, cs_<g>_go, ...
                           have own /workspace + (main only) /peers RW
 ```
 
-**RUNTIME SPLIT (2026-07): groups default to the Firecracker microVM
-runtime, not podman.** The tier-3 description above is the *podman* runtime,
-now the explicit opt-out (`config runtime=podman`, for pip/Chrome/open-net
-groups). A default group is a `--network=none`-equivalent microVM whose only
+**RUNTIME SPLIT (2026-07): every group is a Firecracker microVM.** The
+tier-3 description above is the *retired podman* runtime, kept only as
+history — there is no `runtime` config key and no way back to it. A group is a `--network=none`-equivalent microVM whose only
 host↔guest channel is vsock; see `docs/firecracker-vsock.md`. The two paragraphs
 below describe the podman runtime's weaknesses — **both are closed by the
 microVM runtime**, which is why it's now the default:
@@ -651,27 +660,48 @@ The "we trust the host user" decision was deliberate. **The DooD podman socket h
 
 ## Trust model addendum: cs_tui
 
-`cs_tui` is a fourth tier *below* tier 2 in attack surface, despite running on the host:
+**This tier used to be the strongest claim in the trust model and is now the
+weakest — do not rely on the old text.** `cs_tui` was once `--network=none`
+with a single unix socket mounted. Moving the transport to gRPC/mTLS (the
+daemon may run off-box) ended that: it now needs network reach to the daemon
+and the client PKI on disk.
 
 ```
 tier 2.5: cs_tui          Go (Bubble Tea) TUI, static binary on scratch
-                          --network=none, fs: koto.sock only
-                          can: send commands the daemon accepts, read stream events
-                          cannot: reach proxy, sidecars, API, read group workspaces, or exec anything
+                          --network koto-net   (Makefile `tui` target)
+                          fs: creds/ ro, scripts/ ro, prompts/ ro, run/tui rw
+                          can: everything the `tui` clientid's role allows —
+                               which is `admin`, i.e. EVERY verb on EVERY
+                               group, RunScript and AttachShell included
+                               (both execute code inside a guest VM)
+                          also: reachable to every per-group proxy port on
+                               koto-net, and reads the whole creds dir —
+                               ca.key, server.key, tokens.json, venice.key,
+                               .credentials.json
 ```
 
-A malicious dep in the Charm tree gets you a sock-only relay, not workspace access. That's the whole reason for the separate container. Compared to the prior Ink/bun build the supply-chain surface is much smaller: a static Go binary with no runtime interpreter, no shell, and a single auditable upstream org (charmbracelet) for the direct deps.
+So a malicious dep in the Charm tree is **not** a sock-only relay any more: it
+is an admin client with the private CA in reach. The supply-chain argument for
+the separate container still holds (static Go binary, no interpreter, no shell,
+pinned deps) — the containment argument does not. Narrowing this means giving
+the TUI its own least-privilege role instead of `admin`, mounting only the four
+files it needs (`ca.crt`, `client-tui.crt`, `client-tui.key`, `token-tui`)
+rather than all of `creds/`, and binding the proxy to loopback (see below).
+
+**The proxy is NOT loopback-bound.** `daemon.go` defaults `BIND` to
+`127.0.0.1`, but `host/Dockerfile` sets `ENV BIND=0.0.0.0` and nothing
+overrides it, so every per-group credential-injecting proxy port listens on all
+interfaces inside `cs_host` and is reachable from anything on `koto-net`,
+`cs_tui` included. Any doc that says otherwise is wrong.
 
 ## Driving the daemon for tests
 
-The TUI is a thin client. To exercise the proxy/sidecar/metrics path, skip it and write directly to FIFOs:
-
-```sh
-# send a message to a group, exactly the bytes nc.py's send() writes
-{ printf 'hello world' | base64 -w 0; printf '\n'; } > groups/main/.cs/in
-# watch the response stream
-tail -F groups/main/.cs/log
-```
+The TUI is a thin client. **The old "write base64 to `groups/<g>/.cs/in`" recipe is
+gone**: under Firecracker that FIFO lives inside the guest's workspace.img and the
+host side has no `.cs/in` at all — the daemon delivers turns over vsock (`fcSendMsg`).
+Drive the daemon through `koto ctl` (below) instead. Reading still works host-side:
+`tail -F groups/<g>/.cs/log.0` follows a live turn (slot 0; `log.1`..`log.9` are the
+other concurrency slots).
 
 To drive the gRPC API directly, use `grpcurl` with the client PKI material
 (the API is mTLS + bearer token — no anonymous plaintext endpoint):
@@ -726,18 +756,17 @@ missed, and exits at `turn_end`.
 
 ## Conventions
 
-- All host-side commands assume `/home/<user>/git/metaopt` cwd unless noted.
-- Don't add new Python deps without a written reason — the user's global CLAUDE.md enforces a 6-week dependency lag and supply-chain caution. Stdlib first.
-- The TUI is Go (Bubble Tea); all other host-side code is Python stdlib. Don't add a JS/TS runtime to the project — the prior Ink TUI's npm tree is the reason we rewrote it.
+- All host-side commands assume the repo root as cwd unless noted.
+- Host-side code is **all Go** (the daemon, the proxy, the TUI, `koto ctl`); there is no Python left in the project. Don't add a JS/TS runtime — the prior Ink TUI's npm tree is the reason we rewrote it. The 6-week dependency lag and supply-chain caution apply to every new dep.
 - For Go deps in `tui/`: every direct + indirect entry in `go.mod` must be ≥6 weeks old. After `go mod tidy`, verify each pin via `curl -s https://proxy.golang.org/<mod>/@v/<ver>.info` and compare its `Time` to today minus 6 weeks.
-- When adding a sidecar feature, audit its blast radius: can it read `/peers` (main only)? does it have outbound network beyond the proxy? does it run as root?
+- When adding a guest-side feature, audit its blast radius: does it have outbound network beyond the proxy (`network=` profile)? does it run as root (`root=` profile)? can it reach a peer group through the ctl plane?
 - `make clean` is SAFE (stop + runtime droppings only: logs, metrics, `run/`, sentinels) — group workspaces survive. The destructive wipe is `make clean-groups` (deletes `groups/` + `groups.json` + `schedules.json` + `goals.json` — all sessions, prompts, schedules, goals; confirmation-prompted, `FORCE=1` to skip). Split after a `make clean` irrecoverably deleted five groups' state.
 
 ## Iterating
 
-- **Edits to daemon/proxy `*.go` are live.** `host/Dockerfile` is just `golang:1.24-alpine + podman + claude-code-cli`; the entrypoint builds + execs the daemon (`go build -o /tmp/kotod ./daemon && exec /tmp/kotod daemon`, cwd = repo root, resolved via the root `go.work`) so the daemon is PID 1 and receives `podman stop`'s SIGTERM — its shutdown handler stops every microVM so guests sync+umount their workspace images (`go run` did not forward SIGTERM; VMs died with the container and workspace.img was left dirty). `host/run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`) plus a persistent `.gocache/` build cache, so a daemon edit followed by `make host-run` recompiles + restarts in ~1s. The first compile after `make clean` is ~12s (cold cache). Only rebuild the image (`make host-build`) when changing `host/Dockerfile`, `sidecar/Dockerfile`, or the installed deps (podman/nodejs/claude-code).
-- **Edits to `tui/*.go` require a rebuild.** No hot-reload — the runtime image is `scratch` + static binary. Cycle is `make tui-build && make tui`; Go compiles in 1-2s. Trade-off vs. the prior Ink/bun hot-reload: slower iteration in exchange for sock-only mount (no bind-mount of source), no JS runtime in the container, and ~10MB instead of ~80MB. To regenerate `go.sum` after changing `go.mod`, run `podman run --rm --security-opt label=disable -v $(pwd)/tui:/src -w /src docker.io/library/golang:1.24-alpine go mod tidy` from the project root. **The TUI writes a development log to `run/tui/tui.log`** (DEBUG by default — `tail -f` it while reproducing; rotates once to `.old` at 5 MiB). `run/tui/` is the TUI's one writable mount (at `/koto-run`), which also makes `tui-state.json` survive `/reload`; `KOTO_TUI_LOG` overrides the path (`off` disables), `KOTO_TUI_LOG_LEVEL=info|warn|error|off` raises the threshold. The TUI can't log to stdout/stderr (alt-screen frames), so file-open failure just disables logging silently — see `tui/debuglog.go`.
+- **Edits to daemon/proxy `*.go` are live.** `host/Dockerfile` is `golang:1.24-alpine + nodejs/npm + e2fsprogs + claude-code-cli` (**no podman** — groups are microVMs and the DooD socket is gone); the entrypoint builds + execs the daemon (`go build -o /tmp/kotod ./daemon && exec /tmp/kotod daemon`, cwd = repo root, resolved via the root `go.work`) so the daemon is PID 1 and receives `podman stop`'s SIGTERM — its shutdown handler stops every microVM so guests sync+umount their workspace images (`go run` did not forward SIGTERM; VMs died with the container and workspace.img was left dirty). `host/run-host.sh` bind-mounts the whole project dir at the matching path (`-v "$HERE:$HERE"`) plus a persistent `.gocache/` build cache, so a daemon edit followed by `make host-run` recompiles + restarts in ~1s. The first compile after `make clean` is ~12s (cold cache). Only rebuild the image (`make host-build`) when changing `host/Dockerfile` itself or the installed deps (nodejs/claude-code). Guest-side scripts live in the rootfs — that's `make fc-rootfs`, not `host-build`.
+- **Edits to `tui/*.go` require a rebuild.** No hot-reload — the runtime image is `scratch` + static binary. Cycle is `make tui-build && make tui`; Go compiles in 1-2s. Trade-off vs. the prior Ink/bun hot-reload: slower iteration in exchange for no bind-mount of source, no JS runtime in the container, and ~10MB instead of ~80MB. To regenerate `go.sum` after changing `go.mod`, run `podman run --rm --security-opt label=disable -v $(pwd)/tui:/src -w /src docker.io/library/golang:1.24-alpine go mod tidy` from the project root. **The TUI writes a development log to `run/tui/tui.log`** (DEBUG by default — `tail -f` it while reproducing; rotates once to `.old` at 5 MiB). `run/tui/` is the TUI's one writable mount (at `/koto-run`), which also makes `tui-state.json` survive `/reload`; `KOTO_TUI_LOG` overrides the path (`off` disables), `KOTO_TUI_LOG_LEVEL=info|warn|error|off` raises the threshold. The TUI can't log to stdout/stderr (alt-screen frames), so file-open failure just disables logging silently — see `tui/debuglog.go`.
 - **[podman] Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing podman sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
-- **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent`, node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make fc-rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `docs/firecracker-vsock.md`. the host-side `*.go` (daemon/fc/proxy) is still live (`go run` in `cs_host`), so only guest-side changes need the rootfs rebuild.
+- **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent`, node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make fc-rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `docs/firecracker-vsock.md`. the host-side `*.go` (daemon/fc/proxy) is still live (the entrypoint rebuilds and re-execs on `make host-run`), so only guest-side changes need the rootfs rebuild.
 - **For testing, prefer FIFO writes over the TUI.** Write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic, no UI in the way.
 - **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.
