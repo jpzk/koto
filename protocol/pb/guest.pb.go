@@ -1921,6 +1921,307 @@ func (*AgentFrame_Input) isAgentFrame_Kind() {}
 
 func (*AgentFrame_Resize) isAgentFrame_Kind() {}
 
+// ---- 9004: turn stream (guest → host) --------------------------------------
+// One connection per turn: the guest agent dials when it starts the turn's
+// worker, sends TurnOpen{slot} first, then the turn's events as they happen,
+// and TurnEnd last (always — a timed-out or killed worker still ends its
+// turn). The daemon serializes the frames into the slot's host-side log file
+// in the [[marker]] text grammar (daemon/logparse.go), so History, the
+// tailer and every reader are unchanged — but the guest can no longer author
+// a marker: text is bytes, markers are frame types, and the daemon escapes
+// any text line that would parse as one. Replaces the raw 9001/9004 byte
+// streams (9001 is gone; the guest has no channel that writes raw text into
+// a host file).
+type TurnOpen struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Slot          int32                  `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnOpen) Reset() {
+	*x = TurnOpen{}
+	mi := &file_guest_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnOpen) ProtoMessage() {}
+
+func (x *TurnOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnOpen.ProtoReflect.Descriptor instead.
+func (*TurnOpen) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *TurnOpen) GetSlot() int32 {
+	if x != nil {
+		return x.Slot
+	}
+	return 0
+}
+
+type ToolUse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Input         string                 `protobuf:"bytes,2,opt,name=input,proto3" json:"input,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolUse) Reset() {
+	*x = ToolUse{}
+	mi := &file_guest_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolUse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolUse) ProtoMessage() {}
+
+func (x *ToolUse) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolUse.ProtoReflect.Descriptor instead.
+func (*ToolUse) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ToolUse) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolUse) GetInput() string {
+	if x != nil {
+		return x.Input
+	}
+	return ""
+}
+
+type TurnFrame struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*TurnFrame_Open
+	//	*TurnFrame_Text
+	//	*TurnFrame_ThinkBegin
+	//	*TurnFrame_ThinkEnd
+	//	*TurnFrame_Tool
+	//	*TurnFrame_ToolOutBegin
+	//	*TurnFrame_ToolOutEnd
+	//	*TurnFrame_Err
+	//	*TurnFrame_TurnEnd
+	Kind          isTurnFrame_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnFrame) Reset() {
+	*x = TurnFrame{}
+	mi := &file_guest_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnFrame) ProtoMessage() {}
+
+func (x *TurnFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnFrame.ProtoReflect.Descriptor instead.
+func (*TurnFrame) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *TurnFrame) GetKind() isTurnFrame_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *TurnFrame) GetOpen() *TurnOpen {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_Open); ok {
+			return x.Open
+		}
+	}
+	return nil
+}
+
+func (x *TurnFrame) GetText() []byte {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_Text); ok {
+			return x.Text
+		}
+	}
+	return nil
+}
+
+func (x *TurnFrame) GetThinkBegin() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_ThinkBegin); ok {
+			return x.ThinkBegin
+		}
+	}
+	return false
+}
+
+func (x *TurnFrame) GetThinkEnd() int32 {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_ThinkEnd); ok {
+			return x.ThinkEnd
+		}
+	}
+	return 0
+}
+
+func (x *TurnFrame) GetTool() *ToolUse {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_Tool); ok {
+			return x.Tool
+		}
+	}
+	return nil
+}
+
+func (x *TurnFrame) GetToolOutBegin() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_ToolOutBegin); ok {
+			return x.ToolOutBegin
+		}
+	}
+	return false
+}
+
+func (x *TurnFrame) GetToolOutEnd() int64 {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_ToolOutEnd); ok {
+			return x.ToolOutEnd
+		}
+	}
+	return 0
+}
+
+func (x *TurnFrame) GetErr() string {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_Err); ok {
+			return x.Err
+		}
+	}
+	return ""
+}
+
+func (x *TurnFrame) GetTurnEnd() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_TurnEnd); ok {
+			return x.TurnEnd
+		}
+	}
+	return false
+}
+
+type isTurnFrame_Kind interface {
+	isTurnFrame_Kind()
+}
+
+type TurnFrame_Open struct {
+	Open *TurnOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"`
+}
+
+type TurnFrame_Text struct {
+	Text []byte `protobuf:"bytes,2,opt,name=text,proto3,oneof"` // response text; think/tool-out body while that block is open
+}
+
+type TurnFrame_ThinkBegin struct {
+	ThinkBegin bool `protobuf:"varint,3,opt,name=think_begin,json=thinkBegin,proto3,oneof"`
+}
+
+type TurnFrame_ThinkEnd struct {
+	ThinkEnd int32 `protobuf:"varint,4,opt,name=think_end,json=thinkEnd,proto3,oneof"` // word count
+}
+
+type TurnFrame_Tool struct {
+	Tool *ToolUse `protobuf:"bytes,5,opt,name=tool,proto3,oneof"`
+}
+
+type TurnFrame_ToolOutBegin struct {
+	ToolOutBegin bool `protobuf:"varint,6,opt,name=tool_out_begin,json=toolOutBegin,proto3,oneof"`
+}
+
+type TurnFrame_ToolOutEnd struct {
+	ToolOutEnd int64 `protobuf:"varint,7,opt,name=tool_out_end,json=toolOutEnd,proto3,oneof"` // byte count of the body
+}
+
+type TurnFrame_Err struct {
+	Err string `protobuf:"bytes,8,opt,name=err,proto3,oneof"` // [[err]] line
+}
+
+type TurnFrame_TurnEnd struct {
+	TurnEnd bool `protobuf:"varint,9,opt,name=turn_end,json=turnEnd,proto3,oneof"`
+}
+
+func (*TurnFrame_Open) isTurnFrame_Kind() {}
+
+func (*TurnFrame_Text) isTurnFrame_Kind() {}
+
+func (*TurnFrame_ThinkBegin) isTurnFrame_Kind() {}
+
+func (*TurnFrame_ThinkEnd) isTurnFrame_Kind() {}
+
+func (*TurnFrame_Tool) isTurnFrame_Kind() {}
+
+func (*TurnFrame_ToolOutBegin) isTurnFrame_Kind() {}
+
+func (*TurnFrame_ToolOutEnd) isTurnFrame_Kind() {}
+
+func (*TurnFrame_Err) isTurnFrame_Kind() {}
+
+func (*TurnFrame_TurnEnd) isTurnFrame_Kind() {}
+
 var File_guest_proto protoreflect.FileDescriptor
 
 const file_guest_proto_rawDesc = "" +
@@ -2061,6 +2362,24 @@ const file_guest_proto_rawDesc = "" +
 	"\x05error\x18\x03 \x01(\tH\x00R\x05error\x12\x16\n" +
 	"\x05input\x18\x04 \x01(\fH\x00R\x05input\x12+\n" +
 	"\x06resize\x18\x05 \x01(\v2\x11.koto.ShellResizeH\x00R\x06resizeB\x06\n" +
+	"\x04kind\"\x1e\n" +
+	"\bTurnOpen\x12\x12\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\"3\n" +
+	"\aToolUse\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05input\x18\x02 \x01(\tR\x05input\"\xb3\x02\n" +
+	"\tTurnFrame\x12$\n" +
+	"\x04open\x18\x01 \x01(\v2\x0e.koto.TurnOpenH\x00R\x04open\x12\x14\n" +
+	"\x04text\x18\x02 \x01(\fH\x00R\x04text\x12!\n" +
+	"\vthink_begin\x18\x03 \x01(\bH\x00R\n" +
+	"thinkBegin\x12\x1d\n" +
+	"\tthink_end\x18\x04 \x01(\x05H\x00R\bthinkEnd\x12#\n" +
+	"\x04tool\x18\x05 \x01(\v2\r.koto.ToolUseH\x00R\x04tool\x12&\n" +
+	"\x0etool_out_begin\x18\x06 \x01(\bH\x00R\ftoolOutBegin\x12\"\n" +
+	"\ftool_out_end\x18\a \x01(\x03H\x00R\n" +
+	"toolOutEnd\x12\x12\n" +
+	"\x03err\x18\b \x01(\tH\x00R\x03err\x12\x1b\n" +
+	"\bturn_end\x18\t \x01(\bH\x00R\aturnEndB\x06\n" +
 	"\x04kindB\x15Z\x13koto-protocol/pb;pbb\x06proto3"
 
 var (
@@ -2075,7 +2394,7 @@ func file_guest_proto_rawDescGZIP() []byte {
 	return file_guest_proto_rawDescData
 }
 
-var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_guest_proto_goTypes = []any{
 	(*CtlSendReq)(nil),     // 0: koto.CtlSendReq
 	(*CtlTailReq)(nil),     // 1: koto.CtlTailReq
@@ -2097,62 +2416,65 @@ var file_guest_proto_goTypes = []any{
 	(*AgentRequest)(nil),   // 17: koto.AgentRequest
 	(*AgentResponse)(nil),  // 18: koto.AgentResponse
 	(*AgentFrame)(nil),     // 19: koto.AgentFrame
-	nil,                    // 20: koto.InitReq.EnvEntry
-	(*SpawnReq)(nil),       // 21: koto.SpawnReq
-	(*GroupReq)(nil),       // 22: koto.GroupReq
-	(*ListReq)(nil),        // 23: koto.ListReq
-	(*ResourcesReq)(nil),   // 24: koto.ResourcesReq
-	(*ConfigReq)(nil),      // 25: koto.ConfigReq
-	(*GoalSetReq)(nil),     // 26: koto.GoalSetReq
-	(*GoalGroupReq)(nil),   // 27: koto.GoalGroupReq
-	(*GoalListReq)(nil),    // 28: koto.GoalListReq
-	(*SchedAddReq)(nil),    // 29: koto.SchedAddReq
-	(*SchedListReq)(nil),   // 30: koto.SchedListReq
-	(*SchedIDReq)(nil),     // 31: koto.SchedIDReq
-	(*SchedToggleReq)(nil), // 32: koto.SchedToggleReq
-	(*ListResp)(nil),       // 33: koto.ListResp
-	(*ResourcesResp)(nil),  // 34: koto.ResourcesResp
-	(*ConfigResp)(nil),     // 35: koto.ConfigResp
-	(*GoalResp)(nil),       // 36: koto.GoalResp
-	(*GoalListResp)(nil),   // 37: koto.GoalListResp
-	(*SchedAddResp)(nil),   // 38: koto.SchedAddResp
-	(*SchedListResp)(nil),  // 39: koto.SchedListResp
-	(*ShellResize)(nil),    // 40: koto.ShellResize
+	(*TurnOpen)(nil),       // 20: koto.TurnOpen
+	(*ToolUse)(nil),        // 21: koto.ToolUse
+	(*TurnFrame)(nil),      // 22: koto.TurnFrame
+	nil,                    // 23: koto.InitReq.EnvEntry
+	(*SpawnReq)(nil),       // 24: koto.SpawnReq
+	(*GroupReq)(nil),       // 25: koto.GroupReq
+	(*ListReq)(nil),        // 26: koto.ListReq
+	(*ResourcesReq)(nil),   // 27: koto.ResourcesReq
+	(*ConfigReq)(nil),      // 28: koto.ConfigReq
+	(*GoalSetReq)(nil),     // 29: koto.GoalSetReq
+	(*GoalGroupReq)(nil),   // 30: koto.GoalGroupReq
+	(*GoalListReq)(nil),    // 31: koto.GoalListReq
+	(*SchedAddReq)(nil),    // 32: koto.SchedAddReq
+	(*SchedListReq)(nil),   // 33: koto.SchedListReq
+	(*SchedIDReq)(nil),     // 34: koto.SchedIDReq
+	(*SchedToggleReq)(nil), // 35: koto.SchedToggleReq
+	(*ListResp)(nil),       // 36: koto.ListResp
+	(*ResourcesResp)(nil),  // 37: koto.ResourcesResp
+	(*ConfigResp)(nil),     // 38: koto.ConfigResp
+	(*GoalResp)(nil),       // 39: koto.GoalResp
+	(*GoalListResp)(nil),   // 40: koto.GoalListResp
+	(*SchedAddResp)(nil),   // 41: koto.SchedAddResp
+	(*SchedListResp)(nil),  // 42: koto.SchedListResp
+	(*ShellResize)(nil),    // 43: koto.ShellResize
 }
 var file_guest_proto_depIdxs = []int32{
-	21, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
+	24, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
 	0,  // 1: koto.CtlRequest.send:type_name -> koto.CtlSendReq
-	22, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
-	23, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
-	24, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
-	25, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
+	25, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
+	26, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
+	27, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
+	28, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
 	1,  // 6: koto.CtlRequest.tail:type_name -> koto.CtlTailReq
 	2,  // 7: koto.CtlRequest.job_done:type_name -> koto.JobDoneReq
 	3,  // 8: koto.CtlRequest.notify:type_name -> koto.NotifyReq
 	4,  // 9: koto.CtlRequest.report:type_name -> koto.ReportReq
 	5,  // 10: koto.CtlRequest.goal_done:type_name -> koto.GoalDoneReq
 	6,  // 11: koto.CtlRequest.goal_verdict:type_name -> koto.GoalVerdictReq
-	26, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
-	27, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
-	28, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
-	27, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
-	27, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
-	27, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
-	27, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
-	29, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
-	30, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
-	31, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
-	32, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
-	31, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
-	33, // 24: koto.CtlResponse.list:type_name -> koto.ListResp
-	34, // 25: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
-	35, // 26: koto.CtlResponse.config:type_name -> koto.ConfigResp
+	29, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
+	30, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
+	31, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
+	30, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
+	30, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
+	30, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
+	30, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
+	32, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
+	33, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
+	34, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
+	35, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
+	34, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
+	36, // 24: koto.CtlResponse.list:type_name -> koto.ListResp
+	37, // 25: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
+	38, // 26: koto.CtlResponse.config:type_name -> koto.ConfigResp
 	8,  // 27: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
-	36, // 28: koto.CtlResponse.goal:type_name -> koto.GoalResp
-	37, // 29: koto.CtlResponse.goals:type_name -> koto.GoalListResp
-	38, // 30: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
-	39, // 31: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
-	20, // 32: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
+	39, // 28: koto.CtlResponse.goal:type_name -> koto.GoalResp
+	40, // 29: koto.CtlResponse.goals:type_name -> koto.GoalListResp
+	41, // 30: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
+	42, // 31: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
+	23, // 32: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
 	10, // 33: koto.AgentRequest.init:type_name -> koto.InitReq
 	11, // 34: koto.AgentRequest.msg:type_name -> koto.MsgReq
 	12, // 35: koto.AgentRequest.exec:type_name -> koto.ExecReq
@@ -2160,12 +2482,14 @@ var file_guest_proto_depIdxs = []int32{
 	14, // 37: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
 	15, // 38: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
 	16, // 39: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
-	40, // 40: koto.AgentFrame.resize:type_name -> koto.ShellResize
-	41, // [41:41] is the sub-list for method output_type
-	41, // [41:41] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	43, // 40: koto.AgentFrame.resize:type_name -> koto.ShellResize
+	20, // 41: koto.TurnFrame.open:type_name -> koto.TurnOpen
+	21, // 42: koto.TurnFrame.tool:type_name -> koto.ToolUse
+	43, // [43:43] is the sub-list for method output_type
+	43, // [43:43] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_guest_proto_init() }
@@ -2227,13 +2551,24 @@ func file_guest_proto_init() {
 		(*AgentFrame_Input)(nil),
 		(*AgentFrame_Resize)(nil),
 	}
+	file_guest_proto_msgTypes[22].OneofWrappers = []any{
+		(*TurnFrame_Open)(nil),
+		(*TurnFrame_Text)(nil),
+		(*TurnFrame_ThinkBegin)(nil),
+		(*TurnFrame_ThinkEnd)(nil),
+		(*TurnFrame_Tool)(nil),
+		(*TurnFrame_ToolOutBegin)(nil),
+		(*TurnFrame_ToolOutEnd)(nil),
+		(*TurnFrame_Err)(nil),
+		(*TurnFrame_TurnEnd)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_guest_proto_rawDesc), len(file_guest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

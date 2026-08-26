@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-// Filter claude's --output-format stream-json into raw streaming text.
+// Filter claude's --output-format stream-json into [[marker]] streaming text.
+//
+// ONLY cs-subagent uses this now (KOTO_SUBAGENT mode: a sub-agent's progress
+// framing into a cs-job out file, which JobTail parses with the same grammar).
+// Chat turns no longer pass through here: fc-agent (fcguest/turn.go) decodes
+// stream-json itself and sends typed TurnFrames over vsock; the daemon
+// renders the marker text. Keep the two in step when the grammar changes.
 // Each text_delta is written verbatim to stdout the moment it arrives.
 // Before the first text chunk we emit `[ts:<epoch-ms>]\n` so the daemon
 // tail/history parsers can attach an accurate timestamp to the response

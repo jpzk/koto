@@ -44,7 +44,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
  && npm i -g @anthropic-ai/claude-code \
  && npm cache clean --force
 
-# Same uid/gid contract as the podman sidecar: entrypoint.sh runs as node
+# Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
 

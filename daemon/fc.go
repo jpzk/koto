@@ -10,20 +10,19 @@ package main
 //   guest → host  (FC connects to "<uds>_<port>", daemon listens there)
 //     9000  API egress: raw TCP-in-vsock, spliced into the group's own proxy
 //           listener — cred injection + metrics attribution unchanged.
-//     9001  log stream: the guest agent forwards the in-guest .cs/log FIFO;
-//           the daemon appends the bytes to the HOST groups/<g>/.cs/log,
-//           which stays the single source of truth (tailLog, History,
-//           /clear truncation, proxy logAppend, `>>>` markers all unchanged).
+//     9001  (retired) was the raw guest log stream. The guest no longer has
+//           any channel that writes raw text into a host file.
 //     9002  ctl plane: framed protobuf (protocol/guest.proto CtlRequest →
 //           ctlDispatchPB → CtlResponse on the same connection; the guest
 //           agent converts the shell tools' JSON lines with strict protojson
 //           before framing and flattens the reply into .cs/ctl.out).
-//     9004  slot log streams: one connection per concurrency slot (queue.go),
-//           opening with a header line "<slot>\n" and then behaving exactly
-//           like 9001. The header multiplexes because the slot count is a
-//           constant the guest and host share, and ten more listeners would
-//           be ten more of everything for no gain. The daemon appends each
-//           connection's bytes to HOST .cs/log.<slot>.
+//     9004  turn streams: one connection PER TURN, framed protobuf
+//           (TurnFrame): TurnOpen{slot} first, then the turn's events, then
+//           TurnEnd. fcTurnSink (fcturn.go) renders them into the [[marker]]
+//           text grammar in HOST .cs/log.<slot>, which stays the single
+//           source of truth (tailLog, History, /clear, `>>>` markers all
+//           unchanged) — but the guest can't author a marker: text is bytes,
+//           markers are frame types, marker-shaped text lines are escaped.
 //
 //   host → guest  (daemon connects to "<uds>", sends "CONNECT 10000\n")
 //     10000 agent RPC — one framed AgentRequest per connection, one framed
@@ -60,7 +59,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -543,19 +541,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.listeners = append(vm.listeners, lnProxy)
 	go fcAcceptLoop(lnProxy, func(c net.Conn) { fcSpliceToProxy(c, proxyPort) })
 
-	lnLog, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortLog))
+	// No 9001 listener any more: the guest has no raw-text path into a host
+	// file. Every turn's output arrives as TurnFrames on 9004.
+	lnTurn, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortLogSlot))
 	if err != nil {
 		return fail(err)
 	}
-	vm.listeners = append(vm.listeners, lnLog)
-	go fcAcceptLoop(lnLog, func(c net.Conn) { fcLogSink(g, c) })
-
-	lnLogSlot, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortLogSlot))
-	if err != nil {
-		return fail(err)
-	}
-	vm.listeners = append(vm.listeners, lnLogSlot)
-	go fcAcceptLoop(lnLogSlot, func(c net.Conn) { fcSlotLogSink(g, c) })
+	vm.listeners = append(vm.listeners, lnTurn)
+	go fcAcceptLoop(lnTurn, func(c net.Conn) { fcTurnSink(g, c) })
 
 	lnCtl, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortCtl))
 	if err != nil {
@@ -869,43 +862,8 @@ func fcSpliceToProxy(c net.Conn, proxyPort int) {
 	splice(c, up)
 }
 
-// fcLogSink appends the guest's log stream to the HOST log file — the same
-// file tailLog tails and History reads, so every downstream consumer is
-// oblivious to the runtime. O_APPEND write semantics match the podman-era
-// multi-writer behavior (proxy notices, daemon markers). Each chunk is
-// written under the group's log write lock so the tailer's [[notify]] flush
-// (tryFlushNotify, logtail.go) can check the file tail and append atomically
-// against this stream — an unsynchronized marker append could land mid-line
-// and stop parsing as a marker.
-func fcLogSink(g string, c net.Conn) { fcStreamLogSink(g, groupLogPath(g), c) }
-
-// fcSlotLogSink reads the connection's one-line slot header and then streams
-// that slot's bytes into its host file. An unparseable or out-of-range header
-// drops the connection rather than guessing: writing a turn's frames into the
-// wrong stream would misattribute the turn, and the guest redials.
-func fcSlotLogSink(g string, c net.Conn) {
-	br := bufio.NewReader(c)
-	line, err := br.ReadString('\n')
-	if err != nil {
-		c.Close()
-		return
-	}
-	slot, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil || slot < 0 || slot >= groupSlots {
-		emitLogfG("fc", g, "warn", "[%s] slot log header %q rejected", g, strings.TrimSpace(line))
-		c.Close()
-		return
-	}
-	ensureSlotTail(g, slot)
-	fcStreamLogSinkReader(g, slotLogPath(g, slot), br, c)
-}
-
-func fcStreamLogSink(g, p string, c net.Conn) {
-	fcStreamLogSinkReader(g, p, c, c)
-}
-
-// The 9001 stream is the one channel through which a guest writes into the
-// HOST filesystem, and it used to be unmetered: a guest looping output into
+// The turn stream (9004) is the one channel through which a guest writes into
+// the HOST filesystem, and it used to be unmetered: a guest looping output into
 // its log FIFO could fill the host disk (the fleet-wide EROFS failure) with
 // only the 80/90% alert as a brake. Two guards, per group:
 //
@@ -914,8 +872,8 @@ func fcStreamLogSink(g, p string, c net.Conn) {
 //     is lost). Chat-log rates are KB/s; the budget is far above any
 //     legitimate turn and bounds a hostile writer to ~GB/hour, well inside
 //     the alert's reaction window.
-//   - a hard per-file ceiling past which chunks are dropped with one error
-//     line per connection, so a stalled operator still can't lose the host.
+//   - a hard per-file ceiling past which frames are dropped, so a stalled
+//     operator still can't lose the host (logSinkAppend).
 const (
 	fcLogSinkRateBytes  = 1 << 20        // 1 MiB/s sustained
 	fcLogSinkBurstBytes = 8 << 20        // 8 MiB burst
@@ -952,42 +910,6 @@ func fcLogSinkWait(g string, n int) time.Duration {
 	return time.Duration(-b.tokens / fcLogSinkRateBytes * float64(time.Second))
 }
 
-func fcStreamLogSinkReader(g, p string, r io.Reader, c net.Conn) {
-	defer c.Close()
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	mu := logWriteLock(p)
-	buf := make([]byte, 32*1024)
-	capped := false
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if d := fcLogSinkWait(g, n); d > 0 {
-				time.Sleep(d)
-			}
-			if st, serr := os.Stat(p); serr == nil && st.Size() >= fcLogSinkMaxBytes {
-				if !capped {
-					capped = true
-					emitLogfG("fc", g, "error", "[%s] log sink: %s at %d bytes ceiling, dropping guest log output", g, filepath.Base(p), st.Size())
-				}
-				if err != nil {
-					return
-				}
-				continue
-			}
-			mu.Lock()
-			werr := logSinkAppend(p, buf[:n])
-			mu.Unlock()
-			if werr != nil {
-				emitLogfG("fc", g, "error", "[%s] log sink append: %v", g, werr)
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
 // logSinkAppend opens-appends-closes PER CHUNK, like logAppend, rather than
 // holding one fd for the VM's lifetime. Deliberate: filterLogSession (the
 // per-session clear — which the goal driver runs before EVERY iteration)
@@ -1002,6 +924,9 @@ func logSinkAppend(p string, b []byte) error {
 		return err
 	}
 	defer f.Close()
+	if st, serr := f.Stat(); serr == nil && st.Size() >= fcLogSinkMaxBytes {
+		return fmt.Errorf("%s at the %d-byte ceiling, dropping guest output", filepath.Base(p), fcLogSinkMaxBytes)
+	}
 	_, err = f.Write(b)
 	return err
 }
