@@ -9,20 +9,43 @@ network-isolated TUI container speaking gRPC over mTLS.
 ## Architecture
 
 ```
-you ──▶ cs_tui (Go/BubbleTea, scratch image, on koto-net; creds ro)
-             │ gRPC over mTLS + bearer token (:8443)
-             ▼
-        cs_host ─ daemon (Go) + credential-injecting proxy
-             │        │
-             │        └── creds/ (OAuth token / Venice key — proxy memory only)
-             │
-             │ per-group: jailed Firecracker VMM, vsock-only IPC
-             ▼
-   ┌─ microVM "main" ──┐  ┌─ microVM <g> ──┐   guest kernel behind KVM,
-   │ claude -p loop    │  │ claude -p loop │   own /workspace (ext4 image),
-   │ + rootless podman │  │ ...            │   no NIC unless network=wan/lan/full
-   └───────────────────┘  └────────────────┘
+╔═ TIER 1 · host user (full authority) ═══════════════════════════════════════╗
+║  gRPC clients: cs_tui (tier 2.5, koto-net) · koto ctl · Android             ║
+║  creds/: OAuth token · venice.key · PKI (ca, client-*, tokens) · acl.json   ║
+╚═══════════════╤═══════════════════════════════════════════╤═════════════════╝
+                │ gRPC :8443  (mTLS + bearer token)         │ read per request
+                ▼                                           ▼ (proxy memory only)
+╔═ TIER 2 · cs_host — daemon container (no podman socket) ════════════════════╗
+║  ┌─ role ACL ─────────┐   ┌─ daemon (Go) ─────────────┐   ┌─ LLM proxy ───┐ ║
+║  │ admin · operator   │──▶│ lifecycle · session queues│   │ per-group port│═╬═▶ LLM API
+║  │ reader · agent     │   │ log tailer · replay ring  │   │ injects key   │ ║   (real credential)
+║  │ verb × target      │   │ cron · goals · ctl verbs  │   └───────▲───────┘ ║
+║  └────────────────────┘   └──────▲────────────┬───────┘   ┌───────┼───────┐ ║
+║                                  │            │           │ gVisor gateway│┄╬┄▶ internet / LAN
+║                                  │            │           │ wan/lan/full  │ ║   (filtered NAT)
+║                                  │            │           └───────▲───────┘ ║
+╚══════════════════════════════════╪════════════╪═══════════════════╪═════════╝
+        vsock 9001 log ·  9002 ctl │            │ vsock 10000       │ vsock 9000 (sentinel key)
+              9004 turn streams    │            │ agent RPC         ┆ vsock 9003 (L2 frames)
+╔═ TIER 3 · one jailed Firecracker VMM per group ═════════════════════════════╗
+║  fcjail: userns+mnt+pid+net+ipc+uts · per-VM chroot · unprivileged uid ·    ║
+║          no_new_privs · seccomp                                             ║
+║  ┌┄ KVM boundary · guest kernel ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐  ║
+║  ┆  microVM <g>: fc-agent (PID 1) → claude -p --bare loop as uid 1000    ┆  ║
+║  ┆  /workspace = workspace.img · rootless podman · no NIC by default     ┆  ║
+║  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  ║
+╚═════════════════════════════════════════════════════════════════════════════╝
 ```
+
+**Control flow** runs top-down: a client authenticates (mTLS + token, then the
+role ACL) and calls a gRPC verb; the daemon turns it into agent RPCs over
+vsock 10000. `main`'s agent orchestrates peers through the ctl plane on vsock
+9002, authorized by *group identity* (non-main groups get only self-scoped
+verbs). **Data flow** runs bottom-up: guest output on vsock 9001/9004 → daemon
+tailer → seq-numbered replay ring → `SubscribeGroup`/`WatchState` streams to
+every attached client. The LLM leg is the only egress a default group has
+(vsock 9000 → proxy, which alone holds the credential); a `network=` profile
+adds a filtered NIC via the gateway on vsock 9003.
 
 - **Daemon** (`daemon/`; entry in `daemon.go`, VM runtime in `fc.go`, one
   topic per file — see CLAUDE.md → Layout): boots/supervises microVMs, serializes one
@@ -39,6 +62,47 @@ you ──▶ cs_tui (Go/BubbleTea, scratch image, on koto-net; creds ro)
   `sched_*`/`config_set`/`tail`); non-main groups get only self-targeted
   verbs (`sched_*`, `goal_*`, `notify`, `job_done`, and a solicited one-shot
   `report` back to main), force-scoped to themselves.
+
+## Host requirements
+
+Everything runs rootless as the host user; nothing is installed on or
+configured into the host system itself. What the host must provide:
+
+- **Linux x86_64 with KVM** — `/dev/kvm` present and user-accessible
+  (VT-x/AMD-V, or nested virtualization when the host is itself a VM). This
+  is the one hard requirement: every group boots as a Firecracker microVM.
+  `run-host.sh` passes `--device /dev/kvm` through when present; without it
+  the daemon runs but group boots fail a clear preflight (`fcPreflight`,
+  `fc.go`).
+- **Rootless podman** with pasta networking (the Fedora default;
+  slirp4netns is not used) and working subuid/subgid ranges — the rootfs
+  build runs under `podman unshare`. Podman hosts cs_host, the TUI, and
+  every containerized build (Go, protoc, the guest kernel).
+- **Unprivileged user namespaces — nested.** Rootless podman puts cs_host
+  in a userns; the VMM jailer (`fcjail.go`) then clones a *second* userns
+  from inside that container. So the kernel must allow not just
+  unprivileged userns creation but creation from within an existing one:
+  `user.max_user_namespaces` > 0 and no seccomp/LSM policy blocking
+  `clone(CLONE_NEWUSER)` inside containers. Fedora's defaults satisfy
+  both; hardening like Ubuntu 24.04's
+  `kernel.apparmor_restrict_unprivileged_userns` is the kind of setting
+  that breaks it.
+- **e2fsprogs** (`mkfs.ext4`) for the golden-rootfs build. Workspace image
+  creation and growth at runtime use the copy baked into the cs_host image.
+- **Baseline CLI tools**: `make`, `curl`, `tar`, `git`, plus `openssl` for
+  the PKI targets and `jq` for `pki-client` / `metrics`.
+- **Build-time network and resources**: `make fc-assets` downloads the
+  pinned Firecracker release, clones the Amazon Linux kernel tree, and
+  compiles the guest kernel inside an Ubuntu container (a few GiB of disk
+  under `.kernelcache/`, minutes of CPU). At runtime each group reserves
+  1–8 GiB RAM and an 8–24 GiB workspace image per its `size` preset.
+
+Deliberate **non**-requirements: no root (all rootless), no `vhost_vsock`
+module (Firecracker's hybrid vsock is unix-socket-backed), no host
+`/dev/net/tun` (the `network` gateway is userspace gVisor inside
+cs_host; `CONFIG_TUN` is a *guest* kernel option), no Go/Node/protoc
+toolchain on the host (all builds are containerized), and no SELinux
+tuning (`--security-opt label=disable` is set on every podman run).
 
 ## Data flow
 
@@ -260,47 +324,6 @@ kernel that appear in no list above, and both are worth knowing about:
 | `root` | `no` (default) \| `yes` | `/restart` |
 | `autostart` | `no` (default) \| `yes` — boot with the daemon | daemon start |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `koto-net` | `/restart` |
-
-## Host requirements
-
-Everything runs rootless as the host user; nothing is installed on or
-configured into the host system itself. What the host must provide:
-
-- **Linux x86_64 with KVM** — `/dev/kvm` present and user-accessible
-  (VT-x/AMD-V, or nested virtualization when the host is itself a VM). This
-  is the one hard requirement: every group boots as a Firecracker microVM.
-  `run-host.sh` passes `--device /dev/kvm` through when present; without it
-  the daemon runs but group boots fail a clear preflight (`fcPreflight`,
-  `fc.go`).
-- **Rootless podman** with pasta networking (the Fedora default;
-  slirp4netns is not used) and working subuid/subgid ranges — the rootfs
-  build runs under `podman unshare`. Podman hosts cs_host, the TUI, and
-  every containerized build (Go, protoc, the guest kernel).
-- **Unprivileged user namespaces — nested.** Rootless podman puts cs_host
-  in a userns; the VMM jailer (`fcjail.go`) then clones a *second* userns
-  from inside that container. So the kernel must allow not just
-  unprivileged userns creation but creation from within an existing one:
-  `user.max_user_namespaces` > 0 and no seccomp/LSM policy blocking
-  `clone(CLONE_NEWUSER)` inside containers. Fedora's defaults satisfy
-  both; hardening like Ubuntu 24.04's
-  `kernel.apparmor_restrict_unprivileged_userns` is the kind of setting
-  that breaks it.
-- **e2fsprogs** (`mkfs.ext4`) for the golden-rootfs build. Workspace image
-  creation and growth at runtime use the copy baked into the cs_host image.
-- **Baseline CLI tools**: `make`, `curl`, `tar`, `git`, plus `openssl` for
-  the PKI targets and `jq` for `pki-client` / `metrics`.
-- **Build-time network and resources**: `make fc-assets` downloads the
-  pinned Firecracker release, clones the Amazon Linux kernel tree, and
-  compiles the guest kernel inside an Ubuntu container (a few GiB of disk
-  under `.kernelcache/`, minutes of CPU). At runtime each group reserves
-  1–8 GiB RAM and an 8–24 GiB workspace image per its `size` preset.
-
-Deliberate **non**-requirements: no root (all rootless), no `vhost_vsock`
-module (Firecracker's hybrid vsock is unix-socket-backed), no host
-`/dev/net/tun` (the `network` gateway is userspace gVisor inside
-cs_host; `CONFIG_TUN` is a *guest* kernel option), no Go/Node/protoc
-toolchain on the host (all builds are containerized), and no SELinux
-tuning (`--security-opt label=disable` is set on every podman run).
 
 ## Build & run
 
