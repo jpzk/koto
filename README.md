@@ -23,24 +23,6 @@ network-isolated TUI container speaking gRPC over mTLS.
 - **Access** — mTLS gRPC with role-based ACL, one proto for TUI, `koto ctl`
   and Android; Anthropic (OAuth) or Venice per group, switchable live
 
-### How it compares
-
-| | koto | NanoClaw | OpenClaw | herdr | Claude Code |
-|---|---|---|---|---|---|
-| Agent boundary | Firecracker microVM on **KVM** (own kernel) | Docker container (shared kernel) | host process; sandboxing optional | host process (owns terminals) | host process; optional sandbox |
-| Network | **none by default**; per-group `wan`/`lan`/`full`, frame-filtered | container network | host network | host network | host network |
-| Credentials | proxy-injected, never in the guest | proxy-injected (OneCLI vault) | `.env` on host | host | host keychain |
-| Multi-agent | `main` orchestrates peers over a verb control plane; no shared FS | agent groups per channel | limited | agents spawn panes, prompt each other via socket API | subagents / agent teams in-process |
-| Interface | TUI, `koto ctl`, Android (one gRPC proto) | WhatsApp/Telegram/Slack/… | messaging channels, web UI, CLI, TUI | terminal multiplexer | terminal |
-| Scheduling / jobs | cron, goals, background jobs with callbacks | recurring jobs | — | — | — |
-| Providers | Anthropic (OAuth), Venice | Anthropic (Agent SDK) | many, incl. local | any CLI agent | Anthropic |
-
-koto is for running **untrusted, long-lived agents** where a compromised agent
-must not reach your network, your credentials, or its siblings — the
-messaging-channel breadth of NanoClaw/OpenClaw and the terminal ergonomics of
-herdr are not its focus. If you want an assistant on WhatsApp, use those; if you
-want a fleet of agents behind a hardware boundary, this is it.
-
 ## Architecture
 
 ```
@@ -97,6 +79,24 @@ adds a filtered NIC via the gateway on vsock 9003.
   `sched_*`/`config_set`/`tail`); non-main groups get only self-targeted
   verbs (`sched_*`, `goal_*`, `notify`, `job_done`, and a solicited one-shot
   `report` back to main), force-scoped to themselves.
+
+### How it compares
+
+| | koto | NanoClaw | OpenClaw | herdr | Claude Code |
+|---|---|---|---|---|---|
+| Agent boundary | Firecracker microVM on **KVM** (own kernel) | Docker container (shared kernel) | host process; sandboxing optional | host process (owns terminals) | host process; optional sandbox |
+| Network | **none by default**; per-group `wan`/`lan`/`full`, frame-filtered | container network | host network | host network | host network |
+| Credentials | proxy-injected, never in the guest | proxy-injected (OneCLI vault) | `.env` on host | host | host keychain |
+| Multi-agent | `main` orchestrates peers over a verb control plane; no shared FS | agent groups per channel | limited | agents spawn panes, prompt each other via socket API | subagents / agent teams in-process |
+| Interface | TUI, `koto ctl`, Android (one gRPC proto) | WhatsApp/Telegram/Slack/… | messaging channels, web UI, CLI, TUI | terminal multiplexer | terminal |
+| Scheduling / jobs | cron, goals, background jobs with callbacks | recurring jobs | — | — | — |
+| Providers | Anthropic (OAuth), Venice | Anthropic (Agent SDK) | many, incl. local | any CLI agent | Anthropic |
+
+koto is for running **untrusted, long-lived agents** where a compromised agent
+must not reach your network, your credentials, or its siblings — the
+messaging-channel breadth of NanoClaw/OpenClaw and the terminal ergonomics of
+herdr are not its focus. If you want an assistant on WhatsApp, use those; if you
+want a fleet of agents behind a hardware boundary, this is it.
 
 ## Host requirements
 
