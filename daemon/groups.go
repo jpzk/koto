@@ -200,6 +200,34 @@ func stopGroup(g string) {
 	// A running goal would silently re-boot the VM on its next iteration,
 	// overriding the operator's stop — pause it first (no-op otherwise).
 	goalPauseOnStop(g)
+	// Ordinary traffic needs the same treatment, for the same reason: a stop
+	// has to actually keep the VM down, and every pending turn is a pending
+	// ensure() call. Both halves of "pending" reboot the group if left alone:
+	//
+	//   - a QUEUED message boots it within seconds — its worker starts the
+	//     next turn as soon as the current one retires, and sendNow's first
+	//     act is ensure();
+	//   - an IN-FLIGHT turn boots it 25 minutes later, which is worse for
+	//     being invisible. Its [[turn_end]] can never arrive from a VM that no
+	//     longer exists, so sendNow waits out turnWaitTimeout, declares the
+	//     group STALLED, and selfHeal RESTARTS the group the operator just
+	//     stopped.
+	//
+	// Canceling is not the same as interrupting: the prompt is discarded, not
+	// re-queued. That is the intent of a stop — /restart is how you keep the
+	// backlog. Done BEFORE taking groupOpMu (both helpers take queuesMu, and
+	// the cancel wants to reach the abort loop while the guest is still
+	// signalable) and before fcStop, so no worker can slip a fresh ensure()
+	// into the window between the drain and the power-off.
+	if n := dropQueued(g); n > 0 {
+		emitLogfG("group", g, "info", "stop group=%s: discarded %d queued message(s)", g, n)
+	}
+	for _, sess := range inFlightSessions(g) {
+		if requestTurnCancel(g, sess) {
+			emitLogfG("group", g, "info", "stop group=%s session=%s: canceling in-flight turn",
+				g, sessionMarkerName(sess))
+		}
+	}
 	mu := groupOpMu(g)
 	mu.Lock()
 	defer mu.Unlock()

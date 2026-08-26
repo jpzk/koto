@@ -223,6 +223,18 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #   /stop [g]         -> power off the group's microVM (daemon `stop` verb;
 #                        current group when no arg). VM boots again on next
 #                        send or /restart; workspace + history persist.
+#                        **A stop DISCARDS the group's pending traffic** —
+#                        every queued message, plus the in-flight turn — so
+#                        the VM stays down. Without that a stop silently
+#                        undoes itself: each pending turn begins with an
+#                        ensure(), so a queued message reboots the group
+#                        seconds later (its worker starts the next turn as
+#                        soon as the current one retires) and an in-flight
+#                        turn reboots it 25 minutes later (its [[turn_end]]
+#                        can never come from a VM that is gone, so sendNow
+#                        waits out turnWaitTimeout, marks the group STALLED,
+#                        and selfHeal restarts it). Discarded, not re-queued:
+#                        /restart is the verb that keeps the backlog.
 #                        Interrupting the in-flight turn is Ctrl+C or Esc (or
 #                        /interrupt) — /stop no longer means that. An
 #                        interrupt discards the prompt being worked on

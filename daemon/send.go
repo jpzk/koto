@@ -283,6 +283,19 @@ drain:
 			cancelC = nil // closed channel is always ready; don't spin
 			retry = time.After(interruptRetryDelay)
 		case <-retry:
+			// A stopped VM can never deliver [[turn_end]] — the guest process
+			// that would write it is gone with the VM. Retiring the turn here
+			// is what makes stopGroup's cancel stick: without it the loop
+			// re-signals a dead VM every tick for the full turnWaitTimeout,
+			// and the stall path then calls selfHeal, which RESTARTS the group
+			// the operator just stopped. Checked on the retry tick rather than
+			// at cancel time because the VM is usually still up at that
+			// instant — stopGroup cancels before it powers off.
+			if !fcRunning(g) {
+				emitLogfG("send", g, "info", "group=%s session=%s: VM stopped mid-turn; prompt discarded",
+					g, sessionMarkerName(session))
+				return nil
+			}
 			sig := "INT"
 			if sigAttempts++; sigAttempts >= interruptKillAfter {
 				sig = "KILL"

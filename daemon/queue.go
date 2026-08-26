@@ -307,6 +307,46 @@ func queueDepth(g string) int {
 	return n
 }
 
+// dropQueued discards every message still WAITING in g's queues (all of its
+// sessions) and reports how many it dropped. It is the backlog half of
+// stopGroup's "a stop must stay stopped" rule: each queued message is a
+// pending ensure() call, so a worker holding one boots the VM straight back up
+// the moment the current turn retires and the operator's stop silently undoes
+// itself. In-flight turns are the other half and are canceled separately —
+// this touches only the not-yet-started backlog that queueDepth reports.
+//
+// The channels themselves are drained, never closed: sendWorker ranges over
+// its channel and would exit on a close, leaving a live entry in `queues` with
+// no worker behind it, and the next send to that session would then hang
+// forever. Draining parks the worker on an empty channel instead, exactly as
+// if the backlog had been consumed normally.
+//
+// Each dropped job's result channel is buffered(1) and written by nobody else,
+// so reporting the discard under queuesMu cannot block (same discipline as
+// enqueue's non-blocking send).
+func dropQueued(g string) int {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	n := 0
+	for k, q := range queues {
+		gg, _, ok := splitSessKey(k)
+		if !ok || gg != g {
+			continue
+		}
+	drain:
+		for {
+			select {
+			case job := <-q:
+				job.done <- fmt.Errorf("group %q stopped; queued message discarded", g)
+				n++
+			default:
+				break drain
+			}
+		}
+	}
+	return n
+}
+
 // sendWorker drains one SESSION's queue, running each of its turns to
 // completion before starting the next. One instance per (group, session) →
 // order and single-flight within a conversation. How many workers may be
