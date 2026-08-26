@@ -62,9 +62,21 @@ const SYS_PROMPT = decodeB64(process.env.SP_B64);
 // is ephemeral (saveHistory/loadHistory are skipped) so a sub-call never touches
 // the group's main /workspace/.cs/venice-history.json thread.
 const ONESHOT = !!process.env.VENICE_ONESHOT;
-function writeOut(s) { try { fs.writeSync(ONESHOT ? 2 : 1, s); } catch {} }
+// KOTO_EVENTS: the chat-turn mode under fc-agent (fcguest/turn.go). Instead of
+// [[marker]] text, every event is one JSON line on stdout —
+//   {"ev":"text","text":..} {"ev":"tool","name":..,"input":..}
+//   {"ev":"tool_out","text":..} {"ev":"err","text":..}
+// — which fc-agent turns into typed TurnFrames; the host renders the marker
+// text. Marker text output survives only for VENICE_ONESHOT (cs-subagent), where
+// it lands in a job's out file.
+const EVENTS = !!process.env.KOTO_EVENTS && !ONESHOT;
+function emit(ev) { try { fs.writeSync(1, JSON.stringify(ev) + '\n'); } catch {} }
+function writeOut(s) {
+  if (EVENTS) { if (s.length) emit({ ev: 'text', text: s }); return; }
+  try { fs.writeSync(ONESHOT ? 2 : 1, s); } catch {}
+}
 function writeFinal(s) { try { fs.writeSync(1, s); } catch {} }
-function writeErr(s) { writeOut(`[[err]] ${s}\n`); }
+function writeErr(s) { if (EVENTS) emit({ ev: 'err', text: s }); else writeOut(`[[err]] ${s}\n`); }
 
 if (!BASE) { writeErr('venice: ANTHROPIC_BASE_URL not set'); process.exit(ONESHOT ? 1 : 0); }
 if (!USER_MSG) { writeErr('venice: empty MSG_B64'); process.exit(ONESHOT ? 1 : 0); }
@@ -74,9 +86,11 @@ if (!USER_MSG) { writeErr('venice: empty MSG_B64'); process.exit(ONESHOT ? 1 : 0
 let stamped = false;
 let midline = false;
 function stampOnce() {
+  if (EVENTS) return; // the host stamps the turn
   if (!stamped) { writeOut(`[ts:${Date.now()}]\n`); stamped = true; }
 }
 function breakLine() {
+  if (EVENTS) return; // the host owns line state
   if (midline) { writeOut('\n'); midline = false; }
 }
 // Same escape rule as stream_filter.js's escapeBody — body lines that look
@@ -86,11 +100,13 @@ function escapeBody(s) {
   return s.replace(/^(\[\[tool_out_end\]\] )/gm, '\\$1');
 }
 function emitToolCallHeader(name, argsJson) {
+  if (EVENTS) { emit({ ev: 'tool', name, input: argsJson }); return; }
   stampOnce();
   breakLine();
   writeOut(`[[tool]] ${name} ${argsJson}\n`);
 }
 function emitToolOut(body) {
+  if (EVENTS) { emit({ ev: 'tool_out', text: body }); return; }
   const safe = escapeBody(body);
   const bytes = Buffer.byteLength(body, 'utf8');
   writeOut('[[tool_out_begin]]\n');

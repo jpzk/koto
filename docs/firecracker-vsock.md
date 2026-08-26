@@ -46,7 +46,8 @@ entirely; per-group prompt.md + /runscript cover its use cases.)
 | Dir          | port  | purpose                                | replaces                  |
 |--------------|------:|----------------------------------------|---------------------------|
 | guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
-| guest → host | 9001  | log stream → **appended to host log**  | `.cs/log` bind mount      |
+| guest → host | 9001  | *(retired — no raw guest→host text channel remains)* | `.cs/log` bind mount |
+| guest → host | 9004  | turn stream: one connection per turn, framed `TurnFrame` (open{slot}, text/think/tool/tool_out/err, turn_end) → rendered as `[[marker]]` text into host `.cs/log.<slot>` | `.cs/log` bind mount |
 | guest → host | 9002  | ctl plane (framed protobuf `CtlRequest`/`CtlResponse`, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
 | guest → host | 9003  | L3 ethernet frames → gVisor gateway (**`network` ≠ `none`**) | a real NIC |
 | guest → host | 9004  | per-slot turn streams (one per concurrent turn) | — (new: 10 slots) |
@@ -67,43 +68,51 @@ wrong type or unknown verb is refused in the guest with an `{"ok":false}`
 reply and never framed) and flattens the typed `CtlResponse` back into the
 documented `{"ok":true,"port":…}` shape. Host-side, `ctlDispatchPB`
 (`daemon/ctlpb.go`) adapts the decoded request onto `ctlDispatch`'s verb
-handlers. 9001 (the log stream) is still the `[[marker]]` text stream —
-typed frames there are the next step. Guest and daemon must move together
+handlers. The turn stream (9004) is typed too: fc-agent runs the worker
+itself (`fcguest/turn.go`) and sends `TurnFrame`s; `fcTurnSink`
+(`daemon/fcturn.go`) renders the marker text host-side, escaping any text
+line that would parse as a marker, so the guest cannot author a marker at all. Guest and daemon must move together
 (`make fc-rootfs` + `/restart` every group).
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
 on, exactly like the per-group proxy TCP port does today.
 
 Key insight that kept the diff small: **the host log file stays the single
-source of truth.** The 9001 handler (`fcLogSink`) just appends guest bytes to
-`groups/<g>/.cs/log` — so `tailLog`, History, `/clear` truncation, proxy
-`logAppend`, and sendNow's `>>>` markers are all runtime-oblivious. No parser
-refactor. Similarly the 9000 handler splices into the group's *existing*
+source of truth.** The turn-stream handler (`fcTurnSink`) renders the guest's
+typed frames into `groups/<g>/.cs/log.<slot>` in the marker grammar — so
+`tailLog`, History, `/clear` truncation, proxy `logAppend`, and sendNow's
+`>>>` markers are all runtime-oblivious. No parser refactor. Similarly the 9000 handler splices into the group's *existing*
 proxy listener, so credential injection and metrics attribution are unchanged.
 
 ## Guest side (`fcguest/main.go`, PID 1)
 
-The agent keeps `sidecar/entrypoint.sh` **byte-identical** across runtimes by
-recreating its environment inside the VM:
+The agent runs each turn itself (`fcguest/turn.go` — what
+`sidecar/entrypoint.sh` used to do in shell, retired with the typed turn
+stream):
 
 - early boot: /proc /sys /dev tmpfs devpts mounts, hostname, **loopback up**
   (needed for the in-guest TCP bridge), mount `/dev/vdb` at `/workspace`
   (mkfs.ext4 fallback), chown to uid 1000.
-- `.cs/in`, `.cs/log`, `.cs/ctl` are **FIFOs in the guest** (consume-once
-  transport; durable copies live host-side). entrypoint's `>>` appends work
-  unchanged; the agent holds the FIFOs open O_RDWR so nothing blocks or EOFs.
+- `.cs/ctl` is the one **FIFO in the guest** (the shell tools' request line;
+  replies append to `.cs/ctl.out`). There is no `in` or `log` FIFO any more.
 - bridges: TCP `127.0.0.1:18888` → vsock 9000 (`ANTHROPIC_BASE_URL` points
-  here); log FIFO → vsock 9001 (reconnect with carry buffer); ctl FIFO line →
-  vsock 9002 (strict protojson → framed `CtlRequest`) → framed `CtlResponse`
-  → flattened JSON line → `ctl.out`.
-- agent RPC (vsock 10000): `init` (published ports + env; starts
-  entrypoint.sh as uid 1000 afterwards, restart-with-backoff), `msg` (writes
-  system-prompt.md + config.json into the guest workspace, then the b64 line
-  into the in FIFO; an optional `session` field prefixes the line as
-  `<session> <b64>` — entrypoint.sh routes the turn to that chat session's
-  claude conversation via a per-session id file under
-  `/workspace/.cs/sessions/`, `--resume`d on later turns; a bare b64 line is
-  the default session), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
+  here); ctl FIFO line → vsock 9002 (strict protojson → framed `CtlRequest`)
+  → framed `CtlResponse` → flattened JSON line → `ctl.out`.
+- turns (vsock 9004, `fcguest/turn.go`): `msg` spawns a goroutine that dials
+  9004, sends `TurnOpen{slot}`, runs the worker as uid 1000 — `claude -p
+  --bare … --output-format stream-json` decoded in Go (what
+  `stream_filter.js` did; it now serves only cs-subagent), or
+  `venice_stream.js` in `KOTO_EVENTS` mode emitting JSON events — and sends
+  `TurnFrame`s as they happen, then `TurnEnd` unconditionally (a
+  1200s watchdog SIGKILLs the worker's process group and reports `[[err]]`).
+  Per-session claude conversation pinning (`/workspace/.cs/sessions/<name>.id`,
+  `--resume`; the one-shot `--continue` migration for pre-session workspaces),
+  provider/model/effort from config.json, and `KOTO_SESSION` /
+  `KOTO_SHELL_SESSION` in the worker env all moved here from the entrypoint.
+- agent RPC (vsock 10000): `init` (published ports + env, kept for every
+  worker; reconciles orphaned job dirs once), `msg` (writes the per-session
+  system prompt + config.json + attachments into the guest workspace, then
+  starts the turn above), `exec` (sh -c, 60s cap, rc+output — the `podman exec`
   analogue used by interrupt + /clear), `exec_stream` (raw streamed output,
   peer-close kills the child — used by background-job tailing), `run_script`
   (its OWN op, backing the admin-only RunScript RPC: framed streaming exec as
@@ -136,7 +145,7 @@ groups/<g>/
   workspace.img       guest /workspace (ext4, virtio-block rw) — the ONLY
                       guest-writable persistent state. Single-writer: never
                       mount it host-side while the VM runs.
-  .cs/log             daemon-owned mirror of the vsock 9001 stream
+  .cs/log.<slot>      daemon-rendered transcript of the vsock 9004 turn stream
   .cs/config.json     host-authoritative (proxy + daemon read/write; guest
                       gets a copy pushed per turn)
   prompt.md           host-authoritative (composeSystemPrompt reads it)
@@ -181,9 +190,6 @@ one ergonomic regression vs podman's hot-reload mounts).
 - PID 1 starts with an empty environment — set PATH before any exec.
 - FC has no ACPI: guest poweroff is a no-op; graceful exit is
   `reboot(RESTART)` + `reboot=k` (i8042 reset, FC catches it and exits).
-- FIFO buffers die with their last fd: the agent must hold `.cs/in` open
-  O_RDWR for its lifetime, or a msg racing entrypoint's `exec 3<>` (the
-  spawn-triggered-by-send timing) is silently dropped.
 
 ## Known limitations / follow-ups
 

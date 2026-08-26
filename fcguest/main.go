@@ -32,7 +32,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -94,10 +93,6 @@ func main() {
 	setupCS()
 	loopbackUp()
 	go proxyBridge()
-	go logForward()
-	for i := 0; i < guestSlots; i++ {
-		go logForwardSlot(i)
-	}
 	go ctlForward()
 	agentServer() // blocks
 }
@@ -190,11 +185,9 @@ func mountWorkspace() error {
 func setupCS() {
 	_ = os.MkdirAll(csDir, 0o755)
 	_ = os.Chown(csDir, workerUID, workerGID)
-	names := []string{"in", "log", "ctl"}
-	for i := 0; i < guestSlots; i++ {
-		names = append(names, fmt.Sprintf("log.%d", i))
-	}
-	for _, name := range names {
+	// Only the ctl FIFO remains: turns are delivered over the agent RPC and
+	// their output leaves as TurnFrames (turn.go); no in/log FIFOs.
+	for _, name := range []string{"ctl"} {
 		p := filepath.Join(csDir, name)
 		if st, err := os.Stat(p); err == nil && st.Mode()&os.ModeNamedPipe == 0 {
 			_ = os.Remove(p)
@@ -217,21 +210,7 @@ func setupCS() {
 	// /var/tmp is on the read-only rootfs). See entrypointEnviron.
 	_ = os.MkdirAll(filepath.Join(wsDir, ".tmp"), 0o700)
 	_ = os.Chown(filepath.Join(wsDir, ".tmp"), workerUID, workerGID)
-	// Hold the in FIFO open O_RDWR for the agent's lifetime. A FIFO's buffer
-	// is discarded when its last fd closes — so an open-write-close in
-	// handleMsg loses the message if it races entrypoint.sh's `exec 3<>`
-	// (which is exactly the timing on a spawn-triggered-by-send: the msg op
-	// lands milliseconds after init forks the entrypoint). A permanently held
-	// fd keeps early writes queued until the read loop comes up.
-	if fd, err := unix.Open(filepath.Join(csDir, "in"), unix.O_RDWR, 0); err == nil {
-		inFIFO = os.NewFile(uintptr(fd), "in-fifo")
-	} else {
-		logf("in fifo hold-open: %v", err)
-	}
 }
-
-// inFIFO is the agent's permanent handle on /workspace/.cs/in (see setupCS).
-var inFIFO *os.File
 
 // loopbackUp brings lo up so the in-guest TCP proxy bridge (127.0.0.1:18888)
 // is reachable. Kernel does not raise lo on its own.
@@ -421,62 +400,6 @@ func spliceRW(a io.ReadWriteCloser, b io.ReadWriteCloser) {
 	<-done
 }
 
-// logForward pumps the group log FIFO to host vsock 9001.
-func logForward() { logForwardStream("log", portLog, "") }
-
-// logForwardSlot pumps one slot's turn stream to host vsock 9004, announcing
-// which slot it is so the daemon can file the bytes. Every slot's forwarder
-// runs from boot: a FIFO with no data blocks in read(2) and costs a parked
-// goroutine, which is cheaper than discovering FIFOs at runtime.
-func logForwardSlot(slot int) {
-	name := fmt.Sprintf("log.%d", slot)
-	logForwardStream(name, portLogSlot, fmt.Sprintf("%d\n", slot))
-}
-
-// logForwardStream pumps one log FIFO to its host vsock port, sending `header`
-// (when non-empty) on every fresh connection so a multiplexed port knows which
-// stream this is. O_RDWR keeps a writer reference so entrypoint's `>>` appends
-// never block on a missing reader and the FIFO never EOFs. On a dropped vsock
-// conn the current chunk is carried over and resent after redial.
-func logForwardStream(name string, port uint32, header string) {
-	fd, err := unix.Open(filepath.Join(csDir, name), unix.O_RDWR, 0)
-	if err != nil {
-		logf("%s fifo open: %v", name, err)
-		return
-	}
-	fifo := os.NewFile(uintptr(fd), name+"-fifo")
-	buf := make([]byte, 64*1024)
-	var pending []byte
-	for {
-		conn := dialRetry(port)
-		if header != "" {
-			if _, err := conn.Write([]byte(header)); err != nil {
-				conn.Close()
-				continue
-			}
-		}
-		for {
-			if len(pending) > 0 {
-				if _, err := conn.Write(pending); err != nil {
-					break
-				}
-				pending = nil
-			}
-			n, err := fifo.Read(buf)
-			if n > 0 {
-				if _, werr := conn.Write(buf[:n]); werr != nil {
-					pending = append([]byte{}, buf[:n]...)
-					break
-				}
-			}
-			if err != nil {
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-		conn.Close()
-	}
-}
-
 // ctlForward pumps ctl FIFO lines to host vsock 9002 and appends each
 // response line to ctl.out — preserving the podman-era file interface for
 // the agent inside (prompts/global.md documents ctl/ctl.out paths).
@@ -648,9 +571,12 @@ func handleInit(c *vconn, req *pb.InitReq) {
 	for k, v := range req.Env {
 		_ = os.Setenv(k, v)
 	}
+	initEnvMu.Lock()
+	initEnv = req.Env
+	initEnvMu.Unlock()
 	if !entrypointUp {
 		entrypointUp = true
-		go entrypointLoop(req.Env)
+		reconcileOrphanJobs()
 	}
 	replyOK(c)
 }
@@ -774,32 +700,6 @@ func portBridge(port uint32) {
 	})
 }
 
-// entrypointLoop runs sidecar/entrypoint.sh (baked into the rootfs at
-// /sidecar) as the uid-1000 worker, restarting with backoff if it dies —
-// the sidecar FIFO loop is supposed to be immortal.
-func entrypointLoop(env map[string]string) {
-	for {
-		cmd := exec.Command("/bin/sh", "/sidecar/entrypoint.sh")
-		cmd.Dir = wsDir
-		cmd.Env = entrypointEnviron(env)
-		cmd.Stdout = os.Stderr // → FC console log, debug only
-		cmd.Stderr = os.Stderr
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
-		}
-		pid, ch, err := startTracked(cmd)
-		if err != nil {
-			logf("entrypoint start: %v", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		logf("entrypoint up pid=%d", pid)
-		ws := <-ch
-		logf("entrypoint exited status=%d — restarting", ws.ExitStatus())
-		time.Sleep(2 * time.Second)
-	}
-}
-
 func entrypointEnviron(env map[string]string) []string {
 	out := []string{
 		"PATH=/sidecar:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -825,14 +725,6 @@ func entrypointEnviron(env map[string]string) []string {
 
 // ---- msg: one turn -----------------------------------------------------------
 
-// msgMu serializes the delivery half of handleMsg. Two turns can now be in
-// flight in one group (the chat lane and the goal lane, see daemon/queue.go),
-// and the agent server handles each RPC in its own goroutine, so without this
-// two deliveries interleave on the shared `in` FIFO handle — a base64 message
-// is routinely larger than PIPE_BUF, so the atomicity a short write would have
-// given us does not apply, and both lines arrive spliced and undecodable.
-var msgMu sync.Mutex
-
 func handleMsg(c *vconn, req *pb.MsgReq) {
 	sp := req.SystemPrompt
 	// The system prompt is PER SESSION on disk: it is composed per turn, and
@@ -852,35 +744,7 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 			logf("uploads untar: %v", err)
 		}
 	}
-	// Write through the agent's permanent FIFO handle (setupCS) — never a
-	// transient open/close, which would drop buffered bytes if it raced
-	// entrypoint.sh's `exec 3<>`.
-	if inFIFO == nil {
-		replyErr(c, fmt.Errorf("in fifo unavailable"))
-		return
-	}
-	msgMu.Lock()
-	defer msgMu.Unlock()
-	// Named chat session: prefix the FIFO line with the session name (one
-	// space-delimited token; the daemon validated the charset) so
-	// entrypoint.sh pins the turn to that claude conversation. The default
-	// session stays the bare-b64 line for compat with older entrypoints.
-	// FIFO line framing: "<session> <slot> <b64>". The slot names the log
-	// stream this turn writes to — with concurrent turns the guest cannot
-	// derive it, since it is the daemon that allocates them. A session is
-	// always present on this path; the bare-b64 form remains only for
-	// pre-session callers.
-	// entrypoint.sh reads the body base64'd (one token, no newlines) — the
-	// encoding now happens here, at the FIFO, instead of on the wire.
-	b64 := base64.StdEncoding.EncodeToString(req.Msg)
-	line := b64
-	if req.Session != "" || req.Slot > 0 {
-		line = fmt.Sprintf("%s %d %s", sessionFileName(req.Session), req.Slot, b64)
-	}
-	if _, err := inFIFO.Write([]byte(line + "\n")); err != nil {
-		replyErr(c, err)
-		return
-	}
+	go runTurn(req)
 	replyOK(c)
 }
 

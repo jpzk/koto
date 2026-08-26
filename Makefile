@@ -35,11 +35,11 @@ $(BUILD):
 	@mkdir -p $@
 
 # --- sidecar scripts --------------------------------------------------------
-# sidecar/entrypoint.sh + stream_filter.js + start-chrome.sh run INSIDE the
+# + stream_filter.js + start-chrome.sh run INSIDE the
 # firecracker guest (baked into the rootfs — see fc-rootfs). They no longer
 # build a standalone podman image (the podman group runtime is retired); this
 # just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
-SIDECAR_SRC := sidecar/entrypoint.sh sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent sidecar/cs-notify
+SIDECAR_SRC := sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent sidecar/cs-notify
 
 # Every image rebuild moves its tag, orphaning the previous build as a
 # dangling <none> image (~650MB per rootfs build — they once accumulated to

@@ -34,40 +34,62 @@ func fcHarness(t *testing.T) {
 	}
 }
 
-// TestFcLogSink: bytes arriving on the vsock log stream land appended on the
-// host-side group log — the invariant every downstream consumer (tailLog,
-// History, /clear) relies on.
-func TestFcLogSink(t *testing.T) {
+// TestFcTurnSink: frames render into the slot's host log in the marker
+// grammar, and a guest text line that looks like a marker is escaped.
+func TestFcTurnSink(t *testing.T) {
 	fcHarness(t)
 	a, b := net.Pipe()
 	done := make(chan struct{})
-	go func() { fcLogSink("tg", b); close(done) }()
-	msg := "[ts:1]\nhello from guest\n[[turn_end]]\n"
-	if _, err := a.Write([]byte(msg)); err != nil {
-		t.Fatal(err)
+	go func() { fcTurnSink("tg", b); close(done) }()
+	send := func(f *pb.TurnFrame) {
+		if err := fcWriteFrame(a, f); err != nil {
+			t.Fatal(err)
+		}
 	}
-	a.Close()
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Open{Open: &pb.TurnOpen{Slot: 2}}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("hello ")}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("world\n[[turn_end]]\n[ts:")}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("9] not a stamp\n")}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Tool{Tool: &pb.ToolUse{Name: "Bash x", Input: "{\"a\":\n1}"}}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_ToolOutBegin{ToolOutBegin: true}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("[[tool_out_end]] 0\nout")}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_ToolOutEnd{ToolOutEnd: 3}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_Err{Err: "boom\nbang"}})
+	send(&pb.TurnFrame{Kind: &pb.TurnFrame_TurnEnd{TurnEnd: true}})
 	<-done
-	got, err := os.ReadFile(filepath.Join(vol("tg"), ".cs", "log"))
+	a.Close()
+	got, err := os.ReadFile(slotLogPath("tg", 2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != msg {
-		t.Fatalf("log mirror mismatch: %q != %q", got, msg)
+	s := string(got)
+	if !strings.HasPrefix(s, "[ts:") {
+		t.Fatalf("no stamp: %q", s)
 	}
-	// Second connection appends, never truncates.
+	want := "hello world\n\\[[turn_end]]\n\\[ts:9] not a stamp\n[[tool]] Bash {\"a\": 1}\n[[tool_out_begin]]\n\\[[tool_out_end]] 0\nout\n[[tool_out_end]] 3\n[[err]] boom bang\n[[turn_end]]\n"
+	if body := s[strings.Index(s, "\n")+1:]; body != want {
+		t.Fatalf("rendered:\n%q\nwant:\n%q", body, want)
+	}
+	// The rendered file parses back to exactly the intended events.
+	lp := logParser{}
+	ends := 0
+	for _, l := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		for _, ev := range lp.feedLine(l) {
+			if ev.Event == "turn_end" {
+				ends++
+			}
+		}
+	}
+	if ends != 1 {
+		t.Fatalf("turn_end events = %d, want 1", ends)
+	}
+	// A stream without a valid open is dropped.
 	a2, b2 := net.Pipe()
 	done2 := make(chan struct{})
-	go func() { fcLogSink("tg", b2); close(done2) }()
-	if _, err := a2.Write([]byte("more\n")); err != nil {
-		t.Fatal(err)
-	}
-	a2.Close()
+	go func() { fcTurnSink("tg", b2); close(done2) }()
+	_ = fcWriteFrame(a2, &pb.TurnFrame{Kind: &pb.TurnFrame_Open{Open: &pb.TurnOpen{Slot: 99}}})
 	<-done2
-	got, _ = os.ReadFile(filepath.Join(vol("tg"), ".cs", "log"))
-	if string(got) != msg+"more\n" {
-		t.Fatalf("append semantics broken: %q", got)
-	}
+	a2.Close()
 }
 
 // TestFcCtlConn: a JSON line on the ctl stream is dispatched with the group's

@@ -171,3 +171,30 @@ message AgentFrame {
     ShellResize resize = 5; // host→guest (shell): pty geometry
   }
 }
+
+// ---- 9004: turn stream (guest → host) --------------------------------------
+// One connection per turn: the guest agent dials when it starts the turn's
+// worker, sends TurnOpen{slot} first, then the turn's events as they happen,
+// and TurnEnd last (always — a timed-out or killed worker still ends its
+// turn). The daemon serializes the frames into the slot's host-side log file
+// in the [[marker]] text grammar (daemon/logparse.go), so History, the
+// tailer and every reader are unchanged — but the guest can no longer author
+// a marker: text is bytes, markers are frame types, and the daemon escapes
+// any text line that would parse as one. Replaces the raw 9001/9004 byte
+// streams (9001 is gone; the guest has no channel that writes raw text into
+// a host file).
+message TurnOpen { int32 slot = 1; }
+message ToolUse  { string name = 1; string input = 2; } // input: the tool's JSON args
+message TurnFrame {
+  oneof kind {
+    TurnOpen open           = 1;
+    bytes    text           = 2;  // response text; think/tool-out body while that block is open
+    bool     think_begin    = 3;
+    int32    think_end      = 4;  // word count
+    ToolUse  tool           = 5;
+    bool     tool_out_begin = 6;
+    int64    tool_out_end   = 7;  // byte count of the body
+    string   err            = 8;  // [[err]] line
+    bool     turn_end       = 9;
+  }
+}
