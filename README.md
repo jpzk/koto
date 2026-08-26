@@ -87,6 +87,7 @@ adds a filtered NIC via the gateway on vsock 9003.
 | Agent boundary | Firecracker microVM on **KVM** (own kernel) | Docker container (shared kernel) | host process; sandboxing optional | host process (owns terminals) | host process; optional sandbox |
 | Network | **none by default**; per-group `wan`/`lan`/`full`, frame-filtered | container network | host network | host network | host network |
 | Credentials | proxy-injected, never in the guest | proxy-injected (OneCLI vault) | `.env` on host | host | host keychain |
+| Containers inside the agent | rootless podman on the guest's own kernel; a container escape is still inside the VM | not by default (would need the host's docker socket in the container) | host docker, full authority | host docker, full authority | host docker, full authority |
 | Multi-agent | `main` orchestrates peers over a verb control plane; no shared FS | agent groups per channel | limited | agents spawn panes, prompt each other via socket API | subagents / agent teams in-process |
 | Interface | TUI, `koto ctl`, Android (one gRPC proto) | WhatsApp/Telegram/Slack/… | messaging channels, web UI, CLI, TUI | terminal multiplexer | terminal |
 | Scheduling / jobs | cron, goals, background jobs with callbacks | recurring jobs | — | — | — |
