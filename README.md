@@ -43,8 +43,9 @@ you ──▶ cs_tui (Go/BubbleTea, scratch image, on koto-net; creds ro)
 ## Data flow
 
 **Inbound turn**: client → gRPC `Send` → attachments materialized into the
-group's workspace (queue carries plain text only) → per-group send queue →
-one `claude -p` invocation in the guest → conversation state persists in the
+group's workspace (queue carries plain text only) → the SESSION's send queue
+(one worker per conversation; up to `groupSlots`=10 turns run concurrently per
+group) → one `claude -p` invocation in the guest → conversation state persists in the
 guest's `workspace.img`.
 
 **Outbound stream**: guest stream filter → `/workspace/.cs/log` → vsock 9001 →
@@ -61,7 +62,7 @@ explicit `gap` event when the ring can't cover).
 | guest→host | 9002 | ctl plane (JSON lines) |
 | guest→host | 9003 | L3 ethernet frames → gVisor gateway (`network` ≠ `none`) |
 | guest→host | 9004 | per-slot turn streams (one per concurrent turn) |
-| host→guest | 10000 | agent RPC (init / msg / exec / exec_stream / shutdown) |
+| host→guest | 10000 | agent RPC (init / msg / exec / exec_stream / run_script / shell_attach / shutdown) |
 
 ## Threat model
 
@@ -77,9 +78,11 @@ tier 2   cs_host              daemon + proxy; vetted code, pinned deps
   │      blast radius: koto OAuth token + workspaces — no path to host podman
   │  boundary: KVM + jailer; vsock-only IPC; no shared FS; verb authorization
 tier 3   microVM groups       untrusted; own kernel, no NIC, sentinel creds
-tier 2.5 cs_tui               gRPC client on koto-net (mTLS to cs_host:8443 only —
-                              the proxy binds 127.0.0.1 inside cs_host); scratch
-                              image; mounts creds/ ro, scripts/ + prompts/ ro, run/tui rw
+tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
+                              creds/ ro, scripts/ + prompts/ ro, run/tui rw.
+                              NOT isolated: the `tui` clientid holds the admin
+                              role, and every per-group proxy port is reachable
+                              on koto-net (BIND=0.0.0.0 in host/Dockerfile)
 ```
 
 **Security architecture — the load-bearing decisions:**
@@ -123,11 +126,12 @@ tier 2.5 cs_tui               gRPC client on koto-net (mTLS to cs_host:8443 only
 - **The UI is below the daemon in privilege.** `cs_tui` is a static Go binary
   on `scratch` joined to `koto-net` with the client PKI material mounted
   read-only: a compromised TUI dependency yields a gRPC client the daemon
-  still authorizes per verb (role ACL), not workspace access. It has no
-  shell, no ca-certs, and the only reachable service is the daemon — the
-  proxy listens on cs_host's loopback. Caveat: `creds/` is mounted whole
-  (ro), so the TUI *can* read the OAuth token / Venice key file; narrowing
-  that mount to the client cert/key/CA is on the release todo.
+  still authorizes per verb (role ACL). It has no shell and no ca-certs.
+  Two caveats, both on the release todo: `creds/` is mounted **whole** (ro),
+  so the TUI can read the OAuth token, the Venice key and the private CA key;
+  and the credential-injecting proxy does **not** listen on loopback —
+  `host/Dockerfile` sets `BIND=0.0.0.0`, so every per-group proxy port is
+  reachable from anything on `koto-net`, `cs_tui` included.
 - **No Docker-out-of-Docker.** cs_host holds no podman socket (removed with
   the whisper container, its last user); a tier-2 compromise cannot spawn
   containers or mount host paths. Podman exists only *inside* guests,
