@@ -122,6 +122,120 @@ outside that list arrive via Kconfig `select` closure or as defaults
   DERP relay despite `100.64/10` being classed as LAN. The filter blocks the
   direct peer path, not the relayed one.
 
+## Security
+
+### Threat model
+
+Untrusted tier-3 agents run `claude` on attacker-influenceable input (prompt
+injection is assumed, not hypothetical). The design goal is that a fully
+compromised agent gets **nothing**: no credentials, no network, no peer or
+host filesystem, no control-plane authority beyond its own group.
+
+```
+tier 1   host user            full authority (by definition)
+  │  boundary: dedicated creds dir; no ~/.claude mount; no podman socket in cs_host
+tier 2   cs_host              daemon + proxy; vetted code, pinned deps
+  │      blast radius: koto OAuth token + workspaces — no path to host podman
+  │  boundary: KVM + jailer; vsock-only IPC; no shared FS; verb authorization
+tier 3   microVM groups       untrusted; own kernel, no NIC, sentinel creds
+tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
+                              creds/ ro, scripts/ + prompts/ ro, run/tui rw.
+                              NOT isolated: the `tui` clientid holds the admin
+                              role, and every per-group proxy port is reachable
+                              on koto-net (BIND=0.0.0.0 in host/Dockerfile)
+```
+
+**Security architecture — the load-bearing decisions:**
+
+- **KVM is the boundary, not namespaces.** An escape from a group is a VM
+  escape against Firecracker's minimal device model (virtio blk/vsock/net),
+  not a shared-kernel container escape. This is why in-guest root
+  (`root=yes`) and in-guest rootless podman are safe to offer.
+- **The VMM process itself is jailed** (`fcjail.go`): re-exec'd into fresh
+  user/mount/pid/net/ipc/uts namespaces, per-VM chroot with only what FC
+  needs, distinct unprivileged uid, `no_new_privs`, FC seccomp on. A virtio
+  device-model bug lands as nobody-in-an-empty-chroot, not as cs_host.
+- **Credentials never enter a guest.** The proxy holds the real OAuth token
+  in process memory and injects per request; guests get a sentinel
+  and a `ANTHROPIC_BASE_URL` pointing at vsock 9000. A compromised guest can
+  *use* the proxy, not steal from it.
+- **Egress is a per-group profile.** `network=none` (default): no NIC, no
+  route, no DNS — the LLM leg via the proxy is the only egress, enforced by
+  absence of hardware, not policy. `network=wan|lan|full`: a real L3 NIC via a
+  userspace gVisor gateway over vsock 9003, egress-filtered at the frame layer
+  by destination class — `wan` = public internet only, `lan` = host LAN only,
+  `full` = both. The guest can never reach loopback/link-local/cs_host itself (the
+  control plane stays unreachable); general HTTPS then bypasses proxy audit —
+  that's the documented tradeoff. **Performance caveat:** the gateway is a
+  userspace netstack running *inside the daemon process* — every packet of a
+  networked guest costs daemon CPU (~a core around 1 Gbps, per busy guest).
+  The VMMs run niced and cgrouped so the daemon always preempts them, but the
+  gateway is daemon-side, so this is the one path where guest load is *not*
+  contained by that budget: a guest saturating its NIC (large `git clone`,
+  `podman pull`, bulk ingest) competes directly with the proxy, event streams
+  and gRPC for daemon cycles. Fine for API-scale traffic; if the fleet feels
+  laggy while a networked group downloads, this is why. `network=none` groups
+  are unaffected (no NIC at all).
+- **No shared mutable filesystem.** Workspaces are per-group ext4 images;
+  there is no `/peers`, no bind mounts into guests. Cross-group interaction
+  exists only as authorized ctl verbs, checked against source-group identity
+  daemon-side (`ctl.go`); non-main callers have targets force-overwritten to
+  self.
+- **Control-plane transport is mTLS + bearer** (private CA, client-cert
+  fingerprint allowlist, per-RPC token — `auth.go`). No anonymous endpoint.
+- **The UI is below the daemon in privilege.** `cs_tui` is a static Go binary
+  on `scratch` joined to `koto-net` with the client PKI material mounted
+  read-only: a compromised TUI dependency yields a gRPC client the daemon
+  still authorizes per verb (role ACL). It has no shell and no ca-certs.
+  Two caveats, both on the release todo: `creds/` is mounted **whole** (ro),
+  so the TUI can read the OAuth token and the private CA key;
+  and the credential-injecting proxy does **not** listen on loopback —
+  `host/Dockerfile` sets `BIND=0.0.0.0`, so every per-group proxy port is
+  reachable from anything on `koto-net`, `cs_tui` included.
+- **No Docker-out-of-Docker.** cs_host holds no podman socket (removed with
+  the whisper container, its last user); a tier-2 compromise cannot spawn
+  containers or mount host paths. Podman exists only *inside* guests,
+  rootless, behind KVM.
+
+### Supply chain
+
+No generated SBOM artifact is checked in; the surface is small enough to
+state outright. Everything Go-side is pinned via `go.sum` under a 6-week
+dependency-lag rule (each pin's release date is verified against
+proxy.golang.org before adoption — see CLAUDE.md → Conventions).
+
+**Go modules** (direct deps; indirect counts approximate):
+
+| module | direct deps | indirect |
+|--------|-------------|----------|
+| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `golang.org/x/sys`, `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | 19 |
+| `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
+| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` / `x/ansi` / `x/vt` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | 38 |
+| `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
+
+**Pinned non-Go components:**
+
+| component | pin | where |
+|-----------|-----|-------|
+| Firecracker VMM | v1.16.1 (static musl, GitHub release) | `fcguest/fetch-assets.sh` |
+| guest kernel | `amazonlinux/linux` tag `microvm-kernel-6.1.170-31.327.amzn2023`, verified against a pinned commit sha | `fcguest/build-kernel.sh` |
+| protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
+
+**Container images:** cs_host = `golang:1.24-alpine` + nodejs/npm/
+e2fsprogs(+extra)/tar + claude-code; TUI runtime = `scratch` (one static
+binary, no shell, no ca-certs); guest rootfs = `fedora:44` + 27 dnf packages
+(podman, crun, conmon, fuse-overlayfs, passt, nodejs, python3, git, ripgrep,
+tmux, sudo, …) + claude-code;
+build-only = `ubuntu:24.04` (kernel) and `golang:1.24-alpine` (protoc,
+fc-agent).
+
+**Known-floating** (what a formal SBOM would flag): `@anthropic-ai/
+claude-code` is installed unpinned by npm in both cs_host and the guest
+rootfs — it resolves to latest on every image build; the dnf packages and
+the base-image tags (`fedora:44`, `golang:1.24-alpine`, `ubuntu:24.04`)
+float within their tags. The Go trees are fully locked; the OS-package and
+claude-code layers are the accepted moving parts.
+
 ## Host requirements
 
 Everything runs rootless as the host user; nothing is installed on or
@@ -205,118 +319,6 @@ explicit `gap` event when the ring can't cover).
 | guest→host | 9003 | L3 ethernet frames → gVisor gateway (`network` ≠ `none`) |
 | guest→host | 9004 | per-slot turn streams (one per concurrent turn) |
 | host→guest | 10000 | agent RPC (init / msg / exec / exec_stream / run_script / shell_attach / shutdown) |
-
-## Threat model
-
-Untrusted tier-3 agents run `claude` on attacker-influenceable input (prompt
-injection is assumed, not hypothetical). The design goal is that a fully
-compromised agent gets **nothing**: no credentials, no network, no peer or
-host filesystem, no control-plane authority beyond its own group.
-
-```
-tier 1   host user            full authority (by definition)
-  │  boundary: dedicated creds dir; no ~/.claude mount; no podman socket in cs_host
-tier 2   cs_host              daemon + proxy; vetted code, pinned deps
-  │      blast radius: koto OAuth token + workspaces — no path to host podman
-  │  boundary: KVM + jailer; vsock-only IPC; no shared FS; verb authorization
-tier 3   microVM groups       untrusted; own kernel, no NIC, sentinel creds
-tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
-                              creds/ ro, scripts/ + prompts/ ro, run/tui rw.
-                              NOT isolated: the `tui` clientid holds the admin
-                              role, and every per-group proxy port is reachable
-                              on koto-net (BIND=0.0.0.0 in host/Dockerfile)
-```
-
-**Security architecture — the load-bearing decisions:**
-
-- **KVM is the boundary, not namespaces.** An escape from a group is a VM
-  escape against Firecracker's minimal device model (virtio blk/vsock/net),
-  not a shared-kernel container escape. This is why in-guest root
-  (`root=yes`) and in-guest rootless podman are safe to offer.
-- **The VMM process itself is jailed** (`fcjail.go`): re-exec'd into fresh
-  user/mount/pid/net/ipc/uts namespaces, per-VM chroot with only what FC
-  needs, distinct unprivileged uid, `no_new_privs`, FC seccomp on. A virtio
-  device-model bug lands as nobody-in-an-empty-chroot, not as cs_host.
-- **Credentials never enter a guest.** The proxy holds the real OAuth token
-  in process memory and injects per request; guests get a sentinel
-  and a `ANTHROPIC_BASE_URL` pointing at vsock 9000. A compromised guest can
-  *use* the proxy, not steal from it.
-- **Egress is a per-group profile.** `network=none` (default): no NIC, no
-  route, no DNS — the LLM leg via the proxy is the only egress, enforced by
-  absence of hardware, not policy. `network=wan|lan|full`: a real L3 NIC via a
-  userspace gVisor gateway over vsock 9003, egress-filtered at the frame layer
-  by destination class — `wan` = public internet only, `lan` = host LAN only,
-  `full` = both. The guest can never reach loopback/link-local/cs_host itself (the
-  control plane stays unreachable); general HTTPS then bypasses proxy audit —
-  that's the documented tradeoff. **Performance caveat:** the gateway is a
-  userspace netstack running *inside the daemon process* — every packet of a
-  networked guest costs daemon CPU (~a core around 1 Gbps, per busy guest).
-  The VMMs run niced and cgrouped so the daemon always preempts them, but the
-  gateway is daemon-side, so this is the one path where guest load is *not*
-  contained by that budget: a guest saturating its NIC (large `git clone`,
-  `podman pull`, bulk ingest) competes directly with the proxy, event streams
-  and gRPC for daemon cycles. Fine for API-scale traffic; if the fleet feels
-  laggy while a networked group downloads, this is why. `network=none` groups
-  are unaffected (no NIC at all).
-- **No shared mutable filesystem.** Workspaces are per-group ext4 images;
-  there is no `/peers`, no bind mounts into guests. Cross-group interaction
-  exists only as authorized ctl verbs, checked against source-group identity
-  daemon-side (`ctl.go`); non-main callers have targets force-overwritten to
-  self.
-- **Control-plane transport is mTLS + bearer** (private CA, client-cert
-  fingerprint allowlist, per-RPC token — `auth.go`). No anonymous endpoint.
-- **The UI is below the daemon in privilege.** `cs_tui` is a static Go binary
-  on `scratch` joined to `koto-net` with the client PKI material mounted
-  read-only: a compromised TUI dependency yields a gRPC client the daemon
-  still authorizes per verb (role ACL). It has no shell and no ca-certs.
-  Two caveats, both on the release todo: `creds/` is mounted **whole** (ro),
-  so the TUI can read the OAuth token and the private CA key;
-  and the credential-injecting proxy does **not** listen on loopback —
-  `host/Dockerfile` sets `BIND=0.0.0.0`, so every per-group proxy port is
-  reachable from anything on `koto-net`, `cs_tui` included.
-- **No Docker-out-of-Docker.** cs_host holds no podman socket (removed with
-  the whisper container, its last user); a tier-2 compromise cannot spawn
-  containers or mount host paths. Podman exists only *inside* guests,
-  rootless, behind KVM.
-
-## SBOM (supply chain)
-
-No generated SBOM artifact is checked in; the surface is small enough to
-state outright. Everything Go-side is pinned via `go.sum` under a 6-week
-dependency-lag rule (each pin's release date is verified against
-proxy.golang.org before adoption — see CLAUDE.md → Conventions).
-
-**Go modules** (direct deps; indirect counts approximate):
-
-| module | direct deps | indirect |
-|--------|-------------|----------|
-| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `golang.org/x/sys`, `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | 19 |
-| `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
-| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` / `x/ansi` / `x/vt` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | 38 |
-| `fcguest/` (guest PID-1 agent) | `golang.org/x/sys` only | 0 |
-
-**Pinned non-Go components:**
-
-| component | pin | where |
-|-----------|-----|-------|
-| Firecracker VMM | v1.16.1 (static musl, GitHub release) | `fcguest/fetch-assets.sh` |
-| guest kernel | `amazonlinux/linux` tag `microvm-kernel-6.1.170-31.327.amzn2023`, verified against a pinned commit sha | `fcguest/build-kernel.sh` |
-| protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
-
-**Container images:** cs_host = `golang:1.24-alpine` + nodejs/npm/
-e2fsprogs(+extra)/tar + claude-code; TUI runtime = `scratch` (one static
-binary, no shell, no ca-certs); guest rootfs = `fedora:44` + 27 dnf packages
-(podman, crun, conmon, fuse-overlayfs, passt, nodejs, python3, git, ripgrep,
-tmux, sudo, …) + claude-code;
-build-only = `ubuntu:24.04` (kernel) and `golang:1.24-alpine` (protoc,
-fc-agent).
-
-**Known-floating** (what a formal SBOM would flag): `@anthropic-ai/
-claude-code` is installed unpinned by npm in both cs_host and the guest
-rootfs — it resolves to latest on every image build; the dnf packages and
-the base-image tags (`fedora:44`, `golang:1.24-alpine`, `ubuntu:24.04`)
-float within their tags. The Go trees are fully locked; the OS-package and
-claude-code layers are the accepted moving parts.
 
 ## Config profiles (per group, `groups/<g>/.cs/config.json`)
 
