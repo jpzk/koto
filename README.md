@@ -1,10 +1,45 @@
 # koto
 
 Minimal isolated orchestrator for long-lived `claude` agents. Every group
-(agent) runs in its own **Firecracker microVM** with **no network by default**;
+(agent) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
+so the guest kernel is the security boundary — with **no network by default**;
 a credential-injecting proxy is the only path to the LLM API, and agents never
 see a real credential. Host side is a Go daemon; the UI is a separate,
 network-isolated TUI container speaking gRPC over mTLS.
+
+## Features
+
+- **Isolation** — one Firecracker microVM per agent on KVM; no network by
+  default (the LLM proxy is the only egress, `wan`/`lan`/`full` opt-in and
+  frame-filtered); credentials injected by the proxy, never seen by agents
+- **Orchestration** — `main` spawns, sends, schedules and delegates to peers
+  over a control plane, no shared files; many concurrent named sessions per
+  agent; background jobs, cron and goals that call back into the session
+  that started them
+- **Operation** — a TUI with a shared tmux terminal into every conversation;
+  per-group config (`network`, `size`, `root`, `autostart`, `provider`,
+  `model`) applied by `/restart`; per-VM cgroups and IO budgets with
+  disk/CPU/memory alerts; per-group token metrics and tok/s
+- **Access** — mTLS gRPC with role-based ACL, one proto for TUI, `koto ctl`
+  and Android; Anthropic (OAuth) or Venice per group, switchable live
+
+### How it compares
+
+| | koto | NanoClaw | OpenClaw | herdr | Claude Code |
+|---|---|---|---|---|---|
+| Agent boundary | Firecracker microVM on **KVM** (own kernel) | Docker container (shared kernel) | host process; sandboxing optional | host process (owns terminals) | host process; optional sandbox |
+| Network | **none by default**; per-group `wan`/`lan`/`full`, frame-filtered | container network | host network | host network | host network |
+| Credentials | proxy-injected, never in the guest | proxy-injected (OneCLI vault) | `.env` on host | host | host keychain |
+| Multi-agent | `main` orchestrates peers over a verb control plane; no shared FS | agent groups per channel | limited | agents spawn panes, prompt each other via socket API | subagents / agent teams in-process |
+| Interface | TUI, `koto ctl`, Android (one gRPC proto) | WhatsApp/Telegram/Slack/… | messaging channels, web UI, CLI, TUI | terminal multiplexer | terminal |
+| Scheduling / jobs | cron, goals, background jobs with callbacks | recurring jobs | — | — | — |
+| Providers | Anthropic (OAuth), Venice | Anthropic (Agent SDK) | many, incl. local | any CLI agent | Anthropic |
+
+koto is for running **untrusted, long-lived agents** where a compromised agent
+must not reach your network, your credentials, or its siblings — the
+messaging-channel breadth of NanoClaw/OpenClaw and the terminal ergonomics of
+herdr are not its focus. If you want an assistant on WhatsApp, use those; if you
+want a fleet of agents behind a hardware boundary, this is it.
 
 ## Architecture
 
@@ -103,6 +138,48 @@ module (Firecracker's hybrid vsock is unix-socket-backed), no host
 cs_host; `CONFIG_TUN` is a *guest* kernel option), no Go/Node/protoc
 toolchain on the host (all builds are containerized), and no SELinux
 tuning (`--security-opt label=disable` is set on every podman run).
+
+## Guest kernel
+
+Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh`
+(containerized, no host toolchain). **No patches**: the source is a pristine
+`amazonlinux/linux` clone at a pinned tag with its commit sha asserted before
+the build; everything koto adds is `.config`.
+
+**Amazon Linux tree, not vanilla.** It is the tree Firecracker builds its own
+guest kernels from. A vanilla kernel cannot parse Firecracker's ACPI tables
+and needs `acpi=off` — which removes the LAPIC timer, so **every idle microVM
+busy-polls a full host CPU**. The amzn tree boots with ACPI and idles at ~0%.
+See `docs/kernel-amzn-vs-vanilla.md`.
+
+The base `.config` is Firecracker's own CI guest config plus, all built-in
+(the guest has no module loader):
+
+| enabled | why |
+|---|---|
+| `TUN` | the `network=wan\|lan\|full` gateway: the guest's TAP (`eth0`) talks L3 to the gVisor gateway over vsock; also what pasta needs for rootless podman |
+| `FUSE_FS` | fuse-overlayfs, the storage driver for rootless podman in the guest |
+| `NF_TABLES` + `NFT_*` / `NF_CONNTRACK` / `NF_NAT` | the NAT stack netavark needs for bridged podman networking |
+| `IKCONFIG_PROC` | `zcat /proc/config.gz` in a guest shows what was actually built |
+
+That is the whole delta: network egress and in-guest containers. Symbols
+outside that list arrive via Kconfig `select` closure or as defaults
+`olddefconfig` fills in for options Firecracker's older config never named
+(e.g. the newer CPU mitigations) — harmless, but not chosen.
+
+**Caveats:**
+
+- The **shipped `vmlinux` predates the script's pin**: it was built against
+  Firecracker v1.11.0's base config, the script now pins v1.16.1 (~312 config
+  lines apart, notably `CONFIG_PCI` on). Nothing is broken — the guest boots
+  `pci=off` on virtio-MMIO — but `make fc-kernel` produces a different kernel
+  from the one running today.
+- `TUN` is a capability, not just a device. A `network=wan` group can bring up
+  its own overlay (WireGuard, tailscale) whose outer packets are ordinary
+  public UDP, so the frame-layer egress filter cannot see inside it. Verified:
+  a `network=wan` guest running `tailscaled` reached the host's tailnet via a
+  DERP relay despite `100.64/10` being classed as LAN. The filter blocks the
+  direct peer path, not the relayed one.
 
 ## Data flow
 
@@ -239,79 +316,6 @@ rootfs — it resolves to latest on every image build; the dnf packages and
 the base-image tags (`fedora:44`, `golang:1.24-alpine`, `ubuntu:24.04`)
 float within their tags. The Go trees are fully locked; the OS-package and
 claude-code layers are the accepted moving parts.
-
-## Guest kernel
-
-Every group boots the same `fcassets/vmlinux`, built by
-`fcguest/build-kernel.sh` (containerized in `ubuntu:24.04`, so the host needs
-no toolchain). **There are no patches** — the source is a pristine shallow
-clone of `amazonlinux/linux` at a pinned tag whose resolved commit sha is
-asserted before the build proceeds. Everything koto adds is `.config`.
-
-**Why the Amazon Linux tree and not kernel.org vanilla.** It is the tree
-Firecracker builds its own guest kernels from, and the difference is not
-cosmetic: a vanilla kernel cannot parse Firecracker's ACPI tables
-(`AE_BAD_PARAMETER` at boot), which forces `acpi=off` — and with ACPI off the
-guest has no local APIC, so its idle loop has no LAPIC timer and **every idle
-microVM busy-polls a full host CPU**. The amzn tree boots with ACPI, so the
-timer works, idle costs ~0%, and the `acpi=off` +
-`VIRTIO_MMIO_CMDLINE_DEVICES` workaround pair is gone (devices enumerate via
-ACPI). Full argument in `docs/kernel-amzn-vs-vanilla.md`.
-
-The base `.config` is **Firecracker's own CI guest config**, on top of which
-the script enables the options below and runs `olddefconfig`. Everything is
-`=y`, never `=m` — the guest has no module loader.
-
-| enabled | why it is on |
-|---|---|
-| `TUN` | the `network=wan\|lan\|full` egress gateway: the guest's TAP device (`eth0`, 192.168.127.2) talking L3 to the userspace gVisor gateway over vsock. Also what pasta needs for rootless podman. |
-| `FUSE_FS` | fuse-overlayfs — the storage driver for rootless podman in the guest. |
-| `NF_TABLES{,_INET,_IPV4,_IPV6}`, `NFT_{NAT,MASQ,CT,COMPAT,REJECT,REJECT_INET}`, `NFT_FIB_{INET,IPV4,IPV6}`, `NF_CONNTRACK`, `NF_NAT`, `BRIDGE_NF_EBTABLES` | the NAT stack netavark needs for **bridged** podman networking (`podman network create` + `--network`), as opposed to pasta-only rootless mode. |
-| `IKCONFIG`, `IKCONFIG_PROC` | verification: `zcat /proc/config.gz` from inside a running guest is the only way to confirm what was actually built, rather than what the script asked for. |
-
-Two of those rows are what lets the guest run **containers** at all
-(`FUSE_FS` plus the nftables stack); one is what lets it reach the
-**network** (`TUN`, which serves both); the last exists only so the result is
-checkable. Those two capabilities are the entire reason the kernel delta
-exists — nothing else was added.
-
-**What arrives without being asked.** Two mechanisms put symbols in the built
-kernel that appear in no list above, and both are worth knowing about:
-
-- **Kconfig closure.** `NETFILTER_NETLINK` is `select`ed by `NF_TABLES`;
-  `NFT_FIB` is a promptless helper reachable only by `select`; and
-  `NFT_REJECT_IPV4`/`IPV6` carry `default NFT_REJECT`. They are the
-  dependency closure of the nftables request, not separate decisions.
-- **Base-config age.** `olddefconfig` reconciles Firecracker's config file
-  against a newer tree: symbols the file never mentions get their Kconfig
-  default (this is how `MITIGATION_ITS`, `MITIGATION_TSA`,
-  `PROC_MEM_ALWAYS_FORCE` and the `CC_HAS_AUTO_VAR_INIT_*` compiler probes
-  arrive), and symbols that no longer exist upstream are dropped silently
-  (`UNIX_SCM`, `HAVE_EISA`, `GCC_ASM_GOTO_OUTPUT_WORKAROUND`). Harmless here
-  — two of them are CPU-vulnerability mitigations you want on — but nobody
-  chose them.
-
-**Caveats, stated rather than discovered later:**
-
-- The **shipped `vmlinux` and the script's pin have drifted**. The artifact
-  was built against Firecracker v1.11.0's base config; `FC_VERSION` is now
-  v1.16.1, and those two base configs differ by ~312 lines — including
-  `CONFIG_PCI` going from off to on. Re-running `make fc-kernel` therefore
-  produces a materially different kernel from the one groups are running
-  today. Nothing is broken (Firecracker's device model is virtio-MMIO and the
-  guest boots with `pci=off`), but the pin is not currently what ships.
-- `CONFIG_NFT_COUNTER` is requested but **does not exist as a symbol in this
-  tree**, so it is silently dropped. It is the one requested option the
-  script's own assertion block does not cover. Harmless — nft counters live
-  in the nf_tables core on 6.1.
-- `TUN` is a capability, not just a device. A group with public egress can
-  bring up its own encrypted overlay (WireGuard, tailscale) on top of it, and
-  the frame-layer egress filter cannot classify what it cannot see: the
-  tunnel's outer packets are ordinary public-internet UDP. Verified in
-  practice — a `network=wan` group running its own `tailscaled` reaches the
-  host's tailnet via a DERP relay, even though `fcClassifyDst` classes the
-  CGNAT range `100.64/10` as LAN specifically to prevent that. The filter
-  does still block the *direct* peer path; it does not block the relayed one.
 
 ## Config profiles (per group, `groups/<g>/.cs/config.json`)
 
