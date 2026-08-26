@@ -591,6 +591,12 @@ message GroupResources {
   int64  guest_disk_total_bytes = 13;
   int64  guest_disk_avail_bytes = 14;
   int64  guest_disk_used_bytes  = 15;
+  // Precomputed ratios (percent, one decimal), as resourcesCtlResp reports
+  // them on the in-guest ctl plane; the gRPC Resources handler leaves them 0
+  // and clients derive their own.
+  double alloc_pct           = 16;
+  double guest_mem_used_pct  = 17;
+  double guest_disk_used_pct = 18;
 }
 
 // Fleet-wide rollup for the filesystem the groups directory lives on.
@@ -605,6 +611,7 @@ message HostResources {
   int64 provisioned_bytes = 4;
   int32 groups         = 5;
   int32 running_groups = 6;
+  double fs_used_pct   = 7; // see GroupResources.alloc_pct
 }
 
 // ---- ACL management ---------------------------------------------------------

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"koto-protocol/pb"
 )
 
 func fcHarness(t *testing.T) {
@@ -74,33 +76,23 @@ func TestFcCtlConn(t *testing.T) {
 	fcHarness(t)
 	a, b := net.Pipe()
 	go fcCtlConn("tg", b)
-	if _, err := a.Write([]byte(`{"cmd":"sched_list"}` + "\n")); err != nil {
+	a.SetDeadline(time.Now().Add(2 * time.Second))
+	go fcWriteFrame(a, &pb.CtlRequest{Cmd: &pb.CtlRequest_SchedList{SchedList: &pb.SchedListReq{}}})
+	resp := &pb.CtlResponse{}
+	if err := fcReadFrame(a, fcFrameMaxGuest, resp); err != nil {
 		t.Fatal(err)
 	}
-	a.SetReadDeadline(time.Now().Add(2 * time.Second))
-	line, err := bufio.NewReader(a).ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	var resp struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("bad response %q: %v", line, err)
-	}
-	if !resp.OK {
-		t.Fatalf("sched_list should be allowed for any group: %s", line)
+	if !resp.Ok || resp.GetScheds() == nil {
+		t.Fatalf("sched_list should be allowed for any group: %v", resp)
 	}
 	// Authorization: non-main groups must not spawn.
-	if _, err := a.Write([]byte(`{"cmd":"spawn","group":"x"}` + "\n")); err != nil {
+	go fcWriteFrame(a, &pb.CtlRequest{Cmd: &pb.CtlRequest_Spawn{Spawn: &pb.SpawnReq{Group: "x"}}})
+	resp = &pb.CtlResponse{}
+	if err := fcReadFrame(a, fcFrameMaxGuest, resp); err != nil {
 		t.Fatal(err)
 	}
-	line, err = bufio.NewReader(a).ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(line, "not allowed") {
-		t.Fatalf("non-main spawn should be rejected: %s", line)
+	if !strings.Contains(resp.Error, "not allowed") {
+		t.Fatalf("non-main spawn should be rejected: %v", resp)
 	}
 	a.Close()
 }
@@ -154,28 +146,25 @@ func TestFcAgentCall(t *testing.T) {
 			t.Errorf("expected CONNECT %d, got %d", fcPortAgent, port)
 			return
 		}
-		line, err := bufio.NewReader(c).ReadString('\n')
-		if err != nil {
+		req := &pb.AgentRequest{}
+		if err := fcReadFrame(c, fcFrameMaxHost, req); err != nil {
 			t.Errorf("read req: %v", err)
 			return
 		}
-		var req map[string]any
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			t.Errorf("req not json: %v", err)
+		m := req.GetMsg()
+		if m == nil {
+			t.Errorf("op = %T", req.Op)
 			return
-		}
-		if req["op"] != "msg" {
-			t.Errorf("op = %v", req["op"])
 		}
 		// The slot rides every msg: it names the log stream the turn writes
 		// to, which is what keeps concurrent turns parseable.
-		if got, ok := req["slot"].(float64); !ok || int(got) != 3 {
-			t.Errorf("slot = %v (ok=%v), want 3", req["slot"], ok)
+		if m.Slot != 3 || string(m.Msg) != "hi" || string(m.SystemPrompt) != "system prompt" {
+			t.Errorf("msg = %v", m)
 		}
-		fmt.Fprintf(c, `{"ok":true}`+"\n")
+		fcWriteFrame(c, &pb.AgentResponse{Ok: true})
 	})
 	defer ln.Close()
-	if err := fcSendMsg("tg", "", 3, "aGk=", "system prompt", []byte(`{"provider":"venice"}`)); err != nil {
+	if err := fcSendMsg("tg", "", 3, "hi", "system prompt", []byte(`{"provider":"venice"}`)); err != nil {
 		t.Fatalf("fcSendMsg: %v", err)
 	}
 }
@@ -185,11 +174,11 @@ func TestFcAgentCallError(t *testing.T) {
 	fcHarness(t)
 	ln := fakeFC(t, "tg", func(port int, c net.Conn) {
 		defer c.Close()
-		bufio.NewReader(c).ReadString('\n')
-		fmt.Fprintf(c, `{"ok":false,"error":"boom"}`+"\n")
+		_ = fcReadFrame(c, fcFrameMaxHost, &pb.AgentRequest{})
+		fcWriteFrame(c, &pb.AgentResponse{Ok: false, Error: "boom"})
 	})
 	defer ln.Close()
-	_, err := fcAgentCall("tg", map[string]any{"op": "exec", "script": "true"}, 2*time.Second)
+	_, err := fcAgentCall("tg", &pb.AgentRequest{Op: &pb.AgentRequest_Exec{Exec: &pb.ExecReq{Script: "true"}}}, 2*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected in-band error, got %v", err)
 	}

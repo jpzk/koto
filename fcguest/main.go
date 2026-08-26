@@ -33,8 +33,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -44,6 +42,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"koto-protocol/pb"
 
 	"golang.org/x/sys/unix"
 )
@@ -496,24 +496,32 @@ func ctlForward() {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
+		// Validate in the guest: a line that doesn't fit the schema is
+		// answered here and never framed — the daemon only ever decodes
+		// well-formed CtlRequests off this port.
+		req, err := ctlRequestFromJSON(line)
+		if err != nil {
+			appendCtlOut(ctlErrorJSON(err))
+			continue
+		}
 		// One retry on a stale connection: redial and resend.
 		for attempt := 0; attempt < 2; attempt++ {
 			if conn == nil {
 				conn = dialRetry(portCtl)
 				connR = bufio.NewReader(conn)
 			}
-			if _, err := conn.Write(append(line, '\n')); err != nil {
+			if err := writeFrame(conn, req); err != nil {
 				conn.Close()
 				conn = nil
 				continue
 			}
-			resp, err := connR.ReadBytes('\n')
-			if err != nil {
+			resp := &pb.CtlResponse{}
+			if err := readFrame(connR, frameMaxHost, resp); err != nil {
 				conn.Close()
 				conn = nil
 				continue
 			}
-			appendCtlOut(resp)
+			appendCtlOut(ctlResponseJSON(resp))
 			break
 		}
 	}
@@ -534,72 +542,52 @@ func appendCtlOut(line []byte) {
 
 // ---- agent RPC server ----------------------------------------------------------
 
-type agentReq struct {
-	Op            string            `json:"op"`
-	B64           string            `json:"b64"`
-	SPB64         string            `json:"sp_b64"`
-	CfgB64        string            `json:"cfg_b64"`
-	Script        string            `json:"script"`
-	UploadsTarB64 string            `json:"uploads_tar_b64"`
-	Ports         []int             `json:"ports"`
-	Env           map[string]string `json:"env"`
-	Net           string            `json:"net"`     // "l3" → bring up the TAP (internet=full)
-	Root          bool              `json:"root"`    // true → writable-persistent root overlay + passwordless sudo for node (config root=yes)
-	Group         string            `json:"group"`   // init: owning group name → hostname koto-vm-<group>
-	Session       string            `json:"session"` // shell_attach: tmux session name (default koto-shell); msg: chat session name ("" = default)
-	Slot          int               `json:"slot"`    // msg: concurrency slot → which log.<n> stream this turn writes to
-	Cols          uint32            `json:"cols"`    // shell_attach: initial pty width
-	Rows          uint32            `json:"rows"`    // shell_attach: initial pty height
+// Requests arrive as one framed protocol/guest.proto AgentRequest per
+// connection (see agentServer); the response is one framed AgentResponse,
+// or a per-op stream.
+func reply(c *vconn, v *pb.AgentResponse) {
+	_ = writeFrame(c, v)
 }
 
-func reply(c *vconn, v any) {
-	b, _ := json.Marshal(v)
-	_, _ = c.Write(append(b, '\n'))
-}
+func replyOK(c *vconn) { reply(c, &pb.AgentResponse{Ok: true}) }
 
 func replyErr(c *vconn, err error) {
-	reply(c, map[string]any{"ok": false, "error": err.Error()})
+	reply(c, &pb.AgentResponse{Ok: false, Error: err.Error()})
 }
 
 func agentServer() {
 	vsockAcceptLoop(portAgent, func(c *vconn) {
 		defer c.Close()
 		r := bufio.NewReader(c)
-		line, err := r.ReadBytes('\n')
-		if err != nil {
+		req := &pb.AgentRequest{}
+		if err := readFrame(r, frameMaxHost, req); err != nil {
 			return
 		}
-		var req agentReq
-		if err := json.Unmarshal(line, &req); err != nil {
-			replyErr(c, err)
-			return
-		}
-		switch req.Op {
-		case "init":
-			handleInit(c, &req)
-		case "msg":
-			handleMsg(c, &req)
-		case "exec":
-			handleExec(c, &req)
-		case "exec_stream":
-			handleExecStream(c, &req)
-		case "run_script":
-			handleRunScript(c, &req)
-		case "shell_attach":
+		switch op := req.Op.(type) {
+		case *pb.AgentRequest_Init:
+			handleInit(c, op.Init)
+		case *pb.AgentRequest_Msg:
+			handleMsg(c, op.Msg)
+		case *pb.AgentRequest_Exec:
+			handleExec(c, op.Exec.Script)
+		case *pb.AgentRequest_ExecStream:
+			handleExecStream(c, op.ExecStream.Script)
+		case *pb.AgentRequest_RunScript:
+			handleRunScript(c, op.RunScript.Script)
+		case *pb.AgentRequest_ShellAttach:
 			// Unlike every other op, the host keeps writing to this
-			// connection after the request line (stdin/resize frames for as
+			// connection after the request frame (stdin/resize frames for as
 			// long as the session stays attached) — so reads must continue
-			// on the SAME bufio.Reader `r` used to read the request line,
-			// not a fresh read on `c`. `r` may already have buffered bytes
-			// past the request line's '\n' (bufio reads ahead in chunks),
-			// and reading `c` directly here would silently drop them.
-			handleShellAttach(c, r, &req)
-		case "shutdown":
-			reply(c, map[string]any{"ok": true})
+			// on the SAME bufio.Reader `r` used to read the request, not a
+			// fresh read on `c`: `r` may already have buffered bytes past the
+			// request frame, and reading `c` directly would drop them.
+			handleShellAttach(c, r, op.ShellAttach)
+		case *pb.AgentRequest_Shutdown:
+			replyOK(c)
 			c.Close()
 			shutdown()
 		default:
-			replyErr(c, fmt.Errorf("unknown op %q", req.Op))
+			replyErr(c, fmt.Errorf("unknown op %T", req.Op))
 		}
 	})
 }
@@ -614,7 +602,7 @@ var (
 	portsUp      = map[int]bool{}
 )
 
-func handleInit(c *vconn, req *agentReq) {
+func handleInit(c *vconn, req *pb.InitReq) {
 	initMu.Lock()
 	defer initMu.Unlock()
 	// Hostname carries the group identity (koto-vm-<group>) so shell
@@ -645,7 +633,8 @@ func handleInit(c *vconn, req *agentReq) {
 			rootEnabled = true
 		}
 	}
-	for _, p := range req.Ports {
+	for _, p32 := range req.Ports {
+		p := int(p32)
 		if p < 1024 || p > 65535 || portsUp[p] {
 			continue
 		}
@@ -663,7 +652,7 @@ func handleInit(c *vconn, req *agentReq) {
 		entrypointUp = true
 		go entrypointLoop(req.Env)
 	}
-	reply(c, map[string]any{"ok": true})
+	replyOK(c)
 }
 
 // enableRoot applies the root=yes profile: make root *useful*, not just
@@ -740,11 +729,7 @@ func overlayRootDirs() error {
 
 // untarInto extracts a base64 tarball under dest. chownWorker hands the tree
 // to the uid-1000 worker (uploads); false keeps it root-owned + a+rX.
-func untarInto(b64, dest string, chownWorker bool) error {
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return err
-	}
+func untarInto(raw []byte, dest string, chownWorker bool) error {
 	_ = os.MkdirAll(dest, 0o755)
 	cmd := exec.Command("tar", "-C", dest, "-xf", "-")
 	cmd.Stdin = bytes.NewReader(raw)
@@ -848,28 +833,22 @@ func entrypointEnviron(env map[string]string) []string {
 // given us does not apply, and both lines arrive spliced and undecodable.
 var msgMu sync.Mutex
 
-func handleMsg(c *vconn, req *agentReq) {
-	sp, err := base64.StdEncoding.DecodeString(req.SPB64)
-	if err != nil {
-		replyErr(c, fmt.Errorf("sp_b64: %w", err))
-		return
-	}
+func handleMsg(c *vconn, req *pb.MsgReq) {
+	sp := req.SystemPrompt
 	// The system prompt is PER SESSION on disk: it is composed per turn, and
 	// with concurrent turns a single shared file lets the later delivery
 	// overwrite a prompt the earlier turn has not read yet — that turn would
 	// then run under the other conversation's prompt. entrypoint.sh reads the
 	// per-session file (falling back to the legacy path).
 	writeWorkerFile(filepath.Join(csDir, "system-prompt-"+sessionFileName(req.Session)+".md"), sp)
-	if req.CfgB64 != "" {
-		if cfg, err := base64.StdEncoding.DecodeString(req.CfgB64); err == nil {
-			writeWorkerFile(filepath.Join(csDir, "config.json"), cfg)
-		}
+	if len(req.ConfigJson) > 0 {
+		writeWorkerFile(filepath.Join(csDir, "config.json"), req.ConfigJson)
 	}
 	// Attachments saved host-side by the daemon ride along per turn; the
 	// message body references /workspace/.cs/uploads/<name>, so land them
 	// there (worker-owned) before the FIFO write wakes entrypoint.sh.
-	if req.UploadsTarB64 != "" {
-		if err := untarInto(req.UploadsTarB64, filepath.Join(csDir, "uploads"), true); err != nil {
+	if len(req.UploadsTar) > 0 {
+		if err := untarInto(req.UploadsTar, filepath.Join(csDir, "uploads"), true); err != nil {
 			logf("uploads untar: %v", err)
 		}
 	}
@@ -891,15 +870,18 @@ func handleMsg(c *vconn, req *agentReq) {
 	// derive it, since it is the daemon that allocates them. A session is
 	// always present on this path; the bare-b64 form remains only for
 	// pre-session callers.
-	line := req.B64
+	// entrypoint.sh reads the body base64'd (one token, no newlines) — the
+	// encoding now happens here, at the FIFO, instead of on the wire.
+	b64 := base64.StdEncoding.EncodeToString(req.Msg)
+	line := b64
 	if req.Session != "" || req.Slot > 0 {
-		line = fmt.Sprintf("%s %d %s", sessionFileName(req.Session), req.Slot, req.B64)
+		line = fmt.Sprintf("%s %d %s", sessionFileName(req.Session), req.Slot, b64)
 	}
 	if _, err := inFIFO.Write([]byte(line + "\n")); err != nil {
 		replyErr(c, err)
 		return
 	}
-	reply(c, map[string]any{"ok": true})
+	replyOK(c)
 }
 
 // writeWorkerFile writes atomically (tmp + rename) so a reader in the guest
@@ -930,8 +912,8 @@ func sessionFileName(sess string) string {
 
 const execCap = 60 * time.Second
 
-func handleExec(c *vconn, req *agentReq) {
-	cmd := exec.Command("/bin/sh", "-c", req.Script)
+func handleExec(c *vconn, script string) {
+	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Dir = wsDir
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -944,11 +926,7 @@ func handleExec(c *vconn, req *agentReq) {
 	timer := time.AfterFunc(execCap, func() { killGroup(pid, syscall.SIGKILL) })
 	ws := <-ch
 	timer.Stop()
-	reply(c, map[string]any{
-		"ok":      true,
-		"rc":      ws.ExitStatus(),
-		"out_b64": base64.StdEncoding.EncodeToString(out.Bytes()),
-	})
+	reply(c, &pb.AgentResponse{Ok: true, Rc: int32(ws.ExitStatus()), Out: out.Bytes()})
 }
 
 // handleExecStream pipes the child's combined output straight down the
@@ -958,8 +936,8 @@ func handleExec(c *vconn, req *agentReq) {
 // daemon-driven (the sole caller is the bg-tailer's `tail -F`, which never
 // exits on its own), so there is no guest→host end signal here — see
 // handleRunScript for the framed variant that needs one.
-func handleExecStream(c *vconn, req *agentReq) {
-	cmd := exec.Command("/bin/sh", "-c", req.Script)
+func handleExecStream(c *vconn, script string) {
+	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Dir = wsDir
 	cmd.Stdout = c
 	cmd.Stderr = c
@@ -985,21 +963,21 @@ func handleExecStream(c *vconn, req *agentReq) {
 // can't rely on connection close the way a normal socket would. Instead this
 // op frames the connection explicitly:
 //
-//	data frame  'D' <uint32 len> <bytes>   one chunk of combined stdout+stderr
-//	end frame   'E' <uint32 0>             the script exited; stream is done
-//	error frame 'X' <uint32 len> <bytes>   couldn't start (pipe/spawn failure)
+//	AgentFrame{data}   one chunk of combined stdout+stderr
+//	AgentFrame{end}    the script exited; stream is done
+//	AgentFrame{error}  couldn't start (pipe/spawn failure)
 //
 // The child runs as the worker user (node/uid 1000, HOME=/workspace) — the
 // same world the agent's own bash sees — and writes to a PIPE, never the
 // vsock fd directly, so a backgrounded grandchild can't hold the connection
 // open and the frame loop owns termination.
-func handleRunScript(c *vconn, req *agentReq) {
+func handleRunScript(c *vconn, script string) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		writeScriptFrame(c, 'X', []byte(err.Error()))
+		frameError(c, err.Error())
 		return
 	}
-	cmd := exec.Command("/bin/sh", "-c", req.Script)
+	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Dir = wsDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
@@ -1011,7 +989,7 @@ func handleRunScript(c *vconn, req *agentReq) {
 	pw.Close() // child holds the only write end; pr hits EOF when it (and any grandchild) exits
 	if err != nil {
 		pr.Close()
-		writeScriptFrame(c, 'X', []byte(err.Error()))
+		frameError(c, err.Error())
 		return
 	}
 	go func() {
@@ -1024,7 +1002,7 @@ func handleRunScript(c *vconn, req *agentReq) {
 	for {
 		n, rerr := pr.Read(buf)
 		if n > 0 {
-			if werr := writeScriptFrame(c, 'D', buf[:n]); werr != nil {
+			if werr := frameData(c, buf[:n]); werr != nil {
 				break // daemon gone; peer-close goroutine will reap
 			}
 		}
@@ -1032,25 +1010,17 @@ func handleRunScript(c *vconn, req *agentReq) {
 			break
 		}
 	}
-	<-ch                              // reap the child
-	_ = writeScriptFrame(c, 'E', nil) // signal end (best-effort; conn may be gone)
+	<-ch        // reap the child
+	frameEnd(c) // signal end (best-effort; conn may be gone)
 }
 
-// writeScriptFrame writes one [type][uint32 len][payload] frame. A single
-// Write per header/payload — vsock is a stream, the daemon reassembles via
-// io.ReadFull on the 5-byte header then the exact length.
-func writeScriptFrame(c *vconn, typ byte, payload []byte) error {
-	var hdr [5]byte
-	hdr[0] = typ
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
-	if _, err := c.Write(hdr[:]); err != nil {
-		return err
-	}
-	if len(payload) > 0 {
-		_, err := c.Write(payload)
-		return err
-	}
-	return nil
+// Guest→host stream frames (run_script and shell_attach share the type).
+func frameData(w io.Writer, b []byte) error {
+	return writeFrame(w, &pb.AgentFrame{Kind: &pb.AgentFrame_Data{Data: b}})
+}
+func frameEnd(w io.Writer) { _ = writeFrame(w, &pb.AgentFrame{Kind: &pb.AgentFrame_End{End: true}}) }
+func frameError(w io.Writer, msg string) {
+	_ = writeFrame(w, &pb.AgentFrame{Kind: &pb.AgentFrame_Error{Error: msg}})
 }
 
 // ---- shell_attach: persistent pty attached to a tmux session -------------------
@@ -1087,7 +1057,7 @@ func writeScriptFrame(c *vconn, typ byte, payload []byte) error {
 // orphaned server reparents to fc-agent (PID 1) and is reaped by the
 // existing catch-all reaper() (untracked pids are silently reaped) whenever
 // it eventually exits.
-func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
+func handleShellAttach(c *vconn, r *bufio.Reader, req *pb.ShellAttachReq) {
 	session := req.Session
 	if session == "" {
 		session = "koto-shell"
@@ -1095,23 +1065,23 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 
 	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
-		_ = writeShellFrame(c, 'X', []byte(err.Error()))
+		frameError(c, err.Error())
 		return
 	}
 	if err := unix.IoctlSetPointerInt(int(ptmx.Fd()), unix.TIOCSPTLCK, 0); err != nil {
-		_ = writeShellFrame(c, 'X', []byte("unlock pty: "+err.Error()))
+		frameError(c, "unlock pty: "+err.Error())
 		ptmx.Close()
 		return
 	}
 	ptn, err := unix.IoctlGetInt(int(ptmx.Fd()), unix.TIOCGPTN)
 	if err != nil {
-		_ = writeShellFrame(c, 'X', []byte("pty number: "+err.Error()))
+		frameError(c, "pty number: "+err.Error())
 		ptmx.Close()
 		return
 	}
 	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", ptn), os.O_RDWR, 0)
 	if err != nil {
-		_ = writeShellFrame(c, 'X', []byte("open slave: "+err.Error()))
+		frameError(c, "open slave: "+err.Error())
 		ptmx.Close()
 		return
 	}
@@ -1164,7 +1134,7 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 	pid, ch, err := startTracked(cmd)
 	slave.Close() // child holds the controlling reference now
 	if err != nil {
-		_ = writeShellFrame(c, 'X', []byte(err.Error()))
+		frameError(c, err.Error())
 		ptmx.Close()
 		return
 	}
@@ -1174,20 +1144,16 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 	// detaches (SIGHUP) this client only — never the tmux session, see above.
 	go func() {
 		for {
-			typ, payload, ferr := readShellFrame(r)
-			if ferr != nil {
+			f := &pb.AgentFrame{}
+			if ferr := readFrame(r, frameMaxHost, f); ferr != nil {
 				break
 			}
-			switch typ {
-			case 'I':
-				_, _ = ptmx.Write(payload)
-			case 'R':
-				if len(payload) == 4 {
-					cols := binary.BigEndian.Uint16(payload[0:2])
-					rows := binary.BigEndian.Uint16(payload[2:4])
-					_ = unix.IoctlSetWinsize(int(ptmx.Fd()), unix.TIOCSWINSZ,
-						&unix.Winsize{Row: rows, Col: cols})
-				}
+			switch k := f.Kind.(type) {
+			case *pb.AgentFrame_Input:
+				_, _ = ptmx.Write(k.Input)
+			case *pb.AgentFrame_Resize:
+				_ = unix.IoctlSetWinsize(int(ptmx.Fd()), unix.TIOCSWINSZ,
+					&unix.Winsize{Row: uint16(k.Resize.Rows), Col: uint16(k.Resize.Cols)})
 			}
 		}
 		killGroup(pid, syscall.SIGHUP)
@@ -1199,7 +1165,7 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 	for {
 		n, rerr := ptmx.Read(buf)
 		if n > 0 {
-			if werr := writeShellFrame(c, 'D', buf[:n]); werr != nil {
+			if werr := frameData(c, buf[:n]); werr != nil {
 				break // daemon gone; the frame-in goroutine will reap on its own read error
 			}
 		}
@@ -1207,45 +1173,8 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *agentReq) {
 			break // client detached or tmux session itself ended (EIO once no one holds the slave)
 		}
 	}
-	<-ch                             // reap this attach client
-	_ = writeShellFrame(c, 'E', nil) // best-effort; the tmux session itself lives on
-}
-
-// writeShellFrame / readShellFrame share writeScriptFrame's exact
-// [type][uint32 BE len][payload] shape, but unlike run_script's helpers
-// (guest->host only) this connection is framed in BOTH directions, so
-// readShellFrame is genuinely new — no prior op ever needed to read
-// anything but the initial request line off the host. readShellFrame takes
-// the SAME *bufio.Reader agentServer used for that request line (see the
-// case "shell_attach" comment in agentServer) so no already-buffered bytes
-// are lost.
-func writeShellFrame(w io.Writer, typ byte, payload []byte) error {
-	var hdr [5]byte
-	hdr[0] = typ
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	if len(payload) > 0 {
-		_, err := w.Write(payload)
-		return err
-	}
-	return nil
-}
-
-func readShellFrame(r io.Reader) (typ byte, payload []byte, err error) {
-	var hdr [5]byte
-	if _, err = io.ReadFull(r, hdr[:]); err != nil {
-		return 0, nil, err
-	}
-	n := binary.BigEndian.Uint32(hdr[1:])
-	if n > 0 {
-		payload = make([]byte, n)
-		if _, err = io.ReadFull(r, payload); err != nil {
-			return 0, nil, err
-		}
-	}
-	return hdr[0], payload, nil
+	<-ch        // reap this attach client
+	frameEnd(c) // best-effort; the tmux session itself lives on
 }
 
 // ---- shutdown -------------------------------------------------------------------

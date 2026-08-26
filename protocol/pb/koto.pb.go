@@ -3414,8 +3414,14 @@ type GroupResources struct {
 	GuestDiskTotalBytes int64 `protobuf:"varint,13,opt,name=guest_disk_total_bytes,json=guestDiskTotalBytes,proto3" json:"guest_disk_total_bytes,omitempty"`
 	GuestDiskAvailBytes int64 `protobuf:"varint,14,opt,name=guest_disk_avail_bytes,json=guestDiskAvailBytes,proto3" json:"guest_disk_avail_bytes,omitempty"`
 	GuestDiskUsedBytes  int64 `protobuf:"varint,15,opt,name=guest_disk_used_bytes,json=guestDiskUsedBytes,proto3" json:"guest_disk_used_bytes,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Precomputed ratios (percent, one decimal), as resourcesCtlResp reports
+	// them on the in-guest ctl plane; the gRPC Resources handler leaves them 0
+	// and clients derive their own.
+	AllocPct         float64 `protobuf:"fixed64,16,opt,name=alloc_pct,json=allocPct,proto3" json:"alloc_pct,omitempty"`
+	GuestMemUsedPct  float64 `protobuf:"fixed64,17,opt,name=guest_mem_used_pct,json=guestMemUsedPct,proto3" json:"guest_mem_used_pct,omitempty"`
+	GuestDiskUsedPct float64 `protobuf:"fixed64,18,opt,name=guest_disk_used_pct,json=guestDiskUsedPct,proto3" json:"guest_disk_used_pct,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GroupResources) Reset() {
@@ -3553,6 +3559,27 @@ func (x *GroupResources) GetGuestDiskUsedBytes() int64 {
 	return 0
 }
 
+func (x *GroupResources) GetAllocPct() float64 {
+	if x != nil {
+		return x.AllocPct
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestMemUsedPct() float64 {
+	if x != nil {
+		return x.GuestMemUsedPct
+	}
+	return 0
+}
+
+func (x *GroupResources) GetGuestDiskUsedPct() float64 {
+	if x != nil {
+		return x.GuestDiskUsedPct
+	}
+	return 0
+}
+
 // Fleet-wide rollup for the filesystem the groups directory lives on.
 type HostResources struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
@@ -3563,9 +3590,10 @@ type HostResources struct {
 	// provisioned_bytes: the sum of every group's `size` preset — what the
 	// fleet could grow into. Intentionally allowed to exceed fs_total_bytes
 	// (sparse overcommit is the design); the point is that it be visible.
-	ProvisionedBytes int64 `protobuf:"varint,4,opt,name=provisioned_bytes,json=provisionedBytes,proto3" json:"provisioned_bytes,omitempty"`
-	Groups           int32 `protobuf:"varint,5,opt,name=groups,proto3" json:"groups,omitempty"`
-	RunningGroups    int32 `protobuf:"varint,6,opt,name=running_groups,json=runningGroups,proto3" json:"running_groups,omitempty"`
+	ProvisionedBytes int64   `protobuf:"varint,4,opt,name=provisioned_bytes,json=provisionedBytes,proto3" json:"provisioned_bytes,omitempty"`
+	Groups           int32   `protobuf:"varint,5,opt,name=groups,proto3" json:"groups,omitempty"`
+	RunningGroups    int32   `protobuf:"varint,6,opt,name=running_groups,json=runningGroups,proto3" json:"running_groups,omitempty"`
+	FsUsedPct        float64 `protobuf:"fixed64,7,opt,name=fs_used_pct,json=fsUsedPct,proto3" json:"fs_used_pct,omitempty"` // see GroupResources.alloc_pct
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -3638,6 +3666,13 @@ func (x *HostResources) GetGroups() int32 {
 func (x *HostResources) GetRunningGroups() int32 {
 	if x != nil {
 		return x.RunningGroups
+	}
+	return 0
+}
+
+func (x *HostResources) GetFsUsedPct() float64 {
+	if x != nil {
+		return x.FsUsedPct
 	}
 	return 0
 }
@@ -4114,7 +4149,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12,\n" +
 	"\x06groups\x18\x03 \x03(\v2\x14.koto.GroupResourcesR\x06groups\x12'\n" +
-	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xd3\x04\n" +
+	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xcc\x05\n" +
 	"\x0eGroupResources\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1f\n" +
@@ -4132,14 +4167,18 @@ const file_koto_proto_rawDesc = "" +
 	"\x15guest_mem_avail_bytes\x18\f \x01(\x03R\x12guestMemAvailBytes\x123\n" +
 	"\x16guest_disk_total_bytes\x18\r \x01(\x03R\x13guestDiskTotalBytes\x123\n" +
 	"\x16guest_disk_avail_bytes\x18\x0e \x01(\x03R\x13guestDiskAvailBytes\x121\n" +
-	"\x15guest_disk_used_bytes\x18\x0f \x01(\x03R\x12guestDiskUsedBytes\"\xf1\x01\n" +
+	"\x15guest_disk_used_bytes\x18\x0f \x01(\x03R\x12guestDiskUsedBytes\x12\x1b\n" +
+	"\talloc_pct\x18\x10 \x01(\x01R\ballocPct\x12+\n" +
+	"\x12guest_mem_used_pct\x18\x11 \x01(\x01R\x0fguestMemUsedPct\x12-\n" +
+	"\x13guest_disk_used_pct\x18\x12 \x01(\x01R\x10guestDiskUsedPct\"\x91\x02\n" +
 	"\rHostResources\x12$\n" +
 	"\x0efs_total_bytes\x18\x01 \x01(\x03R\ffsTotalBytes\x12\"\n" +
 	"\rfs_free_bytes\x18\x02 \x01(\x03R\vfsFreeBytes\x12*\n" +
 	"\x11alloc_total_bytes\x18\x03 \x01(\x03R\x0fallocTotalBytes\x12+\n" +
 	"\x11provisioned_bytes\x18\x04 \x01(\x03R\x10provisionedBytes\x12\x16\n" +
 	"\x06groups\x18\x05 \x01(\x05R\x06groups\x12%\n" +
-	"\x0erunning_groups\x18\x06 \x01(\x05R\rrunningGroups\"\v\n" +
+	"\x0erunning_groups\x18\x06 \x01(\x05R\rrunningGroups\x12\x1e\n" +
+	"\vfs_used_pct\x18\a \x01(\x01R\tfsUsedPct\"\v\n" +
 	"\tAclGetReq\"T\n" +
 	"\rAclSetRoleReq\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12/\n" +

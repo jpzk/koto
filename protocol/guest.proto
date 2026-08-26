@@ -1,0 +1,173 @@
+// Daemon <-> microVM guest wire contract (vsock). Shared by the daemon
+// (daemon/fc.go, daemon/ctlpb.go) and the guest PID-1 agent (fcguest/), both
+// Go; generated code lands in ./pb next to koto.proto's. Nothing else speaks
+// this protocol — it never leaves the host↔guest vsock pair.
+//
+// Framing on every channel: one uint32 big-endian length prefix + one
+// serialized message; each side enforces a per-channel maximum BEFORE
+// allocating (daemon/fcframe.go, fcguest/frame.go). Ports (single vsock
+// device, demuxed by port — see docs/firecracker-vsock.md):
+//
+//   guest → host 9002  CtlRequest / CtlResponse   the in-guest control plane
+//   host → guest 10000 AgentRequest / AgentResponse, then per-op streams
+//                      framed as AgentFrame (run_script, shell_attach) or raw
+//                      bytes (exec_stream — a plain pipe the host closes)
+//
+// 9000 (API egress → proxy) and 9003 (L3 frames → gVisor) are byte pipes with
+// their own protocols (HTTP, ethernet) and are not described here; 9001 (log
+// stream) is still the [[marker]] text stream — moving it to typed frames is
+// the next step.
+//
+// Why protobuf here, not JSON lines: length-prefixed frames bound every read
+// before it allocates; a `oneof` per verb makes the verb set closed and every
+// field typed at decode (an unknown or mistyped field is a decode error, not
+// a silently-zeroed struct); binary payloads (job output, report bodies) ride
+// as `bytes` instead of base64-in-a-string. Request fields keep the JSON
+// names the guest-side shell tools (cs-job, cs-notify) already write — the
+// guest agent converts their JSON line into a CtlRequest with strict
+// protojson, so a malformed line is refused in the guest and never reaches
+// the daemon.
+syntax = "proto3";
+
+package koto;
+
+option go_package = "koto-protocol/pb;pb";
+
+import "koto.proto";
+
+// ---- 9002: in-guest control plane (guest → host) --------------------------
+// Authorization is by the SOCKET the request arrives on (which group's vsock
+// listener), never by a field: see daemon/ctl.go. Field semantics per verb
+// are documented in prompts/global.md (agent-facing) and ctl.go.
+
+message CtlSendReq {
+  string group        = 1;
+  string msg          = 2;
+  string session      = 3;
+  bool   reply        = 4; // arm a one-shot report window (report.go)
+  string from_session = 5; // main's session that receives the report
+}
+message CtlTailReq   { string group = 1; int32 n = 2; }
+message JobDoneReq   {
+  string id      = 1;
+  string rc      = 2;
+  bytes  out     = 3; // trailing bytes of the job's output
+  int64  total   = 4;
+  string session = 5;
+}
+message NotifyReq {
+  string severity = 1; // normal | high
+  bytes  title    = 2;
+  bytes  msg      = 3;
+  string session  = 4;
+}
+message ReportReq      { bytes msg = 1; }
+message GoalDoneReq    { string id = 1; bytes note = 2; }
+message GoalVerdictReq { string id = 1; bool met = 2; bytes reasons = 3; }
+
+message CtlRequest {
+  oneof cmd {
+    SpawnReq       spawn          = 1;
+    CtlSendReq     send           = 2;
+    GroupReq       stop           = 3;
+    ListReq        list           = 4;
+    ResourcesReq   resources      = 5;
+    ConfigReq      config_set     = 6;
+    CtlTailReq     tail           = 7;
+    JobDoneReq     job_done       = 8;
+    NotifyReq      notify         = 9;
+    ReportReq      report         = 10;
+    GoalDoneReq    goal_done      = 11;
+    GoalVerdictReq goal_verdict   = 12;
+    GoalSetReq     goal_set       = 13;
+    GoalGroupReq   goal_approve   = 14;
+    GoalListReq    goal_status    = 15;
+    GoalGroupReq   goal_pause     = 16;
+    GoalGroupReq   goal_interrupt = 17;
+    GoalGroupReq   goal_resume    = 18;
+    GoalGroupReq   goal_cancel    = 19;
+    SchedAddReq    sched_add      = 20;
+    SchedListReq   sched_list     = 21;
+    SchedIDReq     sched_del      = 22;
+    SchedToggleReq sched_toggle   = 23;
+    SchedIDReq     sched_run      = 24;
+  }
+}
+
+message CtlTailResp { string text = 1; }
+
+// ok/error are the envelope; `result` carries the verb's payload. The guest
+// agent flattens the payload into the top-level JSON object it appends to
+// .cs/ctl.out, so the shape agents read is unchanged ({"ok":true,"port":..}).
+message CtlResponse {
+  bool   ok    = 1;
+  string error = 2;
+  oneof result {
+    int32         port      = 3;  // spawn
+    ListResp      list      = 4;
+    ResourcesResp resources = 5;
+    ConfigResp    config    = 6;
+    CtlTailResp   tail      = 7;
+    GoalResp      goal      = 8;  // goal_set / approve / pause / interrupt / resume / cancel
+    GoalListResp  goals     = 9;  // goal_status
+    SchedAddResp  sched     = 10; // sched_add
+    SchedListResp scheds    = 11; // sched_list
+  }
+}
+
+// ---- 10000: agent RPC (host → guest) ---------------------------------------
+// One request frame per connection; the response frame (or the per-op stream)
+// follows on the same connection.
+
+message InitReq {
+  repeated int32      ports = 1; // published TCP ports to bridge
+  map<string, string> env   = 2; // entrypoint + exec environment
+  string              net   = 3; // "" | "l3" — bring the TAP up (network ≠ none)
+  bool                root  = 4; // root=yes profile
+  string              group = 5; // hostname koto-vm-<group>
+}
+message MsgReq {
+  bytes  msg           = 1; // the turn's message body (raw)
+  bytes  system_prompt = 2;
+  bytes  config_json   = 3; // "" = leave config.json untouched
+  bytes  uploads_tar   = 4; // attachments newer than the host watermark
+  string session       = 5; // "" = default
+  int32  slot          = 6; // which log.<n> stream this turn writes to
+}
+message ExecReq        { string script = 1; }
+message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
+message GuestScriptReq { string script = 1; } // run_script: AgentFrame stream follows
+message ShellAttachReq { string session = 1; uint32 cols = 2; uint32 rows = 3; }
+message ShutdownReq    {}
+
+message AgentRequest {
+  oneof op {
+    InitReq        init         = 1;
+    MsgReq         msg          = 2;
+    ExecReq        exec         = 3;
+    ExecStreamReq  exec_stream  = 4;
+    GuestScriptReq run_script   = 5;
+    ShellAttachReq shell_attach = 6;
+    ShutdownReq    shutdown     = 7;
+  }
+}
+
+message AgentResponse {
+  bool   ok    = 1;
+  string error = 2;
+  int32  rc    = 3; // exec
+  bytes  out   = 4; // exec: combined stdout+stderr
+}
+
+// Stream frame for run_script (guest→host) and shell_attach (both ways).
+// A guest-side close does not surface as a host EOF on hybrid vsock, so
+// `end` is the explicit terminator.
+message AgentFrame {
+  oneof kind {
+    bytes       data   = 1; // guest→host: output chunk
+    bool        end    = 2; // guest→host: stream done
+    string      error  = 3; // guest→host: couldn't start / failed
+    bytes       input  = 4; // host→guest (shell): stdin bytes
+    ShellResize resize = 5; // host→guest (shell): pty geometry
+  }
+}

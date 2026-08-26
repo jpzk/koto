@@ -14,8 +14,10 @@ package main
 //           the daemon appends the bytes to the HOST groups/<g>/.cs/log,
 //           which stays the single source of truth (tailLog, History,
 //           /clear truncation, proxy logAppend, `>>>` markers all unchanged).
-//     9002  ctl plane: JSON lines → ctlDispatch(g, line), response written
-//           back on the same connection (agent routes it to .cs/ctl.out).
+//     9002  ctl plane: framed protobuf (protocol/guest.proto CtlRequest →
+//           ctlDispatchPB → CtlResponse on the same connection; the guest
+//           agent converts the shell tools' JSON lines with strict protojson
+//           before framing and flattens the reply into .cs/ctl.out).
 //     9004  slot log streams: one connection per concurrency slot (queue.go),
 //           opening with a header line "<slot>\n" and then behaving exactly
 //           like 9001. The header multiplexes because the slot count is a
@@ -24,12 +26,16 @@ package main
 //           connection's bytes to HOST .cs/log.<slot>.
 //
 //   host → guest  (daemon connects to "<uds>", sends "CONNECT 10000\n")
-//     10000 agent RPC — ops:
+//     10000 agent RPC — one framed AgentRequest per connection, one framed
+//           AgentResponse back (or a per-op stream: AgentFrame for
+//           run_script / shell_attach, raw bytes for exec_stream). Framing
+//           is uint32-length + protobuf (fcframe.go), bounded per channel
+//           before allocation. Ops:
 //       init        published ports + env; agent starts entrypoint.sh after
 //                   applying. Idempotent.
-//       msg         one turn: system-prompt + config.json + base64 message;
+//       msg         one turn: system-prompt + config.json + message bytes;
 //                   agent materializes the files in the guest workspace and
-//                   writes the b64 line to the in-guest .cs/in FIFO, so
+//                   writes the base64 line to the in-guest .cs/in FIFO, so
 //                   sidecar/entrypoint.sh runs byte-identical to podman.
 //       exec        run `sh -c script` in the guest, reply {rc, out}. The
 //                   authority equivalent of `podman exec` (daemon is tier 2
@@ -46,8 +52,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +65,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"koto-protocol/pb"
 )
 
 const (
@@ -706,20 +712,20 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			env[k] = "127.0.0.1,localhost"
 		}
 	}
-	initReq := map[string]any{
-		"op":    "init",
-		"ports": pubPorts,
-		"env":   env,
+	init := &pb.InitReq{
+		Env: env,
 		// Guest hostname becomes koto-vm-<group> (handleInit) so shell
 		// prompts identify which group's VM they're in.
-		"group": g,
+		Group: g,
+		Root:  groupRoot(g),
+	}
+	for _, p := range pubPorts {
+		init.Ports = append(init.Ports, int32(p))
 	}
 	if groupNetwork(g) != fcNetNone {
-		initReq["net"] = "l3"
+		init.Net = "l3"
 	}
-	if groupRoot(g) {
-		initReq["root"] = true
-	}
+	initReq := &pb.AgentRequest{Op: &pb.AgentRequest_Init{Init: init}}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		_, err = fcAgentCall(g, initReq, 5*time.Second)
@@ -785,7 +791,7 @@ func fcStop(g string) {
 		fcCgroupRemove(g)
 		return
 	}
-	_, _ = fcAgentCall(g, map[string]any{"op": "shutdown"}, 3*time.Second)
+	_, _ = fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Shutdown{Shutdown: &pb.ShutdownReq{}}}, 3*time.Second)
 	deadline := time.Now().Add(5 * time.Second)
 	for pidAlive(vm.pid) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
@@ -1005,17 +1011,16 @@ func logSinkAppend(p string, b []byte) error {
 // identity is identical to the FIFO path.
 func fcCtlConn(g string, c net.Conn) {
 	defer c.Close()
-	sc := bufio.NewScanner(c)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
+	br := bufio.NewReader(c)
+	for {
+		req := &pb.CtlRequest{}
+		if err := fcReadFrame(br, fcFrameMaxCtl, req); err != nil {
+			if err != io.EOF {
+				emitLogfG("ctl", g, "warn", "[%s] ctl frame: %v", g, err)
+			}
+			return
 		}
-		emitLogfG("ctl", g, "info", "[%s] %s", g, string(line))
-		resp := ctlDispatch(g, line)
-		b, _ := json.Marshal(resp)
-		if _, err := c.Write(append(b, '\n')); err != nil {
+		if err := fcWriteFrame(c, ctlDispatchPB(g, req)); err != nil {
 			return
 		}
 	}
@@ -1074,44 +1079,42 @@ func readLineByte(c net.Conn) (string, error) {
 	}
 }
 
-// fcAgentRespMax bounds one agent RPC response line (see fcAgentCall).
-const fcAgentRespMax = 16 << 20
-
-type fcAgentResp struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error,omitempty"`
-	RC     int    `json:"rc,omitempty"`
-	OutB64 string `json:"out_b64,omitempty"`
+// fcAgentOpen dials the agent port and sends one request frame. The caller
+// owns the conn: the response frame, a framed stream (run_script /
+// shell_attach) or raw bytes (exec_stream) follow, per op.
+func fcAgentOpen(g string, req *pb.AgentRequest, timeout time.Duration) (net.Conn, error) {
+	c, err := fcHostDial(g, fcPortAgent, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if err := fcWriteFrame(c, req); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 // fcAgentCall performs one request/response round trip on the agent port.
-func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentResp, error) {
+// The response frame is bounded by fcFrameMaxGuest before it is read — the
+// guest agent authors it, and exec output rides inside.
+func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.AgentResponse, error) {
 	c, err := fcHostDial(g, fcPortAgent, timeout)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(timeout))
-	b, _ := json.Marshal(req)
-	if _, err := c.Write(append(b, '\n')); err != nil {
+	if err := fcWriteFrame(c, req); err != nil {
 		return nil, err
 	}
-	// Bounded: the guest agent authors this line, and ReadString grows
-	// without limit until '\n' — an unbounded reader is a daemon-memory
-	// lever for a hostile guest. Exec output is base64 inside one line, so
-	// the bound is also the exec output cap.
-	line, err := bufio.NewReader(io.LimitReader(c, fcAgentRespMax)).ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	var resp fcAgentResp
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+	resp := &pb.AgentResponse{}
+	if err := fcReadFrame(c, fcFrameMaxGuest, resp); err != nil {
 		return nil, fmt.Errorf("agent response: %w", err)
 	}
-	if !resp.OK {
-		return &resp, errors.New(resp.Error)
+	if !resp.Ok {
+		return resp, errors.New(resp.Error)
 	}
-	return &resp, nil
+	return resp, nil
 }
 
 // fcSendMsg delivers one turn to the guest. The agent writes system-prompt.md
@@ -1124,35 +1127,29 @@ func fcAgentCall(g string, req map[string]any, timeout time.Duration) (*fcAgentR
 // newer than the last synced watermark rides along in the envelope and the
 // agent untars it into the guest workspace before the FIFO write. The
 // watermark is a host file so a daemon restart doesn't re-push history.
-func fcSendMsg(g, session string, slot int, b64msg, systemPrompt string, cfgJSON []byte) error {
-	req := map[string]any{
-		"op":     "msg",
-		"b64":    b64msg,
-		"sp_b64": base64.StdEncoding.EncodeToString([]byte(systemPrompt)),
+func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte) error {
+	m := &pb.MsgReq{
+		Msg:          []byte(msg),
+		SystemPrompt: []byte(systemPrompt),
+		ConfigJson:   cfgJSON,
+		// Named session: the guest agent prefixes the FIFO line with the
+		// name so entrypoint.sh pins the turn to that claude conversation.
+		Session: session,
 		// The slot tells the guest which log stream this turn writes to, and
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
-		"slot": slot,
-	}
-	// Named session: the guest agent prefixes the FIFO line with the name so
-	// entrypoint.sh pins the turn to that claude conversation. Absent for the
-	// default session — the bare-b64 line older rootfs images expect.
-	if session != "" {
-		req["session"] = session
-	}
-	if len(cfgJSON) > 0 {
-		req["cfg_b64"] = base64.StdEncoding.EncodeToString(cfgJSON)
+		Slot: int32(slot),
 	}
 	newWM, files := fcNewUploads(g)
 	if len(files) > 0 {
 		args := append([]string{"-C", filepath.Join(vol(g), ".cs", "uploads"), "-cf", "-"}, files...)
 		if out, err := exec.Command("tar", args...).Output(); err == nil {
-			req["uploads_tar_b64"] = base64.StdEncoding.EncodeToString(out)
+			m.UploadsTar = out
 		} else {
 			emitLogfG("fc", g, "warn", "[%s] uploads tar: %v", g, err)
 		}
 	}
-	_, err := fcAgentCall(g, req, 30*time.Second)
+	_, err := fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Msg{Msg: m}}, 30*time.Second)
 	if err == nil && !newWM.IsZero() {
 		_ = os.WriteFile(fcUploadsWM(g), []byte(fmt.Sprintf("%d\n", newWM.UnixNano())), 0o644)
 	}
@@ -1198,117 +1195,51 @@ func fcNewUploads(g string) (time.Time, []string) {
 // Runs as guest root (the agent is PID 1); the podman analogue ran as the
 // container user, but the daemon's authority is identical either way.
 func fcExec(g, script string, timeout time.Duration) (string, int, error) {
-	resp, err := fcAgentCall(g, map[string]any{"op": "exec", "script": script}, timeout)
+	resp, err := fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Exec{Exec: &pb.ExecReq{Script: script}}}, timeout)
 	if err != nil {
 		return "", -1, err
 	}
-	out, _ := base64.StdEncoding.DecodeString(resp.OutB64)
-	return string(out), resp.RC, nil
+	return string(resp.Out), int(resp.Rc), nil
 }
 
 // fcExecStream starts a script and returns a reader over its raw combined
 // output. Closing the reader tears the connection down, which the agent
 // treats as "kill the child" — same lifecycle as a cancelled `podman exec`.
 func fcExecStream(g, script string) (io.ReadCloser, error) {
-	c, err := fcHostDial(g, fcPortAgent, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	b, _ := json.Marshal(map[string]any{"op": "exec_stream", "script": script})
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
+	return fcAgentOpen(g, &pb.AgentRequest{Op: &pb.AgentRequest_ExecStream{ExecStream: &pb.ExecStreamReq{Script: script}}}, 5*time.Second)
 }
 
-// fcRunScriptDial opens the guest agent's run_script op: dial the agent port
-// and send the request line. The returned conn then carries framed output
-// ([type][uint32 len][payload], see fcReadScriptFrame) — a guest→host end
-// frame terminates it, because FC's hybrid vsock doesn't surface a guest-side
-// close as a host EOF. The caller owns the conn (read frames, Close to cancel:
-// closing makes the guest agent kill the script's process group).
+// fcRunScriptDial opens the guest agent's run_script op. The returned conn
+// then carries AgentFrame output (fcReadAgentFrame) — a guest→host `end`
+// frame terminates it, because FC's hybrid vsock doesn't surface a
+// guest-side close as a host EOF. The caller owns the conn (read frames,
+// Close to cancel: closing makes the guest agent kill the script's process
+// group).
 func fcRunScriptDial(g, script string) (net.Conn, error) {
-	c, err := fcHostDial(g, fcPortAgent, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	b, _ := json.Marshal(map[string]any{"op": "run_script", "script": script})
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
+	return fcAgentOpen(g, &pb.AgentRequest{Op: &pb.AgentRequest_RunScript{RunScript: &pb.GuestScriptReq{Script: script}}}, 5*time.Second)
 }
 
-// fcReadScriptFrame reads one run_script frame: a 5-byte header (1 type byte +
-// uint32 big-endian length) then exactly that many payload bytes. Types:
-// 'D' data, 'E' end (len 0), 'X' error (payload = message).
-func fcReadScriptFrame(c net.Conn) (typ byte, payload []byte, err error) {
-	var hdr [5]byte
-	if _, err = io.ReadFull(c, hdr[:]); err != nil {
-		return 0, nil, err
+// fcReadAgentFrame reads one guest→host stream frame (run_script and
+// shell_attach share the type).
+func fcReadAgentFrame(r io.Reader) (*pb.AgentFrame, error) {
+	f := &pb.AgentFrame{}
+	if err := fcReadFrame(r, fcFrameMaxGuest, f); err != nil {
+		return nil, err
 	}
-	n := binary.BigEndian.Uint32(hdr[1:])
-	if n > 0 {
-		payload = make([]byte, n)
-		if _, err = io.ReadFull(c, payload); err != nil {
-			return 0, nil, err
-		}
-	}
-	return hdr[0], payload, nil
+	return f, nil
 }
 
-// fcShellDial opens the guest agent's shell_attach op: dial the agent port
-// and send the open request as one JSON line (session name + initial pty
-// geometry). The returned conn then carries frames in BOTH directions — see
-// fcguest/main.go's writeShellFrame/readShellFrame for the full type
-// catalog ('D'/'E'/'X' guest→host, same meaning as run_script's frames;
-// 'I' input / 'R' resize host→guest, new — no prior op ever wrote payload
-// data into a connection after the request line).
+// fcShellDial opens the guest agent's shell_attach op (session name +
+// initial pty geometry). The returned conn then carries AgentFrames in BOTH
+// directions: data/end/error guest→host, input/resize host→guest.
 //
 // Unlike fcRunScriptDial, closing this conn must NOT be read by the guest as
 // "kill the session" — only "detach this client" (handleShellAttach SIGHUPs
 // its local tmux-attach client, never the tmux server), so the tmux session
 // survives a daemon-side close and is reattachable on the next call.
 func fcShellDial(g, session string, cols, rows uint16) (net.Conn, error) {
-	c, err := fcHostDial(g, fcPortAgent, 5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	b, _ := json.Marshal(map[string]any{
-		"op": "shell_attach", "session": session, "cols": cols, "rows": rows,
-	})
-	if _, err := c.Write(append(b, '\n')); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return c, nil
-}
-
-// fcReadShellFrame reads one AttachShell frame off the guest→host direction.
-// Same wire shape as fcReadScriptFrame (a shared frame format, not a
-// coincidence) — reused as-is rather than duplicated.
-func fcReadShellFrame(c net.Conn) (typ byte, payload []byte, err error) {
-	return fcReadScriptFrame(c)
-}
-
-// fcWriteShellFrame writes one host→guest AttachShell frame ('I' input data,
-// 'R' resize — see fcShellDial's doc comment for the full catalog). Nothing
-// on the RunScript path ever needed to write frames after the request line,
-// so this direction is new.
-func fcWriteShellFrame(c net.Conn, typ byte, payload []byte) error {
-	var hdr [5]byte
-	hdr[0] = typ
-	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
-	if _, err := c.Write(hdr[:]); err != nil {
-		return err
-	}
-	if len(payload) > 0 {
-		_, err := c.Write(payload)
-		return err
-	}
-	return nil
+	return fcAgentOpen(g, &pb.AgentRequest{Op: &pb.AgentRequest_ShellAttach{ShellAttach: &pb.ShellAttachReq{
+		Session: session, Cols: uint32(cols), Rows: uint32(rows)}}}, 5*time.Second)
 }
 
 // splice copies bidirectionally and closes both ends when one side finishes.

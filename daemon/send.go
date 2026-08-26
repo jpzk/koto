@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -279,11 +278,10 @@ drain:
 		}
 	}
 	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
-	enc := base64.StdEncoding.EncodeToString([]byte(augmented))
 	if !isReservedSession(session) {
 		activityTurnDelivering(g)
 	}
-	if err := fcSendMsg(g, session, slot, enc, sp, cfgB); err != nil {
+	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB); err != nil {
 		return err
 	}
 	stall := time.After(turnWaitTimeout)
