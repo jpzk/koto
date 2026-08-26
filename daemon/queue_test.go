@@ -312,3 +312,100 @@ func TestQueueCrossGroupConcurrency(t *testing.T) {
 		<-db
 	})
 }
+
+// TestDropQueuedDiscardsBacklog pins the backlog half of "a stop stays
+// stopped" (stopGroup → dropQueued): every message still waiting is discarded
+// with an error to its caller, the worker is left parked on an empty channel
+// rather than advancing into the backlog (which would ensure() the VM straight
+// back up), and other groups' queues are untouched.
+func TestDropQueuedDiscardsBacklog(t *testing.T) {
+	const g = "q-drop"
+	const other = "q-drop-other"
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	processed := make(chan string, 8)
+
+	// Both groups hold their first turn in flight so the messages behind it
+	// stay QUEUED (dropQueued's subject) instead of being consumed instantly.
+	stub := func(grp, session, msg string) error {
+		processed <- grp + "/" + msg
+		if msg == "work" {
+			started <- grp
+			<-release
+		}
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		for _, grp := range []string{g, other} {
+			if _, err := enqueueSend(grp, "", "work"); err != nil {
+				t.Fatalf("enqueue %s work: %v", grp, err)
+			}
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: in-flight turn never started", grp)
+			}
+		}
+		var dones []<-chan error
+		for _, m := range []string{"a", "b", "c"} {
+			d, err := enqueueSend(g, "", m)
+			if err != nil {
+				t.Fatalf("enqueue %s: %v", m, err)
+			}
+			dones = append(dones, d)
+		}
+		if _, err := enqueueSend(other, "", "keep"); err != nil {
+			t.Fatalf("enqueue other: %v", err)
+		}
+
+		if got := queueDepth(g); got != 3 {
+			t.Fatalf("queueDepth before drop = %d, want 3", got)
+		}
+		if n := dropQueued(g); n != 3 {
+			t.Fatalf("dropQueued = %d, want 3", n)
+		}
+		if got := queueDepth(g); got != 0 {
+			t.Fatalf("queueDepth after drop = %d, want 0", got)
+		}
+		if got := queueDepth(other); got != 1 {
+			t.Fatalf("other group's depth = %d, want 1 (untouched by %s's stop)", got, g)
+		}
+
+		// Every discarded caller is told, rather than waiting on a turn that
+		// will never run.
+		for i, d := range dones {
+			select {
+			case err := <-d:
+				if err == nil {
+					t.Fatalf("dropped job %d: nil error, want a discard error", i)
+				}
+			default:
+				t.Fatalf("dropped job %d: no result delivered", i)
+			}
+		}
+
+		// Both in-flight turns retire. g's worker must find nothing left;
+		// other's must still run the message the stop had no business touching.
+		close(release)
+		want := map[string]bool{g + "/work": true, other + "/work": true, other + "/keep": true}
+		deadline := time.After(2 * time.Second)
+		for len(want) > 0 {
+			select {
+			case got := <-processed:
+				if !want[got] {
+					t.Fatalf("worker ran %q; g's backlog should have been discarded", got)
+				}
+				delete(want, got)
+			case <-deadline:
+				t.Fatalf("timed out; still waiting for %v", want)
+			}
+		}
+		select {
+		case got := <-processed:
+			t.Fatalf("worker ran %q after the drop; backlog was not discarded", got)
+		case <-time.After(300 * time.Millisecond):
+		}
+	})
+}
