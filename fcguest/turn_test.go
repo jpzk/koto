@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"koto-protocol/pb"
 )
@@ -103,4 +105,81 @@ func TestVeniceEvents(t *testing.T) {
 func readFileString(p string) (string, error) {
 	b, err := os.ReadFile(p)
 	return string(b), err
+}
+
+// blockingWriter accepts `accept` writes and then blocks until released —
+// a host that stopped draining the turn stream.
+type blockingWriter struct {
+	bytes.Buffer
+	accept  int
+	release chan struct{}
+	closed  atomic.Bool
+}
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	if b.accept > 0 {
+		b.accept--
+		return b.Buffer.Write(p)
+	}
+	<-b.release
+	if b.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	return b.Buffer.Write(p)
+}
+func (b *blockingWriter) Close() error {
+	if b.closed.CompareAndSwap(false, true) {
+		close(b.release)
+	}
+	return nil
+}
+
+func TestTurnConnQueueDrainsOnClose(t *testing.T) {
+	var buf bytes.Buffer
+	tw := newTurnConn(&buf)
+	for i := 0; i < 100; i++ {
+		tw.text([]byte("x\n"))
+	}
+	tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_TurnEnd{TurnEnd: true}})
+	tw.close()
+	fs := decodeFrames(t, &buf)
+	if len(fs) != 101 || !fs[100].GetTurnEnd() {
+		t.Fatalf("want 100 text frames then TurnEnd, got %d frames", len(fs))
+	}
+}
+
+func TestTurnConnStallKillsWorkerNotProducer(t *testing.T) {
+	defer func(d time.Duration) { turnStallTimeoutOverride = d }(turnStallTimeoutOverride)
+	turnStallTimeoutOverride = 50 * time.Millisecond
+	w := &blockingWriter{accept: 1, release: make(chan struct{})}
+	tw := newTurnConn(w)
+	killed := make(chan struct{})
+	kill := func() { close(killed) }
+	tw.onStall.Store(&kill)
+
+	// Fill the queue (writer is stuck on frame 2), then one more: the
+	// producer must return within the stall timeout, not hang.
+	start := time.Now()
+	for i := 0; i < turnQueueFrames+10; i++ {
+		tw.text([]byte("x"))
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("producer blocked on a stalled host")
+	}
+	select {
+	case <-killed:
+	default:
+		t.Fatal("stall must fire onStall (the worker kill)")
+	}
+	if !tw.stalled.Load() {
+		t.Fatal("conn must be marked stalled")
+	}
+	// close must not hang either: it closes the conn to free the writer.
+	done := make(chan struct{})
+	go func() { tw.close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close hung on a stalled writer")
+	}
 }

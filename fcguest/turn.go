@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,18 +53,128 @@ var (
 	initEnv   = map[string]string{}
 )
 
-// turnConn is the per-turn 9004 connection with a send lock — the stdout
-// parser and the stderr pump both write frames.
+// turnConn is the per-turn 9004 connection. Frames are queued and written
+// by ONE goroutine (writer) so a producer never sits in a vsock write:
+// the stdout parser runs inline on the worker's stdout pipe, so before
+// this a stalled host reader (fcturn.go's log sink under host disk
+// pressure) filled the vsock buffer, blocked send() under its lock, stopped
+// the parser draining claude's 64 KiB stdout pipe, and claude blocked on
+// write(1) — the LLM stream itself stalled behind a slow LOG FILE, and an
+// upstream idle timeout turned a host hiccup into a dead turn. Now the
+// producer blocks only once turnQueueFrames are pending, and never for
+// longer than turnStallTimeout: past that the host is gone for this
+// turn's purposes, so the worker is killed (onStall) rather than frozen,
+// and every later frame is dropped — TurnEnd can't reach the host either;
+// the daemon's turn wait times out and self-heals as it always did.
+//
+// A zero turnConn (no queue) writes synchronously — the tests' buffer
+// path. runTurn always builds one with newTurnConn.
 type turnConn struct {
-	mu sync.Mutex
-	c  io.Writer
+	c io.Writer
+
+	q       chan *pb.TurnFrame
+	done    chan struct{}
+	stalled atomic.Bool
+	onStall atomic.Pointer[func()]
+}
+
+// turnQueueFrames bounds the pending frames per turn. Frames are one
+// stream-json event each (a token batch, a tool line, a stderr line), so
+// this is a few seconds of the fastest output — enough to ride out the
+// host's per-chunk log append jitter, small enough that a genuinely stuck
+// host trips the stall timeout instead of eating the guest's memory.
+const turnQueueFrames = 4096
+
+// turnStallTimeout is how long a producer waits on a full queue before the
+// turn is declared stalled. Longer than any healthy host pause (the sink
+// rate limiter's sleeps are milliseconds; a `/clear` rewrite is a rename),
+// far shorter than the daemon's 25-minute turn wait.
+const turnStallTimeout = 60 * time.Second
+
+// turnStallTimeoutOverride shortens the stall wait under test; zero = default.
+var turnStallTimeoutOverride time.Duration
+
+func stallTimeout() time.Duration {
+	if turnStallTimeoutOverride > 0 {
+		return turnStallTimeoutOverride
+	}
+	return turnStallTimeout
+}
+
+func newTurnConn(c io.Writer) *turnConn {
+	t := &turnConn{c: c, q: make(chan *pb.TurnFrame, turnQueueFrames), done: make(chan struct{})}
+	go t.writer()
+	return t
+}
+
+func (t *turnConn) writer() {
+	defer close(t.done)
+	failed := false
+	for f := range t.q {
+		if failed {
+			continue // drain so producers never block on a dead conn
+		}
+		if err := writeFrame(t.c, f); err != nil {
+			failed = true
+			logf("turn stream: write: %v (dropping the rest of the turn)", err)
+		}
+	}
 }
 
 func (t *turnConn) send(f *pb.TurnFrame) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	_ = writeFrame(t.c, f)
+	if t.q == nil {
+		_ = writeFrame(t.c, f)
+		return
+	}
+	if t.stalled.Load() {
+		return
+	}
+	select {
+	case t.q <- f:
+		return
+	default:
+	}
+	timer := time.NewTimer(stallTimeout())
+	defer timer.Stop()
+	select {
+	case t.q <- f:
+	case <-timer.C:
+		t.stall()
+	}
 }
+
+// stall flips the turn into dropped mode exactly once and fires onStall
+// (runWorker installs the worker kill there).
+func (t *turnConn) stall() {
+	if !t.stalled.CompareAndSwap(false, true) {
+		return
+	}
+	logf("turn stream: host did not drain %d frames in %s — stalled, killing the worker", turnQueueFrames, stallTimeout())
+	if fn := t.onStall.Load(); fn != nil {
+		(*fn)()
+	}
+}
+
+// close ends the queue and waits for the writer to drain it — every frame
+// sent before close is on the wire (or the conn is dead) when it returns.
+// A stalled turn's writer is stuck in a vsock write that only the conn's
+// close can unblock, so there it closes first and bounds the wait.
+func (t *turnConn) close() {
+	if t.q == nil {
+		return
+	}
+	close(t.q)
+	if t.stalled.Load() {
+		if c, ok := t.c.(io.Closer); ok {
+			c.Close()
+		}
+	}
+	select {
+	case <-t.done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 func (t *turnConn) text(b []byte) {
 	if len(b) > 0 {
 		t.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: b}})
@@ -108,8 +219,9 @@ func runTurn(req *pb.MsgReq) {
 		slot = 0
 	}
 	conn := dialRetry(portLogSlot)
-	tw := &turnConn{c: conn}
+	tw := newTurnConn(conn)
 	defer conn.Close()
+	defer tw.close()
 	tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Open{Open: &pb.TurnOpen{Slot: int32(slot)}}})
 	// Strict-ordering completion marker: the daemon's turn wait keys off
 	// this frame arriving on THIS slot's stream.
@@ -192,6 +304,12 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	pid, ch, outR, errR := w.pid, w.done, w.out, w.err
 	timedOut := false
 	var tmu sync.Mutex
+	// A stalled turn stream kills the worker (its output has nowhere to go
+	// and blocking it would wedge the LLM stream); the pumps below then see
+	// EOF and the turn ends normally, minus the frames the host never took.
+	kill := func() { killGroup(pid, syscall.SIGKILL) }
+	tw.onStall.Store(&kill)
+	defer tw.onStall.Store(nil)
 	timer := time.AfterFunc(turnTimeout, func() {
 		tmu.Lock()
 		timedOut = true
