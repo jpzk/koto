@@ -46,42 +46,93 @@ var (
 	// subscriber registration are mutually atomic.
 	eventSeq  = map[string]uint64{}
 	eventRing = map[string][]*pb.Event{}
+	// ringFloor is the seq below which the ring no longer proves
+	// continuity: every seq > floor is either in the ring or a superseded
+	// partial (see recordEvent). Advanced only by age trimming.
+	ringFloor = map[string]uint64{}
+	// ringPartial tracks the one live partial per (group, session) the
+	// ring holds, so recordEvent can evict it without scanning.
+	ringPartial = map[string]map[string]*pb.Event{}
 )
+
+// isPartial reports whether ev is a cumulative in-progress line — the
+// tailer re-emits the whole partial on every 50ms poll while a line is
+// being streamed, and each one supersedes the last.
+func isPartial(ev *pb.Event) bool {
+	switch ev.Event {
+	case "stream", "thinking_stream", "tool_result_stream":
+		return true
+	}
+	return false
+}
 
 // recordEvent assigns the next per-group seq to pbev, appends it to the
 // group's replay ring, and snapshots the current subscriber list — one
 // atomic step under subsLock, so a concurrent SubscribeGroup either sees
 // this event in its replay snapshot or is in the returned subscriber list,
 // never neither and never both.
+//
+// Partials get a seq like everything else but hold AT MOST ONE ring slot
+// per session: a newer partial replaces the older one, and the line's
+// terminal frame (`done`, `thinking_done`, …) evicts it — a client that
+// has the finished line has no use for its drafts. Before this every poll's
+// cumulative partial was its own ring entry, so one long streamed
+// paragraph (20 polls/s) filled the 1024-slot ring in ~50s with
+// near-duplicates, pushing the real done/tool frames out — a since_seq
+// resume mid-turn then replayed a ring of drafts and got a `gap` for the
+// frames it actually needed. The ring therefore has seq holes where
+// superseded partials were; replayFrom tolerates them (ringFloor).
 func recordEvent(g string, pbev *pb.Event) []*groupSub {
 	subsLock.Lock()
 	defer subsLock.Unlock()
 	eventSeq[g]++
 	pbev.Seq = eventSeq[g]
-	ring := append(eventRing[g], pbev)
-	if len(ring) > eventRingMax {
-		ring = ring[len(ring)-eventRingMax:]
+	ring := eventRing[g]
+	if live := ringPartial[g][pbev.Session]; live != nil {
+		// Search from the tail: the live partial is the session's newest
+		// frame, so it sits within a few entries of the end.
+		for i := len(ring) - 1; i >= 0; i-- {
+			if ring[i] == live {
+				ring = append(ring[:i], ring[i+1:]...)
+				break
+			}
+		}
+		delete(ringPartial[g], pbev.Session)
+	}
+	if isPartial(pbev) {
+		if ringPartial[g] == nil {
+			ringPartial[g] = map[string]*pb.Event{}
+		}
+		ringPartial[g][pbev.Session] = pbev
+	}
+	ring = append(ring, pbev)
+	if n := len(ring) - eventRingMax; n > 0 {
+		ringFloor[g] = ring[n-1].Seq
+		// Copy rather than reslice: a reslice keeps the trimmed entries
+		// (whole tool/thinking bodies) reachable until the next realloc.
+		ring = append(make([]*pb.Event, 0, eventRingMax+eventRingMax/8), ring[n:]...)
 	}
 	eventRing[g] = ring
 	return append([]*groupSub(nil), subscribers[g]...)
 }
 
-// replayFrom returns the ring suffix with seq > since, or a single synthetic
-// `gap` event when the ring cannot prove continuity: frames aged out of the
-// ring, or the counter regressed below since (daemon restart, destroy+respawn).
-// After a gap the client's view is stale beyond replay — it refetches via
-// History. Must be called with subsLock held; the returned slice is a copy.
+// replayFrom returns the ring entries with seq > since, or a single
+// synthetic `gap` event when the ring cannot prove continuity: frames aged
+// out of the ring (since < ringFloor), or the counter regressed below since
+// (daemon restart, destroy+respawn). After a gap the client's view is stale
+// beyond replay — it refetches via History. Must be called with subsLock
+// held; the returned slice is a copy.
 func replayFrom(g string, since uint64) []*pb.Event {
 	cur := eventSeq[g]
 	if since == cur {
 		return nil
 	}
-	ring := eventRing[g]
-	if since < cur && len(ring) > 0 && ring[0].Seq <= since+1 {
-		idx := int(since + 1 - ring[0].Seq)
-		return append([]*pb.Event(nil), ring[idx:]...)
+	if since > cur || since < ringFloor[g] {
+		return []*pb.Event{{Event: "gap", Group: g, Ts: float64(time.Now().UnixNano()) / 1e9}}
 	}
-	return []*pb.Event{{Event: "gap", Group: g, Ts: float64(time.Now().UnixNano()) / 1e9}}
+	ring := eventRing[g]
+	idx := sort.Search(len(ring), func(i int) bool { return ring[i].Seq > since })
+	return append([]*pb.Event(nil), ring[idx:]...)
 }
 
 func emit(g string, ev Event) {

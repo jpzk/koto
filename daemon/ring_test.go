@@ -12,6 +12,8 @@ func resetRingState(t *testing.T) {
 	subsLock.Lock()
 	eventSeq = map[string]uint64{}
 	eventRing = map[string][]*pb.Event{}
+	ringFloor = map[string]uint64{}
+	ringPartial = map[string]map[string]*pb.Event{}
 	subscribers = map[string][]*groupSub{}
 	subsLock.Unlock()
 }
@@ -100,6 +102,68 @@ func TestOverflowShutsSubscriber(t *testing.T) {
 	got := replay("g", 1)
 	if len(got) != 1 || got[0].Text != "second" {
 		t.Fatalf("overflowed frame should be in the ring, got %+v", got)
+	}
+}
+
+func seqs(evs []*pb.Event) []uint64 {
+	out := make([]uint64, 0, len(evs))
+	for _, ev := range evs {
+		out = append(out, ev.Seq)
+	}
+	return out
+}
+
+func TestPartialsHoldOneRingSlotPerSession(t *testing.T) {
+	resetRingState(t)
+	recordEvent("g", &pb.Event{Event: "prompt", Session: "a"})
+	// 500 polls of a growing partial on session a, interleaved with b's.
+	for i := 0; i < 500; i++ {
+		recordEvent("g", &pb.Event{Event: "stream", Session: "a", Text: "aaa"})
+		recordEvent("g", &pb.Event{Event: "thinking_stream", Session: "b", Text: "bbb"})
+	}
+	ring := eventRing["g"]
+	if len(ring) != 3 {
+		t.Fatalf("ring should hold prompt + one partial per session, got %d entries", len(ring))
+	}
+	// The retained partials are the NEWEST ones, with the newest seqs.
+	if ring[1].Seq != 1000 || ring[2].Seq != 1001 {
+		t.Fatalf("retained partials should be the latest (seq 1000, 1001), got %v", seqs(ring))
+	}
+	// A resume from mid-stream gets exactly the live partials, no gap.
+	got := replay("g", 900)
+	if isGap(got) || len(got) != 2 {
+		t.Fatalf("since=900 should replay the two live partials, got %v", seqs(got))
+	}
+	// The finished line evicts its session's partial; the other survives.
+	recordEvent("g", &pb.Event{Event: "done", Session: "a", Text: "aaa"})
+	ring = eventRing["g"]
+	if len(ring) != 3 || ring[1].Event != "thinking_stream" || ring[2].Event != "done" {
+		t.Fatalf("done must replace a's partial and leave b's: %v", ring)
+	}
+	if ringPartial["g"]["a"] != nil || ringPartial["g"]["b"] == nil {
+		t.Fatal("live-partial index out of sync with the ring")
+	}
+}
+
+func TestReplayCoversSupersededPartialSeqs(t *testing.T) {
+	resetRingState(t)
+	pushN("g", 5)                                            // seq 1..5
+	recordEvent("g", &pb.Event{Event: "stream", Text: "p"})  // seq 6, later superseded
+	recordEvent("g", &pb.Event{Event: "stream", Text: "pq"}) // seq 7, replaces 6
+	pushN("g", 2)                                            // seq 8,9 (8 evicts 7)
+	// A client whose cursor sits on a superseded partial is still covered:
+	// everything it needs after seq 6 is in the ring.
+	got := replay("g", 6)
+	if isGap(got) || len(got) != 2 || got[0].Seq != 8 {
+		t.Fatalf("since=6 should replay seq 8,9, got %v", seqs(got))
+	}
+	// Aging still produces a gap: push the ring past its cap.
+	pushN("g", eventRingMax+10)
+	if got := replay("g", 6); !isGap(got) {
+		t.Fatal("aged-out cursor must gap")
+	}
+	if got := replay("g", ringFloor["g"]); isGap(got) || len(got) != eventRingMax {
+		t.Fatalf("since=floor is the boundary: exactly the ring, got %d (gap=%v)", len(got), isGap(got))
 	}
 }
 

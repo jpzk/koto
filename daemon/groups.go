@@ -506,6 +506,8 @@ func destroy(g string) baseResp {
 	// destroy/respawn sees since_seq > cur → `gap` → history refetch.
 	delete(eventSeq, g)
 	delete(eventRing, g)
+	delete(ringFloor, g)
+	delete(ringPartial, g)
 	if subs, ok := subscribers[g]; ok {
 		for _, c := range subs {
 			c.shut() // unblock the stream handler so it returns (group is gone)
