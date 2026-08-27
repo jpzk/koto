@@ -256,7 +256,7 @@ $(BUILD)/fc-kernel: fcguest/build-kernel.sh | $(BUILD)
 
 fc-kernel: $(BUILD)/fc-kernel
 
-FCGUEST_SRC := fcguest/main.go fcguest/go.mod fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
+FCGUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
 $(BUILD)/fc-rootfs: $(FCGUEST_SRC) | $(BUILD)
 	./fcguest/build-rootfs.sh
 	$(prune-dangling)
