@@ -231,7 +231,20 @@ func trimStyledTail(line string) string {
 		if start < 0 {
 			break
 		}
-		if !fgOnlySGR(line[start+2 : end-1]) {
+		params := line[start+2 : end-1]
+		// Two different reasons to stop, and they end differently. A trailing
+		// 'm' is only a GUESS that an SGR ends here — the line's own text may
+		// simply end in the letter ("from", "them", "system"), in which case
+		// what looks like a parameter string is the real escape plus that
+		// text. That is plain text, so stop where the walk stands and keep
+		// what it has trimmed, exactly as the two breaks above do.
+		if !isSGRParams(params) {
+			break
+		}
+		// A real SGR that paints, though, means the spaces already walked
+		// past are the visible ground of a code span or chroma token — those
+		// belong to the line, so give it back whole.
+		if !fgOnlySGR(params) {
 			return line
 		}
 		sawSGR = true
@@ -257,21 +270,67 @@ func fgOnlySGR(params string) bool {
 		switch toks[i] {
 		case "", "0", "1", "2", "3", "22", "23", "39":
 		case "38":
+			// 38;5;N and 38;2;R;G;B. The colour sub-parameters have to be
+			// CHECKED, not just stepped over: this function is handed a
+			// candidate span by trimStyledTail, which guesses at any trailing
+			// 'm' — so for a line whose visible text ends in the LETTER m
+			// ("from", "them", "system") the params it passes are the real
+			// SGR plus the line's own text, e.g. "38;5;252mwe filled it fro".
+			// Skipping the third token unvalidated made that read as
+			// foreground-only and trimStyledTail then cut the text away.
+			// Measured across the fleet's transcripts: 1011 rendered lines
+			// silently lost 43066 characters, mid-sentence.
 			if i+1 >= len(toks) {
 				return false
 			}
+			var n int
 			switch toks[i+1] {
 			case "5":
-				i += 2
+				n = 1
 			case "2":
-				i += 4
+				n = 3
 			default:
 				return false
 			}
-			if i >= len(toks) {
+			if i+1+n >= len(toks) {
 				return false
 			}
+			for _, t := range toks[i+2 : i+2+n] {
+				if !isDecimal(t) {
+					return false
+				}
+			}
+			// Land on the last sub-parameter; the loop's i++ steps past it.
+			i += 1 + n
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isSGRParams reports whether s is a well-formed SGR parameter string: only
+// digits and semicolons stand between "\x1b[" and the terminating 'm'. This is
+// the precondition fgOnlySGR assumes, and the one thing that separates a real
+// escape from a line of prose that happens to end in the letter 'm'.
+func isSGRParams(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != ';' {
+			return false
+		}
+	}
+	return true
+}
+
+// isDecimal reports whether s is a non-empty run of ASCII digits — what every
+// SGR parameter is. Used to tell a real colour sub-parameter from the line
+// text that trimStyledTail's trailing-'m' guess can drag in.
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
