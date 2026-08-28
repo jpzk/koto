@@ -219,7 +219,10 @@ func monoFrame(s string) string {
 // (which is a reset, and would clear attributes a caller set earlier in the
 // same string). Every other escape sequence — OSC notifications, cursor
 // motion, anything the shell pane's emulator emits — is copied through
-// untouched.
+// untouched. Only a void ESC (ESC ESC) or a sequence broken off by a byte
+// that can't belong to one is dropped: the terminal would abort those too,
+// and scanning on from the byte that broke them is what keeps a colour from
+// riding through inside the wreckage.
 func stripSGRColor(s string) string {
 	if !strings.Contains(s, "\x1b") {
 		return s
@@ -227,128 +230,60 @@ func stripSGRColor(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
-		c := s[i]
-		if c != 0x1b || i+1 >= len(s) {
-			b.WriteByte(c)
-			i++
-			continue
+		j := strings.IndexByte(s[i:], 0x1b)
+		if j < 0 {
+			b.WriteString(s[i:])
+			break
 		}
-		switch s[i+1] {
-		case '[': // CSI
-			j := i + 2
-			for j < len(s) && (s[j] < '@' || s[j] > '~') {
-				j++
-			}
-			if j >= len(s) { // truncated sequence — pass through
-				b.WriteString(s[i:])
-				i = len(s)
-				continue
-			}
-			// Private-parameter sequences (CSI > … m is xterm modifyOtherKeys,
-			// CSI ? … m exists too) are NOT SGR despite the final byte —
-			// filterSGR would drop the private prefix as garbage and turn
-			// e.g. \x1b[>4;2m into \x1b[2m (faint). Pass them through.
-			private := i+2 < len(s) && (s[i+2] == '?' || s[i+2] == '>' || s[i+2] == '<' || s[i+2] == '=')
-			if s[j] == 'm' && !private {
-				b.WriteString(filterSGR(s[i+2 : j]))
-			} else {
-				b.WriteString(s[i : j+1])
-			}
-			i = j + 1
-		case ']': // OSC — runs to BEL or ST
-			j := i + 2
-			for j < len(s) {
-				if s[j] == 0x07 {
-					j++
-					break
-				}
-				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
-					j += 2
-					break
-				}
-				j++
-			}
-			b.WriteString(s[i:j])
-			i = j
+		b.WriteString(s[i : i+j])
+		i += j
+		kind, params, end := scanEsc(s, i)
+		switch kind {
+		case escSGR:
+			b.WriteString(filterSGR(params))
+		case escBadSGR, escAbort, escMalformed:
+			// Meant as an SGR but not one (a space or intermediate among the
+			// parameters), a void ESC, or a sequence broken off by a byte
+			// that can't belong to one. No terminal would act on any of
+			// them, and a colour parameter could be sitting inside — drop.
 		default:
-			if s[i+1] == 0x1b {
-				// ESC aborted by another ESC: terminals drop the first and
-				// re-parse from the second — consuming both as one two-byte
-				// escape would let \x1b\x1b[31m smuggle a color through.
-				b.WriteByte(c)
-				i++
-				continue
-			}
-			b.WriteString(s[i : i+2])
-			i += 2
+			b.WriteString(s[i:end])
 		}
+		i = end
 	}
 	return b.String()
 }
 
 // filterSGR rebuilds one SGR sequence from its parameter list, dropping the
 // color parameters. Extended color (38/48/58) carries its own arguments —
-// `5;n` for indexed, `2;r;g;b` for truecolor — which have to be consumed with
-// it or they'd be re-emitted as bogus standalone attributes.
+// `5;n` for indexed, `2;r;g;b` for truecolor — which forEachSGRAttr consumes
+// with the introducer, so they can't be re-emitted as bogus standalone
+// attributes.
 func filterSGR(params string) string {
 	if params == "" {
 		return "\x1b[m" // bare reset — an attribute op, keep it
 	}
-	fields := strings.Split(params, ";")
-	kept := make([]string, 0, len(fields))
-	for i := 0; i < len(fields); i++ {
-		f := fields[i]
-		switch f {
-		case "38", "48", "58": // extended fg / bg / underline color
-			if i+1 < len(fields) {
-				switch fields[i+1] {
-				case "5":
-					i += 2
-				case "2":
-					i += 4
-				default:
-					i++
-				}
-			}
-			continue
-		}
-		n, ok := atoiSGR(f)
-		if !ok {
-			continue // sub-parameters (colon form) or garbage — drop
-		}
+	var b strings.Builder
+	forEachSGRAttr(params, func(a sgrAttr) bool {
 		switch {
-		case n >= 30 && n <= 39, // fg, incl. 39 default-fg
-			n >= 40 && n <= 49,   // bg, incl. 49 default-bg
-			n >= 90 && n <= 97,   // bright fg
-			n >= 100 && n <= 107, // bright bg
-			n == 59:              // default underline color
-			continue
+		case a.bad: // colon sub-parameters, garbage, a broken colour — drop
+		case a.code >= 30 && a.code <= 39, // fg, incl. 39 default-fg
+			a.code >= 40 && a.code <= 49,   // bg, incl. 49 default-bg
+			a.code >= 90 && a.code <= 97,   // bright fg
+			a.code >= 100 && a.code <= 107, // bright bg
+			a.code == 58, a.code == 59:     // underline color, and its default
+		default:
+			if b.Len() > 0 {
+				b.WriteByte(';')
+			}
+			b.WriteString(a.raw)
 		}
-		kept = append(kept, f)
-	}
-	if len(kept) == 0 {
+		return true
+	})
+	if b.Len() == 0 {
 		return ""
 	}
-	return "\x1b[" + strings.Join(kept, ";") + "m"
-}
-
-// atoiSGR parses a decimal SGR parameter. Reports false for anything that
-// isn't plain digits (an empty field means 0 = reset, which is kept).
-func atoiSGR(s string) (int, bool) {
-	if s == "" {
-		return 0, true
-	}
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int(r-'0')
-		if n > 1000 {
-			return 0, false
-		}
-	}
-	return n, true
+	return "\x1b[" + b.String() + "m"
 }
 
 // --- ASCII folding -----------------------------------------------------------

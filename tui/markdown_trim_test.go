@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,4 +111,67 @@ func TestMarkdownKeepsTextEndingInM(t *testing.T) {
 			t.Errorf("render lost %q\ngot:\n%s", want, got)
 		}
 	}
+}
+
+// TestPaddingTrimPreservesCorpus runs the trim over the fleet's own
+// transcripts, rendered through glamour at the TUI's usual width, and checks
+// that no visible text is lost. This is the measurement that sized bd6d4cb
+// (1011 lines, 43066 characters) made permanent: the fuzzers in sgr_test.go
+// find the shape of a bug, the corpus finds the ones the shape didn't
+// predict. Skips when there are no transcripts (CI, a fresh checkout) and
+// under -short; reads only the tail of each log so the whole fleet costs
+// about a second.
+func TestPaddingTrimPreservesCorpus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("corpus test skipped under -short")
+	}
+	files, _ := filepath.Glob("../groups/*/.cs/log.0")
+	if len(files) == 0 {
+		t.Skip("no group transcripts under ../groups")
+	}
+	invalidateMarkdownCache()
+	t.Cleanup(invalidateMarkdownCache)
+	r := getRenderer(105)
+	if r == nil {
+		t.Fatal("no renderer")
+	}
+	const tailBytes = 128 << 10
+	lines, lost := 0, 0
+	for _, f := range files {
+		fh, err := os.Open(f)
+		if err != nil {
+			continue
+		}
+		if st, err := fh.Stat(); err == nil && st.Size() > tailBytes {
+			fh.Seek(st.Size()-tailBytes, io.SeekStart)
+		}
+		b, _ := io.ReadAll(fh)
+		fh.Close()
+		group := filepath.Base(filepath.Dir(filepath.Dir(f)))
+		for _, para := range strings.Split(string(b), "\n\n") {
+			para = strings.TrimSpace(para)
+			if para == "" || strings.Contains(para, "[[") || strings.HasPrefix(para, "[ts:") {
+				continue
+			}
+			raw, err := r.Render(para)
+			if err != nil {
+				continue
+			}
+			for _, ln := range strings.Split(strings.Trim(raw, "\n"), "\n") {
+				lines++
+				want := strings.TrimRight(ansi.Strip(ln), " ")
+				got := strings.TrimRight(ansi.Strip(trimStyledTail(ln)), " ")
+				if got != want {
+					lost++
+					if lost <= 5 {
+						t.Errorf("%s: visible text lost\n want %q\n got  %q", group, want, got)
+					}
+				}
+			}
+		}
+	}
+	if lost > 0 {
+		t.Errorf("%d of %d rendered lines lost visible text", lost, lines)
+	}
+	t.Logf("%d transcripts, %d rendered lines, none lost", len(files), lines)
 }

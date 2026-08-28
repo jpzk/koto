@@ -15,7 +15,10 @@ package main
 // path); dropped rather than replaced, so a line can only get narrower —
 // never wider than the pane budget.
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // scrubVT sanitizes one emulator-rendered screen. Newlines (the row
 // separators) pass; pure SGR sequences pass; every other escape sequence is
@@ -36,90 +39,41 @@ func scrubVT(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	rs := []rune(s)
-	for i := 0; i < len(rs); i++ {
-		r := rs[i]
+	for i := 0; i < len(s); {
+		r, sz := utf8.DecodeRuneInString(s[i:])
 		switch {
 		case r == '\n':
-			b.WriteRune(r)
+			b.WriteByte('\n')
 		case r == 0x1b:
-			i = scrubEsc(&b, rs, i)
+			// scanEsc consumes the sequence and says what it was; only a
+			// pure SGR is written back. Scanning resumes where it stopped —
+			// after the terminator of a complete sequence, or ON the byte
+			// that broke one (a new ESC, a control, a non-ASCII rune inside
+			// a CSI), so that byte is judged on its own rather than
+			// swallowed as sequence body.
+			kind, _, end := scanEsc(s, i)
+			if kind == escSGR {
+				b.WriteString(s[i:end])
+			}
+			i = end
+			continue
 		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
 			// C0 (incl. \t and \r — the emulator interprets those during
 			// parsing; in *rendered* output they'd desync the terminal's
 			// column state), DEL, C1. Drop.
 		case isHostileFormat(r):
 			// Drop.
+		case r == utf8.RuneError && sz == 1:
+			// An invalid byte is replaced, never copied: two of them with a
+			// dropped control between could otherwise fuse into a valid C1
+			// (\xc2 \x1e \x9b -> U+009B, found by FuzzScrubVT).
+			b.WriteRune(utf8.RuneError)
 		default:
-			b.WriteRune(r)
+			b.WriteString(s[i : i+sz])
 		}
+		i += sz
 	}
 	return b.String()
-}
-
-// scrubEsc consumes the escape sequence starting at rs[i] (an ESC), writing
-// it to b only if it is a pure SGR. Returns the index of the sequence's last
-// rune, so the caller's loop resumes after it. An ESC that aborts the
-// sequence mid-way is re-processed by the caller (we return the index just
-// before it) — consuming it as sequence body would let a follow-up sequence
-// smuggle itself through, the same trap stripSGRColor documents.
-func scrubEsc(b *strings.Builder, rs []rune, i int) int {
-	n := len(rs)
-	if i+1 >= n {
-		return i // lone ESC at end — drop
-	}
-	switch rs[i+1] {
-	case '[': // CSI
-		j := i + 2
-		for j < n && rs[j] >= 0x20 && rs[j] <= 0x3f {
-			j++
-		}
-		if j >= n {
-			return n - 1 // truncated — drop the rest
-		}
-		if rs[j] < 0x40 || rs[j] > 0x7e {
-			// Malformed (control or non-ASCII inside the sequence): drop what
-			// was consumed, re-process the offending rune.
-			return j - 1
-		}
-		if rs[j] == 'm' && pureSGRParams(rs[i+2:j]) {
-			b.WriteString(string(rs[i : j+1]))
-		}
-		return j
-	case ']', 'P', 'X', '^', '_': // OSC / DCS / SOS / PM / APC — to ST or BEL
-		for j := i + 2; j < n; j++ {
-			if rs[j] == 0x07 {
-				return j
-			}
-			if rs[j] == 0x1b {
-				if j+1 < n && rs[j+1] == '\\' {
-					return j + 1 // ST
-				}
-				return j - 1 // aborted by a new escape — re-process it
-			}
-		}
-		return n - 1
-	case 0x1b:
-		return i // ESC ESC: drop the first, re-process the second
-	case '(', ')', '*', '+': // charset designation — ESC + selector + set
-		return min(i+2, n-1)
-	case 'N', 'O': // SS2/SS3 — the shifted rune goes with it
-		return min(i+2, n-1)
-	default: // two-rune escape (RIS, DECSC, keypad modes, …)
-		return i + 1
-	}
-}
-
-// pureSGRParams reports whether every rune between CSI and its final 'm' is a
-// plain SGR parameter byte. Private-prefixed sequences (CSI > … m, CSI ? … m)
-// and intermediates are not SGR despite the final byte.
-func pureSGRParams(rs []rune) bool {
-	for _, r := range rs {
-		if !(r >= '0' && r <= '9') && r != ';' && r != ':' {
-			return false
-		}
-	}
-	return true
 }
 
 // isHostileFormat is daemon/sanitize.go's isBidiOrFormat, mirrored for the
