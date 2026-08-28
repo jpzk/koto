@@ -30,6 +30,14 @@ func TestTrimStyledTail(t *testing.T) {
 		{"\x1b[1mbold\x1b[0m", "\x1b[1mbold\x1b[0m"},
 		// text after the last SGR: nothing to trim past it
 		{"\x1b[38;5;252mtext\x1b[0m end", "\x1b[38;5;252mtext\x1b[0m end"},
+		// A styled line whose VISIBLE TEXT ends in the letter 'm'. The walk
+		// guesses that any trailing 'm' terminates an SGR, so the params it
+		// hands fgOnlySGR are the real escape plus the line's own text
+		// ("38;5;252m...we filled it fro"). That has to be rejected — it once
+		// read as foreground-only and the whole span was cut away.
+		{"\x1b[38;5;252mwe filled it from\x1b[0m", "\x1b[38;5;252mwe filled it from\x1b[0m"},
+		{"\x1b[38;5;252mthe system\x1b[0m" + strings.Repeat(pad, 4), "\x1b[38;5;252mthe system\x1b[0m"},
+		{"\x1b[38;2;1;2;3mstream\x1b[0m", "\x1b[38;2;1;2;3mstream\x1b[0m"},
 	}
 	for _, c := range cases {
 		got := trimStyledTail(c.in)
@@ -55,5 +63,49 @@ func TestMarkdownOutputCarriesNoPadding(t *testing.T) {
 	}
 	if len(out) > 2500 {
 		t.Errorf("rendered block is %d bytes for ~60 chars of markdown; padding not trimmed?", len(out))
+	}
+}
+
+// TestFgOnlySGRRejectsNonParams: fgOnlySGR is handed CANDIDATE spans, not
+// known-good ones, so it must reject anything that isn't a well-formed SGR
+// parameter string. The colour sub-parameters of 38;5;N / 38;2;R;G;B used to
+// be stepped over unchecked, which let a line's own text through as a colour.
+func TestFgOnlySGRRejectsNonParams(t *testing.T) {
+	ok := []string{"", "0", "39", "1;22", "38;5;252", "38;2;1;2;3", "38;5;252;1", "0;38;2;10;20;30;3"}
+	bad := []string{
+		"38;5;252mwe filled it fro",
+		"38;2;1;2;3mJUNK",
+		"38;5",
+		"38;2;1;2",
+		"38;9;1",
+		"48;5;236",
+		"7",
+		"4",
+	}
+	for _, p := range ok {
+		if !fgOnlySGR(p) {
+			t.Errorf("fgOnlySGR(%q) = false, want true", p)
+		}
+	}
+	for _, p := range bad {
+		if fgOnlySGR(p) {
+			t.Errorf("fgOnlySGR(%q) = true, want false", p)
+		}
+	}
+}
+
+// TestMarkdownKeepsTextEndingInM is the end-to-end guard: real prose whose
+// wrapped line lands on an m-word must survive the render intact.
+func TestMarkdownKeepsTextEndingInM(t *testing.T) {
+	invalidateMarkdownCache()
+	t.Cleanup(invalidateMarkdownCache)
+	src := "14 built, 0 failed. IDX $12,345 → $12,346.\n" +
+		"Yesterday Radar had a null for 08-26 and we filled it from Fallback at " +
+		"**12,345.67**. Today Radar has finally published that day: **12,346.91**."
+	got := ansi.Strip(renderMarkdown(src, 105))
+	for _, want := range []string{"Yesterday Radar had a null", "we filled it from", "12,346.91"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("render lost %q\ngot:\n%s", want, got)
+		}
 	}
 }
