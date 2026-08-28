@@ -211,128 +211,68 @@ func visualRows(s string, cols int) int {
 // are the visible ground of an inline code span or a chroma token, and
 // cutting them would shorten the box. The decision is made on the SGR
 // parameters, not on which style produced them, so it holds for any theme.
+//
+// The line is scanned FORWARD, escape by escape (scanEsc), remembering the
+// end of the last thing that has to stay — a non-space byte, or an escape
+// that isn't a foreground-only SGR — and cutting after it. It used to walk
+// backward from the end, taking any trailing 'm' for the terminator of an
+// SGR; a line whose prose ends in that letter ("…we filled it from") then
+// read as one giant escape and was cut away entire (bd6d4cb). Backward there
+// is no telling the two apart; forward, ESC [ is unambiguous.
 func trimStyledTail(line string) string {
-	// Walk back over spaces and SGR sequences. Every SGR met on the way
-	// must be foreground-only: the state a padding space is painted in is
-	// whatever the nearest SGR before it set, so one background sequence in
-	// the tail means the spaces after it are a visible box — abort, keep the
-	// line whole. The walk stops at the first byte that is neither.
-	end := len(line)
-	sawSGR := false
-	for end > 0 {
-		if line[end-1] == ' ' {
-			end--
+	if !strings.Contains(line, "\x1b") {
+		return strings.TrimRight(line, " ")
+	}
+	keep := 0                       // line[:keep] survives
+	dropped, paints := false, false // what the tail after keep held
+	for i := 0; i < len(line); {
+		if line[i] != 0x1b {
+			if line[i] != ' ' {
+				keep, dropped, paints = i+1, false, false
+			}
+			i++
 			continue
 		}
-		if line[end-1] != 'm' {
-			break
+		kind, params, end := scanEsc(line, i)
+		switch {
+		case kind != escSGR:
+			// Cursor motion, a truncated sequence, a stray ESC — not
+			// padding. It stays, and so does everything before it.
+			keep, dropped, paints = end, false, false
+		case fgOnlySGR(params):
+			dropped = true
+		default:
+			paints = true
 		}
-		start := strings.LastIndex(line[:end], "\x1b[")
-		if start < 0 {
-			break
-		}
-		params := line[start+2 : end-1]
-		// Two different reasons to stop, and they end differently. A trailing
-		// 'm' is only a GUESS that an SGR ends here — the line's own text may
-		// simply end in the letter ("from", "them", "system"), in which case
-		// what looks like a parameter string is the real escape plus that
-		// text. That is plain text, so stop where the walk stands and keep
-		// what it has trimmed, exactly as the two breaks above do.
-		if !isSGRParams(params) {
-			break
-		}
-		// A real SGR that paints, though, means the spaces already walked
-		// past are the visible ground of a code span or chroma token — those
-		// belong to the line, so give it back whole.
-		if !fgOnlySGR(params) {
-			return line
-		}
-		sawSGR = true
-		end = start
+		i = end
 	}
-	out := line[:end]
-	// The walk may have taken the reset that closed the last text span.
+	if paints {
+		return line
+	}
+	out := line[:keep]
+	// The cut may have taken the reset that closed the last text span.
 	// Close it again, so the line leaves the terminal in the state it found
 	// it — a foreground left open would bleed into whatever pads the line.
-	if sawSGR && strings.Contains(out, "\x1b[") && !strings.HasSuffix(out, "\x1b[0m") {
+	if dropped && strings.Contains(out, "\x1b[") && !strings.HasSuffix(out, "\x1b[0m") {
 		out += "\x1b[0m"
 	}
 	return out
 }
 
-// fgOnlySGR reports whether an SGR parameter string sets only foreground
+// fgOnlySGR reports whether an SGR parameter list sets only foreground
 // color, reset, or the attributes that leave a blank cell blank (bold,
 // faint, italic, and their offs). Anything else — background, reverse,
-// underline, unknown — is treated as visible.
+// underline, a malformed parameter — is treated as visible.
 func fgOnlySGR(params string) bool {
-	toks := strings.Split(params, ";")
-	for i := 0; i < len(toks); i++ {
-		switch toks[i] {
-		case "", "0", "1", "2", "3", "22", "23", "39":
-		case "38":
-			// 38;5;N and 38;2;R;G;B. The colour sub-parameters have to be
-			// CHECKED, not just stepped over: this function is handed a
-			// candidate span by trimStyledTail, which guesses at any trailing
-			// 'm' — so for a line whose visible text ends in the LETTER m
-			// ("from", "them", "system") the params it passes are the real
-			// SGR plus the line's own text, e.g. "38;5;252mwe filled it fro".
-			// Skipping the third token unvalidated made that read as
-			// foreground-only and trimStyledTail then cut the text away.
-			// Measured across the fleet's transcripts: 1011 rendered lines
-			// silently lost 43066 characters, mid-sentence.
-			if i+1 >= len(toks) {
-				return false
-			}
-			var n int
-			switch toks[i+1] {
-			case "5":
-				n = 1
-			case "2":
-				n = 3
-			default:
-				return false
-			}
-			if i+1+n >= len(toks) {
-				return false
-			}
-			for _, t := range toks[i+2 : i+2+n] {
-				if !isDecimal(t) {
-					return false
-				}
-			}
-			// Land on the last sub-parameter; the loop's i++ steps past it.
-			i += 1 + n
+	fg := true
+	ok := forEachSGRAttr(params, func(a sgrAttr) bool {
+		switch a.code {
+		case 0, 1, 2, 3, 22, 23, 38, 39:
+			fg = !a.bad
 		default:
-			return false
+			fg = false
 		}
-	}
-	return true
-}
-
-// isSGRParams reports whether s is a well-formed SGR parameter string: only
-// digits and semicolons stand between "\x1b[" and the terminating 'm'. This is
-// the precondition fgOnlySGR assumes, and the one thing that separates a real
-// escape from a line of prose that happens to end in the letter 'm'.
-func isSGRParams(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if (s[i] < '0' || s[i] > '9') && s[i] != ';' {
-			return false
-		}
-	}
-	return true
-}
-
-// isDecimal reports whether s is a non-empty run of ASCII digits — what every
-// SGR parameter is. Used to tell a real colour sub-parameter from the line
-// text that trimStyledTail's trailing-'m' guess can drag in.
-func isDecimal(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
+		return fg
+	})
+	return ok && fg
 }

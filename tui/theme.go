@@ -303,7 +303,8 @@ func bgSeq(hex string) string {
 // reassertBg re-emits `set` after every SGR sequence in the line that leaves
 // the background cleared. Sequences that set a background of their own (the
 // bars, the accent chips, the tree cursor) are left alone — they are the
-// foreground furniture the ground exists behind.
+// foreground furniture the ground exists behind. Every other escape passes
+// through untouched.
 func reassertBg(line, set string) string {
 	if !strings.Contains(line, "\x1b") {
 		return line
@@ -311,28 +312,26 @@ func reassertBg(line, set string) string {
 	var b strings.Builder
 	b.Grow(len(line) + 16)
 	for i := 0; i < len(line); {
-		c := line[i]
-		if c != 0x1b || i+1 >= len(line) || line[i+1] != '[' {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		j := i + 2
-		for j < len(line) && (line[j] < '@' || line[j] > '~') {
-			j++
-		}
-		if j >= len(line) { // truncated — pass through
+		j := strings.IndexByte(line[i:], 0x1b)
+		if j < 0 {
 			b.WriteString(line[i:])
 			break
 		}
-		b.WriteString(line[i : j+1])
-		// Private-parameter forms (CSI ? / > / < / =) are not SGR despite the
-		// final byte — same carve-out stripSGRColor makes.
-		private := i+2 < len(line) && (line[i+2] == '?' || line[i+2] == '>' || line[i+2] == '<' || line[i+2] == '=')
-		if line[j] == 'm' && !private && sgrClearsBg(line[i+2:j]) {
-			b.WriteString(set)
+		b.WriteString(line[i : i+j])
+		i += j
+		kind, params, end := scanEsc(line, i)
+		switch kind {
+		case escAbort, escMalformed:
+			// A void ESC, or a sequence broken off by a byte that can't be
+			// part of one: nothing to pass on; the byte it stopped on is
+			// scanned again.
+		default:
+			b.WriteString(line[i:end])
+			if kind == escSGR && sgrClearsBg(params) {
+				b.WriteString(set)
+			}
 		}
-		i = j + 1
+		i = end
 	}
 	return b.String()
 }
@@ -342,51 +341,16 @@ func reassertBg(line, set string) string {
 // touched the background, so `ESC[0;48;2;…m` (reset then set, which is how
 // lipgloss opens a styled span) correctly reads as "sets it".
 func sgrClearsBg(params string) bool {
-	if params == "" {
-		return true // bare ESC[m is a reset
-	}
-	fields := strings.Split(params, ";")
 	touched, bgSet := false, false
-	for i := 0; i < len(fields); i++ {
-		f := fields[i]
-		if f == "48" { // extended background — consume its arguments
-			touched, bgSet = true, true
-			if i+1 < len(fields) {
-				switch fields[i+1] {
-				case "5":
-					i += 2
-				case "2":
-					i += 4
-				default:
-					i++
-				}
-			}
-			continue
-		}
-		if f == "38" || f == "58" { // extended fg / underline color — skip args
-			if i+1 < len(fields) {
-				switch fields[i+1] {
-				case "5":
-					i += 2
-				case "2":
-					i += 4
-				default:
-					i++
-				}
-			}
-			continue
-		}
-		n, ok := atoiSGR(f)
-		if !ok {
-			continue
-		}
+	forEachSGRAttr(params, func(a sgrAttr) bool {
 		switch {
-		case n == 0, n == 49:
-			touched, bgSet = true, false
-		case n >= 40 && n <= 47, n >= 100 && n <= 107:
+		case a.code == 48, a.code >= 40 && a.code <= 47, a.code >= 100 && a.code <= 107:
 			touched, bgSet = true, true
+		case a.code == 0, a.code == 49:
+			touched, bgSet = true, false
 		}
-	}
+		return true
+	})
 	return touched && !bgSet
 }
 
