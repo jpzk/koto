@@ -129,7 +129,7 @@ func (m *Model) peekContent(w int) string {
 	}
 	out := []string{}
 	for _, s := range srcs {
-		rendered := s.text
+		rendered := expandTabs(s.text)
 		if s.kind == "thought" && !m.expandedThoughts && !s.expand {
 			if j := strings.IndexByte(rendered, '\n'); j >= 0 {
 				rendered = rendered[:j]

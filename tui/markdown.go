@@ -136,6 +136,7 @@ func invalidateMarkdownCache() {
 // it wants raw escape codes (colored diff output etc.) that glamour/chroma
 // would otherwise scrub.
 func renderMarkdown(src string, width int) string {
+	src = expandTabs(src)
 	r := getRenderer(width)
 	if r == nil {
 		return src

@@ -5115,7 +5115,7 @@ func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
 	}
 	out := make([]renderedBlock, 0, len(srcs))
 	for _, s := range srcs {
-		rendered := s.text
+		rendered := expandTabs(s.text)
 		// Collapse thought body unless expanded. First line is the summary;
 		// drop everything after it when collapsed.
 		if s.kind == "thought" && !m.expandedThoughts {
