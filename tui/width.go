@@ -153,3 +153,43 @@ func joinCols(h int, widths []int, blocks ...string) string {
 	}
 	return sb.String()
 }
+
+// expandTabs replaces every tab in s with the spaces that carry the text to
+// the next 8-column stop, counted from the start of its line. It runs on
+// transcript SOURCE text — plain, no escapes — before anything measures or
+// wraps it.
+//
+// Nothing else in the pipeline knows what a tab is: the daemon's sanitizer
+// keeps it (it is whitespace, not a control sequence), glamour passes it
+// through, and both cellWidth and ansi.StringWidth count it as zero cells —
+// so a row holding one is padded to the full column width and then the
+// terminal advances the tab to its own stop, up to seven cells past the
+// edge. The row wraps, the frame is a line taller than the terminal, and
+// the whole screen scrolls up one row on every repaint. Found 2026-08-29 by
+// walking the TUI under a VT emulator: three physical lines with a raw tab
+// in a group's tab-separated jq output, three wraps, three scrolls.
+func expandTabs(s string) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\t':
+			n := 8 - col%8
+			for i := 0; i < n; i++ {
+				b.WriteByte(' ')
+			}
+			col += n
+		case '\n':
+			b.WriteRune(r)
+			col = 0
+		default:
+			b.WriteRune(r)
+			col += cellWidth(string(r))
+		}
+	}
+	return b.String()
+}
