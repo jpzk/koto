@@ -208,7 +208,9 @@ func monoFrame(s string) string {
 	if !monoMode {
 		return s
 	}
-	return foldASCII(stripSGRColor(s))
+	// Hyperlinks go too: a terminal with no color is taken to have no OSC 8
+	// either, and a VT100 prints an unknown OSC's payload as text.
+	return foldASCII(stripHyperlinks(stripSGRColor(s)))
 }
 
 // --- SGR color stripping -----------------------------------------------------

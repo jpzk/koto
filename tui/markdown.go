@@ -163,7 +163,10 @@ func renderMarkdown(src string, width int) string {
 			if i > 0 {
 				sb.WriteByte('\n')
 			}
-			sb.WriteString(trimStyledTail(line))
+			// Link the URLs per glamour line: glamour never breaks a word,
+			// so a URL is whole here even when the TUI hard-wraps the row
+			// later (hyperlink.go).
+			sb.WriteString(hyperlinkURLs(trimStyledTail(line)))
 		}
 		sb.WriteByte('\n')
 	}

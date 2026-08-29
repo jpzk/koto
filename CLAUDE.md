@@ -228,6 +228,13 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        nobody had opened (70x60 gave the transcript 25 rows
 #                        of 54). See tui/shell_view.go shellSplitMode.
 #   any text          -> sends to current group (into its active session)
+#   links             -> every URL on screen (markdown links, tool output,
+#                        prompts) is an OSC 8 hyperlink (tui/hyperlink.go).
+#                        The TUI grabs the mouse for click-to-focus, so a
+#                        plain click is the app's; open a link with the
+#                        terminal's grabbed-mode gesture — kitty:
+#                        ctrl+shift+click — or ctrl+s (select mode) to
+#                        release the mouse. xterm has no OSC 8 at all.
 #   /new <g>          -> spawn new group via daemon
 #   /sw  <g>          -> switch active group
 #   /session [name]   -> switch chat session within the group (no arg: show;
