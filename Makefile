@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: tui-walk host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -94,6 +94,18 @@ host-run: $(BUILD)/koto-host
 # closed the box before a frame drew). Measured 2026-08-25: a lone 0x10 sat
 # in the relay 2s until the next byte; a plain pty delivered it at once. An
 # empty chord disables detaching, which is fine — /exit is how you leave.
+# tui-walk: release gate for the TUI's frame integrity. Drives the built
+# koto-tui image in a pty against the live daemon under a VT emulator (pyte)
+# and fails on any auto-wrap or scroll — a row wider than the terminal or a
+# frame taller than it, the two things that "add rows and break the layout".
+# Walks a throwaway fixture group (spawned, seeded with the hard cases,
+# destroyed); WALK_ARGS=--all also pages every real group's history,
+# read-only. Non-destructive by construction: see tools/tuiwalk/walk.py.
+tui-walk: $(BUILD)/koto-tui
+	@test -d .venv-tuiwalk || python3 -m venv .venv-tuiwalk
+	@.venv-tuiwalk/bin/pip -q install -r tools/tuiwalk/requirements.txt
+	.venv-tuiwalk/bin/python tools/tuiwalk/walk.py $(WALK_ARGS)
+
 tui: $(BUILD)/koto-tui
 	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`make pki-init && make pki-client NAME=tui\`"; exit 1; }
 	@mkdir -p run/tui

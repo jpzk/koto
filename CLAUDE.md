@@ -84,6 +84,7 @@ prompts/             harness-controlled system prompts (global.md delivered into
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
 Makefile             sentinel-driven: host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / fc-assets (= fc-fetch + fc-kernel + fc-rootfs)
+tools/tuiwalk/       release gate: pyte-driven TUI walk (make tui-walk) — non-destructive, see its docstring
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
                      into cs_tui at /koto-scripts; run in the focused group's
                      microVM as node via the admin-only RunScript RPC)
@@ -110,6 +111,9 @@ make login         # one-time OAuth into ./creds/.credentials.json
 make host-run      # starts cs_host detached (daemon + proxy + main group); passes --device /dev/kvm when present
 make tui-build     # builds koto-tui image (Go static binary on scratch); first time only
 make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
+make tui-walk      # RELEASE GATE: drive the built TUI under a VT emulator (pyte) and fail on
+                   #   any wrapped row / scrolled frame; fixture group only by default,
+                   #   WALK_ARGS=--all pages every real group read-only (tools/tuiwalk/walk.py)
                    # /exit quits the TUI; daemon keeps running. Reattach with `make tui` again.
                    # (Ctrl+C no longer quits — it interrupts the agent's turn.)
 make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon

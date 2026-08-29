@@ -42,6 +42,15 @@ appears in `List`/WatchState if actually spawned; use a scratch group
 (`Spawn` then `Destroy`) when list membership matters. Never inject into a
 real group's log — it lands in persisted history.
 
+## Frame-integrity gate: `make tui-walk`
+
+Before hand-rolling a pty driver, run `make tui-walk` (tools/tuiwalk/walk.py):
+it drives the built image under a real VT emulator (pyte) and fails on any
+wrapped row or scrolled frame — the class of glitch a char-per-cell screen
+model cannot see (a raw TAB, 5f68d03). `WALK_ARGS=--all` pages every real
+group read-only; `--keep` leaves the fixture group and frame dumps behind.
+Non-destructive by construction (guarantees listed in its docstring).
+
 ## Drive the TUI headless
 
 No tmux/script on this host; use python pty (must set TIOCSWINSZ or the TUI
