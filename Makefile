@@ -100,7 +100,10 @@ host-run: $(BUILD)/koto-host
 # frame taller than it, the two things that "add rows and break the layout".
 # Walks a throwaway fixture group (spawned, seeded with the hard cases,
 # destroyed); WALK_ARGS=--all also pages every real group's history,
-# read-only. Non-destructive by construction: see tools/tuiwalk/walk.py.
+# read-only. Runs twice: once as a truecolor xterm/kitty and once as a
+# TERM=vt100 — the monochrome leg additionally fails on any 8-bit byte or
+# any SGR color parameter in what the binary writes (a VT100 is 7-bit and
+# has attributes only). Non-destructive by construction: see walk.py.
 tui-walk: $(BUILD)/koto-tui
 	@test -d .venv-tuiwalk || python3 -m venv .venv-tuiwalk
 	@.venv-tuiwalk/bin/pip -q install -r tools/tuiwalk/requirements.txt

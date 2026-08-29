@@ -49,6 +49,11 @@ it drives the built image under a real VT emulator (pyte) and fails on any
 wrapped row or scrolled frame — the class of glitch a char-per-cell screen
 model cannot see (a raw TAB, 5f68d03). `WALK_ARGS=--all` pages every real
 group read-only; `--keep` leaves the fixture group and frame dumps behind.
+It runs two legs, `--term xterm,vt100` (default both): the vt100 leg starts
+the binary with `TERM=vt100`, no `COLORTERM`, and on top of wrap/scroll
+fails on any 8-bit byte or any SGR color parameter in the raw stream — the
+end-to-end check that mono mode (tui/mono.go) really leaves nothing a VT100
+can't show. `--term vt100` alone is the quick loop when touching mono.go.
 Non-destructive by construction (guarantees listed in its docstring).
 
 ## Drive the TUI headless

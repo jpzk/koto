@@ -113,7 +113,9 @@ make tui-build     # builds koto-tui image (Go static binary on scratch); first 
 make tui           # runs cs_tui (--network=none, sock-only) — opens TUI
 make tui-walk      # RELEASE GATE: drive the built TUI under a VT emulator (pyte) and fail on
                    #   any wrapped row / scrolled frame; fixture group only by default,
-                   #   WALK_ARGS=--all pages every real group read-only (tools/tuiwalk/walk.py)
+                   #   WALK_ARGS=--all pages every real group read-only (tools/tuiwalk/walk.py).
+                   #   Two legs: truecolor xterm/kitty AND TERM=vt100, the latter also failing
+                   #   on any 8-bit byte or SGR color in the emitted stream (mono mode e2e)
                    # /exit quits the TUI; daemon keeps running. Reattach with `make tui` again.
                    # (Ctrl+C no longer quits — it interrupts the agent's turn.)
 make stop          # tear down cs_host + all groups (podman sidecars); microVMs die with the daemon

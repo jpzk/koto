@@ -37,6 +37,21 @@ Non-destructive by construction — the guarantees, in one place:
   * ESC is never sent: in chat mode it interrupts the group's running turn
   * --all reads other groups' history through the TUI; it writes nothing
 
+Every walk runs once per terminal type in --term (default: xterm,vt100).
+The vt100 leg is the monochrome gate (tui/mono.go): the TUI is started with
+TERM=vt100 and no COLORTERM — the same environment a real VT100 (or a
+`TERM=vt100` serial console) presents — and on top of WRAP/SCROLL the raw
+byte stream it writes is held to what a VT100 can take:
+
+  8BIT    a byte >= 0x80 was written (a VT100 is a 7-bit terminal; every
+          non-ASCII glyph must have been folded to ASCII before it left)
+  COLOR   an SGR carried a color parameter (30-37/40-47/90-97/100-107,
+          38/48 extended, 39/49 default) — the VT100 has attributes only
+
+The unit tests in tui/mono_test.go assert both on frames rendered in-process;
+this leg asserts them on what the built binary actually emits, glamour, the
+log view and the guest's own colors included.
+
 Needs: the daemon up (make host-run), the koto-tui image built (make
 tui-build), podman, python3 with pyte (make tui-walk sets up the venv).
 """
@@ -52,6 +67,34 @@ FIXTURE_GROUP = "walk-fixture"
 DEFAULT_SIZES = "40x140,24x80,56x118,66x146"
 
 ESC = "\x1b"
+
+# Terminal environments the walk runs the TUI under. `xterm` is the everyday
+# case (a truecolor terminal, KOTO_TUI_TERM naming a kitty so the OSC path is
+# exercised too); `vt100` is the monochrome one — plain TERM, no COLORTERM.
+TERM_ENVS = {
+    "xterm": {"TERM": "xterm-256color", "COLORTERM": "truecolor", "KOTO_TUI_TERM": "xterm-kitty"},
+    "vt100": {"TERM": "vt100", "KOTO_TUI_TERM": "vt100"},
+}
+
+# One CSI sequence: ESC [ params final. Trailing-incomplete ones are carried
+# across read chunks by pump().
+CSI_RE = re.compile(rb"\x1b\[([\x30-\x3f]*)[\x20-\x2f]*([\x40-\x7e])")
+CSI_TAIL_RE = re.compile(rb"\x1b(\[[\x30-\x3f]*[\x20-\x2f]*)?$")
+
+
+def sgr_has_color(params):
+    """True if an SGR parameter string sets any color (fg, bg, extended, default)."""
+    toks = params.split(b";") if params else [b"0"]
+    i = 0
+    while i < len(toks):
+        try:
+            n = int(toks[i] or b"0")
+        except ValueError:
+            return True  # colon forms (38:2:...) and anything odd count as color
+        if 30 <= n <= 49 or 90 <= n <= 97 or 100 <= n <= 107:
+            return True
+        i += 1
+    return False
 
 
 def esc(n):
@@ -164,13 +207,17 @@ class Walker:
     UP, DOWN, PGUP, PGDN, HOME, END = b"\x1b[A", b"\x1b[B", b"\x1b[5~", b"\x1b[6~", b"\x1b[H", b"\x1b[F"
     ENTER, BS, DEL, TAB = b"\r", b"\x7f", b"\x1b[3~", b"\t"
 
-    def __init__(self, run_dir, start_group, image):
+    def __init__(self, run_dir, start_group, image, term="xterm"):
         self.run = run_dir
+        self.term = term
+        self.mono = term == "vt100"
+        self.csicarry = b""
         self.rows, self.cols = 24, 80
         self.screen = Term(self.cols, self.rows)
         self.stream = pyte.ByteStream(self.screen)
         self.carry = b""
         self.failures = []
+        self.seen_extra = set()
         with open(os.path.join(run_dir, "tui-state.json"), "w") as f:
             f.write('{"cur":"%s"}' % start_group)
         token = open(os.path.join(HERE, "creds", "token-tui")).read().strip()
@@ -184,7 +231,7 @@ class Walker:
         self.p = subprocess.Popen(
             ["podman", "run", "--rm", "-it", "--detach-keys=", "--name", self.name, "--network", "koto-net",
              "--security-opt", "label=disable", "-v", HERE + "/creds:/koto-creds:ro", "-v", run_dir + ":/koto-run",
-             "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "KOTO_TUI_TERM=xterm-kitty",
+             *[a for k, v in TERM_ENVS[term].items() for a in ("-e", k + "=" + v)],
              "-e", "KOTO_TUI_NOTIFY=off", "-e", "KOTO_TOKEN=" + token,
              "-e", "KOTO_ENDPOINT=" + os.environ.get("KOTO_ADDR", "cs_host_go:8443"), image],
             stdin=s, stdout=s, stderr=s, preexec_fn=preexec)
@@ -216,6 +263,8 @@ class Walker:
             if not d:
                 return
             self.raw.write(d)
+            if self.mono:
+                self.check_7bit(d)
             # xterm/kitty semantics: an ESC inside an escape restarts it, so
             # ESC ESC [0m is one SGR; pyte would print the "[0m". Fold the
             # pair before it looks, carrying a trailing ESC across chunks.
@@ -232,8 +281,32 @@ class Walker:
     def send(self, b):
         os.write(self.m, b)
 
+    def check_7bit(self, d):
+        """The vt100 leg's byte-level checks on what the TUI wrote (see module doc)."""
+        hi = [i for i, b in enumerate(d) if b >= 0x80]
+        if hi:
+            i = hi[0]
+            self.events_extra(("8BIT", d[max(0, i - 40):i + 40]))
+        d = self.csicarry + d
+        m = CSI_TAIL_RE.search(d)
+        self.csicarry = m.group(0) if m else b""
+        if self.csicarry:
+            d = d[:-len(self.csicarry)]
+        for m in CSI_RE.finditer(d):
+            if m.group(2) == b"m" and sgr_has_color(m.group(1)):
+                self.events_extra(("COLOR", m.group(0)))
+
+    def events_extra(self, ev):
+        kind, blob = ev
+        # dedupe: one finding per distinct offending sequence, so a colored
+        # segment repainted on every frame reads as one failure, not 400
+        key = (kind, bytes(blob))
+        if key not in self.seen_extra:
+            self.seen_extra.add(key)
+            self.failures.append("[%s] %s: %r" % (self.term, kind, blob))
+
     def input_row_is(self, cmd):
-        pat = re.compile(r"(^|│)\s*>\s+" + re.escape(cmd) + r"\s*(│|$)")
+        pat = re.compile(r"(^|[│|])\s*>\s+" + re.escape(cmd) + r"\s*([│|]|$)")
         lines = self.screen.dump().split("\n")
         hits = [ln for ln in lines[-10:] if pat.search(ln) and ln.count(cmd) == 1 and ">>>" not in ln]
         return len(hits) == 1
@@ -249,12 +322,12 @@ class Walker:
             for _ in range(15):
                 self.pump(0.2)
                 d = self.screen.dump()
-                if "⇥/⎋ close" in d and not tabbed:  # tree focus: Enter would just close it
+                if ("⇥/⎋ close" in d or "tab/esc close" in d) and not tabbed:  # tree focus: Enter would just close it
                     self.send(self.TAB)
                     tabbed = True
                     self.pump(0.3)
                     continue
-                if self.input_row_is(cmd) and "⇥/⎋ tree" in d:
+                if self.input_row_is(cmd) and ("⇥/⎋ tree" in d or "tab/esc tree" in d):
                     self.send(self.ENTER)
                     self.pump(1.5)
                     return True
@@ -272,7 +345,7 @@ class Walker:
         ev = self.screen.events
         self.screen.events = []
         for kind, y, txt in ev:
-            self.failures.append("[%s] %s at row %d: %r" % (tag, kind, y, txt[:160]))
+            self.failures.append("[%s] [%s] %s at row %d: %r" % (self.term, tag, kind, y, txt[:160]))
         if ev:
             with open(os.path.join(self.run, "frame-%s.txt" % re.sub(r"[^\w.-]+", "_", tag)), "w") as f:
                 f.write(self.screen.dump())
@@ -296,7 +369,7 @@ class Walker:
                 self.send(self.END)
                 self.pump(0.3)
                 self.drain(tag + " end")
-            print("tuiwalk: %dx%d done, %d groups, failures so far: %d" % (c, r, len(groups), len(self.failures)), flush=True)
+            print("tuiwalk[%s]: %dx%d done, %d groups, failures so far: %d" % (self.term, c, r, len(groups), len(self.failures)), flush=True)
 
 
 def main():
@@ -308,6 +381,7 @@ def main():
     ap.add_argument("--pages", type=int, default=12, help="PgUp presses per group per size")
     ap.add_argument("--image", default="koto-tui", help="TUI image to drive")
     ap.add_argument("--keep", action="store_true", help="keep the fixture group and run dir afterwards")
+    ap.add_argument("--term", default="xterm,vt100", help="comma list of terminal legs (%s)" % ",".join(TERM_ENVS))
     args = ap.parse_args()
 
     sizes = [tuple(int(x) for x in s.split("x")) for s in args.sizes.split(",")]
@@ -334,21 +408,33 @@ def main():
         with open(log, "a", encoding="utf-8", errors="surrogateescape") as f:
             f.write(fixture_log())
 
+    terms = args.term.split(",")
+    for t in terms:
+        if t not in TERM_ENVS:
+            sys.exit("tuiwalk: unknown --term %r (know: %s)" % (t, ",".join(TERM_ENVS)))
     run_dir = tempfile.mkdtemp(prefix="tuiwalk-")
-    w = Walker(run_dir, groups[0], args.image)
+    failures = []
     try:
-        w.walk(groups, sizes, args.pages)
+        for t in terms:
+            leg_dir = os.path.join(run_dir, t)
+            os.mkdir(leg_dir)
+            w = Walker(leg_dir, groups[0], args.image, term=t)
+            try:
+                w.walk(groups, sizes, args.pages)
+            finally:
+                w.close()
+            failures += w.failures
     finally:
-        w.close()
         if spawned and not args.keep:
             grpcurl("Destroy", '{"group":"%s"}' % FIXTURE_GROUP)
 
-    if w.failures:
-        print("tuiwalk: FAIL — %d finding(s); frames in %s" % (len(w.failures), run_dir))
-        for f in w.failures:
+    if failures:
+        print("tuiwalk: FAIL — %d finding(s); frames + raw output in %s" % (len(failures), run_dir))
+        for f in failures:
             print("  " + f)
         sys.exit(1)
-    print("tuiwalk: OK — %d group(s) x %d size(s), no wraps, no scrolls" % (len(groups), len(sizes)))
+    print("tuiwalk: OK — %s: %d group(s) x %d size(s), no wraps, no scrolls, vt100 leg 7-bit and colorless"
+          % ("+".join(terms), len(groups), len(sizes)))
     if not args.keep:
         subprocess.run(["rm", "-rf", run_dir])
 
