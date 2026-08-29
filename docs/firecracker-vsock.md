@@ -429,9 +429,10 @@ layers, all defaults, no new user-facing knobs:
    (size-independent thresholds), through the same 80/90 + hysteresis
    notify path. Alert-only; layers 1–3 do the enforcing.
 
-Fleet-wide: `KOTO_HOST_CPUS=<n>` (opt-in, `run-host.sh`) passes `--cpus` to
-the cs_host container — a hard ceiling on daemon + proxy + all VMs together
-(`nproc - 1` keeps the host responsive no matter what). No `--memory`
+Fleet-wide: `run-host.sh` passes `--cpus` to the cs_host container — a hard
+ceiling on daemon + proxy + all VMs together. Default `nproc - 1` (min 1) so
+the host stays responsive no matter what; override with `KOTO_HOST_CPUS=<n>`,
+or `KOTO_HOST_CPUS=0` for unlimited. No `--memory`
 equivalent on purpose: OOM-killing the daemon is a fleet outage.
 
 The spawn log line records what was applied:
