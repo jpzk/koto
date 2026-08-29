@@ -1253,7 +1253,13 @@ func renderPendingLines(pending []string, contentCols int) []string {
 // line still occupies a row. Used for tool command/output lines, which are
 // raw shell text: unlike response blocks (pre-wrapped by glamour) they'd
 // otherwise exceed the viewport width and be clipped at the pane edge.
+//
+// URLs are marked as OSC 8 hyperlinks BEFORE the wrap (hyperlink.go): the
+// sequence is zero-width to Hardwrap and copied through, so a URL split
+// across rows is still one clickable link — after the wrap the regex would
+// see two fragments.
 func wrapLine(ln string, cols int) []string {
+	ln = hyperlinkURLs(ln)
 	if cols <= 0 || ansi.StringWidth(ln) <= cols {
 		return []string{ln}
 	}
