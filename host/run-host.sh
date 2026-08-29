@@ -57,15 +57,20 @@ PUBLISH_ARG=""
 # still run fine; the fc runtime just fails its preflight with a clear error.
 KVM_ARG=""
 [ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm"
-# KOTO_HOST_CPUS (opt-in): fleet-wide CPU ceiling on cs_host — daemon, proxy
-# and every microVM together can never exceed this many host cores (podman
+# KOTO_HOST_CPUS: fleet-wide CPU ceiling on cs_host — daemon, proxy and
+# every microVM together can never exceed this many host cores (podman
 # --cpus = cgroup cpu.max on the container scope; cpu is delegated rootless).
-# Unset = unlimited. `nproc - 1` is the sensible value when you want the host
-# itself to stay responsive no matter what the fleet does. Deliberately no
-# --memory equivalent: OOM-killing the daemon takes the whole fleet down,
-# and each VM's real memory ceiling is its machine-config mem_size_mib.
+# Default = `nproc - 1` (min 1), so the host itself stays responsive no
+# matter what the fleet does. Set an explicit number to override, or
+# KOTO_HOST_CPUS=0 for unlimited. Deliberately no --memory equivalent:
+# OOM-killing the daemon takes the whole fleet down, and each VM's real
+# memory ceiling is its machine-config mem_size_mib.
+if [ -z "${KOTO_HOST_CPUS:-}" ]; then
+  KOTO_HOST_CPUS=$(( $(nproc) - 1 ))
+  [ "$KOTO_HOST_CPUS" -lt 1 ] && KOTO_HOST_CPUS=1
+fi
 CPUS_ARG=""
-[ -n "${KOTO_HOST_CPUS:-}" ] && CPUS_ARG="--cpus $KOTO_HOST_CPUS"
+[ "$KOTO_HOST_CPUS" != "0" ] && CPUS_ARG="--cpus $KOTO_HOST_CPUS"
 # Writable cgroup tree for per-VM caps (daemon/fccgroup.go): the host view is
 # mounted rw and the cgroup namespace stays the host's, so the daemon can find
 # its own scope (delegated to this user by systemd, hence writable rootless),
