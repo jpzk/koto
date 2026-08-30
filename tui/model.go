@@ -2914,6 +2914,20 @@ func (m Model) buildLogContent(contentCols int, plain bool) string {
 	return strings.Join(m.assembleLog(static, lastKind, contentCols), "\n")
 }
 
+// conversationHasLines reports whether any transcript line is attributed
+// to the current group's active session. Global lines (group "") — spawn
+// and reconnect notices — show in every pane and don't count: a group is
+// "new" until something happened in it.
+func (m Model) conversationHasLines() bool {
+	active := m.activeSession(m.cur)
+	for _, l := range m.lines {
+		if l.group == m.cur && lineInSession(l, active) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildStaticLines renders the transcript's blocks — the part of the
 // viewport that only changes when an event lands, and so the part
 // refreshLog caches (vpCacheEntry). Returns the lines and the kind of the
@@ -2921,8 +2935,19 @@ func (m Model) buildLogContent(contentCols int, plain bool) string {
 func (m Model) buildStaticLines(contentCols int, plain bool) ([]string, string) {
 	blocks := m.allBlocks(contentCols, plain)
 	out := []string{}
+	if !m.conversationHasLines() {
+		// Nothing said in this conversation yet: a freshly spawned (or
+		// cleared) group shows the logo banner above whatever global sys
+		// chatter ("spawned abc", "reconnected") is on screen. Static
+		// content, so it rides the vpCache like any block; the first line
+		// attributed to the group retires it.
+		out = append(out, bannerLines(m.cur, contentCols)...)
+		if len(blocks) == 0 {
+			return out, "banner"
+		}
+	}
 	for i, b := range blocks {
-		if i > 0 {
+		if i > 0 || len(out) > 0 {
 			out = append(out, "")
 		}
 		out = append(out, renderBlockLines(b, contentCols)...)
