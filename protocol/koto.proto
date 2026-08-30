@@ -597,6 +597,10 @@ message GroupResources {
   double alloc_pct           = 16;
   double guest_mem_used_pct  = 17;
   double guest_disk_used_pct = 18;
+  // mem_committed_mib is this VM's share of the FLEET memory cap while it
+  // runs: mem_mib + the per-VM VMM margin — the same figure fcHostMemAdmit
+  // charges against HostResources.mem_cap_mib. 0 for a stopped group.
+  int32  mem_committed_mib = 19;
 }
 
 // Fleet-wide rollup for the filesystem the groups directory lives on.
@@ -612,6 +616,14 @@ message HostResources {
   int32 groups         = 5;
   int32 running_groups = 6;
   double fs_used_pct   = 7; // see GroupResources.alloc_pct
+  // Fleet memory ceiling (daemon/fchostmem.go), in MiB. mem_cap_mib is the
+  // resolved cap (0 = unlimited); mem_committed_mib is what the running VMs
+  // are entitled to under it (guest RAM + VMM margin each — the admission
+  // arithmetic, NOT their RSS); mem_host_total_mib is the host's MemTotal
+  // the default cap was derived from (0 if unreadable).
+  int32 mem_cap_mib        = 8;
+  int32 mem_committed_mib  = 9;
+  int32 mem_host_total_mib = 10;
 }
 
 // ---- ACL management ---------------------------------------------------------

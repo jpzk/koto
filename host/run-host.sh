@@ -62,15 +62,22 @@ KVM_ARG=""
 # --cpus = cgroup cpu.max on the container scope; cpu is delegated rootless).
 # Default = `nproc - 1` (min 1), so the host itself stays responsive no
 # matter what the fleet does. Set an explicit number to override, or
-# KOTO_HOST_CPUS=0 for unlimited. Deliberately no --memory equivalent:
-# OOM-killing the daemon takes the whole fleet down, and each VM's real
-# memory ceiling is its machine-config mem_size_mib.
+# KOTO_HOST_CPUS=0 for unlimited.
 if [ -z "${KOTO_HOST_CPUS:-}" ]; then
   KOTO_HOST_CPUS=$(( $(nproc) - 1 ))
   [ "$KOTO_HOST_CPUS" -lt 1 ] && KOTO_HOST_CPUS=1
 fi
 CPUS_ARG=""
 [ "$KOTO_HOST_CPUS" != "0" ] && CPUS_ARG="--cpus $KOTO_HOST_CPUS"
+# KOTO_HOST_MEM_MIB: fleet-wide memory ceiling for the microVMs, so a fleet
+# of FC processes can never eat the whole host and freeze it. Deliberately
+# NOT podman --memory: that puts the daemon/proxy in the same OOM pool as the
+# VMs, and an OOM-killed daemon is a fleet outage. The daemon enforces it
+# instead (daemon/fchostmem.go): a spawn is refused up front when the running
+# VMs' RAM + the new one would exceed the cap, and the vms/ cgroup parent gets
+# memory.max = cap as the hard backstop (only VMMs are ever OOM candidates).
+# Default (unset) = 90% of MemTotal, computed by the daemon.
+# Set an explicit MiB count to override, or KOTO_HOST_MEM_MIB=0 for unlimited.
 # Writable cgroup tree for per-VM caps (daemon/fccgroup.go): the host view is
 # mounted rw and the cgroup namespace stays the host's, so the daemon can find
 # its own scope (delegated to this user by systemd, hence writable rootless),
@@ -112,6 +119,7 @@ podman run -d --rm \
   $EXTRA_MOUNTS \
   -e KOTO_BIND="$KOTO_BIND" \
   -e KOTO_PORT="$KOTO_PORT" \
+  ${KOTO_HOST_MEM_MIB:+-e KOTO_HOST_MEM_MIB="$KOTO_HOST_MEM_MIB"} \
   -e TERM="${TERM:-xterm-256color}" \
   ${TEXTUAL_DEBUG:+-e TEXTUAL_DEBUG="$TEXTUAL_DEBUG"} \
   ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"} \

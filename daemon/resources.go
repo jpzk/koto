@@ -854,6 +854,9 @@ type groupResources struct {
 	GuestDiskTotal int64
 	GuestDiskAvail int64
 	GuestDiskUsed  int64
+	// MemCommittedMiB is the group's share of the fleet memory cap while it
+	// runs (MemMiB + VMM margin); 0 when stopped.
+	MemCommittedMiB int32
 }
 
 // hostResources is the fleet-wide rollup.
@@ -869,6 +872,14 @@ type hostResources struct {
 	ProvisionedBytes int64
 	Groups           int32
 	RunningGroups    int32
+	// MemCapMiB / MemCommittedMiB / MemHostTotalMiB: the fleet memory
+	// ceiling (fchostmem.go) and how much of it the running VMs hold —
+	// mem_mib + fcCgroupMemMarginMiB each, the exact figure admission
+	// charges, so "cap − committed" is what the next spawn can still get.
+	// Not RSS: RSS is a high-water mark and says nothing about admission.
+	MemCapMiB       int32
+	MemCommittedMiB int32
+	MemHostTotalMiB int32
 }
 
 // resourcesCtlResp renders the snapshot for the in-guest ctl plane (main's
@@ -899,6 +910,7 @@ func resourcesCtlResp() resourcesResp {
 			GuestDiskTotalBytes: g.GuestDiskTotal,
 			GuestDiskAvailBytes: g.GuestDiskAvail,
 			GuestDiskUsedBytes:  g.GuestDiskUsed,
+			MemCommittedMiB:     g.MemCommittedMiB,
 		}
 		if g.DeclaredBytes > 0 {
 			gr.AllocPct = roundPct(float64(g.AllocBytes) / float64(g.DeclaredBytes) * 100)
@@ -918,6 +930,9 @@ func resourcesCtlResp() resourcesResp {
 		ProvisionedBytes: host.ProvisionedBytes,
 		Groups:           host.Groups,
 		RunningGroups:    host.RunningGroups,
+		MemCapMiB:        host.MemCapMiB,
+		MemCommittedMiB:  host.MemCommittedMiB,
+		MemHostTotalMiB:  host.MemHostTotalMiB,
 	}
 	if host.FSTotalBytes > 0 {
 		used := host.FSTotalBytes - host.FSFreeBytes
@@ -956,6 +971,8 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 	var host hostResources
 	host.FSTotalBytes, host.FSFreeBytes = hostFSStats()
 	host.Groups = int32(len(names))
+	host.MemCapMiB = int32(fcHostMemCapMiB)
+	host.MemHostTotalMiB = int32(fcHostMemTotalMiB())
 
 	for _, g := range names {
 		resMu.Lock()
@@ -1014,6 +1031,8 @@ func resourcesSnapshot() ([]groupResources, hostResources) {
 		host.ProvisionedBytes += declared
 		if gr.Running {
 			host.RunningGroups++
+			gr.MemCommittedMiB = int32(memMiB + fcCgroupMemMarginMiB)
+			host.MemCommittedMiB += gr.MemCommittedMiB
 		}
 		out = append(out, gr)
 	}

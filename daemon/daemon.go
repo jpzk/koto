@@ -128,8 +128,10 @@ func daemonMain() {
 	// daemon run are stale by construction (VMs die with the daemon) and a
 	// recycled pid would read as a live VM. See fcClearStalePids.
 	fcClearStalePids()
-	// Probe for writable cgroups before the first ensure(): VM placement
-	// happens at clone time, so the tree must be staged before any VM boots.
+	// Resolve the fleet memory cap, then probe for writable cgroups, before
+	// the first ensure(): VM placement happens at clone time, so the tree
+	// (including the vms/ parent limit) must be staged before any VM boots.
+	fcHostMemInit()
 	fcCgroupInit()
 	allocPort("main")
 

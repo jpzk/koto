@@ -432,8 +432,41 @@ layers, all defaults, no new user-facing knobs:
 Fleet-wide: `run-host.sh` passes `--cpus` to the cs_host container — a hard
 ceiling on daemon + proxy + all VMs together. Default `nproc - 1` (min 1) so
 the host stays responsive no matter what; override with `KOTO_HOST_CPUS=<n>`,
-or `KOTO_HOST_CPUS=0` for unlimited. No `--memory`
-equivalent on purpose: OOM-killing the daemon is a fleet outage.
+or `KOTO_HOST_CPUS=0` for unlimited.
+
+Fleet-wide **memory** is capped too, but *not* via podman `--memory` — that
+would put the daemon and proxy in the same OOM pool as the VMs, and an
+OOM-killed daemon is a fleet outage. The daemon enforces it one level down
+(`fchostmem.go`), where only VMMs can ever be charged:
+
+- **Admission** — `fcSpawn` refuses to boot a VM when the live VMs' `mem_mib`
+  (+ the 512 MiB VMM margin each) plus the new one would exceed the cap. The
+  error names the numbers and the way out (stop a VM, smaller `size`, raise
+  the cap). This is the normal path; the cap should never actually be hit.
+- **Backstop** — `fcCgroupInit` writes `memory.max = cap` and
+  `memory.high = cap − 512 MiB` on the `vms/` parent cgroup. Overhead that
+  admission can't see (VMM page cache from `workspace.img` IO, device-model
+  growth) throttles the VMs first and, at worst, OOM-kills one VMM — the host
+  and the daemon in `main/` stay up. Needs the same writable cgroup mount as
+  the per-VM caps; without it only admission applies.
+
+Default = 90 % of `MemTotal` (read from `/proc/meminfo` at daemon start),
+so the kernel, podman, the daemon and the operator's shell keep the remaining
+10 %. Override with `KOTO_HOST_MEM_MIB=<n>` (passed through by
+`run-host.sh`), or `KOTO_HOST_MEM_MIB=0` for unlimited (no admission, no
+parent limit). The daemon logs the resolved cap at start
+(`fleet memory cap: … MiB`).
+
+**The cap is observable, not just enforced.** `resourcesSnapshot` reports it
+on both planes (`HostResources.mem_cap_mib` / `mem_committed_mib` /
+`mem_host_total_mib`, and per group `mem_committed_mib` = `mem_mib` + margin
+while running, 0 stopped — `koto ctl resources`, main's ctl-plane `resources`
+verb). The TUI's fleet view (ctrl+k) renders it as a second rollup row:
+`vm mem 11.5G/12G 94% · free 704M` plus a one-line memory map — a bar scaled
+to the cap, one named segment per running VM sized by its committed share,
+biggest first, dotted tail = what the next spawn can still get. Committed is
+the admission figure on purpose: RSS is a high-water mark of touched pages
+and says nothing about whether another VM fits.
 
 The spawn log line records what was applied:
 `microVM up pid=… vcpus=… mem=…MiB io=…MiB/s,…ops nice=10 cgroup=on|off`.

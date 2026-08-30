@@ -11,7 +11,9 @@ package main
 // SOFT throttle — deliberately
 // never memory.max, because OOM-killing the VMM hard-kills the VM with a
 // dirty ext4; the guest's real ceiling is machine-config's mem_size_mib, and
-// memory.high only reins in pathological VMM-side overhead).
+// memory.high only reins in pathological VMM-side overhead). The FLEET-wide
+// ceiling is different: vms/ itself gets memory.max (see fchostmem.go) —
+// there, losing one VM beats the host freezing under memory exhaustion.
 //
 // Availability is probed once at startup and degrades gracefully: cs_host
 // only has a writable cgroup tree when run-host.sh mounts it
@@ -146,6 +148,26 @@ func fcCgroupInit() {
 	if err := os.WriteFile(filepath.Join(vms, "cgroup.subtree_control"), []byte("+cpu +memory"), 0o644); err != nil {
 		off("enable controllers on vms: %v", err)
 		return
+	}
+
+	// Fleet ceiling on the vms/ parent (fchostmem.go): memory.max hard-caps
+	// every VMM together while the daemon in main/ is never charged against
+	// it; memory.high a margin below throttles first so a fleet creeping up
+	// on the cap slows down before anything is killed. Best-effort — losing
+	// the parent limit does not lose the per-VM caps.
+	if fcHostMemCapMiB > 0 {
+		capBytes := int64(fcHostMemCapMiB) << 20
+		high := int64(fcHostMemCapMiB-fcCgroupMemMarginMiB) << 20
+		if high <= 0 {
+			high = capBytes
+		}
+		if err := os.WriteFile(filepath.Join(vms, "memory.max"), []byte(fmt.Sprint(capBytes)), 0o644); err != nil {
+			emitLogf("fc", "warn", "fleet memory cap: vms/memory.max write failed (%v); admission check only", err)
+		} else if err := os.WriteFile(filepath.Join(vms, "memory.high"), []byte(fmt.Sprint(high)), 0o644); err != nil {
+			emitLogf("fc", "warn", "fleet memory cap: vms/memory.high write failed (%v)", err)
+		} else {
+			emitLogf("fc", "info", "fleet memory cap enforced on %s: memory.max=%dMiB memory.high=%dMiB", vms, fcHostMemCapMiB, high>>20)
+		}
 	}
 
 	// End-to-end probe: a throwaway child must accept the exact writes

@@ -195,6 +195,9 @@ func groupRoot(g string) bool { return groupConfigBool(g, "root") }
 type fcVM struct {
 	pid       int
 	listeners []net.Listener
+	// memMiB is the guest RAM this VM was booted with; fcHostMemCommittedMiB
+	// sums it across live VMs for the fleet memory cap's admission check.
+	memMiB int
 	// netCancel tears down the L3 gVisor gateway's AcceptQemu goroutines on
 	// stop (internet=full only; nil otherwise).
 	netCancel context.CancelFunc
@@ -523,6 +526,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 
 	vm := &fcVM{}
 	fail := func(err error) error {
+		fcHostMemRelease(g)
 		for _, ln := range vm.listeners {
 			_ = ln.Close()
 		}
@@ -530,6 +534,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			_ = syscall.Kill(vm.pid, syscall.SIGKILL)
 		}
 		return err
+	}
+	// Fleet memory cap admission (fchostmem.go): refuse now, with a message
+	// that says why, rather than boot into the vms/ memory.max and let the
+	// kernel pick a VM to kill. Reserves g's share until registration; every
+	// later exit goes through fail(), which releases it.
+	_, admitMiB := fcMachineCfg(g)
+	if err := fcHostMemAdmit(g, admitMiB); err != nil {
+		return fail(err)
 	}
 
 	// Guest→host listeners must exist BEFORE the guest can connect; FC dials
@@ -605,6 +617,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		kernelPath, rootfsPath, wsPath, udsPath = "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v"
 	}
 	vcpus, memMiB := fcMachineCfg(g)
+	vm.memMiB = memMiB
 	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath)
 
 	console, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -756,6 +769,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	fcMu.Lock()
 	fcVMs[g] = vm
 	fcMu.Unlock()
+	fcHostMemRelease(g) // counted from fcVMs from here on
 	bwBytes, ioOps := fcResolveIO(g)
 	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB io=%dMiB/s,%dops nice=%d cgroup=%s ports=%v",
 		g, vm.pid, vcpus, memMiB, bwBytes>>20, ioOps, fcVMNice, fcCgroupState(), pubPorts)
