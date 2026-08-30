@@ -130,6 +130,9 @@ func toPBResources(r resourcesResp) *pb.ResourcesResp {
 			ProvisionedBytes: r.Host.ProvisionedBytes,
 			Groups:           r.Host.Groups,
 			RunningGroups:    r.Host.RunningGroups,
+			MemCapMib:        r.Host.MemCapMiB,
+			MemCommittedMib:  r.Host.MemCommittedMiB,
+			MemHostTotalMib:  r.Host.MemHostTotalMiB,
 		},
 	}
 	for _, g := range r.Groups {
@@ -152,6 +155,7 @@ func toPBResources(r resourcesResp) *pb.ResourcesResp {
 			GuestDiskAvailBytes: g.GuestDiskAvailBytes,
 			GuestDiskUsedBytes:  g.GuestDiskUsedBytes,
 			GuestDiskUsedPct:    g.GuestDiskUsedPct,
+			MemCommittedMib:     g.MemCommittedMiB,
 		})
 	}
 	return out

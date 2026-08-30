@@ -361,6 +361,9 @@ func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.Resou
 			ProvisionedBytes: host.ProvisionedBytes,
 			Groups:           host.Groups,
 			RunningGroups:    host.RunningGroups,
+			MemCapMib:        host.MemCapMiB,
+			MemCommittedMib:  host.MemCommittedMiB,
+			MemHostTotalMib:  host.MemHostTotalMiB,
 		},
 	}
 	for _, g := range groups {
@@ -380,6 +383,7 @@ func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.Resou
 			GuestDiskTotalBytes: g.GuestDiskTotal,
 			GuestDiskAvailBytes: g.GuestDiskAvail,
 			GuestDiskUsedBytes:  g.GuestDiskUsed,
+			MemCommittedMib:     g.MemCommittedMiB,
 		})
 	}
 	return out, nil

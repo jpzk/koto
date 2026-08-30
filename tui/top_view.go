@@ -357,14 +357,100 @@ func (m Model) renderTopSummary() string {
 		gray.Render(fmt.Sprintf(" · alloc %s · provisioned %s", fmtGB(h.AllocTotalBytes), fmtGB(h.ProvisionedBytes)))
 }
 
+// renderTopMemLine is the second rollup row: the memory the fleet's VMs may
+// take (the daemon's admission cap, daemon/fchostmem.go), how much of it the
+// running VMs hold, what is left for the next spawn — and, in the remaining
+// width, a one-line MEMORY MAP: a bar scaled to the cap, one segment per
+// running VM sized by its committed share (guest RAM + VMM margin, the figure
+// admission actually charges — not RSS, which ratchets to the preset and says
+// nothing about whether another VM fits). Segments carry the group's name
+// when it fits and alternate accent/plain so adjacent VMs stay apart; the
+// unfilled tail is the free headroom. Committed/cap is threshold-colored:
+// the number to act on is "can the next /new boot", and 90% says no.
+//
+// An unlimited cap (KOTO_HOST_MEM_MIB=0, or a daemon predating the cap)
+// still lists the committed total and maps against the host's MemTotal when
+// known; with neither the row is empty and costs no height.
+func (m Model) renderTopMemLine(w int) string {
+	h := m.hostRes
+	if h.MemCapMiB == 0 && h.MemCommittedMiB == 0 && h.MemHostTotalMiB == 0 {
+		return ""
+	}
+	gray := lipgloss.NewStyle().Foreground(cGray)
+	committed := int64(h.MemCommittedMiB) << 20
+	capB := int64(h.MemCapMiB) << 20
+	var head string
+	if capB > 0 {
+		frac := float64(committed) / float64(capB)
+		st := alertify(lipgloss.NewStyle(), pctColor(frac)).Foreground(pctColor(frac))
+		head = gray.Render("vm mem ") +
+			st.Render(fmt.Sprintf("%s/%s %d%%", fmtGB(committed), fmtGB(capB), int(frac*100))) +
+			gray.Render(fmt.Sprintf(" · free %s", fmtGB(capB-committed)))
+	} else {
+		head = gray.Render(fmt.Sprintf("vm mem %s committed · cap unlimited", fmtGB(committed)))
+		capB = int64(h.MemHostTotalMiB) << 20
+	}
+	// The map: what's left of the row after the head, less separators.
+	bw := w - lipgloss.Width(head) - 4
+	if capB <= 0 || bw < 8 {
+		return head
+	}
+	type seg struct {
+		name string
+		mib  int32
+	}
+	var segs []seg
+	for _, r := range m.topRows() {
+		if r.hasRes && r.res.Running && r.res.MemCommittedMiB > 0 {
+			segs = append(segs, seg{r.group, r.res.MemCommittedMiB})
+		}
+	}
+	sort.Slice(segs, func(i, j int) bool {
+		if segs[i].mib != segs[j].mib {
+			return segs[i].mib > segs[j].mib
+		}
+		return segs[i].name < segs[j].name
+	})
+	var sb strings.Builder
+	used := 0
+	for i, s := range segs {
+		cells := int(float64(int64(s.mib)<<20) / float64(capB) * float64(bw))
+		if cells < 1 {
+			cells = 1
+		}
+		if used+cells > bw {
+			cells = bw - used
+		}
+		if cells <= 0 {
+			break
+		}
+		label := s.name
+		if len(label) > cells {
+			label = label[:cells]
+		}
+		cell := label + strings.Repeat(" ", cells-len(label))
+		st := inv(cFgInv, cAmber)
+		if i%2 == 1 {
+			st = inv(cFgInv, cDkAmber)
+		}
+		sb.WriteString(st.Render(cell))
+		used += cells
+	}
+	if used < bw {
+		sb.WriteString(gray.Render(strings.Repeat("·", bw-used)))
+	}
+	return head + gray.Render(" [") + sb.String() + gray.Render("]")
+}
+
 // topPaneSize mirrors logPaneSize: full width minus padding/scrollbar, minus
 // the tree column when it's showing alongside (treePaneW — visible when the
 // view was opened from tree mode, like the log view).
 func (m Model) topPaneSize() (int, int) {
 	w := max(10, m.width-2-m.treePaneW()) // -1 left padding, -1 scrollbar
 	// -3: status + hint + metrics; -2 more: summary + header rows rendered
-	// outside the viewport so they never scroll away.
-	h := max(1, m.height-5)
+	// outside the viewport so they never scroll away; -1 more for the memory
+	// row when the daemon reports a fleet cap (renderTopMemLine).
+	h := max(1, m.height-5-m.topMemRows())
 	return w, h
 }
 
@@ -480,6 +566,10 @@ func (m Model) renderTopView() string {
 	w, h := m.topPaneSize()
 	pad := lipgloss.NewStyle().PaddingLeft(1)
 	summary := pad.MaxWidth(w + 2).Render(m.renderTopSummary())
+	if m.topMemRows() > 0 {
+		summary = lipgloss.JoinVertical(lipgloss.Left, summary,
+			pad.MaxWidth(w+2).Render(m.renderTopMemLine(w)))
+	}
 
 	// The header marks the column the rows are ordered by. Underline, not a
 	// brighter color or a ▾ glyph: color alone would vanish in mono mode, and
@@ -511,7 +601,7 @@ func (m Model) renderTopView() string {
 		lipgloss.JoinHorizontal(lipgloss.Top, body, m.renderTopScrollbar()))
 	middle := right
 	if m.treePaneW() > 0 {
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h+2), right)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, m.renderTree(h+2+m.topMemRows()), right)
 	}
 	// The ctrl+r/ctrl+p overlay is composited by View()'s withPicker wrap —
 	// rendering it here too drew a second box underneath the spliced one.
@@ -519,6 +609,16 @@ func (m Model) renderTopView() string {
 	hint := m.renderTopHint()
 	metricsBar := m.renderMetricsBar()
 	return lipgloss.JoinVertical(lipgloss.Left, status, middle, hint, metricsBar)
+}
+
+// topMemRows is the height the memory row takes (0 or 1), so the layout
+// budget and the tree beside it agree with what renderTopMemLine draws.
+func (m Model) topMemRows() int {
+	h := m.hostRes
+	if h.MemCapMiB == 0 && h.MemCommittedMiB == 0 && h.MemHostTotalMiB == 0 {
+		return 0
+	}
+	return 1
 }
 
 // renderTopScrollbar mirrors renderLogScrollbar against the top viewport.

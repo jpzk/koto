@@ -3420,8 +3420,12 @@ type GroupResources struct {
 	AllocPct         float64 `protobuf:"fixed64,16,opt,name=alloc_pct,json=allocPct,proto3" json:"alloc_pct,omitempty"`
 	GuestMemUsedPct  float64 `protobuf:"fixed64,17,opt,name=guest_mem_used_pct,json=guestMemUsedPct,proto3" json:"guest_mem_used_pct,omitempty"`
 	GuestDiskUsedPct float64 `protobuf:"fixed64,18,opt,name=guest_disk_used_pct,json=guestDiskUsedPct,proto3" json:"guest_disk_used_pct,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// mem_committed_mib is this VM's share of the FLEET memory cap while it
+	// runs: mem_mib + the per-VM VMM margin — the same figure fcHostMemAdmit
+	// charges against HostResources.mem_cap_mib. 0 for a stopped group.
+	MemCommittedMib int32 `protobuf:"varint,19,opt,name=mem_committed_mib,json=memCommittedMib,proto3" json:"mem_committed_mib,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GroupResources) Reset() {
@@ -3580,6 +3584,13 @@ func (x *GroupResources) GetGuestDiskUsedPct() float64 {
 	return 0
 }
 
+func (x *GroupResources) GetMemCommittedMib() int32 {
+	if x != nil {
+		return x.MemCommittedMib
+	}
+	return 0
+}
+
 // Fleet-wide rollup for the filesystem the groups directory lives on.
 type HostResources struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
@@ -3594,8 +3605,16 @@ type HostResources struct {
 	Groups           int32   `protobuf:"varint,5,opt,name=groups,proto3" json:"groups,omitempty"`
 	RunningGroups    int32   `protobuf:"varint,6,opt,name=running_groups,json=runningGroups,proto3" json:"running_groups,omitempty"`
 	FsUsedPct        float64 `protobuf:"fixed64,7,opt,name=fs_used_pct,json=fsUsedPct,proto3" json:"fs_used_pct,omitempty"` // see GroupResources.alloc_pct
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Fleet memory ceiling (daemon/fchostmem.go), in MiB. mem_cap_mib is the
+	// resolved cap (0 = unlimited); mem_committed_mib is what the running VMs
+	// are entitled to under it (guest RAM + VMM margin each — the admission
+	// arithmetic, NOT their RSS); mem_host_total_mib is the host's MemTotal
+	// the default cap was derived from (0 if unreadable).
+	MemCapMib       int32 `protobuf:"varint,8,opt,name=mem_cap_mib,json=memCapMib,proto3" json:"mem_cap_mib,omitempty"`
+	MemCommittedMib int32 `protobuf:"varint,9,opt,name=mem_committed_mib,json=memCommittedMib,proto3" json:"mem_committed_mib,omitempty"`
+	MemHostTotalMib int32 `protobuf:"varint,10,opt,name=mem_host_total_mib,json=memHostTotalMib,proto3" json:"mem_host_total_mib,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HostResources) Reset() {
@@ -3673,6 +3692,27 @@ func (x *HostResources) GetRunningGroups() int32 {
 func (x *HostResources) GetFsUsedPct() float64 {
 	if x != nil {
 		return x.FsUsedPct
+	}
+	return 0
+}
+
+func (x *HostResources) GetMemCapMib() int32 {
+	if x != nil {
+		return x.MemCapMib
+	}
+	return 0
+}
+
+func (x *HostResources) GetMemCommittedMib() int32 {
+	if x != nil {
+		return x.MemCommittedMib
+	}
+	return 0
+}
+
+func (x *HostResources) GetMemHostTotalMib() int32 {
+	if x != nil {
+		return x.MemHostTotalMib
 	}
 	return 0
 }
@@ -4149,7 +4189,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12,\n" +
 	"\x06groups\x18\x03 \x03(\v2\x14.koto.GroupResourcesR\x06groups\x12'\n" +
-	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xcc\x05\n" +
+	"\x04host\x18\x04 \x01(\v2\x13.koto.HostResourcesR\x04host\"\xf8\x05\n" +
 	"\x0eGroupResources\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1f\n" +
@@ -4170,7 +4210,8 @@ const file_koto_proto_rawDesc = "" +
 	"\x15guest_disk_used_bytes\x18\x0f \x01(\x03R\x12guestDiskUsedBytes\x12\x1b\n" +
 	"\talloc_pct\x18\x10 \x01(\x01R\ballocPct\x12+\n" +
 	"\x12guest_mem_used_pct\x18\x11 \x01(\x01R\x0fguestMemUsedPct\x12-\n" +
-	"\x13guest_disk_used_pct\x18\x12 \x01(\x01R\x10guestDiskUsedPct\"\x91\x02\n" +
+	"\x13guest_disk_used_pct\x18\x12 \x01(\x01R\x10guestDiskUsedPct\x12*\n" +
+	"\x11mem_committed_mib\x18\x13 \x01(\x05R\x0fmemCommittedMib\"\x8a\x03\n" +
 	"\rHostResources\x12$\n" +
 	"\x0efs_total_bytes\x18\x01 \x01(\x03R\ffsTotalBytes\x12\"\n" +
 	"\rfs_free_bytes\x18\x02 \x01(\x03R\vfsFreeBytes\x12*\n" +
@@ -4178,7 +4219,11 @@ const file_koto_proto_rawDesc = "" +
 	"\x11provisioned_bytes\x18\x04 \x01(\x03R\x10provisionedBytes\x12\x16\n" +
 	"\x06groups\x18\x05 \x01(\x05R\x06groups\x12%\n" +
 	"\x0erunning_groups\x18\x06 \x01(\x05R\rrunningGroups\x12\x1e\n" +
-	"\vfs_used_pct\x18\a \x01(\x01R\tfsUsedPct\"\v\n" +
+	"\vfs_used_pct\x18\a \x01(\x01R\tfsUsedPct\x12\x1e\n" +
+	"\vmem_cap_mib\x18\b \x01(\x05R\tmemCapMib\x12*\n" +
+	"\x11mem_committed_mib\x18\t \x01(\x05R\x0fmemCommittedMib\x12+\n" +
+	"\x12mem_host_total_mib\x18\n" +
+	" \x01(\x05R\x0fmemHostTotalMib\"\v\n" +
 	"\tAclGetReq\"T\n" +
 	"\rAclSetRoleReq\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12/\n" +

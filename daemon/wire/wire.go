@@ -264,6 +264,9 @@ type GroupResources struct {
 	GuestMemTotalBytes int64   `json:"guest_mem_total_bytes,omitempty"`
 	GuestMemAvailBytes int64   `json:"guest_mem_avail_bytes,omitempty"`
 	GuestMemUsedPct    float64 `json:"guest_mem_used_pct,omitempty"`
+	// MemCommittedMiB is the VM's share of the fleet memory cap while it
+	// runs (mem_mib + VMM margin — what admission charges); 0 when stopped.
+	MemCommittedMiB int32 `json:"mem_committed_mib,omitempty"`
 }
 
 type HostResources struct {
@@ -279,6 +282,11 @@ type HostResources struct {
 	ProvisionedBytes int64 `json:"provisioned_bytes"`
 	Groups           int32 `json:"groups"`
 	RunningGroups    int32 `json:"running_groups"`
+	// Fleet memory ceiling (MiB): the resolved cap (0 = unlimited), what the
+	// running VMs are committed to under it, and the host's MemTotal.
+	MemCapMiB       int32 `json:"mem_cap_mib,omitempty"`
+	MemCommittedMiB int32 `json:"mem_committed_mib,omitempty"`
+	MemHostTotalMiB int32 `json:"mem_host_total_mib,omitempty"`
 }
 
 // ---- schedules ------------------------------------------------------------
@@ -366,17 +374,17 @@ type GoalItem struct {
 	// before the first review the session has no transcript to follow.
 	Judged bool `json:"judged,omitempty"`
 	// DoneNote is the worker's evidence summary from the accepted goal_done.
-	DoneNote     string  `json:"done_note,omitempty"`
+	DoneNote     string `json:"done_note,omitempty"`
 	PausedReason string `json:"paused_reason,omitempty"` // cap | stalled | judge | operator | stopped
 	// PausedFrom is the status the pause interrupted (running | planning) —
 	// loop-internal like LastHandoff, not surfaced over pb. goalResume
 	// restores it: a goal paused out of its PLAN phase must resume back into
 	// planning (re-running the plan turn), because resuming to `running`
 	// unconditionally would skip both the plan and the human approval gate.
-	PausedFrom string  `json:"paused_from,omitempty"`
-	CreatedAt  float64 `json:"created_at"`
-	UpdatedAt    float64 `json:"updated_at,omitempty"`
-	CompletedAt  float64 `json:"completed_at,omitempty"`
+	PausedFrom  string  `json:"paused_from,omitempty"`
+	CreatedAt   float64 `json:"created_at"`
+	UpdatedAt   float64 `json:"updated_at,omitempty"`
+	CompletedAt float64 `json:"completed_at,omitempty"`
 }
 
 type GoalSetReq struct {

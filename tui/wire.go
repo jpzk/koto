@@ -101,6 +101,10 @@ type GroupRes struct {
 	// for root, which is neither used nor available, so total-minus-avail
 	// charges that reserve to the group and puts an empty workspace at 5%.
 	GuestDiskUsed int64
+	// MemCommittedMiB is the VM's share of the fleet memory cap while it
+	// runs (MemMiB + VMM margin); 0 when stopped. Feeds the fleet view's
+	// memory map.
+	MemCommittedMiB int32
 }
 
 // HostRes is the fleet-wide rollup of the Resources RPC (koto.proto
@@ -114,6 +118,13 @@ type HostRes struct {
 	ProvisionedBytes int64
 	Groups           int32
 	RunningGroups    int32
+	// Fleet memory ceiling (MiB, daemon/fchostmem.go): the cap the daemon
+	// admits VMs under (0 = unlimited / daemon predating it), what the running
+	// VMs are committed to (guest RAM + VMM margin each — admission
+	// arithmetic, not RSS), and the host's MemTotal.
+	MemCapMiB       int32
+	MemCommittedMiB int32
+	MemHostTotalMiB int32
 }
 
 // LogEvent is one frame of the daemon's own log stream (SubscribeLogs).
