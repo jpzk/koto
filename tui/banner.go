@@ -40,11 +40,12 @@ func bannerLines(group string, contentCols int) []string {
 	if contentCols < len("ctrl+] opens a shared terminal in this group") {
 		return nil
 	}
-	// One color for the whole banner — the accent, so it reads as a
-	// single mark rather than a frame around some text.
-	frame := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
-	ink := lipgloss.NewStyle().Foreground(cAmber)
-	tag := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
+	// One color for the whole banner — the sys-line gray, so it sits
+	// with the "spawned <g>" notice it appears beside rather than
+	// competing with the accent on the prompt glyphs.
+	frame := lipgloss.NewStyle().Foreground(cGray).Bold(true)
+	ink := lipgloss.NewStyle().Foreground(cGray)
+	tag := lipgloss.NewStyle().Foreground(cGray).Bold(true)
 	under := strings.Repeat("_", width+2)
 
 	out := make([]string, 0, 8)
@@ -58,10 +59,13 @@ func bannerLines(group string, contentCols int) []string {
 		line = line[:contentCols]
 	}
 	out = append(out, tag.Render(line))
-	// One line of orientation for a fresh group: the shared terminal is
-	// the thing a newcomer most wants and the key nobody guesses.
-	hint := lipgloss.NewStyle().Foreground(cAmber)
-	key := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
-	out = append(out, "", key.Render("ctrl+]")+hint.Render(" opens a shared terminal in this group"))
+	// Two lines of orientation for a fresh group: the shared terminal is
+	// the thing a newcomer most wants, and the cheatsheet explains the
+	// rest of the keys.
+	hint := lipgloss.NewStyle().Foreground(cGray)
+	key := lipgloss.NewStyle().Foreground(cGray).Bold(true)
+	out = append(out, "",
+		key.Render("ctrl+]")+hint.Render(" opens a shared terminal in this group"),
+		key.Render("ctrl+h")+hint.Render(" opens the cheatsheet"))
 	return out
 }
