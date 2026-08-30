@@ -21,7 +21,7 @@ func TestEmptyTranscriptShowsBanner(t *testing.T) {
 		t.Fatalf("empty transcript: kind=%q lines=%d, want banner", kind, len(lines))
 	}
 	joined := ansi.Strip(strings.Join(lines, "\n"))
-	for _, want := range []string{"#####", "koto :: fresh", "ctrl+] opens a shared terminal"} {
+	for _, want := range []string{"#####", "koto :: fresh", "ctrl+] opens a shared terminal", "ctrl+h opens the cheatsheet"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("banner lacks %q:\n%s", want, joined)
 		}
