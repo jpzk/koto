@@ -337,9 +337,14 @@ explicit `gap` event when the ring can't cover).
 ## Install
 
 ```sh
+sudo dnf install -y git make podman     # Fedora; apt/pacman equivalents work
 git clone <repo> && cd koto
 make setup
 ```
+
+Those three are the whole prerequisite list — no Go, Node, protoc or openssl
+toolchain on the host, all of that is containerized. A stock Fedora cloud
+image ships podman but not git or make, which is why they are named here.
 
 `make setup` builds the `koto` binary in a container (so the host needs only
 git, make and podman) and runs the interactive wizard: it checks every host
