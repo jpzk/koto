@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -129,18 +131,19 @@ actually boot until KVM is available.`)
 
 func stepHostBuild() setupStep {
 	return setupStep{
-		id:    "host-build",
-		title: "Daemon image",
-		explain: `The daemon runs inside a container image (koto-host) holding Go, Node and
-the claude CLI. Building it downloads a few hundred MB and takes a minute or
-two. Nothing is installed into your OS — it all lives in podman's storage.`,
+		id:    "build",
+		title: "Build koto",
+		explain: `Compiles the koto binary. The compiler runs in a container so your host
+needs no Go toolchain — that is the only thing podman is used for here.
+Nothing koto runs afterwards is a container: the daemon becomes a systemd
+service on this host, and each agent group is a Firecracker microVM.`,
 		detect: func(sc *setupCtx) (bool, string) {
-			if sc.podmanHas("image", "koto-host") {
-				return true, "koto-host image present"
+			if exists(filepath.Join(sc.root, "koto")) {
+				return true, "koto binary built"
 			}
-			return false, "koto-host image missing"
+			return false, "koto binary missing"
 		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "host-build") },
+		run: func(sc *setupCtx) error { return sc.stream("make", "koto") },
 	}
 }
 
@@ -241,10 +244,17 @@ Anthropic's terms for which fits your use — the README has the details.`,
 			case 0:
 				u.info("handing over to `claude auth login` — follow its prompts")
 				u.blank()
-				err := sc.interactive("podman", "run", "--rm", "-it",
-					"--security-opt", "label=disable",
-					"-v", sc.credsDir()+":/root/.claude",
-					"--entrypoint", "claude", "koto-host", "auth", "login")
+				// HOME points at the koto creds dir so the token lands
+				// there and never touches the operator's personal
+				// ~/.claude — the dedicated-credentials property the
+				// container mount used to provide.
+				cmd := exec.Command("claude", "auth", "login")
+				cmd.Dir = sc.root
+				cmd.Env = setEnv(os.Environ(), "HOME", sc.credsDir())
+				cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+				signal.Ignore(os.Interrupt)
+				err := cmd.Run()
+				signal.Reset(os.Interrupt)
 				if err != nil {
 					return fmt.Errorf("login: %w", err)
 				}
@@ -271,17 +281,18 @@ Anthropic's terms for which fits your use — the README has the details.`,
 
 func stepTUIBuild() setupStep {
 	return setupStep{
-		id:    "tui-build",
-		title: "TUI image",
-		explain: `The terminal UI is a separate, tiny image: a single static binary on an
-empty base, with no shell and no toolchain. Building it takes a few seconds.`,
+		id:    "tui",
+		title: "Build the TUI",
+		explain: `The terminal UI is a separate static binary — no shell, no interpreter,
+nothing it shells out to. Built in a container like the daemon, and run
+directly on your host so it gets the real terminal.`,
 		detect: func(sc *setupCtx) (bool, string) {
-			if sc.podmanHas("image", "koto-tui") {
-				return true, "koto-tui image present"
+			if exists(filepath.Join(sc.root, "koto-tui")) {
+				return true, "koto-tui binary built"
 			}
-			return false, "koto-tui image missing"
+			return false, "koto-tui binary missing"
 		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "tui-build") },
+		run: func(sc *setupCtx) error { return sc.stream("make", "koto-tui") },
 	}
 }
 
@@ -414,12 +425,6 @@ authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
 		},
 		run: func(sc *setupCtx) error {
 			u := sc.ui
-			if !sc.podmanHas("network", "koto-net") {
-				u.info("creating the koto-net podman network")
-				if err := sc.stream("podman", "network", "create", "koto-net"); err != nil {
-					return err
-				}
-			}
 			creds := filepath.Join(sc.stateDir(), "creds")
 			client, err := newKotoClient(creds, "tui", "127.0.0.1:8443")
 			if err != nil {
