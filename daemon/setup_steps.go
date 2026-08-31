@@ -39,6 +39,11 @@ func setupSteps() []setupStep {
 func (sc *setupCtx) credsDir() string  { return filepath.Join(sc.root, "creds") }
 func (sc *setupCtx) assetsDir() string { return filepath.Join(sc.root, "fcassets") }
 
+// stateDir is where the wizard installs to. KOTO_HOME wins so the same
+// override every other component honors also steers the install, rather than
+// the wizard being the one place that insists on /var/lib/koto.
+func (sc *setupCtx) stateDir() string { return envOr("KOTO_HOME", defaultStateDir) }
+
 func exists(path string) bool { _, err := os.Stat(path); return err == nil }
 
 // rpcShort compacts a gRPC error to its status text for a one-line report.
@@ -367,7 +372,7 @@ runs as you, with rootless podman, exactly as it does now.`,
 				}
 			}
 			return runInstall(installOpts{
-				stateDir: defaultStateDir,
+				stateDir: sc.stateDir(),
 				image:    defaultImage,
 				publish:  "127.0.0.1",
 				root:     sc.root,
@@ -390,7 +395,7 @@ authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
 			if !installed() {
 				return false, "daemon not installed"
 			}
-			client, err := newKotoClient(filepath.Join(defaultStateDir, "creds"), "tui", "127.0.0.1:8443")
+			client, err := newKotoClient(filepath.Join(sc.stateDir(), "creds"), "tui", "127.0.0.1:8443")
 			if err != nil {
 				return false, err.Error()
 			}
@@ -410,7 +415,7 @@ authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
 					return err
 				}
 			}
-			creds := filepath.Join(defaultStateDir, "creds")
+			creds := filepath.Join(sc.stateDir(), "creds")
 			client, err := newKotoClient(creds, "tui", "127.0.0.1:8443")
 			if err != nil {
 				return fmt.Errorf("build client: %w", err)
@@ -463,11 +468,11 @@ func stepHandoff() setupStep {
 			cmd("systemctl status koto", "what the service is doing")
 			cmd("journalctl -u koto -f", "daemon logs")
 			u.blank()
-			u.printf("  state:  %s", defaultStateDir)
+			u.printf("  state:  %s", sc.stateDir())
 			u.printf("  config: %s  (edit, then `sudo systemctl restart koto`)", envFilePath)
 			u.blank()
 			u.prose(`Add another client — a phone, a second laptop — with
-` + "`koto pki client -creds " + filepath.Join(defaultStateDir, "creds") + " <name>`" + `, then copy its
+` + "`koto pki client -creds " + filepath.Join(sc.stateDir(), "creds") + " <name>`" + `, then copy its
 certificate, key and token across.
 
 Re-run ` + "`koto setup --check`" + ` at any time to see the health of the install.`)
