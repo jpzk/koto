@@ -25,6 +25,58 @@ Minimal isolated claude-code orchestrator. **Every group is a Firecracker microV
   - **Streaming format is shared between providers.** fc-agent (`fcguest/turn.go`) decodes Claude's stream-json itself and runs `sidecar/venice_stream.js` in `KOTO_EVENTS` mode (one JSON event per line); both become typed `TurnFrame`s on vsock 9004, and the daemon (`fcturn.go`) renders them into the same `[[marker]]` text in `.cs/log.<slot>` — so `tailLog` parses both identically (partial buffer → `stream` event, `\n`-terminated line → `done`). The guest never writes marker text; `stream_filter.js` survives only for cs-subagent's job out files.
   - **Trust boundary unchanged.** Venice sidecars get `ANTHROPIC_API_KEY=proxied` (sentinel) like Claude sidecars; the real key only exists in `creds/venice.key` and inside the proxy's process memory. A compromised Venice sidecar can talk to the proxy but cannot exfiltrate the key.
 
+## Install vs. dev clone
+
+**koto runs two ways off one code path.** A dev clone resolves all state from
+the working directory, exactly as it always has. An installed system resolves
+it from `KOTO_HOME` (default `/var/lib/koto`) — and the state dir mirrors the
+clone's layout exactly (`groups/ creds/ fcassets/ prompts/ run/ groups.json
+schedules.json goals.json metrics.jsonl`), so the override is ONE env var
+read in `kotoHome()` (`daemon.go`), there is no second layout to maintain, no
+state migration on upgrade, and a state dir can be inspected with the same
+commands as a clone. `initPaths()`/`proxyInitPaths()` are the only readers;
+everything else derives from the globals.
+
+- **`make setup` → `koto setup`** is the newcomer's entry point: an 11-step
+  wizard (host preflight with remediation → images → PKI → credentials →
+  guest assets → install → smoke). **Resumability is by DETECTION, not a
+  state file** — every fact is observable on the host (a podman image, a file
+  in creds/, a systemd unit), so an interrupted run resumes by re-running and
+  there is no wizard state to corrupt. `--check` is the same detection pass
+  with no mutations: the doctor mode, exit 0 when the install is healthy.
+- **`koto install`** builds `host/Dockerfile.release` (daemon baked in — the
+  dev image's rebuild-from-bind-mount entrypoint is a development affordance,
+  not a runtime one), seeds the state dir, writes three root-owned files (the
+  binary, `/etc/koto/koto.env`, the unit) via discrete echoed `sudo` execs,
+  and enables the service. Re-running upgrades in place; `koto.env` values
+  the operator edited are preserved, and `prompts/` refreshes only when
+  untouched (compared against a `.dist` copy).
+- **`koto launch` is the unit's ExecStart and `syscall.Exec`s podman.** This
+  is load-bearing, not style: podman must BE the unit's main process so
+  `--sdnotify=conmon` satisfies `Type=notify` and systemd's SIGTERM reaches
+  podman → the daemon as PID 1 → `fcStopAll`, which is what makes every
+  guest sync+umount its workspace image. A spawn-and-wait wrapper would break
+  that chain and leave dirty images on every reboot. (Verified end-to-end:
+  container exit 0, `e2fsck` clean.)
+- **The unit is a system unit** (`/etc/systemd/system/koto.service`) running
+  rootless podman as the invoking user: `User=`/`Group=`, an explicit
+  `XDG_RUNTIME_DIR` (a system unit does not set it), `Requires=user@<uid>
+  .service` plus `loginctl enable-linger` so the user manager and delegated
+  cgroup tree exist at boot, and `Delegate=yes` so per-VM cgroup caps work
+  (absent it, `fcCgroupInit` degrades to `cgroup=off`). `TimeoutStopSec=25`
+  sits above the daemon's ~12s VM-stop budget.
+- **`KOTO_PUBLISH=127.0.0.1` is the installed default** (dev keeps it off).
+  Rootless podman container IPs are not host-routable, so without a loopback
+  publish, host-side `koto ctl` and `koto tui` could not reach the daemon at
+  all; mTLS + bearer token still gate every call.
+- **The PKI is Go** (`pki.go`, stdlib only), so an installed host needs
+  neither openssl nor jq. It is byte-compatible with what `auth.go` verifies
+  and `TestPKIHandshake` pins that with a real TLS handshake. It is also
+  idempotent by construction — an existing CA is REUSED, never regenerated
+  (the `make pki-init` footgun, now guarded in the Makefile too).
+- Guest assets can be built straight into the state dir via
+  `KOTO_FCASSETS_OUT` (the three `fcguest/*.sh` scripts honor it).
+
 ## Layout
 
 Monorepo: each subproject is its own module, built separately; the only
@@ -64,6 +116,14 @@ daemon/              the daemon Go module (module `koto`):
   logparse.go          the [[marker]] grammar, shared by the tailer and History
   fccgroup.go          per-VM cgroup probing/limits
   ctl_cli.go           the `koto ctl` client subcommand
+  setup.go             `koto setup` wizard: step framework + runner + --check doctor mode
+  setup_steps.go       the 11 step definitions (preflight → … → install → smoke)
+  setup_checks.go      host dependency probes + remediation text
+  setup_ui.go          plain terminal dialog (prompts, ANSI, streamed subprocess output)
+  pki.go               CA / server / client certs + tokens in Go (`koto pki`) — no openssl/jq
+  install.go           `koto install`: state dir, release image, /etc files, systemd unit, upgrade
+  launch.go            `koto launch` — the unit's ExecStart; execs podman
+  tui_cmd.go           `koto tui` — attach the TUI to an installed daemon
   sanitize.go          terminal-escape/bidi scrubbing of streamed events
   attachments.go       inbound attachment staging
   grpc_server.go       gRPC service methods (thin wrappers over the funcs above)
@@ -78,7 +138,9 @@ docs/                design docs — firecracker-vsock.md (authoritative microVM
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
 protocol/            the cross-project contract: koto.proto (gRPC, clients) + guest.proto (daemon↔microVM vsock 9002/10000) + committed generated pb ONLY (no hand-written code). Daemon + TUI + fc-agent import koto-protocol/pb; the Android app (maintained out of tree) Wire-generates Kotlin from koto.proto
 sidecar/             guest worker bits — venice_stream.js (the Venice agent loop), stream_filter.js (cs-subagent only), cs-job, cs-notify, cs-subagent (baked into the fc rootfs). entrypoint.sh is gone: fc-agent runs turns (fcguest/turn.go)
-host/                host-runner bits — Dockerfile (cs_host_go image), run-host.sh (matching-path bind mount + sock + creds + /dev/kvm)
+host/                host-runner bits — Dockerfile (cs_host_go DEV image: toolchain, rebuilds from the
+                     bind-mounted source at every start), Dockerfile.release (INSTALLED image: daemon
+                     baked in, alpine base, no source mount), run-host.sh (dev launcher)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
