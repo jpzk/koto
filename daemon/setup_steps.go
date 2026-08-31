@@ -262,8 +262,13 @@ func stepFCFetch() setupStep {
 	return setupStep{
 		id:    "firecracker",
 		title: "Firecracker binary",
-		explain: `Downloads the pinned Firecracker release — the microVM monitor that boots
-each group. A few seconds.`,
+		explain: `Builds Firecracker, the microVM monitor that boots each group and the
+one process that talks to KVM. Built from a pinned commit in upstream's own
+build container, like everything else koto ships — about three minutes, plus
+a one-time image pull of a couple of GB.
+
+Set FC_PREBUILT=1 to fetch upstream's release binary instead and verify it
+against a pinned checksum; that is seconds rather than minutes.`,
 		detect: func(sc *setupCtx) (bool, string) {
 			if exists(filepath.Join(sc.assetsDir(), "firecracker")) {
 				return true, "fcassets/firecracker present"
