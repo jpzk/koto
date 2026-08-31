@@ -20,7 +20,9 @@
 # Containerized (Ubuntu 24.04, like FC's CI) so the host needs no toolchain.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-OUT="$HERE/fcassets"
+# KOTO_FCASSETS_OUT: see fetch-assets.sh. The source cache stays in the clone
+# either way — it is a build artifact, not state.
+OUT="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
 CACHE="$HERE/.kernelcache"
 mkdir -p "$OUT" "$CACHE"
 

@@ -7,7 +7,7 @@
 # mounted at runtime and recompiled via `go run` inside cs_host_go. Only
 # host/Dockerfile (and its installed deps) re-triggers a host-image build.
 
-.PHONY: tui-walk host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: setup install release-build tui-walk host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -16,6 +16,38 @@
 # (grpc runtime v1.80.0 / 2026-04-01 is pinned in the go.mod files.)
 PROTOC_GEN_GO_VER      := v1.36.11
 PROTOC_GEN_GO_GRPC_VER := v1.6.1
+
+# --- first run ---------------------------------------------------------------
+# `make setup` is the ONE command a newcomer runs. It builds the koto binary
+# inside a container (so the host needs no Go — only git, make and podman) and
+# hands over to the interactive wizard, which checks the host, builds the
+# images and guest assets, mints the PKI, connects your Anthropic credentials
+# and installs koto as a systemd service. Safe to re-run: every step detects
+# whether it is already done, so an interrupted install resumes here.
+KOTO_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d)
+koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go)
+	@command -v podman >/dev/null || { echo "podman is required — install it first (sudo dnf install podman)"; exit 1; }
+	@mkdir -p .gocache .gomodcache
+	podman run --rm --security-opt label=disable \
+	  -v $(PWD):/src -w /src \
+	  -v $(PWD)/.gocache:/root/.cache/go-build \
+	  -v $(PWD)/.gomodcache:/go/pkg/mod \
+	  -e CGO_ENABLED=0 -e GOFLAGS= \
+	  docker.io/library/golang:1.24-alpine \
+	  go build -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
+
+setup: koto
+	@./koto setup
+
+# Install (or upgrade) an existing checkout as a systemd service without the
+# wizard's explanatory pass — for people who already know what they want.
+install: koto
+	@./koto install
+
+# The installed daemon image: the binary baked in, no source mount, no
+# toolchain at runtime. Built by `koto install`; here for CI.
+release-build:
+	podman build -f host/Dockerfile.release --build-arg KOTO_VERSION=$(KOTO_VERSION) -t koto:latest .
 
 # INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
 # worktree — `make host-run INSTANCE=cli`, `make tui INSTANCE=cli`,

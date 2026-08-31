@@ -28,6 +28,23 @@ func main() {
 		// and authorization are the mTLS + bearer token + role ACL every
 		// other client goes through.
 		ctlCliMain(os.Args[2:])
+	case "setup":
+		// First-run wizard: host checks, image + guest-asset builds, PKI,
+		// credentials, install, smoke test. Safe to re-run — every step
+		// detects whether it is already satisfied.
+		setupMain(os.Args[2:])
+	case "install":
+		// Install (or upgrade) koto as a systemd service backed by a state
+		// directory, so it survives a reboot and outlives this clone.
+		installMain(os.Args[2:])
+	case "launch":
+		// Internal: the installed unit's ExecStart. Computes the podman
+		// arguments and execs podman, so podman is the unit's main process.
+		launchMain(os.Args[2:])
+	case "tui":
+		// Attach the terminal UI to an installed daemon (the `make tui`
+		// counterpart for a non-clone install).
+		tuiMain(os.Args[2:])
 	case "pki":
 		// Private CA / server cert / client identities, in Go — the
 		// openssl-free counterpart of the Makefile's pki-* targets.
