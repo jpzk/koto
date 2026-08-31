@@ -349,9 +349,36 @@ client identity, connects your Anthropic credentials, installs koto as a
 systemd service, and smoke-tests the result.
 
 It is safe to re-run — every step detects whether it is already done, so an
-interrupted install (the guest kernel build is 20-40 minutes from cold)
-resumes where it stopped. `koto setup --check` reports the health of an
-install without changing anything.
+interrupted install resumes where it stopped. `koto setup --check` reports
+the health of an install without changing anything, and never modifies it.
+
+**What it asks you**, all in the first couple of minutes:
+
+- whether to continue if a host requirement is unmet (it prints the fix for
+  each one — package names, sysctl lines — and refuses only on the ones that
+  genuinely block);
+- whether you will reach this daemon from another machine, so it can put
+  extra names or addresses in the server certificate (you can reissue later,
+  so "no" is a safe default);
+- how to authenticate: a Claude subscription, which hands the terminal to
+  `claude auth login` for a browser flow, or an Anthropic API key, typed
+  with the echo off;
+- confirmation before the guest kernel build, which is the long one.
+
+**How long**: a few minutes of downloads and image builds, then the guest
+kernel — 20-40 minutes on a cold machine, a few minutes if a source cache is
+already there. It says which case you're in before starting, and it is safe
+to walk away or interrupt.
+
+**Sudo** is asked for only at the install step, near the end, for three
+files: the `koto` binary, `/etc/koto/koto.env` and the systemd unit. Every
+privileged command is printed before it runs. The service itself runs
+rootless, as you.
+
+**If a step fails**, the wizard says which one and stops rather than
+continuing on a broken foundation. Fix the cause and run `make setup` again —
+finished steps are skipped. To retry or force one step on its own, use
+`koto setup --only <id>` (`koto setup --list` names them).
 
 Once installed:
 
@@ -373,6 +400,21 @@ To add another client — a phone, a second laptop:
 ```sh
 koto pki client -creds /var/lib/koto/creds <name>   # cert, key and token
 ```
+
+If that client reaches the daemon over the network, the server certificate
+needs a name or address it can verify. Adding one later is safe — the CA is
+untouched, so every client you have already issued keeps working:
+
+```sh
+koto pki server -creds /var/lib/koto/creds \
+  -san DNS:koto-daemon,DNS:localhost,IP:127.0.0.1,IP:192.168.1.20
+sudo systemctl restart koto
+```
+
+Reaching it from off-box also means publishing the port: set `KOTO_PUBLISH`
+in `/etc/koto/koto.env` to an address other than `127.0.0.1`. mTLS and the
+bearer token are what gate access — but only issue certificates to devices
+you control.
 
 To uninstall: `sudo systemctl disable --now koto`, then remove
 `/etc/systemd/system/koto.service`, `/etc/koto`, `/usr/local/bin/koto` and
