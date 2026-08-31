@@ -134,6 +134,18 @@ func vol(g string) string { return filepath.Join(ROOT, g) }
 // ---- daemon entrypoint ----------------------------------------------------
 
 func daemonMain() {
+	// First, before anything touches the filesystem or a VM: put ourselves in
+	// a user namespace where we are root over our subuid range. The jailer
+	// needs it to write each VMM's uid_map, and fcJailFixupPerms needs it to
+	// chown per-group files to the per-VM id — both were previously supplied
+	// by the podman container the daemon used to run inside. This re-execs,
+	// so it must precede any state we would otherwise set up twice.
+	if err := usernsEnsure(); err != nil {
+		fmt.Fprintf(os.Stderr, "koto: %v\n", err)
+		fmt.Fprintf(os.Stderr, "koto: run `koto userns-check` to diagnose, "+
+			"or set KOTO_FC_NOJAIL=1 to run VMMs unjailed (weaker isolation)\n")
+		os.Exit(1)
+	}
 	initPaths()
 	_ = os.MkdirAll(ROOT, 0o755)
 	_ = os.MkdirAll(SOCK_DIR, 0o755)

@@ -118,3 +118,28 @@ func TestUsernsBootstrapEndToEnd(t *testing.T) {
 		t.Errorf("could not chown into the jail band — the jailer would fail: %s", got)
 	}
 }
+
+// TestJailUIDsAreDistinctAndInRange is the invariant the userns bootstrap
+// exists to preserve: every group's VMM gets its own id, none of them the
+// daemon's, all inside the subuid range we map. Verified end-to-end on
+// 2026-08-31 with the daemon running directly on the host — the jailed
+// Firecracker showed uid 554287 (subuid_base + 30000 - 1) against a daemon at
+// uid 1000. Get the arithmetic wrong and two VMs quietly share a uid, which
+// is exactly the isolation the jail is supposed to provide, with no symptom.
+func TestJailUIDsAreDistinctAndInRange(t *testing.T) {
+	seen := map[int]int{}
+	for port := PORT_BASE; port < PORT_BASE+64; port++ {
+		uid := fcJailUID(port)
+		if uid < fcJailBaseUID {
+			t.Fatalf("port %d produced uid %d below the jail band", port, uid)
+		}
+		if prev, dup := seen[uid]; dup {
+			t.Fatalf("ports %d and %d share jail uid %d — those VMs would not be isolated from each other",
+				prev, port, uid)
+		}
+		seen[uid] = port
+	}
+	if hi := fcJailUID(PORT_BASE + 63); hi >= 65536 {
+		t.Fatalf("jail band reaches %d, outside a standard 65536-id subuid range", hi)
+	}
+}
