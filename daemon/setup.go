@@ -290,8 +290,4 @@ func (sc *setupCtx) capture(name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// podmanHas reports whether an image/network/container exists.
-func (sc *setupCtx) podmanHas(kind, name string) bool {
-	cmd := exec.CommandContext(sc.ctx, "podman", kind, "exists", name)
-	return cmd.Run() == nil
-}
+

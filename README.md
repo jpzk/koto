@@ -346,17 +346,21 @@ explicit `gap` event when the ring can't cover).
 
 ```sh
 # Fedora
-sudo dnf install -y git make podman
+sudo dnf install -y git make podman        # or docker instead of podman
 # Ubuntu 24.04+ (passt and uidmap are Recommends of podman, so a default
 # apt install already pulls them in; name them for --no-install-recommends)
-sudo apt install -y git make podman passt uidmap
+sudo apt install -y git make podman passt uidmap   # or docker instead of podman
 
 git clone <repo> && cd koto
 make setup
 ```
 
 That is the whole prerequisite list — no Go, Node, protoc or openssl toolchain
-on the host, all of it is containerized. They are named explicitly because a
+on the host, all of it is containerized. Either **podman or docker** works and
+is used only to BUILD: nothing koto runs at runtime is a container. (One
+exception: `make fc-rootfs`, which builds the guest filesystem image, needs
+`podman unshare` specifically — a docker-only host can build every binary but
+wants a prebuilt `rootfs.img` for that step.) They are named explicitly because a
 stock cloud image of either distro ships podman but not git or make.
 
 **On Ubuntu, also make `/dev/kvm` world-accessible**, which Fedora does by
