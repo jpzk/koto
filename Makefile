@@ -3,11 +3,12 @@
 # Dockerfile + COPY'd source inputs, so `make host-run` / `make tui` only
 # rebuild when something relevant actually changed.
 #
-# Daemon/proxy *.go files are NOT inputs to koto-host — they're bind-
-# mounted at runtime and recompiled via `go run` inside cs_host_go. Only
-# host/Dockerfile (and its installed deps) re-triggers a host-image build.
+# Podman is a BUILD-time dependency only: it compiles the Go binaries (so the
+# host needs no Go toolchain) and builds the guest kernel and rootfs. Nothing
+# koto runs at runtime is a container — the daemon is a systemd service on the
+# host and the TUI is a plain binary.
 
-.PHONY: setup install release-build tui-walk host-build tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -44,11 +45,6 @@ setup: koto
 install: koto
 	@./koto install
 
-# The installed daemon image: the binary baked in, no source mount, no
-# toolchain at runtime. Built by `koto install`; here for CI.
-release-build:
-	podman build -f host/Dockerfile.release --build-arg KOTO_VERSION=$(KOTO_VERSION) -t koto:latest .
-
 # INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
 # worktree — `make host-run INSTANCE=cli`, `make tui INSTANCE=cli`,
 # `make stop INSTANCE=cli`. Every other piece of state (groups/, groups.json,
@@ -81,111 +77,57 @@ define prune-dangling
 	@podman image prune -f >/dev/null 2>&1 || true
 endef
 
-# --- koto-host (daemon image) -------------------------------------------
-# Inputs: just host/Dockerfile. Go sources land via bind mount, recompiled
-# by `go run` inside the container on every host-run.
-$(BUILD)/koto-host: host/Dockerfile | $(BUILD)
-	podman build -t koto-host -f host/Dockerfile .
-	$(prune-dangling)
-	@touch $@
+# --- the daemon --------------------------------------------------------
+# There is no daemon image any more: koto runs directly on the host, and
+# podman is a BUILD-time dependency only (the `koto` target below compiles in
+# a container so the host needs no Go; the guest kernel and rootfs likewise).
+# `make koto` produces the binary; `make install` puts it under systemd.
 
-host-build: $(BUILD)/koto-host
-
-# --- koto-tui (TUI image) -----------------------------------------------
-# Build context stays at project root so the Dockerfile's `COPY protocol/`
-# and `COPY tui/...` paths resolve. Inputs cover the actual sources COPYed.
+# --- koto-tui (host binary) ---------------------------------------------
+# Built in a container so the host needs no Go, but the ARTIFACT is a plain
+# static binary that runs on the host. The TUI used to run inside a container
+# too; that bought nothing (it shells out to nothing, so the supply-chain
+# argument is a property of the binary) and cost the real terminal — TERM was
+# clobbered, notifications had no D-Bus, and it mounted all of creds/.
 TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
 PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto protocol/guest.proto
-$(BUILD)/koto-tui: tui/Dockerfile $(TUI_GO_SRC) $(PROTO_SRC) | $(BUILD)
-	podman build -t koto-tui -f tui/Dockerfile .
-	$(prune-dangling)
-	@touch $@
+koto-tui: $(TUI_GO_SRC) $(PROTO_SRC)
+	@command -v podman >/dev/null || { echo "podman is required to build (sudo dnf install podman / sudo apt install podman)"; exit 1; }
+	@mkdir -p .gocache .gomodcache
+	podman run --rm --security-opt label=disable \
+	  -v $(PWD):/src -w /src/tui \
+	  -v $(PWD)/.gocache:/root/.cache/go-build \
+	  -v $(PWD)/.gomodcache:/go/pkg/mod \
+	  -e CGO_ENABLED=0 -e GOFLAGS= \
+	  docker.io/library/golang:1.24-alpine \
+	  go build -trimpath -ldflags "-s -w" -o /src/koto-tui .
 
-tui-build: $(BUILD)/koto-tui
+tui-build: koto-tui
 
 # --- run / interactive targets ---------------------------------------------
-login: $(BUILD)/koto-host
+# One-time OAuth into ./creds. Uses the host's claude CLI — a runtime
+# dependency now, like the e2fsprogs tools (see `koto setup --check`).
+login:
+	@command -v claude >/dev/null || { echo "claude not found — npm i -g @anthropic-ai/claude-code"; exit 1; }
 	@mkdir -p creds
-	podman run --rm -it --security-opt label=disable -v $(PWD)/creds:/root/.claude --entrypoint claude koto-host auth login
+	HOME=$(PWD)/creds claude auth login
 
-host-run: $(BUILD)/koto-host
-	KOTO_INSTANCE=$(INSTANCE) ./host/run-host.sh
+# Dev: run the daemon in the foreground, straight from source. It puts itself
+# in a user namespace first (daemon/userns.go) so the jailer can hand each VMM
+# its own uid — what the podman container used to provide.
+host-run: koto
+	./koto daemon
 
-# run/tui is the TUI's one writable mount (at /koto-run): tui-state.json
-# (survives /reload now that the dir persists) and tui.log, the DEBUG-default
-# development log (tail -f run/tui/tui.log; KOTO_TUI_LOG / KOTO_TUI_LOG_LEVEL
-# override path/verbosity — see tui/debuglog.go). Nothing daemon-owned lives
-# there, so the sock-only isolation story is unchanged.
-# The /reload inner loop re-invokes `$(MAKE) tui-build` so the same sentinel
-# logic kicks in: if the user edited any tui/*.go before pressing /reload,
-# Make rebuilds; otherwise it's a no-op and the TUI just respawns.
-# --detach-keys="": podman's default detach chord is ctrl-p,ctrl-q, so the
-# attach relay HOLDS a ctrl+p until the next key arrives to see whether it is
-# ctrl+q — the TUI's command palette opened only on the second keypress (the
-# first was released into the pty together with the second, and esc/enter
-# closed the box before a frame drew). Measured 2026-08-25: a lone 0x10 sat
-# in the relay 2s until the next byte; a plain pty delivered it at once. An
-# empty chord disables detaching, which is fine — /exit is how you leave.
-# tui-walk: release gate for the TUI's frame integrity. Drives the built
-# koto-tui image in a pty against the live daemon under a VT emulator (pyte)
-# and fails on any auto-wrap or scroll — a row wider than the terminal or a
-# frame taller than it, the two things that "add rows and break the layout".
-# Walks a throwaway fixture group (spawned, seeded with the hard cases,
-# destroyed); WALK_ARGS=--all also pages every real group's history,
-# read-only. Runs twice: once as a truecolor xterm/kitty and once as a
-# TERM=vt100 — the monochrome leg additionally fails on any 8-bit byte or
-# any SGR color parameter in what the binary writes (a VT100 is 7-bit and
-# has attributes only). Non-destructive by construction: see walk.py.
-tui-walk: $(BUILD)/koto-tui
-	@test -d .venv-tuiwalk || python3 -m venv .venv-tuiwalk
-	@.venv-tuiwalk/bin/pip -q install -r tools/tuiwalk/requirements.txt
-	.venv-tuiwalk/bin/python tools/tuiwalk/walk.py $(WALK_ARGS)
+tui: koto koto-tui
+	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`./koto pki init && ./koto pki client tui\`"; exit 1; }
+	@KOTO_HOME=$(PWD) ./koto tui
 
-tui: $(BUILD)/koto-tui
-	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`make pki-init && make pki-client NAME=tui\`"; exit 1; }
-	@mkdir -p run/tui
-	@while :; do \
-	  podman run --rm -it \
-	    --detach-keys="" \
-	    --network koto-net \
-	    --security-opt label=disable \
-	    -v $(PWD)/creds:/koto-creds:ro \
-	    -v $(PWD)/scripts:/koto-scripts:ro \
-	    -v $(PWD)/prompts:/koto-prompts:ro \
-	    -v $(PWD)/run/tui:/koto-run \
-	    -v /etc/localtime:/etc/localtime:ro \
-	    -e KOTO_TOKEN="$$(cat $(PWD)/creds/token-tui 2>/dev/null)" \
-	    -e KOTO_ENDPOINT=$(CS_HOST_NAME):8443 \
-	    -e TERM_PROGRAM="$$TERM_PROGRAM" \
-	    -e KOTO_TUI_TERM="$$TERM" \
-	    -e KOTO_TUI_NOTIFY="$$KOTO_TUI_NOTIFY" \
-	    -e KOTO_TUI_MONO="$$KOTO_TUI_MONO" \
-	    -e KOTO_TUI_THEME="$$KOTO_TUI_THEME" \
-	    -e COLORTERM="$$COLORTERM" \
-	    -e KOTO_TUI_LOG="$$KOTO_TUI_LOG" \
-	    -e KOTO_TUI_LOG_LEVEL="$$KOTO_TUI_LOG_LEVEL" \
-	    koto-tui; ec=$$?; \
-	  [ $$ec -eq 75 ] || exit $$ec; \
-	  echo "/reload: rebuilding koto-tui…"; \
-	  $(MAKE) tui-build || exit $$?; \
-	done
-
+# Stop the dev daemon. SIGTERM reaches it directly now (no podman in the
+# middle): it stops every microVM so each guest sync+umounts its workspace
+# image, which is what keeps the images clean across restarts.
 stop:
-	# Graceful first: SIGTERM reaches the daemon (PID 1 — see host/Dockerfile
-	# ENTRYPOINT), which stops every microVM so guests sync+umount their
-	# workspace images. rm -f alone SIGKILLs the VMMs and leaves every
-	# running workspace.img dirty. -t 15 sits above the daemon's own 12s
-	# shutdown bound; the container runs --rm, so the follow-up rm -f is
-	# only the already-dead/wedged fallback.
-	-podman stop -t 15 $(CS_HOST_NAME) 2>/dev/null
-	-podman rm -f $(CS_HOST_NAME)
-	# Sweep leftover podman-era sidecar containers (cs_<group>_go, from the
-	# retired group-podman runtime) — NOT daemon containers: cs_host_go and
-	# cs_host_go_<instance> both match `cs_.*_go` too, so without the
-	# exclusion this would tear down every OTHER instance's daemon on any
-	# `make stop INSTANCE=x` (found the hard way — it killed the default
-	# instance while tearing down a test one).
-	@podman ps -a --format '{{.Names}}' | grep -E '^cs_.*_go$$' | grep -v -E '^cs_host_go(_.+)?$$' | xargs -r podman rm -f
+	-pkill -TERM -u $$(id -u) -f '^\./koto daemon$$' 2>/dev/null || true
+	@echo "sent SIGTERM to the dev daemon (if running); installed service: sudo systemctl stop koto"
 
 run:
 	go run ./daemon daemon
@@ -294,7 +236,8 @@ pki-client:
 # the guest kernel (fc-kernel — built with CONFIG_TUN for L3 networking, pinned
 # in build-kernel.sh), and the golden rootfs (fc-rootfs — rebuild after editing
 # sidecar/*.{sh,js} or fcguest/, since microVMs have no live bind mounts).
-# run-host.sh passes /dev/kvm into cs_host automatically when present.
+# The daemon opens /dev/kvm directly; it must be world-accessible because the
+# jailed VMM runs as an unprivileged per-VM id (see checkKVM).
 fc-fetch:
 	./fcguest/fetch-assets.sh
 

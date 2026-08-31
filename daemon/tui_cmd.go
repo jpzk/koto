@@ -1,14 +1,16 @@
 package main
 
-// `koto tui` — attach the terminal UI to an installed daemon. The Makefile's
-// `tui` target does the same thing for a dev clone; this is the installed
-// counterpart, reading everything from the state dir instead of the cwd and
-// dropping the rebuild step (an installed image is immutable — upgrades come
-// from `koto install`).
+// `koto tui` — launch the terminal UI.
 //
-// The exit-75 respawn loop is kept: that is the TUI's /reload, which restarts
-// the process to pick up a state change without dropping the operator back to
-// a shell.
+// The TUI used to run in its own container. That bought nothing: it is a
+// static Go binary that talks gRPC and shells out to nothing, so the
+// supply-chain argument (no interpreter, no shell, pinned deps) is a property
+// of the BINARY and survives running on the host — while the container cost
+// real ergonomics. `podman run -t` overwrote TERM, which is why KOTO_TUI_TERM
+// exists; there was no D-Bus, so desktop notifications had to go out as OSC
+// escapes; and it mounted the whole creds/ directory when it needs four files.
+// Running it directly gets the real terminal back and narrows that mount to
+// nothing at all, since it just reads the files.
 
 import (
 	"flag"
@@ -22,59 +24,75 @@ import (
 func tuiMain(args []string) {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: koto tui [-state DIR] [-image REF]
+		fmt.Fprintln(os.Stderr, `usage: koto tui [-state DIR]
 
-Attaches the koto TUI to the installed daemon. /exit leaves the TUI without
-touching the daemon or any group.`)
+Attaches the koto TUI to the daemon. /exit leaves the TUI without touching the
+daemon or any group.`)
 	}
 	state := fs.String("state", envOr("KOTO_HOME", defaultStateDir), "state directory")
-	image := fs.String("image", "koto-tui", "TUI image")
 	_ = fs.Parse(args)
 
-	creds := filepath.Join(*state, "creds")
-	tokenPath := filepath.Join(creds, "token-tui")
-	token, err := os.ReadFile(tokenPath)
+	bin, err := exec.LookPath("koto-tui")
 	if err != nil {
-		ctlFatal(1, "no TUI token at %s — run `koto pki client -creds %s tui`", tokenPath, creds)
+		// A dev clone builds it beside the repo rather than installing it.
+		local := filepath.Join(*state, "koto-tui")
+		if !exists(local) {
+			if wd, e := os.Getwd(); e == nil && exists(filepath.Join(wd, "koto-tui")) {
+				local = filepath.Join(wd, "koto-tui")
+			}
+		}
+		if !exists(local) {
+			ctlFatal(1, "koto-tui not found on PATH — build it with `make tui-build`, or install with `koto install`")
+		}
+		bin = local
+	}
+
+	creds := filepath.Join(*state, "creds")
+	token, err := os.ReadFile(filepath.Join(creds, "token-tui"))
+	if err != nil {
+		ctlFatal(1, "no TUI token in %s — mint one with `koto pki client -creds %s tui`", creds, creds)
 	}
 	runDir := filepath.Join(*state, "run", "tui")
 	if err := os.MkdirAll(runDir, 0o750); err != nil {
 		ctlFatal(1, "run dir: %v", err)
 	}
 
-	for {
-		argv := []string{"run", "--rm", "-it", "--detach-keys=",
-			"--network", "koto-net", "--security-opt", "label=disable",
-			"-v", creds + ":/koto-creds:ro",
-			"-v", filepath.Join(*state, "prompts") + ":/koto-prompts:ro",
-			"-v", runDir + ":/koto-run",
-			"-v", "/etc/localtime:/etc/localtime:ro",
-			"-e", "KOTO_TOKEN=" + strings.TrimSpace(string(token)),
-			"-e", "KOTO_ENDPOINT=" + installedContainerName + ":8443",
-		}
-		// The container's own TERM is fixed by the image; the TUI reads the
-		// host's real terminal type from KOTO_TUI_TERM instead.
-		for _, k := range []string{"TERM", "COLORTERM", "TERM_PROGRAM",
-			"KOTO_TUI_NOTIFY", "KOTO_TUI_MONO", "KOTO_TUI_THEME",
-			"KOTO_TUI_LOG", "KOTO_TUI_LOG_LEVEL"} {
-			if v := os.Getenv(k); v != "" {
-				name := k
-				if k == "TERM" {
-					name = "KOTO_TUI_TERM"
-				}
-				argv = append(argv, "-e", name+"="+v)
-			}
-		}
-		if scripts := filepath.Join(*state, "scripts"); exists(scripts) {
-			argv = append(argv, "-v", scripts+":/koto-scripts:ro")
-		}
-		argv = append(argv, *image)
+	// The TUI reads only these four files; it is handed their paths rather
+	// than a directory, so nothing else in creds/ is in reach.
+	env := os.Environ()
+	for k, v := range map[string]string{
+		"KOTO_CA":          filepath.Join(creds, "ca.crt"),
+		"KOTO_CERT":        filepath.Join(creds, "client-tui.crt"),
+		"KOTO_KEY":         filepath.Join(creds, "client-tui.key"),
+		"KOTO_TOKEN":       strings.TrimSpace(string(token)),
+		"KOTO_ENDPOINT":    envOr("KOTO_ADDR", "127.0.0.1:8443"),
+		"KOTO_SERVER_NAME": "koto-daemon",
+		"KOTO_PROMPTS_DIR": filepath.Join(*state, "prompts"),
+		"SOCK_PATH":        filepath.Join(runDir, "koto.sock"),
+		// The container had to smuggle the real terminal type in under its own
+		// name because `podman run -t` clobbered TERM. On the host TERM is
+		// already right, but the TUI still reads KOTO_TUI_TERM first, so set
+		// it to agree rather than leaving it stale.
+		"KOTO_TUI_TERM": envOr("TERM", "xterm-256color"),
+	} {
+		env = setEnv(env, k, v)
+	}
+	if scripts := filepath.Join(*state, "scripts"); exists(scripts) {
+		env = setEnv(env, "KOTO_SCRIPTS_DIR", scripts)
+	}
 
-		cmd := exec.Command("podman", argv...)
+	// Exec, don't spawn: the TUI owns the terminal from here, and /reload
+	// (exit 75) is handled by re-execing ourselves.
+	for {
+		cmd := exec.Command(bin)
+		cmd.Env = env
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		err := cmd.Run()
-		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 75 {
-			continue // the TUI's /reload
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() == 75 { // the TUI's /reload
+				continue
+			}
+			os.Exit(ee.ExitCode())
 		}
 		if err != nil {
 			ctlFatal(1, "tui: %v", err)

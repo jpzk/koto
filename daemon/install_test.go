@@ -21,24 +21,36 @@ func TestRenderUnitIsValid(t *testing.T) {
 	unit := renderUnit(me)
 
 	for _, want := range []string{
-		"Type=notify",
-		"ExecStart=/usr/local/bin/koto launch",
+		"Type=exec",
+		"ExecStart=/usr/local/bin/koto daemon",
 		"User=" + me.Username,
-		"Environment=XDG_RUNTIME_DIR=/run/user/" + me.Uid,
 		"EnvironmentFile=" + envFilePath,
-		"Delegate=yes",
+		"Delegate=yes",     // per-VM cgroup caps depend on it
+		"ProtectHome=yes",  // replaces the container's filesystem scoping
+		"ReadWritePaths=",  // the state dir, and only it
 		"WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q\n---\n%s", want, unit)
 		}
 	}
-	// TimeoutStopSec must exceed the daemon's own ~12s VM-stop budget, or
-	// systemd SIGKILLs mid-shutdown and leaves workspace images dirty.
-	if !strings.Contains(unit, "TimeoutStopSec=25") {
-		t.Error("unit must allow more than the daemon's 12s VM-stop budget")
+	// The whole point of the host-service move: nothing in the runtime path
+	// goes through a container any more. If podman reappears here, someone has
+	// reintroduced the dependency this design deliberately dropped.
+	// Directives only: a comment recalling why something changed is useful,
+	// a directive that shells out to podman is the regression.
+	var directives []string
+	for _, line := range strings.Split(unit, "\n") {
+		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
+			directives = append(directives, l)
+		}
 	}
-
+	body := strings.Join(directives, "\n")
+	for _, banned := range []string{"podman", "sdnotify", "XDG_RUNTIME_DIR", "koto launch"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("unit directive still references %q — the daemon runs on the host now\n---\n%s", banned, body)
+		}
+	}
 	bin, err := exec.LookPath("systemd-analyze")
 	if err != nil {
 		t.Skip("systemd-analyze not available")
@@ -91,10 +103,9 @@ func TestKotoHomeFallback(t *testing.T) {
 	}
 }
 
-// TestLaunchArgsShape pins the podman arguments the unit's ExecStart produces.
-// The exec-podman-directly design is load-bearing: podman must be the unit's
-// main process for Type=notify and for SIGTERM to reach the daemon.
-func TestLaunchArgsShape(t *testing.T) {
+// TestCPUQuota pins the fleet CPU ceiling, which moved from podman --cpus to
+// the unit's CPUQuota when the daemon left the container.
+func TestCPUQuota(t *testing.T) {
 	t.Setenv("KOTO_HOME", "/var/lib/koto")
 	t.Setenv("KOTO_HOST_CPUS", "0") // unlimited: no --cpus argument
 	if got := hostCPUs(); got != "" {

@@ -380,8 +380,6 @@ runs as you, with rootless podman, exactly as it does now.`,
 			}
 			return runInstall(installOpts{
 				stateDir: sc.stateDir(),
-				image:    defaultImage,
-				publish:  "127.0.0.1",
 				root:     sc.root,
 				ui:       sc.ui,
 				ctx:      sc,

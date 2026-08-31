@@ -25,14 +25,46 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 )
 
+const (
+	defaultStateDir = "/var/lib/koto"
+	envFilePath     = "/etc/koto/koto.env"
+	unitPath        = "/etc/systemd/system/koto.service"
+)
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// hostCPUs is the fleet-wide CPU ceiling, in whole cores. Default nproc-1 so
+// the host stays responsive whatever the fleet does; "0" means unlimited.
+// Rendered into the unit as CPUQuota (installCPUQuota) — the host counterpart
+// of what podman --cpus used to do.
+func hostCPUs() string {
+	v := os.Getenv("KOTO_HOST_CPUS")
+	if v == "0" {
+		return ""
+	}
+	if v != "" {
+		return v
+	}
+	n := runtime.NumCPU() - 1
+	if n < 1 {
+		n = 1
+	}
+	return strconv.Itoa(n)
+}
+
 type installOpts struct {
 	stateDir string
-	image    string
-	publish  string
 	root     string // the clone
 	ui       *setupUI
 	ctx      *setupCtx
@@ -41,16 +73,14 @@ type installOpts struct {
 func installUsage() {
 	fmt.Fprintln(os.Stderr, `usage: koto install [flags]
 
-Installs koto as a systemd service: builds the release images, creates the
-state directory, installs the koto binary, writes /etc/koto/koto.env and the
-unit, and starts the service. Re-running upgrades in place (config and state
-are preserved).
+Installs koto as a systemd service running directly on the host: creates the
+state directory, installs the koto and koto-tui binaries, writes
+/etc/koto/koto.env and the unit, and starts the service. No container is
+involved at runtime. Re-running upgrades in place (config and state are
+preserved).
 
 flags:
   -state DIR   state directory (default /var/lib/koto)
-  -image REF   image tag to build and run (default localhost/koto:latest)
-  -publish IP  publish the gRPC port on this host address (default 127.0.0.1,
-               "" to keep it off the host entirely)
   -y           accept defaults, never prompt`)
 }
 
@@ -58,8 +88,6 @@ func installMain(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	fs.Usage = installUsage
 	state := fs.String("state", defaultStateDir, "state directory")
-	image := fs.String("image", defaultImage, "image tag")
-	publish := fs.String("publish", "127.0.0.1", "publish gRPC port on this address")
 	assumeYes := fs.Bool("y", false, "accept defaults")
 	noColor := fs.Bool("no-color", false, "disable color")
 	_ = fs.Parse(args)
@@ -73,7 +101,7 @@ func installMain(args []string) {
 	defer stop()
 	sc := &setupCtx{ui: ui, root: root, ctx: ctx}
 	if err := runInstall(installOpts{
-		stateDir: *state, image: *image, publish: *publish, root: root, ui: ui, ctx: sc,
+		stateDir: *state, root: root, ui: ui, ctx: sc,
 	}); err != nil {
 		ctlFatal(1, "install: %v", err)
 	}
@@ -98,28 +126,13 @@ func runInstall(o installOpts) error {
 		return fmt.Errorf("run as your normal user, not root — the service runs rootless podman as you (sudo is used only for the three system files)")
 	}
 
-	// 1. images
-	u.info("building the release image %s", o.image)
-	version, _ := o.ctx.capture("git", "describe", "--tags", "--always", "--dirty")
-	if version == "" {
-		version = kotoVersion
-	}
-	if err := o.ctx.stream("podman", "build", "-f", "host/Dockerfile.release",
-		"--build-arg", "KOTO_VERSION="+version, "-t", o.image, "."); err != nil {
-		return fmt.Errorf("build release image: %w", err)
-	}
-	if !o.ctx.podmanHas("image", "koto-tui") || upgrade {
-		if err := o.ctx.stream("podman", "build", "-f", "tui/Dockerfile", "-t", "koto-tui", "."); err != nil {
-			return fmt.Errorf("build tui image: %w", err)
-		}
-	}
-
-	// 2. state directory
+	// 1. state directory
 	if err := seedStateDir(o, me); err != nil {
 		return err
 	}
 
-	// 3. the koto binary on PATH
+	// 2. the binaries on PATH. No image is built: podman is a BUILD-time
+	// dependency now, and an installed koto runs straight on the host.
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -127,13 +140,20 @@ func runInstall(o installOpts) error {
 	if err := sudoRun(u, "install", "-m", "0755", self, "/usr/local/bin/koto"); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
+	if tui := filepath.Join(o.root, "koto-tui"); exists(tui) {
+		if err := sudoRun(u, "install", "-m", "0755", tui, "/usr/local/bin/koto-tui"); err != nil {
+			return fmt.Errorf("install tui binary: %w", err)
+		}
+	} else {
+		u.warn("koto-tui not built (run `make tui-build`) — installing without the TUI")
+	}
 
-	// 4. /etc/koto/koto.env
+	// 3. /etc/koto/koto.env
 	if err := writeEnvFile(o); err != nil {
 		return err
 	}
 
-	// 5. the unit
+	// 4. the unit
 	unit := renderUnit(me)
 	changed, err := sudoWriteIfChanged(u, unitPath, unit, "0644")
 	if err != nil {
@@ -145,13 +165,9 @@ func runInstall(o installOpts) error {
 		}
 	}
 
-	// 6. linger — a system unit running rootless podman as this user needs
-	// /run/user/<uid> and the delegated cgroup tree to exist before login.
-	if err := sudoRun(u, "loginctl", "enable-linger", me.Username); err != nil {
-		u.warn("enable-linger failed: %v (the service may not survive a reboot)", err)
-	}
-
-	// 7. start
+	// 5. start. No loginctl enable-linger: that existed so rootless podman
+	// had a live user manager and delegated cgroup tree at boot. The daemon
+	// no longer runs under podman, so the service stands on its own.
 	verb := "enable"
 	if upgrade {
 		verb = "restart"
@@ -162,6 +178,11 @@ func runInstall(o installOpts) error {
 		return err
 	}
 	u.ok("service %sd", verb)
+
+	version, _ := o.ctx.capture("git", "describe", "--tags", "--always", "--dirty")
+	if version == "" {
+		version = kotoVersion
+	}
 	if err := os.WriteFile(filepath.Join(o.stateDir, ".koto-version"), []byte(version+"\n"), 0o644); err != nil {
 		u.warn("could not record version: %v", err)
 	}
@@ -305,14 +326,13 @@ func seedStateDir(o installOpts, me *user.User) error {
 func writeEnvFile(o installOpts) error {
 	defaults := [][2]string{
 		{"KOTO_HOME", o.stateDir},
-		{"KOTO_IMAGE", o.image},
-		{"KOTO_BIND", "0.0.0.0"},
+		// Loopback, not 0.0.0.0. The container set 0.0.0.0 because it was
+		// binding inside its own network namespace and needed a host publish
+		// to be reachable at all; on the host that same value would expose the
+		// control plane on every interface. Widen it deliberately if you want
+		// remote clients, and reissue the server cert with a matching SAN.
+		{"KOTO_BIND", "127.0.0.1"},
 		{"KOTO_PORT", "8443"},
-		// Published on loopback by default: rootless podman container IPs are
-		// not routable from the host, so without this `koto ctl` and the TUI
-		// on this machine could not reach the daemon at all. mTLS + bearer
-		// token still gate every call.
-		{"KOTO_PUBLISH", o.publish},
 	}
 	optional := [][2]string{
 		{"KOTO_HOST_CPUS", ""},
@@ -384,39 +404,74 @@ func renderUnit(me *user.User) string {
 		gid = g.Name
 	}
 	return fmt.Sprintf(`[Unit]
-Description=koto daemon (rootless podman, user %[1]s)
+Description=koto daemon (agent microVM orchestrator, user %[1]s)
 Documentation=https://github.com/jpzk/koto
 Wants=network-online.target
-After=network-online.target user@%[2]s.service
-# The user manager (plus linger, enabled by the installer) is what guarantees
-# /run/user/%[2]s and this user's delegated cgroup tree exist at boot — a
-# system unit does not create them.
-Requires=user@%[2]s.service
+After=network-online.target
 
 [Service]
-Type=notify
-NotifyAccess=all
+Type=exec
 User=%[1]s
 Group=%[3]s
-# Not set for us by a system unit, and rootless podman needs it.
-Environment=XDG_RUNTIME_DIR=/run/user/%[2]s
 EnvironmentFile=%[4]s
-# Lets rootless podman create sub-cgroups so per-VM CPU/memory limits work
-# (daemon/fccgroup.go); without it the daemon degrades to cgroup=off.
+WorkingDirectory=%[5]s
+ExecStart=/usr/local/bin/koto daemon
+
+# Delegate gives this service its own writable cgroup subtree, which is what
+# lets the daemon place each Firecracker process in a vms/<group> leaf with
+# cpu.weight and memory.high (daemon/fccgroup.go). Without it the daemon
+# degrades to cgroup=off — the fleet still runs, it just loses per-VM caps.
 Delegate=yes
-ExecStartPre=-%[5]s network create koto-net
-ExecStart=/usr/local/bin/koto launch
-ExecStop=%[5]s stop -t 15 koto
-# SIGTERM travels systemd -> podman (the exec'd main process) -> the daemon as
-# PID 1 -> every microVM, so each guest sync+umounts its workspace image. The
-# daemon bounds that at ~12s; 25 leaves room before systemd escalates.
+# Fleet-wide CPU ceiling. The container used podman --cpus for this; on the
+# host it is the unit's own quota. 0%% of the setting means unset, so this is
+# written only when KOTO_HOST_CPUS asks for it (see installCPUQuota).
+%[6]s
+
+# Filesystem scoping, replacing what the container's mount list used to give
+# us — and rather more legible: the daemon can see its own state and nothing
+# else of yours. ProtectHome is the one that matters, since the blast radius
+# we care about is the rest of $HOME (~/.ssh, ~/.gnupg, other projects).
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=%[5]s
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=no
+NoNewPrivileges=no
+RestrictSUIDSGID=no
+
+# SIGTERM reaches the daemon directly now (no podman in between); it stops
+# every microVM so each guest sync+umounts its workspace image. The daemon
+# bounds that at ~12s, and the userns supervisor forwards the signal to the
+# real daemon process.
+KillSignal=SIGTERM
 TimeoutStopSec=25
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, me.Username, me.Uid, gid, envFilePath, podmanPath())
+`, me.Username, me.Uid, gid, envFilePath, stateDirOf(), installCPUQuota())
+}
+
+// stateDirOf is the unit's WorkingDirectory and its one writable path. It is
+// resolved at install time so the unit stays literal.
+var stateDirOf = func() string { return envOr("KOTO_HOME", defaultStateDir) }
+
+// installCPUQuota renders the fleet CPU ceiling as a systemd directive. The
+// container used podman --cpus; the unit's CPUQuota is the same knob. Default
+// is nproc-1 so the host stays responsive whatever the fleet does, and
+// KOTO_HOST_CPUS=0 means unlimited (no directive at all).
+func installCPUQuota() string {
+	n := hostCPUs()
+	if n == "" {
+		return "# CPUQuota unset (KOTO_HOST_CPUS=0)"
+	}
+	cores, err := strconv.Atoi(n)
+	if err != nil || cores < 1 {
+		return "# CPUQuota unset (unparsable KOTO_HOST_CPUS)"
+	}
+	return fmt.Sprintf("CPUQuota=%d%%", cores*100)
 }
 
 // ---- privileged helpers ----------------------------------------------------
