@@ -53,10 +53,16 @@ PUBLISH_ARG=""
 [ -n "${KOTO_PUBLISH:-}" ] && PUBLISH_ARG="-p ${KOTO_PUBLISH}:${KOTO_PORT}"
 # Firecracker runtime: pass /dev/kvm through when the host has it so the
 # daemon can boot microVM groups (config.json "runtime": "firecracker").
-# /dev/kvm is 0666 on Fedora — no group juggling needed. Hosts without KVM
+# /dev/kvm is 0666 on Fedora; 0660 root:kvm on Ubuntu — hence keep-groups
+# below, plus the user being in the kvm group. Hosts without KVM
 # still run fine; the fc runtime just fails its preflight with a clear error.
+# --group-add keep-groups keeps our supplementary groups across the userns
+# mapping (so a host user in the kvm group still has it inside). It is NOT the
+# whole story where /dev/kvm is 0660 root:kvm (Ubuntu): the jailed VMM drops to
+# a per-VM uid with no groups at all (fcjail.go), so the device needs its world
+# bits — a udev rule on the host. See checkKVM in daemon/setup_checks.go.
 KVM_ARG=""
-[ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm"
+[ -e /dev/kvm ] && KVM_ARG="--device /dev/kvm --group-add keep-groups"
 # KOTO_HOST_CPUS: fleet-wide CPU ceiling on cs_host — daemon, proxy and
 # every microVM together can never exceed this many host cores (podman
 # --cpus = cgroup cpu.max on the container scope; cpu is delegated rootless).

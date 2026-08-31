@@ -365,6 +365,16 @@ func writeEnvFile(o installOpts) error {
 	return err
 }
 
+// podmanPath resolves podman for the unit's ExecStartPre/ExecStop, which
+// systemd requires to be absolute. /usr/bin/podman on both Fedora and Ubuntu,
+// but resolving means a podman installed anywhere else still works.
+func podmanPath() string {
+	if p, err := exec.LookPath("podman"); err == nil {
+		return p
+	}
+	return "/usr/bin/podman"
+}
+
 // renderUnit builds the service unit. Values are baked in literally rather
 // than using systemd specifiers, so `systemctl cat koto` shows the operator
 // exactly what will run.
@@ -394,9 +404,9 @@ EnvironmentFile=%[4]s
 # Lets rootless podman create sub-cgroups so per-VM CPU/memory limits work
 # (daemon/fccgroup.go); without it the daemon degrades to cgroup=off.
 Delegate=yes
-ExecStartPre=-/usr/bin/podman network create koto-net
+ExecStartPre=-%[5]s network create koto-net
 ExecStart=/usr/local/bin/koto launch
-ExecStop=/usr/bin/podman stop -t 15 koto
+ExecStop=%[5]s stop -t 15 koto
 # SIGTERM travels systemd -> podman (the exec'd main process) -> the daemon as
 # PID 1 -> every microVM, so each guest sync+umounts its workspace image. The
 # daemon bounds that at ~12s; 25 leaves room before systemd escalates.
@@ -406,7 +416,7 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, me.Username, me.Uid, gid, envFilePath)
+`, me.Username, me.Uid, gid, envFilePath, podmanPath())
 }
 
 // ---- privileged helpers ----------------------------------------------------
