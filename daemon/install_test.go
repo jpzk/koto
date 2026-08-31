@@ -175,3 +175,27 @@ func TestMergeRegistriesAddsNewIdentities(t *testing.T) {
 		t.Errorf("installed token was overwritten by the clone's: %s", toks)
 	}
 }
+
+// TestUnitPointsHomeAtKotoCreds guards a bug the de-containerization
+// introduced. The container mounted creds/ AT /root/.claude, so $HOME/.claude
+// WAS koto's credential dir. On the host, leaving HOME alone sends the proxy's
+// default CRED_PATH — and the claude CLI it shells out to for token refresh —
+// at the operator's PERSONAL ~/.claude. That silently breaks the trust model's
+// stated property that koto's credentials are dedicated, and it fails open:
+// everything keeps working, using the wrong credentials.
+func TestUnitPointsHomeAtKotoCreds(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	unit := renderUnit(me)
+	want := "Environment=HOME=" + stateDirOf()
+	if !strings.Contains(unit, want) {
+		t.Errorf("unit must set %q so $HOME/.claude resolves to koto's creds\n---\n%s", want, unit)
+	}
+	// And it must not be the invoking user's real home, which is the failure
+	// mode: the daemon would read ~/.claude/.credentials.json.
+	if strings.Contains(unit, "Environment=HOME="+me.HomeDir) {
+		t.Error("unit points HOME at the operator's personal home directory")
+	}
+}

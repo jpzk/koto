@@ -157,13 +157,20 @@ tui-build: koto-tui
 login:
 	@command -v claude >/dev/null || { echo "claude not found — npm i -g @anthropic-ai/claude-code"; exit 1; }
 	@mkdir -p creds
-	HOME=$(PWD)/creds claude auth login
+	@test -e .claude || ln -s creds .claude
+	@# HOME=$(PWD) so claude writes ./creds/.credentials.json via the symlink,
+	@# never touching your personal ~/.claude.
+	HOME=$(PWD) claude auth login
 
 # Dev: run the daemon in the foreground, straight from source. It puts itself
 # in a user namespace first (daemon/userns.go) so the jailer can hand each VMM
 # its own uid — what the podman container used to provide.
 host-run: koto
-	./koto daemon
+	@# $HOME/.claude must resolve to ./creds, or the proxy and the `claude` it
+	@# shells out to for token refresh read your PERSONAL ~/.claude. The
+	@# container got this by mounting creds/ at /root/.claude.
+	@test -e .claude || ln -s creds .claude
+	HOME=$(PWD) ./koto daemon
 
 tui: koto koto-tui
 	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`./koto pki init && ./koto pki client tui\`"; exit 1; }
