@@ -806,6 +806,13 @@ which is worth knowing before auditing an installed host:
   so this exposes the port to *local* processes that already hold a client
   identity, not to the network. Publishing beyond loopback is an explicit
   `koto.env` edit.
+- **`koto setup` mints TWO client identities**, not one: `tui` with the
+  `admin` role (the TUI needs RunScript/AttachShell), and `agent` with the
+  seeded least-privilege `agent` role — because `koto ctl` defaults to the
+  client name `agent`, and without it the `koto ctl list` the wizard hands
+  you at the end fails on a missing token. So the default CLI identity can
+  read and converse with any group but cannot stop, destroy, reconfigure or
+  run scripts; reach for `KOTO_CLIENT=tui` when an admin verb is needed.
 - **`/usr/local/bin/koto` is root-owned and runs as the operator**; the same
   binary is the daemon, the ctl client and the installer. Write access to it
   is host-user-equivalent, which is the tier-1 assumption already.

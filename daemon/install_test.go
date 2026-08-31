@@ -109,3 +109,58 @@ func TestLaunchArgsShape(t *testing.T) {
 		t.Errorf("default cpu cap should be nproc-1, got %q", got)
 	}
 }
+
+// TestMergeRegistriesAddsNewIdentities pins the fix for a bug found installing
+// on a clean machine: clients.allow and tokens.json are cumulative registries,
+// and copying them only-if-absent left an identity minted during an upgrade
+// with a certificate in the state dir but no allowlist entry — the client then
+// failed the TLS handshake with a bare "tls: bad certificate".
+func TestMergeRegistriesAddsNewIdentities(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+	for _, d := range []string{src, dst} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// installed: tui only. clone: tui + a freshly minted agent.
+	if err := os.WriteFile(filepath.Join(dst, "clients.allow"), []byte("aa11 tui\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "clients.allow"), []byte("aa11 tui\nbb22 agent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "tokens.json"),
+		[]byte(`{"tui":{"hash":"INSTALLED","roles":["admin"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "tokens.json"),
+		[]byte(`{"tui":{"hash":"CLONE","roles":["admin"]},"agent":{"hash":"NEW","roles":["agent"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mergeClientsAllow(filepath.Join(src, "clients.allow"), filepath.Join(dst, "clients.allow")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeTokens(filepath.Join(src, "tokens.json"), filepath.Join(dst, "tokens.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	allow, _ := os.ReadFile(filepath.Join(dst, "clients.allow"))
+	if !strings.Contains(string(allow), "bb22") {
+		t.Errorf("new fingerprint not merged: %q", allow)
+	}
+	if strings.Count(string(allow), "aa11") != 1 {
+		t.Errorf("existing fingerprint duplicated: %q", allow)
+	}
+
+	toks, _ := os.ReadFile(filepath.Join(dst, "tokens.json"))
+	if !strings.Contains(string(toks), "NEW") {
+		t.Errorf("new token entry not merged: %s", toks)
+	}
+	// An identity already installed must win: silently replacing its hash
+	// would revoke a token the operator is actively using.
+	if !strings.Contains(string(toks), "INSTALLED") || strings.Contains(string(toks), "CLONE") {
+		t.Errorf("installed token was overwritten by the clone's: %s", toks)
+	}
+}

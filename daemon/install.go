@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -192,9 +193,22 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// answers, and every agent turn then fails on auth. Caught installing on
 	// a clean machine; keep this list and writeEnvFile's reader in step.
 	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
-		"clients.allow", "tokens.json", "acl.json", ".credentials.json",
-		"venice.key", "anthropic-api-key"} {
+		"acl.json", ".credentials.json", "venice.key", "anthropic-api-key"} {
 		_ = copyIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
+	}
+	// clients.allow and tokens.json are cumulative REGISTRIES, not one-shot
+	// files: copy-if-absent left an upgrade's newly minted identities with a
+	// cert in the state dir but no allowlist entry, so the client failed the
+	// handshake with a bare "tls: bad certificate". Merge instead — additive
+	// only, so an identity minted directly against the state dir is never
+	// clobbered by a stale one in the clone.
+	if err := mergeClientsAllow(filepath.Join(srcCreds, "clients.allow"),
+		filepath.Join(dstCreds, "clients.allow")); err != nil {
+		return fmt.Errorf("clients.allow: %w", err)
+	}
+	if err := mergeTokens(filepath.Join(srcCreds, "tokens.json"),
+		filepath.Join(dstCreds, "tokens.json")); err != nil {
+		return fmt.Errorf("tokens.json: %w", err)
 	}
 	if entries, err := os.ReadDir(srcCreds); err == nil {
 		for _, e := range entries {
@@ -424,6 +438,79 @@ func sudoWriteIfChanged(u *setupUI, path, content, mode string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// mergeClientsAllow unions the fingerprint lines of two allowlists, keyed by
+// fingerprint so a name appearing twice doesn't accumulate duplicate lines.
+func mergeClientsAllow(src, dst string) error {
+	if !exists(src) {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, path := range []string{dst, src} { // dst first: installed entries keep their order
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+				continue
+			}
+			if fp := strings.ToLower(fields[0]); !seen[fp] {
+				seen[fp] = true
+				out = append(out, strings.TrimSpace(line))
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return os.WriteFile(dst, []byte(strings.Join(out, "\n")+"\n"), 0o644)
+}
+
+// mergeTokens adds token entries the installed registry doesn't have yet.
+// Existing names are left untouched: a working installed identity outranks
+// whatever the clone happens to hold.
+func mergeTokens(src, dst string) error {
+	if !exists(src) {
+		return nil
+	}
+	load := func(p string) (map[string]json.RawMessage, error) {
+		m := map[string]json.RawMessage{}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return m, nil // absent is empty, not an error
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, fmt.Errorf("%s is corrupt — fix it on disk first: %w", p, err)
+		}
+		return m, nil
+	}
+	from, err := load(src)
+	if err != nil {
+		return err
+	}
+	into, err := load(dst)
+	if err != nil {
+		return err
+	}
+	added := false
+	for name, entry := range from {
+		if _, ok := into[name]; !ok {
+			into[name] = entry
+			added = true
+		}
+	}
+	if !added {
+		return nil
+	}
+	b, err := json.MarshalIndent(into, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, append(b, '\n'), 0o600)
 }
 
 func copyFile(src, dst string) error {
