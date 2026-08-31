@@ -145,7 +145,7 @@ tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, 
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
-Makefile             sentinel-driven: host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / fc-assets (= fc-fetch + fc-kernel + fc-rootfs)
+Makefile             sentinel-driven: setup (= the newcomer's one command: containerized `koto` build + wizard) / install / release-build / host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / fc-assets (= fc-fetch + fc-kernel + fc-rootfs)
 tools/tuiwalk/       release gate: pyte-driven TUI walk (make tui-walk) — non-destructive, see its docstring
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
                      into cs_tui at /koto-scripts; run in the focused group's
@@ -160,9 +160,19 @@ run/                 daemon runtime droppings (gitignored); run/fc/ holds per-VM
 metrics.jsonl        per-request metric line (gitignored)
 ```
 
-## Build & run
+## Build & run (dev clone)
+
+**This is the DEVELOPMENT path — running koto out of a checkout, with
+host-side Go recompiled on every daemon start.** A first-time user on a fresh
+machine runs `make setup` instead (see "Install vs. dev clone" above), which
+wraps all of the below plus the PKI, credentials and a systemd install. Don't
+recite this sequence to someone who just wants koto running; recite it to
+someone working ON koto.
 
 ```sh
+make setup         # NOT this path: the guided install (host checks, images,
+                   #   assets, PKI, creds, systemd service). `koto setup --check`
+                   #   is also the fastest way to diagnose a broken environment.
 make host-build    # builds the koto-host image (cs_host_go)
 make fc-assets     # fetch firecracker (pinned v1.16.1) + BUILD the guest kernel (fc-kernel;
                    #   FC's CI vmlinux lacks CONFIG_TUN) + build golden rootfs.img
@@ -776,6 +786,33 @@ overrides it, so every per-group credential-injecting proxy port listens on all
 interfaces inside `cs_host` and is reachable from anything on `koto-net`,
 `cs_tui` included. Any doc that says otherwise is wrong.
 
+## Trust model addendum: installed mode
+
+Installing does not change the tier boundaries — the daemon still runs
+rootless as the invoking user, groups are still microVMs, the proxy is still
+the only credential holder. It does move and add a little tier-1 surface,
+which is worth knowing before auditing an installed host:
+
+- **`/etc/koto/koto.env` is a new credential location** (root-owned 0600).
+  When the operator chose API-key auth, the key is in this file — outside
+  `creds/`, which every prior audit treated as the one place secrets live.
+  The wizard also leaves a copy at `<state>/creds/anthropic-api-key` (0600),
+  which is what the installer reads on a re-run.
+- **`KOTO_PUBLISH=127.0.0.1` is on by default when installed**, so the gRPC
+  port IS on the host loopback — unlike a dev clone, where it is off unless
+  asked for. It has to be: rootless podman container IPs are not routable
+  from the host, so nothing on the machine could otherwise reach the daemon.
+  mTLS + client-fingerprint allowlist + bearer token still gate every call,
+  so this exposes the port to *local* processes that already hold a client
+  identity, not to the network. Publishing beyond loopback is an explicit
+  `koto.env` edit.
+- **`/usr/local/bin/koto` is root-owned and runs as the operator**; the same
+  binary is the daemon, the ctl client and the installer. Write access to it
+  is host-user-equivalent, which is the tier-1 assumption already.
+- The state dir (`/var/lib/koto`, 0750, owned by the invoking user) holds
+  exactly what a clone held: `creds/` (CA key included), group workspaces,
+  guest assets. Its blast radius equals a clone's.
+
 ## Driving the daemon for tests
 
 The TUI is a thin client. **The old "write base64 to `groups/<g>/.cs/in`" recipe is
@@ -850,4 +887,11 @@ missed, and exits at `turn_end`.
 - **[podman] Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing podman sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
 - **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent` (which now runs the turns itself — `fcguest/turn.go`), node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make fc-rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `docs/firecracker-vsock.md`. the host-side `*.go` (daemon/fc/proxy) is still live (the entrypoint rebuilds and re-execs on `make host-run`), so only guest-side changes need the rootfs rebuild.
 - **For testing, prefer FIFO writes over the TUI.** Write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic, no UI in the way.
+- **Installed mode has no live reload at all** — `koto install` bakes the
+  daemon into the image, so changing daemon Go and restarting the service
+  runs the OLD binary. Iterate in a dev clone (`make host-run`); re-run
+  `koto install` from the clone to ship the change. A clone and an installed
+  service coexist: different container names (`cs_host_go` vs `koto`),
+  different state dirs, different images — but they share `koto-net` and
+  the host's KVM/RAM budget, so a fleet cap counts both.
 - **Each non-trivial fix this codebase has is one commit** — `git log --oneline` is the design rationale log. When something looks weird and you can't tell why, the commit message will say.
