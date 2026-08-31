@@ -305,8 +305,16 @@ func pkiReadCert(path string) (*x509.Certificate, error) {
 // of the Makefile targets, sharing their file formats and idempotency rules.
 func pkiCliMain(args []string) {
 	usage := func() {
-		fmt.Fprintln(os.Stderr, `usage: koto pki init [-creds DIR] [-san DNS:a,IP:1.2.3.4]
-       koto pki client [-creds DIR] [-role r1,r2] <name>`)
+		fmt.Fprintln(os.Stderr, `usage: koto pki init   [-creds DIR] [-san DNS:a,IP:1.2.3.4]
+       koto pki client [-creds DIR] [-role r1,r2] <name>
+       koto pki server [-creds DIR] -san DNS:a,IP:1.2.3.4
+
+init   creates the CA (if absent), the daemon server cert and acl.json
+client mints a client identity: cert, key and bearer token
+server reissues ONLY the server cert — use it to add a name or address
+       after the fact (a phone, a LAN IP). Existing clients keep working:
+       the CA is untouched, so nothing they hold is invalidated. Restart
+       the daemon to pick it up.`)
 		os.Exit(2)
 	}
 	if len(args) < 1 {
@@ -322,6 +330,31 @@ func pkiCliMain(args []string) {
 			ctlFatal(1, "pki init: %v", err)
 		}
 		fmt.Printf("CA + server cert ready in %s. Distribute ca.crt to clients.\n", *creds)
+	case "server":
+		// Reissuing the server cert is the one regeneration that is always
+		// safe: it is signed by the same CA, so every client identity keeps
+		// verifying. Adding a SAN after the fact is a normal operation
+		// (someone wants the TUI on their phone), not a reinstall.
+		fs := newPkiFlags("pki server")
+		creds := fs.String("creds", "creds", "creds directory")
+		san := fs.String("san", "", "server cert SANs (comma-separated)")
+		_ = fs.Parse(args[1:])
+		if *san == "" {
+			ctlFatal(2, "pki server: -san is required (e.g. -san %s,IP:192.168.1.20)",
+				strings.Join(defaultServerSANs, ","))
+		}
+		caKey, err := pkiReadKey(filepath.Join(*creds, "ca.key"))
+		if err != nil {
+			ctlFatal(1, "pki server: ca.key: %v", err)
+		}
+		caCert, err := pkiReadCert(filepath.Join(*creds, "ca.crt"))
+		if err != nil {
+			ctlFatal(1, "pki server: ca.crt: %v", err)
+		}
+		if err := pkiServerCert(*creds, caKey, caCert, strings.Split(*san, ",")); err != nil {
+			ctlFatal(1, "pki server: %v", err)
+		}
+		fmt.Printf("server cert reissued for %s — restart the daemon to apply\n", *san)
 	case "client":
 		fs := newPkiFlags("pki client")
 		creds := fs.String("creds", "creds", "creds directory")
