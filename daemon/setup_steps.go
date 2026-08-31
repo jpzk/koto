@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -145,12 +146,13 @@ existing CA is never regenerated — that would invalidate every client you
 have already issued.`,
 		detect: func(sc *setupCtx) (bool, string) {
 			c := sc.credsDir()
-			for _, f := range []string{"ca.crt", "server.crt", "client-tui.crt", "token-tui"} {
+			for _, f := range []string{"ca.crt", "server.crt", "client-tui.crt", "token-tui",
+				"client-agent.crt", "token-agent"} {
 				if !exists(filepath.Join(c, f)) {
 					return false, "missing creds/" + f
 				}
 			}
-			return true, "CA, server cert and tui client present"
+			return true, "CA, server cert, tui and agent clients present"
 		},
 		run: func(sc *setupCtx) error {
 			sans := defaultServerSANs
@@ -170,6 +172,17 @@ have already issued.`,
 					return err
 				}
 				sc.ui.info("minted the 'tui' client identity (role: admin)")
+			}
+			// `koto ctl` defaults to the client name "agent", so without this
+			// the `koto ctl list` the wizard hands you at the end fails on a
+			// missing token. Least privilege by default: the seeded agent role
+			// can read and converse but not manage lifecycle — reach for
+			// KOTO_CLIENT=tui when you need an admin verb.
+			if !exists(filepath.Join(sc.credsDir(), "client-agent.crt")) {
+				if _, err := pkiClient(sc.credsDir(), "agent", []string{"agent"}); err != nil {
+					return err
+				}
+				sc.ui.info("minted the 'agent' client identity for `koto ctl` (role: agent)")
 			}
 			return nil
 		},
@@ -201,6 +214,16 @@ Anthropic's terms for which fits your use — the README has the details.`,
 		},
 		run: func(sc *setupCtx) error {
 			u := sc.ui
+			// Credentials are required to finish, and both routes need a real
+			// person: a browser for OAuth, a typed secret for the key. Under
+			// -y there is nobody to ask, so say so instead of handing a tty
+			// that isn't there to `claude auth login` and hanging.
+			if u.yes {
+				return errors.New("credentials are required and cannot be set up non-interactively\n" +
+					"  run `koto setup --only auth` from a terminal, or provide one first:\n" +
+					"    export ANTHROPIC_API_KEY=sk-ant-…    (picked up as-is), or\n" +
+					"    write the key to creds/anthropic-api-key (chmod 600)")
+			}
 			switch u.choice("How do you want to authenticate?",
 				[]string{"Claude subscription (OAuth login in a browser)", "Anthropic API key"}, 0) {
 			case 0:
@@ -424,15 +447,21 @@ func stepHandoff() setupStep {
 		id:      "done",
 		title:   "Ready",
 		explain: ``,
+		quiet:   true,
 		run: func(sc *setupCtx) error {
 			u := sc.ui
 			u.blank()
 			u.printf("%s", u.bold(u.green("koto is installed and running.")))
 			u.blank()
-			u.printf("  %s   open the terminal UI", u.bold("koto tui"))
-			u.printf("  %s  list your groups", u.bold("koto ctl list"))
-			u.printf("  %s   what the service is doing", u.bold("systemctl status koto"))
-			u.printf("  %s  daemon logs", u.bold("journalctl -u koto -f"))
+			// Pad on the plain text, not the styled string: the bold escapes
+			// are zero-width, so %-22s over them mis-aligns every row.
+			cmd := func(c, what string) {
+				u.printf("  %s%s%s", u.bold(c), strings.Repeat(" ", max(2, 24-len(c))), what)
+			}
+			cmd("koto tui", "open the terminal UI")
+			cmd("koto ctl list", "list your groups")
+			cmd("systemctl status koto", "what the service is doing")
+			cmd("journalctl -u koto -f", "daemon logs")
 			u.blank()
 			u.printf("  state:  %s", defaultStateDir)
 			u.printf("  config: %s  (edit, then `sudo systemctl restart koto`)", envFilePath)

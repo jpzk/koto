@@ -43,6 +43,9 @@ type setupStep struct {
 	run    func(*setupCtx) error
 	// verify defaults to re-running detect.
 	verify func(*setupCtx) error
+	// quiet suppresses the trailing "✓ <id> done" line — for the closing
+	// step, whose own output is the message.
+	quiet bool
 }
 
 func setupUsage() {
@@ -235,7 +238,9 @@ asking.`)
 				return 1
 			}
 		}
-		u.ok("%s done", s.id)
+		if !s.quiet {
+			u.ok("%s done", s.id)
+		}
 	}
 	return 0
 }
