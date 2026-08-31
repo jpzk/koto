@@ -229,12 +229,19 @@ tmux, sudo, …) + claude-code;
 build-only = `ubuntu:24.04` (kernel) and `golang:1.24-alpine` (protoc,
 fc-agent).
 
-**Known-floating** (what a formal SBOM would flag): `@anthropic-ai/
-claude-code` is installed unpinned by npm in both cs_host and the guest
-rootfs — it resolves to latest on every image build; the dnf packages and
-the base-image tags (`fedora:44`, `golang:1.24-alpine`, `ubuntu:24.04`)
-float within their tags. The Go trees are fully locked; the OS-package and
-claude-code layers are the accepted moving parts.
+**Pinned**: every build container is pinned by DIGEST, not tag — the Go
+toolchain, the alpine that writes the guest filesystem, the ubuntu that
+compiles the guest kernel, the fedora the guest rootfs is built from, and
+Firecracker's own `fcuvm` build image. Source is pinned by commit: the guest
+kernel (tag + verified commit) and Firecracker (tag + verified commit; the
+prebuilt path verifies a SHA256 instead). The Go module trees are locked by
+`go.sum`.
+
+**Known-floating** (what a formal SBOM would still flag): `@anthropic-ai/
+claude-code` is installed unpinned by npm into the guest rootfs — it resolves
+to latest on every rootfs build — and the `dnf`/`apk` packages inside the
+build and guest images float within their pinned base images. Those are the
+accepted moving parts; everything above them is fixed.
 
 ## Host requirements
 

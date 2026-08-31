@@ -33,9 +33,11 @@ mkdir -p "$OUTDIR"
 CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || true)}"
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to build the rootfs"; exit 1; }
 
-# Pinned by digest for the same reason the Go image is: a moving tag changes
-# the e2fsprogs and busybox underneath the image format.
-MKFS_IMAGE="${MKFS_IMAGE:-docker.io/library/alpine:3.22}"
+# Pinned by DIGEST for the same reason the Go image is: alpine:3.22 is a
+# moving tag, so the e2fsprogs that writes the filesystem would change under
+# us. Bump with:
+#   podman manifest inspect docker.io/library/alpine:3.22
+MKFS_IMAGE="${MKFS_IMAGE:-docker.io/library/alpine@sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6}"
 
 # Which uid the finished image should be chowned to, expressed INSIDE the
 # container — and it differs by engine, which is easy to get backwards.
@@ -50,7 +52,7 @@ if [ "$("$CONTAINER" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" =
 else
   CHOWN_TO="$(id -u):$(id -g)"
 fi
-GO_IMAGE="${GO_IMAGE:-docker.io/library/golang:1.24-alpine}"
+GO_IMAGE="${GO_IMAGE:-docker.io/library/golang@sha256:757779acac4af1b349a20f357c7296097b4a0b89da4ad0e370b339060077282a}"
 
 echo "==> building fc-agent (static)  [$(basename "$CONTAINER")]"
 mkdir -p "$HERE/.gocache/mod"

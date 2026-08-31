@@ -32,7 +32,9 @@ KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.176-43.358.amzn2023}"
 # this, not the f3ba04a… tag-object sha from `git ls-remote refs/tags/…`).
 KERNEL_COMMIT="${KERNEL_COMMIT:-0f7eec7689f13075e603ae2e86d3353c6cb13b24}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
-BUILDER="${BUILDER:-docker.io/library/ubuntu:24.04}"        # Firecracker's CI build OS
+# Pinned by DIGEST: the builder image decides the compiler that produces
+# vmlinux, so a moving tag means a moving kernel binary.
+BUILDER="${BUILDER:-docker.io/library/ubuntu@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316}"        # Firecracker's CI build OS
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 
 echo "==> building guest vmlinux ($KERNEL_TAG + CONFIG_TUN)"

@@ -10,7 +10,10 @@
 # This image is never run as a container — build-rootfs.sh exports its
 # filesystem into an ext4 image that Firecracker attaches read-only as the
 # root drive (shared by every group VM).
-FROM fedora:44
+# Pinned by DIGEST so a rootfs rebuild is reproducible; `fedora:44` moves as
+# the release gets updates. Bump deliberately (and rebuild the rootfs) with:
+#   podman manifest inspect docker.io/library/fedora:44
+FROM docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
 
 RUN dnf install -y --setopt=install_weak_deps=False \
       bash \
