@@ -238,8 +238,10 @@ claude-code layers are the accepted moving parts.
 
 ## Host requirements
 
-Everything runs rootless as the host user; nothing is installed on or
-configured into the host system itself. What the host must provide:
+Everything runs rootless as the host user. A dev clone touches nothing
+outside it; `koto install` adds exactly three system files (the `koto`
+binary, `/etc/koto/koto.env`, the systemd unit) and the service still runs
+rootless, as you. What the host must provide:
 
 - **Linux x86_64 with KVM** — `/dev/kvm` present and user-accessible
   (VT-x/AMD-V, or nested virtualization when the host is itself a VM). This
@@ -262,8 +264,9 @@ configured into the host system itself. What the host must provide:
   that breaks it.
 - **e2fsprogs** (`mkfs.ext4`) for the golden-rootfs build. Workspace image
   creation and growth at runtime use the copy baked into the cs_host image.
-- **Baseline CLI tools**: `make`, `curl`, `tar`, `git`, plus `openssl` for
-  the PKI targets and `jq` for `pki-client` / `metrics`.
+- **Baseline CLI tools**: `make`, `curl`, `tar`, `git`. (`openssl` and `jq`
+  are needed only by the legacy `make pki-*` targets and `make metrics` —
+  `koto setup` mints the PKI itself with Go's stdlib.)
 - **Build-time network and resources**: `make fc-assets` downloads the
   pinned Firecracker release, clones the Amazon Linux kernel tree, and
   compiles the guest kernel inside an Ubuntu container (a few GiB of disk
@@ -331,10 +334,58 @@ explicit `gap` event when the ring can't cover).
 | `autostart` | `no` (default) \| `yes` — boot with the daemon | daemon start |
 | `ports` | e.g. `[8080]` — vsock↔TCP bridge into `koto-net` | `/restart` |
 
-## Build & run
+## Install
 
 ```sh
-make host-build   # cs_host image
+git clone <repo> && cd koto
+make setup
+```
+
+`make setup` builds the `koto` binary in a container (so the host needs only
+git, make and podman) and runs the interactive wizard: it checks every host
+requirement and tells you how to fix what's missing, builds the images and
+the Firecracker guest kernel and rootfs, mints the private CA and the TUI's
+client identity, connects your Anthropic credentials, installs koto as a
+systemd service, and smoke-tests the result.
+
+It is safe to re-run — every step detects whether it is already done, so an
+interrupted install (the guest kernel build is 20-40 minutes from cold)
+resumes where it stopped. `koto setup --check` reports the health of an
+install without changing anything.
+
+Once installed:
+
+```sh
+koto tui                    # attach the TUI (/exit detaches, daemon keeps running)
+koto ctl list               # the agent-facing CLI
+systemctl status koto       # the service
+journalctl -u koto -f       # daemon logs
+sudo systemctl restart koto # after editing /etc/koto/koto.env
+```
+
+State lives in `/var/lib/koto` (groups, credentials, guest assets — same
+layout as a clone) and service configuration in `/etc/koto/koto.env`. The
+clone is only a source checkout after this; `koto install` from a newer one
+upgrades in place, preserving state and any config you have edited.
+
+To add another client — a phone, a second laptop:
+
+```sh
+koto pki client -creds /var/lib/koto/creds <name>   # cert, key and token
+```
+
+To uninstall: `sudo systemctl disable --now koto`, then remove
+`/etc/systemd/system/koto.service`, `/etc/koto`, `/usr/local/bin/koto` and
+`/var/lib/koto` (the last needs `podman unshare rm -rf /var/lib/koto/run`
+first — those sockets are owned by subuids, not by you).
+
+## Build & run (development)
+
+Working on koto itself? Run it straight from the clone — no install, and
+host-side Go is recompiled on every daemon start:
+
+```sh
+make host-build   # cs_host image (the dev image: toolchain + live rebuild)
 make fc-assets    # firecracker binary + kernel + golden rootfs (required)
 make pki-init && make pki-client NAME=tui   # private CA + the TUI's client cert
 make login        # one-time subscription OAuth into ./creds/ — OR export
@@ -345,6 +396,11 @@ make tui          # attach the TUI (/exit detaches; daemon keeps running;
                   # Ctrl+C interrupts the agent's turn)
 make stop         # tear down
 ```
+
+A dev clone and an installed service can coexist: they use different
+container names, different state directories and different images. The
+daemon resolves all state from `KOTO_HOME`, falling back to the working
+directory — which is exactly what makes both modes the same code path.
 
 Guest-side code (`sidecar/`, `fcguest/`) is baked into the rootfs: rebuild
 with `make fc-rootfs` + `/restart <g>`. Host-side Go is live (`go run` in
