@@ -65,6 +65,17 @@ type checkResult struct {
 	warn   bool // satisfied enough to continue, but the operator should know
 	detail string
 	remedy string
+	group  string // section heading in the report; "" = the general group
+}
+
+// inGroup labels a run of results so the report can separate what is needed to
+// BUILD koto from what the installed daemon needs at RUNTIME — the distinction
+// that matters now that podman is a build-time dependency only.
+func inGroup(g string, rs []checkResult) []checkResult {
+	for i := range rs {
+		rs[i].group = g
+	}
+	return rs
 }
 
 func okCheck(name, detail string) checkResult {
@@ -85,7 +96,8 @@ func runPreflight() []checkResult {
 	out = append(out, checkPlatform(), checkKVM())
 	out = append(out, checkPodman()...)
 	out = append(out, checkUserns(), checkSubuid())
-	out = append(out, checkTools()...)
+	out = append(out, inGroup("build-time tools", checkBuildTools())...)
+	out = append(out, inGroup("runtime tools (the installed daemon shells out to these)", checkRuntimeTools())...)
 	out = append(out, checkDisk(), checkNetwork())
 	return out
 }
@@ -235,24 +247,53 @@ func checkSubuid() checkResult {
 		"Rootless podman needs id ranges:\n  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "+u.Username+"\n  podman system migrate")
 }
 
-// checkTools: the host binaries the build pipeline shells out to. openssl and
-// jq are deliberately absent — the Go PKI (pki.go) replaced them.
-// mkfs.ext4 and newuidmap live in /usr/sbin, which is on PATH for a login
-// shell on both families but not under a stripped PATH.
-func checkTools() []checkResult {
+// checkBuildTools: what building koto and its guest assets needs. podman is
+// checked separately (checkPodman). openssl and jq are deliberately absent —
+// the Go PKI (pki.go) replaced them.
+func checkBuildTools() []checkResult {
+	return lookupAll([]toolReq{
+		{bin: "git", why: "pins the guest kernel revision", fedora: "git", debian: "git"},
+		{bin: "make", why: "drives the image and asset builds", fedora: "make", debian: "make"},
+		{bin: "curl", why: "downloads the Firecracker release", fedora: "curl", debian: "curl"},
+	})
+}
+
+// checkRuntimeTools: what the DAEMON shells out to once installed. These are
+// host requirements even for a binary release that never builds anything —
+// podman is not among them, which is the point of keeping it build-only.
+// (Verified against the call sites: proxy.go refresh(), fc.go workspace image
+// creation/growth and skills delivery, plus the jailer's id mapping.)
+func checkRuntimeTools() []checkResult {
+	out := lookupAll([]toolReq{
+		{bin: "mkfs.ext4", why: "creates each group's workspace image", fedora: "e2fsprogs", debian: "e2fsprogs"},
+		{bin: "e2fsck", why: "checks a workspace image before growing it", fedora: "e2fsprogs", debian: "e2fsprogs"},
+		{bin: "resize2fs", why: "grows a workspace image when the size preset increases", fedora: "e2fsprogs", debian: "e2fsprogs"},
+		{bin: "tar", why: "delivers skills into a guest", fedora: "tar", debian: "tar"},
+		// The jailer maps a distinct uid per VM out of the host's subuid
+		// range, which needs these setuid-capability helpers — they carry
+		// cap_setuid/cap_setgid, so nothing here runs as root.
+		{bin: "newuidmap", why: "maps the per-VM uid the microVM monitor is jailed under", fedora: "shadow-utils", debian: "uidmap"},
+		{bin: "newgidmap", why: "maps the per-VM gid the microVM monitor is jailed under", fedora: "shadow-utils", debian: "uidmap"},
+	})
+	// claude is only reachable for OAuth: the proxy shells out to it to
+	// refresh a subscription token (proxy.go). An API-key install never calls
+	// it, so a missing claude is a warning rather than a hard stop.
+	if p, err := exec.LookPath("claude"); err == nil {
+		out = append(out, okCheck("claude", p))
+	} else {
+		out = append(out, warnCheck("claude", "not found",
+			"Needed only for Claude-subscription (OAuth) auth, where the proxy shells\n"+
+				"out to it to refresh the token. Not needed if you authenticate with an\n"+
+				"API key. Install it with:\n  npm i -g @anthropic-ai/claude-code"))
+	}
+	return out
+}
+
+type toolReq struct{ bin, why, fedora, debian string }
+
+func lookupAll(reqs []toolReq) []checkResult {
 	var out []checkResult
-	for _, t := range []struct{ bin, why, fedora, debian string }{
-		{"mkfs.ext4", "builds the guest rootfs image", "e2fsprogs", "e2fsprogs"},
-		{"curl", "downloads the Firecracker release", "curl", "curl"},
-		{"tar", "unpacks release archives", "tar", "tar"},
-		{"git", "pins the guest kernel revision", "git", "git"},
-		{"make", "drives the image builds", "make", "make"},
-		// newuidmap/newgidmap: shadow-utils on Fedora, which is always
-		// installed, so this never fails there. On Ubuntu it is the separate
-		// uidmap package that podman only *recommends* — a minimal image can
-		// have podman, valid /etc/subuid ranges, and still no rootless.
-		{"newuidmap", "maps the uid ranges rootless podman runs in", "shadow-utils", "uidmap"},
-	} {
+	for _, t := range reqs {
 		if p, err := exec.LookPath(t.bin); err == nil {
 			out = append(out, okCheck(t.bin, p))
 		} else {

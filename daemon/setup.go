@@ -109,7 +109,14 @@ func setupCheck(sc *setupCtx, steps []setupStep) int {
 	u := sc.ui
 	u.printf("%s", u.bold("host requirements"))
 	bad := 0
+	group := ""
 	for _, c := range runPreflight() {
+		if c.group != group {
+			group = c.group
+			if group != "" {
+				u.printf("%s", u.dim("  "+group))
+			}
+		}
 		switch {
 		case c.ok && !c.warn:
 			u.ok("%-18s %s", c.name, u.dim(c.detail))
