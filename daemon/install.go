@@ -228,6 +228,21 @@ func seedStateDir(o installOpts, me *user.User) error {
 		}
 	}
 
+	// Migrate live state from a dev clone on first install. Without this an
+	// install of an in-use clone silently starts empty and strands every
+	// group workspace where it lay — the single most destructive-feeling
+	// outcome of "upgrading", even though nothing is deleted.
+	//
+	// Never overwrites: each item moves only when the state dir has none.
+	if err := migrateState(o, "groups"); err != nil {
+		return err
+	}
+	for _, f := range []string{"groups.json", "schedules.json", "goals.json", "metrics.jsonl"} {
+		if err := migrateState(o, f); err != nil {
+			return err
+		}
+	}
+
 	// creds: copy what the wizard minted in the clone, never overwrite.
 	srcCreds := filepath.Join(o.root, "creds")
 	dstCreds := filepath.Join(o.stateDir, "creds")
@@ -533,6 +548,47 @@ func sudoWriteIfChanged(u *setupUI, path, content, mode string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// migrateState moves one item from the clone into the state dir, if the clone
+// has it and the state dir does not.
+//
+// Rename first, which is instant — but it fails with EXDEV across btrfs
+// SUBVOLUMES even on one filesystem, which is exactly the /home -> /var/lib
+// case on a default Fedora layout. So fall back to a reflink copy, which is
+// also instant and consumes no extra space on btrfs/xfs: a group tree can be
+// tens of gigabytes, and a host that has been running koto for a while will
+// not have room for a second copy of it. Plain copy is the last resort.
+func migrateState(o installOpts, name string) error {
+	src := filepath.Join(o.root, name)
+	dst := filepath.Join(o.stateDir, name)
+	if !exists(src) {
+		return nil
+	}
+	// An empty groups/ is what seedStateDir just created; treat it as absent.
+	if exists(dst) {
+		if ents, err := os.ReadDir(dst); err != nil || len(ents) > 0 {
+			return nil
+		}
+		if err := os.Remove(dst); err != nil {
+			return nil // not empty after all, or not a dir — leave it alone
+		}
+	}
+	if err := os.Rename(src, dst); err == nil {
+		o.ui.info("moved %s into the state dir", name)
+		return nil
+	}
+	// Cross-device: reflink if the filesystem supports it, else a real copy.
+	o.ui.info("copying %s into the state dir (different subvolume)", name)
+	cmd := exec.Command("cp", "-a", "--reflink=auto", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("migrate %s: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	// Only remove the original once the copy is in place.
+	if err := os.RemoveAll(src); err != nil {
+		o.ui.warn("copied %s but could not remove the original at %s: %v", name, src, err)
+	}
+	return nil
 }
 
 // mergeClientsAllow unions the fingerprint lines of two allowlists, keyed by
