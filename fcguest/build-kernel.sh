@@ -17,7 +17,14 @@
 # See docs/kernel-amzn-vs-vanilla.md for the full argument.
 #
 # Output: fcassets/vmlinux (gitignored). Rebuild via `make kernel`.
-# Containerized (Ubuntu 24.04, like FC's CI) so the host needs no toolchain.
+# Containerized so the host needs no toolchain. The builder is Fedora, matching
+# the rest of koto's images rather than Firecracker's CI (which uses Ubuntu).
+# The builder image chooses the COMPILER that produces vmlinux, so this is a
+# real pin, not a cosmetic one: a different gcc is a different kernel binary,
+# and divergence from upstream's toolchain means a boot bug here may not
+# reproduce for them. Pinned by digest, and the boot is verified after a
+# rebuild — `cgroup=on` plus a group actually starting is the check that
+# matters, since the failure mode is a kernel that builds cleanly and panics.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # KOTO_FCASSETS_OUT: see fetch-assets.sh. The source cache stays in the clone
@@ -34,7 +41,7 @@ KERNEL_COMMIT="${KERNEL_COMMIT:-0f7eec7689f13075e603ae2e86d3353c6cb13b24}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
 # Pinned by DIGEST: the builder image decides the compiler that produces
 # vmlinux, so a moving tag means a moving kernel binary.
-BUILDER="${BUILDER:-docker.io/library/ubuntu@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316}"        # Firecracker's CI build OS
+BUILDER="${BUILDER:-docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19}"
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 
 echo "==> building guest vmlinux ($KERNEL_TAG + CONFIG_TUN)"
@@ -52,10 +59,15 @@ CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/
   -v "$OUT:/out" \
   -v "$CACHE:/cache" \
   "$BUILDER" bash -eu <<'EOF'
-apt-get update >/dev/null
-apt-get install -y --no-install-recommends \
-  build-essential bc bison flex libelf-dev libssl-dev dwarves \
-  xz-utils tar curl ca-certificates gzip git zstd >/dev/null
+# Fedora equivalents of the Debian set: build-essential -> gcc/make,
+# libelf-dev -> elfutils-libelf-devel, libssl-dev -> openssl-devel,
+# xz-utils -> xz. dwarves supplies pahole, which the kernel's BTF generation
+# needs. diffutils/findutils/perl are implicit on Ubuntu but not in the
+# minimal Fedora image, and the kernel build shells out to all three.
+dnf install -y --setopt=install_weak_deps=False --quiet \
+  gcc make bc bison flex elfutils-libelf-devel openssl-devel dwarves \
+  xz tar curl ca-certificates gzip git zstd diffutils findutils perl \
+  >/dev/null
 
 # Source: cached amzn tree tarball, or a shallow clone of the pinned tag.
 mkdir -p /tmp/src
