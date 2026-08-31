@@ -45,6 +45,11 @@ func main() {
 		// Attach the terminal UI to an installed daemon (the `make tui`
 		// counterpart for a non-clone install).
 		tuiMain(os.Args[2:])
+	case "userns-check":
+		// Verify this host can give the jailer what it needs (ns-root over a
+		// subuid range) without a container. Also the integration test's
+		// entry point.
+		usernsProbeMain()
 	case "pki":
 		// Private CA / server cert / client identities, in Go — the
 		// openssl-free counterpart of the Makefile's pki-* targets.
