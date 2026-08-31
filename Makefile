@@ -8,7 +8,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: build setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -25,24 +25,79 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # images and guest assets, mints the PKI, connects your Anthropic credentials
 # and installs koto as a systemd service. Safe to re-run: every step detects
 # whether it is already done, so an interrupted install resumes here.
+# --- container runtime (BUILD-time only) ------------------------------------
+# The binaries are built in a container so THE HOST NEVER NEEDS GO. That is a
+# hard requirement, not a convenience: `make build`, `make install` and
+# `make setup` all compile inside the image below. The only targets that touch
+# a host Go toolchain are `run`/`proxy`, which exist purely for fast iteration
+# by people who already have one.
+#
+# Either docker or podman works, docker preferred when both are present.
+#
+# One build covers every target distribution. The binaries are CGO_ENABLED=0
+# pure Go, so a single static executable runs on Fedora, Ubuntu, Debian,
+# Alpine — anything linux/amd64. There is nothing per-distro to produce; what
+# would need a separate build is a different ARCHITECTURE, and koto is x86_64
+# only (Firecracker assets and the guest kernel are built for it, and
+# checkPlatform enforces it).
+#
+# NOTE: `make fc-rootfs` is podman-ONLY, unlike these targets. It uses
+# `podman unshare` to preserve in-image uid/gid ownership through
+# `mkfs.ext4 -d`, and docker has no equivalent. A docker-only host can build
+# every binary but not the guest rootfs; use a prebuilt fcassets/rootfs.img,
+# or install podman for that one step.
+CONTAINER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
+CONTAINER_NAME := $(notdir $(CONTAINER))
+# Rootless podman maps your uid to root inside, so build outputs come back
+# owned by you. Rootful docker would write them as root, so ask it for our id
+# explicitly — and then point Go's caches somewhere that id can write, since
+# /root is not it.
+ifeq ($(CONTAINER_NAME),docker)
+  CONTAINER_USER := --user $(shell id -u):$(shell id -g)
+else
+  CONTAINER_USER :=
+endif
+# Pinned by DIGEST, not tag. This is what actually makes the build
+# reproducible — the engine does not: docker and podman run the same OCI
+# image and produce the same bytes. `golang:1.24-alpine` is a moving tag that
+# silently changes toolchain patch versions under you; the digest does not.
+# Combined with -trimpath and CGO_ENABLED=0, two builds of the same commit
+# give identical binaries, except for the version string stamped below.
+# Update deliberately: podman/docker pull golang:1.24-alpine, then
+#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.24-alpine
+GO_IMAGE ?= docker.io/library/golang@sha256:757779acac4af1b349a20f357c7296097b4a0b89da4ad0e370b339060077282a
+# Cache paths are passed as env rather than mounted over /root, so the same
+# invocation works whether we are root in the container (podman) or not.
+GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
+	  $(CONTAINER_USER) \
+	  -v $(PWD):/src -w /src \
+	  -v $(PWD)/.gocache:/gocache -v $(PWD)/.gomodcache:/gomodcache \
+	  -e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
+	  -e CGO_ENABLED=0 -e GOFLAGS= \
+	  $(GO_IMAGE)
+
+define need-container
+@test -n "$(CONTAINER)" || { echo "podman or docker is required to build koto (sudo dnf install podman / sudo apt install podman)"; exit 1; }
+@mkdir -p .gocache .gomodcache
+endef
+
 KOTO_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d)
 koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go)
-	@command -v podman >/dev/null || { echo "podman is required — install it first (sudo dnf install podman)"; exit 1; }
-	@mkdir -p .gocache .gomodcache
-	podman run --rm --security-opt label=disable \
-	  -v $(PWD):/src -w /src \
-	  -v $(PWD)/.gocache:/root/.cache/go-build \
-	  -v $(PWD)/.gomodcache:/go/pkg/mod \
-	  -e CGO_ENABLED=0 -e GOFLAGS= \
-	  docker.io/library/golang:1.24-alpine \
-	  go build -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
+	$(need-container)
+	$(GO_BUILD_RUN) \
+	  go build -trimpath -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
+
+# Everything a host needs to run koto. One static binary each, portable across
+# every supported distribution.
+build: koto koto-tui
+	@echo "built: koto koto-tui ($(KOTO_VERSION), via $(CONTAINER_NAME))"
 
 setup: koto
 	@./koto setup
 
 # Install (or upgrade) an existing checkout as a systemd service without the
 # wizard's explanatory pass — for people who already know what they want.
-install: koto
+install: build
 	@./koto install
 
 # INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
@@ -92,15 +147,9 @@ endef
 TUI_GO_SRC := $(wildcard tui/*.go) tui/go.mod $(wildcard tui/go.sum)
 PROTO_SRC  := $(wildcard protocol/pb/*.go) protocol/go.mod protocol/koto.proto protocol/guest.proto
 koto-tui: $(TUI_GO_SRC) $(PROTO_SRC)
-	@command -v podman >/dev/null || { echo "podman is required to build (sudo dnf install podman / sudo apt install podman)"; exit 1; }
-	@mkdir -p .gocache .gomodcache
-	podman run --rm --security-opt label=disable \
-	  -v $(PWD):/src -w /src/tui \
-	  -v $(PWD)/.gocache:/root/.cache/go-build \
-	  -v $(PWD)/.gomodcache:/go/pkg/mod \
-	  -e CGO_ENABLED=0 -e GOFLAGS= \
-	  docker.io/library/golang:1.24-alpine \
-	  go build -trimpath -ldflags "-s -w" -o /src/koto-tui .
+	$(need-container)
+	$(GO_BUILD_RUN) \
+	  sh -c 'cd tui && go build -trimpath -ldflags "-s -w" -o /src/koto-tui .'
 
 tui-build: koto-tui
 
@@ -129,16 +178,18 @@ stop:
 	-pkill -TERM -u $$(id -u) -f '^\./koto daemon$$' 2>/dev/null || true
 	@echo "sent SIGTERM to the dev daemon (if running); installed service: sudo systemctl stop koto"
 
+# The only targets that need a host Go toolchain. Optional: they exist for
+# fast iteration when you already have Go. Everything a user needs to install
+# and run koto goes through the containerized build instead.
 run:
 	go run ./daemon daemon
 proxy:
 	go run ./daemon proxy
 
 # koto ctl: host-side CLI client for agents (same binary, `ctl` subcommand).
-# Builds a standalone `./koto` so an agent can invoke `koto ctl ...`
-# without a `go run` per call. Reads creds/ + KOTO_* env at runtime.
-ctl-build:
-	go build -o koto ./daemon
+# Kept as an alias for `koto` so the muscle memory still works; it builds in
+# a container like everything else, so no host Go is needed.
+ctl-build: koto
 
 metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl
