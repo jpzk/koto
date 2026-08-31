@@ -59,7 +59,7 @@ whether it is already done.
 flags:
   --check        report what is and isn't set up, change nothing, exit 0 if ready
   -y             accept defaults; never prompt (steps needing real input fail)
-  --only ID      run just one step (e.g. --only fc-rootfs)
+  --only ID      run just one step (e.g. --only rootfs)
   --from ID      start at this step, skipping earlier ones
   --no-color     plain output (also honors NO_COLOR)
   --list         print the step ids in order`)

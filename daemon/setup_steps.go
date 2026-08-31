@@ -260,7 +260,7 @@ directly on your host so it gets the real terminal.`,
 
 func stepFCFetch() setupStep {
 	return setupStep{
-		id:    "fc-fetch",
+		id:    "firecracker",
 		title: "Firecracker binary",
 		explain: `Downloads the pinned Firecracker release — the microVM monitor that boots
 each group. A few seconds.`,
@@ -270,13 +270,13 @@ each group. A few seconds.`,
 			}
 			return false, "not downloaded"
 		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "fc-fetch") },
+		run: func(sc *setupCtx) error { return sc.stream("make", "firecracker") },
 	}
 }
 
 func stepFCKernel() setupStep {
 	return setupStep{
-		id:    "fc-kernel",
+		id:    "kernel",
 		title: "Guest kernel",
 		explain: `Builds the Linux kernel the microVMs boot. koto builds its own because the
 stock Firecracker kernel lacks the options koto needs (TUN for the network
@@ -303,7 +303,7 @@ and safe to interrupt — re-running the wizard picks up where it stopped.`,
 				return errSetupAborted
 			}
 			start := time.Now()
-			if err := sc.stream("make", "fc-kernel"); err != nil {
+			if err := sc.stream("make", "kernel"); err != nil {
 				return err
 			}
 			sc.ui.info("kernel built in %s", time.Since(start).Round(time.Second))
@@ -314,7 +314,7 @@ and safe to interrupt — re-running the wizard picks up where it stopped.`,
 
 func stepFCRootfs() setupStep {
 	return setupStep{
-		id:    "fc-rootfs",
+		id:    "rootfs",
 		title: "Guest rootfs",
 		explain: `Builds the golden filesystem image every microVM boots from: the guest
 agent, Node, the claude CLI and koto's in-guest tools. A few minutes.`,
@@ -324,7 +324,7 @@ agent, Node, the claude CLI and koto's in-guest tools. A few minutes.`,
 			}
 			return false, "not built"
 		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "fc-rootfs") },
+		run: func(sc *setupCtx) error { return sc.stream("make", "rootfs") },
 	}
 }
 

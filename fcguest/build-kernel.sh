@@ -16,7 +16,7 @@
 # ACPI, so the LAPIC timer works and idle is ~0% — and we drop acpi=off.
 # See docs/kernel-amzn-vs-vanilla.md for the full argument.
 #
-# Output: fcassets/vmlinux (gitignored). Rebuild via `make fc-kernel`.
+# Output: fcassets/vmlinux (gitignored). Rebuild via `make kernel`.
 # Containerized (Ubuntu 24.04, like FC's CI) so the host needs no toolchain.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)

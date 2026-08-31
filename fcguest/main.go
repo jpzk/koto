@@ -598,7 +598,7 @@ func handleInit(c *vconn, req *pb.InitReq) {
 //
 // Caveats (documented in docs/firecracker-vsock.md → "Root / sudo profile"):
 // installs consume workspace disk (the `size` preset), and upper-layer entries
-// shadow the golden rootfs — after a `make fc-rootfs` a previously-upgraded
+// shadow the golden rootfs — after a `make rootfs` a previously-upgraded
 // file keeps its old upper copy until the .rootovl tree is reset.
 func enableRoot() error {
 	if err := overlayRootDirs(); err != nil {

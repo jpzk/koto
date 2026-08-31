@@ -113,7 +113,7 @@ outside that list arrive via Kconfig `select` closure or as defaults
 - The **shipped `vmlinux` predates the script's pin**: it was built against
   Firecracker v1.11.0's base config, the script now pins v1.16.1 (~312 config
   lines apart, notably `CONFIG_PCI` on). Nothing is broken — the guest boots
-  `pci=off` on virtio-MMIO — but `make fc-kernel` produces a different kernel
+  `pci=off` on virtio-MMIO — but `make kernel` produces a different kernel
   from the one running today.
 - `TUN` is a capability, not just a device. A `network=wan` group can bring up
   its own overlay (WireGuard, tailscale) whose outer packets are ordinary
@@ -276,7 +276,7 @@ rootless, as you. What the host must provide:
 - **Baseline CLI tools**: `make`, `curl`, `tar`, `git`. (`openssl` and `jq`
   are needed only by the legacy `make pki-*` targets and `make metrics` —
   `koto setup` mints the PKI itself with Go's stdlib.)
-- **Build-time network and resources**: `make fc-assets` downloads the
+- **Build-time network and resources**: `make assets` downloads the
   pinned Firecracker release, clones the Amazon Linux kernel tree, and
   compiles the guest kernel inside an Ubuntu container (a few GiB of disk
   under `.kernelcache/`, minutes of CPU). At runtime each group reserves
@@ -465,7 +465,7 @@ nothing containerized at runtime:
 ```sh
 make koto          # build the daemon binary (compiles in a container, so no host Go)
 make koto-tui      # build the TUI binary, likewise
-make fc-assets     # firecracker binary + guest kernel + golden rootfs (required)
+make assets     # firecracker binary + guest kernel + golden rootfs (required)
 ./koto pki init && ./koto pki client tui     # private CA + the TUI's identity
 make login         # one-time subscription OAuth into ./creds — OR export
                    # ANTHROPIC_API_KEY before host-run
@@ -491,7 +491,7 @@ one thing the podman container used to supply. It needs no root; the helpers
 carry `cap_setuid`/`cap_setgid`. `koto userns-check` verifies it in isolation.
 
 Guest-side code (`sidecar/`, `fcguest/`) is baked into the rootfs: rebuild
-with `make fc-rootfs` + `/restart <g>`.
+with `make rootfs` + `/restart <g>`.
 
 ## Credentials and Anthropic's terms
 
@@ -592,7 +592,7 @@ isolating untrusted workloads:
 
 The trade koto accepts for it is the absence of a shared filesystem: a group
 gets no bind mounts, so every host↔guest channel is vsock, guest-side code
-ships baked into the rootfs image (`make fc-rootfs`), and orchestration
+ships baked into the rootfs image (`make rootfs`), and orchestration
 between groups is verb-based rather than file-based. That constraint is what
 also closed the egress hole — with no NIC by default, the credential-injecting
 proxy is the only way out. See `docs/firecracker-vsock.md`.

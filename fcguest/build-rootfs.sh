@@ -20,7 +20,7 @@
 # takes e2fsprogs off the host's build requirements and pins its version.
 #
 # Output: fcassets/rootfs.img — attached read-only as every group VM's root
-# drive. Rebuild whenever sidecar/*.{sh,js} or fcguest/ change: `make fc-rootfs`.
+# drive. Rebuild whenever sidecar/*.{sh,js} or fcguest/ change: `make rootfs`.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # KOTO_FCASSETS_OUT: see fetch-assets.sh.

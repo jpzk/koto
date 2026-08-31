@@ -72,7 +72,7 @@ handlers. The turn stream (9004) is typed too: fc-agent runs the worker
 itself (`fcguest/turn.go`) and sends `TurnFrame`s; `fcTurnSink`
 (`daemon/fcturn.go`) renders the marker text host-side, escaping any text
 line that would parse as a marker, so the guest cannot author a marker at all. Guest and daemon must move together
-(`make fc-rootfs` + `/restart` every group).
+(`make rootfs` + `/restart` every group).
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
 on, exactly like the per-group proxy TCP port does today.
@@ -167,7 +167,7 @@ shared by all VMs.
 ## Build & run
 
 ```sh
-make fc-assets    # = fc-fetch + fc-kernel + fc-rootfs:
+make assets    # = firecracker + kernel + rootfs:
                   #   fetch firecracker (pinned v1.16.1), BUILD the guest
                   #   kernel (FC's CI vmlinux lacks CONFIG_TUN, so we compile
                   #   the Amazon Linux tree — see build-kernel.sh), and build
@@ -177,7 +177,7 @@ make host-build   # once: host image includes e2fsprogs + tar
 make host-run     # run-host.sh passes --device /dev/kvm when present
 ```
 
-Rootfs rebuild (`make fc-rootfs`) is required after editing
+Rootfs rebuild (`make rootfs`) is required after editing
 `sidecar/*.{sh,js}` or `fcguest/` — microVMs have no live bind mounts (the
 one ergonomic regression vs podman's hot-reload mounts).
 
@@ -323,7 +323,7 @@ always wins over a legacy `internet` key.
   inbound (the guest accepting on `192.168.127.2` via gateway forwards) is a
   follow-up.
 - **Kernel:** any networked profile (`wan`/`lan`/`full`) needs `CONFIG_TUN`, which FC's CI vmlinux lacks — so the
-  guest kernel is built (`build-kernel.sh`, `make fc-kernel`), not fetched.
+  guest kernel is built (`build-kernel.sh`, `make kernel`), not fetched.
   - **Source = the Amazon Linux tree, like FC itself.** `build-kernel.sh` does
     what FC's `resources/rebuild.sh` does: `git clone github.com/amazonlinux/linux`
     at a pinned `microvm-kernel-*.amzn2023` tag, apply FC's guest config, and add
@@ -512,7 +512,7 @@ the entrypoint + `claude` + all bash run as) **passwordless sudo**. Default
   unconditionally (`Dockerfile.rootfs`); only the grant is runtime-gated.
 - **Caveats.** (1) Installs consume **workspace disk** — dnf-heavy groups may
   want a bigger `size` preset. (2) Upper-layer entries **shadow the golden
-  rootfs**: after a `make fc-rootfs` that upgrades a file the group also
+  rootfs**: after a `make rootfs` that upgrades a file the group also
   modified, the group keeps its upper copy. Reset by deleting the `.rootovl`
   tree while its overlays are NOT mounted (never rm a live upper layer): stop
   the group and wipe it from `workspace.img` host-side, or destroy/recreate the
