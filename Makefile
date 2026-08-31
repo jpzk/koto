@@ -213,6 +213,7 @@ proto-verify: proto-gen
 SERVER_SAN ?= DNS:koto-daemon,DNS:localhost,IP:127.0.0.1
 ROLE ?= admin
 pki-init:
+	@test ! -f creds/ca.key || { echo "creds/ca.key exists — refusing to regenerate the CA (it would silently invalidate every client cert). rm creds/ca.{key,crt} to force."; exit 1; }
 	@mkdir -p creds
 	@command -v openssl >/dev/null || { echo "openssl required"; exit 1; }
 	openssl ecparam -name prime256v1 -genkey -noout -out creds/ca.key

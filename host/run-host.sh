@@ -22,7 +22,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 CS_HOST_NAME="cs_host_go"
 [ -n "${KOTO_INSTANCE:-}" ] && CS_HOST_NAME="cs_host_go_${KOTO_INSTANCE}"
 mkdir -p "$HERE/groups" "$HERE/creds" "$HERE/.gocache" "$HERE/.gomodcache"
-[ -f "$HERE/creds/.credentials.json" ] || { echo "no creds: run \`make login\` first"; exit 1; }
+[ -f "$HERE/creds/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "no creds: run \`make login\` first (or export ANTHROPIC_API_KEY)"; exit 1; }
 [ -f "$HERE/creds/server.crt" ] || { echo "no daemon TLS cert: run \`make pki-init\` first"; exit 1; }
 # creds/ and fcassets/ are sometimes symlinked in from another checkout to
 # share one OAuth login + PKI, or the ~800MB firecracker binary+kernel+rootfs
