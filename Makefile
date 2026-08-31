@@ -288,7 +288,7 @@ pki-client:
 # The daemon opens /dev/kvm directly; it must be world-accessible because the
 # jailed VMM runs as an unprivileged per-VM id (see checkKVM).
 firecracker:
-	./fcguest/fetch-assets.sh
+	./fcguest/build-firecracker.sh
 
 $(BUILD)/kernel: fcguest/build-kernel.sh | $(BUILD)
 	./fcguest/build-kernel.sh
