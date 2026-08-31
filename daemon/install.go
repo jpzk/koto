@@ -317,7 +317,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 	if len(missing) > 0 {
 		u.info("building missing guest assets (%s) into the state dir", strings.Join(missing, ", "))
 		env := append(os.Environ(), "KOTO_FCASSETS_OUT="+dstAssets)
-		for _, target := range []string{"fc-fetch", "fc-kernel", "fc-rootfs"} {
+		for _, target := range []string{"firecracker", "kernel", "rootfs"} {
 			cmd := exec.Command("make", target)
 			cmd.Dir = o.root
 			cmd.Env = env

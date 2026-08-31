@@ -6,7 +6,7 @@
 #
 # The guest kernel is NOT fetched here — FC's CI vmlinux lacks CONFIG_TUN, which
 # the microVM's L3 networking needs, so we build our own. See build-kernel.sh
-# (`make fc-kernel`).
+# (`make kernel`).
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 # KOTO_FCASSETS_OUT: `koto install` builds the assets straight into the state

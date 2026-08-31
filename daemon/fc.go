@@ -272,7 +272,7 @@ func fcPreflight() error {
 	}
 	for _, p := range []string{fcBinPath(), fcKernelPath(), fcRootfsPath()} {
 		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("firecracker runtime: missing asset %s (run `make fc-assets`)", p)
+			return fmt.Errorf("firecracker runtime: missing asset %s (run `make assets`)", p)
 		}
 	}
 	return nil

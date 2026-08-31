@@ -8,7 +8,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client fc-fetch fc-kernel fc-rootfs fc-assets
+.PHONY: build setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -41,7 +41,7 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # only (Firecracker assets and the guest kernel are built for it, and
 # checkPlatform enforces it).
 #
-# Every build step honours this, including `make fc-rootfs` — it used to be
+# Every build step honours this, including `make rootfs` — it used to be
 # podman-only (it needed `podman unshare` to preserve in-image ownership), and
 # now does that stage inside a container instead, which both engines can do.
 CONTAINER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
@@ -117,9 +117,9 @@ $(BUILD):
 
 # --- sidecar scripts --------------------------------------------------------
 # + stream_filter.js + start-chrome.sh run INSIDE the
-# firecracker guest (baked into the rootfs — see fc-rootfs). They no longer
+# firecracker guest (baked into the rootfs — see rootfs). They no longer
 # build a standalone podman image (the podman group runtime is retired); this
-# just tracks them as inputs so an edit triggers an fc-rootfs rebuild.
+# just tracks them as inputs so an edit triggers an rootfs rebuild.
 SIDECAR_SRC := sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent sidecar/cs-notify
 
 # Every image rebuild moves its tag, orphaning the previous build as a
@@ -281,30 +281,30 @@ pki-client:
 
 # --- Firecracker microVM runtime assets -------------------------------------
 # Opt-in per group via config.json `"runtime": "firecracker"`. Assets land in
-# fcassets/ (gitignored): the FC binary (fc-fetch, pinned in fetch-assets.sh),
-# the guest kernel (fc-kernel — built with CONFIG_TUN for L3 networking, pinned
-# in build-kernel.sh), and the golden rootfs (fc-rootfs — rebuild after editing
+# fcassets/ (gitignored): the FC binary (firecracker, pinned in fetch-assets.sh),
+# the guest kernel (kernel — built with CONFIG_TUN for L3 networking, pinned
+# in build-kernel.sh), and the golden rootfs (rootfs — rebuild after editing
 # sidecar/*.{sh,js} or fcguest/, since microVMs have no live bind mounts).
 # The daemon opens /dev/kvm directly; it must be world-accessible because the
 # jailed VMM runs as an unprivileged per-VM id (see checkKVM).
-fc-fetch:
+firecracker:
 	./fcguest/fetch-assets.sh
 
-$(BUILD)/fc-kernel: fcguest/build-kernel.sh | $(BUILD)
+$(BUILD)/kernel: fcguest/build-kernel.sh | $(BUILD)
 	./fcguest/build-kernel.sh
 	@touch $@
 
-fc-kernel: $(BUILD)/fc-kernel
+kernel: $(BUILD)/kernel
 
 FCGUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
-$(BUILD)/fc-rootfs: $(FCGUEST_SRC) | $(BUILD)
+$(BUILD)/rootfs: $(FCGUEST_SRC) | $(BUILD)
 	./fcguest/build-rootfs.sh
 	$(prune-dangling)
 	@touch $@
 
-fc-rootfs: $(BUILD)/fc-rootfs
+rootfs: $(BUILD)/rootfs
 
-fc-assets: fc-fetch fc-kernel fc-rootfs
+assets: firecracker kernel rootfs
 
 # clean is SAFE: stops the daemon and removes runtime droppings (logs,
 # metrics, run/, build sentinels). Group workspaces — every agent's session
