@@ -5,9 +5,13 @@ import (
 	"os"
 )
 
+// kotoVersion is stamped by the build (-ldflags "-X main.kotoVersion=...");
+// "dev" means an unstamped `go build`/`go run` from the clone.
+var kotoVersion = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|install|launch|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -24,6 +28,8 @@ func main() {
 		// and authorization are the mTLS + bearer token + role ACL every
 		// other client goes through.
 		ctlCliMain(os.Args[2:])
+	case "version":
+		fmt.Println(kotoVersion)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
 		os.Exit(2)

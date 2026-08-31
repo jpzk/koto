@@ -86,7 +86,7 @@ type credsFile struct {
 }
 
 func proxyInitPaths() {
-	HERE = here()
+	HERE = kotoHome()
 	ROOT = filepath.Join(HERE, "groups")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
 	METRICS = filepath.Join(HERE, "metrics.jsonl")

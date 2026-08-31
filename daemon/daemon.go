@@ -90,6 +90,19 @@ func here() string {
 	return abs
 }
 
+// kotoHome is the state root every path derives from: KOTO_HOME when set
+// (installed mode — /var/lib/koto with the same layout as a dev clone),
+// otherwise the cwd (dev-from-clone mode, unchanged behavior).
+func kotoHome() string {
+	if h := os.Getenv("KOTO_HOME"); h != "" {
+		if abs, err := filepath.Abs(h); err == nil {
+			return abs
+		}
+		return h
+	}
+	return here()
+}
+
 var (
 	HERE        string
 	ROOT        string
@@ -102,7 +115,7 @@ var (
 )
 
 func initPaths() {
-	HERE = here()
+	HERE = kotoHome()
 	ROOT = filepath.Join(HERE, "groups")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
 	SCHED_FILE = filepath.Join(HERE, "schedules.json")
