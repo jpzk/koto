@@ -41,11 +41,9 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # only (Firecracker assets and the guest kernel are built for it, and
 # checkPlatform enforces it).
 #
-# NOTE: `make fc-rootfs` is podman-ONLY, unlike these targets. It uses
-# `podman unshare` to preserve in-image uid/gid ownership through
-# `mkfs.ext4 -d`, and docker has no equivalent. A docker-only host can build
-# every binary but not the guest rootfs; use a prebuilt fcassets/rootfs.img,
-# or install podman for that one step.
+# Every build step honours this, including `make fc-rootfs` — it used to be
+# podman-only (it needed `podman unshare` to preserve in-image ownership), and
+# now does that stage inside a container instead, which both engines can do.
 CONTAINER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
 CONTAINER_NAME := $(notdir $(CONTAINER))
 # Rootless podman maps your uid to root inside, so build outputs come back

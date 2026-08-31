@@ -270,8 +270,9 @@ rootless, as you. What the host must provide:
   both; hardening like Ubuntu 24.04's
   `kernel.apparmor_restrict_unprivileged_userns` is the kind of setting
   that breaks it.
-- **e2fsprogs** (`mkfs.ext4`) for the golden-rootfs build. Workspace image
-  creation and growth at runtime use the copy baked into the cs_host image.
+- **e2fsprogs** (`mkfs.ext4`, `e2fsck`, `resize2fs`) at RUNTIME, for creating
+  and growing each group's workspace image. Not needed to build: the
+  golden-rootfs build carries its own copy in the build image.
 - **Baseline CLI tools**: `make`, `curl`, `tar`, `git`. (`openssl` and `jq`
   are needed only by the legacy `make pki-*` targets and `make metrics` —
   `koto setup` mints the PKI itself with Go's stdlib.)
@@ -356,11 +357,8 @@ make setup
 ```
 
 That is the whole prerequisite list — no Go, Node, protoc or openssl toolchain
-on the host, all of it is containerized. Either **podman or docker** works and
-is used only to BUILD: nothing koto runs at runtime is a container. (One
-exception: `make fc-rootfs`, which builds the guest filesystem image, needs
-`podman unshare` specifically — a docker-only host can build every binary but
-wants a prebuilt `rootfs.img` for that step.) They are named explicitly because a
+on the host, all of it is containerized. Either **podman or docker** works, and
+is used only to BUILD: nothing koto runs at runtime is a container. They are named explicitly because a
 stock cloud image of either distro ships podman but not git or make.
 
 **On Ubuntu, also make `/dev/kvm` world-accessible**, which Fedora does by

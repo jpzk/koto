@@ -37,7 +37,12 @@ FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker
 
 echo "==> building guest vmlinux ($KERNEL_TAG + CONFIG_TUN)"
 
-podman run --rm -i --security-opt label=disable \
+# Either engine, docker first when both are present — same resolution as the
+# Makefile and build-rootfs.sh, so one host never builds half its assets with
+# one engine and half with the other.
+CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || true)}"
+[ -n "$CONTAINER" ] || { echo "podman or docker is required to build the guest kernel"; exit 1; }
+"$CONTAINER" run --rm -i --security-opt label=disable \
   -e KERNEL_TAG="$KERNEL_TAG" \
   -e KERNEL_COMMIT="$KERNEL_COMMIT" \
   -e FC_CONFIG_URL="$FC_CONFIG_URL" \

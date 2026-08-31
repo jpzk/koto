@@ -209,13 +209,15 @@ func checkContainerEngine() []checkResult {
 	res := []checkResult{okCheck(engine, "version "+ver)}
 
 	if engine == "docker" {
-		res = append(res, warnCheck("guest rootfs build", "docker cannot build it",
-			"`make fc-rootfs` needs `podman unshare` to preserve in-image ownership\n"+
-				"through mkfs.ext4; docker has no equivalent. Every binary still builds\n"+
-				"here. Install podman for that one step, or use a prebuilt rootfs.img."))
+		// Nothing further to check: every build step works under docker,
+		// including the guest rootfs (build-rootfs.sh does its
+		// ownership-sensitive stage inside a container rather than under
+		// `podman unshare`, which is what used to make that step podman-only).
 		return res
 	}
-	// podman-specific health, which is also what the rootfs build relies on.
+	// podman-specific health below. These are warnings, not failures: they
+	// describe how well the BUILD will go, and nothing koto runs is a
+	// container.
 	if info.Host.Security.Rootless {
 		res = append(res, okCheck("podman rootless", "yes"))
 	} else {
