@@ -198,10 +198,10 @@ metrics:
 # go_package `koto-protocol/pb` lands in protocol/pb/). The runtime images
 # never invoke protoc — they compile the committed generated code.
 proto-gen:
-	podman run --rm --security-opt label=disable \
+	$(CONTAINER) run --rm --security-opt label=disable \
 	  -v $(PWD):/src -w /src/protocol \
 	  -v $(PWD)/.gocache:/root/.cache/go-build \
-	  docker.io/library/golang:1.24-alpine sh -euc '\
+	  $(GO_IMAGE) sh -euc '\
 	    apk add --no-cache protobuf protobuf-dev >/dev/null; \
 	    go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VER); \
 	    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VER); \
