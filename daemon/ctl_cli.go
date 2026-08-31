@@ -118,7 +118,8 @@ admin role only
                                            e.g. acl set ops stop:ghost restart:ghost list
   acl del <role>                           remove a role
 
-env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds),
+env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds, else
+     $KOTO_HOME/creds, else /var/lib/koto/creds — the installed default),
      KOTO_CLIENT (agent), KOTO_CERT/KEY/CA/TOKEN, KOTO_SERVER_NAME
 `
 
@@ -134,11 +135,49 @@ func ctlFatal(code int, format string, a ...any) {
 	os.Exit(code)
 }
 
+// ctlCredsDir resolves where the client PKI lives: explicit KOTO_CREDS_DIR,
+// else ./creds when it exists (dev clone, the historical default), else the
+// installed-mode locations ($KOTO_HOME/creds, /var/lib/koto/creds). The bare
+// "creds" fallback keeps the historical error text when nothing exists.
+func ctlCredsDir() string {
+	if v := os.Getenv("KOTO_CREDS_DIR"); v != "" {
+		return v
+	}
+	if _, err := os.Stat("creds"); err == nil {
+		return "creds"
+	}
+	if h := os.Getenv("KOTO_HOME"); h != "" {
+		return filepath.Join(h, "creds")
+	}
+	if _, err := os.Stat("/var/lib/koto/creds"); err == nil {
+		return "/var/lib/koto/creds"
+	}
+	return "creds"
+}
+
 // ctlClient dials the daemon with the same mTLS+token scheme as the TUI
 // (tui/daemon.go); kept separate because the TUI is its own module.
 func ctlClient() pb.KotoClient {
-	credsDir := ctlEnvOr("KOTO_CREDS_DIR", "creds")
+	credsDir := ctlCredsDir()
 	name := ctlEnvOr("KOTO_CLIENT", "agent")
+	if os.Getenv("KOTO_TOKEN") == "" {
+		if _, err := os.Stat(filepath.Join(credsDir, "token-"+name)); err != nil {
+			ctlFatal(1, "no token: set KOTO_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)",
+				filepath.Join(credsDir, "token-"+name), name)
+		}
+	}
+	c, err := newKotoClient(credsDir, name, ctlEnvOr("KOTO_ADDR", "127.0.0.1:8443"))
+	if err != nil {
+		ctlFatal(1, "%v", err)
+	}
+	return c
+}
+
+// newKotoClient builds a gRPC client for the daemon from a creds dir and a
+// client identity. Shared by ctlClient (which wraps errors in ctlFatal) and
+// the setup wizard's smoke test (which retries). KOTO_CERT/KEY/CA/TOKEN and
+// KOTO_SERVER_NAME still override individual pieces.
+func newKotoClient(credsDir, name, addr string) (pb.KotoClient, error) {
 	certPath := ctlEnvOr("KOTO_CERT", filepath.Join(credsDir, "client-"+name+".crt"))
 	keyPath := ctlEnvOr("KOTO_KEY", filepath.Join(credsDir, "client-"+name+".key"))
 	caPath := ctlEnvOr("KOTO_CA", filepath.Join(credsDir, "ca.crt"))
@@ -147,23 +186,22 @@ func ctlClient() pb.KotoClient {
 	if token == "" {
 		b, err := os.ReadFile(filepath.Join(credsDir, "token-"+name))
 		if err != nil {
-			ctlFatal(1, "no token: set KOTO_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)",
-				filepath.Join(credsDir, "token-"+name), name)
+			return nil, fmt.Errorf("no token: %v", err)
 		}
 		token = strings.TrimSpace(string(b))
 	}
 
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		ctlFatal(1, "client cert: %v", err)
+		return nil, fmt.Errorf("client cert: %v", err)
 	}
 	caPEM, err := os.ReadFile(caPath)
 	if err != nil {
-		ctlFatal(1, "ca: %v", err)
+		return nil, fmt.Errorf("ca: %v", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		ctlFatal(1, "ca %s: no certificates parsed", caPath)
+		return nil, fmt.Errorf("ca %s: no certificates parsed", caPath)
 	}
 	tcfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -174,7 +212,7 @@ func ctlClient() pb.KotoClient {
 		tcfg.ServerName = sn
 	}
 
-	cc, err := grpc.NewClient(ctlEnvOr("KOTO_ADDR", "127.0.0.1:8443"),
+	cc, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(credentials.NewTLS(tcfg)),
 		grpc.WithPerRPCCredentials(tokenCreds{token}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -184,9 +222,9 @@ func ctlClient() pb.KotoClient {
 		}),
 	)
 	if err != nil {
-		ctlFatal(1, "dial: %v", err)
+		return nil, fmt.Errorf("dial: %v", err)
 	}
-	return pb.NewKotoClient(cc)
+	return pb.NewKotoClient(cc), nil
 }
 
 // tokenCreds attaches the bearer token to every RPC (same shape as the TUI's).
