@@ -151,17 +151,6 @@ tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
   escape against Firecracker's minimal device model (virtio blk/vsock/net),
   not a shared-kernel container escape. This is why in-guest root
   (`root=yes`) and in-guest rootless podman are safe to offer.
-
-  This is a mainstream security recommendation, not a koto invention:
-
-  > Zudem rät Dinaburg, für die Virtualisierung auf minimalistische Lösungen
-  > umzusteigen, die eine geringere Angriffsfläche bieten. Als Beispiel nennt
-  > er das von AWS entwickelte Firecracker.
-  >
-  > *("Dinaburg further advises moving virtualization to minimalist solutions
-  > that present a smaller attack surface. As an example he names Firecracker,
-  > developed by AWS.")* — TODO: source
-
 - **The VMM process itself is jailed** (`fcjail.go`): re-exec'd into fresh
   user/mount/pid/net/ipc/uts namespaces, per-VM chroot with only what FC
   needs, distinct unprivileged uid, `no_new_privs`, FC seccomp on. A virtio
@@ -559,6 +548,43 @@ What that means for you as a reader or user:
 
 If you contribute with AI assistance, that is fine — say so in the commit
 message or PR so the provenance stays visible.
+
+## Why Firecracker
+
+The agent boundary had to be something an untrusted process cannot argue with.
+Containers share the host kernel, so isolation rests on namespaces, cgroups and
+seccomp, and a single kernel LPE collapses the whole stack. A microVM moves the
+boundary to hardware virtualization: the guest runs its own kernel behind
+KVM, and an escape means defeating the VMM's device model rather than the
+Linux syscall surface.
+
+Firecracker specifically, over a general-purpose VMM like QEMU, for the reason
+that also makes it fast: it implements almost nothing. Its device model is
+virtio-block, virtio-net and vsock, with no BIOS, no PCI enumeration, no USB,
+no emulated graphics or audio — the parts of a full VMM where device-model
+CVEs have historically lived. Less emulation is less to get wrong, and it
+boots in ~125ms, which is what makes one VM per agent group practical rather
+than a thought experiment.
+
+That reasoning is not koto's invention — it is the mainstream advice for
+isolating untrusted workloads:
+
+> Zudem rät Dinaburg, für die Virtualisierung auf minimalistische Lösungen
+> umzusteigen, die eine geringere Angriffsfläche bieten. Als Beispiel nennt er
+> das von AWS entwickelte Firecracker.
+>
+> *"Dinaburg further advises moving virtualization to minimalist solutions that
+> present a smaller attack surface. As an example he names Firecracker,
+> developed by AWS."*
+>
+> — TODO: add source
+
+The trade koto accepts for it is the absence of a shared filesystem: a group
+gets no bind mounts, so every host↔guest channel is vsock, guest-side code
+ships baked into the rootfs image (`make fc-rootfs`), and orchestration
+between groups is verb-based rather than file-based. That constraint is what
+also closed the egress hole — with no NIC by default, the credential-injecting
+proxy is the only way out. See `docs/firecracker-vsock.md`.
 
 ## Further reading
 
