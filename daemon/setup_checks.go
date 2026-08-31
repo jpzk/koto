@@ -372,3 +372,56 @@ func errText(err error) string {
 	}
 	return err.Error()
 }
+
+// preflightGate runs every host check, prints the report with remediation, and
+// decides whether it is safe to continue. Shared by the wizard's first step
+// and by `koto install`, so a direct install cannot skip the checks the
+// guided path enforces — which it silently did until this existed.
+//
+// Returns noKVM=true when the operator chose to proceed without KVM: the
+// daemon installs and the API answers, but no group can boot.
+func preflightGate(u *setupUI) (noKVM bool, err error) {
+	var hard, kvm []checkResult
+	group := ""
+	for _, c := range runPreflight() {
+		if c.group != group {
+			group = c.group
+			if group != "" {
+				u.printf("%s", u.dim("  "+group))
+			}
+		}
+		switch {
+		case c.ok && !c.warn:
+			u.ok("%-18s %s", c.name, u.dim(c.detail))
+		case c.warn:
+			u.warn("%-18s %s", c.name, c.detail)
+			if c.remedy != "" {
+				u.hint(c.remedy)
+			}
+		default:
+			u.fail("%-18s %s", c.name, c.detail)
+			if c.remedy != "" {
+				u.hint(c.remedy)
+			}
+			if c.name == "/dev/kvm" {
+				kvm = append(kvm, c)
+			} else {
+				hard = append(hard, c)
+			}
+		}
+	}
+	if len(hard) > 0 {
+		return false, fmt.Errorf("%d unmet requirement(s) — see the remediation above", len(hard))
+	}
+	if len(kvm) > 0 {
+		u.blank()
+		u.prose(`KVM is the one requirement you can proceed without, in a limited way: the
+daemon will install and run, and the API will answer, but no group can
+actually boot until KVM is available.`)
+		if !u.yesno("Continue without KVM?", false) {
+			return false, errSetupAborted
+		}
+		return true, nil
+	}
+	return false, nil
+}

@@ -80,49 +80,11 @@ Nothing is installed into your OS by this check; it only looks.`,
 			return true, "all requirements met"
 		},
 		run: func(sc *setupCtx) error {
-			u := sc.ui
-			var hard, kvm []checkResult
-			group := ""
-			for _, c := range runPreflight() {
-				if c.group != group {
-					group = c.group
-					if group != "" {
-						u.printf("%s", u.dim("  "+group))
-					}
-				}
-				switch {
-				case c.ok && !c.warn:
-					u.ok("%-18s %s", c.name, u.dim(c.detail))
-				case c.warn:
-					u.warn("%-18s %s", c.name, c.detail)
-					if c.remedy != "" {
-						u.hint(c.remedy)
-					}
-				default:
-					u.fail("%-18s %s", c.name, c.detail)
-					if c.remedy != "" {
-						u.hint(c.remedy)
-					}
-					if c.name == "/dev/kvm" {
-						kvm = append(kvm, c)
-					} else {
-						hard = append(hard, c)
-					}
-				}
+			noKVM, err := preflightGate(sc.ui)
+			if err != nil {
+				return err
 			}
-			if len(hard) > 0 {
-				return fmt.Errorf("%d unmet requirement(s) — see the remediation above", len(hard))
-			}
-			if len(kvm) > 0 {
-				u.blank()
-				u.prose(`KVM is the one requirement you can proceed without, in a limited way: the
-daemon will install and run, and the API will answer, but no group can
-actually boot until KVM is available.`)
-				if !u.yesno("Continue without KVM?", false) {
-					return errSetupAborted
-				}
-				sc.noKVM = true
-			}
+			sc.noKVM = noKVM
 			return nil
 		},
 		verify: func(sc *setupCtx) error { return nil }, // the run() above is the verification
@@ -390,10 +352,11 @@ runs as you, with rootless podman, exactly as it does now.`,
 				}
 			}
 			return runInstall(installOpts{
-				stateDir: sc.stateDir(),
-				root:     sc.root,
-				ui:       sc.ui,
-				ctx:      sc,
+				stateDir:      sc.stateDir(),
+				root:          sc.root,
+				ui:            sc.ui,
+				ctx:           sc,
+				skipPreflight: true, // step 1 already gated
 			})
 		},
 	}

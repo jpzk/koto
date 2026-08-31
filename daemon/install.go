@@ -66,6 +66,11 @@ func hostCPUs() string {
 type installOpts struct {
 	stateDir string
 	root     string // the clone
+	// skipPreflight is set by the wizard, whose first step already gated on
+	// the host checks. A direct `koto install` runs them itself — it used to
+	// run none at all, so an install could land on a host with no KVM, no
+	// newuidmap and no e2fsprogs and only fail later, at the first boot.
+	skipPreflight bool
 	ui       *setupUI
 	ctx      *setupCtx
 }
@@ -123,7 +128,14 @@ func runInstall(o installOpts) error {
 		return err
 	}
 	if me.Uid == "0" {
-		return fmt.Errorf("run as your normal user, not root — the service runs rootless podman as you (sudo is used only for the three system files)")
+		return fmt.Errorf("run as your normal user, not root — the daemon runs as you (sudo is used only for the system files)")
+	}
+	if !o.skipPreflight {
+		u.printf("%s", u.bold("host requirements"))
+		if _, err := preflightGate(u); err != nil {
+			return err
+		}
+		u.blank()
 	}
 
 	// 1. state directory
