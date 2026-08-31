@@ -217,6 +217,17 @@ func seedStateDir(o installOpts, me *user.User) error {
 		}
 	}
 
+	// $HOME/.claude must BE the creds dir, which is how the container had it
+	// (creds/ was mounted at /root/.claude). The unit sets HOME to the state
+	// dir, so this symlink is what keeps the proxy and the `claude` refresh
+	// subprocess off the operator's personal credentials.
+	claudeLink := filepath.Join(o.stateDir, ".claude")
+	if _, err := os.Lstat(claudeLink); err != nil {
+		if err := os.Symlink("creds", claudeLink); err != nil {
+			return fmt.Errorf("link .claude -> creds: %w", err)
+		}
+	}
+
 	// creds: copy what the wizard minted in the clone, never overwrite.
 	srcCreds := filepath.Join(o.root, "creds")
 	dstCreds := filepath.Join(o.stateDir, "creds")
@@ -427,6 +438,13 @@ User=%[1]s
 Group=%[3]s
 EnvironmentFile=%[4]s
 WorkingDirectory=%[5]s
+# HOME must resolve $HOME/.claude to koto's OWN creds dir (there is a symlink
+# in the state dir for exactly this). The container got that for free by
+# mounting creds/ at /root/.claude; on the host, leaving HOME alone would send
+# the proxy's default CRED_PATH — and the claude CLI it shells out to for
+# token refresh — at the operator's PERSONAL ~/.claude, quietly undoing the
+# trust model's dedicated-credentials property.
+Environment=HOME=%[5]s
 ExecStart=/usr/local/bin/koto daemon
 
 # Delegate gives this service its own writable cgroup subtree, which is what

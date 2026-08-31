@@ -212,7 +212,14 @@ Anthropic's terms for which fits your use — the README has the details.`,
 				// container mount used to provide.
 				cmd := exec.Command("claude", "auth", "login")
 				cmd.Dir = sc.root
-				cmd.Env = setEnv(os.Environ(), "HOME", sc.credsDir())
+				// HOME is the clone root, not creds/, because claude writes to
+				// $HOME/.claude — and .claude is a symlink to creds. Pointing
+				// HOME at creds/ directly would bury the token one level too
+				// deep, in creds/.claude/, where nothing looks for it.
+				if _, err := os.Lstat(filepath.Join(sc.root, ".claude")); err != nil {
+					_ = os.Symlink("creds", filepath.Join(sc.root, ".claude"))
+				}
+				cmd.Env = setEnv(os.Environ(), "HOME", sc.root)
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 				signal.Ignore(os.Interrupt)
 				err := cmd.Run()
