@@ -61,3 +61,38 @@ func TestInstallHintNamesTheRightPackageManager(t *testing.T) {
 		t.Errorf("unknown distro should show both: %q", h)
 	}
 }
+
+// TestRuntimeToolsCoverEveryShellOut is the guard against the preflight
+// drifting from reality: the daemon shells out to a handful of host binaries,
+// and a missing one surfaces at runtime as a failed group boot or a silently
+// unrefreshed token rather than as a setup error. If you add an exec.Command
+// to the daemon's runtime path, add it here too.
+func TestRuntimeToolsCoverEveryShellOut(t *testing.T) {
+	want := []string{"mkfs.ext4", "e2fsck", "resize2fs", "tar", "newuidmap", "newgidmap", "claude"}
+	got := map[string]bool{}
+	for _, c := range checkRuntimeTools() {
+		got[c.name] = true
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("runtime preflight does not check for %q", w)
+		}
+	}
+}
+
+// TestBuildAndRuntimeToolsAreSeparate pins the split that makes podman a
+// build-time-only dependency legible in the report: a binary release that
+// never builds anything still needs the runtime set, and must not be told it
+// needs git or make.
+func TestBuildAndRuntimeToolsAreSeparate(t *testing.T) {
+	for _, c := range checkBuildTools() {
+		if c.name == "claude" || c.name == "mkfs.ext4" {
+			t.Errorf("%q is a runtime dependency, not a build one", c.name)
+		}
+	}
+	for _, c := range checkRuntimeTools() {
+		if c.name == "git" || c.name == "make" || c.name == "podman" {
+			t.Errorf("%q is a build dependency, not a runtime one", c.name)
+		}
+	}
+}

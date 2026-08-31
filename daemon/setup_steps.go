@@ -80,7 +80,14 @@ Nothing is installed into your OS by this check; it only looks.`,
 		run: func(sc *setupCtx) error {
 			u := sc.ui
 			var hard, kvm []checkResult
+			group := ""
 			for _, c := range runPreflight() {
+				if c.group != group {
+					group = c.group
+					if group != "" {
+						u.printf("%s", u.dim("  "+group))
+					}
+				}
 				switch {
 				case c.ok && !c.warn:
 					u.ok("%-18s %s", c.name, u.dim(c.detail))
