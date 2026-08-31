@@ -28,6 +28,10 @@ func main() {
 		// and authorization are the mTLS + bearer token + role ACL every
 		// other client goes through.
 		ctlCliMain(os.Args[2:])
+	case "pki":
+		// Private CA / server cert / client identities, in Go — the
+		// openssl-free counterpart of the Makefile's pki-* targets.
+		pkiCliMain(os.Args[2:])
 	case "version":
 		fmt.Println(kotoVersion)
 	default:
