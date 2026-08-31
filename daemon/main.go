@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|install|launch|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|install|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -37,10 +37,6 @@ func main() {
 		// Install (or upgrade) koto as a systemd service backed by a state
 		// directory, so it survives a reboot and outlives this clone.
 		installMain(os.Args[2:])
-	case "launch":
-		// Internal: the installed unit's ExecStart. Computes the podman
-		// arguments and execs podman, so podman is the unit's main process.
-		launchMain(os.Args[2:])
 	case "tui":
 		// Attach the terminal UI to an installed daemon (the `make tui`
 		// counterpart for a non-clone install).
