@@ -199,3 +199,52 @@ func TestUnitPointsHomeAtKotoCreds(t *testing.T) {
 		t.Error("unit points HOME at the operator's personal home directory")
 	}
 }
+
+// TestMigrateStateMovesCloneData covers the upgrade path that matters most:
+// installing from a clone that is ALREADY RUNNING koto. Without migration the
+// install starts empty and every group workspace stays behind in the clone —
+// nothing is lost, but it looks exactly like losing everything.
+func TestMigrateStateMovesCloneData(t *testing.T) {
+	root, state := t.TempDir(), t.TempDir()
+	o := installOpts{root: root, stateDir: state, ui: newSetupUI(true, true)}
+
+	// A clone with live group state, and a state dir seeded with the empty
+	// groups/ that seedStateDir creates just before this runs.
+	if err := os.MkdirAll(filepath.Join(root, "groups", "main"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "groups", "main", "workspace.img"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "groups.json"), []byte(`{"main":8787}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(state, "groups"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrateState(o, "groups"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateState(o, "groups.json"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(state, "groups", "main", "workspace.img")) {
+		t.Error("group workspace did not reach the state dir")
+	}
+	if !exists(filepath.Join(state, "groups.json")) {
+		t.Error("groups.json did not reach the state dir")
+	}
+
+	// Re-running must not clobber: an installed system's state always wins
+	// over whatever a clone still happens to hold.
+	if err := os.MkdirAll(filepath.Join(root, "groups", "ghost"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateState(o, "groups"); err != nil {
+		t.Fatal(err)
+	}
+	if exists(filepath.Join(state, "groups", "ghost")) {
+		t.Error("second migration overwrote populated state-dir groups")
+	}
+}
