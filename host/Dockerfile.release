@@ -1,0 +1,40 @@
+# The installed daemon image: the binary is baked in, not rebuilt at start.
+#
+# host/Dockerfile is the DEV image — it ships the Go toolchain and recompiles
+# from bind-mounted source on every container start, which is what makes the
+# edit → `make host-run` → live loop take a second. An installed service has
+# no source tree to mount and should not need a compiler at runtime, so this
+# image compiles once at build time and ships a static binary on a plain
+# alpine base (~15MB of Go binary instead of ~300MB of toolchain, plus the
+# node/claude runtime the proxy's OAuth refresh shells out to).
+#
+# Everything else about the runtime is deliberately identical to the dev
+# image, so a bug can never be "only in production": same alpine packages,
+# same BIND default, same PID-1-is-the-daemon entrypoint.
+
+FROM docker.io/library/golang:1.24-alpine AS build
+WORKDIR /src
+# Only the two modules the daemon needs. daemon/go.mod has
+# `replace koto-protocol => ../protocol`, so GOWORK=off resolves the pair
+# without the repo-root go.work (and without the tui/fcguest modules).
+COPY daemon/ daemon/
+COPY protocol/ protocol/
+ARG KOTO_VERSION=dev
+ENV GOFLAGS="" GOWORK=off CGO_ENABLED=0
+RUN cd daemon && go build -trimpath \
+      -ldflags "-s -w -X main.kotoVersion=${KOTO_VERSION}" \
+      -o /out/kotod .
+
+FROM docker.io/library/alpine:3.22
+# Same runtime deps as the dev image: e2fsprogs/e2fsprogs-extra for
+# workspace.img (mkfs.ext4, e2fsck, resize2fs), tar for skills delivery,
+# node+claude-code for the proxy's credential refresh.
+RUN apk add --no-cache nodejs npm e2fsprogs e2fsprogs-extra tar \
+ && npm i -g @anthropic-ai/claude-code
+COPY --from=build /out/kotod /usr/local/bin/kotod
+# BIND is the proxy's listen address inside the container.
+ENV BIND=0.0.0.0
+# Exec form so the daemon is PID 1 and `podman stop`'s SIGTERM reaches its
+# shutdown handler — it stops every microVM so guests sync+umount their
+# workspace images. Without that, every restart leaves dirty images.
+ENTRYPOINT ["/usr/local/bin/kotod","daemon"]

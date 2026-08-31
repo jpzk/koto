@@ -9,7 +9,10 @@
 # (`make fc-kernel`).
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-OUT="$HERE/fcassets"
+# KOTO_FCASSETS_OUT: `koto install` builds the assets straight into the state
+# directory (/var/lib/koto/fcassets) instead of the clone, so the clone stays
+# disposable. Unset = the clone, i.e. the dev default.
+OUT="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
 mkdir -p "$OUT"
 
 FC_VERSION="${FC_VERSION:-v1.16.1}"   # 2026-07-02; >6 weeks old

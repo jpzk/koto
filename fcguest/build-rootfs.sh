@@ -11,8 +11,10 @@
 # drive. Rebuild whenever sidecar/*.{sh,js} or fcguest/ change: `make fc-rootfs`.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-OUT="$HERE/fcassets/rootfs.img"
-mkdir -p "$HERE/fcassets"
+# KOTO_FCASSETS_OUT: see fetch-assets.sh.
+OUTDIR="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
+OUT="$OUTDIR/rootfs.img"
+mkdir -p "$OUTDIR"
 
 command -v mkfs.ext4 >/dev/null || { echo "need e2fsprogs (mkfs.ext4) on the host"; exit 1; }
 
