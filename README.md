@@ -465,7 +465,10 @@ nothing containerized at runtime:
 ```sh
 make koto          # build the daemon binary (compiles in a container, so no host Go)
 make koto-tui      # build the TUI binary, likewise
-make assets     # firecracker binary + guest kernel + golden rootfs (required)
+make assets        # firecracker + guest kernel + golden rootfs (required).
+                   # Firecracker builds from a pinned commit in upstream's
+                   # container (~3 min); FC_PREBUILT=1 fetches the release and
+                   # verifies its checksum instead.
 ./koto pki init && ./koto pki client tui     # private CA + the TUI's identity
 make login         # one-time subscription OAuth into ./creds — OR export
                    # ANTHROPIC_API_KEY before host-run

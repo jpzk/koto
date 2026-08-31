@@ -2,31 +2,29 @@
 # build-firecracker.sh — obtain the microVM monitor.
 #
 # Firecracker is the most privileged binary koto runs: it opens /dev/kvm and IS
-# the boundary the trust model rests on. This fetches the pinned upstream
-# release and VERIFIES IT against a checksum recorded here. It previously did
-# neither — plain `curl` then `chmod +x`, with no SHA256 and no signature. TLS
-# proves you reached GitHub; it does not prove you got the right bytes.
+# the boundary the trust model rests on.
 #
-# FC_FROM_SOURCE=1 builds it instead, from a pinned commit inside upstream's
-# own build container. That is opt-in rather than the default deliberately:
-#
-#   - The checksum above already closes the INTEGRITY gap, which is the thing
-#     that was actually broken. Building from source does not improve on a
-#     verified artifact for that.
-#   - What it does buy is SOVEREIGNTY: source you can read, the ability to
-#     carry a patch, and independence from a release artifact staying up.
-#   - It does not shrink the trust set. You swap "trust one 3.4MB signed
-#     binary" for "trust a multi-GB CI image plus the source", and a
-#     compromised toolchain can inject into output that reads as clean.
-#   - Practically: multi-GB image, ~10-20 minute build, and a second pin to
-#     keep current. Making it the default would let an upstream toolchain
-#     break block every install.
+# DEFAULT: build it from a pinned COMMIT, in upstream's own build container.
+# Everything else koto ships is built from source in a container — the daemon,
+# the TUI, the guest kernel, the guest rootfs — and the VMM being the one
+# downloaded binary was the odd one out, in the place where it matters most.
+# Building takes ~3 minutes and gives source you can read and patch.
 #
 # The container is needed because a plain Rust image cannot do it: Firecracker
 # links libseccomp and runs bindgen, so a musl-static build (mandatory — see
 # the ldd check below) needs musl-built C deps. Debian ships no musl
 # libseccomp; on Alpine bindgen cannot dlopen libclang, musl having no dynamic
 # loading in a static build script. fcuvm has both.
+#
+# FC_PREBUILT=1 is the escape hatch: fetch upstream's release and verify it
+# against the SHA256 pinned below. It exists so a broken upstream toolchain
+# image cannot block an install, and because it is genuinely a fine way to get
+# the binary — the checksum closes the integrity gap either way. What building
+# adds is sovereignty, not a smaller trust set: source-building swaps "trust
+# one signed 3.4MB binary" for "trust a multi-GB CI image plus the source",
+# and a compromised toolchain injects into output that reads as clean.
+# (The fetch used to have NO verification at all — bare curl then chmod +x.
+# TLS proves you reached GitHub, not that you got the right bytes.)
 #
 # Output: fcassets/firecracker (static musl binary, as upstream ships).
 set -eu
@@ -43,15 +41,16 @@ mkdir -p "$OUT"
 # means deliberately running known-vulnerable boundary code. Promptness beats
 # soak time for this one dependency.
 #
-# To bump: set the version, then take the checksum from upstream's OWN
-# published file rather than from whatever you happened to download —
+# The checksum is only consulted on the FC_PREBUILT=1 path. To bump it, take
+# it from upstream's OWN published file rather than from whatever you happened
+# to download —
 #   curl -fsSL "$FC_REPO_URL/$V/firecracker-$V-x86_64.tgz.sha256.txt"
 FC_VERSION="${FC_VERSION:-v1.16.1}"   # latest release as of 2026-08-31
 FC_SHA256="${FC_SHA256:-382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6}"
 FC_REPO_URL="https://github.com/firecracker-microvm/firecracker/releases/download"
 ARCH=$(uname -m)                      # x86_64
 
-# --- source build (FC_FROM_SOURCE=1) ---------------------------------------
+# --- source build (the default; FC_PREBUILT=1 fetches instead) --------------
 # The COMMIT is the real pin: a tag can be moved, a commit cannot, so the build
 # verifies HEAD and refuses on a mismatch. Dereference the ANNOTATED tag when
 # refreshing it — ls-remote on the bare ref gives the tag OBJECT, not the
@@ -71,9 +70,9 @@ if [ -x "$OUT/firecracker" ] && [ "${FC_FORCE:-}" != "1" ]; then
   exit 0
 fi
 
-if [ "${FC_FROM_SOURCE:-}" = "1" ]; then
+if [ "${FC_PREBUILT:-}" != "1" ]; then
   CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || true)}"
-  [ -n "$CONTAINER" ] || { echo "podman or docker is required for FC_FROM_SOURCE"; exit 1; }
+  [ -n "$CONTAINER" ] || { echo "podman or docker is required to build firecracker (or set FC_PREBUILT=1 to fetch the release)"; exit 1; }
   # Rootless engines map container-root to us, so the artifact lands owned by
   # the invoking user and the correct chown target is 0:0. Chowning to our real
   # uid there would map it into the SUBUID range and leave a file we cannot
