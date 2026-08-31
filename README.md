@@ -151,6 +151,17 @@ tier 2.5 cs_tui               gRPC client on koto-net; scratch image; mounts
   escape against Firecracker's minimal device model (virtio blk/vsock/net),
   not a shared-kernel container escape. This is why in-guest root
   (`root=yes`) and in-guest rootless podman are safe to offer.
+
+  This is a mainstream security recommendation, not a koto invention:
+
+  > Zudem rät Dinaburg, für die Virtualisierung auf minimalistische Lösungen
+  > umzusteigen, die eine geringere Angriffsfläche bieten. Als Beispiel nennt
+  > er das von AWS entwickelte Firecracker.
+  >
+  > *("Dinaburg further advises moving virtualization to minimalist solutions
+  > that present a smaller attack surface. As an example he names Firecracker,
+  > developed by AWS.")* — TODO: source
+
 - **The VMM process itself is jailed** (`fcjail.go`): re-exec'd into fresh
   user/mount/pid/net/ipc/uts namespaces, per-VM chroot with only what FC
   needs, distinct unprivileged uid, `no_new_privs`, FC seccomp on. A virtio
