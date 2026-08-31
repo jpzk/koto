@@ -257,8 +257,10 @@ rootless, as you. What the host must provide:
   Ubuntu 24.04; slirp4netns is not used) and working subuid/subgid ranges —
   the rootfs build runs under `podman unshare`. Podman hosts cs_host, the
   TUI, and every containerized build (Go, protoc, the guest kernel). On
-  Ubuntu the id-mapping helpers are the separate `uidmap` package, which apt
-  does not install alongside podman; without it rootless does not work at all.
+  Ubuntu the id-mapping helpers are the separate `uidmap` package and pasta
+  is `passt`; both are Recommends of podman, so a default `apt install` has
+  them and a `--no-install-recommends` one does not. Rootless podman does not
+  work at all without `uidmap`, so `koto setup` probes for it directly.
 - **Unprivileged user namespaces — nested.** Rootless podman puts cs_host
   in a userns; the VMM jailer (`fcjail.go`) then clones a *second* userns
   from inside that container. So the kernel must allow not just
@@ -345,7 +347,8 @@ explicit `gap` event when the ring can't cover).
 ```sh
 # Fedora
 sudo dnf install -y git make podman
-# Ubuntu 24.04+ (uidmap is what rootless podman needs and apt won't pull in)
+# Ubuntu 24.04+ (passt and uidmap are Recommends of podman, so a default
+# apt install already pulls them in; name them for --no-install-recommends)
 sudo apt install -y git make podman passt uidmap
 
 git clone <repo> && cd koto
