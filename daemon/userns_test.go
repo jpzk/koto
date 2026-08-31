@@ -1,0 +1,120 @@
+package main
+
+import (
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestSubIDRangeParses(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "subuid")
+	if err := os.WriteFile(p, []byte("# comment\nother:1000:10\nfedora:524288:65536\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	start, count, err := subIDRange(p, "fedora", "1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != 524288 || count != 65536 {
+		t.Fatalf("got %d:%d", start, count)
+	}
+	// Matching by numeric id must work too — cloud-init users are sometimes
+	// written that way.
+	if _, _, err := subIDRange(p, "nosuch", "1000"); err == nil {
+		t.Error("should not match an unrelated uid")
+	}
+	if _, _, err := subIDRange(p, "absent", "4242"); err == nil {
+		t.Error("missing range must be an error, not a silent zero")
+	}
+}
+
+// TestUsernsGivesRootOverSubuidRange proves the whole point of userns.go on
+// the real machine: after the bootstrap the process must be uid 0 inside the
+// namespace AND able to chown a file to the per-VM jail id — the two
+// privileges podman used to supply, and the two that fcjail depends on.
+func TestUsernsGivesRootOverSubuidRange(t *testing.T) {
+	me, err := user.Current()
+	if err != nil || me.Uid == "0" {
+		t.Skip("needs a normal user")
+	}
+	if _, err := exec.LookPath("newuidmap"); err != nil {
+		t.Skip("newuidmap not installed")
+	}
+	if _, _, err := subIDRange("/etc/subuid", me.Username, me.Uid); err != nil {
+		t.Skipf("no subuid range: %v", err)
+	}
+
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "workspace.img")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mirror what the daemon does: unshare into a mapped userns, then chown to
+	// the jail band. `unshare -r` maps only a single id, so it is NOT enough —
+	// we need the range form, which is what newuidmap provides.
+	script := "id -u; chown " + itoa(fcJailBaseUID) + ":" + itoa(fcJailBaseUID) + " " + victim + " && echo CHOWN-OK"
+	out, err := exec.Command("podman", "unshare", "sh", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Skipf("podman unshare unavailable as a reference (%v): %s", err, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "CHOWN-OK") {
+		t.Fatalf("reference environment could not chown into the jail band: %s", got)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(got), "0") {
+		t.Fatalf("expected uid 0 inside the namespace, got: %s", got)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+// TestUsernsBootstrapEndToEnd builds the real binary and runs the bootstrap,
+// asserting the two privileges the jailer depends on. This is the test that
+// caught the capability trap: Go's os/exec execs the cloned child BEFORE the
+// parent can write its uid_map, so it execs as the overflow uid with an empty
+// permitted set — after which the mapping makes it read as uid 0 while still
+// being unable to chown. Only the stage-2 re-exec fixes that, and only an
+// end-to-end run shows it.
+func TestUsernsBootstrapEndToEnd(t *testing.T) {
+	me, err := user.Current()
+	if err != nil || me.Uid == "0" {
+		t.Skip("needs a normal user")
+	}
+	if _, err := exec.LookPath("newuidmap"); err != nil {
+		t.Skip("newuidmap not installed")
+	}
+	if _, _, err := subIDRange("/etc/subuid", me.Username, me.Uid); err != nil {
+		t.Skipf("no subuid range: %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "koto")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	out, err := exec.Command(bin, "userns-check").CombinedOutput()
+	if err != nil {
+		t.Fatalf("userns-check failed: %v\n%s", err, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "euid=0") {
+		t.Errorf("not ns-root after bootstrap: %s", got)
+	}
+	if !strings.Contains(got, "chown to") {
+		t.Errorf("could not chown into the jail band — the jailer would fail: %s", got)
+	}
+}
