@@ -445,10 +445,10 @@ koto pki server -creds /var/lib/koto/creds \
 sudo systemctl restart koto
 ```
 
-Reaching it from off-box also means publishing the port: set `KOTO_PUBLISH`
-in `/etc/koto/koto.env` to an address other than `127.0.0.1`. mTLS and the
-bearer token are what gate access — but only issue certificates to devices
-you control.
+Reaching it from off-box also means widening the bind: set `KOTO_BIND` in
+`/etc/koto/koto.env` to an address other than `127.0.0.1` and restart. mTLS
+and the bearer token are what gate access — but only issue certificates to
+devices you control.
 
 To uninstall: `sudo systemctl disable --now koto`, then remove
 `/etc/systemd/system/koto.service`, `/etc/koto`, `/usr/local/bin/koto` and
@@ -458,29 +458,38 @@ first — those sockets are owned by subuids, not by you).
 ## Build & run (development)
 
 Working on koto itself? Run it straight from the clone — no install, and
-host-side Go is recompiled on every daemon start:
+nothing containerized at runtime:
 
 ```sh
-make host-build   # cs_host image (the dev image: toolchain + live rebuild)
-make fc-assets    # firecracker binary + kernel + golden rootfs (required)
-make pki-init && make pki-client NAME=tui   # private CA + the TUI's client cert
-make login        # one-time subscription OAuth into ./creds/ — OR export
-                  # ANTHROPIC_API_KEY before host-run (recommended, see below)
-make host-run     # start daemon (+ main group)
-make tui-build    # TUI image (first time, and after editing tui/*.go)
-make tui          # attach the TUI (/exit detaches; daemon keeps running;
-                  # Ctrl+C interrupts the agent's turn)
-make stop         # tear down
+make koto          # build the daemon binary (compiles in a container, so no host Go)
+make koto-tui      # build the TUI binary, likewise
+make fc-assets     # firecracker binary + guest kernel + golden rootfs (required)
+./koto pki init && ./koto pki client tui     # private CA + the TUI's identity
+make login         # one-time subscription OAuth into ./creds — OR export
+                   # ANTHROPIC_API_KEY before host-run
+make host-run      # run the daemon in the foreground from this directory
+make tui           # attach the TUI (/exit detaches; daemon keeps running)
+make stop          # SIGTERM the dev daemon (stops its microVMs cleanly)
 ```
 
-A dev clone and an installed service can coexist: they use different
-container names, different state directories and different images. The
+**Podman is a build-time dependency only.** It compiles the Go binaries (so
+your host needs no Go toolchain) and builds the guest kernel and rootfs.
+Nothing koto runs is a container: the daemon is a systemd service on the host,
+the TUI is a plain binary, and each agent group is a Firecracker microVM.
+
+A dev clone and an installed service can coexist — different state directories,
+and the dev daemon binds whatever `KOTO_PORT`/`PROXY_PORT` you give it. The
 daemon resolves all state from `KOTO_HOME`, falling back to the working
-directory — which is exactly what makes both modes the same code path.
+directory, which is what makes both modes the same code path.
+
+The daemon puts itself in a user namespace at startup (`daemon/userns.go`)
+using `newuidmap`/`newgidmap` against your `/etc/subuid` allocation. That is
+what lets the jailer give each microVM monitor its own unprivileged uid — the
+one thing the podman container used to supply. It needs no root; the helpers
+carry `cap_setuid`/`cap_setgid`. `koto userns-check` verifies it in isolation.
 
 Guest-side code (`sidecar/`, `fcguest/`) is baked into the rootfs: rebuild
-with `make fc-rootfs` + `/restart <g>`. Host-side Go is live (`go run` in
-cs_host) — edit and `make host-run`.
+with `make fc-rootfs` + `/restart <g>`.
 
 ## Credentials and Anthropic's terms
 

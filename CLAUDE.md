@@ -44,31 +44,21 @@ everything else derives from the globals.
   in creds/, a systemd unit), so an interrupted run resumes by re-running and
   there is no wizard state to corrupt. `--check` is the same detection pass
   with no mutations: the doctor mode, exit 0 when the install is healthy.
-- **`koto install`** builds `host/Dockerfile.release` (daemon baked in — the
-  dev image's rebuild-from-bind-mount entrypoint is a development affordance,
-  not a runtime one), seeds the state dir, writes three root-owned files (the
-  binary, `/etc/koto/koto.env`, the unit) via discrete echoed `sudo` execs,
-  and enables the service. Re-running upgrades in place; `koto.env` values
+- **`koto install`** seeds the state dir and writes four root-owned things (the
+  `koto` and `koto-tui` binaries, `/etc/koto/koto.env`, the unit) via discrete
+  echoed `sudo` execs, then enables the service. No image is built: the daemon
+  runs on the host. Re-running upgrades in place; `koto.env` values
   the operator edited are preserved, and `prompts/` refreshes only when
   untouched (compared against a `.dist` copy).
-- **`koto launch` is the unit's ExecStart and `syscall.Exec`s podman.** This
-  is load-bearing, not style: podman must BE the unit's main process so
-  `--sdnotify=conmon` satisfies `Type=notify` and systemd's SIGTERM reaches
-  podman → the daemon as PID 1 → `fcStopAll`, which is what makes every
-  guest sync+umount its workspace image. A spawn-and-wait wrapper would break
-  that chain and leave dirty images on every reboot. (Verified end-to-end:
-  container exit 0, `e2fsck` clean.)
-- **The unit is a system unit** (`/etc/systemd/system/koto.service`) running
-  rootless podman as the invoking user: `User=`/`Group=`, an explicit
-  `XDG_RUNTIME_DIR` (a system unit does not set it), `Requires=user@<uid>
-  .service` plus `loginctl enable-linger` so the user manager and delegated
-  cgroup tree exist at boot, and `Delegate=yes` so per-VM cgroup caps work
-  (absent it, `fcCgroupInit` degrades to `cgroup=off`). `TimeoutStopSec=25`
-  sits above the daemon's ~12s VM-stop budget.
-- **`KOTO_PUBLISH=127.0.0.1` is the installed default** (dev keeps it off).
-  Rootless podman container IPs are not host-routable, so without a loopback
-  publish, host-side `koto ctl` and `koto tui` could not reach the daemon at
-  all; mTLS + bearer token still gate every call.
+- **The unit runs the daemon directly** (`ExecStart=/usr/local/bin/koto daemon`,
+  `Type=exec`), so systemd's SIGTERM reaches it with nothing in between and
+  `fcStopAll` gets its ~12s to let every guest sync+umount its workspace image
+  (`TimeoutStopSec=25`). The userns supervisor forwards the signal to the real
+  daemon process.
+- **The unit is a system unit** (`/etc/systemd/system/koto.service`) running as
+  the invoking user. No `user@<uid>.service` dependency and no linger: both
+  existed so rootless podman had a live user manager and delegated cgroup tree
+  at boot, and the daemon no longer runs under podman.
 - **The PKI is Go** (`pki.go`, stdlib only), so an installed host needs
   neither openssl nor jq. It is byte-compatible with what `auth.go` verifies
   and `TestPKIHandshake` pins that with a real TLS handshake. It is also
@@ -122,7 +112,6 @@ daemon/              the daemon Go module (module `koto`):
   setup_ui.go          plain terminal dialog (prompts, ANSI, streamed subprocess output)
   pki.go               CA / server / client certs + tokens in Go (`koto pki`) — no openssl/jq
   install.go           `koto install`: state dir, release image, /etc files, systemd unit, upgrade
-  launch.go            `koto launch` — the unit's ExecStart; execs podman
   tui_cmd.go           `koto tui` — attach the TUI to an installed daemon
   sanitize.go          terminal-escape/bidi scrubbing of streamed events
   attachments.go       inbound attachment staging
@@ -138,9 +127,8 @@ docs/                design docs — firecracker-vsock.md (authoritative microVM
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
 protocol/            the cross-project contract: koto.proto (gRPC, clients) + guest.proto (daemon↔microVM vsock 9002/10000) + committed generated pb ONLY (no hand-written code). Daemon + TUI + fc-agent import koto-protocol/pb; the Android app (maintained out of tree) Wire-generates Kotlin from koto.proto
 sidecar/             guest worker bits — venice_stream.js (the Venice agent loop), stream_filter.js (cs-subagent only), cs-job, cs-notify, cs-subagent (baked into the fc rootfs). entrypoint.sh is gone: fc-agent runs turns (fcguest/turn.go)
-host/                host-runner bits — Dockerfile (cs_host_go DEV image: toolchain, rebuilds from the
-                     bind-mounted source at every start), Dockerfile.release (INSTALLED image: daemon
-                     baked in, alpine base, no source mount), run-host.sh (dev launcher)
+host/                (empty — the daemon runs on the host; the Dockerfiles and run-host.sh
+                     went away with the container runtime)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
@@ -660,8 +648,10 @@ TUI driving (all phrased as one shell-style line so cron fields don't need quoti
 ## Non-obvious decisions (don't undo without reason)
 
 - **Pasta networking, not slirp4netns.** Fedora 44+ ships pasta as the rootless default; slirp4netns isn't installed. (The `PROXY_HOST=host.containers.internal` this used to note was the podman sidecars' proxy base URL; the env var was removed with the podman group runtime — a microVM group reaches the proxy over vsock 9000, not by hostname.)
-- **The daemon's container is load-bearing for the JAILER, not just packaging.** It is tempting to read `cs_host` as a dependency bundle (node + claude-code + e2fsprogs) and conclude that, with those installed on the host, the daemon could run as a plain systemd service. It cannot, not without replacing something: `fcJailCommand` writes a **two-entry** `uid_map` (`0→0` and `30000+n→30000+n`, fcjail.go), and an unprivileged process may write only ONE entry mapping its own euid. That works today solely because rootless podman has already put the daemon inside a userns where it is uid 0 owning a 65536-subuid range. As a plain host uid the second mapping fails with `EPERM`, and per-VM uid separation — the thing the jail exists to provide — is what you lose. So podman here is not a security *boundary* (an escape lands as the host user); it is a **privilege primitive**: a range of spare identities the jailer spends one per VM. The host-daemon route is possible — drive `newuidmap`/`newgidmap` against `/etc/subuid` yourself with a pipe handshake, ~70 lines, no root needed at runtime since those helpers carry `cap_setuid`/`cap_setgid` — but then you own a fiddly privilege dance whose bugs are silent (get the arithmetic wrong and two VMs quietly share a uid). Note the `0→0` entry would also have to become `0→<daemon uid>`: mapping to real root is refused off-container. Decided 2026-08-31 to stay with podman's.
-- **Don't swap podman for rootful Docker.** Mechanically the jail's mappings would "work" — a rootful container is real root and can write any `uid_map` — but the VMM's `30000+n` would then be *real host uids* rather than subuids nobody owns, and tier 2 would be running as root, which deletes the trust model's central claim. Rootless Docker or `--userns-remap` sit on the same subuid substrate as podman and would be analogous, but the port is not free: `--sdnotify=conmon` (which is how the systemd unit knows the service came up), `--replace`, `--group-add keep-groups` (a crun annotation), and `podman unshare` in the rootfs build all have no direct Docker equivalent.
+- **Nothing is a container at RUNTIME; podman is a build-time dependency only.** It compiles the Go binaries (so a host needs no Go) and builds the guest kernel and rootfs — that is all. The daemon is a systemd service running directly on the host (`Type=exec`, `ExecStart=/usr/local/bin/koto daemon`), the TUI is a plain static binary, and each group is a Firecracker microVM. Deleted with the container runtime: `launch.go`, `run-host.sh`, `host/Dockerfile*`, `koto-net`, the loopback publish, `--cgroupns=host` + the cgroup bind mount, the `/dev/kvm` passthrough, `--group-add keep-groups`, and `loginctl enable-linger`. `TestRenderUnitIsValid` rejects any podman/sdnotify reference in a unit DIRECTIVE (comments recalling the history are fine), so the dependency cannot quietly return.
+- **The daemon bootstraps its own user namespace (`daemon/userns.go`) — this is what replaced podman, and it is load-bearing.** Two things need root over a RANGE of ids, and the container was silently supplying both: `fcJailCommand` writes a **two-entry** `uid_map` per VMM (an unprivileged process may write only one, mapping its own euid), and `fcJailFixupPerms` **chowns** each group's sockdir and workspace image to the per-VM id (unprivileged chown to another uid is EPERM). So at startup the daemon re-execs into a fresh userns and has `newuidmap`/`newgidmap` install the mapping from `/etc/subuid`. No root: those helpers carry `cap_setuid`/`cap_setgid`; the administrator's one-time act is allocating the range, which rootless podman required anyway. After the bootstrap the daemon is in exactly the shape it had inside the container, so `fcjail` and the chowns are untouched. **Three stages, and the third is the trap:** Go's `os/exec` clones and execs in one step, so the child execs BEFORE the parent can write its `uid_map` — as the overflow uid, with an empty permitted set. Writing the map then makes it read as uid 0 while still being unable to chown; only exec'ing again, now that euid is 0, gets the capabilities. `koto userns-check` is the probe that found this. Verified end to end on Fedora 44 (VMM uid 554287) and Ubuntu 24.04 (129999) — the difference is just their `/etc/subuid` bases.
+- **Filesystem scoping is systemd's, not a mount list.** `ProtectHome=yes`, `ProtectSystem=strict`, `ReadWritePaths=<state dir>`, `PrivateTmp=yes` — stronger and far more legible than the container's ad-hoc `-v` set. `Delegate=yes` is what keeps per-VM cgroup caps working (without it `fcCgroupInit` degrades to `cgroup=off`; confirmed both ways — an interactive session scope is not delegated and does degrade, the unit is and does not). `NoNewPrivileges` must stay **no**: `newuidmap` works through file capabilities, which `no_new_privs` would strip. The fleet CPU ceiling moved from podman `--cpus` to `CPUQuota`.
+- **`KOTO_BIND` defaults to `127.0.0.1`, and must.** The old image set `0.0.0.0`, safe only because it bound inside a network namespace and needed a host publish to be reachable at all. Carried onto the host unchanged, that value would put the control plane and every per-group proxy port on all interfaces. Verified after the move: both `:8443` and `:8787` listen on loopback only.
 - **Sidecar runs as `node` user (uid 1000), not root.** `claude --dangerously-skip-permissions` refuses to run as root. The container is the security boundary; running as a non-root user inside it is fine.
 - **`HOME=/workspace` in sidecars.** Claude stores session state in `$HOME/.claude/projects/...`. Default `$HOME=/home/node` is inside the container and lost on `--rm`. Pointing `HOME` at the bind-mounted workspace persists sessions on the real host across container restarts.
 - **Proxy merges `anthropic-beta` headers.** Claude code sends a beta list including `context-management-*`. Overwriting that with only `oauth-2025-04-20` makes the API return `400 "Extra inputs are not permitted"`. The proxy now appends our oauth beta to whatever the client sent.
@@ -800,14 +790,11 @@ which is worth knowing before auditing an installed host:
   `creds/`, which every prior audit treated as the one place secrets live.
   The wizard also leaves a copy at `<state>/creds/anthropic-api-key` (0600),
   which is what the installer reads on a re-run.
-- **`KOTO_PUBLISH=127.0.0.1` is on by default when installed**, so the gRPC
-  port IS on the host loopback — unlike a dev clone, where it is off unless
-  asked for. It has to be: rootless podman container IPs are not routable
-  from the host, so nothing on the machine could otherwise reach the daemon.
-  mTLS + client-fingerprint allowlist + bearer token still gate every call,
-  so this exposes the port to *local* processes that already hold a client
-  identity, not to the network. Publishing beyond loopback is an explicit
-  `koto.env` edit.
+- **The gRPC port binds `127.0.0.1` directly** (`KOTO_BIND` in koto.env). There
+  is no port publishing any more — the daemon is a host process, so it simply
+  listens where you tell it. mTLS + client-fingerprint allowlist + bearer token
+  gate every call; widening the bind is a deliberate koto.env edit, and needs a
+  server cert reissued with a matching SAN (`koto pki server -san …`).
 - **`koto setup` mints TWO client identities**, not one: `tui` with the
   `admin` role (the TUI needs RunScript/AttachShell), and `agent` with the
   seeded least-privilege `agent` role — because `koto ctl` defaults to the
@@ -870,9 +857,8 @@ KOTO_CLIENT=tui ./koto ctl acl del ops
 `config` takes the group as the first positional with flags *after* it
 (`config <group> [-flags]`); an explicit `-key ""` clears that key, an absent
 flag leaves it unchanged. Streaming verbs (`tail`/`logs`/`watch`) print one
-protojson frame per line. The daemon port isn't host-published by default (see
-run-host.sh `KOTO_PUBLISH`); `ctl` either runs on `koto-net` or dials a
-published endpoint. `ask` subscribes before sending, so no reply frame is
+protojson frame per line. The daemon listens on `127.0.0.1:8443` by default (`KOTO_BIND`/`KOTO_PORT`),
+so `ctl` on the same host needs no configuration. `ask` subscribes before sending, so no reply frame is
 missed, and exits at `turn_end`.
 
 ### Pitfalls observed in this codebase
