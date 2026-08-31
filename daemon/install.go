@@ -186,8 +186,14 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// creds: copy what the wizard minted in the clone, never overwrite.
 	srcCreds := filepath.Join(o.root, "creds")
 	dstCreds := filepath.Join(o.stateDir, "creds")
+	// anthropic-api-key belongs in this list: writeEnvFile reads it from the
+	// STATE dir to fold into koto.env, so omitting it silently produced an
+	// install with no credentials at all — the daemon starts and the API
+	// answers, and every agent turn then fails on auth. Caught installing on
+	// a clean machine; keep this list and writeEnvFile's reader in step.
 	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
-		"clients.allow", "tokens.json", "acl.json", ".credentials.json", "venice.key"} {
+		"clients.allow", "tokens.json", "acl.json", ".credentials.json",
+		"venice.key", "anthropic-api-key"} {
 		_ = copyIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
 	}
 	if entries, err := os.ReadDir(srcCreds); err == nil {

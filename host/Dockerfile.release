@@ -14,13 +14,22 @@
 
 FROM docker.io/library/golang:1.24-alpine AS build
 WORKDIR /src
+ENV GOFLAGS="" GOWORK=off CGO_ENABLED=0
 # Only the two modules the daemon needs. daemon/go.mod has
 # `replace koto-protocol => ../protocol`, so GOWORK=off resolves the pair
-# without the repo-root go.work (and without the tui/fcguest modules).
-COPY daemon/ daemon/
+# without the repo-root go.work (and without the tui/fcguest modules) —
+# and protocol/ must be present for that replace to resolve during download.
+#
+# The download is deliberately its OWN layer, ahead of the source copy (same
+# shape as tui/Dockerfile): the daemon's ~20 deps include gvisor and grpc,
+# so folding them into the build layer makes every upgrade re-fetch the whole
+# tree because one .go file changed. Measured on a 4-vCPU VM, that download
+# is the slowest part of `koto install`.
 COPY protocol/ protocol/
+COPY daemon/go.mod daemon/go.sum daemon/
+RUN cd daemon && go mod download
+COPY daemon/ daemon/
 ARG KOTO_VERSION=dev
-ENV GOFLAGS="" GOWORK=off CGO_ENABLED=0
 RUN cd daemon && go build -trimpath \
       -ldflags "-s -w -X main.kotoVersion=${KOTO_VERSION}" \
       -o /out/kotod .
