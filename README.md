@@ -243,16 +243,22 @@ outside it; `koto install` adds exactly three system files (the `koto`
 binary, `/etc/koto/koto.env`, the systemd unit) and the service still runs
 rootless, as you. What the host must provide:
 
+- **Fedora, or Ubuntu 24.04+.** Both are supported and tested; the
+  differences they need (`/dev/kvm` permissions, the AppArmor userns sysctl,
+  the `uidmap` package) are checked by `koto setup` with the fix printed for
+  your distro. 22.04 is out of scope: no `passt`, podman 3.4.
 - **Linux x86_64 with KVM** — `/dev/kvm` present and user-accessible
   (VT-x/AMD-V, or nested virtualization when the host is itself a VM). This
   is the one hard requirement: every group boots as a Firecracker microVM.
   `run-host.sh` passes `--device /dev/kvm` through when present; without it
   the daemon runs but group boots fail a clear preflight (`fcPreflight`,
   `fc.go`).
-- **Rootless podman** with pasta networking (the Fedora default;
-  slirp4netns is not used) and working subuid/subgid ranges — the rootfs
-  build runs under `podman unshare`. Podman hosts cs_host, the TUI, and
-  every containerized build (Go, protoc, the guest kernel).
+- **Rootless podman** with pasta networking (the default on Fedora and on
+  Ubuntu 24.04; slirp4netns is not used) and working subuid/subgid ranges —
+  the rootfs build runs under `podman unshare`. Podman hosts cs_host, the
+  TUI, and every containerized build (Go, protoc, the guest kernel). On
+  Ubuntu the id-mapping helpers are the separate `uidmap` package, which apt
+  does not install alongside podman; without it rootless does not work at all.
 - **Unprivileged user namespaces — nested.** Rootless podman puts cs_host
   in a userns; the VMM jailer (`fcjail.go`) then clones a *second* userns
   from inside that container. So the kernel must allow not just
@@ -337,14 +343,34 @@ explicit `gap` event when the ring can't cover).
 ## Install
 
 ```sh
-sudo dnf install -y git make podman     # Fedora; apt/pacman equivalents work
+# Fedora
+sudo dnf install -y git make podman
+# Ubuntu 24.04+ (uidmap is what rootless podman needs and apt won't pull in)
+sudo apt install -y git make podman passt uidmap
+
 git clone <repo> && cd koto
 make setup
 ```
 
-Those three are the whole prerequisite list — no Go, Node, protoc or openssl
-toolchain on the host, all of that is containerized. A stock Fedora cloud
-image ships podman but not git or make, which is why they are named here.
+That is the whole prerequisite list — no Go, Node, protoc or openssl toolchain
+on the host, all of it is containerized. They are named explicitly because a
+stock cloud image of either distro ships podman but not git or make.
+
+**On Ubuntu, also make `/dev/kvm` world-accessible**, which Fedora does by
+default and Ubuntu does not:
+
+```sh
+echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+```
+
+Adding yourself to the `kvm` group is *not* sufficient: the process that opens
+the device is the jailed microVM monitor, which runs as an unprivileged id
+with no supplementary groups, so it can only be reached by the world bits.
+`koto setup` checks for this and prints the same commands, along with the
+`kernel.apparmor_restrict_unprivileged_userns=0` sysctl Ubuntu 23.10+ needs
+for the monitor's jail. Ubuntu 22.04 is not supported — it has no `passt` and
+ships podman 3.4.
 
 `make setup` builds the `koto` binary in a container (so the host needs only
 git, make and podman) and runs the interactive wizard: it checks every host

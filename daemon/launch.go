@@ -66,7 +66,16 @@ func launchMain(args []string) {
 		"-e", "KOTO_HOME=" + home,
 	}
 	if _, err := os.Stat("/dev/kvm"); err == nil {
-		argv = append(argv, "--device", "/dev/kvm")
+		// keep-groups carries our supplementary groups past the userns mapping,
+		// so a host user in the kvm group keeps it inside the container. It is
+		// NOT sufficient on its own where /dev/kvm is 0660 root:kvm (Ubuntu):
+		// the process that actually opens the device is the jailed VMM, which
+		// drops to a per-VM uid with an EMPTY group set (fcjail.go), so it
+		// matches neither owner nor group and needs the world bits. That is a
+		// host-policy fix (udev, see checkKVM's remediation), not something we
+		// can set from here — this flag only covers the daemon itself and the
+		// KOTO_FC_NOJAIL=1 path.
+		argv = append(argv, "--device", "/dev/kvm", "--group-add", "keep-groups")
 	}
 	if cpus := hostCPUs(); cpus != "" {
 		argv = append(argv, "--cpus", cpus)

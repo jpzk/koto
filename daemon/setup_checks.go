@@ -19,6 +19,46 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// hostDistro reads /etc/os-release once: "debian" for Debian/Ubuntu, "fedora"
+// for the RPM family, "" when we can't tell. Only used to phrase remediation —
+// nothing branches on it behaviorally, so an unknown distro degrades to
+// showing both package managers rather than to a wrong guess.
+var hostDistro = func() string {
+	b, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	txt := strings.ToLower(string(b))
+	for _, line := range strings.Split(txt, "\n") {
+		v := strings.Trim(strings.TrimPrefix(strings.TrimPrefix(line, "id="), "id_like="), `"`)
+		if !strings.HasPrefix(line, "id=") && !strings.HasPrefix(line, "id_like=") {
+			continue
+		}
+		for _, f := range strings.Fields(v) {
+			switch f {
+			case "debian", "ubuntu":
+				return "debian"
+			case "fedora", "rhel", "centos":
+				return "fedora"
+			}
+		}
+	}
+	return ""
+}()
+
+// installHint renders "install this package" for the host's package manager.
+// Package names are per-family because they genuinely differ (the id-mapping
+// helpers are shadow-utils on Fedora, a separate uidmap package on Ubuntu).
+func installHint(fedoraPkg, debianPkg string) string {
+	switch hostDistro {
+	case "debian":
+		return "  sudo apt install " + debianPkg
+	case "fedora":
+		return "  sudo dnf install " + fedoraPkg
+	}
+	return "  sudo dnf install " + fedoraPkg + "      (Fedora/RHEL)\n  sudo apt install " + debianPkg + "      (Debian/Ubuntu)"
+}
+
 type checkResult struct {
 	name   string
 	ok     bool
@@ -59,20 +99,44 @@ func checkPlatform() checkResult {
 	return okCheck("platform", got)
 }
 
-// checkKVM opens /dev/kvm read-write — existence isn't enough, the invoking
-// user must be able to use it (usually via the kvm group).
-func checkKVM() checkResult {
-	if _, err := os.Stat("/dev/kvm"); err != nil {
+// checkKVM tests the device the way the VMM will use it, which is NOT the same
+// as whether we can open it here.
+//
+// The process that actually opens /dev/kvm is the jailed Firecracker VMM: it
+// runs as an unprivileged per-VM uid inside the container's user namespace
+// with a deliberately EMPTY supplementary group set (fcjail.go). So it matches
+// neither the device's owner (root) nor its group (kvm) — host group
+// membership doesn't reach it, and neither does `--group-add keep-groups`.
+// The world bits are the only thing that can grant it access.
+//
+// Fedora ships /dev/kvm 0666, so this is invisible there. Ubuntu ships
+// 0660 root:kvm, where the host user can be in the kvm group, open the device
+// fine, pass a naive check — and then every single microVM fails to boot with
+// a bare EACCES buried in a Firecracker console log. Check the mode.
+func checkKVM() checkResult { return checkKVMAt("/dev/kvm") }
+
+func checkKVMAt(path string) checkResult {
+	fi, err := os.Stat(path)
+	if err != nil {
 		return failCheck("/dev/kvm", "not present",
 			"No KVM on this host. Enable virtualization in the BIOS/UEFI, or (in a VM)\nenable nested virtualization. Groups cannot boot without it.")
 	}
-	f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	mode := fi.Mode().Perm()
+	if mode&0o006 != 0o006 {
+		return failCheck("/dev/kvm", fmt.Sprintf("mode %04o — not world-accessible", mode),
+			"The jailed microVM monitor runs as an unprivileged id with no groups, so\n"+
+				"it needs the world bits on /dev/kvm; being in the kvm group is not enough.\n"+
+				"Grant them persistently with a udev rule (this is Fedora's default):\n"+
+				`  echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules`+"\n"+
+				"  sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm")
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return failCheck("/dev/kvm", "present but not usable: "+err.Error(),
 			"Add yourself to the kvm group and re-login:\n  sudo usermod -aG kvm $USER")
 	}
 	f.Close()
-	return okCheck("/dev/kvm", "usable")
+	return okCheck("/dev/kvm", fmt.Sprintf("usable (mode %04o)", mode))
 }
 
 // podmanInfo is the slice of `podman info` we care about.
@@ -94,7 +158,7 @@ type podmanInfo struct {
 func checkPodman() []checkResult {
 	if _, err := exec.LookPath("podman"); err != nil {
 		return []checkResult{failCheck("podman", "not found",
-			"Install podman:\n  sudo dnf install podman      (Fedora/RHEL)\n  sudo apt install podman      (Debian/Ubuntu)")}
+			"Install podman:\n"+installHint("podman", "podman"))}
 	}
 	out, err := exec.Command("podman", "info", "--format", "json").Output()
 	if err != nil {
@@ -116,7 +180,8 @@ func checkPodman() []checkResult {
 		res = append(res, okCheck("pasta", info.Host.Pasta.Executable))
 	} else {
 		res = append(res, failCheck("pasta", "not found",
-			"Install passt/pasta — the rootless network backend koto assumes:\n  sudo dnf install passt"))
+			"Install passt/pasta — the rootless network backend koto assumes:\n"+
+				installHint("passt", "passt")))
 	}
 	return res
 }
@@ -136,7 +201,12 @@ func checkUserns() checkResult {
 	if r, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil &&
 		strings.TrimSpace(string(r)) == "1" {
 		return failCheck("nested userns", "restricted by AppArmor",
-			"Ubuntu's AppArmor blocks unprivileged user namespaces:\n  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0")
+			"Ubuntu 23.10+ blocks unprivileged user namespaces, which the microVM\n"+
+				"monitor's jail needs. Allow them, and persist it across reboots:\n"+
+				"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"+
+				"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n"+
+				"Running the VMM unjailed (KOTO_FC_NOJAIL=1) also avoids the restriction,\n"+
+				"but drops a layer of host protection — prefer the sysctl.")
 	}
 	return okCheck("nested userns", "allowed ("+strings.TrimSpace(string(b))+")")
 }
@@ -167,20 +237,27 @@ func checkSubuid() checkResult {
 
 // checkTools: the host binaries the build pipeline shells out to. openssl and
 // jq are deliberately absent — the Go PKI (pki.go) replaced them.
+// mkfs.ext4 and newuidmap live in /usr/sbin, which is on PATH for a login
+// shell on both families but not under a stripped PATH.
 func checkTools() []checkResult {
 	var out []checkResult
-	for _, t := range []struct{ bin, why, pkg string }{
-		{"mkfs.ext4", "builds the guest rootfs image", "e2fsprogs"},
-		{"curl", "downloads the Firecracker release", "curl"},
-		{"tar", "unpacks release archives", "tar"},
-		{"git", "pins the guest kernel revision", "git"},
-		{"make", "drives the image builds", "make"},
+	for _, t := range []struct{ bin, why, fedora, debian string }{
+		{"mkfs.ext4", "builds the guest rootfs image", "e2fsprogs", "e2fsprogs"},
+		{"curl", "downloads the Firecracker release", "curl", "curl"},
+		{"tar", "unpacks release archives", "tar", "tar"},
+		{"git", "pins the guest kernel revision", "git", "git"},
+		{"make", "drives the image builds", "make", "make"},
+		// newuidmap/newgidmap: shadow-utils on Fedora, which is always
+		// installed, so this never fails there. On Ubuntu it is the separate
+		// uidmap package that podman only *recommends* — a minimal image can
+		// have podman, valid /etc/subuid ranges, and still no rootless.
+		{"newuidmap", "maps the uid ranges rootless podman runs in", "shadow-utils", "uidmap"},
 	} {
 		if p, err := exec.LookPath(t.bin); err == nil {
 			out = append(out, okCheck(t.bin, p))
 		} else {
 			out = append(out, failCheck(t.bin, "not found",
-				fmt.Sprintf("%s %s. Install it:\n  sudo dnf install %s", t.bin, t.why, t.pkg)))
+				fmt.Sprintf("%s %s. Install it:\n%s", t.bin, t.why, installHint(t.fedora, t.debian))))
 		}
 	}
 	return out
