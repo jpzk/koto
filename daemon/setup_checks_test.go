@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,5 +95,41 @@ func TestBuildAndRuntimeToolsAreSeparate(t *testing.T) {
 		if c.name == "git" || c.name == "make" || c.name == "podman" {
 			t.Errorf("%q is a build dependency, not a runtime one", c.name)
 		}
+	}
+}
+
+// TestContainerEngineAcceptsEither pins that the build dependency is "podman
+// OR docker", not podman specifically — a docker-only host must pass the
+// preflight, since neither engine is needed to RUN koto at all.
+func TestContainerEngineAcceptsEither(t *testing.T) {
+	name, path := containerEngine()
+	if name == "" {
+		t.Skip("neither engine installed")
+	}
+	if name != "docker" && name != "podman" {
+		t.Fatalf("unexpected engine %q", name)
+	}
+	if path == "" {
+		t.Fatal("engine reported with no path")
+	}
+	// Preference order must match the Makefile's, or the wizard would report
+	// on one engine while the build used the other.
+	if _, err := exec.LookPath("docker"); err == nil && name != "docker" {
+		t.Errorf("docker is installed but %q was chosen; the Makefile prefers docker", name)
+	}
+
+	var enginesReported int
+	for _, c := range checkContainerEngine() {
+		if c.name == "docker" || c.name == "podman" || c.name == "podman/docker" {
+			enginesReported++
+		}
+		// Nothing here may hard-fail on a host that simply lacks the OTHER
+		// engine — the build only needs one.
+		if !c.ok && c.name != "podman/docker" {
+			t.Errorf("check %q failed on a host with a working engine: %s", c.name, c.detail)
+		}
+	}
+	if enginesReported == 0 {
+		t.Error("no engine reported in the build-time group")
 	}
 }

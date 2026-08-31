@@ -94,9 +94,9 @@ func warnCheck(name, detail, remedy string) checkResult {
 func runPreflight() []checkResult {
 	var out []checkResult
 	out = append(out, checkPlatform(), checkKVM())
-	out = append(out, checkPodman()...)
 	out = append(out, checkUserns(), checkSubuid())
-	out = append(out, inGroup("build-time tools", checkBuildTools())...)
+	out = append(out, inGroup("build-time tools (podman or docker; not needed to RUN koto)",
+		append(checkContainerEngine(), checkBuildTools()...))...)
 	out = append(out, inGroup("runtime tools (the installed daemon shells out to these)", checkRuntimeTools())...)
 	out = append(out, checkDisk(), checkNetwork())
 	return out
@@ -151,8 +151,10 @@ func checkKVMAt(path string) checkResult {
 	return okCheck("/dev/kvm", fmt.Sprintf("usable (mode %04o)", mode))
 }
 
-// podmanInfo is the slice of `podman info` we care about.
-type podmanInfo struct {
+// containerInfo is the slice of `<engine> info` we care about. Both podman
+// and docker emit this shape, though docker leaves the podman-only fields
+// empty — which is fine, they are only used to sharpen the report.
+type containerInfo struct {
 	Host struct {
 		Security struct {
 			Rootless bool `json:"rootless"`
@@ -160,40 +162,72 @@ type podmanInfo struct {
 		Pasta struct {
 			Executable string `json:"executable"`
 		} `json:"pasta"`
-		Version string `json:"-"`
 	} `json:"host"`
 	Version struct {
 		Version string `json:"Version"`
 	} `json:"version"`
+	ServerVersion string `json:"ServerVersion"` // docker
 }
 
-func checkPodman() []checkResult {
-	if _, err := exec.LookPath("podman"); err != nil {
-		return []checkResult{failCheck("podman", "not found",
-			"Install podman:\n"+installHint("podman", "podman"))}
+// containerEngine returns the build-time container runtime, matching the
+// Makefile's preference order: docker if present, else podman. This is a
+// BUILD dependency only — nothing koto runs is a container — so a host that
+// installs prebuilt binaries needs neither.
+func containerEngine() (name, path string) {
+	for _, e := range []string{"docker", "podman"} {
+		if p, err := exec.LookPath(e); err == nil {
+			return e, p
+		}
 	}
-	out, err := exec.Command("podman", "info", "--format", "json").Output()
+	return "", ""
+}
+
+// checkContainerEngine: either engine satisfies the build. The guest rootfs
+// build is the one exception — it needs `podman unshare`, which docker cannot
+// do — so a docker-only host gets a warning about that step rather than a
+// failure, since prebuilt assets make it moot.
+func checkContainerEngine() []checkResult {
+	engine, path := containerEngine()
+	if engine == "" {
+		return []checkResult{failCheck("podman/docker", "neither found",
+			"koto builds its binaries and guest assets in a container, so one of\n"+
+				"them is needed to BUILD (never to run):\n"+installHint("podman", "podman"))}
+	}
+	out, err := exec.Command(path, "info", "--format", "json").Output()
 	if err != nil {
-		return []checkResult{failCheck("podman", "`podman info` failed: "+errText(err),
-			"podman is installed but not working for this user. Try `podman info` and\nfix what it reports (often subuid/subgid, see below).")}
+		return []checkResult{failCheck(engine, "`"+engine+" info` failed: "+errText(err),
+			engine+" is installed but not working for this user. Try `"+engine+" info`\nand fix what it reports (often subuid/subgid, see below).")}
 	}
-	var info podmanInfo
+	var info containerInfo
 	if err := json.Unmarshal(out, &info); err != nil {
-		return []checkResult{warnCheck("podman", "installed (could not parse `podman info`)", "")}
+		return []checkResult{warnCheck(engine, "installed (could not parse `"+engine+" info`)", "")}
 	}
-	res := []checkResult{okCheck("podman", "version "+info.Version.Version)}
+	ver := info.Version.Version
+	if ver == "" {
+		ver = info.ServerVersion
+	}
+	res := []checkResult{okCheck(engine, "version "+ver)}
+
+	if engine == "docker" {
+		res = append(res, warnCheck("guest rootfs build", "docker cannot build it",
+			"`make fc-rootfs` needs `podman unshare` to preserve in-image ownership\n"+
+				"through mkfs.ext4; docker has no equivalent. Every binary still builds\n"+
+				"here. Install podman for that one step, or use a prebuilt rootfs.img."))
+		return res
+	}
+	// podman-specific health, which is also what the rootfs build relies on.
 	if info.Host.Security.Rootless {
 		res = append(res, okCheck("podman rootless", "yes"))
 	} else {
 		res = append(res, warnCheck("podman rootless", "running as root",
-			"koto is designed for rootless podman; running as root widens the blast\nradius of a compromise well beyond what the trust model assumes."))
+			"koto's builds assume rootless podman; running as root means the rootfs\nbuild writes root-owned assets."))
 	}
 	if info.Host.Pasta.Executable != "" {
 		res = append(res, okCheck("pasta", info.Host.Pasta.Executable))
 	} else {
-		res = append(res, failCheck("pasta", "not found",
-			"Install passt/pasta — the rootless network backend koto assumes:\n"+
-				installHint("passt", "passt")))
+		res = append(res, warnCheck("pasta", "not found",
+			"podman's rootless network backend. Only the containerized BUILD steps\n"+
+				"need it — koto itself runs no containers.\n"+installHint("passt", "passt")))
 	}
 	return res
 }
