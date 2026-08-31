@@ -745,11 +745,15 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 
 	// Published ports: TCP listener per port, spliced into the guest over
-	// vsock. NOTE: this binds inside cs_host — reachable from koto-net as
-	// cs_host_go:<port>; publishing to the real host loopback additionally
-	// needs a -p on cs_host itself (documented limitation).
+	// vsock. LOOPBACK, not 0.0.0.0. This used to bind inside cs_host, where
+	// 0.0.0.0 was scoped to the container's own network namespace and only
+	// reachable on koto-net. The daemon is a host process now, so that same
+	// value would put a group's published port on every interface of the
+	// machine — a guest service exposed to the entire network by default.
+	// KOTO_PORTS_BIND widens it deliberately.
+	portBind := envOr("KOTO_PORTS_BIND", "127.0.0.1")
 	for _, p := range pubPorts {
-		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
+		ln, err := net.Listen("tcp", net.JoinHostPort(portBind, fmt.Sprintf("%d", p)))
 		if err != nil {
 			emitLogfG("fc", g, "warn", "[%s] publish port %d: %v", g, p, err)
 			continue
