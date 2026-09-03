@@ -1,10 +1,17 @@
 package main
 
-// The step list `koto setup` walks. Ordering rule: everything that needs the
-// operator's attention happens in the first couple of minutes, then the long
-// unattended builds run, then the install. So a newcomer answers the
-// questions, walks away, and comes back to a working system — rather than
-// being asked for an API key forty minutes in.
+// The step list `koto setup` walks. The wizard runs LAST, against a system
+// that is already installed: acquisition is make's job (`make fetch` or
+// `make build`), integration is `koto install`'s, and configuration is this.
+//
+// That ordering is why the wizard needs no clone. Every path below resolves
+// under the state dir, so PKI and credentials are minted straight into the
+// installed system rather than into a checkout and copied afterwards — there
+// is exactly one place credentials live, and no copy to get wrong.
+//
+// The daemon cannot start before it has TLS material (serverTLSConfig loads
+// server.crt), so a fresh `koto install` deliberately enables the unit
+// without starting it. The service step below is the first start.
 
 import (
 	"context"
@@ -22,27 +29,21 @@ import (
 
 func setupSteps() []setupStep {
 	return []setupStep{
-		stepPreflight(),
-		stepHostBuild(),
+		stepInstalled(),
 		stepPKI(),
 		stepAuth(),
-		stepTUIBuild(),
-		stepFCFetch(),
-		stepFCKernel(),
-		stepFCRootfs(),
-		stepInstall(),
+		stepService(),
 		stepSmoke(),
 		stepHandoff(),
 	}
 }
 
-// credsDir/assetsDir during setup are the clone's — `koto install` copies or
-// rebuilds them into the state dir afterwards.
-func (sc *setupCtx) credsDir() string  { return filepath.Join(sc.root, "creds") }
-func (sc *setupCtx) assetsDir() string { return filepath.Join(sc.root, "fcassets") }
+// credsDir is the INSTALLED system's creds dir — the wizard runs after
+// install, so this is the only creds dir in play.
+func (sc *setupCtx) credsDir() string { return filepath.Join(sc.stateDir(), "creds") }
 
-// stateDir is where the wizard installs to. KOTO_HOME wins so the same
-// override every other component honors also steers the install, rather than
+// stateDir is the system the wizard configures. KOTO_HOME wins so the same
+// override every other component honors also steers the wizard, rather than
 // the wizard being the one place that insists on /var/lib/koto.
 func (sc *setupCtx) stateDir() string { return envOr("KOTO_HOME", defaultStateDir) }
 
@@ -60,52 +61,31 @@ func rpcShort(err error) string {
 	return s
 }
 
-func stepPreflight() setupStep {
+func stepInstalled() setupStep {
 	return setupStep{
-		id:    "preflight",
-		title: "Host requirements",
-		explain: `koto runs each agent group inside its own Firecracker microVM — a real
-kernel behind KVM, not a container — and runs the daemon itself in a
-rootless podman container. That shape is what makes it safe to let an agent
-run arbitrary commands, and it is why the host needs a few specific things:
-KVM, working rootless podman, and permission to nest user namespaces.
+		id:    "installed",
+		title: "Installed system",
+		explain: `The wizard configures an installed koto; it does not install one, and it
+builds nothing. Getting here is two commands before this one: acquire the
+artifacts (` + "`make fetch`" + ` to download them, or ` + "`make build`" + ` to build every byte
+yourself), then ` + "`make install`" + ` to integrate them into the system — the state
+directory, the binaries on PATH, /etc/koto/koto.env and the systemd unit.
 
-Nothing is installed into your OS by this check; it only looks.`,
+A fresh install leaves the service enabled but stopped, because the daemon
+cannot start until the TLS material the next step mints exists.`,
 		detect: func(sc *setupCtx) (bool, string) {
-			for _, c := range runPreflight() {
-				if !c.ok {
-					return false, "unmet: " + c.name
-				}
+			if !installed() {
+				return false, "not installed"
 			}
-			return true, "all requirements met"
+			return true, "unit and config present"
 		},
 		run: func(sc *setupCtx) error {
-			noKVM, err := preflightGate(sc.ui)
-			if err != nil {
-				return err
-			}
-			sc.noKVM = noKVM
-			return nil
+			return errors.New("koto is not installed, and the wizard does not install it\n" +
+				"  acquire the artifacts, then integrate them:\n" +
+				"    make fetch      (or `make build` to build them yourself)\n" +
+				"    make install\n" +
+				"  then re-run `koto setup`")
 		},
-		verify: func(sc *setupCtx) error { return nil }, // the run() above is the verification
-	}
-}
-
-func stepHostBuild() setupStep {
-	return setupStep{
-		id:    "build",
-		title: "Build koto",
-		explain: `Compiles the koto binary. The compiler runs in a container so your host
-needs no Go toolchain — that is the only thing podman is used for here.
-Nothing koto runs afterwards is a container: the daemon becomes a systemd
-service on this host, and each agent group is a Firecracker microVM.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.root, "koto")) {
-				return true, "koto binary built"
-			}
-			return false, "koto binary missing"
-		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "koto") },
 	}
 }
 
@@ -151,16 +131,14 @@ have already issued.`,
 				sc.ui.info("minted the 'tui' client identity (role: admin)")
 			}
 			// `koto ctl` defaults to the client name "agent", so without this
-			// the `koto ctl list` the wizard hands you at the end fails on a
-			// missing token. Least privilege by default: the seeded agent role
-			// can read and converse but not manage lifecycle — reach for
-			// KOTO_CLIENT=tui when you need an admin verb.
+			// the command the handoff hands you fails on a missing identity.
 			if !exists(filepath.Join(sc.credsDir(), "client-agent.crt")) {
-				if _, err := pkiClient(sc.credsDir(), "agent", []string{"agent"}); err != nil {
+				if _, err := pkiClient(sc.credsDir(), "agent", []string{"admin"}); err != nil {
 					return err
 				}
-				sc.ui.info("minted the 'agent' client identity for `koto ctl` (role: agent)")
+				sc.ui.info("minted the 'agent' client identity (role: admin)")
 			}
+			sc.credsChanged = true
 			return nil
 		},
 	}
@@ -176,7 +154,11 @@ can talk to the model but cannot read the key.
 
 Two ways to authenticate. A Claude subscription (OAuth) logs in through the
 browser. An API key from console.anthropic.com is billed per token. Check
-Anthropic's terms for which fits your use — the README has the details.`,
+Anthropic's terms for which fits your use — the README has the details.
+
+Either way the result lands in the installed system's creds directory, which
+is where the daemon already looks. Nothing is written to your personal
+~/.claude.`,
 		detect: func(sc *setupCtx) (bool, string) {
 			if exists(filepath.Join(sc.credsDir(), ".credentials.json")) {
 				return true, "OAuth credentials present"
@@ -198,28 +180,22 @@ Anthropic's terms for which fits your use — the README has the details.`,
 			if u.yes {
 				return errors.New("credentials are required and cannot be set up non-interactively\n" +
 					"  run `koto setup --only auth` from a terminal, or provide one first:\n" +
-					"    export ANTHROPIC_API_KEY=sk-ant-…    (picked up as-is), or\n" +
-					"    write the key to creds/anthropic-api-key (chmod 600)")
+					"    write the key to " + filepath.Join(sc.credsDir(), "anthropic-api-key") + " (chmod 600)")
 			}
 			switch u.choice("How do you want to authenticate?",
 				[]string{"Claude subscription (OAuth login in a browser)", "Anthropic API key"}, 0) {
 			case 0:
 				u.info("handing over to `claude auth login` — follow its prompts")
 				u.blank()
-				// HOME points at the koto creds dir so the token lands
-				// there and never touches the operator's personal
-				// ~/.claude — the dedicated-credentials property the
-				// container mount used to provide.
+				// HOME is the STATE dir, not creds/, because claude writes to
+				// $HOME/.claude — and the installer already symlinked
+				// <state>/.claude -> creds. Pointing HOME at creds/ directly
+				// would bury the token one level too deep, in creds/.claude/,
+				// where nothing looks for it. Pointing it at the operator's
+				// home would put koto's token in their personal profile.
 				cmd := exec.Command("claude", "auth", "login")
-				cmd.Dir = sc.root
-				// HOME is the clone root, not creds/, because claude writes to
-				// $HOME/.claude — and .claude is a symlink to creds. Pointing
-				// HOME at creds/ directly would bury the token one level too
-				// deep, in creds/.claude/, where nothing looks for it.
-				if _, err := os.Lstat(filepath.Join(sc.root, ".claude")); err != nil {
-					_ = os.Symlink("creds", filepath.Join(sc.root, ".claude"))
-				}
-				cmd.Env = setEnv(os.Environ(), "HOME", sc.root)
+				cmd.Dir = sc.stateDir()
+				cmd.Env = setEnv(os.Environ(), "HOME", sc.stateDir())
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 				signal.Ignore(os.Interrupt)
 				err := cmd.Run()
@@ -227,6 +203,7 @@ Anthropic's terms for which fits your use — the README has the details.`,
 				if err != nil {
 					return fmt.Errorf("login: %w", err)
 				}
+				sc.credsChanged = true
 				return nil
 			default:
 				key, err := u.secret("Anthropic API key (sk-ant-…)")
@@ -240,137 +217,41 @@ Anthropic's terms for which fits your use — the README has the details.`,
 				if err := os.WriteFile(path, []byte(strings.TrimSpace(key)), 0o600); err != nil {
 					return err
 				}
-				sc.authKey = strings.TrimSpace(key)
-				u.info("stored in %s (0600); the installer puts it in the service config", path)
+				u.info("stored in %s (0600); the daemon reads it from there", path)
+				sc.credsChanged = true
 				return nil
 			}
 		},
 	}
 }
 
-func stepTUIBuild() setupStep {
+func stepService() setupStep {
 	return setupStep{
-		id:    "tui",
-		title: "Build the TUI",
-		explain: `The terminal UI is a separate static binary — no shell, no interpreter,
-nothing it shells out to. Built in a container like the daemon, and run
-directly on your host so it gets the real terminal.`,
+		id:    "service",
+		title: "Start the daemon",
+		explain: `Everything the daemon needs now exists, so this starts it. A fresh install
+enabled the unit but left it stopped — a daemon with no server certificate
+cannot come up, and a unit that crash-loops from the moment it is installed
+teaches you to ignore it.
+
+The service runs as you, not as root, and starts at boot from here on.`,
+		// Not "did we run this" but "is it running, with what we just wrote".
+		// Credentials minted in this run mean a restart is owed even when the
+		// service is already up: the proxy resolves them once, at startup.
 		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.root, "koto-tui")) {
-				return true, "koto-tui binary built"
+			if sc.credsChanged {
+				return false, "credentials changed this run — restart owed"
 			}
-			return false, "koto-tui binary missing"
-		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "koto-tui") },
-	}
-}
-
-func stepFCFetch() setupStep {
-	return setupStep{
-		id:    "firecracker",
-		title: "Firecracker binary",
-		explain: `Builds Firecracker, the microVM monitor that boots each group and the
-one process that talks to KVM. Built from a pinned commit in upstream's own
-build container, like everything else koto ships — about three minutes, plus
-a one-time image pull of a couple of GB.
-
-Set FC_PREBUILT=1 to fetch upstream's release binary instead and verify it
-against a pinned checksum; that is seconds rather than minutes.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.assetsDir(), "firecracker")) {
-				return true, "fcassets/firecracker present"
-			}
-			return false, "not downloaded"
-		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "firecracker") },
-	}
-}
-
-func stepFCKernel() setupStep {
-	return setupStep{
-		id:    "kernel",
-		title: "Guest kernel",
-		explain: `Builds the Linux kernel the microVMs boot. koto builds its own because the
-stock Firecracker kernel lacks the options koto needs (TUN for the network
-profiles, FUSE for container storage inside the guest).
-
-This is the long pole of the install. With a warm source cache it is a few
-minutes; from cold it clones the kernel tree and compiles it, which takes
-roughly 20-40 minutes depending on the machine. It is safe to leave running,
-and safe to interrupt — re-running the wizard picks up where it stopped.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.assetsDir(), "vmlinux")) {
-				return true, "fcassets/vmlinux present"
-			}
-			return false, "not built"
+			return installStatus()
 		},
 		run: func(sc *setupCtx) error {
-			cache, _ := filepath.Glob(filepath.Join(sc.root, ".kernelcache", "*.tar.zst"))
-			if len(cache) > 0 {
-				sc.ui.info("kernel source cache found — this should take a few minutes")
-			} else {
-				sc.ui.warn("cold build: expect 20-40 minutes")
-			}
-			if !sc.ui.yesno("Start the kernel build now?", true) {
-				return errSetupAborted
-			}
-			start := time.Now()
-			if err := sc.stream("make", "kernel"); err != nil {
+			if err := sudoRun(sc.ui, "systemctl", "restart", "koto"); err != nil {
 				return err
 			}
-			sc.ui.info("kernel built in %s", time.Since(start).Round(time.Second))
+			sc.credsChanged = false
 			return nil
 		},
-	}
-}
-
-func stepFCRootfs() setupStep {
-	return setupStep{
-		id:    "rootfs",
-		title: "Guest rootfs",
-		explain: `Builds the golden filesystem image every microVM boots from: the guest
-agent, Node, the claude CLI and koto's in-guest tools. A few minutes.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.assetsDir(), "rootfs.img")) {
-				return true, "fcassets/rootfs.img present"
-			}
-			return false, "not built"
-		},
-		run: func(sc *setupCtx) error { return sc.stream("make", "rootfs") },
-	}
-}
-
-func stepInstall() setupStep {
-	return setupStep{
-		id:    "install",
-		title: "Install as a service",
-		explain: `So far everything lives in this clone. Installing moves koto into the
-system: the state (your groups, credentials and guest assets) goes to
-/var/lib/koto, the daemon becomes a systemd service that starts at boot, and
-the koto command lands on your PATH. After this the clone is only a source
-checkout — you can move or delete it.
-
-Three files are written as root (the koto binary, /etc/koto/koto.env and the
-systemd unit); each sudo command is shown before it runs. The service itself
-runs as you, with rootless podman, exactly as it does now.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			active, detail := installStatus()
-			return active, detail
-		},
-		run: func(sc *setupCtx) error {
-			if installed() {
-				if !sc.ui.yesno("koto is already installed — upgrade it?", true) {
-					return nil
-				}
-			}
-			return runInstall(installOpts{
-				stateDir:      sc.stateDir(),
-				root:          sc.root,
-				ui:            sc.ui,
-				ctx:           sc,
-				skipPreflight: true, // step 1 already gated
-			})
-		},
+		verify: func(sc *setupCtx) error { return nil }, // the smoke step is the real check
 	}
 }
 
@@ -378,15 +259,15 @@ func stepSmoke() setupStep {
 	return setupStep{
 		id:    "smoke",
 		title: "Smoke test",
-		explain: `Checks that the installed daemon is actually reachable over its
-authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
+		explain: `Checks that the daemon is actually reachable over its authenticated API —
+the same path the TUI and ` + "`koto ctl`" + ` use.`,
 		// A quick probe rather than a "did we run this" flag, so --check
 		// answers the question that matters: is the daemon answering now?
 		detect: func(sc *setupCtx) (bool, string) {
 			if !installed() {
 				return false, "daemon not installed"
 			}
-			client, err := newKotoClient(filepath.Join(sc.stateDir(), "creds"), "tui", "127.0.0.1:8443")
+			client, err := newKotoClient(sc.credsDir(), "tui", "127.0.0.1:8443")
 			if err != nil {
 				return false, err.Error()
 			}
@@ -400,8 +281,7 @@ authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
 		},
 		run: func(sc *setupCtx) error {
 			u := sc.ui
-			creds := filepath.Join(sc.stateDir(), "creds")
-			client, err := newKotoClient(creds, "tui", "127.0.0.1:8443")
+			client, err := newKotoClient(sc.credsDir(), "tui", "127.0.0.1:8443")
 			if err != nil {
 				return fmt.Errorf("build client: %w", err)
 			}
@@ -413,8 +293,8 @@ authenticated API — the same path the TUI and `+ "`koto ctl`" + ` use.`,
 				cancel()
 				if err == nil {
 					u.ok("daemon answered: %d group(s) known", len(resp.GetGroups()))
-					if sc.noKVM {
-						u.warn("no KVM on this host — groups will not boot until that is fixed")
+					if !checkKVM().ok {
+						u.warn("no usable /dev/kvm on this host — groups will not boot until that is fixed")
 					}
 					return nil
 				}

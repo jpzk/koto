@@ -233,6 +233,12 @@ func daemonMain() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	// Closed once the shutdown sequence has actually finished. srv.Stop()
+	// below releases srv.Serve() in the main goroutine, and a main goroutine
+	// that returns ends the PROCESS — killing this handler mid-fcStopAll and
+	// orphaning every microVM with a dirty workspace image. Serve's return
+	// therefore has to wait for this.
+	shutdownDone := make(chan struct{})
 	go func() {
 		s := <-sig
 		emitLogf("daemon", "info", "%v: shutting down", s)
@@ -251,10 +257,20 @@ func daemonMain() {
 		// being left to journal replay — the VMMs are container children and
 		// die with the daemon otherwise.
 		fcStopAll()
+		close(shutdownDone)
 		os.Exit(0)
 	}()
 
 	if err := srv.Serve(l); err != nil {
 		emitLogf("daemon", "error", "grpc serve: %v", err)
+	}
+	// Serve returns the moment the handler calls srv.Stop(), which happens
+	// BEFORE fcStopAll. Falling out of daemonMain here would return from
+	// main() and exit the process with the guests still running — the exact
+	// dirty-image outcome fcStop exists to prevent. Wait for the handler
+	// (which exits the process itself, and is hard-bounded at 12s above).
+	// Guarded on shuttingDown so a genuine Serve error still returns.
+	if shuttingDown.Load() {
+		<-shutdownDone
 	}
 }

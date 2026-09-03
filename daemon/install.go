@@ -1,8 +1,17 @@
 package main
 
-// `koto install` — turns a clone into an installed system: a state directory
-// that outlives the clone, a release image with the daemon baked in, the koto
-// binary on PATH, and a systemd service that brings the daemon up at boot.
+// `koto install` — INTEGRATION, the middle of three stages. Acquisition comes
+// before it (`make fetch` downloads the artifacts, `make build` builds them
+// from source) and configuration after it (`koto setup`, the wizard). This
+// stage turns acquired artifacts into an installed system: a state directory
+// that outlives the clone, the binaries on PATH, /etc/koto/koto.env, and a
+// systemd service that brings the daemon up at boot.
+//
+// It builds nothing and configures nothing. In particular it does not START
+// the daemon on a fresh install: the daemon cannot come up without the TLS
+// material `koto setup` mints, so the unit is enabled and left stopped, and
+// the wizard performs the first start. An upgrade, which already has its
+// credentials, restarts as before.
 //
 // The state directory MIRRORS THE CLONE'S LAYOUT exactly (groups/ creds/
 // fcassets/ prompts/ run/ groups.json …). That is the whole trick behind
@@ -66,13 +75,8 @@ func hostCPUs() string {
 type installOpts struct {
 	stateDir string
 	root     string // the clone
-	// skipPreflight is set by the wizard, whose first step already gated on
-	// the host checks. A direct `koto install` runs them itself — it used to
-	// run none at all, so an install could land on a host with no KVM, no
-	// newuidmap and no e2fsprogs and only fail later, at the first boot.
-	skipPreflight bool
-	ui       *setupUI
-	ctx      *setupCtx
+	ui  *setupUI
+	ctx *setupCtx
 }
 
 func installUsage() {
@@ -114,6 +118,31 @@ func installMain(args []string) {
 
 func installed() bool { return exists(unitPath) && exists(envFilePath) }
 
+// artifacts are the five files both acquisition routes produce, named exactly
+// as the Makefile's ARTIFACTS list names them. Kept in step with it by hand;
+// they are the contract between the acquire stage and this one.
+var artifacts = []string{
+	"koto", "koto-tui",
+	"fcassets/firecracker", "fcassets/vmlinux", "fcassets/rootfs.img",
+}
+
+func requireArtifacts(root string) error {
+	var missing []string
+	for _, a := range artifacts {
+		if !exists(filepath.Join(root, a)) {
+			missing = append(missing, a)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("missing artifact(s): %s\n"+
+		"  install integrates artifacts, it does not produce them — acquire them first:\n"+
+		"    make fetch      download them (minutes)\n"+
+		"    make build      build them yourself (~40 min cold)",
+		strings.Join(missing, ", "))
+}
+
 func runInstall(o installOpts) error {
 	u := o.ui
 	upgrade := installed()
@@ -123,6 +152,12 @@ func runInstall(o installOpts) error {
 	if !exists(filepath.Join(o.root, "Makefile")) || !exists(filepath.Join(o.root, "daemon")) {
 		return fmt.Errorf("run this from a koto clone (no Makefile/daemon here)")
 	}
+	// Integration consumes artifacts; it does not produce them. Check all of
+	// them up front rather than discovering a missing rootfs after three sudo
+	// writes have already landed on the system.
+	if err := requireArtifacts(o.root); err != nil {
+		return err
+	}
 	me, err := user.Current()
 	if err != nil {
 		return err
@@ -130,13 +165,15 @@ func runInstall(o installOpts) error {
 	if me.Uid == "0" {
 		return fmt.Errorf("run as your normal user, not root — the daemon runs as you (sudo is used only for the system files)")
 	}
-	if !o.skipPreflight {
-		u.printf("%s", u.bold("host requirements"))
-		if _, err := preflightGate(u); err != nil {
-			return err
-		}
-		u.blank()
+	// The host checks live HERE, not in the wizard: this is the stage that
+	// commits changes to the system, and an install onto a host with no KVM,
+	// no newuidmap and no e2fsprogs used to succeed and only fail later, at
+	// the first boot of the first group.
+	u.printf("%s", u.bold("host requirements"))
+	if _, err := preflightGate(u); err != nil {
+		return err
 	}
+	u.blank()
 
 	// 1. state directory
 	if err := seedStateDir(o, me); err != nil {
@@ -177,19 +214,27 @@ func runInstall(o installOpts) error {
 		}
 	}
 
-	// 5. start. No loginctl enable-linger: that existed so rootless podman
+	// 5. enable. No loginctl enable-linger: that existed so rootless podman
 	// had a live user manager and delegated cgroup tree at boot. The daemon
 	// no longer runs under podman, so the service stands on its own.
-	verb := "enable"
+	//
+	// A FRESH INSTALL IS ENABLED BUT NOT STARTED. serverTLSConfig needs
+	// server.crt, which `koto setup` has not minted yet, so `enable --now`
+	// here would only crash-loop the unit from the moment it exists — and a
+	// service that is red on arrival teaches operators to ignore it. The
+	// wizard's service step performs the first start. An upgrade has its
+	// credentials already, so it restarts as it always did.
 	if upgrade {
-		verb = "restart"
 		if err := sudoRun(u, "systemctl", "restart", "koto"); err != nil {
 			return err
 		}
-	} else if err := sudoRun(u, "systemctl", "enable", "--now", "koto"); err != nil {
-		return err
+		u.ok("service restarted")
+	} else {
+		if err := sudoRun(u, "systemctl", "enable", "koto"); err != nil {
+			return err
+		}
+		u.ok("service enabled (not started — `koto setup` starts it)")
 	}
-	u.ok("service %sd", verb)
 
 	version, _ := o.ctx.capture("git", "describe", "--tags", "--always", "--dirty")
 	if version == "" {
@@ -197,6 +242,11 @@ func runInstall(o installOpts) error {
 	}
 	if err := os.WriteFile(filepath.Join(o.stateDir, ".koto-version"), []byte(version+"\n"), 0o644); err != nil {
 		u.warn("could not record version: %v", err)
+	}
+	if !upgrade {
+		u.blank()
+		u.info("installed, not yet configured — run `koto setup` to mint the TLS")
+		u.info("identities, connect your Anthropic credentials and start the daemon.")
 	}
 	return nil
 }
@@ -243,7 +293,10 @@ func seedStateDir(o installOpts, me *user.User) error {
 		}
 	}
 
-	// creds: copy what the wizard minted in the clone, never overwrite.
+	// creds: MIGRATION ONLY. The wizard now runs after install and mints
+	// straight into the state dir, so nothing here is the normal path — this
+	// exists to carry an older install's clone-side creds across, and to pick
+	// up a dev clone's identities on first install. Never overwrites.
 	srcCreds := filepath.Join(o.root, "creds")
 	dstCreds := filepath.Join(o.stateDir, "creds")
 	// anthropic-api-key belongs in this list: writeEnvFile reads it from the
@@ -277,15 +330,17 @@ func seedStateDir(o installOpts, me *user.User) error {
 			}
 		}
 	}
-	if !exists(filepath.Join(dstCreds, "ca.crt")) {
-		u.info("no CA in the clone — minting one in the state dir")
-		if err := pkiInit(dstCreds, nil); err != nil {
-			return err
-		}
-		if _, err := pkiClient(dstCreds, "tui", []string{"admin"}); err != nil {
-			return err
-		}
-	}
+	// NO PKI MINTING HERE. It used to mint a CA when the clone had none,
+	// which was right when the wizard ran BEFORE install and had already
+	// minted into the clone — "no CA in the clone" then meant something had
+	// gone wrong. Now the wizard runs after, so that condition is the normal
+	// case, and minting here would fire on every fresh install and take the
+	// pki step's job. Worse, it would take it badly: pkiInit never
+	// regenerates an existing CA or server cert, so the wizard's "will you
+	// reach this daemon from another machine?" answer would be silently
+	// dropped, and the operator would get default SANs with no warning.
+	// An install with no PKI is expected — the unit is enabled but stopped,
+	// and `koto setup` mints before the first start.
 
 	// prompts: harness-controlled content, refreshed on upgrade unless the
 	// operator has edited it. The .dist copy is how we tell those apart.
@@ -340,21 +395,13 @@ func seedStateDir(o installOpts, me *user.User) error {
 			missing = append(missing, a)
 		}
 	}
+	// Install copies assets; it does not build them. `make install` depends on
+	// `build`, and `make assets` produces these — so a missing asset here means
+	// the checkout was never fully built, which is the operator's call to make,
+	// not something to discover mid-install as a 40-minute compile.
 	if len(missing) > 0 {
-		u.info("building missing guest assets (%s) into the state dir", strings.Join(missing, ", "))
-		env := append(os.Environ(), "KOTO_FCASSETS_OUT="+dstAssets)
-		for _, target := range []string{"firecracker", "kernel", "rootfs"} {
-			cmd := exec.Command("make", target)
-			cmd.Dir = o.root
-			cmd.Env = env
-			w := &prefixWriter{ui: u}
-			cmd.Stdout, cmd.Stderr = w, w
-			err := cmd.Run()
-			w.Flush()
-			if err != nil {
-				return fmt.Errorf("make %s: %w", target, err)
-			}
-		}
+		return fmt.Errorf("guest assets missing from %s (%s)\n"+
+			"  run `make assets` in %s, then re-run", dstAssets, strings.Join(missing, ", "), o.root)
 	}
 	return nil
 }

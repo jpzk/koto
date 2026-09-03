@@ -78,6 +78,22 @@ func inGroup(g string, rs []checkResult) []checkResult {
 	return rs
 }
 
+// advisory downgrades a group's failures to warnings: reported, remediation
+// shown, but not a blocker. Used for the build-time tools, which the `make
+// fetch` route genuinely does not need — a host that downloads prebuilt
+// artifacts has no reason to own podman, and preflight refusing to install
+// over a missing build dependency would make the fetch route unusable. The
+// build route is not left unguarded: the Makefile's `need-container` fails
+// `make build` with the same remediation before compiling anything.
+func advisory(rs []checkResult) []checkResult {
+	for i := range rs {
+		if !rs[i].ok {
+			rs[i].ok, rs[i].warn = true, true
+		}
+	}
+	return rs
+}
+
 func okCheck(name, detail string) checkResult {
 	return checkResult{name: name, ok: true, detail: detail}
 }
@@ -95,8 +111,8 @@ func runPreflight() []checkResult {
 	var out []checkResult
 	out = append(out, checkPlatform(), checkKVM())
 	out = append(out, checkUserns(), checkSubuid())
-	out = append(out, inGroup("build-time tools (podman or docker; not needed to RUN koto)",
-		append(checkContainerEngine(), checkBuildTools()...))...)
+	out = append(out, inGroup("build-time tools (only for `make build`; not needed to fetch or RUN koto)",
+		advisory(append(checkContainerEngine(), checkBuildTools()...)))...)
 	out = append(out, inGroup("runtime tools (the installed daemon shells out to these)", checkRuntimeTools())...)
 	out = append(out, checkDisk(), checkNetwork())
 	return out
@@ -317,10 +333,19 @@ func checkRuntimeTools() []checkResult {
 	if p, err := exec.LookPath("claude"); err == nil {
 		out = append(out, okCheck("claude", p))
 	} else {
-		out = append(out, warnCheck("claude", "not found",
-			"Needed only for Claude-subscription (OAuth) auth, where the proxy shells\n"+
-				"out to it to refresh the token. Not needed if you authenticate with an\n"+
-				"API key. Install it with:\n  npm i -g @anthropic-ai/claude-code"))
+		hint := "Needed only for Claude-subscription (OAuth) auth, where the proxy shells\n" +
+			"out to it to refresh the token. Not needed if you authenticate with an\n" +
+			"API key. It needs node >= 22. Install it with:\n  npm i -g @anthropic-ai/claude-code"
+		if hostDistro == "debian" {
+			// Ubuntu 24.04's own nodejs is v18, below claude-code's engine floor.
+			// npm installs anyway with only an EBADENGINE warning and `claude
+			// --version` works, so the mismatch stays hidden until the proxy
+			// shells out to refresh a token. Name the real fix here.
+			hint += "\n\nUbuntu's `nodejs` package is v18, too old — install node 22 first:\n" +
+				"  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -\n" +
+				"  sudo apt install -y nodejs"
+		}
+		out = append(out, warnCheck("claude", "not found", hint))
 	}
 	return out
 }
@@ -413,6 +438,15 @@ func preflightGate(u *setupUI) (noKVM bool, err error) {
 		}
 	}
 	if len(hard) > 0 {
+		// Count what the operator can SEE. KVM lives in its own bucket (it
+		// has a "continue without" path), but a non-empty hard list returns
+		// before that prompt is ever reached — so reporting only len(hard)
+		// printed "1 unmet requirement(s)" under two ✗ marks and two
+		// remediation blocks, leaving it ambiguous which one to fix.
+		if len(kvm) > 0 {
+			return false, fmt.Errorf("%d unmet requirement(s), all shown above — fix all of them (%d blocking, plus /dev/kvm)",
+				len(hard)+len(kvm), len(hard))
+		}
 		return false, fmt.Errorf("%d unmet requirement(s) — see the remediation above", len(hard))
 	}
 	if len(kvm) > 0 {

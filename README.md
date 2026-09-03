@@ -360,12 +360,13 @@ sudo dnf install -y git make podman        # or docker instead of podman
 sudo apt install -y git make podman passt uidmap   # or docker instead of podman
 
 git clone <repo> && cd koto
-make setup
+make fetch && make install && make wizard   # or: make build, to build it yourself
 ```
 
 That is the whole prerequisite list — no Go, Node, protoc or openssl toolchain
 on the host, all of it is containerized. Either **podman or docker** works, and
-is used only to BUILD: nothing koto runs at runtime is a container. They are named explicitly because a
+is needed only for the `make build` route: nothing koto runs at runtime is a
+container, and `make fetch` needs neither. They are named explicitly because a
 stock cloud image of either distro ships podman but not git or make.
 
 **On Ubuntu, also make `/dev/kvm` world-accessible**, which Fedora does by
@@ -384,43 +385,88 @@ with no supplementary groups, so it can only be reached by the world bits.
 for the monitor's jail. Ubuntu 22.04 is not supported — it has no `passt` and
 ships podman 3.4.
 
-`make setup` builds the `koto` binary in a container (so the host needs only
-git, make and podman) and runs the interactive wizard: it checks every host
-requirement and tells you how to fix what's missing, builds the images and
-the Firecracker guest kernel and rootfs, mints the private CA and the TUI's
-client identity, connects your Anthropic credentials, installs koto as a
-systemd service, and smoke-tests the result.
+**If you authenticate with a Claude subscription (OAuth), that route wants
+node >= 22 on the host** — the one exception to "no host toolchain" above,
+because the proxy shells out to the `claude` CLI to refresh the token.
+Ubuntu 24.04's own `nodejs` is v18: `npm` installs claude-code anyway with
+only an `EBADENGINE` warning and `claude --version` works, so the mismatch
+stays invisible until a token refresh needs it. Install node 22 first:
 
-It is safe to re-run — every step detects whether it is already done, so an
-interrupted install resumes where it stopped. `koto setup --check` reports
-the health of an install without changing anything, and never modifies it.
+```sh
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+sudo npm i -g @anthropic-ai/claude-code
+```
 
-**What it asks you**, all in the first couple of minutes:
+The API-key route needs none of this.
 
-- whether to continue if a host requirement is unmet (it prints the fix for
-  each one — package names, sysctl lines — and refuses only on the ones that
-  genuinely block);
+Installing koto is **three stages**, one command each. Each stage refuses to
+do the previous one's work, and tells you the command that does.
+
+```sh
+make fetch      # 1. acquire — download the artifacts, checksum-verified
+make install    # 2. integrate — into the system, as a systemd service
+make wizard     # 3. configure — TLS identities, credentials, start it
+```
+
+**Stage 1 has two routes, and they are interchangeable.** `make fetch`
+downloads the five artifacts — `koto`, `koto-tui`, and
+`fcassets/{firecracker,vmlinux,rootfs.img}` — and checks them against
+`dist/artifacts.sha256`, which is committed to this repo, so the checksums
+reach you over git rather than over the same connection as the bytes they
+vouch for. `make build` is the other route: it builds every one of them from
+source, sequentially, each inside a digest-pinned container, so the host
+needs only git, make and podman or docker — no Go toolchain, no kernel build
+deps. Use it if you would rather verify than trust; `make verify` afterwards
+compares what you built against what was published.
+
+Both routes produce identical five files, and nothing downstream — install,
+the wizard, the daemon — can tell which one ran.
+
+**Stage 2, `make install`,** checks every host requirement and tells you how
+to fix what's missing, then integrates: the state directory at
+`/var/lib/koto`, the binaries on PATH, `/etc/koto/koto.env`, and the systemd
+unit. It **enables the service but does not start it** — the daemon cannot
+come up before it has a server certificate, which is stage 3's job, and a
+unit that crash-loops from the moment it is installed teaches you to ignore
+it.
+
+**Stage 3, `make wizard`,** is the interactive part: it mints the private CA
+and the client identities, connects your Anthropic credentials, starts the
+daemon and smoke-tests it over the same authenticated API the TUI uses. It
+works against the installed system, not the clone, so credentials live in
+exactly one place from the moment they exist.
+
+`make setup` still runs all three in order, if you want one command.
+
+Every stage is safe to re-run — each step detects whether it is already done,
+so an interrupted run resumes where it stopped. `koto setup --check` reports
+the health of an install without changing anything.
+
+**What the wizard asks you**, and it is only three things:
+
 - whether you will reach this daemon from another machine, so it can put
   extra names or addresses in the server certificate (you can reissue later,
   so "no" is a safe default);
 - how to authenticate: a Claude subscription, which hands the terminal to
   `claude auth login` for a browser flow, or an Anthropic API key, typed
   with the echo off;
-- confirmation before the guest kernel build, which is the long one.
+- (on an upgrade) whether to go ahead and replace the installed version.
 
-**How long**: a few minutes of downloads and image builds, then the guest
-kernel — 20-40 minutes on a cold machine, a few minutes if a source cache is
-already there. It says which case you're in before starting, and it is safe
-to walk away or interrupt.
+**How long**: `make fetch` is a few minutes, most of it the guest rootfs.
+`make build` is the long one — a few minutes of container builds, then the
+guest kernel at 20-40 minutes on a cold machine, or a few minutes with a warm
+source cache. Either is safe to walk away from or interrupt; re-running picks
+up where it stopped. Stages 2 and 3 together are a couple of minutes.
 
-**Sudo** is asked for only at the install step, near the end, for three
-files: the `koto` binary, `/etc/koto/koto.env` and the systemd unit. Every
-privileged command is printed before it runs. The service itself runs
-rootless, as you.
+**Sudo** is asked for only in stage 2, for three files: the `koto` binary,
+`/etc/koto/koto.env` and the systemd unit — plus the `systemctl` calls in
+stages 2 and 3. Every privileged command is printed before it runs. The
+service itself runs as you, not as root.
 
-**If a step fails**, the wizard says which one and stops rather than
-continuing on a broken foundation. Fix the cause and run `make setup` again —
-finished steps are skipped. To retry or force one step on its own, use
+**If a step fails**, it says which one and stops rather than continuing on a
+broken foundation. Fix the cause and re-run that stage; finished steps are
+skipped. To retry or force one wizard step on its own, use
 `koto setup --only <id>` (`koto setup --list` names them).
 
 Once installed:
