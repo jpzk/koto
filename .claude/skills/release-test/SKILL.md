@@ -31,6 +31,18 @@ Hand-rolled QEMU with user-mode networking. Do **not** use `assemble/fed.sh`
 here: it needs a host bridge + tap created by a root script that also rewrites
 nftables, which is too much to impose on the dev host for a test.
 
+**Check host free space FIRST — this run needs ~20 G and failure is ugly:**
+
+```sh
+df -h ~          # need ~20 G free; the qcow2 grows to ~15 G during the build
+```
+
+A qcow2 is sparse, so a 30 G disk starts near zero and grows silently as the
+build writes. If the host fills, the guest's writes start failing and it dies
+in a way that looks like a network or hang bug — sshd stops answering, no OOM,
+no panic, and you will diagnose everything except the disk. Check `df` before
+blaming anything else when a guest goes unresponsive on a healthy host.
+
 ```sh
 VMDIR=~/.cache/koto-vmtest          # NOT /tmp — that is tmpfs, a VM disk there eats RAM
 mkdir -p $VMDIR && cd $VMDIR
@@ -69,15 +81,52 @@ mode `0666`.
 SSH: `ssh -i $VMDIR/id_vm -p 2222 fedora@127.0.0.1`
 (add `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR`).
 
+### Ubuntu variant — verified 2026-09-03 on 24.04.4 LTS
+
+Same QEMU invocation; three things change. Swap the image and the login user:
+
+```sh
+IMG_URL=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+# cloud-init user: ubuntu (groups: sudo), not fedora (groups: wheel,kvm)
+```
+
+**Do not pre-fix `/dev/kvm` or the userns sysctl in cloud-init.** Both being
+wrong on a stock Ubuntu image is what §4's two distro checks exist to catch;
+fixing them at provision time silently deletes the test. Confirm the
+preconditions before installing — a stock 24.04 gives exactly this:
+
+```sh
+ls -l /dev/kvm    # crw-rw---- root kvm  → 0660, NOT world-accessible
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns    # 1 → restricted
+```
+
+`sudo apt install -y git make podman passt uidmap` (the README's line) is
+**sufficient and complete** on a bare cloud image — verified, all five land on
+`PATH`, podman 4.9.3 with pasta at `/usr/bin/pasta`. Nothing else is needed
+for build or install.
+
+Then §4's preflight fails both checks and prints Ubuntu-specific remediation.
+**Applying exactly what it prints works verbatim, with no reboot** — verified;
+`/dev/kvm` goes 0660 → 0666 and the sysctl 1 → 0, after which preflight reads
+`✓ /dev/kvm usable (mode 0666)` and `✓ nested userns allowed`.
+
+Note the failure count reads `1 unmet requirement(s)` while **two** `✗` marks
+and two remediation blocks are shown. That is correct, not a bug:
+`/dev/kvm` failures go to a separate soft bucket (`setup_checks.go`, the
+"Continue without KVM?" path) and the count reports hard blockers only. A
+non-empty hard list returns before the KVM prompt is ever reached.
+
+Clean build time on 4 vCPU / 8 G was **~24 min** (fcassets ~18, Go binaries
+~6), not the ~40 min the Fedora note estimates.
+
 ## 2. Ship the source — and nothing else
 
 ```sh
 rsync -a -e "$SSH" \
-  --exclude '.git' --exclude '.gocache' --exclude '.gomodcache' --exclude '.build' \
-  --exclude '.kernelcache' --exclude 'fcassets' --exclude '/koto' --exclude '/koto-tui' \
-  --exclude 'creds' --exclude 'groups' --exclude 'run' \
-  --exclude 'groups.json' --exclude 'goals.json' --exclude 'schedules.json' \
-  --exclude 'metrics.jsonl' \
+  --filter=':- .gitignore' \
+  --exclude '.git' --exclude 'creds' --exclude 'groups' --exclude 'run' --exclude 'dist' \
+  --exclude 'fcassets' --exclude 'groups.json' --exclude 'goals.json' \
+  --exclude 'schedules.json' --exclude 'metrics.jsonl' \
   ~/koto/ fedora@127.0.0.1:~/koto/
 ```
 
@@ -94,7 +143,21 @@ blast radius is clean: the VM's `ca.crt` fingerprint must DIFFER from the dev
 host's, and `~/koto/creds` must not exist in the guest.
 
 Ship no binaries and no `fcassets/` — stage 1 has to build them, or it is not
-being tested.
+being tested. **`--filter=':- .gitignore'` is what enforces that**, and it
+replaced a hand-enumerated exclude list that had drifted: that list named
+`/koto` and `/koto-tui` at the repo root but missed `tui/koto-tui`,
+`koto-fcagent`, `fcguest/koto-fcagent`, `fcguest/fc-agent` and `.cargocache/`
+(~70 M of prebuilt binaries and a Rust build cache). Every one of those is a
+gitignored build output, so honouring `.gitignore` excludes them by
+construction and keeps doing so as new outputs are added. Verify rather than
+trust — the source-only transfer is ~285 files / ~2.7 M:
+
+```sh
+rsync -a --dry-run --out-format='%l %n' … | sort -rn | head
+```
+
+Anything multi-megabyte in that list is a build output that should not be going
+over.
 
 ## 3. Stage 1 — build from source
 
@@ -179,6 +242,19 @@ that CLI falls back to printing an authorization URL and waiting for a
 paste-back code, so it is drivable with a human in the loop. Hold the wizard in
 a tmux session so you can read it and type into it across steps:
 
+**On Ubuntu, install node 22 first — `apt install nodejs` gives v18.**
+claude-code declares `"node": ">=22.0.0"`, but npm installs it anyway with
+only an `EBADENGINE` warning and `claude --version` works, so nothing looks
+wrong until the proxy shells out to refresh a token. Verified trap on 24.04:
+
+```sh
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs tmux              # node 22.x, not the distro's 18
+sudo npm i -g @anthropic-ai/claude-code
+```
+
+On Fedora:
+
 ```sh
 sudo dnf install -y nodejs npm tmux
 sudo npm i -g @anthropic-ai/claude-code      # preflight's `! claude not found`
@@ -198,35 +274,29 @@ tmux send-keys -t auth "<code>#<state>" Enter
 tmux capture-pane -t auth -p -J | tail -3      # expect: Login successful. / ✓ auth done
 ```
 
-**The API key shadows OAuth completely.** `authHeaders()` short-circuits on
-`apiKey != ""` and never consults the OAuth credential, so a placeholder key
-left from section 5 means every request 401s and it reads as a bad token.
-Delete it first, and confirm with `koto setup --check` reporting auth as
-`OAuth credentials present`, not `API key stored`.
+**The API key shadows OAuth completely** — `authHeaders()` short-circuits on a
+non-empty key and never consults the OAuth credential. That much is by design.
+What was NOT: the key used to be read once by `proxyInitPaths()` **at daemon
+startup**, including from `<state>/creds/anthropic-api-key`, so section 5's
+placeholder stayed cached in the running process after you `rm`'d the file.
+Verified 2026-09-03: every request kept going out as
+`x-api-key: sk-ant-PLACEHOLDER-not-a-real-key` and 401'd, with a healthy OAuth
+token sitting unread on disk.
 
-Assert, once login succeeds:
+**FIXED**: `currentAPIKey()` now reads the file per request, the same way
+`readCreds()` already re-read OAuth, so adding or removing the key takes effect
+with no restart (verified in both directions). On a binary predating that fix
+the order is: delete the key file, **then `sudo systemctl restart koto`**. Note
+`koto setup --check` reads the disk, not the daemon's cached value, so on an
+old binary it reports `OAuth credentials present` while the daemon is still
+sending the stale key — it cannot be used to detect this.
 
-- the credential is at `/var/lib/koto/creds/.credentials.json`, mode `0600`
-- **`~/.claude` does not exist for the operator.** This is the whole point of
-  the `HOME=<state>` + `<state>/.claude → creds` design: koto's token must
-  never land in the operator's personal profile. Cheap to check, and the thing
-  that would silently regress.
-- the shape is `{"claudeAiOauth":{"accessToken",…}}` — observed alongside
-  `expiresAt`, `refreshToken`, `refreshTokenExpiresAt`, `scopes`,
-  `subscriptionType`; the proxy reads only the first two.
-
-No daemon restart is needed after OAuth: `readCreds()` re-reads the file on
-every request. Only the API-key path is cached at startup (`proxyInitPaths`),
-so that one does need a restart — an asymmetry worth remembering when a
-credential change appears not to take.
-
-`expiresAt` came back ~7 hours out. Past that the proxy kicks `refresh()`,
-which shells out to `claude -p ok` — which is why the CLI has to be installed
-in the VM, not just for the login itself.
-
-> An unattended variant using `claude setup-token` is plausible but UNVERIFIED:
-> it is not known whether that token satisfies the `Bearer` +
-> `anthropic-beta: oauth-2025-04-20` shape the proxy sends. Use the flow above.
+**The 401 it produced also lied about the cause** — `credential expired; run
+`make login`` while the credential had 7.9 h left, `user:inference` in scopes
+and `subscriptionType: max`, so re-running the login could not have helped.
+That message now names the credential actually sent (`upstream rejected the
+API key …`). On an older binary treat "expired" as unreliable and check
+`expiresAt` yourself.
 
 ### Assert a real completion
 
@@ -305,14 +375,32 @@ and a bare `grep -q` sails straight past it.
 Then confirm the group the TUI made is real, from outside the TUI:
 `koto ctl list` must show `e2etui`. Clean up with `koto ctl destroy e2etui`.
 
-### Frame integrity: `make tui-walk`
+### Frame integrity: `make tui-walk` — BROKEN, do not rely on it
 
-Before hand-rolling any of the above, run `make tui-walk` (tools/tuiwalk/walk.py).
-It drives the TUI under a real VT emulator (pyte) and fails on any wrapped row
-or scrolled frame — the glitch class a char-per-cell model cannot see. Two legs,
-`--term xterm,vt100`; the vt100 leg additionally fails on any 8-bit byte or SGR
-color parameter, which is the end-to-end proof that mono mode (`tui/mono.go`)
-leaves nothing a VT100 cannot render. Non-destructive by construction.
+**`make tui-walk` silently passes without running anything.** Verified
+2026-09-03: `tui-walk` is listed in the Makefile's `.PHONY` line but **has no
+rule**, in the working tree and in `HEAD` alike, so make reports
+`Nothing to be done for 'tui-walk'` and **exits 0**. A green exit here is not
+evidence of anything. Do not treat it as a gate until it is fixed.
+
+Underneath, `tools/tuiwalk/walk.py` is also stale: it drives the TUI as a
+**podman container** (`podman run --network koto-net … -e KOTO_ENDPOINT=cs_host_go:8443`,
+`--image koto-tui`) and its docstring wants `make host-run` and `make
+tui-build`. That is the container-era architecture `0d5848b` moved away from —
+`koto tui` is a plain host binary now (`tui_cmd.go:60`). So the script cannot
+work as written even with a rule restored; it needs porting to exec the host
+binary in a pty, not a container.
+
+What it was *meant* to do, and what is still worth having: drive the TUI under
+a real VT emulator (pyte) and fail on any wrapped row or scrolled frame — the
+glitch class a char-per-cell model cannot see. Two legs, `--term xterm,vt100`;
+the vt100 leg additionally fails on any 8-bit byte or SGR color parameter,
+which is the end-to-end proof that mono mode (`tui/mono.go`) leaves nothing a
+VT100 cannot render.
+
+Until it is ported, use the tmux route above and accept that the wrap/scroll
+class is not covered — and say so in the release notes rather than implying it
+was checked.
 
 ### Synthesizing turns without spending tokens
 
@@ -336,6 +424,51 @@ group when list membership matters.
 - **The kernel clone fails transiently.** `fatal: expected flush after ref
   listing` from `git clone amazonlinux/linux` is a transport flake, not a koto
   bug — it cloned fine on immediate retry. Retry once before investigating.
+
+- **A stalled image pull looks exactly like a slow build, and never times
+  out.** Observed: `podman pull` of the fcuvm image hung for 33 minutes with
+  five ESTABLISHED TLS sockets to ECR, all `Recv-Q`/`Send-Q` at 0, podman
+  parked in `futex_wait_queue` with no child processes and **no container in
+  `podman ps`** — while a fresh `curl` to the same registry answered in 0.4 s.
+  QEMU's SLIRP user-mode NAT drops the flow state on a long transfer; the
+  guest still sees ESTABLISHED, the peer's data never arrives, no RST is ever
+  generated, and podman's registry client has no read deadline. Not a koto
+  bug. Pre-pull every pinned image with a hard per-attempt deadline before
+  running `make build`, so a stall is killed and retried instead of hanging:
+
+  ```sh
+  for img in $(grep -rohE "(public\.ecr\.aws|docker\.io)/[a-zA-Z0-9._/-]+@sha256:[0-9a-f]{64}" Makefile */*.sh); do
+    for a in 1 2 3 4 5 6; do timeout --signal=KILL 420 podman pull -q "$img" && break; sleep 5; done
+  done
+  ```
+
+- **Log silence is NOT a stall signal — check CPU.** The kernel build buffers
+  its output, so `build.log` can go 10+ minutes without a write while the
+  machine is flat out. A watcher keyed on log mtime alone fires a false
+  positive here. The discriminator is CPU: a real compile shows `cc1`
+  processes at ~96% and loadavg at the vCPU count; the SLIRP hang above showed
+  podman at 2% with no children. Require log silence **and** no compiler
+  processes **and** loadavg < 1 before calling it stalled.
+- **Daemon shutdown orphaned every microVM — FIXED, verify it stayed fixed.**
+  `daemonMain`'s signal handler called `srv.Stop()` before `fcStopAll()`, which
+  released `srv.Serve()` in the main goroutine; main returning ended the
+  PROCESS and killed the handler mid-shutdown. Measured before the fix: the
+  daemon was gone in <1s, the log stopped at `fc: shutdown: stopping N
+  microVM(s)` with no `[g] stopped`, firecracker survived the whole stop and
+  beyond, `run/fc/<g>.{pid,sock,jail}` were left behind, and the next start
+  logged `cleared N stale pidfile(s)`. `systemctl stop` took the full
+  `TimeoutStopSec=25` and reported failure — systemd waiting on an orphan.
+  **The severity is not the 25s: it is that guests never got the sync+umount
+  window `fcStop` exists to give them, so every stop risked a dirty workspace
+  ext4.** Raising `TimeoutStopSec` would have masked it. The fix makes
+  `Serve`'s return wait on a `shutdownDone` channel. Regression check:
+
+  ```sh
+  time sudo systemctl stop koto     # ~0.4s, not 25s
+  journalctl -u koto -n 5 -o cat    # must show `[g] stopped`
+  pgrep -c firecracker              # must be 0
+  ```
+
 - **`systemctl reset-failed koto` after any teardown.** systemd keeps a unit's
   `failed` state under that name even after you delete and re-create the unit
   file, so the next fresh install reads `failed` instead of `inactive` and you
@@ -346,7 +479,8 @@ group when list membership matters.
   disable, `rm` the unit + `/etc/koto` + `/var/lib/koto` + both
   `/usr/local/bin` binaries, `daemon-reload`, `reset-failed`.
 - **Sparse rootfs.** `rootfs.img` is 2 G apparent / ~770 M real. Use
-  `rsync --sparse` if you ever do copy it in, and give the VM ≥30 G.
+  `rsync --sparse` if you ever do copy it in, and give the VM ≥30 G — and make
+  sure the *host* can actually back those 30 G, see the `df` warning in §1.
 - **Give the VM ≥8 G RAM if you want more than two groups.** The fleet cap is
   90% of host RAM and each group reserves 1536 MiB (1024 mem + 512 VMM margin),
   so on a 4 G VM the third `spawn` fails with "needs 1536 MiB … but the fleet

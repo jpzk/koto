@@ -1,8 +1,14 @@
 package main
 
-// `koto setup` — the first-run wizard. An ordered list of steps, each able to
-// detect whether it is already satisfied, explain itself before acting, and
+// `koto setup` — the configuration wizard. An ordered list of steps, each able
+// to detect whether it is already satisfied, explain itself before acting, and
 // verify itself afterwards.
+//
+// It is the LAST of three stages, and owns none of the other two: `make fetch`
+// or `make build` acquires the artifacts, `koto install` integrates them into
+// the system, and this configures the result. So the wizard neither compiles
+// nor installs — it mints the PKI, connects credentials, starts the daemon and
+// proves it answers, all against the state dir.
 //
 // Resumability is by DETECTION, not by a state file: every fact the wizard
 // cares about is observable on the host (a podman image, a file in creds/, an
@@ -28,9 +34,10 @@ type setupCtx struct {
 	root string // the clone: source of the Makefile, prompts/, fcguest scripts
 	ctx  context.Context
 
-	// carried between steps
-	noKVM   bool // preflight found no usable KVM; continue in degraded mode
-	authKey string
+	// credsChanged is carried from the pki/auth steps to the service step:
+	// the proxy resolves credentials once, at startup, so material minted in
+	// this run means a restart is owed even if the daemon is already up.
+	credsChanged bool
 }
 
 type setupStep struct {
@@ -51,10 +58,11 @@ type setupStep struct {
 func setupUsage() {
 	fmt.Fprintln(os.Stderr, `usage: koto setup [flags]
 
-Interactive first-run wizard: checks host dependencies, builds the images and
-guest assets, mints the PKI, sets up credentials, installs koto as a systemd
-service and smoke-tests the result. Safe to re-run — every step detects
-whether it is already done.
+Configures an installed koto: mints the TLS identities, connects your
+Anthropic credentials, starts the daemon and smoke-tests it. It neither
+builds nor installs — run "make fetch" (or "make build") and then
+"make install" first. Safe to re-run: every step detects whether it is
+already done.
 
 flags:
   --check        report what is and isn't set up, change nothing, exit 0 if ready
@@ -163,11 +171,13 @@ func setupRun(sc *setupCtx, steps []setupStep, only, from string) int {
 	if only == "" && from == "" {
 		u.blank()
 		u.printf("%s", u.bold("koto setup"))
-		u.prose(`This wizard takes a fresh machine to a running koto: it checks what the
-host needs, builds the daemon and TUI images, builds the Firecracker guest
-kernel and rootfs, mints the TLS material the daemon and its clients use,
-connects your Anthropic credentials, installs koto as a systemd service, and
-proves the result works.
+		u.prose(`This wizard takes an installed koto to a running one: it mints the TLS
+material the daemon and its clients use, connects your Anthropic
+credentials, starts the service, and proves the result answers.
+
+It is the last of three stages and owns neither of the others. `+"`make fetch`"+`
+or `+"`make build`"+` acquires the artifacts; `+"`make install`"+` integrates them into
+the system; this configures what they produced.
 
 Steps that are already done are skipped, so re-running this is safe and is
 also how you resume after an interruption. Nothing is destroyed without
@@ -253,21 +263,6 @@ asking.`)
 }
 
 // ---- subprocess helpers ----------------------------------------------------
-
-// stream runs a command, indenting its combined output under the wizard's
-// own. Used for the make targets, which own the build logic (sentinels,
-// image pruning) that the wizard deliberately does not duplicate.
-func (sc *setupCtx) stream(name string, args ...string) error {
-	sc.ui.info("%s", sc.ui.dim("$ "+name+" "+strings.Join(args, " ")))
-	w := &prefixWriter{ui: sc.ui}
-	defer w.Flush()
-	cmd := exec.CommandContext(sc.ctx, name, args...)
-	cmd.Dir = sc.root
-	cmd.Stdout = w
-	cmd.Stderr = w
-	cmd.Env = append(os.Environ(), "TERM=dumb") // no progress-bar escape soup
-	return cmd.Run()
-}
 
 // interactive hands the real terminal to a child process (the OAuth login).
 // The wizard ignores SIGINT for the duration: the child is in the same

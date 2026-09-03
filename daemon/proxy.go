@@ -25,7 +25,8 @@ const (
 
 var (
 	credPath     string
-	apiKey       string
+	envAPIKey    string
+	apiKeyPath   string
 	credLock     sync.Mutex
 	listeners    = map[int]string{}       // port -> group (one-to-one invariant)
 	listenerSrvs = map[int]*http.Server{} // port -> server, for proxyUnlisten rollback
@@ -95,7 +96,45 @@ func proxyInitPaths() {
 		home, _ := os.UserHomeDir()
 		credPath = filepath.Join(home, ".claude", ".credentials.json")
 	}
-	apiKey = os.Getenv("ANTHROPIC_API_KEY")
+	envAPIKey = os.Getenv("ANTHROPIC_API_KEY")
+	// The state dir is where `koto setup` writes the key. The wizard runs
+	// AFTER install, so a key typed there cannot have been folded into
+	// /etc/koto/koto.env at install time — and requiring the wizard to
+	// sudo-rewrite that file just to deliver a secret it already wrote is a
+	// worse trade than reading it here. This mirrors how the OAuth path
+	// already works: credentials live in the state dir, and the daemon
+	// looks there. Note the PATH is resolved here; the FILE is read per
+	// request by currentAPIKey — see there for why.
+	apiKeyPath = filepath.Join(HERE, "creds", "anthropic-api-key")
+}
+
+// currentAPIKey resolves the API key fresh on every call. ANTHROPIC_API_KEY is
+// fixed for the process lifetime, but the state-dir key is a file an operator
+// adds or removes while the daemon runs — switching from an API key to OAuth
+// is exactly that. Caching it at startup meant a deleted key kept being sent
+// (authHeaders short-circuits on a non-empty key and never consults OAuth), so
+// every request 401'd with a perfectly good OAuth token unread on disk. The
+// OAuth path is already re-read per request by readCreds; these two have to
+// behave the same way or the precedence between them is a startup accident.
+func currentAPIKey() string {
+	if envAPIKey != "" {
+		return envAPIKey
+	}
+	if apiKeyPath == "" {
+		return ""
+	}
+	if b, err := os.ReadFile(apiKeyPath); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
+// credKind names which credential authHeaders would send, for error messages.
+func credKind() string {
+	if currentAPIKey() != "" {
+		return "API key"
+	}
+	return "OAuth token"
 }
 
 func refresh() {
@@ -156,9 +195,9 @@ func refreshOnce() {
 }
 
 func authHeaders() (map[string]string, error) {
-	if apiKey != "" {
+	if k := currentAPIKey(); k != "" {
 		return map[string]string{
-			"x-api-key":         apiKey,
+			"x-api-key":         k,
 			"anthropic-version": "2023-06-01",
 		}, nil
 	}
@@ -229,10 +268,15 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	switch status {
 	case 401:
 		// Surfaced, not muted: the proxy's proactive refresh (authHeaders)
-		// already ran before this request, so a 401 here is terminal — the
-		// OAuth credential is expired/invalid. 401 is never retried
-		// (retryableStatus), so this is exactly one line per failed turn.
-		reason = "authentication failed — credential expired; run `make login`"
+		// already ran before this request, so a 401 here is terminal. 401 is
+		// never retried (retryableStatus), so this is exactly one line per
+		// failed turn. Do NOT claim "expired" — an API key takes precedence
+		// over OAuth in authHeaders, so a stale or wrong key produces this
+		// same 401 while a valid OAuth token sits unused, and "run `make
+		// login`" then sends the operator through a login that cannot help.
+		// Name the credential actually sent and let --check say the rest.
+		reason = "authentication failed — upstream rejected the " + credKind() +
+			"; check `koto setup --check` (an API key takes precedence over OAuth)"
 	case 529:
 		reason = "Overloaded" // Anthropic-specific; not in net/http
 	}

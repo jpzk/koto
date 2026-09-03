@@ -1,14 +1,16 @@
-# Sentinel-driven build: every image-build target writes a marker into
-# .build/ on success. Make compares the marker's mtime against the actual
-# Dockerfile + COPY'd source inputs, so `make host-run` / `make tui` only
-# rebuild when something relevant actually changed.
+# Every build target is keyed on the REAL FILE it produces — the koto and
+# koto-tui binaries, fcassets/{firecracker,vmlinux,rootfs.img} — compared
+# against its actual source inputs, so a target is a no-op once its output is
+# current and rebuilds the moment the output is deleted or its inputs change.
+# (The .build/ marker files this used to use are gone; `clean` still removes
+# the directory so an upgraded checkout does not keep stale ones around.)
 #
 # Podman is a BUILD-time dependency only: it compiles the Go binaries (so the
 # host needs no Go toolchain) and builds the guest kernel and rootfs. Nothing
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: build fetch verify wizard require-artifacts setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -19,12 +21,36 @@ PROTOC_GEN_GO_VER      := v1.36.11
 PROTOC_GEN_GO_GRPC_VER := v1.6.1
 
 # --- first run ---------------------------------------------------------------
-# `make setup` is the ONE command a newcomer runs. It builds the koto binary
-# inside a container (so the host needs no Go — only git, make and podman) and
-# hands over to the interactive wizard, which checks the host, builds the
-# images and guest assets, mints the PKI, connects your Anthropic credentials
-# and installs koto as a systemd service. Safe to re-run: every step detects
-# whether it is already done, so an interrupted install resumes here.
+# GETTING koto RUNNING IS THREE STAGES, and each one owns exactly its own job:
+#
+#   1. ACQUIRE     the five artifacts, by one of two routes
+#   2. INTEGRATE   them into the system            (make install)
+#   3. CONFIGURE   the installed system            (make wizard)
+#
+#   make fetch && make install && make wizard      download — minutes
+#   make build && make install && make wizard      build it yourself — ~40 min
+#
+# The two acquire routes produce the SAME five files: ./koto, ./koto-tui, and
+# fcassets/{firecracker,vmlinux,rootfs.img}. Nothing downstream can tell which
+# route produced them.
+#
+# WHY BOTH ROUTES. `make fetch` is for people who want to run koto. `make
+# build` is the don't-trust-verify path for people who cloned the repo: it
+# builds the daemon, the TUI, the Firecracker VMM, the guest kernel and the
+# guest rootfs from source, sequentially, each inside a digest-pinned
+# container, so the host needs no toolchain of its own — only git, make and
+# podman/docker. `make verify` closes the loop: build from source, then check
+# the bytes you produced against the checksums published for the release.
+#
+# WHY THE WIZARD IS LAST. It configures an INSTALLED system — it mints the PKI
+# and connects credentials straight into the state dir, so there is one place
+# credentials live and no copy from the clone to get wrong. It follows that a
+# fresh `make install` enables the unit but does NOT start it: the daemon
+# cannot come up before the wizard has minted its server certificate.
+#
+# Each stage refuses to do the previous one's work, and says which command
+# does. Safe to re-run: make skips what is up to date and every wizard step
+# detects whether it is already done, so an interrupted run resumes here.
 # --- container runtime (BUILD-time only) ------------------------------------
 # The binaries are built in a container so THE HOST NEVER NEEDS GO. That is a
 # hard requirement, not a convenience: `make build`, `make install` and
@@ -80,23 +106,139 @@ define need-container
 endef
 
 KOTO_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d)
+
+# The five files that ARE koto at runtime. Both acquisition routes produce
+# exactly these, and nothing downstream can tell which route did it.
+FCASSETS  := fcassets
+ARTIFACTS := koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux $(FCASSETS)/rootfs.img
 koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go)
 	$(need-container)
 	$(GO_BUILD_RUN) \
 	  go build -trimpath -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
 
-# Everything a host needs to run koto. One static binary each, portable across
-# every supported distribution.
-build: koto koto-tui
-	@echo "built: koto koto-tui ($(KOTO_VERSION), via $(CONTAINER_NAME))"
+# --- stage 1, route 1: build every byte yourself ----------------------------
+# Sub-makes rather than prerequisites, so the order holds under `make -j`:
+# this is the route people run to watch it happen, and a kernel compile
+# interleaved with a rootfs build reads as noise. Each step is a no-op once
+# its artifact is current, so an interrupted run resumes here.
+build:
+	@echo "==> building all koto artifacts from source ($(KOTO_VERSION), via $(CONTAINER_NAME))"
+	$(MAKE) koto
+	$(MAKE) koto-tui
+	$(MAKE) firecracker
+	$(MAKE) kernel
+	$(MAKE) rootfs
+	@echo
+	@echo "built: $(ARTIFACTS)"
+	@echo "next:  make install"
 
-setup: koto
+# --- stage 3: configure the installed system --------------------------------
+# No prerequisites on purpose: this stage does not acquire and does not
+# install. If either earlier stage is incomplete, the wizard's own first step
+# says so and names the command that fixes it.
+wizard:
+	@test -x ./koto || { \
+	  echo "./koto is missing — acquire the artifacts first:"; \
+	  echo "    make fetch     download them (minutes)"; \
+	  echo "    make build     build them yourself (~40 min cold)"; \
+	  exit 1; }
 	@./koto setup
 
-# Install (or upgrade) an existing checkout as a systemd service without the
-# wizard's explanatory pass — for people who already know what they want.
-install: build
+# Shorthand for the source route end to end. Kept because it is the command
+# every doc has pointed at for a year; it is exactly the three stages in order.
+setup:
+	$(MAKE) build
+	$(MAKE) install
+	$(MAKE) wizard
+
+# --- stage 1, route 2: download what was published --------------------------
+# THE MANIFEST IS THE TRUST ANCHOR, NOT THE HOST. dist/artifacts.sha256 is
+# committed to this repo, so the checksums reach you over git — with whatever
+# review and signing the repo has — rather than over the same connection as
+# the bytes they vouch for. KOTO_DIST_URL can point anywhere, a mirror or a
+# file:// path included; the check does not change.
+#
+# The manifest lists the artifacts as INSTALLED, not as transferred: rootfs.img
+# ships compressed and is checked after decompression, so one manifest serves
+# both routes — `make verify` holds a local build to the same line.
+KOTO_DIST_URL ?= https://kotovm.com/dist
+MANIFEST      := dist/artifacts.sha256
+DIST_VERSION   = $(strip $(shell cat dist/VERSION 2>/dev/null))
+
+# Published name -> local path. rootfs is the only one transferred compressed;
+# at ~2G apparent (mostly holes) it is the one where it matters.
+fetch:
+	@test -n "$(DIST_VERSION)" || { echo "dist/VERSION is missing or empty"; exit 1; }
+	@if [ "$(DIST_VERSION)" = "unreleased" ]; then \
+	  echo "no koto release has been published yet, so there is nothing to fetch."; \
+	  echo "build the artifacts from source instead:"; \
+	  echo "    make build && make install && make wizard"; \
+	  exit 1; \
+	fi
+	@command -v curl >/dev/null || { echo "curl is required to fetch artifacts"; exit 1; }
+	@command -v zstd >/dev/null || { echo "zstd is required to unpack rootfs.img.zst"; exit 1; }
+	@mkdir -p $(FCASSETS)
+	@base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
+	echo "==> fetching koto $(DIST_VERSION) from $$base"; \
+	for pair in koto:koto koto-tui:koto-tui \
+	            firecracker:$(FCASSETS)/firecracker vmlinux:$(FCASSETS)/vmlinux; do \
+	  name=$${pair%%:*}; dest=$${pair#*:}; \
+	  echo "    $$name -> $$dest"; \
+	  curl -fsSL --retry 3 -o "$$dest.part" "$$base/$$name" || { \
+	    rm -f "$$dest.part"; echo "failed to fetch $$name from $$base"; exit 1; }; \
+	  mv "$$dest.part" "$$dest"; \
+	done; \
+	echo "    rootfs.img.zst -> $(FCASSETS)/rootfs.img (decompressing)"; \
+	curl -fsSL --retry 3 -o "$(FCASSETS)/rootfs.img.zst" "$$base/rootfs.img.zst" || { \
+	  rm -f "$(FCASSETS)/rootfs.img.zst"; echo "failed to fetch rootfs.img.zst from $$base"; exit 1; }; \
+	zstd -qdf --sparse "$(FCASSETS)/rootfs.img.zst" -o "$(FCASSETS)/rootfs.img" || exit 1; \
+	rm -f "$(FCASSETS)/rootfs.img.zst"
+	@chmod +x koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux
+	@$(MAKE) --no-print-directory verify
+	@echo "next:  make install"
+
+# --- verify -----------------------------------------------------------------
+# Holds whatever is in the working tree — fetched or locally built — to the
+# checksums published for this release. Run it after `make build` and you are
+# checking that building from source reproduces the bytes on kotovm.com; run
+# it after `make fetch` (which does, automatically) and you are checking the
+# download.
+#
+# CAVEAT, stated because a verify step that quietly always fails is worse than
+# none: only koto and koto-tui are expected to reproduce bit-for-bit. They are
+# CGO_ENABLED=0 and -trimpath, built in a digest-pinned image, with the version
+# string the only input that varies — so two builds of the same commit give
+# identical bytes. The guest kernel and rootfs embed build timestamps and
+# resolved package versions and do NOT reproduce; a mismatch there means your
+# image differs from the published one, which is expected, not alarming.
+verify:
+	@test -s $(MANIFEST) || { echo "$(MANIFEST) is empty — nothing to verify against"; exit 1; }
+	@grep -qv '^#' $(MANIFEST) || { \
+	  echo "no checksums published yet ($(MANIFEST) has no entries)."; \
+	  echo "there is nothing to verify against until a release exists."; \
+	  exit 1; }
+	@sha256sum -c $(MANIFEST)
+
+# Guard for targets that consume the artifacts without producing them.
+require-artifacts:
+	@missing=""; for a in $(ARTIFACTS); do [ -e "$$a" ] || missing="$$missing $$a"; done; \
+	if [ -n "$$missing" ]; then \
+	  echo "missing artifact(s):$$missing"; \
+	  echo "acquire them first:"; \
+	  echo "    make fetch     download them (minutes)"; \
+	  echo "    make build     build them yourself (~40 min cold)"; \
+	  exit 1; \
+	fi
+
+# --- stage 2: integrate into the system -------------------------------------
+# State dir, binaries on PATH, /etc/koto/koto.env, the systemd unit. Takes the
+# artifacts as given — acquire them with `make fetch` or `make build` first —
+# and configures nothing: a fresh install enables the unit but leaves it
+# stopped, because the daemon needs the server certificate `make wizard` mints.
+install:
+	@$(MAKE) --no-print-directory require-artifacts
 	@./koto install
+	@echo "next:  make wizard"
 
 # INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
 # worktree — `make host-run INSTANCE=cli`, `make tui INSTANCE=cli`,
@@ -111,9 +253,6 @@ INSTANCE ?=
 CS_HOST_NAME := cs_host_go$(if $(INSTANCE),_$(INSTANCE))
 
 BUILD := .build
-
-$(BUILD):
-	@mkdir -p $@
 
 # --- sidecar scripts --------------------------------------------------------
 # + stream_filter.js + start-chrome.sh run INSIDE the
@@ -150,6 +289,21 @@ koto-tui: $(TUI_GO_SRC) $(PROTO_SRC)
 	  sh -c 'cd tui && go build -trimpath -ldflags "-s -w" -o /src/koto-tui .'
 
 tui-build: koto-tui
+
+# Frame-integrity gate. tools/tuiwalk/walk.py still drives the TUI as a podman
+# container (`podman run --network koto-net -e KOTO_ENDPOINT=cs_host_go:8443`),
+# which is the pre-0d5848b architecture — `koto tui` is a plain host binary
+# now, so the script cannot run as written and needs porting to exec that
+# binary in a pty. Until then this target FAILS rather than silently passing:
+# it was named in .PHONY with no rule at all, so `make tui-walk` printed
+# "Nothing to be done" and exited 0, which reads as a passing gate.
+tui-walk:
+	@echo "make: *** tui-walk is not runnable: tools/tuiwalk/walk.py targets the"
+	@echo "    container-era TUI (podman run --network koto-net), but koto tui is"
+	@echo "    a host binary now. Port walk.py to exec the binary in a pty."
+	@echo "    Until then the wrap/scroll gate is NOT covered — do not report it"
+	@echo "    as checked. See .claude/skills/release-test/SKILL.md section 7."
+	@exit 1
 
 # --- run / interactive targets ---------------------------------------------
 # One-time OAuth into ./creds. Uses the host's claude CLI — a runtime
@@ -294,22 +448,35 @@ pki-client:
 # sidecar/*.{sh,js} or fcguest/, since microVMs have no live bind mounts).
 # The daemon opens /dev/kvm directly; it must be world-accessible because the
 # jailed VMM runs as an unprivileged per-VM id (see checkKVM).
-firecracker:
+# Keyed on the REAL OUTPUTS, not on .build/ markers. Two reasons, both from
+# the wizard no longer building anything:
+#
+#   - `make setup` now depends on `assets`, so these must be no-ops on a
+#     provisioned machine. `firecracker` was phony and rebuilt every time,
+#     which only went unnoticed while the wizard's presence-check gated it.
+#   - a missing artifact makes the wizard say "run `make kernel`". With a
+#     marker file that survives the asset it names, make would answer
+#     "nothing to be done" and the operator would be stuck in a loop.
+#
+# The tradeoff is that a build script newer than the asset it produced now
+# rebuilds, where a stale marker would have stayed quiet. That is make being
+# right: the asset really is out of date.
+$(FCASSETS)/firecracker: fcguest/build-firecracker.sh
 	./fcguest/build-firecracker.sh
 
-$(BUILD)/kernel: fcguest/build-kernel.sh | $(BUILD)
-	./fcguest/build-kernel.sh
-	@touch $@
+firecracker: $(FCASSETS)/firecracker
 
-kernel: $(BUILD)/kernel
+$(FCASSETS)/vmlinux: fcguest/build-kernel.sh
+	./fcguest/build-kernel.sh
+
+kernel: $(FCASSETS)/vmlinux
 
 FCGUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
-$(BUILD)/rootfs: $(FCGUEST_SRC) | $(BUILD)
+$(FCASSETS)/rootfs.img: $(FCGUEST_SRC)
 	./fcguest/build-rootfs.sh
 	$(prune-dangling)
-	@touch $@
 
-rootfs: $(BUILD)/rootfs
+rootfs: $(FCASSETS)/rootfs.img
 
 assets: firecracker kernel rootfs
 

@@ -1,0 +1,25 @@
+# koto artifact manifest — the trust anchor for `make fetch` and `make verify`.
+#
+# Plain sha256sum(1) format over the artifacts AS INSTALLED, relative to the
+# repo root, so `sha256sum -c dist/artifacts.sha256` works verbatim and one
+# file serves both acquisition routes: it checks a download, and it checks
+# whether building from source reproduced the published bytes.
+#
+# This file is COMMITTED ON PURPOSE. It is what makes `make fetch` safe: the
+# checksums arrive over git, not over the same connection as the artifacts
+# they vouch for, so a compromised mirror cannot vouch for itself.
+#
+# Not every artifact reproduces bit-for-bit. koto and koto-tui do — they are
+# CGO_ENABLED=0, -trimpath, built in a digest-pinned image. fcassets/vmlinux
+# and fcassets/rootfs.img embed build timestamps and resolved package
+# versions and do not; a mismatch on those after `make build` is expected.
+#
+# Entries look like:
+#   <sha256>  koto
+#   <sha256>  koto-tui
+#   <sha256>  fcassets/firecracker
+#   <sha256>  fcassets/vmlinux
+#   <sha256>  fcassets/rootfs.img
+#
+# Empty until the first release is published to kotovm.com; until then
+# dist/VERSION reads "unreleased" and `make fetch` says so rather than 404ing.

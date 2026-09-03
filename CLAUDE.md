@@ -37,19 +37,54 @@ state migration on upgrade, and a state dir can be inspected with the same
 commands as a clone. `initPaths()`/`proxyInitPaths()` are the only readers;
 everything else derives from the globals.
 
-- **`make setup` → `koto setup`** is the newcomer's entry point: an 11-step
-  wizard (host preflight with remediation → images → PKI → credentials →
-  guest assets → install → smoke). **Resumability is by DETECTION, not a
-  state file** — every fact is observable on the host (a podman image, a file
-  in creds/, a systemd unit), so an interrupted run resumes by re-running and
-  there is no wizard state to corrupt. `--check` is the same detection pass
+- **THREE STAGES, and the boundaries are load-bearing.** `acquire → integrate
+  → configure`, one command each, each refusing to do the previous one's work
+  and naming the command that does:
+  1. **acquire** — `make fetch` downloads the five artifacts (`koto`,
+     `koto-tui`, `fcassets/{firecracker,vmlinux,rootfs.img}`) and verifies
+     them against the committed `dist/artifacts.sha256`; `make build` builds
+     every one from source, sequentially, for people who cloned the repo and
+     want to verify. Both routes land the same five files, and nothing
+     downstream can tell which ran.
+  2. **integrate** — `make install` → `koto install`: preflight, then the
+     state dir, the binaries on PATH, `/etc/koto/koto.env`, the unit.
+     `requireArtifacts()` gates it, so a missing rootfs is caught before the
+     first `sudo` write rather than after three of them.
+  3. **configure** — `make wizard` → `koto setup`: a 6-step wizard
+     (installed? → PKI → credentials → start → smoke → handoff).
+  `make setup` still runs all three in order; it is the only thing that knows
+  about more than one stage.
+- **The wizard runs LAST, against the installed system.** Every path it
+  touches resolves under the state dir (`sc.credsDir()` is
+  `<state>/creds`), so PKI and credentials are minted straight into the
+  installed system — one place credentials live, no clone-side copy to get
+  wrong, and the wizard needs no clone at all. `credsChanged` carries from the
+  pki/auth steps to the service step, because the proxy resolves credentials
+  once at startup and material minted this run means a restart is owed.
+  **Resumability is by DETECTION, not a state file** — every fact is
+  observable (a unit, a file in `<state>/creds`, a live gRPC probe), so an
+  interrupted run resumes by re-running. `--check` is the same detection pass
   with no mutations: the doctor mode, exit 0 when the install is healthy.
+- **A fresh install is ENABLED BUT NOT STARTED**, and this is the one ordering
+  constraint the whole shape rests on: `serverTLSConfig()` loads `server.crt`,
+  which the wizard has not minted yet, so `enable --now` at install time would
+  crash-loop the unit from the moment it exists. The wizard's `service` step
+  performs the first start. An upgrade already has credentials, so it
+  restarts as before.
 - **`koto install`** seeds the state dir and writes four root-owned things (the
   `koto` and `koto-tui` binaries, `/etc/koto/koto.env`, the unit) via discrete
   echoed `sudo` execs, then enables the service. No image is built: the daemon
   runs on the host. Re-running upgrades in place; `koto.env` values
   the operator edited are preserved, and `prompts/` refreshes only when
-  untouched (compared against a `.dist` copy).
+  untouched (compared against a `.dist` copy). The creds-copy in
+  `seedStateDir` is MIGRATION ONLY now — the wizard writes to the state dir
+  directly.
+- **The API key resolves from the state dir**, not only from `koto.env`:
+  `proxyInitPaths()` falls back to `<state>/creds/anthropic-api-key` when
+  `ANTHROPIC_API_KEY` is unset. Necessary because auth now happens after
+  install, so a key typed in the wizard cannot have been folded into
+  `koto.env` at install time — and it mirrors the OAuth path, which already
+  resolves through `<state>/.claude → creds`.
 - **The unit runs the daemon directly** (`ExecStart=/usr/local/bin/koto daemon`,
   `Type=exec`), so systemd's SIGTERM reaches it with nothing in between and
   `fcStopAll` gets its ~12s to let every guest sync+umount its workspace image
@@ -107,7 +142,7 @@ daemon/              the daemon Go module (module `koto`):
   fccgroup.go          per-VM cgroup probing/limits
   ctl_cli.go           the `koto ctl` client subcommand
   setup.go             `koto setup` wizard: step framework + runner + --check doctor mode
-  setup_steps.go       the 11 step definitions (preflight → … → install → smoke)
+  setup_steps.go       the 6 step definitions (installed → pki → auth → service → smoke → done); builds nothing, installs nothing
   setup_checks.go      host dependency probes + remediation text
   setup_ui.go          plain terminal dialog (prompts, ANSI, streamed subprocess output)
   pki.go               CA / server / client certs + tokens in Go (`koto pki`) — no openssl/jq
@@ -133,7 +168,7 @@ tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, 
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
-Makefile             sentinel-driven: setup (= the newcomer's one command: containerized `koto` build + wizard) / install / release-build / host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / assets (= firecracker + kernel + rootfs)
+Makefile             three stages: fetch|build (acquire) → install (integrate) → wizard (configure); setup = all three; verify = checksums vs dist/artifacts.sha256; install / release-build / host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / assets (= firecracker + kernel + rootfs)
 tools/tuiwalk/       release gate: pyte-driven TUI walk (make tui-walk) — non-destructive, see its docstring
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
                      into cs_tui at /koto-scripts; run in the focused group's
