@@ -70,6 +70,13 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # Every build step honours this, including `make rootfs` — it used to be
 # podman-only (it needed `podman unshare` to preserve in-image ownership), and
 # now does that stage inside a container instead, which both engines can do.
+# $(CURDIR), never $(PWD), throughout this file. $(PWD) is the CALLER'S shell
+# variable, inherited from the environment — under `make -C /path/to/koto` from
+# somewhere else it still holds the caller's directory, so every path built
+# from it points outside the checkout. Measured: `cd /tmp && make -C ~/koto`
+# gave PWD=/tmp and CURDIR=/home/<user>/koto, which would have bind-mounted
+# /tmp as the build source and put the dev state dir in /tmp/.dev. $(CURDIR) is
+# make's own working directory and is always this file's.
 CONTAINER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
 CONTAINER_NAME := $(notdir $(CONTAINER))
 # Rootless podman maps your uid to root inside, so build outputs come back
@@ -94,8 +101,8 @@ GO_IMAGE ?= docker.io/library/golang@sha256:757779acac4af1b349a20f357c7296097b4a
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
 	  $(CONTAINER_USER) \
-	  -v $(PWD):/src -w /src \
-	  -v $(PWD)/.gocache:/gocache -v $(PWD)/.gomodcache:/gomodcache \
+	  -v $(CURDIR):/src -w /src \
+	  -v $(CURDIR)/.gocache:/gocache -v $(CURDIR)/.gomodcache:/gomodcache \
 	  -e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp \
 	  -e CGO_ENABLED=0 -e GOFLAGS= \
 	  $(GO_IMAGE)
@@ -335,11 +342,11 @@ host-run: koto
 	@# shells out to for token refresh read your PERSONAL ~/.claude. The
 	@# container got this by mounting creds/ at /root/.claude.
 	@test -e .claude || ln -s creds .claude
-	HOME=$(PWD) ./koto daemon
+	HOME=$(CURDIR) ./koto daemon
 
 tui: koto koto-tui
-	@test -f $(PWD)/creds/client-tui.crt || { echo "no TUI client cert — run \`./koto pki init && ./koto pki client tui\`"; exit 1; }
-	@KOTO_HOME=$(PWD) ./koto tui
+	@test -f $(CURDIR)/creds/client-tui.crt || { echo "no TUI client cert — run \`./koto pki init && ./koto pki client tui\`"; exit 1; }
+	@KOTO_HOME=$(CURDIR) ./koto tui
 
 # Stop the dev daemon. SIGTERM reaches it directly now (no podman in the
 # middle): it stops every microVM so each guest sync+umounts its workspace
@@ -365,7 +372,7 @@ stop:
 # BOTH port knobs have to move or the second daemon collides with the first:
 # KOTO_PORT is the gRPC listener (8443), PROXY_PORT the base for the per-group
 # credential-injecting proxy listeners (8787, one per group).
-DEV       := $(PWD)/.dev
+DEV       := $(CURDIR)/.dev
 DEV_PORT  ?= 8444
 DEV_PROXY ?= 9500
 # WHERE THE DEV DAEMON GETS ITS ANTHROPIC CREDENTIAL, and this one is not a
@@ -383,7 +390,7 @@ DEV_PROXY ?= 9500
 #
 # With no installed koto, this falls back to the dev state dir and you mint a
 # credential of its own there: KOTO_HOME=$(DEV) ./koto claude-login
-DEV_HOME  ?= $(shell test -f /var/lib/koto/creds/.credentials.json && echo /var/lib/koto || echo $(PWD)/.dev)
+DEV_HOME  ?= $(shell test -f /var/lib/koto/creds/.credentials.json && echo /var/lib/koto || echo $(CURDIR)/.dev)
 
 dev: koto $(DEV)/.stamp
 	@echo "dev daemon → grpc 127.0.0.1:$(DEV_PORT), proxy base $(DEV_PROXY), state $(DEV)"
@@ -441,8 +448,8 @@ metrics:
 # never invoke protoc — they compile the committed generated code.
 proto-gen:
 	$(CONTAINER) run --rm --security-opt label=disable \
-	  -v $(PWD):/src -w /src/protocol \
-	  -v $(PWD)/.gocache:/root/.cache/go-build \
+	  -v $(CURDIR):/src -w /src/protocol \
+	  -v $(CURDIR)/.gocache:/root/.cache/go-build \
 	  $(GO_IMAGE) sh -euc '\
 	    apk add --no-cache protobuf protobuf-dev >/dev/null; \
 	    go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VER); \
