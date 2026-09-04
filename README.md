@@ -1,6 +1,6 @@
 # koto
 
-koto is a microVM-based agent sandbox harness which runs under Linux (Fedora 44 and Ubuntu 24 tested) with KVM capability.
+**koto is a microVM-based agent sandbox harness which runs under Linux with KVM capability.**
 
 Every group (agent) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
 so the guest kernel is the security boundary — with **no network by default**;
