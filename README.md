@@ -7,7 +7,7 @@ so the guest kernel is the security boundary — with **no network by default**;
 a credential-injecting proxy is the only path to the LLM API, and agents never
 see a real credential. Host side is a Go daemon running as a rootless
 systemd service; the TUI and `koto ctl` are plain host binaries speaking gRPC
-over mTLS with the daemon. It's simply superior to OpenClaw, NanoClaw wrt security. 
+over mTLS with the daemon. It's simply superior to OpenClaw, NanoClaw at least with respect to security ;).
 
 ## Quick start
 
