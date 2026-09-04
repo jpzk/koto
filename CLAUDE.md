@@ -1052,10 +1052,22 @@ missed, and exits at `turn_end`.
   runs a SECOND daemon out of the clone instead: own state dir (`.dev/`, the
   installed layout mirrored), own gRPC port (`DEV_PORT`, 8444) and own proxy
   base (`DEV_PROXY`, 9500 — both must move or it collides with the installed
-  daemon on 8443/8787), own microVM fleet. Drive it with `KOTO_ADDR=127.0.0.1:8444
-  KOTO_CREDS_DIR=$PWD/.dev/creds KOTO_CLIENT=tui koto ctl …`, `make dev-tui`
-  for the TUI, `make stop` to stop it (it matches `^./koto daemon$`, so the
+  daemon on 8443/8787), own microVM fleet. Point a shell at it with
+  `eval "$(make dev-env)"` (undo: `eval "$(make dev-env-off)"`) or
+  `make dev-shell` for a subshell that has it already; `make dev-tui` for the
+  TUI, `make stop` to stop the daemon (it matches `^./koto daemon$`, so the
   installed unit is untouched). Loop is edit → ctrl-c → `make dev` (~4s).
+  - **The shell environment lives in the Makefile, not in a `dev.sh` to
+    source.** make cannot export into your shell — recipes run in child
+    processes — so the honest shapes are "print exports you eval" and "hand
+    you a subshell", and both keep the ports and paths defined ONCE, beside
+    the `dev` target that reads them. A sourced file would need bash-vs-zsh
+    detection just to locate itself (`$0` is the script under zsh when
+    sourced, but the shell under bash) and would then carry a second copy of
+    values the Makefile already owns. `KOTO_HOME` is in the exported set
+    deliberately, not just the ctl trio: it is what `koto tui -state` and
+    `koto claude-login` resolve, so without it the shell is half-switched —
+    ctl talking to dev while a login reconfigures the INSTALLED daemon.
   - **The credential is SHARED, never copied, and that is not tidiness:
     OAuth refresh tokens ROTATE.** Copy `.credentials.json` into a second
     state dir and the first daemon to refresh rotates the token, killing the
