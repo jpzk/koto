@@ -2,7 +2,7 @@
 
 **koto is a microVM-based agent sandbox harness which runs under Linux with KVM capability.**
 
-Every claude-based group (agent) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
+Every claude-based group (1 agent runtime = 1 linux kernel = 1 workspace = 1 shared terminal) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
 so the guest kernel is the security boundary — with **no network by default**;
 a credential-injecting proxy is the only path to the LLM API, and agents never
 see a real credential. Host side is a Go daemon running as a rootless
