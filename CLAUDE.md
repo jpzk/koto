@@ -101,6 +101,107 @@ everything else derives from the globals.
   (the `make pki-init` footgun, now guarded in the Makefile too).
 - Guest assets can be built straight into the state dir via
   `KOTO_FCASSETS_OUT` (the three `fcguest/*.sh` scripts honor it).
+- **`koto claude-login` (`claude_login.go`) is the answer to a 401**, and it
+  is deliberately NOT a wizard step. The wizard's auth step restarts the
+  daemon, which stops every running microVM — an unacceptable price for
+  re-logging-in mid-flight. It doesn't have to: the proxy resolves BOTH
+  credential sources per request (`currentAPIKey` re-reads the key file,
+  `readCreds` re-reads the OAuth token), so material written here is picked
+  up by the next turn with nothing restarted. `authConnect` is the single
+  implementation of the flow; `stepAuth` is now just another caller of it
+  (and adds the restart, because it is starting the service anyway).
+  - **`--status` is the doctor**: it walks the same precedence `authHeaders`
+    walks (env key → `creds/anthropic-api-key` → `creds/.credentials.json`),
+    names the credential that is actually going on the wire, and checks it
+    with one `POST /v1/messages` at `max_tokens: 1` — the same call a group
+    makes, deliberately not a lighter endpoint, because the two credential
+    shapes (`x-api-key` vs an OAuth bearer + its beta header) are not
+    guaranteed to be accepted identically everywhere and a probe that says
+    "rejected" about a working credential is worse than no probe. Only
+    401/403 counts as an auth failure. `TestAuthResolveMatchesAuthHeaders`
+    pins the agreement between the two readers; a report that names a
+    credential the proxy is not sending is worse than no report.
+    - **"The same call a group makes" includes the SYSTEM BLOCK**
+      (`claudeCodeSystem`), and that is the whole ballgame for a
+      subscription token: Anthropic honors OAuth credentials only for Claude
+      Code traffic and identifies it by the leading `You are Claude Code,
+      Anthropic's official CLI for Claude.` line. Without it a freshly
+      minted, 2%-utilized token comes back `429
+      {"type":"rate_limit_error","message":"Error"}` — measured 2026-09-04,
+      and the probe then waved the credential through on evidence that meant
+      nothing. Adding the block turns the same request into a 200. Headers
+      are NOT the discriminator: `user-agent: claude-cli/…`, `x-app: cli`
+      and the `claude-code-20250219` beta change nothing in any of the four
+      combinations tested. Every real turn carries the line already, since
+      every turn is `claude` running in a guest — the probe was the only
+      request that did not.
+    - **A 429 means opposite things depending on one header family, so the
+      report splits it.** With `anthropic-ratelimit-*` (or `retry-after`) it
+      is a genuine quota answer, which the credential had to be ACCEPTED to
+      receive → pass, "the quota is what is short". Headerless, it is the
+      shape gate → neither pass nor fail, because the request was refused
+      before the token was judged, and reporting either would be a guess.
+      This is the same headerless-429 signature the proxy sees when a
+      non-Claude-Code request reaches upstream. `TestAuthProbe*` pins both.
+  - **It resolves paths the way the proxy does, never by assumption.** The
+    credentials file is `CRED_PATH` when set, else `$HOME/.claude/.credentials.json`
+    with the daemon's HOME — NOT `<state>/creds/.credentials.json`. Those are
+    the same file only when `<state>/.claude` is the installer's symlink to
+    `creds/`; in a dev clone whose repo has its own project-local `.claude/`
+    (Claude Code keeps skills and settings there) they are different files,
+    `claude auth login` writes the real one, and the old hardcoded path read
+    a stale neighbour and called the login a success while every turn kept
+    401ing. `authOAuthStamp` now also compares mtime+size across the login,
+    so "the file was never written" is caught even when a stale file parses.
+  - **The installed daemon outranks a dev clone** when `KOTO_HOME` is unset —
+    the reverse of `ctlCredsDir`, deliberately. A clone directory is a
+    checkout that happens to contain `creds/`; the installed unit is the
+    process actually serving the 401. Preferring the clone meant running this
+    from `~/koto` silently reconfigured the checkout. When both are present
+    it names the one it passed over, and prints the target before the login,
+    not after.
+  - **The daemon's environment is read from `/proc/<MainPID>/environ`**, not
+    from `/etc/koto/koto.env`. That file is root-owned 0600, so the operator
+    running this command cannot read it, and an `ANTHROPIC_API_KEY` hiding
+    there — which outranks every credential on disk — was invisible to the
+    report. The running process is also simply more truthful (unit
+    `Environment=`, EnvironmentFile and dev-shell exports alike). koto.env is
+    the fallback when no daemon is running, and an unreadable one is reported
+    as a blind spot rather than as "no key here".
+  - It exists mostly to close **the shadowing trap**: an API key outranks
+    OAuth in `authHeaders`, so a stale `creds/anthropic-api-key` makes a
+    successful `claude auth login` look like a no-op. The OAuth path offers
+    to set it aside — a RENAME to `.disabled`, not a delete: the prompt
+    defaults to yes and the file is a secret the operator may hold nowhere
+    else. The one shadow it cannot clear is `ANTHROPIC_API_KEY` in
+    the daemon's environment (`/etc/koto/koto.env`, or the shell that ran
+    `make host-run`) — captured once at startup into `envAPIKey`, so that
+    one genuinely needs a restart and the report says so.
+  - **The provider is in the verb, so there is no provider argument** (a
+    stray positional is an error, not silently ignored). koto's other
+    backend, Venice, is a bare key file the proxy reads (`veniceAuth`) with
+    nothing to log into; if it ever grows a flow it gets its own verb rather
+    than an argument here. The name is narrower than the command — it also
+    stores an API key and `--status` is pure diagnosis — which is the
+    accepted cost of naming it after the thing people actually come here to
+    do.
+  - **It hands the tty to an interactive child, so it guards the terminal
+    both ways** (`setup_ui.go`). `claude auth login` and the TUI draw
+    bubbletea UIs, i.e. raw mode, and one that exits abnormally leaves the
+    line discipline broken for everything after it — Enter arrives as a bare
+    `\r`, so the NEXT run's prompt echoes `^M` and never returns a line
+    (observed 2026-09-04, on the very first prompt of a fresh run).
+    `ttyGuard()` snapshots termios around every handoff (`authOAuthLogin`,
+    `koto tui`, re-armed per `/reload` iteration and called before the
+    `os.Exit` that skips defers). `repairTTY()` is the other half — it
+    reasserts `ICRNL|ICANON|ECHO` at `newSetupUI` when they are missing, and
+    says so, because an operator facing an unanswerable prompt has no way to
+    guess that `stty sane` is the exit; it deliberately does NOT restore what
+    it found, since that state is damage. `readLine` also ends a line on
+    `\r` as well as `\n` (swallowing a following `\n` only when already
+    buffered, so CRLF from a pipe still reads as one line) — the read has to
+    survive a terminal it did not get to fix. `setup_ui_test.go` pins the
+    three line endings.
 
 ## Layout
 
@@ -113,7 +214,7 @@ relative to cwd, which stays the repo root.
 ```
 go.work              workspace: daemon + fcguest + protocol + tui (plus the genproto pin — see its comment)
 daemon/              the daemon Go module (module `koto`):
-  main.go              entry point dispatching `daemon` / `fcjail` / `ctl` subcommands
+  main.go              entry point dispatching `daemon` / `fcjail` / `ctl` / `claude-login` subcommands
   daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
   groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
   send.go              turn delivery: sendNow, turn-done/stall tracking, self-heal, interruptAgent, bg-task tailer
@@ -145,6 +246,9 @@ daemon/              the daemon Go module (module `koto`):
   setup_steps.go       the 6 step definitions (installed → pki → auth → service → smoke → done); builds nothing, installs nothing
   setup_checks.go      host dependency probes + remediation text
   setup_ui.go          plain terminal dialog (prompts, ANSI, streamed subprocess output)
+  claude_login.go      `koto claude-login`: the credential flow (shared with the wizard's auth step),
+                       the precedence report (--status) and the upstream verify — the 401 fix that
+                       does NOT restart the daemon
   pki.go               CA / server / client certs + tokens in Go (`koto pki`) — no openssl/jq
   install.go           `koto install`: state dir, release image, /etc files, systemd unit, upgrade
   tui_cmd.go           `koto tui` — attach the TUI to an installed daemon
@@ -202,7 +306,8 @@ make assets     # fetch firecracker (pinned v1.16.1) + BUILD the guest kernel (k
                    #   REQUIRED for the default (firecracker) runtime; rebuild the rootfs
                    #   (`make rootfs`) after editing sidecar/*.{sh,js} or fcguest/ —
                    #   microVMs have no live bind mounts (the one ergonomic regression vs podman)
-make login         # one-time OAuth into ./creds/.credentials.json
+make login         # OAuth into ./creds/.credentials.json — an alias for
+                   #   `./koto claude-login --method oauth`
 make host-run      # starts cs_host detached (daemon + proxy + main group); passes --device /dev/kvm when present
 make tui-build     # builds koto-tui image (Go static binary on scratch); first time only
 make tui           # runs cs_tui (--network=none, sock-only) — opens TUI

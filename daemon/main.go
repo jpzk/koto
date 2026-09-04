@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|install|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|install|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -33,6 +33,11 @@ func main() {
 		// credentials, install, smoke test. Safe to re-run — every step
 		// detects whether it is already satisfied.
 		setupMain(os.Args[2:])
+	case "claude-login":
+		// Connect or refresh the LLM credentials the proxy injects. Split
+		// out of the wizard because the answer to a mid-flight 401 should
+		// not be a step that restarts the daemon and stops every microVM.
+		claudeLoginMain(os.Args[2:])
 	case "install":
 		// Install (or upgrade) koto as a systemd service backed by a state
 		// directory, so it survives a reboot and outlives this clone.

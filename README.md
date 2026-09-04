@@ -474,10 +474,52 @@ Once installed:
 ```sh
 koto tui                    # attach the TUI (/exit detaches, daemon keeps running)
 koto ctl list               # the agent-facing CLI
+koto claude-login --status  # which credential is live, and does it still work
 systemctl status koto       # the service
 journalctl -u koto -f       # daemon logs
 sudo systemctl restart koto # after editing /etc/koto/koto.env
 ```
+
+### When turns start failing with 401
+
+An expired or wrong credential kills every `claudesdk` group at once, and the
+symptom in the TUI is a red line per turn:
+
+```
+[koto-proxy] /v1/messages → 401 authentication failed — upstream rejected the
+OAuth token; run `koto claude-login --status` …
+```
+
+`koto claude-login` is the fix, and it does **not** restart the daemon — so
+none of your running microVMs are stopped to re-log-in. That works because
+the proxy resolves credentials per request rather than at startup, so a fresh
+login is picked up by the next turn.
+
+```sh
+koto claude-login --status   # report + verify against the API; exit 0 if healthy
+koto claude-login            # connect a fresh one (menu: subscription or key)
+koto claude-login --method oauth
+koto claude-login --api-key-stdin < key.txt   # non-interactive
+```
+
+`--status` reports the credential that is **actually being sent**, which is
+not always the one you last set: an API key outranks an OAuth token, so a
+leftover `creds/anthropic-api-key` silently makes a successful subscription
+login do nothing. The command names what is shadowing what, and the OAuth
+path offers to set the key aside — renamed to `.disabled`, not deleted, so
+a reflexive Enter cannot lose a secret you may hold nowhere else. The one
+shadow it cannot clear for you is an `ANTHROPIC_API_KEY` in
+`/etc/koto/koto.env` — the daemon reads its own environment once, at
+startup, so that one does need a restart.
+
+Despite the name it is not only a subscription login: `--method api-key`
+stores an API key the same way, and `--status` is pure diagnosis. It is
+named for what people come to it to do.
+
+It prints the system it is about to configure before it does anything. With
+`KOTO_HOME` unset it targets the **installed daemon**, even when run from a
+clone that has its own `creds/` — the installed unit is the thing actually
+serving the 401. Set `KOTO_HOME` to point it at a dev daemon instead.
 
 State lives in `/var/lib/koto` (groups, credentials, guest assets — same
 layout as a clone) and service configuration in `/etc/koto/koto.env`. The
@@ -523,7 +565,8 @@ make assets        # firecracker + guest kernel + golden rootfs (required).
                    # container (~3 min); FC_PREBUILT=1 fetches the release and
                    # verifies its checksum instead.
 ./koto pki init && ./koto pki client tui     # private CA + the TUI's identity
-make login         # one-time subscription OAuth into ./creds — OR export
+make login         # subscription OAuth into ./creds (an alias for
+                   # `./koto claude-login --method oauth`) — OR export
                    # ANTHROPIC_API_KEY before host-run
 make host-run      # run the daemon in the foreground from this directory
 make tui           # attach the TUI (/exit detaches; daemon keeps running)
@@ -561,9 +604,9 @@ to a guest: the proxy injects one of two things on the host side
    -p --bare` (what every group runs) is documented as an API-key mode; and
    API traffic falls under the Commercial Terms, so business use is fine.
    Billing is per token to the key owner.
-2. **A Claude subscription login** — `make login` runs `claude auth login`
-   (Anthropic's own flow) and the proxy forwards the resulting OAuth token,
-   refreshing it via `claude` itself. **This works, but read the fine print
+2. **A Claude subscription login** — `koto claude-login` (or `make login`)
+   runs `claude auth login` (Anthropic's own flow) and the proxy forwards the
+   resulting OAuth token, refreshing it via `claude` itself. **This works, but read the fine print
    before relying on it:**
    - OAuth is "intended exclusively for purchasers of … subscription plans
      and designed to support ordinary use of Claude Code"; advertised Pro/Max
