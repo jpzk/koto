@@ -66,7 +66,7 @@ the `make fetch` route that replaces `make build` once releases exist.
 ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
-## Guest kernel
+## Guest kernel & Root FS
 
 Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh`
 (containerized, no host toolchain). **No patches**: the source is a pristine
@@ -94,52 +94,77 @@ outside that list arrive via Kconfig `select` closure or as defaults
 `olddefconfig` fills in for options Firecracker's older config never named
 (e.g. the newer CPU mitigations) — harmless, but not chosen.
 
-### Supply chain
+### Root FS
 
-No generated SBOM artifact is checked in; the surface is small enough to
-state outright. Everything Go-side is pinned via `go.sum` under a 6-week
-dependency-lag rule (each pin's release date is verified against
-proxy.golang.org before adoption — see CLAUDE.md → Conventions).
+Every group also boots the same `fcassets/rootfs.img`: one **golden ext4
+image attached read-only** as the root drive of every microVM. It is built by
+`fcguest/build-rootfs.sh` from `fcguest/Dockerfile.rootfs`, and the image is
+never run as a container — its filesystem is exported and written straight
+into ext4 with `mkfs.ext4 -d` (populated at mkfs time; no loop mount, no root
+on the host). The export/mkfs stage runs inside a digest-pinned `alpine`
+container so the tar's root-owned entries keep their ownership; the image is
+sized to its contents plus 20% and 256 MiB, 2 GiB at minimum.
 
-**Go modules** (direct deps; indirect counts approximate):
+What is in it:
 
-| module | direct deps | indirect |
-|--------|-------------|----------|
-| `koto` (daemon) | `containers/gvisor-tap-vsock` v0.8.8 (`network=wan/lan/full` gateway; pulls the gvisor netstack), `golang.org/x/sys`, `grpc` v1.80.0, `protobuf` v1.36.11, local `koto-protocol` | 19 |
-| `protocol/` (proto + generated pb) | `grpc` v1.80.0, `protobuf` v1.36.11 | 4 |
-| `tui/` | charmbracelet `bubbletea` / `bubbles` / `glamour` / `lipgloss` / `log` / `x/ansi` / `x/vt` + `muesli/termenv`, `grpc`, `protobuf` — one auditable upstream org for the whole UI stack | 38 |
-| `fcguest/` (guest PID-1 agent) | `golang.org/x/sys`, `protobuf` v1.36.11, local `koto-protocol` | 4 |
+| | |
+|---|---|
+| base | `fedora`, pinned by digest, 27 dnf packages with weak deps off |
+| agent runtime | `nodejs` + `npm` + `@anthropic-ai/claude-code` (installed unpinned — the one floating part), `python3`, `git`, `ripgrep`, `jq`, `curl`, `tmux` |
+| PID 1 | `/usr/local/bin/fc-agent`, the static Go guest agent selected by `init=` on the kernel command line; it runs every turn, bridges vsock, and mounts `/workspace` |
+| worker scripts | `/sidecar/` — `cs-job`, `cs-notify`, `cs-subagent`, `venice_stream.js` (baked in: a microVM has no bind mounts) |
+| user | `node`, uid 1000 — everything runs as it, because `claude --dangerously-skip-permissions` refuses root |
+| in-guest containers | rootless `podman` 5 with `crun`, `conmon`, `fuse-overlayfs` storage and `passt`/pasta networking over `/dev/net/tun`; subuid range and `containers.conf` preconfigured, graphroot under `/workspace` |
+| mount points | `/workspace` and `/skills` pre-created (the root drive is read-only, so the agent cannot create them at boot); `/etc/resolv.conf` is a symlink into tmpfs |
 
-**Pinned non-Go components:**
+**Read-only and shared** is the point. Nothing per group lives on it: a
+group's state is its own `workspace.img` (ext4, read-write, the guest's
+`/workspace`, `$HOME` included). The `root=yes` profile does not write to the
+golden image either — `fc-agent` mounts a persistent **overlayfs** on `/usr`,
+`/etc`, `/var` and `/opt` with the upper layer on the workspace disk, so
+`sudo dnf install` persists across `/restart` while every other VM keeps the
+pristine image. Upper-layer entries shadow a later rootfs rebuild until the
+overlay is reset.
 
-| component | pin | where |
-|-----------|-----|-------|
-| Firecracker VMM | v1.16.1, **built from source** at a pinned commit inside upstream's own `fcuvm` build image (pinned by digest); `FC_PREBUILT=1` fetches the GitHub release instead and verifies it against a pinned SHA256 | `fcguest/build-firecracker.sh` |
-| guest kernel | `amazonlinux/linux` tag `microvm-kernel-6.1.176-43.358.amzn2023`, verified against a pinned commit sha | `fcguest/build-kernel.sh` |
-| protoc plugins | `protoc-gen-go` v1.36.11, `protoc-gen-go-grpc` v1.6.1 | `Makefile` |
+**No live reload.** Editing anything under `sidecar/` or `fcguest/` means
+`make rootfs` (~30 s, containerized) and a `/restart <g>` of each group you
+want on the new image — the deliberate cost of having no shared filesystem
+between host and guest.
 
-**Container images:** nothing koto runs at runtime is a container — the
-daemon, the TUI and `koto ctl` are one static host binary each. The only
-image that ships is the guest rootfs: `fedora` (pinned by digest) + 27 dnf
-packages (podman, crun, conmon, fuse-overlayfs, passt, nodejs, python3, git,
-ripgrep, tmux, sudo, …) + claude-code. Build-only images: `golang` (the
-daemon, TUI, fc-agent and protoc), the same `fedora` for the guest kernel,
-`alpine` for the mkfs stage that writes the rootfs image, and Firecracker's
-`fcuvm` for the VMM.
+## Supply chain
 
-**Pinned**: every build container is pinned by DIGEST, not tag — the Go
-toolchain, the alpine that writes the guest filesystem, the fedora that
-both compiles the guest kernel and seeds the guest rootfs, and Firecracker's
-own `fcuvm` build image. Source is pinned by commit: the guest
-kernel (tag + verified commit) and Firecracker (tag + verified commit; the
-prebuilt path verifies a SHA256 instead). The Go module trees are locked by
-`go.sum`.
+Everything is pinned; `go.sum` locks the module trees, build containers are
+pinned by digest, and source checkouts by commit. Go pins follow a 6-week
+dependency-lag rule.
 
-**Known-floating** (what a formal SBOM would still flag): `@anthropic-ai/
-claude-code` is installed unpinned by npm into the guest rootfs — it resolves
-to latest on every rootfs build — and the `dnf`/`apk` packages inside the
-build and guest images float within their pinned base images. Those are the
-accepted moving parts; everything above them is fixed.
+**Go modules** (direct):
+
+| module | dependencies | indirect |
+|---|---|---|
+| `daemon/` | `containers/gvisor-tap-vsock` v0.8.8 · `golang.org/x/sys` v0.40.0 · `grpc` v1.80.0 · `protobuf` v1.36.11 · `koto-protocol` (local) | 19 |
+| `tui/` | charmbracelet `bubbletea` v1.3.10 · `bubbles` v1.0.0 · `glamour` v1.0.0 · `lipgloss` v1.1.1-pre · `log` v1.0.0 · `x/ansi` v0.11.7 · `x/vt` (2026-04-30) · `muesli/termenv` v0.16.0 · `grpc` v1.80.0 · `protobuf` v1.36.11 · `koto-protocol` | 37 |
+| `fcguest/` | `golang.org/x/sys` v0.40.0 · `protobuf` v1.36.11 · `koto-protocol` | 4 |
+| `protocol/` | `grpc` v1.80.0 · `protobuf` v1.36.11 | 4 |
+
+**Source and binaries:**
+
+| component | pin |
+|---|---|
+| Firecracker | v1.16.1, built from source at `2038188f145fb81b8d098147a10e9d9f392fd22f`; `FC_PREBUILT=1` fetches the release, sha256 `382a02a8…c242e6` |
+| guest kernel | `amazonlinux/linux` `microvm-kernel-6.1.176-43.358.amzn2023` at `0f7eec7689f13075e603ae2e86d3353c6cb13b24`, no patches |
+| protoc plugins | `protoc-gen-go` v1.36.11 · `protoc-gen-go-grpc` v1.6.1 |
+
+**Container images** (all by digest; only the rootfs ships, the rest are build-only):
+
+| image | used for | digest |
+|---|---|---|
+| `docker.io/library/fedora` | guest rootfs base, guest kernel build | `sha256:be9d65e2…babbd19` |
+| `docker.io/library/golang` | daemon, TUI, fc-agent, protoc | `sha256:757779ac…077282a` |
+| `docker.io/library/alpine` | mkfs stage of the rootfs build | `sha256:7c8cb692…5eb2e6` |
+| `public.ecr.aws/firecracker/fcuvm` | Firecracker source build | `sha256:a7169057…423042` |
+
+**Floating:** `@anthropic-ai/claude-code` (npm, latest at rootfs build time)
+and the 27 dnf packages inside the pinned fedora image.
 
 ## Credentials and Anthropic's terms
 
