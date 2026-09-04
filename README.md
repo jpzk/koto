@@ -11,7 +11,7 @@ over mTLS with the daemon. It's simply superior to OpenClaw, NanoClaw wrt securi
 
 ## Quick start
 
-Until the first release is published, build the artifacts from source. The
+Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
 host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora or
 Ubuntu 24.04+, and git, make and podman or docker (just for building).  
 
