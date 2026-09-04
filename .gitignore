@@ -30,3 +30,6 @@ fcguest/koto-fcagent
 # `claude auth login` with HOME=<clone> writes this next to .claude/ — no
 # tokens in it, but it carries oauthAccount/userID.
 /.claude.json
+# `make dev` state dir: a second daemon's groups/creds/assets, beside an
+# installed koto. Guest assets in it are hardlinks to fcassets/.
+/.dev

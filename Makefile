@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build fetch verify wizard require-artifacts setup install uninstall tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: build fetch verify wizard require-artifacts setup install uninstall dev dev-tui tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -347,6 +347,76 @@ tui: koto koto-tui
 stop:
 	-pkill -TERM -u $$(id -u) -f '^\./koto daemon$$' 2>/dev/null || true
 	@echo "sent SIGTERM to the dev daemon (if running); installed service: sudo systemctl stop koto"
+
+# --- dev loop beside an INSTALLED koto --------------------------------------
+# The situation this exists for: koto is installed and serving a real fleet,
+# and you are changing the daemon. Restarting the service to try an edit stops
+# every running microVM, so instead run a SECOND daemon out of the clone with
+# its own state dir, its own ports and its own guests. Nothing you break
+# reaches the installed service, and the loop is `make dev` again.
+#
+# .dev/ MIRRORS THE INSTALLED LAYOUT, and that is the point rather than
+# tidiness: it lets HOME=$(DEV) resolve $HOME/.claude to koto's own creds, the
+# way the unit does. The clone itself cannot be the state dir — Claude Code
+# keeps a project-local .claude/ DIRECTORY here, so $HOME/.claude/.credentials.json
+# would name a file that does not exist, the proxy would find no credential,
+# and every turn would 401 while `creds/.credentials.json` sat there unread.
+#
+# BOTH port knobs have to move or the second daemon collides with the first:
+# KOTO_PORT is the gRPC listener (8443), PROXY_PORT the base for the per-group
+# credential-injecting proxy listeners (8787, one per group).
+DEV       := $(PWD)/.dev
+DEV_PORT  ?= 8444
+DEV_PROXY ?= 9500
+# WHERE THE DEV DAEMON GETS ITS ANTHROPIC CREDENTIAL, and this one is not a
+# preference: OAuth refresh tokens ROTATE. Copying .credentials.json into a
+# second state dir forks the chain — the first daemon to refresh rotates the
+# token and the other copy is dead for good (measured: the copy came back with
+# expiresAt 0 and every turn 401'd). So the dev daemon does not get a copy; it
+# is pointed at the INSTALLED credentials file, which is one file with one
+# refresh chain that both daemons read and both refreshes land in.
+#
+# HOME is the knob because that is what resolves the credential: the proxy's
+# default CRED_PATH is $HOME/.claude/.credentials.json, and `refresh()` shells
+# out to `claude` which writes to that same path. Point them anywhere apart
+# and a refresh "succeeds" into a file nobody reads.
+#
+# With no installed koto, this falls back to the dev state dir and you mint a
+# credential of its own there: KOTO_HOME=$(DEV) ./koto claude-login
+DEV_HOME  ?= $(shell test -f /var/lib/koto/creds/.credentials.json && echo /var/lib/koto || echo $(PWD)/.dev)
+
+dev: koto $(DEV)/.stamp
+	@echo "dev daemon → grpc 127.0.0.1:$(DEV_PORT), proxy base $(DEV_PROXY), state $(DEV)"
+	@echo "drive it   → export KOTO_ADDR=127.0.0.1:$(DEV_PORT) KOTO_CREDS_DIR=$(DEV)/creds KOTO_CLIENT=tui"
+	@echo "stop it    → ctrl-c, or \`make stop\` from another shell"
+	@echo "credential → $(DEV_HOME)/creds/.credentials.json (shared, not copied)"
+	@KOTO_HOME=$(DEV) HOME=$(DEV_HOME) KOTO_PORT=$(DEV_PORT) PROXY_PORT=$(DEV_PROXY) ./koto daemon
+
+# The TUI against the dev daemon. Same binary, different endpoint and creds.
+dev-tui: koto koto-tui
+	@KOTO_ADDR=127.0.0.1:$(DEV_PORT) ./koto tui -state $(DEV)
+
+# One-time bootstrap. Identities are COPIED from the clone's creds/ so the
+# `koto ctl` identities you already have keep working (same CA); the guest
+# assets are HARDLINKED, because rootfs.img is 2GB and a dev instance has no
+# reason to own a second copy of it. Delete .dev/ to start over.
+$(DEV)/.stamp:
+	@mkdir -p $(DEV)/groups $(DEV)/creds $(DEV)/fcassets $(DEV)/prompts $(DEV)/run
+	@ln -sfn creds $(DEV)/.claude
+	@test -f creds/ca.crt || { echo "no PKI in creds/ — run \`./koto pki init && ./koto pki client tui\`"; exit 1; }
+	@# NO .credentials.json here — see DEV_HOME above. Copying it forks the
+	@# OAuth refresh chain and kills one of the two copies.
+	@for f in ca.crt ca.key ca.srl server.crt server.key clients.allow tokens.json acl.json \
+	          venice.key; do \
+	  [ -e creds/$$f ] && cp -a creds/$$f $(DEV)/creds/ || true; done
+	@cp -a creds/client-*.crt creds/client-*.key creds/token-* $(DEV)/creds/ 2>/dev/null || true
+	@cp -a prompts/*.md $(DEV)/prompts/ 2>/dev/null || true
+	@for a in firecracker vmlinux rootfs.img; do \
+	  ln -f fcassets/$$a $(DEV)/fcassets/$$a 2>/dev/null || cp fcassets/$$a $(DEV)/fcassets/$$a; done
+	@touch $@
+	@echo "created $(DEV) (state dir for the dev daemon)"
+	@test -f $(DEV_HOME)/creds/.credentials.json || \
+	  echo "no shared credential found — mint one for this instance: KOTO_HOME=$(DEV) ./koto claude-login"
 
 # The only targets that need a host Go toolchain. Optional: they exist for
 # fast iteration when you already have Go. Everything a user needs to install
