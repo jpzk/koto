@@ -18,8 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -179,48 +177,20 @@ is where the daemon already looks. Nothing is written to your personal
 			// that isn't there to `claude auth login` and hanging.
 			if u.yes {
 				return errors.New("credentials are required and cannot be set up non-interactively\n" +
-					"  run `koto setup --only auth` from a terminal, or provide one first:\n" +
-					"    write the key to " + filepath.Join(sc.credsDir(), "anthropic-api-key") + " (chmod 600)")
+					"  run `koto claude-login` from a terminal, or provide one first:\n" +
+					"    koto claude-login --api-key-stdin < keyfile")
 			}
-			switch u.choice("How do you want to authenticate?",
-				[]string{"Claude subscription (OAuth login in a browser)", "Anthropic API key"}, 0) {
-			case 0:
-				u.info("handing over to `claude auth login` — follow its prompts")
-				u.blank()
-				// HOME is the STATE dir, not creds/, because claude writes to
-				// $HOME/.claude — and the installer already symlinked
-				// <state>/.claude -> creds. Pointing HOME at creds/ directly
-				// would bury the token one level too deep, in creds/.claude/,
-				// where nothing looks for it. Pointing it at the operator's
-				// home would put koto's token in their personal profile.
-				cmd := exec.Command("claude", "auth", "login")
-				cmd.Dir = sc.stateDir()
-				cmd.Env = setEnv(os.Environ(), "HOME", sc.stateDir())
-				cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-				signal.Ignore(os.Interrupt)
-				err := cmd.Run()
-				signal.Reset(os.Interrupt)
-				if err != nil {
-					return fmt.Errorf("login: %w", err)
-				}
-				sc.credsChanged = true
-				return nil
-			default:
-				key, err := u.secret("Anthropic API key (sk-ant-…)")
-				if err != nil {
-					return err
-				}
-				if !strings.HasPrefix(key, "sk-ant-") {
-					u.warn("that doesn't look like an Anthropic key, storing it anyway")
-				}
-				path := filepath.Join(sc.credsDir(), "anthropic-api-key")
-				if err := os.WriteFile(path, []byte(strings.TrimSpace(key)), 0o600); err != nil {
-					return err
-				}
-				u.info("stored in %s (0600); the daemon reads it from there", path)
-				sc.credsChanged = true
-				return nil
+			// The flow itself lives in claude_login.go, shared with the
+			// `koto claude-login` subcommand — the wizard is one caller of
+			// it, not a second implementation. What the wizard adds is the
+			// restart: it is already going to start (or restart) the service
+			// in the next step, so credsChanged is its business, not
+			// authConnect's.
+			if err := authConnect(&authCtx{ui: u, state: sc.stateDir()}, "", false); err != nil {
+				return err
 			}
+			sc.credsChanged = true
+			return nil
 		},
 	}
 }

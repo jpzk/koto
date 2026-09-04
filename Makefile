@@ -306,15 +306,15 @@ tui-walk:
 	@exit 1
 
 # --- run / interactive targets ---------------------------------------------
-# One-time OAuth into ./creds. Uses the host's claude CLI — a runtime
-# dependency now, like the e2fsprogs tools (see `koto setup --check`).
-login:
-	@command -v claude >/dev/null || { echo "claude not found — npm i -g @anthropic-ai/claude-code"; exit 1; }
+# OAuth into ./creds. A thin alias for `koto claude-login` now: that command
+# owns the flow (for a dev clone AND an installed system), and going through
+# it means the clone gets the same shadowing check and upstream verification
+# the installed path gets, rather than a second copy of `claude auth login`
+# that drifts. Still needs the host's claude CLI — a runtime dependency, like
+# the e2fsprogs tools (see `koto setup --check`).
+login: koto
 	@mkdir -p creds
-	@test -e .claude || ln -s creds .claude
-	@# HOME=$(PWD) so claude writes ./creds/.credentials.json via the symlink,
-	@# never touching your personal ~/.claude.
-	HOME=$(PWD) claude auth login
+	./koto claude-login --method oauth
 
 # Dev: run the daemon in the foreground, straight from source. It puts itself
 # in a user namespace first (daemon/userns.go) so the jailer can hand each VMM

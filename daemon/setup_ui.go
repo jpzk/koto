@@ -3,8 +3,12 @@ package main
 // Terminal-dialog primitives for `koto setup`. Deliberately plain: raw ANSI,
 // a bufio reader on stdin, no bubbletea. That is not only a dependency
 // decision — because the wizard never enters raw mode or an alternate screen,
-// it can hand the real tty to an interactive child (`claude auth login` under
-// `podman run -it`) with nothing to save or restore.
+// it can hand the real tty to an interactive child (`claude auth login`, the
+// TUI) without saving a mode of its own.
+//
+// It does have to save the CHILD's, though: the child enters raw mode, and
+// one that exits abnormally leaves it that way for everything after it. See
+// ttyGuard (the prevention) and repairTTY (the cure).
 
 import (
 	"bufio"
@@ -19,13 +23,18 @@ import (
 )
 
 type setupUI struct {
-	in    *bufio.Reader
-	color bool
-	yes   bool // -y: take defaults, never block on a y/n
+	in       *bufio.Reader
+	color    bool
+	yes      bool // -y: take defaults, never block on a y/n
+	repaired bool // repairTTY has run (once per process)
 }
 
 func newSetupUI(assumeYes, noColor bool) *setupUI {
-	return &setupUI{in: bufio.NewReader(os.Stdin), color: !noColor && colorOK(), yes: assumeYes}
+	u := &setupUI{in: bufio.NewReader(os.Stdin), color: !noColor && colorOK(), yes: assumeYes}
+	// Up front rather than at the first read, so the notice lands on a line
+	// of its own instead of halfway through "choice [1]: ".
+	u.repairTTY()
+	return u
 }
 
 // colorOK: honor NO_COLOR and dumb terminals, and skip styling when stdout is
@@ -110,15 +119,106 @@ var errSetupAborted = fmt.Errorf("aborted")
 
 // readLine returns the next line, or errSetupAborted on EOF (piped stdin with
 // nothing left — better a clear abort than a silent infinite default).
+//
+// It reads byte-wise and ends the line on EITHER \n or \r, which is not
+// pedantry: a terminal left with ICRNL cleared (by an interactive child that
+// died without restoring it — see ttyGuard) delivers Enter as a bare \r, and
+// a ReadString('\n') then blocks forever while the user's keystrokes echo as
+// ^M and the prompt appears frozen. That was observed. repairTTY fixes the
+// terminal we are prompting on; this makes the read itself survive a
+// terminal it did not get to fix.
 func (u *setupUI) readLine() (string, error) {
-	s, err := u.in.ReadString('\n')
-	if err == io.EOF && strings.TrimSpace(s) == "" {
-		u.blank()
-		return "", errSetupAborted
-	} else if err != nil && err != io.EOF {
-		return "", err
+	u.repairTTY()
+	var b strings.Builder
+	for {
+		c, err := u.in.ReadByte()
+		if err == io.EOF {
+			if strings.TrimSpace(b.String()) == "" {
+				u.blank()
+				return "", errSetupAborted
+			}
+			break
+		} else if err != nil {
+			return "", err
+		}
+		if c == '\n' {
+			break
+		}
+		if c == '\r' {
+			// CRLF from a piped file: swallow the LF so it does not read as
+			// an empty answer to the next prompt. Buffered() keeps this from
+			// blocking on a tty, where the LF never comes.
+			if u.in.Buffered() > 0 {
+				if p, err := u.in.Peek(1); err == nil && p[0] == '\n' {
+					_, _ = u.in.ReadByte()
+				}
+			}
+			break
+		}
+		b.WriteByte(c)
 	}
-	return strings.TrimSpace(s), nil
+	return strings.TrimSpace(b.String()), nil
+}
+
+// repairTTY puts stdin back into a line-editable state before the first
+// prompt, when something else left it otherwise.
+//
+// The wizard hands the real terminal to interactive children (`claude auth
+// login`, the TUI). Those enter raw mode, and one that dies without restoring
+// leaves the line discipline broken for every program that follows —
+// including the next run of this command, whose prompt then swallows every
+// keystroke. ttyGuard stops us causing that; this repairs the terminal when
+// something already did, because the alternative is an operator staring at a
+// prompt that cannot be answered and no clue that `stty sane` is the way out.
+//
+// Deliberately narrow: only the three input flags that make a prompt
+// answerable, only when at least one is missing, and only once. It does NOT
+// restore what it found on exit — the state it repairs is damage, and handing
+// damage back would defeat the point.
+func (u *setupUI) repairTTY() {
+	if u.repaired {
+		return
+	}
+	u.repaired = true
+	fd := int(os.Stdin.Fd())
+	t, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return // not a terminal: nothing to repair, nothing to break
+	}
+	if t.Iflag&unix.ICRNL != 0 && t.Lflag&unix.ICANON != 0 && t.Lflag&unix.ECHO != 0 {
+		return
+	}
+	fixed := *t
+	fixed.Iflag |= unix.ICRNL
+	fixed.Lflag |= unix.ICANON | unix.ECHO
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &fixed); err != nil {
+		return
+	}
+	u.warn("terminal input was left in raw mode by an earlier program — repaired")
+}
+
+// ttyGuard snapshots the terminal state before an interactive child gets the
+// tty, and returns the restore. Every caller that sets cmd.Stdin = os.Stdin
+// on a program that draws its own UI needs it: the child owns the terminal
+// while it runs, and one that exits abnormally (killed, crashed, ^C at the
+// wrong moment) leaves raw mode behind for whatever runs next. Cheap
+// insurance — two ioctls — against a wedged terminal.
+//
+// A no-op when stdin is not a tty. Safe to call twice.
+func ttyGuard() (restore func()) {
+	fd := int(os.Stdin.Fd())
+	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return func() {}
+	}
+	done := false
+	return func() {
+		if done {
+			return
+		}
+		done = true
+		_ = unix.IoctlSetTermios(fd, unix.TCSETS, old)
+	}
 }
 
 // yesno asks a y/n question. Under -y it answers with the default and says so.
@@ -197,6 +297,9 @@ func (u *setupUI) text(q, def string) string {
 // secret prompts with terminal echo disabled (API keys). Falls back to a
 // visible prompt when stdin isn't a tty, with a warning.
 func (u *setupUI) secret(q string) (string, error) {
+	// Before the snapshot, never after: repairTTY turns ECHO back ON, so
+	// letting readLine call it below would print the key being typed.
+	u.repairTTY()
 	fd := int(os.Stdin.Fd())
 	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {

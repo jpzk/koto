@@ -83,11 +83,19 @@ daemon or any group.`)
 
 	// Exec, don't spawn: the TUI owns the terminal from here, and /reload
 	// (exit 75) is handled by re-execing ourselves.
+	//
+	// Owning the terminal means putting it in raw mode, and a TUI that dies
+	// without restoring it leaves the shell — and the next `koto` prompt —
+	// unable to read a line. Restore on every exit path, crash included.
 	for {
+		restoreTTY := ttyGuard()
 		cmd := exec.Command(bin)
 		cmd.Env = env
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		err := cmd.Run()
+		// Before the os.Exit below, which runs no defers, and re-armed each
+		// iteration so a /reload cycle is guarded too.
+		restoreTTY()
 		if ee, ok := err.(*exec.ExitError); ok {
 			if ee.ExitCode() == 75 { // the TUI's /reload
 				continue

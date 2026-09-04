@@ -168,7 +168,7 @@ func readCreds() (credsFile, error) {
 	var c credsFile
 	b, err := os.ReadFile(credPath)
 	if err != nil {
-		return c, fmt.Errorf("no credentials: set ANTHROPIC_API_KEY or run `claude /login`")
+		return c, fmt.Errorf("no credentials: run `koto claude-login` (or set ANTHROPIC_API_KEY)")
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
@@ -258,8 +258,8 @@ func streamLogAppend(p string, data []byte) {
 // retries 529s ~2-3 times then exits without printing anything, leaving the
 // TUI with an empty prompt and no explanation. Only 404 (token-refresh probes)
 // is muted; a 401 DOES surface — an expired/invalid credential silently kills
-// every claudesdk group, and the user needs to see why (and that `make login`
-// is the fix) instead of staring at empty turns.
+// every claudesdk group, and the user needs to see why (and that
+// `koto claude-login` is the fix) instead of staring at empty turns.
 func logProxyError(group, path string, status int, dur time.Duration, reqID string) {
 	if group == "" || status == 200 || status == 404 {
 		return
@@ -272,11 +272,15 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 		// never retried (retryableStatus), so this is exactly one line per
 		// failed turn. Do NOT claim "expired" — an API key takes precedence
 		// over OAuth in authHeaders, so a stale or wrong key produces this
-		// same 401 while a valid OAuth token sits unused, and "run `make
-		// login`" then sends the operator through a login that cannot help.
-		// Name the credential actually sent and let --check say the rest.
+		// same 401 while a valid OAuth token sits unused, and a bare "log in
+		// again" then sends the operator through a login that cannot help.
+		// Name the credential actually sent and point at the command that
+		// resolves the precedence out loud — `koto claude-login --status`
+		// reports which credential is live and what shadows it, and
+		// `koto claude-login` reconnects without restarting the daemon (so
+		// no running microVM is stopped to fix this).
 		reason = "authentication failed — upstream rejected the " + credKind() +
-			"; check `koto setup --check` (an API key takes precedence over OAuth)"
+			"; run `koto claude-login --status` (an API key takes precedence over OAuth)"
 	case 529:
 		reason = "Overloaded" // Anthropic-specific; not in net/http
 	}
