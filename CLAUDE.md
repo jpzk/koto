@@ -54,6 +54,29 @@ everything else derives from the globals.
      (installed? → PKI → credentials → start → smoke → handoff).
   `make setup` still runs all three in order; it is the only thing that knows
   about more than one stage.
+- **`koto uninstall` (`uninstall.go`) is the inverse of stage 2, and only of
+  stage 2.** It stops the service FIRST — that ordering is the load-bearing
+  part, since the daemon's SIGTERM handler is what gives each guest its ~12s
+  to sync and unmount its workspace image — then removes the unit, runs
+  `daemon-reload`/`reset-failed`, and deletes the two binaries. **The
+  remove/purge split is dpkg's**: a bare uninstall keeps every byte of state
+  (group workspaces, the CA and client identities, schedules, goals, guest
+  assets) plus `/etc/koto/koto.env`, and a later `koto install` picks both up
+  exactly where they were; `--purge` is the separate, prompted verb that
+  deletes them. The project made the same call once already for `make clean`
+  (safe) vs `make clean-groups` (destructive) — "stop running this" is not
+  the sentence "destroy my agents' history". `--purge` is guarded by
+  `purgeRefusal`, because it is an `rm -rf` on a path the operator typed and
+  `-state` one directory too high is an ordinary typo: it refuses `/`, `$HOME`,
+  a relative path, a directory with no koto marker in it, and — the one that
+  matters — **a clone**, which has the same subdirectories as a state dir by
+  design, so the marker check alone would delete the checkout you are standing
+  in. `-n` is a dry run that prints every `sudo` it would issue and changes
+  nothing; it is also how the command is smoke-tested against a live install
+  without uninstalling it. `-y` answers the purge prompt only when `--purge`
+  was also typed (apt's bargain); alone it can never delete data.
+  `make uninstall` wraps the safe form only — `--purge` is deliberately not a
+  make target, a tab-completion away from `make install`.
 - **The wizard runs LAST, against the installed system.** Every path it
   touches resolves under the state dir (`sc.credsDir()` is
   `<state>/creds`), so PKI and credentials are minted straight into the
