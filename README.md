@@ -66,7 +66,7 @@ the `make fetch` route that replaces `make build` once releases exist.
 ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
-## Guest kernel
+## Guest kernel & Root FS
 
 Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh`
 (containerized, no host toolchain). **No patches**: the source is a pristine
@@ -93,6 +93,43 @@ That is the whole delta: network egress and in-guest containers. Symbols
 outside that list arrive via Kconfig `select` closure or as defaults
 `olddefconfig` fills in for options Firecracker's older config never named
 (e.g. the newer CPU mitigations) — harmless, but not chosen.
+
+### Root FS
+
+Every group also boots the same `fcassets/rootfs.img`: one **golden ext4
+image attached read-only** as the root drive of every microVM. It is built by
+`fcguest/build-rootfs.sh` from `fcguest/Dockerfile.rootfs`, and the image is
+never run as a container — its filesystem is exported and written straight
+into ext4 with `mkfs.ext4 -d` (populated at mkfs time; no loop mount, no root
+on the host). The export/mkfs stage runs inside a digest-pinned `alpine`
+container so the tar's root-owned entries keep their ownership; the image is
+sized to its contents plus 20% and 256 MiB, 2 GiB at minimum.
+
+What is in it:
+
+| | |
+|---|---|
+| base | `fedora`, pinned by digest, 27 dnf packages with weak deps off |
+| agent runtime | `nodejs` + `npm` + `@anthropic-ai/claude-code` (installed unpinned — the one floating part), `python3`, `git`, `ripgrep`, `jq`, `curl`, `tmux` |
+| PID 1 | `/usr/local/bin/fc-agent`, the static Go guest agent selected by `init=` on the kernel command line; it runs every turn, bridges vsock, and mounts `/workspace` |
+| worker scripts | `/sidecar/` — `cs-job`, `cs-notify`, `cs-subagent`, `venice_stream.js` (baked in: a microVM has no bind mounts) |
+| user | `node`, uid 1000 — everything runs as it, because `claude --dangerously-skip-permissions` refuses root |
+| in-guest containers | rootless `podman` 5 with `crun`, `conmon`, `fuse-overlayfs` storage and `passt`/pasta networking over `/dev/net/tun`; subuid range and `containers.conf` preconfigured, graphroot under `/workspace` |
+| mount points | `/workspace` and `/skills` pre-created (the root drive is read-only, so the agent cannot create them at boot); `/etc/resolv.conf` is a symlink into tmpfs |
+
+**Read-only and shared** is the point. Nothing per group lives on it: a
+group's state is its own `workspace.img` (ext4, read-write, the guest's
+`/workspace`, `$HOME` included). The `root=yes` profile does not write to the
+golden image either — `fc-agent` mounts a persistent **overlayfs** on `/usr`,
+`/etc`, `/var` and `/opt` with the upper layer on the workspace disk, so
+`sudo dnf install` persists across `/restart` while every other VM keeps the
+pristine image. Upper-layer entries shadow a later rootfs rebuild until the
+overlay is reset.
+
+**No live reload.** Editing anything under `sidecar/` or `fcguest/` means
+`make rootfs` (~30 s, containerized) and a `/restart <g>` of each group you
+want on the new image — the deliberate cost of having no shared filesystem
+between host and guest.
 
 ### Supply chain
 
