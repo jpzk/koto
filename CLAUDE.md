@@ -1047,6 +1047,33 @@ missed, and exits at `turn_end`.
 - **[podman] Edits to `sidecar/entrypoint.sh` and `sidecar/stream_filter.js` are live on the next message** to any existing podman sidecar — no respawn needed. The daemon mounts the whole `sidecar/` directory ro at `/sidecar` and overrides the image's ENTRYPOINT to `/sidecar/entrypoint.sh`. Directory bind-mounts resolve filename → inode on every open, so atomic file replacement on the host (which is what most editors, including the harness's `Edit` tool, do) is visible inside the container. We learned this the hard way: the original setup used per-file bind-mounts (`-v ...stream_filter.js:/stream_filter.js:ro`), which capture the source inode at mount time and silently keep serving the orphan inode after a host-side replace. Hours of "why isn't my edit being picked up" pointed at a dead inode. Image rebuild (`make build`) is only needed when changing `sidecar/Dockerfile` itself or upgrading the `claude-code` npm package.
 - **[firecracker] there is NO live reload** — the `sidecar/` scripts, `fc-agent` (which now runs the turns itself — `fcguest/turn.go`), node, and claude-code are all baked into `fcassets/rootfs.img`. Editing any of them requires `make rootfs` (rebuilds the golden image, ~30s) followed by a `/restart <g>` of each group you want on the new code. This is the deliberate trade for the no-shared-FS isolation; see `docs/firecracker-vsock.md`. the host-side `*.go` (daemon/fc/proxy) is still live (the entrypoint rebuilds and re-execs on `make host-run`), so only guest-side changes need the rootfs rebuild.
 - **For testing, prefer FIFO writes over the TUI.** Write directly to `groups/<g>/.cs/in` (base64 + `\n`) and tail `groups/<g>/.cs/log` + `metrics.jsonl`. Faster, deterministic, no UI in the way.
+- **`make dev` is the loop when koto is INSTALLED and serving a real fleet.**
+  Restarting the service to try an edit stops every running microVM, so it
+  runs a SECOND daemon out of the clone instead: own state dir (`.dev/`, the
+  installed layout mirrored), own gRPC port (`DEV_PORT`, 8444) and own proxy
+  base (`DEV_PROXY`, 9500 — both must move or it collides with the installed
+  daemon on 8443/8787), own microVM fleet. Drive it with `KOTO_ADDR=127.0.0.1:8444
+  KOTO_CREDS_DIR=$PWD/.dev/creds KOTO_CLIENT=tui koto ctl …`, `make dev-tui`
+  for the TUI, `make stop` to stop it (it matches `^./koto daemon$`, so the
+  installed unit is untouched). Loop is edit → ctrl-c → `make dev` (~4s).
+  - **The credential is SHARED, never copied, and that is not tidiness:
+    OAuth refresh tokens ROTATE.** Copy `.credentials.json` into a second
+    state dir and the first daemon to refresh rotates the token, killing the
+    other copy permanently — measured 2026-09-04: the copy came back with
+    `expiresAt: 0` and every turn 401'd. So `DEV_HOME` points at the
+    INSTALLED state dir (`/var/lib/koto`), one file with one refresh chain
+    that both daemons read. HOME is the knob because HOME is what resolves
+    the credential: the proxy's default `CRED_PATH` is
+    `$HOME/.claude/.credentials.json`, and `refresh()` shells out to `claude`,
+    which writes to that same path — point them apart and a refresh
+    "succeeds" into a file nobody reads. With no installed koto it falls back
+    to `.dev/` and you mint one there with `KOTO_HOME=$PWD/.dev koto claude-login`.
+  - **The clone cannot be the dev state dir**, which is why `.dev/` exists at
+    all: Claude Code keeps a project-local `.claude/` DIRECTORY in the repo,
+    so `HOME=$PWD` makes `$HOME/.claude/.credentials.json` name a file that
+    does not exist while `creds/.credentials.json` sits there unread. Same
+    trap `claude_login.go` documents; `make host-run`'s `test -e .claude ||
+    ln -s creds .claude` is a no-op against a real directory.
 - **Installed mode has no live reload at all** — `koto install` bakes the
   daemon into the image, so changing daemon Go and restarting the service
   runs the OLD binary. Iterate in a dev clone (`make host-run`); re-run
