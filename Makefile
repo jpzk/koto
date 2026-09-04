@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build fetch verify wizard require-artifacts setup install uninstall dev dev-tui tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -398,6 +398,43 @@ dev: koto $(DEV)/.stamp
 	@echo "stop it    → ctrl-c, or \`make stop\` from another shell"
 	@echo "credential → $(DEV_HOME)/creds/.credentials.json (shared, not copied)"
 	@KOTO_HOME=$(DEV) HOME=$(DEV_HOME) KOTO_PORT=$(DEV_PORT) PROXY_PORT=$(DEV_PROXY) ./koto daemon
+
+# Pointing a SHELL at the dev daemon. make cannot export into your shell —
+# recipes run in child processes — so these are the only two honest shapes,
+# and both keep the values defined here rather than in a second file that
+# drifts:
+#
+#   eval "$$(make dev-env)"      this shell now talks to the dev daemon
+#   eval "$$(make dev-env-off)"  ...and back
+#   make dev-shell               a subshell that already has them; exit leaves
+#
+# KOTO_HOME is in the set deliberately, not just the ctl trio: it is what
+# `koto tui -state` and `koto claude-login` resolve, so without it the shell
+# would be half-switched — ctl talking to dev while a login reconfigured the
+# INSTALLED daemon. CURDIR goes on PATH so plain `koto` is the dev build.
+# KOTO_CLIENT is tui, not agent: on a dev instance you want every verb,
+# including the admin-only ones (runscript, acl, attach-shell).
+dev-env:
+	@echo 'export KOTO_HOME=$(DEV)'
+	@echo 'export KOTO_ADDR=127.0.0.1:$(DEV_PORT)'
+	@echo 'export KOTO_CREDS_DIR=$(DEV)/creds'
+	@echo 'export KOTO_CLIENT=tui'
+	@echo 'export PATH=$(CURDIR):$$PATH'
+	@echo '# dev daemon :$(DEV_PORT), state $(DEV), credential $(DEV_HOME)/creds/.credentials.json'
+	@echo '# undo with: eval "$$(make dev-env-off)"'
+
+dev-env-off:
+	@echo 'unset KOTO_HOME KOTO_ADDR KOTO_CREDS_DIR KOTO_CLIENT'
+	@echo 'export PATH=$${PATH#$(CURDIR):}'
+	@echo '# back to the installed daemon on :8443'
+
+# A subshell with the environment already set. $$SHELL, so you keep your own
+# zsh and its history; `exit` is the off switch, which is why this needs no
+# undo target of its own.
+dev-shell:
+	@echo "koto dev shell → :$(DEV_PORT), state $(DEV). exit to leave."
+	@KOTO_HOME=$(DEV) KOTO_ADDR=127.0.0.1:$(DEV_PORT) KOTO_CREDS_DIR=$(DEV)/creds \
+	 KOTO_CLIENT=tui PATH=$(CURDIR):$$PATH $$SHELL
 
 # The TUI against the dev daemon. Same binary, different endpoint and creds.
 dev-tui: koto koto-tui
