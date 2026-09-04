@@ -4,8 +4,9 @@ Minimal isolated orchestrator for long-lived `claude` agents. Every group
 (agent) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
 so the guest kernel is the security boundary — with **no network by default**;
 a credential-injecting proxy is the only path to the LLM API, and agents never
-see a real credential. Host side is a Go daemon; the UI is a separate,
-network-isolated TUI container speaking gRPC over mTLS.
+see a real credential. Host side is a Go daemon running as a rootless
+systemd service; the TUI and `koto ctl` are plain host binaries speaking gRPC
+over mTLS. Nothing runs in a container at runtime.
 
 ## Quick start
 
@@ -53,12 +54,13 @@ the `make fetch` route that replaces `make build` once releases exist.
 
 ```
 ╔═ TIER 1 · host user (full authority) ═══════════════════════════════════════╗
-║  gRPC clients: cs_tui (tier 2.5, koto-net) · koto ctl · Android             ║
-║  creds/: OAuth token · PKI (ca, client-*, tokens) · acl.json                ║
+║  gRPC clients: koto tui · koto ctl · Android — host processes, no container ║
+║  /var/lib/koto/creds: OAuth token · PKI (ca, client-*, tokens) · acl.json   ║
 ╚═══════════════╤═══════════════════════════════════════════╤═════════════════╝
                 │ gRPC :8443  (mTLS + bearer token)         │ read per request
                 ▼                                           ▼ (proxy memory only)
-╔═ TIER 2 · cs_host — daemon container (no podman socket) ════════════════════╗
+╔═ TIER 2 · koto daemon — systemd service, rootless as the host user ═════════╗
+║  own userns (newuidmap) · ProtectSystem=strict · ProtectHome=yes · CPUQuota ║
 ║  ┌─ role ACL ─────────┐   ┌─ daemon (Go) ─────────────┐   ┌─ LLM proxy ───┐ ║
 ║  │ admin · operator   │──▶│ lifecycle · session queues│   │ per-group port│═╬═▶ LLM API
 ║  │ reader · agent     │   │ log tailer · replay ring  │   │ injects key   │ ║   (real credential)
@@ -98,8 +100,9 @@ adds a filtered NIC via the gateway on vsock 9003.
 - **Proxy** (`proxy.go`): one listener port per group (attribution), injects
   the real credential per request, records per-request token metrics. Guests
   authenticate with a sentinel (`ANTHROPIC_API_KEY=proxied`).
-- **Guest** (`fcguest/`, `sidecar/`): a PID-1 agent bridges everything over a
-  single vsock device; `entrypoint.sh` runs the message loop as uid 1000.
+- **Guest** (`fcguest/`, `sidecar/`): `fc-agent`, the PID-1 agent, bridges
+  everything over a single vsock device and runs each turn itself
+  (`fcguest/turn.go`) as uid 1000.
 - **Orchestration is verb-based**: no shared filesystem anywhere. `main`
   drives peers via ctl verbs (`spawn`/`send`/`stop`/`list`/`resources`/
   `sched_*`/`config_set`/`tail`); non-main groups get only self-targeted
