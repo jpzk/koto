@@ -7,6 +7,32 @@ a credential-injecting proxy is the only path to the LLM API, and agents never
 see a real credential. Host side is a Go daemon; the UI is a separate,
 network-isolated TUI container speaking gRPC over mTLS.
 
+## Quick start
+
+Until the first release is published, build the artifacts from source. The
+host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora or
+Ubuntu 24.04+, and git, make and podman or docker. Nothing else: Go, the
+kernel toolchain and node all run inside containers.
+
+```sh
+# Fedora
+sudo dnf install -y git make podman
+# Ubuntu 24.04+
+sudo apt install -y git make podman passt uidmap
+
+git clone https://github.com/jpzk/koto && cd koto
+make build      # 1. build koto, koto-tui, firecracker, the guest kernel + rootfs (20-40 min cold)
+make install    # 2. install to /var/lib/koto and a systemd unit (asks for sudo, prints each command)
+make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
+koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
+```
+
+On Ubuntu, make `/dev/kvm` world-accessible first (see [Install](#install));
+`koto setup` checks for it and prints the fix. Every stage is safe to re-run,
+and `koto setup --check` reports the health of an install without changing
+anything. The [Install](#install) section explains what each stage does and
+the `make fetch` route that replaces `make build` once releases exist.
+
 ## Features
 
 - **Isolation** — one Firecracker microVM per agent on KVM; no network by
