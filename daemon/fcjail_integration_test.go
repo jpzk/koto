@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,7 +31,14 @@ func TestFcJailBootsReal(t *testing.T) {
 	// fcKernelPath/fcRootfsPath resolve, but keep run/ + groups/ in a tempdir.
 	proj := os.Getenv("KOTO_PROJ")
 	if proj == "" {
-		proj = "/home/<user>/koto"
+		// Derive the tree from this source file, never from a hardcoded path:
+		// the assets are siblings of the package, so anyone's checkout works
+		// and a moved clone does not silently test the wrong fcassets/.
+		_, self, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Skip("cannot locate the project tree; set KOTO_PROJ")
+		}
+		proj = filepath.Dir(filepath.Dir(self))
 	}
 	HERE = proj
 	tmp := t.TempDir()
