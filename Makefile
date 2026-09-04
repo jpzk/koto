@@ -74,7 +74,7 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # variable, inherited from the environment — under `make -C /path/to/koto` from
 # somewhere else it still holds the caller's directory, so every path built
 # from it points outside the checkout. Measured: `cd /tmp && make -C ~/koto`
-# gave PWD=/tmp and CURDIR=/home/<user>/koto, which would have bind-mounted
+# gave PWD=/tmp and CURDIR=~/koto, which would have bind-mounted
 # /tmp as the build source and put the dev state dir in /tmp/.dev. $(CURDIR) is
 # make's own working directory and is always this file's.
 CONTAINER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
