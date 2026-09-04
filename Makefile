@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build fetch verify wizard require-artifacts setup install tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: build fetch verify wizard require-artifacts setup install uninstall tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -239,6 +239,17 @@ install:
 	@$(MAKE) --no-print-directory require-artifacts
 	@./koto install
 	@echo "next:  make wizard"
+
+# The inverse of `install`, and only of it: stops the service (so every guest
+# unmounts its workspace image cleanly), then removes the unit and the
+# binaries. Your state dir survives — deleting that is `./koto uninstall
+# --purge`, which is prompted, and is deliberately NOT wired to a make target:
+# `make clean-groups` is already the destructive verb people know, and a
+# second one a tab-completion away from `make install` is a footgun.
+uninstall:
+	@if [ -x ./koto ]; then ./koto uninstall; \
+	elif command -v koto >/dev/null; then koto uninstall; \
+	else echo "no koto binary here or on PATH — nothing to uninstall"; fi
 
 # INSTANCE (opt-in): run a second daemon+TUI side by side, e.g. from a git
 # worktree — `make host-run INSTANCE=cli`, `make tui INSTANCE=cli`,

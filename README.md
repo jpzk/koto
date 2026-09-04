@@ -526,6 +526,24 @@ layout as a clone) and service configuration in `/etc/koto/koto.env`. The
 clone is only a source checkout after this; `koto install` from a newer one
 upgrades in place, preserving state and any config you have edited.
 
+### Uninstalling
+
+```sh
+koto uninstall          # stop the service, remove the unit and the binaries
+koto uninstall -n       # dry run: print every sudo it would issue, change nothing
+koto uninstall --purge  # also delete /var/lib/koto and /etc/koto (prompted)
+```
+
+The daemon is stopped first, so every running microVM syncs and unmounts its
+workspace image cleanly rather than dying with the host.
+
+A bare `koto uninstall` **keeps all your data** — group workspaces and
+conversations, the CA and client identities, schedules, goals, guest assets —
+and a later `koto install` picks them up exactly where they were. `--purge`
+is the separate verb that deletes them; it prompts, it says how many groups
+and how much disk are at stake, and it refuses paths that are not an
+installed state dir (a clone included).
+
 To add another client — a phone, a second laptop:
 
 ```sh
