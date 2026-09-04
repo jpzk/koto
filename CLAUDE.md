@@ -1053,18 +1053,22 @@ missed, and exits at `turn_end`.
   installed layout mirrored), own gRPC port (`DEV_PORT`, 8444) and own proxy
   base (`DEV_PROXY`, 9500 — both must move or it collides with the installed
   daemon on 8443/8787), own microVM fleet. Point a shell at it with
-  `eval "$(make dev-env)"` (undo: `eval "$(make dev-env-off)"`) or
-  `make dev-shell` for a subshell that has it already; `make dev-tui` for the
+  `. .dev/env` (undo: `. .dev/env-off`) or `make dev-shell` for a subshell
+  that has it already; `make dev-tui` for the
   TUI, `make stop` to stop the daemon (it matches `^./koto daemon$`, so the
   installed unit is untouched). Loop is edit → ctrl-c → `make dev` (~4s).
-  - **The shell environment lives in the Makefile, not in a `dev.sh` to
-    source.** make cannot export into your shell — recipes run in child
-    processes — so the honest shapes are "print exports you eval" and "hand
-    you a subshell", and both keep the ports and paths defined ONCE, beside
-    the `dev` target that reads them. A sourced file would need bash-vs-zsh
-    detection just to locate itself (`$0` is the script under zsh when
-    sourced, but the shell under bash) and would then carry a second copy of
-    values the Makefile already owns. `KOTO_HOME` is in the exported set
+  - **The shell environment lives in the Makefile, and `.dev/env` is
+    GENERATED from it.** make cannot export into your shell — recipes run in
+    child processes — so the honest shapes are a file to source, a subshell,
+    or exports to eval, and all three come from the same `dev-env` target
+    that sits beside the `dev` target reading those values. Generating the
+    file rather than hand-writing a `dev.sh` is what keeps them from
+    drifting; the Makefile is its prerequisite, so changing `DEV_PORT`
+    rewrites it on the next `make dev`. A hand-written one would also have
+    needed bash-vs-zsh detection just to locate itself (`$0` is the script
+    under zsh when sourced, but the shell under bash) — a generated file of
+    plain `export` lines needs none, since the sourcing shell supplies the
+    path. `KOTO_HOME` is in the exported set
     deliberately, not just the ctl trio: it is what `koto tui -state` and
     `koto claude-login` resolve, so without it the shell is half-switched —
     ctl talking to dev while a login reconfigures the INSTALLED daemon.

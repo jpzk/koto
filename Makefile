@@ -392,9 +392,9 @@ DEV_PROXY ?= 9500
 # credential of its own there: KOTO_HOME=$(DEV) ./koto claude-login
 DEV_HOME  ?= $(shell test -f /var/lib/koto/creds/.credentials.json && echo /var/lib/koto || echo $(CURDIR)/.dev)
 
-dev: koto $(DEV)/.stamp
+dev: koto $(DEV)/.stamp $(DEV)/env $(DEV)/env-off
 	@echo "dev daemon → grpc 127.0.0.1:$(DEV_PORT), proxy base $(DEV_PROXY), state $(DEV)"
-	@echo "drive it   → export KOTO_ADDR=127.0.0.1:$(DEV_PORT) KOTO_CREDS_DIR=$(DEV)/creds KOTO_CLIENT=tui"
+	@echo "drive it   → . $(DEV)/env      (in another shell; . $(DEV)/env-off to undo)"
 	@echo "stop it    → ctrl-c, or \`make stop\` from another shell"
 	@echo "credential → $(DEV_HOME)/creds/.credentials.json (shared, not copied)"
 	@KOTO_HOME=$(DEV) HOME=$(DEV_HOME) KOTO_PORT=$(DEV_PORT) PROXY_PORT=$(DEV_PROXY) ./koto daemon
@@ -404,9 +404,16 @@ dev: koto $(DEV)/.stamp
 # and both keep the values defined here rather than in a second file that
 # drifts:
 #
-#   eval "$$(make dev-env)"      this shell now talks to the dev daemon
-#   eval "$$(make dev-env-off)"  ...and back
+#   . .dev/env                   this shell now talks to the dev daemon
+#   . .dev/env-off               ...and back
 #   make dev-shell               a subshell that already has them; exit leaves
+#   eval "$$(make dev-env)"      the same thing without the generated file
+#
+# The .dev/env files are GENERATED from the targets below, not hand-written,
+# so sourcing one cannot drift from what `make dev` actually runs; they are
+# rebuilt whenever this file changes. They exist because `. file` is the
+# ordinary way to put variables into a shell and `eval "$$(...)"` is not —
+# same effect, one fewer construct to trust.
 #
 # KOTO_HOME is in the set deliberately, not just the ctl trio: it is what
 # `koto tui -state` and `koto claude-login` resolve, so without it the shell
@@ -421,12 +428,21 @@ dev-env:
 	@echo 'export KOTO_CLIENT=tui'
 	@echo 'export PATH=$(CURDIR):$$PATH'
 	@echo '# dev daemon :$(DEV_PORT), state $(DEV), credential $(DEV_HOME)/creds/.credentials.json'
-	@echo '# undo with: eval "$$(make dev-env-off)"'
+	@echo '# undo: . $(DEV)/env-off   (or: eval "$$(make dev-env-off)")'
 
 dev-env-off:
 	@echo 'unset KOTO_HOME KOTO_ADDR KOTO_CREDS_DIR KOTO_CLIENT'
 	@echo 'export PATH=$${PATH#$(CURDIR):}'
 	@echo '# back to the installed daemon on :8443'
+
+# Generated, with this Makefile as the prerequisite: change a port above and
+# the next `make dev` rewrites them. Order-only on the stamp, since the state
+# dir has to exist to hold them but its mtime means nothing here.
+$(DEV)/env: Makefile | $(DEV)/.stamp
+	@$(MAKE) --no-print-directory dev-env > $@
+
+$(DEV)/env-off: Makefile | $(DEV)/.stamp
+	@$(MAKE) --no-print-directory dev-env-off > $@
 
 # A subshell with the environment already set. $$SHELL, so you keep your own
 # zsh and its history; `exit` is the off switch, which is why this needs no
