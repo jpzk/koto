@@ -1054,7 +1054,17 @@ missed, and exits at `turn_end`.
   base (`DEV_PROXY`, 9500 — both must move or it collides with the installed
   daemon on 8443/8787), own microVM fleet. Point a shell at it with
   `. .dev/env` (undo: `. .dev/env-off`) or `make dev-shell` for a subshell
-  that has it already; `make dev-tui` for the
+  that has it already — both tag the PROMPT `(koto-dev:<port>)`, since the
+  hazard of the whole arrangement is forgetting which koto you are typing at,
+  and the port rather than a bare "dev" so two worktrees are told apart. The
+  tag is prefixed once onto the prompt the shell already has (guarded on the
+  saved copy, so sourcing twice does not stack) and `env-off` restores it
+  byte-for-byte. `dev-shell` cannot just pass the variables in the
+  environment: an interactive shell reads its rc AFTER inheriting them and the
+  rc is what sets PROMPT, so it hands the shell a generated rc that chains —
+  your real one first, then `.dev/env` — via `ZDOTDIR` for zsh (with a
+  `.zshenv` handing your own back, since ZDOTDIR moves that too) and
+  `--rcfile` for bash. Another shell gets the environment and no tag; `make dev-tui` for the
   TUI, `make stop` to stop the daemon (it matches `^./koto daemon$`, so the
   installed unit is untouched). Loop is edit → ctrl-c → `make dev` (~4s).
   - **The shell environment lives in the Makefile, and `.dev/env` is
