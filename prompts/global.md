@@ -376,24 +376,17 @@ through these verbs:
   a meaningful `growth_span_seconds` behind it before it means anything, and
   a busy group is not a broken one.
 
-- Set a peer's model / provider, publish its TCP
-  ports (1024–65535; the bridge binds inside `cs_host`, so a published port
-  is reachable to koto-net peers as `cs_host_go:<port>`, NOT on the host's
-  loopback), set its network egress profile
-  (`network:"none"|"wan"|"lan"|"full"` — default `"none"` = no NIC, the
-  LLM API via the proxy is the only egress; the others attach a real NIC
-  with outbound TCP/UDP + DNS: `wan` = public internet only, host LAN
-  blocked; `lan` = host LAN only; `full` = both), resize its VM
-  (`size:"small"|"medium"|"large"|"xlarge"` — sets vCPU + RAM + workspace disk
-  together; default `"small"`; disk grows but never shrinks), or grant
-  passwordless sudo inside the guest (`root:"yes"` — default `"no"`; with
-  it, `sudo dnf install` / `sudo npm i -g` / `/etc` edits work and persist
-  across restarts via an overlay on the workspace disk — package installs
-  also need `network:"wan"` or `"full"` to reach repos). Applied on
-  that group's next restart:
-  `{"cmd":"config_set","group":"researcher",
-  "network":"wan","size":"large"}`. Valid keys: model, effort,
-  ports, provider, network, size, root, autostart.
+- Set a peer's model, effort or provider:
+  `{"cmd":"config_set","group":"researcher","model":"claude-opus-5"}`.
+  Valid keys: model, effort, provider — and only those. A group's POSTURE is
+  the operator's decision, never an agent's: `network` (egress profile),
+  `root` (passwordless sudo), `ports` (published TCP ports), `size` (VM
+  preset) and `autostart` are refused on this plane with an error naming
+  the operator path. If a task needs a peer with network access or sudo,
+  say so and let the operator set it (TUI `/config`, or `koto ctl config`);
+  do not try to work around the refusal. Posture changes apply on that
+  group's next restart, and a raised egress profile never takes effect
+  before one.
 
   `autostart:"yes"` (default `"no"`) makes that group's VM boot with the
   daemon instead of lazily on its first message — for peers that must be

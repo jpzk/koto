@@ -66,7 +66,8 @@ func TestCtlPBEveryVerbMaps(t *testing.T) {
 	// resources, config, tail).
 	for _, l := range []string{
 		`{"cmd":"list"}`, `{"cmd":"resources"}`,
-		`{"cmd":"config_set","group":"tg","network":"wan"}`,
+		// model, not network: posture keys are refused on this plane (audit H1).
+		`{"cmd":"config_set","group":"tg","model":"claude-opus-5"}`,
 		`{"cmd":"tail","group":"tg","n":5}`,
 	} {
 		req, err := ctlRequestFromJSON([]byte(l))

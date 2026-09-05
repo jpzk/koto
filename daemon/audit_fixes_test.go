@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -157,5 +160,69 @@ func TestExpectedTurnSlots(t *testing.T) {
 	}
 	if fcConsumeExpectedTurn("g", 3) {
 		t.Fatal("slot accepted twice")
+	}
+}
+
+// H1: posture is the operator's. The ctl plane refuses every posture key,
+// on main itself and on a peer, and still takes model/effort/provider.
+func TestCtlConfigSetRefusesPosture(t *testing.T) {
+	fcHarness(t)
+	for _, key := range []string{"network", "internet", "root", "ports", "size", "autostart"} {
+		for _, target := range []string{"main", "tg"} {
+			val := any("full")
+			if key == "ports" {
+				val = []int{8080}
+			}
+			resp := ctlDispatch("main", ctlLine(t, map[string]any{"cmd": "config_set", "group": target, key: val}))
+			br, ok := resp.(baseResp)
+			if !ok || br.OK || !strings.Contains(br.Error, "operator-only") {
+				t.Fatalf("config_set %s on %s: want operator-only refusal, got %+v", key, target, resp)
+			}
+		}
+	}
+	resp := ctlDispatch("main", ctlLine(t, map[string]any{"cmd": "config_set", "group": "tg", "model": "claude-opus-5", "effort": "high"}))
+	if cr, ok := resp.(configResp); !ok || !cr.OK {
+		t.Fatalf("model/effort should still be settable: %+v", resp)
+	}
+	if groupNetwork("tg") != fcNetNone {
+		t.Fatal("a refused network key must not have landed in config.json")
+	}
+}
+
+// H1: the L7 gate takes the stricter of the booted profile and the live
+// config — a live raise is not live egress; a live lower is.
+func TestEgressGateHonoursBootProfile(t *testing.T) {
+	fcHarness(t)
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	h := &handler{group: "tg"}
+	t.Cleanup(func() { proxySetBootNetwork("tg", fcNetNone) })
+	connect := func() int {
+		req := &http.Request{Method: http.MethodConnect, Host: "192.168.1.10:443", URL: &url.URL{Host: "192.168.1.10:443"}}
+		rec := httptest.NewRecorder()
+		h.serveEgress(rec, req)
+		return rec.Code
+	}
+	// Config says full, but no VM has booted with it → denied.
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"full"}`), 0o644)
+	if code := connect(); code != http.StatusForbidden {
+		t.Fatalf("config=full, booted=none: want 403, got %d", code)
+	}
+	// Booted as wan, config raised to full → the LAN target stays blocked.
+	proxySetBootNetwork("tg", fcNetWAN)
+	if code := connect(); code != http.StatusForbidden {
+		t.Fatalf("config=full, booted=wan: LAN target should be blocked, got %d", code)
+	}
+	// Booted as full, config lowered to none → denied at once.
+	proxySetBootNetwork("tg", fcNetFull)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"none"}`), 0o644)
+	if code := connect(); code != http.StatusForbidden {
+		t.Fatalf("config=none, booted=full: want 403, got %d", code)
+	}
+	// Stop clears the snapshot.
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"full"}`), 0o644)
+	proxySetBootNetwork("tg", fcNetNone)
+	if code := connect(); code != http.StatusForbidden {
+		t.Fatalf("after stop: want 403, got %d", code)
 	}
 }
