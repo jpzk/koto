@@ -180,8 +180,12 @@ to a guest: the proxy injects one of two things on the host side
    Billing is per token to the key owner.
 2. **A Claude subscription login** — `koto claude-login` (or `make login`)
    runs `claude auth login` (Anthropic's own flow) and the proxy forwards the
-   resulting OAuth token, refreshing it via `claude` itself. **This works, but read the fine print
-   before relying on it:**
+   resulting OAuth token, refreshing it via `claude` itself — so the installed
+   daemon needs a `claude` it can exec: `koto install` records the one on your
+   PATH as `KOTO_CLAUDE_BIN` in `/etc/koto/koto.env` and, for a claude under
+   your home, binds its directories read-only through the unit's `ProtectHome`.
+   `koto claude-login --status` verifies that path from the daemon's side.
+   **This works, but read the fine print before relying on it:**
    - OAuth is "intended exclusively for purchasers of … subscription plans
      and designed to support ordinary use of Claude Code"; advertised Pro/Max
      limits "assume ordinary, individual usage". A fleet of scheduled,

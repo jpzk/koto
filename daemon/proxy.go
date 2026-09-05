@@ -137,18 +137,47 @@ func credKind() string {
 	return "OAuth token"
 }
 
-func refresh() {
-	cmd := exec.Command("claude", "-p", "ok")
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Run()
-		close(done)
-	}()
+// refresh runs the claude CLI once so it rotates the OAuth token on disk. The
+// binary comes from claudeBin (KOTO_CLAUDE_BIN, else PATH) — see claudebin.go
+// for why that indirection exists. The error is RETURNED, not discarded: this
+// call swallowed its failure from the first Python proxy on, and that is how a
+// daemon that could not exec claude at all spent a day and a half looking
+// like an Anthropic-side 401 storm.
+func refresh() error {
+	bin := claudeBin()
+	cmd := exec.Command(bin, "-p", "ok")
+	cmd.Env = claudeBinEnviron(bin)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("exec %s: %w", bin, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("%s -p ok: %w%s", bin, err, tailOf(out.String(), 300))
+		}
+		return nil
 	case <-time.After(25 * time.Second):
 		_ = cmd.Process.Kill()
+		<-done
+		return fmt.Errorf("%s -p ok: timed out after 25s%s", bin, tailOf(out.String(), 300))
 	}
+}
+
+// tailOf renders the last n bytes of a subprocess's output as a log suffix,
+// or nothing when there was none.
+func tailOf(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) > n {
+		s = "…" + s[len(s)-n:]
+	}
+	return ": " + strings.ReplaceAll(s, "\n", " | ")
 }
 
 // refreshMu single-flights token refreshes. credLock now guards ONLY the
@@ -191,7 +220,27 @@ func refreshOnce() {
 	if c, err := readCreds(); err == nil && credTTL(c) >= 60 {
 		return // the flight we joined already refreshed
 	}
-	refresh()
+	err := refresh()
+	// Judge the outcome by the only thing that matters — the token on disk —
+	// not by the subprocess's exit status alone: `claude -p ok` can exit 0
+	// without having rotated anything. An error line here becomes an operator
+	// notification (logalert.go), rate-limited by its token bucket, so an
+	// expired token that every request now trips over banners once, not once
+	// per turn.
+	c, rerr := readCreds()
+	switch {
+	case err != nil:
+		emitLogf("proxy", "error", "oauth token refresh failed — turns will 401 until it works "+
+			"(check `koto claude-login --status`): %v", err)
+	case rerr != nil:
+		emitLogf("proxy", "error", "oauth token refresh ran but the credentials file is unreadable: %v", rerr)
+	case credTTL(c) < 60:
+		emitLogf("proxy", "error", "oauth token refresh ran (%s) but the token on disk is still expired — "+
+			"the CLI did not rotate it; run `koto claude-login`", claudeBin())
+	default:
+		emitLogf("proxy", "info", "oauth token refreshed via %s, valid for %s",
+			claudeBin(), (time.Duration(credTTL(c)) * time.Second).Round(time.Minute))
+	}
 }
 
 func authHeaders() (map[string]string, error) {
