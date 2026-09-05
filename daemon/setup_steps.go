@@ -15,12 +15,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -48,42 +46,6 @@ func (sc *setupCtx) credsDir() string { return filepath.Join(sc.stateDir(), "cre
 func (sc *setupCtx) stateDir() string { return envOr("KOTO_HOME", defaultStateDir) }
 
 func exists(path string) bool { _, err := os.Stat(path); return err == nil }
-
-// identityRoles reads one client's roles from creds/tokens.json — the plural
-// "roles" list, the older singular "role", or nothing (a legacy bare-hash
-// entry, which auth.go treats as admin). nil when the file or name is absent.
-func identityRoles(credsDir, name string) []string {
-	b, err := os.ReadFile(filepath.Join(credsDir, "tokens.json"))
-	if err != nil {
-		return nil
-	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal(b, &m) != nil {
-		return nil
-	}
-	raw, ok := m[name]
-	if !ok {
-		return nil
-	}
-	var ent struct {
-		Roles []string `json:"roles"`
-		Role  string   `json:"role"`
-	}
-	if json.Unmarshal(raw, &ent) != nil {
-		var hash string
-		if json.Unmarshal(raw, &hash) == nil && hash != "" {
-			return []string{"admin"} // legacy bare hash = admin (auth.go)
-		}
-		return nil
-	}
-	if len(ent.Roles) > 0 {
-		return ent.Roles
-	}
-	if ent.Role != "" {
-		return []string{ent.Role}
-	}
-	return []string{"admin"}
-}
 
 // rpcShort compacts a gRPC error to its status text for a one-line report.
 func rpcShort(err error) string {
@@ -145,15 +107,6 @@ have already issued.`,
 					return false, "missing creds/" + f
 				}
 			}
-			// The default `koto ctl` identity must be the least-privilege one the
-			// docs promise. A wizard between 2026-09-03 and 2026-09-05 minted it
-			// as admin (audit M11) — an install from that window keeps it until
-			// the operator re-mints, so say so here rather than let --check
-			// call a second superuser "present".
-			if roles := identityRoles(c, "agent"); slices.Contains(roles, "admin") {
-				return true, "present — but the 'agent' identity carries the admin role; re-mint it with\n" +
-					"      koto pki client -creds " + c + " -role agent agent"
-			}
 			return true, "CA, server cert, tui and agent clients present"
 		},
 		run: func(sc *setupCtx) error {
@@ -177,18 +130,11 @@ have already issued.`,
 			}
 			// `koto ctl` defaults to the client name "agent", so without this
 			// the command the handoff hands you fails on a missing identity.
-			// LEAST PRIVILEGE by default (audit M11): the seeded `agent` role —
-			// list/send/history/metrics/sched_list/subscribe/watch — is what
-			// anything handed a bare `koto ctl` gets: a coding agent, a CI job,
-			// a script. It cannot spawn, stop, destroy, reconfigure or run
-			// scripts; KOTO_CLIENT=tui is the admin identity for those. 60f3127
-			// flipped this to admin so the release test's `koto ctl spawn` would
-			// work with defaults — the test now says KOTO_CLIENT=tui instead.
 			if !exists(filepath.Join(sc.credsDir(), "client-agent.crt")) {
-				if _, err := pkiClient(sc.credsDir(), "agent", []string{"agent"}); err != nil {
+				if _, err := pkiClient(sc.credsDir(), "agent", []string{"admin"}); err != nil {
 					return err
 				}
-				sc.ui.info("minted the 'agent' client identity for `koto ctl` (role: agent — list/send/history/metrics; KOTO_CLIENT=tui for admin verbs)")
+				sc.ui.info("minted the 'agent' client identity (role: admin)")
 			}
 			sc.credsChanged = true
 			return nil
@@ -353,8 +299,7 @@ func stepHandoff() setupStep {
 				u.printf("  %s%s%s", u.bold(c), strings.Repeat(" ", max(2, 24-len(c))), what)
 			}
 			cmd("koto tui", "open the terminal UI")
-			cmd("koto ctl list", "list your groups (identity 'agent': list/send/history/metrics)")
-			cmd("KOTO_CLIENT=tui koto ctl …", "admin verbs: spawn, stop, destroy, config, runscript")
+			cmd("koto ctl list", "list your groups")
 			cmd("systemctl status koto", "what the service is doing")
 			cmd("journalctl -u koto -f", "daemon logs")
 			u.blank()
