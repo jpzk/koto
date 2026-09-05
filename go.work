@@ -4,9 +4,9 @@
 // commands work from the repo root — most importantly `go run ./daemon
 // daemon`, which must run with cwd = repo root because the daemon resolves
 // its runtime dirs (groups/, creds/, fcassets/, run/) relative to cwd.
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.14
+toolchain go1.26.8
 
 use (
 	./daemon

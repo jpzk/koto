@@ -1,8 +1,8 @@
 module koto-fcagent
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.14
+toolchain go1.26.8
 
 // x/sys pinned per the 6-week dependency-lag rule: v0.47.0 released
 // 2026-06-30 (verified via proxy.golang.org/golang.org/x/sys/@v/v0.47.0.info;

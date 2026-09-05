@@ -1,8 +1,8 @@
 module koto-tui
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.14
+toolchain go1.26.8
 
 // 6-week dependency lag rule (see /home/<user>/.claude/CLAUDE.md):
 // All five pins are stable releases at least 6 weeks old as of 2026-05-11.
@@ -48,7 +48,7 @@ require (
 //   google.golang.org/grpc   v1.82.1 — 2026-07-15  (GO-2026-6061, reachable)
 //   github.com/yuin/goldmark v1.7.17 — 2026-03-19  (GO-2026-5320, reachable via
 //     glamour's renderer; indirect — bumped with `go get`, glamour unchanged)
-//   golang.org/x/net v0.57.0, x/text v0.40.0, x/crypto v0.54.0 — 2026-07-08
+//   golang.org/x/net v0.57.0, x/text v0.40.0 — 2026-07-08
 replace koto-protocol => ../protocol
 
 require (

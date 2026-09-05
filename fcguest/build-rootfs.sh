@@ -52,7 +52,7 @@ if [ "$("$CONTAINER" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" =
 else
   CHOWN_TO="$(id -u):$(id -g)"
 fi
-GO_IMAGE="${GO_IMAGE:-docker.io/library/golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59}"
+GO_IMAGE="${GO_IMAGE:-docker.io/library/golang@sha256:6e5de3f5b9fb7e30b8bb2ffe8dcbcbdaa2990f0f31267456eabe83f870a623be}"
 
 echo "==> building fc-agent (static)  [$(basename "$CONTAINER")]"
 mkdir -p "$HERE/.gocache/mod"
