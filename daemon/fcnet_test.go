@@ -28,9 +28,15 @@ func TestFcDstAllowed(t *testing.T) {
 		{"::1", false, false, false},             // v6 loopback
 		{"fe80::1", false, false, false},         // v6 link-local
 		{"224.0.0.251", false, false, false},     // mDNS — link-local multicast = ctl
-		// gw subnet — always allowed (guest↔gateway; DNS at .1)
+		{"0.0.0.0", false, false, false},         // unspecified: a local connect (audit H2)
+		{"::", false, false, false},              // v6 unspecified
+		{"::ffff:0.0.0.0", false, false, false},  // v4-mapped unspecified
+		// gw — only the gateway's own address (DNS at .1); the rest of the
+		// /24 is real RFC1918 space the forwarder would dial on the host
+		// (audit L2), so it is LAN like any other 192.168 address.
 		{"192.168.127.1", true, true, true},
-		{"192.168.127.2", true, true, true},
+		{"192.168.127.2", false, true, true},
+		{"192.168.127.200", false, true, true},
 		// LAN — allowed only under lan|full
 		{"192.168.1.5", false, true, true},
 		{"10.0.0.7", false, true, true},

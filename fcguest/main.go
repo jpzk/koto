@@ -159,7 +159,10 @@ func earlyInit() {
 // mkfs fallback covers images created by hand or on hosts without e2fsprogs.
 func mountWorkspace() error {
 	_ = os.MkdirAll(wsDir, 0o755)
-	err := unix.Mount(wsDev, wsDir, "ext4", 0, "")
+	// nosuid,nodev: /workspace is node-writable and root-side code reads
+	// under it; a setuid binary or device node there must not be one latent
+	// bug away from mattering (audit L11).
+	err := unix.Mount(wsDev, wsDir, "ext4", unix.MS_NOSUID|unix.MS_NODEV, "")
 	if err != nil {
 		logf("mount %s: %v — trying mkfs.ext4", wsDev, err)
 		if out, merr := exec.Command("mkfs.ext4", "-F", "-q", wsDev).CombinedOutput(); merr != nil {

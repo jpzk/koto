@@ -41,7 +41,7 @@ var defaultServerSANs = []string{"DNS:koto-daemon", "DNS:localhost", "IP:127.0.0
 // cert, and seeds acl.json with the same agent role the Makefile seeds.
 // Idempotent: an existing CA is reused, an existing valid server cert kept.
 func pkiInit(credsDir string, serverSANs []string) error {
-	if err := os.MkdirAll(credsDir, 0o755); err != nil {
+	if err := os.MkdirAll(credsDir, 0o750); err != nil { // the installer's mode (audit I4)
 		return err
 	}
 	if len(serverSANs) == 0 {

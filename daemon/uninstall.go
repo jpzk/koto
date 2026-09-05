@@ -248,8 +248,19 @@ func purgeRefusal(dir string) string {
 	if dir == "/" || filepath.Dir(dir) == dir {
 		return "that is the filesystem root"
 	}
-	if home, err := os.UserHomeDir(); err == nil && filepath.Clean(home) == dir {
-		return "that is your home directory"
+	if home, err := os.UserHomeDir(); err == nil {
+		// Resolve both sides: a symlinked home compared lexically is a miss
+		// (audit L10).
+		rh, rd := home, dir
+		if r, err := filepath.EvalSymlinks(home); err == nil {
+			rh = r
+		}
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			rd = r
+		}
+		if filepath.Clean(rh) == filepath.Clean(rd) || filepath.Clean(home) == dir {
+			return "that is your home directory"
+		}
 	}
 	// A clone is not a state dir. They have the same subdirectories by
 	// design (that is the whole KOTO_HOME trick), so "looks like koto" alone
@@ -259,6 +270,12 @@ func purgeRefusal(dir string) string {
 	}
 	// Last: it must actually look like one. An empty or unrelated directory
 	// means -state named the wrong place, and deleting it would be silent.
+	// Last: it must actually look like one. An empty or unrelated directory
+	// means -state named the wrong place, and deleting it would be silent.
+	// Any ONE marker is enough, deliberately: the stamp is written at the
+	// END of `koto install`, so a half-installed system has only some of
+	// these, and refusing to clean it up would strand it (the 2026-09-04
+	// audit's L10 asks for the stamp alone; that trade is the operator's).
 	for _, marker := range []string{".koto-version", "groups", "creds", "fcassets", "groups.json"} {
 		if exists(filepath.Join(dir, marker)) {
 			return ""

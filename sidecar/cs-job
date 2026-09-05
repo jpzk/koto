@@ -105,6 +105,9 @@ case "$cmd" in
     id=${1:?}; D=$JOBS/$id
     rc=$(cat "$D/rc" 2>/dev/null || echo '?')
     sess=$(cat "$D/session" 2>/dev/null || echo '')
+    # The value lands inside a JSON string; anything outside the session
+    # charset would forge fields (audit L11) — drop it to the default session.
+    case "$sess" in *[!A-Za-z0-9_-]*) sess='' ;; esac
     total=$(wc -c < "$D/out" 2>/dev/null | tr -d ' '); [ -n "$total" ] || total=0
     # base64 of the last 1500 bytes, newlines stripped so it's one JSON line.
     b64=$(tail -c 1500 "$D/out" 2>/dev/null | base64 | tr -d '\n')

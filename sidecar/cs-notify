@@ -15,6 +15,7 @@ set -u
 sev=normal
 if [ "${1:-}" = "-s" ]; then
   sev=${2:?severity value required after -s}
+  case "$sev" in normal|high) ;; *) echo "cs-notify: severity must be normal or high" >&2; exit 2 ;; esac
   shift 2
 fi
 if [ -z "${1:-}" ] && [ -z "${2:-}" ]; then

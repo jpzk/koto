@@ -70,7 +70,19 @@ func tailBackgroundTask(g, streamPath, id, path string) {
 		// to keep the chat readable.
 		// Into the stream whose turn spawned the task, so a background job's
 		// output stays in that conversation rather than surfacing in another.
-		streamLogAppend(streamPath, []byte("[[bg]] "+id+" "+line+"\n"))
+		// Through the same limiter + ceiling the turn sink has: this is the
+		// guest's second write channel into the host filesystem, and it used
+		// to be a bare O_APPEND (audit M6) — a synthetic "Output is being
+		// written to" notice naming a fast-growing file grew the slot log
+		// bounded only by the 10-minute timer, re-armable at will.
+		b := []byte("[[bg]] " + id + " " + line + "\n")
+		if d := fcLogSinkWait(g, len(b)); d > 0 {
+			time.Sleep(d)
+		}
+		if err := logSinkAppend(streamPath, b); err != nil {
+			emitLogfG("send", g, "warn", "[%s] bg-tail %s: %v", g, id, err)
+			return
+		}
 	}
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }

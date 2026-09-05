@@ -80,6 +80,12 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	if msg == "" {
 		return scheduleItem{}, fmt.Errorf("msg is required")
 	}
+	if len(msg) > schedMaxMsg {
+		return scheduleItem{}, fmt.Errorf("msg too long (%d bytes; max %d)", len(msg), schedMaxMsg)
+	}
+	if n := countSched(group); n >= schedMaxPerGroup {
+		return scheduleItem{}, fmt.Errorf("schedule cap reached for %s (%d)", group, schedMaxPerGroup)
+	}
 	p, err := parseCron(cronExpr)
 	if err != nil {
 		return scheduleItem{}, err
@@ -105,6 +111,27 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	schedLock.Unlock()
 	emitLogfG("sched", group, "info", "add id=%s group=%s cron=%q next=%s", it.ID, group, cronExpr, nx.Format(time.RFC3339))
 	return it, nil
+}
+
+// Bounds on the schedule store (audit M5): every add rewrites
+// schedules.json and every minute walks the whole list, so an unbounded
+// count from a guest's sched_add loop is disk growth plus an O(N) cron tick
+// plus a permanently full queue. The ctlMaxSpawn pattern, per group.
+const (
+	schedMaxPerGroup = 100
+	schedMaxMsg      = 16 << 10
+)
+
+func countSched(group string) int {
+	schedLock.Lock()
+	defer schedLock.Unlock()
+	n := 0
+	for _, it := range sched {
+		if it.Group == group {
+			n++
+		}
+	}
+	return n
 }
 
 func listSched(filter string) []scheduleItem {

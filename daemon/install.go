@@ -26,9 +26,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -134,13 +138,66 @@ func requireArtifacts(root string) error {
 		}
 	}
 	if len(missing) == 0 {
-		return nil
+		// Present is not enough once a release exists: `make fetch` leaves
+		// a failed download in the tree, and install used to copy whatever
+		// was there to /usr/local/bin as root (audit M12). Existence-only
+		// until the manifest has entries, since a locally built kernel and
+		// rootfs do not reproduce and there is nothing to hold them to.
+		return verifyArtifacts(root)
 	}
 	return fmt.Errorf("missing artifact(s): %s\n"+
 		"  install integrates artifacts, it does not produce them — acquire them first:\n"+
 		"    make fetch      download them (minutes)\n"+
 		"    make build      build them yourself (~40 min cold)",
 		strings.Join(missing, ", "))
+}
+
+// verifyArtifacts checks the daemon and TUI binaries against dist/
+// artifacts.sha256 when it lists them. Only those two are held to the
+// manifest: they are the reproducible artifacts (CGO_ENABLED=0, -trimpath,
+// digest-pinned image) and the ones installed root-owned onto PATH; the
+// kernel and rootfs embed build timestamps and are documented as
+// non-reproducing (Makefile, `verify`).
+func verifyArtifacts(root string) error {
+	b, err := os.ReadFile(filepath.Join(root, "dist", "artifacts.sha256"))
+	if err != nil {
+		return nil // no manifest → nothing to hold the tree to
+	}
+	want := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && !strings.HasPrefix(f[0], "#") {
+			want[strings.TrimPrefix(f[1], "*")] = strings.ToLower(f[0])
+		}
+	}
+	for _, a := range []string{"koto", "koto-tui"} {
+		sum, ok := want[a]
+		if !ok {
+			continue
+		}
+		got, err := fileSHA256(filepath.Join(root, a))
+		if err != nil {
+			return err
+		}
+		if got != sum {
+			return fmt.Errorf("%s does not match dist/artifacts.sha256 (got %s…, manifest %s…)\n"+
+				"  refusing to install it — re-run `make fetch` (or `make build`) and check `make verify`", a, got[:12], sum[:12])
+		}
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func runInstall(o installOpts) error {
@@ -208,7 +265,10 @@ func runInstall(o installOpts) error {
 	}
 
 	// 4. the unit
-	unit := renderUnit(me, claude)
+	// From o.stateDir, not $KOTO_HOME: a `make dev` shell exports KOTO_HOME
+	// to the clone's .dev/, and the unit used to render its sandbox from
+	// that while koto.env named /var/lib/koto (audit L8).
+	unit := renderUnit(me, o.stateDir, claude)
 	changed, err := sudoWriteIfChanged(u, unitPath, unit, "0644")
 	if err != nil {
 		return err
@@ -256,15 +316,41 @@ func runInstall(o installOpts) error {
 	return nil
 }
 
+// stateDirTrusted says whether an existing state dir may be used: a real
+// directory (not a symlink), owned by the invoking user, with no group or
+// other write bit.
+func stateDirTrusted(fi os.FileInfo, me *user.User) error {
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("is a symlink")
+	}
+	if !fi.IsDir() {
+		return errors.New("is not a directory")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if fmt.Sprint(st.Uid) != me.Uid {
+			return fmt.Errorf("is owned by uid %d, not you (%s)", st.Uid, me.Uid)
+		}
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("is writable by group/other (mode %04o)", fi.Mode().Perm())
+	}
+	return nil
+}
+
 // seedStateDir creates the state tree and fills it from the clone: creds and
 // fcassets are moved in (or built there), prompts are copied with a .dist
 // marker so a later upgrade can tell an edited prompt from an untouched one.
 func seedStateDir(o installOpts, me *user.User) error {
 	u := o.ui
-	if _, err := os.Stat(o.stateDir); err != nil {
+	if fi, err := os.Lstat(o.stateDir); err != nil {
 		if err := sudoRun(u, "install", "-d", "-o", me.Uid, "-g", me.Gid, "-m", "0750", o.stateDir); err != nil {
 			return fmt.Errorf("create %s: %w", o.stateDir, err)
 		}
+	} else if err := stateDirTrusted(fi, me); err != nil {
+		// The wizard mints the CA key, the admin token and the OAuth
+		// credentials into this tree; a pre-created one under /tmp or a
+		// symlink is another user's directory wearing the name (audit L9).
+		return fmt.Errorf("%s: %v — remove it or choose another -state", o.stateDir, err)
 	}
 	for _, d := range []string{"groups", "creds", "fcassets", "prompts", "run"} {
 		if err := os.MkdirAll(filepath.Join(o.stateDir, d), 0o750); err != nil {
@@ -482,9 +568,12 @@ func writeEnvFile(o installOpts, claude string) error {
 		// find it and ProtectHome may hide it (claudebin.go).
 		{claudeBinEnv, claude},
 	}
-	if key, err := os.ReadFile(filepath.Join(o.stateDir, "creds", "anthropic-api-key")); err == nil {
-		optional[2][1] = strings.TrimSpace(string(key))
-	}
+	// ANTHROPIC_API_KEY is deliberately NOT seeded from <state>/creds: the
+	// proxy already reads that file per request (currentAPIKey), and a copy
+	// folded in here outlived the key's revocation — `koto claude-login`
+	// renames the creds-dir key aside but cannot touch koto.env, and the env
+	// value outranks everything (audit L7). An operator-set value is still
+	// preserved below like every other key.
 
 	existing := readEnvFile()
 
@@ -534,7 +623,7 @@ func podmanPath() string {
 // than using systemd specifiers, so `systemctl cat koto` shows the operator
 // exactly what will run. claude is the CLI path recorded in koto.env ("" for
 // none); it decides how the unit scopes /home (installHomeScoping).
-func renderUnit(me *user.User, claude string) string {
+func renderUnit(me *user.User, stateDir, claude string) string {
 	gid := me.Gid
 	if g, err := user.LookupGroupId(me.Gid); err == nil {
 		gid = g.Name
@@ -594,7 +683,7 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, me.Username, me.Uid, gid, envFilePath, stateDirOf(), installCPUQuota(), installHomeScoping(claude))
+`, me.Username, me.Uid, gid, envFilePath, stateDir, installCPUQuota(), installHomeScoping(claude))
 }
 
 // installHomeScoping renders the unit's view of /home. The default is
@@ -659,16 +748,16 @@ func sudoWriteIfChanged(u *setupUI, path, content, mode string) (bool, error) {
 		u.info("%s unchanged", path)
 		return false, nil
 	}
-	u.info("%s", u.dim("$ sudo tee "+path))
-	cmd := exec.Command("sudo", "tee", path)
+	// install(1) reading stdin creates the file with the final mode in one
+	// step; `tee` then `chmod` left koto.env — which can hold an API key —
+	// world-readable for a moment under root's umask (audit L7).
+	u.info("%s", u.dim("$ sudo install -m "+mode+" /dev/stdin "+path))
+	cmd := exec.Command("sudo", "install", "-m", mode, "/dev/stdin", path)
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Stdout = nil
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := sudoRun(u, "chmod", mode, path); err != nil {
-		return false, err
 	}
 	return true, nil
 }
@@ -735,6 +824,9 @@ func mergeClientsAllow(src, dst string) error {
 			if fp := strings.ToLower(fields[0]); !seen[fp] {
 				seen[fp] = true
 				out = append(out, strings.TrimSpace(line))
+				if path == src {
+					fmt.Fprintf(os.Stderr, "  + client cert %s… from the clone's clients.allow\n", fp[:min(12, len(fp))])
+				}
 			}
 		}
 	}
@@ -775,6 +867,10 @@ func mergeTokens(src, dst string) error {
 		if _, ok := into[name]; !ok {
 			into[name] = entry
 			added = true
+			// Out loud: an additive merge on upgrade resurrects an identity
+			// the operator revoked in the installed registry but not in
+			// the clone (audit L10). Naming it is the least this can do.
+			fmt.Fprintf(os.Stderr, "  + client identity %q from the clone's tokens.json (revoke in %s if unwanted)\n", name, dst)
 		}
 	}
 	if !added {

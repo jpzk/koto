@@ -45,7 +45,8 @@ func truncateRunes(s string, max int) string {
 
 const (
 	ctlMainGroup = "main"
-	ctlMaxSpawn  = 100 // cap of total registered groups; rejects further spawns from ctl
+	ctlMaxSpawn  = 100     // cap of total registered groups; rejects further spawns from ctl
+	ctlMaxJobOut = 8 << 10 // job_done output tail kept per job (cs-job itself sends ~1500 B)
 
 	// Byte caps for the `notify` verb's decoded fields. Truncated, not
 	// rejected — a clipped notification beats an errored one.
@@ -330,6 +331,12 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		_ = json.Unmarshal(line, &req)
 		out, _ := base64.StdEncoding.DecodeString(req.Out)
+		// cs-job sends the last ~1500 bytes; anything past a few KB is a
+		// guest trying to park memory in the daemon (audit M4). Truncate,
+		// keeping the tail — the end of a job's output is the informative part.
+		if len(out) > ctlMaxJobOut {
+			out = out[len(out)-ctlMaxJobOut:]
+		}
 		sess, serr := normalizeSession(req.Session)
 		if serr != nil {
 			sess = "" // malformed attribution → default session, never an error

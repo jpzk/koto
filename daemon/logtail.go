@@ -255,6 +255,9 @@ func logPaths(g string) []string {
 	return out
 }
 
+// tailMaxPartial caps the tailer's partial-line buffer (audit L5).
+const tailMaxPartial = 8 << 20
+
 func tailLog(g string) { tailFile(g, groupLogPath(g), true) }
 
 // tailFile tails one stream. isGroup marks the group stream, which is the only
@@ -335,6 +338,13 @@ func tailFile(g, p string, isGroup bool) {
 			j := strings.IndexByte(chunk[i:], '\n')
 			if j < 0 {
 				buf += chunk[i:]
+				if len(buf) > tailMaxPartial {
+					// A newline-free stream is not a line; it is a buffer
+					// that grows to the 1 GiB file ceiling (audit L5).
+					// Keep the tail so a real line that eventually ends
+					// still parses.
+					buf = buf[len(buf)-tailMaxPartial/2:]
+				}
 				break
 			}
 			buf += chunk[i : i+j]

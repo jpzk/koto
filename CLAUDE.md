@@ -937,11 +937,7 @@ the TUI its own least-privilege role instead of `admin`, mounting only the four
 files it needs (`ca.crt`, `client-tui.crt`, `client-tui.key`, `token-tui`)
 rather than all of `creds/`, and binding the proxy to loopback (see below).
 
-**The proxy is NOT loopback-bound.** `daemon.go` defaults `BIND` to
-`127.0.0.1`, but `host/Dockerfile` sets `ENV BIND=0.0.0.0` and nothing
-overrides it, so every per-group credential-injecting proxy port listens on all
-interfaces inside `cs_host` and is reachable from anything on `koto-net`,
-`cs_tui` included. Any doc that says otherwise is wrong.
+**The proxy IS loopback-bound.** `KOTO_BIND` defaults to `127.0.0.1` and nothing overrides it (the `host/Dockerfile` that set `BIND=0.0.0.0` is gone with the container runtime). What that leaves is a LOCAL-uid problem, not a network one: every per-group proxy port on loopback is unauthenticated TCP, so any process on the host can obtain credentialed LLM access as that group, and — for a networked group — a forward proxy (audit 2026-09-04, M1; open, a design decision between unix-socket listeners and a per-group bearer).
 
 ## Trust model addendum: installed mode
 

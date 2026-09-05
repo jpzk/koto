@@ -38,6 +38,7 @@ func fcHarness(t *testing.T) {
 // grammar, and a guest text line that looks like a marker is escaped.
 func TestFcTurnSink(t *testing.T) {
 	fcHarness(t)
+	fcExpectTurn("tg", 2) // the daemon handed this slot out (audit L4)
 	a, b := net.Pipe()
 	done := make(chan struct{})
 	go func() { fcTurnSink("tg", b); close(done) }()

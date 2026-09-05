@@ -65,17 +65,20 @@ func toPBEvent(ev Event) *pb.Event {
 }
 
 func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
+	// Every string here is rendered by a client, and several are written by
+	// guests or by main through the ctl plane — one chokepoint, as
+	// sanitizeEvent already is for the event stream (audit M9b).
 	out := &pb.GroupInfo{
 		Port:      int32(gi.Port),
 		Running:   gi.Running,
-		Provider:  gi.Provider,
-		Model:     gi.Model,
-		Effort:    gi.Effort,
+		Provider:  sanitize(gi.Provider),
+		Model:     sanitize(gi.Model),
+		Effort:    sanitize(gi.Effort),
 		Stalled:   gi.Stalled,
 		Queued:    int32(gi.Queued),
-		Sessions:  gi.Sessions,
+		Sessions:  sanitizeAll(gi.Sessions),
 		TokPerSec: gi.TokPerSec,
-		Network:   gi.Network,
+		Network:   sanitize(gi.Network),
 		Root:      gi.Root,
 	}
 	for _, j := range gi.Jobs {
@@ -84,10 +87,54 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 	return out
 }
 
+// sanitizeAll sanitizes every string of a slice (session names, etc).
+func sanitizeAll(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = sanitize(s)
+	}
+	return out
+}
+
+// sanitizeAny sanitizes every string leaf of a decoded-JSON value (the
+// config map: model/effort are validated on write, but a config.json edited
+// on disk is not).
+func sanitizeAny(v any) any {
+	switch x := v.(type) {
+	case string:
+		return sanitize(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[sanitize(k)] = sanitizeAny(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = sanitizeAny(e)
+		}
+		return out
+	}
+	return v
+}
+
+// sanitizeConfig is sanitizeAny for the config map's concrete type.
+func sanitizeConfig(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out, _ := sanitizeAny(m).(map[string]any)
+	return out
+}
+
 func toPBJobInfo(j JobInfo) *pb.JobInfo {
 	return &pb.JobInfo{
-		Id: j.ID, Session: j.Session, Status: j.Status, Rc: j.RC,
-		Cmd: j.Cmd, Started: j.Started, OutSize: j.OutSize, Group: j.Group,
+		Id: sanitize(j.ID), Session: sanitize(j.Session), Status: sanitize(j.Status), Rc: sanitize(j.RC),
+		Cmd: sanitize(j.Cmd), Started: j.Started, OutSize: j.OutSize, Group: j.Group,
 	}
 }
 
@@ -95,16 +142,16 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 	return &pb.GoalItem{
 		Id:            it.ID,
 		Group:         it.Group,
-		Name:          it.Name,
-		Text:          it.Text,
-		Criteria:      it.Criteria,
+		Name:          sanitize(it.Name),
+		Text:          sanitize(it.Text),
+		Criteria:      sanitize(it.Criteria),
 		Plan:          it.Plan,
-		Status:        it.Status,
+		Status:        sanitize(it.Status),
 		Iteration:     int32(it.Iteration),
 		MaxIterations: int32(it.MaxIterations),
-		LastFeedback:  it.LastFeedback,
-		DoneNote:      it.DoneNote,
-		PausedReason:  it.PausedReason,
+		LastFeedback:  sanitize(it.LastFeedback), // guest-written (goal_verdict)
+		DoneNote:      sanitize(it.DoneNote),     // guest-written (goal_done)
+		PausedReason:  sanitize(it.PausedReason),
 		CreatedAt:     it.CreatedAt,
 		UpdatedAt:     it.UpdatedAt,
 		CompletedAt:   it.CompletedAt,
@@ -115,8 +162,8 @@ func toPBScheduleItem(it scheduleItem) *pb.ScheduleItem {
 	return &pb.ScheduleItem{
 		Id:          it.ID,
 		Group:       it.Group,
-		Cron:        it.Cron,
-		Msg:         it.Msg,
+		Cron:        sanitize(it.Cron),
+		Msg:         sanitize(it.Msg), // guest-written (sched_add)
 		Enabled:     it.Enabled,
 		CreatedAt:   it.CreatedAt,
 		LastFiredAt: it.LastFiredAt,
@@ -332,7 +379,7 @@ func (s *kotoServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp,
 		return &pb.ConfigResp{Error: "invalid group name"}, nil
 	}
 	resp := configCmd(fromPBConfigReq(r))
-	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(resp.Config)}, nil
+	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(sanitizeConfig(resp.Config))}, nil
 }
 
 func (s *kotoServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
@@ -547,21 +594,49 @@ func (s *kotoServer) SchedList(_ context.Context, r *pb.SchedListReq) (*pb.Sched
 	return &pb.SchedListResp{Ok: true, Schedules: out}, nil
 }
 
-func (s *kotoServer) SchedDel(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+// schedTargetCheck re-runs the ACL target check for a schedule addressed by
+// id: SchedIDReq/SchedToggleReq carry no group, so the interceptor could only
+// check the verb, and a role scoped to one group could fire, disable or delete
+// any group's schedules by id (audit L1). The ctl plane has ownsSched; this
+// is its gRPC twin. An unknown id passes so the handler's own "no schedule"
+// error is what the caller sees.
+func schedTargetCheck(ctx context.Context, verb, id string) error {
+	for _, it := range listSched("") {
+		if it.ID == id {
+			ident, err := authFromCtx(ctx)
+			if err != nil {
+				return err
+			}
+			return aclCheck(ctx, ident, verb, &pb.SchedAddReq{Group: it.Group})
+		}
+	}
+	return nil
+}
+
+func (s *kotoServer) SchedDel(ctx context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+	if err := schedTargetCheck(ctx, "sched_del", r.Id); err != nil {
+		return nil, err
+	}
 	if err := delSched(r.Id); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *kotoServer) SchedToggle(_ context.Context, r *pb.SchedToggleReq) (*pb.BaseResp, error) {
+func (s *kotoServer) SchedToggle(ctx context.Context, r *pb.SchedToggleReq) (*pb.BaseResp, error) {
+	if err := schedTargetCheck(ctx, "sched_toggle", r.Id); err != nil {
+		return nil, err
+	}
 	if _, err := toggleSched(r.Id, r.Enabled); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *kotoServer) SchedRun(_ context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+func (s *kotoServer) SchedRun(ctx context.Context, r *pb.SchedIDReq) (*pb.BaseResp, error) {
+	if err := schedTargetCheck(ctx, "sched_run", r.Id); err != nil {
+		return nil, err
+	}
 	if err := runSchedNow(r.Id); err != nil {
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}

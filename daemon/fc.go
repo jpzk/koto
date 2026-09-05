@@ -147,6 +147,17 @@ func fcKernelPath() string { return filepath.Join(fcAssetsDir(), "vmlinux") }
 func fcRootfsPath() string { return filepath.Join(fcAssetsDir(), "rootfs.img") }
 func fcRunDir() string     { return filepath.Join(SOCK_DIR, "fc") }
 
+// fcEnsureRunDir creates run/fc owner-only. The per-VM listener sockets under
+// it are only as private as their path (audit M7); MkdirAll leaves an
+// existing dir's mode alone, and pre-2026-09-05 trees were 0755, hence the
+// explicit chmod.
+func fcEnsureRunDir() error {
+	if err := os.MkdirAll(fcRunDir(), 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(fcRunDir(), 0o700)
+}
+
 // fcSockDir holds this group's vsock sockets in a dedicated directory so the
 // jailer can bind-mount exactly this VM's sockets (and nothing else) into its
 // chroot. fcUDS is the hybrid-vsock base path inside it: the daemon listens on
@@ -299,7 +310,7 @@ func fcEnsureWorkspaceImg(g string) error {
 		// shrink — that would risk workspace data.
 		return fcGrowWorkspaceImg(g, img, fi.Size(), target)
 	}
-	if err := os.MkdirAll(fcRunDir(), 0o755); err != nil {
+	if err := fcEnsureRunDir(); err != nil {
 		return err
 	}
 	tmpImg := filepath.Join(fcRunDir(), g+".ws.tmp")
@@ -504,7 +515,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if err := fcPreflight(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(fcRunDir(), 0o755); err != nil {
+	if err := fcEnsureRunDir(); err != nil {
 		return err
 	}
 	if err := fcEnsureWorkspaceImg(g); err != nil {
@@ -1070,7 +1081,34 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 // newer than the last synced watermark rides along in the envelope and the
 // agent untars it into the guest workspace before the FIFO write. The
 // watermark is a host file so a daemon restart doesn't re-push history.
+// fcExpectedTurns is the set of (group, slot) pairs with a turn handed to the
+// guest whose stream has not been opened yet. fcTurnSink consumes an entry
+// when the matching TurnOpen arrives and refuses one with no entry: the guest
+// used to choose TurnOpen.slot freely within [0, groupSlots), so it could
+// write TurnEnd into a sibling session's in-flight stream (audit L4). A turn
+// that never opens leaves its entry until the next send on that slot
+// overwrites it — harmless, the slot is the daemon's to reissue.
+var (
+	fcExpectedMu    sync.Mutex
+	fcExpectedTurns = map[string]bool{}
+)
+
+func fcExpectTurn(g string, slot int) {
+	fcExpectedMu.Lock()
+	fcExpectedTurns[slotKey(g, slot)] = true
+	fcExpectedMu.Unlock()
+}
+func fcConsumeExpectedTurn(g string, slot int) bool {
+	fcExpectedMu.Lock()
+	defer fcExpectedMu.Unlock()
+	k := slotKey(g, slot)
+	ok := fcExpectedTurns[k]
+	delete(fcExpectedTurns, k)
+	return ok
+}
+
 func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte) error {
+	fcExpectTurn(g, slot)
 	m := &pb.MsgReq{
 		Msg:          []byte(msg),
 		SystemPrompt: []byte(systemPrompt),
@@ -1095,6 +1133,12 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	_, err := fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Msg{Msg: m}}, 30*time.Second)
 	if err == nil && !newWM.IsZero() {
 		_ = os.WriteFile(fcUploadsWM(g), []byte(fmt.Sprintf("%d\n", newWM.UnixNano())), 0o644)
+		// The guest has its copy now (untarred into /workspace before the
+		// turn); the host copy has no further reader and used to accumulate
+		// for the group's lifetime (audit M10).
+		for _, f := range files {
+			_ = os.Remove(filepath.Join(vol(g), ".cs", "uploads", f))
+		}
 	}
 	return err
 }

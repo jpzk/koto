@@ -20,9 +20,27 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"koto-protocol/pb"
 )
+
+// fcMarkerMaxBody bounds the inline body of a [[tool]] marker. A tool frame
+// may be 16 MiB (fcFrameMaxGuest) and became one 16 MiB log LINE, held whole
+// by every tailer (audit L5); nothing renders past a few KB of it anyway.
+const fcMarkerMaxBody = 64 << 10
+
+// truncateBytes cuts s to at most n bytes on a rune boundary, marking the cut.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
+}
 
 // fcTurnSink serves one turn-stream connection.
 func fcTurnSink(g string, c net.Conn) {
@@ -40,6 +58,12 @@ func fcTurnSink(g string, c net.Conn) {
 		return
 	}
 	slot := int(open.Slot)
+	if !fcConsumeExpectedTurn(g, slot) {
+		// The daemon told the guest its slot in MsgReq.Slot; a stream for a
+		// slot no turn was handed out on is the guest choosing (audit L4).
+		emitLogfG("fc", g, "warn", "[%s] turn stream opened on slot %d with no outstanding turn — refused", g, slot)
+		return
+	}
 	ensureSlotTail(g, slot)
 	w := newTurnWriter(g, slotLogPath(g, slot))
 	for {
@@ -93,7 +117,7 @@ func (w *turnWriter) frame(f *pb.TurnFrame) bool {
 		if len(name) > 0 {
 			n = name[0]
 		}
-		in := flattenInline(k.Tool.Input)
+		in := truncateBytes(flattenInline(k.Tool.Input), fcMarkerMaxBody)
 		if in == "" {
 			in = "{}"
 		}

@@ -391,8 +391,11 @@ func checkNetwork() checkResult {
 	c := &http.Client{Timeout: 5 * time.Second}
 	resp, err := c.Head("https://github.com")
 	if err != nil {
-		return failCheck("network", errText(err),
-			"The build downloads the Firecracker release, the guest kernel source and\nnpm packages. An offline install is not supported.")
+		// A warning, not a gate (audit I4): `make fetch`/`make build` are the
+		// stages that need the network, and they fail loudly on their own;
+		// integrating already-acquired artifacts offline is legitimate.
+		return warnCheck("network", errText(err),
+			"The build stage downloads the Firecracker release, the guest kernel source and\nnpm packages; with the artifacts already present, install works offline.")
 	}
 	resp.Body.Close()
 	return okCheck("network", "reachable")

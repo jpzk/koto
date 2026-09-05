@@ -69,12 +69,39 @@ func uploadsDir(g string) (string, error) {
 // timestamped name and returns the path RELATIVE to the workspace root (so the
 // reference embedded in the message resolves to /workspace/.cs/uploads/... from
 // the sidecar's point of view).
+// maxUploadsPending caps the bytes waiting in a group's host-side uploads/
+// between Sends (audit M10).
+const maxUploadsPending = 64 << 20
+
+// dirBytes sums the regular files directly under dir (0 when absent).
+func dirBytes(dir string) int64 {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var n int64
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+			n += fi.Size()
+		}
+	}
+	return n
+}
+
 func saveImage(g string, data []byte, mime string) (string, error) {
 	if len(data) > maxImageBytes {
 		return "", fmt.Errorf("image too large (%d bytes; max %d)", len(data), maxImageBytes)
 	}
-	if _, err := uploadsDir(g); err != nil {
+	dir, err := uploadsDir(g)
+	if err != nil {
 		return "", err
+	}
+	// Pending (not yet delivered) uploads are bounded per group: every Send
+	// with an image costs host disk before the queue applies any
+	// backpressure, and host disk exhaustion is the fleet-wide failure
+	// (audit M10). Delivered uploads are removed by fcSendMsg.
+	if used := dirBytes(dir); used+int64(len(data)) > maxUploadsPending {
+		return "", fmt.Errorf("too many pending uploads for %s (%d bytes waiting; max %d) — send a turn first", g, used, maxUploadsPending)
 	}
 	name := fmt.Sprintf("img-%d%s", time.Now().UnixNano(), imageExt(mime))
 	rel := filepath.Join(".cs", "uploads", name)

@@ -198,23 +198,36 @@ fetch:
 	@command -v curl >/dev/null || { echo "curl is required to fetch artifacts"; exit 1; }
 	@command -v zstd >/dev/null || { echo "zstd is required to unpack rootfs.img.zst"; exit 1; }
 	@mkdir -p $(FCASSETS)
-	@base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
-	echo "==> fetching koto $(DIST_VERSION) from $$base"; \
+	@# Fail-CLOSED (audit M12): everything lands in a staging dir and is
+	@# verified THERE; only a clean manifest check moves the five files into
+	@# the tree. A failed download used to leave executables behind for the
+	@# next `make install` to copy to /usr/local/bin as root. --proto pins
+	@# https on the request and on every redirect (curl's default lets a
+	@# redirect downgrade to http).
+	@stage=$$(mktemp -d .fetch.XXXXXX) && trap 'rm -rf "$$stage"' EXIT && \
+	base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
+	echo "==> fetching koto $(DIST_VERSION) from $$base (staging in $$stage)"; \
+	mkdir -p "$$stage/fcassets"; \
 	for pair in koto:koto koto-tui:koto-tui \
-	            firecracker:$(FCASSETS)/firecracker vmlinux:$(FCASSETS)/vmlinux; do \
+	            firecracker:fcassets/firecracker vmlinux:fcassets/vmlinux; do \
 	  name=$${pair%%:*}; dest=$${pair#*:}; \
 	  echo "    $$name -> $$dest"; \
-	  curl -fsSL --retry 3 -o "$$dest.part" "$$base/$$name" || { \
-	    rm -f "$$dest.part"; echo "failed to fetch $$name from $$base"; exit 1; }; \
-	  mv "$$dest.part" "$$dest"; \
+	  curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/$$dest" "$$base/$$name" || { \
+	    echo "failed to fetch $$name from $$base"; exit 1; }; \
 	done; \
-	echo "    rootfs.img.zst -> $(FCASSETS)/rootfs.img (decompressing)"; \
-	curl -fsSL --retry 3 -o "$(FCASSETS)/rootfs.img.zst" "$$base/rootfs.img.zst" || { \
-	  rm -f "$(FCASSETS)/rootfs.img.zst"; echo "failed to fetch rootfs.img.zst from $$base"; exit 1; }; \
-	zstd -qdf --sparse "$(FCASSETS)/rootfs.img.zst" -o "$(FCASSETS)/rootfs.img" || exit 1; \
-	rm -f "$(FCASSETS)/rootfs.img.zst"
-	@chmod +x koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux
-	@$(MAKE) --no-print-directory verify
+	echo "    rootfs.img.zst -> fcassets/rootfs.img (decompressing)"; \
+	curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/rootfs.img.zst" "$$base/rootfs.img.zst" || { \
+	  echo "failed to fetch rootfs.img.zst from $$base"; exit 1; }; \
+	zstd -qdf --sparse "$$stage/rootfs.img.zst" -o "$$stage/fcassets/rootfs.img" || exit 1; \
+	rm -f "$$stage/rootfs.img.zst"; \
+	chmod +x "$$stage/koto" "$$stage/koto-tui" "$$stage/fcassets/firecracker" "$$stage/fcassets/vmlinux"; \
+	echo "==> verifying in $$stage"; \
+	( cd "$$stage" && sha256sum -c "$(CURDIR)/$(MANIFEST)" ) || { \
+	  echo "!! checksum mismatch — nothing was installed into the tree"; exit 1; }; \
+	for f in koto koto-tui fcassets/firecracker fcassets/vmlinux fcassets/rootfs.img; do \
+	  mv -f "$$stage/$$f" "$$f"; \
+	done
+	@echo "verified: $(ARTIFACTS)"
 	@echo "next:  make install"
 
 # --- verify -----------------------------------------------------------------
@@ -241,6 +254,12 @@ verify:
 
 # Guard for targets that consume the artifacts without producing them.
 require-artifacts:
+	@# With a published manifest, present is not enough (audit M12): hold the
+	@# two reproducible binaries to it before anything installs them as root.
+	@if grep -qv '^#' $(MANIFEST) 2>/dev/null; then \
+	  grep -E ' \*?(koto|koto-tui)$$' $(MANIFEST) | sha256sum -c - || { \
+	    echo "!! koto/koto-tui do not match $(MANIFEST) — re-run make fetch or make build"; exit 1; }; \
+	fi
 	@missing=""; for a in $(ARTIFACTS); do [ -e "$$a" ] || missing="$$missing $$a"; done; \
 	if [ -n "$$missing" ]; then \
 	  echo "missing artifact(s):$$missing"; \

@@ -109,9 +109,13 @@ func fcJailFixupPerms(g string, uid int) error {
 		if e.IsDir() {
 			continue
 		}
-		// The listener sockets are owned by the daemon uid; a connect from the
-		// VM uid needs write permission on the socket inode.
-		_ = os.Chmod(filepath.Join(fcSockDir(g), e.Name()), 0o666)
+		// A connect(2) needs write permission on the socket inode. Hand the
+		// inode to the VM uid rather than opening it to everyone: 0666 let
+		// any local uid that could traverse the path connect to v_9002 — the
+		// ctl plane, authorized purely by which socket the connection
+		// arrived on, so main's socket was main's full verb set (audit M7).
+		// The daemon keeps its own access as the userns mapped-root.
+		_ = os.Chown(filepath.Join(fcSockDir(g), e.Name()), uid, uid)
 	}
 	if err := os.Chown(fcWorkspaceImg(g), uid, uid); err != nil {
 		return fmt.Errorf("jail: chown workspace: %w", err)

@@ -92,6 +92,10 @@ var fcNetSubnetNet = func() *net.IPNet {
 	return n
 }()
 
+// fcNetGatewayIPParsed is the one gateway-subnet address that is a carve-out
+// (fcClassifyDst); the rest of the /24 is LAN.
+var fcNetGatewayIPParsed = net.ParseIP(fcNetGatewayIP)
+
 // fcNetGateway builds the per-group virtual network (outbound NAT + DNS).
 //
 // Inbound published ports keep riding the existing vsock portBridge path
@@ -124,7 +128,18 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 // the connection ends. The policy is captured per link conn — i.e. fixed for
 // the VM's lifetime; a profile change applies on /restart, same as the
 // gateway attach itself. group is only for the flow log lines.
-func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, group, policy string) error {
+func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, group, policy string) (err error) {
+	// The netstack parses every frame a guest emits, inside the daemon
+	// process (audit M14). A panic on THIS goroutine — the accept/reframe
+	// path — must not take the fleet down with it; it becomes this group's
+	// gateway error and the VM loses its link. Goroutines gvisor spawns
+	// internally are outside this frame's reach; that residue is why the
+	// long-term shape is a separately jailed gateway process.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("l3 gateway: netstack panic: %v", r)
+		}
+	}()
 	return vn.AcceptQemu(ctx, fcNewEgressConn(conn, group, policy))
 }
 
@@ -158,8 +173,14 @@ var fcTailnetNet = func() *net.IPNet {
 // inside the 192.168/16 LAN range but carries guest↔gateway traffic — DNS to
 // .1 — that every networked profile needs), then LAN, else WAN.
 func fcClassifyDst(ip net.IP) fcDstClass {
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return fcDstCtl // 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
+	// The unspecified address is the control plane too: Linux delivers a
+	// connect() to 0.0.0.0 / :: LOCALLY, to whatever listens on that port on
+	// any interface — so at L7 `CONNECT 0.0.0.0:8788` reached a peer group's
+	// proxy port and every other loopback-only host service (audit H2,
+	// 2026-09-04; reproduced). The netstack itself refuses it at the frame
+	// layer, but the proxy dials from the daemon process and did not.
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fcDstCtl // 0.0.0.0, ::, 127.0.0.0/8, ::1, 169.254.0.0/16, fe80::/10
 	}
 	// cs_host's own addresses — the daemon and every group's proxy port live
 	// here (gRPC on KOTO_BIND:KOTO_PORT, proxies on 0.0.0.0:<port>,
@@ -171,7 +192,11 @@ func fcClassifyDst(ip net.IP) fcDstClass {
 			return fcDstCtl
 		}
 	}
-	if fcNetSubnetNet.Contains(ip) {
+	// Only the gateway's own address is the carve-out. The rest of the /24 is
+	// ordinary RFC1918 space that the forwarder would dial verbatim on the
+	// host — a real 192.168.127.0/24 LAN or VPN was reachable under `wan`
+	// (audit L2). DNS goes to .1, so nothing legitimate loses out.
+	if ip.Equal(fcNetGatewayIPParsed) {
 		return fcDstGW
 	}
 	// IsPrivate covers exactly RFC1918 (10/8, 172.16/12, 192.168/16) and IPv6
@@ -201,20 +226,36 @@ func fcDstAllowed(ip net.IP, policy string) bool {
 	}
 }
 
-// fcSelfIPs is the daemon/cs_host's own interface addresses, computed once.
-// Guest L3 packets to any of these are the control plane and are dropped.
+// fcSelfIPsTTL bounds how stale the self-address list may be. Interface
+// addresses change while the daemon runs — tailscale coming up after boot
+// (CGNAT, classed LAN), a VPN, a second NIC, a DHCP renewal — and the list
+// used to be a sync.Once snapshot taken at the FIRST guest frame, so anything
+// acquired later was never blocked (audit M8). net.InterfaceAddrs is a
+// netlink dump, cheap enough to refresh every few seconds; the flow-log
+// dedupe means the extra syscalls are not per packet.
+const fcSelfIPsTTL = 5 * time.Second
+
+// fcSelfIPs is the daemon/cs_host's own interface addresses, refreshed on a
+// short TTL. Guest L3 packets to any of these are the control plane and are
+// dropped. A var so tests can pin the list.
 var fcSelfIPs = func() func() []net.IP {
-	var once sync.Once
+	var mu sync.Mutex
 	var ips []net.IP
+	var at time.Time
 	return func() []net.IP {
-		once.Do(func() {
-			addrs, _ := net.InterfaceAddrs()
-			for _, a := range addrs {
-				if n, ok := a.(*net.IPNet); ok {
-					ips = append(ips, n.IP)
-				}
+		mu.Lock()
+		defer mu.Unlock()
+		if ips != nil && time.Since(at) < fcSelfIPsTTL {
+			return ips
+		}
+		addrs, _ := net.InterfaceAddrs()
+		fresh := make([]net.IP, 0, len(addrs))
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				fresh = append(fresh, n.IP)
 			}
-		})
+		}
+		ips, at = fresh, time.Now()
 		return ips
 	}
 }()
