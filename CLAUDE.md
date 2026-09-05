@@ -538,7 +538,9 @@ full control. **`RunScript` is also in `adminOnlyVerbs`**: it streams a POSIX
 script's live combined output out of a group's microVM, executed as the guest
 worker user (`node`, uid 1000, cwd `/workspace`) — direct code execution
 outside the agent loop, deliberately reserved for the operator rather than
-grantable. Mutations validate shape server-side, refuse to define/delete
+grantable. Its output is sanitized by default (`RunScriptReq.raw` opts out;
+see `chunkSanitizer`) — the operator picks the script, the guest picks the
+bytes. Mutations validate shape server-side, refuse to define/delete
 `admin`, refuse to touch a corrupt file (fix on disk instead), and write
 atomically. This governs the gRPC plane only; the
 in-guest ctl plane (ctl.go) stays hardcoded on group identity because its
@@ -1013,9 +1015,12 @@ Every gRPC RPC has a `ctl` verb. Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, streams (`metrics`, `tail`, `logs`, `watch`), `resources`
 (host-side fleet disk/mem/cpu — see below), `sched *`, and
-admin-only `acl get|set|del` + `runscript <group> <script>` (run a POSIX
-script in the group's microVM as `node`, output streamed raw to stdout,
-`"-"` = script from stdin).
+admin-only `acl get|set|del` + `runscript [-raw] <group> <script>` (run a
+POSIX script in the group's microVM as `node`, output streamed to stdout —
+SANITIZED by default like every other guest-authored byte the daemon relays,
+since the guest authors it and a `root=yes` guest can replace `/bin/sh`; `-raw`
+is the opt-in for binary output going to a file, and warns when stdout is a
+tty — audit 2026-09-04 M9a; `"-"` = script from stdin).
 ```sh
 make pki-client NAME=agent ROLE=agent          # mint a scoped identity
 KOTO_CLIENT=agent ./koto ctl list

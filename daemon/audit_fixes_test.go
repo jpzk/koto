@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -268,5 +269,49 @@ func TestProxyListenIsUnixSocket(t *testing.T) {
 	proxyUnlisten(port)
 	if _, err := os.Lstat(proxySockPath(port)); err == nil {
 		t.Fatal("unlisten should remove the socket file")
+	}
+}
+
+// M9a: RunScript output is sanitized by default, judged on whole lines so an
+// escape split across two frames cannot slip through; raw is a pass-through.
+func TestChunkSanitizer(t *testing.T) {
+	c := newChunkSanitizer(true)
+	// An OSC 52 clipboard write split mid-sequence across frames, then a
+	// line that carries legitimate SGR styling and a real newline.
+	part1 := []byte("hello \x1b]52;c;cG9")
+	part2 := []byte("3duZWQ=\x07 world\n\x1b[31mred\x1b[0m")
+	var got []byte
+	got = append(got, c.write(part1)...)
+	if len(got) != 0 {
+		t.Fatalf("partial line must be held back, got %q", got)
+	}
+	got = append(got, c.write(part2)...)
+	got = append(got, c.flush()...)
+	s := string(got)
+	if strings.Contains(s, "\x1b]52") || strings.Contains(s, "\x07") || strings.Contains(s, "cG93") {
+		t.Fatalf("OSC clipboard write survived: %q", s)
+	}
+	if !strings.Contains(s, "hello  world\n") && !strings.Contains(s, "hello world\n") {
+		t.Fatalf("text or newline lost: %q", s)
+	}
+	if !strings.Contains(s, "\x1b[31mred\x1b[0m") {
+		t.Fatalf("SGR styling should pass: %q", s)
+	}
+	// Mouse-mode switch and cursor motion dropped; text kept.
+	c2 := newChunkSanitizer(true)
+	out := string(append(c2.write([]byte("\x1b[?1000h\x1b[2Jline\n")), c2.flush()...))
+	if strings.Contains(out, "\x1b[?1000h") || strings.Contains(out, "\x1b[2J") || !strings.Contains(out, "line\n") {
+		t.Fatalf("mode/cursor escapes should drop, text stay: %q", out)
+	}
+	// raw: byte-exact pass-through, frame by frame.
+	r := newChunkSanitizer(false)
+	if string(r.write([]byte("\x1b]0;x\x07 partial"))) != "\x1b]0;x\x07 partial" || r.flush() != nil {
+		t.Fatal("raw must pass every byte through unchanged and hold nothing back")
+	}
+	// A newline-free firehose is not held forever.
+	c3 := newChunkSanitizer(true)
+	big := bytes.Repeat([]byte("x"), chunkSanitizerMaxPartial+1)
+	if len(c3.write(big)) == 0 {
+		t.Fatal("over-cap partial should be flushed")
 	}
 }

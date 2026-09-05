@@ -208,9 +208,18 @@ func (x *Event) GetTitle() string {
 }
 
 type RunScriptReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	Script        string                 `protobuf:"bytes,2,opt,name=script,proto3" json:"script,omitempty"` // passed to /bin/sh -c, cwd /workspace, as node (uid 1000)
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Group  string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Script string                 `protobuf:"bytes,2,opt,name=script,proto3" json:"script,omitempty"` // passed to /bin/sh -c, cwd /workspace, as node (uid 1000)
+	// raw = deliver the guest's bytes untouched. Default (false) sanitizes the
+	// output like every other guest-authored byte the daemon relays (JobTail,
+	// the event stream): SGR styling passes, every other escape — OSC clipboard/
+	// title writes, cursor motion, mode switches — and C0/C1 controls are
+	// dropped. The guest authors this output and may have replaced /bin/sh;
+	// an operator running any script against it must not get their terminal
+	// reprogrammed (audit 2026-09-04 M9a). Set raw only for genuinely binary
+	// output you are piping to a file.
+	Raw           bool `protobuf:"varint,3,opt,name=raw,proto3" json:"raw,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -257,6 +266,13 @@ func (x *RunScriptReq) GetScript() string {
 		return x.Script
 	}
 	return ""
+}
+
+func (x *RunScriptReq) GetRaw() bool {
+	if x != nil {
+		return x.Raw
+	}
+	return false
 }
 
 type ScriptEvent struct {
@@ -3937,10 +3953,11 @@ const file_koto_proto_rawDesc = "" +
 	"\x03seq\x18\f \x01(\x04R\x03seq\x12\x18\n" +
 	"\asession\x18\r \x01(\tR\asession\x12\x1a\n" +
 	"\bseverity\x18\x0e \x01(\tR\bseverity\x12\x14\n" +
-	"\x05title\x18\x0f \x01(\tR\x05title\"<\n" +
+	"\x05title\x18\x0f \x01(\tR\x05title\"N\n" +
 	"\fRunScriptReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x16\n" +
-	"\x06script\x18\x02 \x01(\tR\x06script\"t\n" +
+	"\x06script\x18\x02 \x01(\tR\x06script\x12\x10\n" +
+	"\x03raw\x18\x03 \x01(\bR\x03raw\"t\n" +
 	"\vScriptEvent\x12\x14\n" +
 	"\x05event\x18\x01 \x01(\tR\x05event\x12\x14\n" +
 	"\x05chunk\x18\x02 \x01(\fR\x05chunk\x12\x14\n" +

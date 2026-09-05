@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 // sanitize neutralizes terminal control/escape injection in untrusted sidecar
 // output as it crosses the daemon trust boundary into protocol Events. The
@@ -164,3 +167,51 @@ func sanitizeEvent(ev Event) Event {
 	ev.Title = sanitize(ev.Title)
 	return ev
 }
+
+// chunkSanitizer applies sanitize() to a BYTE STREAM that arrives in
+// arbitrary frames (RunScript's combined stdout+stderr). sanitize is a
+// per-string filter, so a frame boundary inside an escape sequence would let
+// the two halves through as innocent text; buffering to the newline makes
+// every sequence whole before it is judged — no legitimate escape spans a
+// newline. flush hands back whatever a stream left without a final newline.
+// With enabled=false it is a pass-through (the RunScriptReq.raw opt-in).
+type chunkSanitizer struct {
+	enabled bool
+	partial []byte
+}
+
+func newChunkSanitizer(enabled bool) *chunkSanitizer { return &chunkSanitizer{enabled: enabled} }
+
+// write returns the sanitized bytes of every COMPLETE line in chunk (plus any
+// partial line carried from before), holding back the trailing partial line.
+// A partial line is capped: a stream with no newline is not a line, and
+// holding it forever would be both unbounded and invisible to the operator.
+func (c *chunkSanitizer) write(chunk []byte) []byte {
+	if !c.enabled {
+		return chunk
+	}
+	c.partial = append(c.partial, chunk...)
+	i := bytes.LastIndexByte(c.partial, '\n')
+	if i < 0 {
+		if len(c.partial) > chunkSanitizerMaxPartial {
+			out := []byte(sanitize(string(c.partial)))
+			c.partial = c.partial[:0]
+			return out
+		}
+		return nil
+	}
+	out := []byte(sanitize(string(c.partial[:i+1])))
+	c.partial = append(c.partial[:0], c.partial[i+1:]...)
+	return out
+}
+
+func (c *chunkSanitizer) flush() []byte {
+	if !c.enabled || len(c.partial) == 0 {
+		return nil
+	}
+	out := []byte(sanitize(string(c.partial)))
+	c.partial = nil
+	return out
+}
+
+const chunkSanitizerMaxPartial = 64 << 10
