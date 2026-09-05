@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: hooks secrets-scan build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -543,6 +543,49 @@ ctl-build: koto
 
 metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl
+
+# --- secrets: a per-commit gate and a whole-history sweep -------------------
+# Both scanners run from digest-pinned images (≥6 weeks old, like every
+# dependency here): betterleaks v1.7.0 (2026-07-23 — gitleaks' author's
+# successor project, drop-in flags/config; see tools/hooks/pre-commit for why)
+# and trufflehog v3.96.0 (2026-07-24). Neither tool recognises koto's own byte-random tokens or the
+# sk-ant-oat01- OAuth token (canary-tested 2026-09-05), so secrets-scan also
+# greps history for the LIVE values in the installed creds dir, verbatim (one
+# per line — the token files carry no trailing newline, so a bare cat glues
+# them into one string that matches nothing), and
+# lists every credential-shaped filename ever committed. creds/ staying out of
+# the tree is .gitignore's job; these are the checks that it did.
+BETTERLEAKS_IMAGE ?= ghcr.io/betterleaks/betterleaks@sha256:06d60954c287c19af7a7171a1b5d466959d2f49b6946d4cf92ea65ba725a633a
+TRUFFLEHOG_IMAGE  ?= docker.io/trufflesecurity/trufflehog@sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+SCAN_RUN = $(CONTAINER) run --rm --security-opt label=disable -v "$(CURDIR):/src:ro" -w /src \
+  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src
+
+# Point git at tools/hooks: pre-commit refuses a commit whose staged diff
+# contains a recognisable secret. Per-clone, so run it once after cloning.
+hooks:
+	git config core.hooksPath tools/hooks
+	@echo "hooks installed: $$(git config core.hooksPath)/pre-commit (bypass once: git commit --no-verify)"
+
+secrets-scan:
+	$(need-container)
+	@echo "==> betterleaks: every commit on every ref"
+	$(SCAN_RUN) $(BETTERLEAKS_IMAGE) git /src --log-opts="--all" --no-banner --redact=100
+	@echo "==> trufflehog: every commit, verified + unverified"
+	$(SCAN_RUN) $(TRUFFLEHOG_IMAGE) git file:///src --results=verified,unverified,unknown --no-update --fail
+	@echo "==> credential-shaped filenames ever committed (must print nothing)"
+	@git log --all --diff-filter=A --name-only --format= \
+	  | grep -iE '(^|/)(creds/|\.credentials\.json|token-|tokens\.json|venice\.key|anthropic-api-key|koto\.env|clients\.allow|.*\.key$$|.*\.pem$$)' \
+	  | sort -u | tee /dev/stderr | { ! grep -q .; }
+	@echo "==> live credential values from $${KOTO_HOME:-/var/lib/koto}/creds, searched verbatim across history"
+	@d="$${KOTO_HOME:-/var/lib/koto}/creds"; if [ -d "$$d" ]; then \
+	  { for f in "$$d"/token-* "$$d"/venice.key "$$d"/anthropic-api-key; do [ -f "$$f" ] && { cat "$$f"; echo; }; done; \
+	    jq -r '.claudeAiOauth.accessToken, .claudeAiOauth.refreshToken' "$$d"/.credentials.json 2>/dev/null; } \
+	  | awk 'length>=32' | sort -u > .build/live-secrets.tmp; \
+	  n=$$(git log --all -p --format= | grep -F -c -f .build/live-secrets.tmp || true); \
+	  v=$$(wc -l < .build/live-secrets.tmp); rm -f .build/live-secrets.tmp; \
+	  echo "    $$v values checked, history lines matching: $$n"; test "$$n" = 0; \
+	else echo "    (no creds dir at $$d — skipped)"; fi
+	@echo "secrets-scan: clean"
 
 # --- protobuf / gRPC codegen (host-only; generated code is committed) -------
 # Runs entirely in an ephemeral golang:alpine container with pinned plugins.
