@@ -1,0 +1,136 @@
+package main
+
+// The claude CLI on the HOST. The proxy refreshes a subscription (OAuth) token
+// by running `claude -p ok` and letting the CLI rotate the token in
+// $HOME/.claude/.credentials.json — it has done so since the first Python
+// proxy, and koto has never reimplemented the OAuth refresh itself (see
+// README, "Credentials": the token is the operator's, koto only forwards it).
+//
+// That shell-out silently broke when the daemon moved out of its container
+// onto the host (2026-09-03). The container image installed claude-code into
+// /usr/local/bin; the systemd unit runs with PATH=/usr/local/bin:/usr/bin and
+// ProtectHome=yes, so a claude installed by the native installer into
+// ~/.local/bin is both off PATH and hidden. refresh() discarded the exec
+// error, so the token simply expired every ~8h and every turn 401'd until the
+// operator ran `koto claude-login` again — measured 2026-09-05: three such
+// outages in the first 36h of the install, each cleared by a manual login.
+//
+// The fix keeps the shell-out (the CLI manages the token, koto does not) and
+// makes the binary reachable: `koto install` resolves claude at install time,
+// records the path in koto.env as KOTO_CLAUDE_BIN, and — when that path lives
+// under a directory ProtectHome hides — switches the unit to
+// ProtectHome=tmpfs plus a read-only bind of exactly the directories the
+// binary needs, so the rest of the operator's home stays invisible. The
+// daemon execs that path; refresh() now logs its failure; and `koto
+// claude-login --status` checks the binary from the DAEMON's point of view,
+// which is the check preflight never made (it looked on the operator's PATH,
+// where the binary was fine).
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// claudeBinEnv names the claude executable the daemon runs for token
+// refresh. Written by `koto install`, read by the proxy on every refresh.
+const claudeBinEnv = "KOTO_CLAUDE_BIN"
+
+// claudeBin is the executable refresh() runs: KOTO_CLAUDE_BIN when set, else a
+// bare "claude" for exec.Command's PATH lookup — the dev-clone case, where the
+// daemon inherits the operator's shell PATH.
+func claudeBin() string {
+	if v := strings.TrimSpace(os.Getenv(claudeBinEnv)); v != "" {
+		return v
+	}
+	return "claude"
+}
+
+// claudeBinEnviron is the environment for the refresh subprocess: ours, with
+// the binary's own directory prepended to PATH when we exec an absolute path.
+// An npm-installed claude is `#!/usr/bin/env node` and node is its sibling
+// (nvm lays out bin/{node,claude}), so the interpreter has to be findable from
+// the unit's PATH, which the operator's shell PATH is not.
+func claudeBinEnviron(bin string) []string {
+	env := os.Environ()
+	if !filepath.IsAbs(bin) {
+		return env
+	}
+	dir := filepath.Dir(bin)
+	path := os.Getenv("PATH")
+	for _, p := range strings.Split(path, ":") {
+		if p == dir {
+			return env
+		}
+	}
+	if path == "" {
+		return setEnv(env, "PATH", dir)
+	}
+	return setEnv(env, "PATH", dir+":"+path)
+}
+
+// claudeBinResolve finds claude on the CURRENT process's PATH — the install-
+// time answer, taken in the operator's shell, which is the only place the
+// binary is guaranteed to be findable. Returns the PATH entry, not its symlink
+// target: the native installer points ~/.local/bin/claude at
+// ~/.local/share/claude/versions/<v> and moves the link on every update, so
+// the link is the stable name and the target is not.
+func claudeBinResolve() (string, error) {
+	p, err := exec.LookPath("claude")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(p) {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+	}
+	return p, nil
+}
+
+// protectHomeHides says whether systemd's ProtectHome= makes this path
+// invisible to the unit: it covers /home, /root and /run/user.
+func protectHomeHides(path string) bool {
+	for _, pre := range []string{"/home/", "/root/", "/run/user/"} {
+		if strings.HasPrefix(path, pre) {
+			return true
+		}
+	}
+	return path == "/home" || path == "/root" || path == "/run/user"
+}
+
+// claudeBindDirs lists the directories a ProtectHome'd unit must bind
+// read-only for bin to be executable: the directory holding the PATH entry
+// and, when that is a symlink, the directory holding its target. Directories
+// rather than the files themselves so an update — a new versions/<v> file
+// and a re-pointed link — is picked up without a daemon restart; a bound
+// FILE pins the inode at mount time and dangles once the old version is
+// removed. Only directories ProtectHome actually hides are returned; a claude
+// under /usr/local needs nothing.
+//
+// hidden is the predicate (protectHomeHides in production), a parameter so
+// the symlink walk can be tested against a temp layout that ProtectHome would
+// never hide.
+func claudeBindDirs(bin string, hidden func(string) bool) []string {
+	if bin == "" || !filepath.IsAbs(bin) {
+		return nil
+	}
+	var out []string
+	add := func(d string) {
+		if !hidden(d) {
+			return
+		}
+		for _, o := range out {
+			if o == d {
+				return
+			}
+		}
+		out = append(out, d)
+	}
+	add(filepath.Dir(bin))
+	if real, err := filepath.EvalSymlinks(bin); err == nil {
+		add(filepath.Dir(real))
+	}
+	return out
+}

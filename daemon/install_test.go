@@ -18,16 +18,16 @@ func TestRenderUnitIsValid(t *testing.T) {
 	if err != nil {
 		t.Skip("no current user")
 	}
-	unit := renderUnit(me)
+	unit := renderUnit(me, "")
 
 	for _, want := range []string{
 		"Type=exec",
 		"ExecStart=/usr/local/bin/koto daemon",
 		"User=" + me.Username,
 		"EnvironmentFile=" + envFilePath,
-		"Delegate=yes",     // per-VM cgroup caps depend on it
-		"ProtectHome=yes",  // replaces the container's filesystem scoping
-		"ReadWritePaths=",  // the state dir, and only it
+		"Delegate=yes",    // per-VM cgroup caps depend on it
+		"ProtectHome=yes", // replaces the container's filesystem scoping
+		"ReadWritePaths=", // the state dir, and only it
 		"WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(unit, want) {
@@ -188,7 +188,7 @@ func TestUnitPointsHomeAtKotoCreds(t *testing.T) {
 	if err != nil {
 		t.Skip("no current user")
 	}
-	unit := renderUnit(me)
+	unit := renderUnit(me, "")
 	want := "Environment=HOME=" + stateDirOf()
 	if !strings.Contains(unit, want) {
 		t.Errorf("unit must set %q so $HOME/.claude resolves to koto's creds\n---\n%s", want, unit)
@@ -246,5 +246,87 @@ func TestMigrateStateMovesCloneData(t *testing.T) {
 	}
 	if exists(filepath.Join(state, "groups", "ghost")) {
 		t.Error("second migration overwrote populated state-dir groups")
+	}
+}
+
+// TestUnitBindsHomeClaude pins the OAuth-refresh fix: a claude under the
+// operator's home (the native installer's ~/.local/bin/claude) must be bound
+// through ProtectHome, or the proxy cannot exec it and the token expires
+// unrefreshed every ~8h (claudebin.go). A claude under /usr/local, or none at
+// all (API-key install), keeps the plain ProtectHome=yes.
+func TestUnitBindsHomeClaude(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	// A realistic native-installer layout, so the symlink target's directory
+	// is bound too — it is where the actual executable lives.
+	home := t.TempDir()
+	versions := filepath.Join(home, ".local", "share", "claude", "versions")
+	bindir := filepath.Join(home, ".local", "bin")
+	for _, d := range []string{versions, bindir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(versions, "2.1.261")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(bindir, "claude")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir is not under /home, so stand in for ProtectHome's view.
+	hidden := func(p string) bool { return strings.HasPrefix(p, home) }
+	dirs := claudeBindDirs(link, hidden)
+	if len(dirs) != 2 || dirs[0] != bindir || dirs[1] != versions {
+		t.Fatalf("claudeBindDirs = %v, want [%s %s]", dirs, bindir, versions)
+	}
+
+	// The unit itself, rendered against a path ProtectHome really hides.
+	unit := renderUnit(me, "/home/op/.local/bin/claude")
+	for _, want := range []string{"ProtectHome=tmpfs", "BindReadOnlyPaths=/home/op/.local/bin"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %q\n---\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "ProtectHome=yes") {
+		t.Error("unit keeps ProtectHome=yes, which hides the bound claude")
+	}
+	for _, bin := range []string{"", "/usr/local/bin/claude"} {
+		u := renderUnit(me, bin)
+		if !strings.Contains(u, "ProtectHome=yes") || strings.Contains(u, "BindReadOnlyPaths=") {
+			t.Errorf("claude=%q: unit should keep plain ProtectHome=yes\n---\n%s", bin, u)
+		}
+	}
+	if bin, err := exec.LookPath("systemd-analyze"); err == nil {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "koto.service")
+		if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(bin, "verify", "--man=no", path).CombinedOutput()
+		if err != nil {
+			t.Errorf("systemd-analyze verify rejected the tmpfs unit: %v\n%s", err, out)
+		}
+	}
+}
+
+func TestProtectHomeHides(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/home/op/.local/bin/claude": true,
+		"/root/.local/bin/claude":    true,
+		"/run/user/1000/x":           true,
+		"/usr/local/bin/claude":      false,
+		"/opt/claude/bin/claude":     false,
+		"/homework/claude":           false,
+	} {
+		if got := protectHomeHides(p); got != want {
+			t.Errorf("protectHomeHides(%q) = %v, want %v", p, got, want)
+		}
+	}
+	if claudeBindDirs("", protectHomeHides) != nil || claudeBindDirs("claude", protectHomeHides) != nil {
+		t.Error("no bind dirs for an empty or bare-name claude")
 	}
 }
