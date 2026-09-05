@@ -49,8 +49,9 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 	if key == "network" {
 		// Egress profile: none|wan|lan|full (see fcnet.go for the destination
 		// classes). Frame filter + guest env apply on the next spawn
-		// (/restart), but the proxy-side L7 gate flips live — lowering to
-		// "none" denies proxy egress on the very next request.
+		// (/restart). The proxy-side L7 gate takes the stricter of the booted
+		// profile and this value: lowering to "none" denies proxy egress on
+		// the very next request, raising waits for /restart (audit H1).
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return

@@ -116,6 +116,23 @@ type ctlTailResp struct {
 	Text string `json:"text"`
 }
 
+// configPostureKey names the first posture key a ctl-plane config_set tries
+// to set, or "" when the request touches only model/effort/provider.
+func configPostureKey(req configReq) string {
+	for _, k := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
+		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
+	} {
+		if len(k.raw) > 0 {
+			return k.name
+		}
+	}
+	return ""
+}
+
 // ownsSched returns true iff a schedule with id exists AND belongs to
 // owner. Used to gate del/toggle/run on the non-main ctl path. Returns
 // true when id is missing so the underlying call's "no schedule with
@@ -278,6 +295,17 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
+		}
+		// POSTURE keys are the operator's, never an agent's (audit H1). The
+		// trust model's central promise — network=none by default, the proxy
+		// the only egress — was voidable by the tier-3 principal it exists to
+		// contain: main could write network=full into its own config and the
+		// proxy honoured it on the next request, or into a peer's and reboot
+		// it with a NIC. Root, published ports, VM size and autostart are the
+		// same class. What remains is what main legitimately tunes on a peer:
+		// model, effort, provider.
+		if k := configPostureKey(req); k != "" {
+			return errResp("ctl: " + k + " is an operator-only setting — ask the operator (TUI /config, or koto ctl config)")
 		}
 		return configCmd(req)
 

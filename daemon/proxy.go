@@ -510,6 +510,37 @@ type handler struct {
 	group string
 }
 
+// proxyBootNet is the network profile each group's VM booted with, set by the
+// fc runtime at boot and cleared (to none) at stop. The L7 egress gate takes
+// the stricter of this and the live config, so a config edit can only lower
+// a running group's egress; raising it takes the /restart that also attaches
+// the NIC (audit H1). Absent = none: a group whose VM has not booted this
+// daemon lifetime — or any local process reaching a proxy port while the VM
+// is down — gets no egress.
+var (
+	proxyBootNetMu sync.Mutex
+	proxyBootNet   = map[string]string{}
+)
+
+func proxySetBootNetwork(group, pol string) {
+	proxyBootNetMu.Lock()
+	defer proxyBootNetMu.Unlock()
+	if pol == fcNetNone {
+		delete(proxyBootNet, group)
+		return
+	}
+	proxyBootNet[group] = pol
+}
+
+func proxyBootNetwork(group string) string {
+	proxyBootNetMu.Lock()
+	defer proxyBootNetMu.Unlock()
+	if p, ok := proxyBootNet[group]; ok {
+		return p
+	}
+	return fcNetNone
+}
+
 var hopByHop = map[string]bool{
 	"authorization":     true,
 	"x-api-key":         true,
@@ -1017,13 +1048,26 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = r.URL.Host
 	}
+	// Two profiles, both must allow: the one the VM BOOTED with (snapshot,
+	// see proxySetBootNetwork) and the one in config.json now. Raising the
+	// profile therefore needs the /restart the docs always promised — the
+	// gate used to re-read the file per request, so main could write
+	// network=full and exfiltrate on the very next request (audit H1).
+	// Lowering still applies live: `none` in the file denies at once.
 	pol := groupNetwork(h.group)
-	if pol == fcNetNone {
-		emitLogfG("egress", h.group, "warn", "[%s] DENIED %s %s (network profile is 'none')", h.group, r.Method, target)
-		http.Error(w, "egress denied: this group's network profile is 'none'", http.StatusForbidden)
+	boot := proxyBootNetwork(h.group)
+	if pol == fcNetNone || boot == fcNetNone {
+		emitLogfG("egress", h.group, "warn", "[%s] DENIED %s %s (network profile is 'none'; config=%s, booted=%s)", h.group, r.Method, target, pol, boot)
+		http.Error(w, "egress denied: this group's network profile is 'none' (a raised profile applies on /restart)", http.StatusForbidden)
 		return
 	}
 	ok, vetted := egressTargetAllowed(target, pol)
+	if ok {
+		ok, _ = egressTargetAllowed(target, boot)
+		if !ok {
+			pol = boot + " (booted; config says " + pol + " — apply with /restart)"
+		}
+	}
 	if !ok {
 		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (network profile '%s')", h.group, r.Method, target, pol)
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)

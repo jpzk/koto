@@ -585,7 +585,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// connection is handed to the gateway, egress-filtered under the group's
 	// profile (see fcnet.go). Gated here so a `none` group never even opens
 	// this listener. The policy is captured at spawn — changes apply on /restart.
-	if netPol := groupNetwork(g); netPol != fcNetNone {
+	netPol := groupNetwork(g)
+	proxySetBootNetwork(g, netPol) // the L7 gate's snapshot (audit H1)
+	if netPol != fcNetNone {
 		vn, err := fcNetGateway()
 		if err != nil {
 			return fail(fmt.Errorf("l3 gateway: %w", err))
@@ -794,6 +796,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 // fcStop gracefully shuts the VM down (agent syncs + unmounts the workspace
 // ext4 — kill-only would risk a dirty image), then falls back to SIGKILL.
 func fcStop(g string) {
+	proxySetBootNetwork(g, fcNetNone) // no VM, no egress — whoever is dialing the port
 	fcMu.Lock()
 	vm := fcVMs[g]
 	delete(fcVMs, g)
