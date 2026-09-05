@@ -1,53 +1,105 @@
 #!/bin/sh
-# pre-commit: refuse a commit that stages a secret.
+# pre-commit: the checks every Go project runs at commit time, fast → slow.
 #
-# Runs betterleaks over the STAGED changes only (a second or so, most of it
-# container start-up), so the check that matters — "is a credential about to
-# enter history" — happens before the commit exists, where undoing it is
-# `git reset` and not a history rewrite plus a key rotation. The whole-history
-# sweep with both scanners is `make secrets-scan`; this hook is the per-commit
-# gate. Install it with `make hooks` (sets core.hooksPath to this directory).
+#   1. gofmt      staged .go files must be gofmt-clean         (milliseconds)
+#   2. go vet     every module with a staged .go file           (~1-3s, cached)
+#   3. go mod tidy -diff   go.mod/go.sum must match imports     (~1s per module)
+#   4. betterleaks  no secret in the staged diff               (~1s, container)
 #
-# betterleaks rather than gitleaks: same author (who left gitleaks after losing
-# control of the repo — gitleaks has had no release since v8.30.1, 2026-03),
-# drop-in flags and config, and entropy replaced by a BPE token-efficiency
-# score, which is the exact heuristic our canaries found wanting. Detection on
-# koto's own shapes was identical between the two on 2026-09-05: both flag the
-# sk-ant-api03- API-key shape, PEM private keys and a hex string assigned to a
-# variable named like a secret; NEITHER flags the sk-ant-oat01- OAuth token or
-# a bare 64-hex token file. So this hook is a net for the recognisable shapes
-# and for other people's keys; keeping creds/ out of the tree is still
-# .gitignore's job, and `make secrets-scan` greps history for the live values
-# verbatim to cover what no pattern scanner can.
+# Only the STAGED content is judged wherever the tool allows it: gofmt reads
+# each file out of the index (`git show :path`), so a partially staged file is
+# checked as it will be committed, not as it sits in the tree. vet and tidy
+# have to see a whole package on disk, so they run on the working tree of the
+# affected module — the usual compromise, and the one every Go hook makes.
 #
-# Bypass for a known false positive: `git commit --no-verify`, or add an
-# allowlist entry to .betterleaks.toml at the repo root (picked up
-# automatically; the default rules are in use until it exists).
+# The Go checks need a Go toolchain. An INSTALLED koto deliberately needs no
+# Go on the host, and a dev machine may keep it in ~/.local/go (assemble does),
+# so the hook looks there too and, finding none, SKIPS the Go checks with a
+# warning rather than refusing the commit — a hook that blocks on a toolchain
+# the project says you don't need would just train `--no-verify`. The secrets
+# scan is never skipped for that reason.
 #
-# Image pinned by DIGEST, ≥6 weeks old like every dependency here
-# (betterleaks v1.7.0, released 2026-07-23). A native `betterleaks` on PATH is
-# preferred when present — no container start-up cost.
+# Bypass once: `git commit --no-verify`. Install: `make hooks` (sets
+# core.hooksPath to this directory). The whole-history secrets sweep with both
+# scanners is `make secrets-scan`; this hook is the per-commit gate.
+#
+# Secrets scanner: betterleaks rather than gitleaks — same author (who left
+# gitleaks after losing control of the repo; gitleaks has had no release since
+# v8.30.1, 2026-03), drop-in flags and config, entropy replaced by a BPE
+# token-efficiency score. Detection on koto's own shapes was identical between
+# the two on 2026-09-05: both flag the sk-ant-api03- API-key shape, PEM private
+# keys and a hex string assigned to a variable named like a secret; NEITHER
+# flags the sk-ant-oat01- OAuth token or a bare 64-hex token file. So the scan
+# is a net for the recognisable shapes and for other people's keys; keeping
+# creds/ out of the tree is .gitignore's job, and `make secrets-scan` greps
+# history for the live values verbatim to cover what no pattern scanner can.
+# Allowlist a false positive in .betterleaks.toml at the repo root (picked up
+# automatically). Image pinned by DIGEST, ≥6 weeks old like every dependency
+# (v1.7.0, 2026-07-23); a native `betterleaks` on PATH is preferred.
 
-set -eu
+set -u
 
 repo=$(git rev-parse --show-toplevel)
+cd "$repo"
 BETTERLEAKS_IMAGE=ghcr.io/betterleaks/betterleaks@sha256:06d60954c287c19af7a7171a1b5d466959d2f49b6946d4cf92ea65ba725a633a
 
+fail() { printf 'pre-commit: %s\n' "$*" >&2; exit 1; }
+note() { printf 'pre-commit: %s\n' "$*" >&2; }
+
+# Staged Go files (added/copied/modified/renamed — a deletion has nothing to
+# format). Generated protobuf code is excluded from gofmt: it is protoc's
+# output, verified by `make proto-verify`, not something a commit edits.
+staged_go=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go' | grep -v '\.pb\.go$' || true)
+
+if [ -n "$staged_go" ]; then
+	go=""
+	for cand in "$(command -v go 2>/dev/null || true)" "$HOME/.local/go/bin/go" /usr/local/go/bin/go; do
+		[ -n "$cand" ] && [ -x "$cand" ] && { go=$cand; break; }
+	done
+	if [ -z "$go" ]; then
+		note "no Go toolchain found (PATH, ~/.local/go, /usr/local/go) — skipping gofmt/vet/tidy on staged .go files"
+	else
+		gofmt="$(dirname "$go")/gofmt"
+		[ -x "$gofmt" ] || gofmt="gofmt"
+
+		# 1. gofmt, on the INDEX content of each staged file.
+		bad=""
+		for f in $staged_go; do
+			if [ -n "$(git show ":$f" | "$gofmt" -l 2>/dev/null)" ]; then
+				bad="$bad $f"
+			fi
+		done
+		[ -z "$bad" ] || fail "not gofmt-clean:$bad
+  fix:  gofmt -w$bad && git add$bad"
+
+		# Modules touched: the first path component is the module dir in this
+		# monorepo (daemon/ fcguest/ tui/ protocol/), each with its own go.mod.
+		mods=$(for f in $staged_go $(git diff --cached --name-only -- '*/go.mod' '*/go.sum'); do
+			d=${f%%/*}; [ -f "$d/go.mod" ] && echo "$d"; done | sort -u)
+
+		for m in $mods; do
+			# 2. go vet — the compiler's suspicious-construct pass: printf
+			# arguments vs verbs, copied locks, unreachable code, misuse of
+			# unsafe, struct tags, and the rest of `go tool vet help`.
+			(cd "$m" && "$go" vet ./...) || fail "go vet failed in $m/"
+			# 3. go mod tidy -diff — exits non-zero (and prints the diff) when
+			# go.mod/go.sum would change, i.e. an import was added or dropped
+			# without tidying, or a sum is missing.
+			(cd "$m" && "$go" mod tidy -diff >/dev/null 2>&1) || fail "go.mod/go.sum out of date in $m/
+  fix:  (cd $m && go mod tidy) && git add $m/go.mod $m/go.sum"
+		done
+	fi
+fi
+
+# 4. secrets. The index is what --staged reads, so the repo (with .git) is
+# mounted read-only. Root inside a rootless container is this user outside,
+# but git still checks the .git owner against the uid it sees, hence
+# safe.directory.
 if command -v betterleaks >/dev/null 2>&1; then
-	cd "$repo"
 	exec betterleaks git --pre-commit --staged --no-banner --redact=100 .
 fi
-
 engine=$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)
-if [ -z "$engine" ]; then
-	echo "pre-commit: neither betterleaks nor podman/docker found — cannot scan for secrets." >&2
-	echo "pre-commit: install betterleaks, or bypass once with: git commit --no-verify" >&2
-	exit 1
-fi
-
-# The index is what --staged reads, so the repo (with .git) is mounted, read-
-# only. Root inside a rootless container is this user outside, but git still
-# checks the .git owner against the uid it sees, hence safe.directory.
+[ -n "$engine" ] || fail "neither betterleaks nor podman/docker found — cannot scan for secrets (install betterleaks, or bypass once: git commit --no-verify)"
 exec "$engine" run --rm --security-opt label=disable \
 	-v "$repo:/src:ro" -w /src \
 	-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
