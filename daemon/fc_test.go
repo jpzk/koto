@@ -207,12 +207,17 @@ func TestFcAgentCallError(t *testing.T) {
 	}
 }
 
-// TestFcSpliceToProxy: a guest connection on the proxy port is spliced
-// bidirectionally into the group's TCP proxy listener.
+// TestFcSpliceToProxy: a guest connection on vsock 9000 is spliced
+// bidirectionally into the group's proxy listener — a unix socket under
+// run/proxy (audit M1), never a loopback TCP port.
 func TestFcSpliceToProxy(t *testing.T) {
 	fcHarness(t)
-	// Fake proxy: echo server on an ephemeral port.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Fake proxy: echo server on the socket path the splice will dial.
+	const port = 4242
+	if err := os.MkdirAll(proxySockDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", proxySockPath(port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +236,6 @@ func TestFcSpliceToProxy(t *testing.T) {
 			}(c)
 		}
 	}()
-	port := ln.Addr().(*net.TCPAddr).Port
-
 	a, b := net.Pipe()
 	go fcSpliceToProxy(b, port)
 	a.SetDeadline(time.Now().Add(2 * time.Second))
