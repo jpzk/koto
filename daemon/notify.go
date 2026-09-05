@@ -56,6 +56,8 @@ var (
 	notifyMu      sync.Mutex
 	notifyTimers  = map[string]*time.Timer{}
 	notifyPending = map[string][]jobResult{}
+	// notifyMaxPending caps buffered job results per (group, session).
+	notifyMaxPending = 64
 )
 
 // recordJobDone buffers one completed job's result and (re)arms the
@@ -77,6 +79,12 @@ func recordJobDone(group string, res jobResult) {
 		}
 	}
 	if !replaced {
+		// Bounded: distinct ids all accumulate and every post re-arms the
+		// debounce, so a burst never flushed and the slice grew without
+		// limit (audit M4). Keep the newest; the flush coalesces anyway.
+		if len(pend) >= notifyMaxPending {
+			pend = pend[len(pend)-notifyMaxPending+1:]
+		}
 		notifyPending[key] = append(pend, res)
 	}
 

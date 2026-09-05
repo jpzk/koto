@@ -42,6 +42,10 @@ func loadState(sock string) persistedState {
 	if err := json.Unmarshal(b, &s); err != nil {
 		logWarn("persist", "state file unparseable: %v", err)
 	}
+	// The draft goes straight into the input bar; the file is under a
+	// writable mount, so it gets the same scrub as any other outside bytes
+	// (audit L12).
+	s.Draft = scrubVT(s.Draft)
 	logDbg("persist", "loaded state: cur=%q draft_len=%d sessions=%d", s.Cur, len(s.Draft), len(s.Sessions))
 	return s
 }

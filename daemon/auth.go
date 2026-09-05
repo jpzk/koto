@@ -128,7 +128,7 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 // the "*" wildcard (a request that reads across every group, e.g. unfiltered
 // metrics) is daemon-wide, so it stays unattributed.
 func aclLogGroup(target string) string {
-	if target == "*" {
+	if target == "*" || !validGroupName(target) { // unvalidated request field (audit I4)
 		return ""
 	}
 	return target

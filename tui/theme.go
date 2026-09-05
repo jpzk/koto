@@ -44,6 +44,7 @@ package main
 import (
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -479,6 +480,28 @@ func themeNames(sock string) []string {
 // "solarised.dark", hence dots being legal at all.)
 var themeNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+// themeMaxBytes bounds a drop-in theme file: the upstream SVGs are ~1 KB, and
+// run/tui is a writable mount (audit L12).
+const themeMaxBytes = 256 << 10
+
+// readFileLimited reads at most max bytes of a file; a larger file is an error
+// rather than a truncated parse.
+func readFileLimited(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s: larger than %d bytes", filepath.Base(path), max)
+	}
+	return b, nil
+}
+
 // loadTheme reads and parses a theme by name, user directory first.
 func loadTheme(sock, name string) (*themePalette, error) {
 	name = strings.TrimSpace(name)
@@ -486,7 +509,7 @@ func loadTheme(sock, name string) (*themePalette, error) {
 		return nil, fmt.Errorf("bad theme name %q", name)
 	}
 	if dir := userThemeDir(sock); dir != "" {
-		if b, err := os.ReadFile(filepath.Join(dir, name+".svg")); err == nil {
+		if b, err := readFileLimited(filepath.Join(dir, name+".svg"), themeMaxBytes); err == nil {
 			p, perr := parseTheme(name, string(b))
 			if perr != nil {
 				return nil, fmt.Errorf("%s.svg: %w", name, perr)

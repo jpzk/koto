@@ -33,3 +33,4 @@ fcguest/koto-fcagent
 # `make dev` state dir: a second daemon's groups/creds/assets, beside an
 # installed koto. Guest assets in it are hardlinks to fcassets/.
 /.dev
+.fetch.*/

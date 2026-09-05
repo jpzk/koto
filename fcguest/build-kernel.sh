@@ -89,6 +89,12 @@ cd /tmp/src/linux
 # NO acpi=off / CMDLINE_DEVICES workarounds: the amzn tree parses FC's ACPI
 # tables, so virtio is enumerated via ACPI and the LAPIC timer comes up.
 curl -fsSL "$FC_CONFIG_URL" >.config
+# Pinned: the kernel SOURCE is verified by commit, and this config decides
+# what that source becomes — a tampered one could re-enable vsock loopback
+# (see the assertion below). Refresh deliberately when FC_VERSION moves:
+#   curl -fsSL "$FC_CONFIG_URL" | sha256sum
+echo "${FC_CONFIG_SHA256:-adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326bb14c22963b}  .config" | sha256sum -c - >/dev/null || {
+  echo "!! guest kernel .config does not match its pinned sha256"; exit 1; }
 # Everything built-in (=y): the guest has no module loader, so netfilter/nft
 # bits can't be =m. FC's config has TUN off and only the nftables *core*; we
 # add the full nftables NAT stack netavark needs for podman *bridged*
@@ -121,6 +127,12 @@ grep -q '^CONFIG_TUN=y'     .config || { echo "!! CONFIG_TUN missing";     exit 
 grep -q '^CONFIG_PVH=y'     .config || { echo "!! CONFIG_PVH missing (FC needs PVH)"; exit 1; }
 grep -q '^CONFIG_FUSE_FS=y' .config || { echo "!! CONFIG_FUSE_FS missing (rootless podman)"; exit 1; }
 grep -q '^CONFIG_ACPI=y'    .config || { echo "!! CONFIG_ACPI missing (needed to drop acpi=off)"; exit 1; }
+# The guest agent RPC on vsock 10000 is unauthenticated and runs exec as
+# guest root; it is safe only because nothing INSIDE the guest can reach
+# vsock. Loopback vsock would let node drive it and defeat root=no (audit I1).
+grep -q '^CONFIG_VSOCKETS_LOOPBACK=y' .config && { echo "!! CONFIG_VSOCKETS_LOOPBACK must stay off"; exit 1; }
+grep -q '^CONFIG_VHOST_VSOCK=y'       .config && { echo "!! CONFIG_VHOST_VSOCK must stay off"; exit 1; }
+true
 grep -q '^CONFIG_NFT_NAT=y' .config || { echo "!! CONFIG_NFT_NAT missing (netavark bridged NAT)"; exit 1; }
 grep -q '^CONFIG_NFT_MASQ=y' .config || { echo "!! CONFIG_NFT_MASQ missing (netavark masquerade)"; exit 1; }
 

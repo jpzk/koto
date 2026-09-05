@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -165,12 +166,35 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		cfg[key] = out
 		return
 	}
+	if key == "model" || key == "effort" {
+		// Free-form strings that render in every client's status bar, fleet
+		// table and /config echo, settable by main on any peer through the
+		// ctl plane — an OSC escape stored here reached the operator's
+		// terminal on every view (audit M9b). Identifier charset, bounded.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.TrimSpace(s)
+		if s == "" || len(s) > configMaxIdent || !configIdentRE.MatchString(s) {
+			return
+		}
+		cfg[key] = s
+		return
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return
 	}
 	cfg[key] = v
 }
+
+// configIdentRE is the charset for model/effort: what model ids across both
+// providers actually use (claude-sonnet-5, qwen/qwen3-235b, kimi-k2.5,
+// gpt-4.1:free) and nothing a terminal interprets.
+var configIdentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
+
+const configMaxIdent = 128
 
 func configCmd(req configReq) configResp {
 	p := filepath.Join(vol(req.Group), ".cs", "config.json")

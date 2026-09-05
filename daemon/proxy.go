@@ -23,6 +23,9 @@ const (
 	veniceUpstream = "https://api.venice.ai"
 )
 
+// proxyMaxBody bounds a buffered LLM-leg request body (audit M2).
+const proxyMaxBody = 64 << 20
+
 var (
 	credPath     string
 	envAPIKey    string
@@ -313,6 +316,9 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	if group == "" || status == 200 || status == 404 {
 		return
 	}
+	// The path is guest-chosen and lands in a line-framed log: a %0a in it
+	// would forge the next line (audit L3).
+	path = flattenInline(path)
 	reason := http.StatusText(status)
 	switch status {
 	case 401:
@@ -560,6 +566,7 @@ var llmFlowSeen = newLogDedup(fcFlowTTL, fcFlowSeenMax)
 // which is the anomaly-hunting ground). Logged before the upstream call, so
 // failed/retried requests still leave a trace.
 func llmFlowLog(group, method, upstreamURL, path string) {
+	path = flattenInline(path) // guest-chosen; keep it on one log line (audit L3)
 	target := strings.TrimPrefix(strings.TrimPrefix(upstreamURL, "https://"), "http://") + path
 	if llmFlowSeen.allow(group + "|" + method + "|" + target) {
 		emitLogfG("llm", group, "info", "[%s] flow %s %s", group, method, target)
@@ -583,7 +590,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		body, _ = io.ReadAll(r.Body)
+		// Bounded: the body is buffered whole and lives across up to 7
+		// retry attempts, so an unbounded read let one guest streaming
+		// /dev/zero grow the daemon's heap without limit (audit M2).
+		// Anthropic's own request cap is 32 MB.
+		r.Body = http.MaxBytesReader(w, r.Body, proxyMaxBody)
+		var rerr error
+		if body, rerr = io.ReadAll(r.Body); rerr != nil {
+			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
@@ -759,7 +775,16 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
 	var body []byte
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		body, _ = io.ReadAll(r.Body)
+		// Bounded: the body is buffered whole and lives across up to 7
+		// retry attempts, so an unbounded read let one guest streaming
+		// /dev/zero grow the daemon's heap without limit (audit M2).
+		// Anthropic's own request cap is 32 MB.
+		r.Body = http.MaxBytesReader(w, r.Body, proxyMaxBody)
+		var rerr error
+		if body, rerr = io.ReadAll(r.Body); rerr != nil {
+			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 	key, err := veniceAuth()
 	if err != nil {
@@ -1069,6 +1094,17 @@ func egressTargetAllowed(hostport, pol string) (bool, string) {
 	return true, net.JoinHostPort(ips[0].String(), port)
 }
 
+// egressDialIP parses the host part of an ip:port dial target; nil when it is
+// not a literal IP (a name here would reopen the DNS-rebind window the vetted
+// IP exists to close, so it is refused rather than resolved).
+func egressDialIP(hostport string) net.IP {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(strings.Trim(host, "[]"))
+}
+
 func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target, vetted string) {
 	// Dial the vetted IP, not the name: re-resolving here would reopen a
 	// DNS-rebind window between the allow-check and the connect. CONNECT
@@ -1078,6 +1114,15 @@ func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target, 
 	dialTo := vetted
 	if dialTo == "" {
 		dialTo = target
+	}
+	// Belt and braces under egressTargetAllowed: whatever the check said,
+	// the daemon never dials the control plane from its own process — an
+	// unspecified or loopback address, or one of its own (audit H2). vetted
+	// is always ip:port; anything else here is a bug and fails closed.
+	if ip := egressDialIP(dialTo); ip == nil || fcClassifyDst(ip) == fcDstCtl {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED dial %s (control plane)", h.group, dialTo)
+		http.Error(w, "egress blocked: target not permitted", http.StatusForbidden)
+		return
 	}
 	dst, err := net.DialTimeout("tcp", dialTo, 15*time.Second)
 	if err != nil {

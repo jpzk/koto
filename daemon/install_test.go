@@ -18,7 +18,7 @@ func TestRenderUnitIsValid(t *testing.T) {
 	if err != nil {
 		t.Skip("no current user")
 	}
-	unit := renderUnit(me, "")
+	unit := renderUnit(me, stateDirOf(), "")
 
 	for _, want := range []string{
 		"Type=exec",
@@ -188,7 +188,7 @@ func TestUnitPointsHomeAtKotoCreds(t *testing.T) {
 	if err != nil {
 		t.Skip("no current user")
 	}
-	unit := renderUnit(me, "")
+	unit := renderUnit(me, stateDirOf(), "")
 	want := "Environment=HOME=" + stateDirOf()
 	if !strings.Contains(unit, want) {
 		t.Errorf("unit must set %q so $HOME/.claude resolves to koto's creds\n---\n%s", want, unit)
@@ -285,7 +285,7 @@ func TestUnitBindsHomeClaude(t *testing.T) {
 	}
 
 	// The unit itself, rendered against a path ProtectHome really hides.
-	unit := renderUnit(me, "/home/op/.local/bin/claude")
+	unit := renderUnit(me, stateDirOf(), "/home/op/.local/bin/claude")
 	for _, want := range []string{"ProtectHome=tmpfs", "BindReadOnlyPaths=/home/op/.local/bin"} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q\n---\n%s", want, unit)
@@ -295,7 +295,7 @@ func TestUnitBindsHomeClaude(t *testing.T) {
 		t.Error("unit keeps ProtectHome=yes, which hides the bound claude")
 	}
 	for _, bin := range []string{"", "/usr/local/bin/claude"} {
-		u := renderUnit(me, bin)
+		u := renderUnit(me, stateDirOf(), bin)
 		if !strings.Contains(u, "ProtectHome=yes") || strings.Contains(u, "BindReadOnlyPaths=") {
 			t.Errorf("claude=%q: unit should keep plain ProtectHome=yes\n---\n%s", bin, u)
 		}
