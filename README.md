@@ -135,7 +135,11 @@ between host and guest.
 
 Everything is pinned; `go.sum` locks the module trees, build containers are
 pinned by digest, and source checkouts by commit. Go pins follow a 6-week
-dependency-lag rule.
+dependency-lag rule, with one exception: a pin that closes a *reachable*
+govulncheck finding is taken at once (the Go toolchain included — a
+supported series' newest patch is the standard library's security fix).
+The `go.mod` ledgers name every pin taken under it. `make secrets-scan`
+and the `release`-branch govulncheck action are the checks behind both.
 
 **Go modules** (direct):
 
