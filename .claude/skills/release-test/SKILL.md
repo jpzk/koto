@@ -308,12 +308,12 @@ API key …`). On an older binary treat "expired" as unreliable and check
 goes to Anthropic with no extra config:
 
 ```sh
-koto ctl spawn e2e
+KOTO_CLIENT=tui koto ctl spawn e2e     # spawn/destroy are admin verbs; the default 'agent' identity is least-privilege (audit M11)
 sleep 20                                     # let the guest agent come up
 koto ctl ask -timeout 120s e2e 'hi' >/dev/null   # warm-up turn, see below
 koto ctl ask -timeout 120s e2e 'Reply with exactly one word: pong'
 echo "exit=${PIPESTATUS[0]}"                 # NOT $? — that is the pipe's tail
-koto ctl destroy e2e
+KOTO_CLIENT=tui koto ctl destroy e2e
 ```
 
 Assert the reply contains `pong`. A warm turn answers in ~2.5s.
@@ -377,7 +377,7 @@ occurrences, do not just grep**: a duplicated render is a real bug class here
 and a bare `grep -q` sails straight past it.
 
 Then confirm the group the TUI made is real, from outside the TUI:
-`koto ctl list` must show `e2etui`. Clean up with `koto ctl destroy e2etui`.
+`koto ctl list` must show `e2etui`. Clean up with `KOTO_CLIENT=tui koto ctl destroy e2etui`.
 
 ### Frame integrity: `make tui-walk` — BROKEN, do not rely on it
 

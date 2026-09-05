@@ -270,3 +270,38 @@ func TestProxyListenIsUnixSocket(t *testing.T) {
 		t.Fatal("unlisten should remove the socket file")
 	}
 }
+
+// M11: the wizard's default `koto ctl` identity is least-privilege, and the
+// doctor can read an identity's roles out of tokens.json in every shape the
+// file has had.
+func TestIdentityRoles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "tokens.json"), []byte(`{
+	  "agent": {"hash":"aa", "roles":["agent"]},
+	  "ops":   {"hash":"bb", "role":"operator"},
+	  "old":   "cc",
+	  "bare":  {"hash":"dd"}
+	}`), 0o600)
+	for name, want := range map[string][]string{
+		"agent": {"agent"}, "ops": {"operator"}, "old": {"admin"}, "bare": {"admin"},
+	} {
+		got := identityRoles(dir, name)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("identityRoles(%s) = %v, want %v", name, got, want)
+		}
+	}
+	if identityRoles(dir, "nobody") != nil || identityRoles(t.TempDir(), "agent") != nil {
+		t.Error("absent name / absent file should be nil")
+	}
+	// The wizard source itself: the agent identity is minted with the agent role.
+	src, err := os.ReadFile("setup_steps.go")
+	if err != nil {
+		t.Skip("source not available")
+	}
+	if strings.Contains(string(src), `pkiClient(sc.credsDir(), "agent", []string{"admin"})`) {
+		t.Fatal("the wizard mints the default koto ctl identity as admin again (audit M11)")
+	}
+	if !strings.Contains(string(src), `pkiClient(sc.credsDir(), "agent", []string{"agent"})`) {
+		t.Fatal("the wizard no longer mints the agent identity with the agent role")
+	}
+}
