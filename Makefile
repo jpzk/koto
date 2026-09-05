@@ -90,21 +90,22 @@ else
 endif
 # Pinned by DIGEST, not tag. This is what actually makes the build
 # reproducible — the engine does not: docker and podman run the same OCI
-# image and produce the same bytes. `golang:1.25-alpine` is a moving tag that
+# image and produce the same bytes. `golang:1.26-alpine` is a moving tag that
 # silently changes toolchain patch versions under you; the digest does not.
 # Combined with -trimpath and CGO_ENABLED=0, two builds of the same commit
 # give identical binaries, except for the version string stamped below.
-# Update deliberately: podman/docker pull golang:1.25-alpine, then
-#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.25-alpine
-# golang:1.25.14-alpine (2026-08-19). Go 1.24 fell out of support when 1.26
+# Update deliberately: podman/docker pull golang:1.26-alpine, then
+#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
+# golang:1.26.8-alpine (2026-09-01). Go 1.24 fell out of support when 1.26
 # shipped, so its stdlib no longer receives security fixes: govulncheck on the
-# release toolchain (2026-09-05) reported 13 reachable stdlib vulnerabilities
-# fixed only in 1.25.x. Go patch releases are the ONE exception to the 6-week
-# lag besides Firecracker, for the same reason — they ARE the security fixes,
-# and sitting behind them is deliberately running known-vulnerable code.
-# Keep in step with the `toolchain` lines in every go.mod / go.work and the
+# then-shipped toolchain (2026-09-05) reported 13 reachable stdlib
+# vulnerabilities. 1.26 rather than 1.25 because x/crypto v0.56.0 — the fix for
+# two reachable ssh DoS findings — requires go >= 1.26. Per the security-fix
+# exception to the 6-week lag (CLAUDE.md, Conventions): a pin that closes a
+# reachable govulncheck finding is taken at once, soak or no soak. Keep in
+# step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/govulncheck.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+GO_IMAGE ?= docker.io/library/golang@sha256:6e5de3f5b9fb7e30b8bb2ffe8dcbcbdaa2990f0f31267456eabe83f870a623be
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
@@ -126,7 +127,11 @@ KOTO_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || date
 # exactly these, and nothing downstream can tell which route did it.
 FCASSETS  := fcassets
 ARTIFACTS := koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux $(FCASSETS)/rootfs.img
-koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go)
+# go.mod/go.sum, go.work and this Makefile are prerequisites too: a dependency
+# bump or a GO_IMAGE change produces different bytes with not one *.go touched,
+# and until 2026-09-05 `make koto` silently kept the stale binary after exactly
+# that (a Go 1.25 → 1.26 move; caught by `go version -m koto`).
+koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go) daemon/go.mod daemon/go.sum protocol/go.mod protocol/go.sum go.work Makefile
 	$(need-container)
 	$(GO_BUILD_RUN) \
 	  go build -trimpath -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
