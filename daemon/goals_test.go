@@ -1430,7 +1430,7 @@ func TestGoalEventsCarryTheGoalSession(t *testing.T) {
 // room for the "goal-" prefix and the judge's "-judge" suffix.
 func TestGoalNameSlugging(t *testing.T) {
 	cases := map[string]string{
-		"find a signal in weather data":  "signal-weather",
+		"find a signal in weather data":   "signal-weather",
 		"fix the flaky tests":             "fix-flaky-tests",
 		"Ship IT!!!":                      "ship",
 		"":                                "goal",

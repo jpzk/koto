@@ -88,13 +88,13 @@ func TestTopViewRendersColumns(t *testing.T) {
 	out := stripANSI(m.View())
 	for _, want := range []string{
 		"GROUP", "SPACE", "CPU", "MEM", "TOK/S", "NET", "ROOT", "MODEL", // header
-		"1.0G/8.0G 12%", // main's space
-		"12G/16G 75%",   // web's space
+		"1.0G/8.0G 12%",  // main's space
+		"12G/16G 75%",    // web's space
 		"200M/1000M 20%", // main's mem: the guest figure, NOT its 512M RSS
 		"2.0G/4.0G 50%",  // web's mem: RSS fallback vs preset (no guest figure)
-		"42",            // main's tok/s
-		"full",          // web's network profile
-		"none",          // main's network profile
+		"42",             // main's tok/s
+		"full",           // web's network profile
+		"none",           // main's network profile
 		"claude-sonnet-5", "claude-opus-5",
 		"groups 2 (2 running)", // host summary
 		"40G/100G 40%",         // host fs used/total

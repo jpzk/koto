@@ -10,12 +10,12 @@ import (
 
 func TestExpandTabs(t *testing.T) {
 	for in, want := range map[string]string{
-		"a\tb":           "a       b",
-		"\t":             "        ",
-		"12345678\tx":    "12345678        x",
+		"a\tb":            "a       b",
+		"\t":              "        ",
+		"12345678\tx":     "12345678        x",
 		"1234567\tx\n\ty": "1234567 x\n        y",
-		"中\tx":           "中      x",
-		"none":           "none",
+		"中\tx":            "中      x",
+		"none":            "none",
 	} {
 		if got := expandTabs(in); got != want {
 			t.Errorf("expandTabs(%q) = %q, want %q", in, got, want)

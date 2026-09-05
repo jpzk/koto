@@ -142,9 +142,9 @@ func isBidiOrFormat(r rune) bool {
 	case 0x200b, // ZERO WIDTH SPACE
 		0x200e, 0x200f, // LRM, RLM
 		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
-		0x2060, // WORD JOINER
+		0x2060,                         // WORD JOINER
 		0x2066, 0x2067, 0x2068, 0x2069, // LRI, RLI, FSI, PDI
-		0x061c, // ARABIC LETTER MARK
+		0x061c,         // ARABIC LETTER MARK
 		0xfeff,         // BOM / ZERO WIDTH NO-BREAK SPACE
 		0x2028, 0x2029: // LINE SEPARATOR, PARAGRAPH SEPARATOR
 		return true
