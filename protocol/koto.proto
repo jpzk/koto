@@ -178,6 +178,15 @@ message Event {
 message RunScriptReq {
   string group  = 1;
   string script = 2; // passed to /bin/sh -c, cwd /workspace, as node (uid 1000)
+  // raw = deliver the guest's bytes untouched. Default (false) sanitizes the
+  // output like every other guest-authored byte the daemon relays (JobTail,
+  // the event stream): SGR styling passes, every other escape — OSC clipboard/
+  // title writes, cursor motion, mode switches — and C0/C1 controls are
+  // dropped. The guest authors this output and may have replaced /bin/sh;
+  // an operator running any script against it must not get their terminal
+  // reprogrammed (audit 2026-09-04 M9a). Set raw only for genuinely binary
+  // output you are piping to a file.
+  bool   raw    = 3;
 }
 
 message ScriptEvent {

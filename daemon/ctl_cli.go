@@ -109,7 +109,7 @@ shared shell
                                            detaches without ending the session
 
 admin role only
-  runscript <group> <script...>            run a POSIX script in the group's
+  runscript [-raw] <group> <script...>     run a POSIX script in the group's
                                            microVM as node ("-" = stdin);
                                            output streams live to stdout
   acl get                                  print the ACL document
@@ -492,14 +492,23 @@ func ctlCliMain(args []string) {
 		ctlGoal(rest)
 
 	case "runscript":
-		// Raw output on purpose — this verb is "run my script, show me its
-		// bytes", not an event feed, so no protojson framing like tail/logs.
+		// Bytes, not an event feed — no protojson framing like tail/logs. The
+		// daemon SANITIZES them unless -raw (audit M9a): the guest authors this
+		// output and it lands on your tty; -raw is for binary output you are
+		// redirecting to a file.
+		raw := false
+		if len(rest) > 0 && rest[0] == "-raw" {
+			raw, rest = true, rest[1:]
+		}
 		if len(rest) < 2 {
-			ctlFatal(2, "usage: koto ctl runscript <group> <script...>")
+			ctlFatal(2, "usage: koto ctl runscript [-raw] <group> <script...>")
+		}
+		if raw && stdoutIsTTY() {
+			fmt.Fprintln(os.Stderr, "koto ctl: -raw with a terminal on stdout — the guest's escape sequences will reach it unfiltered")
 		}
 		cl := ctlClient()
 		stream, err := cl.RunScript(context.Background(),
-			&pb.RunScriptReq{Group: rest[0], Script: ctlMsgArg(rest[1:])})
+			&pb.RunScriptReq{Group: rest[0], Script: ctlMsgArg(rest[1:]), Raw: raw})
 		if err != nil {
 			ctlFatal(1, "runscript: %v", err)
 		}
@@ -1029,4 +1038,11 @@ func ctlGoal(args []string) {
 	default:
 		ctlFatal(2, "unknown goal subcommand: %s", sub)
 	}
+}
+
+// stdoutIsTTY reports whether stdout is a terminal — the case where raw
+// guest bytes are dangerous rather than merely unformatted.
+func stdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

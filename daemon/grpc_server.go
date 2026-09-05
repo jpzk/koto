@@ -758,7 +758,17 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 	if _, err := ensure(r.Group, r.Group == "main"); err != nil {
 		return fail(err.Error())
 	}
-	emitLogfG("exec", r.Group, "info", "[%s] runscript start (%d-byte script)", r.Group, len(r.Script))
+	emitLogfG("exec", r.Group, "info", "[%s] runscript start (%d-byte script, raw=%v)", r.Group, len(r.Script), r.Raw)
+	// Sanitized by default (audit M9a): the operator chooses the script, but
+	// the GUEST authors the output — with root=yes it can replace /bin/sh or
+	// cat through the overlay — and this stream used to reach the operator's
+	// tty untouched, so any script run against a hostile group could write
+	// the clipboard (OSC 52), retitle the window or leave mouse mode on.
+	// JobTail already sanitized the identical case; this is the same policy
+	// (SGR passes, every other escape and control is dropped), line-buffered
+	// so an escape split across two frames is judged whole. raw is the
+	// explicit opt-in for binary output going to a file.
+	scrub := newChunkSanitizer(!r.Raw)
 	c, err := fcRunScriptDial(r.Group, r.Script)
 	if err != nil {
 		return fail(err.Error())
@@ -784,10 +794,17 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 		}
 		switch k := f.Kind.(type) {
 		case *pb.AgentFrame_Data:
-			if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: k.Data}); serr != nil {
-				return serr
+			if out := scrub.write(k.Data); len(out) > 0 {
+				if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: out}); serr != nil {
+					return serr
+				}
 			}
 		case *pb.AgentFrame_End:
+			if out := scrub.flush(); len(out) > 0 {
+				if serr := stream.Send(&pb.ScriptEvent{Event: "data", Chunk: out}); serr != nil {
+					return serr
+				}
+			}
 			emitLogfG("exec", r.Group, "info", "[%s] runscript end", r.Group)
 			return stream.Send(&pb.ScriptEvent{Event: "end"})
 		case *pb.AgentFrame_Error:
