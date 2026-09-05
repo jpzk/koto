@@ -1,0 +1,62 @@
+# govulncheck on the release branch — the one GitHub Action this repo runs.
+#
+# govulncheck (golang.org/x/vuln) checks the Go vulnerability database
+# (vuln.go.dev, curated by the Go security team) against a CALL GRAPH of each
+# module, so it reports only vulnerabilities in functions koto actually
+# reaches — a known bug in a dependency function nobody calls is informational,
+# not a failure. It also covers the standard library, so it flags a fix that
+# only a Go toolchain bump delivers.
+#
+# It runs on pushes to `release` (and by hand via workflow_dispatch), NOT on
+# every push to main: this is a release gate, the moment to decide whether a
+# pinned dependency's six-week soak (CLAUDE.md, "Conventions") has to be cut
+# short for a reachable vulnerability — the same call the project already made
+# explicitly for Firecracker. It needs network for the database, which is why
+# it is not a pre-commit hook.
+#
+# Go version: pinned to the exact version the release binaries are BUILT with
+# (the Makefile's GO_IMAGE digest — `podman run --rm $GO_IMAGE go version`), so
+# standard-library findings describe the shipped binaries, not whatever Go the
+# runner happens to have. Bump the two together.
+#
+# Every third-party piece is pinned by SHA / version and is ≥6 weeks old at
+# the time of pinning, like every other dependency here:
+#   actions/checkout  v7.0.0  2026-06-18
+#   actions/setup-go  v6.5.0  2026-06-24
+#   golang.org/x/vuln v1.6.0  2026-07-09
+name: govulncheck
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.24.13" # = Makefile GO_IMAGE (golang:1.24-alpine digest)
+          cache-dependency-path: |
+            daemon/go.sum
+            fcguest/go.sum
+            tui/go.sum
+            protocol/go.sum
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      # One module at a time, each with its own go.mod; the loop fails the job
+      # on the first module with a reachable finding (govulncheck exits 3) but
+      # still runs the rest so the log shows every module's state.
+      - name: govulncheck every module
+        run: |
+          rc=0
+          for m in daemon fcguest tui protocol; do
+            echo "::group::govulncheck $m"
+            (cd "$m" && govulncheck ./...) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
