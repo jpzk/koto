@@ -34,7 +34,6 @@ var (
 	listeners    = map[int]string{}       // port -> group (one-to-one invariant)
 	listenerSrvs = map[int]*http.Server{} // port -> server, for proxyUnlisten rollback
 	listLock     sync.Mutex
-	proxyBind    string // captured by proxyStart; used by ensure() via proxyListenForGroup
 )
 
 // veniceKeyPath returns the on-disk location of the Venice API key. It lives
@@ -933,8 +932,23 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 // today's collision bug violated silently). Callers — daemon startup and
 // ensure() — must propagate the error so spawn fails atomically when the
 // invariant can't be maintained.
-func proxyListen(bind string, port int, group string) error {
-	addr := fmt.Sprintf("%s:%d", bind, port)
+// proxySockDir is where the per-group proxy listeners live: unix sockets, not
+// loopback TCP. On the host every local uid could reach 127.0.0.1:<port> and
+// obtain credentialed LLM access attributed to that group — and, for a
+// networked group, a forward proxy (audit M1). The guest never saw a TCP port
+// anyway: it reaches its proxy over vsock 9000 and the daemon splices
+// (fcSpliceToProxy), so the only client is the daemon itself, and a socket in
+// an owner-only directory is unreachable to other uids by construction. The
+// port number survives as the group's stable identifier (groups.json,
+// GroupInfo.Port, metrics) and names the socket file.
+func proxySockDir() string { return filepath.Join(SOCK_DIR, "proxy") }
+
+func proxySockPath(port int) string {
+	return filepath.Join(proxySockDir(), fmt.Sprintf("p%d.sock", port))
+}
+
+func proxyListen(port int, group string) error {
+	addr := proxySockPath(port)
 	listLock.Lock()
 	if existing, ok := listeners[port]; ok {
 		listLock.Unlock()
@@ -945,7 +959,12 @@ func proxyListen(bind string, port int, group string) error {
 	}
 	listLock.Unlock()
 
-	ln, err := net.Listen("tcp", addr)
+	if err := os.MkdirAll(proxySockDir(), 0o700); err != nil {
+		return err
+	}
+	_ = os.Chmod(proxySockDir(), 0o700) // MkdirAll leaves an existing dir's mode alone
+	_ = os.Remove(addr)                 // a previous daemon's socket file would EADDRINUSE
+	ln, err := net.Listen("unix", addr)
 	if err != nil {
 		emitLogfG("proxy", group, "error", "listen %s for %s: %v", addr, group, err)
 		return err
@@ -953,7 +972,7 @@ func proxyListen(bind string, port int, group string) error {
 	// IdleTimeout reaps keep-alive conns parked between requests. Without it
 	// every guest LLM request leaks its whole conn chain: the guest client
 	// closes, but Firecracker's hybrid vsock never surfaces that close to the
-	// daemon's splice, so the vsock UDS conn + both loopback TCP legs sit
+	// daemon's splice, so the vsock UDS conn + both legs of the splice sit
 	// ESTABLISHED forever — and each one holds a slot in FC's 1023-conn vsock
 	// muxer until the VM refuses all host connections (jobs mirror, shell
 	// attach: "connection reset by peer"). Server-side close is the one end we
@@ -994,6 +1013,7 @@ func proxyUnlisten(port int) {
 	if srv != nil {
 		_ = srv.Close()
 	}
+	_ = os.Remove(proxySockPath(port))
 }
 
 // proxyStart brings the proxy up in the daemon process. Reads groups.json
@@ -1005,9 +1025,9 @@ func proxyUnlisten(port int) {
 // trigger.
 func proxyStart(bind string) {
 	proxyInitPaths()
-	proxyBind = bind
-	emitLogf("proxy", "info", "bind=%s upstream=%s venice=%s metrics=%s",
-		bind, upstream, veniceUpstream, METRICS)
+	_ = bind // the gRPC bind; the proxy listens on unix sockets (proxySockDir)
+	emitLogf("proxy", "info", "listeners=%s upstream=%s venice=%s metrics=%s",
+		proxySockDir(), upstream, veniceUpstream, METRICS)
 	b, err := os.ReadFile(GROUPS_FILE)
 	if err != nil {
 		return
@@ -1018,7 +1038,7 @@ func proxyStart(bind string) {
 		return
 	}
 	for g, p := range m {
-		_ = proxyListen(bind, p, g)
+		_ = proxyListen(p, g)
 	}
 }
 

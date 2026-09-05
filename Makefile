@@ -401,9 +401,11 @@ stop:
 # would name a file that does not exist, the proxy would find no credential,
 # and every turn would 401 while `creds/.credentials.json` sat there unread.
 #
-# BOTH port knobs have to move or the second daemon collides with the first:
-# KOTO_PORT is the gRPC listener (8443), PROXY_PORT the base for the per-group
-# credential-injecting proxy listeners (8787, one per group).
+# KOTO_PORT is the gRPC listener (8443) and has to move or the second daemon
+# collides with the first. PROXY_PORT is the base for the per-group proxy
+# IDENTIFIERS (8787, one per group): since 2026-09-05 the listeners are unix
+# sockets under <state>/run/proxy/, so they cannot collide across state dirs;
+# a distinct base just keeps a dev group's port number unmistakable.
 DEV       := $(CURDIR)/.dev
 DEV_PORT  ?= 8444
 DEV_PROXY ?= 9500

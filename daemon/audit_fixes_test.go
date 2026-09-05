@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The 2026-09-04 audit's mechanical fixes, pinned. Each test names the
@@ -224,5 +225,48 @@ func TestEgressGateHonoursBootProfile(t *testing.T) {
 	proxySetBootNetwork("tg", fcNetNone)
 	if code := connect(); code != http.StatusForbidden {
 		t.Fatalf("after stop: want 403, got %d", code)
+	}
+}
+
+// M1: the per-group proxy listens on a unix socket in an owner-only dir, not
+// on loopback TCP; (port, group) stays one-to-one; unlisten removes the file.
+func TestProxyListenIsUnixSocket(t *testing.T) {
+	fcHarness(t)
+	const port = 4343
+	if err := proxyListen(port, "tg"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { proxyUnlisten(port) })
+	fi, err := os.Lstat(proxySockPath(port))
+	if err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("expected a unix socket at %s, got %v %v", proxySockPath(port), fi, err)
+	}
+	if di, err := os.Stat(proxySockDir()); err != nil || di.Mode().Perm() != 0o700 {
+		t.Fatalf("run/proxy should be 0700, got %v %v", di, err)
+	}
+	if err := proxyListen(port, "tg"); err != nil {
+		t.Fatalf("re-listen for the same group should be a no-op: %v", err)
+	}
+	if err := proxyListen(port, "other"); err == nil {
+		t.Fatal("same port for a different group must be refused")
+	}
+	// The server actually serves on it: a CONNECT for a none-profile group
+	// comes back 403 from serveEgress, which proves the request reached the
+	// handler through the socket.
+	c, err := net.Dial("unix", proxySockPath(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	fmt.Fprintf(c, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+	buf := make([]byte, 64)
+	n, _ := c.Read(buf)
+	if !strings.Contains(string(buf[:n]), " 403 ") {
+		t.Fatalf("expected a 403 through the unix listener, got %q", buf[:n])
+	}
+	proxyUnlisten(port)
+	if _, err := os.Lstat(proxySockPath(port)); err == nil {
+		t.Fatal("unlisten should remove the socket file")
 	}
 }

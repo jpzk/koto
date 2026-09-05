@@ -883,10 +883,12 @@ func fcAcceptLoop(ln net.Listener, handle func(net.Conn)) {
 }
 
 // fcSpliceToProxy forwards one guest API connection into the group's proxy
-// listener. The proxy sees a plain TCP client, so credential injection and
-// per-group metrics attribution work exactly as for podman sidecars.
+// listener — a unix socket under run/proxy (proxySockPath), so nothing on
+// the host but this daemon can reach it (audit M1). The proxy sees a plain
+// stream client; credential injection and per-group attribution are
+// unchanged.
 func fcSpliceToProxy(c net.Conn, proxyPort int) {
-	up, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
+	up, err := net.Dial("unix", proxySockPath(proxyPort))
 	if err != nil {
 		c.Close()
 		return

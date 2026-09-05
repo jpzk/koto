@@ -45,7 +45,7 @@ entirely; per-group prompt.md + /runscript cover its use cases.)
 
 | Dir          | port  | purpose                                | replaces                  |
 |--------------|------:|----------------------------------------|---------------------------|
-| guest → host | 9000  | API egress (TCP-in-vsock → proxy port) | `ANTHROPIC_BASE_URL` bridge |
+| guest → host | 9000  | API egress (vsock → the group's proxy unix socket, `run/proxy/p<port>.sock`) | `ANTHROPIC_BASE_URL` bridge |
 | guest → host | 9001  | *(retired — no raw guest→host text channel remains)* | `.cs/log` bind mount |
 | guest → host | 9004  | turn stream: one connection per turn, framed `TurnFrame` (open{slot}, text/think/tool/tool_out/err, turn_end) → rendered as `[[marker]]` text into host `.cs/log.<slot>` | `.cs/log` bind mount |
 | guest → host | 9002  | ctl plane (framed protobuf `CtlRequest`/`CtlResponse`, replies inline)  | `.cs/ctl` + `.cs/ctl.out` |
@@ -75,7 +75,9 @@ line that would parse as a marker, so the guest cannot author a marker at all. G
 (`make rootfs` + `/restart` every group).
 
 Attribution comes from *which* `<g>.vsock_<port>` socket a connection lands
-on, exactly like the per-group proxy TCP port does today.
+on, exactly like the per-group proxy socket does (`run/proxy/p<port>.sock`,
+unix — the loopback TCP listener it replaced was reachable by every local
+uid, audit 2026-09-04 M1).
 
 Key insight that kept the diff small: **the host log file stays the single
 source of truth.** The turn-stream handler (`fcTurnSink`) renders the guest's
@@ -285,7 +287,7 @@ always wins over a legacy `internet` key.
   - **ctl** — loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`,
     incl. link-local multicast like mDNS `224.0.0.251`), and **cs_host's own
     interface IPs** (`fcSelfIPs`, where the daemon gRPC on
-    `KOTO_BIND:KOTO_PORT` and every group's proxy port live). **Dropped
+    `KOTO_BIND:KOTO_PORT` lives; the per-group proxies are unix sockets). **Dropped
     under every profile.** `Ec2MetadataAccess=false` also blocks metadata inside
     the netstack.
   - **gw** — the guest↔gateway subnet `192.168.127.0/24` (DNS at `.1`). **Always

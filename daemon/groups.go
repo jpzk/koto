@@ -134,7 +134,7 @@ func ensureLocked(g string, isMain bool) (int, error) {
 	// invariant violation we want to surface here rather than serving the
 	// wrong group's traffic on the same socket. Rolled back below if the
 	// container spawn itself fails.
-	if err := proxyListen(proxyBind, port, g); err != nil {
+	if err := proxyListen(port, g); err != nil {
 		return 0, fmt.Errorf("proxy listen: %w", err)
 	}
 	if fcRunning(g) {
