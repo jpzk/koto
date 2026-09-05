@@ -175,8 +175,8 @@ func setupRun(sc *setupCtx, steps []setupStep, only, from string) int {
 material the daemon and its clients use, connects your Anthropic
 credentials, starts the service, and proves the result answers.
 
-It is the last of three stages and owns neither of the others. `+"`make fetch`"+`
-or `+"`make build`"+` acquires the artifacts; `+"`make install`"+` integrates them into
+It is the last of three stages and owns neither of the others. ` + "`make fetch`" + `
+or ` + "`make build`" + ` acquires the artifacts; ` + "`make install`" + ` integrates them into
 the system; this configures what they produced.
 
 Steps that are already done are skipped, so re-running this is safe and is
@@ -284,5 +284,3 @@ func (sc *setupCtx) capture(name string, args ...string) (string, error) {
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
-
-

@@ -66,10 +66,10 @@ func TestFuzzyRankCaseInsensitive(t *testing.T) {
 // the noisy subsequence hit outright.
 func TestFuzzyRankStoryBugRegression(t *testing.T) {
 	items := []string{
-		"tell me a story about news",              // substring hit
-		"set up tom orrow for the year",               // scattered s-t-o-r-y noise
-		"show today's monthly summary for next year",  // similarly loose
-		"investigate why the news feed is broken", // no match at all
+		"tell me a story about news",                 // substring hit
+		"set up tom orrow for the year",              // scattered s-t-o-r-y noise
+		"show today's monthly summary for next year", // similarly loose
+		"investigate why the news feed is broken",    // no match at all
 	}
 	got := fuzzyRank("story", items, 0)
 	if len(got) == 0 {

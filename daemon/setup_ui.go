@@ -103,9 +103,15 @@ func (u *setupUI) prose(s string) {
 	}
 }
 
-func (u *setupUI) ok(format string, a ...any)   { u.printf("%s %s", u.green("✓"), fmt.Sprintf(format, a...)) }
-func (u *setupUI) fail(format string, a ...any) { u.printf("%s %s", u.red("✗"), fmt.Sprintf(format, a...)) }
-func (u *setupUI) warn(format string, a ...any) { u.printf("%s %s", u.yellow("!"), fmt.Sprintf(format, a...)) }
+func (u *setupUI) ok(format string, a ...any) {
+	u.printf("%s %s", u.green("✓"), fmt.Sprintf(format, a...))
+}
+func (u *setupUI) fail(format string, a ...any) {
+	u.printf("%s %s", u.red("✗"), fmt.Sprintf(format, a...))
+}
+func (u *setupUI) warn(format string, a ...any) {
+	u.printf("%s %s", u.yellow("!"), fmt.Sprintf(format, a...))
+}
 func (u *setupUI) info(format string, a ...any) { u.printf("  %s", fmt.Sprintf(format, a...)) }
 
 // hint prints remediation text indented under a failed check.
