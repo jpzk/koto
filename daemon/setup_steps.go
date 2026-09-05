@@ -130,6 +130,15 @@ have already issued.`,
 			}
 			// `koto ctl` defaults to the client name "agent", so without this
 			// the command the handoff hands you fails on a missing identity.
+			// ADMIN BY DESIGN (decided 2026-09-05, audit M11): `koto ctl` is the
+			// operator's tool — the user who runs the shell, the same person who
+			// runs the TUI — not something handed to agents. fbb75a9 minted this
+			// identity least-privilege and CLAUDE.md said so; 60f3127 made it
+			// admin; the audit flagged the contradiction and the operator kept
+			// admin and had the docs changed. A scoped identity for a script or
+			// a CI job is one `koto pki client -role agent <name>` away and is
+			// selected with KOTO_CLIENT=<name>; the seeded `agent` role in
+			// acl.json exists for exactly that.
 			if !exists(filepath.Join(sc.credsDir(), "client-agent.crt")) {
 				if _, err := pkiClient(sc.credsDir(), "agent", []string{"admin"}); err != nil {
 					return err
