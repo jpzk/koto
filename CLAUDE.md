@@ -955,13 +955,23 @@ which is worth knowing before auditing an installed host:
   listens where you tell it. mTLS + client-fingerprint allowlist + bearer token
   gate every call; widening the bind is a deliberate koto.env edit, and needs a
   server cert reissued with a matching SAN (`koto pki server -san …`).
-- **`koto setup` mints TWO client identities**, not one: `tui` with the
-  `admin` role (the TUI needs RunScript/AttachShell), and `agent` with the
-  seeded least-privilege `agent` role — because `koto ctl` defaults to the
-  client name `agent`, and without it the `koto ctl list` the wizard hands
-  you at the end fails on a missing token. So the default CLI identity can
-  read and converse with any group but cannot stop, destroy, reconfigure or
-  run scripts; reach for `KOTO_CLIENT=tui` when an admin verb is needed.
+- **`koto setup` mints TWO client identities, both `admin`**: `tui` (the TUI
+  needs RunScript/AttachShell) and `agent`, which is what a bare `koto ctl`
+  uses — because `koto ctl` defaults to the client name `agent`, and without
+  it the `koto ctl list` the wizard hands you at the end fails on a missing
+  token. **`koto ctl` is the OPERATOR's tool** — the user who runs the shell,
+  the same person who runs the TUI — so its default identity is admin by
+  design (decided 2026-09-05, audit M11; an earlier version of this bullet
+  promised least privilege and was wrong about the code, and the operator
+  kept the code). The name `agent` is historical and misleading: nothing an
+  agent runs ever holds this identity — guests reach the daemon only over the
+  vsock ctl plane, authorized by group identity, and never see `creds/`. When
+  something OTHER than you needs `koto ctl` — a script, a CI job, a coding
+  assistant — mint it a scoped identity: `koto pki client -role agent <name>`
+  (the seeded `agent` role: list/send/history/metrics/sched_list/subscribe/
+  watch — cannot spawn, stop, destroy, reconfigure or run scripts) and point
+  it there with `KOTO_CLIENT=<name>`. Treat `creds/client-agent.key` +
+  `token-agent` as admin material, because they are.
 - **`KOTO_CLAUDE_BIN` in `koto.env` names the claude CLI the daemon execs for
   OAuth token refresh**, and when it points under the operator's home the unit
   runs `ProtectHome=tmpfs` with a read-only `BindReadOnlyPaths=` of the claude
