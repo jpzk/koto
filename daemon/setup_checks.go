@@ -329,7 +329,12 @@ func checkRuntimeTools() []checkResult {
 	})
 	// claude is only reachable for OAuth: the proxy shells out to it to
 	// refresh a subscription token (proxy.go). An API-key install never calls
-	// it, so a missing claude is a warning rather than a hard stop.
+	// it, so a missing claude is a warning rather than a hard stop. This looks
+	// on the OPERATOR's PATH, which is the right place to find it — `koto
+	// install` records the path as KOTO_CLAUDE_BIN so the daemon, whose PATH
+	// and ProtectHome cannot see ~/.local/bin, execs it by absolute path
+	// (claudebin.go). Whether the DAEMON can run it is `koto claude-login
+	// --status`'s check, not this one's.
 	if p, err := exec.LookPath("claude"); err == nil {
 		out = append(out, okCheck("claude", p))
 	} else {
