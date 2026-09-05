@@ -75,8 +75,8 @@ func hostCPUs() string {
 type installOpts struct {
 	stateDir string
 	root     string // the clone
-	ui  *setupUI
-	ctx *setupCtx
+	ui       *setupUI
+	ctx      *setupCtx
 }
 
 func installUsage() {
@@ -197,13 +197,18 @@ func runInstall(o installOpts) error {
 		u.warn("koto-tui not built (run `make tui-build`) — installing without the TUI")
 	}
 
-	// 3. /etc/koto/koto.env
-	if err := writeEnvFile(o); err != nil {
+	// 3. /etc/koto/koto.env. The claude CLI is resolved HERE, in the
+	// operator's shell, because the daemon's own environment cannot find it:
+	// the unit's PATH is systemd's default and ProtectHome hides ~/.local/bin,
+	// which is where the native installer puts it. Recording the path is what
+	// lets the proxy refresh an OAuth token at all (claudebin.go).
+	claude := installClaudeBin(u)
+	if err := writeEnvFile(o, claude); err != nil {
 		return err
 	}
 
 	// 4. the unit
-	unit := renderUnit(me)
+	unit := renderUnit(me, claude)
 	changed, err := sudoWriteIfChanged(u, unitPath, unit, "0644")
 	if err != nil {
 		return err
@@ -406,9 +411,58 @@ func seedStateDir(o installOpts, me *user.User) error {
 	return nil
 }
 
+// readEnvFile parses /etc/koto/koto.env as KEY=VALUE lines; nil when it does
+// not exist or cannot be read (it is root-owned 0600, so an unprivileged
+// re-run sees nothing — which is why the file is rewritten with sudo).
+func readEnvFile() map[string]string {
+	b, err := os.ReadFile(envFilePath)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}
+
+// installClaudeBin decides which claude the installed daemon will exec for
+// OAuth token refresh. A KOTO_CLAUDE_BIN the operator already has in koto.env
+// wins (their edit, preserved like every other value there); otherwise the
+// binary on this shell's PATH. Empty when there is none — an API-key install
+// never calls it, so that is a warning, not a failure. The same value feeds
+// both koto.env and the unit's bind, so the two cannot disagree.
+func installClaudeBin(u *setupUI) string {
+	if v := strings.TrimSpace(readEnvFile()[claudeBinEnv]); v != "" {
+		if exists(v) {
+			return v
+		}
+		u.warn("%s=%s in %s no longer exists — re-resolving", claudeBinEnv, v, envFilePath)
+	}
+	p, err := claudeBinResolve()
+	if err != nil {
+		u.warn("claude not found on PATH — the daemon cannot refresh a subscription (OAuth)")
+		u.warn("token; API-key auth is unaffected. Install claude and re-run `koto install`.")
+		return ""
+	}
+	if dirs := claudeBindDirs(p, protectHomeHides); len(dirs) > 0 {
+		u.info("claude is %s — the unit binds %s read-only through ProtectHome", p, strings.Join(dirs, " and "))
+	} else {
+		u.info("claude is %s", p)
+	}
+	return p
+}
+
 // writeEnvFile creates /etc/koto/koto.env, or merges new keys into an
-// existing one without touching values the operator has edited.
-func writeEnvFile(o installOpts) error {
+// existing one without touching values the operator has edited. claude is the
+// resolved CLI path (installClaudeBin), or "" for none.
+func writeEnvFile(o installOpts, claude string) error {
 	defaults := [][2]string{
 		{"KOTO_HOME", o.stateDir},
 		// Loopback, not 0.0.0.0. The container set 0.0.0.0 because it was
@@ -423,23 +477,16 @@ func writeEnvFile(o installOpts) error {
 		{"KOTO_HOST_CPUS", ""},
 		{"KOTO_HOST_MEM_MIB", ""},
 		{"ANTHROPIC_API_KEY", ""},
+		// The claude CLI the proxy execs to refresh an OAuth token. Resolved
+		// at install time in the operator's shell; the unit's PATH cannot
+		// find it and ProtectHome may hide it (claudebin.go).
+		{claudeBinEnv, claude},
 	}
 	if key, err := os.ReadFile(filepath.Join(o.stateDir, "creds", "anthropic-api-key")); err == nil {
 		optional[2][1] = strings.TrimSpace(string(key))
 	}
 
-	existing := map[string]string{}
-	if b, err := os.ReadFile(envFilePath); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if k, v, ok := strings.Cut(line, "="); ok {
-				existing[strings.TrimSpace(k)] = strings.TrimSpace(v)
-			}
-		}
-	}
+	existing := readEnvFile()
 
 	var b strings.Builder
 	b.WriteString("# koto service configuration — read by the systemd unit.\n")
@@ -454,7 +501,10 @@ func writeEnvFile(o installOpts) error {
 	}
 	b.WriteString("\n")
 	for _, kv := range optional {
-		if cur, ok := existing[kv[0]]; ok {
+		// KOTO_CLAUDE_BIN is the one key whose existing value has ALREADY been
+		// honored (or found stale and re-resolved) by installClaudeBin, so the
+		// resolved value is written as-is rather than re-preferring the file.
+		if cur, ok := existing[kv[0]]; ok && kv[0] != claudeBinEnv {
 			fmt.Fprintf(&b, "%s=%s\n", kv[0], cur)
 		} else if kv[1] != "" {
 			fmt.Fprintf(&b, "%s=%s\n", kv[0], kv[1])
@@ -482,8 +532,9 @@ func podmanPath() string {
 
 // renderUnit builds the service unit. Values are baked in literally rather
 // than using systemd specifiers, so `systemctl cat koto` shows the operator
-// exactly what will run.
-func renderUnit(me *user.User) string {
+// exactly what will run. claude is the CLI path recorded in koto.env ("" for
+// none); it decides how the unit scopes /home (installHomeScoping).
+func renderUnit(me *user.User, claude string) string {
 	gid := me.Gid
 	if g, err := user.LookupGroupId(me.Gid); err == nil {
 		gid = g.Name
@@ -523,7 +574,7 @@ Delegate=yes
 # us — and rather more legible: the daemon can see its own state and nothing
 # else of yours. ProtectHome is the one that matters, since the blast radius
 # we care about is the rest of $HOME (~/.ssh, ~/.gnupg, other projects).
-ProtectHome=yes
+%[7]s
 ProtectSystem=strict
 ReadWritePaths=%[5]s
 PrivateTmp=yes
@@ -543,7 +594,32 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, me.Username, me.Uid, gid, envFilePath, stateDirOf(), installCPUQuota())
+`, me.Username, me.Uid, gid, envFilePath, stateDirOf(), installCPUQuota(), installHomeScoping(claude))
+}
+
+// installHomeScoping renders the unit's view of /home. The default is
+// ProtectHome=yes: the daemon sees nothing of the operator's home at all. That
+// is also what broke OAuth token refresh on the host — the claude CLI the
+// proxy execs is, on a native-installer host, ~/.local/bin/claude, and `yes`
+// hides it (claudebin.go has the full story). When the recorded claude lives
+// under a hidden directory, this switches to ProtectHome=tmpfs — the mode
+// systemd documents as the one that lets BindReadOnlyPaths= punch specific
+// directories through an otherwise empty /home — and binds exactly the
+// directories the binary needs, read-only. Everything else in $HOME stays as
+// invisible as under `yes`; a claude under /usr/local changes nothing.
+func installHomeScoping(claude string) string {
+	dirs := claudeBindDirs(claude, protectHomeHides)
+	if len(dirs) == 0 {
+		return "ProtectHome=yes"
+	}
+	var b strings.Builder
+	b.WriteString("# tmpfs rather than yes: the claude CLI the proxy execs for OAuth token\n")
+	b.WriteString("# refresh (KOTO_CLAUDE_BIN in koto.env) lives under the operator's home, and\n")
+	b.WriteString("# tmpfs is the ProtectHome mode that lets the read-only binds below show\n")
+	b.WriteString("# through an otherwise empty /home. Nothing else of $HOME is visible.\n")
+	b.WriteString("ProtectHome=tmpfs\n")
+	b.WriteString("BindReadOnlyPaths=" + strings.Join(dirs, " "))
+	return b.String()
 }
 
 // stateDirOf is the unit's WorkingDirectory and its one writable path. It is

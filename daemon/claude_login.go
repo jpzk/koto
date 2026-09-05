@@ -464,7 +464,18 @@ func authReport(ac *authCtx, probe bool) int {
 		u.hint("an ANTHROPIC_API_KEY there would outrank everything above and is invisible from here\n" +
 			"check it with: sudo grep ANTHROPIC_API_KEY " + authEnvFile)
 	}
+	// Only for OAuth: an API key is never refreshed, so the claude CLI is
+	// irrelevant to it. "installed" = this report targets the state dir the
+	// systemd unit serves, which is the only daemon whose ProtectHome applies.
+	refreshBroken := false
+	if c.kind == "OAuth token" {
+		inst, ok := authInstalledStateDir()
+		refreshBroken = !authRefreshReport(u, ok && inst == ac.state)
+	}
 	if !probe {
+		if refreshBroken {
+			return 1
+		}
 		return 0
 	}
 	pr := authProbe(c.headers)
@@ -501,8 +512,13 @@ func authReport(ac *authCtx, probe bool) int {
 		// failing after the daemon has tried.
 		u.warn("api.anthropic.com rejected the expired token (%d %s) — expected, since this "+
 			"check does not refresh", status, http.StatusText(status))
-		u.info("the daemon refreshes it via `claude` before every request; if turns are")
-		u.info("still 401ing, that refresh is failing and a fresh login is the fix")
+		if refreshBroken {
+			u.info("and the daemon CANNOT refresh it (see above) — that is why turns 401; a fresh")
+			u.info("login only buys one token lifetime (~8h) until the refresh path is fixed")
+		} else {
+			u.info("the daemon refreshes it via `claude` before every request; if turns are")
+			u.info("still 401ing, that refresh is failing and a fresh login is the fix")
+		}
 		u.hint("run `koto claude-login` if the 401s continue")
 		return 1
 	case status == 401 || status == 403:
@@ -523,6 +539,98 @@ func authReport(ac *authCtx, probe bool) int {
 		}
 		return 0
 	}
+}
+
+// authRefreshReport checks the OAuth refresh path from the DAEMON's point of
+// view and reports it; false means the daemon cannot run claude, so the token
+// will expire (~8h) and every turn will 401 until someone logs in by hand.
+//
+// This is the check preflight never made. `koto setup --check` looks for
+// claude on the OPERATOR's PATH, where it is fine; the daemon has systemd's
+// PATH and ProtectHome, and on a native-installer host (~/.local/bin/claude)
+// it could not exec the binary at all. refresh() used to discard that error,
+// so the only symptom was a 401 storm eight hours after every login.
+func authRefreshReport(u *setupUI, installed bool) bool {
+	bin, src := authDaemonEnv(claudeBinEnv)
+	how := ""
+	if bin != "" {
+		how = claudeBinEnv + " from " + src
+	} else {
+		path, psrc := authDaemonEnv("PATH")
+		if psrc == "" {
+			path, psrc = os.Getenv("PATH"), "this shell's PATH (no daemon environment to read)"
+		}
+		for _, d := range strings.Split(path, ":") {
+			if d == "" {
+				continue
+			}
+			p := filepath.Join(d, "claude")
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+				bin, how = p, "PATH lookup in "+psrc
+				break
+			}
+		}
+		if bin == "" {
+			u.fail("token refresh: no `claude` on the daemon's PATH (%s) and %s is unset", path, claudeBinEnv)
+			u.hint("the daemon execs claude to rotate the token, so without it the token expires every\n" +
+				"~8h and every turn 401s. Install claude (`npm i -g @anthropic-ai/claude-code`) and\n" +
+				"re-run `koto install`, which records its path as " + claudeBinEnv)
+			return false
+		}
+	}
+	if _, err := os.Stat(bin); err != nil {
+		u.fail("token refresh: %s (%s) does not exist", bin, how)
+		u.hint("re-run `koto install` to re-resolve it, or fix " + claudeBinEnv + " in " + authEnvFile)
+		return false
+	}
+	if installed && protectHomeHides(bin) && !authUnitShows(bin) {
+		u.fail("token refresh: %s is under a home directory the unit's ProtectHome hides", bin)
+		u.hint("re-run `koto install` — it switches the unit to ProtectHome=tmpfs and binds the\n" +
+			"claude directories read-only, so the daemon can exec it")
+		return false
+	}
+	u.ok("token refresh via %s (%s)", bin, how)
+	return true
+}
+
+// authUnitShows reads the installed unit and says whether bin, which lives
+// under a ProtectHome'd directory, is bound through. An unreadable or absent
+// unit answers true: the report accuses only on evidence.
+func authUnitShows(bin string) bool {
+	b, err := os.ReadFile(unitPath)
+	if err != nil {
+		return true
+	}
+	protect := ""
+	var binds []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "ProtectHome="); ok {
+			protect = strings.TrimSpace(v)
+		}
+		for _, key := range []string{"BindReadOnlyPaths=", "BindPaths="} {
+			if v, ok := strings.CutPrefix(line, key); ok {
+				binds = append(binds, strings.Fields(v)...)
+			}
+		}
+	}
+	if protect == "" || protect == "no" || protect == "read-only" {
+		return true
+	}
+	for _, need := range claudeBindDirs(bin, protectHomeHides) {
+		covered := false
+		for _, have := range binds {
+			have = strings.TrimPrefix(have, "-")
+			if need == have || strings.HasPrefix(need, have+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeCodeSystem is the first system block every turn koto proxies carries,

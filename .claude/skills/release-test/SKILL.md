@@ -258,6 +258,10 @@ On Fedora:
 ```sh
 sudo dnf install -y nodejs npm tmux
 sudo npm i -g @anthropic-ai/claude-code      # preflight's `! claude not found`
+# npm -g lands claude in /usr/local/bin, on the unit's PATH. A claude from the
+# NATIVE installer (~/.local/bin) is what `koto install` must record as
+# KOTO_CLAUDE_BIN and bind through ProtectHome — worth one leg of the test:
+# `koto claude-login --status` must print `✓ token refresh via …` either way.
 rm -f /var/lib/koto/creds/anthropic-api-key  # or it shadows OAuth, see below
 tmux new-session -d -s auth -x 200 -y 50 "cd ~/koto && koto setup --only auth; sleep 3600"
 tmux capture-pane -t auth -p            # read the prompt
