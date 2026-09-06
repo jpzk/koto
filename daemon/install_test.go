@@ -29,6 +29,26 @@ func TestRenderUnitIsValid(t *testing.T) {
 		"ProtectHome=yes", // replaces the container's filesystem scoping
 		"ReadWritePaths=", // the state dir, and only it
 		"WantedBy=multi-user.target",
+		// The 2026-09-06 hardening (audit M13). Each is here because the
+		// daemon demonstrably does not need what it takes away; losing one
+		// silently would be losing the last boundary before the operator's
+		// uid, so they are named rather than merely rendered.
+		"DevicePolicy=closed",
+		"DeviceAllow=/dev/kvm rw",
+		"CapabilityBoundingSet=CAP_SETUID CAP_SETGID",
+		"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+		"RestrictNamespaces=user mnt pid net ipc uts cgroup",
+		"ProtectKernelModules=yes",
+		"ProtectKernelLogs=yes",
+		"ProtectClock=yes",
+		"ProtectHostname=yes",
+		"LockPersonality=yes",
+		"RestrictRealtime=yes",
+		"SystemCallArchitectures=native",
+		// NoNewPrivileges must stay `no` DESPITE the directives above, several
+		// of which imply `yes` when a unit does not say otherwise. `yes` would
+		// strip newuidmap's file capabilities and no microVM would ever boot.
+		"NoNewPrivileges=no",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q\n---\n%s", want, unit)
