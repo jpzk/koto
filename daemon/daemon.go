@@ -219,6 +219,7 @@ func daemonMain() {
 	)
 	pb.RegisterKotoServer(srv, &kotoServer{})
 	emitLogf("daemon", "info", "kotod ready grpc=%s (mTLS+token)", addr)
+	authBindingPreflight()
 
 	loadSched()
 	loadGoals()

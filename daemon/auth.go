@@ -14,6 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -98,6 +99,25 @@ func tokenIdentity(tok string) (clientIdentity, bool) {
 	return id, ok
 }
 
+// certIdentity returns the CommonName of the client certificate the peer
+// presented. Every identity this project mints — `koto pki client` (pki.go)
+// and the Makefile's openssl route alike — sets CN, the clients.allow name
+// column and the tokens.json key to the SAME name, so the CN is the cert's
+// claim about which identity it is. The bool is false when the connection
+// carries no TLS peer certificate at all, which cannot happen through the
+// real listener (RequireAndVerifyClientCert) and so is a deny, not a skip.
+func certIdentity(ctx context.Context) (string, bool) {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return "", false
+	}
+	ti, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(ti.State.PeerCertificates) == 0 {
+		return "", false
+	}
+	return ti.State.PeerCertificates[0].Subject.CommonName, true
+}
+
 func peerAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
 		return p.Addr.String()
@@ -120,7 +140,57 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 		emitLogf("auth", "warn", "rejected call from %s (bad/missing token)", peerAddr(ctx))
 		return clientIdentity{}, status.Error(codes.Unauthenticated, "invalid or missing token")
 	}
+	// The two credentials must name the SAME identity (audit L6). Without
+	// this the two layers authenticate independently: any allowlisted cert
+	// plus a leaked admin token is admin, and revoking a device means
+	// remembering both clients.allow and tokens.json — miss one and the
+	// device keeps full access. Binding them makes either revocation
+	// sufficient. Fails closed on a connection with no peer certificate.
+	cn, ok := certIdentity(ctx)
+	if !ok {
+		emitLogf("auth", "warn", "rejected call from %s (no client certificate)", peerAddr(ctx))
+		return clientIdentity{}, status.Error(codes.Unauthenticated, "no client certificate")
+	}
+	if cn != id.Name {
+		emitLogf("auth", "warn", "rejected call from %s: client cert %q presented %q's token", peerAddr(ctx), cn, id.Name)
+		return clientIdentity{}, status.Error(codes.Unauthenticated, "client certificate and token name different identities")
+	}
 	return id, nil
+}
+
+// authBindingPreflight names every identity whose two credentials cannot
+// agree, at startup, on the daemon log. The binding above turns a mismatch
+// into an Unauthenticated no client would explain to itself, so the operator
+// hears about it once when the daemon comes up rather than from a device that
+// silently stopped working: a clients.allow name with no tokens.json entry can
+// never authenticate, and a tokens.json entry with no allowlisted cert of that
+// name can only be used from a cert someone else holds.
+func authBindingPreflight() {
+	allowNames := map[string]bool{}
+	b, err := os.ReadFile(credFile("clients.allow"))
+	if err != nil {
+		return // no allowlist yet: pre-wizard, nothing to check
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && !strings.HasPrefix(f[0], "#") {
+			allowNames[f[1]] = true
+		}
+	}
+	tokNames := map[string]bool{}
+	for _, id := range loadTokenIdentities() {
+		tokNames[id.Name] = true
+	}
+	for n := range allowNames {
+		if !tokNames[n] {
+			emitLogf("auth", "warn", "identity %q has an allowlisted cert but no tokens.json entry — its calls will be refused (mint one: koto pki client %s)", n, n)
+		}
+	}
+	for n := range tokNames {
+		if !allowNames[n] {
+			emitLogf("auth", "warn", "identity %q has a token but no cert named %q in clients.allow — its calls will be refused", n, n)
+		}
+	}
 }
 
 // aclLogGroup maps a group-scoped verb's target onto the pb.LogEvent.group

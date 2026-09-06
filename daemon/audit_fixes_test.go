@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +17,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"koto-protocol/pb"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 // The 2026-09-04 audit's mechanical fixes, pinned. Each test names the
@@ -313,5 +323,88 @@ func TestChunkSanitizer(t *testing.T) {
 	big := bytes.Repeat([]byte("x"), chunkSanitizerMaxPartial+1)
 	if len(c3.write(big)) == 0 {
 		t.Fatal("over-cap partial should be flushed")
+	}
+}
+
+// L6: the client cert and the bearer token must name the same identity.
+// Two allowlisted identities are minted into a temp creds dir and driven
+// through the REAL serverTLSConfig + interceptors over a loopback gRPC
+// connection, because that is the only place the binding can be observed:
+// the cert reaches the interceptor through the peer's TLS state, not through
+// anything a unit test can synthesize honestly.
+func TestCertAndTokenMustNameOneIdentity(t *testing.T) {
+	dir := t.TempDir()
+	creds := filepath.Join(dir, "creds")
+	if err := pkiInit(creds, nil); err != nil {
+		t.Fatalf("pkiInit: %v", err)
+	}
+	tokTUI, err := pkiClient(creds, "tui", []string{"admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokRO, err := pkiClient(creds, "readonly", []string{"reader"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHere := HERE
+	HERE = dir
+	t.Cleanup(func() { HERE = oldHere })
+
+	tlsCfg, err := serverTLSConfig()
+	if err != nil {
+		t.Fatalf("serverTLSConfig: %v", err)
+	}
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.ChainUnaryInterceptor(authUnary),
+	)
+	pb.RegisterKotoServer(srv, &kotoServer{})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(l)
+	defer srv.Stop()
+
+	caPEM, _ := os.ReadFile(filepath.Join(creds, "ca.crt"))
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caPEM)
+
+	call := func(certName, token string) error {
+		cert, err := tls.LoadX509KeyPair(
+			filepath.Join(creds, "client-"+certName+".crt"),
+			filepath.Join(creds, "client-"+certName+".key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := grpc.NewClient(l.Addr().String(),
+			grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+				ServerName:   "koto-daemon",
+				MinVersion:   tls.VersionTLS13,
+			})),
+			grpc.WithPerRPCCredentials(testToken{token}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err = pb.NewKotoClient(conn).List(ctx, &pb.ListReq{})
+		return err
+	}
+
+	if err := call("tui", tokTUI); err != nil {
+		t.Fatalf("matched cert+token must be accepted: %v", err)
+	}
+	// The attack L6 describes: an allowlisted cert of a low-privilege
+	// identity plus a leaked admin token.
+	if err := call("readonly", tokTUI); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("readonly cert + tui token: want Unauthenticated, got %v", err)
+	}
+	// And the mirror: the admin's own cert may not carry someone else's token.
+	if err := call("tui", tokRO); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("tui cert + readonly token: want Unauthenticated, got %v", err)
 	}
 }
