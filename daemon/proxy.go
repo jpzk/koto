@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -712,6 +713,124 @@ func llmRefuse(w http.ResponseWriter, group, provider, method, reqPath string) {
 		" (the proxy relays inference and model metadata only)", http.StatusForbidden)
 }
 
+// --- M2: concurrency and stalled readers ------------------------------------
+//
+// MaxBytesReader bounds ONE request body. What the finding actually exploited
+// is that nothing bounded how MANY: 50 parallel POSTs each buffering a body
+// that lives across up to 7 retry attempts, in the process that also holds
+// the OAuth token and every workspace image. groupSlots caps turns, not proxy
+// requests, and cs-subagent fans out through the same socket, so concurrency
+// here was unbounded by construction.
+
+const (
+	// proxyMaxInflightPerGroup is deliberately generous: this is an OOM
+	// backstop, not a scheduler. A turn plus a subagent fan-out is real work
+	// on this socket, and a limit low enough to shape traffic would fail
+	// legitimate turns intermittently — the worst kind of bug to attribute.
+	proxyMaxInflightPerGroup = 32
+	// proxyMaxInflightGlobal keeps one group from taking the whole heap while
+	// still letting every group reach its own limit.
+	proxyMaxInflightGlobal = 128
+	// proxyInflightWait bounds the wait for a slot, so a leaked slot degrades
+	// to 503s rather than wedging a group forever.
+	proxyInflightWait = 60 * time.Second
+)
+
+var (
+	proxyInflightGlobal = make(chan struct{}, proxyMaxInflightGlobal)
+	proxyInflightMu     sync.Mutex
+	proxyInflightGroup  = map[string]chan struct{}{}
+)
+
+func proxyGroupSem(group string) chan struct{} {
+	proxyInflightMu.Lock()
+	defer proxyInflightMu.Unlock()
+	c, ok := proxyInflightGroup[group]
+	if !ok {
+		c = make(chan struct{}, proxyMaxInflightPerGroup)
+		proxyInflightGroup[group] = c
+	}
+	return c
+}
+
+// proxyAcquire takes one per-group slot and one global slot, always in that
+// order so two callers cannot deadlock against each other. Returns false when
+// the client goes away or the wait expires; the caller answers 503.
+func proxyAcquire(ctx context.Context, group string) (release func(), ok bool) {
+	g := proxyGroupSem(group)
+	// Fast path first, and not only for speed: `select` picks UNIFORMLY AT
+	// RANDOM among ready cases, so a combined select would refuse a request
+	// whose context happened to be done even with slots free. Trying the
+	// non-blocking send on its own makes "a slot is available" decisive.
+	var t *time.Timer
+	take := func(c chan struct{}) bool {
+		select {
+		case c <- struct{}{}:
+			return true
+		default:
+		}
+		if t == nil {
+			t = time.NewTimer(proxyInflightWait)
+		}
+		select {
+		case c <- struct{}{}:
+			return true
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return false
+		}
+	}
+	defer func() {
+		if t != nil {
+			t.Stop()
+		}
+	}()
+	if !take(g) {
+		return nil, false
+	}
+	// Always group then global, so two callers cannot deadlock against each
+	// other.
+	if !take(proxyInflightGlobal) {
+		<-g
+		return nil, false
+	}
+	return func() { <-proxyInflightGlobal; <-g }, true
+}
+
+// proxyWriteStall is how long a single write to the guest may block before the
+// connection is torn down.
+const proxyWriteStall = 120 * time.Second
+
+// proxyStallWriter re-arms the write deadline before EVERY write, which is the
+// whole point: the deadline then bounds a reader that has stopped reading, not
+// a model that is answering slowly. A long thinking gap moves no bytes and so
+// arms nothing; a guest that opens a streamed response and stops draining it
+// trips in proxyWriteStall, freeing the buffered body and the upstream
+// connection instead of parking both for the 600 s client timeout.
+type proxyStallWriter struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func newProxyStallWriter(w http.ResponseWriter) *proxyStallWriter {
+	return &proxyStallWriter{w: w, rc: http.NewResponseController(w)}
+}
+
+func (s *proxyStallWriter) Write(p []byte) (int, error) {
+	// Best-effort: a ResponseWriter that cannot do deadlines returns
+	// ErrNotSupported and the write proceeds undeadlined — the pre-M2
+	// behaviour, not a failure.
+	_ = s.rc.SetWriteDeadline(time.Now().Add(proxyWriteStall))
+	return s.w.Write(p)
+}
+
+// clear disarms the deadline. Necessary, not tidiness: the deadline lives on
+// the CONNECTION, which keep-alive hands to the next request — leaving one
+// armed would fail a later request on the same connection for no visible
+// reason.
+func (s *proxyStallWriter) clear() { _ = s.rc.SetWriteDeadline(time.Time{}) }
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// General internet egress (internet=full groups). Identified by the
 	// CONNECT method (HTTPS tunnel) or an absolute-form request target (plain
@@ -727,6 +846,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		llmRefuse(w, h.group, provider, r.Method, r.URL.Path)
 		return
 	}
+	// Bound concurrent in-flight requests (audit M2). Taken BEFORE the body
+	// is buffered, since the buffered body is the memory being bounded, and
+	// after the allowlist gate, so a refused probe never consumes a slot.
+	release, ok := proxyAcquire(r.Context(), h.group)
+	if !ok {
+		if llmFlowSeen.allow("inflight|" + h.group) {
+			emitLogfG("llm", h.group, "warn",
+				"[%s] too many concurrent LLM requests (per-group %d, global %d) — refusing after %s",
+				h.group, proxyMaxInflightPerGroup, proxyMaxInflightGlobal, proxyInflightWait)
+		}
+		http.Error(w, "koto proxy: too many concurrent requests for this group", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	if provider == "venice" {
 		h.serveVenice(w, r)
 		return
@@ -828,6 +961,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
+	out := newProxyStallWriter(w)
+	defer out.clear()
 
 	usage := map[string]any{}
 	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
@@ -835,7 +970,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			if _, err := w.Write(append(line, '\n')); err != nil {
+			if _, err := out.Write(append(line, '\n')); err != nil {
 				break
 			}
 			if flusher != nil {
@@ -885,7 +1020,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		data, _ := io.ReadAll(resp.Body)
 		probe.firstByte()
-		_, _ = w.Write(data)
+		_, _ = out.Write(data)
 		var parsed map[string]any
 		if json.Unmarshal(data, &parsed) == nil {
 			if u, ok := parsed["usage"].(map[string]any); ok {
@@ -992,6 +1127,8 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
+	out := newProxyStallWriter(w)
+	defer out.clear()
 
 	usage := map[string]any{}
 	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
@@ -999,7 +1136,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			if _, err := w.Write(append(line, '\n')); err != nil {
+			if _, err := out.Write(append(line, '\n')); err != nil {
 				break
 			}
 			if flusher != nil {
@@ -1028,7 +1165,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	} else {
 		data, _ := io.ReadAll(resp.Body)
 		probe.firstByte()
-		_, _ = w.Write(data)
+		_, _ = out.Write(data)
 		var parsed map[string]any
 		if json.Unmarshal(data, &parsed) == nil {
 			if u, ok := parsed["usage"].(map[string]any); ok {
