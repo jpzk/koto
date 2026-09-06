@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-walk tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
+.PHONY: hooks secrets-scan build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -339,21 +339,6 @@ koto-tui: $(TUI_GO_SRC) $(PROTO_SRC)
 	  sh -c 'cd tui && go build -trimpath -ldflags "-s -w" -o /src/koto-tui .'
 
 tui-build: koto-tui
-
-# Frame-integrity gate. tools/tuiwalk/walk.py still drives the TUI as a podman
-# container (`podman run --network koto-net -e KOTO_ENDPOINT=cs_host_go:8443`),
-# which is the pre-0d5848b architecture — `koto tui` is a plain host binary
-# now, so the script cannot run as written and needs porting to exec that
-# binary in a pty. Until then this target FAILS rather than silently passing:
-# it was named in .PHONY with no rule at all, so `make tui-walk` printed
-# "Nothing to be done" and exited 0, which reads as a passing gate.
-tui-walk:
-	@echo "make: *** tui-walk is not runnable: tools/tuiwalk/walk.py targets the"
-	@echo "    container-era TUI (podman run --network koto-net), but koto tui is"
-	@echo "    a host binary now. Port walk.py to exec the binary in a pty."
-	@echo "    Until then the wrap/scroll gate is NOT covered — do not report it"
-	@echo "    as checked. See .claude/skills/release-test/SKILL.md section 7."
-	@exit 1
 
 # --- run / interactive targets ---------------------------------------------
 # OAuth into ./creds. A thin alias for `koto claude-login` now: that command

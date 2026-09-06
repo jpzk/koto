@@ -379,32 +379,37 @@ and a bare `grep -q` sails straight past it.
 Then confirm the group the TUI made is real, from outside the TUI:
 `koto ctl list` must show `e2etui`. Clean up with `koto ctl destroy e2etui`.
 
-### Frame integrity: `make tui-walk` — BROKEN, do not rely on it
+### Frame integrity: no end-to-end gate — say so, do not imply otherwise
 
-**`make tui-walk` silently passes without running anything.** Verified
-2026-09-03: `tui-walk` is listed in the Makefile's `.PHONY` line but **has no
-rule**, in the working tree and in `HEAD` alike, so make reports
-`Nothing to be done for 'tui-walk'` and **exits 0**. A green exit here is not
-evidence of anything. Do not treat it as a gate until it is fixed.
+**`make tui-walk` and `tools/tuiwalk/` were REMOVED on 2026-09-06.** Do not
+look for them; do not report the wrap/scroll class as checked. The tool drove
+the TUI as a podman container on `koto-net`, so it died with the container
+runtime and had been dead code behind a deliberately failing target — while
+still carrying an unpinned `grpcurl:latest` with all of `creds/` mounted and
+the admin token on argv (audit L10). It was deleted rather than ported.
 
-Underneath, `tools/tuiwalk/walk.py` is also stale: it drives the TUI as a
-**podman container** (`podman run --network koto-net … -e KOTO_ENDPOINT=cs_host_go:8443`,
-`--image koto-tui`) and its docstring wants `make host-run` and `make
-tui-build`. That is the container-era architecture `0d5848b` moved away from —
-`koto tui` is a plain host binary now (`tui_cmd.go:60`). So the script cannot
-work as written even with a rule restored; it needs porting to exec the host
-binary in a pty, not a container.
+What covers frame integrity now, and what to claim in a release note:
 
-What it was *meant* to do, and what is still worth having: drive the TUI under
-a real VT emulator (pyte) and fail on any wrapped row or scrolled frame — the
-glitch class a char-per-cell model cannot see. Two legs, `--term xterm,vt100`;
-the vt100 leg additionally fails on any 8-bit byte or SGR color parameter,
-which is the end-to-end proof that mono mode (`tui/mono.go`) leaves nothing a
-VT100 cannot render.
+- **The Go tests, per component** — `wrap_test.go`, `width_test.go`,
+  `treewidth_test.go`, `responsive_test.go`, `mono_test.go`, `fuzz_test.go`.
+  `go test ./...` in `tui/` is a real gate and can be reported as one.
+- **The tmux route above** — the real TUI, real frames, asserted against a
+  140x40 dump. Report exactly what it asserted.
+- **Nothing covers composition**: a frame every Go width table calls exact
+  that the TERMINAL still wraps. That is a live class — 2026-08-29, a raw TAB
+  (width 0 by every table, advances to the next tab stop) wrapped a row,
+  made the frame one line too tall and scrolled the screen; fixed by
+  `expandTabs`, commit `5f68d03`.
 
-Until it is ported, use the tmux route above and accept that the wrap/scroll
-class is not covered — and say so in the release notes rather than implying it
-was checked.
+If a "rows get added / layout breaks" report arrives, the technique that found
+it is the one worth repeating rather than a target to run: drive the
+`koto-tui` binary in a pty, feed the bytes to a `pyte.Screen` subclass, and
+count `linefeed()` from inside `draw()` (auto-wrap) and `index()` at the
+bottom margin (scroll), paging history at several sizes. Two pyte quirks: fold
+`\x1b\x1b` to `\x1b` before feeding (it renders `ESC ESC [0m` as literal
+text where xterm/kitty restart the escape), and either answer OSC 11 / DSR
+queries or ignore them entirely — a late reply lands in the message bar as
+typed text. Walk read-only, on a scratch group.
 
 ### Synthesizing turns without spending tokens
 
