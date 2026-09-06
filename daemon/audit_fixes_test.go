@@ -408,3 +408,58 @@ func TestCertAndTokenMustNameOneIdentity(t *testing.T) {
 		t.Fatalf("tui cert + readonly token: want Unauthenticated, got %v", err)
 	}
 }
+
+// M3: the LLM leg relays a LIST of endpoints, not whatever the guest asks
+// for. The allowed set is what koto's own clients were observed to call; the
+// refused set is drawn from the same 7 weeks of recorded traffic (the probes
+// that actually arrived) plus the credential- and spend-reaching endpoints
+// the finding is about.
+func TestLLMEndpointAllowlist(t *testing.T) {
+	allowed := []struct{ provider, method, path string }{
+		{"claudesdk", "POST", "/v1/messages"},
+		{"claudesdk", "POST", "/v1/messages/count_tokens"},
+		{"claudesdk", "POST", "/v1/chat/completions"},
+		{"claudesdk", "GET", "/v1/models"},
+		{"claudesdk", "GET", "/v1/models/claude-sonnet-5"},
+		{"claudesdk", "GET", "/api/hello"},  // Claude Code's connectivity check
+		{"claudesdk", "HEAD", "/api/hello"}, // ...which it actually sends as HEAD
+		{"claudesdk", "HEAD", "/v1/models"},
+		{"venice", "POST", "/api/v1/chat/completions"},
+		{"venice", "GET", "/api/v1/models"},
+	}
+	for _, c := range allowed {
+		if !llmPathAllowed(c.provider, c.method, c.path) {
+			t.Errorf("%s %s %s must be allowed — it is traffic koto itself generates", c.provider, c.method, c.path)
+		}
+	}
+	refused := []struct{ provider, method, path string }{
+		{"claudesdk", "POST", "/v1/files"},            // Files API: storage that outlives the VM
+		{"claudesdk", "POST", "/v1/messages/batches"}, // spend that outlives the turn
+		{"claudesdk", "GET", "/v1/organizations/me"},
+		{"venice", "POST", "/api/v1/api_keys"}, // mint a key and read it back
+		{"venice", "GET", "/api/v1/api_keys"},
+		{"claudesdk", "GET", "/media/../secret.txt"}, // seen in the wild
+		{"claudesdk", "GET", "/"},
+		{"claudesdk", "GET", "/api/tags"},
+		{"claudesdk", "DELETE", "/v1/messages"}, // right path, wrong method
+		{"claudesdk", "GET", "/v1/messages"},
+		{"venice", "POST", "/v1/messages"},    // the other provider's route
+		{"claudesdk", "POST", "/api/hello"},   // right path, wrong method
+		{"claudesdk", "HEAD", "/v1/messages"}, // HEAD is GET, and GET is not allowed here
+		{"claudesdk", "GET", "/v1/models/"},   // the prefix rule needs an id
+	}
+	for _, c := range refused {
+		if llmPathAllowed(c.provider, c.method, c.path) {
+			t.Errorf("%s %s %s must be refused", c.provider, c.method, c.path)
+		}
+	}
+	// Traversal is judged by where it RESOLVES, not by how it is spelled:
+	// Go keeps `..` in an origin-form request target, and the upstream
+	// resolves it, so the allowlist has to as well — in both directions.
+	if !llmPathAllowed("claudesdk", "POST", "/v1/foo/../messages") {
+		t.Error("a path that resolves onto an allowed route must be allowed")
+	}
+	if llmPathAllowed("claudesdk", "POST", "/v1/messages/../files") {
+		t.Error("a path that resolves OFF an allowed route must be refused")
+	}
+}

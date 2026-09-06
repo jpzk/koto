@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -603,6 +604,114 @@ func llmFlowLog(group, method, upstreamURL, path string) {
 	}
 }
 
+// The LLM leg is an AUTHENTICATED relay, so what it will relay is a list, not
+// "whatever the guest asks for" (audit M3). Before this, any (method, path)
+// went upstream with the credential injected and the response handed back —
+// so a prompt-injected guest reached every endpoint the credential
+// authorizes, not just inference: with an API key that is the Files API and
+// Message Batches (spend that outlives the turn and the VM); with a Venice
+// key that may be admin-scoped it is /api/v1/api_keys, i.e. mint a fresh key
+// and read it out of the response body, which contradicts the trust model's
+// claim that a compromised guest "cannot exfiltrate the key".
+//
+// The list is drawn from what koto's own clients actually call, verified
+// against 138,494 recorded proxy requests over 2026-07-18..09-06 (14 groups):
+// /v1/messages (107k), /api/hello (30.5k — Claude Code's connectivity check,
+// which an allowlist written from the API docs alone would have broken),
+// /v1/messages/count_tokens (527), /v1/models (15), /v1/chat/completions (1,
+// Anthropic's OpenAI-compatible inference endpoint). Everything else in that
+// window was a 404 probe — /props, /api/tags, /version, /anthropic/*, and
+// three requests for `/media/../secret.txt`, which is precisely the class
+// this closes.
+//
+// Every entry is inference or metadata. Nothing here can spend outside the
+// turn, mint a credential, or read account state. Query strings pass through
+// untouched: the decision is on method and path.
+type llmRoute struct {
+	method string
+	path   string
+	// prefix matches path and anything below it, for the /{id} forms
+	// (GET /v1/models/claude-sonnet-5). Exact match otherwise.
+	prefix bool
+}
+
+var llmRoutesAnthropic = []llmRoute{
+	{http.MethodPost, "/v1/messages", false},
+	{http.MethodPost, "/v1/messages/count_tokens", false},
+	{http.MethodPost, "/v1/chat/completions", false},
+	{http.MethodGet, "/v1/models", false},
+	{http.MethodGet, "/v1/models/", true},
+	{http.MethodGet, "/api/hello", false},
+}
+
+var llmRoutesVenice = []llmRoute{
+	{http.MethodPost, "/api/v1/chat/completions", false},
+	{http.MethodGet, "/api/v1/models", false},
+	{http.MethodGet, "/api/v1/models/", true},
+}
+
+// llmRoutesFor returns the allowlist governing a provider's leg.
+func llmRoutesFor(provider string) []llmRoute {
+	if provider == "venice" {
+		return llmRoutesVenice
+	}
+	return llmRoutesAnthropic
+}
+
+// llmPathAllowed decides one request against its provider's list. The path is
+// cleaned first so `/v1/../v1/messages` and `/v1/messages/../../admin` are
+// judged as what they resolve to upstream rather than as what they spell —
+// path.Clean also collapses the `..` that Go's URL parsing preserves in
+// origin-form request targets.
+func llmPathAllowed(provider, method, reqPath string) bool {
+	// HEAD is GET without a body: same exposure, and koto's own client uses
+	// it — the guest's claude preflights every turn with HEAD /api/hello,
+	// which is why this exists. The recorded-traffic evidence above could not
+	// have shown it (metrics.jsonl logs the path, not the method); the boot
+	// test on the dev daemon did, on the first turn after the gate went in.
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
+	clean := path.Clean(reqPath)
+	if clean != "/" && strings.HasSuffix(reqPath, "/") {
+		clean += "/" // Clean drops a trailing slash; keep it for prefix rules
+	}
+	for _, rt := range llmRoutesFor(provider) {
+		if rt.method != method {
+			continue
+		}
+		if rt.prefix {
+			if strings.HasPrefix(clean, rt.path) && len(clean) > len(rt.path) {
+				return true
+			}
+			continue
+		}
+		if clean == rt.path {
+			return true
+		}
+	}
+	return false
+}
+
+// llmRefuse answers a request outside the allowlist. 403 rather than 404: the
+// guest should be able to tell "koto will not relay this" from "the upstream
+// does not have this", since the first is a koto decision it can read about
+// and the second is not. Logged at WARN on the llm subsystem, not error — a
+// guest can trigger it in a loop and error level would banner the operator
+// once per probe (see logalert.go's warn-stays-log-only rule).
+func llmRefuse(w http.ResponseWriter, group, provider, method, reqPath string) {
+	clean := flattenInline(reqPath) // guest-chosen; keep it on one line (audit L3)
+	// Deduped on the same TTL as the flow log: a guest can probe in a loop,
+	// and the daemon's log ring is 200 lines.
+	if llmFlowSeen.allow("refused|" + group + "|" + method + "|" + clean) {
+		emitLogfG("llm", group, "warn", "[%s] refused %s %s — outside the %s endpoint allowlist",
+			group, method, clean, provider)
+	}
+	http.Error(w, "koto proxy: "+method+" "+reqPath+
+		" is outside the endpoint allowlist for provider "+provider+
+		" (the proxy relays inference and model metadata only)", http.StatusForbidden)
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// General internet egress (internet=full groups). Identified by the
 	// CONNECT method (HTTPS tunnel) or an absolute-form request target (plain
@@ -612,7 +721,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveEgress(w, r)
 		return
 	}
-	if groupProvider(h.group) == "venice" {
+	// One gate for both legs, before either injects a credential (audit M3).
+	provider := groupProvider(h.group)
+	if !llmPathAllowed(provider, r.Method, r.URL.Path) {
+		llmRefuse(w, h.group, provider, r.Method, r.URL.Path)
+		return
+	}
+	if provider == "venice" {
 		h.serveVenice(w, r)
 		return
 	}
