@@ -21,6 +21,12 @@ import (
 	"strings"
 )
 
+// isKotoCheckout reports whether dir is a koto source tree. Two markers, so a
+// stray koto-tui in an unrelated directory is not executed.
+func isKotoCheckout(dir string) bool {
+	return exists(filepath.Join(dir, "go.work")) && exists(filepath.Join(dir, "daemon"))
+}
+
 func tuiMain(args []string) {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
 	fs.Usage = func() {
@@ -34,15 +40,28 @@ daemon or any group.`)
 
 	bin, err := exec.LookPath("koto-tui")
 	if err != nil {
-		// A dev clone builds it beside the repo rather than installing it.
-		local := filepath.Join(*state, "koto-tui")
-		if !exists(local) {
-			if wd, e := os.Getwd(); e == nil && exists(filepath.Join(wd, "koto-tui")) {
-				local = filepath.Join(wd, "koto-tui")
-			}
+		// There used to be a fallback to <state>/koto-tui. It was removed
+		// (audit L10): the state dir is the ONE directory the daemon can
+		// write — ReadWritePaths= names it and nothing else — so a compromised
+		// tier-2 daemon could plant a binary there that the operator then runs
+		// unconfined as tier 1, which is the whole boundary the unit exists to
+		// hold. Nothing ever put koto-tui there in the first place: it is built
+		// at the repo root and installed to /usr/local/bin, so the fallback
+		// resolved a path no koto workflow produces and was attack surface with
+		// no user.
+		//
+		// The dev-clone convenience stays, narrowed to a cwd that IS a koto
+		// checkout (go.work + daemon/), which is where `make tui-build` puts
+		// the binary. An installed daemon cannot write there — ProtectSystem=
+		// strict makes the operator's tree read-only to it — so the tier-2
+		// plant does not apply, and requiring the checkout markers keeps this
+		// from becoming "exec ./koto-tui from whatever directory you are in".
+		local := ""
+		if wd, e := os.Getwd(); e == nil && isKotoCheckout(wd) && exists(filepath.Join(wd, "koto-tui")) {
+			local = filepath.Join(wd, "koto-tui")
 		}
-		if !exists(local) {
-			ctlFatal(1, "koto-tui not found on PATH — build it with `make tui-build`, or install with `koto install`")
+		if local == "" {
+			ctlFatal(1, "koto-tui not found on PATH — install it with `koto install`, or build it with `make tui-build` and run this from the checkout")
 		}
 		bin = local
 	}

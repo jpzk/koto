@@ -512,3 +512,33 @@ func TestProxyInflightBounded(t *testing.T) {
 		defer r()
 	}
 }
+
+// L10: `koto tui` must never resolve its binary from the state directory.
+// That is the one path the daemon can write (ReadWritePaths=), so a binary
+// planted there and then run by the operator is a tier-2 -> tier-1 step. The
+// dev-clone fallback survives only for a real checkout.
+func TestTUIBinaryNotResolvedFromStateDir(t *testing.T) {
+	src, err := os.ReadFile("tui_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(src), `filepath.Join(*state, "koto-tui")`) {
+		t.Error("koto tui resolves its binary from the state dir again — the daemon can write there")
+	}
+	dir := t.TempDir()
+	if isKotoCheckout(dir) {
+		t.Error("an empty dir must not pass as a koto checkout")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.work"), []byte("go 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isKotoCheckout(dir) {
+		t.Error("go.work alone must not pass — both markers are required")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !isKotoCheckout(dir) {
+		t.Error("go.work + daemon/ is a koto checkout")
+	}
+}
