@@ -19,7 +19,7 @@ import (
 // of "VT100 italic", so a banner says which empty conversation you're in.
 //
 // Returns nil when the pane is too narrow for the art: a wrapped logo row
-// is worse than none, and tui-walk fails the frame on any wrapped row.
+// is worse than none, and a wrapped row is the glitch class this guards.
 func bannerLines(group string, contentCols int) []string {
 	const (
 		k1, k2, k3, k4, k5 = "#   #", "#  # ", "###  ", "#  # ", "#   #"

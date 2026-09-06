@@ -24,7 +24,6 @@ fcguest/fc-agent
 fcguest/koto-fcagent
 /koto-fcagent
 .kernelcache/
-.venv-tuiwalk/
 /.cargocache
 /.claude
 # `claude auth login` with HOME=<clone> writes this next to .claude/ — no
