@@ -463,3 +463,52 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		t.Error("a path that resolves OFF an allowed route must be refused")
 	}
 }
+
+// M2: concurrency is bounded per group and globally, and a slot is always
+// returned. The per-group limit is the one a single runaway group hits first,
+// so that is what this pins; the global limit is the same mechanism one level
+// up.
+func TestProxyInflightBounded(t *testing.T) {
+	// A cancelled context makes proxyAcquire answer immediately instead of
+	// waiting proxyInflightWait, so "would have blocked" is observable
+	// without the test sleeping for a minute.
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var releases []func()
+	for i := 0; i < proxyMaxInflightPerGroup; i++ {
+		rel, ok := proxyAcquire(context.Background(), "m2group")
+		if !ok {
+			t.Fatalf("slot %d of %d refused; the limit must be reachable", i+1, proxyMaxInflightPerGroup)
+		}
+		releases = append(releases, rel)
+	}
+	if _, ok := proxyAcquire(dead, "m2group"); ok {
+		t.Fatalf("a %dst concurrent request must not get a slot", proxyMaxInflightPerGroup+1)
+	}
+	// A different group is unaffected: the per-group limit must not become a
+	// fleet-wide one.
+	rel, ok := proxyAcquire(dead, "m2other")
+	if !ok {
+		t.Fatal("another group must still get a slot — the limit is per group")
+	}
+	rel()
+
+	releases[0]()
+	rel2, ok := proxyAcquire(dead, "m2group")
+	if !ok {
+		t.Fatal("releasing a slot must make it available again")
+	}
+	rel2()
+	for _, r := range releases[1:] {
+		r()
+	}
+	// Every slot returned: the group can fill up from empty once more.
+	for i := 0; i < proxyMaxInflightPerGroup; i++ {
+		r, ok := proxyAcquire(dead, "m2group")
+		if !ok {
+			t.Fatalf("slot %d leaked — released slots must return to the pool", i+1)
+		}
+		defer r()
+	}
+}
