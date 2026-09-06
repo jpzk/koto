@@ -506,7 +506,18 @@ The wire contract is the `Koto` gRPC service in `protocol/koto.proto`
 `make proto-verify`). Transport is TCP `:8443` (bind via `KOTO_BIND`/
 `KOTO_PORT`), secured by mTLS (private CA + client-cert fingerprint
 allowlist in `creds/clients.allow`) plus a per-RPC bearer token — see
-`auth.go` and `make pki-init` / `make pki-client`. Clients: the Go TUI
+`auth.go` and `make pki-init` / `make pki-client`. **The two credentials are
+BOUND to one identity** (since 2026-09-06, audit L6): the client cert's CN
+must equal the clientid its bearer token resolves to, so an allowlisted cert
+plus someone else's token is `Unauthenticated`, and revoking a device by
+deleting EITHER its `clients.allow` line or its `tokens.json` entry is
+sufficient — before this the two layers authenticated independently and
+missing one left the device fully working. Every minting route already agrees
+on the name (`koto pki client` and the Makefile's openssl route both set
+CN = clients.allow name = tokens.json key), so this is invisible to material
+either one produced; `authBindingPreflight` names any identity whose two
+halves disagree in the daemon log at startup, since the alternative is a
+device that stops working for no reason a client could explain. Clients: the Go TUI
 (`tui/daemon.go`) and the Android app; both consume the same proto, so
 changes must stay additive.
 
