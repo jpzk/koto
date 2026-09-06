@@ -672,6 +672,58 @@ ProtectControlGroups=no
 NoNewPrivileges=no
 RestrictSUIDSGID=no
 
+# Devices. The daemon opens exactly two nodes: /dev/kvm (the VM control
+# interface) and /dev/urandom, both of which the jailer bind-mounts into every
+# per-VM chroot (fcjail.go). "closed" keeps the standard pseudo devices
+# (null/zero/full/random/urandom/tty) and denies everything else, so a
+# compromised daemon cannot open /dev/net/tun, a raw block device or an input
+# device. There is deliberately no /dev/vhost-vsock line: Firecracker
+# implements vsock in userspace over unix sockets, so the kernel driver is
+# never opened — verified against a running fleet before writing this.
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+
+# Capability bounding set. Be precise about what this does and does not buy,
+# because the obvious reading is wrong: the daemon runs as an unprivileged
+# user and holds no capabilities of its own, and the kernel RESETS cap_bset to
+# the full set inside a newly created user namespace (kernel/user_namespace.c),
+# so this does not constrain the daemon after its own userns bootstrap, nor
+# the jailed VMM. What it does constrain is the FILE capabilities of binaries
+# the service execs — which here is exactly newuidmap/newgidmap (cap_setuid,
+# cap_setgid; see userns.go), the one privilege source the daemon genuinely
+# needs. So the set is those two and nothing else, and any OTHER setcap binary
+# on the host stops being usable as a privilege source. NoNewPrivileges must
+# stay "no" for those file caps to be raised at all.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+
+# Address families. gRPC/mTLS and the LLM upstream are AF_INET/AF_INET6; every
+# local channel — the per-group proxy sockets, the Firecracker API socket, the
+# per-VM vsock sockets, the jail's control pipe — is AF_UNIX; AF_NETLINK is
+# what net.InterfaceAddrs() reads for the egress filter's own-address list
+# (fcnet.go, audit M8). AF_PACKET is the one this is written to deny: raw
+# frames on the host LAN from the process that terminates every guest's
+# network.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# Namespace types, as an allowlist. All seven are koto's own: the daemon's
+# userns bootstrap (user), and the per-VM jail, which clones
+# user|mnt|pid|net|ipc|uts|cgroup around every Firecracker process
+# (fcjail.go). Dropping any one of these breaks a VM boot, and adding an
+# eighth is not something koto has a use for.
+RestrictNamespaces=user mnt pid net ipc uts cgroup
+
+# The rest of the standard set, none of which koto needs: no module loading,
+# no kernel log, no clock or hostname changes, no personality switching (i.e.
+# no 32-bit ABI as a confusion path), no realtime scheduling (the VMM is niced
+# DOWN, never up — see fc.go), and only this machine's own syscall ABI.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
 # SIGTERM reaches the daemon directly now (no podman in between); it stops
 # every microVM so each guest sync+umounts its workspace image. The daemon
 # bounds that at ~12s, and the userns supervisor forwards the signal to the
