@@ -542,3 +542,65 @@ func TestTUIBinaryNotResolvedFromStateDir(t *testing.T) {
 		t.Error("go.work + daemon/ is a koto checkout")
 	}
 }
+
+// M10: host-side uploads are bounded, and the bound is checked BEFORE the
+// write — the point of the finding was that every Send with an image cost
+// host disk before the queue applied any backpressure, and host disk
+// exhaustion is the fleet-wide failure (every guest remounts read-only).
+// This was the one fix in the batch that no test pinned.
+func TestUploadsPendingBounded(t *testing.T) {
+	oldRoot := ROOT
+	ROOT = t.TempDir()
+	t.Cleanup(func() { ROOT = oldRoot })
+	if err := os.MkdirAll(filepath.Join(ROOT, "g", ".cs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// One image may not exceed maxImageBytes, whatever the pending total.
+	if _, err := saveImage("g", make([]byte, maxImageBytes+1), "image/png"); err == nil {
+		t.Fatal("an oversize single image must be refused")
+	}
+
+	// Fill the pending budget. Each accepted image is real bytes on disk, so
+	// the loop terminates against the cap rather than a counter.
+	chunk := make([]byte, 4<<20)
+	accepted := 0
+	var lastErr error
+	for i := 0; i < 1000; i++ {
+		if _, err := saveImage("g", chunk, "image/png"); err != nil {
+			lastErr = err
+			break
+		}
+		accepted++
+	}
+	if lastErr == nil {
+		t.Fatal("pending uploads grew without limit — this is the finding")
+	}
+	if !strings.Contains(lastErr.Error(), "too many pending uploads") {
+		t.Fatalf("refusal should name the cause, got %v", lastErr)
+	}
+	dir := filepath.Join(ROOT, "g", ".cs", "uploads")
+	if used := dirBytes(dir); used > maxUploadsPending {
+		t.Fatalf("pending bytes %d exceed the cap %d — the check must run BEFORE the write", used, maxUploadsPending)
+	}
+	if accepted == 0 {
+		t.Fatal("the cap must still admit ordinary uploads")
+	}
+
+	// Delivery is what frees the budget: fcSendMsg removes each host copy
+	// once the tar into the guest succeeds. Emulate that and confirm the
+	// group can upload again — without it a group would wedge permanently
+	// after 64 MiB of images, which would be a worse bug than the one fixed.
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := saveImage("g", chunk, "image/png"); err != nil {
+		t.Fatalf("after delivery removes the host copies, uploads must be accepted again: %v", err)
+	}
+}
