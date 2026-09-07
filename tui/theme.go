@@ -36,6 +36,11 @@ package main
 // are light, and 205-pink on #dad7cd is unreadable). Meaning survives the theme
 // switch; contrast follows it.
 //
+// TWO PALETTES ARE NOT SVGs. The default (`terminal`) and koto's own look
+// (`amber`) set the vars to terminal palette INDEXES and paint no ground, and
+// neither is expressible as nine hex colors — see "the native palettes" below.
+// applyThemeName is the resolver that knows about all three kinds.
+//
 // MONO WINS. monoFrame strips every color parameter out of the finished frame,
 // so a theme under monoMode would be work with no output — initTheme skips it
 // entirely rather than fighting over lipgloss's color profile (mono pins ANSI
@@ -100,8 +105,8 @@ var themePageBg string
 // --- the color-var defaults --------------------------------------------------
 
 // builtinPalette snapshots view.go's twelve vars plus cFgInv as they are at
-// program start, so resetTheme restores the original rendering exactly rather
-// than approximately. Captured in a func-level var initializer, which runs
+// program start — the `terminal` palette — so resetTheme restores the default
+// rendering exactly rather than approximately. Captured in a func-level var initializer, which runs
 // after view.go's own — package-level vars are initialized in dependency
 // order, and these depend on those.
 var builtinPalette = struct {
@@ -113,6 +118,82 @@ var builtinPalette = struct {
 	amber: cAmber, dkAmber: cDkAmber, white: cWhite, gray: cGray,
 	brWhite: cBrWhite, pink: cPink, emerald: cEmerald, rose: cRose,
 	fgInv: cFgInv,
+}
+
+// --- the native palettes -----------------------------------------------------
+//
+// Two of koto's palettes are not swatch sheets, because neither can be
+// expressed as one. A swatch sheet is nine hex colors plus a painted ground
+// (applyTheme + themeFrame); these two set the vars to PALETTE INDEXES and
+// paint no ground at all, which is exactly what a hex file cannot say.
+//
+//   - `terminal` is the default and needs no entry here: it IS the vars as
+//     view.go declares them, so isThemeOff routes it to resetTheme and there
+//     is one copy of those values rather than two that can drift.
+//   - `amber` is koto's own look — the 256-cube accent these vars held before
+//     the terminal palette became the default. It is a native rather than an
+//     SVG so it renders byte-identically to what it always did: no ground
+//     painted (the transcript stays on the terminal's own background) and no
+//     contrast repair (there is nothing measurable to repair against).
+
+// nativePalette is a palette given directly as color values — indexes here,
+// though nothing stops a hex one. Field order mirrors builtinPalette so the
+// two can be read side by side.
+type nativePalette struct {
+	name, hint                                  string
+	black, red, yellow, magenta, amber, dkAmber lipgloss.Color
+	white, gray, brWhite, pink, emerald, rose   lipgloss.Color
+	fgInv                                       lipgloss.Color
+}
+
+// nativePalettes are the ones a name can select, in the order the picker
+// offers them. `terminal` is absent on purpose (see above).
+var nativePalettes = []nativePalette{{
+	name: "amber", hint: "koto's own amber accent",
+	black: lipgloss.Color("0"), red: lipgloss.Color("1"),
+	yellow: lipgloss.Color("3"), magenta: lipgloss.Color("5"),
+	amber:   lipgloss.Color("214"), // #ffaf00
+	dkAmber: lipgloss.Color("130"), // #af5f00
+	white:   lipgloss.Color("7"), gray: lipgloss.Color("8"),
+	brWhite: lipgloss.Color("15"),
+	pink:    lipgloss.Color("205"), // #ff5faf
+	emerald: lipgloss.Color("42"),  // #00d787
+	rose:    lipgloss.Color("212"), // #ff87d7
+	fgInv:   lipgloss.Color("0"),
+}}
+
+// findNative looks a native palette up by name, case-insensitively.
+func findNative(name string) *nativePalette {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for i := range nativePalettes {
+		if nativePalettes[i].name == name {
+			return &nativePalettes[i]
+		}
+	}
+	return nil
+}
+
+// nativeNames lists them for the picker and /themes list.
+func nativeNames() []string {
+	out := make([]string, 0, len(nativePalettes))
+	for _, p := range nativePalettes {
+		out = append(out, p.name)
+	}
+	return out
+}
+
+// applyNative points the palette vars at a native palette. Same contract as
+// applyTheme (between frames only), and the same two globals left cleared:
+// no ground to paint, and no ground to call light either — glamour keeps its
+// dark standard style, which is what these values were drawn against.
+func applyNative(p *nativePalette) {
+	cBlack, cRed, cYellow, cMagenta = p.black, p.red, p.yellow, p.magenta
+	cAmber, cDkAmber, cWhite, cGray = p.amber, p.dkAmber, p.white, p.gray
+	cBrWhite, cPink, cEmerald, cRose = p.brWhite, p.pink, p.emerald, p.rose
+	cFgInv = p.fgInv
+	themePageBg = ""
+	themeLight = false
+	activeTheme = p.name
 }
 
 // statusHues is the six meaning-carrying colors in one shade tier. See the
@@ -355,7 +436,10 @@ func sgrClearsBg(params string) bool {
 	return touched && !bgSet
 }
 
-// resetTheme returns to the built-in palette.
+// resetTheme returns to the default palette — the `terminal` theme, i.e. the
+// vars as view.go declares them, which are the terminal's own 16 colors.
+// activeTheme goes back to "", which is what that state has always been called
+// on the wire (the persisted state file) and in the early-return checks.
 func resetTheme() {
 	b := builtinPalette
 	cBlack, cRed, cYellow, cMagenta = b.black, b.red, b.yellow, b.magenta
@@ -384,19 +468,42 @@ func initTheme(env func(string) string, sock, persisted string) (string, error) 
 	if name == "" || isThemeOff(name) {
 		return "", nil
 	}
+	if err := applyThemeName(sock, name, env); err != nil {
+		return "", err
+	}
+	return activeTheme, nil
+}
+
+// applyThemeName resolves one name and applies what it names: a word meaning
+// the default, a native palette, or a swatch sheet. It is the ONE resolver —
+// the /themes verb, the picker's live preview and startup all reach it, so
+// "what does this name mean" has a single answer, and a name that fails to
+// load leaves the palette exactly as it was.
+func applyThemeName(sock, name string, env func(string) string) error {
+	if isThemeOff(name) {
+		resetTheme()
+		return nil
+	}
+	if np := findNative(name); np != nil {
+		applyNative(np)
+		return nil
+	}
 	p, err := loadTheme(sock, name)
 	if err != nil {
-		return "", err
+		return err
 	}
 	applyThemeProfile(env)
 	applyTheme(p)
-	return p.Name, nil
+	return nil
 }
 
-// isThemeOff recognizes the words that mean "built-in palette".
+// isThemeOff recognizes the words that mean the default palette — which is
+// the terminal's own colors, hence "terminal" among them. It is the name the
+// picker offers and the one themeLabel reports; the rest are the words a user
+// reaches for when they want out of a theme.
 func isThemeOff(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "off", "none", "default", "builtin", "built-in":
+	case "terminal", "off", "none", "default", "builtin", "built-in":
 		return true
 	}
 	return false
@@ -442,8 +549,10 @@ func userThemeDir(sock string) string {
 	return filepath.Join(filepath.Dir(sock), "themes")
 }
 
-// themeNames lists every loadable theme, bundled and user-supplied, sorted.
-// A user file shadows a bundled one of the same name (listed once).
+// themeNames lists every loadable SWATCH SHEET, bundled and user-supplied,
+// sorted. A user file shadows a bundled one of the same name (listed once).
+// The native palettes are not here — nothing can loadTheme them — so callers
+// that want everything a user may type use pickableThemes.
 func themeNames(sock string) []string {
 	seen := map[string]bool{}
 	add := func(fname string) {
@@ -472,6 +581,14 @@ func themeNames(sock string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// pickableThemes is every name the user can choose, in the order the picker
+// offers them: the default first (the way back leads the list), then koto's
+// own native palettes, then the swatch sheets alphabetically.
+func pickableThemes(sock string) []string {
+	out := append([]string{themeOffRow}, nativeNames()...)
+	return append(out, themeNames(sock)...)
 }
 
 // themeNameRE bounds a theme name to what a filename may be here. It is a
@@ -652,19 +769,54 @@ func isLightHex(s string) bool {
 // notification banner is the case: an emerald or pink ground, where which of
 // black or white reads on it flips between the light and dark status sets.
 //
-// A non-hex background means the built-in palette is active — every color
-// there is an ANSI or 256-color index, whose actual value belongs to the
-// user's terminal and can't be measured. The caller's `deflt` is then the
-// answer, which is how the untuned rendering stays byte-identical.
+// An index background can't be measured — its actual value belongs to the
+// user's terminal — so the two index ranges are answered differently. An ANSI
+// slot 0-15 is answered from CONVENTION (ansiSlotIsLight): every scheme worth
+// the name keeps yellow and cyan lighter than blue and red, whatever the hues
+// are, and the answer is given as an index too so it still comes out of the
+// user's own palette. A 256-cube index (the `amber` theme's #ffaf00 accent and
+// friends) has no such convention behind it, so the caller's `deflt` stands —
+// which is how that palette renders byte-identically to what it always did.
 func fgOn(bg, deflt lipgloss.Color) lipgloss.Color {
-	l, ok := hexLum(string(bg))
-	if !ok {
-		return deflt
+	if l, ok := hexLum(string(bg)); ok {
+		if l > 0.55 {
+			return lipgloss.Color("#000000")
+		}
+		return lipgloss.Color("#ffffff")
 	}
-	if l > 0.55 {
-		return lipgloss.Color("#000000")
+	if i, ok := ansiSlot(string(bg)); ok {
+		if ansiSlotIsLight(i) {
+			return lipgloss.Color("0")
+		}
+		return lipgloss.Color("15")
 	}
-	return lipgloss.Color("#ffffff")
+	return deflt
+}
+
+// ansiSlot parses a color that names one of the terminal's 16 palette entries.
+// The 256-cube indexes (16-255) are deliberately NOT slots: they name a fixed
+// point in a standard cube, not something the user configured.
+func ansiSlot(s string) (int, bool) {
+	i, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || i < 0 || i > 15 {
+		return 0, false
+	}
+	return i, true
+}
+
+// ansiSlotIsLight reports whether black text reads on slot i. It is a
+// convention, not a measurement: a scheme may paint its yellow any shade it
+// likes, but every scheme keeps yellow, cyan and white above blue, red and
+// magenta, so this holds across the ones people actually use. Only slots 2, 3,
+// 6 and 13 are ever a background here (the banner, the accent, the group chip
+// and the high-severity banner); the rest of the table is written out so the
+// next background does not have to rediscover it.
+func ansiSlotIsLight(i int) bool {
+	switch i {
+	case 2, 3, 6, 7, 10, 11, 13, 14, 15: // green, yellow, cyan, white + brights
+		return true
+	}
+	return false // black, red, blue, magenta, bright black/red/blue
 }
 
 // contrastFix nudges fg until its luma differs from ground by at least min,

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -378,7 +379,7 @@ func TestInitThemePrecedenceAndFailure(t *testing.T) {
 }
 
 func TestIsThemeOff(t *testing.T) {
-	for _, s := range []string{"off", "none", "default", "builtin", "Built-In", " OFF "} {
+	for _, s := range []string{"terminal", "Terminal", "off", "none", "default", "builtin", "Built-In", " OFF "} {
 		if !isThemeOff(s) {
 			t.Errorf("isThemeOff(%q) = false", s)
 		}
@@ -490,5 +491,214 @@ func TestThemeFrameSkippedInMono(t *testing.T) {
 	monoMode = true
 	if got := themeFrame("x", 10); got != "x" {
 		t.Errorf("themeFrame painted under mono: %q", got)
+	}
+}
+
+// --- the native palettes -----------------------------------------------------
+
+// THE test for the default being the terminal's own scheme: every color in it
+// names one of the 16 palette slots the user configured. A 256-cube index or a
+// hex triple here is a color koto picked for them, which is exactly what this
+// default exists not to do — and it would be invisible in a screenshot, since
+// #ffaf00 and slot 3 look alike on the machine it was chosen on.
+func TestDefaultPaletteIsAllTerminalSlots(t *testing.T) {
+	withBuiltinPalette(t)
+	resetTheme()
+	for name, c := range map[string]lipgloss.Color{
+		"cBlack": cBlack, "cRed": cRed, "cYellow": cYellow, "cMagenta": cMagenta,
+		"cAmber": cAmber, "cDkAmber": cDkAmber, "cWhite": cWhite, "cGray": cGray,
+		"cBrWhite": cBrWhite, "cPink": cPink, "cEmerald": cEmerald,
+		"cRose": cRose, "cFgInv": cFgInv,
+	} {
+		if _, ok := ansiSlot(string(c)); !ok {
+			t.Errorf("%s = %q, want an ANSI slot 0-15", name, c)
+		}
+	}
+	// Nothing painted, either: the ground is the terminal's too.
+	if themePageBg != "" || activeTheme != "" || themeLight {
+		t.Errorf("default palette is not the untouched state: bg=%q theme=%q light=%v",
+			themePageBg, activeTheme, themeLight)
+	}
+}
+
+// The six status hues still have to be six colors under the default palette —
+// ANSI-16 is a small vocabulary and the mapping is hand-picked, so a collision
+// is a plausible edit rather than a theoretical one.
+func TestDefaultPaletteStatusHuesStayDistinct(t *testing.T) {
+	withBuiltinPalette(t)
+	resetTheme()
+	seen := map[lipgloss.Color]string{}
+	for name, c := range map[string]lipgloss.Color{
+		"red": cRed, "yellow": cYellow, "magenta": cMagenta,
+		"pink": cPink, "emerald": cEmerald, "rose": cRose,
+	} {
+		if prev, dup := seen[c]; dup {
+			t.Errorf("%s and %s are both %q", prev, name, c)
+		}
+		seen[c] = name
+	}
+}
+
+// koto's amber look is now a theme rather than the default, and it must be the
+// SAME look — these are the exact values view.go held before the terminal
+// palette took over, so a drift here is a silent restyle of the theme people
+// switch to in order to get the old rendering back.
+func TestAmberThemeIsTheHistoricalPalette(t *testing.T) {
+	withBuiltinPalette(t)
+	if err := applyThemeName("/nonexistent/koto.sock", "amber", func(string) string { return "" }); err != nil {
+		t.Fatal(err)
+	}
+	if activeTheme != "amber" {
+		t.Fatalf("activeTheme = %q, want amber", activeTheme)
+	}
+	for _, tc := range []struct {
+		name string
+		got  lipgloss.Color
+		want string
+	}{
+		{"cBlack", cBlack, "0"}, {"cRed", cRed, "1"}, {"cYellow", cYellow, "3"},
+		{"cMagenta", cMagenta, "5"}, {"cAmber", cAmber, "214"},
+		{"cDkAmber", cDkAmber, "130"}, {"cWhite", cWhite, "7"},
+		{"cGray", cGray, "8"}, {"cBrWhite", cBrWhite, "15"},
+		{"cPink", cPink, "205"}, {"cEmerald", cEmerald, "42"},
+		{"cRose", cRose, "212"}, {"cFgInv", cFgInv, "0"},
+	} {
+		if string(tc.got) != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+	// A native palette paints no ground and claims no light/dark: both would
+	// change the rendering of a palette whose whole job is to be unchanged.
+	if themePageBg != "" || themeLight {
+		t.Errorf("amber painted a ground (%q) or claimed light (%v)", themePageBg, themeLight)
+	}
+}
+
+// The words route to the palettes, and back again — the round trip is what
+// /themes amber followed by /themes terminal does.
+func TestApplyThemeNameRoundTrip(t *testing.T) {
+	withBuiltinPalette(t)
+	env := func(string) string { return "" }
+	before := cAmber
+
+	if err := applyThemeName("/nonexistent/koto.sock", "amber", env); err != nil {
+		t.Fatal(err)
+	}
+	if cAmber == before {
+		t.Fatal("amber left the accent at the default value")
+	}
+	if err := applyThemeName("/nonexistent/koto.sock", "terminal", env); err != nil {
+		t.Fatal(err)
+	}
+	if cAmber != before || activeTheme != "" {
+		t.Errorf("terminal left accent %q theme %q, want %q and the default", cAmber, activeTheme, before)
+	}
+	if err := applyThemeName("/nonexistent/koto.sock", "no-such-theme", env); err == nil {
+		t.Error("an unknown name was accepted")
+	}
+	if activeTheme != "" {
+		t.Errorf("a failed name left %q applied", activeTheme)
+	}
+}
+
+// The picker's list is what a user can type, so it must carry both natives and
+// every swatch sheet, with the default leading and nothing listed twice.
+func TestPickableThemes(t *testing.T) {
+	names := pickableThemes("/nonexistent/koto.sock")
+	if len(names) < 3 || names[0] != themeOffRow || names[1] != "amber" {
+		t.Fatalf("pickable list starts %v", names[:min(3, len(names))])
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			t.Errorf("%q listed twice", n)
+		}
+		seen[n] = true
+	}
+	for _, want := range []string{"nord", "noir"} {
+		if !seen[want] {
+			t.Errorf("swatch sheet %q missing from the pickable list", want)
+		}
+	}
+}
+
+// fgOn answers an ANSI slot from the convention (yellow and cyan take black
+// text, blue and magenta take white) and hands it back as a slot, so the text
+// on a chip comes out of the user's palette too. A 256-cube index keeps the
+// caller's default — that is what holds the amber theme's rendering fixed.
+func TestFgOnAnsiSlots(t *testing.T) {
+	deflt := lipgloss.Color("#123456")
+	for _, tc := range []struct{ bg, want string }{
+		{"3", "0"},  // yellow accent — black on it
+		{"6", "0"},  // cyan group chip
+		{"2", "0"},  // emerald banner
+		{"13", "0"}, // high-severity banner
+		{"4", "15"}, // blue
+		{"1", "15"}, // red
+	} {
+		if got := fgOn(lipgloss.Color(tc.bg), deflt); string(got) != tc.want {
+			t.Errorf("fgOn(%q) = %q, want %q", tc.bg, got, tc.want)
+		}
+	}
+	for _, bg := range []string{"214", "130", "42", "205"} {
+		if got := fgOn(lipgloss.Color(bg), deflt); got != deflt {
+			t.Errorf("fgOn(%q) = %q, want the caller's default %q", bg, got, deflt)
+		}
+	}
+	if got := fgOn(lipgloss.Color("#ffffff"), deflt); string(got) != "#000000" {
+		t.Errorf("fgOn(#ffffff) = %q, want #000000", got)
+	}
+}
+
+// extendedColorParams reports the sequences in s that name a color OUTSIDE the
+// terminal's 16 slots: a 256-cube index (38;5;n with n > 15) or a truecolor
+// triple. Under the default palette a frame must carry none.
+func extendedColorParams(s string) []string {
+	var bad []string
+	for _, m := range sgrRe.FindAllStringSubmatch(s, -1) {
+		fields := strings.Split(m[1], ";")
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] != "38" && fields[i] != "48" {
+				continue
+			}
+			switch fields[i+1] {
+			case "2":
+				bad = append(bad, m[0])
+			case "5":
+				if i+2 < len(fields) {
+					if n, err := strconv.Atoi(fields[i+2]); err == nil && n > 15 {
+						bad = append(bad, m[0])
+					}
+				}
+			}
+		}
+	}
+	return bad
+}
+
+// End-to-end for the default palette: a rendered frame names only slots in the
+// user's own terminal palette. The palette vars are asserted above, but a
+// widget that reaches past them and hard-codes a 256-cube color would still
+// leave one koto-chosen color on a themed terminal, and nothing else would
+// notice.
+//
+// The fleet view is the frame under test because it is dense with palette
+// furniture — threshold colors, the header, the tree beside it — and, unlike
+// the chat view, carries no markdown: glamour brings its own 256-color palette
+// for code spans and lists, which is not ours to hold to this rule.
+func TestDefaultFrameUsesOnlyTerminalColors(t *testing.T) {
+	withColor(t)
+	withBuiltinPalette(t)
+	resetTheme()
+	m := monoTestModel(t)
+	m.hostRes = HostRes{Groups: 2, RunningGroups: 1,
+		FsTotalBytes: 50 << 30, FsFreeBytes: 2 << 30, AllocTotalBytes: 20 << 30, ProvisionedBytes: 200 << 30}
+	m.focus = focusTop
+	frame := m.View()
+	if !strings.Contains(frame, "\x1b[") {
+		t.Fatal("frame carries no escapes at all — the color profile is not set")
+	}
+	if bad := extendedColorParams(frame); len(bad) > 0 {
+		t.Errorf("default frame names colors outside the terminal palette: %q", bad[:min(3, len(bad))])
 	}
 }

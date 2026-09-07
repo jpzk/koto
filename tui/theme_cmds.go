@@ -8,11 +8,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // handleThemeCmd runs `/themes [list|<name>|off]`. Bare `/themes` opens the
@@ -37,31 +37,33 @@ func (m *Model) handleThemeCmd(rest string) tea.Cmd {
 		return nil
 	}
 
-	if isThemeOff(arg) {
-		resetTheme()
-		m.repaintForTheme()
-		m.addLine(logLine{kind: "sys", text: "theme: built-in palette"})
-		m.persistUIState()
-		return nil
-	}
-
-	p, err := loadTheme(m.sock, arg)
-	if err != nil {
+	if err := applyThemeName(m.sock, arg, os.Getenv); err != nil {
 		m.addLine(logLine{kind: "err", text: "theme: " + err.Error()})
 		return nil
 	}
-	applyThemeProfile(os.Getenv)
-	applyTheme(p)
 	m.repaintForTheme()
+	m.addLine(logLine{kind: "sys", text: themeSummary()})
+	m.persistUIState()
+	return nil
+}
+
+// themeSummary is the chat line describing the palette now in force. One
+// sentence for all three kinds of theme, so the verb and the picker's enter
+// report the same thing rather than each phrasing it their own way.
+func themeSummary() string {
+	if activeTheme == "" {
+		return "theme: terminal — your terminal's own colors; /themes to change"
+	}
+	if np := findNative(activeTheme); np != nil {
+		return fmt.Sprintf("theme: %s (%s) — persists across /reload; /themes terminal to revert",
+			np.name, np.hint)
+	}
 	ground := "dark"
 	if themeLight {
 		ground = "light"
 	}
-	m.addLine(logLine{kind: "sys", text: fmt.Sprintf(
-		"theme: %s (%s ground · accent %s) — persists across /reload; /themes off to revert",
-		p.Name, ground, p.BInv)})
-	m.persistUIState()
-	return nil
+	return fmt.Sprintf("theme: %s (%s ground) — persists across /reload; /themes terminal to revert",
+		activeTheme, ground)
 }
 
 // --- the live-preview picker -------------------------------------------------
@@ -122,17 +124,26 @@ func (m Model) themeItems() (names []string, items []paletteItem) {
 			}
 		}
 	}
-	names = append(names, themeOffRow)
-	items = append(items, paletteItem{title: themeOffRow, hint: "koto default"})
-	for _, n := range themeNames(m.sock) {
-		hint := "dark"
-		if p, err := loadTheme(m.sock, n); err == nil && isLightHex(p.Background) {
-			hint = "light"
+	for _, n := range pickableThemes(m.sock) {
+		var hint string
+		switch {
+		case isThemeOff(n):
+			hint = "your terminal's own colors"
+		case findNative(n) != nil:
+			hint = findNative(n).hint
+		default:
+			hint = "dark"
+			if p, err := loadTheme(m.sock, n); err == nil && isLightHex(p.Background) {
+				hint = "light"
+			}
+			if !bundled[n] {
+				hint += " · custom"
+			}
 		}
-		if !bundled[n] {
-			hint += " · custom"
-		}
-		if n == activeTheme {
+		// The default row is the active one when no theme is applied, which
+		// is the state activeTheme spells "" — hence the two cases rather
+		// than one name comparison.
+		if n == activeTheme || (isThemeOff(n) && activeTheme == "") {
 			hint = "current · " + hint
 		}
 		names = append(names, n)
@@ -142,8 +153,11 @@ func (m Model) themeItems() (names []string, items []paletteItem) {
 }
 
 // themeOffRow is the first row's name — also a value isThemeOff accepts, so
-// picking it flows through the same path as typing `/themes off`.
-const themeOffRow = "default"
+// picking it flows through the same path as typing `/themes off`. It is named
+// for what it IS rather than for being the absence of a theme: the default
+// palette is the terminal's own 16 colors, and a row called "default" told the
+// user nothing about what they were choosing.
+const themeOffRow = "terminal"
 
 // previewPickedTheme applies the row under the cursor. No chat line, no
 // persistence — a preview that logged would fill the transcript with one line
@@ -162,16 +176,9 @@ func (m *Model) applyThemeByName(name string) {
 	if name == activeTheme || (isThemeOff(name) && activeTheme == "") {
 		return // already showing it; skip the repaint
 	}
-	if isThemeOff(name) {
-		resetTheme()
-	} else {
-		p, err := loadTheme(m.sock, name)
-		if err != nil {
-			logWarn("theme", "preview %q failed: %v", name, err)
-			return
-		}
-		applyThemeProfile(os.Getenv)
-		applyTheme(p)
+	if err := applyThemeName(m.sock, name, os.Getenv); err != nil {
+		logWarn("theme", "preview %q failed: %v", name, err)
+		return
 	}
 	m.repaintForTheme()
 }
@@ -186,16 +193,7 @@ func (m *Model) commitThemePick() {
 		m.applyThemeByName(m.picker.items[m.picker.matches[m.picker.cursor].Idx])
 	}
 	m.closePicker()
-	if activeTheme == "" {
-		m.addLine(logLine{kind: "sys", text: "theme: built-in palette"})
-	} else {
-		ground := "dark"
-		if themeLight {
-			ground = "light"
-		}
-		m.addLine(logLine{kind: "sys", text: fmt.Sprintf(
-			"theme: %s (%s ground) — persists across /reload; /themes to change", activeTheme, ground)})
-	}
+	m.addLine(logLine{kind: "sys", text: themeSummary()})
 	m.persistUIState()
 }
 
@@ -228,6 +226,8 @@ func (m *Model) cancelThemePick() {
 // width costs nothing. Only invalidateMarkdownCache (resize) clears them, and
 // only to bound the map.
 func (m *Model) repaintForTheme() {
+	// bubbles captured this at construction; see newModel.
+	m.input.PlaceholderStyle = placeholderStyle()
 	m.mdCache = map[string]string{}
 	m.vpCache = map[string]vpCacheEntry{}
 	m.treeRowCache = map[string]string{}
@@ -239,7 +239,7 @@ func (m *Model) repaintForTheme() {
 // themeLabel names the active palette for a status line.
 func themeLabel() string {
 	if activeTheme == "" {
-		return "built-in"
+		return themeOffRow
 	}
 	return activeTheme
 }
@@ -248,16 +248,17 @@ func themeLabel() string {
 // run. A one-per-line list of ~45 names would push the whole conversation off
 // the screen for what is a menu, not a result.
 func (m *Model) themeListing() string {
-	names := themeNames(m.sock)
+	names := pickableThemes(m.sock)
 	if len(names) == 0 {
 		return "theme: none available"
 	}
-	sort.Strings(names)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d themes (active: %s) — /themes <name>\n", len(names), themeLabel())
 	line := "  "
 	for i, n := range names {
-		if n == activeTheme {
+		// Same two cases as the picker's "current" hint: the default row is
+		// the active one when activeTheme is "".
+		if n == activeTheme || (isThemeOff(n) && activeTheme == "") {
 			n = "[" + n + "]"
 		}
 		sep := ", "
@@ -272,4 +273,10 @@ func (m *Model) themeListing() string {
 	}
 	b.WriteString(strings.TrimRight(line, " "))
 	return b.String()
+}
+
+// placeholderStyle is the message bar's placeholder, in the palette's dim
+// tier. A function rather than a var because the palette vars move under it.
+func placeholderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(cGray)
 }

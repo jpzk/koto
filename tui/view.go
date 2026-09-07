@@ -10,13 +10,33 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Color palette — 256-color codes that work in any modern terminal.
+// Color palette — THE TERMINAL'S OWN 16 COLORS, by default.
 //
 // These are the ONLY color values in the TUI: every one of the ~150 styled
 // call sites reads one of them, which is what makes a theme an assignment to
 // this block and nothing more (theme.go). They are therefore vars, not consts,
 // and must be read at render time — a package-level style that captured one at
 // init would not follow a /themes switch.
+//
+// EVERY DEFAULT IS AN ANSI INDEX 0-15, and that is the point: an index names a
+// SLOT in the palette the user already configured, so koto comes up wearing
+// their terminal's scheme — the `terminal` theme (/themes), and the default
+// because a TUI that ignores the colors the terminal was set up with looks
+// wrong on every desktop but the one it was tuned on. Nothing here paints a
+// ground either (themeFrame is a no-op without a swatch theme), so the
+// background is the terminal's too. The cost is that we cannot MEASURE these
+// colors — fgOn falls back to its caller's default rather than computing a
+// readable foreground — which is why contrast is chosen per site instead.
+//
+// koto's own amber look, which is what these vars used to hold (the 256-cube
+// #ffaf00 accent and its four companions), lives on as the `amber` theme:
+// /themes amber. Both are nativePalettes in theme.go.
+//
+// The indexes are drawn from the NORMAL 0-7 range wherever a color carries
+// meaning. Several widely-used schemes (solarized, and every palette derived
+// from it) repurpose the bright half as UI grays, so a status hue mapped to
+// one of those renders as gray for those users. The two exceptions are chosen
+// to survive that: bright magenta and bright red are real colors there.
 //
 // The names describe the DEFAULT hue, but the role is what a theme preserves.
 // Structural, and replaced wholesale by a theme's palette roles:
@@ -36,17 +56,17 @@ import (
 //	cPink high-severity · cEmerald normal-severity · cRose over-threshold
 var (
 	cBlack   = lipgloss.Color("0")
-	cRed     = lipgloss.Color("1")
-	cYellow  = lipgloss.Color("3")
-	cMagenta = lipgloss.Color("5")
-	cAmber   = lipgloss.Color("214") // signature accent (256-color amber #ffaf00)
-	cDkAmber = lipgloss.Color("130") // group indicator (256-color dark amber #af5f00)
+	cRed     = lipgloss.Color("1") // error
+	cYellow  = lipgloss.Color("3") // working
+	cMagenta = lipgloss.Color("5") // thinking, keys
+	cAmber   = lipgloss.Color("3") // signature accent — yellow, koto's hue
+	cDkAmber = lipgloss.Color("6") // second accent tier; cyan, so the chip is not a status hue
 	cWhite   = lipgloss.Color("7")
 	cGray    = lipgloss.Color("8")
 	cBrWhite = lipgloss.Color("15")
-	cPink    = lipgloss.Color("205")
-	cEmerald = lipgloss.Color("42")  // notification banner, normal severity (256-color #00d787)
-	cRose    = lipgloss.Color("212") // over-threshold alert in the metrics bar (256-color #ff87d7)
+	cPink    = lipgloss.Color("13") // high severity — bright, to part it from cMagenta
+	cEmerald = lipgloss.Color("2")  // notification banner, normal severity
+	cRose    = lipgloss.Color("9")  // over-threshold alert — bright, to part it from cRed
 	// cFgInv is the text drawn on top of cAmber. It is black in the built-in
 	// palette — same value cBlack has — but the two roles come apart under a
 	// theme: cBlack becomes b_low (a panel tier nothing paints any more, kept

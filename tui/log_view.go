@@ -81,12 +81,15 @@ func applyLogStyles() {
 	// TrueColor would also work but ANSI256 is enough for our 4-color
 	// palette and renders identically on every terminal we care about.
 	//
-	// A THEME does need TrueColor: its colors are 24-bit hex, and quantizing
-	// them onto the 256-cube here while the rest of the frame renders them
-	// exactly would leave this pane a half-step off the palette it is meant
-	// to match. Themes are off by default, so the default path is unchanged.
+	// A SWATCH THEME does need TrueColor: its colors are 24-bit hex, and
+	// quantizing them onto the 256-cube here while the rest of the frame
+	// renders them exactly would leave this pane a half-step off the palette
+	// it is meant to match. The test is the painted ground rather than
+	// activeTheme, because the native palettes (`terminal`, `amber`) are
+	// palette indexes with nothing to quantize — ANSI256 renders them
+	// exactly, and it is the default path.
 	profile := termenv.ANSI256
-	if activeTheme != "" {
+	if themePageBg != "" {
 		profile = termenv.TrueColor
 	}
 	logRenderer.SetColorProfile(profile)
