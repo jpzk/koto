@@ -106,7 +106,7 @@ func helpSections() []helpSection {
 			{"/prompt <name>", "fire a prompt file"},
 			{"/runscript <file>", "run scripts/<file> in the group's microVM"},
 			{"/shell", "open the shared terminal (same as ctrl+])"},
-			{"/themes", "color theme picker, live-previewed (also: /themes <name> | list | off)"},
+			{"/themes", "color theme picker, live-previewed (default: terminal; /themes amber | <name> | list)"},
 			{"/repaint", "force a full redraw"},
 			{"/reload", "reload the TUI"},
 			{"/exit", "exit the TUI (alias /quit; daemon and groups keep running)"},

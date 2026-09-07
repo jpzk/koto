@@ -60,16 +60,23 @@ func TestThemePickerListsDefaultFirst(t *testing.T) {
 func TestThemePickerPreviewsOnCursorMove(t *testing.T) {
 	m := themePickerModel(t)
 	if activeTheme != "" {
-		t.Fatalf("opened on theme %q, want the built-in palette", activeTheme)
+		t.Fatalf("opened on theme %q, want the default palette", activeTheme)
 	}
 	before := m.View()
+	// Two rows down: the list leads with the default and koto's native
+	// palettes, both of which are terminal/256 indexes, and the assertion
+	// below wants a swatch sheet's hex accent to prove the vars moved.
+	m = press(t, m, tea.KeyDown)
 	m = press(t, m, tea.KeyDown)
 	want := m.picker.items[m.picker.matches[m.picker.cursor].Idx]
 	if activeTheme != want {
 		t.Fatalf("cursor is on %q but %q is applied", want, activeTheme)
 	}
-	// The palette vars really moved — the built-in accent is the 256-color
-	// index "214", a theme's is a hex triple.
+	if findNative(want) != nil || isThemeOff(want) {
+		t.Fatalf("row 2 is %q, still a native palette — the test needs a swatch sheet", want)
+	}
+	// The palette vars really moved — an index palette's accent is a bare
+	// number, a swatch sheet's is a hex triple.
 	if !strings.HasPrefix(string(cAmber), "#") {
 		t.Errorf("accent is still %q — the preview did not repoint the palette", cAmber)
 	}

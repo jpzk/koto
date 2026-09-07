@@ -844,6 +844,12 @@ func newModel(sock string, ctxWindow int) Model {
 	// that has room to explain all of them (help_view.go), which is exactly
 	// what a discoverability hint should point at.
 	ti.Placeholder = "ask anything   (ctrl+h for the cheatsheet)"
+	// bubbles paints its placeholder in a hard-coded 256-cube gray, which is
+	// the one color in the message bar that answers to neither the terminal's
+	// palette nor a theme. Point it at cGray, the dim tier every other piece
+	// of secondary text uses. The style is CAPTURED here rather than read at
+	// render time, so repaintForTheme re-sets it after a palette swap.
+	ti.PlaceholderStyle = placeholderStyle()
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.Width = 80
