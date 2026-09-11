@@ -3488,3 +3488,59 @@ func TestAskSessionNormalization(t *testing.T) {
 		t.Error("two named sessions compared equal")
 	}
 }
+
+// 2026-09-11 M104: destroy cleaned up by group NAME, and three pieces of state
+// are not keyed that way. Tail claims are keyed by PATH, so `delete(tails, g)`
+// reached none of them and a recreated group's tailer never started at all;
+// the notification queue and the expected-marker allowlist survived under the
+// reused name.
+func TestDestroyReleasesTailAndNotifyState(t *testing.T) {
+	fcHarness(t)
+	const g = "tailstate"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	groupsLock.Lock()
+	m := readGroups()
+	m[g] = PORT_BASE + 902
+	writeGroups(m)
+	groupsLock.Unlock()
+
+	// A live tailer claim on the group stream and a slot stream, a queued
+	// notification, and an armed marker expectation.
+	if !markTail(groupLogPath(g)) || !markTail(slotLogPath(g, 0)) {
+		t.Fatal("could not claim the tails")
+	}
+	notifyQueueMu.Lock()
+	notifyQueue[g] = []string{"[[notify]] a b c d"}
+	notifyQueueMu.Unlock()
+	notifyExpect(g, "[[notify]] a b c d")
+	if !notifyExpected(g, "[[notify]] a b c d") {
+		t.Fatal("the expectation did not arm")
+	}
+
+	if r := destroy(g); !r.OK {
+		t.Fatalf("destroy: %s", r.Error)
+	}
+
+	// A replacement of the same name can claim its tails — the bug here made
+	// the recreated group silent, not merely leaky.
+	if !markTail(groupLogPath(g)) {
+		t.Fatal("a replacement group cannot start its group tailer")
+	}
+	if !markTail(slotLogPath(g, 0)) {
+		t.Fatal("a replacement group cannot start its slot tailer")
+	}
+	notifyQueueMu.Lock()
+	queued := len(notifyQueue[g])
+	notifyQueueMu.Unlock()
+	if queued != 0 {
+		t.Fatalf("%d notification(s) queued for a destroyed group", queued)
+	}
+	if notifyExpected(g, "[[notify]] a b c d") {
+		t.Fatal("a stale marker expectation would authorize a forged notification in the replacement")
+	}
+	// Cleanup for the claims this test just took.
+	subsLock.Lock()
+	delete(tails, groupLogPath(g))
+	delete(tails, slotLogPath(g, 0))
+	subsLock.Unlock()
+}
