@@ -5860,3 +5860,101 @@ func TestLogSubscriberIsToldWhatItMissed(t *testing.T) {
 		t.Errorf("the deferred notice never arrived: %q", notice.Msg)
 	}
 }
+
+// 2026-09-11 M159: alert subjects shared one map with unqualified keys — the
+// fleet filesystem check wrote the literal "host", the per-group disk check
+// wrote the raw group name. validGroupName accepts "host", so a group of that
+// name and the whole host's filesystem were ONE subject: a group disk crossing
+// raised the level, and the next host filesystem crossing was then not an
+// increase and raised nothing. At 100% every guest remounts read-only and the
+// fleet wedges, which is the alert this project least wants suppressed.
+func TestAlertSubjectsCannotAliasEachOther(t *testing.T) {
+	for _, s := range []string{resSubjectHostFS, resSubjectDisk("host"), resSubjectCPU("host")} {
+		resForgetAlert(s)
+	}
+	t.Cleanup(func() {
+		for _, s := range []string{resSubjectHostFS, resSubjectDisk("host"), resSubjectCPU("host")} {
+			resForgetAlert(s)
+		}
+	})
+
+	// A group named `host` crosses its disk threshold.
+	if fire, lvl := resShouldFire(resSubjectDisk("host"), 95); !fire || lvl != 2 {
+		t.Fatalf("the group's own alert did not fire: fire=%v lvl=%d", fire, lvl)
+	}
+	// The HOST filesystem crossing the same threshold must still fire.
+	if fire, lvl := resShouldFire(resSubjectHostFS, 95); !fire || lvl != 2 {
+		t.Errorf("the host filesystem alert was suppressed by a group named `host`: fire=%v lvl=%d", fire, lvl)
+	}
+	// ...and so must that group's CPU subject, which is a third thing again.
+	if fire, _ := resShouldFire(resSubjectCPU("host"), 95); !fire {
+		t.Error("the cpu alert was suppressed too")
+	}
+
+	// No group name can produce a subject in another namespace: ":" is outside
+	// the group-name charset.
+	for _, g := range []string{"host", "hostfs", "disk", "cpu", "a-b_c", "Z9"} {
+		if !validGroupName(g) {
+			continue
+		}
+		if resSubjectDisk(g) == resSubjectHostFS || resSubjectCPU(g) == resSubjectHostFS ||
+			resSubjectDisk(g) == resSubjectCPU(g) {
+			t.Errorf("group %q collides across alert namespaces", g)
+		}
+	}
+	if validGroupName("disk:x") || validGroupName("hostfs:") {
+		t.Error("the group-name charset allows a colon — the namespace prefixes are forgeable")
+	}
+}
+
+// 2026-09-11 M165: the login subprocess got os.Environ() with only HOME
+// replaced, so the destination of a CREDENTIAL write was decided by whatever
+// the operator's shell exports ahead of HOME. CLAUDE_CONFIG_DIR and
+// XDG_CONFIG_HOME are config-root overrides: an operator with one set for their
+// personal use would have had `koto claude-login` write the koto token into
+// their personal config — the precise arrangement the trust model rules out
+// ("creds/ is dedicated, not ~/.claude").
+func TestLoginChildEnvironmentIsDecidedByKoto(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/someone",
+		"CLAUDE_CONFIG_DIR=/home/someone/.config/claude",
+		"XDG_CONFIG_HOME=/home/someone/.config",
+		"CRED_PATH=/tmp/elsewhere.json",
+		"TERM=xterm",
+	}
+	env := setEnv(base, "HOME", "/var/lib/koto")
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "CRED_PATH"} {
+		env = unsetEnv(env, k)
+	}
+
+	got := map[string]string{}
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		got[k] = v
+	}
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "CRED_PATH"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s was inherited by the login child: %q", k, v)
+		}
+	}
+	if got["HOME"] != "/var/lib/koto" {
+		t.Errorf("HOME = %q, want the state dir", got["HOME"])
+	}
+	// Everything else still passes through — the child needs a PATH and a
+	// terminal type to run at all.
+	if got["PATH"] != "/usr/bin" || got["TERM"] != "xterm" {
+		t.Errorf("the child lost unrelated environment: %v", got)
+	}
+	// One entry per key, no duplicates left behind.
+	seen := map[string]int{}
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		seen[k]++
+	}
+	for k, n := range seen {
+		if n != 1 {
+			t.Errorf("%s appears %d times in the child environment", k, n)
+		}
+	}
+}

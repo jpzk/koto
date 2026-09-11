@@ -504,28 +504,29 @@ func TestResCPUAvgPct(t *testing.T) {
 	}
 }
 
-// The CPU subject ("cpu:<g>") must keep its alert state separate from the
-// disk subject (bare group name) and be dropped alongside it on destroy.
+// The CPU subject must keep its alert state separate from the disk subject and
+// be dropped alongside it on destroy. Both are namespaced since M159; the disk
+// one used to be the bare group name.
 func TestResCPUAlertSubjectIndependent(t *testing.T) {
 	g := "cputest"
-	resForgetAlert(g)
-	resForgetAlert("cpu:" + g)
-	defer resForgetAlert(g)
-	defer resForgetAlert("cpu:" + g)
+	resForgetAlert(resSubjectDisk(g))
+	resForgetAlert(resSubjectCPU(g))
+	defer resForgetAlert(resSubjectDisk(g))
+	defer resForgetAlert(resSubjectCPU(g))
 
-	if fire, lvl := resShouldFire(g, 85); !fire || lvl != 1 {
+	if fire, lvl := resShouldFire(resSubjectDisk(g), 85); !fire || lvl != 1 {
 		t.Fatalf("disk subject first crossing: fire=%v lvl=%d", fire, lvl)
 	}
 	// Disk at warn must not pre-arm the CPU subject.
-	if fire, lvl := resShouldFire("cpu:"+g, 85); !fire || lvl != 1 {
+	if fire, lvl := resShouldFire(resSubjectCPU(g), 85); !fire || lvl != 1 {
 		t.Fatalf("cpu subject first crossing: fire=%v lvl=%d", fire, lvl)
 	}
 	// And forgetting one leaves the other armed.
-	resForgetAlert("cpu:" + g)
-	if fire, _ := resShouldFire(g, 85); fire {
+	resForgetAlert(resSubjectCPU(g))
+	if fire, _ := resShouldFire(resSubjectDisk(g), 85); fire {
 		t.Fatal("disk subject re-fired after cpu forget")
 	}
-	if fire, _ := resShouldFire("cpu:"+g, 85); !fire {
+	if fire, _ := resShouldFire(resSubjectCPU(g), 85); !fire {
 		t.Fatal("cpu subject should fire fresh after forget")
 	}
 }
