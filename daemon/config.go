@@ -30,6 +30,16 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 	}
 	if isClear(raw) {
 		delete(cfg, key)
+		// Clearing the egress profile means clearing it, not clearing one of
+		// its two spellings. `network()` falls back to the legacy `internet`
+		// key, so deleting only `network` on a pre-migration config left
+		// `internet:"full"` resolving to wan — an operator revoking egress
+		// with `-network=` kept public WAN access, and the config read back
+		// would say so while the VM did not (audit M91).
+		if key == "network" || key == "internet" {
+			delete(cfg, "network")
+			delete(cfg, "internet")
+		}
 		return
 	}
 	if key == "provider" {
@@ -61,6 +71,9 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		switch s {
 		case fcNetNone, fcNetWAN, fcNetLAN, fcNetFull:
 			cfg[key] = s
+			// Same reason as the clear above: leave no legacy spelling behind
+			// that a later read could resolve through.
+			delete(cfg, "internet")
 		}
 		return
 	}

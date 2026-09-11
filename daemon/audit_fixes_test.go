@@ -3062,3 +3062,51 @@ func TestScheduleStoreHasADaemonWideCap(t *testing.T) {
 		t.Fatalf("a schedule below the cap was refused: %v", err)
 	}
 }
+
+// 2026-09-11 M91: clearing the egress profile must clear it, not one of its
+// two spellings. network() falls back to the legacy `internet` key, so
+// deleting only `network` on a pre-migration config left `internet:"full"`
+// resolving to wan — an operator revoking egress kept public WAN access.
+func TestClearingNetworkClearsTheLegacyKey(t *testing.T) {
+	clear := json.RawMessage(`""`)
+	set := func(v string) json.RawMessage { b, _ := json.Marshal(v); return b }
+
+	// A pre-migration config, cleared with -network=.
+	cfg := map[string]any{"internet": "full", "model": "kimi"}
+	applyConfig(cfg, "network", clear)
+	if got := groupConfig(cfg).network(); got != fcNetNone {
+		t.Fatalf("after clearing network, profile resolves to %q", got)
+	}
+	if _, stale := cfg["internet"]; stale {
+		t.Fatal("the legacy internet key survived the clear")
+	}
+	if cfg["model"] != "kimi" {
+		t.Fatal("clearing the profile disturbed an unrelated key")
+	}
+
+	// Clearing via the legacy spelling clears both too.
+	cfg = map[string]any{"internet": "full", "network": "full"}
+	applyConfig(cfg, "internet", clear)
+	if got := groupConfig(cfg).network(); got != fcNetNone {
+		t.Fatalf("after clearing internet, profile resolves to %q", got)
+	}
+
+	// Setting network leaves no legacy spelling behind to resolve through.
+	cfg = map[string]any{"internet": "full"}
+	applyConfig(cfg, "network", set("lan"))
+	if _, stale := cfg["internet"]; stale {
+		t.Fatal("setting network left the legacy key in place")
+	}
+	if got := groupConfig(cfg).network(); got != fcNetLAN {
+		t.Fatalf("profile resolves to %q, want lan", got)
+	}
+	// And the legacy write still migrates forward.
+	cfg = map[string]any{}
+	applyConfig(cfg, "internet", set("full"))
+	if cfg["network"] != fcNetWAN {
+		t.Fatalf("internet=full migrated to %v, want wan", cfg["network"])
+	}
+	if _, stale := cfg["internet"]; stale {
+		t.Fatal("internet=full left the legacy key on disk")
+	}
+}
