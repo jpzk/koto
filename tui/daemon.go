@@ -239,16 +239,22 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalSet(ctx, r)
 	case "goal_list":
 		return cl.GoalList(ctx, &pb.GoalListReq{Group: s("group")})
+	// The NAME matters on every one of these. goalOpCmd puts the selected run
+	// in extra["name"] and these five dropped it, so the daemon fell back to
+	// implicit selection — with several goals in a group, /goals cancel on the
+	// row you picked could resolve to a different eligible run, or fail as
+	// ambiguous (audit M96). A group runs several goals at once by design, so
+	// this is the ordinary case, not a corner.
 	case "goal_approve":
-		return cl.GoalApprove(ctx, &pb.GoalGroupReq{Group: s("group")})
+		return cl.GoalApprove(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_pause":
-		return cl.GoalPause(ctx, &pb.GoalGroupReq{Group: s("group")})
+		return cl.GoalPause(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_interrupt":
-		return cl.GoalInterrupt(ctx, &pb.GoalGroupReq{Group: s("group")})
+		return cl.GoalInterrupt(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_resume":
-		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group")})
+		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_cancel":
-		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group")})
+		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }
