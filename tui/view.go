@@ -1611,9 +1611,16 @@ func (m Model) renderInputLines(cols int) []string {
 
 	ghost := lipgloss.NewStyle().Foreground(cGray)
 	out := make([]string, 0, len(rows))
+	// Scrubbed per PIECE rather than on the value, so the cursor arithmetic
+	// above — done on the raw runes — still lands where the operator put it
+	// (audit 2026-09-11 L8). lipgloss styles text without neutralising what is
+	// in it, and drawBox, themeFrame and monoFrame all pass a non-SGR escape
+	// straight through; this row and its ghost were the live input's only
+	// route to the terminal, and the ghost comes from prompt history.
+	safe := func(s string) string { return scrubVTStrict(s) }
 	for i, row := range rows {
 		if !m.input.Focused() || i+start != curRow || curCol >= len(row) {
-			out = append(out, string(row)) // curCol guard: never panic the whole TUI over a cursor
+			out = append(out, safe(string(row))) // curCol guard: never panic the whole TUI over a cursor
 			continue
 		}
 		cur := m.input.Cursor // copy: blink state is owned by m.input
@@ -1622,10 +1629,15 @@ func (m Model) renderInputLines(cols int) []string {
 			// End-of-value: the cursor sits on the ghost's first cell (what
 			// bubbles does) and the rest trails it, clipped by renderInput.
 			cur.TextStyle = ghost
-			ch, after = string(g[0]), ghost.Render(string(g[1:]))
+			ch, after = string(g[0]), ghost.Render(safe(string(g[1:])))
+		} else {
+			after = safe(after)
+		}
+		if ch = safe(ch); ch == "" {
+			ch = " " // the cell under the cursor was itself a control
 		}
 		cur.SetChar(ch)
-		out = append(out, string(row[:curCol])+cur.View()+after)
+		out = append(out, safe(string(row[:curCol]))+cur.View()+after)
 	}
 	return out
 }

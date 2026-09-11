@@ -151,3 +151,63 @@ func TestInputRowChangeResizesViewport(t *testing.T) {
 			m.vp.Height, m.inputRows(), before-(m.inputRows()-1))
 	}
 }
+
+// 2026-09-11 L8: renderInputLines put m.input.Value() and the suggestion ghost
+// into rows that drawBox writes straight into View(). Width calculation, ANSI
+// truncation, padding and styling do not make an embedded ESC/C1/C0 sequence
+// inert, and neither themeFrame nor monoFrame strips one. The ghost comes from
+// prompt history, so a restored or pasted value reached the terminal raw.
+func TestInputRowAndGhostAreScrubbed(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 120, 30
+	m.groups = map[string]GroupInfo{"g": {Running: true}}
+	m.cur = "g"
+	m.focus = focusInput
+
+	// Prompt history is scrubbed on the way in, so recall, the picker and the
+	// ghost are all clean at once.
+	m.pushHistory("g", "deploy \x1b]0;pwned\x07 prod\x1b[2J")
+	h := m.promptHistory["g"]
+	if len(h) != 1 {
+		t.Fatalf("history = %v", h)
+	}
+	if strings.ContainsAny(h[0], "\x1b\x07\r") {
+		t.Errorf("prompt history kept terminal controls: %q", h[0])
+	}
+	if !strings.Contains(h[0], "deploy") || !strings.Contains(h[0], "prod") {
+		t.Errorf("scrubbing ate the prompt: %q", h[0])
+	}
+
+	// A live value carrying controls must not reach the frame, and the cursor
+	// must still render.
+	m.input.Focus()
+	m.input.SetValue("ls \x1b]0;title\x07 -la\x1b[H")
+	m.input.SetCursor(len([]rune(m.input.Value())))
+	rows := m.renderInputLines(100)
+	if len(rows) == 0 {
+		t.Fatal("no input rows rendered")
+	}
+	for i, r := range rows {
+		// The cursor's own SGR is fine; OSC, CSI-erase and bare CR are not.
+		if strings.Contains(r, "\x1b]") || strings.Contains(r, "\x1b[H") ||
+			strings.Contains(r, "\x1b[2J") || strings.Contains(r, "\x07") || strings.Contains(r, "\r") {
+			t.Errorf("input row %d carries a terminal control: %q", i, r)
+		}
+	}
+	frame := m.View()
+	if strings.Contains(frame, "\x1b]0;") || strings.Contains(frame, "\x07") {
+		t.Error("the rendered frame carries an OSC from the input box")
+	}
+
+	// Ordinary input is untouched — the scrub must not eat the operator's text
+	// or move the cursor off it.
+	m.input.SetValue("git status")
+	m.input.SetCursor(3)
+	rows = m.renderInputLines(100)
+	joined := strings.Join(rows, "")
+	for _, want := range []string{"git", "status"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("ordinary input lost %q: %q", want, joined)
+		}
+	}
+}

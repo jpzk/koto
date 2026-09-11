@@ -6308,3 +6308,159 @@ func TestEnvFileReadDistinguishesAbsentFromUnreadable(t *testing.T) {
 		t.Error("an unreadable but PRESENT file was reported as absent — the bug")
 	}
 }
+
+// 2026-09-11 L7: the claim is that the turn renderer converts the remaining
+// byte slice to a string on every newline — `strings.IndexByte(string(b),
+// '\n')` — making a newline-dense payload quadratic. It does not: fcturn.go's
+// text() uses bytes.IndexByte over a RESLICE, which allocates nothing.
+//
+// This measures the difference between the two shapes rather than arguing from
+// a code read, and pins that the one in use is the linear one.
+func TestNewlineScanShapeIsLinear(t *testing.T) {
+	payload := bytes.Repeat([]byte("x\n"), (64<<10)/2)
+
+	// The shape the code uses.
+	start := time.Now()
+	n := 0
+	for b := payload; len(b) > 0; {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			break
+		}
+		n++
+		b = b[i+1:]
+	}
+	linear := time.Since(start)
+
+	// The shape the finding describes: a fresh string of the whole remaining
+	// suffix on every iteration.
+	start = time.Now()
+	m := 0
+	for b := payload; len(b) > 0; {
+		i := strings.IndexByte(string(b), '\n')
+		if i < 0 {
+			break
+		}
+		m++
+		b = b[i+1:]
+	}
+	quadratic := time.Since(start)
+
+	if n != m {
+		t.Fatalf("the two shapes disagree on the line count: %d vs %d", n, m)
+	}
+	t.Logf("%d lines over 64 KiB — reslice %v, string-conversion %v (%.0fx)",
+		n, linear, quadratic, float64(quadratic)/float64(max(int64(linear), 1)))
+	if quadratic <= linear*4 {
+		t.Errorf("the conversion shape was not materially slower (%v vs %v) — "+
+			"this test no longer demonstrates the difference it documents", quadratic, linear)
+	}
+	// The real guard: the renderer must keep using the reslice form.
+	src, err := os.ReadFile("fcturn.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(src, []byte("IndexByte(string(")) {
+		t.Error("fcturn.go converts a byte slice to a string to scan it — the quadratic shape is back")
+	}
+	if !bytes.Contains(src, []byte(`bytes.IndexByte(b, '\n')`)) {
+		t.Error("fcturn.go no longer scans with bytes.IndexByte over a reslice")
+	}
+}
+
+// 2026-09-11 L11: when /proc/meminfo could not be read and no cgroup limit was
+// in force, fcHostMemInit left the cap at 0 — which means UNLIMITED. So a
+// capacity-discovery failure silently disabled the fleet's only memory
+// protection, both layers at once: fcHostMemAdmit accepts everything at 0, and
+// fcCgroupInit installs the vms/ parent limits only for a positive cap. Unknown
+// capacity is not the same as unlimited capacity, and the operator already has
+// a way to say the latter.
+func TestUnknownHostCapacityRefusesSpawns(t *testing.T) {
+	prevCap, prevUnknown := fcHostMemCapMiB, fcHostMemUnknown
+	t.Cleanup(func() { fcHostMemCapMiB, fcHostMemUnknown = prevCap, prevUnknown })
+
+	// The failure state: no capacity known.
+	fcHostMemCapMiB, fcHostMemUnknown = 0, true
+	err := fcHostMemAdmit("g", 1024)
+	if err == nil {
+		t.Fatal("a spawn was admitted with no known host capacity — the fail-open")
+	}
+	for _, want := range []string{"KOTO_HOST_MEM_MIB", "0 for", "could not be determined"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+
+	// The operator saying "unlimited" explicitly is still honoured — that is
+	// the documented escape hatch and the reason refusing is acceptable.
+	t.Setenv("KOTO_HOST_MEM_MIB", "0")
+	fcHostMemInit()
+	if fcHostMemUnknown {
+		t.Error("an explicit KOTO_HOST_MEM_MIB left the daemon in the unknown state")
+	}
+	if err := fcHostMemAdmit("g", 1024); err != nil {
+		t.Errorf("an explicitly unlimited fleet refused a spawn: %v", err)
+	}
+
+	// ...and an explicit ceiling both clears the flag and bounds admission.
+	t.Setenv("KOTO_HOST_MEM_MIB", "2048")
+	fcHostMemInit()
+	if fcHostMemUnknown || fcHostMemCapMiB != 2048 {
+		t.Errorf("explicit cap: unknown=%v cap=%d", fcHostMemUnknown, fcHostMemCapMiB)
+	}
+	if err := fcHostMemAdmit("g", 8192); err == nil {
+		t.Error("a VM larger than the whole cap was admitted")
+	}
+	fcHostMemRelease("g")
+
+	// A normal start on a real machine discovers capacity and clears the flag.
+	t.Setenv("KOTO_HOST_MEM_MIB", "")
+	fcHostMemInit()
+	if fcHostMemUnknown {
+		t.Error("a host with a readable /proc/meminfo was left in the unknown state")
+	}
+}
+
+// 2026-09-11 L9 and L12: the setup hints are operator instructions, and two of
+// them told the operator to weaken their machine. L9: the AppArmor remedy led
+// with a host-wide sysctl that gives unprivileged user namespaces back to EVERY
+// local program, not just koto, and is scoped by neither the unit, its
+// RestrictNamespaces allowlist, nor the daemon's uid. L12: the node hint printed
+// `curl … | sudo -E bash -`, which makes mutable third-party HTTPS content into
+// a privileged shell program on the operator's machine.
+func TestSetupHintsDoNotTellOperatorsToWeakenTheHost(t *testing.T) {
+	src, err := os.ReadFile("setup_checks.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	// No pipe-to-privileged-shell anywhere in the remediation text. The two
+	// mentions that remain are this file's own comment and the line explaining
+	// why koto does not print one, so the test looks for the SHAPE.
+	for _, shape := range []string{"| sudo -E bash", "| sudo bash -", "| sudo sh -", "| bash -\" +"} {
+		if strings.Contains(body, shape) {
+			t.Errorf("a setup hint still pipes a download into a privileged shell: %q", shape)
+		}
+	}
+	// The alternatives it should offer instead.
+	for _, want := range []string{"snap install node", "nvm"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the node hint no longer offers %q", want)
+		}
+	}
+
+	// The AppArmor hint leads with the scoped profile and keeps the host-wide
+	// switch as an explicitly-labelled fallback.
+	prof := strings.Index(body, "/etc/apparmor.d/koto")
+	wide := strings.Index(body, "apparmor_restrict_unprivileged_userns=0")
+	if prof < 0 {
+		t.Fatal("the AppArmor hint no longer offers a per-binary profile")
+	}
+	if wide >= 0 && prof > wide {
+		t.Error("the host-wide AppArmor switch is offered before the scoped profile")
+	}
+	if wide >= 0 && !strings.Contains(body, "EVERY local\\n") {
+		t.Error("the host-wide switch is offered without saying what it costs")
+	}
+}

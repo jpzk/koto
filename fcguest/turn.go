@@ -77,6 +77,14 @@ type turnConn struct {
 	done    chan struct{}
 	stalled atomic.Bool
 	onStall atomic.Pointer[func()]
+
+	// queued is the byte weight of the frames currently in q, so the queue is
+	// bounded by size as well as by count (audit 2026-09-11 L10). Signalled
+	// through room so a producer waiting on space wakes when the writer makes
+	// some, rather than polling.
+	qmu    sync.Mutex
+	queued int
+	room   chan struct{}
 }
 
 // turnQueueFrames bounds the pending frames per turn. Frames are one
@@ -85,6 +93,21 @@ type turnConn struct {
 // host's per-chunk log append jitter, small enough that a genuinely stuck
 // host trips the stall timeout instead of eating the guest's memory.
 const turnQueueFrames = 4096
+
+// turnQueueBytes bounds the same queue by SIZE, because a frame count is not a
+// memory bound (audit 2026-09-11 L10). One frame may approach the channel's
+// 16 MiB maximum, so 4096 of them is ~64 GiB on paper — and the guest has
+// between 1 and 8 GiB depending on the size preset, so it is OOM-killed long
+// before the frame cap is reached. The host sink deliberately throttles to
+// 1 MiB/s, so a producer filling this queue faster than the writer drains it is
+// the ORDINARY case rather than a contrived one; a blocked vsock or a host disk
+// under pressure is the clearer one.
+//
+// 64 MiB is far above what any real turn has pending (kilobyte frames, drained
+// continuously) and far below what a guest can lose. Reaching it blocks the
+// producer exactly as a full frame count does, so the existing stall timeout
+// and worker-kill path handle it with no new failure mode.
+const turnQueueBytes = 64 << 20
 
 // turnStallTimeout is how long a producer waits on a full queue before the
 // turn is declared stalled. Longer than any healthy host pause (the sink
@@ -103,15 +126,63 @@ func stallTimeout() time.Duration {
 }
 
 func newTurnConn(c io.Writer) *turnConn {
-	t := &turnConn{c: c, q: make(chan *pb.TurnFrame, turnQueueFrames), done: make(chan struct{})}
+	t := &turnConn{
+		c:    c,
+		q:    make(chan *pb.TurnFrame, turnQueueFrames),
+		done: make(chan struct{}),
+		room: make(chan struct{}, 1),
+	}
 	go t.writer()
 	return t
+}
+
+// frameBytes is a frame's weight for the queue budget: the payload fields a
+// guest can grow. The fixed scalars are noise beside a multi-megabyte body.
+func frameBytes(f *pb.TurnFrame) int {
+	switch k := f.Kind.(type) {
+	case *pb.TurnFrame_Text:
+		return len(k.Text)
+	case *pb.TurnFrame_Tool:
+		if k.Tool == nil {
+			return 0
+		}
+		return len(k.Tool.Name) + len(k.Tool.Input)
+	case *pb.TurnFrame_Err:
+		return len(k.Err)
+	}
+	return 0
+}
+
+// reserve accounts n bytes against the queue budget, reporting whether they
+// fit. charged is released by the writer as each frame goes out.
+func (t *turnConn) reserve(n int) bool {
+	t.qmu.Lock()
+	defer t.qmu.Unlock()
+	if t.queued > 0 && t.queued+n > turnQueueBytes {
+		return false // never refuse the FIRST frame: it has to go somewhere
+	}
+	t.queued += n
+	return true
+}
+
+func (t *turnConn) release(n int) {
+	t.qmu.Lock()
+	t.queued -= n
+	if t.queued < 0 {
+		t.queued = 0
+	}
+	t.qmu.Unlock()
+	select {
+	case t.room <- struct{}{}:
+	default:
+	}
 }
 
 func (t *turnConn) writer() {
 	defer close(t.done)
 	failed := false
 	for f := range t.q {
+		t.release(frameBytes(f)) // the budget is freed as the frame leaves the queue
 		if failed {
 			continue // drain so producers never block on a dead conn
 		}
@@ -130,17 +201,29 @@ func (t *turnConn) send(f *pb.TurnFrame) {
 	if t.stalled.Load() {
 		return
 	}
-	select {
-	case t.q <- f:
-		return
-	default:
-	}
+	n := frameBytes(f)
 	timer := time.NewTimer(stallTimeout())
 	defer timer.Stop()
-	select {
-	case t.q <- f:
-	case <-timer.C:
-		t.stall()
+	// Wait for BOTH bounds: a slot in the channel and room in the byte budget.
+	// Whichever is short blocks the producer the same way, so the stall timeout
+	// and the worker kill behind it need no new case (audit 2026-09-11 L10).
+	for {
+		if t.reserve(n) {
+			select {
+			case t.q <- f:
+				return
+			case <-timer.C:
+				t.release(n)
+				t.stall()
+				return
+			}
+		}
+		select {
+		case <-t.room:
+		case <-timer.C:
+			t.stall()
+			return
+		}
 	}
 }
 

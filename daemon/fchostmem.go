@@ -44,6 +44,10 @@ const fcHostMemDefaultPct = 90
 // fcHostMemCapMiB is the resolved fleet ceiling; 0 = unlimited.
 var fcHostMemCapMiB int
 
+// fcHostMemUnknown means capacity could not be discovered at all, which is NOT
+// the same as unlimited — see fcHostMemInit. Admission refuses while it is set.
+var fcHostMemUnknown bool
+
 // fcHostMemTotalMiB reads MemTotal from /proc/meminfo (the host's — podman
 // shares the kernel and does not virtualize meminfo). 0 on any failure.
 func fcHostMemTotalMiB() int {
@@ -75,7 +79,7 @@ func fcHostMemInit() {
 		if err != nil || n < 0 {
 			emitLogf("fc", "warn", "KOTO_HOST_MEM_MIB=%q invalid; using derived default", v)
 		} else {
-			fcHostMemCapMiB = n
+			fcHostMemCapMiB, fcHostMemUnknown = n, false
 			if n == 0 {
 				emitLogf("fc", "info", "fleet memory cap: unlimited (KOTO_HOST_MEM_MIB=0)")
 			} else {
@@ -87,7 +91,21 @@ func fcHostMemInit() {
 	total := fcHostMemTotalMiB()
 	limit := fcCgroupMemLimitMiB()
 	if total == 0 && limit == 0 {
-		emitLogf("fc", "warn", "fleet memory cap: /proc/meminfo unreadable and no cgroup limit; unlimited")
+		// FAIL CLOSED (audit 2026-09-11 L11). This used to leave the cap at 0,
+		// which means "unlimited" — so a capacity-discovery failure silently
+		// disabled the fleet's only memory protection: fcHostMemAdmit accepts
+		// everything at 0, and fcCgroupInit installs the vms/ parent limits
+		// only for a positive cap, so BOTH layers went away at once and an
+		// authorized spawner could take the host down with OOM kills.
+		//
+		// Unknown capacity is not the same as unlimited capacity, and the
+		// operator already has a way to say the latter: KOTO_HOST_MEM_MIB=0 is
+		// the documented "unlimited". So refuse admission until they say which
+		// they mean, and say so at ERROR — which reaches them as a banner
+		// through logalert rather than sitting in a log nobody reads.
+		fcHostMemUnknown = true
+		emitLogf("fc", "error", "fleet memory cap: /proc/meminfo unreadable and no cgroup limit — "+
+			"REFUSING VM spawns until KOTO_HOST_MEM_MIB is set (use 0 for explicitly unlimited)")
 		return
 	}
 	// The SMALLER of the two bounds, because both are real (audit M153).
@@ -111,7 +129,7 @@ func fcHostMemInit() {
 			src = fmt.Sprintf("%d%% of the daemon's cgroup limit %d MiB", fcHostMemDefaultPct, limit)
 		}
 	}
-	fcHostMemCapMiB = cap
+	fcHostMemCapMiB, fcHostMemUnknown = cap, false
 	emitLogf("fc", "info", "fleet memory cap: %d MiB (%s; KOTO_HOST_MEM_MIB overrides, 0 = unlimited)",
 		fcHostMemCapMiB, src)
 }
@@ -199,6 +217,12 @@ func fcHostMemCommittedMiB() int {
 // the fleet cap and, if so, reserves its share until fcHostMemRelease. The
 // error is the user-facing spawn failure, so it says what to do about it.
 func fcHostMemAdmit(g string, memMiB int) error {
+	if fcHostMemUnknown {
+		return fmt.Errorf("refusing to boot %s: the host's memory capacity could not be determined "+
+			"(/proc/meminfo unreadable and no cgroup limit), so the fleet cap and the vms/ cgroup "+
+			"limits are both absent — set KOTO_HOST_MEM_MIB to a ceiling in MiB, or to 0 for "+
+			"explicitly unlimited, and restart the daemon", g)
+	}
 	if fcHostMemCapMiB == 0 {
 		return nil
 	}

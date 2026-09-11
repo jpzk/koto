@@ -431,3 +431,50 @@ func TestExecOutputBufferIsBounded(t *testing.T) {
 		t.Errorf("execOutMax (%d) exceeds the guest→host channel maximum", execOutMax)
 	}
 }
+
+// 2026-09-11 L10: the turn queue was bounded by frame COUNT, which is not a
+// memory bound — one frame may approach the channel's 16 MiB maximum, so 4096
+// of them is ~64 GiB on paper against a guest that has 1–8 GiB. The host sink
+// throttles to 1 MiB/s by design, so a producer outrunning the writer is the
+// ordinary case rather than a contrived one.
+func TestTurnQueueIsBoundedByBytes(t *testing.T) {
+	// A writer that never drains: everything the producer sends stays queued.
+	bw := &blockingWriter{release: make(chan struct{})}
+	tw := newTurnConn(bw)
+	t.Cleanup(func() { bw.closed.Store(true); close(bw.release) })
+
+	prev := turnStallTimeoutOverride
+	turnStallTimeoutOverride = 200 * time.Millisecond
+	t.Cleanup(func() { turnStallTimeoutOverride = prev })
+
+	var stalls atomic.Int32
+	fn := func() { stalls.Add(1) }
+	tw.onStall.Store(&fn)
+
+	big := strings.Repeat("x", 4<<20) // 4 MiB a frame
+	sent := 0
+	for i := 0; i < 64 && stalls.Load() == 0; i++ { // 256 MiB offered
+		tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte(big)}})
+		sent++
+	}
+
+	tw.qmu.Lock()
+	queued := tw.queued
+	tw.qmu.Unlock()
+	if queued > turnQueueBytes {
+		t.Errorf("queue holds %d bytes, budget is %d", queued, turnQueueBytes)
+	}
+	// The byte bound is what bit, long before 4096 frames.
+	if sent >= 64 && stalls.Load() == 0 {
+		t.Errorf("256 MiB was accepted without the byte bound biting (%d bytes queued)", queued)
+	}
+	if stalls.Load() == 0 {
+		t.Error("a producer blocked by the byte budget never reached the stall path")
+	}
+
+	// A single frame larger than the whole budget is still accepted: refusing
+	// the first one would drop output rather than bound anything.
+	fresh := newTurnConn(&bytes.Buffer{})
+	fresh.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte(strings.Repeat("y", turnQueueBytes+4096))}})
+	fresh.close()
+}
