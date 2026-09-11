@@ -358,3 +358,39 @@ func FuzzScrubVTKeepsText(f *testing.F) {
 		}
 	})
 }
+
+// 2026-09-11 M141: the TUI's mirror of the daemon's SGR allowlist, and the
+// split between the two scrubs. The shell pane is a terminal and keeps reverse
+// video — less, vim, fzf and tmux all use it legitimately, and the pane's own
+// frame is what bounds the spoof; text rendered as koto's OWN interface goes
+// through the strict scrub, where conceal, blink and reverse are deception.
+func TestScrubVTStrictDropsDeceptiveSGR(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"bold red survives", "\x1b[1;31mx", "\x1b[1;31mx"},
+		{"truecolor survives", "\x1b[38;2;1;2;3mx", "\x1b[38;2;1;2;3mx"},
+		{"conceal goes", "\x1b[8mhidden", "hidden"},
+		{"reverse goes", "\x1b[7m koto \x1b[27m", " koto "},
+		{"blink goes", "\x1b[5m!", "!"},
+		{"styling survives beside it", "\x1b[1;7;31mx", "\x1b[1;31mx"},
+		{"malformed extended drops the sequence", "\x1b[38;7mx", "x"},
+	} {
+		if got := scrubVTStrict(c.in); got != c.want {
+			t.Errorf("%s: scrubVTStrict(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+
+	// The pane keeps what the guest drew: a vim status line or an fzf cursor
+	// row is reverse video, and stripping it would break the view to prevent a
+	// spoof the pane's own frame already contains.
+	if got := scrubVT("\x1b[7mselected\x1b[27m"); got != "\x1b[7mselected\x1b[27m" {
+		t.Errorf("the shell pane lost its reverse video: %q", got)
+	}
+	// Both scrubs still drop everything that is not an SGR.
+	for _, in := range []string{"\x1b]0;title\x07x", "\x1b[2J\x1b[Hx", "a\rb"} {
+		for name, f := range map[string]func(string) string{"scrubVT": scrubVT, "scrubVTStrict": scrubVTStrict} {
+			if got := f(in); strings.ContainsAny(got, "\x1b\r\x07") {
+				t.Errorf("%s(%q) = %q still carries a control", name, in, got)
+			}
+		}
+	}
+}

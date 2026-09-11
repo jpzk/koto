@@ -2825,7 +2825,7 @@ func (m *Model) addLine(l logLine) {
 	// producer, present and future, without touching the streaming paths where
 	// throughput matters.
 	if l.kind == "err" {
-		l.text = scrubVT(l.text)
+		l.text = scrubVTStrict(l.text)
 		logWarn("ui", "error line (group=%q): %s", l.group, l.text)
 	}
 	m.lines = append(m.lines, l)
@@ -3111,7 +3111,7 @@ func formatTool(name, input string) string {
 	pick := func(keys ...string) string {
 		for _, k := range keys {
 			if v, ok := args[k].(string); ok && v != "" {
-				return scrubVT(v)
+				return scrubVTStrict(v)
 			}
 		}
 		return ""

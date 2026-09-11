@@ -2853,3 +2853,50 @@ fills all ten slots, parks a worker in the wait, cancels it through the same
 `requestTurnCancel` the Interrupt RPC and `stopGroup` call, and asserts it
 returns without a slot and without disturbing the pool. Verified to hang past
 its own deadline with the wake removed. Also run under `-race`.
+
+## M141 — Sanitizer accepts deceptive SGR attributes — FIXED
+
+`daemon/sanitize.go` (`scanEsc` → `sgrApproved`), `tui/sgr.go`, `tui/vt_scrub.go`.
+
+**Confirmed.** "Pure SGR" was the whole test: a CSI whose parameters were digits
+and semicolons and whose final byte was `m` was copied through **verbatim**. Four
+of those codes are not styling but deception, and every producer this sanitizer
+exists for can set them — guest output, tool results, a peer's report, a
+`cs-notify` title, model text:
+
+| code | effect |
+|---|---|
+| **8** conceal | makes text invisible. A warning, a refusal, the `> `-quoted attribution around a peer report: gone, while the transcript still reads as complete. |
+| **7** reverse | is koto's OWN vocabulary for "this is the UI, not content" — the status bar, the chip pair, the tree's cursor row — and in **mono mode it is the only signal those have**. Untrusted text painting itself reverse imitates them directly. |
+| **5, 6** blink | manufacture urgency the renderer never asked for. |
+
+**Fix:** `sgrApproved` filters the parameter list to an allowlist of the styling
+half — 0/1/2/3/4/9, the decoration resets, 26, 53/55, 39/49/59, 30–37, 40–47,
+90–97, 100–107, and the 38/48/58 extended forms with their arguments checked —
+and drops the blink/reverse/conceal vocabulary **in both directions**: 25, 27
+and 28 go too, because a lone "reverse off" inside a row koto is drawing
+reversed escapes the highlight as effectively as a "reverse on" imitates it.
+
+An allowlist rather than a denylist because the parameter space is open. A
+malformed extended colour drops the **whole** sequence rather than resyncing,
+since resyncing would reinterpret that form's arguments as codes in their own
+right — `38;7` would otherwise leave a `7`. Styling in the same sequence as
+deception survives (`ESC[1;8;31m` → `ESC[1;31m`), so a legitimately coloured
+line is not collateral.
+
+**The TUI mirrors it, with one deliberate split.** `scrubVT` — the **shell
+pane** — keeps every SGR, reverse included: that pane is a terminal, framed and
+bounded as one, showing the guest's own rendering, and `less`, `vim`, `fzf` and
+`tmux` all reverse cells for legitimate reasons. Taking that away would break the
+view to prevent a spoof the surrounding frame already contains. The new
+`scrubVTStrict` applies the allowlist and is what the paths rendering untrusted
+text as koto's own interface now use: job-tail chunks, error lines, decoded tool
+arguments, shell error text. The TUI's version is expressed on the existing
+`forEachSGRAttr` parser rather than re-parsing.
+
+Tests: `TestSanitizeKeepsStylingAndDropsDeceptiveSGR` in
+`daemon/audit_fixes_test.go` (23 cases plus a property check that no arrangement
+of parameters gets conceal/blink/reverse through) and
+`TestScrubVTStrictDropsDeceptiveSGR` in `tui/sgr_test.go`, which also pins that
+the shell pane KEEPS its reverse video and that both scrubs still drop
+everything that is not an SGR.

@@ -150,7 +150,7 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 		for {
 			frame, err := stream.Recv()
 			if err != nil {
-				prog.Send(shellFrameMsg{id: id, errText: scrubVT(err.Error())})
+				prog.Send(shellFrameMsg{id: id, errText: scrubVTStrict(err.Error())})
 				return
 			}
 			switch frame.Event {
@@ -168,7 +168,7 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 				// neutralizing what is in it (audit M127). The transport
 				// error above gets the same treatment: it is assembled on the
 				// client and can carry a server message through.
-				prog.Send(shellFrameMsg{id: id, errText: scrubVT(frame.Error)})
+				prog.Send(shellFrameMsg{id: id, errText: scrubVTStrict(frame.Error)})
 				return
 			}
 		}
