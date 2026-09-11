@@ -3844,3 +3844,38 @@ full-length write contract, that post-cap writes grow nothing, that the head is
 what is kept, and that `execOutMax` stays inside the channel maximum) and
 `TestJobsTSVParseSurvivesHostileMetadata` in `daemon/audit_fixes_test.go` (the
 bounded line parses, carries no framing, and no forged line becomes a job id).
+
+## M166 — JobTail parsed output can exhaust TUI memory — FIXED
+
+`tui/peek_render.go`, `tui/model.go`.
+
+**Confirmed, and the comment that justified the old bound named its own
+mistake.** `peekLineCap` bounded the parsed scrollback at 2048 **blocks**, on the
+stated grounds that "the bodies inside tool_out/thought blocks are already
+capped by the daemon's 64KB tail window". That holds for the *initial replay*
+only: `JobTail` then **follows** the file, and every block after that is bounded
+by the daemon's own `blockBodyMax`, which is 1 MiB. 2048 blocks at 1 MiB each is
+**two gigabytes** in the operator's TUI, sized by whoever wrote the job.
+`peekOpen` was capped the same way — 2048 *elements*, each a streamed partial of
+arbitrary size — and `snapshotPeek` then stored the slices per job behind a cache
+that counted jobs, not bytes: sixteen entries × the block cap.
+
+**Fix:** byte budgets alongside the counts, carried rather than re-summed.
+
+- `peekBytesMax` (4 MiB) on the parsed scrollback, trimmed from the oldest end.
+  The newest block is always kept even when it alone exceeds the budget —
+  dropping it would show the operator nothing at all.
+- `peekOpenBytesMax` (1 MiB) on an open block's partials, which are redundant by
+  construction: the authoritative body arrives in the `*_done` frame, and this
+  buffer exists only to show progress while the block streams.
+- `peekCacheBytesMax` (16 MiB) across the whole cache, evicting
+  least-recently-saved first and never the entry just written.
+
+Every reset path zeroes the counters, and a restore from the cache recounts them
+(`recountPeekBytes`) since those slices did not come through `applyPeekEvent`.
+
+Test: `TestPeekStateIsBoundedByBytes` in `tui/peek_test.go` offers 50 MiB of
+blocks against the 4 MiB budget, asserts both bounds hold and that the byte one
+is what bit, checks the carried total against a fresh count, exercises the open
+block and its reset on close, and fills the cache past its byte budget.
+Verified to fail on all three counts with the budgets removed.
