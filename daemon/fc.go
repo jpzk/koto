@@ -59,6 +59,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -1232,7 +1233,7 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
 	}
-	newWM, files := fcNewUploads(g)
+	files := fcTurnUploads(g, msg)
 	if len(files) > 0 {
 		args := append([]string{"-C", filepath.Join(vol(g), ".cs", "uploads"), "-cf", "-"}, files...)
 		if out, err := exec.Command("tar", args...).Output(); err == nil {
@@ -1242,8 +1243,7 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		}
 	}
 	_, err := fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Msg{Msg: m}}, 30*time.Second)
-	if err == nil && !newWM.IsZero() {
-		_ = os.WriteFile(fcUploadsWM(g), []byte(fmt.Sprintf("%d\n", newWM.UnixNano())), 0o644)
+	if err == nil {
 		// The guest has its copy now (untarred into /workspace before the
 		// turn); the host copy has no further reader and used to accumulate
 		// for the group's lifetime (audit M10).
@@ -1254,39 +1254,48 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	return err
 }
 
-func fcUploadsWM(g string) string { return filepath.Join(vol(g), ".cs", ".uploads-synced") }
+// uploadRefRE matches the reference processAttachments embeds in the message
+// text for a staged image.
+var uploadRefRE = regexp.MustCompile(`\[image: \.cs/uploads/([A-Za-z0-9._-]+)\]`)
 
-// fcNewUploads lists upload basenames modified after the group's watermark,
-// plus the newest mtime seen (the next watermark).
-func fcNewUploads(g string) (time.Time, []string) {
-	var wm time.Time
-	if b, err := os.ReadFile(fcUploadsWM(g)); err == nil {
-		var ns int64
-		fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &ns)
-		wm = time.Unix(0, ns)
-	}
-	entries, err := os.ReadDir(filepath.Join(vol(g), ".cs", "uploads"))
-	if err != nil {
-		return time.Time{}, nil
-	}
-	var newest time.Time
-	var files []string
-	for _, e := range entries {
-		if e.IsDir() {
+// fcTurnUploads names the uploads THIS turn owns, by reading the references out
+// of the message it is delivering.
+//
+// The spool used to be selected by a group-wide mtime watermark: every file
+// newer than the last delivery rode along with whatever turn happened to go
+// next (audit M36). With concurrent sessions in one group that is three bugs.
+// Two turns can both select a file before either advances the watermark, so one
+// session's image reaches another session's agent; the turn that was supposed
+// to carry it can find it already gone; and a file whose Send was rejected
+// after staging — queue full, validation error — is orphaned yet still
+// delivered later to an unrelated turn.
+//
+// The message already carries the answer: processAttachments embeds
+// "[image: .cs/uploads/<name>]" for exactly the files this turn is about. So
+// ownership is read from the text rather than inferred from timestamps, which
+// makes it exact and needs no claim protocol.
+//
+// The names are constrained to plain basenames that already exist as regular
+// files in the group's own uploads dir: the message text is not always the
+// operator's (a ctl `send` from main carries arbitrary text), and these names
+// become `tar -C uploads` arguments.
+func fcTurnUploads(g, msg string) []string {
+	dir := filepath.Join(vol(g), ".cs", "uploads")
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range uploadRefRE.FindAllStringSubmatch(msg, -1) {
+		name := m[1]
+		if seen[name] || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		fi, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		if info.ModTime().After(wm) {
-			files = append(files, e.Name())
-			if info.ModTime().After(newest) {
-				newest = info.ModTime()
-			}
-		}
+		seen[name] = true
+		out = append(out, name)
 	}
-	return newest, files
+	return out
 }
 
 // fcExec runs a short script in the guest and returns its combined output.

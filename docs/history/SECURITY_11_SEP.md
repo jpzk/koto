@@ -660,3 +660,30 @@ NAMED, with the command that would add one back deliberately: silence would be
 the worse failure of the two, since an operator who really did mint in the clone
 needs to know why it does not work, and one who revoked a device needs to know
 it stayed revoked. `TestInstallDoesNotResurrectRevokedIdentities`.
+
+### M36 — Group-wide attachment spool can deliver orphaned uploads to unrelated turns (`daemon/fc.go`) — **fixed**
+
+Real, and three bugs in one mechanism. Uploads were selected by a group-wide
+mtime WATERMARK: every file newer than the last delivery rode along with
+whichever turn went next. With concurrent sessions in one group that means two
+turns can both select a file before either advances the watermark (one
+session's image reaches another session's agent), the turn that was supposed to
+carry it can find it already deleted, and a file whose `Send` was refused after
+staging — queue full, validation error — is orphaned yet still delivered later
+to an unrelated turn.
+
+The message already carried the answer, which is why this needed no claim
+protocol and no plumbing through the queue: `processAttachments` embeds
+`[image: .cs/uploads/<name>]` for exactly the files that turn is about, and
+`fcSendMsg` already receives the message. `fcTurnUploads` reads ownership out
+of the text — exact, per turn, and unaffected by concurrency. The watermark is
+gone.
+
+Two supporting pieces. The names become `tar -C uploads` arguments and the
+message text is not always the operator's (a ctl `send` from main carries
+arbitrary text), so a reference must resolve to a plain basename that already
+exists as a regular file in that group's own uploads dir. And staging is rolled
+back when the enqueue is refused, with a 24h sweep for the one orphan that
+remains possible — a daemon restart between staging and delivery — so the
+pending-upload quota cannot be held by a file no turn will ever claim.
+`TestUploadsAreOwnedByTheirTurn`.

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -285,14 +287,24 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 		return &pb.BaseResp{Error: "session " + session + " is reserved for the goal loop"}, nil
 	}
 	msg := r.Msg
+	staged := false
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
 		m, err := processAttachments(r)
 		if err != nil {
 			return &pb.BaseResp{Error: err.Error()}, nil
 		}
-		msg = m
+		msg, staged = m, true
 	}
 	if _, err := enqueueSend(r.Group, session, msg); err != nil {
+		// Roll the staging back. The file was written before the queue got a
+		// say, so a refused send used to leave it behind — charged against the
+		// group's pending-upload quota with no turn that will ever claim it
+		// (audit M36).
+		if staged {
+			for _, f := range fcTurnUploads(r.Group, msg) {
+				_ = os.Remove(filepath.Join(vol(r.Group), ".cs", "uploads", f))
+			}
+		}
 		return &pb.BaseResp{Error: err.Error()}, nil
 	}
 	// Register after a successful enqueue so the name shows up in

@@ -936,10 +936,20 @@ func mainPeerGoalPlanFirst(t *testing.T) {
 	if gr.Item.Status != goalStatusPlanning {
 		t.Fatalf("main-to-peer goal with plan=false started as %q, want %q", gr.Item.Status, goalStatusPlanning)
 	}
+	// Join the driver before the test's TempDir is torn down (waitGoal is the
+	// harness's join — see goalTestSetup). The plan turn runs against the stub
+	// and the goal parks exactly where plan-first is supposed to park it:
+	// awaiting a human.
+	if it := waitGoal(t, "peer", goalStatusAwaiting); it.Status != goalStatusAwaiting {
+		t.Fatalf("peer goal parked at %q", it.Status)
+	}
 	// A group setting a goal on ITSELF may skip planning: approving its own
 	// plan is allowed, so plan=false is the same authority by a shorter route.
-	resp = ctlDispatch("peer", ctlLine(t, map[string]any{
-		"cmd": "goal_set", "group": "peer", "text": "self work",
+	// A different group for the self-set case: the first goal's driver is
+	// live, and two goals in one group interact through the per-group cap and
+	// the name resolver — neither of which this test is about.
+	resp = ctlDispatch("selfer", ctlLine(t, map[string]any{
+		"cmd": "goal_set", "group": "selfer", "text": "self work",
 		"criteria": "1. done", "name": "p2", "plan": no,
 	}))
 	gr, ok = resp.(goalResp)
@@ -949,6 +959,10 @@ func mainPeerGoalPlanFirst(t *testing.T) {
 	if gr.Item.Status != goalStatusRunning {
 		t.Fatalf("self-set goal with plan=false started as %q, want %q", gr.Item.Status, goalStatusRunning)
 	}
+	// A running goal iterates until its cap; cancel it so the driver exits
+	// before the harness tears the goals file down.
+	ctlDispatch("selfer", ctlLine(t, map[string]any{"cmd": "goal_cancel", "group": "selfer", "name": "p2"}))
+	waitGoalTerminal(t, "selfer")
 }
 
 // 2026-09-11 M18: List and WatchState are verb-only in the ACL, so the
@@ -1571,5 +1585,55 @@ func TestInstallDoesNotResurrectRevokedIdentities(t *testing.T) {
 	b, _ = os.ReadFile(filepath.Join(fresh, "tokens.json"))
 	if !strings.Contains(string(b), "revoked") || !strings.Contains(string(b), "tui") {
 		t.Fatalf("first install did not carry the clone's identities: %s", b)
+	}
+}
+
+// 2026-09-11 M36: an upload belongs to the TURN whose message references it,
+// not to whatever turn happens to run next. The group-wide mtime watermark let
+// two concurrent sessions both select a file, delivered one session's image
+// into another's context, and delivered files whose Send had been refused.
+func TestUploadsAreOwnedByTheirTurn(t *testing.T) {
+	fcHarness(t)
+	g := "uploads"
+	dir := filepath.Join(vol(g), ".cs", "uploads")
+	os.MkdirAll(dir, 0o755)
+	for _, n := range []string{"img-1.png", "img-2.png", "orphan.png"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	msg := "look at this\n[image: .cs/uploads/img-1.png]"
+	got := fcTurnUploads(g, msg)
+	if len(got) != 1 || got[0] != "img-1.png" {
+		t.Fatalf("turn claimed %v, want only its own img-1.png", got)
+	}
+	// Two references, deduped; an unreferenced file is never picked up.
+	got = fcTurnUploads(g, "[image: .cs/uploads/img-1.png] [image: .cs/uploads/img-2.png] [image: .cs/uploads/img-1.png]")
+	if len(got) != 2 {
+		t.Fatalf("two references claimed %v", got)
+	}
+	// A name that is not a plain existing basename is refused — the message
+	// text is not always the operator's, and these become tar arguments.
+	for _, bad := range []string{
+		"[image: .cs/uploads/../../../etc/passwd]",
+		"[image: .cs/uploads/nope.png]",
+		"[image: .cs/uploads/.]",
+		"[image: .cs/uploads/..]",
+	} {
+		if got := fcTurnUploads(g, bad); len(got) != 0 {
+			t.Errorf("%s claimed %v", bad, got)
+		}
+	}
+
+	// The orphan sweep bounds a staging whose turn never ran.
+	old := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(filepath.Join(dir, "orphan.png"), old, old)
+	sweepStaleUploads(dir, uploadsOrphanMaxAge)
+	if _, err := os.Stat(filepath.Join(dir, "orphan.png")); err == nil {
+		t.Fatal("stale orphan survived the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "img-1.png")); err != nil {
+		t.Fatal("the sweep took a fresh upload")
 	}
 }
