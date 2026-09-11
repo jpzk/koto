@@ -6398,3 +6398,196 @@ pause, cancel, interrupt and stop could not make the goal driver return: the
 operator's `/goals interrupt` did nothing visible until the retry sequence ran
 out on its own. `goalStillRunnable` is checked between attempts, and the final
 sleep is gone. Pinned by `TestGoalEnqueueGivesUpWhenTheGoalStops`.
+
+## L154 — Concurrent producers can reorder the live stream — FIXED
+
+`daemon/events.go`. The daemon-log path already fans out under its own lock
+(M156), so `SubscribeLogs` — the finding's subject — was closed. The **group**
+stream was not: `recordEvent` assigned the sequence and copied the subscriber
+list under `subsLock`, and the fan-out ran after releasing it, so producer A
+could take seq 1, pause, let producer B take seq 2 and deliver it, and only then
+deliver its own. The ring then held A,B while the live stream carried B,A — and
+a client renders in arrival order. `emitOrderMu` now spans sequencing and
+delivery (a separate mutex, because `dropSub` takes `subsLock`); the critical
+section is the same non-blocking sends it always was.
+
+## L155 — Notification fields are decoded before the caps apply — FIXED
+
+`daemon/logparse.go`. `notifyField` base64-decoded and converted to a string
+before `notifyTitleMax`/`notifyMsgMax` were applied — so the advertised limits
+bounded what was **kept**, not what was **done**, and `JobTail` hands
+guest-controlled job output to this parser directly, without the live tailer's
+authenticity filtering. `notifyFieldMax` (64 KiB) bounds the ENCODED field
+first. Pinned by `TestNotificationFieldsAreBoundedBeforeDecoding`.
+
+## L156 — Time-dependent tree hit-test uses a stale row index — FIXED
+
+`tui/mouse.go`. `treeRowAt` builds its own rows and `handleLeftClick` builds a
+second set, and the tree is time-dependent — a finished job row blinks for ~10s
+and then vanishes. If it was the last visible row, `rows[i]` **panics and takes
+the TUI down**; if it was an earlier one, the same index names a different
+group, session or job and the click selects or attaches to the wrong thing.
+`syncPeekToHover` already rechecked fresh bounds for exactly this; the mouse
+path now does too. Pinned by `TestStaleTreeIndexDoesNotPanic`.
+
+## L157 — Guest job metadata imposes repeated hashing work — ALREADY FIXED (M160, L58)
+
+Every field the mirror carries is bounded at the producer: `jobsListScript`
+reads status, rc, session and started through `head -c 64` and the command
+through `head -c 200` (M160), the record count is capped at `jobsMaxPerGroup`
+(L58), and forged directory names are rejected outright (L72). A group's whole
+job set is therefore on the order of 100 KB, which is what the 1 Hz state hash
+walks. The finding describes the pre-M160 code.
+
+## L158 — KOTO_FC_NOJAIL does not bypass the userns bootstrap — FIXED
+
+`daemon/daemon.go`. `usernsEnsure()` ran unconditionally and consulted neither
+`fcJailEnabled()` nor the variable — while the failure message it prints, and
+`koto setup`'s diagnostics for a restrictive AppArmor policy, both offer
+`KOTO_FC_NOJAIL=1` as the way out. It was not one: an operator following the
+advice got the identical failure and no microVMs at all. Both users of the
+namespace (`fcJailCommand`'s two-entry uid_map, `fcJailFixupPerms`' chown to the
+per-VM id) are on the jailed path, so the bootstrap is gated on the same switch,
+and the unjailed path now says plainly what it costs. Pinned by
+`TestNoJailSkipsTheUsernsBootstrap`.
+
+## L159 — Unbounded prompt and suggestion layout — FIXED
+
+`tui/view.go`. `wrapInput` converted the whole value to rows and
+`renderInputLines` built every one of them before windowing to `maxInputRows` —
+which is a handful — and both run on **every keystroke**, on the update loop.
+The value can be a paste, or a prompt an authorized peer sent into a shared
+group that the operator's history then offers as a ghost. `inputWindow` narrows
+the layout to `inputRenderMax` (8 KiB) of runes around the cursor, which is the
+only part that can be drawn; an ordinary value passes through untouched. The
+ghost's source is bounded by L135. Pinned by `TestInputLayoutIsWindowed`.
+
+## L160 — Prewarm races on the shared session map — FIXED
+
+`tui/model.go`. `prewarmGroupCmd` snapshots every other input but read
+`m.session[group]` inside the returned `tea.Cmd`, which bubbletea runs on its
+own goroutine — while `Update`, on the main one, may be writing or deleting that
+key for a `/session` switch or a destroy. A Go map is not safe for a concurrent
+read and write: a race-detector failure at best, a fatal `concurrent map read
+and map write` — which kills the TUI — at worst. Snapshotted with the rest.
+
+## L161 — Destroyed groups leave jobsPrimed entries — FIXED
+
+`tui/model.go`. It was the one per-group entry the job sweep did not drop:
+`forgetGroup` removes it, but a group that simply stops being listed (destroyed
+by another client, gone from a `WatchState` frame) never goes through
+`forgetGroup`. The sweep prunes it now, beside `jobStatusSeen`, `jobDoneAt`,
+`peekCache` and `jobsOpen`. Pinned by `TestJobsPrimedIsDroppedWithTheGroup`.
+
+## L162 — Guest-writable job metadata can terminate `cs-job peek -new` — FIXED
+
+`sidecar/cs-job`. `started` is job metadata the worker can write and it went
+straight into **shell arithmetic** — a value like `1/0` reaches the evaluator,
+the division fails, and under `set -e` the whole peek exits non-zero, so a job
+that already holds the guest identity can break progress inspection for every
+job it can name. Both `started` and the peek cursor are now read bounded
+(`head -c 20`) and validated as plain decimals **before** any arithmetic.
+
+## L163 — Unbounded stdin ingestion in the ctl client — FIXED
+
+`daemon/ctl_cli.go`. `-` read all of stdin, converted it to a string and trimmed
+it — three large copies — before any RPC started, so the daemon's own
+message-size limit could not protect this process. Bounded at `ctlStdinMax`
+(1 MiB, matching `sendMsgMax`), with a usage-style refusal past it: anything
+larger was never going to be sent. Pinned by `TestCtlStdinIsBounded`.
+
+## L164 — Unbounded persisted TUI state — FIXED
+
+`tui/persist.go`. The 1 MiB read already bounded the FILE (an earlier audit);
+nothing bounded what a megabyte of JSON can describe — unrestricted strings and
+a map with no entry limit — and `loadState` runs twice at startup, once for the
+theme and once building the model, with every value then copied into the live
+model and rendered. Names, the draft and the session-map size are bounded now.
+Trimmed rather than refused: this file is a convenience (which group you were
+on, a half-typed draft), and a startup that fails because of it would be worse
+than one that starts with less of it. Pinned by
+`TestPersistedStateContentsAreBounded`.
+
+## L165 — Strict mtime watermark strands pending attachments — ALREADY FIXED (M36)
+
+The group-wide mtime watermark is gone: `fcTurnUploads` reads ownership out of
+the message text (`[image: .cs/uploads/<name>]`), which is exact and needs no
+timestamps. M36 replaced it for three reasons the finding's fourth joins.
+
+## L166 — ctlShell can leave the terminal in raw mode — FIXED
+
+`daemon/ctl_cli.go`. `ctlClient()` was called AFTER raw mode was entered, and it
+calls `ctlFatal` — `os.Exit`, which skips the deferred restore — on a missing
+credential or a TLS setup error. The operator is then left with no echo, no line
+discipline and Enter arriving as a bare `\r`, recoverable only with a blind
+`reset`. Everything that can fail fatally now happens before raw mode. The other
+half: only `SIGWINCH` was handled, so a `SIGTERM` or `SIGHUP` — a closed
+terminal emulator, a logout, a supervisor stopping the session — took the
+default disposition and left the terminal just as raw; both now restore and
+exit. `SIGINT` is deliberately not in that set, because raw mode clears `ISIG`
+and ctrl-C is a byte for the guest, which is the point of attaching.
+
+## L167 — Stream closure leaves stale activity state — FIXED
+
+`tui/model.go`. `applyActivity` clears a phase only on an explicit empty-phase
+event — which arrives over the stream that just died. A reconnect usually
+delivers one, but a `PermissionDenied` resubscribe stops permanently and a gap
+need never produce one, and the stale entry keeps `anyActivity()` and
+`isAnimating()` true: the TUI spins a tree dot and repaints the whole frame on
+every tick, forever, for a turn that is not running. `streamClosedMsg` clears it.
+Pinned by `TestStreamCloseClearsActivity`.
+
+## L168 — Fixed `.disabled` destination overwrites an earlier key — FIXED
+
+`daemon/claude_login.go`. The prompt's whole point is that the shadowing key is
+**preserved** rather than deleted — it is a secret the operator may hold nowhere
+else — and a fixed `.disabled` broke exactly that: disable key A, later activate
+key B, accept the default again, and `os.Rename` silently replaces A. That is an
+ordinary sequence, and the loss is unrecoverable and unannounced. `authAsidePath`
+keeps `.disabled` as the first name (the one the operator has been told about)
+and dates the rest. Pinned by `TestSetAsideNeverOverwritesAnEarlierKey`.
+
+## L169 — Guest job metadata can corrupt JobLogs framing — ALREADY FIXED (M160)
+
+`fcJobLogs` reads status, rc, session and started through the same `fld()`
+helper the list script uses (`head -c 64 | tr -d '\t\n'`) and squashes the
+command's tabs and newlines, so no metadata field can break the record's
+framing; the id is validated by `jobIDRE` before it is interpolated, and the
+output half is base64 the daemon's own `tail` produced. The finding describes
+the pre-M160 code.
+
+## L170 — Interactive OAuth subprocess cannot be cancelled — FIXED
+
+`daemon/setup.go`, `daemon/claude_login.go`. Two problems, one cause:
+`signal.Reset(os.Interrupt)` after an interactive child removes **every**
+registration for the signal — including `koto setup`'s own context canceller —
+so the second Ctrl-C of a session behaved differently from the first: it took
+the default disposition and killed the process mid-run instead of cancelling.
+And `sc.interactive` used `exec.Command`, so a cancel by any route left the
+child running and attached to the operator's terminal.
+
+`withChildInterrupt` now hands the signal to the child and **restores** the
+wizard's registration afterwards (`newSetupSignals` makes that registration
+re-armable, which `signal.NotifyContext` does not), and interactive children are
+bound to `sc.ctx`. Ignoring the signal while the child owns the tty is still
+right — a signal that killed this process mid-login would leave a half-written
+credentials file — it just has to be undone rather than reset.
+
+## L171 — Zero MemAvailable is discarded as "no reading" — FIXED
+
+`daemon/resources.go`, `tui/wire.go`.
+
+**Confirmed, and it is the one that hides the thing the mirror exists for.**
+`resParseMemInfo` returned `(0, 0)` when MemAvailable was zero and
+`guestMemUsage` independently rejected `GuestMemAvail == 0` — so a guest that had
+**actually run out of memory** was treated as having no reading at all, the
+pressure path was bypassed, and the display fell back to RSS: which the code
+itself calls a high-water mark, renders gray, and never alert-colours. The
+operator misses the signal until the guest stalls or is OOM-killed.
+
+**Fix:** the sentinel moves off the value. The parser tracks whether the
+MemAvailable LINE was present, so a missing one still yields no reading while a
+zero is carried through; `MemTotal` (never legitimately 0 for a running guest)
+stays the "is there a reading" test everywhere downstream, and the TUI's check
+becomes `GuestMemAvail < 0`. Pinned by `TestZeroMemAvailableIsAReading`,
+including that a missing line is still nothing.

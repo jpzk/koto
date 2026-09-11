@@ -261,11 +261,23 @@ func ctlCtx() (context.Context, context.CancelFunc) {
 
 // ctlMsgArg joins trailing args into the message; a lone "-" reads stdin so
 // agents can pipe long prompts without shell-quoting pain.
+// ctlStdinMax bounds `-` (read the message from stdin) (audit 2026-09-11
+// L163). The whole of stdin was read, converted to a string and trimmed —
+// three large copies — before any RPC started, so the daemon's own
+// message-size limit could not protect this process: by the time it would
+// apply, the ctl client has already paid. A megabyte matches sendMsgMax, which
+// is what the daemon will accept anyway, so anything past it was never going
+// to be sent.
+const ctlStdinMax = 1 << 20
+
 func ctlMsgArg(args []string) string {
 	if len(args) == 1 && args[0] == "-" {
-		b, err := io.ReadAll(os.Stdin)
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, ctlStdinMax+1))
 		if err != nil {
 			ctlFatal(1, "stdin: %v", err)
+		}
+		if len(b) > ctlStdinMax {
+			ctlFatal(2, "stdin is larger than %d bytes, which is more than the daemon accepts for one message", ctlStdinMax)
 		}
 		return strings.TrimRight(string(b), "\n")
 	}
@@ -656,6 +668,17 @@ func ctlStreamJSON(recv func() (proto.Message, error)) {
 // mirroring telnet's escape convention, since raw mode swallows the usual
 // ctrl-C/ctrl-D interrupt path.
 func ctlShell(group, session string) {
+	// EVERYTHING that can fail fatally happens BEFORE raw mode (audit
+	// 2026-09-11 L166). ctlClient() calls ctlFatal on a missing credential or
+	// a TLS setup error, and ctlFatal is os.Exit — which skips the deferred
+	// restore and leaves the operator's terminal raw: no echo, no line
+	// discipline, Enter arriving as a bare \r, recoverable only with a blind
+	// `reset`. The restore-before-fatal wrapper below covers the failures that
+	// can only be discovered after attaching; this covers the ones that can be
+	// discovered before.
+	cl := ctlClient()
+	cols, rows := ctlWinsize()
+
 	fd := int(os.Stdin.Fd())
 	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
@@ -687,8 +710,20 @@ func ctlShell(group, session string) {
 		ctlFatal(1, format, a...)
 	}
 
-	cols, rows := ctlWinsize()
-	cl := ctlClient()
+	// ...and a SIGNAL while raw must restore too. Only SIGWINCH was handled,
+	// so a SIGTERM or SIGHUP — a closed terminal emulator, a logout, a
+	// supervisor stopping the session — took the default disposition and left
+	// the terminal exactly as raw as a fatal error would have (audit L166).
+	// SIGINT is not in the list on purpose: raw mode clears ISIG, so ctrl-C is
+	// a byte for the guest, which is the point of attaching.
+	death := make(chan os.Signal, 1)
+	signal.Notify(death, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-death
+		restore()
+		os.Exit(1)
+	}()
+
 	stream, err := cl.AttachShell(context.Background())
 	if err != nil {
 		fail("shell: %v", err)

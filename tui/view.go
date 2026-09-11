@@ -1508,8 +1508,38 @@ func (m Model) inputRows() int {
 	if m.input.Value() == "" {
 		return 1 // placeholder is clipped, never wrapped — see renderInput
 	}
-	rows, _, _ := wrapInput([]rune(m.input.Value()), m.input.Position(), m.inputTextCols())
+	rs, pos := inputWindow([]rune(m.input.Value()), m.input.Position())
+	rows, _, _ := wrapInput(rs, pos, m.inputTextCols())
 	return min(len(rows), m.maxInputRows())
+}
+
+// inputRenderMax bounds how much of the prompt value is laid out (audit
+// 2026-09-11 L159). wrapInput converted the WHOLE value to rows and
+// renderInputLines built them all before windowing to maxInputRows — which is
+// a handful — and both run on every keystroke, on the update loop. The value
+// can be a paste, or a prompt an authorized peer sent into a shared group that
+// the operator's history then offers as a ghost. Only the rows around the
+// cursor can ever be drawn, so only the runes around the cursor are laid out.
+const inputRenderMax = 8 << 10
+
+// inputWindow narrows rs to at most inputRenderMax runes around pos, returning
+// the window and the cursor's position inside it. A value under the cap passes
+// through untouched, which is every real prompt.
+func inputWindow(rs []rune, pos int) ([]rune, int) {
+	if len(rs) <= inputRenderMax {
+		return rs, pos
+	}
+	pos = clampInt(pos, 0, len(rs))
+	lo := pos - inputRenderMax/2
+	if lo < 0 {
+		lo = 0
+	}
+	hi := lo + inputRenderMax
+	if hi > len(rs) {
+		hi = len(rs)
+		lo = hi - inputRenderMax
+	}
+	return rs[lo:hi], pos - lo
 }
 
 // wrapInput word-wraps the prompt value to cols cells and reports where the
@@ -1619,8 +1649,8 @@ func (m Model) inputGhost() string {
 // the cursor position and the suggestion ghost trailing it. Returns at most
 // maxInputRows rows, windowed on the cursor.
 func (m Model) renderInputLines(cols int) []string {
-	rs := []rune(m.input.Value())
-	rows, curRow, curCol := wrapInput(rs, m.input.Position(), cols)
+	rs, pos := inputWindow([]rune(m.input.Value()), m.input.Position())
+	rows, curRow, curCol := wrapInput(rs, pos, cols)
 
 	start := 0
 	if maxRows := m.maxInputRows(); len(rows) > maxRows {

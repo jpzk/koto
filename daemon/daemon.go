@@ -140,11 +140,27 @@ func daemonMain() {
 	// chown per-group files to the per-VM id — both were previously supplied
 	// by the podman container the daemon used to run inside. This re-execs,
 	// so it must precede any state we would otherwise set up twice.
-	if err := usernsEnsure(); err != nil {
-		fmt.Fprintf(os.Stderr, "koto: %v\n", err)
-		fmt.Fprintf(os.Stderr, "koto: run `koto userns-check` to diagnose, "+
-			"or set KOTO_FC_NOJAIL=1 to run VMMs unjailed (weaker isolation)\n")
-		os.Exit(1)
+	//
+	// Gated on the jail being ENABLED (audit 2026-09-11 L158). Both users of
+	// the namespace — fcJailCommand's two-entry uid_map and fcJailFixupPerms'
+	// chown to the per-VM id — run only on the jailed path, and the failure
+	// message here has always offered KOTO_FC_NOJAIL=1 as the way out. It was
+	// not one: the bootstrap ran unconditionally and consulted neither
+	// fcJailEnabled() nor the variable, so an operator following the advice
+	// (the same advice `koto setup`'s diagnostics give for a restrictive
+	// AppArmor policy) got the identical failure and no microVMs at all.
+	if fcJailEnabled() {
+		if err := usernsEnsure(); err != nil {
+			fmt.Fprintf(os.Stderr, "koto: %v\n", err)
+			fmt.Fprintf(os.Stderr, "koto: run `koto userns-check` to diagnose, "+
+				"or set KOTO_FC_NOJAIL=1 to run VMMs unjailed (weaker isolation)\n")
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "koto: KOTO_FC_NOJAIL=1 — VMMs run UNJAILED, as this uid, "+
+			"with no user namespace. A VMM compromise is then a compromise of the daemon's own "+
+			"account rather than of a nobody uid in an empty chroot. Unset it once the host allows "+
+			"the userns bootstrap.\n")
 	}
 	initPaths()
 	_ = os.MkdirAll(ROOT, 0o700)

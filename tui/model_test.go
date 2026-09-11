@@ -337,3 +337,105 @@ func TestUnknownToolSummaryIsBoundedAndScrubbed(t *testing.T) {
 		t.Errorf("known-tool rendering changed: %q", got)
 	}
 }
+
+// 2026-09-11 L156: treeRowAt builds its own rows and handleLeftClick builds a
+// SECOND set, and the tree is time-dependent — a finished job row blinks for
+// ~10s and then vanishes. If it was the last visible row, rows[i] panics and
+// takes the TUI down; if it was an earlier one, the same index names something
+// else and the click selects or attaches to the wrong thing.
+func TestStaleTreeIndexDoesNotPanic(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 120, 40
+	m.cur = "g"
+	m.groups["g"] = GroupInfo{}
+	m.focus = focusTree
+	rows := m.treeRows()
+	if len(rows) == 0 {
+		t.Skip("no tree rows in this configuration")
+	}
+	// A click whose row index is past the end of a freshly built tree: what a
+	// disappearing job row produces between the two builds.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a stale row index panicked the TUI: %v", r)
+		}
+	}()
+	for i := len(rows); i < len(rows)+5; i++ {
+		m.treeIdx = i
+		_ = m.handleLeftClick(1, 1+i)
+	}
+}
+
+// 2026-09-11 L161: jobsPrimed was the one per-group entry the job sweep did not
+// drop. forgetGroup removes it, but a group that simply stops being listed —
+// destroyed by another client, or gone from a WatchState frame — never goes
+// through forgetGroup, so repeating that lifecycle grew the map by a key per
+// group name for as long as the process lived.
+func TestJobsPrimedIsDroppedWithTheGroup(t *testing.T) {
+	m := newModel("", 200000)
+	m.jobsPrimed["ghost"] = true
+	m.jobsPrimed["alive"] = true
+	m.processJobTransitions(map[string]GroupInfo{
+		"alive": {Jobs: []JobInfo{{ID: "j1", Status: "running"}}},
+	})
+	if m.jobsPrimed["ghost"] {
+		t.Error("a group that vanished from the frame kept its primed flag")
+	}
+	if !m.jobsPrimed["alive"] {
+		t.Error("a listed group lost its primed flag")
+	}
+}
+
+// 2026-09-11 L167: applyActivity clears a phase only on an explicit
+// empty-phase event, which arrives over the stream that just died. A
+// PermissionDenied resubscribe stops permanently and a gap need never produce
+// one — so the stale entry kept anyActivity() and isAnimating() true and the
+// TUI spun and repainted forever for a turn that was not running.
+func TestStreamCloseClearsActivity(t *testing.T) {
+	m := newModel("", 200000)
+	m.cur = "g"
+	m.groups["g"] = GroupInfo{}
+	m.subscribed["g"] = true
+	m.activity["g"] = activityInfo{phase: "llm", since: time.Now()}
+	if !m.anyActivity() {
+		t.Fatal("the fixture did not register as active")
+	}
+	m2, _ := m.Update(streamClosedMsg{group: "g", err: fmt.Errorf("closed")})
+	mm := m2.(Model)
+	if _, still := mm.activity["g"]; still {
+		t.Fatal("the phase survived the stream that was the only thing able to clear it")
+	}
+	if mm.anyActivity() {
+		t.Error("the TUI still reports activity, so it keeps repainting")
+	}
+}
+
+// 2026-09-11 L159: wrapInput laid out the WHOLE value and renderInputLines
+// built every row before windowing to maxInputRows — both on every keystroke,
+// on the update loop, for a value that can be a paste or a prompt an authorized
+// peer put in the operator's history.
+func TestInputLayoutIsWindowed(t *testing.T) {
+	rs := []rune(strings.Repeat("z", inputRenderMax*4))
+	out, pos := inputWindow(rs, len(rs))
+	if len(out) != inputRenderMax {
+		t.Fatalf("window is %d runes, want %d", len(out), inputRenderMax)
+	}
+	if pos < 0 || pos > len(out) {
+		t.Fatalf("cursor %d is outside the window of %d", pos, len(out))
+	}
+	// The cursor's neighbourhood is what survives: at the end of the value the
+	// window ends there too.
+	if pos != len(out) {
+		t.Errorf("a cursor at the end mapped to %d of %d", pos, len(out))
+	}
+	// A cursor in the middle keeps context on both sides.
+	out, pos = inputWindow(rs, len(rs)/2)
+	if pos <= 0 || pos >= len(out) {
+		t.Errorf("a mid-value cursor mapped to an edge: %d of %d", pos, len(out))
+	}
+	// Ordinary values pass through untouched.
+	short := []rune("deploy the thing")
+	if got, p := inputWindow(short, 3); len(got) != len(short) || p != 3 {
+		t.Errorf("an ordinary value was windowed: %d runes, cursor %d", len(got), p)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,5 +304,50 @@ func TestStateFilePermissionsAreRepairedOnWrite(t *testing.T) {
 	// The write still happened.
 	if got := loadState(sock); got.Draft != "unsubmitted secret" {
 		t.Fatalf("draft not persisted: %q", got.Draft)
+	}
+}
+
+// 2026-09-11 L164: the 1 MiB read bounds the FILE; nothing bounded what a
+// megabyte of JSON can describe — unrestricted strings and a map with no entry
+// limit — and loadState runs twice at startup, once for the theme and once
+// building the model, with every value then copied into the live model and
+// rendered.
+func TestPersistedStateContentsAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "daemon.sock")
+	sessions := map[string]string{}
+	for i := 0; i < persistSessionsMax*2; i++ {
+		sessions[fmt.Sprintf("g%05d", i)] = "s"
+	}
+	b, err := json.Marshal(persistedState{
+		Cur:      strings.Repeat("c", persistNameMax*4),
+		Draft:    strings.Repeat("d", persistDraftMax*4),
+		Theme:    strings.Repeat("t", persistNameMax*4),
+		Sessions: sessions,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath(sock), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := loadState(sock)
+	if len(got.Draft) > persistDraftMax {
+		t.Errorf("draft is %d bytes, past the %d cap", len(got.Draft), persistDraftMax)
+	}
+	if got.Cur != "" {
+		t.Errorf("an oversized group name was kept: %d bytes", len(got.Cur))
+	}
+	if got.Theme != "" {
+		t.Errorf("an oversized theme name was kept: %d bytes", len(got.Theme))
+	}
+	if len(got.Sessions) > persistSessionsMax {
+		t.Errorf("%d sessions kept, past the %d cap", len(got.Sessions), persistSessionsMax)
+	}
+	// An ordinary state file still round-trips.
+	saveState(sock, persistedState{Cur: "main", Draft: "half typed", Sessions: map[string]string{"main": "ops"}})
+	back := loadState(sock)
+	if back.Cur != "main" || back.Draft != "half typed" || back.Sessions["main"] != "ops" {
+		t.Errorf("an ordinary state file was altered: %+v", back)
 	}
 }

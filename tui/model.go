@@ -1655,6 +1655,14 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 	expTO := m.expandedToolOuts
 	ver := m.groupVer[group]
 	gver := m.groupVer[""]
+	// The session is snapshotted HERE, with every other input (audit
+	// 2026-09-11 L160). It used to be read inside the returned tea.Cmd, which
+	// bubbletea runs on its own goroutine — while Update, on the main one, may
+	// be writing or deleting m.session[group] for a /session switch or a
+	// destroy. A Go map is not safe for a concurrent read and write: the
+	// outcome is a race-detector failure at best and a fatal "concurrent map
+	// read and map write" — which kills the TUI — at worst.
+	sess := m.session[group]
 
 	return func() tea.Msg {
 		// Reuse the existing assembler by constructing a minimal Model.
@@ -1665,7 +1673,7 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 		snap := Model{
 			lines:            linesCopy,
 			cur:              group,
-			session:          map[string]string{group: m.session[group]},
+			session:          map[string]string{group: sess},
 			expandedThoughts: expT,
 			expandedToolOuts: expTO,
 			mdCache:          mdSnap,
@@ -2772,6 +2780,16 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamClosedMsg:
 		delete(m.subscribed, msg.group)
+		// The phase indicator is cleared with the stream (audit 2026-09-11
+		// L167). applyActivity stores a non-empty phase and clears it only on
+		// an explicit empty-phase event — which arrives over the stream that
+		// just died. A reconnect usually delivers one, but not always: a
+		// PermissionDenied resubscribe stops permanently (the branch below
+		// returns), and a gap or a destroyed group need never produce one. The
+		// stale entry keeps anyActivity() and isAnimating() true, so the TUI
+		// spins a tree dot and repaints the whole frame on every tick, forever,
+		// for a turn that is not running.
+		delete(m.activity, msg.group)
 		if status.Code(msg.err) == codes.PermissionDenied {
 			// A scoped role may hold list/watch_state but not
 			// subscribe_group for this group. Retrying is a permanent loop
@@ -4710,6 +4728,17 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 		g, _, _ := strings.Cut(k, "\x00")
 		if _, ok := groups[g]; !ok {
 			delete(m.jobsOpen, k)
+		}
+	}
+	// ...and so does the primed flag (audit 2026-09-11 L161). It was the one
+	// per-group entry this sweep did not drop — forgetGroup removes it, but a
+	// group that simply stops being listed (destroyed by ANOTHER client, or
+	// gone from a WatchState frame) never goes through forgetGroup. Repeating
+	// that lifecycle against a running TUI grew the map by a key per group
+	// name, for as long as the process lived.
+	for g := range m.jobsPrimed {
+		if _, ok := groups[g]; !ok {
+			delete(m.jobsPrimed, g)
 		}
 	}
 }

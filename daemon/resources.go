@@ -231,6 +231,7 @@ func mulNoOverflow(a, b int64) (int64, bool) {
 // which is the entire point of mirroring this instead of trusting RSS.
 // Either field missing → (0, 0) = unknown.
 func resParseMemInfo(s string) (total, avail int64) {
+	sawAvail := false
 	for _, line := range strings.Split(s, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 {
@@ -247,10 +248,18 @@ func resParseMemInfo(s string) (total, avail int64) {
 		case "MemTotal:":
 			total = kb << 10
 		case "MemAvailable:":
-			avail = kb << 10
+			avail, sawAvail = kb<<10, true
 		}
 	}
-	if total <= 0 || avail <= 0 || avail > total {
+	// ZERO AVAILABLE IS A READING, not a missing one (audit 2026-09-11 L171).
+	// The two were conflated because both came out as 0 — so a guest that had
+	// actually reached zero available memory, which is precisely the state this
+	// mirror exists to show, was discarded and the operator fell back to the
+	// RSS high-water mark, rendered gray and raising no alert. The LINE's
+	// presence is the sentinel now; MemTotal is never legitimately 0 for a
+	// running guest, so it remains the "is there a reading at all" test for
+	// everything downstream.
+	if total <= 0 || !sawAvail || avail > total {
 		return 0, 0
 	}
 	return total, avail

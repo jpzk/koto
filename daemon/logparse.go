@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -83,9 +84,22 @@ func flattenInline(s string) string {
 }
 
 // notifyField decodes one b64 field of a [[notify]] marker ("-" = empty).
+// notifyFieldMax bounds the ENCODED field before any decoding (audit
+// 2026-09-11 L155). The caps the notification advertises — notifyTitleMax and
+// notifyMsgMax — were applied to the DECODED value, after base64 decoding and
+// the byte-to-string conversion had already allocated it, so they bounded what
+// was kept and not what was done. JobTail hands guest-controlled job output to
+// this parser directly, without the live tailer's authenticity filtering, so
+// the field is chosen by the guest. Base64 is 4/3 of its payload, and the cap
+// is generous next to the decoded limits it feeds.
+const notifyFieldMax = 64 << 10
+
 func notifyField(f string) (string, error) {
 	if f == "-" {
 		return "", nil
+	}
+	if len(f) > notifyFieldMax {
+		return "", fmt.Errorf("notification field is %d bytes; the limit is %d", len(f), notifyFieldMax)
 	}
 	b, err := base64.StdEncoding.DecodeString(f)
 	return string(b), err

@@ -167,6 +167,9 @@ func isPartial(ev *pb.Event) bool {
 // resume mid-turn then replayed a ring of drafts and got a `gap` for the
 // frames it actually needed. The ring therefore has seq holes where
 // superseded partials were; replayFrom tolerates them (ringFloor).
+// emitOrderMu serialises sequence assignment with delivery — see emit().
+var emitOrderMu sync.Mutex
+
 func recordEvent(g string, pbev *pb.Event) []*groupSub {
 	subsLock.Lock()
 	defer subsLock.Unlock()
@@ -318,6 +321,20 @@ func emit(g string, ev Event) {
 	}
 	ev = sanitizeEvent(ev)
 	pbev := toPBEvent(ev)
+	// Sequencing and DELIVERY are one step (audit 2026-09-11 L154). They used
+	// to be two: recordEvent assigned the seq and copied the subscriber list
+	// under subsLock, and the fan-out ran after releasing it — so producer A
+	// could take seq 1, pause, let producer B take seq 2 and deliver it, and
+	// only then deliver its own. The ring then held A,B while the live stream
+	// carried B,A, and a client renders in arrival order. (The daemon-log
+	// stream already fans out under its own lock, M156; this makes the group
+	// stream agree.)
+	//
+	// A separate mutex rather than subsLock, because dropSub below takes
+	// subsLock. The critical section is the same non-blocking sends it always
+	// was, now serialised across producers.
+	emitOrderMu.Lock()
+	defer emitOrderMu.Unlock()
 	subs := recordEvent(g, pbev)
 	for _, s := range subs {
 		// Non-blocking: a slow consumer whose buffer is full must not stall
