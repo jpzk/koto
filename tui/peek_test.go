@@ -449,3 +449,73 @@ func TestPeekParsedPlainJobStaysRaw(t *testing.T) {
 		t.Errorf("chat response glyph in raw pane:\n%s", pane)
 	}
 }
+
+// 2026-09-11 M166: the peek pane bounded its parsed scrollback by BLOCK COUNT,
+// and the premise for that ("bodies are already capped by the daemon's 64KB tail
+// window") holds only for the initial replay — JobTail then FOLLOWS the file and
+// every block after that is bounded by the daemon's 1 MiB blockBodyMax. 2048
+// blocks at 1 MiB each is two gigabytes in the operator's TUI, sized by whoever
+// wrote the job; snapshotPeek then stored the slices per job behind a cache that
+// counted jobs rather than bytes.
+func TestPeekStateIsBoundedByBytes(t *testing.T) {
+	m := newModel("", 200000)
+	body := strings.Repeat("x", 256<<10) // a quarter of a maximum block
+
+	// Parsed blocks: the byte bound bites long before the count one.
+	for i := 0; i < 200; i++ { // 50 MiB offered against 4 MiB
+		m.applyPeekEvent(Event{Event: "tool_result_done", Body: body})
+	}
+	if m.peekBytes > peekBytesMax {
+		t.Errorf("peek holds %d bytes, budget is %d", m.peekBytes, peekBytesMax)
+	}
+	if len(m.peekLines) >= 200 {
+		t.Errorf("the byte bound did not bite: %d blocks held", len(m.peekLines))
+	}
+	// The carried total must match a fresh count, or the trim over- or
+	// under-shoots forever.
+	sum := 0
+	for _, l := range m.peekLines {
+		sum += len(l.text)
+	}
+	if sum != m.peekBytes {
+		t.Errorf("carried byte total drifted (%d vs %d)", m.peekBytes, sum)
+	}
+	// The NEWEST blocks are what survive — the pane exists to show the tail.
+	if len(m.peekLines) == 0 {
+		t.Fatal("everything was trimmed")
+	}
+
+	// An open block's partials are bounded too. They are redundant by
+	// construction: the authoritative body arrives in the *_done frame.
+	m.applyPeekEvent(Event{Event: "thinking_begin"})
+	for i := 0; i < 200; i++ {
+		m.applyPeekEvent(Event{Event: "thinking", Text: body})
+	}
+	if m.peekOpenBytes > peekOpenBytesMax+len(body) {
+		t.Errorf("an open block holds %d bytes, budget is %d", m.peekOpenBytes, peekOpenBytesMax)
+	}
+	// ...and closing it resets both the buffer and its counter.
+	m.applyPeekEvent(Event{Event: "thinking_done", Words: 3, Body: "short"})
+	if m.peekOpenBytes != 0 || len(m.peekOpen) != 0 {
+		t.Errorf("the open block's state survived its close: %d bytes, %d parts", m.peekOpenBytes, len(m.peekOpen))
+	}
+
+	// The cache is bounded by total size, not only by entry count.
+	m.peekPrimed = true
+	for i := 0; i < peekCacheCap; i++ {
+		m.peekJob = jobRef{group: "g", id: fmt.Sprintf("j%d", i)}
+		m.peekLines = []logLine{{kind: "tool_out", text: strings.Repeat("y", 4<<20)}}
+		m.recountPeekBytes()
+		m.snapshotPeek()
+	}
+	total := 0
+	for _, s := range m.peekCache {
+		total += peekSnapBytes(s)
+	}
+	if total > peekCacheBytesMax {
+		t.Errorf("the peek cache holds %d bytes, budget is %d", total, peekCacheBytesMax)
+	}
+	if len(m.peekCache) == 0 {
+		t.Error("the cache evicted everything, including the current job")
+	}
+}

@@ -750,6 +750,12 @@ type Model struct {
 	peekOpen     []string
 	peekOpenKind string // "" | "thought" | "tool_out"
 	peekFramed   bool
+	// Byte totals for the two buffers above, carried so the size bounds cost
+	// nothing to check (audit M166). A block count is not a bound on memory:
+	// JobTail follows the file after its initial 64 KiB replay, and every block
+	// after that is bounded only by the daemon's 1 MiB blockBodyMax.
+	peekBytes     int
+	peekOpenBytes int
 	// Repaint coalescing (see peekQuietMs). peekPrimed flips on the first
 	// paint of a stream — until then the pane shows a placeholder rather
 	// than a half-arrived backlog. peekFlushSeq invalidates superseded
@@ -2323,6 +2329,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				// keeps showing the cached paint until this stream's first
 				// flush (peekStaleView).
 				m.peekOut, m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = "", nil, nil, "", false
+				m.peekBytes, m.peekOpenBytes = 0, 0
 				m.peekStaleBuf = false
 			}
 			if msg.ev != nil {
@@ -4730,6 +4737,7 @@ func (m *Model) armPeek(g, id string) {
 	m.peekJob = jobRef{group: g, id: id}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
 	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
+	m.peekBytes, m.peekOpenBytes = 0, 0
 	m.peekDirty, m.peekPrimed = false, false
 	m.peekStaleView, m.peekStaleBuf = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Now(), time.Time{}
@@ -4737,6 +4745,7 @@ func (m *Model) armPeek(g, id string) {
 	m.peekSID++
 	if snap := m.peekCache[m.peekJob]; snap != nil {
 		m.peekOut, m.peekLines, m.peekOpen, m.peekOpenKind = snap.out, snap.lines, snap.open, snap.openKind
+		m.recountPeekBytes()
 		m.peekFramed = snap.framed
 		if snap.ended && m.jobFinished(g, id) {
 			m.peekFetched, m.peekEnded, m.peekPrimed = true, true, true
@@ -4762,19 +4771,44 @@ func (m *Model) snapshotPeek() {
 		openKind: m.peekOpenKind, framed: m.peekFramed, ended: m.peekEnded,
 		savedAt: time.Now(),
 	}
-	if len(m.peekCache) <= peekCacheCap {
-		return
-	}
-	oldest, oldestAt := jobRef{}, time.Time{}
-	for k, s := range m.peekCache {
-		if k == m.peekJob {
-			continue
+	// Evict by entry count AND by total size: sixteen entries of peekBytesMax
+	// would be 64 MiB of the operator's memory, held for jobs they are no
+	// longer looking at (audit M166). Least-recently-saved first, never the
+	// entry just written.
+	for {
+		bytes := 0
+		for _, s := range m.peekCache {
+			bytes += peekSnapBytes(s)
 		}
-		if oldest == (jobRef{}) || s.savedAt.Before(oldestAt) {
-			oldest, oldestAt = k, s.savedAt
+		if len(m.peekCache) <= peekCacheCap && bytes <= peekCacheBytesMax {
+			return
 		}
+		oldest, oldestAt := jobRef{}, time.Time{}
+		for k, s := range m.peekCache {
+			if k == m.peekJob {
+				continue
+			}
+			if oldest == (jobRef{}) || s.savedAt.Before(oldestAt) {
+				oldest, oldestAt = k, s.savedAt
+			}
+		}
+		if oldest == (jobRef{}) {
+			return // only the current entry is left; keeping it is the point
+		}
+		delete(m.peekCache, oldest)
 	}
-	delete(m.peekCache, oldest)
+}
+
+// recountPeekBytes re-derives the byte totals from the buffers — for a restore
+// from the cache, where the slices did not come from applyPeekEvent.
+func (m *Model) recountPeekBytes() {
+	m.peekBytes, m.peekOpenBytes = 0, 0
+	for _, l := range m.peekLines {
+		m.peekBytes += len(l.text)
+	}
+	for _, o := range m.peekOpen {
+		m.peekOpenBytes += len(o)
+	}
 }
 
 // jobFinished reports whether the daemon's last state frame shows the job as
@@ -4808,6 +4842,7 @@ func (m *Model) clearPeek() {
 	m.peekJob = jobRef{}
 	m.peekOut, m.peekErr, m.peekFetched, m.peekEnded = "", "", false, false
 	m.peekLines, m.peekOpen, m.peekOpenKind, m.peekFramed = nil, nil, "", false
+	m.peekBytes, m.peekOpenBytes = 0, 0
 	m.peekDirty, m.peekPrimed = false, false
 	m.peekStaleView, m.peekStaleBuf = false, false
 	m.peekArmedAt, m.peekPaintedAt = time.Time{}, time.Time{}
