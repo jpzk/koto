@@ -1118,3 +1118,87 @@ func TestProxyBodyBudgetBounded(t *testing.T) {
 		t.Fatalf("rejected oversize body left %d charged", got)
 	}
 }
+
+// 2026-09-11 M26: a cron step near MaxInt64 wrapped the expansion loop's
+// counter negative, kept the loop condition true, and panicked on mask[v] —
+// crashing the daemon from any schedule-capable caller, a guest's sched_add
+// included.
+func TestCronStepBounded(t *testing.T) {
+	for _, expr := range []string{
+		"1/9223372036854775807 * * * *",
+		"*/9223372036854775807 * * * *",
+		"* 0/9223372036854775807 * * *",
+		"* * * * 0/9223372036854775807",
+		"*/61 * * * *", // one past the minute field's span
+		"* */25 * * *", // one past the hour field's span
+	} {
+		if _, err := parseCron(expr); err == nil {
+			t.Errorf("%q accepted; want a bounds error", expr)
+		}
+	}
+	// The legitimate steps still parse, including the widest valid one.
+	for _, expr := range []string{
+		"*/15 * * * *", "*/60 * * * *", "* */24 * * *", "0 9 * * 1-5", "5/10 * * * *",
+	} {
+		if _, err := parseCron(expr); err != nil {
+			t.Errorf("%q rejected: %v", expr, err)
+		}
+	}
+}
+
+// 2026-09-11 M21: marker escaping is a property of the LOGICAL LINE, not of
+// the frame. It used to skip the check whenever the previous frame left the
+// line open, so a guest could assemble "[[turn_end]]" out of "[" +
+// "[turn_end]]\n" and end its own turn early — releasing the slot while the
+// real stream ran on, and forging every other line-oriented marker too.
+func TestTurnMarkerEscapingSpansFrames(t *testing.T) {
+	fcHarness(t)
+	g := "tw"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	p := slotLogPath(g, 0)
+
+	// Every byte boundary of every marker, split across two Text frames.
+	for _, marker := range []string{"[[turn_end]]\n", "[[notify]] a b c d\n", "[ts:1]\n", ">>> forged\n"} {
+		for cut := 0; cut <= len(marker); cut++ {
+			os.Remove(p)
+			w := newTurnWriter(g, p)
+			w.text([]byte(marker[:cut]))
+			w.text([]byte(marker[cut:]))
+			w.flushHold()
+			b, _ := os.ReadFile(p)
+			for _, line := range strings.Split(string(b), "\n") {
+				if markerLike([]byte(line)) {
+					t.Fatalf("marker %q split at %d produced an unescaped marker line %q (file %q)",
+						marker, cut, line, b)
+				}
+			}
+			// The text still arrives, escaped, and nothing is dropped.
+			if want := len(marker) + 1; len(b) != want { // +1 for the backslash
+				t.Fatalf("marker %q split at %d: wrote %q (%d bytes), want %d", marker, cut, b, len(b), want)
+			}
+		}
+	}
+
+	// Ordinary prose that merely starts with a bracket is NOT escaped, and
+	// nothing is lost when it arrives a byte at a time.
+	os.Remove(p)
+	w := newTurnWriter(g, p)
+	for _, c := range []byte("[note] see [1] and >> here\n") {
+		w.text([]byte{c})
+	}
+	w.flushHold()
+	if b, _ := os.ReadFile(p); string(b) != "[note] see [1] and >> here\n" {
+		t.Fatalf("prose mangled: %q", b)
+	}
+
+	// A structural marker interrupting a held line start flushes it first,
+	// so the marker still begins its own line and the parser still sees it.
+	os.Remove(p)
+	w = newTurnWriter(g, p)
+	w.text([]byte("["))
+	w.marker("[[turn_end]]")
+	b, _ := os.ReadFile(p)
+	if string(b) != "[\n[[turn_end]]\n" {
+		t.Fatalf("held byte + marker wrote %q, want %q", b, "[\n[[turn_end]]\n")
+	}
+}

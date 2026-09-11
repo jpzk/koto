@@ -813,9 +813,37 @@ func sessionFileName(sess string) string {
 
 const execCap = 60 * time.Second
 
-func handleExec(c *vconn, script string) {
+// execAsWorker builds the child for the agent's `exec` and `exec_stream` ops.
+//
+// These used to run as guest ROOT, because fc-agent is PID 1 and nothing
+// dropped privilege. Nothing needed it: every script the daemon sends reads or
+// removes WORKER-OWNED data — the job dirs (jobs.go), the session/venice
+// history files (clearCmd), a `tail -F` of a file claude code wrote as the
+// worker, `stat -f /workspace` + /proc/meminfo (resources.go) — and the one
+// that signals (interruptAgent) targets uid-1000 processes, which uid 1000 may
+// signal. Meanwhile the worker owns the paths those scripts name, so it could
+// replace `out` or `cmd` in a job dir with a symlink and have root's `cat`,
+// `wc`, `head` or `tail` read a file the worker cannot (audit M23) — a
+// worker→root disclosure inside a guest whose `root=no` profile says there is
+// no path to root. Hardening every shell reader against symlinks is the wrong
+// shape of fix; not being root is the right one, and `run_script` and
+// `shell_attach` already worked this way. A symlink now buys the worker
+// exactly what it could read anyway.
+//
+// If some future exec genuinely needs root, give it its own op rather than
+// raising this one back: the privilege should be named at the call site.
+func execAsWorker(script string) *exec.Cmd {
 	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Dir = wsDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
+	}
+	cmd.Env = append(os.Environ(), "HOME="+wsDir, "USER=node", "LOGNAME=node")
+	return cmd
+}
+
+func handleExec(c *vconn, script string) {
+	cmd := execAsWorker(script)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -838,8 +866,7 @@ func handleExec(c *vconn, script string) {
 // exits on its own), so there is no guest→host end signal here — see
 // handleRunScript for the framed variant that needs one.
 func handleExecStream(c *vconn, script string) {
-	cmd := exec.Command("/bin/sh", "-c", script)
-	cmd.Dir = wsDir
+	cmd := execAsWorker(script)
 	cmd.Stdout = c
 	cmd.Stderr = c
 	pid, ch, err := startTracked(cmd)

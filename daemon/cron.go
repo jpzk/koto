@@ -71,8 +71,17 @@ func parseField(s string, lo, hi int) ([64]bool, bool, error) {
 		if i := strings.Index(part, "/"); i >= 0 {
 			stepStr := part[i+1:]
 			n, err := strconv.Atoi(stepStr)
-			if err != nil || n < 1 {
-				return mask, false, fmt.Errorf("bad step %q", stepStr)
+			// Bounded by the field's own span, not merely positive. The
+			// expansion below is `for v := from; v <= to; v += step`, so a
+			// step near MaxInt64 wrapped v to a NEGATIVE value on the second
+			// iteration, left the loop condition true, and panicked on
+			// mask[v] — taking the whole daemon down, from any schedule-
+			// capable caller including a guest's sched_add (audit M26).
+			// Rejecting rather than clamping: a step wider than the range can
+			// only ever select `from`, so every value above the span is a
+			// typo, and silently accepting it would hide the typo.
+			if err != nil || n < 1 || n > hi-lo+1 {
+				return mask, false, fmt.Errorf("bad step %q (must be 1..%d)", stepStr, hi-lo+1)
 			}
 			step = n
 			part = part[:i]
