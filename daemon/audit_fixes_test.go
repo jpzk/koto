@@ -2019,3 +2019,66 @@ func TestJobMetadataFieldsAreClamped(t *testing.T) {
 		t.Errorf("rc with a forged line survived as %q", got)
 	}
 }
+
+// 2026-09-11 M51: the guest boots with console=ttyS0, so anything in it can
+// write to /dev/ttyS0 forever, and those bytes went straight into a file on the
+// state filesystem — the one every workspace image lives on, whose exhaustion
+// remounts every guest read-only. The sink caps what it writes and keeps
+// draining, because a pipe whose reader stops blocks the VMM.
+func TestConsoleSinkIsBounded(t *testing.T) {
+	fcHarness(t)
+	g := "console"
+	if err := fcEnsureRunDir(); err != nil {
+		t.Fatal(err)
+	}
+	w, err := fcConsoleSink(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write well past the cap, and assert every write completes — a copier
+	// that stopped draining would block here forever.
+	chunk := make([]byte, 64<<10)
+	done := make(chan error, 1)
+	go func() {
+		for n := 0; n < (fcConsoleMax/len(chunk))+64; n++ {
+			if _, err := w.Write(chunk); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- w.Close()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("writer failed: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the writer blocked — the copier stopped draining, which would wedge the VMM")
+	}
+
+	// The copier is racing our Close; wait for the file to settle.
+	deadline := time.Now().Add(10 * time.Second)
+	var size int64
+	for time.Now().Before(deadline) {
+		fi, err := os.Stat(fcConsolePath(g))
+		if err == nil {
+			size = fi.Size()
+			if size > 0 {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if size == 0 {
+		t.Fatal("nothing was written to the console log")
+	}
+	// The cap plus the one notice line the copier appends.
+	if size > fcConsoleMax+256 {
+		t.Fatalf("console log is %d bytes, cap is %d", size, fcConsoleMax)
+	}
+	b, _ := os.ReadFile(fcConsolePath(g))
+	if !strings.Contains(string(b), "console capped at") {
+		t.Error("a capped console carries no notice saying so")
+	}
+}

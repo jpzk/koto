@@ -649,7 +649,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.memMiB = memMiB
 	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath)
 
-	console, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	console, err := fcConsoleSink(g)
 	if err != nil {
 		return fail(err)
 	}
@@ -934,6 +934,70 @@ func fcConnRelease(g string) {
 	} else {
 		delete(fcConnCount, g)
 	}
+}
+
+// fcConsoleMax bounds one boot's serial-console output on disk.
+const fcConsoleMax = 8 << 20
+
+// fcConsoleSink returns the file the VMM's stdout and stderr are wired to: the
+// write end of a pipe, drained by a goroutine that writes at most
+// fcConsoleMax bytes into the group's console log.
+//
+// It used to be the log file itself, opened O_APPEND. The guest boots with
+// `console=ttyS0`, so anything running in it can write to /dev/ttyS0 forever
+// and the bytes land straight in a file on the state filesystem — the one the
+// whole fleet's workspace images live on, whose exhaustion remounts every
+// guest read-only (audit M51). logSinkAppend's token bucket and ceiling guard
+// the TURN stream; nothing guarded this one.
+//
+// The copier keeps READING after the cap and simply stops writing. That is the
+// load-bearing half: a pipe whose reader stops draining blocks the writer, and
+// the writer here is the VMM — capping by walking away would wedge the VM
+// instead of its log.
+//
+// Truncated per boot rather than capped cumulatively. The console is boot
+// debugging, so the boot that just happened is the one worth keeping, and a
+// cumulative cap would leave a crash-looping VM's later boots writing nothing —
+// exactly when the file is being read.
+func fcConsoleSink(g string) (*os.File, error) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		pr.Close()
+		pw.Close()
+		return nil, err
+	}
+	go func() {
+		defer pr.Close()
+		defer f.Close()
+		var n int64
+		buf := make([]byte, 32<<10)
+		for {
+			r, rerr := pr.Read(buf)
+			if r > 0 && n < fcConsoleMax {
+				w := int64(r)
+				if n+w > fcConsoleMax {
+					w = fcConsoleMax - n
+				}
+				if _, werr := f.Write(buf[:int(w)]); werr != nil {
+					n = fcConsoleMax // stop writing, keep draining
+				} else {
+					n += w
+				}
+				if n >= fcConsoleMax {
+					fmt.Fprintf(f, "\n[koto] console capped at %d bytes; further output discarded\n", fcConsoleMax)
+					emitLogfG("fc", g, "warn", "[%s] console output hit the %d-byte cap; discarding the rest of this boot", g, fcConsoleMax)
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+	return pw, nil
 }
 
 func fcAcceptLoop(g string, ln net.Listener, handle func(net.Conn)) {

@@ -914,3 +914,28 @@ let one malformed field lose the whole batch.
 
 The finding's other half — that this path does not reject reserved `goal-*`
 sessions — was fixed under M42. `TestJobMetadataFieldsAreClamped`.
+
+### M51 — Unbounded Firecracker console output can exhaust the host filesystem (`daemon/fc.go`) — **fixed**
+
+Real. The guest boots with `console=ttyS0`, and the VMM's stdout and stderr
+were the console log file itself, opened `O_APPEND`. So anything running in a
+guest could write to `/dev/ttyS0` forever and the bytes landed straight on the
+state filesystem — the one every workspace image lives on, and whose exhaustion
+remounts every guest read-only, which is the fleet-wide failure this project
+has already been bitten by. `logSinkAppend`'s token bucket and 1 GiB ceiling
+guard the TURN stream; nothing guarded this one.
+
+`fcConsoleSink` hands the VMM the write end of a pipe and drains it into the
+log, writing at most 8 MiB. Two decisions worth naming:
+
+- The copier keeps READING after the cap and merely stops writing. That is the
+  load-bearing half — a pipe whose reader walks away blocks its writer, and the
+  writer is the VMM, so capping by closing would wedge the VM instead of its
+  log.
+- Truncated per boot rather than capped cumulatively. The console is boot
+  debugging, so the boot that just happened is the one worth keeping, and a
+  cumulative cap would leave a crash-looping VM's later boots writing nothing —
+  exactly when someone is reading the file.
+
+`TestConsoleSinkIsBounded` writes far past the cap and fails if the writer ever
+blocks.
