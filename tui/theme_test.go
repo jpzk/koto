@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -700,5 +701,58 @@ func TestDefaultFrameUsesOnlyTerminalColors(t *testing.T) {
 	}
 	if bad := extendedColorParams(frame); len(bad) > 0 {
 		t.Errorf("default frame names colors outside the terminal palette: %q", bad[:min(3, len(bad))])
+	}
+}
+
+// 2026-09-11 M131: a drop-in theme FILENAME is attacker-influenceable text —
+// the drop-in directory is the TUI's one writable mount — and enumeration
+// listed it without applying the name policy loadTheme enforces. The name then
+// reached the terminal twice over: concatenated into a `sys` transcript line by
+// themeListing (only `err` lines are scrubbed on the way into addLine) and
+// rendered as a picker title, with the frame transforms preserving every
+// non-SGR sequence. Enumeration now applies the same policy, so the listed set
+// is exactly the loadable set and no control byte survives to either consumer.
+func TestThemeNamesRejectHostileDropInFilenames(t *testing.T) {
+	withBuiltinPalette(t)
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "koto.sock")
+	if err := os.MkdirAll(userThemeDir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const good = `<svg><rect id='background' fill='#010203'></rect>
+	  <circle id='f_high' fill='#ffffff'></circle><circle id='f_med' fill='#dddddd'></circle>
+	  <circle id='f_low' fill='#999999'></circle><circle id='f_inv' fill='#000000'></circle>
+	  <circle id='b_high' fill='#886600'></circle><circle id='b_med' fill='#444444'></circle>
+	  <circle id='b_low' fill='#222222'></circle><circle id='b_inv' fill='#ffaa00'></circle></svg>`
+	hostile := []string{
+		"\x1b]0;pwned\x07plain", // OSC: retitles the operator's terminal
+		"a\x1b[2J\x1b[Hclear",   // CSI: erases the display and homes the cursor
+		"spoof\rkoto: ok",       // bare CR: overwrites the line already drawn
+		"../../../etc/passwd",   // traversal, which the RE also has to refuse
+		"has space",             // simply outside the charset
+	}
+	for _, n := range append(hostile, "fine") {
+		if err := os.WriteFile(filepath.Join(userThemeDir(sock), n+".svg"), []byte(good), 0o600); err != nil {
+			continue // a filename the host filesystem itself refuses is fine
+		}
+	}
+
+	names := themeNames(sock)
+	for _, n := range names {
+		if !themeNameOK(n) {
+			t.Errorf("themeNames listed %q, which loadTheme refuses", n)
+		}
+		if strings.ContainsAny(n, "\x1b\r\n\x07") {
+			t.Errorf("themeNames listed a name carrying terminal controls: %q", n)
+		}
+	}
+	if !slices.Contains(names, "fine") {
+		t.Errorf("the well-named drop-in theme was dropped too: %v", names)
+	}
+
+	// End to end: the transcript line the operator actually sees.
+	m := Model{sock: sock}
+	if listing := m.themeListing(); strings.ContainsAny(listing, "\x1b\r\x07") {
+		t.Errorf("theme listing carries terminal controls: %q", listing)
 	}
 }
