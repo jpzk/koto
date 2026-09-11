@@ -1722,3 +1722,18 @@ fleet is already ~100 streams for one identity and several operators share the
 `JobTail`'s own tighter cap (M78) stays: it bounds a guest-side `tail -f`
 process and a vsock connection, which this does not distinguish.
 `TestStreamAdmissionIsBounded`.
+
+### M96 — TUI lifecycle commands omit the selected goal name (`tui/daemon.go`) — **fixed**
+
+Real, and not a corner case: a group runs several goals at once by design, so
+this is the ordinary shape. `goalOpCmd` put the selected run in `extra["name"]`
+and `GoalApprove`/`Pause`/`Interrupt`/`Resume`/`Cancel` built their requests
+with only the group — the daemon then fell back to implicit selection, so
+`/goals cancel` aimed at the row the operator picked could resolve to a
+different eligible run, or fail as ambiguous while a run sat right there
+selected.
+
+All five now pass `Name`. Pinned by a test that reads the call sites, because
+the failure is an omitted FIELD — nothing a behavioural test of the RPC would
+catch, since a single-goal group resolves the same either way.
+`TestGoalLifecycleRPCsCarryTheName`.

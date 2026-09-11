@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,29 @@ func TestToolInputControlsAreScrubbedAfterDecoding(t *testing.T) {
 	}
 	if got := formatTool("Read", `{"file_path":"/workspace/a b.txt"}`); got != "Read /workspace/a b.txt" {
 		t.Errorf("plain path mangled: %q", got)
+	}
+}
+
+// 2026-09-11 M96: goalOpCmd puts the selected run in extra["name"] and the
+// five lifecycle RPCs dropped it, so the daemon fell back to implicit
+// selection. A group runs several goals at once by design, so a command aimed
+// at the row you picked could resolve to a different eligible run.
+func TestGoalLifecycleRPCsCarryTheName(t *testing.T) {
+	src, err := os.ReadFile("daemon.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"GoalApprove", "GoalPause", "GoalInterrupt", "GoalResume", "GoalCancel"} {
+		i := strings.Index(string(src), "cl."+op+"(ctx,")
+		if i < 0 {
+			t.Fatalf("%s call not found", op)
+		}
+		line := string(src)[i:]
+		if j := strings.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j]
+		}
+		if !strings.Contains(line, `Name: s("name")`) {
+			t.Errorf("%s does not pass the selected run name: %s", op, line)
+		}
 	}
 }
