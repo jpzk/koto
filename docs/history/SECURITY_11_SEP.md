@@ -1995,3 +1995,23 @@ key generated before this.
 Verified end to end under `umask 022` in a scratch tree: after `pki-init` and
 `pki-client`, `creds/` is 0700, every `.key` and token is 0600, and the
 certificates stay world-readable as they should.
+
+### M109 — Worker-controlled status object can wedge Firecracker VM initialization (`fcguest/turn.go`) — **fixed**
+
+Real, and the blast radius is larger than "a bad read": `reconcileOrphanJobs`
+runs inside `handleInit` while it holds `initMu`, so a poisoned entry wedges
+the GUEST'S INITIALIZATION — and the job tree lives in `workspace.img`, so it
+survives the restart and does it again on every later boot. The group stays
+dead until someone repairs the workspace by hand.
+
+`os.ReadFile` on a worker-owned path offered three ways in: a FIFO with no
+writer blocks forever, a symlink to `/dev/zero` buffers until the agent dies,
+and a large regular file does the same more slowly.
+
+`jobStatusIsRunning` opens `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` — no symlink, no
+blocking on a FIFO — then requires a regular file via `fstat` on the
+DESCRIPTOR (not an `Lstat` on the path, which the worker could swap
+afterwards), and reads at most 64 bytes, since a status marker is one short
+word. The write-back is `O_NOFOLLOW` too. `TestJobStatusReadIsDefensive` covers
+the FIFO (with a timeout, because the failure mode is a hang), the symlink, a
+directory, an oversized file, and that genuine markers still parse.
