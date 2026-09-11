@@ -379,7 +379,12 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 	if isReservedSession(session) {
 		return &pb.BaseResp{Error: "goal sessions are follow-only — use /goals interrupt"}, nil
 	}
-	if !sessionBusy(r.Group, session) {
+	// Capture the turn's IDENTITY, not just "something is running": the state
+	// is keyed by (group, session) and reused, so a turn that retires between
+	// the observation and the cancel would hand this interrupt to the next
+	// queued prompt (audit M85).
+	turn := sessionTurn(r.Group, session)
+	if turn == nil {
 		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil
 	}
 	// Arm the discard FIRST: from this point the turn is dead even if its
@@ -388,8 +393,10 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 	// it dies (send.go abort loop), then the queue advances to the next
 	// prompt. The immediate SIGINT below is just the fast path for the common
 	// case; "no agent process yet" is no longer a failed interrupt.
-	if !requestTurnCancel(r.Group, session) {
-		// The turn retired between the busy check and here.
+	if !cancelTurn(r.Group, session, turn) {
+		// The turn retired between the observation and here — and whatever
+		// holds the key now is a DIFFERENT turn, which this interrupt was
+		// never about.
 		return &pb.BaseResp{Error: "no turn in flight in session '" + sessionMarkerName(session) + "'"}, nil
 	}
 	if err := interruptAgent(r.Group, session); err != nil {

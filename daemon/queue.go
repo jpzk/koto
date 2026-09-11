@@ -223,6 +223,44 @@ func sessionBusy(g, session string) bool {
 	return inFlightSess[sessKey(g, session)]
 }
 
+// sessionTurn returns the IDENTITY of g/session's in-flight turn — its cancel
+// channel, which sendWorkerTurn makes fresh per turn — or nil when none is
+// running.
+//
+// The identity exists so an interrupt can name the turn it observed. Without
+// it, Interrupt asked sessionBusy under one lock acquisition and cancelled
+// under another, and the turn state is keyed by (group, session) and REUSED:
+// if the observed turn retired in the gap and the worker started the next
+// queued prompt, the cancel closed the NEW turn's channel and aborted a prompt
+// nobody asked to interrupt (audit M85).
+func sessionTurn(g, session string) chan struct{} {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	if !inFlightSess[sessKey(g, session)] {
+		return nil
+	}
+	return turnCancels[sessKey(g, session)]
+}
+
+// cancelTurn closes exactly the turn `want` identifies, and reports whether it
+// did. A different turn now holding the key is not cancelled.
+func cancelTurn(g, session string, want chan struct{}) bool {
+	if want == nil {
+		return false
+	}
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	if turnCancels[sessKey(g, session)] != want {
+		return false // retired, and its key reused by a later turn
+	}
+	select {
+	case <-want: // already cancelled
+	default:
+		close(want)
+	}
+	return true
+}
+
 // turnCancelCh returns the cancel channel of g/session's in-flight turn, or
 // nil when no turn is running. A nil channel blocks forever in select, which
 // is exactly the "no cancel can come" behavior sendNow wants.
