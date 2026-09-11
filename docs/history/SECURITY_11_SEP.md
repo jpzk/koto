@@ -1877,3 +1877,34 @@ leak — it is a functional break nobody would have attributed:
 name-reuse cleanups. The test asserts the replacement can claim its tails,
 which is the half that would otherwise have read as "the new group is broken".
 `TestDestroyReleasesTailAndNotifyState`.
+
+### M102 — Plan phase treats aborted or self-healed turns as completed (`daemon/goals.go`) — **fixed**
+
+Real, and it is the same gate M20 and M49 are about — so a fail-open here made
+both of those partly decorative. `goalPlanPhase` does check for a stall, but
+both failure paths defeated it:
+
+- `abortInflightTurn` (the VM exited mid-turn) wakes the blocked sender through
+  the SAME channel a real `[[turn_end]]` uses, and `sendNow` returned nil.
+- On timeout `sendNow` marks the session stalled, calls `selfHeal`, and returns
+  nil — and a SUCCESSFUL heal clears the stall flags before the caller reads
+  `isStalled`.
+
+Either way the plan phase concluded the turn ran and moved the goal to
+`awaiting_approval` with no plan behind it: a human is shown a plan to review
+that was never written, and a group that set its own goal can approve and
+execute one.
+
+Fixed where the ambiguity is, not where it surfaces: the completion channel now
+carries a `turnOutcome`, so a VM exit is `turnAborted` and a real `turn_end` is
+`turnCompleted`, and `sendNow` returns an error for the abort and for the stall.
+The plan phase's existing `if terr != nil` branch then pauses the goal, and
+every other caller of a turn gets the truth for free.
+
+**A rejected first attempt, recorded because the reasoning matters:** requiring
+a captured HANDOFF as proof of a completed plan seemed neater and is wrong. The
+handoff is a best-effort read of the transcript, so a legitimate plan whose
+closing report does not match the expected shape would pause the goal — the
+harness surfaced exactly that, failing ten goal tests at once. Absence of a
+handoff is not evidence of absence of a plan; the wakeup's provenance is.
+`TestTurnOutcomeDistinguishesAbortFromCompletion`.

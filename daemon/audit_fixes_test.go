@@ -3544,3 +3544,49 @@ func TestDestroyReleasesTailAndNotifyState(t *testing.T) {
 	delete(tails, slotLogPath(g, 0))
 	subsLock.Unlock()
 }
+
+// 2026-09-11 M102: the plan approval boundary was fail-open in two ways. A VM
+// exit wakes the send through the same completion channel a real [[turn_end]]
+// uses, and a stall's self-heal CLEARS the stall flags before sendNow returns
+// — so both read as "the turn ran", and the goal moved to awaiting_approval
+// with no plan behind it.
+func TestTurnOutcomeDistinguishesAbortFromCompletion(t *testing.T) {
+	const g, sess = "outcome", "s"
+	t.Cleanup(func() {
+		turnDoneMu.Lock()
+		delete(turnDone, sessKey(g, sess))
+		turnDoneMu.Unlock()
+		queuesMu.Lock()
+		delete(inFlightSess, sessKey(g, sess))
+		queuesMu.Unlock()
+	})
+
+	// A real completion.
+	notifyTurnDone(g, sess)
+	select {
+	case out := <-turnDoneCh(g, sess):
+		if out != turnCompleted {
+			t.Fatalf("a turn_end signalled %v, want turnCompleted", out)
+		}
+	default:
+		t.Fatal("notifyTurnDone signalled nothing")
+	}
+
+	// A VM exit, which must NOT look like one. abortInflightTurn only wakes
+	// sessions it believes are in flight.
+	queuesMu.Lock()
+	inFlightSess[sessKey(g, sess)] = true
+	queuesMu.Unlock()
+	abortInflightTurn(g)
+	select {
+	case out := <-turnDoneCh(g, sess):
+		if out != turnAborted {
+			t.Fatalf("a VM exit signalled %v, want turnAborted", out)
+		}
+	default:
+		t.Fatal("abortInflightTurn signalled nothing")
+	}
+	if turnCompleted == turnAborted {
+		t.Fatal("the two outcomes are indistinguishable")
+	}
+}
