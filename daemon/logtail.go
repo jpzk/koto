@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -549,8 +550,21 @@ func markTail(p string) bool {
 // session itself. Merge is stable, so within a stream the file order always
 // survives.
 func readHistory(g string, limit int, before float64) ([]Event, bool) {
+	return readHistoryCtx(context.Background(), g, limit, before)
+}
+
+// readHistoryCtx is readHistory that gives up when the caller has (audit
+// 2026-09-11 L39). A group has eleven streams and each is read and parsed in
+// full before paging is applied, so checking between them is where the work
+// actually is — and the caller that cancelled is not waiting for any of it.
+// Limits are still applied to whatever was read, so a cancelled call returns
+// consistent (if partial) data rather than a half-built slice.
+func readHistoryCtx(ctx context.Context, g string, limit int, before float64) ([]Event, bool) {
 	events := []Event{}
 	for _, p := range logPaths(g) {
+		if ctx.Err() != nil {
+			break
+		}
 		events = append(events, readStreamHistory(g, p)...)
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].Ts < events[j].Ts })

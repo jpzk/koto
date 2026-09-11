@@ -134,7 +134,17 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 		if d := fcLogSinkWait(g, len(b)); d > 0 {
 			time.Sleep(d)
 		}
-		if err := logSinkAppend(streamPath, b); err != nil {
+		// Under the same per-path lock every other writer of this stream takes
+		// (audit 2026-09-11 L37). Without it the ceiling check inside
+		// logSinkAppend and the write that follows are not atomic against the
+		// turn sink and the marker flush, so two writers could both see a
+		// below-limit size and both append past it — and a [[bg]] line landing
+		// between another writer's open and write could split a marker.
+		mu := logWriteLock(streamPath)
+		mu.Lock()
+		err := logSinkAppend(streamPath, b)
+		mu.Unlock()
+		if err != nil {
 			emitLogfG("send", g, "warn", "[%s] bg-tail %s: %v", g, id, err)
 			return
 		}

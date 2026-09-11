@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -6706,4 +6707,112 @@ func TestDestroyForgetsCollectorAndActivityState(t *testing.T) {
 		resForgetGroup(g)
 		activityForget(g)
 	})
+}
+
+// 2026-09-11 L33, L34, L37, L40, L41: five independent guards, each verified on
+// the primitive it protects.
+func TestAssortedInputAndCeilingGuards(t *testing.T) {
+	// L33 — a PKI client name becomes three filenames, a tokens.json key and a
+	// certificate CN, and `koto pki client` took it straight off argv. The
+	// fixed prefix eats the first `..`, but "../../x" still resolves above the
+	// creds dir.
+	for _, bad := range []string{
+		"../../etc/cron.d/x", "a/../../b", "..", "a..b", "/abs", "with space",
+		"ctl\x1b]0;x\x07", "", strings.Repeat("n", 200),
+	} {
+		if pkiClientNameOK(bad) {
+			t.Errorf("pkiClientNameOK accepted %q", bad)
+		}
+	}
+	for _, ok := range []string{"tui", "agent", "ci-runner", "a.b_c-9"} {
+		if !pkiClientNameOK(ok) {
+			t.Errorf("pkiClientNameOK rejected %q", ok)
+		}
+	}
+	if _, err := pkiClient(t.TempDir(), "../../escape", []string{"admin"}); err == nil {
+		t.Error("pkiClient wrote material for a traversing name")
+	}
+
+	// L34 — copyFile streams and keeps holes instead of reading the whole
+	// source into memory. A sparse source must not become dense.
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sparse.img")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(64 << 20); err != nil { // 64 MiB of holes
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("end"), (64<<20)-3); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	dst := filepath.Join(dir, "copy.img")
+	if err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	si, _ := os.Stat(src)
+	di, _ := os.Stat(dst)
+	if si.Size() != di.Size() {
+		t.Errorf("copy is %d bytes, source is %d", di.Size(), si.Size())
+	}
+	if blocks := diskBlocks(t, dst); blocks > (8<<20)/512 {
+		t.Errorf("the copy occupies %d blocks — sparseness was not preserved", blocks)
+	}
+	// ...and a FIFO in the checkout is refused rather than read forever.
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
+		if err := copyFile(fifo, filepath.Join(dir, "out")); err == nil {
+			t.Error("copyFile accepted a FIFO as a source")
+		}
+	}
+
+	// L37 — the ceiling must account for the BUFFER, not just the file's
+	// current size: at max-1 a whole chunk used to be accepted.
+	logp := filepath.Join(dir, "log")
+	lf, err := os.Create(logp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SPARSE: the ceiling is a gigabyte, and the test is about the arithmetic,
+	// not about writing one.
+	if err := lf.Truncate(fcLogSinkMaxBytes - 1); err != nil {
+		lf.Close()
+		t.Skipf("cannot stage a %d-byte file here: %v", fcLogSinkMaxBytes, err)
+	}
+	lf.Close()
+	if err := logSinkAppend(logp, make([]byte, 4096)); err == nil {
+		t.Error("a 4 KiB append was accepted onto a file one byte under the ceiling")
+	}
+	// One byte still fits exactly at the boundary.
+	if err := os.Truncate(logp, fcLogSinkMaxBytes-1); err != nil {
+		t.Fatal(err)
+	}
+	if err := logSinkAppend(logp, []byte("x")); err != nil {
+		t.Errorf("the last byte under the ceiling was refused: %v", err)
+	}
+
+	// L41 — a goal name may not wear a goal id's shape, because
+	// resolveGoalLocked matches either and returns the first in creation order.
+	for _, bad := range []string{"0123456789ab", "ABCDEF012345", "deadbeefcafe"} {
+		if !goalIDRE.MatchString(bad) {
+			t.Errorf("goalIDRE does not recognise the id shape %q", bad)
+		}
+	}
+	for _, ok := range []string{"deploy", "refactor-api", "0123456789abc", "0123456789a", "zzzzzzzzzzzz"} {
+		if goalIDRE.MatchString(ok) {
+			t.Errorf("goalIDRE claimed the ordinary name %q is an id", ok)
+		}
+	}
+}
+
+// diskBlocks is the file's real allocation in 512-byte units.
+func diskBlocks(t *testing.T, p string) int64 {
+	t.Helper()
+	var st syscall.Stat_t
+	if err := syscall.Stat(p, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st.Blocks
 }

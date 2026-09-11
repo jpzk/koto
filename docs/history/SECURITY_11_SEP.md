@@ -4455,3 +4455,154 @@ cannot cancel a stream context it does not own, and returning with a `Recv` in
 flight is outside what grpc-go permits — the same limit recorded under M154.
 Their count is bounded by `streamAdmit` (M95): 512 streams per identity, 2048
 globally.
+
+## L33 — Unvalidated PKI client name enables writes outside the credentials directory — FIXED
+
+`daemon/pki.go`, `pkiClient`.
+
+**Confirmed.** The positional name from `koto pki client <name>` reached
+`filepath.Join(credsDir, "token-"+name)` and the `client-<name>.{crt,key}`
+pattern with no filename-component validation. The fixed prefix eats the first
+`..` component, but `../../x` still resolves above `credsDir`, so the writes
+landed wherever the caller pointed them — and a name carrying a control
+character or a space would have produced material whose allowlist entry and CN
+could never be matched again.
+
+**Fix:** `pkiClientNameOK` — letters, digits and `._-`, no `..`, bounded length
+— checked inside `pkiClient` so every caller (the CLI and the wizard) is covered
+rather than just the one that was noticed.
+
+## L34 — Installation copies guest assets with unbounded buffering and destroys sparse allocation — FIXED
+
+`daemon/install.go`, `copyFile`.
+
+**Confirmed.** It read the whole source into memory and wrote it back, so
+seeding `fcassets/rootfs.img` — ~2 GiB apparent and mostly holes — cost ~2 GiB
+of installer memory *and* ~2 GiB of real blocks on the state disk.
+
+**Fix, after a first attempt that did not work.** Streaming with `io.Copy`
+between two `*os.File` was measured writing **all 131072 blocks** of a fully
+sparse 64 MiB source on this host, so `copy_file_range` is not something to rely
+on here — the test caught my own fix. `copySparse` now skips all-zero blocks
+explicitly and truncates to the source's size so a trailing hole survives.
+
+The source is also opened `O_NONBLOCK` and judged on the **descriptor**: a plain
+`os.Open` on a FIFO blocks at `open(2)`, *before* any mode check can run, which
+the same test demonstrated by hanging.
+
+## L35 — Delivered attachments are retained indefinitely in each guest workspace — FIXED
+
+`fcguest/main.go`.
+
+**Confirmed.** The host bounds what is *staged and undelivered*
+(`maxUploadsPending`, plus a 24-hour orphan sweep), but delivery removes only
+the host copy: every image ever sent to a group stayed in its workspace under a
+fresh timestamped name. A caller with `send` could fill the group's disk one
+valid attachment at a time, and a full guest filesystem remounts read-only and
+wedges the agent.
+
+**Fix:** `pruneUploads` trims the guest's uploads directory to
+`uploadsKeepBytes` (256 MiB), oldest first, after each delivery. Attachments are
+referenced by the turn that delivered them, so what matters is the recent ones;
+the budget is far above any conversation's back-reference and far below the
+smallest workspace preset.
+
+Test: `TestUploadsArePrunedToABudget` in `fcguest/turn_test.go`.
+
+## L36 — Recovery mount drops nosuid/nodev — ALREADY FIXED (M138)
+
+All three mount attempts now carry `wsMountFlags` (`MS_NOSUID|MS_NODEV`) —
+fixed as the second half of M138, where the reformat-on-any-error was the first.
+
+## L37 — Per-file log ceiling is bypassable — FIXED
+
+`daemon/fc.go` (`logSinkAppend`), `daemon/send.go` (the bg tailer).
+
+**Confirmed, both halves.** `size >= max` let a file one byte under the ceiling
+accept a whole chunk and finish over it — by up to the chunk size, every time a
+writer tried. And `tailBackgroundTask` reached `logSinkAppend` **without**
+`logWriteLock`, so its size check and write were not atomic against the turn
+sink or the marker flush: two writers could both see a below-limit size and both
+append past it, and a `[[bg]]` line landing between another writer's open and
+write could split a marker.
+
+**Fix:** the arithmetic includes the buffer (`size+len(b) > max`), and the bg
+tailer takes the same per-path lock every other writer of that stream takes.
+
+## L38 — Unnormalized multiline input escapes the framed prompt box — FIXED
+
+`tui/view.go`, `wrapInput`.
+
+**Confirmed.** Rows were broken on width only, so an embedded newline went into
+a row verbatim — and `drawBox` writes each row between one pair of borders, so
+the terminal produced extra physical lines with no borders and no place in the
+layout. `inputRows` and `maxInputRows` size the chat viewport from the
+**logical** row count, so those lines were unaccounted for and pushed the frame
+out of shape. Persisted drafts and recalled prompt history both reach this path.
+
+**Fix:** a newline ends the row.
+
+Test: `TestMultilineInputStaysInsideTheBox` in `tui/input_test.go` checks the
+rows, the cursor's row, and that a three-line draft leaves the rendered frame
+exactly as tall as the terminal.
+
+## L39 — History RPC performs uncancellable log replay — FIXED
+
+`daemon/grpc_server.go`, `daemon/logtail.go`.
+
+**Confirmed.** The handler discarded the request context, so a client could fire
+parallel `History` calls and cancel them the moment they reached the handler
+while the daemon read every one of the group's eleven streams, parsed all of it,
+allocated the events and sorted the merge — the whole cost, for a reply nobody
+would take. A small `limit` does not avoid it: paging is applied to the result,
+not to the read.
+
+**Fix:** `readHistoryCtx` checks cancellation between streams, which is where
+the work is, and the handler checks before and after. Limits are still applied
+to whatever was read, so a cancelled call returns consistent data rather than a
+half-built slice.
+
+## L40 — Warning-only raw RunScript mode permits terminal escape injection — FIXED
+
+`daemon/ctl_cli.go`.
+
+**Confirmed.** `-raw` is documented for binary output being redirected to a
+file, and on a TTY it was allowed with a warning printed to stderr — *before*
+the output that would do the damage, which is no protection at all. The guest
+authors those bytes, so it could set the title, rewrite the screen, put data on
+the clipboard via OSC 52, or trigger whatever the emulator does with an untested
+sequence.
+
+**Fix:** refused, with the redirection spelled out. Redirecting is the whole
+documented use case, so the legitimate caller pays a `>`.
+
+## L41 — Goal names can shadow goal IDs — FIXED
+
+`daemon/goals.go`.
+
+**Confirmed.** IDs are 12 hex characters; names may be up to 16 and may be
+hexadecimal; and `resolveGoalLocked` matches `Name == want || ID == want`,
+returning the first record in creation order. A goal named after an existing
+goal's id was therefore permanently unreachable by its own name — every
+`approve`, `pause`, `interrupt`, `resume` and `cancel` aimed at it landed on the
+older goal instead.
+
+**Fix:** a name may not wear an id's shape. The two namespaces share one lookup,
+so they cannot share a shape; the refusal says exactly that.
+
+## L42 — Denied `/destroy` leaks the existing subscription — FIXED
+
+`tui/model.go`.
+
+**Confirmed.** The local wipe ran **optimistically**, and it cleared
+`m.subscribed[target]` — the guard that stops a second `SubscribeGroup` stream
+being opened for the same group. A denied destroy therefore left the group alive
+with its guard gone, and the unconditional `listCmd` on the response opened a
+replacement stream while the first stayed live with no cancellation handle. Each
+denied attempt leaked one more, and every event of that group was then delivered
+to all of them.
+
+**Fix:** nothing local until the daemon has actually destroyed it. The success
+branch does the teardown — now `forgetGroup` (M155), which is a superset of the
+hand-written wipe it replaces — and moves the focus; the failure branch changes
+nothing at all.

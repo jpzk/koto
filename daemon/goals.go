@@ -79,6 +79,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -467,6 +468,13 @@ func goalTurnShouldRun(g, session string) bool {
 
 // ---- verbs ------------------------------------------------------------------
 
+// goalIDLen / goalIDRE are the shape of a generated goal id. Names are checked
+// against it so the two namespaces cannot collide in resolveGoalLocked, which
+// matches either (audit 2026-09-11 L41).
+const goalIDLen = 12
+
+var goalIDRE = regexp.MustCompile(`^[0-9a-fA-F]{12}$`)
+
 // goalNameMax keeps a run's name short. The name is a SESSION name, so it
 // must leave room for the "goal-" prefix and the judge's "-judge" suffix
 // inside the 32-char session charset — but the real reason it is this short is
@@ -575,6 +583,17 @@ func resolveGoalNameLocked(group, name, text string, taken map[string]bool) (str
 	if !sessionNameRE.MatchString(goalWorkSessionFor(name)) ||
 		!sessionNameRE.MatchString(goalJudgeSessionFor(name)) {
 		return "", fmt.Errorf("goal name %q is not usable as a session name", name)
+	}
+	// A name may not look like an ID (audit 2026-09-11 L41). resolveGoalLocked
+	// matches `Name == want || ID == want` and returns the FIRST record in
+	// creation order, and IDs are 12 hex characters while names may be up to 16
+	// and may be hexadecimal — so a goal named after an existing goal's id was
+	// permanently unreachable by its own name: every approve, pause, interrupt,
+	// resume and cancel aimed at it landed on the older goal instead. The two
+	// namespaces share one lookup, so they cannot share a shape.
+	if goalIDRE.MatchString(name) {
+		return "", fmt.Errorf("goal name %q looks like a goal id (%d hex characters); "+
+			"the two share one lookup, so pick a different name", name, goalIDLen)
 	}
 	// The occupied set is built over both sessions of every existing goal, by
 	// its effective SLUG rather than its Name.

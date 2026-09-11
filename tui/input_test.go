@@ -211,3 +211,45 @@ func TestInputRowAndGhostAreScrubbed(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L38: wrapInput broke rows only on width, so an embedded newline
+// went into a row verbatim — and drawBox writes each row between one pair of
+// borders, so the terminal produced extra physical lines with no borders and no
+// place in the layout. inputRows and maxInputRows size the chat viewport from
+// the LOGICAL row count, so those lines were unaccounted for and pushed the
+// frame out of shape. Persisted drafts and recalled history both reach here.
+func TestMultilineInputStaysInsideTheBox(t *testing.T) {
+	rows, curRow, curCol := wrapInput([]rune("one\ntwo\nthree"), 13, 40)
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows for three lines: %q", len(rows), rows)
+	}
+	for i, r := range rows {
+		if strings.ContainsRune(string(r), '\n') {
+			t.Errorf("row %d still carries a newline: %q", i, string(r))
+		}
+	}
+	for i, want := range []string{"one", "two", "three"} {
+		if got := strings.TrimRight(string(rows[i]), " "); got != want {
+			t.Errorf("row %d = %q, want %q", i, got, want)
+		}
+	}
+	// The cursor still lands on the row its rune is on.
+	if curRow != 2 {
+		t.Errorf("cursor row = %d, want 2 (end of the third line)", curRow)
+	}
+	_ = curCol
+
+	// End to end: a multiline draft must not add physical lines to the frame
+	// beyond what the box accounts for.
+	m := newModel("", 200000)
+	m.width, m.height = 80, 24
+	m.groups = map[string]GroupInfo{"g": {Running: true}}
+	m.cur = "g"
+	m.focus = focusInput
+	m.input.Focus()
+	m.input.SetValue("alpha\nbeta\ngamma")
+	frame := m.View()
+	if got := strings.Count(frame, "\n") + 1; got != m.height {
+		t.Errorf("frame is %d physical lines, terminal is %d — a multiline draft escaped the layout", got, m.height)
+	}
+}

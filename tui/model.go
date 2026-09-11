@@ -3618,10 +3618,26 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		return listCmd(m.sock) // pick up auto-spawned sidecar
 	case "destroy":
 		if msg.err != nil {
+			// Denied or failed: the group still exists, so nothing local
+			// changes — in particular m.subscribed stays set, which is what
+			// keeps the next list from opening a second stream for it (audit
+			// 2026-09-11 L42).
 			m.addLine(logLine{kind: "err", text: fmt.Sprintf("destroy %s: %v", msg.group, msg.err)})
-		} else {
-			m.addLine(logLine{kind: "sys", text: fmt.Sprintf("destroyed %s", msg.group)})
+			return nil
 		}
+		// Gone for real: drop every piece of state keyed by the name, the same
+		// teardown a group vanishing from the snapshot gets (M155), and move
+		// the focus off it if it was current.
+		if msg.group == m.cur {
+			m.cur = "main"
+			m.autoFollow = true
+			m.chaseShell()
+		}
+		m.forgetGroup(msg.group)
+		m.clearUnread(m.cur, m.activeSession(m.cur))
+		m.syncLogScope()
+		m.refreshLog()
+		m.addLine(logLine{kind: "sys", text: fmt.Sprintf("destroyed %s", msg.group)})
 		return listCmd(m.sock)
 	case "restart":
 		if msg.err != nil {
@@ -5154,40 +5170,15 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.addLine(logLine{kind: "err", text: "cannot destroy main (orchestrator group)"})
 			return nil
 		}
-		if target == m.cur {
-			// Drop the focus first so we don't keep rendering a group whose
-			// log file is about to vanish.
-			m.cur = "main"
-			m.clearUnread(m.cur, m.activeSession(m.cur))
-			m.autoFollow = true
-			m.syncLogScope()
-			m.chaseShell()
-		}
-		// Wipe any cached state for the group so a future /new <name> with
-		// the same name starts clean.
-		delete(m.subscribed, target)
-		delete(m.session, target)
-		m.dropGroupLiveState(target)
-		delete(m.busy, target)
-		// activity especially: the stream dies before any idle frame can
-		// arrive, and a stale mid-phase entry keeps anyActivity() true —
-		// which pins the 80ms spinner tick chain on for the rest of the
-		// process with nothing animating.
-		delete(m.activity, target)
-		delete(m.loadedGroups, target)
-		delete(m.pageOldestTs, target)
-		delete(m.pageLoading, target)
-		delete(m.pageExhausted, target)
-		m.clearGroupUnread(target)
-		delete(m.pending, target)
-		filtered := m.lines[:0]
-		for _, l := range m.lines {
-			if l.group != target {
-				filtered = append(filtered, l)
-			}
-		}
-		m.lines = filtered
-		m.refreshLog()
+		// NOTHING local until the daemon has actually destroyed it (audit
+		// 2026-09-11 L42). The wipe used to run optimistically, and it cleared
+		// m.subscribed[target] — the guard that stops a second SubscribeGroup
+		// stream being opened for the same group. A DENIED destroy therefore
+		// left the group alive with its guard gone, and the unconditional
+		// listCmd on the response opened a replacement stream while the first
+		// stayed live with no cancellation handle. Each denied attempt leaked
+		// one more, and every event of that group was then delivered to all of
+		// them.
 		return daemonCmd(m.sock, "destroy", target, nil)
 	}
 	if v == "/restart" || strings.HasPrefix(v, "/restart ") {

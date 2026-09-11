@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -477,4 +478,61 @@ func TestTurnQueueIsBoundedByBytes(t *testing.T) {
 	fresh := newTurnConn(&bytes.Buffer{})
 	fresh.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte(strings.Repeat("y", turnQueueBytes+4096))}})
 	fresh.close()
+}
+
+// 2026-09-11 L35: the host bounds what is STAGED and undelivered, but delivery
+// only removes the host copy — every image ever sent to a group stayed in its
+// workspace under a fresh timestamped name. A caller with `send` could fill the
+// group's disk one valid attachment at a time, at which point the guest's ext4
+// goes read-only and the agent wedges.
+func TestUploadsArePrunedToABudget(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, size int, age time.Duration) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	oldest := write("a.png", 4096, 3*time.Hour)
+	middle := write("b.png", 4096, 2*time.Hour)
+	newest := write("c.png", 4096, time.Hour)
+
+	// Budget that fits only the newest.
+	pruneUploads(dir, 5000)
+
+	if _, err := os.Stat(newest); err != nil {
+		t.Errorf("the newest attachment was pruned: %v", err)
+	}
+	for _, p := range []string{oldest, middle} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived the budget: %v", filepath.Base(p), err)
+		}
+	}
+
+	// Under budget: nothing is touched.
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruneUploads(dir, 1<<30)
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("a directory under budget lost files: %d → %d", len(before), len(after))
+	}
+
+	// A missing directory is not an error — attachments are optional.
+	pruneUploads(filepath.Join(dir, "absent"), 1)
+
+	// The real budget is generous next to the smallest workspace preset (8 GiB).
+	if uploadsKeepBytes >= 1<<30 {
+		t.Errorf("uploadsKeepBytes (%d) is a large share of the smallest workspace", uploadsKeepBytes)
+	}
 }
