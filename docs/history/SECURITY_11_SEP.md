@@ -2402,3 +2402,40 @@ A cumulative spend budget per group is a real feature and a good one —
 is there — but it is a product decision about defaults, refusal behaviour and
 operator visibility, not a fix to apply inside an audit pass. Recorded for the
 operator rather than invented.
+
+## M130 — Goal interruption can fail to cancel a reserved turn — FIXED
+
+`daemon/goals.go`, `goalInterrupt`.
+
+**Confirmed.** The verb did two things: transition the goal to `paused`, and —
+only when `sessionBusy` said the goal's worker session had a turn in flight —
+call `interruptAgent(g, work)`, a best-effort SIGINT to the guest process. It
+never touched the turn-cancellation machinery the ordinary `Interrupt` RPC goes
+through, so:
+
+- **Pre-delivery.** A turn that is in flight but has not reached the guest —
+  booting the VM, waiting on one of the group's ten slots, mid-`fcSendMsg` —
+  has no process to signal. `interruptAgent` was a no-op against it and the
+  iteration ran to completion after the goal was already paused.
+- **Post-delivery.** One SIGINT is all the guest ever got. The re-signal and
+  SIGKILL escalation live in `sendNow`'s abort loop, which it enters only once
+  the turn's cancel channel is closed; a worker that ignored the first signal
+  was never escalated on. The explicit cancellation checks in `sendNow` that
+  DISCARD the prompt likewise never fired.
+
+**Fix:** `goalInterrupt` now calls `requestTurnCancel(g, work)` before the
+signal, and keeps the signal as the fast path for an already-delivered process.
+`requestTurnCancel` rather than the identity-bound `cancelTurn` (M85) on
+purpose: the meaning here is "stop whatever this goal's session is running" —
+the same meaning `stopGroup` and `clearFence` carry — not "stop the turn I just
+observed", so there is no observed identity to bind to.
+
+**Not a gap, and left alone:** a turn still *queued* when the interrupt lands.
+`sendWorker` re-checks `goalTurnShouldRun` at delivery and drops a turn whose
+goal is no longer `running`/`planning`, so that half already worked (it is what
+`TestGoalQueuedTurnSkippedAfterCancel` pins).
+
+Test: `TestGoalInterruptCancelsTheReservedTurn` in `daemon/audit_fixes_test.go`
+takes the in-flight turn's channel identity via `sessionTurn`, interrupts, and
+asserts that exact channel is closed. Verified to fail with the
+`requestTurnCancel` call removed.

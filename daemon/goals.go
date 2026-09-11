@@ -806,13 +806,36 @@ func goalInterrupt(g, name string) (goalItem, error) {
 	// Aimed at the goal's own worker session alone: up to groupSlots turns run
 	// at once, so a group-wide signal would abort conversations that have
 	// nothing to do with this goal.
-	if work := goalWorkSessionFor(goalSessionSlug(it)); sessionBusy(g, work) {
+	work := goalWorkSessionFor(goalSessionSlug(it))
+	// CANCEL first, then signal. A best-effort signal was the WHOLE interrupt
+	// (audit M130), and a signal only means something to a guest worker that
+	// already exists. A turn that is in flight but not yet delivered — booting
+	// the VM, waiting on a group slot, mid-fcSendMsg — had nothing to signal,
+	// so `interrupt` changed the goal's status and let that iteration run to
+	// completion anyway. And post-delivery the signal is a SINGLE SIGINT: the
+	// re-signal and SIGKILL escalation live in sendNow's abort loop, which it
+	// enters only once this channel is closed, so a worker that ignored the
+	// first one was never escalated on. Closing it also makes sendNow DISCARD
+	// the prompt at its explicit cancellation checks rather than deliver it.
+	//
+	// (A turn still QUEUED needs no cancel: goalTurnShouldRun re-checks the
+	// goal's status at delivery and skips a turn whose goal is no longer
+	// running — that half already worked.)
+	//
+	// requestTurnCancel, not the identity-bound cancelTurn (M85): this is
+	// "stop whatever this goal's session is running", the same meaning
+	// stopGroup and clearFence have, not "stop the turn I just observed".
+	if requestTurnCancel(g, work) {
+		emitLogfG("goal", g, "info", "interrupt id=%s: canceled the in-flight turn", it.ID)
+	}
+	if sessionBusy(g, work) {
 		fn := goalInterruptTurnFn
 		if fn == nil {
 			fn = interruptAgent
 		}
 		if ierr := fn(g, work); ierr != nil {
-			// Non-fatal: the pause already holds; the turn just runs out.
+			// Non-fatal: the cancel above already holds, and sendNow's abort
+			// loop re-signals and escalates from here.
 			emitLogfG("goal", g, "warn", "interrupt turn: %v", ierr)
 		}
 	}

@@ -4065,3 +4065,62 @@ func TestRPCsRefuseUnregisteredGroups(t *testing.T) {
 		t.Fatal("setup: the group is not registered")
 	}
 }
+
+// 2026-09-11 M130: goal interrupt must CANCEL the reserved turn, not merely
+// signal the guest. Before the fix goalInterrupt paused the goal and called
+// interruptAgent — a single SIGINT that means nothing to a turn still booting
+// the VM or waiting on a slot, and that is never escalated post-delivery
+// because sendNow enters its re-signal/SIGKILL loop only once this channel is
+// closed. The channel identity (M85) is what the test asserts on: the turn the
+// interrupt observed is the turn that gets cancelled.
+func TestGoalInterruptCancelsTheReservedTurn(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-m130"
+	prevInt := goalInterruptTurnFn
+	goalInterruptTurnFn = func(string, string) error { return nil }
+	t.Cleanup(func() { goalInterruptTurnFn = prevInt })
+
+	turnStarted := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var workSess string
+	var mu sync.Mutex
+	withTurnFn(func(_, session, _ string) error {
+		if goalRole(session) == roleWork {
+			mu.Lock()
+			workSess = session
+			mu.Unlock()
+			once.Do(func() { close(turnStarted) })
+			<-release
+		}
+		return nil
+	}, func() {
+		if _, err := goalSet(g, "long haul", "1. done", "m130", 0, false); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		<-turnStarted
+		mu.Lock()
+		sess := workSess
+		mu.Unlock()
+		cancel := sessionTurn(g, sess)
+		if cancel == nil {
+			t.Fatalf("no in-flight turn recorded for %q", sess)
+		}
+		select {
+		case <-cancel:
+			t.Fatal("turn was already cancelled before the interrupt")
+		default:
+		}
+		if _, err := goalInterrupt(g, ""); err != nil {
+			t.Fatalf("interrupt: %v", err)
+		}
+		select {
+		case <-cancel:
+		default:
+			t.Fatal("goalInterrupt left the in-flight turn's cancel channel open: " +
+				"sendNow will neither discard the prompt nor escalate the signal")
+		}
+		close(release)
+		waitGoal(t, g, goalStatusPaused)
+	})
+}
