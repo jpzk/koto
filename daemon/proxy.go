@@ -1396,6 +1396,54 @@ var egressDial = func(ctx context.Context, network, addr string) (net.Conn, erro
 // that request's vetted IP.
 func egressNoRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
+// Egress admission. A CONNECT tunnel is a hijacked connection spliced raw for
+// as long as both ends hold it, and the absolute-form path holds a response
+// body for as long as the origin streams — neither goes through proxyAcquire,
+// which guards the LLM leg and is taken AFTER this branch has already returned
+// (audit M103). So a process in a networked guest could open policy-permitted
+// tunnels in a loop and leave them idle, each costing a guest-side bridge with
+// two copy goroutines, a vsock connection, a unix socket and a host dial.
+//
+// Per group as well as globally, so one guest cannot crowd out another's
+// egress. Generous, because real traffic is parallel: npm and git open many
+// connections at once, and a browser-shaped workload more. The guest-side
+// vsock count is separately capped by fcMaxConnsPerGroup (M22/M27); this bounds
+// the host end, which that does not reach.
+const (
+	egressMaxPerGroup = 64
+	egressMaxGlobal   = 512
+)
+
+var (
+	egressMu    sync.Mutex
+	egressCount = map[string]int{}
+	egressTotal int
+)
+
+func egressAcquire(g string) bool {
+	egressMu.Lock()
+	defer egressMu.Unlock()
+	if egressTotal >= egressMaxGlobal || egressCount[g] >= egressMaxPerGroup {
+		return false
+	}
+	egressCount[g]++
+	egressTotal++
+	return true
+}
+
+func egressRelease(g string) {
+	egressMu.Lock()
+	defer egressMu.Unlock()
+	if n := egressCount[g] - 1; n > 0 {
+		egressCount[g] = n
+	} else {
+		delete(egressCount, g)
+	}
+	if egressTotal > 0 {
+		egressTotal--
+	}
+}
+
 // serveEgress handles forward-proxy requests (CONNECT tunnel or absolute-form
 // HTTP) from a group whose bash/curl/git points HTTP_PROXY at us. Gated by the
 // group's network profile — the server-side enforcement point, so a
@@ -1445,6 +1493,16 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)
 		return
 	}
+	if !egressAcquire(h.group) {
+		if llmFlowSeen.allow("egressconns|" + h.group) {
+			emitLogfG("egress", h.group, "warn",
+				"[%s] refusing egress: %d already open (per-group %d, global %d)",
+				h.group, egressCount[h.group], egressMaxPerGroup, egressMaxGlobal)
+		}
+		http.Error(w, "koto proxy: too many concurrent egress connections for this group", http.StatusServiceUnavailable)
+		return
+	}
+	defer egressRelease(h.group)
 	if r.Method == http.MethodConnect {
 		h.egressConnect(w, r, target, vetted)
 		return
