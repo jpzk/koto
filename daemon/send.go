@@ -34,20 +34,68 @@ var (
 // and the goroutine exits. We deliberately don't try to detect "task
 // finished" — claude code surfaces that via a regular tool_result in a later
 // turn, and stale tailers are bounded by the time cap.
-func tailBackgroundTask(g, streamPath, session, id, path string) {
-	key := g + "\x00" + id
+// Background-task tailers are bounded per group and fleet-wide.
+//
+// The trigger is a REGEX MATCH in a tool_result — the daemon takes claude
+// code's "Command running in background with ID: X / Output is being written
+// to: Y" notice at face value, because there is nothing else to take. So the
+// admission has to be on the resource, not on the provenance: a guest emitting
+// many matching lines with distinct ids got a separate exec stream, a guest
+// shell running `tail -F`, host reader state and a ten-minute timer for each
+// (audit M121). bgActive deduped by (group, id), which is exactly what distinct
+// ids evade.
+//
+// Small on purpose, unlike the other caps in this audit: a turn backgrounds a
+// handful of commands at most, and the ten-minute lifetime means the ceiling is
+// per ten minutes rather than per turn. Refusing the excess costs the operator
+// a live view of one background job's output, which is a feature degrading,
+// not a turn failing.
+const (
+	bgTailMaxPerGroup = 8
+	bgTailMaxGlobal   = 64
+)
+
+var bgTailTotal int // guarded by bgActiveLock
+
+func bgTailAdmit(g, key string) bool {
 	bgActiveLock.Lock()
+	defer bgActiveLock.Unlock()
 	if bgActive[key] {
-		bgActiveLock.Unlock()
-		return
+		return false // already tailing this exact task
+	}
+	if bgTailTotal >= bgTailMaxGlobal {
+		return false
+	}
+	n := 0
+	for k := range bgActive {
+		if strings.HasPrefix(k, g+"\x00") {
+			n++
+		}
+	}
+	if n >= bgTailMaxPerGroup {
+		emitLogfG("send", g, "warn", "[%s] %d background tailers already running; not following another", g, n)
+		return false
 	}
 	bgActive[key] = true
+	bgTailTotal++
+	return true
+}
+
+func bgTailRelease(key string) {
+	bgActiveLock.Lock()
+	delete(bgActive, key)
+	if bgTailTotal > 0 {
+		bgTailTotal--
+	}
 	bgActiveLock.Unlock()
-	defer func() {
-		bgActiveLock.Lock()
-		delete(bgActive, key)
-		bgActiveLock.Unlock()
-	}()
+}
+
+func tailBackgroundTask(g, streamPath, session, id, path string) {
+	key := g + "\x00" + id
+	if !bgTailAdmit(g, key) {
+		return
+	}
+	defer bgTailRelease(key)
 
 	if !fcRunning(g) {
 		return
