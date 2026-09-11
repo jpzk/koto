@@ -1650,3 +1650,17 @@ The remaining suggestions — per-caller ownership of schedules, rate limiting
 creation, bounding due work per tick — are product design rather than this
 finding. A group's schedules fire through `enqueueSend`, which is already
 bounded per session and per group (M70) and closed during stop/destroy (M63).
+
+### M91 — Clearing the replacement network policy leaves legacy WAN egress active (`daemon/groups.go`, fixed in `daemon/config.go`) — **fixed**
+
+Real, and it fails in the direction that matters: an operator REVOKING egress
+gets told it worked while the guest keeps it. `applyConfig`'s clear deleted
+only the key it was given, and `groupConfig.network()` falls back to the legacy
+`internet` key — so `-network=` on a pre-migration config left
+`internet:"full"` resolving to `wan`, and both the frame filter and the L7
+proxy gate read that resolution.
+
+Clearing either spelling now clears both, and SETTING `network` deletes the
+legacy key too, so no stale spelling survives for a later read to resolve
+through. The legacy write path already migrated forward; it stays that way.
+`TestClearingNetworkClearsTheLegacyKey`.
