@@ -1211,3 +1211,31 @@ is left alone deliberately. Those are at most a buffer's worth of frames the
 client had already been sent moments earlier, the `gap` that follows tells it
 to discard its view anyway, and reaching into live subscriber channels to
 rewrite history in flight buys nothing for the complexity.
+
+### M65 — Group-only report capability accepts stale or canceled delegation results (`daemon/report.go`) — **partly fixed, partly rejected**
+
+Three claims, three different answers.
+
+**Fixed: the window outliving its work.** A stop discards the group's queued
+messages and cancels its in-flight turn, so an armed window then describes
+delegated work that will never run — while keeping a one-turn channel into main
+open for up to 24h. `destroy` already disarmed for exactly this reason; `stop`
+is the other lifecycle edge that discards the traffic, and now does too.
+`TestStopDisarmsTheReportWindow`. Not `/restart`: it deliberately KEEPS the
+backlog, so a queued delegation still runs and its window is still owed.
+
+**Already fixed elsewhere: the destroy race.** "Destroy disarms before teardown
+is complete, so a concurrent reply-enabled send can re-arm the same group name"
+— the ctl `send` arms atomically with its enqueue, and M63 now closes admission
+for the whole of destroy, so that enqueue fails and nothing arms.
+
+**Rejected: the delegation nonce.** A delayed report from delegation A being
+routed to delegation B's session is the DOCUMENTED semantics — one window per
+peer, newest delegation wins — and both sessions are main's own, so nothing
+crosses a boundary; the misattribution is between two of the orchestrator's
+conversations about the same peer. Making it exact would require the peer to
+ECHO a token it was handed, and the peer is a language model: a capability an
+LLM must copy back out of its prompt is not a capability, it is a suggestion
+with extra steps. The invariant that actually matters — a group can push at
+most one turn into main per turn main pushed into it — holds on the group key
+alone.
