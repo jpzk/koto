@@ -881,6 +881,40 @@ func goalCancelOnDestroy(g string) {
 	}
 }
 
+// delGoalsFor drops every goal record of g, and reports how many. Called from
+// destroy() right after goalCancelOnDestroy — cancel first so live drivers see
+// a terminal status and exit through their normal path, then remove, because
+// cancelling alone left the records in goals.json for GoalList to serve. Group
+// names are reusable (the workspace and the port allocation go, the global
+// goal store did not), and both the ACL and the goal store key on the NAME —
+// so a later group of the same name inherited the old group's goal text,
+// criteria, plans and judge feedback, all agent-authored (audit M50). Same
+// name-reuse hazard delSchedsFor, disarmReport and the event-ring drop close
+// for their own state.
+func delGoalsFor(g string) int {
+	goalLock.Lock()
+	kept := goals[:0]
+	n := 0
+	for _, it := range goals {
+		if it.Group == g {
+			n++
+			continue
+		}
+		kept = append(kept, it)
+	}
+	var snap goalSnap
+	if n > 0 {
+		goals = kept
+		snap = snapshotGoalsLocked()
+	}
+	goalLock.Unlock()
+	if n > 0 {
+		snap.write()
+		emitLogfG("goal", g, "info", "dropped %d goal record(s) with the group", n)
+	}
+	return n
+}
+
 // goalPauseOnStop pauses every running AND planning goal when the operator
 // stops its group — otherwise a driver's next enqueue would silently re-boot
 // the VM the operator just powered off. Planning used to be exempt on the
