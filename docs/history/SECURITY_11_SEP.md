@@ -895,3 +895,22 @@ One mutex around the check and the write. The write is tens of kilobytes and
 the contention is per group, so nothing here wants a reservation counter.
 `TestUploadQuotaHoldsUnderConcurrency` runs 64 concurrent senders at a
 sixteenth of the budget each — four times the quota if the window were open.
+
+### M56 — Guest-controlled job metadata can inject model notifications and host prompt logs (`daemon/notify.go`) — **fixed**
+
+Real, and it slipped through because the obvious field was already handled. A
+job's OUTPUT is sanitized and `> `-quote-fenced before it reaches the model —
+the id and rc beside it were neither. `flushNotify` formats them as
+`[job %s rc=%s]` into text the model reads, and `notifyDeliver` mirrors the same
+string into the host log, so a newline in either forges further lines in both:
+daemon-looking context inside the model's turn, and forged records for anything
+reading `koto ctl logs`.
+
+Both fields have narrow real shapes — `cs-job` mints ids from `mktemp`, an rc is
+a wait status — so `ctlJobField` clamps them to bare alphanumerics plus `-_.`
+and replaces anything else with `?`. Replacing rather than refusing: a result
+with an unreadable id is still worth delivering, and rejecting the message would
+let one malformed field lose the whole batch.
+
+The finding's other half — that this path does not reject reserved `goal-*`
+sessions — was fixed under M42. `TestJobMetadataFieldsAreClamped`.
