@@ -2708,3 +2708,21 @@ Tests: `TestHardenStatePathsClearsGroupAndOtherBits` (the repair, including that
 it preserves the owner triad, skips nothing it should tighten, and never widens
 an already-tight file) and `TestStateWritersCreateOwnerOnlyFiles` (the creation
 side, since the repair only runs at startup), in `daemon/audit_fixes_test.go`.
+
+## M137 — Active detached jobs can be removed from concurrency accounting — ALREADY FIXED (duplicate of M83)
+
+`sidecar/cs-job`, the `rm` verb.
+
+Same defect as M83 in this audit, described from the accounting angle rather
+than the resource-leak one, and closed by the same commit (`071f8e6`). `rm` now
+signals the recorded process group — TERM, up to 2 s of grace, then KILL — and
+only then deletes the directory. `setsid` made the job its own group leader, so
+the negative pid reaches its descendants too.
+
+With that in place the accounting the finding is worried about holds:
+`count_running` counts job directories whose `status` file reads `running`, and
+a job `rm` has just terminated is neither running nor present. `clean` was
+already correct — it skips any directory whose status is `running` — so the
+`rm` path was the only way to drop a live job out of the count.
+
+No further change. Verified against the current file rather than assumed.
