@@ -487,20 +487,78 @@ func (d *logDedup) allow(key string) bool {
 			}
 		}
 		if len(d.seen) >= d.max {
-			d.seen = map[string]time.Time{} // pathological churn — start over
+			// Pathological churn — start over. Note what this COSTS: every
+			// suppression currently in force is forgotten, so the keys that
+			// were being deduped are all admitted again. That is why the
+			// caller must not rely on this map alone as its rate limit (audit
+			// 2026-09-11 L86); see fcFlowLogger's budget.
+			d.seen = map[string]time.Time{}
 		}
 	}
 	d.seen[key] = now
 	return true
 }
 
+// fcFlowRate is the ceiling on flow lines ONE guest can put into the daemon
+// log per minute, with a burst for the honest case (audit 2026-09-11 L86).
+//
+// The dedup map is not a rate limit and cannot be made into one: its key is
+// (protocol, destination, port), every field of which the guest chooses, so
+// walking a port range mints a fresh key per packet — and when the map hits
+// fcFlowSeenMax it drops every live suppression and admits the lot again.
+// Each admitted line is then formatted, written to stderr, inserted into the
+// global log ring (evicting real entries) and pushed to every SubscribeLogs
+// subscriber, which is an audit-availability problem as much as a CPU one: the
+// cheapest way to hide one flow is to bury it under ten thousand.
+//
+// So the line count is bounded independently of the key space. The suppressed
+// count is reported when the budget refills, because "the log is incomplete" is
+// itself the finding an operator needs — silence there would be the same
+// erasure by a slower route. Sized so an ordinary networked turn (a clone, an
+// npm install, a container pull — tens of distinct flows) never reaches it.
+const (
+	fcFlowRatePerMin = 120
+	fcFlowRateBurst  = 240
+)
+
 type fcFlowLogger struct {
 	group string
 	seen  *logDedup
+
+	mu         sync.Mutex
+	tokens     float64
+	last       time.Time
+	suppressed int
 }
 
 func newFcFlowLogger(group string) *fcFlowLogger {
-	return &fcFlowLogger{group: group, seen: newLogDedup(fcFlowTTL, fcFlowSeenMax)}
+	return &fcFlowLogger{
+		group:  group,
+		seen:   newLogDedup(fcFlowTTL, fcFlowSeenMax),
+		tokens: fcFlowRateBurst,
+		last:   time.Now(),
+	}
+}
+
+// budget spends one line's worth of the guest's allowance. When it returns
+// false the line is dropped; when it returns true it may also report how many
+// were dropped since the last one got through.
+func (l *fcFlowLogger) budget() (ok bool, dropped int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.tokens += now.Sub(l.last).Minutes() * fcFlowRatePerMin
+	if l.tokens > fcFlowRateBurst {
+		l.tokens = fcFlowRateBurst
+	}
+	l.last = now
+	if l.tokens < 1 {
+		l.suppressed++
+		return false, 0
+	}
+	l.tokens--
+	dropped, l.suppressed = l.suppressed, 0
+	return true, dropped
 }
 
 // fcFlow is one parsed guest-egress flow start.
@@ -527,6 +585,14 @@ func (l *fcFlowLogger) record(frame []byte, policy string, allowed bool) {
 	}
 	if !l.seen.allow(fl.proto + "|" + dst) {
 		return
+	}
+	ok2, dropped := l.budget()
+	if !ok2 {
+		return
+	}
+	if dropped > 0 {
+		emitLogfG("egress", l.group, "warn", "[%s] %d flow lines were dropped: this guest is over its logging budget "+
+			"(%d/min) — the flow log for it is INCOMPLETE", l.group, dropped, fcFlowRatePerMin)
 	}
 	if allowed {
 		emitLogfG("egress", l.group, "info", "[%s] flow %s %s -> %s", l.group, fl.proto, fl.src, dst)

@@ -123,6 +123,26 @@ func usernsBootstrap() error {
 		return fmt.Errorf("subuid range for %s is %d ids, need more than %d "+
 			"(the per-VM jail band starts there)", me.Username, uidCount, fcJailBaseUID)
 	}
+	// ...and the check above only proves the band STARTS inside the allocation
+	// (audit 2026-09-11 L89). The band runs to fcJailMaxUID, so an allocation
+	// of, say, 32768 ids passed while leaving 32768..60000 unmapped — and an
+	// id from the unmapped part is not a usable identity: fcJailFixupPerms
+	// chowns with it and fcJailCommand writes it as a nested mapping's HostID,
+	// both of which fail in ways that read as a broken boot rather than as a
+	// misconfiguration.
+	//
+	// Refusing to start would be the wrong answer: with a short allocation the
+	// LOW part of the band is perfectly usable, and a fleet already running on
+	// it must not be taken down by an upgrade. So the band is CLAMPED to what
+	// was actually allocated, and a group whose port falls past the clamp is
+	// refused by name at boot (fcJailUID) with the range in the message.
+	if max := min(uidCount, gidCount) - 1; max < fcJailMaxUID {
+		jailMaxUID = max
+		emitLogf("fc", "warn", "subuid/subgid range for %s covers only %d ids: the per-VM jail band is clamped to %d-%d "+
+			"(the full band is %d-%d). Groups whose proxy port maps past %d will refuse to boot; "+
+			"widen the range in /etc/subuid and /etc/subgid to lift this.",
+			me.Username, min(uidCount, gidCount), fcJailBaseUID, jailMaxUID, fcJailBaseUID, fcJailMaxUID, jailMaxUID)
+	}
 
 	newuidmap, err := exec.LookPath("newuidmap")
 	if err != nil {
@@ -144,7 +164,7 @@ func usernsBootstrap() error {
 	}
 
 	cmd := exec.Command(self, os.Args[1:]...)
-	cmd.Env = append(os.Environ(), usernsEnv+"=1")
+	cmd.Env = append(os.Environ(), usernsEnv+"=1", jailMaxEnv+"="+strconv.Itoa(jailMaxUID))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.ExtraFiles = []*os.File{pr} // becomes fd 3 in the child
 	// No Uid/GidMappings here on purpose: Go would write them directly, which
@@ -234,6 +254,7 @@ func usernsAwaitParent() error {
 	// execve keeps the FIRST occurrence of a duplicated key, so appending
 	// would leave us reading "1" forever and looping on the sync pipe.
 	env := setEnv(os.Environ(), usernsEnv, "2")
+	env = setEnv(env, jailMaxEnv, strconv.Itoa(jailMaxUID))
 	// Exec, not fork: this process becomes the daemon, so the supervising
 	// parent's Wait() and signal forwarding keep working unchanged.
 	if err := syscall.Exec(self, os.Args, env); err != nil {

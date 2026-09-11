@@ -19,6 +19,23 @@ type fuzzyMatch struct {
 // runs of consecutive characters — same broad strokes as fzf's v1 scorer.
 // Case-insensitive. Empty query returns every item in input order (the
 // caller passes items newest-first so this matches shell Ctrl+R recall).
+// fuzzyScanMax bounds how much of one candidate is scored. Far past any row
+// the picker can render, far below the megabyte a single transcript line may
+// carry.
+const fuzzyScanMax = 4096
+
+// truncBytes cuts on a rune boundary so a clipped candidate is still valid
+// UTF-8 for the lowercasing and rune conversion inside scoreOne.
+func truncBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
+
 func fuzzyRank(query string, items []string, limit int) []fuzzyMatch {
 	if limit <= 0 {
 		limit = len(items)
@@ -34,9 +51,19 @@ func fuzzyRank(query string, items []string, limit int) []fuzzyMatch {
 		return out
 	}
 	q := []rune(strings.ToLower(query))
-	out := make([]fuzzyMatch, 0, len(items))
+	// Presized to what can actually be RETURNED, not to the corpus (audit
+	// 2026-09-11 L85): every keystroke re-runs this inside the Bubble Tea
+	// update loop, and prompt-history entries are arbitrary text from the
+	// daemon's echo — allocating one match slot per item made the empty-result
+	// case as expensive as the full one.
+	out := make([]fuzzyMatch, 0, min(limit, len(items)))
 	for i, s := range items {
-		if m, ok := scoreOne(q, s); ok {
+		// Only the head of a candidate is scored. scoreOne lowercases its
+		// whole input and may convert it to a rune slice, so an outsized
+		// item cost proportional to its length on EVERY keystroke — and a
+		// match beyond fuzzyScanMax is not something a picker row could show
+		// anyway.
+		if m, ok := scoreOne(q, truncBytes(s, fuzzyScanMax)); ok {
 			m.Idx = i
 			out = append(out, m)
 		}

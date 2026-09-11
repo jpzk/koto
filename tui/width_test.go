@@ -119,3 +119,45 @@ func TestNarrowRuneRangesAreActuallyNarrow(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L88: expandTabs counted columns rune by rune, which gets two
+// things wrong that the daemon's sanitizer deliberately lets through — an SGR
+// sequence (zero cells, but its '[', parameters and 'm' are printable runes)
+// and a grapheme cluster (one glyph whose parts do not have the width of their
+// sum). Either puts the running column off, so the next tab advances to the
+// wrong stop and the row is misaligned or wrapped early.
+func TestExpandTabsMeasuresSpansNotRunes(t *testing.T) {
+	const esc = "\x1b"
+	for _, c := range []struct{ name, prefix string }{
+		{"plain", "ab"},
+		{"exactly at a stop", "12345678"},
+		{"sgr before the tab", esc + "[31m" + "ab" + esc + "[0m"},
+		{"sgr is the whole prefix", esc + "[1;32;45m"},
+		{"zwj emoji cluster", "\U0001F468\u200d\U0001F469\u200d\U0001F467"},
+		{"combining marks", "e\u0301e\u0301"},
+		{"wide glyph", "\u6f22\u5b57"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := expandTabs(c.prefix + "\tx")
+			if strings.Contains(got, "\t") {
+				t.Fatalf("a tab survived expansion: %q", got)
+			}
+			if !strings.HasPrefix(got, c.prefix) {
+				t.Fatalf("output lost its prefix: %q", got)
+			}
+			pad := 0
+			for rest := got[len(c.prefix):]; pad < len(rest) && rest[pad] == ' '; pad++ {
+			}
+			w := cellWidth(c.prefix)
+			want := w + 8 - w%8
+			if w+pad != want {
+				t.Errorf("the tab landed at column %d, want the next 8-stop %d "+
+					"(the prefix measures %d cells and %d spaces were added)", w+pad, want, w, pad)
+			}
+		})
+	}
+	// A newline restarts the count, or every row after the first is wrong.
+	if got := expandTabs("ab\tc\nde\tf"); got != "ab      c\nde      f" {
+		t.Errorf("multiline expansion = %q", got)
+	}
+}

@@ -5335,3 +5335,171 @@ error path clears `pageLoading`, so a stale failure would otherwise release a
 deleted: group names are reusable, and a counter that went back to zero with the
 name would let the old incarnation's page land in the new one's transcript.
 Pinned by `TestStaleHistoryPagesAreDropped`, which covers all four properties.
+
+## L83 — Venice credential read errors disclose the host path to guests — FIXED
+
+`daemon/proxy.go`.
+
+**Confirmed.** `veniceAuth`'s error is `"no venice key: write to <absolute
+path>"` and `serveVenice` passed it straight to `http.Error`. That path is
+`/var/lib/koto/creds/venice.key` on an installed host and
+`/home/<operator>/koto/creds/venice.key` in a dev clone — so a prompt-injected
+guest learned the daemon's username and state-directory layout for free, across
+the one boundary the proxy exists to be.
+
+**Fix:** the guest is told *that* the credential is unavailable and to ask the
+operator; the path goes to the daemon log at error, where the operator — who is
+the one who needs it — already looks. Pinned by
+`TestVeniceCredentialPathIsNotToldToTheGuest`.
+
+## L84 — Unbounded guest PTY output can monopolize the operator TUI — FIXED
+
+`tui/shell_view.go`.
+
+**Confirmed.** The guest emits a frame per non-empty pty read; the daemon
+forwards each one; the TUI hands each to the terminal emulator **synchronously,
+on the single Bubble Tea update loop**. The 16 MiB protocol limit bounds one
+*frame*, not the stream, and transport backpressure slows the producer without
+ever being a policy — so a guest that simply keeps writing keeps the whole UI
+busy: the transcript stops redrawing, keystrokes queue, the tree freezes.
+
+**Fix:** a per-pane token bucket (4 MiB/s, 8 MiB burst) spent before the
+emulator sees anything. Over budget the chunk is **dropped**, not queued — this
+pane is a live view of a terminal, so falling behind is worse than missing
+bytes and the guest's next repaint restores the screen, while queueing would
+move the unbounded work rather than bound it. The drop is **announced in the
+pane** (`[koto: dropped N bytes — this pane is over its budget]`), because a
+pane silently missing output is a pane lying about what the guest printed.
+Pinned by `TestShellPaneHasAnOutputBudget`.
+
+## L85 — Fuzzy picker scores the whole corpus before applying its limit — FIXED
+
+`tui/fuzzy.go`.
+
+**Confirmed, and it got worse with L69's 1 MiB event cap**: `fuzzyRank`
+allocated an output slice sized to the *corpus*, called `scoreOne` on every
+item, and `scoreOne` lowercases its whole input and may convert it to a rune
+slice. Prompt history holds up to 200 entries of arbitrary text the daemon
+echoed back, and this runs synchronously in the Bubble Tea update loop on
+**every keystroke**.
+
+**Fix:** the output slice is presized to what can actually be returned
+(`min(limit, len(items))`), and only the first `fuzzyScanMax` (4 KiB, cut on a
+rune boundary) of each candidate is scored — far past any row the picker can
+render, far below the megabyte one transcript line may carry.
+
+## L86 — Guest-controlled flow-key churn causes log pressure — FIXED
+
+`daemon/fcnet.go`.
+
+**Confirmed.** The flow log's dedup key is `(protocol, destination, port)` and
+the guest chooses every field, so walking a port range mints a fresh key per
+packet — and when the map reaches `fcFlowSeenMax`, `logDedup.allow` **discards
+every live suppression** and admits the lot again. Each admitted line is
+formatted, written to stderr, inserted into the global log ring (evicting real
+entries) and pushed to every `SubscribeLogs` subscriber. That is an
+**audit-availability** problem as much as a CPU one: the cheapest way to hide
+one flow is to bury it under ten thousand.
+
+**Fix:** the *line count* is bounded independently of the key space — a
+per-guest token bucket at 120 lines/min with a 240 burst, sized so an ordinary
+networked turn (tens of distinct flows) never reaches it. The suppressed count
+is **reported when the budget refills**, because "the flow log for this guest is
+incomplete" is itself the finding an operator needs; silence there would be the
+same erasure by a slower route. `logDedup`'s reset now documents what it costs,
+so no future caller mistakes it for a rate limit. Pinned by
+`TestFlowLogHasAPerGuestBudget`.
+
+## L87 — Config writes create unregistered group directories — FIXED
+
+`daemon/config.go`.
+
+**Confirmed.** `updateGroupConfig`'s first act is `os.MkdirAll` under the
+caller's group path, and `configCmd` validated only the name's *syntax*. So a
+caller with a wildcard `config` grant created persistent state — a directory, a
+`.cs` subdirectory, a `config.json` — for any syntactically valid name, in no
+registry, booting no VM, listed nowhere, removable only by hand. An ACL grant
+says the caller may configure that target; it does not say the target exists.
+
+**Fix:** `configCmd` refuses a group that is not in `groups.json`, the same
+split `ensure()` draws (M14) — creating a group is spawn's job, and spawn is the
+path that is quota-checked. Pinned by `TestConfigRefusesAnUnregisteredGroup`;
+`fcHarness` now registers its stock test groups, since driving a group requires
+it to exist.
+
+## L88 — Per-rune tab accounting mismeasures SGR and grapheme clusters — FIXED
+
+`tui/width.go`.
+
+**Confirmed.** `expandTabs` walked rune by rune and added `cellWidth` of each,
+which gets wrong exactly the two things the daemon's sanitizer deliberately
+preserves: an **SGR sequence** costs nothing as a whole, but its `[`, parameters
+and `m` are each ordinary printable runes; and a **grapheme cluster** (a ZWJ
+emoji, a base plus combining marks) is one glyph whose parts do not have the
+width of their sum. The running column then goes wrong, the next tab advances to
+the wrong 8-stop, and the row is misaligned or wrapped early.
+
+**Fix:** the column is measured over **spans**, not runes — `cellWidth` already
+skips CSI/OSC and falls back to `ansi.StringWidth` for clusters, so it only had
+to be handed whole segments. Pinned by `TestExpandTabsMeasuresSpansNotRunes`
+(negative control: the old code puts the SGR cases at column 9 and 7 instead of
+8).
+
+## L89 — Subordinate-ID validation does not cover the full jail band — FIXED
+
+`daemon/userns.go`, `daemon/fcjail.go`.
+
+**Confirmed.** The bootstrap checked `uidCount > fcJailBaseUID` (30000) while
+the allocator's band runs to `fcJailMaxUID` (60000). An allocation of 32768 ids
+therefore passed with 32768–60000 **unmapped**, and an unmapped id is not an
+identity: `fcJailFixupPerms` chowns with it and `fcJailCommand` writes it as a
+nested mapping's `HostID`, both failing in ways that read as a broken boot
+rather than as a misconfiguration.
+
+**Fix:** the band is **clamped** to what was actually allocated, not the daemon
+refused. Refusing to start would be the wrong answer twice over — with a short
+allocation the low part of the band is perfectly usable, and an upgrade must not
+take down a fleet already running on it. So `jailMaxUID` is narrowed at
+bootstrap with a warn line naming the range and the fix, a group whose proxy
+port maps past the clamp is refused **by name** at boot with `/etc/subuid` named
+in the message, and the clamp rides `KOTO_JAIL_MAX_UID` across the bootstrap's
+two re-execs so every stage agrees on which ids are mapped. Pinned by
+`TestJailBandNeverExceedsTheMappedRange`.
+
+## L90 — Concurrent appends bypass the readTail size bound — FIXED
+
+`daemon/metrics.go`. `readTail` seeked to `size-max` and then `io.ReadAll`'d to
+EOF. The stat that sized the seek is not the read, and these are **live** files
+— `metrics.jsonl` gains a line per proxied request, a group log a line per
+output line — so an append in between returned the tail *plus* everything
+written since, unbounded, to callers that split, parse and in some cases
+serialise it into a response. One `io.LimitReader`: the bound belongs on the
+read. Pinned by `TestReadTailBoundsTheReadNotJustTheSeek`.
+
+## L91 — Existing TUI log permissions are not enforced — FIXED
+
+`tui/debuglog.go`. Same shape as L65, with an extra leg: the `0600` applies only
+when the call **creates** the file, *and* `os.Rename` carries an inode's mode
+into the rotated `.old` copy — so a `tui.log` created, copied or restored at
+`0644` stayed world-readable through every write and every rotation, exposing
+current diagnostics and the retained history. `dbgTighten` repairs the mode
+through the **descriptor** at both open sites, and only when it is actually too
+wide. Pinned by `TestDebugLogPermissionsAreRepairedOnOpen`.
+
+## L92 — Spawn keeps booting after client cancellation — FIXED
+
+`daemon/grpc_server.go`. `Spawn` declared its context as `_`, so a client that
+disconnected or hit its deadline ended only its own wait while the daemon went
+on to seed config, register the group, allocate a proxy listener and boot a
+microVM — a client in a retry loop against a deadline it never meets consumed
+fleet capacity at a rate its own timeout chose.
+
+**Fix:** the context is checked at the door and again immediately before
+`spawnEnsure` (the validation, cap read and config seed are all filesystem work,
+during which the client may have gone). Deliberately a check at the **door**,
+not cancellation of the boot: `fcSpawn` is uninterruptible past the point where
+a VM exists, because a half-created group with a live VMM and no registry entry
+is a worse state than one extra group — unwinding that is precisely the ordering
+`destroy` exists to get right. A cancel arriving mid-boot is honoured on the
+*next* attempt, which is what bounds the loop. Pinned by
+`TestSpawnHonoursClientCancellation`.

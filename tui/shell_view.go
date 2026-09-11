@@ -64,6 +64,17 @@ type shellSession struct {
 	// log line to one per session (see feed).
 	panics int
 
+	// The pane's output budget (audit 2026-09-11 L84). The guest emits a frame
+	// per non-empty pty read and the TUI hands each one straight to the
+	// terminal emulator, synchronously, on the single Bubble Tea update loop —
+	// so a guest that simply keeps writing keeps the whole UI busy: the
+	// transcript stops redrawing, keystrokes queue, the tree freezes. The
+	// 16 MiB protocol limit bounds one FRAME, not the stream, and transport
+	// backpressure slows the producer without ever being a policy.
+	outTokens  float64
+	outLast    time.Time
+	outDropped int
+
 	// out is the session's outbound queue, drained by ONE writer goroutine
 	// that owns stream.Send. Two senders exist — the Update goroutine
 	// (keystrokes, pastes, resizes) and the goroutine that drains term.Read()
@@ -309,7 +320,58 @@ func (s *shellSession) enqueue(msg *pb.ShellInput) {
 // this. The rest of the panicking chunk is dropped — the parser aborted
 // mid-buffer and there is no way to tell how far it got — so the pane can be
 // briefly garbled until the guest's next repaint.
+// shellBytesPerSec is one pane's parser budget, with a burst for the honest
+// case. A full repaint of a large tmux pane is well under a megabyte, and a
+// legitimate flood (`cat` of a big file) is not something an operator reads —
+// it is something they see the tail of, which is exactly what survives.
+const (
+	shellBytesPerSec = 4 << 20
+	shellBytesBurst  = 8 << 20
+)
+
+// budget spends len(data) of the pane's allowance and reports whether the
+// chunk may be parsed. Over budget the chunk is DROPPED rather than queued:
+// this pane is a live view of a terminal, so falling behind is worse than
+// missing bytes — the guest's next repaint restores the screen — and queueing
+// would move the unbounded work rather than bound it.
+func (s *shellSession) budget(n int) bool {
+	now := time.Now()
+	if s.outLast.IsZero() {
+		s.outTokens, s.outLast = shellBytesBurst, now
+	}
+	s.outTokens += now.Sub(s.outLast).Seconds() * shellBytesPerSec
+	if s.outTokens > shellBytesBurst {
+		s.outTokens = shellBytesBurst
+	}
+	s.outLast = now
+	if s.outTokens < float64(n) {
+		s.outDropped += n
+		return false
+	}
+	s.outTokens -= float64(n)
+	return true
+}
+
+// writeNote puts one koto-authored line into the pane, with its own recover:
+// the emulator is the same library feed() guards, and a note must never be the
+// thing that takes the pane down.
+func (s *shellSession) writeNote(note string) {
+	defer func() { _ = recover() }()
+	_, _ = s.term.Write([]byte(note))
+}
+
 func (s *shellSession) feed(data []byte) {
+	if !s.budget(len(data)) {
+		return
+	}
+	if s.outDropped > 0 {
+		// Say so IN THE PANE. A pane silently missing output is a pane lying
+		// about what the guest printed; the notice goes through the emulator
+		// so it lands in the scrollback like any other line.
+		s.writeNote(fmt.Sprintf("\r\n[koto: dropped %d bytes — this pane is over its %d MiB/s output budget]\r\n",
+			s.outDropped, shellBytesPerSec>>20))
+		s.outDropped = 0
+	}
 	defer func() {
 		r := recover()
 		if r == nil {
