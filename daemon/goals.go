@@ -539,6 +539,29 @@ func slugifyGoalName(text string) string {
 // group's chat sessions and its past goals, since the name becomes a session
 // name and two runs sharing one would merge their transcripts.
 func resolveGoalName(group, name, text string) (string, error) {
+	taken := groupSessionSet(group)
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	return resolveGoalNameLocked(group, name, text, taken)
+}
+
+// groupSessionSet is the group's chat sessions as a set — the non-goal half of
+// the occupied namespace. Read outside goalLock because it touches a file.
+func groupSessionSet(group string) map[string]bool {
+	taken := map[string]bool{}
+	for _, s := range listSessions(group) {
+		taken[s] = true
+	}
+	return taken
+}
+
+// resolveGoalNameLocked is the name allocator with the caller holding goalLock,
+// so goalSet can resolve a name and insert the record under ONE acquisition.
+// Resolving and inserting under separate acquisitions let two concurrent
+// GoalSets both see the same name free and both take it (audit M47) — the
+// collision M44 describes, arriving by a race instead of by a gap in the
+// occupied set. `taken` starts as the group's chat sessions.
+func resolveGoalNameLocked(group, name, text string, taken map[string]bool) (string, error) {
 	if name == "" {
 		name = slugifyGoalName(text)
 	}
@@ -562,11 +585,6 @@ func resolveGoalName(group, name, text string) (string, error) {
 	// handoff capture, the transcript and the reserved-session checks, so the
 	// colliding goal's turns interleave with the other's — and in the
 	// foo-judge case, with the other's JUDGE.
-	taken := map[string]bool{}
-	for _, s := range listSessions(group) {
-		taken[s] = true
-	}
-	goalLock.Lock()
 	for _, it := range goals {
 		if it.Group != group {
 			continue
@@ -578,7 +596,6 @@ func resolveGoalName(group, name, text string) (string, error) {
 		taken[goalWorkSessionFor(slug)] = true
 		taken[goalJudgeSessionFor(slug)] = true
 	}
-	goalLock.Unlock()
 	free := func(n string) bool {
 		return !taken[goalWorkSessionFor(n)] && !taken[goalJudgeSessionFor(n)]
 	}
@@ -636,8 +653,16 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 	if plan {
 		status = goalStatusPlanning
 	}
-	name, err := resolveGoalName(group, strings.TrimSpace(name), text)
+	// The name check and the insert happen under ONE goalLock acquisition.
+	// Resolving first and inserting after meant two concurrent callers could
+	// both find the same name free and both take it (audit M47) — the same
+	// collision M44 describes, arriving by a race instead of by a gap in the
+	// occupied set. listSessions reads a file, so it is gathered outside.
+	taken := groupSessionSet(group)
+	goalLock.Lock()
+	name, err := resolveGoalNameLocked(group, strings.TrimSpace(name), text, taken)
 	if err != nil {
+		goalLock.Unlock()
 		return goalItem{}, err
 	}
 	it := goalItem{
@@ -651,7 +676,6 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 		MaxIterations: maxIter,
 		CreatedAt:     goalNow(),
 	}
-	goalLock.Lock()
 	if n := len(activeGoalsLocked(group)); n >= goalMaxActive {
 		goalLock.Unlock()
 		return goalItem{}, fmt.Errorf("group %q already has %d active goals; finish or cancel one first", group, n)

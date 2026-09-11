@@ -756,3 +756,16 @@ reserved-session checks. A collision interleaves two goals' turns — and in the
 
 The occupied set is now built over both sessions of every goal in the group, by
 effective slug. `TestGoalNamesReserveBothSessions`.
+
+### M47 — Concurrent GoalSet requests can allocate the same run name (`daemon/goals.go`) — **fixed**
+
+Real, and it produces exactly the collision M44 describes by a different route.
+`resolveGoalName` took `goalLock`, built the occupied set, released it, and
+`goalSet` took the lock again to insert — so two concurrent callers could both
+find a name free and both take it.
+
+Split into `resolveGoalNameLocked`, which `goalSet` calls inside its existing
+critical section, so the check and the insert happen under one acquisition.
+`listSessions` reads a file and is gathered outside the lock
+(`groupSessionSet`). `resolveGoalName` survives as the unlocked wrapper.
+`TestConcurrentGoalSetsGetDistinctNames`.

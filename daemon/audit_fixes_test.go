@@ -1773,3 +1773,46 @@ func TestGoalNamesReserveBothSessions(t *testing.T) {
 		t.Fatalf("resolveGoalName(unrelated) = %q, %v", got, err)
 	}
 }
+
+// 2026-09-11 M47: the name check and the insert happen under ONE goalLock
+// acquisition. Resolving first and inserting after let two concurrent callers
+// both find the same name free and both take it.
+func TestConcurrentGoalSetsGetDistinctNames(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goalrace"
+	const n = 8
+	var wg sync.WaitGroup
+	names := make([]string, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			it, err := goalSet(g, "build the widget", "1. it builds", "widget", 1, true)
+			names[i], errs[i] = it.Name, err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	seen := map[string]bool{}
+	got := 0
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			continue // the per-group active cap is a legitimate refusal
+		}
+		got++
+		if seen[names[i]] {
+			t.Fatalf("two goals were allocated the name %q", names[i])
+		}
+		seen[names[i]] = true
+	}
+	if got < 2 {
+		t.Fatalf("only %d goals were created; the race window never opened", got)
+	}
+	// Cancel everything so the drivers exit before the harness tears down.
+	goalCancelOnDestroy(g)
+	waitGoalTerminal(t, g)
+}
