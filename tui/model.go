@@ -26,7 +26,18 @@ const (
 	// history, each group starts at ≤ historyPageSize; the cap is sized so
 	// many pages of back-scroll across many groups still fits. Eviction at
 	// the global cap is a safety lid, not a normal-path concern anymore.
-	maxLines        = 50000
+	maxLines = 50000
+	// maxLineBytes is the GLOBAL byte budget on m.lines, alongside the line
+	// count. The two bound different things and both are needed: 50k lines of
+	// one word is nothing, 50k lines of a megabyte each is not (audit M122).
+	//
+	// The daemon bounds what ARRIVES — a parser block at 1 MiB (M48), a live
+	// partial at 64 KiB on the wire (M82), the log sink's 1 MiB/s bucket and
+	// 1 GiB ceiling — so this is the TUI's own retention, which those do not
+	// cover: a line count times a per-line size nobody caps is not a budget.
+	// 64 MiB is far above any real session's transcript and far below what an
+	// operator's terminal can be pushed into swapping over.
+	maxLineBytes    = 64 << 20
 	historyPageSize = 1000 // events per history page (initial + each older-page fetch)
 
 	// A failed INITIAL history page retries this many times, this far apart,
@@ -354,9 +365,12 @@ type Model struct {
 	// watching is true while the WatchState snapshot stream is up. It gates
 	// re-opening the stream from the listMsg handler (which watch frames
 	// themselves flow through).
-	watching  bool
-	cur       string
-	lines     []logLine
+	watching bool
+	cur      string
+	lines    []logLine
+	// lineBytes is the running sum of len(lines[i].text), so the byte budget
+	// costs an add per line rather than a walk per append (M122).
+	lineBytes int
 	streamBuf map[string]string
 	// thinkingBuf accumulates completed thinking lines per-group while a
 	// thinking block is in flight. thinkingTail holds the in-flight partial
@@ -2004,8 +2018,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			combined = append(combined, batch...)
 			combined = append(combined, m.lines...)
 			m.lines = combined
-			if len(m.lines) > maxLines {
-				m.lines = m.lines[len(m.lines)-maxLines:]
+			m.recountLineBytes() // wholesale replacement, not an append
+			if len(m.lines) > maxLines || m.lineBytes > maxLineBytes {
+				m.trimLines()
 				// Global trim wipes whole-cache state; mirror addLine's
 				// behavior so stale per-group versions don't keep ghost
 				// vpCache entries from a different m.lines layout.
@@ -2077,9 +2092,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.lines = kept
 			}
 		}
+		for _, l := range batch {
+			m.lineBytes += len(l.text)
+		}
 		m.lines = append(m.lines, batch...)
-		if len(m.lines) > maxLines {
-			m.lines = m.lines[len(m.lines)-maxLines:]
+		if len(m.lines) > maxLines || m.lineBytes > maxLineBytes {
+			m.trimLines()
 			// Same rationale as addLine and the older-page trim: a global
 			// trim evicts other groups' lines without touching their
 			// groupVer, so stale vpCache entries would keep rendering them.
@@ -2765,6 +2783,35 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// recountLineBytes recomputes the running total. Only for the paths that
+// REPLACE m.lines wholesale (a history page prepended in front of the live
+// tail); every ordinary append keeps the counter incrementally.
+func (m *Model) recountLineBytes() {
+	n := 0
+	for _, l := range m.lines {
+		n += len(l.text)
+	}
+	m.lineBytes = n
+}
+
+// trimLines drops the oldest lines until BOTH caps are satisfied. Oldest
+// first, because a transcript is read from the bottom.
+func (m *Model) trimLines() {
+	if n := len(m.lines) - maxLines; n > 0 {
+		for _, l := range m.lines[:n] {
+			m.lineBytes -= len(l.text)
+		}
+		m.lines = append([]logLine(nil), m.lines[n:]...)
+	}
+	for m.lineBytes > maxLineBytes && len(m.lines) > 1 {
+		m.lineBytes -= len(m.lines[0].text)
+		m.lines = m.lines[1:]
+	}
+	if m.lineBytes < 0 {
+		m.lineBytes = 0
+	}
+}
+
 func (m *Model) addLine(l logLine) {
 	// Error lines are scrubbed HERE, at the one place they all pass through.
 	//
@@ -2782,8 +2829,9 @@ func (m *Model) addLine(l logLine) {
 		logWarn("ui", "error line (group=%q): %s", l.group, l.text)
 	}
 	m.lines = append(m.lines, l)
-	if len(m.lines) > maxLines {
-		m.lines = m.lines[len(m.lines)-maxLines:]
+	m.lineBytes += len(l.text)
+	if len(m.lines) > maxLines || m.lineBytes > maxLineBytes {
+		m.trimLines()
 		// Trim evicts unknown lines from any group; nuke the whole content cache.
 		m.vpCache = map[string]vpCacheEntry{}
 		m.groupVer = map[string]int{}
