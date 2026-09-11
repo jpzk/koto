@@ -175,6 +175,12 @@ func emit(g string, ev Event) {
 type stateSub struct {
 	ch       chan *pb.StateFrame
 	lastSent string // stateHash of the last frame this watcher took
+	// project narrows the snapshot to what THIS watcher may see (M18). nil
+	// means "everything" — the common case (admin, or any role whose grant
+	// for watch_state is "*"), and the case the shared-frame fast path below
+	// is written for. A narrowed watcher pays for its own frame and its own
+	// hash, which is right: its view changes on a different schedule.
+	project func(map[string]GroupInfo) map[string]GroupInfo
 }
 
 var (
@@ -241,15 +247,26 @@ func stateWatchLoop() {
 		var frame *pb.StateFrame
 		stateSubsLock.Lock()
 		for _, w := range stateSubs {
-			if w.lastSent == hash {
-				continue
-			}
-			if frame == nil {
-				frame = toStateFrame(gs)
+			wHash, wFrame := hash, frame
+			if w.project != nil {
+				view := w.project(gs)
+				wHash = stateHash(view)
+				if w.lastSent == wHash {
+					continue
+				}
+				wFrame = toStateFrame(view)
+			} else {
+				if w.lastSent == wHash {
+					continue
+				}
+				if frame == nil {
+					frame = toStateFrame(gs)
+				}
+				wFrame = frame
 			}
 			select {
-			case w.ch <- frame:
-				w.lastSent = hash
+			case w.ch <- wFrame:
+				w.lastSent = wHash
 			default:
 			}
 		}

@@ -248,6 +248,27 @@ func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) erro
 	return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 }
 
+// identityKey carries the authenticated caller into the handler. The
+// interceptors already resolve it; handlers that must PROJECT a response by
+// what the caller may see (List, WatchState — see visibleTargets) need the
+// same value, and re-deriving it from metadata would be a second place for the
+// two credentials' binding rules to drift.
+type identityKeyT struct{}
+
+var identityKey identityKeyT
+
+func withIdentity(ctx context.Context, id clientIdentity) context.Context {
+	return context.WithValue(ctx, identityKey, id)
+}
+
+// identityOf returns the caller. The zero value has no roles, so every
+// grant lookup on it fails closed — which is the right answer for a context
+// that never went through the interceptor (a direct call in a test).
+func identityOf(ctx context.Context) clientIdentity {
+	id, _ := ctx.Value(identityKey).(clientIdentity)
+	return id
+}
+
 func authUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	id, err := authFromCtx(ctx)
 	if err != nil {
@@ -256,13 +277,24 @@ func authUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler
 	if err := aclCheck(ctx, id, verbFromMethod(info.FullMethod), req); err != nil {
 		return nil, err
 	}
-	return handler(ctx, req)
+	return handler(withIdentity(ctx, id), req)
 }
 
 // aclStream wraps a ServerStream so the target check runs when the request
 // message actually decodes: a streaming RPC's request isn't available at
 // interception time (the generated handler calls RecvMsg *after* the
 // interceptor chain), so target enforcement has to ride the RecvMsg path.
+// idStream overrides a ServerStream's Context so a streaming handler reaches
+// the caller the same way a unary one does. grpc-go offers no hook for this —
+// the stream's context is fixed at creation — so the wrapper is the only way
+// to hand WatchState the identity it projects its frames through.
+type idStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s idStream) Context() context.Context { return s.ctx }
+
 type aclStream struct {
 	grpc.ServerStream
 	id   clientIdentity
@@ -291,5 +323,5 @@ func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, hand
 		emitLogf("acl", "warn", "%s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ss.Context()))
 		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 	}
-	return handler(srv, &aclStream{ServerStream: ss, id: id, verb: verb})
+	return handler(srv, &aclStream{ServerStream: idStream{ss, withIdentity(ss.Context(), id)}, id: id, verb: verb})
 }

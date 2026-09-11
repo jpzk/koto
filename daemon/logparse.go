@@ -171,8 +171,22 @@ func (p *logParser) feedLine(line string) []Event {
 	case strings.HasPrefix(line, "[[err]] "):
 		return []Event{ev(Event{Event: "err", Text: line[len("[[err]] "):]})}
 	case strings.HasPrefix(line, "[[bg]] "):
+		// "<id>:<session> <text>". A background tailer outlives the turn that
+		// spawned it — that is the feature, the operator watches the output
+		// accumulate — so by the time a line lands, the slot's stream may
+		// belong to a different conversation and sticky attribution would put
+		// it there (audit M19). The session is therefore written INTO the
+		// record. Legacy transcripts have no colon and keep the sticky
+		// behavior; an id with a trailing colon and nothing after it is the
+		// default session, explicitly.
 		name, text, _ := strings.Cut(line[len("[[bg]] "):], " ")
-		return []Event{ev(Event{Event: "bg", Name: name, Text: text})}
+		e := ev(Event{Event: "bg", Text: text})
+		if id, sess, tagged := strings.Cut(name, ":"); tagged {
+			e.Name, e.Session = id, sess
+		} else {
+			e.Name = name
+		}
+		return []Event{e}
 	case strings.HasPrefix(line, "[[notify]] "):
 		// Host-written by the ctl `notify` verb (see notifyMarker). Malformed
 		// lines are swallowed like the stray-close case below — surfacing raw

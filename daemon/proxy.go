@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -753,6 +754,77 @@ func proxyGroupSem(group string) chan struct{} {
 	return c
 }
 
+// --- 2026-09-11 M15: an aggregate byte budget, not just a request count ------
+//
+// proxyMaxBody bounds ONE body and the inflight semaphores bound HOW MANY, but
+// the product is the real number: 128 global slots x 64 MiB is ~8 GiB of live
+// heap, in the process that also holds the OAuth token, every group's log
+// tailer and the whole control plane. The bodies stay live across up to 7
+// retry attempts, and injectThinkingDisplay unmarshals one on top, so peak is
+// a multiple of that again. A guest needs no exploit to reach it — just large
+// valid-looking requests, in parallel, which cs-subagent already fans out.
+//
+// The budget is charged as the body is READ, not guessed from Content-Length
+// (which a guest sets, and which is absent on a chunked request). It is
+// deliberately far above real traffic — a turn's body is kilobytes, and 512
+// MiB still admits sixteen simultaneous maximum-size ones — so it is an OOM
+// backstop like the semaphores beside it, never a scheduler. Exceeding it
+// answers 503, the same "come back" the slot wait already answers with.
+const proxyBodyBudget = 512 << 20
+
+var proxyBodyCharged atomic.Int64
+
+// budgetReader charges every byte it yields against the global budget and
+// fails the read once the budget is gone.
+type budgetReader struct {
+	r      io.Reader
+	n      int64 // charged so far by THIS reader
+	failed bool
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if n > 0 {
+		if proxyBodyCharged.Add(int64(n)) > proxyBodyBudget {
+			proxyBodyCharged.Add(-int64(n))
+			b.failed = true
+			return 0, errProxyBodyBudget
+		}
+		b.n += int64(n)
+	}
+	return n, err
+}
+
+var errProxyBodyBudget = errors.New("proxy body budget exhausted")
+
+// readRequestBody buffers a request body under both bounds — per request
+// (proxyMaxBody) and fleet-wide (proxyBodyBudget) — and returns the release
+// that gives the bytes back. The release must run when the body stops being
+// referenced, i.e. after the last retry attempt, not after the first.
+func readRequestBody(w http.ResponseWriter, r *http.Request, group string) (body []byte, release func(), ok bool) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		return nil, func() {}, true
+	}
+	br := &budgetReader{r: http.MaxBytesReader(w, r.Body, proxyMaxBody)}
+	b, err := io.ReadAll(br)
+	rel := func() { proxyBodyCharged.Add(-br.n) }
+	if err != nil {
+		rel()
+		if br.failed {
+			if llmFlowSeen.allow("bodybudget|" + group) {
+				emitLogfG("llm", group, "warn",
+					"[%s] refusing request: fleet request-body budget (%d MiB) exhausted",
+					group, proxyBodyBudget>>20)
+			}
+			http.Error(w, "koto proxy: request-body memory budget exhausted; retry shortly", http.StatusServiceUnavailable)
+			return nil, nil, false
+		}
+		http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+		return nil, nil, false
+	}
+	return b, rel, true
+}
+
 // proxyAcquire takes one per-group slot and one global slot, always in that
 // order so two callers cannot deadlock against each other. Returns false when
 // the client goes away or the wait expires; the caller answers 503.
@@ -866,19 +938,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	llmFlowLog(h.group, r.Method, upstream, r.URL.Path)
 	t0 := time.Now()
-	var body []byte
-	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		// Bounded: the body is buffered whole and lives across up to 7
-		// retry attempts, so an unbounded read let one guest streaming
-		// /dev/zero grow the daemon's heap without limit (audit M2).
-		// Anthropic's own request cap is 32 MB.
-		r.Body = http.MaxBytesReader(w, r.Body, proxyMaxBody)
-		var rerr error
-		if body, rerr = io.ReadAll(r.Body); rerr != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-			return
-		}
+	// Bounded per request (proxyMaxBody — the body lives across up to 7 retry
+	// attempts, so an unbounded read let one guest streaming /dev/zero grow
+	// the heap without limit, audit M2) and fleet-wide (proxyBodyBudget —
+	// because the request COUNT limits multiply by that cap, audit M15).
+	body, releaseBody, bodyOK := readRequestBody(w, r, h.group)
+	if !bodyOK {
+		return
 	}
+	defer releaseBody()
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
 	// thinking.display to "omitted", so thinking blocks stream with empty text
@@ -1053,19 +1121,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	llmFlowLog(h.group, r.Method, veniceUpstream, r.URL.Path)
 	t0 := time.Now()
-	var body []byte
-	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		// Bounded: the body is buffered whole and lives across up to 7
-		// retry attempts, so an unbounded read let one guest streaming
-		// /dev/zero grow the daemon's heap without limit (audit M2).
-		// Anthropic's own request cap is 32 MB.
-		r.Body = http.MaxBytesReader(w, r.Body, proxyMaxBody)
-		var rerr error
-		if body, rerr = io.ReadAll(r.Body); rerr != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-			return
-		}
+	// Same two bounds as the Anthropic path — this one buffers and retries
+	// identically, so it needs the identical budget (audit M2, M15).
+	body, releaseBody, bodyOK := readRequestBody(w, r, h.group)
+	if !bodyOK {
+		return
 	}
+	defer releaseBody()
 	key, err := veniceAuth()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)

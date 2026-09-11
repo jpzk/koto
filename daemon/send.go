@@ -34,7 +34,7 @@ var (
 // and the goroutine exits. We deliberately don't try to detect "task
 // finished" — claude code surfaces that via a regular tool_result in a later
 // turn, and stale tailers are bounded by the time cap.
-func tailBackgroundTask(g, streamPath, id, path string) {
+func tailBackgroundTask(g, streamPath, session, id, path string) {
 	key := g + "\x00" + id
 	bgActiveLock.Lock()
 	if bgActive[key] {
@@ -75,7 +75,14 @@ func tailBackgroundTask(g, streamPath, id, path string) {
 		// to be a bare O_APPEND (audit M6) — a synthetic "Output is being
 		// written to" notice naming a fast-growing file grew the slot log
 		// bounded only by the 10-minute timer, re-armable at will.
-		b := []byte("[[bg]] " + id + " " + line + "\n")
+		// id:session, not a bare id: this tailer runs for up to ten minutes
+		// and the turn that spawned it usually ends first, after which the
+		// slot is released and a LATER turn — possibly another conversation —
+		// writes its own session marker into this same stream. The parser's
+		// attribution is sticky, so a bare record landed in whatever
+		// conversation happened to own the stream by then (audit M19). The
+		// session the task was started in is known here; write it down.
+		b := []byte("[[bg]] " + id + ":" + session + " " + line + "\n")
 		if d := fcLogSinkWait(g, len(b)); d > 0 {
 			time.Sleep(d)
 		}
