@@ -792,3 +792,18 @@ operator too: the safe reading of "unknown provenance", and self-limiting since
 goals turn over. The field is loop-internal and deliberately absent from the pb
 conversions — it is an authorization fact, not something a client renders.
 `TestCtlApprovesOnlySelfSetGoals`.
+
+### M50 — Destroyed group goals remain readable after group-name reuse (`daemon/grpc_server.go`) — **fixed**
+
+Real, and the same name-reuse hazard M14 found for schedules. `destroy()` called
+`goalCancelOnDestroy`, which moves non-terminal records to `cancelled` — and
+leaves them in `goals.json`. `GoalList` serves cancelled records, and group
+names are reusable: the workspace and the port allocation go, the global goal
+store did not. Both the ACL and the store key on the NAME, so a later group of
+the same name inherited the old one's goal text, acceptance criteria, plans and
+judge feedback, all agent-authored.
+
+`delGoalsFor(g)` runs right after the cancel — cancel first so live drivers see
+a terminal status and exit through their normal path, then remove. It sits
+beside `delSchedsFor`, `disarmReport` and the event-ring drop, which close the
+same hazard for their own state. `TestDestroyDropsGoalRecords`.

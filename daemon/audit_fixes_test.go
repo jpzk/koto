@@ -1866,3 +1866,38 @@ func TestCtlApprovesOnlySelfSetGoals(t *testing.T) {
 		waitGoalTerminal(t, "solo")
 	})
 }
+
+// 2026-09-11 M50: destroy cancelled a group's goals but kept the records, and
+// group names are reusable — so a later group of the same name inherited the
+// old one's goal text, criteria, plans and judge feedback.
+func TestDestroyDropsGoalRecords(t *testing.T) {
+	goalTestSetup(t)
+	fcHarness(t)
+	const g = "ghost"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		if _, err := goalSet(g, "secret work", "1. done", "s1", 1, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusAwaiting)
+	})
+	if r := destroy(g); !r.OK {
+		t.Fatalf("destroy: %s", r.Error)
+	}
+	goalLock.Lock()
+	var left int
+	for _, it := range goals {
+		if it.Group == g {
+			left++
+		}
+	}
+	goalLock.Unlock()
+	if left != 0 {
+		t.Fatalf("%d goal record(s) survived destroy — a reused name inherits them", left)
+	}
+	srv := &kotoServer{}
+	resp, _ := srv.GoalList(context.Background(), &pb.GoalListReq{Group: g})
+	if len(resp.Goals) != 0 {
+		t.Fatalf("GoalList still serves %d record(s) for a destroyed group", len(resp.Goals))
+	}
+}

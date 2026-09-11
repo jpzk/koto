@@ -469,6 +469,9 @@ func destroy(g string) baseResp {
 	// doesn't raise a spurious "paused (group stopped), resume later" alert
 	// for a goal that is about to be deleted with its group.
 	goalCancelOnDestroy(g)
+	// ...then remove the records. Cancelling alone left them in goals.json for
+	// GoalList to serve, and group names are reusable (audit M50).
+	delGoalsFor(g)
 	// An armed report window (report.go) belongs to the delegation sent to
 	// THIS instance — a later group reusing the name must not inherit a
 	// stale push-one-turn-to-main token.
