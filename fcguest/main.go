@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"syscall"
@@ -953,9 +954,18 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 	// message body references /workspace/.cs/uploads/<name>, so land them
 	// there (worker-owned) before the FIFO write wakes entrypoint.sh.
 	if len(req.UploadsTar) > 0 {
-		if err := untarInto(req.UploadsTar, filepath.Join(csDir, "uploads"), true); err != nil {
+		up := filepath.Join(csDir, "uploads")
+		if err := untarInto(req.UploadsTar, up, true); err != nil {
 			logf("uploads untar: %v", err)
 		}
+		// ...and prune, because nothing else does (audit 2026-09-11 L35). The
+		// HOST bounds what is staged and undelivered (maxUploadsPending, plus a
+		// 24h orphan sweep), but delivery only removes the host copy: every
+		// image ever sent to this group stayed in its workspace under a fresh
+		// timestamped name. A caller with `send` could fill the group's disk
+		// one valid attachment at a time, at which point the guest's ext4 goes
+		// read-only and the agent wedges.
+		pruneUploads(up, uploadsKeepBytes)
 	}
 	go runTurn(req)
 	replyOK(c)
@@ -1073,6 +1083,53 @@ func (w *boundedBuf) Write(p []byte) (int, error) {
 	// child see an I/O error on stdout, and the point is to stop storing the
 	// bytes rather than to break the command producing them.
 	return n, nil
+}
+
+// uploadsKeepBytes bounds what /workspace/.cs/uploads retains. Attachments are
+// images referenced by the turn that delivered them, so what matters is the
+// RECENT ones; a quarter of a gigabyte is far more than any conversation refers
+// back to and far less than the smallest workspace preset.
+const uploadsKeepBytes = 256 << 20
+
+// pruneUploads deletes the oldest attachments until the directory fits the
+// budget. Best effort: an unreadable directory or a file that will not unlink
+// is logged by its absence, never fatal to the turn being delivered.
+func pruneUploads(dir string, max int64) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type up struct {
+		path string
+		mod  time.Time
+		size int64
+	}
+	var files []up
+	var total int64
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		fi, ferr := e.Info()
+		if ferr != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, up{filepath.Join(dir, e.Name()), fi.ModTime(), fi.Size()})
+		total += fi.Size()
+	}
+	if total <= max {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	for _, f := range files {
+		if total <= max {
+			return
+		}
+		if os.Remove(f.path) == nil {
+			total -= f.size
+			logf("uploads: pruned %s (%d bytes) to stay under %d", filepath.Base(f.path), f.size, max)
+		}
+	}
 }
 
 func handleExec(c *vconn, script string) {

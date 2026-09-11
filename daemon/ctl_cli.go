@@ -503,8 +503,18 @@ func ctlCliMain(args []string) {
 		if len(rest) < 2 {
 			ctlFatal(2, "usage: koto ctl runscript [-raw] <group> <script...>")
 		}
+		// REFUSED, not warned (audit 2026-09-11 L40). -raw is documented for
+		// binary output being redirected to a file; allowing it onto a terminal
+		// defeats the boundary it is documented against. The guest authors
+		// these bytes, so with -raw on a tty it can set the title, rewrite the
+		// screen, put data on the clipboard through OSC 52, or trigger whatever
+		// the emulator does with a sequence nobody tested — and a warning on
+		// stderr is printed BEFORE the output that does it, which is no
+		// protection at all. Redirecting is the whole use case, so requiring it
+		// costs the legitimate caller a `>`.
 		if raw && stdoutIsTTY() {
-			fmt.Fprintln(os.Stderr, "koto ctl: -raw with a terminal on stdout — the guest's escape sequences will reach it unfiltered")
+			ctlFatal(2, "-raw writes the guest's bytes to your terminal unfiltered; redirect stdout to a file "+
+				"(koto ctl runscript -raw %s ... > out.bin) or drop -raw to get the sanitized stream", rest[0])
 		}
 		cl := ctlClient()
 		stream, err := cl.RunScript(context.Background(),

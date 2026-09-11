@@ -30,6 +30,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -178,7 +179,25 @@ func pkiServerCert(credsDir string, caKey *ecdsa.PrivateKey, caCert *x509.Certif
 // clients.allow (dedup by fingerprint, like the Makefile), a fresh bearer
 // token at token-<name> (0600) and its hash+roles in tokens.json. Returns the
 // token so callers (wizard) can use it immediately.
+// pkiClientNameRE bounds a client identity's name. It becomes three FILENAMES
+// (token-<name>, client-<name>.crt, client-<name>.key), a tokens.json key and a
+// certificate CN, and `koto pki client` took it straight off argv (audit
+// 2026-09-11 L33). The fixed prefix eats the first `..` component, but
+// "../../x" still resolves above credsDir, so the writes landed wherever the
+// caller pointed them — and a name with a control character or a space would
+// have produced material the allowlist and the CN check could never match
+// again.
+var pkiClientNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func pkiClientNameOK(name string) bool {
+	return pkiClientNameRE.MatchString(name) && !strings.Contains(name, "..")
+}
+
 func pkiClient(credsDir, name string, roles []string) (token string, err error) {
+	if !pkiClientNameOK(name) {
+		return "", fmt.Errorf("invalid client name %q: letters, digits and ._- only, "+
+			"no path separators (it becomes creds/token-%s and creds/client-%s.{crt,key})", name, "<name>", "<name>")
+	}
 	if name == "" {
 		return "", fmt.Errorf("client name required")
 	}

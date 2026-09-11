@@ -435,11 +435,24 @@ func (s *kotoServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, 
 	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
 }
 
-func (s *kotoServer) History(_ context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
+func (s *kotoServer) History(ctx context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.HistoryResp{Error: "invalid group name"}, nil
 	}
-	evs, more := readHistory(r.Group, int(r.Limit), r.Before)
+	// The caller's cancellation counts (audit 2026-09-11 L39). The context was
+	// discarded, so a client could fire parallel History calls and cancel them
+	// the moment they reached the handler while the daemon went on reading
+	// every stream of the group, parsing all of it, allocating the events and
+	// sorting the merge — the whole cost, for a reply nobody would take. A
+	// small `limit` does not avoid it either: paging is applied to the result,
+	// not to the read.
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	evs, more := readHistoryCtx(ctx, r.Group, int(r.Limit), r.Before)
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	out := make([]*pb.Event, len(evs))
 	for i := range evs {
 		out[i] = toPBEvent(sanitizeEvent(evs[i]))

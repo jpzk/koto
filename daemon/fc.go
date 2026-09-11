@@ -1336,7 +1336,12 @@ func logSinkAppend(p string, b []byte) error {
 		return err
 	}
 	defer f.Close()
-	if st, serr := f.Stat(); serr == nil && st.Size() >= fcLogSinkMaxBytes {
+	// The BUFFER counts, not just the file's current size (audit 2026-09-11
+	// L37). `size >= max` let a file one byte under the ceiling accept a whole
+	// chunk and finish over it — by up to the chunk size, every time, for as
+	// long as a writer kept trying. The ceiling is a host-storage backstop, so
+	// the arithmetic has to include what is about to be written.
+	if st, serr := f.Stat(); serr == nil && st.Size()+int64(len(b)) > fcLogSinkMaxBytes {
 		return fmt.Errorf("%s at the %d-byte ceiling, dropping guest output", filepath.Base(p), fcLogSinkMaxBytes)
 	}
 	_, err = f.Write(b)

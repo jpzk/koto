@@ -25,6 +25,7 @@ package main
 // (/usr/local/bin/koto, /etc/koto/koto.env, the unit) plus systemctl calls.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1202,16 +1203,79 @@ func mergeTokens(src, dst string) error {
 	return os.WriteFile(dst, append(b, '\n'), 0o600)
 }
 
+// copyFile streams src to dst and keeps its holes (audit 2026-09-11 L34).
+//
+// It used to ReadFile the whole source and WriteFile it back, which for
+// fcassets/rootfs.img — documented as ~2 GiB apparent and mostly holes — meant
+// ~2 GiB of installer memory AND ~2 GiB of real blocks on the state disk for a
+// file that occupies a fraction of that.
+//
+// Sparseness is preserved EXPLICITLY, by skipping runs of zeros rather than by
+// hoping the runtime does it: io.Copy between two *os.File was measured on this
+// host writing all 64 MiB of a fully sparse 64 MiB source (131072 blocks
+// allocated), so `copy_file_range` is not something to rely on here. Block
+// granularity, which is all a hole has anyway.
+//
+// The source is opened O_NONBLOCK and judged on the DESCRIPTOR, so a FIFO in
+// the checkout is refused instead of blocking the installer forever at open(2)
+// — which is what a plain os.Open does, before any mode check can run.
 func copyFile(src, dst string) error {
-	b, err := os.ReadFile(src)
+	fd, err := syscall.Open(src, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("copy %s: %w", src, err)
+	}
+	in := os.NewFile(uintptr(fd), src)
+	defer in.Close()
+	info, err := in.Stat()
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(src)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("copy %s: not a regular file (%s)", src, info.Mode().Type())
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, info.Mode().Perm())
+	if err := copySparse(out, in, info.Size()); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// copySparse writes src to dst, seeking over all-zero blocks instead of writing
+// them, and truncating to size so a trailing hole survives.
+func copySparse(dst, src *os.File, size int64) error {
+	const block = 64 << 10
+	buf := make([]byte, block)
+	zero := make([]byte, block)
+	var at int64
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if bytes.Equal(buf[:n], zero[:n]) {
+				if _, err := dst.Seek(int64(n), io.SeekCurrent); err != nil {
+					return err
+				}
+			} else if _, err := dst.Write(buf[:n]); err != nil {
+				return err
+			}
+			at += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+	// A file that ends in a hole has nothing written past it, so the size has
+	// to be set rather than implied.
+	if at < size {
+		at = size
+	}
+	return dst.Truncate(at)
 }
 
 func copyIfAbsent(src, dst string) error {

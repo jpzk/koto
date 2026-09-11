@@ -1549,6 +1549,19 @@ func wrapInput(rs []rune, pos, cols int) (rows [][]rune, curRow, curCol int) {
 		if i == pos {
 			curRow, curCol, seen = len(rows), len(cur), true
 		}
+		// A newline ENDS the row (audit 2026-09-11 L38). wrapInput used to
+		// break only on width, so an embedded \n went into a row verbatim —
+		// and drawBox writes each row between one pair of borders, so the
+		// terminal produced extra physical lines with no borders and no place
+		// in the layout. inputRows and maxInputRows size the chat viewport from
+		// the LOGICAL row count, so those extra lines were unaccounted for and
+		// pushed the frame out of shape. Persisted drafts and recalled history
+		// both reach this path.
+		if r == '\n' {
+			rows = append(rows, cur)
+			cur, w = nil, 0
+			continue
+		}
 		cur = append(cur, r)
 		w += rw
 	}
