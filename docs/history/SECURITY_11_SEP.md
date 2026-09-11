@@ -1686,3 +1686,18 @@ exactly the outage this binding was added to fix (three OAuth expiries in 36h,
 2026-09-05). `installClaudeBin` now says so at install time and names the fix —
 move the binary — instead of quietly handing over the home.
 `TestClaudeBindRefusesAWholeHome`.
+
+### M94 — Age-trimmed partial events remain pinned by ringPartial (`daemon/events.go`) — **fixed**
+
+Real. `ringPartial[g][session]` indexes a session's live partial BY POINTER so
+the next frame can supersede it, and the age trim dropped events off the front
+of the ring without touching that index. A partial whose event had aged out
+therefore kept the event — and its payload, which before M82 could be
+megabytes — alive until another event for that exact session arrived. For a
+session whose turn ended without one (a stopped, wedged or restarted guest)
+that is never, and session names are caller-chosen.
+
+The trim now reconciles: any indexed partial found in the prefix being
+discarded is dropped with it, and an empty per-group index is removed. A
+partial still IN the ring keeps its entry, because supersession depends on it.
+`TestAgeTrimReleasesStalePartials`.
