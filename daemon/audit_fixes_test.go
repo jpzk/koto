@@ -3402,3 +3402,49 @@ func TestGroupCapIsAtomicWithRegistration(t *testing.T) {
 		t.Fatalf("an existing group was refused at the cap: %v", err)
 	}
 }
+
+// 2026-09-11 M99: tokRates was the only thing that pruned aged-out samples,
+// and it runs from stateWatchLoop — which skips its tick when no client is
+// watching. A headless daemon accumulated a sample per retired proxy request
+// forever, and a guest can produce those at will.
+func TestTokSamplesArePrunedWithoutAReader(t *testing.T) {
+	tokRateLock.Lock()
+	prev := tokSamples
+	tokSamples = nil
+	tokRateLock.Unlock()
+	t.Cleanup(func() {
+		tokRateLock.Lock()
+		tokSamples = prev
+		tokRateLock.Unlock()
+	})
+
+	// Old samples, well outside the window, inserted with nobody reading.
+	old := time.Now().Add(-10 * tokRateWindow)
+	for i := 0; i < tokSamplesPruneAt+50; i++ {
+		tokRateAdd("g", old, old.Add(time.Second), 10)
+	}
+	tokRateLock.Lock()
+	n := len(tokSamples)
+	tokRateLock.Unlock()
+	if n >= tokSamplesPruneAt {
+		t.Fatalf("%d samples retained with no reader; the insertion prune never ran", n)
+	}
+
+	// The hard ceiling holds even when every sample is live.
+	now := time.Now()
+	for i := 0; i < tokSamplesMax+tokSamplesPruneAt; i++ {
+		tokRateAdd("g", now, now.Add(time.Second), 10)
+	}
+	tokRateLock.Lock()
+	n = len(tokSamples)
+	tokRateLock.Unlock()
+	if n > tokSamplesMax {
+		t.Fatalf("%d samples retained, ceiling is %d", n, tokSamplesMax)
+	}
+
+	// And the rate is still computed from what survives.
+	per, global := tokRates()
+	if global <= 0 || per["g"] <= 0 {
+		t.Fatalf("rates went to zero after pruning: per=%v global=%v", per["g"], global)
+	}
+}

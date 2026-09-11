@@ -1790,3 +1790,22 @@ caller. `allocPort` returns an error instead of a bare int; the call-site checks
 stay, because they produce a specific message before any workspace is created.
 `TestGroupCapIsAtomicWithRegistration` runs 200 concurrent allocations and
 asserts exactly `ctlMaxSpawn` are admitted.
+
+### M99 — Unbounded token-rate sample retention enables daemon resource exhaustion (`daemon/tokrate.go`) — **fixed**
+
+Real, and the trigger is the ordinary headless case. `tokRates` was the only
+thing that pruned aged-out samples, and it runs from `stateWatchLoop`, which
+skips its tick entirely when no client is watching — so a daemon nobody has a
+TUI attached to accumulated one sample per retired proxy request, forever, and
+a guest in a running group produces those at will.
+
+Pruning now happens at INSERTION, amortized: a full scan on every add would be
+O(n) per request under the global lock, so it runs once the slice passes
+`tokSamplesPruneAt`, with `tokSamplesMax` as a hard ceiling for the case where
+everything in the window is genuinely live.
+
+The prune also COPIES into a right-sized slice instead of `tokSamples[:0]`,
+which the finding was right to call out separately: reslicing kept the largest
+backing array the daemon had ever needed for the life of the process, so a
+burst's peak capacity was retained even after its samples aged out.
+`TestTokSamplesArePrunedWithoutAReader`.

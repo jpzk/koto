@@ -53,6 +53,60 @@ func tokRateAdd(group string, t0, t1 time.Time, tokens int64) {
 	tokRateLock.Lock()
 	defer tokRateLock.Unlock()
 	tokSamples = append(tokSamples, tokSample{group: group, t0: t0, t1: t1, tokens: float64(tokens)})
+	// Pruned at INSERTION, not only when someone reads. tokRates is the only
+	// thing that dropped aged-out samples, and it runs from stateWatchLoop —
+	// which skips its tick entirely when no client is watching. A headless
+	// daemon therefore accumulated a sample per retired proxy request forever,
+	// and a guest in a running group can produce those at will (audit M99).
+	//
+	// Amortized: a full scan on every add would be O(n) per request under the
+	// global lock, so it runs when the slice has grown past a threshold. The
+	// cap is a hard ceiling on top, for the pathological case where everything
+	// in the window is genuinely live.
+	if len(tokSamples) >= tokSamplesPruneAt {
+		tokPruneLocked(time.Now())
+	}
+	if n := len(tokSamples) - tokSamplesMax; n > 0 {
+		tokSamples = append(make([]tokSample, 0, tokSamplesMax), tokSamples[n:]...)
+	}
+}
+
+const (
+	// tokSamplesPruneAt is when an insertion sweeps aged-out samples.
+	tokSamplesPruneAt = 4096
+	// tokSamplesMax is the hard ceiling, enforced by dropping the OLDEST —
+	// they are the ones closest to leaving the window anyway.
+	tokSamplesMax = 16384
+)
+
+// tokPruneLocked drops samples that can no longer contribute to the window.
+// Caller holds tokRateLock.
+//
+// Copies into a right-sized slice rather than reslicing in place: tokSamples[:0]
+// reuses the largest backing array the daemon ever needed, so a burst's peak
+// capacity was retained for the process's life even after the samples went.
+func tokPruneLocked(now time.Time) {
+	cutoff := now.Add(-tokRateWindow)
+	n := 0
+	for _, s := range tokSamples {
+		if s.t1.After(cutoff) {
+			n++
+		}
+	}
+	if n == len(tokSamples) {
+		return
+	}
+	if n == 0 {
+		tokSamples = nil
+		return
+	}
+	kept := make([]tokSample, 0, n+n/8)
+	for _, s := range tokSamples {
+		if s.t1.After(cutoff) {
+			kept = append(kept, s)
+		}
+	}
+	tokSamples = kept
 }
 
 // tokRates returns per-group tok/s and the global tok/s over the trailing
@@ -66,12 +120,10 @@ func tokRates() (map[string]float64, float64) {
 
 	tokRateLock.Lock()
 	defer tokRateLock.Unlock()
-	kept := tokSamples[:0]
 	for _, s := range tokSamples {
 		if !s.t1.After(cutoff) {
 			continue // fully aged out
 		}
-		kept = append(kept, s)
 		// Overlap of [t0,t1] with [cutoff,now], credited at the sample's
 		// average rate.
 		o0, o1 := s.t0, s.t1
@@ -88,6 +140,6 @@ func tokRates() (map[string]float64, float64) {
 		perGroup[s.group] += toks / tokRateWindow.Seconds()
 		global += toks / tokRateWindow.Seconds()
 	}
-	tokSamples = kept
+	tokPruneLocked(now)
 	return perGroup, global
 }
