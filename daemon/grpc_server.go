@@ -287,6 +287,16 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	if isReservedSession(session) {
 		return &pb.BaseResp{Error: "session " + session + " is reserved for the goal loop"}, nil
 	}
+	// The group has to EXIST before anything is written on its behalf.
+	// saveImage creates <ROOT>/<group>/.cs/uploads and writes the bytes BEFORE
+	// enqueueSend gets a say, and the per-group pending quota is per DIRECTORY
+	// — so a caller holding `send: "*"` (the seeded agent role does) could
+	// multiply that allowance across invented group names and leave the files
+	// in shared state (audit M125). ensure() already refuses to provision an
+	// unregistered group (M17); this refuses to spend disk on one.
+	if !registeredGroup(r.Group) {
+		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
+	}
 	msg := r.Msg
 	staged := false
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
@@ -1120,6 +1130,17 @@ func (s *kotoServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Koto_Subscribe
 	g := r.GetGroup()
 	if !validGroupName(g) {
 		return status.Error(codes.InvalidArgument, "invalid group name")
+	}
+	// The group has to EXIST before a tailer is allocated for it. `tails` is
+	// process-wide and permanent, and tailFile creates the log file and then
+	// polls it forever — so a role holding `subscribe_group: "*"` (which the
+	// seeded `agent` role does) could subscribe to unique invented names and
+	// leave a descriptor, a goroutine and a poll loop behind for each, with
+	// nothing tying any of them to the stream that asked (audit M124). The
+	// ACL authorizes the VERB against a target pattern; it does not assert the
+	// target is real, and nothing else did either.
+	if !registeredGroup(g) {
+		return status.Errorf(codes.NotFound, "no such group %q", g)
 	}
 	ensureTail(g)
 	sub := &groupSub{ch: make(chan *pb.Event, 256), done: make(chan struct{})}

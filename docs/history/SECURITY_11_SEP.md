@@ -2278,3 +2278,25 @@ one produces a peer that hangs up rather than an error naming the size.
 (M36 already narrowed the exposure considerably: uploads are per-turn now, so
 only files the message references are packed, not everything newer than a
 group-wide watermark.) `TestOversizeFramesAreRefusedBeforeSending`.
+
+### M124 — Authenticated wildcard subscriber can permanently allocate tailers for nonexistent groups (`daemon/grpc_server.go`) — **fixed**
+### M125 — Wildcard-authorized Send can exhaust shared storage across group buckets (`daemon/attachments.go`) — **fixed**
+
+The same mistake in two RPCs: spending daemon resources on a group NAME before
+establishing that the group exists. The ACL authorizes a verb against a target
+PATTERN, and a role holding `"*"` — which the seeded `agent` role does — can
+legitimately name anything; nothing else asserted the target was real.
+
+- **Subscribe** called `ensureTail` first. `tails` is process-wide and
+  permanent, and `tailFile` CREATES the log file and then polls it forever, with
+  nothing tying the tailer to the stream that asked. Unique invented names left
+  a descriptor, a goroutine and a poll loop behind for each.
+- **Send** processed attachments first. `saveImage` creates
+  `<ROOT>/<group>/.cs/uploads` and writes the bytes before `enqueueSend` gets a
+  say, and the pending quota is per DIRECTORY — so the per-group allowance
+  multiplied across the namespace, in shared state, for groups that do not
+  exist.
+
+Both now require `registeredGroup` first. This completes what M17 started:
+`ensure()` refuses to PROVISION an unregistered group, and these refuse to spend
+a descriptor or a byte of disk on one. `TestRPCsRefuseUnregisteredGroups`.

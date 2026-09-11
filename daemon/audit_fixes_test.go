@@ -4011,3 +4011,57 @@ func TestOversizeFramesAreRefusedBeforeSending(t *testing.T) {
 		t.Fatalf("a request under the limit was refused: %v", err)
 	}
 }
+
+// 2026-09-11 M124/M125: two RPCs spent daemon resources on a group name before
+// establishing that the group exists. The ACL authorizes a verb against a
+// target PATTERN — a role holding "*" (the seeded `agent` role does) can name
+// anything — and nothing else asserted the target was real.
+func TestRPCsRefuseUnregisteredGroups(t *testing.T) {
+	fcHarness(t)
+	srv := &kotoServer{}
+
+	// Send: saveImage would create <ROOT>/<group>/.cs/uploads and write the
+	// bytes before enqueueSend gets a say, and the pending quota is per
+	// directory — so the allowance multiplies across invented names.
+	resp, _ := srv.Send(context.Background(), &pb.SendReq{
+		Group: "invented", Msg: "hi",
+		Image: []byte("\x89PNG\r\n\x1a\n"), ImageMime: "image/png",
+	})
+	if resp.Ok {
+		t.Fatal("Send accepted an unregistered group")
+	}
+	if !strings.Contains(resp.Error, "no such group") {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	if _, err := os.Stat(vol("invented")); err == nil {
+		t.Fatal("Send created a workspace for an unregistered group")
+	}
+
+	// Subscribe: `tails` is process-wide and permanent, and tailFile creates
+	// the log file and polls it forever.
+	err := srv.SubscribeGroup(&pb.SubscribeReq{Group: "invented2"}, nil)
+	if err == nil {
+		t.Fatal("SubscribeGroup accepted an unregistered group")
+	}
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("want NotFound, got %v", err)
+	}
+	subsLock.Lock()
+	_, claimed := tails[groupLogPath("invented2")]
+	subsLock.Unlock()
+	if claimed {
+		t.Fatal("a tailer was allocated for an unregistered group")
+	}
+
+	// A registered group still works on both.
+	const g = "realgroup"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o700)
+	groupsLock.Lock()
+	m := readGroups()
+	m[g] = PORT_BASE + 903
+	writeGroups(m)
+	groupsLock.Unlock()
+	if !registeredGroup(g) {
+		t.Fatal("setup: the group is not registered")
+	}
+}
