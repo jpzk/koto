@@ -5538,3 +5538,62 @@ func TestFleetMemoryCapHonoursTheCgroupLimit(t *testing.T) {
 		t.Errorf("KOTO_HOST_MEM_MIB was overruled: cap = %d", fcHostMemCapMiB)
 	}
 }
+
+// 2026-09-11 M154: the SubscribeGroup handler returns on sub.done — BETWEEN
+// sends. A stream.Send already in flight blocks on HTTP/2 flow control for as
+// long as the client keeps the connection open without reading, and closing a
+// channel does not interrupt it. So shut() left the subscriber registered, with
+// its 256 queued frames held and emit() still walking it on every event. The
+// handler goroutine and its stream cannot be reclaimed from this side — that is
+// what streamAdmit bounds (M95) — but the registration and the queued frames
+// can be, and are.
+func TestShutSubscriberIsDeregisteredAndDrained(t *testing.T) {
+	const g = "m154"
+
+	sub := &groupSub{ch: make(chan *pb.Event, 4), done: make(chan struct{})}
+	subsLock.Lock()
+	subscribers[g] = append(subscribers[g], sub)
+	subsLock.Unlock()
+	t.Cleanup(func() {
+		subsLock.Lock()
+		delete(subscribers, g)
+		subsLock.Unlock()
+	})
+
+	// Fill the buffer, then overflow it: emit's default branch fires.
+	for i := 0; i < 8; i++ {
+		emit(g, Event{Event: "text", Text: strings.Repeat("x", 64)})
+	}
+	select {
+	case <-sub.done:
+	default:
+		t.Fatal("an overflowing subscriber was not shut")
+	}
+
+	subsLock.Lock()
+	n := len(subscribers[g])
+	subsLock.Unlock()
+	if n != 0 {
+		t.Errorf("a shut subscriber is still registered (%d) — emit keeps walking it", n)
+	}
+	if q := len(sub.ch); q != 0 {
+		t.Errorf("a shut subscriber still holds %d queued frames", q)
+	}
+	// Its channel must NOT be closed: the handler may still be selecting on
+	// it, and a closed channel would hand it a nil event to Send.
+	select {
+	case ev, ok := <-sub.ch:
+		if !ok {
+			t.Error("drain closed the subscriber's channel")
+		} else {
+			t.Errorf("the queue was not empty after all: %v", ev)
+		}
+	default:
+	}
+
+	// Further events do not reach it, and do not panic on the drained channel.
+	emit(g, Event{Event: "text", Text: "after"})
+	if q := len(sub.ch); q != 0 {
+		t.Errorf("a deregistered subscriber received %d more frames", q)
+	}
+}

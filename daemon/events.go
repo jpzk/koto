@@ -30,6 +30,50 @@ type groupSub struct {
 // strictly better than the old silent frame drop).
 func (s *groupSub) shut() { s.shutOnce.Do(func() { close(s.done) }) }
 
+// dropSub is shut() plus the cleanup that used to wait on the handler noticing
+// (audit M154): deregister the subscriber and drain its queue.
+//
+// The handler's select returns on sub.done — BETWEEN sends. A stream.Send that
+// is already in flight blocks on HTTP/2 flow control for as long as the client
+// keeps the connection open without reading, and closing a channel does not
+// interrupt it. So the handler stayed put, and with it the 256 queued events
+// and a registration emit() kept walking on every frame.
+//
+// Cutting the subscriber loose here is what is actually in this side's gift:
+// the queued frames are freed, no further frame is queued for it, and destroy()
+// no longer waits on a handler that cannot come back. The handler goroutine and
+// its stream are NOT reclaimed — returning from a server handler with a Send in
+// flight, or calling Send from a second goroutine, are both outside what
+// grpc-go permits, and the server cannot cancel a stream context it does not
+// own. What bounds those is the per-identity and global stream admission
+// (streamAdmit, audit M95); they come back when the transport dies.
+func dropSub(g string, s *groupSub) {
+	s.shut()
+	subsLock.Lock()
+	kept := subscribers[g][:0]
+	for _, x := range subscribers[g] {
+		if x != s {
+			kept = append(kept, x)
+		}
+	}
+	subscribers[g] = kept
+	subsLock.Unlock()
+	drainSub(s)
+}
+
+// drainSub frees the frames a shut subscriber will never read. The channel is
+// deliberately NOT closed: the handler may still be selecting on it, and a
+// closed channel would hand it a nil event to Send.
+func drainSub(s *groupSub) {
+	for {
+		select {
+		case <-s.ch:
+		default:
+			return
+		}
+	}
+}
+
 // eventRingMax bounds the per-group replay ring. Sized to cover several
 // turns of streaming frames — a reconnecting client whose since_seq has
 // aged out gets a synthetic `gap` event and refetches history instead.
@@ -206,7 +250,10 @@ func emit(g string, ev Event) {
 		select {
 		case s.ch <- pbev:
 		default:
-			s.shut()
+			// Overflow: end the stream AND cut the subscriber loose, rather
+			// than waiting for a handler that may be blocked mid-Send to
+			// notice (audit M154).
+			dropSub(g, s)
 		}
 	}
 }

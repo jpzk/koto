@@ -662,13 +662,15 @@ func destroy(g string) baseResp {
 	delete(eventRing, g)
 	delete(ringFloor, g)
 	delete(ringPartial, g)
-	if subs, ok := subscribers[g]; ok {
-		for _, c := range subs {
-			c.shut() // unblock the stream handler so it returns (group is gone)
-		}
-		delete(subscribers, g)
-	}
+	gone := subscribers[g]
+	delete(subscribers, g)
 	subsLock.Unlock()
+	for _, c := range gone {
+		c.shut() // unblock the stream handler so it returns (group is gone)
+		// ...and free what it will never read. A handler blocked mid-Send
+		// does not come back to do it (audit M154).
+		drainSub(c)
+	}
 	return baseResp{OK: true}
 }
 
