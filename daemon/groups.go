@@ -333,6 +333,10 @@ func stopGroupPrepare(g string) {
 	// sweep is still running for its first minutes and would otherwise start
 	// the group back up after this stop completes.
 	autostartCancel(g)
+	// Same reasoning for a job completion already buffered here: its debounce
+	// flush is an enqueueSend, whose first act is ensure() (audit 2026-09-11
+	// L46).
+	dropPendingJobNotifications(g)
 	// A running goal would silently re-boot the VM on its next iteration,
 	// overriding the operator's stop — pause it first (no-op otherwise).
 	goalPauseOnStop(g)

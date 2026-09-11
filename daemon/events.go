@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"sort"
@@ -123,6 +125,21 @@ var (
 	eventRingBytes = map[string]int{}
 )
 
+// seqBaseFn is seqBase, overridable so the ring tests can pin sequences to
+// start at 1 and keep their explicit arithmetic.
+var seqBaseFn = seqBase
+
+// seqBase picks a group incarnation's starting sequence number. Random, so a
+// cursor from an earlier incarnation cannot coincide with a position in this
+// one; well below the range where a long-lived group would ever reach it.
+func seqBase() uint64 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano() & 0x7fffffff)
+	}
+	return uint64(binary.BigEndian.Uint32(b[:]))
+}
+
 // isPartial reports whether ev is a cumulative in-progress line — the
 // tailer re-emits the whole partial on every 50ms poll while a line is
 // being streamed, and each one supersedes the last.
@@ -153,6 +170,16 @@ func isPartial(ev *pb.Event) bool {
 func recordEvent(g string, pbev *pb.Event) []*groupSub {
 	subsLock.Lock()
 	defer subsLock.Unlock()
+	if eventSeq[g] == 0 {
+		// A fresh sequence space for this incarnation, starting at a random
+		// base rather than at 1 (audit 2026-09-11 L47). The floor starts with
+		// it, so any cursor from a previous incarnation of this NAME — or from
+		// a previous daemon — lands below it and is answered with a gap
+		// instead of being mistaken for a position in this one.
+		base := seqBaseFn()
+		eventSeq[g] = base
+		ringFloor[g] = base
+	}
 	eventSeq[g]++
 	pbev.Seq = eventSeq[g]
 	ring := eventRing[g]
@@ -261,11 +288,20 @@ func clearEventRing(g string) {
 
 func replayFrom(g string, since uint64) []*pb.Event {
 	cur := eventSeq[g]
+	// CONTINUITY FIRST (audit 2026-09-11 L47). `since == cur` used to answer
+	// "you are up to date" before proving the cursor belongs to this sequence
+	// space at all — and the space is process-local: destroy deletes the
+	// counter, a daemon restart recreates the map empty, and group names are
+	// reusable. A client holding N from a previous incarnation, against a new
+	// one that had emitted exactly N events, got neither replay nor gap and
+	// went on believing its transcript was current. Seeding each incarnation at
+	// a random base (seqBaseFor) is what makes the floor test decisive: a
+	// stale cursor is below this incarnation's floor, so it is a gap.
+	if since > 0 && (since > cur || since < ringFloor[g]) {
+		return []*pb.Event{{Event: "gap", Group: g, Ts: float64(time.Now().UnixNano()) / 1e9}}
+	}
 	if since == cur {
 		return nil
-	}
-	if since > cur || since < ringFloor[g] {
-		return []*pb.Event{{Event: "gap", Group: g, Ts: float64(time.Now().UnixNano()) / 1e9}}
 	}
 	ring := eventRing[g]
 	idx := sort.Search(len(ring), func(i int) bool { return ring[i].Seq > since })

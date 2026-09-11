@@ -152,6 +152,15 @@ function execBash(command) {
       cwd: '/workspace',
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Its own process GROUP (audit 2026-09-11 L50). The timeout below used
+      // to signal the bash pid alone, so a command that forked or backgrounded
+      // anything left those children running — free to keep burning the
+      // guest's cpu and writing to /workspace after the tool call had reported
+      // a timeout. And a descendant holding the inherited stdout or stderr
+      // keeps the pipe open, so the 'close' event this Promise waits on does
+      // not arrive until IT exits either. detached puts bash in a new group
+      // whose negative pid reaches the whole tree.
+      detached: true,
     });
     let out = Buffer.alloc(0);
     let truncated = false;
@@ -168,10 +177,17 @@ function execBash(command) {
     };
     proc.stdout.on('data', collect);
     proc.stderr.on('data', collect);
+    // Signal the GROUP, not the single pid — that is the whole point of
+    // detached above. A negative pid is the process group; falling back to the
+    // bare pid keeps the old behaviour if the group is already gone.
+    const killGroup = (sig) => {
+      try { process.kill(-proc.pid, sig); }
+      catch { try { proc.kill(sig); } catch {} }
+    };
     const killTimer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill('SIGTERM'); } catch {}
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
+      killGroup('SIGTERM');
+      setTimeout(() => killGroup('SIGKILL'), 2000);
     }, BASH_TIMEOUT_MS);
     proc.on('close', (code, signal) => {
       clearTimeout(killTimer);

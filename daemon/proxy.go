@@ -98,8 +98,25 @@ func proxyInitPaths() {
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
 	credPath = os.Getenv("CRED_PATH")
 	if credPath == "" {
-		home, _ := os.UserHomeDir()
-		credPath = filepath.Join(home, ".claude", ".credentials.json")
+		// The STATE dir first, then $HOME (audit 2026-09-11 L43). The two agree
+		// in the supported deployments — the unit sets HOME to the state dir —
+		// but nothing enforced that for a daemon started by hand, and the
+		// divergence is silent and expensive: `koto claude-login` resolves its
+		// target from KOTO_HOME, so an operator could log in, see it verified,
+		// and have the live proxy go on using a DIFFERENT account's token from
+		// their personal ~/.claude — other identity, other quota, other bill,
+		// with nothing on either side saying so.
+		//
+		// Preferring <state>/.claude/.credentials.json makes the daemon agree
+		// with the command that writes it, whatever HOME happens to be. The
+		// $HOME fallback stays for the case where the state dir has no
+		// credential at all, and CRED_PATH still overrides both.
+		if p := filepath.Join(HERE, ".claude", ".credentials.json"); fileExists(p) {
+			credPath = p
+		} else {
+			home, _ := os.UserHomeDir()
+			credPath = filepath.Join(home, ".claude", ".credentials.json")
+		}
 	}
 	envAPIKey = os.Getenv("ANTHROPIC_API_KEY")
 	// The state dir is where `koto setup` writes the key. The wizard runs
@@ -111,6 +128,12 @@ func proxyInitPaths() {
 	// looks there. Note the PATH is resolved here; the FILE is read per
 	// request by currentAPIKey — see there for why.
 	apiKeyPath = filepath.Join(HERE, "creds", "anthropic-api-key")
+}
+
+// fileExists reports whether p names something that is there.
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // currentAPIKey resolves the API key fresh on every call. ANTHROPIC_API_KEY is
