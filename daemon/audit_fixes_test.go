@@ -1816,3 +1816,53 @@ func TestConcurrentGoalSetsGetDistinctNames(t *testing.T) {
 	goalCancelOnDestroy(g)
 	waitGoalTerminal(t, g)
 }
+
+// 2026-09-11 M49: plan-first on a delegated goal IS the human gate, so the
+// DELEGATE must not be able to close it. goal_approve checked only that the
+// target was self — which a goal main set on this group also is — so the peer
+// approved its own delegated plan and M20's forced plan-first was decorative.
+func TestCtlApprovesOnlySelfSetGoals(t *testing.T) {
+	goalTestSetup(t)
+	fcHarness(t)
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		// main delegates to peer; peer tries to approve it.
+		resp := ctlDispatch("main", ctlLine(t, map[string]any{
+			"cmd": "goal_set", "group": "peer", "text": "do it", "criteria": "1. done", "name": "deleg",
+		}))
+		if gr, ok := resp.(goalResp); !ok || !gr.OK {
+			t.Fatalf("delegation refused: %+v", resp)
+		}
+		waitGoal(t, "peer", goalStatusAwaiting)
+		resp = ctlDispatch("peer", ctlLine(t, map[string]any{"cmd": "goal_approve", "name": "deleg"}))
+		br, ok := resp.(baseResp)
+		if !ok || br.OK || !strings.Contains(br.Error, "needs a human") {
+			t.Fatalf("the delegate approved its own delegated plan: %+v", resp)
+		}
+		// The operator still can, over the RPC.
+		srv := &kotoServer{}
+		gresp, _ := srv.GoalApprove(context.Background(), &pb.GoalGroupReq{Group: "peer", Name: "deleg"})
+		if !gresp.Ok {
+			t.Fatalf("operator could not approve: %s", gresp.Error)
+		}
+		goalCancelOnDestroy("peer")
+		waitGoalTerminal(t, "peer")
+	})
+
+	// A group's own plan-first goal is still its own to approve — that is how
+	// a coordinator starts plan-first work autonomously.
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		resp := ctlDispatch("solo", ctlLine(t, map[string]any{
+			"cmd": "goal_set", "group": "solo", "text": "my own", "criteria": "1. done", "name": "mine",
+		}))
+		if gr, ok := resp.(goalResp); !ok || !gr.OK {
+			t.Fatalf("self goal_set refused: %+v", resp)
+		}
+		waitGoal(t, "solo", goalStatusAwaiting)
+		resp = ctlDispatch("solo", ctlLine(t, map[string]any{"cmd": "goal_approve", "name": "mine"}))
+		if gr, ok := resp.(goalResp); !ok || !gr.OK {
+			t.Fatalf("a group could not approve its OWN plan: %+v", resp)
+		}
+		goalCancelOnDestroy("solo")
+		waitGoalTerminal(t, "solo")
+	})
+}

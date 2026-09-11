@@ -732,7 +732,10 @@ func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp,
 		return &pb.GoalResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
 	}
 	plan := r.Plan == nil || r.GetPlan() // absent = plan-first default
-	it, err := goalSet(r.Group, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
+	// "" creator: the operator set this one. It is the human the plan gate
+	// defers to, and it approves over GoalApprove — the guest ctl plane must
+	// not be able to (audit M49).
+	it, err := goalSetBy("", r.Group, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}

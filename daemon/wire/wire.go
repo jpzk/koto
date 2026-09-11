@@ -354,7 +354,13 @@ type GoalItem struct {
 	Criteria string `json:"criteria"`
 	// Plan records whether the goal was set plan-first (one planning turn,
 	// then awaiting_approval until a human approves).
-	Plan          bool   `json:"plan"`
+	Plan bool `json:"plan"`
+	// CreatedBy is the GROUP that set this goal, and it exists so the guest
+	// ctl plane can tell a self-set goal from one main delegated to it (audit
+	// M49). Empty means the operator set it over gRPC. Loop-internal: the
+	// pb conversions don't carry it — it is an authorization fact, not
+	// something a client renders.
+	CreatedBy     string `json:"created_by,omitempty"`
 	Status        string `json:"status"` // planning | awaiting_approval | running | paused | met | cancelled
 	Iteration     int    `json:"iteration"`
 	MaxIterations int    `json:"max_iterations"`

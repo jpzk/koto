@@ -624,7 +624,18 @@ func goalSessionSlug(it goalItem) string {
 	return it.ID
 }
 
+// goalSet creates a SELF-set goal — the group is its own creator, so its own
+// agent may approve the plan. Kept as the plain form because that is what a
+// group setting a goal on itself means, and what the tests exercise.
 func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalItem, error) {
+	return goalSetBy(group, group, text, criteria, name, maxIter, plan)
+}
+
+// goalSetBy records WHO set the goal. creator is the group that asked; "" is
+// the operator, over gRPC. The ctl plane's goal_approve consults it, because
+// plan-first on a delegated goal IS the human gate and the delegate must not
+// be able to close it (audit M49).
+func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bool) (goalItem, error) {
 	if group == "" {
 		return goalItem{}, fmt.Errorf("group is required")
 	}
@@ -672,6 +683,7 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 		Text:          text,
 		Criteria:      criteria,
 		Plan:          plan,
+		CreatedBy:     creator,
 		Status:        status,
 		MaxIterations: maxIter,
 		CreatedAt:     goalNow(),
@@ -1571,4 +1583,24 @@ without a verdict is discarded):
   printf '{"cmd":"goal_verdict","id":"%s","met":false,"reasons":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl`,
 		it.ID, it.Iteration, it.MaxIterations, goalDirFor(it), it.Text, it.Criteria, it.ID, it.ID)
+}
+
+// ctlGoalSelfSet reports whether the named goal of g was set BY g, i.e.
+// whether g's own ctl plane may approve its plan. See the goal_approve case in
+// ctl.go for why self-targeted is not the same question.
+func ctlGoalSelfSet(g, name string) error {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	it, err := resolveGoalLocked(g, name, []string{goalStatusAwaiting})
+	if err != nil {
+		return err
+	}
+	if it.CreatedBy != g {
+		who := "the operator"
+		if it.CreatedBy != "" {
+			who = it.CreatedBy
+		}
+		return fmt.Errorf("ctl: goal %q was set by %s — its plan needs a human to approve", goalSessionSlug(*it), who)
+	}
+	return nil
 }

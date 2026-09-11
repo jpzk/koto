@@ -558,7 +558,7 @@ func ctlDispatch(owner string, line []byte) any {
 			plan = true
 			emitLogfG("goal", req.Group, "info", "[%s] main set a peer goal with plan=false; forcing plan-first (approval is a human's)", req.Group)
 		}
-		it, err := goalSet(req.Group, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		it, err := goalSetBy(owner, req.Group, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
 		if err != nil {
 			return errResp(err.Error())
 		}
@@ -575,6 +575,20 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		if req.Group != "" && req.Group != owner {
 			return errResp("ctl: goal_approve is self-only (a plan set on a peer needs a human)")
+		}
+		// Self-TARGETED was never the question. A goal main delegated to this
+		// group is self-targeted from here, so the check above let the
+		// delegate approve its own delegated plan — closing the human gate
+		// that plan-first exists to open, and making the forced plan-first on
+		// main→peer goals (M20) decorative (audit M49). Approve only what this
+		// group SET. An operator-set goal ("" creator) and a main-delegated one
+		// both need a human, who has GoalApprove over gRPC.
+		//
+		// A record written before CreatedBy existed has no creator, so it
+		// needs the operator too: the safe reading of "unknown provenance",
+		// and self-limiting, since goals turn over.
+		if err := ctlGoalSelfSet(owner, req.Name); err != nil {
+			return errResp(err.Error())
 		}
 		it, err := goalApprove(owner, req.Name)
 		if err != nil {
