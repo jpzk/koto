@@ -100,6 +100,30 @@ func protectHomeHides(path string) bool {
 	return path == "/home" || path == "/root" || path == "/run/user"
 }
 
+// protectHomeRoot says whether path is a whole protected HOME rather than a
+// directory inside one: /home/<user>, /root, /run/user/<uid>, or the parents
+// of those.
+//
+// Binding one of these read-only into the unit would make every file in the
+// operator's home visible to the daemon — unrelated credentials, private
+// repositories, ssh keys — which is the confidentiality half of ProtectHome
+// and not something a claude location should be able to switch off (audit
+// M93). Read-only is not containment here; the daemon is tier 2 and the home
+// is tier 1's.
+func protectHomeRoot(path string) bool {
+	path = filepath.Clean(path)
+	switch path {
+	case "/home", "/root", "/run/user", "/":
+		return true
+	}
+	for _, pre := range []string{"/home/", "/run/user/"} {
+		if strings.HasPrefix(path, pre) && !strings.Contains(path[len(pre):], "/") {
+			return true // exactly /home/<user> or /run/user/<uid>
+		}
+	}
+	return strings.HasPrefix(path, "/root/") && !strings.Contains(path[len("/root/"):], "/")
+}
+
 // claudeBindDirs lists the directories a ProtectHome'd unit must bind
 // read-only for bin to be executable: the directory holding the PATH entry
 // and, when that is a symlink, the directory holding its target. Directories
@@ -119,6 +143,14 @@ func claudeBindDirs(bin string, hidden func(string) bool) []string {
 	var out []string
 	add := func(d string) {
 		if !hidden(d) {
+			return
+		}
+		if protectHomeRoot(d) {
+			// A claude sitting directly in the operator's home would bind the
+			// WHOLE home read-only into the service namespace. Refuse, and let
+			// the caller report it — the fix is to move the binary (the native
+			// installer's ~/.local/bin is already fine), not to hand tier 2 the
+			// operator's home (audit M93).
 			return
 		}
 		for _, o := range out {
