@@ -1585,3 +1585,29 @@ split into `stopGroupPrepare` (pause goals, discard queued traffic, disarm the
 report window, cancel in-flight turns) and `stopGroupLocked` (the power-off),
 since Go mutexes are not reentrant and `destroy` calls both from inside the
 lock. `TestDestroyHoldsTheGroupLockThroughout`.
+
+### M85 — Interrupt can cancel a subsequent session turn via a TOCTOU race (`daemon/queue.go`) — **fixed**
+
+Real. Turn state is keyed by `(group, session)` and REUSED, and `Interrupt`
+asked `sessionBusy` under one lock acquisition and cancelled under another. If
+the observed turn retired in the gap and the worker had already started the
+next queued prompt, the cancel closed the NEW turn's channel — aborting a
+prompt nobody asked to interrupt.
+
+The turn now has an IDENTITY the interrupt can name: `sessionTurn` returns the
+running turn's cancel channel (made fresh per turn by `sendWorkerTurn`), and
+`cancelTurn` closes it only while it is still the current one. A successor
+holding the key is left alone, and the RPC reports "no turn in flight", which
+is the truthful answer about the turn the caller meant.
+`TestInterruptCancelsOnlyTheObservedTurn`.
+
+`requestTurnCancel` survives unchanged for `stopGroup` and `clearFence`, which
+genuinely mean "whatever is running now" — they are cancelling the session, not
+one turn of it.
+
+**Residual, stated:** `interruptAgent` signals the guest by SESSION, matching
+worker processes rather than a pid, so the same race could in principle deliver
+a SIGINT to a successor turn's worker. Narrowing it needs the guest to report
+the turn's pid back to the daemon — a protocol change — and the window is
+small, same-session and same-caller-authority. The channel half, which is what
+actually discards a queued prompt, is closed.

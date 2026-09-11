@@ -2956,3 +2956,67 @@ func TestDestroyHoldsTheGroupLockThroughout(t *testing.T) {
 		t.Fatal("the group is still registered after destroy")
 	}
 }
+
+// 2026-09-11 M85: turn state is keyed by (group, session) and REUSED, so an
+// interrupt that observed one turn and cancelled under a later lock
+// acquisition could abort the NEXT queued prompt instead.
+func TestInterruptCancelsOnlyTheObservedTurn(t *testing.T) {
+	const g, sess = "interrupt", "s"
+	k := sessKey(g, sess)
+	t.Cleanup(func() {
+		queuesMu.Lock()
+		delete(inFlightSess, k)
+		delete(turnCancels, k)
+		queuesMu.Unlock()
+	})
+
+	// A turn is running; capture its identity the way Interrupt does.
+	queuesMu.Lock()
+	first := make(chan struct{})
+	inFlightSess[k], turnCancels[k] = true, first
+	queuesMu.Unlock()
+	observed := sessionTurn(g, sess)
+	if observed != first {
+		t.Fatal("sessionTurn did not return the running turn")
+	}
+
+	// It retires and the worker starts the NEXT prompt in the same session,
+	// reusing the key — exactly the gap the old code cancelled through.
+	queuesMu.Lock()
+	second := make(chan struct{})
+	turnCancels[k] = second
+	queuesMu.Unlock()
+
+	if cancelTurn(g, sess, observed) {
+		t.Fatal("the interrupt cancelled a turn it never observed")
+	}
+	select {
+	case <-second:
+		t.Fatal("the successor turn was cancelled")
+	default:
+	}
+
+	// Cancelling the turn that IS current works, and is idempotent.
+	if !cancelTurn(g, sess, second) {
+		t.Fatal("cancelling the current turn failed")
+	}
+	select {
+	case <-second:
+	default:
+		t.Fatal("the current turn's channel was not closed")
+	}
+	if !cancelTurn(g, sess, second) {
+		t.Fatal("a repeated cancel of the same turn should still report success")
+	}
+
+	// No turn running: nothing to name, nothing cancelled.
+	queuesMu.Lock()
+	delete(inFlightSess, k)
+	queuesMu.Unlock()
+	if sessionTurn(g, sess) != nil {
+		t.Fatal("sessionTurn named a turn with none in flight")
+	}
+	if cancelTurn(g, sess, nil) {
+		t.Fatal("cancelTurn(nil) reported a cancellation")
+	}
+}
