@@ -384,6 +384,23 @@ type toolState struct {
 }
 type thinkState struct{ words strings.Builder }
 
+// validSessionID accepts the provider's opaque conversation id: a UUID in
+// practice, so hex and dashes. Deliberately narrow — this value becomes a path
+// component on the host's clear path, and nothing legitimate needs more.
+func validSessionID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func newClaudeParser(tw *turnConn, idf string) *claudeParser {
 	return &claudeParser{tw: tw, idf: idf, tools: map[int]*toolState{}, thinking: map[int]*thinkState{}}
 }
@@ -427,7 +444,14 @@ func (p *claudeParser) line(b []byte) {
 	}
 	// Session pinning: every record carries the run's session_id; capture
 	// the first so the next turn can --resume the same conversation.
-	if p.idf != "" && !p.wroteID && ev.SessionID != "" {
+	//
+	// Validated, because this value is not ours: it comes off the provider's
+	// stream and lands in a file the worker can also rewrite, and the daemon's
+	// clear path substitutes it into a path
+	// (/workspace/.claude/projects/*/<id>.jsonl). An id of "../other/x" walks
+	// out of the session's own project directory (audit M33). Claude's ids are
+	// UUIDs; anything outside that charset is not one.
+	if p.idf != "" && !p.wroteID && validSessionID(ev.SessionID) {
 		writeWorkerFile(p.idf, []byte(ev.SessionID))
 		p.wroteID = true
 	}

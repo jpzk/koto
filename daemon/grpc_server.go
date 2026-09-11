@@ -425,11 +425,21 @@ func (s *kotoServer) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp,
 	return &pb.ConfigResp{Ok: resp.OK, Error: resp.Error, Config: toStruct(sanitizeConfig(resp.Config))}, nil
 }
 
-func (s *kotoServer) Metrics(_ context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
+func (s *kotoServer) Metrics(ctx context.Context, r *pb.MetricsReq) (*pb.MetricsResp, error) {
 	if r.Group != "" && !validGroupName(r.Group) {
 		return &pb.MetricsResp{Error: "invalid group name"}, nil
 	}
-	out := &pb.MetricsResp{Ok: true, GlobalMetric: toStruct(latestMetricAny())}
+	out := &pb.MetricsResp{Ok: true}
+	// GlobalMetric is the newest record from ANY group — path, status, request
+	// id, token counts, rate-limit and provider-org metadata — and it used to
+	// ride along with every scoped answer. The ACL had done its job: it
+	// checked `metrics` against r.Group. This field simply ignored the target,
+	// so asking about a group you may see returned another group's newest
+	// request (audit M30). It is a global read, so it needs the "*" grant the
+	// untargeted form of this verb already needs.
+	if id := identityOf(ctx); id.Name == "" || visibleTargets(loadACL(), id.Roles, "metrics").any {
+		out.GlobalMetric = toStruct(latestMetricAny())
+	}
 	if r.Group != "" {
 		out.Metric = toStruct(latestMetric(r.Group))
 	}
@@ -614,9 +624,23 @@ func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, err
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
+// registeredGroup reports whether g is a live group. Both deferred-work verbs
+// check it: a schedule or a goal is a promise to send LATER, and ensure() no
+// longer provisions on a send (M17), so an unregistered target used to persist
+// a record that could only ever fail at fire time. Refusing at creation turns
+// that into an error the caller can read, and keeps `spawn` the one verb that
+// brings a group into existence (audit M29).
+func registeredGroup(g string) bool {
+	_, ok := readGroups()[g]
+	return ok
+}
+
 func (s *kotoServer) SchedAdd(_ context.Context, r *pb.SchedAddReq) (*pb.SchedAddResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.SchedAddResp{Error: "invalid group name"}, nil
+	}
+	if !registeredGroup(r.Group) {
+		return &pb.SchedAddResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
 	}
 	it, err := addSched(r.Group, r.Cron, r.Msg)
 	if err != nil {
@@ -691,6 +715,9 @@ func (s *kotoServer) SchedRun(ctx context.Context, r *pb.SchedIDReq) (*pb.BaseRe
 func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.GoalResp{Error: "invalid group name"}, nil
+	}
+	if !registeredGroup(r.Group) {
+		return &pb.GoalResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
 	}
 	plan := r.Plan == nil || r.GetPlan() // absent = plan-first default
 	it, err := goalSet(r.Group, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
