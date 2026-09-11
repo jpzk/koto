@@ -121,3 +121,27 @@ func TestGoalLifecycleRPCsCarryTheName(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M111: error text is assembled on the CLIENT from gRPC status
+// messages, daemon errors and guest errors, and it goes into both the rendered
+// frame and the debug log, neither of which strips anything. addLine is the
+// one place every error line passes through.
+func TestErrorLinesAreScrubbed(t *testing.T) {
+	esc := string(rune(0x1b))
+	m := &Model{lines: nil, groupVer: map[string]int{}, vpCache: map[string]vpCacheEntry{}}
+	m.addLine(logLine{kind: "err", group: "g", text: esc + "]52;c;cGF5bG9hZA==" + string(rune(7)) + "stolen"})
+	if len(m.lines) != 1 {
+		t.Fatalf("addLine stored %d lines", len(m.lines))
+	}
+	got := m.lines[0].text
+	for _, r := range got {
+		if r == 0x1b || (r < 0x20 && r != '\n') || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) {
+			t.Fatalf("error line kept %q: %q", r, got)
+		}
+	}
+	// Ordinary error text is untouched.
+	m.addLine(logLine{kind: "err", group: "g", text: "no such group \"ghost\""})
+	if got := m.lines[1].text; got != "no such group \"ghost\"" {
+		t.Fatalf("a plain error was mangled: %q", got)
+	}
+}
