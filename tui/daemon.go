@@ -550,7 +550,7 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 				// terminal the moment they hovered the row (audit M62). A
 				// client cannot rely on a peer it is explicitly compatible
 				// with; scrubVT is the same policy daemon/sanitize.go applies.
-				line := scrubVT(string(ev.Chunk))
+				line := scrubVTStrict(string(ev.Chunk))
 				for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
 					line = line[:len(line)-1]
 				}

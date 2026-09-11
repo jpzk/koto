@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 )
 
@@ -97,12 +98,12 @@ func scanEsc(b *strings.Builder, rs []rune, i int) int {
 			j++
 		}
 		if j < n && rs[j] == 'm' { // SGR: params were digits/';' only
-			b.WriteByte(0x1b)
-			b.WriteByte('[')
-			for k := start; k < j; k++ {
-				b.WriteRune(rs[k])
+			if params, ok := sgrApproved(string(rs[start:j])); ok {
+				b.WriteByte(0x1b)
+				b.WriteByte('[')
+				b.WriteString(params)
+				b.WriteByte('m')
 			}
-			b.WriteByte('m')
 			return j
 		}
 		// Not SGR (cursor move, private '?'-mode, intermediates): consume
@@ -134,6 +135,125 @@ func scanEsc(b *strings.Builder, rs []rune, i int) int {
 	default: // single-char ESC (ESC c = RIS reset, ESC 7/8/=/>, …)
 		return i + 1
 	}
+}
+
+// sgrApproved filters an SGR parameter list down to the attributes koto is
+// willing to let untrusted output set, and reports whether anything survived
+// (audit M141).
+//
+// "Pure SGR" was previously the whole test: a sequence whose parameters were
+// digits and semicolons was copied through verbatim. That admits four codes
+// that are not styling but DECEPTION, and every producer this sanitizer exists
+// for — guest output, tool results, a peer's report, a cs-notify title, model
+// text — can set them:
+//
+//	8  conceal   makes text invisible. A warning, a refusal, the quoted
+//	             attribution around a peer report: gone, while the transcript
+//	             still reads as complete.
+//	7  reverse   is koto's OWN vocabulary for "this is the UI, not content" —
+//	             the status bar, the chip pair, the tree's cursor row, and in
+//	             mono mode it is the ONLY signal those have. Untrusted text
+//	             painting itself reverse imitates them directly.
+//	5, 6 blink   manufacture urgency the renderer never asked for.
+//
+// So the policy is an allowlist of the styling half — weights, decorations,
+// the basic/bright color pairs and the 256/truecolor extended forms — and the
+// blink/reverse/conceal vocabulary is dropped in BOTH directions: 25, 27 and
+// 28 go too, because a lone "reverse off" inside a row koto is drawing
+// reversed escapes the highlight just as effectively as a "reverse on"
+// imitates it.
+//
+// An allowlist rather than a denylist because the parameter space is open: a
+// code nobody here has heard of should not render until somebody decides it is
+// styling. A malformed extended color (38/48/58 without its arguments) drops
+// the WHOLE sequence rather than resyncing, since resyncing would reinterpret
+// that form's arguments as codes in their own right — `38;7` would leave a 7.
+func sgrApproved(params string) (string, bool) {
+	if params == "" {
+		return "", true // ESC[m is ESC[0m — a reset, and resets are fine
+	}
+	fields := strings.Split(params, ";")
+	out := make([]string, 0, len(fields))
+	num := func(f string) (int, bool) {
+		if f == "" {
+			return 0, true // an empty parameter is 0 per ECMA-48
+		}
+		n, err := strconv.Atoi(f)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return n, true
+	}
+	for i := 0; i < len(fields); i++ {
+		n, ok := num(fields[i])
+		if !ok {
+			return "", false
+		}
+		switch {
+		case n == 38 || n == 48 || n == 58:
+			// Extended color: 5;<n> (256-color) or 2;<r>;<g>;<b>.
+			if i+1 >= len(fields) {
+				return "", false
+			}
+			mode, ok := num(fields[i+1])
+			if !ok {
+				return "", false
+			}
+			args := 0
+			switch mode {
+			case 5:
+				args = 1
+			case 2:
+				args = 3
+			default:
+				return "", false
+			}
+			if i+1+args >= len(fields) {
+				return "", false
+			}
+			for k := i + 2; k <= i+1+args; k++ {
+				v, ok := num(fields[k])
+				if !ok || v > 255 {
+					return "", false
+				}
+			}
+			out = append(out, fields[i:i+2+args]...)
+			i += 1 + args
+		case sgrStyleCode(n):
+			out = append(out, fields[i])
+		default:
+			// Dropped: 5/6/7/8 and their 25/27/28 resets, font selection
+			// (10-19), framing (51/52/54), super/subscript (73-75), and
+			// anything unrecognised.
+		}
+	}
+	if len(out) == 0 {
+		return "", false
+	}
+	return strings.Join(out, ";"), true
+}
+
+// sgrStyleCode reports whether a single SGR parameter is one of the styling
+// attributes untrusted output may set. See sgrApproved for what is missing and
+// why.
+func sgrStyleCode(n int) bool {
+	switch {
+	case n == 0, // reset
+		n == 1, n == 2, // bold, dim
+		n == 3, n == 4, // italic, underline
+		n == 9,           // strikethrough
+		n == 21, n == 22, // double underline, normal intensity
+		n == 23, n == 24, n == 29, // no italic / no underline / no strike
+		n == 26,          // proportional spacing
+		n == 53, n == 55, // overline, no overline
+		n == 39, n == 49, n == 59: // default fg / bg / underline color
+		return true
+	case n >= 30 && n <= 37, n >= 40 && n <= 47: // basic fg/bg
+		return true
+	case n >= 90 && n <= 97, n >= 100 && n <= 107: // bright fg/bg
+		return true
+	}
+	return false
 }
 
 // isBidiOrFormat reports whether r is a bidi/format control used for

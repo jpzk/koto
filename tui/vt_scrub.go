@@ -23,7 +23,22 @@ import (
 // scrubVT sanitizes one emulator-rendered screen. Newlines (the row
 // separators) pass; pure SGR sequences pass; every other escape sequence is
 // consumed and dropped; C0/C1/DEL and bidi/format runes are dropped.
-func scrubVT(s string) string {
+//
+// This is the SHELL PANE's scrub and it keeps every SGR, reverse video
+// included. The pane is a terminal, framed and bounded as one, showing the
+// guest's own rendering — less, vim, fzf and tmux all reverse cells for
+// legitimate reasons, and taking that away would break the view to prevent a
+// spoof the surrounding frame already contains. Text presented as koto's own
+// UI goes through scrubVTStrict instead (audit M141).
+func scrubVT(s string) string { return scrubVTMode(s, false) }
+
+// scrubVTStrict is scrubVT plus the daemon's SGR allowlist: for untrusted text
+// rendered as part of koto's interface rather than inside a terminal pane —
+// error lines, tool arguments, job-tail output — where conceal, blink and
+// reverse are deception rather than styling. See sgrApproved.
+func scrubVTStrict(s string) string { return scrubVTMode(s, true) }
+
+func scrubVTMode(s string, strict bool) string {
 	clean := true
 	for _, r := range s {
 		if r == 0x1b || r < 0x20 || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) {
@@ -51,9 +66,15 @@ func scrubVT(s string) string {
 			// that broke one (a new ESC, a control, a non-ASCII rune inside
 			// a CSI), so that byte is judged on its own rather than
 			// swallowed as sequence body.
-			kind, _, end := scanEsc(s, i)
+			kind, params, end := scanEsc(s, i)
 			if kind == escSGR {
-				b.WriteString(s[i:end])
+				if !strict {
+					b.WriteString(s[i:end])
+				} else if keep, ok := sgrApproved(params); ok {
+					b.WriteString("\x1b[")
+					b.WriteString(keep)
+					b.WriteString("m")
+				}
 			}
 			i = end
 			continue

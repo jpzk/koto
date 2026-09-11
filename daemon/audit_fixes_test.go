@@ -4644,3 +4644,70 @@ func closedChan() chan struct{} {
 	close(c)
 	return c
 }
+
+// 2026-09-11 M141: "pure SGR" was the whole test — a sequence whose parameters
+// were digits and semicolons went through verbatim. Four of those codes are not
+// styling but deception, and every producer this sanitizer exists for (guest
+// output, tool results, a peer's report, a cs-notify title, model text) can set
+// them: 8 conceals, 7 reverses — which is koto's own "this is the UI" signal,
+// and mono mode's ONLY one — and 5/6 blink.
+func TestSanitizeKeepsStylingAndDropsDeceptiveSGR(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		// The styling half survives, byte for byte.
+		{"reset", "\x1b[0mx", "\x1b[0mx"},
+		{"bare reset", "\x1b[mx", "\x1b[mx"},
+		{"bold red", "\x1b[1;31mx", "\x1b[1;31mx"},
+		{"bright bg", "\x1b[104mx", "\x1b[104mx"},
+		{"256 colour", "\x1b[38;5;208mx", "\x1b[38;5;208mx"},
+		{"truecolor", "\x1b[48;2;12;34;56mx", "\x1b[48;2;12;34;56mx"},
+		{"underline colour", "\x1b[58;5;9mx", "\x1b[58;5;9mx"},
+		{"strike + italic", "\x1b[3;9mx", "\x1b[3;9mx"},
+
+		// The deceptive half does not.
+		{"conceal", "\x1b[8mhidden", "hidden"},
+		{"blink", "\x1b[5mnow", "now"},
+		{"rapid blink", "\x1b[6mnow", "now"},
+		{"reverse", "\x1b[7m koto \x1b[27m", " koto "},
+		{"conceal reset", "\x1b[28mx", "x"},
+		{"blink reset", "\x1b[25mx", "x"},
+
+		// Mixed: the styling survives the same sequence the deception is
+		// hiding in, so a legitimately coloured line is not collateral.
+		{"mixed", "\x1b[1;8;31mx", "\x1b[1;31mx"},
+		{"mixed reverse", "\x1b[7;32mx", "\x1b[32mx"},
+
+		// Unrecognised codes are dropped rather than trusted: font selection,
+		// framing, subscript.
+		{"alt font", "\x1b[13mx", "x"},
+		{"framed", "\x1b[51mx", "x"},
+		{"subscript", "\x1b[74mx", "x"},
+
+		// A malformed extended colour drops the WHOLE sequence: resyncing
+		// would reinterpret its arguments as codes, and `38;7` would leave a 7.
+		{"truncated 38", "\x1b[38mx", "x"},
+		{"38 with a reverse in its argument slot", "\x1b[38;7mx", "x"},
+		{"38;2 short", "\x1b[38;2;1;2mx", "x"},
+		{"unknown selector", "\x1b[38;9;1mx", "x"},
+		{"out of range", "\x1b[38;5;999mx", "x"},
+	}
+	for _, c := range cases {
+		if got := sanitize(c.in); got != c.want {
+			t.Errorf("%s: sanitize(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+
+	// The property that matters, stated as one: no sanitized output can set
+	// conceal, blink or reverse, however the parameters are arranged.
+	for _, in := range []string{
+		"\x1b[8m", "\x1b[08m", "\x1b[;8m", "\x1b[1;;8;;2m", "\x1b[7;7;7m", "\x1b[5;6;7;8m",
+	} {
+		got := sanitize(in)
+		for _, bad := range []string{";8m", "[8m", ";7m", "[7m", ";5m", "[5m", ";6m", "[6m"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("sanitize(%q) = %q still carries %q", in, got, bad)
+			}
+		}
+	}
+}

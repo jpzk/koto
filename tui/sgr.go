@@ -240,3 +240,72 @@ func sgrNumber(f string) (int, bool) {
 	}
 	return n, true
 }
+
+// --- 2026-09-11 M141: not every "pure SGR" is styling ------------------------
+
+// sgrApproved filters an SGR parameter list down to the attributes untrusted
+// output may set, and reports whether anything survived. Same policy as
+// daemon/sanitize.go's function of the same name — the daemon module cannot be
+// imported here, and the two sanitizers have been deliberate mirrors since they
+// were written; this one is expressed on forEachSGRAttr rather than re-parsing.
+//
+// The codes it exists to remove are not styling but deception: 8 (conceal)
+// makes a warning, or the attribution quoting a peer's report, invisible while
+// the text still reads as complete; 7 (reverse) is koto's OWN vocabulary for
+// "this is the UI, not content" — the bars, the chip pair, the tree cursor —
+// and in mono mode the only signal they have; 5 and 6 (blink) manufacture
+// urgency the renderer never asked for. Their resets (25, 27, 28) go with them,
+// because a lone "reverse off" inside a row koto is drawing reversed escapes
+// the highlight as effectively as a "reverse on" imitates it.
+//
+// An allowlist, not a denylist: the parameter space is open, and a code nobody
+// here has heard of should not render until somebody decides it is styling. A
+// malformed attribute — which for 38/48/58 means a missing or unknown extended
+// form — drops the WHOLE sequence, because resyncing past it would reinterpret
+// that form's arguments as codes in their own right (`38;7` would leave a 7).
+func sgrApproved(params string) (string, bool) {
+	var out []string
+	bad := false
+	ok := forEachSGRAttr(params, func(a sgrAttr) bool {
+		if a.bad {
+			return false
+		}
+		for k := 0; k < a.nargs; k++ {
+			if a.args[k] > 255 { // not a colour component
+				bad = true
+				return false
+			}
+		}
+		if a.code == 38 || a.code == 48 || a.code == 58 || sgrStyleCode(a.code) {
+			out = append(out, a.raw)
+		}
+		return true
+	})
+	if !ok || bad || len(out) == 0 {
+		return "", false
+	}
+	return strings.Join(out, ";"), true
+}
+
+// sgrStyleCode reports whether a single SGR parameter is one of the styling
+// attributes untrusted output may set: weights, decorations, and the basic and
+// bright colour pairs. See sgrApproved for what is missing and why.
+func sgrStyleCode(n int) bool {
+	switch {
+	case n == 0, // reset
+		n == 1, n == 2, // bold, dim
+		n == 3, n == 4, // italic, underline
+		n == 9,           // strikethrough
+		n == 21, n == 22, // double underline, normal intensity
+		n == 23, n == 24, n == 29, // no italic / no underline / no strike
+		n == 26,          // proportional spacing
+		n == 53, n == 55, // overline, no overline
+		n == 39, n == 49, n == 59: // default fg / bg / underline colour
+		return true
+	case n >= 30 && n <= 37, n >= 40 && n <= 47: // basic fg/bg
+		return true
+	case n >= 90 && n <= 97, n >= 100 && n <= 107: // bright fg/bg
+		return true
+	}
+	return false
+}
