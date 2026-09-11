@@ -67,9 +67,14 @@ func notifyGroupKeys(group string) int {
 }
 
 var (
-	notifyMu      sync.Mutex
-	notifyTimers  = map[string]*time.Timer{}
-	notifyPending = map[string][]jobResult{}
+	notifyMu     sync.Mutex
+	notifyTimers = map[string]*time.Timer{}
+	// notifyTimerGen names the arming each key's live timer belongs to, so a
+	// callback that Stop() failed to unschedule can tell it has been superseded
+	// (audit 2026-09-11 L30).
+	notifyTimerGen = map[string]uint64{}
+	notifyGen      uint64
+	notifyPending  = map[string][]jobResult{}
 	// notifyMaxPending caps buffered job results per (group, session).
 	notifyMaxPending = 64
 )
@@ -133,9 +138,29 @@ func recordJobDone(group string, res jobResult) {
 	if t, ok := notifyTimers[key]; ok {
 		t.Stop()
 	}
+	// Each timer carries the identity of the ARMING, and only the timer that is
+	// still the registered one may flush (audit 2026-09-11 L30).
+	//
+	// Stop() does not unschedule a callback that is already runnable, and the
+	// old callback took no identity with it: it acquired notifyMu after the
+	// replacement had been stored, deleted the REPLACEMENT's map entry, and
+	// flushed. Deleting the entry does not cancel the replacement's own
+	// callback, so both then ran, both snapshotted the same pending results
+	// before either cleared them, and one job's completion woke the session
+	// twice. A guest that can produce notify-enabled completions could turn
+	// that into extra model turns in its own group — self-amplification on the
+	// one path that exists to wake an agent.
+	notifyGen++
+	gen := notifyGen
+	notifyTimerGen[key] = gen
 	notifyTimers[key] = time.AfterFunc(notifyDebounce, func() {
 		notifyMu.Lock()
+		if notifyTimerGen[key] != gen {
+			notifyMu.Unlock()
+			return // superseded by a later job_done; that arming will flush
+		}
 		delete(notifyTimers, key)
+		delete(notifyTimerGen, key)
 		notifyMu.Unlock()
 		flushNotify(group, session)
 	})

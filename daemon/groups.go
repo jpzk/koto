@@ -654,6 +654,14 @@ func destroy(g string) baseResp {
 	// expected-marker allowlist by name — none of which the bare
 	// `delete(tails, g)` below reached (audit M104).
 	dropGroupTailState(g)
+	// The collector's and the phase reporter's name-keyed state, for the same
+	// reason as everything above it: group names are reusable, and a
+	// replacement must not inherit the previous group's telemetry, alert LEVEL
+	// (alerts fire only on an increase, so an inherited level suppresses the
+	// replacement's first real crossing) or activity phase (audit 2026-09-11
+	// L27, L32).
+	resForgetGroup(g)
+	activityForget(g)
 	subsLock.Lock()
 	// Drop the seq counter + ring with the group: a later group of the same
 	// name starts a fresh sequence, and a client resuming across the

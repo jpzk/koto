@@ -48,14 +48,35 @@ jobs:
             tui/go.sum
             protocol/go.sum
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-      # One module at a time, each with its own go.mod; the loop fails the job
-      # on the first module with a reachable finding (govulncheck exits 3) but
-      # still runs the rest so the log shows every module's state.
+      # One module at a time, each with its own go.mod — and GOWORK=off is what
+      # makes that true (audit 2026-09-11 L26). go.work ties all four modules
+      # together, and a go command run from a module BENEATH it uses workspace
+      # mode, where minimal version selection runs across the union. The
+      # manifests genuinely diverge: daemon requires x/text v0.41.0 while
+      # fcguest, protocol and tui require v0.40.0, so in workspace mode all four
+      # were analysed at v0.41.0 while three of them SHIP v0.40.0. Measured:
+      # `go list -m golang.org/x/text` in fcguest gives v0.41.0 under the
+      # workspace and v0.40.0 with GOWORK=off. A vulnerability fixed in v0.41.0
+      # but reachable in v0.40.0 would have passed this gate and shipped.
+      #
+      # CGO_ENABLED=0 for the same reason: the release binaries are built with
+      # it (Makefile), and it changes which files build — the cgo-guarded
+      # variants of net and os/user among them — so a scan with cgo enabled is
+      # analysing a call graph that is not the one being released (audit
+      # 2026-09-11 L123).
+      #
+      # The loop fails the job on the first module with a reachable finding
+      # (govulncheck exits 3) but still runs the rest so the log shows every
+      # module's state.
       - name: govulncheck every module
+        env:
+          GOWORK: "off"
+          CGO_ENABLED: "0"
         run: |
           rc=0
           for m in daemon fcguest tui protocol; do
             echo "::group::govulncheck $m"
+            (cd "$m" && go list -m golang.org/x/text 2>/dev/null || true)
             (cd "$m" && govulncheck ./...) || rc=1
             echo "::endgroup::"
           done

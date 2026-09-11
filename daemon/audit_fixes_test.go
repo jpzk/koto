@@ -6526,3 +6526,184 @@ func TestTruncatedPartialLineCannotBecomeFraming(t *testing.T) {
 		t.Errorf("the truncation mark does not say it truncated: %q", tailTruncMark)
 	}
 }
+
+// 2026-09-11 L23: sanitize deliberately keeps newlines — most of what it guards
+// is prose that legitimately has them. A log RECORD is not prose: it goes to
+// stderr with one terminating newline, is held as one ring entry and rendered as
+// one row, so an embedded LF forged a whole extra record — a convincing
+// continuation line for any collector reading the daemon's stderr, and an extra
+// row in the TUI attributed to the daemon itself.
+func TestDaemonLogRecordIsOneLine(t *testing.T) {
+	sub := &logSub{ch: make(chan *pb.LogEvent, 8)}
+	logSubsLock.Lock()
+	prev := logSubs
+	logSubs = []*logSub{sub}
+	logSubsLock.Unlock()
+	t.Cleanup(func() {
+		logSubsLock.Lock()
+		logSubs = prev
+		logSubsLock.Unlock()
+	})
+
+	// The shape a guest could previously produce through any field that reaches
+	// a log line.
+	forged := "job abc rc=0\n[error] fc: [main] operator override accepted\nmore"
+	emitLogfQuiet("l23", "info", "%s", forged)
+
+	ev := <-sub.ch
+	if strings.ContainsAny(ev.Msg, "\n\r") {
+		t.Errorf("a log record carries a line break: %q", ev.Msg)
+	}
+	// The content survives — flattening is not dropping.
+	for _, want := range []string{"job abc rc=0", "operator override accepted", "more"} {
+		if !strings.Contains(ev.Msg, want) {
+			t.Errorf("flattening lost %q: %q", want, ev.Msg)
+		}
+	}
+	// ...and the ring holds the same single-line record.
+	logSubsLock.Lock()
+	last := logRing[len(logRing)-1]
+	logSubsLock.Unlock()
+	if strings.ContainsAny(last.Msg, "\n\r") {
+		t.Errorf("the ring entry carries a line break: %q", last.Msg)
+	}
+	// Terminal controls are still removed, as before.
+	emitLogfQuiet("l23", "info", "%s", "x\x1b]0;pwned\x07y")
+	ev = <-sub.ch
+	if strings.ContainsAny(ev.Msg, "\x1b\x07") {
+		t.Errorf("a log record carries a terminal control: %q", ev.Msg)
+	}
+}
+
+// 2026-09-11 L30: Timer.Stop does not unschedule a callback that is already
+// runnable, and the old callback carried no identity — so it could acquire
+// notifyMu after the replacement was stored, delete the REPLACEMENT's map
+// entry, and flush. Deleting the entry does not cancel the replacement's own
+// callback, so both ran, both snapshotted the same pending results before
+// either cleared them, and one job's completion woke the session twice. A guest
+// producing notify-enabled completions could turn that into extra model turns
+// in its own group.
+func TestNotifyTimerSupersessionIsOneFlush(t *testing.T) {
+	const g = "l30"
+	key := notifyKey(g, "")
+	notifyMu.Lock()
+	delete(notifyPending, key)
+	delete(notifyTimers, key)
+	delete(notifyTimerGen, key)
+	notifyMu.Unlock()
+	t.Cleanup(func() {
+		notifyMu.Lock()
+		delete(notifyPending, key)
+		delete(notifyTimers, key)
+		delete(notifyTimerGen, key)
+		notifyMu.Unlock()
+	})
+
+	// Two armings in a row: the first callback is allowed to run late (the
+	// race), the second is the live one.
+	notifyMu.Lock()
+	notifyGen++
+	stale := notifyGen
+	notifyTimerGen[key] = stale
+	notifyMu.Unlock()
+
+	notifyMu.Lock()
+	notifyGen++
+	live := notifyGen
+	notifyTimerGen[key] = live
+	notifyMu.Unlock()
+
+	// The stale callback's own guard: it must decline.
+	supersededRan := func(gen uint64) bool {
+		notifyMu.Lock()
+		defer notifyMu.Unlock()
+		return notifyTimerGen[key] == gen
+	}
+	if supersededRan(stale) {
+		t.Error("a superseded arming still considers itself live — it would flush twice")
+	}
+	if !supersededRan(live) {
+		t.Error("the live arming does not recognise itself")
+	}
+
+	// End to end: two job_done posts in quick succession must leave exactly one
+	// registered timer and one generation for the key.
+	// End to end: two job_done posts in quick succession must leave exactly one
+	// registered timer and one generation for the key, so only one flush can
+	// ever fire for them.
+	recordJobDone(g, jobResult{ID: "j1", RC: "0", Out: "a"})
+	recordJobDone(g, jobResult{ID: "j2", RC: "0", Out: "b"})
+	// Per KEY, not global counts: other tests in this package have their own
+	// groups pending, and this assertion is about this key's timer identity.
+	notifyMu.Lock()
+	_, hasTimer := notifyTimers[key]
+	keyGen, hasGen := notifyTimerGen[key]
+	pend := len(notifyPending[key])
+	notifyMu.Unlock()
+	if !hasTimer || !hasGen {
+		t.Errorf("after two posts: timer=%v generation=%v — want both registered", hasTimer, hasGen)
+	}
+	if keyGen <= live {
+		t.Errorf("the second post did not supersede: generation %d, earlier arming was %d", keyGen, live)
+	}
+	if pend != 2 {
+		t.Errorf("both results should be pending for one coalesced flush, got %d", pend)
+	}
+}
+
+// 2026-09-11 L27 and L32: the resource collector and the activity registry are
+// process-global maps keyed by group NAME, and destroy cleaned up neither.
+// resSweep prunes against a snapshot taken before its asynchronous guest
+// probes and never takes groupOpMu, so a group destroyed and recreated inside
+// one sweep handed the replacement the previous group's samples; and an alert
+// LEVEL is inherited, which matters because alerts fire only on an increase —
+// the replacement's first genuine crossing would have been suppressed.
+func TestDestroyForgetsCollectorAndActivityState(t *testing.T) {
+	const g = "l27"
+	// Stage state in every map the two teardowns cover.
+	resMu.Lock()
+	resRing[g] = []resSample{{}}
+	resMu.Unlock()
+	resGuestMu.Lock()
+	resGuestMap[g] = resGuestMem{}
+	resGuestMu.Unlock()
+	if fire, _ := resShouldFire(resSubjectDisk(g), 95); !fire {
+		t.Fatal("staging the disk alert did not fire")
+	}
+	if fire, _ := resShouldFire(resSubjectCPU(g), 95); !fire {
+		t.Fatal("staging the cpu alert did not fire")
+	}
+	activityMu.Lock()
+	activities[g] = &activityState{}
+	activityMu.Unlock()
+
+	resForgetGroup(g)
+	activityForget(g)
+
+	resMu.Lock()
+	_, ring := resRing[g]
+	resMu.Unlock()
+	resGuestMu.Lock()
+	_, guest := resGuestMap[g]
+	resGuestMu.Unlock()
+	activityMu.Lock()
+	_, act := activities[g]
+	activityMu.Unlock()
+	if ring || guest || act {
+		t.Errorf("state survived destroy: ring=%v guest=%v activity=%v", ring, guest, act)
+	}
+
+	// The alert LEVEL is what makes this more than tidiness: a replacement
+	// inheriting `critical` gets no alert on its own first crossing, because
+	// the level did not increase. After the teardown it fires again.
+	if fire, lvl := resShouldFire(resSubjectDisk(g), 95); !fire || lvl != 2 {
+		t.Errorf("a recreated group's first disk crossing was suppressed: fire=%v lvl=%d", fire, lvl)
+	}
+	if fire, _ := resShouldFire(resSubjectCPU(g), 95); !fire {
+		t.Error("a recreated group's first cpu crossing was suppressed")
+	}
+	t.Cleanup(func() {
+		resForgetGroup(g)
+		activityForget(g)
+	})
+}

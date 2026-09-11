@@ -394,6 +394,30 @@ func resSweep() {
 	}
 }
 
+// resForgetGroup drops every piece of collector state keyed by a group's NAME,
+// at the moment the group stops existing (audit 2026-09-11 L27).
+//
+// resSweep prunes against a snapshot it took BEFORE its asynchronous guest
+// probes, and it never takes groupOpMu — so a group destroyed and recreated
+// inside one sweep, or an in-flight probe landing after the recreation, handed
+// the replacement the previous group's samples. Group names are reusable, so
+// the consequences are the ones name-reuse always has here: telemetry that
+// describes a VM that no longer exists, a growth rate computed across two
+// different workspaces, and — because alert state is a LEVEL and alerts fire
+// only on an increase — the replacement's first genuine disk or CPU crossing
+// suppressed.
+func resForgetGroup(g string) {
+	resMu.Lock()
+	delete(resRing, g)
+	resMu.Unlock()
+	resGuestMu.Lock()
+	delete(resGuestMap, g)
+	resGuestMu.Unlock()
+	resForgetAlert(resSubjectDisk(g))
+	resForgetAlert(resSubjectCPU(g))
+	resLiveForget(g)
+}
+
 // resourcesLoop is the collector goroutine, started once from daemonMain.
 // It takes an immediate first sample so the very first Resources call has
 // something to report rather than waiting out a full interval.
