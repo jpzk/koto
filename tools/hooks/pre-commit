@@ -100,7 +100,22 @@ if command -v betterleaks >/dev/null 2>&1; then
 fi
 engine=$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)
 [ -n "$engine" ] || fail "neither betterleaks nor podman/docker found — cannot scan for secrets (install betterleaks, or bypass once: git commit --no-verify)"
+# --network=none is the load-bearing flag here. The scanner needs the repo
+# WITH .git to read the index, so it can read the whole checkout — git history,
+# ignored files, and creds/ among them — and read-only prevents writes, not
+# reads. A digest pin stops a mutable tag being swapped, but it is not a
+# confidentiality boundary: if the image, its build pipeline or the registry
+# account were compromised, the only thing standing between it and the
+# operator's credentials is having nowhere to send them (audit M100).
+#
+# The rest is ordinary least privilege for a process that only reads files:
+# no capabilities, no privilege escalation, a read-only root with a tmpfs for
+# whatever scratch it wants. label=disable stays — Fedora's SELinux policy
+# denies the bind mount otherwise, which is the same trade the project makes
+# everywhere else.
 exec "$engine" run --rm --security-opt label=disable \
+	--network=none --cap-drop=ALL --security-opt=no-new-privileges \
+	--read-only --tmpfs /tmp \
 	-v "$repo:/src:ro" -w /src \
 	-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
 	"$BETTERLEAKS_IMAGE" git --pre-commit --staged --no-banner --redact=100 /src
