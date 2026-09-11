@@ -3929,3 +3929,50 @@ func TestGroupStreamAppendsAreBounded(t *testing.T) {
 		t.Fatalf("the group stream grew past its ceiling: %d -> %d", before.Size(), after.Size())
 	}
 }
+
+// 2026-09-11 M121: a background tailer is triggered by a REGEX MATCH in a
+// tool_result — the daemon takes claude code's notice at face value because
+// there is nothing else to take. So the bound has to be on the resource: a
+// guest emitting many matching lines with distinct ids got an exec stream, a
+// guest `tail -F` process, host reader state and a ten-minute timer each, and
+// bgActive deduped by (group, id), which distinct ids evade.
+func TestBackgroundTailersAreBounded(t *testing.T) {
+	t.Cleanup(func() {
+		bgActiveLock.Lock()
+		bgActive = map[string]bool{}
+		bgTailTotal = 0
+		bgActiveLock.Unlock()
+	})
+	const g = "bgtail"
+	for i := 0; i < bgTailMaxPerGroup; i++ {
+		if !bgTailAdmit(g, fmt.Sprintf("%s\x00id%d", g, i)) {
+			t.Fatalf("tailer %d refused below the per-group cap of %d", i, bgTailMaxPerGroup)
+		}
+	}
+	if bgTailAdmit(g, g+"\x00one-more") {
+		t.Fatal("admitted a tailer past the per-group cap")
+	}
+	// The same task is still deduped, which is what bgActive was for.
+	if bgTailAdmit(g, g+"\x00id0") {
+		t.Fatal("the same task was admitted twice")
+	}
+	// Another group is unaffected.
+	if !bgTailAdmit("other", "other\x00id0") {
+		t.Fatal("a second group was refused by the first group's cap")
+	}
+	bgTailRelease("other\x00id0")
+	// Release frees a slot, and the id can then be re-admitted.
+	bgTailRelease(g + "\x00id0")
+	if !bgTailAdmit(g, g+"\x00id0") {
+		t.Fatal("release did not free a slot")
+	}
+
+	// The global cap binds across groups.
+	bgActiveLock.Lock()
+	bgActive = map[string]bool{}
+	bgTailTotal = bgTailMaxGlobal
+	bgActiveLock.Unlock()
+	if bgTailAdmit("fresh", "fresh\x00id") {
+		t.Fatal("admitted a tailer past the global cap")
+	}
+}

@@ -2235,3 +2235,21 @@ Both fixes are the shape M13, M23 and M109 established: no privileged operation
 on a worker-controlled pathname without a no-follow open and a descriptor-based
 type check. `TestOpenCtlOutRefusesNonRegularFiles` covers the FIFO with a
 timeout, because the failure is a hang.
+
+### M121 — Unbounded forged background-task notices enable resource exhaustion (`daemon/logtail.go`) — **fixed**
+
+Real, and the provenance point is unanswerable rather than an oversight: the
+trigger IS a regex match in a tool_result, because claude code announces a
+backgrounded command in prose and there is no structured signal to prefer. So
+the bound has to be on the resource.
+
+Each accepted notice opened an exec stream, started a `tail -F` process in the
+guest, allocated host reader state and armed a ten-minute timer. `bgActive`
+deduped by `(group, id)` — which is exactly what distinct ids evade — and
+nothing else counted them.
+
+`bgTailMaxPerGroup` (8) and `bgTailMaxGlobal` (64). Deliberately small, unlike
+the other caps in this audit: a turn backgrounds a handful of commands at most,
+and the ten-minute lifetime makes the ceiling per ten minutes rather than per
+turn. Refusing the excess costs a live view of one background job's output — a
+feature degrading, not a turn failing. `TestBackgroundTailersAreBounded`.
