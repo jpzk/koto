@@ -2900,3 +2900,52 @@ of parameters gets conceal/blink/reverse through) and
 `TestScrubVTStrictDropsDeceptiveSGR` in `tui/sgr_test.go`, which also pins that
 the shell pane KEEPS its reverse video and that both scrubs still drop
 everything that is not an SGR.
+
+## M142 — Installer accepts a missing or incomplete artifact manifest — FIXED
+
+`daemon/install.go`, `verifyArtifactsUI`.
+
+**Confirmed, with one correction to the threat model.** Two of the manifest's
+behaviours were deliberate and documented — an artifact with no entry is
+skipped, and a manifest with no entries at all is not an error — but both were
+**unconditional**, which made the only integrity check switchable off from
+outside the code:
+
+- delete `dist/artifacts.sha256` → a warning, then install;
+- make it unreadable → `os.ReadFile` fails, and the error was swallowed by the
+  "no manifest" branch, which is wrong on its own terms: a permission error or a
+  short read on a file that *is there* says something is wrong with the tree;
+- drop just the `koto` and `koto-tui` lines → the two artifacts that land
+  root-owned on PATH go unchecked while the message still says "verified".
+
+`dist/VERSION` is committed alongside the manifest and says which world the tree
+is in — it is the same guard the Makefile's `fetch` target already uses. So the
+exceptions are now scoped to "no release exists yet": a **released** tree refuses
+a manifest that is missing, unreadable, or that fails to cover `koto` and
+`koto-tui`, with a message naming `git checkout dist/artifacts.sha256` as the
+fix. An unreadable manifest is refused in **both** worlds.
+
+The non-reproducing artifacts keep their exemption unconditionally — `vmlinux`
+and `rootfs.img` embed build timestamps and resolved package versions, so
+`make build` legitimately produces bytes a published manifest cannot match, and
+holding them to a published hash would break the build-from-source route the
+project offers on purpose. Firecracker has its own pinned checksum in
+`build-firecracker.sh`.
+
+**The correction:** the finding says this is a bypass "when the installer
+executable is trusted but an attacker can modify the staged artifact files or
+manifest". Against an attacker with write access to the checkout the delta is
+zero either way — they would edit the manifest to match their binaries rather
+than delete it. What this actually closes is the case the manifest was built
+for: the artifacts arrive over `KOTO_DIST_URL` while the checksums arrive over
+git, and a tree that has *lost* its manifest through any means — a bad merge, a
+partial checkout, a `make clean` that went too far, a tampering mirror serving a
+truncated file — no longer installs unverified binaries while calling itself a
+release.
+
+Test: `TestReleasedTreeRefusesAnAbsentOrGuttedManifest` in
+`daemon/audit_fixes_test.go` runs every combination of `dist/VERSION` present /
+absent / `unreleased` against a full, partial, entry-less, missing and
+unreadable manifest, and pins that a pre-release tree keeps every exception it
+had. The existing `TestArtifactVerificationCoversEveryManifestEntry` (M116) still
+passes unchanged.
