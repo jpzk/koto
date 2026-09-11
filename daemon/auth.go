@@ -375,6 +375,56 @@ func (s *aclStream) revalidate() error {
 	return nil
 }
 
+// Streaming admission, at the one boundary every streaming RPC passes through.
+//
+// authStream authenticated, verb-checked, and handed straight to the handler.
+// Each of those handlers then retains something for the life of the call — a
+// subscriber registration and its buffered channel (SubscribeGroup,
+// WatchState, SubscribeLogs), or guest-side execution and an attachment
+// (JobTail, AttachShell) — with nothing bounding how many an authenticated
+// caller could open. gRPC keepalives police dead CONNECTIONS, not live streams
+// (audit M95).
+//
+// Generous, because these are backstops and the legitimate shape is large: one
+// TUI holds a SubscribeGroup per group plus WatchState and SubscribeLogs, so a
+// full fleet is already ~100 streams for one identity, and several attached
+// operators share the `tui` identity. Per-identity as well as global, so one
+// client cannot crowd out the rest.
+const (
+	streamMaxPerIdentity = 512
+	streamMaxGlobal      = 2048
+)
+
+var (
+	streamMu    sync.Mutex
+	streamCount = map[string]int{}
+	streamTotal int
+)
+
+func streamAdmit(name string) bool {
+	streamMu.Lock()
+	defer streamMu.Unlock()
+	if streamTotal >= streamMaxGlobal || streamCount[name] >= streamMaxPerIdentity {
+		return false
+	}
+	streamCount[name]++
+	streamTotal++
+	return true
+}
+
+func streamRelease(name string) {
+	streamMu.Lock()
+	defer streamMu.Unlock()
+	if n := streamCount[name] - 1; n > 0 {
+		streamCount[name] = n
+	} else {
+		delete(streamCount, name)
+	}
+	if streamTotal > 0 {
+		streamTotal--
+	}
+}
+
 func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	id, err := authFromCtx(ss.Context())
 	if err != nil {
@@ -390,5 +440,12 @@ func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, hand
 		emitLogf("acl", "warn", "%s (roles %s) denied %s from %s", id.Name, roles, verb, peerAddr(ss.Context()))
 		return status.Errorf(codes.PermissionDenied, "roles %s may not call %s", roles, verb)
 	}
+	if !streamAdmit(id.Name) {
+		emitLogf("acl", "warn", "%s: refusing %s — too many live streams (per-identity %d, global %d)",
+			id.Name, verb, streamMaxPerIdentity, streamMaxGlobal)
+		return status.Errorf(codes.ResourceExhausted,
+			"too many live streams (per-identity %d, global %d)", streamMaxPerIdentity, streamMaxGlobal)
+	}
+	defer streamRelease(id.Name)
 	return handler(srv, &aclStream{ServerStream: idStream{ss, withIdentity(ss.Context(), id)}, id: id, verb: verb})
 }
