@@ -143,7 +143,7 @@ var artifacts = []string{
 	"fcassets/firecracker", "fcassets/vmlinux", "fcassets/rootfs.img",
 }
 
-func requireArtifacts(root string) error {
+func requireArtifacts(root string, u *setupUI) error {
 	var missing []string
 	for _, a := range artifacts {
 		if !exists(filepath.Join(root, a)) {
@@ -156,7 +156,7 @@ func requireArtifacts(root string) error {
 		// was there to /usr/local/bin as root (audit M12). Existence-only
 		// until the manifest has entries, since a locally built kernel and
 		// rootfs do not reproduce and there is nothing to hold them to.
-		return verifyArtifacts(root)
+		return verifyArtifactsUI(root, u)
 	}
 	return fmt.Errorf("missing artifact(s): %s\n"+
 		"  install integrates artifacts, it does not produce them — acquire them first:\n"+
@@ -171,9 +171,34 @@ func requireArtifacts(root string) error {
 // digest-pinned image) and the ones installed root-owned onto PATH; the
 // kernel and rootfs embed build timestamps and are documented as
 // non-reproducing (Makefile, `verify`).
-func verifyArtifacts(root string) error {
+// verifyArtifacts holds every artifact the manifest vouches for to it, before
+// any of them is promoted into the state dir or onto PATH.
+//
+// It used to check `koto` and `koto-tui` and stop (audit M116) — while the
+// manifest covers five files and the other three are the RUNTIME boundary
+// itself: the Firecracker binary is exec'd and bind-mounted into the jail, and
+// vmlinux and rootfs.img are the VM's boot inputs. Checking the two that run
+// as the operator and not the three that define the sandbox is backwards.
+//
+// Two deliberate non-failures, both documented in the manifest itself:
+//
+//   - An artifact with NO ENTRY is skipped rather than refused. vmlinux and
+//     rootfs.img embed build timestamps and resolved package versions, so they
+//     do not reproduce bit-for-bit; `make build` legitimately produces bytes
+//     the published manifest cannot match, and failing closed would break the
+//     build-from-source route the project offers on purpose.
+//   - NO MANIFEST ENTRIES AT ALL is not an error either — the manifest is
+//     committed but empty until the first release. It is now SAID OUT LOUD
+//     rather than passing silently, because "nothing was verified" and
+//     "everything verified" should not look the same to an operator.
+func verifyArtifacts(root string) error { return verifyArtifactsUI(root, nil) }
+
+func verifyArtifactsUI(root string, u *setupUI) error {
 	b, err := os.ReadFile(filepath.Join(root, "dist", "artifacts.sha256"))
 	if err != nil {
+		if u != nil {
+			u.warn("no dist/artifacts.sha256 in %s — installing artifacts unverified", root)
+		}
 		return nil // no manifest → nothing to hold the tree to
 	}
 	want := map[string]string{}
@@ -183,9 +208,11 @@ func verifyArtifacts(root string) error {
 			want[strings.TrimPrefix(f[1], "*")] = strings.ToLower(f[0])
 		}
 	}
-	for _, a := range []string{"koto", "koto-tui"} {
+	checked, skipped := 0, []string{}
+	for _, a := range artifacts {
 		sum, ok := want[a]
 		if !ok {
+			skipped = append(skipped, a)
 			continue
 		}
 		got, err := fileSHA256(filepath.Join(root, a))
@@ -195,6 +222,18 @@ func verifyArtifacts(root string) error {
 		if got != sum {
 			return fmt.Errorf("%s does not match dist/artifacts.sha256 (got %s…, manifest %s…)\n"+
 				"  refusing to install it — re-run `make fetch` (or `make build`) and check `make verify`", a, got[:12], sum[:12])
+		}
+		checked++
+	}
+	if u != nil {
+		switch {
+		case checked == 0:
+			u.warn("dist/artifacts.sha256 has no entries — installing all %d artifacts unverified", len(artifacts))
+		case len(skipped) > 0:
+			u.warn("verified %d artifact(s) against dist/artifacts.sha256; %s not covered by it",
+				checked, strings.Join(skipped, ", "))
+		default:
+			u.info("verified all %d artifacts against dist/artifacts.sha256", checked)
 		}
 	}
 	return nil
@@ -225,7 +264,7 @@ func runInstall(o installOpts) error {
 	// Integration consumes artifacts; it does not produce them. Check all of
 	// them up front rather than discovering a missing rootfs after three sudo
 	// writes have already landed on the system.
-	if err := requireArtifacts(o.root); err != nil {
+	if err := requireArtifacts(o.root, o.ui); err != nil {
 		return err
 	}
 	me, err := user.Current()
