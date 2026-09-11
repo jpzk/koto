@@ -490,7 +490,9 @@ func TestFcVMConfigRateLimiter(t *testing.T) {
 				} `json:"rate_limiter"`
 			} `json:"drives"`
 		}
-		if err := json.Unmarshal(fcVMConfig("tg", "/k", "/r", "/w", "/v"), &cfg); err != nil {
+		tvcpus, tmem, _ := fcResolveSize("tg")
+		tbw, tops := fcResolveIO("tg")
+		if err := json.Unmarshal(fcVMConfig("tg", "/k", "/r", "/w", "/v", tvcpus, tmem, tbw, tops), &cfg); err != nil {
 			t.Fatalf("%s: unmarshal: %v", name, err)
 		}
 		if len(cfg.Drives) != 2 {

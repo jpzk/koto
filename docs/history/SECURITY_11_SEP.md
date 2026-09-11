@@ -2015,3 +2015,25 @@ afterwards), and reads at most 64 bytes, since a status marker is one short
 word. The write-back is `O_NOFOLLOW` too. `TestJobStatusReadIsDefensive` covers
 the FIFO (with a timeout, because the failure mode is a hang), the symlink, a
 directory, an oversized file, and that genuine markers still parse.
+
+### M110 — Memory admission can be bypassed by racing mutable VM configuration (`daemon/fc.go`) — **fixed**
+
+Real. `fcSpawn` read the machine shape for `fcHostMemAdmit`, then read it AGAIN
+— inside `fcVMConfig`, for `vm.memMiB`, and for the cgroup — after listener,
+network, jail and image setup had run. `configCmd` writes `config.json` without
+`groupOpMu`, and `seedSpawnConfig` writes it before `ensure` takes that lock, so
+a concurrent authorized Config or Spawn could raise the preset in between. The
+VM and its cgroup were then built from the LARGER value while the fleet
+reservation still held the smaller — the accounting is wrong either way, and
+without the optional per-VM cgroups it directly overcommits host memory.
+
+One resolution now, taken before admission and threaded through: `fcVMConfig`
+takes the vCPU count, memory and IO budget as PARAMETERS rather than re-reading
+`config.json`, which also makes it a pure function of its arguments. The IO
+budget joined the snapshot for the same reason.
+
+The workspace DISK size is still resolved separately, in
+`fcEnsureWorkspaceImg` before this point, and deliberately left that way: that
+path only ever grows the image, so a preset raised underneath it produces a
+larger disk, never a mismatch anything relies on.
+`TestVMConfigUsesTheAdmittedShape`.
