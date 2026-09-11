@@ -1476,3 +1476,45 @@ it buys is latency on slot return, not a bound — and the cost is `context` on
 that. Recorded rather than done.
 
 `TestJobQueriesAreBounded`, `TestRefreshJobsSharesTheInFlightGuard`.
+
+### M83 — Detached jobs can outlive turns and exhaust persistent workspace resources (`sidecar/cs-job`) — **partly fixed, partly by design**
+
+**Fixed: `rm` now terminates before it forgets.** A detached job outliving its
+turn is the FEATURE — `setsid` is there so a turn's process-group kill does not
+take the background work with it — but deleting only the bookkeeping left the
+job running against a directory nobody tracks: still burning CPU and workspace
+disk, still writing to a now-unreferenced `out` file, and no longer listed by
+`cs-job list`. The mint records the job's pgid (the `setsid` child is its own
+session and group leader, so its pid IS the pgid), and `rm` sends TERM then
+KILL to the negative pid so descendants go too. Verified against a running job,
+a completed one, and a legacy dir with no pgid file.
+
+**By design: the rest.** "Run jobs under a daemon-owned supervisor" with
+non-overridable admission, wall-clock deadlines and cgroup limits describes a
+different product. The guest IS the supervision boundary here: a job's CPU,
+memory and disk are the microVM's, bounded by the `size` preset and the
+host-side IO/cpu/memory limits, and guest filesystem fullness raises an operator
+alert at 80/90% (`resources.go`). `CS_MAX_JOBS` being caller-overridable is
+real and deliberate — it is the agent's own concurrency knob inside its own VM,
+not an authorization boundary, and an agent that wants more parallelism in its
+own sandbox may have it.
+
+### M79 — Untrusted background-task paths are opened by the guest-root agent (`daemon/send.go`) — **premise removed by M23**
+
+The finding is "a worker-controlled path is opened by a ROOT process". That
+privilege is gone: `exec`/`exec_stream` now run as the worker (M23), so the
+background tailer opens what the worker could already open, named in text the
+worker itself wrote, and copies it into the worker's own conversation — which
+it could do with `cat`. No boundary is crossed.
+
+What remains is not a privilege issue: a FIFO or other special file could block
+the tailer, bounded by the existing 10-minute cap and now by
+`fcMaxConnsPerGroup` (M22/M27), and the content lands in the group's own
+transcript, whose growth is bounded by `fcLogSinkWait` and the 1 GiB ceiling.
+
+### M84 — Restart authorization can register arbitrary new groups (`daemon/groups.go`) — **already fixed (M17)**
+
+`restart` goes through `ensureLocked`, which since M17 refuses a name that is
+not registered in `groups.json`. Creating a group is `spawnEnsure`, reachable
+only from the three admission points, and the `Spawn` RPC now enforces
+`ctlMaxSpawn` as well. Noted so the report is not mistaken for a separate bug.
