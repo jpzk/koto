@@ -1630,7 +1630,13 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 		// handlers that turn this error into a protobuf error field and hand
 		// it to a client (audit M74). The guest chooses this string and can
 		// produce one on demand by making an operation fail.
-		return resp, errors.New(sanitize(resp.Error))
+		//
+		// FLATTENED as well as sanitized (audit 2026-09-11 L107): sanitize
+		// deliberately preserves newlines — a transcript is made of them —
+		// but this is a single error line by contract, printed straight to
+		// stderr by ctlFatal and rendered as one `err` row by the TUI. A
+		// newline in it forges further lines in both.
+		return resp, errors.New(flattenInline(sanitize(resp.Error)))
 	}
 	return resp, nil
 }

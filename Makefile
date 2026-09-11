@@ -739,7 +739,16 @@ $(FCASSETS)/vmlinux: fcguest/build-kernel.sh
 
 kernel: $(FCASSETS)/vmlinux
 
-FCGUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum fcguest/Dockerfile.rootfs $(SIDECAR_SRC)
+# The guest binary's inputs include protocol/ — fcguest/go.mod `replace`s
+# koto-protocol with ../protocol, so the generated pb code and the module
+# metadata are compiled INTO fc-agent (audit 2026-09-11 L108). They were not
+# listed here, so a protocol change rebuilt the host daemon (built fresh every
+# `make host-run`) and left the cached rootfs.img alone: new microVMs booted
+# a guest agent speaking the OLD contract while the daemon spoke the new one.
+# For a wire-format fix that is a silently unfixed guest; for anything else it
+# is a mismatch that surfaces as an unexplained runtime failure.
+PROTOCOL_SRC := $(wildcard protocol/*.proto) $(wildcard protocol/pb/*.go) protocol/go.mod protocol/go.sum
+FCGUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum fcguest/Dockerfile.rootfs $(SIDECAR_SRC) $(PROTOCOL_SRC)
 $(FCASSETS)/rootfs.img: $(FCGUEST_SRC)
 	./fcguest/build-rootfs.sh
 	$(prune-dangling)

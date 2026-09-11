@@ -278,8 +278,33 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 	return nil
 }
 
+// oneLine folds every line break to a space. The daemon's sanitizer
+// deliberately PRESERVES newlines — a transcript is made of them — so a field
+// that is agent-authored (a paused reason, a verdict's reasons, a completion
+// note, a goal's own text) arrives able to contain them, and the renderer
+// splits a chat line on newlines and draws each fragment as its own row. The
+// lines below are single lifecycle rows by contract; without this an agent
+// could add as many trusted-looking "goal …" rows as it liked (audit
+// 2026-09-11 L104).
+func oneLine(s string) string {
+	if !strings.ContainsAny(s, "\n\r\v\f\u0085\u2028\u2029") {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\v', '\f', 0x85, 0x2028, 0x2029:
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // formatGoalEvent renders a live goal_* stream event as one chat line.
 func formatGoalEvent(ev Event) string {
+	return oneLine(formatGoalEventRaw(ev))
+}
+
+func formatGoalEventRaw(ev Event) string {
 	switch ev.Event {
 	case "goal_set":
 		return fmt.Sprintf("◎ goal %s set", ev.ID)
@@ -332,5 +357,6 @@ func goalStatusLine(it goalItemT) string {
 	if handle == "" {
 		handle = it.ID
 	}
-	return fmt.Sprintf("  %-16s %-12s %-18s %s", handle, it.Group, it.Status+extra, truncRunes(it.Text, 44))
+	return oneLine(fmt.Sprintf("  %-16s %-12s %-18s %s",
+		handle, it.Group, it.Status+extra, truncRunes(oneLine(it.Text), 44)))
 }

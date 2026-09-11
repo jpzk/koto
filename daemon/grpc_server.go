@@ -1086,7 +1086,7 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 			// by making the operation fail. It reaches the operator's terminal
 			// and the TUI's debug log, where nothing downstream strips control
 			// sequences.
-			msg := sanitize(k.Error)
+			msg := flattenInline(sanitize(k.Error))
 			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, msg)
 			return fail(msg)
 		}
@@ -1198,7 +1198,7 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 				// pane's DATA is deliberately raw — the TUI renders it through
 				// a terminal emulator — but this string is not pty output, it
 				// is a daemon error the client prints directly.
-				msg := sanitize(k.Error)
+				msg := flattenInline(sanitize(k.Error))
 				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, msg)
 				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: msg})
 				return

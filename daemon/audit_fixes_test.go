@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -7128,9 +7129,22 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 		logSubsLock.Unlock()
 	}
 
-	drain()
-	_ = composeSystemPrompt(probe)
-	if !logged() {
+	// The ring holds logRingMax lines and other tests' workers write into it
+	// concurrently, so a single observation can be evicted by an unrelated
+	// burst. Retried: eviction in the window is possible, five times in a row
+	// is not.
+	loggedAfter := func(call func()) bool {
+		for i := 0; i < 5; i++ {
+			drain()
+			call()
+			if logged() {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !loggedAfter(func() { _ = composeSystemPrompt(probe) }) {
 		t.Error("a missing prompts/global.md produced no error-level log line")
 	}
 
@@ -7138,12 +7152,10 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(HERE, "prompts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	drain()
 	if err := os.WriteFile(filepath.Join(HERE, "prompts", "global.md"), []byte("  \n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_ = composeSystemPrompt(probe)
-	if !logged() {
+	if !loggedAfter(func() { _ = composeSystemPrompt(probe) }) {
 		t.Error("an empty prompts/global.md produced no error-level log line")
 	}
 
@@ -8027,5 +8039,169 @@ func TestDestroyForgetsNotificationLimiters(t *testing.T) {
 	logAlertMu.Unlock()
 	if !otherLeft {
 		t.Error("forgetting one group dropped another's bucket")
+	}
+}
+
+// 2026-09-11 L103: the wizard writes to a real terminal with no renderer in
+// between, and not every string it prints is ours — container-engine stderr, a
+// probe's JSON, a PATH-resolved executable path, an HTTP response body. A
+// hostile one could forge a "✓" line, erase the failure above it with a
+// carriage return, or reach a terminal feature.
+func TestSetupUISanitizesWhatItPrints(t *testing.T) {
+	const esc = "\x1b"
+	hostile := "engine failed" + esc + "[2K\r✓ everything is fine" + esc + "]0;pwned\x07\nforged second line"
+	got := uiText(hostile)
+	for _, bad := range []string{"\x1b[2K", "\r", "\x1b]0;", "\x07", "\n"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("%q survived: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "engine failed") {
+		t.Errorf("the message itself was lost: %q", got)
+	}
+	// The wizard's OWN colour is pure SGR and must survive, or every line it
+	// prints loses its meaning.
+	colored := "\x1b[32m✓\x1b[0m done"
+	if got := uiText(colored); got != colored {
+		t.Errorf("the UI's own SGR was stripped: %q", got)
+	}
+	// Multi-line text keeps its shape, line by line.
+	lines := uiLines("first\rsecond" + esc + "[Aoverwrite\nthird")
+	if len(lines) != 2 {
+		t.Fatalf("uiLines returned %d lines, want 2: %q", len(lines), lines)
+	}
+	for _, l := range lines {
+		if strings.ContainsAny(l, "\x1b\r") {
+			t.Errorf("a control survived in %q", l)
+		}
+	}
+}
+
+// 2026-09-11 L105: Spawn passed r.Model to seedSpawnConfig verbatim, which
+// wrote it to config.json. The value is then handed to the guest on every later
+// turn — an os/exec argument for claude, an environment entry for venice — so a
+// NUL or an oversized value accepted once at spawn made every later turn of
+// that group fail. The /config path already had the invariant.
+func TestSpawnModelGoesThroughTheConfigValidation(t *testing.T) {
+	fcHarness(t)
+	for _, bad := range []string{
+		"claude\x00opus",
+		strings.Repeat("m", configMaxIdent+1),
+		"claude opus 5",
+		"model\nname",
+	} {
+		if err := seedSpawnConfig("tg", "", bad, ""); err == nil {
+			t.Errorf("spawn accepted the model %q", bad)
+		}
+	}
+	if err := seedSpawnConfig("tg", "", "claude-opus-5", ""); err != nil {
+		t.Fatalf("a valid model was refused: %v", err)
+	}
+	if got := groupModelName("tg"); got != "claude-opus-5" {
+		t.Errorf("model not persisted: %q", got)
+	}
+}
+
+// 2026-09-11 L111: fcFrameAllowed judges and forwards a packet on its
+// DESTINATION, while the flow logger gave up on anything whose transport it
+// could not read — an IPv6 flow behind an extension-header chain, or a
+// fragmented IPv4 flow. Those went out leaving no trace in the egress audit
+// trail at all.
+func TestOpaqueEgressIsStillLogged(t *testing.T) {
+	eth := func(ethType uint16, payload ...byte) []byte {
+		f := make([]byte, 14)
+		binary.BigEndian.PutUint16(f[12:14], ethType)
+		return append(f, payload...)
+	}
+	// IPv4, fragment continuation (offset != 0): no L4 header in this packet.
+	v4 := make([]byte, 20)
+	v4[0] = 0x45
+	binary.BigEndian.PutUint16(v4[6:8], 0x0001) // fragment offset 1
+	v4[9] = 6                                   // TCP
+	copy(v4[12:16], net.IPv4(10, 0, 0, 1).To4())
+	copy(v4[16:20], net.IPv4(93, 184, 216, 34).To4())
+	fl, ok := fcParseFlow(eth(0x0800, append(v4, make([]byte, 20)...)...))
+	if !ok {
+		t.Fatal("a fragmented IPv4 packet produced no flow record at all")
+	}
+	if fl.dst.String() != "93.184.216.34" {
+		t.Errorf("the destination — the part an investigation needs — is wrong: %v", fl.dst)
+	}
+	if fl.proto != "IPv4-frag" {
+		t.Errorf("proto = %q, want the opaque label", fl.proto)
+	}
+
+	// IPv6 with a hop-by-hop extension header in front of the TCP SYN: the
+	// chain is walked, so this classifies as an ordinary TCP flow start.
+	v6 := make([]byte, 40)
+	v6[0] = 0x60
+	v6[6] = 0 // next header: hop-by-hop
+	copy(v6[8:24], net.ParseIP("fd00::1").To16())
+	copy(v6[24:40], net.ParseIP("2606:2800::1").To16())
+	hop := make([]byte, 8)
+	hop[0] = 6 // next header: TCP
+	hop[1] = 0 // 8 bytes total
+	tcp := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcp[2:4], 443)
+	tcp[13] = 0x02 // SYN
+	fl, ok = fcParseFlow(eth(0x86DD, append(append(v6, hop...), tcp...)...))
+	if !ok {
+		t.Fatal("an IPv6 packet behind an extension header produced no flow record")
+	}
+	if fl.proto != "TCP" || fl.dstPort != 443 {
+		t.Errorf("the extension-header chain was not walked: proto=%q port=%d", fl.proto, fl.dstPort)
+	}
+	// ESP: the transport really is unreadable, so it logs as opaque rather
+	// than vanishing.
+	v6[6] = 50
+	fl, ok = fcParseFlow(eth(0x86DD, append(v6, make([]byte, 20)...)...))
+	if !ok || fl.proto != "IPv6-esp" {
+		t.Errorf("an ESP packet was not logged as opaque: ok=%v proto=%q", ok, fl.proto)
+	}
+	// A chain longer than the walk budget is opaque, not an excuse to spin.
+	long := v6
+	long[6] = 0
+	payload := []byte{}
+	for i := 0; i < 32; i++ {
+		h := make([]byte, 8)
+		h[0] = 0 // another hop-by-hop
+		payload = append(payload, h...)
+	}
+	if fl, ok := fcParseFlow(eth(0x86DD, append(long, payload...)...)); !ok || fl.proto != "IPv6-opaque" {
+		t.Errorf("an overlong header chain: ok=%v proto=%q", ok, fl.proto)
+	}
+}
+
+// 2026-09-11 L112: the attachment basename came from time.Now().UnixNano()
+// alone and the write truncated, so two handlers landing on the same value both
+// resolved to the same relative path and the later write replaced the earlier
+// message's image. The image is what the operator is asking about.
+func TestAttachmentNamesCannotCollide(t *testing.T) {
+	prevRoot := ROOT
+	ROOT = t.TempDir()
+	t.Cleanup(func() { ROOT = prevRoot })
+	const g = "attach"
+	if err := os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 64; i++ {
+		rel, err := saveImage(g, []byte{0x89, 'P', 'N', 'G', byte(i)}, "image/png")
+		if err != nil {
+			t.Fatalf("saveImage: %v", err)
+		}
+		if seen[rel] {
+			t.Fatalf("two attachments resolved to the same path: %s", rel)
+		}
+		seen[rel] = true
+	}
+	// Every one of them is still on disk with its own bytes.
+	if len(seen) != 64 {
+		t.Fatalf("%d distinct names for 64 attachments", len(seen))
+	}
+	for rel := range seen {
+		if _, err := os.Stat(filepath.Join(vol(g), rel)); err != nil {
+			t.Errorf("%s was overwritten or removed: %v", rel, err)
+		}
 	}
 }

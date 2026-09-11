@@ -1132,19 +1132,58 @@ func pruneUploads(dir string, max int64) {
 	}
 }
 
+// execDrain is how long a finished command's output is still collected before
+// the read end is closed. A DESCENDANT that inherited the write end keeps the
+// pipe open after the direct child exits (audit 2026-09-11 L110), and this
+// bounds that: output already written is drained, and a background process
+// holding the pipe cannot keep a goroutine and two descriptors alive forever.
+const execDrain = 2 * time.Second
+
 func handleExec(c *vconn, script string) {
 	cmd := execAsWorker(script)
 	out := &boundedBuf{cap: execOutMax}
-	cmd.Stdout = out
-	cmd.Stderr = out
+	// An explicit pipe, the way handleRunScript does it, rather than handing
+	// os/exec a plain io.Writer (audit 2026-09-11 L110). A non-*os.File writer
+	// makes os/exec create the pipe itself and copy on a goroutine that only
+	// Cmd.Wait() synchronises with — and this agent never calls Wait: the
+	// central wait4(-1) reaper owns exit statuses and the Process is Released.
+	// So out.b.Bytes() was read while that goroutine might still be writing to
+	// it (a data race, and a reply that can be missing the tail), and nothing
+	// ever closed the parent's pipe ends, so a descendant holding the write
+	// end leaked the goroutine and both descriptors for the life of the agent.
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		replyErr(c, perr)
+		return
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 	pid, ch, err := startTracked(cmd)
+	pw.Close() // the child holds the only write end now
 	if err != nil {
+		pr.Close()
 		replyErr(c, err)
 		return
 	}
+	copied := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(out, pr)
+		close(copied)
+	}()
 	timer := time.AfterFunc(execCap, func() { killGroup(pid, syscall.SIGKILL) })
 	ws := <-ch
 	timer.Stop()
+	// Wait for the copier, but not forever: closing the read end makes it
+	// return whatever a lingering descendant is still holding open.
+	select {
+	case <-copied:
+	case <-time.After(execDrain):
+		pr.Close()
+		<-copied
+	}
+	pr.Close()
+	// Safe now, and only now: the copier has returned, so nothing else is
+	// writing to out.
 	body := out.b.Bytes()
 	if out.truncated {
 		logf("exec: output exceeded %d bytes — truncated", execOutMax)
@@ -1163,19 +1202,44 @@ func handleExec(c *vconn, script string) {
 // handleRunScript for the framed variant that needs one.
 func handleExecStream(c *vconn, script string) {
 	cmd := execAsWorker(script)
-	cmd.Stdout = c
-	cmd.Stderr = c
+	// Same explicit pipe as handleExec and handleRunScript (audit 2026-09-11
+	// L110): a *vconn is not an *os.File as far as os/exec is concerned, so
+	// handing it over directly created an unsynchronised copy goroutine that
+	// outlived this function — still writing into a connection the caller was
+	// about to close — and that a descendant could hold open indefinitely.
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		replyErr(c, perr)
+		return
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 	pid, ch, err := startTracked(cmd)
+	pw.Close()
 	if err != nil {
+		pr.Close()
 		replyErr(c, err)
 		return
 	}
+	copied := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(c, pr)
+		close(copied)
+	}()
 	go func() {
 		one := make([]byte, 1)
 		_, _ = c.Read(one) // returns on peer close
 		killGroup(pid, syscall.SIGKILL)
+		pr.Close() // unblock the copier even if a descendant holds the pipe
 	}()
 	<-ch
+	select {
+	case <-copied:
+	case <-time.After(execDrain):
+		pr.Close()
+		<-copied
+	}
+	pr.Close()
 }
 
 // ---- run_script: framed streaming exec as the worker user ----------------------

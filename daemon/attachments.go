@@ -22,10 +22,14 @@ package main
 // attachment can't fill the workspace.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"koto-protocol/pb"
@@ -117,6 +121,19 @@ func dirBytes(dir string) int64 {
 // fix: the write is a few tens of KB and the contention is per group.
 var uploadsMu sync.Mutex
 
+// randHex returns n bytes of randomness as hex. crypto/rand, because the
+// value's job is to be unguessable to a concurrent writer as well as unique.
+func randHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand does not fail on Linux; if it somehow did, a timestamp
+		// alone is what this function exists to stop relying on, so fall back
+		// to something that still differs per call.
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 func saveImage(g string, data []byte, mime string) (string, error) {
 	if len(data) > maxImageBytes {
 		return "", fmt.Errorf("image too large (%d bytes; max %d)", len(data), maxImageBytes)
@@ -141,11 +158,44 @@ func saveImage(g string, data []byte, mime string) (string, error) {
 	if used := dirBytes(dir); used+int64(len(data)) > maxUploadsPending {
 		return "", fmt.Errorf("too many pending uploads for %s (%d bytes waiting; max %d) — send a turn first", g, used, maxUploadsPending)
 	}
-	name := fmt.Sprintf("img-%d%s", time.Now().UnixNano(), imageExt(mime))
-	rel := filepath.Join(".cs", "uploads", name)
-	abs := filepath.Join(vol(g), rel)
-	if err := os.WriteFile(abs, data, 0o600); err != nil {
-		return "", err
+	// The name carries randomness AND the write is exclusive (audit
+	// 2026-09-11 L112). A timestamp alone is not an identity: UnixNano repeats
+	// on a coarse clock, and the quota check above is not a uniqueness check —
+	// two handlers that land on the same value both resolve to the same
+	// relative path, and the truncating write silently replaces the FIRST
+	// message's attachment with the second's. The image is what the operator
+	// is asking the agent about, so delivering the wrong one is worse than
+	// failing.
+	//
+	// O_EXCL is the part that makes it an invariant rather than a
+	// probability, and O_NOFOLLOW because this directory is the group's own.
+	// The retry is for the collision O_EXCL reports, which with 64 bits of
+	// randomness should never be seen.
+	ext := imageExt(mime)
+	var rel string
+	var f *os.File
+	for attempt := 0; ; attempt++ {
+		name := fmt.Sprintf("img-%d-%s%s", time.Now().UnixNano(), randHex(8), ext)
+		rel = filepath.Join(".cs", "uploads", name)
+		var oerr error
+		f, oerr = os.OpenFile(filepath.Join(vol(g), rel),
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if oerr == nil {
+			break
+		}
+		if !errors.Is(oerr, os.ErrExist) || attempt >= 4 {
+			return "", oerr
+		}
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(filepath.Join(vol(g), rel))
+		return "", werr
+	}
+	if cerr != nil {
+		_ = os.Remove(filepath.Join(vol(g), rel))
+		return "", cerr
 	}
 	emitLogfG("attach", g, "info", "image group=%s bytes=%d -> %s", g, len(data), rel)
 	return rel, nil

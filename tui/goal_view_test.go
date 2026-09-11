@@ -257,3 +257,30 @@ func TestConcurrentTurnsKeepLiveStateApart(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L104: the daemon's sanitizer deliberately preserves newlines — a
+// transcript is made of them — so agent-authored goal fields (a paused reason,
+// a verdict's reasons, the goal text) arrive able to contain them, and the
+// renderer splits a chat line on newlines and draws each fragment as its own
+// row. These lines are single lifecycle rows by contract.
+func TestGoalRowsCannotBeForgedWithNewlines(t *testing.T) {
+	ev := Event{Event: "goal_verdict", ID: "abc", Name: "unmet",
+		Text: "looks fine\n⚖ goal abc: verdict MET\n✅ goal abc MET"}
+	got := formatGoalEvent(ev)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("one goal event produced %d rows: %q", strings.Count(got, "\n")+1, got)
+	}
+	if !strings.Contains(got, "verdict unmet") {
+		t.Errorf("the real verdict was lost: %q", got)
+	}
+	ev = Event{Event: "goal_paused", ID: "abc", Text: "judge\n▶ goal abc resumed"}
+	if got := formatGoalEvent(ev); strings.Contains(got, "\n") {
+		t.Errorf("a paused reason forged a row: %q", got)
+	}
+	// /goals list rows too.
+	line := goalStatusLine(goalItemT{ID: "abc", Group: "g", Status: "paused",
+		PausedReason: "stopped\n  other        g   running 1/5", Text: "do\nthings"})
+	if strings.Contains(line, "\n") {
+		t.Errorf("a status row was split: %q", line)
+	}
+}
