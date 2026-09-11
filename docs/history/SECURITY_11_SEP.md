@@ -881,3 +881,17 @@ daemon-side and an opaque per-turn handle — would be a real feature (in-group
 multi-tenancy) rather than a fix. It is not in koto's model: the isolation
 boundary is the GROUP, and the way to isolate two workloads is to give them two
 groups, which costs one microVM and is what `/new` is for.
+
+### M55 — Concurrent attachment uploads bypass the per-group pending-disk quota (`daemon/attachments.go`) — **fixed**
+
+Real. `saveImage` read the spool's size with `dirBytes`, compared it, and then
+wrote — a check and a use with nothing between them, while gRPC serves unary
+RPCs concurrently. N image-bearing Sends could all read the same under-quota
+total and all write, putting the spool arbitrarily far past
+`maxUploadsPending` and consuming shared host storage, which is the fleet-wide
+failure the quota exists to prevent.
+
+One mutex around the check and the write. The write is tens of kilobytes and
+the contention is per group, so nothing here wants a reservation counter.
+`TestUploadQuotaHoldsUnderConcurrency` runs 64 concurrent senders at a
+sixteenth of the budget each — four times the quota if the window were open.
