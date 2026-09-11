@@ -109,6 +109,23 @@ func armReportAndEnqueue(g, session, msg, mainSession string) error {
 	return nil
 }
 
+// reportArmed is a cheap pre-check used before the decode/sanitize work, so an
+// UNSOLICITED report costs a map lookup rather than a megabyte of base64
+// decoding and rune-by-rune scrubbing (audit M115).
+//
+// It asks only whether an entry EXISTS, deliberately — not whether it is still
+// within reportArmedMax. An expired window is rare and carries bookkeeping
+// deliverReport owns (delete the entry, log the expiry, answer with the reason
+// it expired); short-circuiting it here would swap that for a generic refusal
+// and silently skip the cleanup. This never consumes anything, so deliverReport
+// remains the authoritative check.
+func reportArmed(g string) bool {
+	reportMu.Lock()
+	defer reportMu.Unlock()
+	_, ok := reportPending[g]
+	return ok
+}
+
 // disarmReport closes g's window without a report — the ctl send that armed
 // it failed to enqueue, so no delegation is actually pending.
 func disarmReport(g string) {
