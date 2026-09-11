@@ -295,13 +295,51 @@ function loadHistory() {
   try {
     const raw = fs.readFileSync(HISTORY, 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    // Trimmed on load too: a transcript written before the cap existed, or by
+    // an older sidecar, must not be replayed whole into the request.
+    return Array.isArray(parsed) ? trimHistory(parsed) : [];
   } catch { return []; }
+}
+
+// HISTORY_MAX_BYTES bounds the serialized transcript.
+//
+// Venice's chat API is stateless, so the whole transcript is replayed on every
+// request — an unbounded one grows the session workspace, grows every request,
+// and eventually exceeds the proxy's 64 MiB body cap, at which point that
+// session can make no further Venice turns at all until someone clears it
+// (audit M90). The failure is silent up to that point and then total.
+//
+// 4 MiB is far more context than any Venice model accepts, so trimming to it
+// costs nothing the provider would have used.
+const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
+
+// trimHistory drops the OLDEST entries until the transcript fits, always
+// keeping the most recent ones — the model's own context window works the same
+// way, and a turn is far more likely to need what just happened.
+//
+// Whole entries, never partial: a truncated tool_calls entry without its
+// matching role:"tool" reply is a malformed conversation the API rejects, so a
+// size cap that split one would turn a large session into a broken one.
+function trimHistory(h) {
+  let out = h;
+  while (out.length > 1 && Buffer.byteLength(JSON.stringify(out)) > HISTORY_MAX_BYTES) {
+    // Drop from the front, and keep dropping past any orphaned tool replies so
+    // the surviving head is a coherent conversation.
+    out = out.slice(1);
+    while (out.length > 1 && out[0] && out[0].role === 'tool') out = out.slice(1);
+  }
+  return out;
 }
 
 function saveHistory(h) {
   if (ONESHOT) return; // sub-agent history is ephemeral — never persist it
-  try { fs.writeFileSync(HISTORY, JSON.stringify(h)); }
+  const trimmed = trimHistory(h);
+  if (trimmed.length < h.length) {
+    writeErr(`venice: transcript trimmed to the newest ${trimmed.length} of ${h.length} messages (${HISTORY_MAX_BYTES >> 20} MiB cap)`);
+    h.length = 0;
+    h.push(...trimmed); // keep the caller's in-memory copy in step
+  }
+  try { fs.writeFileSync(HISTORY, JSON.stringify(trimmed)); }
   catch (e) { writeErr(`venice: history write failed: ${e.message}`); }
 }
 
