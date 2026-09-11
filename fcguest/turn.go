@@ -616,9 +616,43 @@ func reconcileOrphanJobs() {
 	dirs, _ := filepath.Glob(filepath.Join(csDir, "jobs", "*"))
 	for _, d := range dirs {
 		st := filepath.Join(d, "status")
-		if b, err := os.ReadFile(st); err == nil && strings.TrimSpace(string(b)) == "running" {
-			_ = os.WriteFile(st, []byte("orphaned\n"), 0o644)
-			_ = os.Chown(st, workerUID, workerGID)
+		if !jobStatusIsRunning(st) {
+			continue
 		}
+		f, err := os.OpenFile(st, os.O_WRONLY|os.O_TRUNC|unix.O_NOFOLLOW, 0o644)
+		if err != nil {
+			continue
+		}
+		_, _ = f.WriteString("orphaned\n")
+		_ = f.Chown(workerUID, workerGID)
+		f.Close()
 	}
+}
+
+// jobStatusIsRunning reads one job's status marker, defensively.
+//
+// The job tree belongs to the WORKER (uid 1000) and this runs as PID 1 inside
+// handleInit, holding initMu — so a poisoned entry does not merely mislead the
+// reconciliation, it wedges the guest's initialization, and it survives in the
+// workspace to do it again on every later boot (audit M109). os.ReadFile on a
+// worker-controlled path gives three ways to do that: a FIFO with no writer
+// blocks forever, a symlink to /dev/zero buffers until the agent is killed,
+// and a huge regular file does the same more slowly.
+//
+// O_NOFOLLOW|O_NONBLOCK opens without following a link and without blocking on
+// a FIFO; fstat then requires a regular file; and the read is bounded. A
+// status marker is one short word, so the bound can be tiny.
+func jobStatusIsRunning(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	var buf [64]byte
+	n, _ := io.ReadFull(io.LimitReader(f, int64(len(buf))), buf[:])
+	return strings.TrimSpace(string(buf[:n])) == "running"
 }
