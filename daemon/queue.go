@@ -387,12 +387,51 @@ func clearFence(g, session string, onlySession bool) func() {
 // clearFenceWait bounds how long a clear waits for cancelled turns to retire.
 const clearFenceWait = 10 * time.Second
 
+const (
+	// sendMsgMax bounds ONE queued message. A prompt is prose plus whatever
+	// the caller pasted; a megabyte is far beyond any real turn and well under
+	// the proxy's own 64 MiB request cap, which this sits upstream of.
+	sendMsgMax = 1 << 20
+	// sendQueuedBytesMax bounds what ONE group may hold queued across all its
+	// sessions. Depth alone did not: sendQueueDepth is per session, and the
+	// number of sessions is bounded by idle reclamation rather than a cap
+	// (M54), so a sender with Send permission could multiply retained payload
+	// across session names while turns were slow (audit M70).
+	sendQueuedBytesMax = 16 << 20
+)
+
+var groupQueuedBytes = map[string]int64{} // guarded by queuesMu
+
+// releaseQueuedBytes gives back what a job held. Every path that removes a job
+// from a queue calls it — the worker's receive and the drain alike — so the
+// accounting cannot drift from the channels.
+func releaseQueuedBytes(g string, n int) {
+	queuesMu.Lock()
+	releaseQueuedBytesLocked(g, n)
+	queuesMu.Unlock()
+}
+
+func releaseQueuedBytesLocked(g string, n int) {
+	if v := groupQueuedBytes[g] - int64(n); v > 0 {
+		groupQueuedBytes[g] = v
+	} else {
+		delete(groupQueuedBytes, g)
+	}
+}
+
 func enqueue(g string, job sendJob) (<-chan error, error) {
 	job.done = make(chan error, 1)
+	if len(job.msg) > sendMsgMax {
+		return nil, fmt.Errorf("message is %d bytes; the limit is %d", len(job.msg), sendMsgMax)
+	}
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
 	if groupBarred(g) {
 		return nil, fmt.Errorf("group %q is stopping; retry once it is down", g)
+	}
+	if groupQueuedBytes[g]+int64(len(job.msg)) > sendQueuedBytesMax {
+		return nil, fmt.Errorf("group %q already has %d bytes queued (max %d); retry later",
+			g, groupQueuedBytes[g], sendQueuedBytesMax)
 	}
 	k := sessKey(g, job.session)
 	q, ok := queues[k]
@@ -403,6 +442,7 @@ func enqueue(g string, job sendJob) (<-chan error, error) {
 	}
 	select {
 	case q <- job:
+		groupQueuedBytes[g] += int64(len(job.msg))
 		return job.done, nil
 	default:
 		return nil, fmt.Errorf("group %q send queue full (%d pending); retry later", g, sendQueueDepth)
@@ -476,6 +516,7 @@ func dropQueuedScope(g, session string, onlySession bool) int {
 		for {
 			select {
 			case job := <-q:
+				releaseQueuedBytesLocked(g, len(job.msg))
 				job.done <- fmt.Errorf("group %q stopped; queued message discarded", g)
 				n++
 			default:
@@ -527,6 +568,7 @@ func sendWorker(g, session string, q chan sendJob) {
 		var job sendJob
 		select {
 		case job = <-q:
+			releaseQueuedBytes(g, len(job.msg))
 			if !idle.Stop() {
 				select {
 				case <-idle.C:
