@@ -2253,3 +2253,28 @@ the other caps in this audit: a turn backgrounds a handful of commands at most,
 and the ten-minute lifetime makes the ceiling per ten minutes rather than per
 turn. Refusing the excess costs a live view of one background job's output — a
 feature degrading, not a turn failing. `TestBackgroundTailersAreBounded`.
+
+### M117 — Pending upload quota permits oversized host-to-guest frames and wedges group delivery (`daemon/fc.go`) — **fixed**
+
+Real, and the wedge is the part that matters: the guest refuses an oversize
+frame BEFORE unmarshalling, and the uploads were only cleared after a
+successful agent call — so an oversize set left the turn undeliverable and the
+files pending, and every later turn in that group retried the same doomed
+frame. The group stops accepting work until someone clears the spool by hand.
+
+The budget is now taken against the SERIALIZED `MsgReq` (`proto.Size`), which is
+what the channel limit applies to: `maxUploadsPending` bounds raw file bytes on
+disk, while tar headers, block padding, the end blocks, the message, the system
+prompt and config.json all land on top.
+
+Over the limit, the turn is delivered WITHOUT its attachments and the files stay
+pending, with a log line saying so. Delivering a degraded turn beats failing
+delivery: the alternative is the wedge above, and the operator can see what
+happened.
+
+`fcWriteFrame` also refuses an oversize frame outright, as the remediation asks
+— both peers reject a declared length over their channel maximum, so writing
+one produces a peer that hangs up rather than an error naming the size.
+(M36 already narrowed the exposure considerably: uploads are per-turn now, so
+only files the message references are packed, not everything newer than a
+group-wide watermark.) `TestOversizeFramesAreRefusedBeforeSending`.

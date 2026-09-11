@@ -1428,6 +1428,21 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 			emitLogfG("fc", g, "warn", "[%s] uploads tar: %v", g, err)
 		}
 	}
+	// The budget that matters is the SERIALIZED request, not the raw file
+	// bytes. maxUploadsPending bounds what is pending on disk; tar headers,
+	// block padding, the end blocks and the rest of the MsgReq (the message,
+	// the system prompt, config.json) all land on top, and the guest refuses
+	// the whole frame before unmarshalling it (audit M117). Delivering the
+	// turn WITHOUT its attachments beats failing the delivery: an oversize set
+	// used to leave the turn undeliverable and the files pending, so every
+	// later turn in that group retried the same doomed frame.
+	if n := proto.Size(m); n > fcFrameMaxWrite {
+		emitLogfG("fc", g, "warn",
+			"[%s] %d upload(s) would make a %d-byte request (max %d) — delivering the turn without them; they stay pending",
+			g, len(files), n, fcFrameMaxWrite)
+		m.UploadsTar = nil
+		files = nil
+	}
 	_, err := fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Msg{Msg: m}}, 30*time.Second)
 	if err == nil {
 		// The guest has its copy now (untarred into /workspace before the
