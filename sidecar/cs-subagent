@@ -49,7 +49,14 @@ PROMPT="$*"
 
 # provider/model from per-group config (same node one-liner pattern as entrypoint.sh).
 jget() { node -e "try{process.stdout.write((JSON.parse(require('fs').readFileSync('$CFG','utf8'))['$1']||''))}catch(e){}" 2>/dev/null; }
-PROVIDER=$(jget provider); [ -z "$PROVIDER" ] && PROVIDER=venice
+# claudesdk, not venice, when the read or the parse fails (audit M148). The
+# daemon's defaultProvider is claudesdk and ensureProviderConfig writes it into
+# any group whose config is missing or invalid, so a config this cannot read
+# belongs to a claudesdk group — answering "venice" sent the system prompt and
+# the workspace-derived task to a third party the operator had not selected,
+# and disagreed with what the turn path (fcguest/turn.go) does with the same
+# state.
+PROVIDER=$(jget provider); [ -z "$PROVIDER" ] && PROVIDER=claudesdk
 MODEL=$(jget model)
 
 case "$PROVIDER" in

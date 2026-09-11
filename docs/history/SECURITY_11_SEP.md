@@ -3178,3 +3178,43 @@ Test: `TestCredentialFlowRefusesAnUntrustedCredsDir` in
 `daemon/audit_fixes_test.go` drives `authConnect` against a symlinked creds dir
 (refused, with the reason named), exercises the owner and mode rules on the
 shared predicate, and asserts that a freshly created creds dir passes.
+
+## M148 — Malformed provider configuration fails open to Venice — FIXED (the write half was already closed)
+
+`daemon/proxy.go` (`groupProvider`), `sidecar/cs-subagent`.
+
+**Confirmed: three readers of one field, two answers.** The proxy's
+`groupProvider` and `cs-subagent` answered **"venice"** for every failure —
+absent file, unparseable JSON, unrecognised value — while the guest turn path
+(`fcguest/turn.go readGroupConfig`) answered **"claudesdk"** for exactly the same
+state. So a claudesdk group whose `config.json` was momentarily unreadable had
+its traffic relayed to a different third party than the operator selected —
+system prompt and workspace-derived task material included, with the credential
+for it injected by the proxy.
+
+The Venice default was true when it was written ("this is a Venice-first
+deployment", says the comment it carried). It has not been for a long time:
+`defaultProvider` is `claudesdk`, and `ensureProviderConfig` **writes that into
+any group whose config is missing or invalid** on every `ensure()` — so a group
+whose config cannot be read is, by koto's own definition, a claudesdk group.
+Answering otherwise was the fail-open.
+
+**Fix:** one implementation. `groupProvider` is now a thin wrapper over
+`groupProviderName` → `loadGroupConfig(g).provider()`, which already returns
+`defaultProvider` for a nil/failed parse and for a value that is neither known
+provider. `cs-subagent`'s `jget` fallback becomes `claudesdk`. All three readers
+now agree, which was the actual defect.
+
+**The finding's second half was already closed**: `configCmd` no longer rewrites
+`config.json` with a truncating `os.WriteFile` — `updateGroupConfig` holds the
+group's config lock across read-mutate-commit and commits by **rename**, so a
+concurrent reader sees either the old document or the new one, never half of
+either.
+
+Tests: `TestProviderResolutionFailsClosed` in `daemon/audit_fixes_test.go` walks
+eight config shapes (explicit venice, explicit claudesdk, no key, empty
+document, truncated mid-write, non-JSON, unrecognised value, wrong type) plus a
+missing file and the empty group name, asserting the result AND that the proxy's
+reader and the canonical one never disagree. `cs-subagent`'s one-liner was smoke
+tested directly against the same four shapes: `venice` only for an explicit
+`venice`, `claudesdk` for a truncated document, an empty one and a missing file.
