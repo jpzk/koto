@@ -52,3 +52,51 @@ virtio/vsock device-model bug, so the attacker held it already. The jailer's
 actual claim is narrower and still holds: a VMM escape reaches no credentials,
 no network, no other group's sockets, and no host filesystem outside its
 chroot. Recorded in the comment at `fcJailFixupPerms`.
+
+---
+
+## medium
+
+### M3 — DNS rebinding bypasses the HTTP egress destination policy (`daemon/proxy.go`) — **fixed**
+
+`egressConnect` pinned its dial to the vetted IP; `egressHTTP` did not — it
+handed the original URL to a shared `http.Client`, whose transport re-resolved
+the name inside `Do()`. The comment there acknowledged the window and deferred
+it on the grounds that plain-HTTP egress is rare. It is still a wide window,
+because the daemon's own dial is not behind the guest's L3 frame filter: a
+guest controlling DNS for a name it is allowed to reach could steer the
+DAEMON's connection at a destination its profile forbids.
+
+Fixed with a per-request `http.Transport` whose `DialContext` ignores the
+address the transport resolved and dials the vetted `ip:port`. The Host header
+still rides `r.URL`, so the origin sees the name it was asked for. The dial
+guard `egressConnect` already had (never dial the control plane, whatever the
+check said) is applied on this path too, and `serveEgress` now defaults a
+missing port from the URL scheme so the vetted address is a complete `ip:port`.
+`TestEgressHTTPDialsVettedIP`.
+
+### M6 — IPv6 AWS metadata endpoint bypasses the guest egress filter (`daemon/fcnet.go`) — **fixed**
+
+`169.254.169.254` — the metadata endpoint for AWS, GCP, Azure and most others
+— is link-local, so `fcClassifyDst` already returned `fcDstCtl` for it. AWS's
+IPv6 IMDS is `fd00:ec2::254`, a ULA, which `IsPrivate()` classes as LAN: a
+`lan` or `full` guest on a dual-stack host could read the instance's role
+credentials. `Ec2MetadataAccess: false` does not cover it — that governs the
+netstack's own answer, not a host-routed dial.
+
+Classified as control plane, so it is denied under every profile, on both the
+frame filter and the L7 proxy. `TestIPv6MetadataIsControlPlane`.
+
+### M10 — Independent DNS lookups bypass the boot-time egress profile (`daemon/proxy.go`) — **fixed**
+
+`serveEgress` called `egressTargetAllowed` twice — once for the config profile,
+once for the booted one — and kept the vetted IP from the first. Each call did
+its own `egressLookupIP`, so a rebinding name answering LAN then WAN passed
+`full` on lookup one and `wan` on lookup two while the dial went to the LAN
+address the booted profile forbids.
+
+Fixed by intersecting the two profiles first (`egressIntersect`) and checking
+once, which also makes "the stricter of the two" a property of the value rather
+than of the call sequence. `wan ∩ lan` is `none`, which is correct: a group
+that booted `wan` and now reads `lan` reaches nothing until the `/restart`.
+`TestEgressProfilesIntersectOnOneLookup`.

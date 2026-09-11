@@ -156,6 +156,10 @@ const (
 	fcDstWAN                   // everything else
 )
 
+// fcIMDSv6 is AWS's IPv6 instance-metadata address (fd00:ec2::254). See
+// fcClassifyDst for why it needs naming separately from the v4 endpoint.
+var fcIMDSv6 = net.ParseIP("fd00:ec2::254")
+
 // fcTailnetNet is the CGNAT range Tailscale allocates from (100.64.0.0/10),
 // classified as LAN so a wan-only group cannot reach tailnet peers — tailnet
 // access now requires lan|full, same as the rest of the host's network.
@@ -198,6 +202,17 @@ func fcClassifyDst(ip net.IP) fcDstClass {
 	// (audit L2). DNS goes to .1, so nothing legitimate loses out.
 	if ip.Equal(fcNetGatewayIPParsed) {
 		return fcDstGW
+	}
+	// Cloud instance-metadata endpoints are control plane wherever koto runs,
+	// because they hand out the host's own role credentials to anything that
+	// asks. The IPv4 one (169.254.169.254 — AWS, GCP, Azure, and most of the
+	// rest) is already caught above as link-local; AWS's IPv6 IMDS is a ULA,
+	// which IsPrivate() classes as LAN, so a root-enabled lan|full guest
+	// could reach it on a dual-stack host and read temporary credentials.
+	// Deny by address rather than trusting Ec2MetadataAccess:false, which
+	// only governs the netstack's own answer, not a host-routed dial.
+	if ip.Equal(fcIMDSv6) {
+		return fcDstCtl
 	}
 	// IsPrivate covers exactly RFC1918 (10/8, 172.16/12, 192.168/16) and IPv6
 	// ULA fc00::/7, and is IPv4-mapped-IPv6 aware. Multicast is LAN by

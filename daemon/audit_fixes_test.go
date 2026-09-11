@@ -632,3 +632,120 @@ func TestWorkspaceImgRefusesNonRegularFile(t *testing.T) {
 		t.Fatalf("symlink target was modified: %q", b)
 	}
 }
+
+// 2026-09-11 M6: AWS's IPv6 instance-metadata address is a ULA, so IsPrivate
+// classed it LAN and a lan|full guest could read the host's role credentials.
+func TestIPv6MetadataIsControlPlane(t *testing.T) {
+	ip := net.ParseIP("fd00:ec2::254")
+	if got := fcClassifyDst(ip); got != fcDstCtl {
+		t.Fatalf("fd00:ec2::254 classified %v, want ctl", got)
+	}
+	for _, pol := range []string{fcNetWAN, fcNetLAN, fcNetFull} {
+		if fcDstAllowed(ip, pol) {
+			t.Errorf("IPv6 IMDS allowed under %s", pol)
+		}
+		if ok, _ := egressTargetAllowed("[fd00:ec2::254]:80", pol); ok {
+			t.Errorf("IPv6 IMDS allowed at L7 under %s", pol)
+		}
+	}
+	// The v4 endpoint stays blocked as link-local, and ordinary ULA stays LAN.
+	if fcClassifyDst(net.ParseIP("169.254.169.254")) != fcDstCtl {
+		t.Error("v4 IMDS no longer control plane")
+	}
+	if fcClassifyDst(net.ParseIP("fd12:3456::1")) != fcDstLAN {
+		t.Error("ordinary ULA no longer LAN")
+	}
+}
+
+// 2026-09-11 M10: the config and boot profiles are intersected and checked
+// ONCE. Two separate checks meant two DNS lookups, so a rebinding name that
+// answered LAN then WAN passed full on the first and wan on the second, and
+// the dial used the LAN address the booted profile forbids.
+func TestEgressProfilesIntersectOnOneLookup(t *testing.T) {
+	for _, c := range []struct{ a, b, want string }{
+		{fcNetFull, fcNetFull, fcNetFull},
+		{fcNetFull, fcNetWAN, fcNetWAN},
+		{fcNetFull, fcNetLAN, fcNetLAN},
+		{fcNetWAN, fcNetLAN, fcNetNone},
+		{fcNetLAN, fcNetWAN, fcNetNone},
+		{fcNetWAN, fcNetNone, fcNetNone},
+	} {
+		if got := egressIntersect(c.a, c.b); got != c.want {
+			t.Errorf("egressIntersect(%s,%s) = %s, want %s", c.a, c.b, got, c.want)
+		}
+	}
+
+	fcHarness(t)
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"full"}`), 0o644)
+	proxySetBootNetwork("tg", fcNetWAN)
+	t.Cleanup(func() { proxySetBootNetwork("tg", fcNetNone) })
+
+	// A name that alternates LAN, WAN, LAN, ... — the rebinding attacker.
+	orig := egressLookupIP
+	t.Cleanup(func() { egressLookupIP = orig })
+	n := 0
+	egressLookupIP = func(string) ([]net.IP, error) {
+		n++
+		if n%2 == 1 {
+			return []net.IP{net.ParseIP("192.168.1.10")}, nil
+		}
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	h := &handler{group: "tg"}
+	req := &http.Request{Method: http.MethodConnect, Host: "rebind.example:443", URL: &url.URL{Host: "rebind.example:443"}}
+	rec := httptest.NewRecorder()
+	h.serveEgress(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("rebinding LAN/WAN name under config=full booted=wan: want 403, got %d", rec.Code)
+	}
+	if n != 1 {
+		t.Fatalf("resolved %d times; the gate must resolve exactly once", n)
+	}
+}
+
+// 2026-09-11 M3: absolute-form (plain HTTP) egress dials the vetted IP, not a
+// freshly resolved one — the same pinning CONNECT already had. The shared
+// transport used to re-resolve inside Do(), and the daemon's own dial is not
+// behind the guest's L3 frame filter, so that window was a wide one.
+func TestEgressHTTPDialsVettedIP(t *testing.T) {
+	fcHarness(t)
+	d := filepath.Join(vol("tg"), ".cs")
+	os.MkdirAll(d, 0o755)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"network":"wan"}`), 0o644)
+	proxySetBootNetwork("tg", fcNetWAN)
+	t.Cleanup(func() { proxySetBootNetwork("tg", fcNetNone) })
+
+	origLookup, origDial := egressLookupIP, egressDial
+	t.Cleanup(func() { egressLookupIP, egressDial = origLookup, origDial })
+
+	// First answer is the vetted WAN address; every later one is a LAN
+	// address the profile forbids — the rebind.
+	lookups := 0
+	egressLookupIP = func(string) ([]net.IP, error) {
+		lookups++
+		if lookups == 1 {
+			return []net.IP{net.ParseIP("93.184.216.34")}, nil
+		}
+		return []net.IP{net.ParseIP("192.168.1.10")}, nil
+	}
+	var dialed []string
+	egressDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return nil, fmt.Errorf("no network in test")
+	}
+
+	h := &handler{group: "tg"}
+	req := httptest.NewRequest(http.MethodGet, "http://rebind.example/x", nil)
+	req.Host = "rebind.example"
+	rec := httptest.NewRecorder()
+	h.serveEgress(rec, req)
+
+	if len(dialed) != 1 || dialed[0] != "93.184.216.34:80" {
+		t.Fatalf("dialed %v; want exactly the vetted 93.184.216.34:80", dialed)
+	}
+	if lookups != 1 {
+		t.Fatalf("resolved %d times; want exactly one lookup", lookups)
+	}
+}
