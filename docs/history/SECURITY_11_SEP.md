@@ -2726,3 +2726,50 @@ already correct — it skips any directory whose status is `running` — so the
 `rm` path was the only way to drop a live job out of the count.
 
 No further change. Verified against the current file rather than assumed.
+
+## M138 — Mount failure unconditionally reformats the persistent workspace — FIXED
+
+`fcguest/main.go`, `mountWorkspace`.
+
+**Confirmed, and the worst-consequence finding in this batch.** The guest agent
+ran `mkfs.ext4 -F` on *any* non-nil error from the first mount, with no
+classification of the error and no look at what was on the device. `/dev/vdb`
+is the group's persistent workspace: the conversation transcripts, the pinned
+claude session ids, the agent's memory, its background jobs, its uploads and
+whatever the user put there. So a dirty journal, a kernel without ext4, a wrong
+mount flag, an `EBUSY`, or any inconsistency `e2fsck` would have fixed in a
+second all read as "no filesystem here" — and were answered by destroying the
+filesystem that was there, irreversibly, at boot, with no prompt and no backup.
+
+**Fix — format only a device that is provably blank.** `workspaceIsBlank` reads
+the first MiB and requires every byte to be zero. That is deliberately stricter
+than a magic-number check: an ext4 image has its primary superblock at offset
+1024 and its group descriptors right behind it, so the probe separates the two
+easily, *and* it refuses to call "blank" a device whose superblock is damaged
+but whose data is intact — precisely the case backup superblocks exist to
+recover and the old code could not distinguish.
+
+Everything else gets `e2fsck -p -f` and a second mount attempt. If that still
+does not mount, the boot **fails**, loudly, naming the recovery: an unbootable
+group whose data is intact is recoverable by the operator; a booted group whose
+data was just erased is not.
+
+The blank case is still reachable and still correct — the host formats a new
+image before the VM ever sees it (`fcEnsureWorkspaceImg`, with `-d` to migrate
+an old workspace in), so a blank device here means the host's own format did not
+happen, and there is nothing to lose.
+
+**Also fixed, the finding's second point:** the retry mount dropped
+`MS_NOSUID|MS_NODEV`. Every attempt now carries the same flags, so a workspace
+that had just been reformatted no longer came back without the L11 hardening.
+
+Test: `TestWorkspaceIsBlankOnlyForAnUntouchedDevice` in
+`fcguest/workspace_test.go` covers the zero-filled image, an ext4 superblock, a
+damaged superblock over live data, a device too small to probe, and a missing
+one.
+
+**Carry-over for the operator:** this is guest-side code, so it reaches a group
+only after `make rootfs` and a `/restart`. Same carry-over as the M46
+claude-code pin — the rootfs has deliberately not been rebuilt in this session,
+because `make rootfs` replaces the live `fcassets/rootfs.img` under running
+groups.
