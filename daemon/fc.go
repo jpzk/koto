@@ -644,13 +644,25 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// capture it.
 	vm := &fcVM{gen: fcNextGen()}
 	fail := func(err error) error {
-		fcHostMemRelease(g)
 		for _, ln := range vm.listeners {
 			_ = ln.Close()
 		}
+		// Kill and REAP before giving the reservation back (audit M152). The
+		// release used to come first, so a failed spawn whose VMM was already
+		// running handed its memory back to the fleet cap while that process
+		// was still alive — and a concurrent spawn could commit against
+		// memory nobody had actually freed.
 		if vm.pid > 0 {
 			_ = syscall.Kill(vm.pid, syscall.SIGKILL)
+			if !fcAwaitExit(nil, vm.pid) {
+				emitLogfG("fc", g, "error",
+					"[%s] failed spawn's pid %d did not die on SIGKILL after %s — "+
+						"its memory stays reserved against the fleet cap until it does",
+					g, vm.pid, fcReapWait)
+				return err // reservation deliberately NOT released
+			}
 		}
+		fcHostMemRelease(g)
 		return err
 	}
 	// Fleet memory cap admission (fchostmem.go): refuse now, with a message
@@ -923,22 +935,82 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	return nil
 }
 
+// fcReapWait is how long a stop waits for a SIGKILLed VMM to actually leave
+// the process table. Generous, because what it is waiting out is a VMM stuck in
+// an uninterruptible kernel path — kvm_async_pf under host memory pressure is
+// the observed one, and a process in D state does not die on SIGKILL until the
+// fault it is waiting on completes.
+var fcReapWait = 20 * time.Second
+
+// fcStopGraceWait is how long the guest gets to sync and unmount its workspace
+// after the shutdown RPC, before the kill. A var only so tests need not sit
+// through it.
+var fcStopGraceWait = 5 * time.Second
+
+// fcAwaitExit waits for a killed VMM to be gone, and reports whether it went.
+// Identity-checked throughout (vmAlive / pidIsFirecracker), so a recycled pid
+// is not mistaken for the process still being there.
+// A var so a test can drive the "it would not die" branch, which is otherwise
+// only reachable with an actually unkillable process.
+var fcAwaitExit = fcAwaitExitImpl
+
+func fcAwaitExitImpl(vm *fcVM, pid int) bool {
+	deadline := time.Now().Add(fcReapWait)
+	for time.Now().Before(deadline) {
+		if vm != nil {
+			if !vmAlive(vm) {
+				return true
+			}
+		} else if !(pid > 0 && pidAlive(pid) && pidIsFirecracker(pid)) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if vm != nil {
+		return !vmAlive(vm)
+	}
+	return !(pid > 0 && pidAlive(pid) && pidIsFirecracker(pid))
+}
+
 // fcStop gracefully shuts the VM down (agent syncs + unmounts the workspace
 // ext4 — kill-only would risk a dirty image), then falls back to SIGKILL.
+//
+// It does not return until the VMM is GONE, and when it will not go, it leaves
+// the evidence in place rather than tidying it away (audit M151, M152):
+//
+//   - the registry entry stays until the process is confirmed dead, because
+//     fcHostMemCommittedMiB sums fcVMs — deleting first made a still-running
+//     VMM invisible to fleet admission for the whole shutdown window, so
+//     concurrent spawns could commit past the cap and let the kernel pick
+//     which VM to OOM-kill;
+//   - the PIDFILE stays too, when the kill did not take. That file is what
+//     fcRunning falls back to, and fcRunning is what stands between a live VMM
+//     and fcGrowWorkspaceImg running truncate + e2fsck + resize2fs on the ext4
+//     image that process still has open. Removing it after an unconfirmed kill
+//     turned a wedged VMM into silent workspace corruption. Left in place, the
+//     group reads as running: no resize, and no second VM booted onto the same
+//     image — which is exactly the rule the operator already follows by hand
+//     for a D-state VMM.
 func fcStop(g string) {
 	proxySetBootNetwork(g, fcNetNone) // no VM, no egress — whoever is dialing the port
 	fcMu.Lock()
 	vm := fcVMs[g]
-	delete(fcVMs, g)
 	fcMu.Unlock()
 	if vm == nil {
 		// Not in registry (daemon restarted?) — best-effort pidfile kill.
+		pid := 0
 		if b, err := os.ReadFile(fcPidPath(g)); err == nil {
-			var pid int
 			fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid)
 			if pid > 0 && pidIsFirecracker(pid) {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
+		}
+		if pid > 0 && !fcAwaitExit(nil, pid) {
+			emitLogfG("fc", g, "error",
+				"[%s] pid %d did not die on SIGKILL after %s — leaving the pidfile in place, "+
+					"so the group still reads as running and nothing resizes or reboots its workspace image",
+				g, pid, fcReapWait)
+			return
 		}
 		_ = os.Remove(fcPidPath(g))
 		_ = os.RemoveAll(fcSockDir(g))
@@ -947,7 +1019,7 @@ func fcStop(g string) {
 		return
 	}
 	_, _ = fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Shutdown{Shutdown: &pb.ShutdownReq{}}}, 3*time.Second)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(fcStopGraceWait)
 	for vmAlive(vm) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -958,12 +1030,30 @@ func fcStop(g string) {
 		emitLogfG("fc", g, "warn", "[%s] graceful shutdown timed out; killing pid=%d", g, vm.pid)
 		_ = syscall.Kill(vm.pid, syscall.SIGKILL)
 	}
+	gone := fcAwaitExit(vm, vm.pid)
 	if vm.netCancel != nil {
 		vm.netCancel() // stop the L3 gateway's AcceptQemu goroutines
 	}
 	for _, ln := range vm.listeners {
 		_ = ln.Close()
 	}
+	if !gone {
+		// Everything below this point tells the rest of the daemon that the
+		// image is free. It is not. Keep the registry entry (so the memory it
+		// holds still counts against the fleet cap) and the pidfile (so
+		// fcRunning keeps saying true, which is what blocks the offline
+		// resize and a second boot onto the same image).
+		emitLogfG("fc", g, "error",
+			"[%s] pid %d did not die on SIGKILL after %s — the group still holds its workspace image "+
+				"and will not resize or reboot until that process is gone (check for D state)",
+			g, vm.pid, fcReapWait)
+		return
+	}
+	fcMu.Lock()
+	if fcVMs[g] == vm { // a restart may already have registered its successor
+		delete(fcVMs, g)
+	}
+	fcMu.Unlock()
 	_ = os.Remove(fcPidPath(g))
 	_ = os.RemoveAll(fcSockDir(g))
 	_ = os.RemoveAll(fcJailDir(g))
