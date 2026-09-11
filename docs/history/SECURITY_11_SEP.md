@@ -1019,3 +1019,19 @@ able to stop the orchestrator — and it still holds.
 with it. `stop` is neither: the next send boots the group again, and the
 operator's own TUI `/stop` with `main` focused is a routine action that this
 change would break. Different verbs, different answers, for a reason.
+
+### M62 — Legacy JobTail raw frames allow terminal escape injection (`tui/daemon.go`) — **fixed**
+
+Real, and the compatibility branch is what makes it real. The current daemon
+sanitizes every guest-authored byte it relays — but `startJobTail`'s `"data"`
+case exists precisely for daemons that DON'T: one predating
+`JobTailReq.parsed` ignores the flag and streams raw frames. The raw peek
+renderer then hands the line to ANSI-aware wrapping and lipgloss, both of which
+PRESERVE control sequences, so a job whose output contains OSC 52, a title set,
+cursor control or a private-mode switch had it interpreted by the operator's
+terminal the moment they hovered the row.
+
+`scrubVT` — the same policy `daemon/sanitize.go` applies, already used for the
+shell pane — now runs on every raw frame. A client cannot rely on the
+sanitization of a peer it is explicitly written to be compatible with.
+`TestJobTailRawFramesAreScrubbed`.

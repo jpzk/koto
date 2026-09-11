@@ -533,7 +533,18 @@ func startJobTail(sid int, group, id string) context.CancelFunc {
 			case "data":
 				// Raw-line frame: a daemon predating JobTailReq.parsed
 				// ignores the flag and streams these; keep rendering them.
-				line := string(ev.Chunk)
+				// Scrubbed client-side. The current daemon sanitizes every
+				// guest-authored byte it relays, but this branch exists
+				// precisely for daemons that DON'T — one predating
+				// JobTailReq.parsed streams raw frames, and the raw peek
+				// renderer hands them to ANSI-aware wrapping and lipgloss,
+				// which preserve control sequences rather than removing them.
+				// A job whose output contains OSC 52, a title set, or cursor
+				// control would then have it interpreted by the operator's
+				// terminal the moment they hovered the row (audit M62). A
+				// client cannot rely on a peer it is explicitly compatible
+				// with; scrubVT is the same policy daemon/sanitize.go applies.
+				line := scrubVT(string(ev.Chunk))
 				for len(line) > 0 && (line[len(line)-1] == '\n' || line[len(line)-1] == '\r') {
 					line = line[:len(line)-1]
 				}
