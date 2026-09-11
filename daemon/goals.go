@@ -588,6 +588,15 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 	if criteria == "" {
 		return goalItem{}, fmt.Errorf("acceptance criteria are required")
 	}
+	// No goal on main, on any plane. The ctl dispatcher refused it and the
+	// GoalSet RPC did not (audit M38), so an ACL-authorized caller could start
+	// an autonomous, self-judged loop on the one group that holds cross-group
+	// orchestration verbs — spawn, stop, send, config, sched — i.e. hand the
+	// judge-and-iterate machinery the fleet. The rule belongs here, at the
+	// creation boundary every caller shares, rather than in one dispatcher.
+	if group == ctlMainGroup {
+		return goalItem{}, fmt.Errorf("cannot set a goal on main")
+	}
 	if maxIter <= 0 {
 		maxIter = goalDefaultMaxIter
 	}

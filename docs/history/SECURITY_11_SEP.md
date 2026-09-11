@@ -551,3 +551,54 @@ the L3 filter and the L7 proxy alike, since they share `fcClassifyDst`.
 The last known-good list is now kept on error and `at` is left alone so the
 next call retries immediately rather than after another TTL.
 `TestSelfIPRefreshFailsClosed`.
+
+### M35 — Empty or null ACL targets authorize global cross-group reads (`daemon/acl.go`) — **fixed**
+
+Real, and a one-line hole with a wide answer. `json.Unmarshal` of `null` into a
+string SUCCEEDS and leaves `""`, as does an explicit `""` — and the scalar
+branch of `parseTargets` stored that as `names[""]`. The empty target is what
+`targetOf` returns for a group-scoped request that OMITS the group: the
+read-across-every-group form, documented to need `"*"`. So a malformed or
+migrated grant read as a global one. (The list branch already skipped empties;
+only the scalar branch did not, which is why it survived review.)
+
+Empty and whitespace-only scalars now grant nothing. `TestEmptyACLTargetGrantsNothing`.
+
+### M37 — gRPC lifecycle paths bypass the daemon-wide group quota (`daemon/groups.go`) — **fixed (with M17/M29)**
+
+The same finding as M17 from the lifecycle side, and closed by the same split:
+`ensure()` no longer provisions, so `Send` and `Restart` cannot bring a group
+into existence, and the `ctlMaxSpawn` cap now applies to the `Spawn` RPC as well
+as the ctl verb. `SchedAdd`/`GoalSet` refuse an unregistered target (M29).
+
+The remainder of the remediation — per-identity quotas, rate limits on
+lifecycle grants, separate accounting for ports/queues/workspaces,
+transactional rollback of a failed provision — is a capacity-planning wish
+list, not this finding. `fcHostMemAdmit` already refuses a spawn that does not
+fit beside the running VMs, which is the bound that actually protects the host.
+
+### M38 — gRPC GoalSet bypasses the protected main-group autonomous-goal restriction (`daemon/grpc_server.go`) — **fixed**
+
+Real. `ctlDispatch` refused a goal on `main`; the `GoalSet` RPC did not, and
+`goalSet` persisted and started the driver regardless. `main` is the group
+holding the cross-group orchestration verbs — spawn, stop, send, config, sched
+— so an autonomous, self-judged, multi-iteration loop there is the
+judge-and-iterate machinery pointed at the fleet.
+
+The check moved INTO `goalSet`, the creation boundary every caller shares, so
+no plane can differ from another again.  `TestNoGoalOnMain`.
+
+### M39 — Daemon-writable TUI path enables symlink redirection into operator-owned files (`tui/persist.go`) — **fixed**
+
+Real, and a crossing in the wrong direction. `<state>/run/tui` is the one path
+systemd's `ReadWritePaths=` leaves the daemon (tier 2) able to write, while the
+TUI runs as the operator (tier 1), unconfined — so the daemon names the files
+the operator opens for writing. A symlink dropped at `tui-state.json` or
+`tui.log` redirected that write onto an operator-owned file. Same family as
+audit L10, which removed `<state>/koto-tui` as an executable lookup path.
+
+Every TUI open under that directory now uses `O_NOFOLLOW` (state load and save,
+the debug log, its rotation). This does not harden every component of the path
+— the run directory is the daemon's by design — but it closes the sink the
+daemon can reach without also being able to replace its own state root.
+`TestStateWriteRefusesSymlink`.

@@ -161,8 +161,18 @@ func identityByName(name string) (clientIdentity, bool) {
 func parseTargets(raw json.RawMessage) targetSet {
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
+		one = strings.TrimSpace(one)
 		if one == "*" {
 			return targetSet{any: true}
+		}
+		if one == "" {
+			// `null` unmarshals into "" without error, and so does an explicit
+			// "". Storing names[""] granted the EMPTY target, which targetOf
+			// returns for a group-scoped request that omits the group — the
+			// read-across-every-group form that is documented to need "*".
+			// So a malformed grant read as a global one (audit M35). The list
+			// branch below already skipped empties; this one did not.
+			return targetSet{}
 		}
 		return targetSet{names: map[string]bool{one: true}}
 	}
