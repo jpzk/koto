@@ -559,13 +559,21 @@ func clearCmd(req groupReq) baseResp {
 		if err != nil {
 			return errResp("clear: " + err.Error())
 		}
+		// Fence this conversation before deleting its state (queue.go).
+		defer clearFence(req.Group, sess, true)()
 		return clearSession(req.Group, sess)
 	}
+	// Group-wide: fence every conversation in it.
+	defer clearFence(req.Group, "", false)()
 	// Session state lives inside workspace.img, which the host must not touch
 	// while (or whether) the VM runs — clear it in-guest via the agent (the
 	// .claude session dir, the per-session id pointers, and venice's
 	// stateless-API history files). ensure() first so a stopped group's
 	// history doesn't survive a /clear and resurrect on the next message.
+	// The barrier gates the send QUEUE, not ensure: the guest state lives in
+	// workspace.img and only the agent can delete it, so a stopped group still
+	// has to boot for its history to be cleared rather than resurrect on the
+	// next message.
 	if _, err := ensure(req.Group, req.Group == "main"); err != nil {
 		return errResp("clear: " + err.Error())
 	}

@@ -2262,3 +2262,71 @@ func TestStopBarrierClosesAdmission(t *testing.T) {
 		t.Fatalf("admission stayed closed after the stop: %v", err)
 	}
 }
+
+// 2026-09-11 M60: /clear deleted the guest's conversation state and truncated
+// the host transcript with queued messages, in-flight turns and background
+// tailers all still live — so it could report success while the reset did not
+// hold. The fence closes admission, drains the scope, cancels its turns and
+// waits for them to retire.
+func TestClearFencesQueuedAndActiveWork(t *testing.T) {
+	const g = "clearfence"
+	prev := turnFn
+	turnFn = func(string, string, string) error { return nil }
+	t.Cleanup(func() {
+		turnFn = prev
+		queuesMu.Lock()
+		delete(groupBarrier, g)
+		for k := range queues {
+			if gg, _, ok := splitSessKey(k); ok && gg == g {
+				delete(queues, k)
+			}
+		}
+		queuesMu.Unlock()
+	})
+
+	// A queued message for the conversation being cleared is discarded, and
+	// another session's queue is left alone by a scoped clear.
+	queuesMu.Lock()
+	qMine := make(chan sendJob, sendQueueDepth)
+	qOther := make(chan sendJob, sendQueueDepth)
+	queues[sessKey(g, "mine")] = qMine
+	queues[sessKey(g, "other")] = qOther
+	mine := sendJob{session: "mine", msg: "stale", done: make(chan error, 1)}
+	other := sendJob{session: "other", msg: "keep", done: make(chan error, 1)}
+	qMine <- mine
+	qOther <- other
+	queuesMu.Unlock()
+
+	reopen := clearFence(g, "mine", true)
+	select {
+	case err := <-mine.done:
+		if err == nil {
+			t.Fatal("the cleared conversation's queued message was not discarded")
+		}
+	default:
+		t.Fatal("the cleared conversation's queued message survived the fence")
+	}
+	if len(qOther) != 1 {
+		t.Fatal("a scoped clear drained another conversation's queue")
+	}
+	// Admission is closed while the clear runs.
+	if _, err := enqueueSend(g, "mine", "during"); err == nil {
+		t.Fatal("a send was admitted while the clear was running")
+	}
+	reopen()
+	if _, err := enqueueSend(g, "mine", "after"); err != nil {
+		t.Fatalf("admission stayed closed after the clear: %v", err)
+	}
+
+	// A group-wide clear drains every conversation.
+	queuesMu.Lock()
+	q2 := make(chan sendJob, sendQueueDepth)
+	queues[sessKey(g, "other")] = q2
+	j := sendJob{session: "other", msg: "x", done: make(chan error, 1)}
+	q2 <- j
+	queuesMu.Unlock()
+	clearFence(g, "", false)()
+	if len(q2) != 0 {
+		t.Fatal("a group-wide clear left a conversation's queue intact")
+	}
+}
