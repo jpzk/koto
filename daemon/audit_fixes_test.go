@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -5331,5 +5332,129 @@ func TestCtlNotifyCannotClaimAReservedSession(t *testing.T) {
 		if evs[0].Title != "hidden" {
 			t.Errorf("%s: the notification lost its content: %+v", sess, evs[0])
 		}
+	}
+}
+
+// 2026-09-11 M151/M152: fcStop deleted the registry entry first and removed the
+// pidfile straight after an unconfirmed SIGKILL. Both are load-bearing records.
+// fcHostMemCommittedMiB sums fcVMs, so deleting first made a still-running VMM
+// invisible to fleet admission for the whole shutdown window; and the pidfile is
+// what fcRunning falls back to, which is the only thing standing between a live
+// VMM and fcGrowWorkspaceImg running truncate + e2fsck + resize2fs on the ext4
+// image that process still has open.
+func TestFcStopKeepsTheEvidenceWhenTheKillDoesNotTake(t *testing.T) {
+	fcHarness(t)
+	const g = "m151"
+
+	// A real process whose /proc/<pid>/comm is "firecracker", so the pidfile
+	// fallback in fcRunning treats it as a live VMM exactly as it would a real
+	// one. comm is the basename of the executable.
+	bin := filepath.Join(t.TempDir(), "firecracker")
+	src, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep(1) to impersonate a VMM with")
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, b, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "120")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	if !pidIsFirecracker(pid) {
+		t.Skipf("pid %d does not present as firecracker on this system", pid)
+	}
+
+	pidPath := fcPidPath(g)
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The guard the whole fix rests on: a pidfile naming a live VMM makes the
+	// group read as running, which is what refuses both a resize and a second
+	// boot onto the same image.
+	if !fcRunning(g) {
+		t.Fatal("a pidfile naming a live firecracker did not make the group read as running")
+	}
+
+	// Drive the "it would not die" branch. The registry entry and the pidfile
+	// must both survive — tidying either away is what told the rest of the
+	// daemon the image was free.
+	prevAwait, prevWait, prevGrace := fcAwaitExit, fcReapWait, fcStopGraceWait
+	fcAwaitExit = func(*fcVM, int) bool { return false }
+	fcReapWait, fcStopGraceWait = 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() {
+		fcAwaitExit, fcReapWait, fcStopGraceWait = prevAwait, prevWait, prevGrace
+	})
+
+	vm := &fcVM{gen: fcNextGen(), pid: pid, memMiB: 1024}
+	vm.start, _ = pidStartTime(pid)
+	fcMu.Lock()
+	fcVMs[g] = vm
+	fcMu.Unlock()
+	t.Cleanup(func() { fcMu.Lock(); delete(fcVMs, g); fcMu.Unlock() })
+
+	fcStop(g)
+
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Error("fcStop removed the pidfile after an unconfirmed kill — the resize guard is gone")
+	}
+	fcMu.Lock()
+	_, stillRegistered := fcVMs[g]
+	fcMu.Unlock()
+	if !stillRegistered {
+		t.Error("fcStop deregistered a VM it could not kill — its memory stops counting against the fleet cap")
+	}
+	if !fcRunning(g) {
+		t.Error("the group stopped reading as running while its VMM is alive")
+	}
+
+	// ...and when the kill DOES take, everything is cleaned up as before.
+	fcAwaitExit = func(*fcVM, int) bool { return true }
+	fcStop(g)
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("a confirmed stop left the pidfile behind: %v", err)
+	}
+	fcMu.Lock()
+	_, stillRegistered = fcVMs[g]
+	fcMu.Unlock()
+	if stillRegistered {
+		t.Error("a confirmed stop left the VM registered")
+	}
+}
+
+// The reaper's own contract: it waits for a live VMM and returns as soon as one
+// is gone, judging identity rather than the bare pid number.
+func TestFcAwaitExitJudgesIdentity(t *testing.T) {
+	prev := fcReapWait
+	fcReapWait = 3 * time.Second
+	t.Cleanup(func() { fcReapWait = prev })
+
+	// A live process that is NOT a firecracker is "gone" as far as this is
+	// concerned — a recycled pid must not hold a stop open.
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	start := time.Now()
+	if !fcAwaitExitImpl(nil, cmd.Process.Pid) {
+		t.Error("a live non-firecracker pid was treated as a live VMM")
+	}
+	if el := time.Since(start); el > time.Second {
+		t.Errorf("it waited %s on a pid that was never ours", el)
+	}
+
+	// A pid that does not exist at all is gone immediately.
+	if !fcAwaitExitImpl(nil, 0) {
+		t.Error("pid 0 was treated as alive")
 	}
 }

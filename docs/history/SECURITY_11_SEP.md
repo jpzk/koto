@@ -3289,3 +3289,56 @@ thinking trace split mid-word and mid-space across chunks (count matches
 
 **Carry-over:** guest-side, so it reaches a group only after `make rootfs` and a
 `/restart` — same as M138 and M46.
+
+## M151 + M152 — Forced stop races the offline resize, and releases memory before the VMM dies — FIXED together
+
+`daemon/fc.go`, `fcStop` and `fcSpawn`'s failure closure. The findings are two
+faces of one thing — `fcStop` returning while the VMM may still be alive — and
+M152 says so itself ("two instances of the same teardown/accounting flaw …
+should be fixed through a common lifecycle path").
+
+**What the old code did:** deleted the registry entry *first*, sent the agent a
+shutdown, waited 5 s, `SIGKILL`ed, and then — with no wait at all — removed the
+pidfile, the socket dir and the jail, and returned.
+
+**M152, accounting.** `fcHostMemCommittedMiB` sums `fcVMs`. Deleting first made
+a still-running VMM invisible to fleet admission for the whole shutdown window
+(up to 8 s), so a concurrent spawn could commit past the cap — and past the
+`vms/` cgroup's `memory.max`, which is where the kernel decides which VM to
+OOM-kill. `fcSpawn`'s `fail` closure had the same shape: `fcHostMemRelease`
+before the `SIGKILL`, and no wait after it.
+
+**M151, corruption.** `fcGrowWorkspaceImg` runs `truncate` + `e2fsck -fy` +
+`resize2fs` on the group's ext4 image. It is guarded — `fcSpawn` refuses when
+`fcRunning(g)` — and `fcRunning` falls back to the **pidfile** when the registry
+entry is gone. Which is precisely the file `fcStop` deleted after an unconfirmed
+kill. So a VMM that survived the `SIGKILL` had its group read as stopped, and
+the next `ensure()` ran a filesystem repair-and-resize on an image that process
+still had open.
+
+**Fix — one rule: do not return until the VMM is gone, and when it will not go,
+leave the evidence in place.** `fcAwaitExit` waits up to `fcReapWait` (20 s,
+identity-checked throughout so a recycled pid is not mistaken for it). Then:
+
+- the registry entry is deleted only after the exit is confirmed, so the
+  memory keeps counting while the process lives;
+- the pidfile is removed only after the exit is confirmed. When the kill does
+  not take, it stays — the group keeps reading as running, which blocks both
+  the resize and a second boot onto the same image — and an **error**-level log
+  line says so, naming the pid and suggesting D state;
+- `fcSpawn`'s `fail` closure kills, reaps, and only then releases the
+  reservation; an unreaped pid keeps its memory reserved.
+
+20 s is generous on purpose: what it waits out is a VMM stuck in an
+uninterruptible kernel path. `kvm_async_pf` under host memory pressure is the
+observed one, and a D-state process does not die on `SIGKILL` until the fault it
+is waiting on completes — which is the same condition the operator already
+handles by hand with the rule "never boot a group whose old VMM is D-state".
+This makes the daemon follow that rule on its own.
+
+Tests: `TestFcStopKeepsTheEvidenceWhenTheKillDoesNotTake` builds a real process
+whose `/proc/<pid>/comm` is `firecracker`, confirms the pidfile alone makes
+`fcRunning` true, then drives both branches — the kill that does not take (the
+pidfile and the registry entry both survive, the group still reads as running)
+and the kill that does (both are cleaned up). `TestFcAwaitExitJudgesIdentity`
+pins that a live pid which is *not* ours does not hold a stop open.
