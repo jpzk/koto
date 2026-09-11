@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"koto-protocol/pb"
 
@@ -561,6 +562,51 @@ func (s *kotoServer) JobLogs(_ context.Context, r *pb.JobLogsReq) (*pb.JobLogsRe
 // terminal, unlike RunScript's deliberately-raw operator channel. The
 // stream keeps following until the client cancels — a finished job simply
 // stops producing frames after the initial window.
+// Live tails are bounded per group and fleet-wide (audit M78). Each one costs
+// a daemon goroutine, an HTTP/2 stream, a vsock connection and a `tail -f`
+// PROCESS in the guest, and cleanup is tied to the RPC context ending — so an
+// authorized reader reopening streams for a known job accumulated all four.
+// The guest side is additionally capped by fcMaxConnsPerGroup, but that cap is
+// shared with the group's ctl and turn channels, and having job tails be what
+// exhausts it would take the group's control plane down with them.
+//
+// The numbers are an exhaustion backstop, not a scheduler: the TUI opens ONE
+// tail per hovered row, so even several attached operators stay far below.
+const (
+	jobTailMaxPerGroup = 8
+	jobTailMaxGlobal   = 64
+)
+
+var (
+	jobTailMu    sync.Mutex
+	jobTailCount = map[string]int{}
+	jobTailTotal int
+)
+
+func jobTailAdmit(g string) bool {
+	jobTailMu.Lock()
+	defer jobTailMu.Unlock()
+	if jobTailTotal >= jobTailMaxGlobal || jobTailCount[g] >= jobTailMaxPerGroup {
+		return false
+	}
+	jobTailCount[g]++
+	jobTailTotal++
+	return true
+}
+
+func jobTailRelease(g string) {
+	jobTailMu.Lock()
+	defer jobTailMu.Unlock()
+	if n := jobTailCount[g] - 1; n > 0 {
+		jobTailCount[g] = n
+	} else {
+		delete(jobTailCount, g)
+	}
+	if jobTailTotal > 0 {
+		jobTailTotal--
+	}
+}
+
 func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) error {
 	fail := func(msg string) error {
 		return stream.Send(&pb.ScriptEvent{Event: "error", Error: msg})
@@ -568,6 +614,11 @@ func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) err
 	if !validGroupName(r.Group) {
 		return fail("invalid group name")
 	}
+	if !jobTailAdmit(r.Group) {
+		return fail(fmt.Sprintf("too many live job tails (per-group %d, global %d) — close one and retry",
+			jobTailMaxPerGroup, jobTailMaxGlobal))
+	}
+	defer jobTailRelease(r.Group)
 	if !jobIDRE.MatchString(r.Id) {
 		return fail("invalid job id")
 	}

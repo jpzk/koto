@@ -2658,3 +2658,44 @@ func TestGuestErrorTextIsSanitized(t *testing.T) {
 		t.Errorf("an ordinary error was mangled: %q", got)
 	}
 }
+
+// 2026-09-11 M78: each live tail costs a daemon goroutine, an HTTP/2 stream, a
+// vsock connection and a `tail -f` process in the guest, and cleanup is tied
+// to the RPC context ending — so reopening streams for a known job
+// accumulated all four.
+func TestJobTailsAreBounded(t *testing.T) {
+	t.Cleanup(func() {
+		jobTailMu.Lock()
+		jobTailCount = map[string]int{}
+		jobTailTotal = 0
+		jobTailMu.Unlock()
+	})
+	const g = "tails"
+	for i := 0; i < jobTailMaxPerGroup; i++ {
+		if !jobTailAdmit(g) {
+			t.Fatalf("tail %d refused below the per-group cap of %d", i, jobTailMaxPerGroup)
+		}
+	}
+	if jobTailAdmit(g) {
+		t.Fatal("admitted a tail past the per-group cap")
+	}
+	// Another group is unaffected by the first group's cap.
+	if !jobTailAdmit("other") {
+		t.Fatal("a second group was refused by the first group's cap")
+	}
+	jobTailRelease("other")
+	// Releasing frees exactly one.
+	jobTailRelease(g)
+	if !jobTailAdmit(g) {
+		t.Fatal("release did not free a slot")
+	}
+
+	// The global cap binds across groups.
+	jobTailMu.Lock()
+	jobTailCount = map[string]int{}
+	jobTailTotal = jobTailMaxGlobal
+	jobTailMu.Unlock()
+	if jobTailAdmit("fresh") {
+		t.Fatal("admitted a tail past the global cap")
+	}
+}

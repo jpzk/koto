@@ -1390,3 +1390,18 @@ the microVM, the `network` profile and the `root` profile, exactly as for every
 other turn. But "the harness is the only source of context" is a stated
 property of this system — `--bare` exists for it — and a background job is not
 an exception to it.
+
+### M78 — Authenticated JobTail streams can exhaust daemon and guest resources (`daemon/grpc_server.go`) — **fixed**
+
+Real. Each live tail costs four things — a daemon goroutine, an HTTP/2 stream,
+a vsock connection, and a `tail -f` PROCESS in the guest — and cleanup is tied
+to the individual RPC context ending, with no admission limit anywhere. An
+authorized reader reopening streams for a known job accumulated all four.
+
+`jobTailMaxPerGroup` (8) and `jobTailMaxGlobal` (64), released on every
+termination path. Per group as well as globally, because the guest-side cost
+lands in `fcMaxConnsPerGroup` (M22/M27) — a budget SHARED with that group's ctl
+and turn channels, so letting job tails exhaust it would take the group's
+control plane down with them. The numbers are an exhaustion backstop, not a
+scheduler: the TUI opens one tail per hovered row, so several attached
+operators stay far below. `TestJobTailsAreBounded`.
