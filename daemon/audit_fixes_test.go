@@ -3221,3 +3221,56 @@ func TestAgeTrimReleasesStalePartials(t *testing.T) {
 		t.Fatal("a live partial lost its index")
 	}
 }
+
+// 2026-09-11 M95: every streaming RPC passes through authStream, and it
+// authenticated, verb-checked and handed straight to the handler — each of
+// which then retains a subscriber registration, a buffered channel, or
+// guest-side execution for the life of the call, with nothing bounding how
+// many an authenticated caller could open. Keepalives police dead
+// CONNECTIONS, not live streams.
+func TestStreamAdmissionIsBounded(t *testing.T) {
+	t.Cleanup(func() {
+		streamMu.Lock()
+		streamCount = map[string]int{}
+		streamTotal = 0
+		streamMu.Unlock()
+	})
+	const who = "tui"
+	for i := 0; i < streamMaxPerIdentity; i++ {
+		if !streamAdmit(who) {
+			t.Fatalf("stream %d refused below the per-identity cap of %d", i, streamMaxPerIdentity)
+		}
+	}
+	if streamAdmit(who) {
+		t.Fatal("admitted a stream past the per-identity cap")
+	}
+	// A different identity is unaffected — one client must not crowd out the
+	// rest.
+	if !streamAdmit("android") {
+		t.Fatal("a second identity was refused by the first identity's cap")
+	}
+	streamRelease("android")
+	streamRelease(who)
+	if !streamAdmit(who) {
+		t.Fatal("release did not free a slot")
+	}
+
+	// The legitimate shape fits: a full fleet's worth of subscriptions from
+	// several operators sharing one identity.
+	streamMu.Lock()
+	streamCount, streamTotal = map[string]int{}, 0
+	streamMu.Unlock()
+	for i := 0; i < (ctlMaxSpawn+2)*4; i++ {
+		if !streamAdmit(who) {
+			t.Fatalf("refused at %d streams; four operators on a full fleet must fit", i)
+		}
+	}
+
+	// The global cap binds across identities.
+	streamMu.Lock()
+	streamCount, streamTotal = map[string]int{}, streamMaxGlobal
+	streamMu.Unlock()
+	if streamAdmit("fresh") {
+		t.Fatal("admitted a stream past the global cap")
+	}
+}

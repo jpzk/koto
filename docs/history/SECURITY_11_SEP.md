@@ -1701,3 +1701,24 @@ The trim now reconciles: any indexed partial found in the prefix being
 discarded is dropped with it, and an empty per-group index is removed. A
 partial still IN the ring keeps its entry, because supersession depends on it.
 `TestAgeTrimReleasesStalePartials`.
+
+### M95 — Authorized clients can exhaust daemon capacity with unbounded streaming RPCs (`daemon/auth.go`) — **fixed**
+
+Real, and the finding is right that the control belongs at the shared boundary.
+`authStream` authenticated, verb-checked and handed straight to the handler —
+and each handler then retains something for the life of the call: a subscriber
+registration and its buffered channel (`SubscribeGroup`, `WatchState`,
+`SubscribeLogs`), or guest-side execution and an attachment (`JobTail`,
+`AttachShell`). Nothing bounded how many an authenticated caller could open.
+gRPC keepalives police dead CONNECTIONS, not live streams.
+
+Admission now rides `authStream`, so every streaming RPC is covered by one
+change rather than five. Per-identity as well as global, so one client cannot
+crowd out the rest. Deliberately generous — a single TUI holds a
+`SubscribeGroup` per group plus `WatchState` and `SubscribeLogs`, so a full
+fleet is already ~100 streams for one identity and several operators share the
+`tui` identity; the test pins that four operators on a full fleet still fit.
+
+`JobTail`'s own tighter cap (M78) stays: it bounds a guest-side `tail -f`
+process and a vsock connection, which this does not distinguish.
+`TestStreamAdmissionIsBounded`.
