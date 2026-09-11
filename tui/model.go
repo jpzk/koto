@@ -1288,7 +1288,12 @@ func (m *Model) reconcilePending(groups map[string]GroupInfo) bool {
 // send (logged from dispatchInput) is later mirrored back by the daemon's
 // own subscribe event. Capped at promptHistoryMax per group.
 func (m *Model) pushHistory(group, msg string) {
-	msg = strings.TrimSpace(msg)
+	// Scrubbed on the way IN, so every consumer is clean at once: ↑/↓ recall,
+	// the ctrl+R picker, and the inline suggestion ghost, none of which has a
+	// sanitising boundary of its own (audit 2026-09-11 L8). It also keeps this
+	// history byte-identical to what the daemon echoed back, which is what the
+	// pending-row match compares against (L2).
+	msg = scrubVTStrict(strings.TrimSpace(msg))
 	if group == "" || msg == "" {
 		return
 	}

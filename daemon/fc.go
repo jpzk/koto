@@ -840,6 +840,22 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		}
 		fcMu.Unlock()
 		_ = os.Remove(fcPidPath(g))
+		// This boot's own resources, released before anything else — they are
+		// unambiguously THIS VM's, whether or not a replacement exists (audit
+		// 2026-09-11 L13). fcStop did this and the exit path did not, so a VM
+		// that crashed, panicked or was OOM-killed left its published-port
+		// listeners bound and accepting: a port removed from config.json stayed
+		// exposed, the next boot's bind of the same port failed and was only
+		// logged, and the surviving listener's callback went on dialing
+		// fcHostDial(g, port) — into whichever VM answered next. The L3
+		// gateway's AcceptQemu goroutines were left running for the same
+		// reason.
+		if vm.netCancel != nil {
+			vm.netCancel()
+		}
+		for _, ln := range vm.listeners {
+			_ = ln.Close()
+		}
 		if fcGenSuperseded(g, gen) {
 			// A replacement VM is registered for this group; every cleanup
 			// below is keyed on the group alone, so running them now would

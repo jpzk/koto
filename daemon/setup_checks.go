@@ -298,13 +298,34 @@ func checkUserns() checkResult {
 	}
 	if r, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil &&
 		strings.TrimSpace(string(r)) == "1" {
+		// The SCOPED remedy first (audit 2026-09-11 L9). The sysctl this used
+		// to lead with turns Ubuntu's AppArmor gate off for the whole machine —
+		// every local program gets unprivileged user namespaces back, not just
+		// koto — which is a poor trade to make on an operator's behalf for one
+		// daemon's needs, and it is not scoped by the koto unit, its
+		// RestrictNamespaces allowlist, or the daemon's uid. An AppArmor
+		// profile granting `userns,` to this one binary is the same capability
+		// with none of the reach.
 		return failCheck("nested userns", "restricted by AppArmor",
 			"Ubuntu 23.10+ blocks unprivileged user namespaces, which the microVM\n"+
-				"monitor's jail needs. Allow them, and persist it across reboots:\n"+
+				"monitor's jail needs. Grant them to koto ALONE with an AppArmor profile:\n"+
+				"  sudo tee /etc/apparmor.d/koto >/dev/null <<'EOF'\n"+
+				"  abi <abi/4.0>,\n"+
+				"  include <tunables/global>\n"+
+				"  profile koto /usr/local/bin/koto flags=(unconfined) {\n"+
+				"    userns,\n"+
+				"  }\n"+
+				"  EOF\n"+
+				"  sudo apparmor_parser -r /etc/apparmor.d/koto\n"+
+				"\n"+
+				"If your kernel is too old for per-profile userns rules, the host-wide\n"+
+				"switch works but gives unprivileged user namespaces back to EVERY local\n"+
+				"program, not just koto — a deliberate weakening of the machine:\n"+
 				"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"+
 				"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n"+
-				"Running the VMM unjailed (KOTO_FC_NOJAIL=1) also avoids the restriction,\n"+
-				"but drops a layer of host protection — prefer the sysctl.")
+				"\n"+
+				"Running the VMM unjailed (KOTO_FC_NOJAIL=1) avoids the restriction too,\n"+
+				"but drops a layer of host protection — prefer the profile.")
 	}
 	return okCheck("nested userns", "allowed ("+strings.TrimSpace(string(b))+")")
 }
@@ -380,9 +401,21 @@ func checkRuntimeTools() []checkResult {
 			// npm installs anyway with only an EBADENGINE warning and `claude
 			// --version` works, so the mismatch stays hidden until the proxy
 			// shells out to refresh a token. Name the real fix here.
-			hint += "\n\nUbuntu's `nodejs` package is v18, too old — install node 22 first:\n" +
-				"  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -\n" +
-				"  sudo apt install -y nodejs"
+			// No `curl | sudo bash` (audit 2026-09-11 L12). Printing one makes
+			// mutable third-party HTTPS content into a privileged shell program
+			// on the operator's machine, and koto is in no position to vouch
+			// for what that endpoint serves tomorrow. Both alternatives below
+			// install the same node without handing root to a download:
+			// Ubuntu's own snap is distro-signed, and nvm installs per-user
+			// with no privilege at all.
+			hint += "\n\nUbuntu's `nodejs` package is v18, too old — install node 22 first,\n" +
+				"either from Ubuntu's own channel:\n" +
+				"  sudo snap install node --classic --channel=22\n" +
+				"or per-user, with no root at all:\n" +
+				"  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o nvm-install.sh\n" +
+				"  less nvm-install.sh && bash nvm-install.sh && nvm install 22\n" +
+				"(NodeSource publishes a `curl | sudo bash` one-liner; koto does not\n" +
+				"print it, because it makes a third party's HTTPS content a root shell.)"
 		}
 		out = append(out, warnCheck("claude", "not found", hint))
 	}

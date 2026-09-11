@@ -4034,3 +4034,150 @@ identity to collapse.
 
 Test: extended `TestJailUIDsAreDistinctAndInRange` in `daemon/userns_test.go` —
 five out-of-range ports refused, and the refusal names `PORT_BASE`.
+
+## L7 — Quadratic work when rendering newline-dense guest text frames — NOT A FINDING
+
+`daemon/fcturn.go`, `turnWriter.text`.
+
+The finding describes `strings.IndexByte(string(b), '\n')` — a fresh string of
+the whole remaining suffix on every newline. The code does not do that: it is
+`bytes.IndexByte(b, '\n')` over a **reslice** (`b = b[i+1:]`), which allocates
+nothing and copies nothing, so the scan is linear. The only `strings.IndexByte`
+in the daemon (`logtail.go`) operates on a *string* reslice, which is also a
+slice header rather than a copy.
+
+Measured rather than argued: over 64 KiB of `"x\n"`, the reslice form takes
+**164 µs** and the shape the finding describes takes **179 ms** — **1090×**. The
+difference is real; the code is on the right side of it.
+
+Test: `TestNewlineScanShapeIsLinear` in `daemon/audit_fixes_test.go` measures
+both shapes and then asserts the source still uses the reslice form, so the
+quadratic one cannot return unnoticed.
+
+## L8 — Terminal control-sequence injection via unsanitized TUI input — FIXED
+
+`tui/view.go` (`renderInputLines`), `tui/model.go` (`pushHistory`).
+
+**Confirmed.** `renderInputLines` put `m.input.Value()` and the suggestion ghost
+into rows that `drawBox` writes straight into `View()`. Width calculation, ANSI
+truncation, padding and styling do not make an embedded ESC/C1/C0 sequence
+inert, and neither `themeFrame` nor `monoFrame` strips one. The ghost comes from
+**prompt history**, so a restored or pasted value reached the terminal raw.
+
+**Fix, in two places:**
+
+- `pushHistory` scrubs on the way **in**, so every consumer is clean at once —
+  ↑/↓ recall, the ctrl+R picker and the inline ghost, none of which has a
+  sanitising boundary of its own. It also keeps the history byte-identical to
+  what the daemon echoes back, which is what L2's pending-row match compares.
+- `renderInputLines` scrubs per **piece** rather than on the value, so the
+  cursor arithmetic — done on the raw runes — still lands where the operator put
+  it. A cell that is itself a control renders as a space rather than nothing.
+
+Test: `TestInputRowAndGhostAreScrubbed` in `tui/input_test.go` covers history,
+the rendered rows, the whole frame, and that ordinary input is untouched.
+
+## L9 — Setup instructs operators to disable host-wide AppArmor user-namespace protection — FIXED
+
+`daemon/setup_checks.go`, `checkUserns`.
+
+**Confirmed.** The remediation led with
+`kernel.apparmor_restrict_unprivileged_userns=0`, immediately and persisted —
+which turns Ubuntu's gate off for the **whole machine**. Every local program
+gets unprivileged user namespaces back, not just koto, and it is scoped by
+neither the koto unit, its `RestrictNamespaces` allowlist, nor the daemon's uid.
+A poor trade to print on an operator's behalf for one daemon's needs.
+
+**Fix:** lead with the scoped remedy — an AppArmor profile granting `userns,` to
+`/usr/local/bin/koto` alone, which is the same capability with none of the
+reach. The host-wide switch stays as an explicitly-labelled fallback for kernels
+too old for per-profile userns rules, and now says what it costs.
+
+## L12 — Operator-facing setup hint executes mutable third-party script as root — FIXED
+
+`daemon/setup_checks.go`, the node-22 hint.
+
+**Confirmed.** The hint printed
+`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`, which makes
+mutable third-party HTTPS content into a privileged shell program on the
+operator's machine. koto is in no position to vouch for what that endpoint
+serves tomorrow.
+
+**Fix:** offer `snap install node --classic --channel=22` (distro-signed) and an
+nvm install that runs **per-user with no root at all**, with the download shown
+to the operator before it runs. The one-liner is named and explicitly not
+printed, so the omission reads as a decision rather than an oversight.
+
+Test: `TestSetupHintsDoNotTellOperatorsToWeakenTheHost` in
+`daemon/audit_fixes_test.go` covers both — no pipe-to-privileged-shell shape
+survives, the alternatives are present, and the scoped AppArmor profile is
+offered before the host-wide switch.
+
+## L10 — Turn output queue is bounded by frame count, not bytes — FIXED
+
+`fcguest/turn.go`.
+
+**Confirmed.** `turnQueueFrames` is 4096 and one frame may approach the
+channel's 16 MiB maximum — ~64 GiB on paper, against a guest that has 1–8 GiB
+depending on its size preset, so it is OOM-killed long before the frame cap is
+reached. And the host sink deliberately throttles to 1 MiB/s, so a producer
+outrunning the writer is the **ordinary** case rather than a contrived one.
+
+**Fix:** `turnQueueBytes` (64 MiB) bounds the same queue by size, carried on the
+connection and released by the writer as each frame goes out. A producer that
+hits the byte bound blocks exactly as it does on a full frame count, so the
+existing stall timeout and worker-kill path handle it with no new failure mode.
+A single frame larger than the whole budget is still accepted — refusing the
+first one would drop output rather than bound anything.
+
+Test: `TestTurnQueueIsBoundedByBytes` in `fcguest/turn_test.go` offers 256 MiB
+into a writer that never drains, asserting the byte bound holds, that it is what
+bit, and that the stall path is reached. Run under `-race`.
+
+## L11 — Host-memory protection fails open when capacity discovery fails — FIXED
+
+`daemon/fchostmem.go`.
+
+**Confirmed.** With `KOTO_HOST_MEM_MIB` unset and no readable capacity,
+`fcHostMemInit` left the cap at **0 — which means unlimited**. Both layers then
+went away at once: `fcHostMemAdmit` accepts everything at 0, and `fcCgroupInit`
+installs the `vms/` parent limits only for a positive cap. A discovery failure
+silently disabled the fleet's only memory protection.
+
+**Fix:** unknown capacity is not the same as unlimited capacity, and the
+operator already has a way to say the latter — `KOTO_HOST_MEM_MIB=0` is the
+documented "unlimited". So admission **refuses** until they say which they mean,
+and the log line is at **error**, which reaches them as a banner through
+`logalert` rather than sitting in a log nobody reads. Any successful
+discovery — or an explicit override — clears the state.
+
+Test: `TestUnknownHostCapacityRefusesSpawns` in `daemon/audit_fixes_test.go`.
+
+## L13 — Stale published listeners survive VM exit — FIXED
+
+`daemon/fc.go`, the VM-exit reaper.
+
+**Confirmed.** `fcStop` closes `vm.listeners` and calls `vm.netCancel`; the
+goroutine that handles an *unexpected* `cmd.Wait()` return did neither. So a VM
+that crashed, panicked or was OOM-killed left its published-port listeners bound
+and accepting: a port removed from `config.json` stayed exposed, the next boot's
+bind of the same port failed and was only logged, and the surviving listener's
+callback went on dialling `fcHostDial(g, port)` — into whichever VM answered
+next. The gVisor gateway's `AcceptQemu` goroutines were left running for the same
+reason.
+
+**Fix:** released in the reaper, **before** the superseded check, because they
+are unambiguously this boot's resources whether or not a replacement exists.
+
+## L14 — Persisted conversation state is exposed through permissive filesystem permissions — ALREADY FIXED (M136)
+
+The four sinks the finding names were verified rather than assumed:
+`send.go:321` and `logtail.go:327` open transcripts `0600`, `logtail.go:326`,
+`fcturn.go:107` and `config.go:251` create their directories `0700`. The state
+root, `groups/` and `run/` were tightened in M136, which also added
+`hardenStatePaths` — the startup repair pass, needed exactly because `MkdirAll`
+and `OpenFile` preserve an existing mode.
+
+The remaining claim — that an unset `KOTO_HOME` roots state at the working
+directory — is the dev-clone design, and is the same sub-claim declined under
+M136: that is tier 1 choosing where its own state lives.
