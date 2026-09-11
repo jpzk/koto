@@ -855,3 +855,29 @@ landing silently).
 `fcassets/rootfs.img` on a host with running groups. The pinned version matches
 what the operator's own `claude` reports (2.1.268) and the spec resolves, but
 the first rebuild is the real check.
+
+### M43 — Installer executes a PATH-resolved `git` after privileged operations (`daemon/setup.go`) — **not a finding**
+
+Same shape as M5 and M8: an attacker who can write a directory on the
+operator's PATH already executes as the operator on their next shell command.
+The "after sudo, so cached authorization multiplies it" framing does not add
+anything — the attacker does not need koto's sudo timestamp when they control
+what the operator runs next. The repository-local `git` config angle is real in
+general but subordinate: it requires the operator to run the installer inside a
+hostile checkout, which is the same tier-1 premise.
+
+### M45 — Named Claude session state is readable and writable by every worker (`fcguest/turn.go`) — **not a finding**
+
+Sessions are conversations, not tenants — the same answer as M4 and M28. Every
+worker in a group runs as the same uid in the same VM with the same
+`/workspace`, and that is the documented design: `goals.go` says so about
+concurrent goals ("goals that fight over the same files are the caller's
+problem, same as two chat sessions editing one repo"). A worker that can read
+`sessions/<name>.id` can already read that session's transcript, its files and
+its git history directly.
+
+The remediation — a uid or user namespace per session, with the mapping held
+daemon-side and an opaque per-turn handle — would be a real feature (in-group
+multi-tenancy) rather than a fix. It is not in koto's model: the isolation
+boundary is the GROUP, and the way to isolate two workloads is to give them two
+groups, which costs one microVM and is what `/new` is for.
