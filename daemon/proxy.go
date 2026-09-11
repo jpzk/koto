@@ -59,27 +59,27 @@ func veniceAuth() (string, error) {
 }
 
 // groupProvider reads the per-group provider from config.json on every request.
-// Cheap (a few hundred bytes from disk) and avoids any cache-invalidation
-// dance when /config changes the value at runtime. Defaults to "venice" when
-// absent or unrecognized — this is a Venice-first deployment; opt back into
-// Claude with `/config provider=claudesdk`.
+// Cheap (a few hundred bytes from disk) and avoids any cache-invalidation dance
+// when /config changes the value at runtime.
+//
+// One implementation, deliberately (audit M148). This used to be a second copy
+// of the read that answered "venice" for every failure — absent file,
+// unparseable JSON, unrecognised value — on the grounds, true when it was
+// written, that koto was a Venice-first deployment. It has not been for a long
+// time: defaultProvider is claudesdk, and ensureProviderConfig WRITES that into
+// any group whose config is missing or invalid on every ensure(), so a group
+// whose config cannot be read is by koto's own definition a claudesdk group.
+//
+// The divergence was the defect. Three readers, two answers: this one and
+// cs-subagent said venice, the guest turn path said claudesdk. A claudesdk
+// group whose config.json was momentarily unreadable had its traffic — system
+// prompt and workspace-derived task material included — relayed to a different
+// third party than the operator selected, with the credential for it injected.
 func groupProvider(group string) string {
 	if group == "" {
-		return "venice"
+		return defaultProvider
 	}
-	p := filepath.Join(ROOT, group, ".cs", "config.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return "venice"
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return "venice"
-	}
-	if s, ok := cfg["provider"].(string); ok && s == "claudesdk" {
-		return "claudesdk"
-	}
-	return "venice"
+	return groupProviderName(group)
 }
 
 type oauthCreds struct {

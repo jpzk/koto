@@ -5217,3 +5217,65 @@ func authTrustedCredsDirAfterCreate(ac *authCtx) error {
 	}
 	return authTrustedCredsDir(ac)
 }
+
+// 2026-09-11 M148: three readers of one field, two answers. The proxy's
+// groupProvider and cs-subagent answered "venice" for every failure — absent
+// file, unparseable JSON, unrecognised value — while the guest turn path
+// answered "claudesdk" for the same state. So a claudesdk group whose
+// config.json was momentarily unreadable had its traffic relayed to a different
+// third party than the operator selected, system prompt and workspace-derived
+// task material included, with the credential for it injected.
+//
+// claudesdk is the fail-closed answer because it is what koto itself says the
+// group is: defaultProvider, which ensureProviderConfig WRITES into any group
+// whose config is missing or invalid, on every ensure().
+func TestProviderResolutionFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	prevRoot := ROOT
+	ROOT = dir
+	t.Cleanup(func() { ROOT = prevRoot })
+
+	write := func(g, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, g, ".cs"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, g, ".cs", "config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct{ name, g, body, want string }{
+		{"explicit venice", "v", `{"provider":"venice"}`, "venice"},
+		{"explicit claudesdk", "c", `{"provider":"claudesdk"}`, "claudesdk"},
+		{"no provider key", "empty", `{"model":"x"}`, defaultProvider},
+		{"empty document", "blank", `{}`, defaultProvider},
+		{"truncated mid-write", "partial", `{"provider":"clau`, defaultProvider},
+		{"not JSON at all", "junk", `garbage`, defaultProvider},
+		{"unrecognised value", "odd", `{"provider":"openai"}`, defaultProvider},
+		{"wrong type", "typed", `{"provider":42}`, defaultProvider},
+	}
+	for _, c := range cases {
+		write(c.g, c.body)
+		if got := groupProvider(c.g); got != c.want {
+			t.Errorf("%s: groupProvider = %q, want %q", c.name, got, c.want)
+		}
+		// The proxy's reader and the daemon's canonical one must never differ:
+		// the divergence WAS the defect.
+		if got, canon := groupProvider(c.g), groupProviderName(c.g); got != canon {
+			t.Errorf("%s: proxy says %q, groupProviderName says %q", c.name, got, canon)
+		}
+	}
+
+	// A group with no config file at all, and the empty group name the proxy
+	// uses before one is known.
+	if got := groupProvider("absent"); got != defaultProvider {
+		t.Errorf("a group with no config.json resolved to %q, want %q", got, defaultProvider)
+	}
+	if got := groupProvider(""); got != defaultProvider {
+		t.Errorf("the empty group resolved to %q, want %q", got, defaultProvider)
+	}
+	if defaultProvider != "claudesdk" {
+		t.Errorf("defaultProvider is %q — this test assumes the documented default", defaultProvider)
+	}
+}
