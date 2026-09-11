@@ -3461,3 +3461,30 @@ func TestTokSamplesArePrunedWithoutAReader(t *testing.T) {
 		t.Fatalf("rates went to zero after pruning: per=%v global=%v", per["g"], global)
 	}
 }
+
+// 2026-09-11 M97: SubscribeGroup carries the whole GROUP, so a capture keyed
+// on message text alone could lock onto another conversation's turn — a client
+// with send access could race an identical prompt in a different session and
+// hand `ctl ask` the wrong output while the intended turn ran on unconsumed.
+func TestAskSessionNormalization(t *testing.T) {
+	for _, spelling := range []string{"", "-", "default"} {
+		if got := normalizeAskSession(spelling); got != "" {
+			t.Errorf("normalizeAskSession(%q) = %q, want the default session", spelling, got)
+		}
+	}
+	if got := normalizeAskSession("work"); got != "work" {
+		t.Errorf("a named session was rewritten to %q", got)
+	}
+	// The property the capture loop relies on: an event from another session
+	// never compares equal to the one asked for, in any spelling of default.
+	for _, want := range []string{"", "-", "default"} {
+		for _, other := range []string{"work", "goal-abc", "other"} {
+			if normalizeAskSession(other) == normalizeAskSession(want) {
+				t.Errorf("session %q matched the default-session filter %q", other, want)
+			}
+		}
+	}
+	if normalizeAskSession("work") == normalizeAskSession("work2") {
+		t.Error("two named sessions compared equal")
+	}
+}

@@ -857,6 +857,20 @@ func ctlAsk(args []string) {
 		ctlFatal(1, "daemon: %s", resp.GetError())
 	}
 
+	// SubscribeGroup carries the whole GROUP, every session of it, so a
+	// capture keyed on the message text alone could lock onto another
+	// conversation's turn — a client with send access could pre-stage or race
+	// an identical prompt in a different session and hand this command the
+	// wrong output while the intended turn ran on unconsumed (audit M97).
+	//
+	// The session is the discriminator the events already carry, so both the
+	// start and the end are qualified by it. Within ONE session the daemon
+	// serializes turns, so the next `prompt` matching this text in this
+	// session is this turn — two identical prompts queued back to back in the
+	// same conversation are indistinguishable on the wire, which would need a
+	// server-issued turn id to separate and is noted in the ledger rather than
+	// pretended away.
+	want := normalizeAskSession(*session)
 	capturing := false
 	for {
 		ev, err := stream.Recv()
@@ -865,6 +879,9 @@ func ctlAsk(args []string) {
 				ctlFatal(1, "timed out after %s waiting for turn end", *timeout)
 			}
 			ctlFatal(1, "stream: %v", err)
+		}
+		if normalizeAskSession(ev.GetSession()) != want {
+			continue // another conversation in this group
 		}
 		if !capturing {
 			if ev.GetEvent() == "prompt" && ev.GetMsg() == msg {
@@ -889,6 +906,16 @@ func ctlAsk(args []string) {
 			return
 		}
 	}
+}
+
+// normalizeAskSession folds the default session's spellings together: the
+// flag accepts "" / "-" / "default", and the daemon stamps events with "".
+func normalizeAskSession(s string) string {
+	switch s {
+	case "-", "default":
+		return ""
+	}
+	return s
 }
 
 // ctlSched parses the shell-friendly schedule forms:
