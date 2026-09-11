@@ -66,12 +66,39 @@ func (u *setupUI) yellow(s string) string { return u.sgr("33", s) }
 func (u *setupUI) red(s string) string    { return u.sgr("31", s) }
 func (u *setupUI) cyan(s string) string   { return u.sgr("36", s) }
 
-func (u *setupUI) printf(format string, a ...any) { fmt.Printf(format+"\n", a...) }
-func (u *setupUI) blank()                         { fmt.Println() }
+// uiText is the sanitizing boundary for EVERYTHING this UI prints (audit
+// 2026-09-11 L103). The wizard's strings are not all ours: container-engine
+// stderr, JSON metadata from a probe, executable paths resolved from PATH,
+// HTTP response bodies from the credential check. A hostile one of those could
+// forge a "✓" line, erase the failure above it with a carriage return, or
+// reach a terminal feature — and this is the one program in the project that
+// writes to a real terminal with no renderer in between.
+//
+// sanitize() keeps pure SGR (so the wizard's own colour survives, and it is
+// applied before this runs at most call sites) and drops every other escape,
+// C0/C1 control, and bidi/format rune; flattenInline additionally folds line
+// breaks, so one printed line stays one line and cannot become three.
+func uiText(s string) string { return flattenInline(sanitize(s)) }
+
+// uiLines is uiText for text whose multi-line shape is intentional (prose,
+// hint): each line is flattened on its own, so injected breaks add indented
+// lines rather than forged top-level ones.
+func uiLines(s string) []string {
+	out := strings.Split(sanitize(s), "\n")
+	for i, l := range out {
+		out[i] = flattenInline(l)
+	}
+	return out
+}
+
+func (u *setupUI) printf(format string, a ...any) {
+	fmt.Println(uiText(fmt.Sprintf(format, a...)))
+}
+func (u *setupUI) blank() { fmt.Println() }
 
 // header draws a step banner: ── [3/11] PKI ──────────────
 func (u *setupUI) header(n, total int, title string) {
-	label := fmt.Sprintf("── [%d/%d] %s ", n, total, title)
+	label := fmt.Sprintf("── [%d/%d] %s ", n, total, uiText(title))
 	if pad := 72 - len([]rune(label)); pad > 0 {
 		label += strings.Repeat("─", pad)
 	}
@@ -82,7 +109,7 @@ func (u *setupUI) header(n, total int, title string) {
 // wrap reflows prose to 76 columns so explain text reads as paragraphs
 // rather than one long line in a narrow terminal.
 func (u *setupUI) prose(s string) {
-	for _, para := range strings.Split(strings.TrimSpace(s), "\n\n") {
+	for _, para := range strings.Split(strings.TrimSpace(strings.Join(uiLines(s), "\n")), "\n\n") {
 		words := strings.Fields(para)
 		line := ""
 		for _, w := range words {
@@ -116,7 +143,7 @@ func (u *setupUI) info(format string, a ...any) { u.printf("  %s", fmt.Sprintf(f
 
 // hint prints remediation text indented under a failed check.
 func (u *setupUI) hint(s string) {
-	for _, line := range strings.Split(strings.TrimSpace(s), "\n") {
+	for _, line := range uiLines(strings.TrimSpace(s)) {
 		fmt.Println("    " + u.yellow(strings.TrimSpace(line)))
 	}
 }
@@ -354,6 +381,10 @@ func (w *prefixWriter) Flush() {
 }
 
 func (w *prefixWriter) emit(line string) {
-	line = strings.TrimRight(line, "\r")
-	fmt.Println(w.ui.dim("  │ ") + line)
+	// This is the most directly attacker-facing sink in the wizard: it is a
+	// SUBPROCESS's stdout and stderr, verbatim, on the operator's terminal
+	// (audit 2026-09-11 L103). The prefix is what makes a line legible as the
+	// child's; a bare \r or a cursor-up would let the child erase that frame
+	// and write where koto's own lines go.
+	fmt.Println(w.ui.dim("  │ ") + uiText(strings.TrimRight(line, "\r")))
 }

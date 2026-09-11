@@ -118,3 +118,34 @@ func TestDebugLogPermissionsAreRepairedOnOpen(t *testing.T) {
 		t.Fatalf("tightening the mode broke the logger: %v %q", err, b)
 	}
 }
+
+// 2026-09-11 L109: dispatchInput logged every slash command verbatim, before
+// any validation. The verb is operator intent; the arguments are not — `/sched
+// add … <message>` carries an arbitrary prompt, `/goals set` the goal text and
+// its acceptance criteria. This log defaults to DEBUG, appends for the life of
+// the process and keeps a rotated generation, so what lands in it outlives the
+// session.
+func TestSlashCommandArgumentsAreNotLogged(t *testing.T) {
+	defer resetDebugLog()
+	dir := t.TempDir()
+	initDebugLog(envMap(nil), filepath.Join(dir, "koto.sock"))
+
+	m := newModel("", 200000)
+	m.cur = "g"
+	const secret = "deploy-token-hunter2-do-not-log"
+	_ = m.dispatchInput("/sched add 0 9 * * 1-5 " + secret)
+	_ = m.dispatchInput("/goals set g " + secret)
+
+	b, err := os.ReadFile(filepath.Join(dir, "tui.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), secret) {
+		t.Fatalf("a slash-command argument was written to the debug log:\n%s", b)
+	}
+	// The verb is still there — following what the TUI did is what this log
+	// is for.
+	if !strings.Contains(string(b), "/sched") {
+		t.Errorf("the command itself was not logged:\n%s", b)
+	}
+}

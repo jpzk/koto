@@ -5092,11 +5092,26 @@ func (m Model) treeOrder() []string {
 }
 
 func (m *Model) dispatchInput(v string) tea.Cmd {
-	// Slash commands are operator intent — log them verbatim. Plain chat text
-	// is NOT logged here; its send surfaces as the rpc-layer line (length
-	// only), keeping conversation content out of the debug log.
+	// Slash commands are operator INTENT, and the intent is the verb. The
+	// arguments are not (audit 2026-09-11 L109): `/sched add * * * * *
+	// <message>` carries an arbitrary prompt, `/goals set` carries the goal
+	// text and its acceptance criteria, `/prompt` and `/runscript` carry file
+	// names — private prompts, incident detail, a pasted credential. This log
+	// defaults to DEBUG, appends for the life of the process and keeps one
+	// rotated generation, so anything written here outlives the session; mode
+	// 0600 bounds who can read it but not backups, log collection or the
+	// operator's own diagnostics paste.
+	//
+	// So the verb is logged with the argument's SIZE, which is what the log is
+	// actually used for — following what the TUI did while reproducing a bug.
+	// Plain chat text was already excluded here for the same reason.
 	if strings.HasPrefix(v, "/") {
-		logDbg("cmd", "%s", v)
+		verb, arg, _ := strings.Cut(v, " ")
+		if arg == "" {
+			logDbg("cmd", "%s", verb)
+		} else {
+			logDbg("cmd", "%s (%d bytes of arguments)", verb, len(arg))
+		}
 	}
 	if strings.HasPrefix(v, "/new ") {
 		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"

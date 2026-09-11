@@ -613,6 +613,16 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 	var proto byte
 	var src, dst net.IP
 	var l4 []byte
+	// opaque marks a packet that HAS an IP destination but whose transport
+	// could not be read (audit 2026-09-11 L111). It used to return
+	// unclassified, i.e. NOT LOGGED, while fcFrameAllowed had already judged
+	// and forwarded the packet on its destination alone — so an IPv6 flow
+	// behind an extension-header chain, or a fragmented IPv4 flow whose first
+	// fragment carries no usable L4 header, left no trace in the egress audit
+	// trail at all. The destination is the part that matters for
+	// investigation, and it is always available here, so it is logged with
+	// what IS known instead of being dropped.
+	opaque := ""
 	switch binary.BigEndian.Uint16(frame[12:14]) {
 	case 0x0800: // IPv4
 		if len(frame) < 34 {
@@ -622,21 +632,25 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 		if ihl < 20 || len(frame) < 14+ihl {
 			return fcFlow{}, false
 		}
-		if binary.BigEndian.Uint16(frame[20:22])&0x1fff != 0 {
-			return fcFlow{}, false // fragment continuation — no L4 header
-		}
 		proto = frame[23]
 		src, dst = net.IP(frame[26:30]), net.IP(frame[30:34])
 		l4 = frame[14+ihl:]
+		if binary.BigEndian.Uint16(frame[20:22])&0x1fff != 0 {
+			opaque = "IPv4-frag" // continuation — no L4 header in this packet
+		}
 	case 0x86DD: // IPv6
 		if len(frame) < 54 {
 			return fcFlow{}, false
 		}
-		proto = frame[20] // next header; extension headers → unknown proto below
+		proto = frame[20]
 		src, dst = net.IP(frame[22:38]), net.IP(frame[38:54])
 		l4 = frame[54:]
+		proto, l4, opaque = fcWalkIPv6Ext(proto, l4)
 	default:
 		return fcFlow{}, false
+	}
+	if opaque != "" {
+		return fcFlow{proto: opaque, src: src, dst: dst}, true
 	}
 	switch proto {
 	case 6: // TCP — log connection starts only: SYN set, ACK clear
@@ -656,7 +670,63 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 	case 58:
 		return fcFlow{proto: "ICMPv6", src: src, dst: dst}, true
 	}
-	return fcFlow{}, false
+	// A transport this parser has no rule for still went somewhere, and the
+	// destination is the part an investigation needs.
+	return fcFlow{proto: fmt.Sprintf("IP-proto-%d", proto), src: src, dst: dst}, true
+}
+
+// fcWalkIPv6Ext follows the IPv6 next-header chain to the transport header.
+// Returns the transport protocol number, the bytes at it, and — when the
+// chain cannot be resolved — a label for the opaque case.
+//
+// The chain was not walked at all before (audit 2026-09-11 L111): the base
+// header's Next Header was read as if it were the transport, so any packet
+// carrying hop-by-hop options, routing, destination options, a fragment
+// header or AH classified as "some protocol we have no rule for" and was
+// silently not logged, while the frame filter had already passed it on its
+// destination. Bounded at fcIPv6ExtMax headers, since the chain is
+// attacker-chosen and walking it is per-packet work.
+const fcIPv6ExtMax = 8
+
+func fcWalkIPv6Ext(next byte, rest []byte) (byte, []byte, string) {
+	for i := 0; i < fcIPv6ExtMax; i++ {
+		switch next {
+		case 0, 43, 60, 135: // hop-by-hop, routing, destination options, mobility
+			if len(rest) < 8 {
+				return next, rest, "IPv6-opaque"
+			}
+			n := (int(rest[1]) + 1) * 8
+			if len(rest) < n {
+				return next, rest, "IPv6-opaque"
+			}
+			next, rest = rest[0], rest[n:]
+		case 44: // fragment header — 8 bytes, fixed
+			if len(rest) < 8 {
+				return next, rest, "IPv6-opaque"
+			}
+			// Only the FIRST fragment carries the transport header.
+			if binary.BigEndian.Uint16(rest[2:4])&0xfff8 != 0 {
+				return next, rest, "IPv6-frag"
+			}
+			next, rest = rest[0], rest[8:]
+		case 51: // authentication header — length in 4-byte units, minus 2
+			if len(rest) < 8 {
+				return next, rest, "IPv6-opaque"
+			}
+			n := (int(rest[1]) + 2) * 4
+			if len(rest) < n {
+				return next, rest, "IPv6-opaque"
+			}
+			next, rest = rest[0], rest[n:]
+		case 50: // ESP — the transport is encrypted; nothing further to read
+			return next, rest, "IPv6-esp"
+		case 59: // no next header
+			return next, rest, "IPv6-opaque"
+		default:
+			return next, rest, ""
+		}
+	}
+	return next, rest, "IPv6-opaque" // chain longer than we will walk
 }
 
 // fcFrameAllowed parses an ethernet frame's L3 destination and applies

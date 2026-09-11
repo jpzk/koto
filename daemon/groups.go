@@ -480,6 +480,22 @@ func ensureProviderConfig(g string) error {
 // kicks in (and before fcResolveSize reads the size). Empty arguments are
 // skipped (preserving any existing value).
 func seedSpawnConfig(g, provider, model, size string) error {
+	// The model identifier goes through the SAME validation the /config path
+	// applies (audit 2026-09-11 L105). Spawn wrote it verbatim, and the value
+	// persists into config.json and is handed to the guest on every later turn
+	// — as an os/exec argument for claude, as an environment entry for venice.
+	// A NUL makes both invalid, and a large enough one exceeds the argv or
+	// environ limit, so the group's every turn fails from a value accepted
+	// once at spawn. The config path already established this invariant
+	// (trimmed, bounded, identifier charset, audit M9b); an alternative
+	// admission point that does not share it is just a way around it.
+	model = strings.TrimSpace(model)
+	if model != "" {
+		if len(model) > configMaxIdent || !configIdentRE.MatchString(model) {
+			return fmt.Errorf("model %q is not a valid identifier (max %d chars, %s)",
+				truncateRunes(model, 40), configMaxIdent, configIdentRE.String())
+		}
+	}
 	_, err := updateGroupConfig(g, func(cfg map[string]any) {
 		if provider != "" {
 			cfg["provider"] = provider

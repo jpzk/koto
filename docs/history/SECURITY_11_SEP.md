@@ -5676,3 +5676,161 @@ on the **descriptor** with `fstat`. Discovery additionally takes regular files
 only and stops at `themeMaxFiles` (256; the bundled collection is ~45), because
 the picker loads every candidate synchronously. Pinned by
 `TestThemeLoadingRefusesSpecialFiles`.
+
+## L103 — Setup diagnostics render attacker-controlled text to the terminal — FIXED
+
+`daemon/setup_ui.go`.
+
+**Confirmed.** The wizard is the one program in this project that writes to a
+real terminal with no renderer in between, and not every string it prints is
+ours: container-engine stderr, a probe's JSON, an executable path resolved from
+`PATH`, an HTTP response body from the credential check. `sgr` only *adds*
+colour; nothing removed escapes, carriage returns or control characters. A
+hostile one could forge a `✓` line, erase the failure above it with `\r`, or
+reach a terminal feature.
+
+**Fix:** one sanitizing boundary, `uiText`, through which `printf` (and so
+`ok`/`fail`/`warn`/`info`), `header`, `prose`, `hint` and the subprocess
+`prefixWriter` all print. `sanitize` keeps pure SGR — so the wizard's own colour
+survives — and drops every other escape, C0/C1 control and bidi/format rune;
+`flattenInline` folds line breaks so one printed line cannot become three.
+`uiLines` is the multi-line variant for `prose`/`hint`, flattening each line on
+its own so an injected break adds an indented line rather than a forged
+top-level one. The subprocess writer is the sharpest case — a child's stdout
+verbatim on the operator's terminal, where the `│ ` prefix is the only thing
+marking it as the child's. Pinned by `TestSetupUISanitizesWhatItPrints`.
+
+## L104 — Newline injection forges trusted-looking TUI status rows — FIXED
+
+`tui/goal_cmds.go`. The daemon's sanitizer preserves newlines (a transcript is
+made of them), so agent-authored goal fields — a paused reason, a verdict's
+reasons, a completion note, the goal text — arrive able to contain them, and the
+renderer splits a chat line on newlines and draws each fragment as a row. These
+are single lifecycle rows by contract, so `formatGoalEvent` and
+`goalStatusLine` now fold line breaks (`oneLine`). Pinned by
+`TestGoalRowsCannotBeForgedWithNewlines`.
+
+## L105 — Spawn's model string bypasses the config validation — FIXED
+
+`daemon/groups.go`. `Spawn` passed `r.Model` to `seedSpawnConfig`, which wrote
+it to `config.json` verbatim. The persisted value is handed to the guest on
+every later turn — an `os/exec` argument for claude, an environment entry for
+venice — so a NUL (invalid in both) or an oversized value accepted **once** at
+spawn made **every** later turn of that group fail. The `/config` path already
+established the invariant (trimmed, ≤ `configMaxIdent`, identifier charset,
+audit M9b); an alternative admission point that does not share it is just a way
+around it. Pinned by `TestSpawnModelGoesThroughTheConfigValidation`.
+
+## L106 — Backup copy of the reserved global prompt is fireable — FIXED
+
+`tui/prompts.go`.
+
+**Confirmed.** The guard stripped only a trailing `.md` before comparing with
+`global`, and `loadLibraryFile` tries the filename **exactly as given** before
+appending the suffix — while `koto install` leaves a `global.md.dist` beside
+every prompt as its untouched-since-install marker. So `/prompt global.md.dist`
+passed the reserved-name check, was read, and was sent through the normal `send`
+path: the harness system prompt delivered into the conversation as a **user**
+message, recorded in history. That discloses the harness instructions and
+weakens the system-versus-user boundary they exist to draw.
+
+**Fix:** the reserved name is matched on the **stem** (everything before the
+first dot), case-insensitively, so every spelling the loader would resolve is
+covered; and `.dist` files are refused outright as installer bookkeeping — they
+are a second name for a file the library already offers under its real one.
+Pinned by `TestReservedPromptNameCoversItsAliases`.
+
+## L107 — Guest-agent error text reaches terminal sinks unsanitized — MOSTLY FIXED ALREADY (M74), residual closed
+
+`fcAgentCall` and both `AgentFrame_Error` paths already run guest error strings
+through `sanitize` (audit M74) — the finding describes the code before it. The
+residual is real though: `sanitize` deliberately **preserves newlines**, and
+these strings are single error lines by contract, printed straight to stderr by
+`ctlFatal` and rendered as one `err` row by the TUI. All three now
+`flattenInline(sanitize(…))`.
+
+## L108 — Protocol changes do not invalidate the cached rootfs — FIXED
+
+`Makefile`.
+
+**Confirmed.** `fcguest/go.mod` `replace`s `koto-protocol` with `../protocol`,
+so the generated pb code and the module metadata are compiled **into**
+`fc-agent` — but `FCGUEST_SRC` listed only `fcguest/`, the rootfs Dockerfile and
+`sidecar/`. A protocol change therefore rebuilt the host daemon (built fresh on
+every `make host-run`) and left `fcassets/rootfs.img` alone: new microVMs booted
+a guest agent speaking the **old** contract while the daemon spoke the new one.
+For a wire-format security fix that is a guest that silently never got it.
+
+**Fix:** `PROTOCOL_SRC` (the `.proto` files, `protocol/pb/*.go`, and the module
+manifests) joins the rootfs prerequisites. Note the consequence: the next `make
+rootfs`/`make build` on a tree whose protocol has changed since the last rootfs
+build WILL rebuild it, which is the point.
+
+## L109 — Slash-command arguments are persisted in the TUI debug log — FIXED
+
+`tui/model.go`. `dispatchInput` logged every slash command verbatim before any
+validation. The verb is operator intent; the arguments are not — `/sched add …
+<message>` carries an arbitrary prompt, `/goals set` the goal text and its
+acceptance criteria, and either can hold incident detail or a pasted credential.
+The log defaults to DEBUG, appends for the life of the process and keeps one
+rotated generation, so what lands there outlives the session; 0600 bounds who
+can read it but not backups, log collection or a diagnostics paste. Now the verb
+plus the argument's **size**, which is what the log is actually used for
+(following what the TUI did while reproducing a bug) — the same line plain chat
+text was already held to. Pinned by `TestSlashCommandArgumentsAreNotLogged`.
+
+## L110 — Tracked commands leak pipe-copy goroutines and race output — FIXED
+
+`fcguest/main.go`.
+
+**Confirmed.** `os/exec` creates the pipe and an asynchronous copy goroutine for
+any stdout/stderr that is not an `*os.File`, and only `Cmd.Wait()` synchronises
+with it — which this agent never calls: the central `wait4(-1)` reaper owns exit
+statuses and the `Process` is `Release`d. So in `handleExec`, `out.b.Bytes()`
+was read while that goroutine might still be writing to it (a data race, and a
+reply that can be missing its tail), and nothing ever closed the parent's pipe
+ends, so a descendant holding the write end leaked the goroutine and both
+descriptors for the life of the agent. `handleExecStream` had the same shape
+with a `*vconn` — a copy goroutine outliving the function, still writing into a
+connection the caller was about to close.
+
+**Fix:** both now use the explicit `os.Pipe` pattern `handleRunScript` already
+had right — the parent drops the write end after `Start`, copies on a goroutine
+it can wait for, and closes the read end after a bounded drain (`execDrain`, 2s)
+so a lingering descendant cannot hold it open. `out.b.Bytes()` is read only
+after the copier has returned.
+
+## L111 — Extension headers and fragments evade the egress flow log — FIXED
+
+`daemon/fcnet.go`.
+
+**Confirmed.** `fcFrameAllowed` judges and forwards a packet on its
+**destination**, while `fcParseFlow` gave up — returning "not a flow", i.e. not
+logged — on anything whose transport it could not read: the IPv6 base header's
+Next Header was taken as the transport (so hop-by-hop options, routing,
+destination options, a fragment header or AH classified as unknown), and
+non-first IPv4 fragments were rejected outright. Those packets went out leaving
+**no trace** in the summarized egress audit trail. Not a policy bypass — the
+destination filter still applied — but the audit trail is what detection and
+investigation have.
+
+**Fix:** two parts. The IPv6 next-header chain is now walked (bounded at
+`fcIPv6ExtMax`, since the chain is attacker-chosen), so an ordinary flow behind
+extension headers classifies as the TCP/UDP/ICMP flow it is. And a packet whose
+transport genuinely cannot be read — a fragment continuation, ESP, an overlong
+chain, a protocol with no rule here — is logged with what **is** known
+(`IPv4-frag`, `IPv6-esp`, `IPv6-opaque`, `IP-proto-N`) and its destination,
+which is the part an investigation needs, instead of vanishing. The dedup key
+and the L86 budget bound the volume. Pinned by `TestOpaqueEgressIsStillLogged`.
+
+## L112 — Timestamp-only upload names can collide — FIXED
+
+`daemon/attachments.go`. The basename came from `time.Now().UnixNano()` alone
+and the write truncated. A timestamp is not an identity — UnixNano repeats on a
+coarse clock, and the pending-size check is not a uniqueness check — so two
+handlers landing on the same value both resolved to the same relative path and
+the later write silently replaced the **first** message's attachment. The image
+is what the operator is asking the agent about, so delivering the wrong one is
+worse than failing. Now 64 bits of `crypto/rand` in the name **and**
+`O_CREATE|O_EXCL|O_NOFOLLOW`, which makes it an invariant rather than a
+probability. Pinned by `TestAttachmentNamesCannotCollide`.
