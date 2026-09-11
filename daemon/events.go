@@ -108,12 +108,39 @@ func recordEvent(g string, pbev *pb.Event) []*groupSub {
 	ring = append(ring, pbev)
 	if n := len(ring) - eventRingMax; n > 0 {
 		ringFloor[g] = ring[n-1].Seq
+		// Reconcile ringPartial with the trim. The index is what keeps a
+		// session's live partial FINDABLE for supersession, and it holds a
+		// pointer — so an entry whose event has just aged out of the ring
+		// pinned that event's payload (a multi-megabyte streamed line) for as
+		// long as the map entry survived, which is until another event for
+		// that exact session arrives. A session whose turn ended without one
+		// — a stopped, wedged or restarted guest — kept it indefinitely, and
+		// session names are caller-chosen (audit M94).
+		for sess, live := range ringPartial[g] {
+			if partialInPrefix(ring[:n], live) {
+				delete(ringPartial[g], sess)
+			}
+		}
+		if len(ringPartial[g]) == 0 {
+			delete(ringPartial, g)
+		}
 		// Copy rather than reslice: a reslice keeps the trimmed entries
 		// (whole tool/thinking bodies) reachable until the next realloc.
 		ring = append(make([]*pb.Event, 0, eventRingMax+eventRingMax/8), ring[n:]...)
 	}
 	eventRing[g] = ring
 	return append([]*groupSub(nil), subscribers[g]...)
+}
+
+// partialInPrefix reports whether live is one of the entries about to be
+// trimmed. Compared by POINTER, which is how ringPartial indexes it.
+func partialInPrefix(prefix []*pb.Event, live *pb.Event) bool {
+	for _, e := range prefix {
+		if e == live {
+			return true
+		}
+	}
+	return false
 }
 
 // replayFrom returns the ring entries with seq > since, or a single

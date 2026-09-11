@@ -3163,3 +3163,61 @@ func TestClaudeBindRefusesAWholeHome(t *testing.T) {
 		t.Fatalf("unit lost the legitimate bind:\n%s", u)
 	}
 }
+
+// 2026-09-11 M94: ringPartial indexes a session's live partial BY POINTER so
+// it can be superseded. The age trim dropped events from the ring without
+// touching that index, so a partial whose event had aged out kept the event's
+// payload alive — until another event for that exact session arrived, which
+// for a session whose turn ended (stopped, wedged or restarted guest) is
+// never. Session names are caller-chosen.
+func TestAgeTrimReleasesStalePartials(t *testing.T) {
+	const g = "partialtrim"
+	t.Cleanup(func() {
+		subsLock.Lock()
+		delete(eventRing, g)
+		delete(eventSeq, g)
+		delete(ringFloor, g)
+		delete(ringPartial, g)
+		subsLock.Unlock()
+	})
+
+	// One session streams a partial and then goes quiet forever.
+	emit(g, Event{Event: "stream", Session: "abandoned", Text: strings.Repeat("x", 4096)})
+	subsLock.Lock()
+	_, indexed := ringPartial[g]["abandoned"]
+	subsLock.Unlock()
+	if !indexed {
+		t.Fatal("the partial was not indexed")
+	}
+
+	// Another session pushes the ring past its age limit.
+	for i := 0; i < eventRingMax+10; i++ {
+		emit(g, Event{Event: "response", Session: "busy", Text: "x"})
+	}
+
+	subsLock.Lock()
+	_, stillIndexed := ringPartial[g]["abandoned"]
+	inRing := false
+	for _, e := range eventRing[g] {
+		if e.Session == "abandoned" {
+			inRing = true
+		}
+	}
+	subsLock.Unlock()
+	if inRing {
+		t.Fatal("setup: the partial never aged out of the ring")
+	}
+	if stillIndexed {
+		t.Fatal("an aged-out partial is still pinned by ringPartial")
+	}
+
+	// A partial that is still IN the ring keeps its index — supersession
+	// depends on it.
+	emit(g, Event{Event: "stream", Session: "live", Text: "partial"})
+	subsLock.Lock()
+	_, liveIndexed := ringPartial[g]["live"]
+	subsLock.Unlock()
+	if !liveIndexed {
+		t.Fatal("a live partial lost its index")
+	}
+}
