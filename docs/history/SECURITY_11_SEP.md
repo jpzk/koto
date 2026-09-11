@@ -1664,3 +1664,25 @@ Clearing either spelling now clears both, and SETTING `network` deletes the
 legacy key too, so no stale spelling survives for a later read to resolve
 through. The legacy write path already migrated forward; it stays that way.
 `TestClearingNetworkClearsTheLegacyKey`.
+
+### M93 — Claude executable parent directories bypass the daemon's ProtectHome boundary (`daemon/install.go`) — **fixed**
+
+Real, and the unit's own comment made a claim the code did not keep: "Nothing
+else of $HOME is visible". `claudeBindDirs` returned `filepath.Dir(bin)`
+unconditionally, so a claude at `/home/<user>/claude` bound the WHOLE home
+read-only into the service namespace. Read-only is not containment here — the
+daemon is tier 2 and the home is tier 1's — so every unrelated credential,
+repository and ssh key in it became readable by the process that already holds
+the OAuth token.
+
+`protectHomeRoot` refuses to bind a whole protected home: `/home/<user>`,
+`/root`, `/run/user/<uid>` and their parents. The native installer's
+`~/.local/bin` is unaffected, and a symlinked binary still gets its target's
+directory bound, which is what keeps a version update working without a restart.
+
+The failure mode is deliberate and LOUD rather than silent: refusing the bind
+means the daemon cannot exec claude, and a silent refusal would reproduce
+exactly the outage this binding was added to fix (three OAuth expiries in 36h,
+2026-09-05). `installClaudeBin` now says so at install time and names the fix —
+move the binary — instead of quietly handing over the home.
+`TestClaudeBindRefusesAWholeHome`.

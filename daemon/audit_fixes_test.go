@@ -3110,3 +3110,56 @@ func TestClearingNetworkClearsTheLegacyKey(t *testing.T) {
 		t.Fatal("internet=full left the legacy key on disk")
 	}
 }
+
+// 2026-09-11 M93: a claude sitting directly in the operator's home would make
+// the unit bind the WHOLE home read-only into the service namespace. Read-only
+// is not containment here — the daemon is tier 2 and the home is tier 1's, so
+// every unrelated credential, repository and key in it becomes readable.
+func TestClaudeBindRefusesAWholeHome(t *testing.T) {
+	for _, p := range []string{"/home/fedora", "/root", "/run/user/1000", "/home", "/run/user", "/"} {
+		if !protectHomeRoot(p) {
+			t.Errorf("protectHomeRoot(%q) = false", p)
+		}
+	}
+	for _, p := range []string{
+		"/home/fedora/.local/bin", "/root/.local/bin", "/run/user/1000/x",
+		"/usr/local/bin", "/opt/claude",
+	} {
+		if protectHomeRoot(p) {
+			t.Errorf("protectHomeRoot(%q) = true", p)
+		}
+	}
+
+	// The real shapes: the native installer's location binds; a binary sitting
+	// straight in $HOME does not.
+	// (This path may exist on the test host and be a symlink, in which case
+	// the target's directory is bound too — that is the intended behaviour.
+	// What must never appear is a whole home.)
+	got := claudeBindDirs("/home/fedora/.local/bin/claude", protectHomeHides)
+	if len(got) == 0 {
+		t.Fatal("~/.local/bin/claude bound nothing")
+	}
+	for _, d := range got {
+		if protectHomeRoot(d) {
+			t.Fatalf("a whole home was bound: %v", got)
+		}
+	}
+	if got = claudeBindDirs("/home/fedora/claude", protectHomeHides); len(got) != 0 {
+		t.Fatalf("a claude directly in $HOME binds %v — that is the whole home", got)
+	}
+	if got = claudeBindDirs("/root/claude", protectHomeHides); len(got) != 0 {
+		t.Fatalf("a claude in /root binds %v", got)
+	}
+	// Outside the protected roots nothing is bound at all, as before.
+	if got = claudeBindDirs("/usr/local/bin/claude", protectHomeHides); len(got) != 0 {
+		t.Fatalf("/usr/local/bin/claude binds %v", got)
+	}
+
+	// And the rendered unit never names a whole home.
+	if u := installHomeScoping("/home/fedora/claude"); !strings.Contains(u, "ProtectHome=yes") {
+		t.Fatalf("unit for a $HOME claude is not ProtectHome=yes:\n%s", u)
+	}
+	if u := installHomeScoping("/home/fedora/.local/bin/claude"); !strings.Contains(u, "BindReadOnlyPaths=") || !strings.Contains(u, "/home/fedora/.local/bin") {
+		t.Fatalf("unit lost the legitimate bind:\n%s", u)
+	}
+}

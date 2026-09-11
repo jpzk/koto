@@ -557,9 +557,17 @@ func installClaudeBin(u *setupUI) string {
 		u.warn("token; API-key auth is unaffected. Install claude and re-run `koto install`.")
 		return ""
 	}
-	if dirs := claudeBindDirs(p, protectHomeHides); len(dirs) > 0 {
+	dirs := claudeBindDirs(p, protectHomeHides)
+	switch {
+	case len(dirs) > 0:
 		u.info("claude is %s — the unit binds %s read-only through ProtectHome", p, strings.Join(dirs, " and "))
-	} else {
+	case protectHomeHides(p) && protectHomeRoot(filepath.Dir(p)):
+		// Reachable only by binding a whole home, which is refused (M93).
+		u.warn("claude is %s — directly in a home directory, so the unit would have to", p)
+		u.warn("bind all of %s read-only into the service namespace. Refusing: move it", filepath.Dir(p))
+		u.warn("(e.g. ~/.local/bin/claude) and re-run `koto install`. Until then the daemon")
+		u.warn("cannot refresh a subscription (OAuth) token; API-key auth is unaffected.")
+	default:
 		u.info("claude is %s", p)
 	}
 	return p
