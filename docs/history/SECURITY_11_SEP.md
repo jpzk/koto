@@ -1278,3 +1278,34 @@ is the one place guaranteed to run after the decode and before the format. The
 fallback path that renders raw JSON needs nothing: there the escapes are still
 literal `\u001b` text, which is exactly what should be displayed.
 `TestToolInputControlsAreScrubbedAfterDecoding`.
+
+### M70 — Unbounded send payloads exhaust daemon memory through per-session queues (`daemon/queue.go`) — **fixed**
+
+Real, and the gap the previous bounds left open. `sendQueueDepth` (64) is per
+SESSION, and after M54 the number of live sessions is bounded by idle
+reclamation rather than by a cap — so a caller with Send permission could
+multiply retained payload across session names while turns were slow, with no
+limit on any individual message either.
+
+Two bounds at the one admission point both planes share:
+`sendMsgMax` (1 MiB) per message — far beyond any real prompt, and well under
+the proxy's own 64 MiB request cap that this sits upstream of — and
+`sendQueuedBytesMax` (16 MiB) for everything one group holds queued across all
+its sessions. Every path that takes a job OFF a queue releases its bytes, the
+worker's receive and the drain alike, so the accounting cannot drift from the
+channels. `TestSendPayloadsAreBounded`.
+
+### M69 — Parsed JobTail retains unbounded open blocks in the daemon (`daemon/logparse.go`) — **already fixed (M48)**
+
+Same defect, reached through `JobTail`'s parsed mode instead of the group
+tailer: both feed the same `logParser`, and the cumulative block budget M48
+added (`blockBodyMax`) applies to every caller of `feedLine`. Nothing further
+to do; noted so the two reports are not mistaken for two bugs.
+
+### M71 — Pre-queue attachment persistence can orphan uploads and reuse them in later turns (`daemon/grpc_server.go`) — **already fixed (M36)**
+
+The same finding as M36, filed from the lifecycle end, and closed by the same
+change: uploads are owned by the turn whose message references them
+(`fcTurnUploads`), staging is rolled back when the enqueue is refused, and a
+24h sweep collects the one orphan a daemon restart can still leave. The
+group-wide mtime watermark it describes no longer exists.

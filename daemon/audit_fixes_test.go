@@ -2518,3 +2518,59 @@ func TestGoalPromptsFenceAgentAuthoredText(t *testing.T) {
 		t.Error("the goal text was mangled")
 	}
 }
+
+// 2026-09-11 M70: nothing capped one message or a group's total queued bytes.
+// sendQueueDepth is per SESSION and the session count is bounded by idle
+// reclamation rather than a cap (M54), so a sender could multiply retained
+// payload across session names while turns were slow.
+func TestSendPayloadsAreBounded(t *testing.T) {
+	const g = "payload"
+	t.Cleanup(func() {
+		queuesMu.Lock()
+		delete(groupQueuedBytes, g)
+		for k := range queues {
+			if gg, _, ok := splitSessKey(k); ok && gg == g {
+				delete(queues, k)
+			}
+		}
+		queuesMu.Unlock()
+	})
+	prev := turnFn
+	turnFn = func(string, string, string) error { select {} } // never retires a turn
+	t.Cleanup(func() { turnFn = prev })
+
+	// One oversized message is refused outright.
+	if _, err := enqueueSend(g, "s", strings.Repeat("x", sendMsgMax+1)); err == nil {
+		t.Fatal("an oversized message was accepted")
+	}
+
+	// Many sessions, each under the per-message cap, are bounded in aggregate.
+	chunk := strings.Repeat("x", sendMsgMax)
+	accepted := 0
+	for i := 0; i < 64; i++ {
+		if _, err := enqueueSend(g, fmt.Sprintf("s%d", i), chunk); err == nil {
+			accepted++
+		}
+	}
+	queuesMu.Lock()
+	held := groupQueuedBytes[g]
+	queuesMu.Unlock()
+	if held > sendQueuedBytesMax {
+		t.Fatalf("group holds %d queued bytes, cap is %d", held, sendQueuedBytesMax)
+	}
+	if accepted == 0 {
+		t.Fatal("no send was accepted at all")
+	}
+	if accepted == 64 {
+		t.Fatal("the aggregate cap never bound")
+	}
+
+	// Draining gives the budget back.
+	dropQueued(g)
+	queuesMu.Lock()
+	after := groupQueuedBytes[g]
+	queuesMu.Unlock()
+	if after >= held {
+		t.Fatalf("draining released nothing: %d then %d", held, after)
+	}
+}
