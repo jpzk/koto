@@ -749,3 +749,63 @@ func TestEgressHTTPDialsVettedIP(t *testing.T) {
 		t.Fatalf("resolved %d times; want exactly one lookup", lookups)
 	}
 }
+
+// 2026-09-11 M7: ConfigReq mixes delegable settings with posture. A `config`
+// grant covers the first; the second needs admin, whatever acl.json says.
+func TestConfigPostureIsAdminOnly(t *testing.T) {
+	s := func(v string) *string { return &v }
+	for _, c := range []struct {
+		name string
+		req  *pb.ConfigReq
+		want string
+	}{
+		{"model", &pb.ConfigReq{Group: "g", Model: s("claude-sonnet-5")}, "config"},
+		{"effort", &pb.ConfigReq{Group: "g", Effort: s("high")}, "config"},
+		{"provider", &pb.ConfigReq{Group: "g", Provider: s("venice")}, "config"},
+		{"read", &pb.ConfigReq{Group: "g"}, "config"},
+		{"network", &pb.ConfigReq{Group: "g", Network: s("full")}, "config_posture"},
+		{"internet", &pb.ConfigReq{Group: "g", Internet: s("full")}, "config_posture"},
+		{"root", &pb.ConfigReq{Group: "g", Root: s("yes")}, "config_posture"},
+		{"ports", &pb.ConfigReq{Group: "g", Ports: s("8080")}, "config_posture"},
+		{"size", &pb.ConfigReq{Group: "g", Size: s("xlarge")}, "config_posture"},
+		{"autostart", &pb.ConfigReq{Group: "g", Autostart: s("yes")}, "config_posture"},
+		{"mixed", &pb.ConfigReq{Group: "g", Model: s("x"), Root: s("yes")}, "config_posture"},
+		// Clearing a posture key is setting it.
+		{"clear network", &pb.ConfigReq{Group: "g", Network: s("")}, "config_posture"},
+	} {
+		if got := postureVerb("config", c.req); got != c.want {
+			t.Errorf("%s: verb %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Admin-only means no acl.json grant reaches it, "*" included.
+	acl := aclTable{"ops": {"*": targetSet{any: true}}}
+	if !rolesAllowed(acl, []string{"ops"}, "config", "g", true) {
+		t.Fatal("ordinary config denied to a wildcard role")
+	}
+	if rolesAllowed(acl, []string{"ops"}, "config_posture", "g", true) {
+		t.Fatal("posture config granted through a wildcard role")
+	}
+	if !rolesAllowed(acl, []string{defaultRole}, "config_posture", "g", true) {
+		t.Fatal("admin denied posture config")
+	}
+}
+
+// 2026-09-11 M4: AttachShell's session is a raw tmux selector. Pin it to the
+// namespace the daemon mints, so it can't create unmanaged sessions or forge
+// a daemon log record with a newline.
+func TestShellSessionNamePinned(t *testing.T) {
+	for _, ok := range []string{"koto-shell", "koto-shell-work", "koto-shell-a", "koto-shell-A_1-2"} {
+		if !shellSessionRE.MatchString(ok) {
+			t.Errorf("rejected minted name %q", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "other", "koto-shell-", "koto-shell--x", "koto-shell-_x",
+		"koto-shell\ninjected", "koto-shell-x;rm -rf /", "../koto-shell",
+		"koto-shell-" + strings.Repeat("a", 33),
+	} {
+		if shellSessionRE.MatchString(bad) {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

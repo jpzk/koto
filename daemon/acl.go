@@ -285,6 +285,17 @@ var adminOnlyVerbs = map[string]bool{
 	"acl_set_role": true,
 	"acl_del_role": true,
 	"run_script":   true,
+	// Not an RPC: the synthetic verb aclCheck substitutes for `config` when
+	// the request carries a POSTURE setter. ConfigReq mixes model/effort/
+	// provider with network, root, ports, size and autostart, and one coarse
+	// `config` grant covered both — so a role delegated "may set this group's
+	// model" could also give it WAN egress, passwordless guest sudo, a
+	// published host port, more of the host's RAM, or a boot at daemon start.
+	// The ctl plane already refuses every posture key to the agent principal
+	// (audit H1, 2026-09-05) precisely because network=none must not be
+	// voidable by what it contains; this is the same rule on the gRPC plane,
+	// where the docs have always said posture is the operator's.
+	"config_posture": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

@@ -344,13 +344,25 @@ func vsockAcceptLoop(port uint32, handle func(*vconn)) {
 		return
 	}
 	for {
-		nfd, _, err := unix.Accept(lfd)
+		nfd, sa, err := unix.Accept(lfd)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
 			}
 			logf("vsock accept %d: %v", port, err)
 			return
+		}
+		// Every listener here is host-facing, and the agent RPC on 10000 is
+		// unauthenticated and execs as guest root — so a peer that is not the
+		// host is a worker reaching for root, which would defeat root=no.
+		// Nothing in-guest can reach vsock today (the kernel build refuses
+		// CONFIG_VSOCKETS_LOOPBACK, audit I1); this makes that a backstop
+		// rather than the only defense, since the kernel is an asset an
+		// operator can replace.
+		if vm, ok := sa.(*unix.SockaddrVM); !ok || vm.CID != hostCID {
+			logf("vsock %d: refusing non-host peer %v", port, sa)
+			unix.Close(nfd)
+			continue
 		}
 		go handle(&vconn{os.NewFile(uintptr(nfd), fmt.Sprintf("vsock-acc:%d", port))})
 	}

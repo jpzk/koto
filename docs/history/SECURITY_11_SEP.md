@@ -100,3 +100,56 @@ once, which also makes "the stricter of the two" a property of the value rather
 than of the call sequence. `wan ∩ lan` is `none`, which is correct: a group
 that booted `wan` and now reads `lan` reaches nothing until the `/restart`.
 `TestEgressProfilesIntersectOnOneLookup`.
+
+### M2 — Unauthenticated local vsock peers can invoke the guest agent as root (`fcguest/main.go`) — **fixed (defense in depth)**
+
+Already mitigated, and the mitigation is load-bearing enough to deserve a
+second layer. `fc-agent` binds `VMADDR_CID_ANY` and its `Exec`/`ExecStream`/
+`ShellAttach`/`Init`/`Shutdown` ops run as PID 1, i.e. guest root — so anything
+in-guest that could reach vsock would defeat the `root=no` profile outright.
+Nothing can: `build-kernel.sh` refuses to produce a kernel with
+`CONFIG_VSOCKETS_LOOPBACK=y` or `CONFIG_VHOST_VSOCK=y` (audit I1).
+
+But that is a property of an ASSET — `fcassets/vmlinux` — which an operator can
+replace, and the agent itself took the peer on faith. `vsockAcceptLoop` now
+keeps the `SockaddrVM` that `accept` returns and refuses any peer whose CID is
+not `VMADDR_CID_HOST`. The kernel guard stays the primary defense; this makes
+it a backstop rather than the only one.
+
+A per-VM shared secret was the other half of the suggested remediation and is
+deliberately not taken: the secret would have to reach the guest over the same
+vsock channel it is meant to protect, so it buys nothing against a peer that
+can already speak on that channel.
+
+### M4 — AttachShell permits cross-session tmux attachment within an authorized group (`daemon/grpc_server.go`) — **fixed (hygiene), claim partly rejected**
+
+`open.Session` went to the guest unvalidated and became `tmux new-session -A -s
+<value>`. Now pinned to `shellSessionRE` — `koto-shell` plus an optional
+`-<chat session>`, which is exactly the namespace `shellSessionName` (TUI) and
+`turn.go` (guest) mint. That closes the two real consequences: an arbitrary
+selector created an unmanaged tmux session outside the group's namespace, and a
+newline in it forged daemon log records.
+
+The access-control framing does not hold. `attach_shell` on a group yields an
+interactive shell as the guest worker uid, from which `tmux attach -t` reaches
+every session in that VM — so restricting the selector cannot be the boundary
+between conversations, and nothing here claims it is. Cross-conversation
+isolation inside one group is a VM-level property koto does not offer; the
+boundary is the group.
+
+### M7 — Group-scoped Config permission bypasses field-level posture authorization (`daemon/grpc_server.go`) — **fixed**
+
+Real, and the reasoning already existed on the other plane. `ConfigReq` carries
+the delegable settings (`model`, `effort`, `provider`) and the posture keys
+(`network`/`internet`, `root`, `ports`, `size`, `autostart`) in one message,
+and the interceptor did one coarse `config` check against the group. So a role
+granted "may set this group's model" could also give the group WAN egress,
+passwordless guest sudo, a published host port, more of the host's RAM, or a
+boot at daemon start.
+
+`postureVerb` (auth.go) re-labels a posture-setting request as the synthetic
+verb `config_posture`, which is in `adminOnlyVerbs` — so no acl.json grant
+reaches it, `"*"` included. Reads and delegable-key writes stay `config`. This
+is the gRPC twin of the ctl plane's posture refusal (audit H1, 2026-09-05);
+the invariant is the same one, that `network=none` must not be voidable by
+anything the default contains. `TestConfigPostureIsAdminOnly`.
