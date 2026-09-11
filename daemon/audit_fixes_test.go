@@ -2574,3 +2574,62 @@ func TestSendPayloadsAreBounded(t *testing.T) {
 		t.Fatalf("draining released nothing: %d then %d", held, after)
 	}
 }
+
+// 2026-09-11 M72: copyFile preserves the SOURCE's permissions, which is right
+// for the guest assets (the firecracker binary must stay executable) and wrong
+// for secrets — a clone whose creds/ was made under a loose umask materialized
+// a group- or world-readable CA key in the installed state dir.
+func TestCredentialCopiesAreOwnerOnly(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	loose := filepath.Join(src, "ca.key")
+	if err := os.WriteFile(loose, []byte("PRIVATE KEY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loose, 0o644); err != nil { // umask-proof
+		t.Fatal(err)
+	}
+	out := filepath.Join(dst, "ca.key")
+	if err := copySecretIfAbsent(loose, out); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("migrated credential is mode %04o, want 0600", fi.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(out); string(b) != "PRIVATE KEY" {
+		t.Fatalf("content not copied: %q", b)
+	}
+	// Never overwrites an installed credential.
+	os.WriteFile(loose, []byte("OTHER"), 0o600)
+	if err := copySecretIfAbsent(loose, out); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(out); string(b) != "PRIVATE KEY" {
+		t.Fatalf("an existing credential was overwritten: %q", b)
+	}
+
+	// An existing loose creds dir is tightened.
+	loosedir := filepath.Join(t.TempDir(), "creds")
+	os.MkdirAll(loosedir, 0o755)
+	os.Chmod(loosedir, 0o755)
+	tightenSecretDir(loosedir)
+	if fi, _ := os.Stat(loosedir); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("creds dir left at %04o, want 0700", fi.Mode().Perm())
+	}
+
+	// The asset copy still preserves an executable bit.
+	binSrc := filepath.Join(src, "firecracker")
+	os.WriteFile(binSrc, []byte("#!/bin/true\n"), 0o755)
+	os.Chmod(binSrc, 0o755)
+	binDst := filepath.Join(dst, "firecracker")
+	if err := copyFile(binSrc, binDst); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(binDst); fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("asset copy lost its executable bit (%04o)", fi.Mode().Perm())
+	}
+}

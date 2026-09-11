@@ -1309,3 +1309,30 @@ change: uploads are owned by the turn whose message references them
 (`fcTurnUploads`), staging is rolled back when the enqueue is refused, and a
 24h sweep collects the one orphan a daemon restart can still leave. The
 group-wide mtime watermark it describes no longer exists.
+
+### M72 — Credential and private-key files retain or inherit non-private permissions (`daemon/install.go`) — **fixed (the migration path); the rest declined with reasons**
+
+The primary defect is real and specific: `copyFile` passes
+`info.Mode().Perm()` to the destination, which is right for the guest assets —
+the firecracker binary has to stay executable — and wrong for secrets. A clone
+whose `creds/` was created under a loose umask, or copied off another machine,
+materialized a group- or world-readable CA key, client private key or bearer
+token in the installed state dir. A destination mode is a property of what the
+file IS, not of where it came from.
+
+`copySecretIfAbsent` writes credentials at a fixed `0600`, with
+`O_EXCL|O_NOFOLLOW` — "create it fresh or not at all" is both the containment
+and the already-present check. `tightenSecretDir` forces `0700` on an existing
+`creds/`, which `MkdirAll` leaves alone, and the directory mode is the last
+line of defense for every file under it.
+`TestCredentialCopiesAreOwnerOnly`.
+
+Declined, with reasons. **Readers validating owner/mode before loading**: the
+state dir is `0750` and owned by the operator, and `stateDirTrusted` already
+checks the ROOT at install time (audit L9); a per-read stat would be a check
+against a use that follows it, and the thing it defends against — another local
+user writing into the operator's state dir — is tier 1 (see M52). **The
+"creation mode only" overwrite paths**: every one of them writes to a path the
+installer or the PKI created at `0600` in the same run, so there is no
+pre-existing inode with looser bits to inherit; making each one `fchmod` would
+add ceremony without changing an outcome.
