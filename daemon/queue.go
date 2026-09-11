@@ -329,6 +329,64 @@ func groupBarrierEnd(g string) {
 // groupBarred reports whether g is mid stop/destroy. Caller holds queuesMu.
 func groupBarred(g string) bool { return groupBarrier[g] > 0 }
 
+// clearFence closes admission for g, discards what is queued in scope, asks
+// every in-flight turn in scope to stop, and waits for them to retire. Returns
+// the function that reopens admission.
+//
+// /clear used to delete the guest's conversation state and truncate the host
+// transcript with all of that still live (audit M60), so it could report
+// success while the reset did not hold: a queued message ran against the
+// conversation that was just forgotten, an in-flight turn still held the old
+// claude session id and wrote it back into sessions/<name>.id AFTER the rm,
+// and a background tailer kept appending to the log that had just been
+// truncated. A clear that the next turn undoes is not a clear.
+//
+// Cancelling an in-flight turn is a deliberate part of this, not a side
+// effect: "forget this conversation" while a turn OF that conversation is
+// running and will re-create its id is incoherent. The barrier is the group's
+// (admission is per group), while the drain and the cancel honour the scope.
+func clearFence(g, session string, onlySession bool) func() {
+	groupBarrierBegin(g)
+	if n := dropQueuedScope(g, session, onlySession); n > 0 {
+		emitLogfG("group", g, "info", "clear group=%s: discarded %d queued message(s)", g, n)
+	}
+	for _, sess := range inFlightSessions(g) {
+		if onlySession && sess != session {
+			continue
+		}
+		if requestTurnCancel(g, sess) {
+			emitLogfG("group", g, "info", "clear group=%s session=%s: canceling in-flight turn", g, sessionMarkerName(sess))
+		}
+	}
+	// Wait for the cancelled turns to actually retire — their writers are what
+	// the clear is racing. Bounded: a turn that will not die within the window
+	// is already the stall path's problem, and blocking /clear forever is
+	// worse than a clear that logs it could not fence one writer.
+	deadline := time.Now().Add(clearFenceWait)
+	for time.Now().Before(deadline) {
+		busy := false
+		for _, sess := range inFlightSessions(g) {
+			if !onlySession || sess == session {
+				busy = true
+				break
+			}
+		}
+		if !busy {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, sess := range inFlightSessions(g) {
+		if !onlySession || sess == session {
+			emitLogfG("group", g, "warn", "clear group=%s session=%s: turn still running after %s; clearing anyway", g, sessionMarkerName(sess), clearFenceWait)
+		}
+	}
+	return func() { groupBarrierEnd(g) }
+}
+
+// clearFenceWait bounds how long a clear waits for cancelled turns to retire.
+const clearFenceWait = 10 * time.Second
+
 func enqueue(g string, job sendJob) (<-chan error, error) {
 	job.done = make(chan error, 1)
 	queuesMu.Lock()
@@ -397,13 +455,21 @@ func queueDepth(g string) int {
 // Each dropped job's result channel is buffered(1) and written by nobody else,
 // so reporting the discard under queuesMu cannot block (same discipline as
 // enqueue's non-blocking send).
-func dropQueued(g string) int {
+func dropQueued(g string) int { return dropQueuedScope(g, "", false) }
+
+// dropQueuedScope drains g's queues, optionally only the one belonging to
+// `session`. Split out for the clear barrier, which fences one conversation
+// rather than the whole group.
+func dropQueuedScope(g, session string, onlySession bool) int {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
 	n := 0
 	for k, q := range queues {
-		gg, _, ok := splitSessKey(k)
+		gg, sess, ok := splitSessKey(k)
 		if !ok || gg != g {
+			continue
+		}
+		if onlySession && sess != session {
 			continue
 		}
 	drain:

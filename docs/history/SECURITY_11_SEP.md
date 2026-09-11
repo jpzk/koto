@@ -1120,3 +1120,27 @@ A COUNTER rather than a flag: `destroy` wraps `stopGroup`, and the barrier has
 to survive the inner call and span the workspace removal and the `groups.json`
 delete that follow it — the window where an escaped turn would re-register the
 very name it is being removed under. `TestStopBarrierClosesAdmission`.
+
+### M60 — Clear reports success without fencing queued and active work (`daemon/groups.go`) — **fixed**
+
+Real, and it made `/clear` a suggestion rather than an operation. Both the
+scoped and group-wide paths deleted the guest's conversation state and
+truncated the host transcript with everything still live, so the reset need not
+hold: a queued message ran against the conversation that had just been
+forgotten, an in-flight turn still held the old claude session id and wrote it
+back into `sessions/<name>.id` AFTER the `rm`, and a background tailer kept
+appending to the log that had just been truncated. A clear the next turn undoes
+is not a clear.
+
+`clearFence` closes admission (the `groupBarrier` M63 added), discards what is
+queued in scope, cancels the scope's in-flight turns and WAITS for them to
+retire — bounded at 10s, because a turn that will not die inside that window is
+already the stall path's problem and blocking `/clear` forever is worse than
+one that logs which writer it could not fence.
+
+Cancelling the in-flight turn is a deliberate part of the contract rather than
+a side effect: "forget this conversation" while a turn OF that conversation is
+running and will re-create its id is incoherent. The barrier is per group,
+because admission is; the drain and the cancel honour the requested scope, so a
+scoped clear leaves the group's other conversations alone.
+`TestClearFencesQueuedAndActiveWork`.
