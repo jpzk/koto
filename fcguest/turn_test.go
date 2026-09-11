@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"koto-protocol/pb"
+
+	"golang.org/x/sys/unix"
 )
 
 // decodeFrames reads every TurnFrame a turnConn wrote into buf.
@@ -293,4 +297,77 @@ func mustJSON(t *testing.T, s string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// 2026-09-11 M161: the turn's completion used to be EOF on the worker's pipes.
+// Those pipes are parent-owned and every descendant inherits the write ends;
+// startTracked puts the worker in its own process group and the timeout and
+// stall paths kill that group, but a descendant that calls setsid leaves it —
+// while still holding the pipes. The scanner then never reached EOF, runWorker
+// sat in wg.Wait() and never emitted its deferred TurnEnd, and the host waited
+// out the full 25-minute turn timeout, declared the group STALLED and
+// self-healed it. One quarantined slot per occurrence, from a tool call that
+// backgrounded something.
+func TestRunWorkerDoesNotWaitOnADetachedDescendant(t *testing.T) {
+	prev := workerDrainGrace
+	workerDrainGrace = 150 * time.Millisecond
+	t.Cleanup(func() { workerDrainGrace = prev })
+
+	// A worker that exits while a DESCENDANT keeps its stdout and stderr open.
+	// setsid(1) is what a backgrounding tool call reaches for; `sh -c` with a
+	// background child inheriting the fds is the same shape and needs no extra
+	// binary.
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	cmd := exec.Command(sh, "-c", `echo from-the-worker; sleep 30 & exit 0`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout, cmd.Stderr = outW, errW
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	outW.Close()
+	errW.Close()
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { killGroup(pid, syscall.SIGKILL) })
+	// The PID-1 reaper is not running in a test binary, so stand in for it:
+	// `ch` is what startTracked would deliver when the WORKER exits, which is
+	// the signal runWorker now keys on.
+	ch := make(chan unix.WaitStatus, 1)
+	go func() {
+		_ = cmd.Wait()
+		ch <- 0
+	}()
+
+	var buf bytes.Buffer
+	tw := &turnConn{c: &buf}
+	var lines []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runWorker(tw, &worker{pid: pid, done: ch, out: outR, err: errR},
+			func(b []byte) { lines = append(lines, string(b)) })
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("runWorker is still waiting on a descendant that outlived the worker — " +
+			"the turn would stall for the host's full 25-minute timeout")
+	}
+
+	// The output the worker did produce before exiting still came through:
+	// the grace window is there so a forced close does not cost real frames.
+	if len(lines) != 1 || lines[0] != "from-the-worker" {
+		t.Errorf("the worker's own output was lost: %q", lines)
+	}
 }

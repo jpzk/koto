@@ -301,6 +301,12 @@ type worker struct {
 // runWorker drives a started worker: pumps stderr into text frames, hands
 // stdout to parse line by line, enforces turnTimeout on the process group,
 // and reports a kill as an [[err]].
+// workerDrainGrace is how long the pumps get to finish AFTER the worker has
+// exited. They are draining bytes already written, which takes microseconds; the
+// window exists only so a descendant still holding the pipe cannot hold the turn
+// (audit M161).
+var workerDrainGrace = 2 * time.Second
+
 func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	pid, ch, outR, errR := w.pid, w.done, w.out, w.err
 	timedOut := false
@@ -317,26 +323,56 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 		tmu.Unlock()
 		killGroup(pid, syscall.SIGKILL)
 	})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		sc := bufio.NewScanner(errR)
-		sc.Buffer(make([]byte, 64*1024), 1<<20)
-		for sc.Scan() {
-			tw.text(append(sc.Bytes(), '\n'))
-		}
-		errR.Close()
-	}()
-	sc := bufio.NewScanner(outR)
-	sc.Buffer(make([]byte, 64*1024), 16<<20)
-	for sc.Scan() {
-		parse(sc.Bytes())
+	// Both pumps run on their own goroutine, and the turn's completion is the
+	// WORKER's exit, not EOF on its pipes (audit M161).
+	//
+	// EOF was the wrong signal. The worker's stdout and stderr are
+	// parent-owned pipes and every descendant inherits the write ends;
+	// startTracked puts the worker in its own process group and the timeout
+	// and stall paths kill that group, but a descendant that calls setsid
+	// leaves it — while still holding the pipes. The scanner then never
+	// reached EOF, so runWorker sat in wg.Wait() and never emitted its
+	// deferred TurnEnd: the host waited out the full turnWaitTimeout (25
+	// minutes), declared the group STALLED, and self-healed it. One slot
+	// quarantined per occurrence, three inside the breaker window and the
+	// group needs a manual restart — all from a tool call that backgrounded
+	// something, which agents do routinely.
+	pump := func(r *os.File, maxLine int, fn func([]byte)) <-chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sc := bufio.NewScanner(r)
+			sc.Buffer(make([]byte, 64*1024), maxLine)
+			for sc.Scan() {
+				fn(sc.Bytes())
+			}
+		}()
+		return done
 	}
-	outR.Close()
-	wg.Wait()
-	<-ch
+	outDone := pump(outR, 16<<20, parse)
+	errDone := pump(errR, 1<<20, func(b []byte) { tw.text(append(b, '\n')) })
+
+	<-ch // the worker itself has exited; whatever still holds the pipes is not it
 	timer.Stop()
+
+	// Drain what is already in flight, then take the pipes away. Closing the
+	// READ end is what unblocks a scanner parked on a descendant that will
+	// never write again — os.Pipe files are registered with the runtime
+	// poller, so a concurrent Close makes the pending Read return.
+	for _, d := range []struct {
+		done <-chan struct{}
+		r    *os.File
+		what string
+	}{{outDone, outR, "stdout"}, {errDone, errR, "stderr"}} {
+		select {
+		case <-d.done:
+		case <-time.After(workerDrainGrace):
+			logf("turn: %s still held after the worker exited (a detached descendant) — closing it", d.what)
+			d.r.Close()
+			<-d.done
+		}
+		d.r.Close()
+	}
 	tmu.Lock()
 	defer tmu.Unlock()
 	if timedOut {

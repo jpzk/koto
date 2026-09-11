@@ -3767,3 +3767,39 @@ message above, while everything already running keeps running.
 Test: `TestWorkspaceImagesHaveHostDiskAdmission` in `daemon/audit_fixes_test.go`
 covers admission on a real filesystem with room, the unmeasurable case, the
 threshold arithmetic at five levels, and the refusal text.
+
+## M161 — Detached worker descendants can hold stderr open and stall turn cleanup — FIXED
+
+`fcguest/turn.go`, `runWorker`.
+
+**Confirmed, and it was worse than the finding says — stdout too.** A turn's
+completion was **EOF on the worker's pipes**. Those pipes are parent-owned and
+every descendant inherits the write ends; `startTracked` puts the worker in its
+own process group and the timeout and stall paths kill that group, but a
+descendant that calls `setsid` leaves it — while still holding the pipes.
+
+The scanner therefore never reached EOF. `runWorker` sat there and never emitted
+its deferred `TurnEnd`, so the host waited out the full `turnWaitTimeout` (25
+minutes), declared the group STALLED and self-healed it: one slot quarantined
+per occurrence, three inside the breaker window and the group needs a manual
+`/restart`. All from a tool call that backgrounded something, which agents do
+routinely — `cs-job` itself uses `setsid` by design.
+
+**Fix:** the turn's completion is now the **worker's own exit** (`<-ch`, the
+reaper's status channel), not EOF. Both pumps run on their own goroutine; once
+the worker is gone, they get `workerDrainGrace` (2 s) to finish the bytes
+already in flight, and then the **read** ends are closed — which is what unblocks
+a scanner parked on a descendant that will never write again, since `os.Pipe`
+files are registered with the runtime poller and a concurrent `Close` makes the
+pending `Read` return. A forced close is logged, naming which stream and why.
+
+The grace window exists so the fix costs no real output: a worker's last lines
+are already written when it exits, and draining them takes microseconds.
+
+Test: `TestRunWorkerDoesNotWaitOnADetachedDescendant` in `fcguest/turn_test.go`
+runs a worker that prints a line, backgrounds a 30-second child inheriting both
+pipes, and exits — asserting `runWorker` returns (against a 20-second bound; it
+did not before) **and** that the worker's own output still arrived.
+
+**Carry-over:** guest-side, so it reaches a group after `make rootfs` and a
+`/restart` — with M138 and M150.
