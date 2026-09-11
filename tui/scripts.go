@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -29,8 +30,15 @@ func loadLibraryFile(kind, lib, dir, suffix, arg string) (name, content string, 
 	if arg == "" {
 		return "", "", fmt.Errorf("no %s name", kind)
 	}
-	if strings.ContainsAny(arg, "/\\") || strings.HasPrefix(arg, ".") {
-		return "", "", fmt.Errorf("invalid %s name %q (bare filename from %s only)", kind, arg, lib)
+	// A NAME POLICY, not just a separator check (audit 2026-09-11 L16). The
+	// old test rejected separators and a leading dot and let everything else
+	// through — including embedded control characters, which then went into
+	// the `/runscript` and `/prompt` messages. Those are `err` and `sys` lines
+	// and only the former is scrubbed on the way into addLine (M111), so a
+	// newline forged extra rows and an escape reached the terminal. The same
+	// shape as the theme drop-in names (M131): a filename is not free text.
+	if !libNameOK(arg) {
+		return "", "", fmt.Errorf("invalid %s name (bare filename from %s, letters/digits/._- only)", kind, lib)
 	}
 	// Prefer the name as given; else try with the suffix appended.
 	candidates := []string{arg}
@@ -51,6 +59,15 @@ func loadLibraryFile(kind, lib, dir, suffix, arg string) (name, content string, 
 		}
 	}
 	return "", "", fmt.Errorf("no such %s %q in %s", kind, arg, dir)
+}
+
+// libNameRE bounds a library filename. Same reasoning as themeNameRE: the value
+// is a path component built from operator input AND a string rendered into the
+// transcript, so the character class is the guard on both counts.
+var libNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func libNameOK(name string) bool {
+	return libNameRE.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // loadScript resolves a /runscript argument to (displayName, scriptText).

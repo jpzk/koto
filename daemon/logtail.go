@@ -293,6 +293,11 @@ func logPaths(g string) []string {
 	return out
 }
 
+// tailTruncMark heads the surviving tail of an over-long partial line. It is
+// content, not framing: its job is to make the synthetic line start impossible
+// to confuse with a real one, and to say so (audit 2026-09-11 L22).
+const tailTruncMark = "…[line truncated] "
+
 // tailMaxPartial caps the tailer's partial-line buffer (audit L5).
 const tailMaxPartial = 8 << 20
 
@@ -403,7 +408,18 @@ func tailFile(g, p string, isGroup bool) {
 					// that grows to the 1 GiB file ceiling (audit L5).
 					// Keep the tail so a real line that eventually ends
 					// still parses.
-					buf = buf[len(buf)-tailMaxPartial/2:]
+					//
+					// The cut lands on an arbitrary byte, and whatever follows
+					// it becomes the START of the line the parser is handed —
+					// so a guest that emits one long newline-free line with
+					// `[[err]] `, `>>> ` or a block-close marker positioned at
+					// the boundary had it read as FRAMING (audit 2026-09-11
+					// L22). turnWriter escapes marker-like text only at genuine
+					// line starts, and this start is synthetic. The marker of
+					// the truncation is also what prevents it: nothing after a
+					// non-empty prefix is at position 0 any more, and the
+					// operator gets told the line was cut, which is true.
+					buf = tailTruncMark + buf[len(buf)-tailMaxPartial/2:]
 				}
 				break
 			}
