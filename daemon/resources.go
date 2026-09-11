@@ -245,6 +245,14 @@ func resSweepGuestMem(groups []string) {
 				if err == nil && rc == 0 {
 					total, avail = resParseMemInfo(out)
 					dTotal, dAvail, dUsed = resParseGuestFS(out)
+					// The probe runs `stat` and `cat` inside the guest, as the
+					// guest's own user — and a root=yes group has a writable
+					// /usr overlay, so it can replace both (audit 2026-09-11
+					// L79). Nothing here can make a guest tell the truth about
+					// its own internals, but the host KNOWS the envelope it
+					// gave the VM, so a reading outside it is provably a lie
+					// and is dropped rather than cached, hashed and alerted on.
+					total, avail, dTotal, dAvail, dUsed = resValidateGuest(g, total, avail, dTotal, dAvail, dUsed)
 				}
 			}
 			resGuestMu.Lock()
@@ -260,6 +268,59 @@ func resSweepGuestMem(groups []string) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// resValidateGuest drops guest-reported figures that contradict the envelope
+// the HOST gave the VM, or that are not internally coherent (audit
+// 2026-09-11 L79). Dropped, not clamped: a clamped figure is still the guest's
+// number wearing the host's bound, and every consumer already has an
+// "unknown" state that degrades honestly — the fleet column says so, and the
+// per-group disk alert simply does not fire on a figure it does not have.
+//
+// What this CANNOT do is stated plainly, because the alternative is a false
+// sense of what the mirror is worth: a guest may still under-report its own
+// usage and suppress its own disk alert. The host has no truthful view of
+// guest-internal state (that is why this mirror exists at all), and the two
+// subjects that decide whether the FLEET survives — the host filesystem and
+// the host memory budget — are measured host-side and are not affected by any
+// of this. The guest figures are per-group observability.
+func resValidateGuest(g string, mTotal, mAvail, dTotal, dAvail, dUsed int64) (int64, int64, int64, int64, int64) {
+	_, memMiB, diskBytes := fcResolveSize(g)
+	// Memory: MemTotal is a little under the configured RAM (firmware and
+	// kernel reservations), never above it. A tenth of slack absorbs any
+	// accounting difference without admitting a fabricated figure.
+	memCap := int64(memMiB)<<20 + int64(memMiB)<<20/10
+	if mTotal < 0 || mAvail < 0 || mAvail > mTotal || (memMiB > 0 && mTotal > memCap) {
+		if mTotal != 0 || mAvail != 0 {
+			resGuestLie(g, "memory")
+		}
+		mTotal, mAvail = 0, 0
+	}
+	// Filesystem: /workspace is the workspace image, so its size is the
+	// ceiling; used and available both come out of the same filesystem and
+	// cannot together exceed it.
+	if dTotal < 0 || dAvail < 0 || dUsed < 0 || dAvail > dTotal || dUsed > dTotal ||
+		dUsed+dAvail > dTotal || (diskBytes > 0 && dTotal > diskBytes) {
+		if dTotal != 0 || dAvail != 0 || dUsed != 0 {
+			resGuestLie(g, "filesystem")
+		}
+		dTotal, dAvail, dUsed = 0, 0, 0
+	}
+	return mTotal, mAvail, dTotal, dAvail, dUsed
+}
+
+// resGuestLie logs an implausible reading once in a while per subject. At warn
+// rather than error: a guest that is lying about its own telemetry has not
+// escaped anything, and error-level lines become operator banners a guest
+// could then raise at will (the same reasoning the flow log's warn tier has).
+var resGuestLieLog = newLogDedup(30*time.Minute, 256)
+
+func resGuestLie(g, subject string) {
+	if resGuestLieLog.allow(g + "/" + subject) {
+		emitLogfG("resources", g, "warn",
+			"[%s] guest %s reading is outside the envelope this VM was given — ignoring it "+
+				"(the guest controls the probe's own binaries; host-side figures are unaffected)", g, subject)
+	}
 }
 
 // resGuestRetain is the staleness policy for one group's cached guest-memory

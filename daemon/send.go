@@ -690,3 +690,16 @@ func abortInflightTurn(g string) {
 		}
 	}
 }
+
+// failInflightTurn wakes the ONE conversation whose turn cannot complete —
+// sendNow parked on turnDoneCh for a [[turn_end]] that will never be written
+// (audit 2026-09-11 L81). It is abortInflightTurn narrowed to a single session:
+// a transcript sink refusing writes is that stream's fault (its ceiling, its
+// file), and reporting the group's other, healthy turns as aborted would
+// advance their queues past turns still running in the guest.
+func failInflightTurn(g, session string) {
+	select {
+	case turnDoneCh(g, session) <- turnAborted:
+	default:
+	}
+}

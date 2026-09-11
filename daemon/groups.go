@@ -77,22 +77,57 @@ func allocPort(g string) (int, error) {
 // booted two Firecracker processes onto the SAME workspace.img (rw, twice —
 // ext4 corruption) while the second spawn clobbered the first VM's vsock
 // socket dir and jail dir. Observed live on 2026-08-01 (groups BRAVO + 9AZ,
-// two VMs each). Keyed lazily; entries are never removed — a stale mutex per
-// destroyed group name is noise, not a leak that matters.
+// two VMs each).
+//
+// Entries are REFERENCE-COUNTED and removed when the last holder lets go
+// (audit 2026-09-11 L80). They used to be keyed lazily and never removed, on
+// the reasoning that a stale mutex per destroyed group name is noise — which is
+// true of destroyed groups and false of names that never existed. Both Stop and
+// Destroy take the lock before checking the registry, and ensureAny takes it
+// before refusing an unregistered name, so any identity granted one of those
+// verbs could mint an entry per unique valid name, without a group, a VM or a
+// spawn grant, for as long as it cared to keep calling. Refcounting is the same
+// shape groupBarrier already uses, and it keeps the map bounded by the
+// operations actually in flight rather than by the names anyone has ever named.
+type groupOp struct {
+	mu   sync.Mutex
+	refs int
+}
+
 var (
 	groupOpMusMu sync.Mutex
-	groupOpMus   = map[string]*sync.Mutex{}
+	groupOpMus   = map[string]*groupOp{}
 )
 
-func groupOpMu(g string) *sync.Mutex {
+// groupOpLock takes g's operation lock and returns its release. The entry is
+// registered BEFORE the lock is taken and released after it is dropped, so a
+// waiter keeps it alive: the map entry can only disappear when nobody holds or
+// wants it, which is what makes the removal safe. Two callers must never end up
+// on two different mutexes for one name — that is the ext4-corruption bug this
+// lock exists to prevent.
+func groupOpLock(g string) func() {
 	groupOpMusMu.Lock()
-	defer groupOpMusMu.Unlock()
-	mu := groupOpMus[g]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		groupOpMus[g] = mu
+	e := groupOpMus[g]
+	if e == nil {
+		e = &groupOp{}
+		groupOpMus[g] = e
 	}
-	return mu
+	e.refs++
+	groupOpMusMu.Unlock()
+
+	e.mu.Lock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.mu.Unlock()
+			groupOpMusMu.Lock()
+			e.refs--
+			if e.refs == 0 {
+				delete(groupOpMus, g)
+			}
+			groupOpMusMu.Unlock()
+		})
+	}
 }
 
 // ensure boots an EXISTING group and refuses a name that is not registered in
@@ -112,9 +147,7 @@ func ensure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, fa
 func spawnEnsure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, true) }
 
 func ensureAny(g string, isMain, create bool) (int, error) {
-	mu := groupOpMu(g)
-	mu.Lock()
-	defer mu.Unlock()
+	defer groupOpLock(g)()
 	return ensureLockedCreate(g, isMain, create)
 }
 
@@ -242,15 +275,14 @@ func autostartGroups() {
 		// longer registered. A stop leaves the group registered, on purpose —
 		// so without the claim the sweep booted it straight back up and the
 		// operator's stop silently undid itself.
-		mu := groupOpMu(g)
-		mu.Lock()
+		unlock := groupOpLock(g)
 		if !autostartTake(g) {
-			mu.Unlock()
+			unlock()
 			emitLogfG("group", g, "info", "autostart %s: skipped — the group was stopped while the boot sweep was running", g)
 			continue
 		}
 		_, err := ensureLocked(g, false)
-		mu.Unlock()
+		unlock()
 		if err != nil {
 			emitLogfG("group", g, "error", "autostart %s: %v", g, err)
 			continue
@@ -318,9 +350,7 @@ func stopGroup(g string) {
 	groupBarrierBegin(g)
 	defer groupBarrierEnd(g)
 	stopGroupPrepare(g)
-	mu := groupOpMu(g)
-	mu.Lock()
-	defer mu.Unlock()
+	defer groupOpLock(g)()
 	stopGroupLocked(g)
 }
 
@@ -609,9 +639,7 @@ func destroy(g string) baseResp {
 	// deleted the replacement's workspace and runtime artifacts while its VM
 	// stayed registered and alive (audit M89). Taken here, so the group cannot
 	// be recreated until the name is gone from groups.json.
-	mu := groupOpMu(g)
-	mu.Lock()
-	defer mu.Unlock()
+	defer groupOpLock(g)()
 	goalCancelOnDestroy(g)
 	// ...then remove the records. Cancelling alone left them in goals.json for
 	// GoalList to serve, and group names are reusable (audit M50).
@@ -724,9 +752,7 @@ func restart(g string) (int, error) {
 	// One lock across stop+ensure: a send arriving mid-restart blocks until
 	// the new VM is up instead of slipping into the stopped-but-not-yet-
 	// spawned window and booting a second one (see groupOpMu).
-	mu := groupOpMu(g)
-	mu.Lock()
-	defer mu.Unlock()
+	defer groupOpLock(g)()
 	fcStop(g)
 	return ensureLocked(g, g == "main")
 }

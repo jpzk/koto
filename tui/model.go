@@ -165,6 +165,13 @@ type historyMsg struct {
 	group  string
 	events []Event
 	more   bool
+	// gen is the group's history generation at the moment the request was
+	// dispatched (audit 2026-09-11 L82). A response that comes back after the
+	// transcript it belongs to was thrown away — /clear, /destroy, /reload, a
+	// stream gap — would otherwise be prepended or appended as if nothing had
+	// happened, restoring content the operator just cleared or content from a
+	// previous incarnation of a reused group name.
+	gen int
 	// before == 0 → initial/tail load (append + bottom-stick).
 	// before  > 0 → older-page response (prepend + scroll-anchor).
 	before float64
@@ -575,6 +582,10 @@ type Model struct {
 	pageOldestTs  map[string]float64
 	pageLoading   map[string]bool
 	pageExhausted map[string]bool
+	// histGen counts how many times a group's transcript has been thrown
+	// away. In-flight history requests carry the value they were dispatched
+	// with, and a response that does not match is dropped — see historyMsg.
+	histGen map[string]int
 	// historyRetries[g] counts failed initial-page fetches (bounded retry —
 	// see historyMsg's error path); cleared on the first success.
 	historyRetries map[string]int
@@ -943,6 +954,7 @@ func newModel(sock string, ctxWindow int) Model {
 		loadedGroups:   map[string]bool{},
 		prewarming:     map[string]int{},
 		pageOldestTs:   map[string]float64{},
+		histGen:        map[string]int{},
 		pageLoading:    map[string]bool{},
 		historyRetries: map[string]int{},
 		pageExhausted:  map[string]bool{},
@@ -1069,6 +1081,15 @@ func (m *Model) dropGroupLiveState(g string) {
 // rendered markdown of its messages, treeRowCache rows built from its name —
 // so dropping the lines without dropping these leaves the text cached under a
 // key a later group of the same name can hit.
+// invalidateHistory marks g's transcript as thrown away and returns the new
+// generation. Every site that drops a group's lines or its pagination state
+// calls it, and every history request carries the generation it saw, so a
+// response that outlives its transcript is discarded instead of restoring it.
+func (m *Model) invalidateHistory(g string) int {
+	m.histGen[g]++
+	return m.histGen[g]
+}
+
 func (m *Model) forgetGroupHistory(g string) {
 	// Keyed per conversation since L71, so every session of the group goes —
 	// a later group of the same name must not inherit any of them.
@@ -1109,6 +1130,10 @@ func (m *Model) forgetGroup(g string) {
 
 	m.dropGroupLiveState(g)
 	m.forgetGroupHistory(g)
+	// Bumped rather than deleted: a group name is reusable, and a page
+	// fetched for the PREVIOUS incarnation must not land in the next one's
+	// transcript. A counter that went back to zero with the name would let it.
+	m.invalidateHistory(g)
 
 	delete(m.groups, g)
 	delete(m.subscribed, g)
@@ -1442,7 +1467,7 @@ func asInt64(v any) int64 {
 // historyCmd dispatches a paged history request. before=0 fetches the
 // tail page; before>0 fetches events with ts < before for back-scroll
 // lazy-loading. limit=0 lets the daemon default to historyPageSize.
-func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
+func historyCmd(sock, group string, before float64, limit, gen int) tea.Cmd {
 	return func() tea.Msg {
 		args := map[string]any{"group": group}
 		if before > 0 {
@@ -1453,7 +1478,7 @@ func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
 		}
 		resp, err := daemonCall(sock, "history", args)
 		if err != nil {
-			return historyMsg{group: group, before: before, err: err}
+			return historyMsg{group: group, before: before, err: err, gen: gen}
 		}
 		// Round-trip the events list through json so we get typed Event
 		// values without re-parsing each field by hand. daemonCall already
@@ -1466,7 +1491,7 @@ func historyCmd(sock, group string, before float64, limit int) tea.Cmd {
 			}
 		}
 		more, _ := resp["more"].(bool)
-		return historyMsg{group: group, events: evs, more: more, before: before}
+		return historyMsg{group: group, events: evs, more: more, before: before, gen: gen}
 	}
 }
 
@@ -1960,6 +1985,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.pageOldestTs, g)
 				delete(m.pageLoading, g)
 				delete(m.pageExhausted, g)
+				m.invalidateHistory(g)
 			}
 		}
 		for g := range msg.groups {
@@ -1969,7 +1995,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					// Resume: the ring replay delivers the missed frames.
 					startSubscribe(m.sock, g, since)
 				} else {
-					cmds = append(cmds, historyCmd(m.sock, g, 0, historyPageSize))
+					cmds = append(cmds, historyCmd(m.sock, g, 0, historyPageSize, m.histGen[g]))
 					startSubscribe(m.sock, g, 0)
 				}
 			}
@@ -1983,11 +2009,18 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-fire the initial page unless the group vanished or a later
 		// fetch already succeeded in the meantime.
 		if _, ok := m.groups[msg.group]; ok && !m.loadedGroups[msg.group] {
-			return m, historyCmd(m.sock, msg.group, 0, historyPageSize)
+			return m, historyCmd(m.sock, msg.group, 0, historyPageSize, m.histGen[msg.group])
 		}
 		return m, nil
 
 	case historyMsg:
+		if msg.gen != m.histGen[msg.group] {
+			// The transcript this page belongs to is gone (audit 2026-09-11
+			// L82). Dropped whole — including the error path's bookkeeping,
+			// which would otherwise clear a NEWER request's in-flight guard.
+			logDbg("history", "dropping a page for %s from generation %d (now %d)", msg.group, msg.gen, m.histGen[msg.group])
+			return m, nil
+		}
 		if msg.err != nil {
 			m.pageLoading[msg.group] = false
 			// A failed INITIAL page used to wedge the group for the life of
@@ -2429,7 +2462,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.dropGroupLiveState(ev.Group)
 			delete(m.activity, ev.Group)
 			m.refreshLog()
-			return m, historyCmd(m.sock, ev.Group, 0, historyPageSize)
+			return m, historyCmd(m.sock, ev.Group, 0, historyPageSize, m.invalidateHistory(ev.Group))
 		case "prompt":
 			evk := turnKey(ev.Group, ev.Session)
 			if cur, ok := m.streamBuf[evk]; ok {
@@ -3048,7 +3081,7 @@ func (m *Model) maybePageOlder() tea.Cmd {
 		return nil
 	}
 	m.pageLoading[g] = true
-	return historyCmd(m.sock, g, before, historyPageSize)
+	return historyCmd(m.sock, g, before, historyPageSize, m.histGen[g])
 }
 
 // refreshLog rebuilds the viewport content from m.lines + live overlay.
@@ -3735,6 +3768,9 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			delete(m.streamBuf, turnKey(msg.group, target))
 		}
 		m.groupVer[msg.group]++
+		// A history page already in flight describes the transcript that was
+		// just wiped; without this it would be appended back into the view.
+		m.invalidateHistory(msg.group)
 		m.refreshLog()
 		scope := msg.group
 		if !all {

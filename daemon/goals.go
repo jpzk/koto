@@ -108,6 +108,11 @@ const (
 	// both agent-authored, both persisted into goals.json and (for reasons)
 	// embedded into later prompts.
 	goalNoteMax = 4000
+	// goalTextMax bounds the caller-supplied goal text and acceptance
+	// criteria. Sized like schedMaxMsg, and for the same reason: this is prose
+	// a person writes, it is stored and re-sent on every iteration, and 16 KiB
+	// is far more than any real one while still being a bound.
+	goalTextMax = 16 << 10
 
 	// goalSilentJudgeMax pauses the goal after this many consecutive
 	// done-claims whose judge check (with one retry each) produced no
@@ -667,6 +672,23 @@ func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bo
 	}
 	if criteria == "" {
 		return goalItem{}, fmt.Errorf("acceptance criteria are required")
+	}
+	// Both are caller-chosen and BOTH ARE PERSISTED: they go into goals.json,
+	// are marshaled and rewritten on every goal mutation, are copied into every
+	// GoalList response, and are embedded in the plan, worker and judge prompt
+	// of every iteration — so an oversized pair is paid again per turn, in
+	// provider spend as well as in the daemon's heap (audit 2026-09-11 L75).
+	// The agent-authored fields beside them were already bounded (goalNoteMax);
+	// these two were not bounded anywhere.
+	//
+	// REFUSED, not truncated: a clipped acceptance criterion is a different
+	// contract from the one the caller wrote, and the judge would evaluate the
+	// clipped one without anybody being told.
+	if len(text) > goalTextMax {
+		return goalItem{}, fmt.Errorf("goal text is %d bytes; the limit is %d", len(text), goalTextMax)
+	}
+	if len(criteria) > goalTextMax {
+		return goalItem{}, fmt.Errorf("acceptance criteria are %d bytes; the limit is %d", len(criteria), goalTextMax)
 	}
 	// No goal on main, on any plane. The ctl dispatcher refused it and the
 	// GoalSet RPC did not (audit M38), so an ACL-authorized caller could start
