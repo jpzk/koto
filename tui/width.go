@@ -176,28 +176,48 @@ func joinCols(h int, widths []int, blocks ...string) string {
 // the whole screen scrolls up one row on every repaint. Found 2026-08-29 by
 // walking the TUI under a VT emulator: three physical lines with a raw tab
 // in a group's tab-separated jq output, three wraps, three scrolls.
+// The column is measured over SPANS, not rune by rune (audit 2026-09-11 L88).
+// Per-rune accounting gets two things wrong that reach this function, because
+// the daemon's sanitizer preserves both: an SGR sequence costs nothing as a
+// whole but its '[', parameters and 'm' are each ordinary printable runes, and
+// a grapheme cluster (a ZWJ emoji, a base plus combining marks) is one glyph
+// whose parts do not have the widths of their sum. Either one puts the running
+// column off, so the next tab advances to the wrong stop and the row is
+// misaligned or wrapped early.
+//
+// cellWidth already answers both correctly — it skips CSI/OSC sequences and
+// falls back to ansi.StringWidth for anything it does not know to be a single
+// narrow cell — so the fix is to hand it whole spans rather than single runes.
 func expandTabs(s string) string {
 	if !strings.Contains(s, "\t") {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 16)
-	col := 0
-	for _, r := range s {
-		switch r {
+	col, start := 0, 0
+	flush := func(end int) {
+		if end > start {
+			seg := s[start:end]
+			b.WriteString(seg)
+			col += cellWidth(seg)
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
 		case '\t':
+			flush(i)
 			n := 8 - col%8
-			for i := 0; i < n; i++ {
+			for k := 0; k < n; k++ {
 				b.WriteByte(' ')
 			}
 			col += n
+			start = i + 1
 		case '\n':
-			b.WriteRune(r)
-			col = 0
-		default:
-			b.WriteRune(r)
-			col += cellWidth(string(r))
+			flush(i)
+			b.WriteByte('\n')
+			col, start = 0, i+1
 		}
 	}
+	flush(len(s))
 	return b.String()
 }

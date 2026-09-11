@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
@@ -47,8 +48,26 @@ import (
 // out of the high end so they never collide with the image's service accounts.
 const fcJailBaseUID = 30000
 
-// fcJailMaxUID ends the per-VM uid band.
+// fcJailMaxUID ends the per-VM uid band — the widest it can ever be.
 const fcJailMaxUID = 60000
+
+// jailMaxEnv carries the CLAMPED end of the band across the userns bootstrap's
+// two re-execs, so every stage agrees on which ids are actually mapped.
+const jailMaxEnv = "KOTO_JAIL_MAX_UID"
+
+// jailMaxUID is the end of the band this host can actually map: fcJailMaxUID
+// unless /etc/subuid gave us less, in which case unsBootstrap clamps it and
+// says so (audit 2026-09-11 L89). Read from the environment first so the
+// re-exec'd stages inherit the parent's finding rather than re-deriving it
+// inside a user namespace where the lookup no longer answers the same way.
+var jailMaxUID = func() int {
+	if v := os.Getenv(jailMaxEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > fcJailBaseUID && n <= fcJailMaxUID {
+			return n
+		}
+	}
+	return fcJailMaxUID
+}()
 
 // fcJailUID derives a stable, per-group uid from the group's unique proxy port
 // (persisted in groups.json, so it survives restarts — which keeps the
@@ -67,11 +86,11 @@ const fcJailMaxUID = 60000
 // to boot into. Refusing names the port and the base, which is the fix.
 func fcJailUID(proxyPort int) (int, error) {
 	uid := fcJailBaseUID + (proxyPort - PORT_BASE)
-	if uid < fcJailBaseUID || uid > fcJailMaxUID {
+	if uid < fcJailBaseUID || uid > jailMaxUID {
 		return 0, fmt.Errorf("proxy port %d maps to jail uid %d, outside the %d-%d band "+
 			"(PORT_BASE is %d) — refusing to boot rather than share a VM identity; "+
-			"check PROXY_PORT against groups.json",
-			proxyPort, uid, fcJailBaseUID, fcJailMaxUID, PORT_BASE)
+			"check PROXY_PORT against groups.json, and /etc/subuid if the band looks short",
+			proxyPort, uid, fcJailBaseUID, jailMaxUID, PORT_BASE)
 	}
 	return uid, nil
 }

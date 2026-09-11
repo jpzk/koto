@@ -289,6 +289,22 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 }
 
 func configCmd(req configReq) configResp {
+	// A group must EXIST before it can be configured (audit 2026-09-11 L87).
+	// updateGroupConfig's first act is MkdirAll under the caller's group path,
+	// so a syntactically valid name was enough to create persistent state —
+	// a directory, a .cs subdirectory and a config.json — for a name that is
+	// in no registry, boots no VM and is listed nowhere, leaving no way to
+	// find or remove it except by hand. An ACL grant says the caller may
+	// configure that target; it does not say the target is a group.
+	//
+	// Same split ensure() draws (M14): creating a group is spawn's job, and
+	// spawn is the path that is quota-checked.
+	if !validGroupName(req.Group) {
+		return configResp{BaseResp: errResp("invalid group name")}
+	}
+	if _, known := readGroups()[req.Group]; !known {
+		return configResp{BaseResp: errResp("no such group: " + req.Group + " (spawn it first)")}
+	}
 	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
 		applyConfig(cfg, "model", req.Model)
 		applyConfig(cfg, "effort", req.Effort)

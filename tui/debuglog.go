@@ -79,6 +79,7 @@ func initDebugLog(env func(string) string, sock string) {
 		f.Close()
 		return
 	}
+	dbgTighten(f, st)
 	dbgMu.Lock()
 	dbgFile, dbgPath, dbgSize, dbgLevel = f, path, st.Size(), level
 	dbgMu.Unlock()
@@ -119,6 +120,21 @@ func dbgWrite(level int, tag, subsys, format string, args []any) {
 	}
 }
 
+// dbgTighten repairs a log file that already existed with a permissive mode
+// (audit 2026-09-11 L91). The 0600 passed to OpenFile applies only when the
+// call CREATES the file, and os.Rename carries an inode's mode into the
+// rotated copy — so a tui.log created, copied or restored at 0644 stayed
+// world-readable through every write and every rotation, exposing current
+// diagnostics and the retained history to anyone who can reach the state dir.
+// Applied to the DESCRIPTOR, so it cannot be redirected onto another file
+// between the open and the chmod, and only when the mode is actually too wide.
+func dbgTighten(f *os.File, st os.FileInfo) {
+	if st.Mode().Perm()&0o077 == 0 {
+		return
+	}
+	_ = f.Chmod(0o600)
+}
+
 // dbgRotate renames the live file to <path>.old (replacing any previous one)
 // and reopens fresh. Called under dbgMu. On any failure it keeps the current
 // file — an oversized log beats a lost one.
@@ -133,6 +149,12 @@ func dbgRotate() {
 		dbgSize = 0
 		return
 	}
+	if st, serr := f.Stat(); serr == nil {
+		dbgTighten(f, st)
+	}
+	// The rotated file KEEPS its inode through os.Rename, so its mode came
+	// from whatever the live file had — which is why the repair above has to
+	// happen on open rather than only here.
 	dbgFile.Close()
 	dbgFile = f
 	dbgSize = 0

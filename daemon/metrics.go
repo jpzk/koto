@@ -30,7 +30,13 @@ func readTail(path string, max int) ([]byte, error) {
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		return nil, err
 	}
-	return io.ReadAll(f)
+	// LimitReader, not a bare ReadAll (audit 2026-09-11 L90). max is the
+	// caller's memory budget, and the stat that sized the seek is not the read:
+	// metrics.jsonl gains a line per proxied request and a group log a line per
+	// output line, so an append between the two made ReadAll return the tail
+	// PLUS everything written since — unbounded, then split, parsed and in some
+	// callers serialised into a response. The bound has to be on the read.
+	return io.ReadAll(io.LimitReader(f, int64(max)))
 }
 
 func latestMetric(g string) map[string]any {

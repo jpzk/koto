@@ -3387,6 +3387,8 @@ func TestDestroyDropsTheJobCache(t *testing.T) {
 // every one then registered. The cap now lives with the registration.
 func TestGroupCapIsAtomicWithRegistration(t *testing.T) {
 	fcHarness(t)
+	// The harness registers its stock groups, which count against the cap.
+	base := len(readGroups())
 	var wg sync.WaitGroup
 	var admitted atomic.Int64
 	start := make(chan struct{})
@@ -3407,8 +3409,9 @@ func TestGroupCapIsAtomicWithRegistration(t *testing.T) {
 	if n := len(readGroups()); n > ctlMaxSpawn {
 		t.Fatalf("%d groups registered, cap is %d", n, ctlMaxSpawn)
 	}
-	if admitted.Load() != int64(ctlMaxSpawn) {
-		t.Fatalf("%d allocations admitted, want exactly the cap (%d)", admitted.Load(), ctlMaxSpawn)
+	if want := int64(ctlMaxSpawn - base); admitted.Load() != want {
+		t.Fatalf("%d allocations admitted, want exactly the room left under the cap (%d of %d)",
+			admitted.Load(), want, ctlMaxSpawn)
 	}
 	// An ALREADY-registered group still resolves at the cap — re-spawning one
 	// does not grow the set, so it must not be refused.
@@ -7734,5 +7737,178 @@ func TestTranscriptWriteFailureStopsTheStream(t *testing.T) {
 	other := turnDoneCh(g, "s2")
 	if len(other) != 0 {
 		t.Fatal("a sibling conversation was reported aborted too")
+	}
+}
+
+// 2026-09-11 L83: veniceAuth's error names the absolute host path of the key,
+// and serveVenice handed it to the guest verbatim — the daemon's username and
+// state-directory layout, free, across the guest→host proxy boundary.
+func TestVeniceCredentialPathIsNotToldToTheGuest(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere; initPaths() })
+	if _, err := veniceAuth(); err == nil {
+		t.Fatal("veniceAuth succeeded with no key file")
+	}
+	h := &handler{group: "g"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/chat/completions", strings.NewReader("{}"))
+	h.serveVenice(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, veniceKeyPath()) || strings.Contains(body, HERE) {
+		t.Fatalf("the reply hands the guest a host path: %q", body)
+	}
+	if !strings.Contains(body, "venice credential") {
+		t.Errorf("the guest is not told what went wrong: %q", body)
+	}
+}
+
+// 2026-09-11 L86: the flow log's dedup key is (protocol, destination, port) —
+// every field guest-chosen — so walking a port range mints a fresh key per
+// packet, and at fcFlowSeenMax the map drops every live suppression and admits
+// the lot again. Each admitted line is formatted, written, inserted into the
+// global log ring (evicting real entries) and pushed to every subscriber: the
+// cheapest way to hide one flow is to bury it under ten thousand.
+func TestFlowLogHasAPerGuestBudget(t *testing.T) {
+	l := newFcFlowLogger("floody")
+	allowed, dropped := 0, 0
+	for i := 0; i < fcFlowRateBurst*3; i++ {
+		ok, _ := l.budget()
+		if ok {
+			allowed++
+		} else {
+			dropped++
+		}
+	}
+	if allowed > fcFlowRateBurst {
+		t.Fatalf("%d lines admitted in one instant; the burst is %d", allowed, fcFlowRateBurst)
+	}
+	if dropped == 0 {
+		t.Fatal("an unbounded flood was admitted whole")
+	}
+	// The suppressed count is reported when the budget refills: "the log is
+	// incomplete" is itself the thing an operator needs to know.
+	l.mu.Lock()
+	l.tokens, l.last = fcFlowRateBurst, time.Now()
+	l.mu.Unlock()
+	ok, n := l.budget()
+	if !ok {
+		t.Fatal("a refilled budget still refused")
+	}
+	if n != dropped {
+		t.Errorf("reported %d dropped lines, want %d", n, dropped)
+	}
+	// ...once. The next line does not re-report them.
+	if _, again := l.budget(); again != 0 {
+		t.Errorf("the dropped count was reported twice (%d)", again)
+	}
+}
+
+// 2026-09-11 L87: updateGroupConfig's first act is MkdirAll under the caller's
+// group path, so a syntactically valid name was enough to create persistent
+// state for a group that is in no registry, boots no VM and is listed nowhere.
+// An ACL grant says the caller may configure that target; it does not say the
+// target exists.
+func TestConfigRefusesAnUnregisteredGroup(t *testing.T) {
+	fcHarness(t)
+	const ghost = "ghostcfg"
+	resp := configCmd(configReq{Group: ghost, Model: json.RawMessage(`"claude-opus-5"`)})
+	if resp.OK {
+		t.Fatal("config succeeded for a group that was never spawned")
+	}
+	if !strings.Contains(resp.Error, "no such group") {
+		t.Errorf("unhelpful refusal: %q", resp.Error)
+	}
+	if exists(vol(ghost)) {
+		t.Fatal("a refused config still created the group's directory")
+	}
+	// A registered group is configured as before.
+	if r := configCmd(configReq{Group: "tg", Model: json.RawMessage(`"claude-opus-5"`)}); !r.OK {
+		t.Fatalf("a registered group was refused: %+v", r)
+	}
+}
+
+// 2026-09-11 L89: the bootstrap check proved only that the jail band STARTS
+// inside the subuid allocation. The band runs to fcJailMaxUID, so a short
+// allocation left part of it unmapped — and an unmapped id is not an identity:
+// the chown and the nested uid_map both fail on it.
+func TestJailBandNeverExceedsTheMappedRange(t *testing.T) {
+	prev := jailMaxUID
+	t.Cleanup(func() { jailMaxUID = prev })
+
+	// Full band: the top of it resolves.
+	jailMaxUID = fcJailMaxUID
+	if _, err := fcJailUID(PORT_BASE + (fcJailMaxUID - fcJailBaseUID)); err != nil {
+		t.Fatalf("the top of the full band was refused: %v", err)
+	}
+	// Clamped band: the low part still works, the part beyond the allocation
+	// is refused by name rather than silently used.
+	jailMaxUID = fcJailBaseUID + 1000
+	if _, err := fcJailUID(PORT_BASE + 10); err != nil {
+		t.Fatalf("a port inside the clamped band was refused: %v", err)
+	}
+	_, err := fcJailUID(PORT_BASE + 2000)
+	if err == nil {
+		t.Fatal("a port past the mapped range produced a uid anyway")
+	}
+	if !strings.Contains(err.Error(), "subuid") {
+		t.Errorf("the refusal does not point at the cause: %v", err)
+	}
+}
+
+// 2026-09-11 L90: readTail seeked to size-max and then ReadAll'd to EOF. The
+// stat that sized the seek is not the read, and these files grow a line per
+// proxied request or per output line — so an append in between returned the
+// tail PLUS everything written since, unbounded, to callers that split, parse
+// and in some cases serialise it.
+func TestReadTailBoundsTheReadNotJustTheSeek(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.jsonl")
+	const max = 4096
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), max*4), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Append after the file has been sized, the way a live writer does.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 64; i++ {
+			_, _ = f.Write(bytes.Repeat([]byte("b"), 1<<16))
+		}
+		f.Close()
+	}()
+	<-done
+	b, err := readTail(path, max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > max {
+		t.Fatalf("readTail returned %d bytes for a %d-byte budget", len(b), max)
+	}
+}
+
+// 2026-09-11 L92: Spawn declared its context as `_`, so a client that
+// disconnected or hit its deadline ended only its own wait while the daemon
+// went on to register the group, allocate a listener and boot a microVM — a
+// retry loop consuming fleet capacity at a rate the client's timeout chose.
+func TestSpawnHonoursClientCancellation(t *testing.T) {
+	fcHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &kotoServer{}
+	if _, err := s.Spawn(ctx, &pb.SpawnReq{Group: "cancelled"}); err == nil {
+		t.Fatal("a cancelled Spawn ran anyway")
+	}
+	if exists(vol("cancelled")) {
+		t.Error("a cancelled Spawn still created group state")
+	}
+	if _, known := readGroups()["cancelled"]; known {
+		t.Error("a cancelled Spawn still registered the group")
 	}
 }

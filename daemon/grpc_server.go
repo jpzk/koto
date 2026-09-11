@@ -226,7 +226,24 @@ func toStruct(m map[string]any) *structpb.Struct {
 
 // ---- unary RPCs -----------------------------------------------------------
 
-func (s *kotoServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
+func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
+	// The context was ignored (audit 2026-09-11 L92), so a client that
+	// disconnected — or gave up on its deadline — ended only its own wait,
+	// while the daemon went on to seed config, register the group, allocate a
+	// proxy listener and boot a microVM. A client in a retry loop against a
+	// deadline it never meets therefore consumed fleet capacity at a rate its
+	// own timeout chose.
+	//
+	// This is a check at the DOOR, not cancellation of the boot. fcSpawn is
+	// deliberately uninterruptible past the point where a VM exists: a
+	// half-created group with a live VMM and no registry entry is a worse
+	// state than one extra group, and unwinding it is precisely the ordering
+	// destroy exists to get right. So a cancel that arrives mid-boot is
+	// honoured on the NEXT attempt rather than this one — which is what bounds
+	// the loop.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name (must match [A-Za-z0-9][A-Za-z0-9_-]{0,31})"}, nil
 	}
@@ -252,6 +269,12 @@ func (s *kotoServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, er
 		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size); err != nil {
 			return &pb.SpawnResp{Error: err.Error()}, nil
 		}
+	}
+	// Re-checked immediately before the boot: the validation, the cap read and
+	// the config seed are all filesystem work, and the client may have gone
+	// during them.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	port, err := spawnEnsure(r.Group, r.Main)
 	if err != nil {

@@ -32,6 +32,12 @@ func fcHarness(t *testing.T) {
 	if err := os.MkdirAll(fcRunDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The harness's stock groups, registered: configCmd and ensure() both
+	// refuse a name that is in no registry (audit M14, 2026-09-11 L87), so a
+	// test group has to exist before it can be driven.
+	groupsLock.Lock()
+	writeGroups(map[string]int{"main": 8787, "tg": 8788, "peer": 8789})
+	groupsLock.Unlock()
 }
 
 // TestFcTurnSink: frames render into the slot's host log in the marker

@@ -73,7 +73,7 @@ func TestDebugLogUnwritablePathStaysSilent(t *testing.T) {
 func TestDebugLogRotation(t *testing.T) {
 	defer resetDebugLog()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tui.log")
+	path := filepath.Join(dir, "tui.log") // where initDebugLog puts it, beside the sock
 	initDebugLog(envMap(map[string]string{"KOTO_TUI_LOG": path}), filepath.Join(dir, "koto.sock"))
 	dbgMu.Lock()
 	dbgSize = dbgRotateBytes // next write crosses the threshold
@@ -90,5 +90,31 @@ func TestDebugLogRotation(t *testing.T) {
 	cur, _ := os.ReadFile(path)
 	if !strings.Contains(string(cur), "fresh file") {
 		t.Errorf("post-rotation line missing from fresh file: %q", cur)
+	}
+}
+
+// 2026-09-11 L91: the 0600 passed to OpenFile applies only when the call
+// CREATES the file, and os.Rename carries an inode's mode into the rotated
+// copy — so a tui.log created, copied or restored at 0644 stayed
+// world-readable through every write and every rotation, exposing current
+// diagnostics and the retained history to anyone who can reach the state dir.
+func TestDebugLogPermissionsAreRepairedOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tui.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer resetDebugLog()
+	initDebugLog(envMap(nil), filepath.Join(dir, "koto.sock"))
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("the log is mode %04o after open; diagnostics are world-readable", st.Mode().Perm())
+	}
+	logDbg("test", "still writable")
+	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), "still writable") {
+		t.Fatalf("tightening the mode broke the logger: %v %q", err, b)
 	}
 }

@@ -1273,7 +1273,15 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	defer releaseBody()
 	key, err := veniceAuth()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		// The guest is told THAT there is no key, never where it should be
+		// (audit 2026-09-11 L83). veniceAuth's message names an absolute host
+		// path — `/var/lib/koto/creds/venice.key`, or a dev clone's
+		// `/home/<operator>/koto/creds/venice.key` — and handing that across
+		// the guest→host proxy boundary gives a prompt-injected agent the
+		// daemon's username and state-directory layout for free. The operator
+		// needs the path; the operator reads the daemon log.
+		emitLogfG("llm", h.group, "error", "[%s] venice request refused: %v", h.group, err)
+		http.Error(w, "the venice credential is not available on this host; ask the operator", http.StatusServiceUnavailable)
 		return
 	}
 	mkReq := func() (*http.Request, error) {
