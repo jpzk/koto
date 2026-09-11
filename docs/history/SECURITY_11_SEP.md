@@ -824,3 +824,34 @@ with an explicit `…[truncated]` marker so a clipped body is never mistaken for
 a complete one. The budget is released on every exit from a block: the close
 marker, and a `[[turn_end]]` arriving mid-block.
 `TestOpenBlockBodiesAreBounded`.
+
+### M46 — Mutable package resolution can poison the shared golden rootfs during a root build (`fcguest/Dockerfile.rootfs`) — **partly fixed**
+
+The npm half is real and was inconsistent with the file it sits in: the Fedora
+base is pinned by DIGEST, with a comment explaining why, and the line below it
+installed `@anthropic-ai/claude-code` at whatever `latest` resolved to that day.
+npm runs lifecycle scripts as root during the build, before the `node` account
+exists, and the result is exported as the read-only root drive shared by every
+VM — so a compromised publish would have entered every guest on the next
+rebuild, and two rebuilds a week apart produced different images with no record
+of the difference. Pinned to `2.1.268` via an `ARG`, with the recorded integrity
+hash and the bump procedure in the comment.
+
+The RPM half is **not taken**. Fedora offers no first-class repository
+snapshot, so "pin every RPM version" means either hand-maintaining ~25 NEVRAs
+that go stale the moment the mirror garbage-collects them — turning every
+rootfs rebuild into a dependency-resolution puzzle — or standing up a private
+mirror, which is infrastructure this project does not have. `dnf` already
+verifies package signatures against the Fedora keys baked into the pinned base
+image, which is the control the finding is really asking for; what is missing
+is reproducibility, not authenticity.
+
+`--ignore-scripts` is also not taken: claude-code's install needs its lifecycle
+scripts, and disabling them would trade a working rootfs for a hardening step
+the version pin already covers for the realistic threat (a malicious publish
+landing silently).
+
+**Not rebuilt.** `make rootfs` was not run — it would replace the live
+`fcassets/rootfs.img` on a host with running groups. The pinned version matches
+what the operator's own `claude` reports (2.1.268) and the spec resolves, but
+the first rebuild is the real check.
