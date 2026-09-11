@@ -188,3 +188,27 @@ func TestTranscriptRetentionIsBoundedByBytes(t *testing.T) {
 		t.Fatalf("counter drifted after a count trim: %d", m2.lineBytes)
 	}
 }
+
+// 2026-09-11 M127: the shared-shell PTY path is deliberately safe — raw guest
+// bytes go through the terminal emulator and then scrubVT — but the ended-shell
+// ERROR is a guest-authored string concatenated into the hint line and handed
+// to lipgloss, which styles content without neutralizing what is in it.
+func TestShellErrorTextIsScrubbed(t *testing.T) {
+	esc := string(rune(0x1b))
+	for _, payload := range []string{
+		esc + "]52;c;cGF5bG9hZA==" + string(rune(7)) + "clipboard",
+		esc + "[2J" + esc + "[H",
+		string(rune(0x9b)) + "C1",
+		"bidi" + string(rune(0x202e)) + "flip",
+	} {
+		got := scrubVT(payload)
+		for _, r := range got {
+			if r == 0x1b || (r < 0x20 && r != '\n') || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) {
+				t.Errorf("shell error kept %q from %q: %q", r, payload, got)
+			}
+		}
+	}
+	if got := scrubVT("session ended: connection reset"); got != "session ended: connection reset" {
+		t.Errorf("a plain shell error was mangled: %q", got)
+	}
+}

@@ -2360,3 +2360,45 @@ The remaining suggestions — byte-bounding the render cache, replacing string
 concatenation with builders, truncating before markdown rendering — are
 performance work on paths whose INPUT is now bounded at 1 MiB per block, and
 are not tracked here as security findings.
+
+### M127 — Shell error text bypasses TUI terminal-output sanitization (`tui/shell_view.go`) — **fixed**
+
+Real, and it is the same seam M111 describes from the other end: the PTY path
+is deliberately safe — raw guest bytes go through the terminal EMULATOR and
+then `scrubVT` — while the ended-shell ERROR is a guest-authored string
+concatenated into the hint line and handed to `lipgloss.Render`, which styles
+content without neutralizing what is in it.
+
+`scrubVT` on both error sinks: the `ShellFrame.Error` the guest sends, and the
+transport error beside it, which is assembled on the client and can carry a
+server message through. `TestShellErrorTextIsScrubbed`.
+
+### M128 — State directory validation is not bound to subsequent writes (`daemon/install.go`) — **not a finding (M52/M77/M112 again)**
+
+The third report of the check-then-use shape against the state root, and the
+answer is the one M52 and M77 already got: every operation it names needs write
+access to the state tree or its parent, and the default `/var/lib/koto` sits
+under a parent no unprivileged user can write. `stateDirTrusted` validates the
+ROOT and claims nothing more (audit L9 added it for a pre-created `/tmp`
+directory wearing the name).
+
+Where the same shape had a consequence I could not dismiss — `--purge`, which
+is an `rm -rf` gated by a prompt a human takes seconds to answer — it IS fixed,
+by binding the deletion to the directory's `(device, inode)` (M112). The
+difference is the width of the window and what is on the other side of it.
+
+### M129 — Guest-controlled Venice proxy lacks per-group spend or request-rate enforcement (`daemon/proxy.go`) — **accepted**
+
+Accurate, and describes the product rather than a defect. The proxy exists to
+hold the credential and inject it for the group's own inference; a guest
+spending the account's quota on inference is the feature, and the same is true
+of the Anthropic leg, which this finding does not single out. What bounds it
+today is concurrency (32 per group, 128 global), the body budget (M15), the
+endpoint allowlist (M3's sibling, which keeps the credential to inference and
+model metadata), and the operator's own per-group `/config model`.
+
+A cumulative spend budget per group is a real feature and a good one —
+`metrics.jsonl` already records per-request token counts per group, so the data
+is there — but it is a product decision about defaults, refusal behaviour and
+operator visibility, not a fix to apply inside an audit pass. Recorded for the
+operator rather than invented.
