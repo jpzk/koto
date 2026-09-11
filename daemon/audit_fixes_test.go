@@ -2911,3 +2911,48 @@ func currentUID(t *testing.T) string {
 	}
 	return me.Uid
 }
+
+// 2026-09-11 M89: stopGroup took groupOpMu, powered the VM off, and RELEASED
+// it before destroy had removed anything — so ensure() could see a group that
+// was merely not running, register a replacement VM, and have destroy then
+// delete the replacement's workspace while its VM stayed registered and alive.
+func TestDestroyHoldsTheGroupLockThroughout(t *testing.T) {
+	fcHarness(t)
+	const g = "destroyrace"
+	if err := os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Register it so ensure() would accept it (M17).
+	groupsLock.Lock()
+	m := readGroups()
+	m[g] = PORT_BASE + 900
+	writeGroups(m)
+	groupsLock.Unlock()
+
+	// Hold the group lock the way a concurrent ensure() would, then check that
+	// destroy blocks on it rather than proceeding to delete state.
+	mu := groupOpMu(g)
+	mu.Lock()
+	done := make(chan baseResp, 1)
+	go func() { done <- destroy(g) }()
+	select {
+	case <-done:
+		t.Fatal("destroy ran its cleanup while another lifecycle op held the group lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+	mu.Unlock()
+	select {
+	case r := <-done:
+		if !r.OK {
+			t.Fatalf("destroy failed: %s", r.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("destroy never completed after the lock was released")
+	}
+	if _, err := os.Stat(vol(g)); err == nil {
+		t.Fatal("the workspace survived destroy")
+	}
+	if _, known := readGroups()[g]; known {
+		t.Fatal("the group is still registered after destroy")
+	}
+}
