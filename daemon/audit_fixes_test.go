@@ -1988,3 +1988,34 @@ func TestUploadQuotaHoldsUnderConcurrency(t *testing.T) {
 		t.Fatal("no upload was admitted at all")
 	}
 }
+
+// 2026-09-11 M56: a job's id and rc are guest-authored and, unlike the output
+// body, were neither sanitized nor fenced — flushNotify formats them into text
+// the MODEL reads and notifyDeliver mirrors the same string into the host log,
+// so a newline in either forges lines in both.
+func TestJobMetadataFieldsAreClamped(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"abc123", "abc123"},
+		{"a-b_c.d", "a-b_c.d"},
+		{"", "?"},
+		{"has space", "?"},
+		{"line\ninjected", "?"},
+		{"esc\x1b[31m", "?"},
+		{"rtl‮", "?"},
+		{strings.Repeat("a", 65), "?"},
+	} {
+		if got := ctlJobField(c.in, 64); got != c.want {
+			t.Errorf("ctlJobField(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// rc has its own, tighter budget.
+	if got := ctlJobField("0", 8); got != "0" {
+		t.Errorf("rc 0 clamped to %q", got)
+	}
+	if got := ctlJobField("137", 8); got != "137" {
+		t.Errorf("rc 137 clamped to %q", got)
+	}
+	if got := ctlJobField("0\n[job x rc=0]", 8); got != "?" {
+		t.Errorf("rc with a forged line survived as %q", got)
+	}
+}

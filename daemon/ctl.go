@@ -43,6 +43,25 @@ func truncateRunes(s string, max int) string {
 	return s[:max]
 }
 
+// ctlJobField clamps a guest-authored job id or return code to the shape it
+// actually has: bare alphanumerics plus the handful of separators cs-job and
+// wait statuses use. Anything else becomes "?" rather than an error — a job
+// result with an unreadable id is still worth delivering, and refusing it
+// would let one malformed field lose the whole batch.
+func ctlJobField(s string, max int) string {
+	if s == "" || len(s) > max {
+		return "?"
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return "?"
+		}
+	}
+	return s
+}
+
 const (
 	ctlMainGroup = "main"
 	ctlMaxSpawn  = 100     // cap of total registered groups; rejects further spawns from ctl
@@ -369,6 +388,15 @@ func ctlDispatch(owner string, line []byte) any {
 		if serr != nil {
 			sess = "" // malformed attribution → default session, never an error
 		}
+		// The id and rc are guest-authored too, and unlike the output body
+		// they were neither sanitized nor fenced: flushNotify formats them as
+		// "[job %s rc=%s]" into text the MODEL reads, and notifyDeliver mirrors
+		// the same string into the host log. A newline in either forges further
+		// lines there — daemon-looking context in the model's turn, or forged
+		// records for anything reading the log (audit M56). Both have narrow
+		// real shapes: cs-job mints ids from mktemp, and an rc is a wait status.
+		req.ID = ctlJobField(req.ID, 64)
+		req.RC = ctlJobField(req.RC, 8)
 		emitLogfG("ctl", owner, "info", "[%s] job_done %s rc=%s session=%s", owner, req.ID, req.RC, sessionMarkerName(sess))
 		recordJobDone(owner, jobResult{ID: req.ID, RC: req.RC, Out: string(out), Total: req.Total, Session: sess})
 		// Completion is the moment the tree wants fresh state — don't wait
