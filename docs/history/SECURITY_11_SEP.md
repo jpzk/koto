@@ -3879,3 +3879,71 @@ blocks against the 4 MiB budget, asserts both bounds hold and that the byte one
 is what bit, checks the carried total against a fresh count, exercises the open
 block and its reset on close, and fills the cache past its byte budget.
 Verified to fail on all three counts with the budgets removed.
+
+---
+
+# low
+
+171 findings. Same method as the mediums: every one is checked against the
+code, gets a verdict, and a verdict of *accepted* or *not a finding* carries
+its reasoning.
+
+**Numbering.** `L1`–`L12` were already used by the 2026-09-05/06 audits and are
+referenced from code comments and CLAUDE.md, so this audit's low findings are
+written `audit 2026-09-11 L<n>` in code and plain `L<n>` here, where the file's
+own date disambiguates them.
+
+Related findings are fixed and committed together where they share a site or a
+cause — a commit per finding would put 171 near-identical entries in a log whose
+job is to explain the design.
+
+## L1 — Oversized control line permanently stops guest-to-host forwarding — FIXED
+
+`fcguest/main.go`, `ctlForward`.
+
+**Confirmed.** The forwarder read `/workspace/.cs/ctl` with a `bufio.Scanner`
+capped at 1 MiB. A record over that makes `Scan()` return false with
+`ErrTooLong`, and the loop exited without checking `sc.Err()` — so the function
+returned and the FIFO's **only reader was gone**. Every later `notify`,
+`job_done`, `report` and `goal_*` from that guest went nowhere until the VM was
+restarted, and writers blocked on a pipe nobody was draining. The worker owns
+the FIFO, so writing one long line was the whole attack.
+
+**Fix:** `readCtlLine` reads with `ReadSlice` and handles the two cases the
+scanner conflated — an oversized record is **discarded through its terminator**
+(retaining none of it, which is the memory half of the same bug) and answered on
+`ctl.out`, and the stream then resynchronises on the next line. A read error is
+ridden out rather than fatal, since the FIFO is held `O_RDWR` by this process and
+has no EOF to reach; `ctlReadErrMax` stops that becoming a spin on a broken
+descriptor.
+
+Test: `TestReadCtlLineResynchronisesAfterAnOversizedRecord` in
+`fcguest/ctl_test.go` — a record before, an oversized one, and a record after,
+plus a long-but-legal record arriving in buffer-sized pieces and an unterminated
+final record.
+
+## L3 — Special filesystem objects can pin a worker through synchronous file operations — FIXED
+
+`sidecar/venice_stream.js`, the `file` tool.
+
+**Confirmed and measured.** The only check was `statSync().isDirectory()`, so a
+FIFO or a character device reached `readFileSync`/`writeFileSync` — synchronous
+calls with no timeout that block the **Node event loop**, which is why the bash
+tool's 30-second budget cannot help: a blocked loop cannot run the timer that
+would enforce it. `/workspace/.cs/ctl` is a FIFO the worker can name. Measured
+against the old code: `read` on a FIFO and on `/dev/zero` both hang indefinitely
+(killed at 3 s). Recovery needed the guest watchdog (up to 20 min) or the
+daemon's turn wait (~25 min), per group and repeatable.
+
+**Fix:** `openRegular` judges the **descriptor**, not a prior stat of the path —
+`O_NONBLOCK` is what makes the refusal possible rather than academic, since it
+lets the open of a FIFO or device return so `fstat` can classify it. `O_NOFOLLOW`
+is deliberately *not* set: the agent's own workspace is its own and a symlinked
+file is an ordinary thing to edit; what this refuses is a file that is not a
+file. `readCapped` also reads at most the cap + 1 byte, so the read cap bounds
+the **allocation** and not just the answer — `readFileSync` used to read a whole
+file and slice afterwards.
+
+Smoke-tested directly: FIFO, `/dev/zero`, `/dev/null` and a directory refused by
+name for `read`, `write` and `edit`; a regular file and a **symlink to one** read,
+written and edited normally; every call returned immediately.
