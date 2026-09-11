@@ -129,7 +129,10 @@ func TestUsernsBootstrapEndToEnd(t *testing.T) {
 func TestJailUIDsAreDistinctAndInRange(t *testing.T) {
 	seen := map[int]int{}
 	for port := PORT_BASE; port < PORT_BASE+64; port++ {
-		uid := fcJailUID(port)
+		uid, err := fcJailUID(port)
+		if err != nil {
+			t.Fatalf("port %d: %v", port, err)
+		}
 		if uid < fcJailBaseUID {
 			t.Fatalf("port %d produced uid %d below the jail band", port, uid)
 		}
@@ -139,7 +142,29 @@ func TestJailUIDsAreDistinctAndInRange(t *testing.T) {
 		}
 		seen[uid] = port
 	}
-	if hi := fcJailUID(PORT_BASE + 63); hi >= 65536 {
+	hi, err := fcJailUID(PORT_BASE + 63)
+	if err != nil {
+		t.Fatalf("top of the swept range: %v", err)
+	}
+	if hi >= 65536 {
 		t.Fatalf("jail band reaches %d, outside a standard 65536-id subuid range", hi)
+	}
+
+	// 2026-09-11 L6: an out-of-range port is refused, not collapsed onto the
+	// base uid. The clamp it replaces produced exactly the collision this test
+	// exists to catch — every group whose port fell outside the band shared one
+	// identity, and that identity owns the workspace image, the vsock socket
+	// directory and the jailed VMM process. Reachable by a PROXY_PORT change
+	// against existing groups.json state, a hand-edited port, or exhaustion.
+	for _, bad := range []int{PORT_BASE - 1, PORT_BASE - 1000, PORT_BASE + fcJailMaxUID - fcJailBaseUID + 1, 0, -1} {
+		got, err := fcJailUID(bad)
+		if err == nil {
+			t.Errorf("port %d was accepted as jail uid %d instead of refused", bad, got)
+		}
+	}
+	// ...and the refusal names what to look at.
+	if _, err := fcJailUID(PORT_BASE - 1); err == nil ||
+		!strings.Contains(err.Error(), "PORT_BASE") {
+		t.Errorf("the refusal does not name PORT_BASE: %v", err)
 	}
 }

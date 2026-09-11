@@ -3947,3 +3947,90 @@ file and slice afterwards.
 Smoke-tested directly: FIFO, `/dev/zero`, `/dev/null` and a directory refused by
 name for `read`, `write` and `edit`; a regular file and a **symlink to one** read,
 written and edited normally; every call returned immediately.
+
+## L2 — Optimistic pending prompts allow terminal escape-sequence injection — FIXED
+
+`tui/model.go`, `dispatchInput`.
+
+**Confirmed.** The optimistic ⏳ row stores the submitted text verbatim and
+`renderPendingLines` hands each segment to `lipgloss.Style.Render`, which styles
+text without neutralising what is in it. `themeFrame` and `monoFrame` do not
+remove general terminal controls either — `monoFrame` deliberately preserves OSC
+and cursor control. Every other piece of chat on that screen reaches it through
+the daemon's sanitizer; this row was the one that did not, so a pasted escape
+sequence rendered raw.
+
+**Fix:** the **local** copy is scrubbed (`scrubVTStrict`); what goes on the wire
+is not, because the model should see what the operator typed. It also makes the
+two agree: `popPending` matches this text against the daemon's `prompt` event,
+which *is* sanitized, so a control-bearing prompt used to leave its row stranded
+until `reconcilePending` swept it.
+
+Test: `TestPendingPromptIsScrubbed` in `tui/pending_reconcile_test.go` — the
+stored row, the rendered frame, and the pop-by-echo.
+
+## L4 — Unprivileged installer replaces unreadable root-only environment file — FIXED
+
+`daemon/install.go`.
+
+**Confirmed, and it fires on every upgrade rather than in an edge case.**
+`readEnvFile` collapsed *every* error to nil, so a `koto.env` that exists but
+cannot be read looked exactly like one that is absent. The file is root-owned
+0600 and `koto install` deliberately refuses to run as root — verified on this
+host: `-rw------- root root /etc/koto/koto.env`, `cat` → Permission denied. So
+on an upgrade every operator-set value (`ANTHROPIC_API_KEY`, a hand-set
+`KOTO_CLAUDE_BIN`, `KOTO_HOST_MEM_MIB`, `KOTO_HOST_CPUS`) was re-rendered as a
+commented-out blank and written over by sudo — while `sudoWriteIfChanged`'s own
+"unchanged" comparison was blind for exactly the same reason, so it always
+rewrote. That contradicts the line the file prints about itself: *"Re-running
+`koto install` preserves the values set here."*
+
+**Fix:** `sudoReadFile` distinguishes **absent** from **unreadable** and falls
+back to `sudo cat` for the latter — the same privilege every write here already
+uses. `renderEnvFile` refuses to rewrite when the existing file cannot be read,
+rather than treating it as empty, and `sudoWriteIfChanged` compares through the
+same helper so an unchanged file is actually detected as unchanged.
+
+Test: `TestEnvFileReadDistinguishesAbsentFromUnreadable` in
+`daemon/audit_fixes_test.go` covers absent, readable-and-parsed (including that
+a commented-out key is not "set"), and present-but-unreadable.
+
+## L5 — Group-wide clear reports success when transcript truncation fails — FIXED
+
+`daemon/groups.go`, `clearCmd` → `clearGroupLogs`.
+
+**Confirmed.** Each stream was stat'd with the error discarded, truncated with
+`_ = os.WriteFile(...)`, and the function returned `OK: true` regardless. A
+transcript that could not be truncated — read-only filesystem, permissions, a
+full host disk, or a non-regular file left in its place — reported a successful
+clear to the operator and to every client, with the conversation still on disk
+and still replayed by the next `History`. The per-session path already returned
+`filterLogSession`'s error; this is the same promise on the wider verb.
+
+**Fix:** `clearGroupLogs` returns the first failure, naming the stream; a
+missing stream is still fine (never written), and a non-regular file in a
+stream's place is refused explicitly.
+
+Test: `TestGroupClearReportsATruncationFailure` in `daemon/audit_fixes_test.go`.
+
+## L6 — Out-of-range proxy ports collapse VM jail identities onto UID 30000 — FIXED
+
+`daemon/fcjail.go`, `fcJailUID`.
+
+**Confirmed.** The uid is `fcJailBaseUID + (port - PORT_BASE)`, and anything
+outside the 30000–60000 band was **clamped to the base** — which is the one
+outcome the function exists to prevent. Every group whose port fell outside
+(after a `PROXY_PORT` change against existing `groups.json` state, a hand-edited
+port, or eventual exhaustion) shared a single uid, and that uid owns the
+workspace image, the vsock socket directory and the jailed VMM process itself.
+The per-VM chroot and mount namespaces make it defence-in-depth rather than
+immediate cross-VM access today — but "the isolation identity collapsed
+silently" is not a state to boot into.
+
+**Fix:** an out-of-range port is an error and the spawn is refused, with a
+message naming the port, the computed uid, the band and `PORT_BASE`. The
+unjailed path (`KOTO_FC_NOJAIL=1`) is unaffected, since it has no per-VM
+identity to collapse.
+
+Test: extended `TestJailUIDsAreDistinctAndInRange` in `daemon/userns_test.go` —
+five out-of-range ports refused, and the refusal names `PORT_BASE`.

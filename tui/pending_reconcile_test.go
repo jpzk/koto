@@ -8,6 +8,7 @@ package main
 // (model.go).
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,5 +134,47 @@ func TestSendAckClearsInFlightGate(t *testing.T) {
 	}
 	if m.sendAckAt["main"].IsZero() {
 		t.Fatal("send ack did not stamp sendAckAt; the grace window would never start")
+	}
+}
+
+// 2026-09-11 L2: the optimistic ⏳ row is rendered straight through lipgloss,
+// which styles text without neutralising what is in it, and neither themeFrame
+// nor monoFrame removes general terminal controls (monoFrame deliberately
+// preserves OSC and cursor control). Everything else on the screen reaches it
+// through the daemon's sanitizer; this row was the one piece of chat that did
+// not, so a pasted escape sequence rendered raw.
+func TestPendingPromptIsScrubbed(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 120, 30
+	const g = "pend"
+	m.groups = map[string]GroupInfo{g: {Running: true}}
+	m.cur = g
+
+	hostile := "deploy \x1b]0;pwned\x07 now\x1b[2J"
+	_ = m.dispatchInput(hostile)
+
+	p := m.pending[g]
+	if len(p) != 1 {
+		t.Fatalf("pending = %d rows, want 1", len(p))
+	}
+	if strings.ContainsAny(p[0].text, "\x1b\x07\r") {
+		t.Errorf("the stored pending row still carries terminal controls: %q", p[0].text)
+	}
+	if !strings.Contains(p[0].text, "deploy") || !strings.Contains(p[0].text, "now") {
+		t.Errorf("scrubbing ate the operator's actual text: %q", p[0].text)
+	}
+
+	// ...and it reaches the frame clean.
+	frame := m.View()
+	if strings.Contains(frame, "\x1b]0;") || strings.Contains(frame, "\x1b[2J") {
+		t.Error("a pending row put an OSC or erase sequence into the rendered frame")
+	}
+
+	// The match against the daemon's (sanitized) prompt echo now succeeds,
+	// which is what pops the row; before, a control-bearing prompt left it
+	// stranded until reconcilePending swept it.
+	m.popPending(g, "", scrubVTStrict(hostile))
+	if len(m.pending[g]) != 0 {
+		t.Errorf("the row was not popped by the daemon's echo: %+v", m.pending[g])
 	}
 }

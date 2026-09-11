@@ -648,7 +648,10 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	base := fcUDS(g)
 	jailed := fcJailEnabled()
-	jailUID := fcJailUID(proxyPort)
+	jailUID, err := fcJailUID(proxyPort)
+	if err != nil && jailed {
+		return err
+	}
 
 	// The boot identity is allocated before anything can observe this VM, so
 	// the reaper goroutine (started below, well before fcVMs[g] is set) can

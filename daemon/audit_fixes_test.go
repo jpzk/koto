@@ -6199,3 +6199,112 @@ func TestJobsTSVParseSurvivesHostileMetadata(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L5: a group-wide clear discarded both the stat and the WriteFile
+// result and returned OK regardless, so a transcript that could not be
+// truncated — read-only filesystem, permissions, a full disk — reported a
+// successful clear to the operator and to every client, with the conversation
+// still on disk and still replayed by the next History. The per-session path
+// already returned filterLogSession's error.
+func TestGroupClearReportsATruncationFailure(t *testing.T) {
+	fcHarness(t)
+	const g = "l5"
+	cs := filepath.Join(vol(g), ".cs")
+	if err := os.MkdirAll(cs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The group stream, plus one slot stream, both with content.
+	for _, p := range []string{groupLogPath(g), slotLogPath(g, 0)} {
+		if err := os.WriteFile(p, []byte(">>> secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Sanity: the loop's own logic clears a writable tree.
+	if err := clearGroupLogs(g); err != nil {
+		t.Fatalf("a writable tree was refused: %v", err)
+	}
+	for _, p := range []string{groupLogPath(g), slotLogPath(g, 0)} {
+		if b, err := os.ReadFile(p); err != nil || len(b) != 0 {
+			t.Errorf("%s not truncated: %d bytes, %v", filepath.Base(p), len(b), err)
+		}
+	}
+
+	// A stream that cannot be truncated must surface, not be swallowed. A
+	// directory in a stream's place is the cheapest unwritable thing to stage
+	// — and it is also the shape a hostile guest could leave behind.
+	if err := os.Remove(slotLogPath(g, 1)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(slotLogPath(g, 1), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := clearGroupLogs(g)
+	if err == nil {
+		t.Fatal("a stream that could not be cleared was reported as cleared")
+	}
+	if !strings.Contains(err.Error(), "log.1") {
+		t.Errorf("the error does not name the stream: %v", err)
+	}
+}
+
+// 2026-09-11 L4: readEnvFile collapsed every error to nil, so a koto.env that
+// EXISTS but cannot be read looked exactly like one that is absent. Since the
+// file is root-owned 0600 and the installer deliberately refuses to run as
+// root, that was the case on EVERY upgrade: each operator-set value was
+// re-rendered as a commented-out blank and then written over by sudo, whose own
+// unchanged-check was blind for the same reason — contradicting the line the
+// file prints about itself ("Re-running `koto install` preserves the values set
+// here"). Verified against the live host, where /etc/koto/koto.env is
+// -rw------- root and `cat` gives Permission denied.
+func TestEnvFileReadDistinguishesAbsentFromUnreadable(t *testing.T) {
+	dir := t.TempDir()
+
+	// Absent: not an error, and not a value — a fresh install.
+	if raw, ok, err := sudoReadFile(filepath.Join(dir, "absent.env")); err != nil || ok || raw != "" {
+		t.Errorf("an absent file: %q ok=%v err=%v — want empty, not-ok, no error", raw, ok, err)
+	}
+
+	// Present and readable: returned and parsed.
+	p := filepath.Join(dir, "koto.env")
+	body := "# koto service configuration\n\nKOTO_BIND=127.0.0.1\n" +
+		"ANTHROPIC_API_KEY=sk-ant-operator-set\nKOTO_CLAUDE_BIN=/home/op/.local/bin/claude\n" +
+		"#KOTO_HOST_MEM_MIB=\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok, err := sudoReadFile(p)
+	if err != nil || !ok {
+		t.Fatalf("a readable file: ok=%v err=%v", ok, err)
+	}
+	env := parseEnvFile(raw)
+	for k, want := range map[string]string{
+		"KOTO_BIND":         "127.0.0.1",
+		"ANTHROPIC_API_KEY": "sk-ant-operator-set",
+		"KOTO_CLAUDE_BIN":   "/home/op/.local/bin/claude",
+	} {
+		if env[k] != want {
+			t.Errorf("%s = %q, want %q", k, env[k], want)
+		}
+	}
+	if _, present := env["KOTO_HOST_MEM_MIB"]; present {
+		t.Error("a commented-out key was parsed as set")
+	}
+
+	// Present and UNREADABLE must NOT come back as absent — that equivalence is
+	// the bug. As root everything is readable, so the case cannot be staged.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an unreadable file cannot be staged")
+	}
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p, 0o600) })
+	raw, ok, err = sudoReadFile(p)
+	switch {
+	case err == nil && ok:
+		t.Skip("sudo read succeeded here; the refusal path needs a run without passwordless sudo")
+	case err == nil && !ok:
+		t.Error("an unreadable but PRESENT file was reported as absent — the bug")
+	}
+}

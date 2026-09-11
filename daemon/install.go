@@ -620,13 +620,48 @@ func seedStateDir(o installOpts, me *user.User) error {
 // readEnvFile parses /etc/koto/koto.env as KEY=VALUE lines; nil when it does
 // not exist or cannot be read (it is root-owned 0600, so an unprivileged
 // re-run sees nothing — which is why the file is rewritten with sudo).
-func readEnvFile() map[string]string {
-	b, err := os.ReadFile(envFilePath)
-	if err != nil {
-		return nil
+// sudoReadFile reads a root-owned file the installer cannot open directly.
+// Returns ok=false when the file does not exist; an error means it is there
+// and could not be read, which is never the same thing (audit 2026-09-11 L4).
+func sudoReadFile(path string) (content string, ok bool, err error) {
+	b, rerr := os.ReadFile(path)
+	if rerr == nil {
+		return string(b), true, nil
 	}
+	if os.IsNotExist(rerr) {
+		return "", false, nil
+	}
+	// /etc/koto/koto.env is root-owned 0600 and the installer deliberately
+	// refuses to run as root, so EACCES here is the NORMAL case on every
+	// upgrade — not an edge case. Ask sudo, the same way every write does.
+	out, serr := exec.Command("sudo", "cat", path).Output()
+	if serr != nil {
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read %s: %v (and directly: %v)", path, serr, rerr)
+	}
+	return string(out), true, nil
+}
+
+// readEnvFile parses the installed koto.env. An error means "it is there and I
+// could not read it", which the caller must not treat as "empty" — see
+// renderEnvFile.
+func readEnvFile() (map[string]string, error) {
+	raw, ok, err := sudoReadFile(envFilePath)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return parseEnvFile(raw), nil
+}
+
+// parseEnvFile reads KEY=VALUE lines, ignoring blanks and comments.
+func parseEnvFile(raw string) map[string]string {
 	out := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
+	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -645,7 +680,8 @@ func readEnvFile() map[string]string {
 // never calls it, so that is a warning, not a failure. The same value feeds
 // both koto.env and the unit's bind, so the two cannot disagree.
 func installClaudeBin(u *setupUI) string {
-	if v := strings.TrimSpace(readEnvFile()[claudeBinEnv]); v != "" {
+	env, _ := readEnvFile() // a read failure here only means "no preference"
+	if v := strings.TrimSpace(env[claudeBinEnv]); v != "" {
 		if exists(v) {
 			return v
 		}
@@ -713,7 +749,18 @@ func writeEnvFile(o installOpts, claude string) error {
 	// value outranks everything (audit L7). An operator-set value is still
 	// preserved below like every other key.
 
-	existing := readEnvFile()
+	// A koto.env that EXISTS but cannot be read must stop the rewrite (audit
+	// 2026-09-11 L4). It used to collapse to nil, and since the file is
+	// root-owned 0600 while the installer refuses to run as root, that was the
+	// case on EVERY upgrade: every operator-set value — the API key, a hand-set
+	// KOTO_CLAUDE_BIN, KOTO_HOST_MEM_MIB, KOTO_HOST_CPUS — was re-rendered as a
+	// commented-out blank and then written over by sudo, whose own
+	// unchanged-check was blind for exactly the same reason. Which contradicts
+	// the line this file prints about itself three lines below.
+	existing, err := readEnvFile()
+	if err != nil {
+		return fmt.Errorf("%w\n  refusing to rewrite it: re-running install must preserve the values set there", err)
+	}
 
 	var b strings.Builder
 	b.WriteString("# koto service configuration — read by the systemd unit.\n")
@@ -743,8 +790,8 @@ func writeEnvFile(o installOpts, claude string) error {
 		return err
 	}
 	// 0600: this file can hold an API key.
-	_, err := sudoWriteIfChanged(o.ui, envFilePath, b.String(), "0600")
-	return err
+	_, werr := sudoWriteIfChanged(o.ui, envFilePath, b.String(), "0600")
+	return werr
 }
 
 // podmanPath resolves podman for the unit's ExecStartPre/ExecStop, which
@@ -948,7 +995,10 @@ func sudoRun(u *setupUI, args ...string) error {
 // sudoWriteIfChanged writes content to a root-owned path via `sudo tee`,
 // skipping the write (and reporting false) when the file already matches.
 func sudoWriteIfChanged(u *setupUI, path, content, mode string) (bool, error) {
-	if cur, err := os.ReadFile(path); err == nil && string(cur) == content {
+	// Through sudo, so the comparison works on a root-only file: a plain
+	// os.ReadFile fails with EACCES on koto.env and every run therefore counted
+	// as "changed" and rewrote it (audit 2026-09-11 L4).
+	if cur, ok, err := sudoReadFile(path); err == nil && ok && cur == content {
 		u.info("%s unchanged", path)
 		return false, nil
 	}
