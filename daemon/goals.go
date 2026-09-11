@@ -198,10 +198,13 @@ func goalCaptureHandoff(g, sess string) string {
 // keeps the previous handoff rather than blanking it — a stale pickup note
 // beats none, and the prompt tells the worker the filesystem wins on
 // disagreement.
-func goalSaveHandoff(g, id, sess string) {
+// goalSaveHandoff captures the turn's closing report and reports whether there
+// was one. The boolean is what the PLAN phase uses as proof of completion —
+// see goalPlanPhase.
+func goalSaveHandoff(g, id, sess string) bool {
 	h := goalCaptureHandoff(g, sess)
 	if h == "" {
-		return
+		return false
 	}
 	var snap goalSnap
 	goalLock.Lock()
@@ -212,6 +215,7 @@ func goalSaveHandoff(g, id, sess string) {
 	}
 	goalLock.Unlock()
 	snap.write()
+	return true
 }
 
 // clearGoalSessionFn, when non-nil, replaces clearSessionContext as the

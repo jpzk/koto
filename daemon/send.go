@@ -321,7 +321,12 @@ drain:
 	sigAttempts := 0
 	for {
 		select {
-		case <-doneC:
+		case out := <-doneC:
+			if out == turnAborted {
+				// The VM went away mid-turn. The wait ended, but the turn did
+				// not: returning nil told every caller it had (M102).
+				return fmt.Errorf("turn aborted: the group's VM exited mid-turn")
+			}
 			return nil
 		case <-cancelC:
 			// Interrupt requested mid-turn. The RPC already fired one
@@ -367,7 +372,11 @@ drain:
 			emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
 				g, sessionMarkerName(session), turnWaitTimeout)
 			selfHeal(g, time.Now())
-			return nil
+			// An error, not nil: a successful self-heal CLEARS the stall flags
+			// before this returns, so a caller checking isStalled afterwards
+			// sees a healthy group and concludes the turn ran (M102). It did
+			// not — that is what the stall was.
+			return fmt.Errorf("turn stalled: no turn_end within %s", turnWaitTimeout)
 		}
 	}
 }
@@ -416,16 +425,27 @@ const turnWaitTimeout = 25 * time.Minute
 // produced it, not to whatever the sticky marker last named.
 var (
 	turnDoneMu sync.Mutex
-	turnDone   = map[string]chan struct{}{}
+	turnDone   = map[string]chan turnOutcome{}
 )
 
-func turnDoneCh(g, session string) chan struct{} {
+// turnOutcome says WHY a turn's wait ended. The channel used to carry
+// struct{}, so a VM exit and a real [[turn_end]] were the same signal and
+// sendNow returned nil for both — which the goal loop reads as "the turn ran"
+// (audit M102).
+type turnOutcome int
+
+const (
+	turnCompleted turnOutcome = iota // a genuine [[turn_end]]
+	turnAborted                      // the VM went away mid-turn
+)
+
+func turnDoneCh(g, session string) chan turnOutcome {
 	turnDoneMu.Lock()
 	defer turnDoneMu.Unlock()
 	k := sessKey(g, session)
 	c, ok := turnDone[k]
 	if !ok {
-		c = make(chan struct{}, 16)
+		c = make(chan turnOutcome, 16)
 		turnDone[k] = c
 	}
 	return c
@@ -556,7 +576,7 @@ func notifyTurnDone(g, sess string) {
 	setStalled(g, sess, false) // a turn completed → that conversation is alive
 	c := turnDoneCh(g, sess)
 	select {
-	case c <- struct{}{}:
+	case c <- turnCompleted:
 	default:
 		// Buffer full — multiple completions piled up with no waiter.
 		// Dropping is safe; send() drains before waiting anyway.
@@ -577,7 +597,7 @@ func abortInflightTurn(g string) {
 	for _, sess := range inFlightSessions(g) {
 		c := turnDoneCh(g, sess)
 		select {
-		case c <- struct{}{}:
+		case c <- turnAborted:
 		default:
 		}
 	}
