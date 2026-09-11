@@ -115,6 +115,46 @@ func (b *notifyBucket) take(burst float64, refill time.Duration) bool {
 	return true
 }
 
+// ctlPollRate bounds how often ONE group may run a verb that does host
+// filesystem work per call (audit 2026-09-11 L113). `tail` is the case: it is
+// main-only and the group name is validated, but nothing limited how OFTEN it
+// could be asked — and main is a guest running an agent on attacker-influenceable
+// input. Each call stats and reads up to 256 KiB, parses it and builds a
+// response, synchronously on the ctl goroutine. A poll loop is free CPU and IO
+// on the host, and it also starves this group's own ctl plane.
+//
+// Two per second sustained with a burst of thirty: far above any sane polling
+// interval for a log tail (main's prompt suggests one call per check), far
+// below a loop.
+const (
+	ctlPollBurst  = 30
+	ctlPollRefill = 500 * time.Millisecond
+)
+
+var (
+	ctlPollMu   sync.Mutex
+	ctlPollRate = map[string]*notifyBucket{}
+)
+
+func ctlPollAllow(g string) bool {
+	ctlPollMu.Lock()
+	defer ctlPollMu.Unlock()
+	b := ctlPollRate[g]
+	if b == nil {
+		b = &notifyBucket{tokens: ctlPollBurst, last: time.Now()}
+		ctlPollRate[g] = b
+	}
+	return b.take(ctlPollBurst, ctlPollRefill)
+}
+
+// ctlPollForget drops g's poll bucket — destroy's name-keyed teardown, same
+// reasoning as notifyRateForget (audit 2026-09-11 L98).
+func ctlPollForget(g string) {
+	ctlPollMu.Lock()
+	delete(ctlPollRate, g)
+	ctlPollMu.Unlock()
+}
+
 func notifyAllow(g string) bool {
 	notifyRateMu.Lock()
 	defer notifyRateMu.Unlock()
@@ -344,6 +384,9 @@ func ctlDispatch(owner string, line []byte) any {
 		// line-oriented request/response channel, not a stream).
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: tail")
+		}
+		if !ctlPollAllow(owner) {
+			return errResp("ctl: tail is being polled too fast — slow down (this is rate limited per group)")
 		}
 		var req struct {
 			Group string `json:"group"`

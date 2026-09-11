@@ -864,7 +864,40 @@ type pickerState struct {
 	themeBefore string
 }
 
-const mdCacheMax = 1024
+const (
+	mdCacheMax = 1024
+	// mdCacheBytesMax and mdEntryMax bound the cache by SIZE as well as by
+	// entry count (audit 2026-09-11 L114). A count is not a budget: the key is
+	// the block's source text and the value its rendered form, both of which a
+	// guest, a job or a model chooses, and the daemon's per-event cap is 1 MiB
+	// — so 1024 entries could be a gigabyte. The per-entry cap is the more
+	// useful of the two: a block nobody can read on one screen is not worth
+	// keeping to save one re-render, and refusing to cache it costs only that.
+	mdCacheBytesMax = 32 << 20
+	mdEntryMax      = 256 << 10
+)
+
+// mdCacheBytes tracks what mdCachePut has stored since the map was last
+// emptied. Package-level because allBlocks has a VALUE receiver and shares the
+// map by reference — the same reason the eviction there must clear() rather
+// than reassign. mdCacheReset is called wherever the map is replaced.
+var mdCacheBytes int
+
+func mdCacheReset() { mdCacheBytes = 0 }
+
+// mdCachePut stores one rendered block under both bounds. An oversized entry
+// is simply not cached; the render still happened and is still displayed.
+func mdCachePut(c map[string]string, key, val string) {
+	if len(key)+len(val) > mdEntryMax {
+		return
+	}
+	if len(c) >= mdCacheMax || mdCacheBytes+len(key)+len(val) > mdCacheBytesMax {
+		clear(c)
+		mdCacheBytes = 0
+	}
+	c[key] = val
+	mdCacheBytes += len(key) + len(val)
+}
 
 func newModel(sock string, ctxWindow int) Model {
 	ti := textinput.New()
@@ -1115,6 +1148,7 @@ func (m *Model) forgetGroupHistory(g string) {
 	}
 	m.vpCache = map[string]vpCacheEntry{}
 	m.mdCache = map[string]string{}
+	mdCacheReset()
 	m.treeRowCache = map[string]string{}
 	m.groupVer[g]++
 }
@@ -1642,7 +1676,38 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 // startPrewarm marks the group as prewarm-in-flight and returns the cmd.
 // The mark is what keeps refreshLog off the synchronous-glamour path while
 // the goroutine runs; vpPrewarmMsg clears it.
+// Bounds on background prewarming (audit 2026-09-11 L119). startPrewarm used
+// only to COUNT jobs; it rejected nothing, queued nothing and cancelled
+// nothing — so a settled resize fanned out one per loaded group, each scanning
+// the whole transcript and running glamour over every response body in it,
+// while history pages and navigation could stack more on top. On a fleet of
+// twenty groups that is twenty concurrent renderers competing with the update
+// loop they exist to keep free.
+//
+// Over the bound the prewarm is SKIPPED, not queued: the group then keeps its
+// stale-width cache and pays a synchronous render when the operator actually
+// visits it — exactly what a group that was never prewarmed already does. The
+// current group is exempt, because it is the one on screen and its prewarm is
+// what refreshLog's plain-build fallback is waiting for.
+const (
+	prewarmMaxInFlight = 4
+	prewarmMaxPerGroup = 2
+)
+
+func (m *Model) prewarmInFlight() int {
+	n := 0
+	for _, c := range m.prewarming {
+		n += c
+	}
+	return n
+}
+
 func (m *Model) startPrewarm(group string, cols int, older bool) tea.Cmd {
+	if group != m.cur {
+		if m.prewarming[group] >= prewarmMaxPerGroup || m.prewarmInFlight() >= prewarmMaxInFlight {
+			return nil
+		}
+	}
 	cmd := m.prewarmGroupCmd(group, cols, older)
 	if cmd != nil {
 		m.prewarming[group]++
@@ -1806,6 +1871,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// wipe so memory tracks the active terminal width.
 		invalidateMarkdownCache()
 		m.mdCache = map[string]string{}
+		mdCacheReset()
 		m.vpCache = map[string]vpCacheEntry{}
 		// Re-render the fleet at the new width on background goroutines:
 		// the current group's prewarm repaints styled when it lands, the
@@ -2315,10 +2381,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				if _, exists := m.mdCache[k]; exists {
 					continue
 				}
-				if len(m.mdCache) >= mdCacheMax {
-					m.mdCache = map[string]string{}
-				}
-				m.mdCache[k] = v
+				mdCachePut(m.mdCache, k, v)
 			}
 		}
 		// Staleness check: if events arrived for this group while the
@@ -5429,10 +5492,19 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 }
 
 func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
+	// parts, not text: merging consecutive same-kind lines with `text += "\n"
+	// + l.text` copies the whole accumulated block on EVERY line, which is
+	// quadratic in the block's length (audit 2026-09-11 L120). addLine bumps
+	// the group version for every line appended, so the viewport cache misses
+	// and this rebuild runs again — a sustained stream in the group on screen
+	// therefore re-paid a cost that grows with what it had already sent. The
+	// 16ms debounce coalesces repaints, not the merge. Joined once, at the
+	// end, which is linear.
 	type src struct {
-		kind, group, text string
-		ts                int64
-		expand            bool
+		kind, group string
+		parts       []string
+		ts          int64
+		expand      bool
 	}
 	srcs := []src{}
 	active := m.activeSession(m.cur)
@@ -5447,16 +5519,21 @@ func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
 		// to stay paired with its own summary line; merging consecutive ones
 		// would lose the per-block boundary on expand.
 		if n := len(srcs); n > 0 && srcs[n-1].kind == l.kind && srcs[n-1].group == l.group && l.kind != "thought" && l.kind != "tool_out" {
-			srcs[n-1].text += "\n" + l.text
+			srcs[n-1].parts = append(srcs[n-1].parts, l.text)
 			if srcs[n-1].ts == 0 && l.ts != 0 {
 				srcs[n-1].ts = l.ts
 			}
 		} else {
-			srcs = append(srcs, src{kind: l.kind, group: l.group, text: l.text, ts: l.ts, expand: l.expand})
+			srcs = append(srcs, src{kind: l.kind, group: l.group, parts: []string{l.text}, ts: l.ts, expand: l.expand})
 		}
 	}
 	out := make([]renderedBlock, 0, len(srcs))
-	for _, s := range srcs {
+	for _, sp := range srcs {
+		s := struct {
+			kind, group, text string
+			ts                int64
+			expand            bool
+		}{sp.kind, sp.group, strings.Join(sp.parts, "\n"), sp.ts, sp.expand}
 		rendered := expandTabs(s.text)
 		// Collapse thought body unless expanded. First line is the summary;
 		// drop everything after it when collapsed.
@@ -5502,10 +5579,7 @@ func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {
 				// one, and caching silently turned off for good once the
 				// cap was reached (glamour re-ran per uncached block on
 				// every repaint).
-				if len(m.mdCache) >= mdCacheMax {
-					clear(m.mdCache)
-				}
-				m.mdCache[key] = rendered
+				mdCachePut(m.mdCache, key, rendered)
 			}
 		}
 		out = append(out, renderedBlock{

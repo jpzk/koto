@@ -48,6 +48,16 @@ const TOOL_BUDGET = 25;
 const BASH_TIMEOUT_MS = 30_000;
 const OUTPUT_CAP_BYTES = 1_000_000;
 const FILE_READ_CAP_BYTES = 1_000_000;
+// Bounds on what an UPSTREAM response may make this worker accumulate (audit
+// 2026-09-11 L116). The worker watchdog bounds elapsed time, not bytes, and the
+// proxy's scanner bounds one relayed line, not a request's total — so a
+// compromised or malfunctioning provider could grow these without limit inside
+// a single turn. The reply cap is on the RETAINED copy (it goes into the
+// history file replayed on every later turn); streaming to the operator has its
+// own budget and is unaffected.
+const REPLY_CAP_BYTES = 2_000_000;
+const TOOLARG_CAP_BYTES = 1_000_000;
+const SSE_BUF_CAP = 16_000_000;
 
 function decodeB64(s) {
   if (!s) return '';
@@ -469,8 +479,14 @@ function streamTurn(messages) {
 
     const req = client.request(opts, (resp) => {
       if (resp.statusCode !== 200) {
+        // Bounded while it accumulates, not after (audit 2026-09-11 L116).
+        // Only 500 bytes of this are ever used, and the body comes from
+        // upstream — buffering all of it first and slicing afterwards made a
+        // hostile or broken provider a memory cost this worker pays in full.
         let errBody = '';
-        resp.on('data', (c) => { errBody += c.toString('utf8'); });
+        resp.on('data', (c) => {
+          if (errBody.length < 4096) errBody += c.toString('utf8');
+        });
         resp.on('end', () => {
           resolve({ error: `HTTP ${resp.statusCode}: ${errBody.slice(0, 500).replace(/\n/g, ' ')}` });
         });
@@ -478,9 +494,20 @@ function streamTurn(messages) {
       }
       let sseBuf = '';
       let text = '';
+      let overflow = '';
       const toolCallsByIdx = new Map();
       resp.setEncoding('utf8');
       resp.on('data', (chunk) => {
+        // The SSE line buffer is bounded too: a stream with no newline in it
+        // grows this for the life of the request, and the proxy's 16 MiB
+        // scanner bounds one line of what it RELAYS, not what this accumulates
+        // across a request (audit 2026-09-11 L116).
+        if (sseBuf.length + chunk.length > SSE_BUF_CAP) {
+          overflow = overflow || 'an SSE line exceeded ' + SSE_BUF_CAP + ' bytes';
+          sseBuf = '';
+          resp.destroy();
+          return;
+        }
         sseBuf += chunk;
         let idx;
         while ((idx = sseBuf.indexOf('\n')) !== -1) {
@@ -499,7 +526,16 @@ function streamTurn(messages) {
           if (typeof delta.content === 'string' && delta.content.length > 0) {
             stampOnce();
             writeOut(delta.content);
-            text += delta.content;
+            // The assistant text is RETAINED (it goes into the history file
+            // replayed on every later turn), so it is capped: the watchdog
+            // bounds elapsed time, not how much a provider may send inside it
+            // (audit 2026-09-11 L116). Streaming to the operator continues —
+            // writeOut has its own budget — only the retained copy stops.
+            if (text.length < REPLY_CAP_BYTES) {
+              text += delta.content;
+            } else if (!overflow) {
+              overflow = 'the reply exceeded ' + REPLY_CAP_BYTES + ' bytes and was truncated in the history';
+            }
             midline = !delta.content.endsWith('\n');
           }
           if (Array.isArray(delta.tool_calls)) {
@@ -513,13 +549,16 @@ function streamTurn(messages) {
               if (tc.id) acc.id = tc.id;
               if (tc.function) {
                 if (tc.function.name) acc.function.name = tc.function.name;
-                if (tc.function.arguments) acc.function.arguments += tc.function.arguments;
+                if (tc.function.arguments && acc.function.arguments.length < TOOLARG_CAP_BYTES) {
+                  acc.function.arguments += tc.function.arguments;
+                }
               }
             }
           }
         }
       });
       resp.on('end', () => {
+        if (overflow) writeErr('venice: ' + overflow);
         const toolCalls = [...toolCallsByIdx.entries()]
           .sort((a, b) => a[0] - b[0])
           .map(([, v]) => v)

@@ -738,6 +738,7 @@ func destroy(g string) baseResp {
 	// — its first error banners silently suppressed — and churning distinct
 	// names grew both maps without bound.
 	notifyRateForget(g)
+	ctlPollForget(g)
 	logAlertForgetGroup(g)
 	subsLock.Lock()
 	// Drop the seq counter + ring with the group: a later group of the same

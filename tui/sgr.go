@@ -227,6 +227,20 @@ func sgrField(params string, start int) (field string, next int) {
 // parameter, a bare reset. Anything that isn't plain digits, or is absurdly
 // large, is not a parameter.
 func sgrNumber(f string) (int, bool) {
+	// A parameter is at most four digits, leading zeros included (audit
+	// 2026-09-11 L122). The value check below bounds the NUMBER, which
+	// `ESC[0000…0m` never exceeds — so a field of a hundred thousand zeros
+	// parsed as a valid SGR 0, and the sanitizers, which keep pure SGR, passed
+	// the whole raw field through to be re-scanned and re-emitted on every
+	// frame and then parsed again by the operator's terminal. A zero-width
+	// payload that costs CPU, allocations and frame bandwidth at every hop.
+	// No real SGR parameter needs more than four digits (the largest is 107,
+	// and truecolor components reach 255).
+	// The EMPTY field stays valid: ECMA-48's default parameter is 0, and a
+	// bare `ESC[m` is the reset every styled span ends with.
+	if len(f) > 4 {
+		return 0, false
+	}
 	n := 0
 	for i := 0; i < len(f); i++ {
 		c := f[i]

@@ -287,7 +287,7 @@ func sendNow(g, session, msg string) error {
 	// progress surfaces as goal_* events in the goal's own session instead.
 	if !isReservedSession(session) {
 		activityTurnBegin(g, session)
-		defer activityTurnEnd(g)
+		defer activityTurnEnd(g, session)
 	}
 	// The turn's cancel channel (armed by sendWorker, closed by the Interrupt
 	// RPC). An interrupt that lands while the VM is still booting or while
@@ -371,7 +371,7 @@ drain:
 	}
 	cfgB, _ := os.ReadFile(filepath.Join(v, ".cs", "config.json"))
 	if !isReservedSession(session) {
-		activityTurnDelivering(g)
+		activityTurnDelivering(g, session)
 	}
 	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB); err != nil {
 		// An error here is an AMBIGUOUS delivery, not a proven non-delivery.

@@ -8205,3 +8205,165 @@ func TestAttachmentNamesCannotCollide(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L113: the ctl `tail` verb was gated on main-only and a valid group
+// name, and on nothing else — main is a guest running an agent on
+// attacker-influenceable input, and each call stats and reads up to 256 KiB,
+// parses it and builds a response, synchronously on the ctl goroutine.
+func TestCtlTailIsRateLimited(t *testing.T) {
+	const g = "pollster"
+	ctlPollForget(g)
+	allowed := 0
+	for i := 0; i < ctlPollBurst*3; i++ {
+		if ctlPollAllow(g) {
+			allowed++
+		}
+	}
+	if allowed > ctlPollBurst {
+		t.Fatalf("%d calls admitted in one instant; the burst is %d", allowed, ctlPollBurst)
+	}
+	if allowed == 0 {
+		t.Fatal("the burst admitted nothing — an honest caller would be refused")
+	}
+	// Destroy's teardown drops the bucket, so a replacement group does not
+	// inherit a spent one.
+	ctlPollForget(g)
+	if !ctlPollAllow(g) {
+		t.Error("a fresh group started with the previous one's tokens spent")
+	}
+}
+
+// 2026-09-11 L115: activityState held ONE group-wide turn, so a later begin
+// overwrote the earlier turn's state and any end cleared it. Session B
+// finishing while session A was still running left the group reading idle with
+// A in flight — and the TUI uses activity as its fallback signal for whether a
+// live-only attached turn is interruptible.
+func TestConcurrentTurnsKeepTheGroupActive(t *testing.T) {
+	resetActivity(t)
+	activityTurnBegin("g", "a")
+	activityTurnBegin("g", "b")
+	activityTurnEnd("g", "b")
+
+	activityMu.Lock()
+	st := activities["g"]
+	ph, _ := st.resolve()
+	n := len(st.turns)
+	activityMu.Unlock()
+	if ph == actIdle {
+		t.Fatalf("the group reads idle with session a still in flight (turns=%d)", n)
+	}
+	// With more than one turn in flight the frame carries no session: naming
+	// one would attribute a group-wide phase to a conversation that may not be
+	// causing it.
+	activityTurnBegin("g", "c")
+	activityMu.Lock()
+	multi := activities["g"].frameSession()
+	activityMu.Unlock()
+	if multi != "" {
+		t.Errorf("two turns in flight stamped session %q", multi)
+	}
+	activityTurnEnd("g", "c")
+	activityMu.Lock()
+	single := activities["g"].frameSession()
+	activityMu.Unlock()
+	if single != "a" {
+		t.Errorf("one turn left, frame session = %q, want a", single)
+	}
+	activityTurnEnd("g", "a")
+	activityMu.Lock()
+	ph, _ = activities["g"].resolve()
+	activityMu.Unlock()
+	if ph != actIdle {
+		t.Errorf("the group is still %q with no turns in flight", ph)
+	}
+}
+
+// 2026-09-11 L117: resParseGuestFS turned guest-authored counters into byte
+// values while checking only freeBlocks > blocks. Negative counts, avail above
+// the filesystem size, and products that wrap to a negative byte count all
+// reached the cache, the threshold check and the TUI — whose own validity test
+// only asks for a positive total.
+func TestGuestFilesystemCountersAreValidated(t *testing.T) {
+	mk := func(bs, blocks, free, avail int64) string {
+		return fmt.Sprintf("%s %d %d %d %d\n", resGuestProbeTag, bs, blocks, free, avail)
+	}
+	if tot, av, used := resParseGuestFS(mk(4096, 1000, 400, 300)); tot != 4096000 || av != 1228800 || used != 2457600 {
+		t.Fatalf("an honest reading was mangled: %d %d %d", tot, av, used)
+	}
+	for name, probe := range map[string]string{
+		"negative free":        mk(4096, 1000, -1, 300),
+		"negative avail":       mk(4096, 1000, 400, -1),
+		"avail above the fs":   mk(4096, 1000, 400, 5000),
+		"free above the fs":    mk(4096, 1000, 5000, 300),
+		"block size overflow":  mk(1<<62, 1<<10, 0, 0),
+		"block count overflow": mk(1<<10, 1<<62, 0, 0),
+		"negative block size":  mk(-4096, 1000, 400, 300),
+		"negative block count": mk(4096, -1000, 0, 0),
+	} {
+		tot, av, used := resParseGuestFS(probe)
+		if tot != 0 || av != 0 || used != 0 {
+			t.Errorf("%s produced %d/%d/%d instead of unknown", name, tot, av, used)
+		}
+	}
+	// Memory too: a shifted value must not wrap, and avail cannot exceed total.
+	if tot, av := resParseMemInfo("MemTotal: 1024 kB\nMemAvailable: 4096 kB\n"); tot != 0 || av != 0 {
+		t.Errorf("avail above total was accepted: %d %d", tot, av)
+	}
+	if tot, _ := resParseMemInfo("MemTotal: 9007199254740992 kB\nMemAvailable: 1 kB\n"); tot != 0 {
+		t.Errorf("an overflowing MemTotal was accepted: %d", tot)
+	}
+}
+
+// 2026-09-11 L121: the debounce callback deletes its own timer entry before
+// flushing, so a queue-full enqueue left the results buffered with NOTHING
+// scheduled to retry them — the completion stayed unreported until another
+// job_done happened to arrive, and was lost outright on a daemon restart.
+func TestNotifyRearmsItselfWhenTheQueueIsFull(t *testing.T) {
+	setupNotifyRoot(t, ctlMainGroup)
+	const g, sess = "notifyretry", ""
+	key := notifyKey(g, sess)
+	notifyMu.Lock()
+	notifyPending[key] = []jobResult{{ID: "j1", RC: "0", Out: "done"}}
+	delete(notifyTimers, key)
+	delete(notifyTimerGen, key)
+	notifyMu.Unlock()
+	t.Cleanup(func() { dropPendingJobNotifications(g) })
+
+	// No worker for this group, and the queue is closed to it: enqueueSend
+	// fails, which is the path under test.
+	groupBarrierBegin(g)
+	defer groupBarrierEnd(g)
+	flushNotify(g, sess)
+
+	notifyMu.Lock()
+	_, armed := notifyTimers[key]
+	stillPending := len(notifyPending[key])
+	notifyMu.Unlock()
+	if stillPending == 0 {
+		t.Fatal("the results were dropped rather than kept for a retry")
+	}
+	if !armed {
+		t.Fatal("a failed flush left nothing scheduled — the completion is never reported")
+	}
+}
+
+// 2026-09-11 L122: sgrApproved bounded a parameter's VALUE, not its length, and
+// strconv.Atoi accepts any number of leading zeros — so `ESC[0000…0m` was a
+// valid SGR 0 of unlimited size, copied verbatim into the transcript, the
+// replay ring and every client, and re-scanned at each hop.
+func TestOversizedSGRParametersAreRejected(t *testing.T) {
+	long := "\x1b[" + strings.Repeat("0", 100000) + "m"
+	got := sanitize("before" + long + "after")
+	if strings.Contains(got, strings.Repeat("0", 100)) {
+		t.Fatalf("a %d-byte SGR parameter survived (%d bytes out)", len(long), len(got))
+	}
+	if !strings.Contains(got, "before") || !strings.Contains(got, "after") {
+		t.Errorf("the surrounding text was lost: %q", got)
+	}
+	// Ordinary SGR is untouched, empty parameter included.
+	for _, ok := range []string{"\x1b[0m", "\x1b[m", "\x1b[1;31m", "\x1b[38;5;208m", "\x1b[48;2;10;20;30m"} {
+		if got := sanitize("x" + ok + "y"); got != "x"+ok+"y" {
+			t.Errorf("%q was altered → %q", ok, got)
+		}
+	}
+}

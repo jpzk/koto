@@ -56,11 +56,11 @@ func wantPhases(t *testing.T, g string, want ...string) {
 func TestActivityTurnLifecycle(t *testing.T) {
 	resetActivity(t)
 	activityTurnBegin("g", "")
-	activityTurnDelivering("g")
+	activityTurnDelivering("g", "")
 	p := activityLLMBegin("g")
 	p.firstByte()
 	p.end()
-	activityTurnEnd("g")
+	activityTurnEnd("g", "")
 	wantPhases(t, "g", actBoot, actSend, actLLM, actStream, actWork, actIdle)
 }
 
@@ -101,7 +101,7 @@ func TestActivityConcurrentCalls(t *testing.T) {
 	b.firstByte()
 	a.end() // b still streaming → phase unchanged
 	b.end()
-	activityTurnEnd("g")
+	activityTurnEnd("g", "")
 	wantPhases(t, "g", actBoot, actLLM, actStream, actWork, actIdle)
 }
 
@@ -152,7 +152,7 @@ func TestActivityPhaseChangeResetsClock(t *testing.T) {
 	resetActivity(t)
 	activityTurnBegin("g", "")
 	time.Sleep(20 * time.Millisecond)
-	activityTurnDelivering("g")
+	activityTurnDelivering("g", "")
 	got := emitted("g")
 	if len(got) != 2 {
 		t.Fatalf("want 2 frames, got %d", len(got))
@@ -168,7 +168,7 @@ func TestActivityNoWorkLingerAfterTurn(t *testing.T) {
 	resetActivity(t)
 	activityTurnBegin("g", "")
 	p := activityLLMBegin("g")
-	activityTurnEnd("g") // turn ends while the call is still in flight
+	activityTurnEnd("g", "") // turn ends while the call is still in flight
 	if got := phases("g"); got[len(got)-1] != actLLM {
 		t.Fatalf("in-flight call after turn end should still read as llm, got %q", got[len(got)-1])
 	}
@@ -212,7 +212,7 @@ func TestActivitySnapshot(t *testing.T) {
 		t.Fatalf("snapshot must be synthetic (seq 0), got %d", snap.Seq)
 	}
 	p.end()
-	activityTurnEnd("g")
+	activityTurnEnd("g", "side")
 	if activitySnapshot("g") != nil {
 		t.Fatal("snapshot should be gone once the turn ends")
 	}

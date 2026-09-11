@@ -140,7 +140,16 @@ func recordJobDone(group string, res jobResult) {
 		notifyPending[key] = append(pend, res)
 	}
 
-	session := res.Session
+	armNotifyTimerLocked(key, group, res.Session, notifyDebounce)
+}
+
+// notifyRetryDelay is how long a flush waits before trying again after main's
+// — or the group's — send queue refused it (audit 2026-09-11 L121).
+const notifyRetryDelay = 30 * time.Second
+
+// armNotifyTimerLocked (re)arms the debounce for one key. Caller holds
+// notifyMu.
+func armNotifyTimerLocked(key, group, session string, delay time.Duration) {
 	if t, ok := notifyTimers[key]; ok {
 		t.Stop()
 	}
@@ -159,7 +168,7 @@ func recordJobDone(group string, res jobResult) {
 	notifyGen++
 	gen := notifyGen
 	notifyTimerGen[key] = gen
-	notifyTimers[key] = time.AfterFunc(notifyDebounce, func() {
+	notifyTimers[key] = time.AfterFunc(delay, func() {
 		notifyMu.Lock()
 		if notifyTimerGen[key] != gen {
 			notifyMu.Unlock()
@@ -240,8 +249,19 @@ func flushNotify(group, session string) {
 	b.WriteString("\n(`cs-job logs <id>` for full output; `cs-job clean` to clear finished jobs.)")
 
 	if _, err := enqueueSend(group, session, b.String()); err != nil {
-		emitLogfG("notify", group, "warn", "[%s] enqueue failed, will retry on next job_done: %v", group, err)
-		return // leave pending buffered for retry
+		// RE-ARM (audit 2026-09-11 L121). The callback deleted its timer entry
+		// before calling this, so leaving the results buffered was not a
+		// retry: nothing was left to fire, and the queue draining on its own
+		// caused no second attempt — the completion went unreported until the
+		// next job_done happened to arrive, and was lost outright on a daemon
+		// restart. The results are what the agent asked to be woken for.
+		notifyMu.Lock()
+		if len(notifyPending[key]) > 0 {
+			armNotifyTimerLocked(key, group, session, notifyRetryDelay)
+		}
+		notifyMu.Unlock()
+		emitLogfG("notify", group, "warn", "[%s] enqueue failed, retrying in %s: %v", group, notifyRetryDelay, err)
+		return // leave pending buffered for the retry
 	}
 
 	// Clear only the ids we reported; anything that arrived meanwhile stays.

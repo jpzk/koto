@@ -186,12 +186,43 @@ func resParseGuestFS(s string) (total, avail, used int64) {
 		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || bs <= 0 || blocks <= 0 {
 			return 0, 0, 0
 		}
-		if freeBlocks > blocks {
+		// Every relationship, and the multiplication (audit 2026-09-11 L117).
+		// These counters are guest-authored — the probe runs `stat` inside the
+		// guest, which a root=yes group can replace — and the old check tested
+		// only `freeBlocks > blocks`. Negative counts, avail above the
+		// filesystem size, and a product that wraps to a negative byte count
+		// all reached the cache, the threshold check and the TUI, whose own
+		// validity test only asks for a positive total.
+		if freeBlocks < 0 || availBlocks < 0 || freeBlocks > blocks || availBlocks > blocks {
 			return 0, 0, 0
 		}
-		return bs * blocks, bs * availBlocks, bs * (blocks - freeBlocks)
+		total, ok1 := mulNoOverflow(bs, blocks)
+		avail, ok2 := mulNoOverflow(bs, availBlocks)
+		used, ok3 := mulNoOverflow(bs, blocks-freeBlocks)
+		if !ok1 || !ok2 || !ok3 {
+			return 0, 0, 0
+		}
+		return total, avail, used
 	}
 	return 0, 0, 0
+}
+
+// mulNoOverflow multiplies two non-negative int64s, reporting whether the
+// product fits. A block size and a block count are both attacker-chosen here,
+// and a wrapped product is a NEGATIVE byte count that every consumer downstream
+// reads as a number.
+func mulNoOverflow(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	p := a * b
+	if p/a != b || p < 0 {
+		return 0, false
+	}
+	return p, true
 }
 
 // resParseMemInfo extracts MemTotal and MemAvailable (bytes) from a
@@ -209,6 +240,9 @@ func resParseMemInfo(s string) (total, avail int64) {
 		if err != nil {
 			continue
 		}
+		if kb < 0 || kb > (1<<50) { // guest-authored; a shifted value must not wrap
+			continue
+		}
 		switch f[0] {
 		case "MemTotal:":
 			total = kb << 10
@@ -216,7 +250,7 @@ func resParseMemInfo(s string) (total, avail int64) {
 			avail = kb << 10
 		}
 	}
-	if total == 0 || avail == 0 {
+	if total <= 0 || avail <= 0 || avail > total {
 		return 0, 0
 	}
 	return total, avail

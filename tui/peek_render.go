@@ -192,10 +192,7 @@ func (m *Model) peekContent(w int) string {
 				rendered = cached
 			} else {
 				rendered = renderMarkdown(text, contentCols)
-				if len(m.mdCache) >= mdCacheMax {
-					m.mdCache = map[string]string{}
-				}
-				m.mdCache[key] = rendered
+				mdCachePut(m.mdCache, key, rendered)
 			}
 		}
 		if len(out) > 0 {
