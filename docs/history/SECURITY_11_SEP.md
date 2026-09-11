@@ -1239,3 +1239,25 @@ LLM must copy back out of its prompt is not a capability, it is a suggestion
 with extra steps. The invariant that actually matters — a group can push at
 most one turn into main per turn main pushed into it — holds on the group key
 alone.
+
+### M66 — Untrusted goal and agent output is replayed as trusted instructions across agent sessions (`daemon/goals.go`) — **fixed for the agent-authored fields**
+
+The part that is real is the AGENT-authored text, and it is real: the judge's
+feedback, the previous worker turn's closing handoff, and the worker's evidence
+note were interpolated raw into a LATER agent's instruction stream. A label
+like `REVIEWER FEEDBACK:` is not a boundary — the next worker reads the block
+with the same weight as the harness's own words — and the handoff is captured
+out of a transcript that a prompt-injected worker (a hostile repo, a poisoned
+tool result) can write into. The two coordinator messages are the sharpest: they
+land in MAIN's session, which holds the cross-group verbs.
+
+All four are now fenced with `reportQuoteBody` — the same `> ` quoting main's
+delegation callbacks already use — and labelled as quoted agent text, a claim
+to verify rather than an instruction. That is not a guarantee; no in-band
+framing is, against an instruction-following model. It is the boundary this
+codebase already had for exactly this problem, and it was missing here.
+`TestGoalPromptsFenceAgentAuthoredText`.
+
+The goal's own `Text` and `Criteria` stay unfenced, deliberately: they ARE the
+instruction, supplied by the operator or by main under `goal_set`, which is
+authorized. Fencing them would mean the worker has no instruction left.
