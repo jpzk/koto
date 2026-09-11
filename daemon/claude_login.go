@@ -768,7 +768,16 @@ func authConnect(ac *authCtx, method string, keyStdin bool) error {
 // it at the operator's home would put koto's token in their personal profile.
 func authOAuthLogin(ac *authCtx) error {
 	u := ac.ui
-	if _, err := exec.LookPath("claude"); err != nil {
+	// Resolve ONCE and keep the path. LookPath-then-exec.Command("claude")
+	// does the lookup twice, and the second one happens when the command is
+	// built — so the binary that was checked and the binary that runs need not
+	// be the same file (audit M126). PATH being attacker-writable is tier 1
+	// and not koto's boundary (M5, M8), but a check followed by a separate
+	// name-based execution is a defect on its own terms: it makes the check
+	// mean less than it reads as, and this child inherits the operator's
+	// terminal for an interactive credential flow.
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
 		return errors.New("`claude` not found on PATH — install it with `npm i -g @anthropic-ai/claude-code`")
 	}
 	// <state>/.claude is where `claude` will write, and the installer makes
@@ -794,7 +803,7 @@ func authOAuthLogin(ac *authCtx) error {
 	before := authOAuthStamp(ac)
 	u.info("handing over to `claude auth login` — follow its prompts")
 	u.blank()
-	cmd := exec.Command("claude", "auth", "login")
+	cmd := exec.Command(claudeBin, "auth", "login")
 	cmd.Dir = ac.state
 	cmd.Env = setEnv(os.Environ(), "HOME", ac.state)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -808,7 +817,7 @@ func authOAuthLogin(ac *authCtx) error {
 	// returns a line, because Enter arrives as \r with ICRNL cleared. Restore
 	// what we handed over.
 	restoreTTY := ttyGuard()
-	err := cmd.Run()
+	err = cmd.Run()
 	restoreTTY()
 	signal.Reset(os.Interrupt)
 	if err != nil {

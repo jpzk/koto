@@ -2319,3 +2319,21 @@ that was never written, i.e. the normal first-turn case) is now an explicit
 Both callers check `rc` and report the guest's output on failure. Verified
 against the three shapes by hand: no id file → 0, a valid id → 0 with the
 transcript gone, and an undeletable transcript → 1 with the operator told.
+
+### M126 — OAuth login executes an untrusted PATH-selected `claude` binary (`daemon/claude_login.go`) — **fixed (the check-to-use gap)**
+
+The PATH premise is tier 1, as in M5 and M8: an attacker who can write a
+directory on the operator's PATH already executes as the operator on their next
+shell command. That part does not change.
+
+What IS a defect on its own terms is the shape: `exec.LookPath("claude")`
+followed by `exec.Command("claude", …)` does the lookup TWICE, and the second
+happens when the command is built — so the binary that was checked and the
+binary that runs need not be the same file. A check that does not constrain the
+thing it precedes means less than it reads as, and this particular child
+inherits the operator's terminal for an interactive credential flow.
+
+Resolved once, and the resolved path is what runs. Cheap, and it makes the
+existing check honest. (`KOTO_CLAUDE_BIN`, which the daemon's own refresh exec
+uses, does not cover this interactive path and is not meant to — the wizard
+resolves in the operator's shell on purpose.)
