@@ -606,11 +606,17 @@ jailer is strictly about containing the host-side VMM process.
 
 **Permissions plumbing.** FC runs as the dropped uid but reaches its sockets
 and workspace through bind mounts, so `fcJailFixupPerms` chowns the socket dir
-(FC creates its own `uds` listener there) and `workspace.img` to the VM uid,
-and `chmod 0666`s the daemon-created `uds_<port>` listener sockets so the
-cross-uid connect is permitted (scoped to this group's own dir). The daemon
-keeps full access as the container's mapped-root (`CAP_DAC_OVERRIDE` over its
-subuids), so later resize/migration still works.
+(FC creates its own `uds` listener there), the daemon-created `uds_<port>`
+listener sockets, and `workspace.img` to the VM uid. The daemon keeps full
+access as the container's mapped-root (`CAP_DAC_OVERRIDE` over its subuids), so
+later resize/migration still works.
+
+> This used to say `chmod 0666` on the listener sockets, and did that. A
+> `connect(2)` needs write permission on the socket inode, and 0666 granted it
+> to any local uid that could traverse the path — including on `v_9002`, the
+> ctl plane, which is authorized purely by which socket the connection arrived
+> on, so `main`'s socket was `main`'s full verb set. Audit M7 replaced it with
+> the chown; this paragraph described the removed behavior until 2026-09-11.
 
 **Opt-out.** `KOTO_FC_NOJAIL=1` runs FC unjailed as the daemon uid with the
 absolute-path config at `<g>.cfg.json` (the pre-jailer behavior) — for
