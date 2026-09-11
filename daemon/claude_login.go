@@ -536,8 +536,14 @@ func authReport(ac *authCtx, probe bool) int {
 	// environment was not available — that read already answered the question.
 	if authDaemonEnvWhere == "" && authEnvFileHidden() {
 		u.warn("cannot read %s (root-owned) and the daemon is not running", authEnvFile)
+		// `grep` prints the matching LINE, i.e. the key (audit 2026-09-11
+		// L97). The question here is only whether the variable is SET, and
+		// answering it by putting a live credential into the operator's
+		// scrollback — and from there into session recordings, tmux buffers
+		// and pasted diagnostics — defeats the 0600 the file is carrying.
+		// `grep -c` answers the same question with a count.
 		u.hint("an ANTHROPIC_API_KEY there would outrank everything above and is invisible from here\n" +
-			"check it with: sudo grep ANTHROPIC_API_KEY " + authEnvFile)
+			"check it with: sudo grep -c '^ANTHROPIC_API_KEY=' " + authEnvFile + "   (a count, not the key)")
 	}
 	// Only for OAuth: an API key is never refreshed, so the claude CLI is
 	// irrelevant to it. "installed" = this report targets the state dir the

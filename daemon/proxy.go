@@ -497,9 +497,49 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	}
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
+	metricsAppend(b)
+}
+
+// metricsMaxBytes bounds metrics.jsonl (audit 2026-09-11 L95). Every completed
+// upstream request appends a record, and a guest reaches its own proxy over
+// vsock — concurrency is capped, cumulative volume was not, so a persistent
+// guest workload filled KOTO_HOME and took the daemon's OTHER state writes down
+// with it (groups.json, schedules, goals, workspace images: the fleet, not the
+// metrics). The 64 KiB tail read the consumers use bounds what is READ; it
+// reclaims nothing.
+//
+// 256 MiB is generous — millions of records — because this file is also the
+// only per-request billing and rate-limit history the project keeps, and the
+// audits in docs/history are written from it.
+const metricsMaxBytes = 256 << 20
+
+var metricsMu sync.Mutex
+
+// metricsAppend writes one record, rotating at the ceiling. ONE generation is
+// kept (metrics.jsonl.1, replaced), so the worst case on disk is twice the
+// ceiling and the recent history survives a rotation — a plain truncate would
+// discard the window an operator is usually looking at, which is the most
+// recent one.
+func metricsAppend(b []byte) {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
 	f, err := os.OpenFile(METRICS, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
+	}
+	if st, serr := f.Stat(); serr == nil && st.Size()+int64(len(b)) > metricsMaxBytes {
+		f.Close()
+		if rerr := os.Rename(METRICS, METRICS+".1"); rerr != nil {
+			// Rotation failed — keep writing rather than losing metrics, but
+			// say so: the ceiling is not holding and the disk is the stake.
+			emitLogf("proxy", "error", "metrics rotation failed (%v): %s is past its %d MiB ceiling and still growing",
+				rerr, METRICS, metricsMaxBytes>>20)
+		} else {
+			emitLogf("proxy", "info", "metrics rotated at %d MiB: previous file kept as %s.1", metricsMaxBytes>>20, METRICS)
+		}
+		if f, err = os.OpenFile(METRICS, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
+			return
+		}
 	}
 	defer f.Close()
 	_, _ = f.Write(b)

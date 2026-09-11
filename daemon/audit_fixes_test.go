@@ -7912,3 +7912,120 @@ func TestSpawnHonoursClientCancellation(t *testing.T) {
 		t.Error("a cancelled Spawn still registered the group")
 	}
 }
+
+// 2026-09-11 L93: fcSpawn starts the VMM and registers it in fcVMs only at the
+// far end, after waiting for the guest agent — so a SIGTERM inside that window
+// let the daemon exit while a live child kept running: an orphaned microVM
+// holding its workspace image open, with nothing left to give the guest its
+// sync-and-unmount window. fcStopAll snapshots fcVMs, so it never saw it.
+func TestShutdownWaitsForInFlightSpawns(t *testing.T) {
+	fcSpawnBegin()
+	done := make(chan struct{})
+	go func() {
+		fcSpawnDrain(5 * time.Second)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the drain returned while a spawn was still in flight")
+	case <-time.After(120 * time.Millisecond):
+	}
+	fcSpawnEnd()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain never noticed the spawn finishing")
+	}
+	// Bounded: a spawn wedged on a dead guest must not hold the whole
+	// shutdown past systemd's TimeoutStopSec, at which point every VM is
+	// SIGKILLed anyway — which is the outcome this exists to avoid.
+	fcSpawnBegin()
+	defer fcSpawnEnd()
+	t0 := time.Now()
+	fcSpawnDrain(100 * time.Millisecond)
+	if d := time.Since(t0); d > 3*time.Second {
+		t.Fatalf("the drain waited %v on a stuck spawn; it is supposed to be bounded", d)
+	}
+}
+
+// 2026-09-11 L95: every completed upstream request appends a record, a guest
+// reaches its own proxy over vsock, and concurrency was capped while cumulative
+// volume was not — so a persistent guest workload filled KOTO_HOME and took the
+// daemon's other state writes down with it. The 64 KiB tail read bounds what is
+// READ; it reclaims nothing.
+func TestMetricsFileIsBounded(t *testing.T) {
+	prev := METRICS
+	METRICS = filepath.Join(t.TempDir(), "metrics.jsonl")
+	t.Cleanup(func() { METRICS = prev })
+
+	rec := append(bytes.Repeat([]byte("m"), 4096), '\n')
+	// Stage the file just under the ceiling rather than writing 256 MiB.
+	if err := os.WriteFile(METRICS, make([]byte, metricsMaxBytes-1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metricsAppend(rec)
+	st, err := os.Stat(METRICS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() >= metricsMaxBytes {
+		t.Fatalf("metrics.jsonl is %d bytes, past the %d ceiling", st.Size(), metricsMaxBytes)
+	}
+	// Rotated, not truncated: the recent history is what an operator is
+	// usually looking at, and it survives.
+	if _, err := os.Stat(METRICS + ".1"); err != nil {
+		t.Fatalf("no rotated generation kept: %v", err)
+	}
+	if b, err := os.ReadFile(METRICS); err != nil || !bytes.Equal(b, rec) {
+		t.Fatalf("the record that triggered rotation was lost: %v %d bytes", err, len(b))
+	}
+}
+
+// 2026-09-11 L98: notifyRate and logAlertBuckets are name-keyed with no removal
+// path, so a replacement group inherited the destroyed one's spent tokens —
+// its first error banners silently suppressed — and churning distinct names
+// grew both maps without bound.
+func TestDestroyForgetsNotificationLimiters(t *testing.T) {
+	const g = "limiterforget"
+	// Spend both buckets for the name.
+	for i := 0; i < notifyRateBurst+2; i++ {
+		notifyAllow(g)
+	}
+	for i := 0; i < logAlertBurst+2; i++ {
+		logAlertAllow("fc", g)
+	}
+	if notifyAllow(g) {
+		t.Fatal("the notify bucket was not actually spent")
+	}
+	if logAlertAllow("fc", g) {
+		t.Fatal("the logalert bucket was not actually spent")
+	}
+
+	notifyRateForget(g)
+	logAlertForgetGroup(g)
+
+	notifyRateMu.Lock()
+	_, nLeft := notifyRate[g]
+	notifyRateMu.Unlock()
+	logAlertMu.Lock()
+	_, lLeft := logAlertBuckets["fc\x00"+g]
+	logAlertMu.Unlock()
+	if nLeft || lLeft {
+		t.Fatalf("state survived the teardown (notify=%v logalert=%v)", nLeft, lLeft)
+	}
+	if !notifyAllow(g) {
+		t.Error("a replacement group starts with the previous one's notify tokens spent")
+	}
+	if !logAlertAllow("fc", g) {
+		t.Error("a replacement group starts with the previous one's banner tokens spent")
+	}
+	// An unrelated group's buckets are untouched.
+	logAlertAllow("fc", "other-"+g)
+	logAlertForgetGroup(g)
+	logAlertMu.Lock()
+	_, otherLeft := logAlertBuckets["fc\x00other-"+g]
+	logAlertMu.Unlock()
+	if !otherLeft {
+		t.Error("forgetting one group dropped another's bucket")
+	}
+}

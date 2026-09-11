@@ -800,7 +800,15 @@ func (m *Model) closeShell() {
 // the terminal is too small to split at all (there the pane only shows
 // fullscreen, while focused).
 func (m Model) shellSplitVisible() bool {
-	if m.shell == nil || m.focus == focusLog {
+	// focusLog AND focusTop: view() dispatches on both BEFORE the shell and
+	// returns a whole frame, so the pane is not on screen under either — and
+	// this predicate is what the mouse router hit-tests against (audit
+	// 2026-09-11 L100). With the fleet view up and a shell still open, a click
+	// inside the pane's stale geometry focused the pty and a wheel event was
+	// forwarded into the guest, while the operator was looking at the fleet
+	// table and had every reason to think it owned the input. Pasting into
+	// that pane put the operator's clipboard into the guest.
+	if m.shell == nil || m.focus == focusLog || m.focus == focusTop {
 		return false
 	}
 	if m.focus != focusShell && !m.shellOpen {

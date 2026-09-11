@@ -716,6 +716,13 @@ func destroy(g string) baseResp {
 	// L27, L32).
 	resForgetGroup(g)
 	activityForget(g)
+	// The two notification rate limiters are name-keyed too, with no removal
+	// path of their own (audit 2026-09-11 L98). A replacement group of this
+	// name would otherwise start with the destroyed one's tokens already spent
+	// — its first error banners silently suppressed — and churning distinct
+	// names grew both maps without bound.
+	notifyRateForget(g)
+	logAlertForgetGroup(g)
 	subsLock.Lock()
 	// Drop the seq counter + ring with the group: a later group of the same
 	// name starts a fresh sequence, and a client resuming across the

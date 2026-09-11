@@ -5503,3 +5503,176 @@ is a worse state than one extra group — unwinding that is precisely the orderi
 `destroy` exists to get right. A cancel arriving mid-boot is honoured on the
 *next* attempt, which is what bounds the loop. Pinned by
 `TestSpawnHonoursClientCancellation`.
+
+## L93 — Shutdown can miss in-flight Firecracker processes — FIXED
+
+`daemon/fc.go`.
+
+**Confirmed.** `ensureLocked` checks `shuttingDown` on entry; `fcSpawn` then
+starts the VMM, persists its pid, **waits for the guest agent**, and registers
+in `fcVMs` only at the far end. `fcStopAll` takes a one-time snapshot of
+`fcVMs`, so a SIGTERM arriving anywhere in that window let the daemon exit with
+a live child it had never recorded — an orphaned microVM holding its workspace
+image open, and nothing left to give the guest its sync-and-unmount window (a
+dirty ext4 image is the failure the whole stop-first ordering exists to
+prevent).
+
+**Fix, two halves, because either alone leaves the other side of the window
+open** — which is what the finding says and it is right:
+
+- `fcSpawn` checks `shuttingDown` the moment the child exists and unwinds
+  through `fail()`, which already kills and reaps properly.
+- `fcSpawn` is bracketed by an in-flight counter, and `fcStopAll` **drains** it
+  before snapshotting, so a spawn already past that check still gets into the
+  snapshot. The drain is bounded (10s): a spawn wedged on a dead guest must not
+  hold the shutdown past systemd's `TimeoutStopSec`, at which point every VM is
+  SIGKILLed anyway — spending the budget there would be self-defeating.
+
+Pinned by `TestShutdownWaitsForInFlightSpawns`, including the bound.
+
+## L94 — RunScript output can exhaust the TUI through unbounded buffering — FIXED
+
+`tui/daemon.go`. Bytes left the pending buffer only at a newline, so a stream
+with no newline in it grew it for the life of the stream; the daemon's sanitizer
+threshold and the transport frame limit are both per-*fragment* and neither is a
+budget for the stream. The buffer is now capped at 64 KiB: the head is emitted
+as its own line with `…[line too long; the rest of it is not shown]`, and the
+rest of that logical line is discarded until a newline arrives. A run of output
+with no line break is not lines — it is a blob, which the transcript renders as
+one entry that `maxLines` counts as one.
+
+## L95 — Unbounded metrics append permits guest-driven disk exhaustion — FIXED
+
+`daemon/proxy.go`.
+
+**Confirmed.** A guest reaches its own proxy over vsock; concurrency is capped
+(M2) but cumulative volume was not, and every completed request on an allowed
+route appends a record. The 64 KiB tail read the consumers use bounds what is
+**read** and reclaims nothing. A persistent guest workload therefore filled
+`KOTO_HOME` — and what fails then is not the metrics: it is `groups.json`, the
+schedule and goal stores, and the workspace images, i.e. the fleet.
+
+**Fix:** `metricsAppend` rotates at a 256 MiB ceiling, keeping **one**
+generation (`metrics.jsonl.1`, replaced). Rotated rather than truncated because
+the most recent window is the one an operator is looking at, and this file is
+also the only per-request billing and rate-limit history the project keeps (the
+audits in `docs/history` are written from it). A failed rotation logs at error
+and keeps writing — losing metrics silently would be the worse trade — and says
+that the ceiling is not holding. Pinned by `TestMetricsFileIsBounded`.
+
+## L96 — Reset group versions can resurrect cleared transcript data — FIXED
+
+`tui/model.go`.
+
+**Confirmed.** A global line trim did `m.groupVer = map[string]int{}`, sending
+every per-group counter back to zero. A prewarm goroutine captures
+`(groupVer[g], groupVer[""])`; a `/clear` bumps the group's version and so
+invalidates it — but after a reset both numbers could climb back to the captured
+pair, `vpPrewarmMsg` would accept the stale result into `vpCache`, and
+`refreshLog` would render the deleted transcript again.
+
+**Fix:** `invalidateAllViewports` bumps the **global** version instead of
+replacing the map. Every cache key carries both versions, so the bump
+invalidates everything while no counter ever goes backwards. `forgetGroup` still
+deletes the per-group entry — that is the right thing for a name that is gone —
+and bumps the global version alongside it, so a reused name cannot match a
+previous incarnation's key either. Pinned by
+`TestViewportVersionsAreMonotonic`.
+
+## L97 — Diagnostic hint recommends printing the API credential — FIXED
+
+`daemon/claude_login.go`. The hint was `sudo grep ANTHROPIC_API_KEY
+/etc/koto/koto.env`, and `grep` prints the matching **line** — the key. The
+question the hint answers is only whether the variable is *set*, and answering
+it by putting a live credential into the operator's scrollback (and from there
+into session recordings, tmux buffers and pasted diagnostics) defeats the 0600
+the file is carrying. Now `sudo grep -c '^ANTHROPIC_API_KEY=' …   (a count, not
+the key)`.
+
+## L98 — Destroyed groups retain name-keyed notification limiter state — FIXED
+
+`daemon/groups.go`, `daemon/ctl.go`, `daemon/logalert.go`.
+
+**Confirmed.** `notifyRate` and `logAlertBuckets` are process-global, keyed by
+group name, with no removal path — and destroy's name-keyed teardown (which
+already covers goals, schedules, the report window, the job cache, tail state,
+the resource collector, the activity phase and the event ring) did not reach
+them. So a replacement group of the same name started with the destroyed one's
+tokens already spent, its first error banners silently suppressed, and churning
+distinct names grew both maps without bound.
+
+**Fix:** `notifyRateForget` and `logAlertForgetGroup` join the teardown list.
+Pinned by `TestDestroyForgetsNotificationLimiters`, including that forgetting
+one group leaves another's bucket alone.
+
+## L99 — Halfwidth katakana sound marks break the shell pane's width invariant — FIXED
+
+`tui/vt_scrub.go`.
+
+**Confirmed, and measured — it is worse than the finding states.** uniseg folds
+a **run** of U+FF9E/U+FF9F into ONE grapheme cluster, so a hundred of them
+measure as width **1** by `lipgloss.Width`, by `ansi.StringWidth` and by
+`cellWidth` (which defers to the same measurement), while a terminal that gives
+each halfwidth mark its own cell draws a hundred:
+
+    100 bare marks  →  runes=100  lipgloss=1  cellWidth=1
+    "a" + 100 marks →  runes=101  lipgloss=1  cellWidth=1
+
+The row then overruns its pane budget and shears the frame. This is exactly the
+class of bug the raw-TAB overflow was (2026-08-29), and the one no width table
+catches — because every table *agrees*, and it is the terminal that disagrees.
+
+**Fix:** in `scrubVT`/`scrubVTStrict`, a sound mark survives only directly after
+a halfwidth katakana **base**, and only one per base. Not dropped outright: `ｶﾞ`
+is ordinary halfwidth Japanese and a mark after its base is what that text *is*.
+What goes is the unbounded part — a mark with no base in front of it, and any
+repeat — which caps the possible divergence at the one cell per base that
+legitimate text already carries. The base is the last rune actually **written**,
+so a dropped escape or control between them does not let a mark inherit a base
+that never reached the output; an SGR writes no cell and is transparent. Pinned
+by `TestHalfwidthSoundMarkRunsCannotBreakTheWidthInvariant`.
+
+## L100 — Fleet view stale shell hit-testing misroutes operator input — FIXED
+
+`tui/shell_view.go`. `shellSplitVisible` excluded `focusLog` but not
+`focusTop`, while `View()` dispatches on **both** before the shell and returns a
+whole frame. With the fleet view up and a shell still open, the pane was not on
+screen — but the predicate said it was, and the predicate is what the mouse
+router hit-tests against: a click inside the stale geometry called
+`focusShellPane()` and a wheel event was forwarded into the guest, with the
+operator looking at the fleet table and every reason to think it owned the
+input. Pasting into that pane put the operator's clipboard into the guest. One
+condition added; pinned by
+`TestFleetViewDoesNotRouteInputToAStaleShellPane`.
+
+## L101 — Go pre-commit validation skips manifest-only changes — FIXED
+
+`tools/hooks/pre-commit`. Every Go check hung off `$staged_go`, and the manifest
+discovery that would have caught a `go.mod`-only commit was *inside* the skipped
+block. So a commit changing only `go.mod`/`go.sum`/`go.work` — which is exactly
+the shape of a dependency bump — ran none of gofmt, `go vet` or `go mod tidy
+-diff`. That is the change this project most wants a local check on: the
+six-week pin rule and the security-fix exception both live in those files.
+Manifests are now a trigger of their own, and a root `go.work` change stands in
+for every module, since a workspace edit can change what any of them resolves
+to.
+
+## L102 — Custom-theme loading blocks on special files and has no aggregate limit — FIXED
+
+`tui/theme.go`.
+
+**Confirmed, both halves.** Discovery filtered on `DirEntry.IsDir()` alone —
+which admits FIFOs, sockets and devices — and `readFileLimited` used `os.Open`,
+which **blocks inside open(2)** on a FIFO until a writer appears, before any
+check could run. Discovery, the picker's live preview and `/themes` all run on
+the single Bubble Tea update loop, so one FIFO dropped into the writable
+`run/tui/themes/` mount hung the entire TUI with no timeout and no way out. A
+byte limit is no defence against a file that never returns a byte.
+
+**Fix:** the same defensive-open shape used for L3 and L34 — `O_NONBLOCK` so the
+open returns, `O_NOFOLLOW` because this directory is in the daemon's writable
+tree while the TUI runs as the operator (M39's crossing), and the judgement made
+on the **descriptor** with `fstat`. Discovery additionally takes regular files
+only and stops at `themeMaxFiles` (256; the bundled collection is ~45), because
+the picker loads every candidate synchronously. Pinned by
+`TestThemeLoadingRefusesSpecialFiles`.
