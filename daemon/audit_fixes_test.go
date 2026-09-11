@@ -2450,3 +2450,36 @@ func TestClearInvalidatesTheReplayRing(t *testing.T) {
 		t.Fatalf("an up-to-date cursor got %+v", evs)
 	}
 }
+
+// 2026-09-11 M65: a stop discards the group's queued messages and cancels its
+// in-flight turn, so an armed report window describes delegated work that will
+// never run — and leaving it armed keeps a one-turn channel into main open for
+// up to 24h on behalf of a task that no longer exists.
+func TestStopDisarmsTheReportWindow(t *testing.T) {
+	fcHarness(t)
+	const g = "repstop"
+	t.Cleanup(func() { disarmReport(g) })
+
+	reportMu.Lock()
+	armLocked(g, "deleg")
+	reportMu.Unlock()
+	reportMu.Lock()
+	_, armed := reportPending[g]
+	reportMu.Unlock()
+	if !armed {
+		t.Fatal("the window did not arm")
+	}
+
+	stopGroup(g)
+
+	reportMu.Lock()
+	_, stillArmed := reportPending[g]
+	reportMu.Unlock()
+	if stillArmed {
+		t.Fatal("a stop left the report window armed for work it just discarded")
+	}
+	// And an unsolicited report is refused, as always.
+	if err := deliverReport(g, "late", 0); err == nil {
+		t.Fatal("a report was accepted with no armed window")
+	}
+}

@@ -251,6 +251,14 @@ func stopGroup(g string) {
 	if n := dropQueued(g); n > 0 {
 		emitLogfG("group", g, "info", "stop group=%s: discarded %d queued message(s)", g, n)
 	}
+	// An armed report window belongs to delegated work that a stop has just
+	// discarded — the queued message is gone and the in-flight turn is
+	// cancelled below — so the window describes a task that will never run
+	// (audit M65). Leaving it armed keeps a one-turn channel into main open
+	// for up to 24h on behalf of work that no longer exists. destroy already
+	// disarmed for the same reason; stop is the other lifecycle edge that
+	// discards the traffic.
+	disarmReport(g)
 	for _, sess := range inFlightSessions(g) {
 		if requestTurnCancel(g, sess) {
 			emitLogfG("group", g, "info", "stop group=%s session=%s: canceling in-flight turn",
