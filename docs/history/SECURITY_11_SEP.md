@@ -336,3 +336,56 @@ the tailer is *supposed* to outlive its turn, so cancelling it at turn end (the
 other obvious fix) would have removed the feature. Legacy transcripts have no
 colon and keep the old behavior, so replayed history still parses.
 `TestBackgroundRecordsCarryTheirSession`.
+
+### M21 — Turn text marker escaping is bypassable across frame boundaries (`daemon/fcturn.go`) — **fixed**
+
+Real, and the one guest→host transcript forgery the marker design exists to
+prevent. `turnWriter.text` checked `markerLike` only when the frame began at a
+line boundary, so a guest sending `"["` in one Text frame and
+`"[turn_end]]\n"` in the next assembled a marker on disk that no frame ever
+contained. `logParser.feedLine` accepts it: the turn ends early, the slot is
+released while the real stream is still running, and the same trick forges
+`[ts:]`, `[[tool]]`, `[[notify]]` and the rest.
+
+The check is now on the LOGICAL line. Rather than buffer to the next newline —
+which would stall a whole paragraph of streamed prose — `text` withholds the
+first bytes of a line only while they are still an ambiguous prefix of a marker
+(`[`, `[t`, `>>`): at most three bytes, only at a line start, released by the
+next byte, a newline, an interrupting marker, or the end of the stream.
+`TestTurnMarkerEscapingSpansFrames` splits every marker at every byte boundary
+and asserts no unescaped marker line appears and nothing is dropped.
+
+### M23 — Privileged job readers follow worker-controlled symlinks (`fcguest/main.go`) — **fixed, by removing the privilege**
+
+The worker owns `/workspace/.cs/jobs/<id>/`, and the daemon asked the ROOT
+guest agent to `cat`/`wc`/`head`/`tail` paths inside it. Ordinary shell tools
+follow symlinks, so replacing `out` or `cmd` with one made root read a file the
+worker cannot — a worker→root disclosure inside a guest whose `root=no` profile
+says there is no path to root.
+
+The remediation proposed hardening the readers (`openat2`,
+`RESOLVE_NO_SYMLINKS`, a confined walk). That is the wrong shape of fix here,
+because nothing in this path ever needed root. Every script the daemon sends
+over `exec`/`exec_stream` reads or removes WORKER-OWNED data — the job dirs,
+the session and venice-history files, a `tail -F` of a file claude code wrote
+as the worker, `stat -f /workspace` plus `/proc/meminfo` — and the one that
+signals (`interruptAgent`) targets uid-1000 processes, which uid 1000 may
+signal. So `exec` and `exec_stream` now drop to the worker uid, exactly as
+`run_script` and `shell_attach` already did. A planted symlink buys the worker
+what it could read anyway, and the whole class goes with it. If a future exec
+genuinely needs root it gets its own op: the privilege should be named at the
+call site.
+
+### M26 — Oversized cron step can crash the daemon via integer wraparound (`daemon/cron.go`) — **fixed**
+
+Real and cheap. `parseField` checked only that a step was positive, and the
+expansion is `for v := from; v <= to; v += step` — so a step near `MaxInt64`
+wrapped `v` NEGATIVE on the second iteration, left the loop condition true, and
+panicked on `mask[v]`. Reachable from every schedule-add path, the guest ctl
+plane's `sched_add` included, none of which recovers: one malformed cron line
+from a compromised guest takes the daemon down.
+
+Steps are now bounded by the field's own span. Rejected rather than clamped: a
+step wider than the range can only ever select `from`, so anything above the
+span is a typo and accepting it silently would hide the typo.
+`TestCronStepBounded`.

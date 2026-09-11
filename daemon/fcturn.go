@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -66,6 +67,10 @@ func fcTurnSink(g string, c net.Conn) {
 	}
 	ensureSlotTail(g, slot)
 	w := newTurnWriter(g, slotLogPath(g, slot))
+	// A stream that dies mid-line may leave a byte or two withheld by text()'s
+	// marker-ambiguity hold; they are the guest's output and belong in the
+	// transcript whether or not the turn ended cleanly.
+	defer w.flushHold()
 	for {
 		f := &pb.TurnFrame{}
 		if err := fcReadFrame(br, fcFrameMaxGuest, f); err != nil {
@@ -88,6 +93,9 @@ type turnWriter struct {
 	midline bool // last byte written was not '\n'
 	stamped bool // [ts:] written for this turn
 	ended   bool
+	// hold carries the first few bytes of a logical line when they are still
+	// an AMBIGUOUS marker prefix — "[", "[t", ">>", and so on. See text().
+	hold []byte
 }
 
 func newTurnWriter(g, p string) *turnWriter {
@@ -151,6 +159,7 @@ func (w *turnWriter) stamp() {
 }
 
 func (w *turnWriter) marker(line string) {
+	w.flushHold()
 	var b strings.Builder
 	if w.midline {
 		b.WriteByte('\n')
@@ -162,35 +171,117 @@ func (w *turnWriter) marker(line string) {
 }
 
 // text writes body bytes, escaping every line start that would parse as a
-// marker (`[[`, `[ts:`, `>>> `). Line state carries across frames, so a
-// marker split over two frames is still caught.
+// marker (`[[`, `[ts:`, `>>> `).
+//
+// The check is on the LOGICAL line, not on the frame. It used to look at the
+// frame's own first bytes and skip the check whenever the previous frame had
+// left the line open — so a guest that sent "[" in one Text frame and
+// "[turn_end]]\n" in the next assembled an authentic-looking marker on disk
+// that no frame ever contained (audit M21). Completing a turn early releases
+// the slot while the real stream is still running, and the same trick forges
+// [ts:], [[tool]], [[notify]] and the rest.
+//
+// The fix withholds the first bytes of a line while they are still an
+// ambiguous prefix of a marker ("[", "[t", ">>"). That is at most three bytes
+// and only at a line start, so streaming is not delayed in any way an operator
+// could see — the alternative, buffering to the next newline, would stall a
+// whole paragraph of streamed prose. Anything that resolves the ambiguity (a
+// fourth byte, a newline, the end of the turn) releases the hold at once.
 func (w *turnWriter) text(b []byte) {
 	if len(b) == 0 {
 		return
 	}
+	if len(w.hold) > 0 {
+		b = append(append([]byte(nil), w.hold...), b...)
+		w.hold = nil
+	}
 	var out []byte
 	atStart := !w.midline
 	for len(b) > 0 {
-		i := strings.IndexByte(string(b), '\n')
-		var line []byte
+		if atStart {
+			// Decide the line start, or hold for more bytes.
+			n := len(b)
+			if n > markerPrefixMax {
+				n = markerPrefixMax
+			}
+			head := b[:n]
+			if markerAmbiguous(head) && !bytes.ContainsRune(head, '\n') {
+				w.hold = append([]byte(nil), b...)
+				break
+			}
+			if markerLike(head) {
+				out = append(out, '\\')
+			}
+			atStart = false
+		}
+		i := bytes.IndexByte(b, '\n')
 		if i < 0 {
-			line, b = b, nil
-		} else {
-			line, b = b[:i+1], b[i+1:]
+			out = append(out, b...)
+			b = nil
+			break
 		}
-		if atStart && markerLike(line) {
-			out = append(out, '\\')
-		}
-		out = append(out, line...)
-		atStart = line[len(line)-1] == '\n'
+		out = append(out, b[:i+1]...)
+		b = b[i+1:]
+		atStart = true
+	}
+	if len(out) == 0 {
+		return
 	}
 	w.write(out)
 	w.midline = !atStart
 }
 
+// markerPrefixes are the three line starts the grammar reserves. markerLike
+// answers "this line IS one"; markerAmbiguous answers "this could still become
+// one once more bytes arrive".
+var markerPrefixes = []string{"[[", "[ts:", ">>> "}
+
+// markerPrefixMax is the longest of them — the most bytes text() ever holds.
+const markerPrefixMax = 4
+
 func markerLike(line []byte) bool {
 	s := string(line)
-	return strings.HasPrefix(s, "[[") || strings.HasPrefix(s, "[ts:") || strings.HasPrefix(s, ">>> ")
+	for _, p := range markerPrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// markerAmbiguous reports whether head is a PROPER prefix of some marker
+// prefix — too short to decide, so text() must wait for more bytes.
+func markerAmbiguous(head []byte) bool {
+	s := string(head)
+	if s == "" {
+		return true
+	}
+	for _, p := range markerPrefixes {
+		if len(s) < len(p) && strings.HasPrefix(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// flushHold writes any withheld line start verbatim. Called when the turn
+// ends or a structural marker interrupts the text, both of which resolve the
+// ambiguity: no further text bytes are coming for that line.
+func (w *turnWriter) flushHold() {
+	if len(w.hold) == 0 {
+		return
+	}
+	b := w.hold
+	w.hold = nil
+	if markerLike(b) {
+		b = append([]byte{'\\'}, b...)
+	}
+	w.write(b)
+	// text() only holds bytes that contain no newline (it holds at most three,
+	// at a line start), so the stream is mid-line after this. marker() reads
+	// midline to decide whether to open a fresh line — stale here, it would
+	// glue the held bytes onto the marker and the parser would lose it.
+	w.midline = true
 }
 
 func (w *turnWriter) write(b []byte) {
