@@ -1438,3 +1438,94 @@ func TestNoGoalOnMain(t *testing.T) {
 		t.Fatal("GoalSet RPC accepted a goal on main")
 	}
 }
+
+// 2026-09-11 M40: a slot hold carries the generation it was granted, so an
+// operation from a hold that has already ended is a no-op instead of reaching
+// into its successor's.
+func TestSlotHoldGenerations(t *testing.T) {
+	const g = "slotgen"
+	t.Cleanup(func() {
+		slotMu.Lock()
+		for i := 0; i < groupSlots; i++ {
+			k := slotKey(g, i)
+			delete(slotBusy, k)
+			delete(slotOwner, k)
+			delete(slotQuarantined, k)
+			delete(slotGen, k)
+		}
+		slotMu.Unlock()
+	})
+
+	// Race 1: a stalled turn quarantines its slot; the VM-exit reaper lifts
+	// the quarantine and a waiter acquires the same slot; the stalled turn's
+	// DEFERRED release then runs. It must not free the waiter's allocation.
+	stalled := acquireSlot(g, "wedged")
+	quarantineSlot(stalled)
+	releaseGroupQuarantine(g) // VM died
+	fresh := acquireSlot(g, "waiter")
+	if fresh.slot != stalled.slot {
+		t.Fatalf("setup: waiter took slot %d, wanted the freed %d", fresh.slot, stalled.slot)
+	}
+	releaseSlot(stalled) // the stale deferred release
+	slotMu.Lock()
+	busy := slotBusy[slotKey(g, fresh.slot)]
+	slotMu.Unlock()
+	if !busy {
+		t.Fatal("a stale release freed the slot its successor was holding")
+	}
+	// The current holder still frees it normally.
+	releaseSlot(fresh)
+	if n := activeSlots(g); n != 0 {
+		t.Fatalf("activeSlots = %d after the real release, want 0", n)
+	}
+
+	// Race 2: the reaper clears the quarantine before the stall path sets it.
+	// A hold that no longer owns the slot must quarantine nothing, or the
+	// slot is stranded busy with no owner to free it.
+	old := acquireSlot(g, "wedged2")
+	releaseSlot(old)
+	next := acquireSlot(g, "next")
+	quarantineSlot(old) // late, from the previous hold
+	slotMu.Lock()
+	q := slotQuarantined[slotKey(g, next.slot)]
+	slotMu.Unlock()
+	if q {
+		t.Fatal("a stale quarantine stranded a slot its successor was holding")
+	}
+	releaseSlot(next)
+	if n := activeSlots(g); n != 0 {
+		t.Fatalf("activeSlots = %d, want 0 — a slot was stranded", n)
+	}
+}
+
+// 2026-09-11 M31: a failed context reset is fatal to the goal turn. A fresh
+// context per turn is the loop's design — the judge above all must not review
+// inside the worker's own conversation, or the loop can end on an unverified
+// self-report, which is the one thing the judge exists to prevent.
+func TestGoalTurnAbortsOnFailedReset(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-reset"
+	clearGoalSessionFn = func(string, string) error { return fmt.Errorf("guest unreachable") }
+
+	var notified string
+	prevNotify := goalNotify
+	goalNotify = func(_, _, _, msg string) { notified = msg }
+	t.Cleanup(func() { goalNotify = prevNotify })
+
+	var enqueued int
+	withTurnFn(func(_, _, _ string) error {
+		enqueued++
+		return nil
+	}, func() {
+		if _, err := goalSet(g, "build the thing", "1. it exists", "", 0, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusPaused)
+	})
+	if !strings.Contains(notified, "context reset failed") {
+		t.Fatalf("operator was told %q; want the reset failure named", notified)
+	}
+	if enqueued != 0 {
+		t.Fatalf("%d turn(s) dispatched after a failed reset", enqueued)
+	}
+}

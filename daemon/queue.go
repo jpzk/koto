@@ -89,13 +89,39 @@ var (
 	// (releaseGroupQuarantine, called from the VM-exit reaper and after a
 	// successful self-heal restart).
 	slotQuarantined = map[string]bool{}
+	// slotGen counts ACQUISITIONS of each slot. Every hold carries the
+	// generation it was granted, and release/quarantine act only when the
+	// generation still matches — so an operation from a hold that has already
+	// ended is a no-op instead of reaching into its successor's.
+	//
+	// Without it two windows were open (audit M40). A stalled turn quarantines
+	// its slot and still runs its deferred release; if the quarantine was
+	// lifted in between — by the VM-exit reaper, or by a successful self-heal
+	// restart — the release saw a slot that was no longer quarantined, freed
+	// it, and deleted the busy flag of whichever waiter had since ACQUIRED it,
+	// putting two live turns on one stream. And in the other order, the reaper
+	// cleared the quarantine before the stall path set it, after which a
+	// failed self-heal left the slot quarantined-and-busy with no owner to
+	// free it: one of ten slots gone until the daemon restarted.
+	slotGen = map[string]uint64{}
 )
+
+// slotHold is what acquireSlot hands back: which slot, and which acquisition
+// of it. Release and quarantine take the whole thing.
+type slotHold struct {
+	group string
+	slot  int
+	gen   uint64
+}
+
+// current reports whether this hold still owns the slot. Caller holds slotMu.
+func (h slotHold) currentLocked() bool { return slotGen[slotKey(h.group, h.slot)] == h.gen }
 
 // acquireSlot blocks until one of g's slots is free and returns its index. The
 // LOWEST free index is chosen so a group that never runs concurrent turns only
 // ever touches slot 0 — its log stream, tailer and guest FIFO are the only ones
 // that ever come alive, and the other nine cost nothing.
-func acquireSlot(g, session string) int {
+func acquireSlot(g, session string) slotHold {
 	slotMu.Lock()
 	defer slotMu.Unlock()
 	for {
@@ -104,22 +130,26 @@ func acquireSlot(g, session string) int {
 			if !slotBusy[k] {
 				slotBusy[k] = true
 				slotOwner[k] = session
-				return i
+				slotGen[k]++
+				return slotHold{group: g, slot: i, gen: slotGen[k]}
 			}
 		}
 		slotCond.Wait()
 	}
 }
 
-func releaseSlot(g string, slot int) {
+func releaseSlot(h slotHold) {
 	slotMu.Lock()
-	k := slotKey(g, slot)
-	// A quarantined slot does not free on release: its guest writer may still
-	// be alive (see slotQuarantined). Enforced here, in the pool, so the
-	// invariant holds regardless of caller discipline — sendNow's deferred
-	// release runs on every exit path, including the stall one that
-	// quarantined the slot a moment earlier.
-	if !slotQuarantined[k] {
+	k := slotKey(h.group, h.slot)
+	// Only this acquisition's own hold may free it. sendNow's release is
+	// deferred and runs on every exit path, including the stall one that
+	// quarantined the slot — by which time the quarantine may already have
+	// been lifted and the slot handed to a waiter.
+	//
+	// A quarantined slot does not free on release either: its guest writer may
+	// still be alive (see slotQuarantined). Enforced here, in the pool, so the
+	// invariant holds regardless of caller discipline.
+	if h.currentLocked() && !slotQuarantined[k] {
 		delete(slotBusy, k)
 		delete(slotOwner, k)
 		slotCond.Broadcast()
@@ -129,10 +159,14 @@ func releaseSlot(g string, slot int) {
 
 // quarantineSlot takes a stalled turn's slot out of circulation WITHOUT
 // freeing it — see slotQuarantined. Called instead of releaseSlot on the
-// stall path.
-func quarantineSlot(g string, slot int) {
+// stall path. A hold that no longer owns the slot quarantines nothing: the
+// VM-exit reaper may have freed and re-handed it already, and re-marking it
+// would strand a slot that has a live owner.
+func quarantineSlot(h slotHold) {
 	slotMu.Lock()
-	slotQuarantined[slotKey(g, slot)] = true
+	if h.currentLocked() {
+		slotQuarantined[slotKey(h.group, h.slot)] = true
+	}
 	slotMu.Unlock()
 }
 

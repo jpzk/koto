@@ -25,7 +25,7 @@ func goalTestSetup(t *testing.T) {
 	GOALS_FILE = filepath.Join(t.TempDir(), "goals.json")
 	prevClear, prevNotify, prevSleep, prevHandoff := clearGoalSessionFn, goalNotify, goalRetrySleep, goalHandoffFn
 	goalRetrySleep = time.Millisecond
-	clearGoalSessionFn = func(g, sess string) {}
+	clearGoalSessionFn = func(g, sess string) error { return nil }
 	goalNotify = func(g, sev, title, msg string) {}
 	goalHandoffFn = func(g, sess string) string { return "" }
 	t.Cleanup(func() {
