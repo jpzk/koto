@@ -604,3 +604,31 @@ func TestUploadsPendingBounded(t *testing.T) {
 		t.Fatalf("after delivery removes the host copies, uploads must be accepted again: %v", err)
 	}
 }
+
+// 2026-09-11 H1: a workspace.img that is not a regular file is refused before
+// anything truncates, fscks, chowns or bind-mounts it into a VM as /dev/vdb.
+func TestWorkspaceImgRefusesNonRegularFile(t *testing.T) {
+	origRoot, origHere := ROOT, HERE
+	defer func() { ROOT, HERE = origRoot, origHere }()
+	HERE = t.TempDir()
+	ROOT = filepath.Join(HERE, "groups")
+	g := "victim"
+	if err := os.MkdirAll(vol(g), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(HERE, "secret")
+	if err := os.WriteFile(secret, []byte("operator data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, fcWorkspaceImg(g)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fcEnsureWorkspaceImg(g); err == nil {
+		t.Fatal("symlinked workspace.img accepted as a VM disk")
+	} else if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b, _ := os.ReadFile(secret); string(b) != "operator data" {
+		t.Fatalf("symlink target was modified: %q", b)
+	}
+}

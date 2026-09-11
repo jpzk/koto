@@ -304,7 +304,20 @@ func fcPreflight() error {
 func fcEnsureWorkspaceImg(g string) error {
 	img := fcWorkspaceImg(g)
 	target := fcWorkspaceDiskBytes(g)
-	if fi, err := os.Stat(img); err == nil {
+	// Lstat, not Stat: everything downstream of this check operates on the
+	// PATH — truncate/e2fsck/resize2fs in the grow path, os.Chown in
+	// fcJailFixupPerms, and the jail shim's bind mount, which hands the
+	// resolved inode to the VM as a read-write block device. A symlink here
+	// would redirect all of that at whatever the daemon can reach, and the
+	// guest's mount fallback (mkfs.ext4 -F on an unmountable /dev/vdb) would
+	// then format it. Planting one needs write access to the group dir, i.e.
+	// tier 1 — except for a podman-era workspace, which the migration path
+	// below deliberately treats as pre-existing input. Refuse anything that
+	// is not a plain regular file rather than reason about who wrote it.
+	if fi, err := os.Lstat(img); err == nil {
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("workspace.img for %s is not a regular file (%s) — refusing to use it as a VM disk", g, fi.Mode().Type())
+		}
 		// Image exists: grow it offline if the resolved size is larger (the
 		// VM is stopped during ensure(), so an offline resize is safe). Never
 		// shrink — that would risk workspace data.
