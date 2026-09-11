@@ -3274,3 +3274,53 @@ func TestStreamAdmissionIsBounded(t *testing.T) {
 		t.Fatal("admitted a stream past the global cap")
 	}
 }
+
+// 2026-09-11 M92: the upstream request did not inherit the guest's context and
+// the retry backoff was an unconditional sleep — so a guest that disconnected
+// left credentialed work running against the provider, and held its
+// proxyAcquire slot for the whole backoff (retries reach tens of seconds).
+func TestUpstreamWorkFollowsTheGuestContext(t *testing.T) {
+	// Upstream always answers 429, so the retry path is taken.
+	var attempts atomic.Int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("retry-after", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer up.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mk := func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, up.URL, nil)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := doWithRetry(ctx, up.Client(), "tg", mk)
+		done <- err
+	}()
+
+	// Let the first attempt land and the backoff begin, then disconnect.
+	deadline := time.Now().Add(5 * time.Second)
+	for attempts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if attempts.Load() == 0 {
+		t.Fatal("upstream was never called")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled request returned success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("doWithRetry slept through the backoff after the client disconnected")
+	}
+	// And it did not start another attempt after the cancel.
+	n := attempts.Load()
+	time.Sleep(100 * time.Millisecond)
+	if attempts.Load() != n {
+		t.Fatalf("attempts went from %d to %d after cancellation", n, attempts.Load())
+	}
+}
