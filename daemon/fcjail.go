@@ -115,6 +115,20 @@ func fcJailFixupPerms(g string, uid int) error {
 		// ctl plane, authorized purely by which socket the connection
 		// arrived on, so main's socket was main's full verb set (audit M7).
 		// The daemon keeps its own access as the userns mapped-root.
+		//
+		// The VMM process itself can therefore also speak the ctl plane as
+		// its own group, and that is not closable and not an escalation.
+		// Firecracker's hybrid vsock makes every guest→host connection a
+		// connect(2) BY THE VMM to "<uds>_<port>" — the VMM is definitionally
+		// the peer, so SO_PEERCRED can never distinguish "VMM relaying its
+		// guest" from "VMM acting alone", and a per-VM MAC would have to be
+		// handed to the guest through that same VMM. What the channel grants
+		// is exactly the authority the group's own guest already holds, and a
+		// VMM compromise is reached THROUGH that guest (a virtio/vsock device
+		// -model bug), so the attacker had it before. The jail's claim is
+		// narrower and still holds: a VMM escape reaches no creds, no
+		// network, no other group's sockets, and no host filesystem outside
+		// its chroot.
 		_ = os.Chown(filepath.Join(fcSockDir(g), e.Name()), uid, uid)
 	}
 	if err := os.Chown(fcWorkspaceImg(g), uid, uid); err != nil {
