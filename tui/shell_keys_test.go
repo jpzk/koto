@@ -9,11 +9,15 @@ package main
 // the pane silently ignoring the key.
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/vt"
+
+	"koto-protocol/pb"
 )
 
 // shellKeyModel: terminal pane open and focused, wired to a recording stub
@@ -196,5 +200,74 @@ func TestShellPasteBracketedWhenGuestAsked(t *testing.T) {
 				t.Fatalf("guest received %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// blockingShellStream is a stream whose Send never returns until released —
+// the guest's half of audit M143: it controls what the pty emits AND whether
+// anything reads the pty's input, so it can wedge the daemon → vsock → fc-agent
+// → pty-master chain and leave stream.Send blocked indefinitely.
+type blockingShellStream struct {
+	pb.Koto_AttachShellClient
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingShellStream) Send(*pb.ShellInput) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+
+// 2026-09-11 M143: send() used to take a mutex and call stream.Send under it,
+// from BOTH the Update goroutine (keystrokes, pastes, resizes) and the
+// goroutine draining term.Read() for the emulator's own protocol responses. A
+// guest that emits terminal queries forever while never reading its pty wedges
+// the drain goroutine inside Send and leaves Update blocked on the mutex behind
+// it — the whole Bubble Tea event loop, so no redraw, no ctrl+] to detach, no
+// way out but killing the TUI. Which is the same freeze the drain goroutine was
+// introduced to fix, one layer further down.
+func TestShellSendNeverBlocksOnAWedgedGuest(t *testing.T) {
+	stream := &blockingShellStream{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(stream.release)
+
+	term := vt.NewEmulator(80, 20)
+	t.Cleanup(func() { closeEmulator(term) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess := &shellSession{
+		term: term, stream: stream, group: "main", session: "koto-shell",
+		cols: 80, rows: 20, out: make(chan *pb.ShellInput, shellOutQueue),
+	}
+	go sess.writer(ctx, stream)
+
+	// The writer is now stuck inside Send, exactly as a wedged guest leaves it.
+	sess.send([]byte("first"))
+	select {
+	case <-stream.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer never reached Send")
+	}
+
+	// Every subsequent send — a keystroke from Update, a resize, or an
+	// emulator response from the drain goroutine — must return immediately.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < shellOutQueue*3; i++ {
+			sess.send([]byte("key"))
+		}
+		sess.resize(100, 40)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("send blocked behind a wedged guest — the Update goroutine would be frozen with it")
+	}
+
+	// ...and the queue is bounded rather than growing without limit.
+	if n := len(sess.out); n > shellOutQueue {
+		t.Errorf("outbound queue holds %d messages, cap is %d", n, shellOutQueue)
 	}
 }
