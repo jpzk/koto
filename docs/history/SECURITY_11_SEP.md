@@ -1052,13 +1052,17 @@ read. Deleting rather than filtering at the spawn site keeps it true for every
 child, including ones added later. Verified by loading the script with the
 variables set and checking they are gone by the time it exits.
 
-**Residual, stated rather than fixed:** the claude path has the same exposure by
-a different route — `runClaude` passes the composed system prompt as
-`--append-system-prompt <text>` on ARGV, which any process of the same uid
-reads from `/proc/<pid>/cmdline` for the turn's duration. (The message body
-goes over stdin and is not exposed.) Closing it needs the CLI to accept the
-prompt from a file or stdin; that is an upstream capability question, not a
-change koto can make on its own, so it is recorded here rather than guessed at.
+**Residual — POSTPONED by the operator (2026-09-11).** The claude path has the
+same exposure by a different route: `runClaude` passes the composed system
+prompt as `--append-system-prompt <text>` on ARGV, which any process of the
+same uid reads from `/proc/<pid>/cmdline` for the turn's duration. (The message
+body goes over stdin and is not exposed.)
+
+Not pursued, deliberately. Closing it needs the CLI to accept the prompt from a
+file or stdin, which is an upstream capability question rather than a change
+koto can make on its own — and the exposure is same-uid inside one guest, i.e.
+the reach a worker already has to that session's transcript, files and git
+history (see M45). Revisit if claude-code grows a file/stdin form of the flag.
 
 ### M59 — Stale Firecracker reaper corrupts replacement VM state after restart (`daemon/fc.go`) — **fixed**
 
