@@ -42,7 +42,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -985,8 +984,12 @@ func authOAuthLogin(ac *authCtx) error {
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The child owns the tty and handles its own ^C; a signal that killed us
-	// mid-login would leave a half-written credentials file behind.
-	signal.Ignore(os.Interrupt)
+	// mid-login would leave a half-written credentials file behind. Taken back
+	// through withChildInterrupt, which RESTORES the wizard's own registration
+	// rather than resetting the signal outright (audit 2026-09-11 L170) — the
+	// bare signal.Reset here left `koto setup` unable to be cancelled for the
+	// rest of its run.
+	restoreInterrupt := withChildInterrupt()
 	// `claude auth login` draws a bubbletea UI, so it puts the terminal into
 	// raw mode. If it exits abnormally it does not put it back, and the
 	// damage outlives this process: every prompt afterwards — including the
@@ -996,7 +999,7 @@ func authOAuthLogin(ac *authCtx) error {
 	restoreTTY := ttyGuard()
 	err = cmd.Run()
 	restoreTTY()
-	signal.Reset(os.Interrupt)
+	restoreInterrupt()
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -1048,7 +1051,17 @@ func authClearShadowingKey(ac *authCtx) error {
 		u.blank()
 		u.warn("%s still holds an API key, and an API key outranks OAuth", p)
 		if u.yesno("Set it aside so the new login is what gets used?", true) {
-			aside := p + ".disabled"
+			// A UNIQUE destination (audit 2026-09-11 L168). The point of this
+			// prompt is that the key is PRESERVED rather than deleted — it is
+			// a secret the operator may hold nowhere else — and a fixed
+			// `.disabled` broke exactly that: disable key A, activate key B,
+			// accept the default again, and rename silently replaces A. The
+			// sequence is an ordinary one, and the loss is unrecoverable and
+			// unannounced.
+			aside, err := authAsidePath(p)
+			if err != nil {
+				return err
+			}
 			if err := os.Rename(p, aside); err != nil {
 				return fmt.Errorf("move %s aside: %w", p, err)
 			}
@@ -1061,6 +1074,24 @@ func authClearShadowingKey(ac *authCtx) error {
 		u.hint("clear it there and `sudo systemctl restart koto`, or the new login stays unused")
 	}
 	return nil
+}
+
+// authAsidePath picks a destination for a key being set aside that cannot
+// overwrite one set aside earlier. `.disabled` first (the name the operator
+// has been told about and the one this has always used), then dated variants.
+func authAsidePath(p string) (string, error) {
+	for i := 0; i < 100; i++ {
+		aside := p + ".disabled"
+		if i == 1 {
+			aside = fmt.Sprintf("%s.disabled-%s", p, time.Now().Format("20060102"))
+		} else if i > 1 {
+			aside = fmt.Sprintf("%s.disabled-%s-%d", p, time.Now().Format("20060102"), i)
+		}
+		if _, err := os.Lstat(aside); os.IsNotExist(err) {
+			return aside, nil
+		}
+	}
+	return "", fmt.Errorf("every %s.disabled* name is taken — move some aside by hand first", p)
 }
 
 // authStoreKey writes an API key into the state dir at 0600. It is read per

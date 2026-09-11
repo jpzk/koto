@@ -85,8 +85,15 @@ func setupMain(args []string) {
 	_ = fs.Parse(args)
 
 	ui := newSetupUI(*assumeYes, *noColor)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// Re-armable, because an interactive child suspends the interrupt handling
+	// while it owns the tty and must put it back exactly as it was (audit
+	// 2026-09-11 L170). signal.Reset removes EVERY registration for the
+	// signal, this one included — so after the first interactive step, a
+	// Ctrl-C no longer cancelled setup through the context; it took the
+	// default disposition and killed the process mid-run.
+	var ctx context.Context
+	ctx, setupArmInterrupt, setupDisarmInterrupt = newSetupSignals()
+	defer setupDisarmInterrupt()
 
 	root, err := os.Getwd()
 	if err != nil {
@@ -269,12 +276,58 @@ asking.`)
 // foreground process group and owns ^C while it runs.
 func (sc *setupCtx) interactive(name string, args ...string) error {
 	sc.ui.info("%s", sc.ui.dim("$ "+name+" "+strings.Join(args, " ")))
-	signal.Ignore(os.Interrupt)
-	defer signal.Reset(os.Interrupt)
-	cmd := exec.Command(name, args...)
+	defer withChildInterrupt()()
+	// Bound to the setup context: a cancel now actually reaches the child
+	// (audit 2026-09-11 L170). exec.Command ignored it, so a wizard cancelled
+	// by any route left its interactive child running and attached to the
+	// operator's terminal.
+	cmd := exec.CommandContext(sc.ctx, name, args...)
 	cmd.Dir = sc.root
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+// setupArmInterrupt/setupDisarmInterrupt manage the wizard's own SIGINT
+// registration so an interactive child can suspend it and give it back. They
+// are package-level because the child handoffs are in claude_login.go too,
+// and nil outside `koto setup` (a bare `koto claude-login` installs no
+// context-cancelling handler in the first place).
+var (
+	setupArmInterrupt    func()
+	setupDisarmInterrupt = func() {}
+)
+
+// newSetupSignals returns a context cancelled by SIGINT/SIGTERM, plus the two
+// functions that put that registration back and take it away.
+func newSetupSignals() (context.Context, func(), func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan os.Signal, 1)
+	arm := func() { signal.Notify(ch, os.Interrupt, syscall.SIGTERM) }
+	arm()
+	go func() {
+		<-ch
+		cancel()
+	}()
+	return ctx, arm, func() { signal.Stop(ch); cancel() }
+}
+
+// withChildInterrupt hands SIGINT to an interactive child — which owns the tty
+// and handles ^C itself — and returns the function that takes it back.
+//
+// signal.Reset was what this used to do, and it is too broad: it drops every
+// registration for the signal, including the wizard's own context canceller,
+// so the SECOND Ctrl-C of a session behaved differently from the first (audit
+// 2026-09-11 L170). Ignoring is still right while the child runs — a signal
+// that killed this process mid-login would leave a half-written credentials
+// file behind — but it has to be undone by restoring what was there.
+func withChildInterrupt() func() {
+	signal.Ignore(os.Interrupt)
+	return func() {
+		signal.Reset(os.Interrupt)
+		if setupArmInterrupt != nil {
+			setupArmInterrupt()
+		}
+	}
 }
 
 // capture runs a command for its output, discarding stderr noise.

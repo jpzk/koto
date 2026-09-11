@@ -59,6 +59,16 @@ func (m Model) treeBodyRows() int {
 func (m *Model) handleLeftClick(x, y int) bool {
 	if i := m.treeRowAt(x, y); i >= 0 {
 		rows := m.treeRows()
+		// treeRowAt built its own rows; this is a SECOND build, and the tree
+		// is time-dependent — a finished job row blinks for ~10s and then
+		// disappears (audit 2026-09-11 L156). If it was the last visible row,
+		// rows[i] panics and takes the TUI down; if it was an earlier one, the
+		// same index now names a different group, session or job and the click
+		// selects or attaches to the wrong thing. syncPeekToHover already
+		// rechecks fresh bounds for exactly this; the mouse path did not.
+		if i >= len(rows) {
+			return true // the row went away under the pointer; claim and do nothing
+		}
 		if m.focus == focusShell {
 			if rows[i].job == "" {
 				// Group/session row with the terminal open: the terminal

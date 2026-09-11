@@ -205,12 +205,22 @@ case "$cmd" in
     # so this is what silences the shell's own error on a job whose `out` does
     # not exist yet (mint → exec race).
     total=$(wc -c 2>/dev/null < "$D/out" | tr -d ' '); [ -n "$total" ] || total=0
-    started=$(cat "$D/started" 2>/dev/null || echo '')
+    # `started` is job metadata the worker can write, and it goes into SHELL
+    # ARITHMETIC (audit 2026-09-11 L162). A value like `1/0` reaches the
+    # evaluator, the division fails, and under `set -e` the whole peek exits
+    # non-zero — so a job that already has the guest identity can break
+    # progress inspection for every job it can name. Validated as a bounded
+    # decimal before it is used as a number, the same shape the peek cursor
+    # below is checked with.
+    started=$(head -c 20 "$D/started" 2>/dev/null | tr -d '\n' || echo '')
+    case "$started" in ''|*[!0-9]*) started='' ;; esac
     age=-; [ -n "$started" ] && age=$(( $(date +%s) - started ))
     printf '%s %s rc=%s bytes=%s age=%ss\n' "$id" "$(jstatus "$id")" \
       "$(cat "$D/rc" 2>/dev/null || echo -)" "$total" "$age"
     if [ "$mode" = new ]; then
-      off=$(cat "$D/peek" 2>/dev/null || echo 0)
+      # Bounded BEFORE the digit test, so an enormous all-digits value cannot
+      # reach the arithmetic either (audit 2026-09-11 L162).
+      off=$(head -c 20 "$D/peek" 2>/dev/null | tr -d '\n' || echo 0)
       case "$off" in ''|*[!0-9]*) off=0 ;; esac
       # Output truncated/rewritten under us — restart from the top.
       [ "$off" -gt "$total" ] && off=0

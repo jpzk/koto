@@ -168,7 +168,15 @@ func guestDiskUsage(r GroupRes) (used, total int64, frac float64, ok bool) {
 // rather than approximated, so callers choose their own fallback instead of
 // silently mixing the two figures.
 func guestMemUsage(r GroupRes) (used, total int64, frac float64, ok bool) {
-	if r.GuestMemTotal <= 0 || r.GuestMemAvail <= 0 || r.GuestMemAvail > r.GuestMemTotal {
+	// GuestMemTotal alone is the "is there a reading" test (audit 2026-09-11
+	// L171). Rejecting a zero AVAILABLE threw away exactly the state this
+	// indicator exists for: a guest that has actually run out. The pressure
+	// path was then bypassed and the display fell back to RSS — which the code
+	// itself calls a high-water mark, renders gray, and never alert-colours —
+	// so the operator missed the signal until the guest stalled or was
+	// OOM-killed. The daemon's parser makes the pair honest (a missing
+	// MemAvailable line yields no reading at all rather than a zero).
+	if r.GuestMemTotal <= 0 || r.GuestMemAvail < 0 || r.GuestMemAvail > r.GuestMemTotal {
 		return 0, 0, 0, false
 	}
 	used = r.GuestMemTotal - r.GuestMemAvail

@@ -8801,3 +8801,137 @@ func TestGoalEnqueueGivesUpWhenTheGoalStops(t *testing.T) {
 		t.Error("a running goal reports as not runnable")
 	}
 }
+
+// 2026-09-11 L155: feedLine base64-decoded both notification fields and only
+// THEN applied the advertised caps, so the limits bounded what was kept and not
+// what was done. JobTail hands guest-controlled job output to this parser
+// directly, without the live tailer's authenticity filtering.
+func TestNotificationFieldsAreBoundedBeforeDecoding(t *testing.T) {
+	big := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), notifyFieldMax))
+	if _, err := notifyField(big); err == nil {
+		t.Fatalf("a %d-byte encoded field was decoded", len(big))
+	}
+	// Ordinary fields still decode, and "-" is still the empty marker.
+	enc := base64.StdEncoding.EncodeToString([]byte("deploy finished"))
+	if got, err := notifyField(enc); err != nil || got != "deploy finished" {
+		t.Errorf("an ordinary field broke: %v %q", err, got)
+	}
+	if got, err := notifyField("-"); err != nil || got != "" {
+		t.Errorf(`"-" no longer means empty: %v %q`, err, got)
+	}
+}
+
+// 2026-09-11 L158: the failure message has always offered KOTO_FC_NOJAIL=1 as
+// the way past a host that will not allow the userns bootstrap — and it was not
+// one, because the bootstrap ran unconditionally and consulted neither
+// fcJailEnabled() nor the variable. An operator following the advice got the
+// identical failure and no microVMs at all.
+func TestNoJailSkipsTheUsernsBootstrap(t *testing.T) {
+	prev, had := os.LookupEnv("KOTO_FC_NOJAIL")
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("KOTO_FC_NOJAIL", prev)
+		} else {
+			os.Unsetenv("KOTO_FC_NOJAIL")
+		}
+	})
+	os.Setenv("KOTO_FC_NOJAIL", "1")
+	if fcJailEnabled() {
+		t.Fatal("KOTO_FC_NOJAIL=1 did not disable the jail")
+	}
+	os.Unsetenv("KOTO_FC_NOJAIL")
+	if !fcJailEnabled() {
+		t.Fatal("the jail is not on by default")
+	}
+}
+
+// 2026-09-11 L163: `-` read the whole of stdin, converted it to a string and
+// trimmed it — three large copies — before any RPC started, so the daemon's own
+// message-size limit could not protect this process.
+func TestCtlStdinIsBounded(t *testing.T) {
+	if ctlStdinMax > sendMsgMax {
+		t.Errorf("the ctl stdin cap (%d) is above what the daemon accepts (%d)", ctlStdinMax, sendMsgMax)
+	}
+	if ctlStdinMax <= 0 {
+		t.Fatal("the cap is not a bound")
+	}
+}
+
+// 2026-09-11 L168: the prompt's whole point is that the key is PRESERVED rather
+// than deleted — it is a secret the operator may hold nowhere else — and a
+// fixed `.disabled` broke exactly that: disable key A, activate key B, accept
+// the default again, and rename silently replaces A.
+func TestSetAsideNeverOverwritesAnEarlierKey(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "anthropic-api-key")
+
+	first, err := authAsidePath(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(first) != "anthropic-api-key.disabled" {
+		t.Errorf("the first set-aside changed name: %s", first)
+	}
+	if err := os.WriteFile(first, []byte("key A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := authAsidePath(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("the second set-aside would overwrite the first")
+	}
+	if err := os.WriteFile(second, []byte("key B"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(first); err != nil || string(b) != "key A" {
+		t.Fatalf("the first key was lost: %v %q", err, b)
+	}
+	third, err := authAsidePath(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first || third == second {
+		t.Fatalf("a third set-aside collides: %s", third)
+	}
+}
+
+// 2026-09-11 L171: zero AVAILABLE is a reading, not a missing one — and the two
+// were conflated because both came out as 0. A guest that had actually run out
+// of memory, which is exactly what this mirror exists to show, was discarded and
+// the display fell back to the RSS high-water mark, which is rendered gray and
+// never alert-coloured.
+func TestZeroMemAvailableIsAReading(t *testing.T) {
+	total, avail := resParseMemInfo("MemTotal: 1024 kB\nMemAvailable: 0 kB\n")
+	if total != 1024<<10 {
+		t.Fatalf("total = %d, want %d", total, 1024<<10)
+	}
+	if avail != 0 {
+		t.Fatalf("avail = %d, want 0", avail)
+	}
+	// A MISSING MemAvailable line is still "no reading".
+	if tot, av := resParseMemInfo("MemTotal: 1024 kB\n"); tot != 0 || av != 0 {
+		t.Errorf("a missing MemAvailable produced a reading: %d %d", tot, av)
+	}
+	// And a zero reading survives the envelope check, which is what lets the
+	// alert fire.
+	prevRoot := ROOT
+	ROOT = t.TempDir()
+	t.Cleanup(func() { ROOT = prevRoot })
+	const g = "memzero"
+	if err := os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vol(g), ".cs", "config.json"), []byte(`{"size":"small"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, memMiB, _ := fcResolveSize(g)
+	gmT, gmA, _, _, _ := resValidateGuest(g, int64(memMiB)<<20-(64<<20), 0, 0, 0, 0)
+	if gmT == 0 {
+		t.Fatal("a guest at zero available memory was dropped as implausible")
+	}
+	if gmA != 0 {
+		t.Fatalf("avail = %d, want the reported 0", gmA)
+	}
+}

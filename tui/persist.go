@@ -30,6 +30,16 @@ type persistedState struct {
 	Theme string `json:"theme,omitempty"`
 }
 
+// Bounds on what the persisted state may describe (audit 2026-09-11 L164).
+// A group or session NAME is bounded by the daemon's own charset rules; a
+// draft is a prompt, which the daemon caps at 1 MiB but which nobody needs
+// restored at that size; and the session map has one entry per group.
+const (
+	persistNameMax     = 256
+	persistDraftMax    = 64 << 10
+	persistSessionsMax = 512
+)
+
 func statePath(sock string) string {
 	return filepath.Join(filepath.Dir(sock), "tui-state.json")
 }
@@ -66,6 +76,36 @@ func loadState(sock string) persistedState {
 	}
 	if err := json.Unmarshal(b, &s); err != nil {
 		logWarn("persist", "state file unparseable: %v", err)
+	}
+	// The 1 MiB read bounds the FILE; nothing bounded what a megabyte of JSON
+	// can describe (audit 2026-09-11 L164). The schema has unrestricted
+	// strings and a map with no entry limit, and this runs twice at startup —
+	// once for the theme, once building the model — with every value then
+	// copied into the live model and rendered. This file sits in the daemon's
+	// writable state tree while the TUI is the operator, which is the same
+	// crossing openNoFollow exists for.
+	//
+	// Trimmed rather than refused: the file is a convenience (which group you
+	// were on, a half-typed draft), and a startup that fails because of it
+	// would be a worse outcome than one that starts with less of it.
+	if len(s.Draft) > persistDraftMax {
+		logWarn("persist", "draft in the state file is %d bytes — truncated to %d", len(s.Draft), persistDraftMax)
+		s.Draft = s.Draft[:persistDraftMax]
+	}
+	if len(s.Cur) > persistNameMax {
+		s.Cur = ""
+	}
+	if len(s.Theme) > persistNameMax {
+		s.Theme = ""
+	}
+	if len(s.Sessions) > persistSessionsMax {
+		logWarn("persist", "state file names %d sessions — keeping none of them", len(s.Sessions))
+		s.Sessions = nil
+	}
+	for k, v := range s.Sessions {
+		if len(k) > persistNameMax || len(v) > persistNameMax {
+			delete(s.Sessions, k)
+		}
 	}
 	// The draft goes straight into the input bar; the file is under a
 	// writable mount, so it gets the same scrub as any other outside bytes
