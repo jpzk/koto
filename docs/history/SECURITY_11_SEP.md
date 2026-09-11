@@ -2037,3 +2037,32 @@ The workspace DISK size is still resolved separately, in
 path only ever grows the image, so a preset raised underneath it produces a
 larger disk, never a mismatch anything relies on.
 `TestVMConfigUsesTheAdmittedShape`.
+
+### M111 — Untrusted TUI content can inject terminal control sequences (`tui/theme.go`) — **fixed for the reachable class; the blanket render-boundary sanitizer declined**
+
+The finding's framing is right — `reassertBg`, `stripSGRColor` and `foldASCII`
+are styling transformations, not safety boundaries, and nothing should be
+relying on them as such. But the concrete paths it names have been closed one
+at a time over this audit, at the producer rather than the renderer:
+`AgentFrame_Error` at the daemon's trust boundary (M74), the legacy raw JobTail
+frames (M62), decoded tool arguments (M73), and the shell pane through
+`scrubVT` all along. Chat content arrives already sanitized by the daemon's
+`sanitizeEvent`.
+
+What was left is the awkward class: ERROR text. It is assembled on the CLIENT
+from gRPC status messages, daemon errors and guest-influenced errors, and it
+lands in both the rendered frame and the debug log, neither of which strips
+anything. `addLine` is the one place every error line passes through, so the
+scrub goes there — covering every producer, present and future, without
+touching the streaming paths where throughput matters.
+`TestErrorLinesAreScrubbed`.
+
+**Declined: one sanitizer over the finished `View()` frame.** It sounds like
+the strictly safer design and is not. The frame at that point contains
+glamour's markdown rendering and lipgloss's layout, and an allowlist tight
+enough to be a boundary would have to enumerate what those libraries emit —
+so the failure mode is a silently mangled UI on a library upgrade, traded for
+coverage of paths that are already sanitized at the producer, where the code
+actually knows whether the bytes are trusted. The existing frame-level pass
+(`monoFrame`) is a deliberate exception: it STRIPS colour rather than judging
+sequences, so it cannot mangle anything.

@@ -2766,9 +2766,19 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) addLine(l logLine) {
-	// Every user-visible error line doubles as a debug-log entry — the chat
-	// pane scrolls away, the file doesn't.
+	// Error lines are scrubbed HERE, at the one place they all pass through.
+	//
+	// Chat content arrives already sanitized by the daemon (sanitizeEvent) and
+	// the guest-authored paths were closed one at a time — the legacy JobTail
+	// frames (M62), decoded tool arguments (M73), agent error strings at the
+	// trust boundary (M74). Error TEXT is the awkward class: it is assembled
+	// on the client from gRPC status messages, daemon errors and guest errors,
+	// and it goes into both the rendered frame and the debug log, neither of
+	// which strips anything (audit M111). One scrub on the way in covers every
+	// producer, present and future, without touching the streaming paths where
+	// throughput matters.
 	if l.kind == "err" {
+		l.text = scrubVT(l.text)
 		logWarn("ui", "error line (group=%q): %s", l.group, l.text)
 	}
 	m.lines = append(m.lines, l)
