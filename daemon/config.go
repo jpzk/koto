@@ -175,6 +175,18 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 			if p < 1024 || p > 65535 || seen[p] {
 				continue
 			}
+			// Bounded in COUNT, not just in range (audit 2026-09-11 L129).
+			// Every entry becomes a host listener with its own accept loop and
+			// a guest-side bridge, and the whole list is serialised into the
+			// guest's init request — so a caller authorized to configure a
+			// group could hand it 64,000 of them and spend the daemon's
+			// descriptors and goroutines (and quite possibly stop that VM from
+			// booting at all) with one valid config write. Publishing a few
+			// services is what this is for; there is no legitimate list this
+			// long.
+			if len(out) >= configMaxPorts {
+				break
+			}
 			seen[p] = true
 			out = append(out, p)
 		}
@@ -210,6 +222,10 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 var configIdentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
 
 const configMaxIdent = 128
+
+// configMaxPorts bounds the published-port list (audit 2026-09-11 L129). Each
+// entry costs a host listener plus an accept loop and a guest-side bridge.
+const configMaxPorts = 32
 
 // ---- the one config.json writer -------------------------------------------
 //

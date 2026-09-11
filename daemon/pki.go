@@ -266,6 +266,26 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 	}
 	sum := sha256.Sum256([]byte(token))
 	tokPath := filepath.Join(credsDir, "tokens.json")
+
+	// The read-modify-write is under an INTERPROCESS lock (audit 2026-09-11
+	// L133). Each `koto pki client` invocation read the registry, added its
+	// own entry and renamed a fixed temporary name into place — so two runs
+	// with overlapping snapshots left the loser's token hash out of the file
+	// that authentication actually reads. The per-client `token-<name>` file
+	// still existed, so the failure looked like a working credential the
+	// daemon inexplicably rejects. `make pki-client` in a loop, or two
+	// terminals, is all it takes.
+	//
+	// flock, not a lockfile-by-rename: it is released by the kernel when the
+	// process exits, so an interrupted provisioning run cannot wedge every
+	// later one. The temporary name is unique as well, so the two never fight
+	// over it even if the lock is unavailable on some exotic filesystem.
+	unlock, err := pkiLockCreds(credsDir)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
 	toks := map[string]json.RawMessage{}
 	if b, err := os.ReadFile(tokPath); err == nil {
 		if err := json.Unmarshal(b, &toks); err != nil {
@@ -278,11 +298,43 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 	if err != nil {
 		return "", err
 	}
-	tmp := tokPath + ".tmp"
-	if err := pkiWriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+	tmpf, err := os.CreateTemp(credsDir, ".tokens.json.*")
+	if err != nil {
 		return "", err
 	}
-	return token, os.Rename(tmp, tokPath)
+	tmp := tmpf.Name()
+	tmpf.Close()
+	if err := pkiWriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, tokPath); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return token, nil
+}
+
+// pkiLockCreds takes an exclusive lock on the credentials directory for the
+// duration of a registry update. The lock file is its own inode so it is never
+// the thing being renamed, and flock is advisory between the processes that
+// take it — which is every writer here, the only ones that exist.
+func pkiLockCreds(credsDir string) (func(), error) {
+	if err := os.MkdirAll(credsDir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(credsDir, ".tokens.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock %s: %w", credsDir, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // ---- helpers ---------------------------------------------------------------

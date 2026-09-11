@@ -1485,8 +1485,79 @@ func logSinkAppend(p string, b []byte) error {
 	if st, serr := f.Stat(); serr == nil && st.Size()+int64(len(b)) > fcLogSinkMaxBytes {
 		return fmt.Errorf("%s at the %d-byte ceiling, dropping guest output", filepath.Base(p), fcLogSinkMaxBytes)
 	}
+	// ...and the GROUP's total, not only this path's (audit 2026-09-11 L131).
+	// A group's turn output goes to eleven independent streams (.cs/log plus
+	// log.0…log.9), and filling one said nothing about the others — so the
+	// real per-group ceiling was eleven times the per-file one, reachable by
+	// ordinary turn output with no file ever exceeding its own limit. The
+	// token bucket delays a burst; it is not a cumulative budget.
+	if total, terr := groupLogBytes(filepath.Dir(p)); terr == nil && total+int64(len(b)) > fcLogGroupMaxBytes {
+		return fmt.Errorf("this group's logs total %d bytes, at the %d-byte group ceiling, dropping guest output",
+			total, fcLogGroupMaxBytes)
+	}
 	_, err = f.Write(b)
 	return err
+}
+
+// fcLogGroupMaxBytes bounds ONE group's log streams together. Deliberately
+// below 11 x fcLogSinkMaxBytes (which is what the per-file ceiling alone
+// allowed) and far above any real transcript: a group that reaches it has been
+// writing gigabytes, which is the condition worth stopping.
+const fcLogGroupMaxBytes = int64(2) << 30
+
+// groupLogBytes sums the .cs directory's log files. Cached per directory for
+// fcLogGroupTTL because this runs on every append and the answer moves slowly
+// at these magnitudes — a cache miss costs eleven stats, a hit costs a map
+// lookup, and the error the cache can make is bounded by one TTL's writes.
+const fcLogGroupTTL = 5 * time.Second
+
+var (
+	logBytesMu    sync.Mutex
+	logBytesCache = map[string]logBytesEntry{}
+)
+
+type logBytesEntry struct {
+	bytes int64
+	at    time.Time
+}
+
+func groupLogBytes(dir string) (int64, error) {
+	logBytesMu.Lock()
+	if e, ok := logBytesCache[dir]; ok && time.Since(e.at) < fcLogGroupTTL {
+		logBytesMu.Unlock()
+		return e.bytes, nil
+	}
+	logBytesMu.Unlock()
+
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "log") {
+			continue
+		}
+		if info, ierr := e.Info(); ierr == nil {
+			total += info.Size()
+		}
+	}
+	logBytesMu.Lock()
+	// Bounded: one entry per group's .cs dir, dropped with the group.
+	if len(logBytesCache) > 512 {
+		logBytesCache = map[string]logBytesEntry{}
+	}
+	logBytesCache[dir] = logBytesEntry{bytes: total, at: time.Now()}
+	logBytesMu.Unlock()
+	return total, nil
+}
+
+// logBytesForget drops a destroyed group's cached total — the same name-keyed
+// teardown as the rest (audit L98/L132).
+func logBytesForget(g string) {
+	logBytesMu.Lock()
+	delete(logBytesCache, filepath.Join(vol(g), ".cs"))
+	logBytesMu.Unlock()
 }
 
 // fcCtlConn serves the guest's ctl plane: JSON lines in, JSON lines out on
