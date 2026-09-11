@@ -410,6 +410,11 @@ func fcEnsureWorkspaceImg(g string) error {
 		// shrink — that would risk workspace data.
 		return fcGrowWorkspaceImg(g, img, fi.Size(), target)
 	}
+	// Nothing has been created yet, so this is the cheapest possible refusal
+	// (audit M163).
+	if err := fcHostDiskAdmit(g, "creating a workspace image"); err != nil {
+		return err
+	}
 	if err := fcEnsureRunDir(); err != nil {
 		return err
 	}
@@ -478,6 +483,12 @@ func fcEnsureWorkspaceImg(g string) error {
 func fcGrowWorkspaceImg(g, img string, current, target int64) error {
 	if target <= current {
 		return nil
+	}
+	// A grow is an e2fsck plus a resize2fs writing new metadata, on a
+	// filesystem that may have no room for it — and it is the operation most
+	// likely to be attempted when the disk is already in trouble (audit M163).
+	if err := fcHostDiskAdmit(g, "growing the workspace image"); err != nil {
+		return err
 	}
 	emitLogfG("fc", g, "info", "[%s] growing workspace.img → %d GiB", g, target>>30)
 	if err := os.Truncate(img, target); err != nil {

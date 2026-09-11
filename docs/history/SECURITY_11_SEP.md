@@ -3727,3 +3727,43 @@ Test: `TestEventRingIsBoundedByBytesAndCount` in `daemon/audit_fixes_test.go`
 offers 200 MiB against the 64 MiB budget, asserts both bounds hold and that the
 byte bound is what bit; checks the carried total against a fresh sum both after
 plain appends and after partial supersession; and pins the oversized-event case.
+
+## M163 — Workspace images have no fleet-wide host-disk admission control — FIXED
+
+`daemon/fchostmem.go`, `daemon/fc.go`.
+
+**Confirmed.** The memory half of `fchostmem.go` refuses a spawn that will not
+fit beside the running VMs. The disk half did not exist:
+`fcEnsureWorkspaceImg` created a sparse image and `Truncate`d it to its apparent
+size, guest writes materialised real blocks afterwards, and
+`fcGrowWorkspaceImg` extended an existing image without looking at the
+filesystem at all. With up to 100 registered groups, images that survive a stop,
+and a resource collector that only *watches* the number go up, a caller able to
+spawn groups could fill the host's filesystem — at which point every guest
+remounts read-only, the daemon cannot write its own state, VM startup and
+shutdown fail, and unrelated host services fail with them.
+
+**Fix:** `fcHostDiskAdmit`, called before creating an image and before growing
+one — the two places the daemon is about to add to the problem. It refuses when
+the filesystem holding the group tree is at or past `resCritPct` (90%), the same
+threshold the resource alerts already fire at, so the operator has been told
+twice before anything is refused. The message names the group, the operation,
+the percentage, the free space and what to do.
+
+**It is a FLOOR, not an accounting model, and the difference is the point.**
+Images are sparse and grow by guest writes, so no reservation arithmetic can
+predict consumption the way memory admission can. What a floor *can* do is stop
+adding new consumers to a filesystem that is already nearly full, which is the
+same friendly-failure principle `fcHostMemAdmit` states: a refusal that says why
+beats ENOSPC choosing for us.
+
+A statfs that fails means "unmeasurable", not "refuse" — a missing directory
+must not become a fleet-wide spawn block.
+
+**Operator note:** this host currently reads **80% full** on `/var`. Nothing
+changes at 80%; at 90% new groups and disk grows start being refused, with the
+message above, while everything already running keeps running.
+
+Test: `TestWorkspaceImagesHaveHostDiskAdmission` in `daemon/audit_fixes_test.go`
+covers admission on a real filesystem with room, the unmeasurable case, the
+threshold arithmetic at five levels, and the refusal text.
