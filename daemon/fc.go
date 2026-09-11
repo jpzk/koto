@@ -1350,7 +1350,11 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 		return nil, fmt.Errorf("agent response: %w", err)
 	}
 	if !resp.Ok {
-		return resp, errors.New(resp.Error)
+		// Sanitized at the trust boundary, once, rather than at each of the
+		// handlers that turn this error into a protobuf error field and hand
+		// it to a client (audit M74). The guest chooses this string and can
+		// produce one on demand by making an operation fail.
+		return resp, errors.New(sanitize(resp.Error))
 	}
 	return resp, nil
 }

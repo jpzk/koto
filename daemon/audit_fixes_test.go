@@ -2633,3 +2633,28 @@ func TestCredentialCopiesAreOwnerOnly(t *testing.T) {
 		t.Fatalf("asset copy lost its executable bit (%04o)", fi.Mode().Perm())
 	}
 }
+
+// 2026-09-11 M74: the guest CHOOSES its error strings and can produce one on
+// demand by making an operation fail. RunScript's data frames went through the
+// chunk sanitizer and its error frame did not; the same string also reaches
+// clients as a protobuf error field via fcAgentCall.
+func TestGuestErrorTextIsSanitized(t *testing.T) {
+	esc := string(rune(0x1b))
+	for _, payload := range []string{
+		esc + "]52;c;cGF5bG9hZA==" + string(rune(7)) + "clipboard",
+		esc + "[2J" + esc + "[H",
+		"line\rforged",
+		string(rune(0x9b)) + "C1 CSI",
+		"rtl" + string(rune(0x202e)) + "flip",
+	} {
+		got := sanitize(payload)
+		for _, r := range got {
+			if r == 0x1b || (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+				t.Errorf("sanitize(%q) left %q", payload, r)
+			}
+		}
+	}
+	if got := sanitize("no such job abc123"); got != "no such job abc123" {
+		t.Errorf("an ordinary error was mangled: %q", got)
+	}
+}

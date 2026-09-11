@@ -1336,3 +1336,35 @@ user writing into the operator's state dir — is tier 1 (see M52). **The
 installer or the PKI created at `0600` in the same run, so there is no
 pre-existing inode with looser bits to inherit; making each one `fchmod` would
 add ceremony without changing an outcome.
+
+### M74 — Guest-controlled daemon error text reaches terminal output without sanitization (`daemon/grpc_server.go`) — **fixed**
+
+Real, and backwards from where the care already was. RunScript's DATA frames go
+through `newChunkSanitizer`; its ERROR frame went straight to `fail(k.Error)`.
+An error is the frame a guest can produce on demand — by making the operation
+fail — and it reaches the operator's terminal and the TUI's debug log, where
+nothing downstream strips control sequences (lipgloss styling and ANSI-aware
+width measurement are not sanitizers).
+
+Sanitized in three places, chosen so the whole class is covered once:
+`fcAgentCall`'s `resp.Error` at the trust boundary — which catches every
+handler that turns a guest error into a protobuf error field, not just this one
+— plus RunScript's and AttachShell's error frames, which arrive on their own
+streams. AttachShell's DATA stays raw deliberately: that is pty output the TUI
+renders through a terminal emulator, whereas the error string is a daemon
+message the client prints directly. `TestGuestErrorTextIsSanitized`.
+
+### M77 — Installer accepts attacker-controlled descendant symlinks in the state directory (`daemon/install.go`) — **not a finding**
+
+M52 by another route. Every descendant it names lives inside a `0750`
+directory owned by the operator, so pre-seeding one requires the write access
+that already implies replacing the binary or reading `creds/` outright. And a
+no-follow walk of the descendants would not settle it anyway: the check would
+still precede the use, and `stateDirTrusted` deliberately validates the ROOT —
+the property that actually holds — rather than implying a guarantee about a
+tree that can change underneath it.
+
+One part of the description is simply wrong about the consequence: `.claude` is
+a symlink to `creds/` the installer creates, and `claude_login.go` already
+treats an existing non-symlink there as the normal dev-clone case and resolves
+credentials the way the proxy does rather than trusting the path.
