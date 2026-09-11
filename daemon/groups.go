@@ -568,8 +568,11 @@ func destroy(g string) baseResp {
 		fmt.Sprintf("%s_%d", fcUDS(g), fcPortCtl)} {
 		_ = os.Remove(p)
 	}
+	// Tail claims are keyed by PATH, and the notification queue and
+	// expected-marker allowlist by name — none of which the bare
+	// `delete(tails, g)` below reached (audit M104).
+	dropGroupTailState(g)
 	subsLock.Lock()
-	delete(tails, g)
 	// Drop the seq counter + ring with the group: a later group of the same
 	// name starts a fresh sequence, and a client resuming across the
 	// destroy/respawn sees since_seq > cur → `gap` → history refetch.

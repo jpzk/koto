@@ -439,6 +439,41 @@ func ensureSlotTail(g string, slot int) {
 
 // markTail claims a stream for tailing, reporting whether the caller is the
 // one that must start it.
+// dropGroupTailState releases everything keyed to g's LOG PATHS or to its name
+// in the notification machinery, so a later group reusing the name starts
+// clean (audit M104).
+//
+// Three separate leaks, one cause — destroy cleaned up by group name and these
+// are not all keyed that way:
+//
+//   - tail claims are keyed by PATH (markTail), and destroy did
+//     `delete(tails, g)` with the bare NAME. So every claim for
+//     groupLogPath(g) and the ten slot paths survived, and a recreated group's
+//     tailer never started: markTail returned false forever and the group
+//     streamed no events at all.
+//   - notifyQueue[g] holds undelivered markers that tryFlushNotify appends to
+//     whatever groupLogPath(g) names WHEN IT RUNS — the replacement's log.
+//   - notifyExpectN[g] is the allowlist that decides whether a [[notify]] line
+//     in the log may become a live notification. A stale expectation
+//     authorizes a matching marker in the replacement's stream, which is the
+//     one thing that allowlist exists to prevent.
+func dropGroupTailState(g string) {
+	subsLock.Lock()
+	delete(tails, groupLogPath(g))
+	for _, p := range logPaths(g) {
+		delete(tails, p)
+	}
+	subsLock.Unlock()
+
+	notifyQueueMu.Lock()
+	delete(notifyQueue, g)
+	notifyQueueMu.Unlock()
+
+	notifyExpectMu.Lock()
+	delete(notifyExpectN, g)
+	notifyExpectMu.Unlock()
+}
+
 func markTail(p string) bool {
 	subsLock.Lock()
 	defer subsLock.Unlock()

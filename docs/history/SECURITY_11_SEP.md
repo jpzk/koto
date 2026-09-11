@@ -1853,3 +1853,27 @@ tmpfs for scratch (also verified: a write to `/` is refused, `/tmp` works).
 which is the same trade the project documents everywhere else. The staged-only
 snapshot the remediation prefers would change what `--staged` reads; with no
 network, reading the checkout costs nothing.
+
+### M104 — Notification and tailer state survives group destruction and name reuse (`daemon/logtail.go`) — **fixed**
+
+Three leaks with one cause: `destroy` cleaned up by group NAME, and these are
+not all keyed that way. The tail-claim bug is the sharpest and is not only a
+leak — it is a functional break nobody would have attributed:
+
+- **Tail claims are keyed by PATH** (`markTail`), and `destroy` did
+  `delete(tails, g)` with the bare name. Every claim for `groupLogPath(g)` and
+  the ten slot paths survived, so a group recreated under the same name could
+  never start a tailer — `markTail` returned false forever and the group
+  streamed no events at all.
+- **`notifyQueue[g]`** holds undelivered markers that `tryFlushNotify` appends
+  to whatever `groupLogPath(g)` names WHEN IT RUNS, which after recreation is
+  the replacement's log.
+- **`notifyExpectN[g]`** is the allowlist deciding whether a `[[notify]]` line
+  may become a live notification. A stale expectation authorizes a matching
+  marker in the replacement's stream — the exact forgery that allowlist exists
+  to stop.
+
+`dropGroupTailState` clears all three, called from `destroy` beside the other
+name-reuse cleanups. The test asserts the replacement can claim its tails,
+which is the half that would otherwise have read as "the new group is broken".
+`TestDestroyReleasesTailAndNotifyState`.
