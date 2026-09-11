@@ -2182,3 +2182,25 @@ needed: a delivery path that is not argv. `cs-job run` already accepts the
 stdin form; making `spawn` use it would change the documented agent-facing
 interface, which is not a change to make inside an audit pass without the
 operator's call. Recorded here so the two are tracked together.
+
+### M119 — Guest-triggered proxy errors can grow the host group log without bound (`daemon/proxy.go`) — **fixed**
+
+Real, and the exempt writer was the one a guest could drive hardest.
+`logSinkAppend` gives the guest TURN sink a 1 GiB per-file ceiling and a
+per-group byte-rate bucket; `streamLogAppend` — the group stream, carrying
+proxy error records and notifications — was a bare `O_APPEND` write with
+neither. Every non-200/non-404 upstream response writes a line, and the
+per-group concurrency semaphore bounds simultaneous REQUESTS rather than
+cumulative responses, so a guest could sustain failing requests to an
+allowlisted endpoint and grow that group's log until the shared filesystem gave
+out — which is the fleet-wide failure (every guest remounts read-only).
+
+Both writers now go through `logSinkAppend` under the path's write lock, and an
+append failure is logged (deduped) rather than silently swallowed: a full
+filesystem used to make "the transcript stopped" indistinguishable from
+"nothing happened".
+
+`tryFlushNotify` already holds that lock across its whole flush, so it calls a
+`logAppendLocked` variant — Go mutexes are not reentrant, and taking it twice
+deadlocked the daemon. The test suite caught that as a hang, which is how it
+should be caught. `TestGroupStreamAppendsAreBounded`.

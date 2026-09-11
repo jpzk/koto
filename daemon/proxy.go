@@ -297,13 +297,58 @@ func logAppend(group string, data []byte) {
 	streamLogAppend(groupLogPath(group), data)
 }
 
-func streamLogAppend(p string, data []byte) {
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
+// logAppendLocked is logAppend for a caller already holding the group stream's
+// write lock.
+func logAppendLocked(group string, data []byte) {
+	if group == "" {
 		return
 	}
-	defer f.Close()
-	_, _ = f.Write(data)
+	streamLogAppendLocked(groupLogPath(group), data)
+}
+
+// streamLogAppend writes to a group stream through the SAME bound as the guest
+// turn sink: logSinkAppend's 1 GiB per-file ceiling, plus the per-group byte
+// rate bucket.
+//
+// It used to be a bare O_APPEND write (audit M119). The lines it carries are
+// proxy error records and notifications — both produced in response to guest
+// behaviour, and the proxy-error path is the sharp one: every non-200, non-404
+// upstream response writes a line, the per-group concurrency semaphore bounds
+// simultaneous REQUESTS rather than cumulative responses, and a guest can
+// sustain failing requests to an allowlisted endpoint indefinitely. So the one
+// host-side writer that was exempt from the guest-output limits was the one a
+// guest could drive hardest.
+func streamLogAppend(p string, data []byte) {
+	mu := logWriteLock(p)
+	mu.Lock()
+	defer mu.Unlock()
+	streamLogAppendLocked(p, data)
+}
+
+// streamLogAppendLocked is the body, for callers that already hold the path's
+// write lock — tryFlushNotify takes it across its whole flush so a notification
+// cannot land mid-line.
+func streamLogAppendLocked(p string, data []byte) {
+	if d := fcLogSinkWait(groupOfLogPath(p), len(data)); d > 0 {
+		time.Sleep(d)
+	}
+	err := logSinkAppend(p, data)
+	if err != nil {
+		// Surfaced rather than swallowed: a full filesystem or a stream at its
+		// ceiling is the operator's problem, and the old silent return made
+		// "the transcript stopped" indistinguishable from "nothing happened".
+		// Deduped, because the condition persists and the writer is a loop.
+		if llmFlowSeen.allow("streamlog|" + p) {
+			emitLogf("proxy", "warn", "group stream append failed (%s): %v", filepath.Base(p), err)
+		}
+	}
+}
+
+// groupOfLogPath recovers the group name from one of its log paths, for the
+// per-group rate bucket. The layout is <ROOT>/<group>/.cs/log[.<slot>].
+func groupOfLogPath(p string) string {
+	cs := filepath.Dir(p)                  // <ROOT>/<group>/.cs
+	return filepath.Base(filepath.Dir(cs)) // <group>
 }
 
 // logProxyError appends a human-readable line to the group's chat log for
