@@ -327,7 +327,9 @@ func fcPidOf(g string) int {
 	fcMu.Lock()
 	vm := fcVMs[g]
 	fcMu.Unlock()
-	if vm != nil && pidAlive(vm.pid) {
+	// vmAlive, not pidAlive: this pid is handed to /proc sampling, so a
+	// reused one would report an unrelated process as this group's VM (M68).
+	if vmAlive(vm) {
 		return vm.pid
 	}
 	b, err := os.ReadFile(fcPidPath(g))

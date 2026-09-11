@@ -1162,3 +1162,29 @@ injection — refusing them would turn a real directory name into an install
 failure. Values PRESERVED from an existing `koto.env` need no check:
 `readEnvFile` parses line by line, so a newline was already a line boundary
 there. `TestInstallerValuesRejectControlCharacters`.
+
+### M68 — Stale Firecracker PID can be reused to kill or misidentify another process (`daemon/fc.go`) — **fixed**
+
+Real. The reaper reaped the child but left `fcVMs[g]` in place with its pid
+still set, and every registry-first path — `fcRunning`, `fcPidOf`,
+`fcHostMemCommittedMiB`, the resource sampler — asked only `pidAlive`, which
+answers "is this number signalable". After reuse the daemon can call an
+unrelated process this group's VM: report a dead group as UP (so the lazy boot
+never fires and the jobs refresher hammers a dead vsock), count its memory
+against the fleet cap and block legitimate spawns, sample its `/proc`, and — in
+`fcStop` — SIGKILL it. The stronger `pidIsFirecracker` check guarded only the
+pidfile path, and would not have helped between two VMMs anyway.
+
+Two changes. `fcVM.start` records the process's start tick
+(`/proc/<pid>/stat` field 22) at spawn, and `vmAlive` requires pid AND start to
+match on every one of those paths — including immediately before the SIGKILL,
+not just in the wait loop, since the VMM can exit in that gap. And the reaper
+now DELETES its own registry entry and pidfile, so there is no reaped-but-still-
+registered state to misread; it deletes only if the entry is still its own
+generation, so a replacement's entry survives (M59).
+
+An entry with no recorded start time falls back to `pidAlive`, so an upgrade
+does not declare every running VM dead. `pidStartTime` parses from the last
+`)`, because field 2 is the comm and may contain spaces and parens — the detail
+behind a long line of `/proc` parsing bugs.
+`TestVMIdentityGuardsAgainstPIDReuse`.

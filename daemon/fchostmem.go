@@ -120,7 +120,9 @@ func fcHostMemCommittedMiB() int {
 		if _, pending := fcHostMemPending[g]; pending {
 			continue // a restart's new spawn already holds the reservation
 		}
-		if pidAlive(vm.pid) {
+		// vmAlive, not pidAlive: a reused pid would keep a dead VM's memory
+		// counted against the fleet cap and block legitimate spawns (M68).
+		if vmAlive(vm) {
 			sum += vm.memMiB + fcCgroupMemMarginMiB
 		}
 	}

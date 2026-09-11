@@ -2368,3 +2368,38 @@ func TestInstallerValuesRejectControlCharacters(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M68: pid+start time is a stable process identity; a pid alone is
+// not. Every registry-first path trusted the bare number, and the reaper left
+// the entry in place with its pid still set.
+func TestVMIdentityGuardsAgainstPIDReuse(t *testing.T) {
+	self := os.Getpid()
+	st, ok := pidStartTime(self)
+	if !ok || st == 0 {
+		t.Fatalf("could not read our own start time (%d, %v)", st, ok)
+	}
+	// Stable across reads — it is a boot-relative tick, not a clock sample.
+	if again, _ := pidStartTime(self); again != st {
+		t.Fatalf("start time moved: %d then %d", st, again)
+	}
+	if _, ok := pidStartTime(-1); ok {
+		t.Error("read a start time for an impossible pid")
+	}
+
+	// Matching identity: alive.
+	if !vmAlive(&fcVM{pid: self, start: st}) {
+		t.Fatal("a VM with matching identity read as dead")
+	}
+	// Same pid, different start tick — the reuse case. Signalable, not ours.
+	if vmAlive(&fcVM{pid: self, start: st + 1}) {
+		t.Fatal("a reused pid was accepted as the original VM")
+	}
+	// A pre-existing entry with no recorded identity falls back to pidAlive,
+	// so an upgrade does not suddenly declare every running VM dead.
+	if !vmAlive(&fcVM{pid: self, start: 0}) {
+		t.Fatal("an entry without a recorded start time read as dead")
+	}
+	if vmAlive(nil) {
+		t.Fatal("a nil VM read as alive")
+	}
+}

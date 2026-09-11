@@ -60,6 +60,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -217,7 +218,11 @@ type fcVM struct {
 	// are all keyed on the GROUP, so they would land on the replacement:
 	// completing a turn the new VM is still running, freeing slots it owns,
 	// and clearing stall flags it raised.
-	gen       uint64
+	gen uint64
+	// start is the VMM process's start tick (/proc/<pid>/stat field 22),
+	// captured at spawn. pid+start is a stable identity; pid alone is not,
+	// and every registry-first path used to trust the number alone.
+	start     uint64
 	listeners []net.Listener
 	// memMiB is the guest RAM this VM was booted with; fcHostMemCommittedMiB
 	// sums it across live VMs for the fleet memory cap's admission check.
@@ -262,7 +267,7 @@ func fcRunning(g string) bool {
 	fcMu.Lock()
 	vm := fcVMs[g]
 	fcMu.Unlock()
-	if vm != nil && pidAlive(vm.pid) {
+	if vmAlive(vm) {
 		return true
 	}
 	b, err := os.ReadFile(fcPidPath(g))
@@ -279,6 +284,54 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+// pidStartTime reads a process's start time — field 22 of /proc/<pid>/stat, in
+// clock ticks since boot. Together with the pid it is a stable process
+// IDENTITY: the kernel may hand the number to someone else, but not with the
+// same start tick.
+//
+// Parsed from the last ')' rather than by splitting the whole line, because
+// field 2 is the comm in parentheses and may itself contain spaces and
+// parens — a detail that has produced a long line of /proc parsing bugs.
+func pidStartTime(pid int) (uint64, bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(string(b)[i+1:])
+	// After the comm, field 3 is state; starttime is field 22 overall, i.e.
+	// index 19 of what follows.
+	if len(f) < 20 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(f[19], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// vmAlive is pidAlive plus process identity (audit M68). The registry-first
+// paths — fcRunning, fcPidOf, the memory accounting, the resource sampler —
+// all trusted a bare number that pidAlive says is signalable, and the reaper
+// left the entry in place with its pid still set. After reuse the daemon can
+// call an unrelated process this group's VM: report a dead group as up (so the
+// lazy boot never fires), count its memory, sample its /proc, and — in
+// fcStop — SIGKILL it.
+func vmAlive(vm *fcVM) bool {
+	if vm == nil || !pidAlive(vm.pid) {
+		return false
+	}
+	if vm.start == 0 {
+		return true // identity unknown (pre-existing entry); fall back to pidAlive
+	}
+	st, ok := pidStartTime(vm.pid)
+	return ok && st == vm.start
 }
 
 // pidIsFirecracker guards the pidfile path against pid reuse.
@@ -739,6 +792,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			emitLogfG("fc", g, "warn", "[%s] setpriority nice=%d: %v", g, fcVMNice, err)
 		}
 	}
+	vm.start, _ = pidStartTime(vm.pid)
 	_ = os.WriteFile(fcPidPath(g), []byte(fmt.Sprintf("%d\n", vm.pid)), 0o644)
 	// Reap on exit so a crashed/stopped VM doesn't linger as a zombie and
 	// fcRunning flips promptly.
@@ -746,6 +800,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	go func() {
 		_ = cmd.Wait()
 		emitLogfG("fc", g, "info", "[%s] vm process exited", g)
+		// Drop the registry entry, so no later path can revive this pid. Only
+		// if it is still OURS — a replacement's entry must survive (M59).
+		fcMu.Lock()
+		if cur := fcVMs[g]; cur != nil && cur.gen == gen {
+			delete(fcVMs, g)
+		}
+		fcMu.Unlock()
+		_ = os.Remove(fcPidPath(g))
 		if fcGenSuperseded(g, gen) {
 			// A replacement VM is registered for this group; every cleanup
 			// below is keyed on the group alone, so running them now would
@@ -881,10 +943,13 @@ func fcStop(g string) {
 	}
 	_, _ = fcAgentCall(g, &pb.AgentRequest{Op: &pb.AgentRequest_Shutdown{Shutdown: &pb.ShutdownReq{}}}, 3*time.Second)
 	deadline := time.Now().Add(5 * time.Second)
-	for pidAlive(vm.pid) && time.Now().Before(deadline) {
+	for vmAlive(vm) && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if pidAlive(vm.pid) {
+	// Identity re-checked immediately before the signal, not just in the wait
+	// loop: the VMM can exit and its pid be reused in the gap, and this is the
+	// one place the daemon sends SIGKILL at a bare number (audit M68).
+	if vmAlive(vm) {
 		emitLogfG("fc", g, "warn", "[%s] graceful shutdown timed out; killing pid=%d", g, vm.pid)
 		_ = syscall.Kill(vm.pid, syscall.SIGKILL)
 	}
