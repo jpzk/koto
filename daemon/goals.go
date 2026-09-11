@@ -549,19 +549,41 @@ func resolveGoalName(group, name, text string) (string, error) {
 		!sessionNameRE.MatchString(goalJudgeSessionFor(name)) {
 		return "", fmt.Errorf("goal name %q is not usable as a session name", name)
 	}
+	// The occupied set is built over both sessions of every existing goal, by
+	// its effective SLUG rather than its Name.
+	//
+	// Two gaps, one consequence (audit M44). Only the WORK session was
+	// reserved, so with `foo` live the name `foo-judge` was accepted — and
+	// goalWorkSessionFor("foo-judge") is byte-identical to
+	// goalJudgeSessionFor("foo"). And unnamed legacy records were skipped
+	// entirely, even though goalSessionSlug falls back to their ID, so their
+	// sessions are occupied too. A collision is not cosmetic here: the derived
+	// (group, session) pair keys the send queue, the context reset, the
+	// handoff capture, the transcript and the reserved-session checks, so the
+	// colliding goal's turns interleave with the other's — and in the
+	// foo-judge case, with the other's JUDGE.
 	taken := map[string]bool{}
 	for _, s := range listSessions(group) {
 		taken[s] = true
 	}
 	goalLock.Lock()
 	for _, it := range goals {
-		if it.Group == group && it.Name != "" {
-			taken[goalWorkSessionFor(it.Name)] = true
+		if it.Group != group {
+			continue
 		}
+		slug := goalSessionSlug(it)
+		if slug == "" {
+			continue
+		}
+		taken[goalWorkSessionFor(slug)] = true
+		taken[goalJudgeSessionFor(slug)] = true
 	}
 	goalLock.Unlock()
+	free := func(n string) bool {
+		return !taken[goalWorkSessionFor(n)] && !taken[goalJudgeSessionFor(n)]
+	}
 	base := name
-	for n := 2; taken[goalWorkSessionFor(name)]; n++ {
+	for n := 2; !free(name); n++ {
 		suffix := fmt.Sprintf("-%d", n)
 		trimmed := base
 		if len(trimmed)+len(suffix) > goalNameMax {

@@ -1735,3 +1735,41 @@ func TestJobDoneSessionGuards(t *testing.T) {
 		t.Fatalf("a named session lost its own key (%d pending)", n)
 	}
 }
+
+// 2026-09-11 M44: a goal's name reserves BOTH of its sessions, and every
+// existing goal counts by its effective slug — including unnamed legacy
+// records, whose slug is their id. goalWorkSessionFor("foo-judge") is
+// byte-identical to goalJudgeSessionFor("foo"), and the derived (group,
+// session) pair keys the queue, the context reset, the handoff and the
+// transcript, so a collision interleaves two goals' turns.
+func TestGoalNamesReserveBothSessions(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goalns"
+	goalLock.Lock()
+	goals = []goalItem{
+		{ID: "aaaa1111", Group: g, Name: "foo", Status: goalStatusRunning},
+		{ID: "bbbb2222", Group: g, Status: goalStatusRunning}, // legacy: no name
+	}
+	goalLock.Unlock()
+
+	// The judge-shaped collision.
+	got, err := resolveGoalName(g, "foo-judge", "")
+	if err != nil {
+		t.Fatalf("resolveGoalName: %v", err)
+	}
+	if goalWorkSessionFor(got) == goalJudgeSessionFor("foo") {
+		t.Fatalf("name %q still collides with foo's judge session (%s)", got, goalJudgeSessionFor("foo"))
+	}
+	// The plain collision still resolves away.
+	if got, err = resolveGoalName(g, "foo", ""); err != nil || got == "foo" {
+		t.Fatalf("resolveGoalName(foo) = %q, %v — want a uniquified name", got, err)
+	}
+	// An unnamed legacy record's id is occupied too.
+	if got, err = resolveGoalName(g, "bbbb2222", ""); err != nil || got == "bbbb2222" {
+		t.Fatalf("resolveGoalName(legacy id) = %q, %v — want a uniquified name", got, err)
+	}
+	// A genuinely free name is returned unchanged.
+	if got, err = resolveGoalName(g, "unrelated", ""); err != nil || got != "unrelated" {
+		t.Fatalf("resolveGoalName(unrelated) = %q, %v", got, err)
+	}
+}

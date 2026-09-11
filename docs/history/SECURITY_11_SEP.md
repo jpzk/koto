@@ -737,3 +737,22 @@ authenticates nothing. What a forged `job_done` can now do is make its own group
 wake its own default session with text the operator sees quoted and fenced —
 which is what `cs-notify` already permits by design.
 `TestJobDoneSessionGuards`.
+
+### M44 — Goal session namespace collision permits cross-goal state and execution interference (`daemon/goals.go`) — **fixed**
+
+Real. `resolveGoalName` reserved only the WORK session of each existing goal,
+and only for goals with a Name. Two consequences:
+
+- With `foo` live, the name `foo-judge` was accepted — and
+  `goalWorkSessionFor("foo-judge")` is byte-identical to
+  `goalJudgeSessionFor("foo")`.
+- Unnamed legacy records were skipped entirely, even though `goalSessionSlug`
+  falls back to their ID, so their sessions were occupied and invisible.
+
+Not cosmetic: the derived `(group, session)` pair keys the send queue, the
+per-turn context reset, the handoff capture, the transcript and the
+reserved-session checks. A collision interleaves two goals' turns — and in the
+`foo-judge` case, interleaves one goal's worker with another's JUDGE.
+
+The occupied set is now built over both sessions of every goal in the group, by
+effective slug. `TestGoalNamesReserveBothSessions`.
