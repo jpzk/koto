@@ -2817,3 +2817,39 @@ covers all six shapes — absent, idempotent re-check, the clone's own directory
 (asserting it is left untouched), a link outside the state dir (asserting the
 message names the target), a dangling link, a regular file, and an absolute link
 that lands on `creds/` anyway.
+
+## M140 — Canceled turns cannot leave a full slot pool — FIXED
+
+`daemon/queue.go` (`acquireSlot`), `daemon/send.go` (`sendNow`).
+
+**Confirmed.** `sendNow` takes the turn's cancellation channel and then calls
+`acquireSlot`, which loops on `slotCond.Wait()` with no way out.
+`requestTurnCancel` closed the channel and woke nothing, and `sendNow` does not
+look at the channel again until the slot is already in hand — so an interrupt
+that landed while all ten of the group's slots were busy took effect **one slot
+release later**, after acquiring a slot purely to hand it straight back at the
+next check.
+
+Each waiter is a resident goroutine, one per session, and nothing bounds how
+many sessions a caller authorized to `Send` may open. So a group whose ten slots
+are occupied by long turns accumulates blocked workers that cancellation cannot
+clear — an authenticated, group-scoped availability problem, and one where the
+operator's own remedy (interrupt everything) was the thing that did not work.
+
+**Fix:** `acquireSlot(g, session, cancel)` now returns `(slotHold, bool)` and
+re-examines `cancel` under `slotMu` before every wait; `slotWakeAll` broadcasts
+from both cancellation entry points (`requestTurnCancel` and the identity-bound
+`cancelTurn`). The broadcast takes `slotMu` rather than firing bare, because
+`Cond.Wait` registers the waiter and only *then* releases the lock — a bare
+`Broadcast` can land in the gap between a waiter's last check and its `Wait` and
+be missed entirely. `nil` means "this acquisition cannot be cancelled", which is
+what every non-turn caller passes.
+
+`sendNow` discards the prompt and logs it when the wait is cancelled, matching
+the two checks that already surround `ensure` and delivery.
+
+Test: `TestCanceledTurnLeavesAFullSlotPool` in `daemon/audit_fixes_test.go`
+fills all ten slots, parks a worker in the wait, cancels it through the same
+`requestTurnCancel` the Interrupt RPC and `stopGroup` call, and asserts it
+returns without a slot and without disturbing the pool. Verified to hang past
+its own deadline with the wake removed. Also run under `-race`.
