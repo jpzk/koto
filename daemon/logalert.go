@@ -51,6 +51,16 @@ var (
 	logAlertBuckets = map[string]*notifyBucket{}
 )
 
+// The fleet-wide ceiling on forwarded log banners. Sized so a handful of
+// subsystems failing at once still all reach the operator, and a fleet failing
+// at once does not consume the queue that resource alerts share.
+const (
+	logAlertGlobalBurst  = 20
+	logAlertGlobalRefill = 10 * time.Second
+)
+
+var logAlertGlobal = &notifyBucket{tokens: logAlertGlobalBurst, last: time.Now()}
+
 func logAlertAllow(subsystem, group string) bool {
 	logAlertMu.Lock()
 	defer logAlertMu.Unlock()
@@ -97,6 +107,21 @@ func forwardLogAlert(subsystem, group, level, msg string) {
 		return
 	}
 	if !logAlertAllow(subsystem, group) {
+		return
+	}
+	// A GLOBAL budget on top of the per-(subsystem, group) one (audit
+	// 2026-09-11 L147). Each pair gets its own bucket, and every one of them
+	// empties into main's single notification queue — so enough distinct pairs
+	// (a fleet in trouble is exactly when there are many) fill that queue
+	// between them, and notifyDeliver drops what does not fit WITHOUT keeping
+	// it. What gets lost behind a crowd of forwarded log lines is the resource
+	// alert: the one notification the operator most needs, on the same queue,
+	// from the subject that is silent by design until it is catastrophic.
+	//
+	// So forwarded log lines — which are a convenience mirror of something
+	// already in the daemon log — yield to it. The line is still logged; only
+	// the banner is elided, which is the same trade the per-pair bucket makes.
+	if !logAlertGlobal.take(logAlertGlobalBurst, logAlertGlobalRefill) {
 		return
 	}
 	// A full backlog drops the banner silently — logging it would re-enter

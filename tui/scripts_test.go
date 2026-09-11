@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLoadScript(t *testing.T) {
@@ -108,5 +110,49 @@ func TestLibraryNamesAndGroupSwitchAreValidated(t *testing.T) {
 	_ = m.dispatchInput("/sw live")
 	if m.cur != "live" {
 		t.Errorf("/sw to a real group failed: %q", m.cur)
+	}
+}
+
+// 2026-09-11 L152: loadLibraryFile used os.ReadFile, which BLOCKS inside
+// open(2) on a FIFO before any check can run — and both callers are on the
+// interactive path (`/runscript` reads while handling the command, `/prompt`
+// reads the whole file before the RPC). One FIFO under a name an operator is
+// likely to type froze the client with no timeout.
+func TestLibraryLoaderRefusesSpecialFilesAndHugeOnes(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "trap.sh")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readLibraryFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("a FIFO was read as a library entry: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readLibraryFile blocked on a FIFO — the whole TUI would be wedged")
+	}
+
+	big := filepath.Join(dir, "big.sh")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(libMaxBytes + 1); err != nil {
+		t.Skipf("cannot stage a sparse file here: %v", err)
+	}
+	f.Close()
+	if _, err := readLibraryFile(big); err == nil {
+		t.Error("an oversized library entry was accepted")
+	}
+
+	ok := filepath.Join(dir, "real.sh")
+	if err := os.WriteFile(ok, []byte("echo hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := readLibraryFile(ok); err != nil || string(b) != "echo hi\n" {
+		t.Fatalf("an ordinary script no longer reads: %v %q", err, b)
 	}
 }

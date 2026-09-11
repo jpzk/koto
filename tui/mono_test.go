@@ -320,3 +320,33 @@ func TestColorModeUnaffected(t *testing.T) {
 		t.Error("color frame lost its Unicode furniture")
 	}
 }
+
+// 2026-09-11 L150: monoFrame runs AFTER layout and wrapping, so whatever
+// foldASCII produces must occupy exactly the width the layout already
+// measured. Folding rune by rune emitted a two-character replacement for each
+// component of a ZWJ emoji sequence and dropped the joiners, so a family of
+// three came out six cells wide in a row budgeted for two — which overruns the
+// pane and wraps the terminal. The daemon's sanitizer preserves printable emoji
+// and U+200D deliberately.
+func TestMonoFoldPreservesClusterWidth(t *testing.T) {
+	for _, s := range []string{
+		"\U0001F468‍\U0001F469‍\U0001F467", // family
+		"\U0001F9D1‍\U0001F4BB",            // technologist
+		"\U0001F44D️",                      // thumbs up + VS16
+		"\U0001F44D\U0001F3FD",             // thumbs up + skin tone
+		"é",                               // base + combining acute
+		"漢字",                               // CJK
+		"plain ascii",
+	} {
+		got := foldASCII(s)
+		if w, fw := ansi.StringWidth(s), ansi.StringWidth(got); w != fw {
+			t.Errorf("%q measures %d cells, folded to %q measuring %d — the row overruns its pane", s, w, got, fw)
+		}
+		for _, r := range got {
+			if r > 0x7f {
+				t.Errorf("%q folded to %q, which is still not ASCII", s, got)
+				break
+			}
+		}
+	}
+}

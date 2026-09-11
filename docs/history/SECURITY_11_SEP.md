@@ -6248,3 +6248,153 @@ mint that has released the lock but is still between files), and skips one
 carrying a `notifying` marker — raised by the job before the status flips and
 cleared after the callback has read its result, so the window is one `clean` can
 see rather than one it can only lose.
+
+## L144 — PKI initialization does not renew an unusable server certificate — FIXED
+
+`daemon/pki.go`. Generation was skipped whenever `os.Stat(server.crt)`
+succeeded, and the setup step's detector agreed — so an **expired** certificate
+(they are minted for a year), one that no longer chains to the current CA, or an
+unparseable pair survived every `koto setup` and every `koto pki init`
+untouched. What the operator gets is a daemon every client refuses, from a setup
+run that reported success, with `koto pki server` as a fix nothing told them to
+run. `pkiServerCertNeedsReissue` now decides: absent, missing key, unreadable,
+expired, inside a 30-day renewal window, not yet valid, or not chaining to this
+CA. SANs are deliberately **not** checked — changing them is the operator's
+explicit `koto pki server -san …`, and silently changing what the daemon answers
+to is a different decision from renewal. Pinned by
+`TestExpiredServerCertIsReissued`.
+
+## L145 — Container fallback can scan the wrong Git index — FIXED
+
+`tools/hooks/pre-commit`. The containerized scanner sees only the repo it is
+handed: no `GIT_INDEX_FILE`, no `GIT_DIR`, no mount for metadata outside the
+worktree. Pointed at an alternate index, git commits from that one while the
+scanner inside reads the default — empty or stale — and reports clean. That is
+the hook's entire guarantee, lost silently. The container route now **refuses** when
+git's git-dir, index or object store resolves outside the directory being
+mounted, naming the two ways forward (install betterleaks natively — it inherits
+the environment and sees what git sees — or bypass deliberately). Refusing rather
+than guessing, because a scan that cannot see what is being committed is worse
+than no scan: it reports success.
+
+The test is **where**, not whether — git sets `GIT_INDEX_FILE` for every hook it
+runs and the ordinary value is this repo's own index, which the mount does
+contain. The first version of this fix refused on the variable being set at all
+and blocked an ordinary commit immediately, which is how the distinction got
+found. What it catches now: an alternate index, a separate git dir, and a linked
+worktree whose real git dir lives in another checkout (where the containerized
+scan cannot work at all).
+
+## L146 — SIGTERM during startup bypasses VM cleanup — FIXED
+
+`daemon/daemon.go`. `signal.Notify` ran *after* `ensure("main")` and the
+autostart sweep, so a termination signal arriving while `fcSpawn` was booting a
+VM took the **default disposition**: the process died without setting
+`shuttingDown` and without `fcStopAll`, leaving a Firecracker child with no
+parent (FC is started with no parent-death signal) and a guest that never got
+its sync-and-unmount window — a workspace image needing journal replay. Under
+systemd the cgroup teardown kills the child but does not give the guest the
+protocol either. The channel is registered before the first boot now; it is
+buffered, so a signal arriving early is queued and the handler — which still
+starts once the daemon is up — reads it.
+
+## L147 — Independent error buckets exhaust the shared main queue — FIXED
+
+`daemon/logalert.go`. Each (subsystem, group) pair gets its own token bucket and
+every one of them empties into main's single notification queue, which
+`notifyDeliver` drops from once full **without keeping** what did not fit. A
+fleet in trouble is exactly when there are many distinct pairs — and what gets
+lost behind the crowd is the resource alert, on the same queue, from the subject
+that is silent by design until it is catastrophic. A fleet-wide budget (burst 20,
+then 1 per 10s) now sits above the per-pair ones: a forwarded log line is a
+convenience mirror of something already in the daemon log, so it yields. Pinned
+by `TestForwardedAlertsHaveAFleetWideBudget`.
+
+## L148 — Deadline-less streaming setup can stall reconnects — PARTLY ALREADY COVERED, watchdog added
+
+Two of the three legs the finding describes are already closed: `grpc.NewClient`
+is lazy and non-blocking, transport keepalive (30s ping / 10s timeout,
+`PermitWithoutStream`) detects a dead link under a long-lived stream, and both
+`streamClosedMsg` and `watchClosedMsg` clear the active flag so a replacement is
+not suppressed.
+
+What was not covered: a stream that OPENS and then says nothing. `WatchState`
+sends its first frame immediately by contract, so silence there is a stream that
+opened and is not working — and the model marks state active when the goroutine
+starts. A first-frame watchdog (`streamFirstFrameWait`, 10s) cancels the
+context, which makes `Recv` return and takes the ordinary closed-and-reconnect
+path. `SubscribeGroup` deliberately gets none: a live-only group stream is
+legitimately silent for hours.
+
+## L149 — Null tool arguments kill the Venice worker — FIXED
+
+`sidecar/venice_stream.js`. `JSON.parse("null")` **succeeds** and yields `null`
+— as do `"42"`, `"\"x\""` and `"[]"` — and `args.command` on null throws a
+TypeError. The tool loop awaits `executeToolCall` without catching and the
+worker has no top-level rejection handler, so node's default behaviour killed
+the process: the whole response lost, for a turn the model can reproduce at
+will. The parsed value is now required to be a plain object, and the dispatch is
+wrapped — a tool that throws is a failed tool call fed back to the model, not a
+dead worker.
+
+## L150 — Monochrome folding expands ZWJ clusters — FIXED
+
+`tui/mono.go`.
+
+**Confirmed, and it is a frame-integrity bug of the class this project has been
+bitten by.** `monoFrame` runs AFTER layout and wrapping, so whatever `foldASCII`
+produces must occupy exactly the width the layout already measured — and
+`foldRune` measured each rune in isolation. A family emoji (`👨‍👩‍👧`) measures
+**two** cells as a cluster and folded to **six** (`??` per component, joiners
+dropped), so the row overran its pane and wrapped the terminal. The sanitizer
+preserves printable emoji and U+200D deliberately, so this input arrives.
+
+**Fix:** fold by grapheme cluster — the span of a rune plus the joiners,
+variation selectors, skin-tone modifiers and combining marks that attach to it —
+and size the replacement with `ansi.StringWidth` over the whole span, which is
+the same authority the layout used. Pinned by
+`TestMonoFoldPreservesClusterWidth`, which asserts folded width equals original
+width across ZWJ sequences, variation selectors, skin tones, combining marks and
+CJK.
+
+## L151 — Unbounded subagent buffers — FIXED (persisted job output accepted)
+
+`sidecar/stream_filter.js`. Neither accumulating buffer had a budget: readline
+hands over a whole line before the handler sees it, and `inputBuf` and
+`wordsBuf` then grew for the life of a block whose length the model chooses.
+`inputBuf` additionally becomes a single `[[tool]]` LINE that the daemon parses,
+the transcript stores and every client carries. Bounded at `TOOL_INPUT_MAX`
+(64 KiB, with the marker saying the JSON is clipped) and `WORDS_BUF_MAX`
+(256 KiB — that buffer exists only to count words at the end, so past the cap
+the count is reported as approximate with a `+`).
+
+**The persisted half is accepted.** A detached job's `out` file has no byte quota
+of its own, but it is bounded by the workspace image (the `size` preset) and
+that filesystem's fullness is exactly what the per-group disk alert watches — the
+subject this audit has spent L79 and L117 keeping truthful. The available
+alternative, `ulimit -f` in the job's subshell, applies to every file the job
+writes and would break a legitimate job producing a large artifact in
+`/workspace`, which is a worse trade than the one being closed.
+
+## L152 — TUI library loader blocks on special files — FIXED
+
+`tui/scripts.go`. The name policy stops traversal and says nothing about what
+the filesystem object IS, and `os.ReadFile` on a FIFO blocks inside `open(2)`
+until a writer appears, before any check can run. Both callers are interactive:
+`/runscript` reads synchronously while handling the command, `/prompt` reads the
+whole file before the RPC goes out. One FIFO under a name an operator is likely
+to type freezes the client with no timeout. `readLibraryFile` uses the same
+shape as L102 and L3 — `O_NONBLOCK` so the open returns, `O_NOFOLLOW`,
+`fstat` on the descriptor, and a 1 MiB ceiling. Pinned by
+`TestLibraryLoaderRefusesSpecialFilesAndHugeOnes`.
+
+## L153 — Goal enqueue retry ignores cancellation — FIXED
+
+`daemon/goals.go`. The retry loop slept unconditionally between attempts — and
+after the LAST one, which nobody waits through for a reason — and looked at
+nothing in between. An agent in the group can forge `job_done` notifications
+into a reserved goal session and keep the queue full, and while that held,
+pause, cancel, interrupt and stop could not make the goal driver return: the
+operator's `/goals interrupt` did nothing visible until the retry sequence ran
+out on its own. `goalStillRunnable` is checked between attempts, and the final
+sleep is gone. Pinned by `TestGoalEnqueueGivesUpWhenTheGoalStops`.

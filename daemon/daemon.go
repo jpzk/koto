@@ -176,6 +176,22 @@ func daemonMain() {
 	}
 	proxyStart(bind)
 
+	// The signal is ARMED BEFORE the first VM boots (audit 2026-09-11 L146).
+	// signal.Notify used to run far below, after ensure("main") and the
+	// autostart sweep — so a SIGTERM arriving while fcSpawn was booting a VM
+	// took the default disposition: the process died without setting
+	// shuttingDown and without fcStopAll, leaving a Firecracker child with no
+	// parent (FC is started with no parent-death signal) and a guest that
+	// never got its sync-and-unmount window, i.e. a workspace image needing
+	// journal replay. Under systemd the cgroup is torn down, which kills the
+	// child but does not give the guest the shutdown protocol either.
+	//
+	// Registering the channel here only QUEUES a signal (it is buffered);
+	// the handler below still starts when the rest of the daemon is up, and
+	// reads whatever arrived in the meantime.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+
 	if _, err := spawnEnsure("main", true); err != nil {
 		emitLogf("daemon", "error", "ensure main: %v", err)
 	}
@@ -237,8 +253,6 @@ func daemonMain() {
 	// exactly when nobody is attached (see daemon/resources.go).
 	go resourcesLoop()
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	// Closed once the shutdown sequence has actually finished. srv.Stop()
 	// below releases srv.Serve() in the main goroutine, and a main goroutine
 	// that returns ends the PROCESS — killing this handler mid-fcStopAll and

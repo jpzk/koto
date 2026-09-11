@@ -47,6 +47,8 @@ package main
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -331,15 +333,69 @@ func foldASCII(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r < 0x80:
+	// Folded by GRAPHEME CLUSTER, not by rune (audit 2026-09-11 L150).
+	// monoFrame runs AFTER layout and wrapping, so whatever this produces has
+	// to occupy exactly the width the layout already measured — and the layout
+	// measures a ZWJ sequence (👨‍👩‍👧, 🧑‍💻) as ONE cluster of about two
+	// cells, while folding rune by rune emitted a two-character replacement
+	// for each emoji COMPONENT and dropped the joiners: a family of three came
+	// out six cells wide in a row budgeted for two, which overruns the pane
+	// and wraps the terminal. The daemon's sanitizer preserves printable emoji
+	// and U+200D deliberately, so this input reaches here.
+	for i := 0; i < len(s); {
+		r, sz := utf8.DecodeRuneInString(s[i:])
+		if r < 0x80 {
 			b.WriteRune(r)
-		default:
-			b.WriteString(foldRune(r))
+			i += sz
+			continue
 		}
+		// The cluster is this rune plus everything that measures as part of
+		// it: joiners, variation selectors, combining marks and the runes a
+		// joiner binds on. ansi.StringWidth over the span is the same
+		// authority the layout used, so the replacement is the width the row
+		// was budgeted for.
+		j := i + sz
+		for j < len(s) {
+			nr, nsz := utf8.DecodeRuneInString(s[j:])
+			if !clusterContinues(nr) {
+				break
+			}
+			j += nsz
+			// A joiner binds the rune after it into the same cluster.
+			if nr == 0x200d && j < len(s) {
+				_, bsz := utf8.DecodeRuneInString(s[j:])
+				j += bsz
+			}
+		}
+		if j > i+sz {
+			w := ansi.StringWidth(s[i:j])
+			if w > 0 {
+				b.WriteString(strings.Repeat("?", w))
+			}
+			i = j
+			continue
+		}
+		b.WriteString(foldRune(r))
+		i += sz
 	}
 	return b.String()
+}
+
+// clusterContinues reports whether r attaches to the preceding rune rather
+// than starting a new grapheme cluster: the zero-width joiner, variation
+// selectors (including the supplementary ones), and combining marks.
+func clusterContinues(r rune) bool {
+	switch {
+	case r == 0x200d: // ZERO WIDTH JOINER
+		return true
+	case r >= 0xfe00 && r <= 0xfe0f: // variation selectors
+		return true
+	case r >= 0xe0100 && r <= 0xe01ef: // variation selectors supplement
+		return true
+	case r >= 0x1f3fb && r <= 0x1f3ff: // emoji skin-tone modifiers
+		return true
+	}
+	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r)
 }
 
 // foldRune is foldASCII for one rune.

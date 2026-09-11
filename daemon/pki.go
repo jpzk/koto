@@ -57,7 +57,19 @@ func pkiInit(credsDir string, serverSANs []string) error {
 	if created {
 		fmt.Printf("new CA written to %s\n", filepath.Join(credsDir, "ca.crt"))
 	}
-	if _, err := os.Stat(filepath.Join(credsDir, "server.crt")); err != nil {
+	// The server certificate is reissued when it is MISSING or no longer
+	// usable, not only when the file is absent (audit 2026-09-11 L144). The
+	// test was os.Stat alone, and the setup step's detector agrees with it —
+	// so an expired certificate (they are minted for a year), one that no
+	// longer chains to the current CA, or an unparseable pair, survived every
+	// `koto setup` and every `koto pki init` untouched. What the operator then
+	// gets is a daemon whose clients all refuse it, from a setup run that
+	// reported success, with `koto pki server` as the fix nothing had told
+	// them to run.
+	if why := pkiServerCertNeedsReissue(credsDir, caCert); why != "" {
+		if why != "absent" {
+			fmt.Printf("reissuing server.crt: %s\n", why)
+		}
 		if err := pkiServerCert(credsDir, caKey, caCert, serverSANs); err != nil {
 			return err
 		}
@@ -75,6 +87,46 @@ func pkiInit(credsDir string, serverSANs []string) error {
 	}
 	return nil
 }
+
+// pkiServerCertNeedsReissue reports why the server certificate must be minted
+// again, or "" when the existing one is fine. Deliberately generous about what
+// counts: this runs in a provisioning path, where reissuing a healthy-looking
+// certificate costs a few milliseconds and keeping a broken one costs an
+// outage. SANs are NOT checked here — changing them is the operator's explicit
+// `koto pki server -san …`, and silently narrowing or widening what the daemon
+// answers to would be a different decision from renewal.
+func pkiServerCertNeedsReissue(credsDir string, caCert *x509.Certificate) string {
+	crtPath := filepath.Join(credsDir, "server.crt")
+	if _, err := os.Stat(crtPath); err != nil {
+		return "absent"
+	}
+	if _, err := os.Stat(filepath.Join(credsDir, "server.key")); err != nil {
+		return "server.key is missing"
+	}
+	cert, err := pkiReadCert(crtPath)
+	if err != nil {
+		return fmt.Sprintf("unreadable (%v)", err)
+	}
+	now := time.Now()
+	switch {
+	case now.After(cert.NotAfter):
+		return fmt.Sprintf("expired on %s", cert.NotAfter.Format("2006-01-02"))
+	case now.Add(pkiRenewWindow).After(cert.NotAfter):
+		return fmt.Sprintf("expires on %s, inside the %s renewal window",
+			cert.NotAfter.Format("2006-01-02"), pkiRenewWindow)
+	case now.Before(cert.NotBefore):
+		return "not valid yet (check the host clock)"
+	}
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		return "does not chain to this CA"
+	}
+	return ""
+}
+
+// pkiRenewWindow is how long before expiry a provisioning run renews. Long
+// enough that an operator who runs setup even twice a year never meets an
+// expired certificate.
+const pkiRenewWindow = 30 * 24 * time.Hour
 
 // pkiEnsureCA loads the CA, creating it only when absent.
 func pkiEnsureCA(credsDir string) (*ecdsa.PrivateKey, *x509.Certificate, bool, error) {
