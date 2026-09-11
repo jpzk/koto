@@ -17,6 +17,7 @@ package main
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -103,16 +104,29 @@ func scrubVTMode(s string, strict bool) string {
 // separators (a rendered row must stay one frame row). ZWJ (U+200D) stays —
 // it's load-bearing inside emoji, and on its own it only joins.
 func isHostileFormat(r rune) bool {
-	switch r {
-	case 0x200b, // ZERO WIDTH SPACE
-		0x200e, 0x200f, // LRM, RLM
-		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
-		0x2060,                         // WORD JOINER
-		0x2066, 0x2067, 0x2068, 0x2069, // LRI, RLI, FSI, PDI
-		0x061c,         // ARABIC LETTER MARK
-		0xfeff,         // BOM / ZERO WIDTH NO-BREAK SPACE
-		0x2028, 0x2029: // LINE SEPARATOR, PARAGRAPH SEPARATOR
+	// Byte-for-byte the policy in daemon/sanitize.go's isBidiOrFormat. The two
+	// have to agree: the daemon guards the chat path and this guards the shell
+	// pane, and a rune only one of them drops reaches the operator's terminal
+	// through the other (audit M157).
+	//
+	// ZWJ and ZWNJ stay — load-bearing inside emoji clusters and Persian/Indic
+	// word separation respectively, and neither can move the cursor, reorder
+	// anything or hide anything. Zl/Zp are listed because a rendered row must
+	// stay one row, and they are not format characters by category.
+	//
+	// The rest comes from Unicode's own tables rather than a list somebody has
+	// to remember to extend: Cf covers the bidi overrides and isolates, the
+	// zero-width set, the BOM, the Arabic marks and the whole TAG block
+	// (U+E0000–U+E007F, which encodes arbitrary ASCII invisibly);
+	// Other_Default_Ignorable_Code_Point covers the invisible runes that are
+	// not Cf — U+034F, U+2065, the Hangul fillers — which is exactly where the
+	// old fourteen-rune list leaked. Variation selectors are in neither, so
+	// emoji presentation survives.
+	if r == 0x200d || r == 0x200c {
+		return false
+	}
+	if r == 0x2028 || r == 0x2029 {
 		return true
 	}
-	return false
+	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // sanitize neutralizes terminal control/escape injection in untrusted sidecar
@@ -261,18 +262,43 @@ func sgrStyleCode(n int) bool {
 // excluded — it's load-bearing for emoji grapheme clusters and cannot move the
 // cursor.
 func isBidiOrFormat(r rune) bool {
-	switch r {
-	case 0x200b, // ZERO WIDTH SPACE
-		0x200e, 0x200f, // LRM, RLM
-		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
-		0x2060,                         // WORD JOINER
-		0x2066, 0x2067, 0x2068, 0x2069, // LRI, RLI, FSI, PDI
-		0x061c,         // ARABIC LETTER MARK
-		0xfeff,         // BOM / ZERO WIDTH NO-BREAK SPACE
-		0x2028, 0x2029: // LINE SEPARATOR, PARAGRAPH SEPARATOR
+	// Two exemptions, both for the same reason: they are load-bearing inside
+	// real text and neither can move the cursor, reorder anything, or hide
+	// anything. ZWJ joins emoji into one grapheme cluster; ZWNJ is what
+	// separates Persian and Indic words that would otherwise ligature — its
+	// effect is to make text look MORE separated, which is the wrong direction
+	// for a spoof.
+	if r == 0x200d || r == 0x200c {
+		return false
+	}
+	// Zl/Zp. Not format characters by category, but a rendered line must stay
+	// one line, so they are listed rather than derived.
+	if r == 0x2028 || r == 0x2029 {
 		return true
 	}
-	return false
+	// Everything else comes from Unicode's own tables rather than a list
+	// somebody has to remember to extend (audit M157). The hand-maintained set
+	// this replaces named fourteen runes and missed, among others, U+00AD SOFT
+	// HYPHEN, U+034F COMBINING GRAPHEME JOINER, U+180E MONGOLIAN VOWEL
+	// SEPARATOR, the invisible operators U+2061–U+2064, U+2065, the Hangul
+	// fillers (U+115F, U+1160, U+3164 — blank but not space), and the whole
+	// TAG block U+E0000–U+E007F, which encodes arbitrary ASCII invisibly.
+	//
+	//   Cf  — every format character: the bidi overrides and isolates, the
+	//         zero-width set, the BOM, the Arabic marks, the tags.
+	//   Other_Default_Ignorable_Code_Point — the ones that are invisible
+	//         without being Cf, which is exactly where the hand list leaked.
+	//
+	// Variation selectors are in NEITHER (they are Mn, carrying the
+	// Variation_Selector property), so emoji presentation survives — checked
+	// against U+FE00, U+FE0F and U+E0100 rather than assumed.
+	//
+	// The cost is stated rather than hidden: Cf also holds the Arabic
+	// number-sign prefixes (U+0600–U+0605, U+06DD, U+08E2), so text using them
+	// loses a rendering hint. That is the same trade the old list already made
+	// for ZWSP and the bidi marks — invisible characters do not get to stay on
+	// the grounds that some of them are innocent.
+	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
 }
 
 // sanitizeEvent scrubs every free-text field of an outbound event. Group, ID,
