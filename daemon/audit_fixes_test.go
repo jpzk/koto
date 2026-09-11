@@ -2536,16 +2536,22 @@ func TestSendPayloadsAreBounded(t *testing.T) {
 		}
 		queuesMu.Unlock()
 	})
-	prev := turnFn
-	turnFn = func(string, string, string) error { select {} } // never retires a turn
-	t.Cleanup(func() { turnFn = prev })
+	// Pre-create the queues so enqueue finds them and starts NO worker: a
+	// worker would drain a job and release its bytes, which is correct
+	// behaviour but makes the accounting race the assertions.
+	queuesMu.Lock()
+	for i := 0; i < 64; i++ {
+		queues[sessKey(g, fmt.Sprintf("s%d", i))] = make(chan sendJob, sendQueueDepth)
+	}
+	queuesMu.Unlock()
 
 	// One oversized message is refused outright.
-	if _, err := enqueueSend(g, "s", strings.Repeat("x", sendMsgMax+1)); err == nil {
+	if _, err := enqueueSend(g, "s0", strings.Repeat("x", sendMsgMax+1)); err == nil {
 		t.Fatal("an oversized message was accepted")
 	}
 
-	// Many sessions, each under the per-message cap, are bounded in aggregate.
+	// Many sessions, each message under the per-message cap, are bounded in
+	// aggregate — the point being that per-session depth does not bound this.
 	chunk := strings.Repeat("x", sendMsgMax)
 	accepted := 0
 	for i := 0; i < 64; i++ {
@@ -2565,14 +2571,21 @@ func TestSendPayloadsAreBounded(t *testing.T) {
 	if accepted == 64 {
 		t.Fatal("the aggregate cap never bound")
 	}
+	if want := sendQueuedBytesMax / sendMsgMax; accepted != want {
+		t.Fatalf("%d sends admitted, want exactly %d (%d MiB of %d MiB)",
+			accepted, want, accepted, sendQueuedBytesMax>>20)
+	}
 
-	// Draining gives the budget back.
+	// Draining gives the budget back, so the next send fits again.
 	dropQueued(g)
 	queuesMu.Lock()
 	after := groupQueuedBytes[g]
 	queuesMu.Unlock()
-	if after >= held {
-		t.Fatalf("draining released nothing: %d then %d", held, after)
+	if after != 0 {
+		t.Fatalf("draining left %d bytes charged", after)
+	}
+	if _, err := enqueueSend(g, "s0", chunk); err != nil {
+		t.Fatalf("a send after the drain was refused: %v", err)
 	}
 }
 
