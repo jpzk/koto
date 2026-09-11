@@ -1809,3 +1809,25 @@ which the finding was right to call out separately: reslicing kept the largest
 backing array the daemon had ever needed for the life of the process, so a
 burst's peak capacity was retained even after its samples aged out.
 `TestTokSamplesArePrunedWithoutAReader`.
+
+### M97 — ctl ask can substitute another session's response (`daemon/ctl_cli.go`) — **fixed for the cross-session case; the same-session case named**
+
+Real. `SubscribeGroup` carries the whole GROUP — every session of it — and
+`ctlAsk` started capturing at the first `prompt` whose text equalled its own
+and stopped at the first unqualified `turn_end`. A client with send access to
+the group could pre-stage or race an identical prompt in a DIFFERENT session
+and hand the victim's synchronous command the wrong conversation's output,
+leaving the intended turn unconsumed.
+
+Both the start and the end are now qualified by session, which the events
+already carry, with the default session's three spellings (`""`, `-`,
+`default`) folded together so the filter matches what the daemon stamps.
+
+**Named, not pretended away:** two IDENTICAL prompts queued back to back in the
+SAME session remain indistinguishable on the wire. Within one session the
+daemon serializes turns, so the next matching `prompt` is this turn under
+ordinary use — but separating a deliberate duplicate needs a server-issued turn
+id propagated onto every lifecycle event, which is a proto change and a
+contract change for every client. The cross-session substitution, which is the
+part another principal can cause, is closed.
+`TestAskSessionNormalization`.
