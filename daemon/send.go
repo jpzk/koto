@@ -303,6 +303,17 @@ drain:
 		activityTurnDelivering(g)
 	}
 	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB); err != nil {
+		// An error here is an AMBIGUOUS delivery, not a proven non-delivery.
+		// fc-agent starts runTurn BEFORE it replies, so a transport failure,
+		// a lost response or a deadline all leave a turn possibly running in
+		// the guest, writing to this slot's stream. The deferred releaseSlot
+		// would then hand the slot to another session while that writer is
+		// still live — the exact interleaving slots exist to prevent (audit
+		// M61). Quarantine instead, which is what the stall path already does
+		// for the same reason: the slot comes back when the VM's death proves
+		// no writer survived (releaseGroupQuarantine), not before.
+		quarantineSlot(hold)
+		emitLogfG("send", g, "warn", "[%s] delivery failed ambiguously (%v) — quarantining slot %d until the VM is known dead", g, err, slot)
 		return err
 	}
 	stall := time.After(turnWaitTimeout)

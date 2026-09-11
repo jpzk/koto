@@ -2182,3 +2182,39 @@ func TestStaleVMReaperIsFenced(t *testing.T) {
 		t.Fatal("a different group's VM fenced this reaper")
 	}
 }
+
+// 2026-09-11 M61: fc-agent starts the turn BEFORE it replies, so an
+// fcSendMsg error is an ambiguous delivery, not a proven non-delivery. The
+// slot must not go back into the pool while a guest-side writer may still be
+// live on its stream.
+func TestAmbiguousDeliveryQuarantinesTheSlot(t *testing.T) {
+	const g = "ambig"
+	t.Cleanup(func() {
+		slotMu.Lock()
+		for i := 0; i < groupSlots; i++ {
+			k := slotKey(g, i)
+			delete(slotBusy, k)
+			delete(slotOwner, k)
+			delete(slotQuarantined, k)
+			delete(slotGen, k)
+		}
+		slotMu.Unlock()
+	})
+	hold := acquireSlot(g, "s1")
+	quarantineSlot(hold) // what the delivery-error path now does
+	releaseSlot(hold)    // sendNow's deferred release still runs
+	if n := activeSlots(g); n != 1 {
+		t.Fatalf("the slot was returned to the pool while delivery was unresolved (active=%d)", n)
+	}
+	// The next turn gets a different slot.
+	next := acquireSlot(g, "s2")
+	if next.slot == hold.slot {
+		t.Fatalf("slot %d was reissued while quarantined", hold.slot)
+	}
+	releaseSlot(next)
+	// The VM's death is what frees it — that is the proof no writer survived.
+	releaseGroupQuarantine(g)
+	if n := activeSlots(g); n != 0 {
+		t.Fatalf("activeSlots = %d after the VM died, want 0", n)
+	}
+}

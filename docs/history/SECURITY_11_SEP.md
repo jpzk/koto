@@ -1077,3 +1077,20 @@ when `fcGenSuperseded` says a different VM is registered. Deliberately not "no
 VM registered" — an ordinary stop or crash with no replacement still needs those
 cleanups, and they are what wakes a turn parked on a `[[turn_end]]` that can
 never come. `TestStaleVMReaperIsFenced`.
+
+### M61 — Cross-session stream confusion after ambiguous agent delivery (`daemon/queue.go`) — **fixed**
+
+Real, and the asymmetry is the point: fc-agent starts `runTurn` BEFORE it
+sends its RPC response, so an `fcSendMsg` error — transport failure, lost
+response, deadline — does not prove the turn was not accepted. `sendNow`
+returned on that error and its deferred `releaseSlot` put the slot straight
+back in the pool, where another session could take it while a guest-side
+writer was still live on that stream. That is the exact interleaving slots
+exist to prevent.
+
+The stall path already had the right answer for the same reason, so the
+delivery error now takes it too: quarantine, not release. The slot comes back
+when the VM's death proves no writer survived
+(`releaseGroupQuarantine`), not before. With M40's holds in place this composes
+correctly — `sendNow`'s deferred release still runs and is correctly a no-op.
+`TestAmbiguousDeliveryQuarantinesTheSlot`.
