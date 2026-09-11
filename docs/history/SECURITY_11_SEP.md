@@ -1518,3 +1518,29 @@ transcript, whose growth is bounded by `fcLogSinkWait` and the 1 GiB ceiling.
 not registered in `groups.json`. Creating a group is `spawnEnsure`, reachable
 only from the three admission points, and the `Spawn` RPC now enforces
 `ctlMaxSpawn` as well. Noted so the report is not mistaken for a separate bug.
+
+### M86 — `koto ctl shell` forwards guest terminal-control bytes to the operator terminal (`daemon/ctl_cli.go`) — **fixed**
+
+Real, and the gap is exactly where the finding says: the TUI renders guest pty
+bytes through a terminal EMULATOR — they become a screen grid and only safe
+cell content reaches the real terminal — while the CLI attach puts the terminal
+in raw mode and relays bytes straight to `os.Stdout`, because that is what makes
+vim, tmux and colours work. So a process in the guest could drive the
+operator's terminal directly: set the clipboard through OSC 52, retitle the
+window, or provoke a query reply, which makes the terminal write attacker-chosen
+bytes back INTO the guest's stdin.
+
+Blanket sanitization is the wrong fix — strip CSI and the attach stops being a
+terminal. `shellFilter` removes only the classes that are never needed to DRAW
+and are the ones that do harm: OSC, DCS/APC/PM/SOS (and their C1 forms), and the
+CSI queries `n` (Device Status Report) and `c` (Device Attributes). Cursor
+movement, modes, scrolling regions and SGR pass through byte for byte.
+
+Stateful, because a chunk boundary falls wherever the vsock read ended — the
+test splits a hostile sequence at every byte offset and asserts the same output
+each time — and the CSI buffer is bounded so a malformed sequence cannot buffer
+without limit or swallow the rest of the stream.
+
+The two other `os.Stdout.Write(ev.Chunk)` sites in this file need nothing:
+`runscript` is sanitized daemon-side unless `-raw` (audit M9a) and `job-tail`
+always is.

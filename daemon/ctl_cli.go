@@ -724,6 +724,7 @@ func ctlShell(group, session string) {
 		}
 	}()
 
+	var shf shellFilter
 	for {
 		frame, rerr := stream.Recv()
 		if rerr == io.EOF {
@@ -734,7 +735,13 @@ func ctlShell(group, session string) {
 		}
 		switch frame.Event {
 		case "data":
-			_, _ = os.Stdout.Write(frame.Chunk)
+			// Filtered, not relayed raw. The TUI renders these bytes through a
+			// terminal emulator; this path writes them to the operator's REAL
+			// terminal in raw mode, so a process in the guest could set the
+			// clipboard, retitle the window, or provoke a query reply that
+			// injects bytes into the pty (audit M86). shellfilter.go drops
+			// exactly those classes and passes everything an editor needs.
+			_, _ = os.Stdout.Write(shf.filter(frame.Chunk))
 		case "end":
 			restore()
 			fmt.Fprintf(os.Stderr, "\r\n[connection ended — session may still be running]\r\n")

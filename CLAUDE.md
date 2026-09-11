@@ -1055,7 +1055,13 @@ Every gRPC RPC has a `ctl` verb. Group lifecycle
 (`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, streams (`metrics`, `tail`, `logs`, `watch`), `resources`
 (host-side fleet disk/mem/cpu — see below), `sched *`, and
-admin-only `acl get|set|del` + `runscript [-raw] <group> <script>` (run a
+admin-only `acl get|set|del` + `runscript [-raw] <group> <script>`
+(and `shell <group> [session]`, whose guest pty bytes are FILTERED before they
+reach the operator's real terminal — `daemon/shellfilter.go`, audit M86: the
+TUI renders these through a terminal emulator, the CLI has none, so OSC
+(clipboard/title/hyperlink), DCS/APC/PM/SOS and the CSI queries that make a
+terminal write a reply back into the pty are dropped, while everything an
+editor needs — cursor, modes, scroll regions, SGR — passes through) (run a
 POSIX script in the group's microVM as `node`, output streamed to stdout —
 SANITIZED by default like every other guest-authored byte the daemon relays,
 since the guest authors it and a `root=yes` guest can replace `/bin/sh`; `-raw`
