@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -4821,5 +4822,149 @@ func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
 		if err := verifyArtifacts(root); err == nil {
 			t.Error("an unreadable manifest was treated as absent in a pre-release tree")
 		}
+	}
+}
+
+// 2026-09-11 M144: filterLogSession used to ReadFile the whole log, convert it
+// to a string, strings.Split it — a string header per line, every one pinning
+// the original — then strings.Join the survivors and []byte() the result: four
+// full-size allocations alive at once, against a per-file ceiling of 1 GiB, and
+// a per-session clear sweeps all eleven of a group's streams. It is streamed
+// now, and this pins both halves of that: the allocation profile, and that the
+// streamed version produces exactly what the buffered one did.
+func TestFilterLogSessionIsStreamed(t *testing.T) {
+	dir := t.TempDir()
+
+	// The rewrite must be byte-identical to the buffered implementation's
+	// output across the shapes that used to exercise its Split/Join edges:
+	// no trailing newline, an empty file, a file that is all target, a file
+	// with nothing to drop.
+	cases := []struct{ name, in, sess, want string }{
+		{"empty", "", "alpha", ""},
+		{"nothing to drop", "[[session]] beta\nx\n", "alpha", "[[session]] beta\nx\n"},
+		{"all target", "[[session]] alpha\nx\ny\n", "alpha", ""},
+		{"leading default segment", "pre\n[[session]] alpha\nx\n[[session]] -\npost\n", "alpha",
+			"pre\n[[session]] -\npost\n"},
+		{"clear the default", "pre\n[[session]] alpha\nx\n[[session]] -\npost\n", "",
+			"[[session]] alpha\nx\n"},
+		{"no trailing newline", "[[session]] beta\nlast line", "alpha", "[[session]] beta\nlast line\n"},
+		{"target last, unterminated", "[[session]] beta\nkeep\n[[session]] alpha\ndrop", "alpha",
+			"[[session]] beta\nkeep\n"},
+	}
+	for _, c := range cases {
+		p := filepath.Join(dir, "log-"+c.name)
+		if err := os.WriteFile(p, []byte(c.in), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := filterLogSession(p, c.sess); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// A stream with nothing to drop keeps its INODE: the rename bumps it, and
+	// every live tailer then reopens at EOF, losing whatever lands in the gap —
+	// a [[turn_end]] among them. A per-session clear touches all eleven of a
+	// group's streams and a session lives in a few, so this is the common case.
+	p := filepath.Join(dir, "untouched")
+	if err := os.WriteFile(p, []byte("[[session]] beta\nx\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := filterLogSession(p, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("a stream with nothing to drop was rewritten, bumping its inode")
+	}
+
+	// The finding itself: peak allocation must not scale with the file. 24 MiB
+	// of log, mostly surviving, is far too small to OOM anything — the point is
+	// the RATIO, which the old shape put at four-plus and this holds near zero.
+	big := filepath.Join(dir, "big")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const lines = 200_000
+	bw := bufio.NewWriter(f)
+	fmt.Fprintln(bw, "[[session]] alpha")
+	for i := 0; i < lines/2; i++ {
+		fmt.Fprintf(bw, "dropped line %d %s\n", i, strings.Repeat("x", 100))
+	}
+	fmt.Fprintln(bw, "[[session]] beta")
+	for i := 0; i < lines/2; i++ {
+		fmt.Fprintf(bw, "kept line %d %s\n", i, strings.Repeat("y", 100))
+	}
+	if err := bw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	size, err := os.Stat(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var m0, m1 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m0)
+	if err := filterLogSession(big, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&m1)
+	alloc := m1.TotalAlloc - m0.TotalAlloc
+	// The bound is the two 64 KiB read buffers and one write buffer, not the
+	// file: filterSessionScan hands out slices into the reader's own buffer, so
+	// not even a line is allocated. 1 MiB leaves room for the marker lines it
+	// does convert and for whatever the runtime does around the call; the old
+	// shape allocated four times the FILE.
+	if limit := uint64(1 << 20); alloc > limit {
+		t.Errorf("clearing a %d-byte log allocated %d bytes — it is not streaming", size.Size(), alloc)
+	}
+	t.Logf("clearing a %d-byte log allocated %d bytes", size.Size(), alloc)
+
+	// A line longer than the read buffer arrives in several chunks; only the
+	// first carries the decision and the rest follow it, so an unbroken
+	// megabyte streams rather than being assembled.
+	long := filepath.Join(dir, "long")
+	huge := strings.Repeat("z", 300<<10)
+	if err := os.WriteFile(long, []byte(
+		"[[session]] alpha\ndropped "+huge+"\n[[session]] beta\nkept "+huge+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := filterLogSession(long, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	lb, err := os.ReadFile(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[[session]] beta\nkept " + huge + "\n"; string(lb) != want {
+		t.Errorf("a line longer than the read buffer was mangled: got %d bytes, want %d", len(lb), len(want))
+	}
+
+	// ...and it still did the job.
+	out, err := os.ReadFile(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "dropped line") {
+		t.Error("the streamed rewrite kept the cleared session's lines")
+	}
+	if n := strings.Count(string(out), "kept line"); n != lines/2 {
+		t.Errorf("kept %d lines, want %d", n, lines/2)
 	}
 }

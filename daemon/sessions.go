@@ -22,8 +22,11 @@ package main
 // concurrently across sessions, up to groupSlots at a time per VM.
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -224,71 +227,139 @@ func parseSessionMarker(line string) (string, bool) {
 // (not offset 0), so subscribers are not flooded with a re-emit of the
 // surviving history. Clients that held lines for the cleared session drop
 // them locally (the TUI does) or catch up on their next History fetch.
+// sessionMarkerPrefix / notifyLinePrefix are the only two line shapes whose
+// TEXT filterSessionScan has to look at. Matched as bytes so an ordinary
+// transcript line — the overwhelming majority — is classified without being
+// turned into a string at all.
+var (
+	sessionMarkerPrefix = []byte("[[session]] ")
+	notifyLinePrefix    = []byte("[[notify]] ")
+)
+
+// filterSessionScan walks the log and calls emit with every byte that survives
+// a clear of session s, in order. emit may be nil for a decision-only pass.
+// Returns whether the file needs rewriting at all: any line dropped, or a
+// non-empty file whose last line has no terminator (the rewrite always
+// terminates).
+//
+// A line's session is the session of the SEGMENT it sits in — delimited by the
+// [[session]] markers sendNow writes before each turn, with everything before
+// the first marker belonging to the default session, which is exactly what a
+// pre-session log is — except a [[notify]] line, which states its own (M133).
+//
+// It reads with ReadSlice, so the slices it hands out point into the reader's
+// own buffer and nothing is allocated per line. A line longer than the buffer
+// arrives in several chunks; only the first carries the decision, and the rest
+// follow it, so an unbroken megabyte is streamed rather than assembled.
+func filterSessionScan(r *bufio.Reader, s string, emit func([]byte) error) (rewrite bool, err error) {
+	cur := ""          // segment being scanned; a log starts in the default session
+	atStart := true    // next chunk begins a line
+	survives := true   // ...of the line being scanned
+	wroteAny := false  // anything emitted at all
+	lastOut := byte(0) // last byte emitted
+	sawAny := false    // anything read at all
+	lastNL := true     // last byte READ was a terminator
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		if len(chunk) > 0 {
+			sawAny = true
+			lastNL = chunk[len(chunk)-1] == '\n'
+			if atStart {
+				text := chunk
+				if lastNL {
+					text = chunk[:len(chunk)-1]
+				}
+				survives = lineSurvives(text, s, &cur)
+				if !survives {
+					rewrite = true
+				}
+			}
+			atStart = lastNL
+			if survives && emit != nil {
+				if err := emit(chunk); err != nil {
+					return rewrite, err
+				}
+				wroteAny = true
+				lastOut = chunk[len(chunk)-1]
+			} else if survives {
+				wroteAny = true
+				lastOut = chunk[len(chunk)-1]
+			}
+		}
+		if rerr == bufio.ErrBufferFull {
+			continue
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return rewrite, rerr
+		}
+	}
+	// The rewrite always terminates its last line, so an unterminated input is
+	// itself a difference (the buffered implementation re-added the newline for
+	// the same reason).
+	if sawAny && !lastNL {
+		rewrite = true
+	}
+	if wroteAny && lastOut != '\n' && emit != nil {
+		if err := emit([]byte{'\n'}); err != nil {
+			return rewrite, err
+		}
+	}
+	return rewrite, nil
+}
+
+// lineSurvives decides one line and advances the segment cursor. Only the two
+// marker shapes are converted to strings, and both are short by construction —
+// a [[session]] line is a name, a [[notify]] line is bounded by the title and
+// message caps the parser enforces.
+func lineSurvives(text []byte, s string, cur *string) bool {
+	switch {
+	case bytes.HasPrefix(text, sessionMarkerPrefix):
+		if name, ok := parseSessionMarker(string(text)); ok {
+			*cur = name
+			return *cur != s
+		}
+	case bytes.HasPrefix(text, notifyLinePrefix):
+		if ns, ok := notifyMarkerSession(string(text)); ok {
+			return ns != s
+		}
+	}
+	return *cur != s
+}
+
 func filterLogSession(path, s string) error {
 	// Under the SAME per-path lock every append takes (logWriteLock,
 	// logtail.go). Read-rewrite-rename is a whole transaction on this file:
 	// without the lock a line appended after the snapshot is dropped by the
 	// rename, and losing a [[turn_end]] that way parks its send worker until
-	// the stall timeout (audit M81). Held across the read too, not just the
-	// write, because the snapshot is what the rename is asserting is current.
+	// the stall timeout (audit M81). Held across both passes, not just the
+	// write, because what pass one decided is what the rename asserts.
 	mu := logWriteLock(path)
 	mu.Lock()
 	defer mu.Unlock()
-	b, err := os.ReadFile(path)
+
+	scan := func(emit func([]byte) error) (bool, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
+		return filterSessionScan(bufio.NewReaderSize(f, 64<<10), s, emit)
+	}
+
+	needed, err := scan(nil)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	cur := "" // session of the segment being scanned; log starts in default
-	var out []string
-	for _, line := range strings.Split(string(b), "\n") {
-		if name, ok := parseSessionMarker(line); ok {
-			cur = name
-			if cur == s {
-				continue // drop the target's own marker too
-			}
-			out = append(out, line)
-			continue
-		}
-		// A [[notify]] line states its OWN session and is appended to the
-		// group stream out-of-band, with no [[session]] marker around it
-		// (audit M133). Judging it by the enclosing segment was wrong in both
-		// directions: the group stream carries no [[session]] markers at all,
-		// so clearing a NAMED session kept every one of its notifications —
-		// title and message intact, and History replays them as notification
-		// events — while clearing the DEFAULT session swept away the
-		// notifications of every other conversation in the group.
-		if ns, ok := notifyMarkerSession(line); ok {
-			if ns == s {
-				continue
-			}
-			out = append(out, line)
-			continue
-		}
-		if cur == s {
-			continue
-		}
-		out = append(out, line)
-	}
-	content := strings.Join(out, "\n")
-	// Splitting a \n-terminated file leaves a final "" element that the join
-	// restores; if the tail segment was dropped, re-terminate explicitly so
-	// the next appended line starts fresh.
-	if content != "" && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-	// Nothing dropped → do not rewrite. The rename bumps the inode, which
-	// makes every live tailer of this file reopen at EOF — bytes landing in
-	// the gap (including a [[turn_end]]) are lost to the live view, stalling
-	// a healthy turn for the full wait window. A per-session clear sweeps all
-	// of the group's streams, and a session's segments live in only a few of
-	// them; the rest must pass through untouched, especially the ones an
-	// ACTIVE turn is writing this instant.
-	if content == string(b) {
+	if !needed {
 		return nil
 	}
+
 	// A uniquely named temp, not "<path>.tmp": two clears of the same group
 	// race through a shared name and can install each other's stale content.
 	// The lock above serializes clears of one STREAM, but a group has ten, and
@@ -298,15 +369,23 @@ func filterLogSession(path, s string) error {
 		return err
 	}
 	name := tmp.Name()
-	if _, err := tmp.WriteString(content); err != nil {
+	fail := func(e error) error {
 		tmp.Close()
 		os.Remove(name)
+		return e
+	}
+	w := bufio.NewWriterSize(tmp, 64<<10)
+	if _, err := scan(func(b []byte) error {
+		_, err := w.Write(b)
 		return err
+	}); err != nil {
+		return fail(err)
+	}
+	if err := w.Flush(); err != nil {
+		return fail(err)
 	}
 	if err := tmp.Chmod(0o600); err != nil { // keep the atomic rewrite owner-only too (M113)
-		tmp.Close()
-		os.Remove(name)
-		return err
+		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(name)
