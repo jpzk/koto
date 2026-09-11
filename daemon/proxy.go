@@ -1221,6 +1221,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// interleaved once display=summarized gave them text. Dropped; the
 			// proxy now only extracts usage/metrics from the stream.
 		}
+		// A scanner that stopped on an error relayed a TRUNCATED response and
+		// the guest sees only a stream that stops (audit 2026-09-11 L70). At
+		// 16 MiB the token limit is far past any real SSE line, so reaching it
+		// is a fact worth having in the log rather than a silent short read.
+		if err := scanner.Err(); err != nil {
+			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
+		}
 	} else {
 		data, _ := io.ReadAll(resp.Body)
 		probe.firstByte()
@@ -1359,6 +1366,13 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 			if u, ok := ev["usage"].(map[string]any); ok {
 				normalizeVeniceUsage(u, usage)
 			}
+		}
+		// A scanner that stopped on an error relayed a TRUNCATED response and
+		// the guest sees only a stream that stops (audit 2026-09-11 L70). At
+		// 16 MiB the token limit is far past any real SSE line, so reaching it
+		// is a fact worth having in the log rather than a silent short read.
+		if err := scanner.Err(); err != nil {
+			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
 		}
 	} else {
 		data, _ := io.ReadAll(resp.Body)

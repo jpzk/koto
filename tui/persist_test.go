@@ -280,3 +280,28 @@ func TestPersistedNamesAndDebugLogAreScrubbed(t *testing.T) {
 		t.Error("a restored group name put an OSC into the rendered frame")
 	}
 }
+
+// 2026-09-11 L65: the 0600 on the state file's open applies only when that
+// call CREATES it. A tui-state.json already at 0644 — copied, restored,
+// migrated, or left by an older build — kept that mode through every later
+// write, and what is written is the operator's unsubmitted input bar.
+func TestStateFilePermissionsAreRepairedOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "daemon.sock")
+	path := statePath(sock)
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saveState(sock, persistedState{Draft: "unsubmitted secret"})
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("state file is mode %04o after a write; the draft is world-readable", st.Mode().Perm())
+	}
+	// The write still happened.
+	if got := loadState(sock); got.Draft != "unsubmitted secret" {
+		t.Fatalf("draft not persisted: %q", got.Draft)
+	}
+}

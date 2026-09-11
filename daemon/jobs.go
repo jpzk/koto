@@ -54,6 +54,16 @@ var (
 // cmd is last because it's the only field that may contain runs of
 // arbitrary text; its tabs/newlines are squashed to spaces first.
 //
+// EVERY field that can reach the line is stripped of tabs and newlines,
+// INCLUDING the id (audit 2026-09-11 L72). The id comes from a directory name,
+// and the guest creates those: `mkdir $'abcdef\tdone\t0\t\t9\t0\tmake'` put a
+// forged record on the wire whose first field still passed jobIDRE, and a name
+// containing a newline produced an entire extra record with an id of the
+// guest's choosing. The id is REJECTED rather than stripped — a mangled id
+// names a directory that does not exist, so JobLogs and JobTail would resolve
+// it to nothing — which also means the ids the daemon reports are exactly the
+// ones cs-job can mint.
+//
 // EVERY field is read with a bound, and the size with stat rather than wc
 // (audit M160). All of these files are written by the WORKER — cs-job mints the
 // directory but uid 1000 owns it — and `cat` inlined whatever was there into a
@@ -65,6 +75,8 @@ const jobsListScript = `fld() { head -c 64 "$1" 2>/dev/null | tr -d '\t\n'; }
 for d in /workspace/.cs/jobs/*/; do
   [ -d "$d" ] || continue
   id=$(basename "$d")
+  case "$id" in ""|*[!A-Za-z0-9]*) continue ;; esac
+  [ ${#id} -le 32 ] || continue
   st=$(fld "$d/status"); [ -n "$st" ] || st=unknown
   rc=$(fld "$d/rc")
   sess=$(fld "$d/session")
@@ -119,6 +131,22 @@ func parseJobsTSV(out string) []JobInfo {
 			Started: started, OutSize: size, Cmd: sanitize(strings.TrimSpace(f[6])),
 		})
 	}
+	// One record per id. The script cannot emit a duplicate any more (the
+	// glob yields each directory once, and a name that could fake a row is
+	// skipped), but this is the parser for guest-authored text and a second
+	// row silently overwriting a real job's status in the tree is exactly the
+	// spoof L72 describes. First wins, so a forged row cannot displace one
+	// already read.
+	seen := make(map[string]bool, len(jobs))
+	uniq := jobs[:0]
+	for _, j := range jobs {
+		if seen[j.ID] {
+			continue
+		}
+		seen[j.ID] = true
+		uniq = append(uniq, j)
+	}
+	jobs = uniq
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].Started != jobs[j].Started {
 			return jobs[i].Started < jobs[j].Started

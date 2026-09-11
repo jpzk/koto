@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -736,6 +737,19 @@ func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) err
 	}
 	if ctx.Err() != nil {
 		return ctx.Err() // client cancelled — the normal end
+	}
+	// A scanner that stopped on an ERROR is not a tail that ended (audit
+	// 2026-09-11 L70). A job can write more than the 1 MiB token limit with no
+	// newline — the file has no trusted writer — and the loop then exits, the
+	// deferred Close kills the guest tail, and the operator's live monitoring
+	// stops. Reported as "end", the CLI returns 0 and the TUI renders a clean
+	// finish, so incomplete output reads as successfully observed.
+	if err := sc.Err(); err != nil {
+		msg := err.Error()
+		if errors.Is(err, bufio.ErrTooLong) {
+			msg = "a single log line exceeded 1 MiB — the tail stopped here, it did not end"
+		}
+		return fail("job tail: " + msg)
 	}
 	// Guest side went away (VM stopped/restarted mid-tail).
 	return stream.Send(&pb.ScriptEvent{Event: "end"})

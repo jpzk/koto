@@ -57,11 +57,21 @@ const (
 type pendingReport struct {
 	mainSession string
 	armed       time.Time
+	// gen identifies THIS arming. A delivery captures it and only ever
+	// finishes (or unclaims) a window that still carries it, so a newer
+	// delegation's window can never be replaced by an older delivery's
+	// bookkeeping — see deliverReport (audit 2026-09-11 L67).
+	gen uint64
+	// claimed marks a delivery in flight. The window used to be DELETED
+	// before the enqueue and restored on failure, which is what made an older
+	// delivery able to resurrect a superseded window into an empty map.
+	claimed bool
 }
 
 var (
 	reportMu      sync.Mutex
 	reportPending = map[string]pendingReport{}
+	reportGenSeq  uint64
 )
 
 // armLocked opens g's one-shot window, directing the eventual report into
@@ -80,7 +90,8 @@ func armLocked(g, mainSession string) bool {
 		}
 	}
 	_, had := reportPending[g]
-	reportPending[g] = pendingReport{mainSession: mainSession, armed: now}
+	reportGenSeq++
+	reportPending[g] = pendingReport{mainSession: mainSession, armed: now, gen: reportGenSeq}
 	return had
 }
 
@@ -169,12 +180,40 @@ func deliverReport(g, msg string, truncated int) error {
 		ok = false
 		emitLogfG("report", g, "warn", "[%s] report refused: reply window expired (armed >%s ago)", g, reportArmedMax)
 	}
-	if ok {
-		delete(reportPending, g)
+	inFlight := ok && p.claimed
+	if ok && !inFlight {
+		// CLAIM the window rather than consume it. Consuming meant the
+		// recovery path below had to put a window BACK, and a delivery whose
+		// window had since been superseded then restored the superseded one
+		// into an empty map — main waiting on delegation B, the window
+		// pointing at delegation A's session (audit 2026-09-11 L67). A claim
+		// gives the same one-report-per-delegation guarantee (a second
+		// concurrent report finds it claimed and is refused) without ever
+		// writing a window back.
+		p.claimed = true
+		reportPending[g] = p
 	}
 	reportMu.Unlock()
+	if inFlight {
+		return fmt.Errorf("a report for this delegation is already being delivered (one report per delegation)")
+	}
 	if !ok {
 		return fmt.Errorf("no reply pending: main must delegate with reply:true first (one report per delegation)")
+	}
+	// finish applies an outcome to the window ONLY if it is still the one this
+	// delivery claimed. A newer delegation has its own gen, so it is left
+	// alone either way.
+	finish := func(delivered bool) {
+		reportMu.Lock()
+		if cur, exists := reportPending[g]; exists && cur.gen == p.gen {
+			if delivered {
+				delete(reportPending, g)
+			} else {
+				cur.claimed = false
+				reportPending[g] = cur
+			}
+		}
+		reportMu.Unlock()
 	}
 
 	var b strings.Builder
@@ -189,17 +228,15 @@ func deliverReport(g, msg string, truncated int) error {
 		"`{\"cmd\":\"tail\",\"group\":\"%s\"}` for its full transcript.)", g)
 
 	if _, err := enqueueSend(ctlMainGroup, p.mainSession, b.String()); err != nil {
-		// Main's queue is full. Re-arm (keeping the original arm time so
-		// expiry still measures from the delegation) unless a new delegation
-		// arrived in the gap — that one wins.
-		reportMu.Lock()
-		if _, exists := reportPending[g]; !exists {
-			reportPending[g] = p
-		}
-		reportMu.Unlock()
+		// Main's queue is full. Release the claim so the peer can retry; the
+		// window keeps its original arm time, so expiry still measures from
+		// the delegation. A newer delegation that arrived in the gap wins,
+		// because finish() only touches the window it claimed.
+		finish(false)
 		emitLogfG("report", g, "warn", "[%s] report delivery failed (main queue full), window re-armed: %v", g, err)
 		return fmt.Errorf("main is backlogged, report not delivered — retry later: %v", err)
 	}
+	finish(true)
 	// Make sure the receiving conversation is listed in main's session
 	// registry: a report turn must never land in a conversation the
 	// operator's tree doesn't show (from_session may name a session that no

@@ -756,3 +756,35 @@ func TestThemeNamesRejectHostileDropInFilenames(t *testing.T) {
 		t.Errorf("theme listing carries terminal controls: %q", listing)
 	}
 }
+
+// 2026-09-11 L63: sgrExtended marks an incomplete or unknown 38/48/58
+// introducer bad WITHOUT changing its code, and sgrClearsBg treated every 48 as
+// a background setter. So `ESC[0;48m` — reset, then a 48 with no selector —
+// read as "a background was set", reassertBg skipped the theme ground, and the
+// rest of the line rendered on the terminal's default background. The daemon's
+// sanitizer deliberately preserves digit-and-semicolon SGR, malformed included,
+// so guest output reaches this.
+func TestMalformedBackgroundSGRStillReassertsTheGround(t *testing.T) {
+	for _, params := range []string{"0;48", "0;48;5", "0;48;9;1", "0;38;2;1"} {
+		if !sgrClearsBg(params) {
+			t.Errorf("ESC[%sm reads as setting a background; the theme ground would be dropped", params)
+		}
+	}
+	// A sequence that touches no background at all is not a clear either —
+	// there is nothing to reassert after it.
+	if sgrClearsBg("48") {
+		t.Error("a bare malformed 48 reads as clearing a background it never touched")
+	}
+	// A well-formed background setter is still left alone — that is what the
+	// bars, chips and the tree cursor rely on.
+	for _, params := range []string{"0;48;5;208", "0;48;2;10;20;30", "41", "0;100"} {
+		if sgrClearsBg(params) {
+			t.Errorf("ESC[%sm reads as clearing the background; the ground would overpaint a real one", params)
+		}
+	}
+	// End to end: the malformed sequence must not stop the ground coming back.
+	const set = "\x1b[48;2;1;2;3m"
+	if got := reassertBg("a\x1b[0;48mb", set); !strings.Contains(got, set) {
+		t.Errorf("reassertBg dropped the ground after a malformed 48: %q", got)
+	}
+}

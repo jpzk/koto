@@ -139,10 +139,10 @@ func TestDestroyedGroupIsForgottenCompletely(t *testing.T) {
 	m.addLine(logLine{kind: "user", group: g, text: "secret prompt"})
 	m.addLine(logLine{kind: "resp", group: g, text: "secret answer"})
 	m.addLine(logLine{kind: "user", group: other, text: "keep me"})
-	m.pushHistory(g, "rm -rf /tmp/secret")
-	m.pushHistory(other, "innocuous")
-	m.histNav[g] = 1
-	m.histDraft[g] = "half-typed secret"
+	m.pushHistory(g, "", "rm -rf /tmp/secret")
+	m.pushHistory(other, "", "innocuous")
+	m.histNav[turnKey(g, "")] = 1
+	m.histDraft[turnKey(g, "")] = "half-typed secret"
 	m.lastSeq[g] = 42
 	m.subscribed[g] = true
 	m.activity[g] = activityInfo{}
@@ -162,13 +162,13 @@ func TestDestroyedGroupIsForgottenCompletely(t *testing.T) {
 	nm, _ := m.Update(listMsg{groups: map[string]GroupInfo{other: {Running: true}}})
 	m = nm.(Model)
 
-	if h := m.promptHistory[g]; len(h) != 0 {
+	if h := m.promptHistory[turnKey(g, "")]; len(h) != 0 {
 		t.Errorf("the destroyed group's prompts are still recallable: %q", h)
 	}
-	if _, ok := m.histNav[g]; ok {
+	if _, ok := m.histNav[turnKey(g, "")]; ok {
 		t.Error("history cursor survived")
 	}
-	if d := m.histDraft[g]; d != "" {
+	if d := m.histDraft[turnKey(g, "")]; d != "" {
 		t.Errorf("an unsent draft survived: %q", d)
 	}
 	for _, l := range m.lines {
@@ -197,7 +197,7 @@ func TestDestroyedGroupIsForgottenCompletely(t *testing.T) {
 	}
 
 	// The surviving group is untouched — this is a targeted forget, not a wipe.
-	if h := m.promptHistory[other]; len(h) != 1 || h[0] != "innocuous" {
+	if h := m.promptHistory[turnKey(other, "")]; len(h) != 1 || h[0] != "innocuous" {
 		t.Errorf("the other group's prompt history was disturbed: %q", h)
 	}
 	// (Its transcript is not asserted here: the first listMsg treats every
@@ -214,17 +214,17 @@ func TestGroupClearForgetsThePrompts(t *testing.T) {
 	m.groups = map[string]GroupInfo{g: {Running: true}}
 	m.cur = g
 	m.addLine(logLine{kind: "user", group: g, text: "secret prompt"})
-	m.pushHistory(g, "a secret I typed")
-	m.histDraft[g] = "half-typed"
-	m.histNav[g] = 1
+	m.pushHistory(g, "", "a secret I typed")
+	m.histDraft[turnKey(g, "")] = "half-typed"
+	m.histNav[turnKey(g, "")] = 1
 
 	nm, _ := m.Update(daemonRespMsg{op: "clear", group: g, session: ""})
 	m = nm.(Model)
 
-	if h := m.promptHistory[g]; len(h) != 0 {
+	if h := m.promptHistory[turnKey(g, "")]; len(h) != 0 {
 		t.Errorf("a group-wide clear left the prompts recallable: %q", h)
 	}
-	if m.histDraft[g] != "" || mapHas(m.histNav, g) {
+	if m.histDraft[turnKey(g, "")] != "" || mapHas(m.histNav, turnKey(g, "")) {
 		t.Error("a group-wide clear left the history cursor/draft behind")
 	}
 	for _, l := range m.lines {

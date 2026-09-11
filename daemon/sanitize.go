@@ -301,16 +301,41 @@ func isBidiOrFormat(r rune) bool {
 	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
 }
 
+// eventTextMax bounds ONE outbound event's free text (audit 2026-09-11 L69).
+//
+// Multi-line blocks were already bounded at blockBodyMax and a live partial at
+// tailMaxLiveEvent, but a COMPLETED single line was bounded only by the tailer's
+// buffer — 8 MiB — and the guest chooses where its newlines go. That one event
+// is retained in the replay ring, served again by History, and materialised by
+// every attached TUI, which stores it, markdown-renders it, expands its tabs
+// and wraps it into viewport rows. The TUI's own budget (maxLineBytes) caps the
+// AGGREGATE, not one entry, so a single line could evict the whole transcript
+// and still be rendered.
+//
+// 1 MiB is deliberately the same number as blockBodyMax and sendMsgMax: an
+// operator's own maximum-size prompt must survive this untouched, because the
+// TUI matches its pending row against the daemon's echo byte for byte.
+const eventTextMax = 1 << 20
+
+// boundText truncates on a rune boundary and says that it did, using the same
+// marker the block parser uses so a client sees one idiom.
+func boundText(s string) string {
+	if len(s) <= eventTextMax {
+		return s
+	}
+	return truncateRunes(s, eventTextMax) + "…[truncated]"
+}
+
 // sanitizeEvent scrubs every free-text field of an outbound event. Group, ID,
 // and Event are daemon-controlled enums/identifiers and left untouched.
 func sanitizeEvent(ev Event) Event {
-	ev.Msg = sanitize(ev.Msg)
-	ev.Text = sanitize(ev.Text)
-	ev.Name = sanitize(ev.Name)
-	ev.Input = sanitize(ev.Input)
-	ev.Body = sanitize(ev.Body)
+	ev.Msg = boundText(sanitize(ev.Msg))
+	ev.Text = boundText(sanitize(ev.Text))
+	ev.Name = boundText(sanitize(ev.Name))
+	ev.Input = boundText(sanitize(ev.Input))
+	ev.Body = boundText(sanitize(ev.Body))
 	ev.Severity = sanitize(ev.Severity)
-	ev.Title = sanitize(ev.Title)
+	ev.Title = boundText(sanitize(ev.Title))
 	return ev
 }
 

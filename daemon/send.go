@@ -149,6 +149,13 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 			return
 		}
 	}
+	// A scanner that stopped on an error did not reach the end of the file: a
+	// guest line over the 1 MiB token limit ends this ten-minute tailer
+	// silently, and the agent's "output is being written to" notice then names
+	// a file nothing is following (audit 2026-09-11 L70).
+	if err := sc.Err(); err != nil {
+		emitLogfG("send", g, "warn", "bg-tail stopped early group=%s id=%s: %v", g, id, err)
+	}
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }
 
