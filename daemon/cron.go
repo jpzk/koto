@@ -123,36 +123,69 @@ func parseField(s string, lo, hi int) ([64]bool, bool, error) {
 	return mask, star, nil
 }
 
+// dateMatches applies POSIX cron's day semantics: day-of-month AND day-of-week
+// when at least one field is unrestricted (the `*` is always true), OR when
+// both are restricted.
+func (p parsedCron) dateMatches(t time.Time) bool {
+	domOK, dowOK := p.dom[t.Day()], p.dow[int(t.Weekday())]
+	if p.domStar || p.dowStar {
+		return domOK && dowOK
+	}
+	return domOK || dowOK
+}
+
 // next returns the next time strictly after `after` that matches the
-// expression, in the receiver's local time zone. Returns ok=false if no
-// match is found within 4 years (effectively unsatisfiable, e.g.
-// `0 0 30 2 *` — February 30th).
+// expression, in the receiver's local time zone. Returns ok=false if no match
+// is found within 4 years (effectively unsatisfiable, e.g. `0 0 30 2 *` —
+// February 30th; four years so a `29 2` leap-day expression still resolves).
+//
+// It advances by the LARGEST unit that cannot match, not a minute at a time
+// (audit M158). The minute-at-a-time walk had to visit every one of the ~2.1
+// million minutes in the horizon before it could answer "never" — for an
+// expression naming a date that does not exist, which the parser accepts
+// because each field is individually in range. That scan runs on the gRPC
+// handler with no budget and no cancellation, and toggleSched and the
+// due-entry rescheduling run it while holding schedLock, so it blocks every
+// scheduler operation for its duration. Skipping to the next candidate month,
+// day or hour turns the same answer into a few hundred iterations: a
+// non-matching month jumps to the 1st of the next one, a non-matching day to
+// the next midnight, a non-matching hour to the next hour.
 func (p parsedCron) next(after time.Time) (time.Time, bool) {
 	t := after.Truncate(time.Minute).Add(time.Minute)
 	end := t.Add(4 * 365 * 24 * time.Hour)
-	for ; t.Before(end); t = t.Add(time.Minute) {
-		if !p.min[t.Minute()] {
+	// Every jump below must move FORWARD. They do, for every zone reasoned
+	// through (including both sides of a DST fold), but a loop that fails to
+	// advance is the exact failure class this function is being fixed for, so
+	// the step is checked rather than trusted: anything that does not advance
+	// falls back to one minute.
+	step := func(to time.Time) time.Time {
+		if to.After(t) {
+			return to
+		}
+		return t.Add(time.Minute)
+	}
+	for t.Before(end) {
+		if !p.mon[int(t.Month())] {
+			// First minute of the next month.
+			t = step(time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location()).AddDate(0, 1, 0))
+			continue
+		}
+		if !p.dateMatches(t) {
+			// Midnight of the next day. AddDate normalises past month ends,
+			// which is also what makes the impossible dates terminate: the
+			// walk crosses months at day speed instead of minute speed.
+			t = step(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).AddDate(0, 0, 1))
 			continue
 		}
 		if !p.hour[t.Hour()] {
+			t = step(time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location()).Add(time.Hour))
 			continue
 		}
-		if !p.mon[int(t.Month())] {
+		if !p.min[t.Minute()] {
+			t = t.Add(time.Minute)
 			continue
 		}
-		domOK := p.dom[t.Day()]
-		dowOK := p.dow[int(t.Weekday())]
-		var dateOK bool
-		if p.domStar || p.dowStar {
-			// At least one is unrestricted → AND (the * field is always true).
-			dateOK = domOK && dowOK
-		} else {
-			// Both restricted → OR (POSIX cron semantics).
-			dateOK = domOK || dowOK
-		}
-		if dateOK {
-			return t, true
-		}
+		return t, true
 	}
 	return time.Time{}, false
 }
