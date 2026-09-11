@@ -408,7 +408,7 @@ func writeACLDoc(doc map[string]any) error {
 		return err
 	}
 	tmp := credFile(".acl.json.tmp")
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, credFile("acl.json"))

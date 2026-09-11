@@ -60,7 +60,7 @@ func imageExt(mime string) string {
 // and never leaks into another group.
 func uploadsDir(g string) (string, error) {
 	d := filepath.Join(vol(g), ".cs", "uploads")
-	if err := os.MkdirAll(d, 0o755); err != nil {
+	if err := os.MkdirAll(d, 0o700); err != nil {
 		return "", err
 	}
 	return d, nil
@@ -144,7 +144,7 @@ func saveImage(g string, data []byte, mime string) (string, error) {
 	name := fmt.Sprintf("img-%d%s", time.Now().UnixNano(), imageExt(mime))
 	rel := filepath.Join(".cs", "uploads", name)
 	abs := filepath.Join(vol(g), rel)
-	if err := os.WriteFile(abs, data, 0o644); err != nil {
+	if err := os.WriteFile(abs, data, 0o600); err != nil {
 		return "", err
 	}
 	emitLogfG("attach", g, "info", "image group=%s bytes=%d -> %s", g, len(data), rel)

@@ -415,7 +415,7 @@ func fcEnsureWorkspaceImg(g string) error {
 	}
 	tmpImg := filepath.Join(fcRunDir(), g+".ws.tmp")
 	_ = os.Remove(tmpImg)
-	f, err := os.OpenFile(tmpImg, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmpImg, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -431,7 +431,7 @@ func fcEnsureWorkspaceImg(g string) error {
 	if entries, err := os.ReadDir(vol(g)); err == nil && len(entries) > 0 {
 		stage = filepath.Join(fcRunDir(), g+".mig")
 		_ = os.RemoveAll(stage)
-		if err := os.MkdirAll(stage, 0o755); err != nil {
+		if err := os.MkdirAll(stage, 0o700); err != nil {
 			os.Remove(tmpImg)
 			return err
 		}
@@ -632,7 +632,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	_ = os.RemoveAll(fcSockDir(g))
 	_ = os.RemoveAll(fcJailDir(g))
 	fcCgroupRemove(g)
-	if err := os.MkdirAll(fcSockDir(g), 0o755); err != nil {
+	if err := os.MkdirAll(fcSockDir(g), 0o700); err != nil {
 		return err
 	}
 	base := fcUDS(g)
@@ -761,7 +761,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			return fail(serr)
 		}
 	} else {
-		if err := os.WriteFile(fcCfgPath(g), cb, 0o644); err != nil {
+		if err := os.WriteFile(fcCfgPath(g), cb, 0o600); err != nil {
 			console.Close()
 			return fail(err)
 		}
@@ -1077,7 +1077,7 @@ func fcConsoleSink(g string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(fcConsolePath(g), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		pr.Close()
 		pw.Close()

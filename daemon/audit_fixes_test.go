@@ -4359,3 +4359,118 @@ func TestProxyStalledRequestBodyReleasesTheSlot(t *testing.T) {
 		t.Errorf("%d of the group's in-flight slots are still held after the stall", n)
 	}
 }
+
+// 2026-09-11 M136: creation modes only govern paths this daemon creates. A
+// state tree an older koto built keeps what it was given — measured on a live
+// install: groups/ and every groups/<g>/ at 0755, every workspace.img at 0644,
+// goals.json / schedules.json / groups.json / metrics.jsonl at 0644 — and
+// MkdirAll/WriteFile/OpenFile never repair an existing mode. workspace.img is
+// the one that matters: it is the ext4 image behind /workspace, so 0644 hands
+// every transcript, session file and note the agent ever wrote to any local uid
+// that can traverse the state dir, with no daemon and no credential involved.
+func TestHardenStatePathsClearsGroupAndOtherBits(t *testing.T) {
+	home := t.TempDir()
+	prevHere, prevRoot, prevGroups, prevSched, prevGoals, prevSock, prevMetrics :=
+		HERE, ROOT, GROUPS_FILE, SCHED_FILE, GOALS_FILE, SOCK_DIR, METRICS
+	t.Cleanup(func() {
+		HERE, ROOT, GROUPS_FILE, SCHED_FILE, GOALS_FILE, SOCK_DIR, METRICS =
+			prevHere, prevRoot, prevGroups, prevSched, prevGoals, prevSock, prevMetrics
+	})
+	HERE = home
+	ROOT = filepath.Join(home, "groups")
+	GROUPS_FILE = filepath.Join(home, "groups.json")
+	SCHED_FILE = filepath.Join(home, "schedules.json")
+	GOALS_FILE = filepath.Join(home, "goals.json")
+	SOCK_DIR = filepath.Join(home, "run")
+	METRICS = filepath.Join(home, "metrics.jsonl")
+
+	// The shape an older koto leaves behind.
+	cs := filepath.Join(ROOT, "g1", ".cs")
+	if err := os.MkdirAll(filepath.Join(cs, "uploads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(SOCK_DIR, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wide := []string{
+		filepath.Join(ROOT, "g1", "workspace.img"),
+		filepath.Join(cs, "log"),
+		filepath.Join(cs, "sessions.json"),
+		filepath.Join(cs, "uploads", "note.txt"),
+		GROUPS_FILE, SCHED_FILE, GOALS_FILE, METRICS,
+	}
+	for _, p := range wide {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs := []string{ROOT, filepath.Join(ROOT, "g1"), cs, filepath.Join(cs, "uploads"), SOCK_DIR}
+	for _, d := range dirs {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A file the operator deliberately made owner-execute: the pass must not
+	// touch the owner triad while clearing the other two.
+	odd := filepath.Join(ROOT, "g1", "hook.sh")
+	if err := os.WriteFile(odd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hardenStatePaths()
+
+	for _, p := range append(append([]string{}, wide...), dirs...) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := fi.Mode().Perm(); m&0o077 != 0 {
+			t.Errorf("%s left at %04o — group/other still have access", p, m)
+		}
+	}
+	if fi, err := os.Lstat(odd); err != nil {
+		t.Fatal(err)
+	} else if m := fi.Mode().Perm(); m != 0o700 {
+		t.Errorf("hook.sh = %04o, want 0700 (owner bits preserved, the rest cleared)", m)
+	}
+
+	// Idempotent, and never widening: a second pass changes nothing, and an
+	// already-tight path is left exactly as it is.
+	tight := filepath.Join(ROOT, "g1", "secret")
+	if err := os.WriteFile(tight, []byte("x"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	hardenStatePaths()
+	if fi, err := os.Lstat(tight); err != nil {
+		t.Fatal(err)
+	} else if m := fi.Mode().Perm(); m != 0o400 {
+		t.Errorf("an already-tight file was re-moded to %04o", m)
+	}
+}
+
+// 2026-09-11 M136 (creation side): the repair pass runs at startup, so a
+// creation site that drifts back to 0644 leaks until the next restart. Pin the
+// writers themselves. Each of these files is conversation-derived content —
+// goal text and acceptance criteria, schedule prompt bodies, the group→port
+// map — and none of it has a second reader.
+func TestStateWritersCreateOwnerOnlyFiles(t *testing.T) {
+	home := t.TempDir()
+	prevGroups, prevSched := GROUPS_FILE, SCHED_FILE
+	prevSched2 := sched
+	t.Cleanup(func() { GROUPS_FILE, SCHED_FILE, sched = prevGroups, prevSched, prevSched2 })
+	GROUPS_FILE = filepath.Join(home, "groups.json")
+	SCHED_FILE = filepath.Join(home, "schedules.json")
+
+	writeGroups(map[string]int{"g1": 8787})
+	saveSched()
+
+	for _, p := range []string{GROUPS_FILE, SCHED_FILE} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := fi.Mode().Perm(); m != 0o600 {
+			t.Errorf("%s created %04o, want 0600", filepath.Base(p), m)
+		}
+	}
+}

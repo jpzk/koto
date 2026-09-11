@@ -62,7 +62,7 @@ func saveSched() {
 		emitLogf("sched", "error", "save marshal: %v", err)
 		return
 	}
-	if err := os.WriteFile(SCHED_FILE, b, 0o644); err != nil {
+	if err := os.WriteFile(SCHED_FILE, b, 0o600); err != nil {
 		emitLogf("sched", "error", "save write: %v", err)
 	}
 }

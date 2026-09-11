@@ -27,7 +27,7 @@ func readGroups() map[string]int {
 
 func writeGroups(m map[string]int) {
 	b, _ := json.Marshal(m)
-	_ = os.WriteFile(GROUPS_FILE, b, 0o644)
+	_ = os.WriteFile(GROUPS_FILE, b, 0o600)
 }
 
 // allocPort returns a stable port for g, allocating max(existing)+1 when g
