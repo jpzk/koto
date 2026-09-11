@@ -906,9 +906,35 @@ func authOAuthLogin(ac *authCtx) error {
 	before := authOAuthStamp(ac)
 	u.info("handing over to `claude auth login` — follow its prompts")
 	u.blank()
+	// The login writes a credential, so koto decides WHERE — not whatever the
+	// operator's shell happens to export (audit M165). HOME was overridden and
+	// everything else inherited, which leaves the destination decided by any
+	// variable the CLI honours ahead of it: CLAUDE_CONFIG_DIR and
+	// XDG_CONFIG_HOME are config-root overrides, and an operator who has one
+	// set for their personal use would have had `koto claude-login` write the
+	// koto token into their personal config — the precise arrangement the trust
+	// model rules out ("creds/ is dedicated, not ~/.claude … compromise can
+	// only steal the koto token, not your personal claude session").
+	//
+	// CRED_PATH goes too. It is koto's own variable rather than the CLI's, so
+	// it does not steer the write — but it steers where authOAuthPath then
+	// LOOKS, and an inherited one differing from the daemon's is exactly the
+	// "verified a different file than was written" trap this command exists to
+	// close. authDaemonEnv reads the DAEMON's value, which is the one that
+	// matters, and the check below reports a disagreement rather than
+	// discovering it after the token is on disk.
+	env := setEnv(os.Environ(), "HOME", ac.state)
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "CRED_PATH"} {
+		env = unsetEnv(env, k)
+	}
+	if want := filepath.Join(ac.state, ".claude", ".credentials.json"); authOAuthPath(ac) != want {
+		u.warn("the daemon reads its OAuth token from %s, but this login writes %s",
+			authOAuthPath(ac), want)
+		u.hint("that is a CRED_PATH in the daemon's environment; the login will succeed and the daemon will not see it")
+	}
 	cmd := exec.Command(claudeBin, "auth", "login")
 	cmd.Dir = ac.state
-	cmd.Env = setEnv(os.Environ(), "HOME", ac.state)
+	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The child owns the tty and handles its own ^C; a signal that killed us
 	// mid-login would leave a half-written credentials file behind.
@@ -1021,4 +1047,16 @@ func authStoreKey(ac *authCtx, fromStdin bool) error {
 	}
 	u.ok("stored in %s (0600); the daemon reads it from there per request", p)
 	return nil
+}
+
+// unsetEnv removes a variable from an environment slice. The mirror of setEnv
+// (userns.go), for the variables a child must NOT inherit.
+func unsetEnv(env []string, key string) []string {
+	out := env[:0:0]
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); !ok || k != key {
+			out = append(out, e)
+		}
+	}
+	return out
 }

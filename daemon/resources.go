@@ -388,8 +388,8 @@ func resSweep() {
 	}
 	resGuestMu.Unlock()
 	for _, g := range gone {
-		resForgetAlert(g)
-		resForgetAlert("cpu:" + g)
+		resForgetAlert(resSubjectDisk(g))
+		resForgetAlert(resSubjectCPU(g))
 		resLiveForget(g)
 	}
 }
@@ -443,10 +443,26 @@ const (
 
 var (
 	resAlertMu sync.Mutex
-	// resAlertLevel is the last level notified per subject ("host", or a
-	// group name). 0 = below warn, 1 = warn, 2 = critical.
+	// resAlertLevel is the last level notified per subject. 0 = below warn,
+	// 1 = warn, 2 = critical.
 	resAlertLevel = map[string]int{}
 )
+
+// Alert subjects are NAMESPACED, because they used to share one map with
+// unqualified keys: the fleet filesystem check wrote the literal "host" and
+// the per-group disk check wrote the raw group name (audit M159). validGroupName
+// accepts "host", so a group of that name and the whole host's filesystem were
+// one subject — a group disk crossing raised resAlertLevel["host"] to the same
+// level, and the next HOST filesystem crossing was then not an increase and
+// raised nothing. At 100% every guest remounts read-only and the fleet wedges,
+// which is the alert this project least wants suppressed.
+//
+// ":" is not in the group-name charset ([A-Za-z0-9][A-Za-z0-9_-]{0,31}), so a
+// "<kind>:" prefix cannot be produced by any group name.
+const resSubjectHostFS = "hostfs:"
+
+func resSubjectDisk(g string) string { return "disk:" + g }
+func resSubjectCPU(g string) string  { return "cpu:" + g }
 
 // resLevel maps a percentage to an alert level.
 func resLevel(pct float64) int {
@@ -517,7 +533,7 @@ func resCheckThresholds() {
 
 	if host.FSTotalBytes > 0 {
 		used := float64(host.FSTotalBytes-host.FSFreeBytes) / float64(host.FSTotalBytes) * 100
-		if fire, lvl := resShouldFire("host", used); fire {
+		if fire, lvl := resShouldFire(resSubjectHostFS, used); fire {
 			freeGiB := float64(host.FSFreeBytes) / (1 << 30)
 			resNotifyOperator(lvl,
 				fmt.Sprintf("Host disk %.0f%% full", used),
@@ -548,7 +564,7 @@ func resCheckThresholds() {
 		}
 		used := g.GuestDiskUsed
 		pct := resGuestDiskPct(used, g.GuestDiskAvail)
-		if fire, lvl := resShouldFire(g.Group, pct); fire {
+		if fire, lvl := resShouldFire(resSubjectDisk(g.Group), pct); fire {
 			resNotifyOperator(lvl,
 				fmt.Sprintf("Group %s disk %.0f%% full", g.Group, pct),
 				fmt.Sprintf("%s has used %.1f GiB of its %.1f GiB workspace (%.1f%%), "+
@@ -577,7 +593,7 @@ func resCheckThresholds() {
 		}
 		avg := resCPUAvgPct(rings[g.Group], resCPUAvgWindow)
 		pct := avg / (float64(g.Vcpus) * 100) * 100
-		if fire, lvl := resShouldFire("cpu:"+g.Group, pct); fire {
+		if fire, lvl := resShouldFire(resSubjectCPU(g.Group), pct); fire {
 			resNotifyOperator(lvl,
 				fmt.Sprintf("Group %s CPU %.0f%% sustained", g.Group, pct),
 				fmt.Sprintf("%s has averaged %.0f%% of its %d vCPUs for 5+ minutes — "+

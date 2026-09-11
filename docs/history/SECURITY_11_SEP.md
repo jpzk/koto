@@ -3587,3 +3587,65 @@ overflows a subscriber, asserts the exact count, drains it, and asserts the
 notice arrives **before** the next content line and resets the counter — then
 repeats the overflow to pin that a notice which cannot fit is deferred rather
 than lost.
+
+## M159 — Group name `host` aliases fleet-wide alert state — FIXED
+
+`daemon/resources.go`.
+
+**Confirmed.** `resAlertLevel` was keyed by an unqualified string: the fleet
+filesystem check wrote the literal `"host"`, the per-group disk check wrote the
+raw group name, and `validGroupName` accepts `host`. So a group of that name and
+the whole host's filesystem were **one subject** — a group disk crossing raised
+`resAlertLevel["host"]` to that level, and the next *host* filesystem crossing at
+the same severity was then not an increase and notified nobody.
+
+Which alert that suppresses matters: at 100% host filesystem every guest
+remounts read-only and the entire fleet wedges. It is the one this project least
+wants silenced, and the suppression needs no privilege beyond spawning a group
+with a particular name.
+
+**Fix:** namespace every subject — `hostfs:`, `disk:<g>`, `cpu:<g>`. `:` is
+outside the group-name charset (`[A-Za-z0-9][A-Za-z0-9_-]{0,31}`), so no group
+name can produce a subject in another namespace. The CPU subject already had a
+prefix; the disk one was the bare name, which is what collided.
+`resForgetAlert` on destroy now drops both namespaced subjects.
+
+Test: `TestAlertSubjectsCannotAliasEachOther` in `daemon/audit_fixes_test.go`
+fires a group named `host` at critical and asserts the host filesystem still
+fires, that the CPU subject is a third thing again, and that the charset cannot
+produce a colon. Verified to fail with the bare-name keying restored.
+
+## M165 — OAuth login inherits a caller-controlled credential destination — FIXED
+
+`daemon/claude_login.go`.
+
+**Confirmed in the part that is real; the second half was already fixed.** The
+login subprocess got `os.Environ()` with only `HOME` replaced, so the
+destination of a **credential** write was decided by whatever the operator's
+shell exports ahead of `HOME`. `CLAUDE_CONFIG_DIR` and `XDG_CONFIG_HOME` are
+config-root overrides: an operator who has one set for their own use would have
+had `koto claude-login` write the koto token into their personal config — the
+precise arrangement the trust model rules out (*"creds/ is dedicated, not
+~/.claude. Compromise of cs_host can only steal the koto token, not your
+personal claude session"*).
+
+**Fix:** koto decides. Those two are removed from the child's environment, along
+with `CRED_PATH` — which is koto's own variable rather than the CLI's, so it does
+not steer the write, but it steers where `authOAuthPath` then *looks*, and an
+inherited one differing from the daemon's is exactly the "verified a different
+file than was written" trap this command exists to close. Everything else passes
+through, because the child needs a PATH and a terminal type to run at all.
+
+And since `authOAuthPath` resolves through the **daemon's** `CRED_PATH`, a
+disagreement between where the daemon reads and where this login writes is now
+reported **before** the handover rather than discovered after the token is on
+disk.
+
+**Already fixed:** "preserving an arbitrary existing `state/.claude` entry allows
+the OAuth client to follow a project directory or symlink" — that is M139,
+closed earlier in this audit by `authClaudeDirCheck`, which runs immediately
+above this code.
+
+Test: `TestLoginChildEnvironmentIsDecidedByKoto` in `daemon/audit_fixes_test.go`
+asserts the three variables are gone, HOME points at the state dir, unrelated
+entries survive, and no key is duplicated.
