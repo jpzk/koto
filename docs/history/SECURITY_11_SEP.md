@@ -687,3 +687,19 @@ back when the enqueue is refused, with a 24h sweep for the one orphan that
 remains possible — a daemon restart between staging and delivery — so the
 pending-upload quota cannot be held by a file no turn will ever claim.
 `TestUploadsAreOwnedByTheirTurn`.
+
+### M41 — IPv4-mapped IPv6 loopback destinations bypass the host control-plane filter (`daemon/fcnet.go`) — **not a finding (pinned by a test)**
+
+The premise is wrong, and measurably so. `net.IP.IsLoopback` does not only
+recognize `::1`: it calls `To4()` first and, on success, tests `ip4[0] == 127`.
+The same is true of `IsPrivate` and `IsLinkLocalUnicast`. So `::ffff:127.0.0.2`
+— including the raw 16-byte form the frame filter actually sees — already
+classifies as `fcDstCtl`, and the mapped v4 IMDS address already classifies as
+link-local.
+
+Verified against the stdlib rather than reasoned about, then pinned:
+`TestMappedIPv4DestinationsClassifyAsIPv4` covers the finding's exact case plus
+the mapped forms of loopback, unspecified, IMDS, RFC1918, tailnet and public.
+The property is load-bearing and invisible in the code — `fcClassifyDst` reads
+as though it only handled the v6 spellings — which is presumably how the
+finding arose, and is reason enough for the test to exist.
