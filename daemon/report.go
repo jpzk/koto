@@ -212,6 +212,19 @@ func deliverReport(g, msg string, truncated int) error {
 // reportRequestNote is appended to a delegated task when main asks for a
 // reply, so the peer knows one is expected and how to send it (the full verb
 // doc lives in prompts/global.md, which every group carries).
+// The recipe deliberately puts the report text in a FILE and keeps the command
+// CONSTANT (audit 2026-09-11 L21). It used to ask the agent to substitute its
+// own text inside `printf '%s' '...'` — and shell single quotes cannot contain
+// a single quote, so a report whose content included one (a contraction, a
+// quoted identifier, anything an attacker-influenced summary might carry) closed
+// the string and the remainder ran as commands with the worker's authority.
+// The daemon never performs that substitution itself, so the hazard was in what
+// koto TAUGHT the agent to do — which is still koto's to fix. With the text
+// travelling through a file, nothing attacker-influenced is ever spliced into a
+// shell word.
 const reportRequestNote = "\n\n[koto] main requested a reply to this delegation. When the task is COMPLETE — " +
-	"in this turn or a later one, after any background jobs finish — report back ONCE:\n" +
-	`  printf '%s\n' "{\"cmd\":\"report\",\"msg\":\"$(printf '%s' 'your report text' | base64 -w 0)\"}" > /workspace/.cs/ctl`
+	"in this turn or a later one, after any background jobs finish — report back ONCE.\n" +
+	"Write the report to a file with your normal file tool, then run this command EXACTLY as written\n" +
+	"(it takes no substitutions — your text never goes on the command line):\n" +
+	`  printf '%s\n' "{\"cmd\":\"report\",\"msg\":\"$(base64 -w 0 < /workspace/.cs/report.txt)\"}" > /workspace/.cs/ctl` +
+	"\n  (write your report to /workspace/.cs/report.txt first)"

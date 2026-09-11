@@ -137,7 +137,18 @@ function execBash(command) {
       resolve({ error: 'bash: command must be a non-empty string' });
       return;
     }
-    const proc = spawn('bash', ['-lc', command], {
+    // -c, NOT -lc (audit 2026-09-11 L15). HOME is /workspace, so a login shell
+    // sources /workspace/.bash_profile, .bash_login and .profile before every
+    // command — and those are ordinary workspace files. Anything the agent
+    // clones, unpacks or is handed can drop one, and it then runs ahead of each
+    // later bash call with the worker's authority, able to alter what commands
+    // do and what they appear to return. The VM and the worker uid still
+    // contain it, but "content became code" is not a property to keep.
+    //
+    // Nothing is lost: PATH and the rest come from the agent's own environment
+    // (fcguest sets it explicitly and process.env carries it), so the login
+    // shell was never what made the tool work.
+    const proc = spawn('bash', ['-c', command], {
       cwd: '/workspace',
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -320,7 +331,7 @@ const TOOLS = [
     function: {
       name: 'bash',
       description:
-        'Run a shell command via bash -lc in /workspace. Returns exit_code and combined stdout+stderr. ' +
+        'Run a shell command via bash -c in /workspace. Returns exit_code and combined stdout+stderr. ' +
         `Output is capped at ${OUTPUT_CAP_BYTES} bytes (truncated flag set if hit). ` +
         `Killed after ${BASH_TIMEOUT_MS / 1000}s. Use for inspection, builds, git, etc.`,
       parameters: {

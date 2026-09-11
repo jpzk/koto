@@ -999,6 +999,19 @@ func sudoWriteIfChanged(u *setupUI, path, content, mode string) (bool, error) {
 	// os.ReadFile fails with EACCES on koto.env and every run therefore counted
 	// as "changed" and rewrote it (audit 2026-09-11 L4).
 	if cur, ok, err := sudoReadFile(path); err == nil && ok && cur == content {
+		// Same BYTES is not the same as same MODE (audit 2026-09-11 L17). The
+		// 0600 here is the confidentiality invariant for a file that can hold
+		// an API key, and it was applied only on the rewrite path — so a file
+		// whose content already matched kept whatever permissions it had, and
+		// re-running install never repaired them. An install is exactly when
+		// an operator expects the promised mode to be established.
+		if fi, serr := os.Lstat(path); serr == nil && fmt.Sprintf("%04o", fi.Mode().Perm()) != mode {
+			u.info("%s", u.dim("$ sudo chmod "+mode+" "+path))
+			if cerr := sudoRun(u, "chmod", mode, path); cerr != nil {
+				return false, fmt.Errorf("chmod %s: %w", path, cerr)
+			}
+			return true, nil
+		}
 		u.info("%s unchanged", path)
 		return false, nil
 	}

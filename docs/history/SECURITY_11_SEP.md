@@ -4181,3 +4181,145 @@ and `OpenFile` preserve an existing mode.
 The remaining claim — that an unset `KOTO_HOME` roots state at the working
 directory — is the dev-clone design, and is the same sub-claim declined under
 M136: that is tier 1 choosing where its own state lives.
+
+## L15 — Workspace-controlled Bash login startup files enable persistent worker code execution — FIXED
+
+`sidecar/venice_stream.js`, the `bash` tool.
+
+**Confirmed and demonstrated.** The tool spawned `bash -lc`. `HOME` is
+`/workspace`, so a **login** shell sources `/workspace/.bash_profile`,
+`.bash_login` and `.profile` before every command — and those are ordinary
+workspace files. Anything the agent clones, unpacks or is handed can drop one,
+and it then runs ahead of each later `bash` call with the worker's authority,
+able to change what commands do and what they appear to return. Measured: with
+a `.bash_profile` in place, `bash -lc 'echo command-output'` prints
+`STARTUP FILE RAN` first; `bash -c` prints only the command's own output.
+
+**Fix:** `bash -c`. Nothing is lost — `PATH` and the rest come from the agent's
+own environment (fcguest sets it explicitly, `process.env` carries it), so the
+login shell was never what made the tool work; verified that a custom `PATH`
+survives `-c` unchanged. The VM and the worker uid still contained this, but
+"workspace content became code" is not a property to keep.
+
+## L16 — Terminal control injection via untrusted library names — FIXED
+
+`tui/scripts.go`, `loadLibraryFile`.
+
+**Confirmed.** The check rejected path separators and a leading dot and let
+everything else through — including embedded control characters in an otherwise
+bare filename. That name goes into the `/runscript` and `/prompt` messages, and
+only `err` lines are scrubbed on the way into `addLine` (M111), so a newline
+forged extra rendered rows and an escape reached the terminal.
+
+**Fix:** a name policy (`libNameOK`), the same shape as the theme drop-in names
+in M131 — a filename is a path component *and* a rendered string, so the
+character class guards both. The refusal deliberately does not echo the rejected
+name.
+
+**Script OUTPUT, the finding's second half, is already covered**: the daemon
+sanitizes `RunScript` output by default (`chunkSanitizer`) and the TUI's
+`/runscript` never passes `raw`.
+
+Test: `TestLibraryNamesAndGroupSwitchAreValidated` in `tui/scripts_test.go`.
+
+## L17 — Unchanged credential file can remain world-readable — FIXED
+
+`daemon/install.go`, `sudoWriteIfChanged`.
+
+**Confirmed.** The `0600` is the confidentiality invariant for a file that can
+hold an API key, and it was applied only on the **rewrite** path. A file whose
+content already matched kept whatever permissions it had, and re-running install
+never repaired them — which is exactly when an operator expects the promised
+mode to be established.
+
+**Fix:** same bytes is not the same mode. When the content matches but the
+permissions do not, the helper issues `sudo chmod` and reports the change.
+
+## L18 — Stale cached transcripts remain renderable after group authorization is removed — FIXED
+
+`tui/model.go`, `/sw`.
+
+**Confirmed, in the half M155 did not cover.** `m.groups` is the authorized,
+per-identity projection, so a group whose authorization is removed leaves the
+snapshot and `forgetGroup` (M155) now drops its transcript, caches and cursor.
+But `/sw` set `m.cur` to **any** name at all, so the name stayed reachable —
+and within the window before the next `listMsg`, its cached lines rendered.
+
+**Fix:** `/sw` accepts only a group the daemon currently shows this client, and
+says so otherwise. The spawn path is unaffected (it switches directly, before
+the list refresh, and does not go through `/sw`), and so is tree selection,
+whose rows are built from `m.groups`. It also catches a typo, which used to
+switch to a blank screen with no explanation.
+
+## L19 — Unredacted tool arguments are persisted in group logs — ACCEPTED
+
+`daemon/fcturn.go`, `daemon/logparse.go`.
+
+The facts are right: the complete serialized tool input is written into
+`.cs/log.<slot>`, parsed back as `Event.Input`, and `sanitizeEvent` removes
+terminal controls rather than secrets.
+
+**Accepted, because the transcript IS the record.** The same reasoning declined
+M105: koto's audit story is that what the agent did is reconstructible, and a
+tool call's arguments are the substance of what it did — a `Bash` command line,
+a file path, a URL. Redacting them would leave an audit log that cannot answer
+the question it exists for. There is also no tractable rule for *which*
+arguments are sensitive: they are arbitrary JSON authored by a model, with no
+schema koto controls and no marker for secrecy.
+
+What actually bounds the audience is already in place and is the right layer:
+the transcript files are 0600 inside a 0700 directory under a 0750 state root
+(M136), and reading them over the wire needs an authenticated identity whose
+role grants `history`/`subscribe_group` on that group.
+
+If a deployment needs guest secrets kept out of the transcript, the lever is the
+guest's own behaviour — do not pass secrets as tool arguments — not a filter the
+daemon cannot write correctly.
+
+## L20 — Invalid provider configuration can silently route prompts to Venice — ALREADY FIXED (M148)
+
+`groupProvider` is now a thin wrapper over `groupProviderName`, which returns
+`defaultProvider` (claudesdk) for an absent, unparseable or unrecognised value —
+so the proxy, the TUI and the guest turn path give the same answer for the same
+state. The non-atomic write the finding also names was closed earlier too:
+`updateGroupConfig` holds the group's lock across read-mutate-commit and commits
+by rename. Verified rather than assumed.
+
+## L21 — Shell command injection in peer-facing report recipe — FIXED
+
+`daemon/report.go`, `reportRequestNote`.
+
+**Confirmed.** The note is an executable recipe delivered to a peer agent, and
+it asked that agent to substitute its own report text inside
+`printf '%s' '...'`. Shell single quotes cannot contain a single quote, so a
+report whose content included one — a contraction, a quoted identifier, anything
+an attacker-influenced summary might carry — closed the string and the remainder
+ran as commands with the worker's authority. The daemon never performs the
+substitution itself, so the hazard is in what koto **taught** the agent to do,
+which is still koto's to fix.
+
+**Fix:** the report text travels through a **file** and the command is
+**constant** — it takes no substitutions, so nothing attacker-influenced is ever
+spliced into a shell word. The note says so explicitly, since an agent
+improvising around a template is the failure mode being removed.
+
+## L22 — Partial-line truncation enables embedded log markers to become semantic events — FIXED
+
+`daemon/logtail.go`, `tailFile`.
+
+**Confirmed.** An over-long newline-free partial is cut to its tail, and the cut
+lands on an arbitrary byte — so whatever follows becomes the **start** of the
+line handed to `feedLine`. `turnWriter` escapes marker-like text only at genuine
+output line starts, and this start is synthetic, so a guest emitting one long
+line with `[[err]] `, `>>> `, `[[tool]] ` or a block-close marker positioned at
+the boundary had it read as framing.
+
+**Fix:** the surviving tail is prefixed with `…[line truncated] `. Nothing after
+a non-empty prefix is at position 0 any more, so no marker can match — and the
+mark is *content*, telling the operator the line was cut, which is true and was
+previously silent.
+
+Test: `TestTruncatedPartialLineCannotBecomeFraming` in
+`daemon/audit_fixes_test.go` puts all seven markers at a synthetic start,
+asserting none becomes an event or opens a parser block, that the text still
+arrives as text, and that a real marker at a real line start still frames.

@@ -5057,7 +5057,20 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		return daemonCmd(m.sock, "spawn", g, extra)
 	}
 	if strings.HasPrefix(v, "/sw ") {
-		m.cur = strings.TrimSpace(v[4:])
+		// Only a group the daemon currently shows us (audit 2026-09-11 L18).
+		// m.groups is the authorized, per-identity projection, so a group whose
+		// authorization was removed — or that never existed — is no longer a
+		// name this client will switch to. forgetGroup already drops the cached
+		// transcript when a group leaves the snapshot (L155/M155); this closes
+		// the other half, where /sw selected the name regardless and the stale
+		// view was rendered by group name alone. It also catches a typo, which
+		// used to switch to an empty screen with no explanation.
+		want := strings.TrimSpace(v[4:])
+		if _, ok := m.groups[want]; !ok {
+			m.addLine(logLine{kind: "err", text: fmt.Sprintf("no such group %q (/ls to refresh)", want)})
+			return nil
+		}
+		m.cur = want
 		m.clearUnread(m.cur, m.activeSession(m.cur))
 		m.refreshLog()
 		m.syncLogScope()
