@@ -191,21 +191,82 @@ func requireArtifacts(root string, u *setupUI) error {
 //     committed but empty until the first release. It is now SAID OUT LOUD
 //     rather than passing silently, because "nothing was verified" and
 //     "everything verified" should not look the same to an operator.
+//
+// Both of those exceptions are scoped to "no release exists yet" (audit M142).
+// Before this they were unconditional, which made the check switchable off
+// from the outside: delete the manifest, truncate it, or drop
+// the two lines that matter, and an install of tampered binaries into
+// /usr/local/bin became a warning the operator scrolls past. dist/VERSION says
+// which world we are in, and it is committed alongside the manifest — so once a
+// release exists, koto and koto-tui MUST be covered, and a manifest that is
+// missing or unreadable is a refusal rather than a shrug.
+//
+// Only those two, still: vmlinux and rootfs.img embed build timestamps and
+// resolved package versions, so `make build` legitimately produces bytes the
+// published manifest cannot match, and firecracker has its own pinned checksum
+// in build-firecracker.sh. Holding the non-reproducing artifacts to a published
+// hash would break the build-from-source route the project offers on purpose.
 func verifyArtifacts(root string) error { return verifyArtifactsUI(root, nil) }
 
+// reproducibleArtifacts are the ones a published manifest must vouch for: the
+// two binaries built with CGO_ENABLED=0, -trimpath and a digest-pinned image,
+// and the two that land root-owned on PATH.
+var reproducibleArtifacts = []string{"koto", "koto-tui"}
+
+// distReleased reports whether this tree carries a published release, i.e.
+// whether there is a manifest to expect entries in. Mirrors the Makefile's
+// `fetch` guard: dist/VERSION absent, empty or "unreleased" means no.
+func distReleased(root string) bool {
+	b, err := os.ReadFile(filepath.Join(root, "dist", "VERSION"))
+	if err != nil {
+		return false
+	}
+	v := strings.TrimSpace(string(b))
+	return v != "" && v != "unreleased"
+}
+
 func verifyArtifactsUI(root string, u *setupUI) error {
+	released := distReleased(root)
 	b, err := os.ReadFile(filepath.Join(root, "dist", "artifacts.sha256"))
 	if err != nil {
+		// An unreadable manifest is NOT an absent one. A permission error or a
+		// short read on a file that is there says something is wrong with the
+		// tree, and answering it by installing unverified is the failure the
+		// manifest exists to prevent.
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("dist/artifacts.sha256 exists but cannot be read: %w\n"+
+				"  refusing to install unverified artifacts — fix the file (or `git checkout dist/artifacts.sha256`)", err)
+		}
+		if released {
+			return fmt.Errorf("no dist/artifacts.sha256 in %s, but dist/VERSION names a release\n"+
+				"  the manifest is committed to the repo and is what makes a fetched artifact trustworthy —\n"+
+				"  restore it with `git checkout dist/artifacts.sha256` and re-run", root)
+		}
 		if u != nil {
 			u.warn("no dist/artifacts.sha256 in %s — installing artifacts unverified", root)
 		}
-		return nil // no manifest → nothing to hold the tree to
+		return nil // pre-release tree → nothing to hold it to
 	}
 	want := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 2 && !strings.HasPrefix(f[0], "#") {
 			want[strings.TrimPrefix(f[1], "*")] = strings.ToLower(f[0])
+		}
+	}
+	if released {
+		var uncovered []string
+		for _, a := range reproducibleArtifacts {
+			if _, ok := want[a]; !ok {
+				uncovered = append(uncovered, a)
+			}
+		}
+		if len(uncovered) > 0 {
+			return fmt.Errorf("dist/artifacts.sha256 has no entry for %s, but dist/VERSION names a release\n"+
+				"  those are the reproducible artifacts and the ones installed root-owned onto PATH —\n"+
+				"  a manifest that does not cover them verifies nothing that matters.\n"+
+				"  restore it with `git checkout dist/artifacts.sha256` and re-run",
+				strings.Join(uncovered, " and "))
 		}
 	}
 	checked, skipped := 0, []string{}

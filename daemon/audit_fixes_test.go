@@ -4711,3 +4711,115 @@ func TestSanitizeKeepsStylingAndDropsDeceptiveSGR(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M142: the manifest's two documented non-failures — no manifest,
+// and a manifest with no entries — were unconditional, which made the only
+// integrity check switchable off from outside: delete the file, truncate it, or
+// drop the two lines that matter, and installing tampered binaries root-owned
+// into /usr/local/bin became a warning the operator scrolls past. dist/VERSION
+// is committed beside the manifest and says which world the tree is in, so the
+// exceptions are now scoped to "no release exists yet".
+func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fcassets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sums := map[string]string{}
+	for _, a := range artifacts {
+		p := filepath.Join(root, a)
+		if err := os.WriteFile(p, []byte("content of "+a), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s, err := fileSHA256(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sums[a] = s
+	}
+	manifestPath := filepath.Join(root, "dist", "artifacts.sha256")
+	versionPath := filepath.Join(root, "dist", "VERSION")
+	writeManifest := func(entries ...string) {
+		body := "# koto artifact manifest\n" + strings.Join(entries, "\n") + "\n"
+		if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full := []string{}
+	for _, a := range artifacts {
+		full = append(full, sums[a]+"  "+a)
+	}
+
+	// --- a pre-release tree keeps every exception it had -------------------
+	for _, v := range []string{"", "unreleased", "  unreleased \n"} {
+		if err := os.WriteFile(versionPath, []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeManifest()
+		if err := verifyArtifacts(root); err != nil {
+			t.Errorf("VERSION=%q: an entry-less manifest was fatal: %v", v, err)
+		}
+		os.Remove(manifestPath)
+		if err := verifyArtifacts(root); err != nil {
+			t.Errorf("VERSION=%q: a missing manifest was fatal: %v", v, err)
+		}
+	}
+	os.Remove(versionPath)
+	writeManifest()
+	if err := verifyArtifacts(root); err != nil {
+		t.Errorf("no VERSION at all: an entry-less manifest was fatal: %v", err)
+	}
+
+	// --- a released tree does not ------------------------------------------
+	if err := os.WriteFile(versionPath, []byte("0.4.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeManifest(full...)
+	if err := verifyArtifacts(root); err != nil {
+		t.Fatalf("a released tree with a full manifest was refused: %v", err)
+	}
+
+	// The non-reproducing artifacts may still go uncovered — that is the
+	// build-from-source route, not an attack.
+	writeManifest(sums["koto"]+"  koto", sums["koto-tui"]+"  koto-tui")
+	if err := verifyArtifacts(root); err != nil {
+		t.Errorf("a released tree was refused for not covering vmlinux/rootfs: %v", err)
+	}
+
+	// The two that land on PATH may not.
+	writeManifest(sums["koto"] + "  koto")
+	err := verifyArtifacts(root)
+	if err == nil {
+		t.Error("a released tree accepted a manifest with no entry for koto-tui")
+	} else if !strings.Contains(err.Error(), "koto-tui") {
+		t.Errorf("the refusal does not name the uncovered artifact: %v", err)
+	}
+	writeManifest()
+	if err := verifyArtifacts(root); err == nil {
+		t.Error("a released tree accepted an entry-less manifest")
+	}
+	os.Remove(manifestPath)
+	if err := verifyArtifacts(root); err == nil {
+		t.Error("a released tree accepted a missing manifest")
+	}
+
+	// An unreadable manifest is not an absent one, in either world: something
+	// is wrong with the tree, and installing unverified is the wrong answer.
+	writeManifest(full...)
+	if err := os.Chmod(manifestPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(manifestPath, 0o644) })
+	if os.Geteuid() != 0 { // root reads it regardless; skip the assertion there
+		if err := verifyArtifacts(root); err == nil {
+			t.Error("an unreadable manifest was treated as absent")
+		}
+		os.Remove(versionPath)
+		if err := verifyArtifacts(root); err == nil {
+			t.Error("an unreadable manifest was treated as absent in a pre-release tree")
+		}
+	}
+}
