@@ -2699,3 +2699,75 @@ func TestJobTailsAreBounded(t *testing.T) {
 		t.Fatal("admitted a tail past the global cap")
 	}
 }
+
+// 2026-09-11 M81: filterLogSession is a read-rewrite-rename transaction on a
+// file that append paths write concurrently. Without the per-path append lock,
+// a line appended after the snapshot is dropped by the rename — and losing a
+// [[turn_end]] that way parks its send worker until the stall timeout.
+func TestFilterLogSessionIsSerializedWithAppends(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log.0")
+	var seed strings.Builder
+	seed.WriteString("[[session]] doomed\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&seed, "doomed line %d\n", i)
+	}
+	seed.WriteString("[[session]] -\n")
+	if err := os.WriteFile(path, []byte(seed.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Appenders race the filter, through the same lock the filter now takes.
+	var wg sync.WaitGroup
+	const appends = 200
+	for i := 0; i < appends; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			line := []byte(fmt.Sprintf("kept %d\n", i))
+			mu := logWriteLock(path)
+			mu.Lock()
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err == nil {
+				f.Write(line)
+				f.Close()
+			}
+			mu.Unlock()
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := filterLogSession(path, "doomed"); err != nil {
+			t.Error(err)
+		}
+	}()
+	wg.Wait()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if strings.Contains(got, "doomed line") {
+		t.Fatal("the cleared session's lines survived")
+	}
+	// Every append that completed is present: the filter cannot silently drop
+	// a line that was written before it renamed.
+	missing := 0
+	for i := 0; i < appends; i++ {
+		if !strings.Contains(got, fmt.Sprintf("kept %d\n", i)) {
+			missing++
+		}
+	}
+	if missing > 0 {
+		t.Fatalf("the filter dropped %d/%d concurrent appends", missing, appends)
+	}
+	// No shared temp file left behind.
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.Contains(e.Name(), ".clear.") || strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
