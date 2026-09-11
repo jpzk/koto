@@ -145,3 +145,46 @@ func TestErrorLinesAreScrubbed(t *testing.T) {
 		t.Fatalf("a plain error was mangled: %q", got)
 	}
 }
+
+// 2026-09-11 M122: maxLines caps the line COUNT, and nothing capped the bytes
+// behind it — 50k lines of one word is nothing, 50k lines of a megabyte each
+// is not. The daemon bounds what ARRIVES (M48, M82, the log sink); this is the
+// TUI's own retention, which those do not cover.
+func TestTranscriptRetentionIsBoundedByBytes(t *testing.T) {
+	m := &Model{groupVer: map[string]int{}, vpCache: map[string]vpCacheEntry{}}
+	big := strings.Repeat("x", 1<<20) // a 1 MiB line, the parser block cap
+	for i := 0; i < (maxLineBytes/len(big))+64; i++ {
+		m.addLine(logLine{kind: "response", group: "g", text: big})
+	}
+	if m.lineBytes > maxLineBytes {
+		t.Fatalf("retained %d bytes, budget is %d", m.lineBytes, maxLineBytes)
+	}
+	if len(m.lines) == 0 {
+		t.Fatal("the trim emptied the transcript")
+	}
+	// The counter matches what is actually held — a drift here would let the
+	// budget stop binding.
+	sum := 0
+	for _, l := range m.lines {
+		sum += len(l.text)
+	}
+	if sum != m.lineBytes {
+		t.Fatalf("counter says %d, lines hold %d", m.lineBytes, sum)
+	}
+	// Newest kept, oldest dropped: a transcript is read from the bottom.
+	m.addLine(logLine{kind: "response", group: "g", text: "the newest line"})
+	if m.lines[len(m.lines)-1].text != "the newest line" {
+		t.Fatal("the newest line was trimmed")
+	}
+	// And the line-count cap still applies on its own, for many small lines.
+	m2 := &Model{groupVer: map[string]int{}, vpCache: map[string]vpCacheEntry{}}
+	for i := 0; i < maxLines+100; i++ {
+		m2.addLine(logLine{kind: "response", group: "g", text: "short"})
+	}
+	if len(m2.lines) > maxLines {
+		t.Fatalf("retained %d lines, cap is %d", len(m2.lines), maxLines)
+	}
+	if m2.lineBytes != len(m2.lines)*len("short") {
+		t.Fatalf("counter drifted after a count trim: %d", m2.lineBytes)
+	}
+}

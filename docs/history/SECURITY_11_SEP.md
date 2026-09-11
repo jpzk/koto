@@ -2337,3 +2337,26 @@ Resolved once, and the resolved path is what runs. Cheap, and it makes the
 existing check honest. (`KOTO_CLAUDE_BIN`, which the daemon's own refresh exec
 uses, does not cover this interactive path and is not meant to — the wizard
 resolves in the operator's shell on purpose.)
+
+### M122 — Unbounded transcript retention can exhaust the operator TUI (`tui/model.go`) — **fixed**
+
+Partly closed already, by the daemon-side work in this audit: a parser block is
+capped at 1 MiB (M48), a live partial at 64 KiB on the wire (M82), and the log
+sink has a 1 MiB/s bucket and a 1 GiB ceiling. Those bound what ARRIVES.
+
+What they do not cover is the TUI's own retention, and `maxLines` caps the line
+COUNT: 50k lines of one word is nothing, 50k lines of a megabyte each is not. A
+line count times a per-line size nobody bounds is not a budget.
+
+`maxLineBytes` (64 MiB) is the second cap, kept as a running sum so it costs an
+add per append rather than a walk. Every path that mutates `m.lines` goes
+through `trimLines` now — the append, the live-batch append, and the
+history-page prepend, which REPLACES the slice wholesale and so recounts.
+Oldest-first, because a transcript is read from the bottom. The test asserts
+both caps bind independently and that the counter never drifts from what is
+actually held — a drift would silently stop the budget working.
+
+The remaining suggestions — byte-bounding the render cache, replacing string
+concatenation with builders, truncating before markdown rendering — are
+performance work on paths whose INPUT is now bounded at 1 MiB per block, and
+are not tracked here as security findings.
