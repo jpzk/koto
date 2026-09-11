@@ -39,6 +39,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -405,13 +406,19 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// handshake with a bare "tls: bad certificate". Merge instead — additive
 	// only, so an identity minted directly against the state dir is never
 	// clobbered by a stale one in the clone.
-	if err := mergeClientsAllow(filepath.Join(srcCreds, "clients.allow"),
-		filepath.Join(dstCreds, "clients.allow")); err != nil {
-		return fmt.Errorf("clients.allow: %w", err)
-	}
-	if err := mergeTokens(filepath.Join(srcCreds, "tokens.json"),
-		filepath.Join(dstCreds, "tokens.json")); err != nil {
-		return fmt.Errorf("tokens.json: %w", err)
+	//
+	// But ONLY on a first install (audit M32). Revoking a device is deleting
+	// its line from clients.allow and its entry from tokens.json; an additive
+	// merge on every upgrade put both back from a clone that predates the
+	// revocation, and the `client-*`/`token-*` files are copied too, so
+	// possession of the old certificate and token was enough to authenticate
+	// again with the old roles. An install must not undo a security action.
+	// Once the installed registries exist they are AUTHORITATIVE: the wizard
+	// mints into the state dir (`koto pki client -creds <state>/creds`), so a
+	// clone-side identity is legacy by construction. Skipped names are printed
+	// with the command that would add them back deliberately.
+	if err := seedIdentityRegistries(srcCreds, dstCreds); err != nil {
+		return err
 	}
 	if entries, err := os.ReadDir(srcCreds); err == nil {
 		for _, e := range entries {
@@ -857,6 +864,58 @@ func migrateState(o installOpts, name string) error {
 
 // mergeClientsAllow unions the fingerprint lines of two allowlists, keyed by
 // fingerprint so a name appearing twice doesn't accumulate duplicate lines.
+// seedIdentityRegistries carries the clone's client registries into the state
+// dir on a FIRST install and refuses to touch them on any later one. See the
+// call site for why.
+func seedIdentityRegistries(srcCreds, dstCreds string) error {
+	if exists(filepath.Join(dstCreds, "clients.allow")) || exists(filepath.Join(dstCreds, "tokens.json")) {
+		reportSkippedIdentities(srcCreds, dstCreds)
+		return nil
+	}
+	if err := mergeClientsAllow(filepath.Join(srcCreds, "clients.allow"),
+		filepath.Join(dstCreds, "clients.allow")); err != nil {
+		return fmt.Errorf("clients.allow: %w", err)
+	}
+	if err := mergeTokens(filepath.Join(srcCreds, "tokens.json"),
+		filepath.Join(dstCreds, "tokens.json")); err != nil {
+		return fmt.Errorf("tokens.json: %w", err)
+	}
+	return nil
+}
+
+// reportSkippedIdentities names clone-side identities the installed registry
+// does not have, without adding them. Silence here would be the worse failure
+// mode of the two: an operator who genuinely minted an identity in the clone
+// needs to know why it does not work, and one who revoked a device needs to
+// know it stayed revoked.
+func reportSkippedIdentities(srcCreds, dstCreds string) {
+	var into map[string]json.RawMessage
+	if b, err := os.ReadFile(filepath.Join(dstCreds, "tokens.json")); err == nil {
+		_ = json.Unmarshal(b, &into)
+	}
+	b, err := os.ReadFile(filepath.Join(srcCreds, "tokens.json"))
+	if err != nil {
+		return
+	}
+	var from map[string]json.RawMessage
+	if json.Unmarshal(b, &from) != nil {
+		return
+	}
+	names := make([]string, 0, len(from))
+	for name := range from {
+		if _, ok := into[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	sort.Strings(names)
+	fmt.Fprintf(os.Stderr, "  · the installed registry is authoritative; NOT importing %d clone identity/identities: %s\n",
+		len(names), strings.Join(names, ", "))
+	fmt.Fprintf(os.Stderr, "    (if one of these is wanted: koto pki client -creds %s <name>)\n", dstCreds)
+}
+
 func mergeClientsAllow(src, dst string) error {
 	if !exists(src) {
 		return nil
