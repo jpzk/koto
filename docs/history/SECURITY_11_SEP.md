@@ -1934,3 +1934,42 @@ keepalives. A deadline tuned to catch a parked tunnel would kill working ones
 intermittently, which is the worst kind of bug to attribute, and the
 per-connection cost is already bounded by the admission limit.
 `TestEgressConnectionsAreBounded`.
+
+### M105 — Tool transcript renders unredacted tool arguments (`tui/model.go`) — **not a finding**
+
+The transcript is the AUDIT LOG. `Bash $ <command>` exists so the operator can
+see what the agent actually ran, and a redacted one would defeat the purpose of
+the pane it lives in — "the operator can't tell what the agent did" is a worse
+failure than the one being described.
+
+The premise also does not hold here. The proposed disclosure is to "other users
+with legitimate transcript access", but a group's transcript is readable
+exactly by principals the ACL grants `subscribe_group`/`history` on that group
+— the same principals who can `send` to it, attach its shell, and read its
+workspace. There is no audience that can read the transcript but should not see
+what ran in it.
+
+Where a redaction rule WOULD have bitten, the boundary is elsewhere and is
+already drawn: secrets never reach an agent's tool arguments in the first place
+(the proxy holds the credentials; guests get `ANTHROPIC_API_KEY=proxied`), and
+the pre-commit scan plus `make secrets-scan` exist to keep the operator's own
+secrets out of the repository the agent works in.
+
+The one adjacent thing that IS a real problem — control characters in those
+same arguments reaching the terminal — is M73, and is fixed.
+
+### M106 — Group-scoped interrupt authorization permits cross-session turn cancellation (`daemon/grpc_server.go`) — **not a finding**
+
+The fourth report of the same shape (M4, M28, M45), and the answer does not
+change: sessions are conversations, not tenants. A caller authorized to
+`interrupt` a group can already `send` to it, attach its shell, and read its
+workspace — cancelling a turn in one of its conversations is strictly less than
+any of those.
+
+The finding is careful and correct that this is "the missing authorization
+binding" rather than injection; the disagreement is only about whether that
+binding should exist. It should not: koto's isolation boundary is the GROUP,
+and two workloads that need isolating get two groups, which costs one microVM.
+
+The genuinely wrong behaviour in this area was an interrupt hitting a turn the
+caller never observed — a race, not a permission — and that is M85, fixed.
