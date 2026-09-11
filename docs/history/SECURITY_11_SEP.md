@@ -1611,3 +1611,25 @@ a SIGINT to a successor turn's worker. Narrowing it needs the guest to report
 the turn's pid back to the daemon — a protocol change — and the window is
 small, same-session and same-caller-authority. The channel half, which is what
 actually discards a queued prompt, is closed.
+
+### M90 — Unbounded Venice transcript can exhaust a session workspace and deny turns (`sidecar/venice_stream.js`) — **fixed**
+
+Real, and the failure mode is the notable part: Venice's chat API is stateless,
+so the WHOLE transcript is replayed on every request. An unbounded one grows
+the session workspace, grows every request, and eventually exceeds the proxy's
+64 MiB body cap — at which point that session can make no further Venice turns
+at all until someone clears it. Silent up to that point, then total.
+
+`trimHistory` caps the serialized transcript at 4 MiB, far more than any Venice
+model accepts, so it discards nothing the provider would have used. Applied on
+SAVE and on LOAD, because a transcript written before the cap existed must not
+be replayed whole either.
+
+Oldest-first, which matches how the model's own context window behaves and what
+a turn is likely to need. Whole entries only, never partial — a truncated
+`tool_calls` entry without its matching `role:"tool"` reply is a malformed
+conversation the API rejects, so a naive byte cap would turn a large session
+into a broken one; the trim keeps dropping past orphaned tool replies until the
+surviving head is coherent. Verified directly against the function: a 20 MB
+transcript trims to 4.1 MB, keeps the newest turn, and leaves no leading
+orphan.
