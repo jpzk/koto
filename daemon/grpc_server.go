@@ -893,8 +893,16 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 			emitLogfG("exec", r.Group, "info", "[%s] runscript end", r.Group)
 			return stream.Send(&pb.ScriptEvent{Event: "end"})
 		case *pb.AgentFrame_Error:
-			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, k.Error)
-			return fail(k.Error)
+			// Guest-authored, so sanitized like every other byte the guest
+			// puts on this stream. The DATA frames went through
+			// newChunkSanitizer and this one did not (audit M74), which is
+			// backwards: an error is the frame a guest can produce on demand,
+			// by making the operation fail. It reaches the operator's terminal
+			// and the TUI's debug log, where nothing downstream strips control
+			// sequences.
+			msg := sanitize(k.Error)
+			emitLogfG("exec", r.Group, "warn", "[%s] runscript error: %s", r.Group, msg)
+			return fail(msg)
 		}
 	}
 }
@@ -983,8 +991,13 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 				_ = stream.Send(&pb.ShellFrame{Event: "end"})
 				return
 			case *pb.AgentFrame_Error:
-				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, k.Error)
-				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: k.Error})
+				// Same reasoning as RunScript's error frame (M74). The shell
+				// pane's DATA is deliberately raw — the TUI renders it through
+				// a terminal emulator — but this string is not pty output, it
+				// is a daemon error the client prints directly.
+				msg := sanitize(k.Error)
+				emitLogfG("shell", group, "warn", "[%s] session=%s error: %s", group, session, msg)
+				_ = stream.Send(&pb.ShellFrame{Event: "error", Error: msg})
 				return
 			}
 		}
