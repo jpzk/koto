@@ -1144,3 +1144,21 @@ running and will re-create its id is incoherent. The barrier is per group,
 because admission is; the drain and the cancel honour the requested scope, so a
 scoped clear leaves the group's other conversations alone.
 `TestClearFencesQueuedAndActiveWork`.
+
+### M67 — Unvalidated installer values allow systemd unit and EnvironmentFile injection (`daemon/install.go`) — **fixed**
+
+Real, with the finding's own caveat worth keeping: an unrestricted sudo user
+already has this authority. The case that matters is delegated sudo or
+privileged automation supplying `-state`, where the caller is meant to choose a
+DIRECTORY, not the unit's contents. `renderUnit` interpolates the value into
+`WorkingDirectory`, `Environment=HOME` and `ReadWritePaths`, and `writeEnvFile`
+emits raw `KEY=VALUE` lines; both are installed through sudo and read by the
+privileged service manager, so a newline writes additional directives.
+
+`unitSafeValue` rejects newline, carriage return and NUL on `-state` and on the
+resolved claude path. Deliberately ONLY control characters: spaces, quotes and
+backslashes are legal in a path and are the renderers' quoting problem, not an
+injection — refusing them would turn a real directory name into an install
+failure. Values PRESERVED from an existing `koto.env` need no check:
+`readEnvFile` parses line by line, so a newline was already a line boundary
+there. `TestInstallerValuesRejectControlCharacters`.

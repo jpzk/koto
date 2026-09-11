@@ -2330,3 +2330,41 @@ func TestClearFencesQueuedAndActiveWork(t *testing.T) {
 		t.Fatal("a group-wide clear left a conversation's queue intact")
 	}
 }
+
+// 2026-09-11 M67: the state path is interpolated into the systemd unit
+// (WorkingDirectory, Environment=HOME, ReadWritePaths) and into koto.env as a
+// KEY=VALUE line; both are installed through sudo and read by the privileged
+// service manager, so a newline writes additional DIRECTIVES.
+func TestInstallerValuesRejectControlCharacters(t *testing.T) {
+	bad := []string{
+		"/var/lib/koto\nExecStartPost=/bin/sh -c id",
+		"/var/lib/koto\rX=1",
+		"/var/lib/koto\x00",
+		"/var/lib/koto\nKOTO_BIND=0.0.0.0",
+	}
+	for _, v := range bad {
+		if err := unitSafeValue(v); err == nil {
+			t.Errorf("accepted %q", v)
+		}
+	}
+	// Spaces, quotes and backslashes are legal in a path and are the
+	// renderers' quoting problem, not an injection.
+	for _, v := range []string{
+		"/var/lib/koto", "/opt/koto state", `/opt/ko"to`, `/opt/ko\to`, "/opt/koto#1",
+	} {
+		if err := unitSafeValue(v); err != nil {
+			t.Errorf("rejected the legal path %q: %v", v, err)
+		}
+	}
+	// And the renderer never emits a value it would have refused.
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	unit := renderUnit(me, "/var/lib/koto", "/usr/local/bin/claude")
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ExecStartPost=") {
+			t.Fatalf("unexpected directive in a clean render: %q", line)
+		}
+	}
+}

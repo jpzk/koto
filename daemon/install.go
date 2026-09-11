@@ -106,6 +106,18 @@ func installMain(args []string) {
 	noColor := fs.Bool("no-color", false, "disable color")
 	_ = fs.Parse(args)
 
+	// The state path is interpolated into the systemd unit (WorkingDirectory,
+	// Environment=HOME, ReadWritePaths) and into koto.env as a KEY=VALUE line,
+	// and both files are installed through sudo and consumed by the privileged
+	// service manager. A newline in it writes additional DIRECTIVES (audit
+	// M67). An unrestricted sudo user already has this authority — the case
+	// that matters is delegated sudo or privileged automation supplying the
+	// argument, where the caller is meant to choose a directory, not the
+	// unit's contents.
+	if err := unitSafeValue(*state); err != nil {
+		ctlFatal(2, "-state: %v", err)
+	}
+
 	root, err := os.Getwd()
 	if err != nil {
 		ctlFatal(1, "cwd: %v", err)
@@ -556,6 +568,16 @@ func installClaudeBin(u *setupUI) string {
 // existing one without touching values the operator has edited. claude is the
 // resolved CLI path (installClaudeBin), or "" for none.
 func writeEnvFile(o installOpts, claude string) error {
+	// Every value lands as a KEY=VALUE line, so a newline in one starts an
+	// assignment systemd will honour (audit M67). Only these two can carry
+	// one: the state dir comes from -state, and the claude path from a PATH
+	// lookup. Values PRESERVED from an existing koto.env cannot — readEnvFile
+	// parses it line by line, so a newline was already a line boundary there.
+	for _, v := range []string{o.stateDir, claude} {
+		if err := unitSafeValue(v); err != nil {
+			return fmt.Errorf("koto.env: %w", err)
+		}
+	}
 	defaults := [][2]string{
 		{"KOTO_HOME", o.stateDir},
 		// Loopback, not 0.0.0.0. The container set 0.0.0.0 because it was
@@ -630,6 +652,20 @@ func podmanPath() string {
 // than using systemd specifiers, so `systemctl cat koto` shows the operator
 // exactly what will run. claude is the CLI path recorded in koto.env ("" for
 // none); it decides how the unit scopes /home (installHomeScoping).
+// unitSafeValue rejects a value that cannot appear inside one systemd unit
+// directive or one EnvironmentFile assignment. Only control characters are
+// refused: spaces, quotes and backslashes are legal in a path and are handled
+// by the renderers' own quoting, whereas a newline, carriage return or NUL
+// ENDS the line and starts something systemd will read as its own.
+func unitSafeValue(v string) error {
+	for _, r := range v {
+		if r == '\n' || r == '\r' || r == 0 {
+			return fmt.Errorf("value contains a control character (%q) — it would inject a systemd directive", r)
+		}
+	}
+	return nil
+}
+
 func renderUnit(me *user.User, stateDir, claude string) string {
 	gid := me.Gid
 	if g, err := user.LookupGroupId(me.Gid); err == nil {
