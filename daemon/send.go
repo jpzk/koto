@@ -293,8 +293,14 @@ func sendNow(g, session, msg string) error {
 	// life. Acquired AFTER ensure() so a boot doesn't occupy one, and released
 	// on every exit path. Blocks while all groupSlots are busy, which is the
 	// concurrency cap doing its job — the queue worker for this session is the
-	// only thing waiting.
-	hold := acquireSlot(g, session)
+	// only thing waiting. The wait is cancellable (audit M140): it can be a
+	// long one, and a turn interrupted during it used to wait anyway, then
+	// acquire a slot purely to hand it straight back at the check below.
+	hold, gotSlot := acquireSlot(g, session, cancelC)
+	if !gotSlot {
+		emitLogfG("send", g, "info", "group=%s session=%s: turn canceled while waiting for a slot; prompt discarded", g, sessionMarkerName(session))
+		return nil
+	}
 	slot := hold.slot
 	defer releaseSlot(hold) // no-op if the stall path quarantined it, or if
 	// the quarantine was lifted and the slot re-handed out (audit M40)

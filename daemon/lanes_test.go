@@ -38,16 +38,16 @@ func writeStream(t *testing.T, p, body string) {
 // group that never runs concurrent turns only ever touches slot 0.
 func TestSlotPool(t *testing.T) {
 	const g = "slots1"
-	h0 := acquireSlot(g, "")
+	h0, _ := acquireSlot(g, "", nil)
 	if h0.slot != 0 {
 		t.Fatalf("first slot = %d, want 0", h0.slot)
 	}
-	h1 := acquireSlot(g, "b")
+	h1, _ := acquireSlot(g, "b", nil)
 	if h1.slot != 1 {
 		t.Fatalf("second slot = %d, want 1", h1.slot)
 	}
 	releaseSlot(h0)
-	h0 = acquireSlot(g, "c")
+	h0, _ = acquireSlot(g, "c", nil)
 	if h0.slot != 0 {
 		t.Fatalf("slot after release = %d, want the freed 0", h0.slot)
 	}
@@ -55,7 +55,7 @@ func TestSlotPool(t *testing.T) {
 		t.Fatalf("activeSlots = %d, want 2", n)
 	}
 	// A different group has its own pool.
-	other := acquireSlot("slots2", "")
+	other, _ := acquireSlot("slots2", "", nil)
 	if other.slot != 0 {
 		t.Fatalf("other group's first slot = %d, want 0", other.slot)
 	}
@@ -73,13 +73,13 @@ func TestSlotPoolCapsConcurrency(t *testing.T) {
 	const g = "slotcap"
 	holds := make([]slotHold, groupSlots)
 	for i := 0; i < groupSlots; i++ {
-		holds[i] = acquireSlot(g, "")
+		holds[i], _ = acquireSlot(g, "", nil)
 		if holds[i].slot != i {
 			t.Fatalf("slot %d = %d", i, holds[i].slot)
 		}
 	}
 	got := make(chan slotHold, 1)
-	go func() { got <- acquireSlot(g, "waiter") }()
+	go func() { h, _ := acquireSlot(g, "waiter", nil); got <- h }()
 	select {
 	case h := <-got:
 		t.Fatalf("acquired slot %d beyond the cap of %d", h.slot, groupSlots)
@@ -196,7 +196,7 @@ func TestConcurrentTurnStreamsStaySeparate(t *testing.T) {
 // heal restart) proves otherwise.
 func TestSlotQuarantine(t *testing.T) {
 	const g = "slotq"
-	h0 := acquireSlot(g, "wedged")
+	h0, _ := acquireSlot(g, "wedged", nil)
 	s0 := h0.slot
 	quarantineSlot(h0)
 	// sendNow's deferred release runs unconditionally; the pool itself must
@@ -206,7 +206,7 @@ func TestSlotQuarantine(t *testing.T) {
 		t.Fatalf("quarantined slot freed by releaseSlot (active=%d)", n)
 	}
 	// The next turn must get a different slot.
-	h1 := acquireSlot(g, "healthy")
+	h1, _ := acquireSlot(g, "healthy", nil)
 	s1 := h1.slot
 	if s1 == s0 {
 		t.Fatalf("quarantined slot %d was reassigned", s0)
@@ -216,7 +216,7 @@ func TestSlotQuarantine(t *testing.T) {
 	if n := activeSlots(g); n != 1 {
 		t.Fatalf("activeSlots after quarantine release = %d, want 1 (the healthy turn)", n)
 	}
-	h2 := acquireSlot(g, "next")
+	h2, _ := acquireSlot(g, "next", nil)
 	if h2.slot != s0 {
 		t.Fatalf("freed slot %d not reused, got %d", s0, h2.slot)
 	}

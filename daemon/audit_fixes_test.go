@@ -1478,10 +1478,10 @@ func TestSlotHoldGenerations(t *testing.T) {
 	// Race 1: a stalled turn quarantines its slot; the VM-exit reaper lifts
 	// the quarantine and a waiter acquires the same slot; the stalled turn's
 	// DEFERRED release then runs. It must not free the waiter's allocation.
-	stalled := acquireSlot(g, "wedged")
+	stalled, _ := acquireSlot(g, "wedged", nil)
 	quarantineSlot(stalled)
 	releaseGroupQuarantine(g) // VM died
-	fresh := acquireSlot(g, "waiter")
+	fresh, _ := acquireSlot(g, "waiter", nil)
 	if fresh.slot != stalled.slot {
 		t.Fatalf("setup: waiter took slot %d, wanted the freed %d", fresh.slot, stalled.slot)
 	}
@@ -1501,9 +1501,9 @@ func TestSlotHoldGenerations(t *testing.T) {
 	// Race 2: the reaper clears the quarantine before the stall path sets it.
 	// A hold that no longer owns the slot must quarantine nothing, or the
 	// slot is stranded busy with no owner to free it.
-	old := acquireSlot(g, "wedged2")
+	old, _ := acquireSlot(g, "wedged2", nil)
 	releaseSlot(old)
-	next := acquireSlot(g, "next")
+	next, _ := acquireSlot(g, "next", nil)
 	quarantineSlot(old) // late, from the previous hold
 	slotMu.Lock()
 	q := slotQuarantined[slotKey(g, next.slot)]
@@ -2204,14 +2204,14 @@ func TestAmbiguousDeliveryQuarantinesTheSlot(t *testing.T) {
 		}
 		slotMu.Unlock()
 	})
-	hold := acquireSlot(g, "s1")
+	hold, _ := acquireSlot(g, "s1", nil)
 	quarantineSlot(hold) // what the delivery-error path now does
 	releaseSlot(hold)    // sendNow's deferred release still runs
 	if n := activeSlots(g); n != 1 {
 		t.Fatalf("the slot was returned to the pool while delivery was unresolved (active=%d)", n)
 	}
 	// The next turn gets a different slot.
-	next := acquireSlot(g, "s2")
+	next, _ := acquireSlot(g, "s2", nil)
 	if next.slot == hold.slot {
 		t.Fatalf("slot %d was reissued while quarantined", hold.slot)
 	}
@@ -4560,4 +4560,87 @@ func TestAuthClaudeDirRefusesARedirectedLink(t *testing.T) {
 	if err := authClaudeDirCheck(ac); err != nil {
 		t.Errorf("an absolute link to creds/ was refused: %v", err)
 	}
+}
+
+// 2026-09-11 M140: acquireSlot waited on a condition variable with no way out.
+// sendNow checks its cancellation channel only AFTER the slot is in hand, so an
+// interrupt landing while all ten of a group's slots were busy took effect one
+// slot-release later — having first acquired a slot purely to hand it straight
+// back. Each waiter is a resident goroutine, one per session, and nothing bounds
+// how many sessions a caller authorized to Send may open, so "cancel the turns
+// and they go away" had to become true rather than eventually true.
+func TestCanceledTurnLeavesAFullSlotPool(t *testing.T) {
+	const g = "m140"
+	held := make([]slotHold, groupSlots)
+	for i := range held {
+		h, ok := acquireSlot(g, fmt.Sprintf("busy%d", i), nil)
+		if !ok {
+			t.Fatalf("slot %d: the pool refused a fresh acquisition", i)
+		}
+		held[i] = h
+	}
+	t.Cleanup(func() {
+		for _, h := range held {
+			releaseSlot(h)
+		}
+	})
+	// The pool is full: an uncancellable waiter would block here forever.
+	if _, ok := acquireSlot(g, "extra", closedChan()); ok {
+		t.Fatal("a pre-cancelled acquisition took a slot")
+	}
+
+	// The real shape: a worker already parked in the wait, cancelled by the
+	// same call the Interrupt RPC and stopGroup make.
+	const sess = "victim"
+	queuesMu.Lock()
+	turnCancels[sessKey(g, sess)] = make(chan struct{})
+	queuesMu.Unlock()
+	t.Cleanup(func() {
+		queuesMu.Lock()
+		delete(turnCancels, sessKey(g, sess))
+		queuesMu.Unlock()
+	})
+	cancelC := turnCancelCh(g, sess)
+
+	done := make(chan bool, 1)
+	go func() { _, ok := acquireSlot(g, sess, cancelC); done <- ok }()
+	// Let it reach the wait. Without the fix nothing below wakes it, and the
+	// pool stays full for the whole test.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("acquireSlot returned while every slot was still busy")
+	default:
+	}
+
+	if !requestTurnCancel(g, sess) {
+		t.Fatal("requestTurnCancel found no turn to cancel")
+	}
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("the cancelled wait still took a slot")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled worker is still parked in acquireSlot with every slot busy")
+	}
+
+	// Nothing was taken: all ten slots are still the ones this test holds.
+	slotMu.Lock()
+	busy := 0
+	for i := 0; i < groupSlots; i++ {
+		if slotBusy[slotKey(g, i)] {
+			busy++
+		}
+	}
+	slotMu.Unlock()
+	if busy != groupSlots {
+		t.Errorf("%d/%d slots busy after the cancelled wait — it disturbed the pool", busy, groupSlots)
+	}
+}
+
+func closedChan() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
 }

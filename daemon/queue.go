@@ -122,21 +122,50 @@ func (h slotHold) currentLocked() bool { return slotGen[slotKey(h.group, h.slot)
 // LOWEST free index is chosen so a group that never runs concurrent turns only
 // ever touches slot 0 — its log stream, tailer and guest FIFO are the only ones
 // that ever come alive, and the other nine cost nothing.
-func acquireSlot(g, session string) slotHold {
+//
+// `cancel` is the waiting turn's cancellation channel; nil means "this
+// acquisition cannot be cancelled", which is what every non-turn caller wants.
+// ok=false means the wait was cancelled and NO slot was taken.
+//
+// The cancellation is not a nicety (audit M140): every one of a
+// group's ten slots can be busy for a long time, and a turn cancelled while
+// waiting here used to keep waiting — sendNow checks its channel only AFTER
+// this returns, so the interrupt took effect one slot-release later, having
+// first acquired a slot it was about to give straight back. Every waiting
+// worker is a resident goroutine, one per session, and nothing bounds how many
+// sessions a caller authorized to Send may open — so "cancel the turns and they
+// go away" had to actually be true.
+func acquireSlot(g, session string, cancel <-chan struct{}) (slotHold, bool) {
 	slotMu.Lock()
 	defer slotMu.Unlock()
 	for {
+		// Checked under slotMu and before each wait, so a cancel that lands
+		// while this goroutine is between wakeups cannot be missed: the waker
+		// takes slotMu too (slotWakeAll).
+		if turnCanceled(cancel) {
+			return slotHold{}, false
+		}
 		for i := 0; i < groupSlots; i++ {
 			k := slotKey(g, i)
 			if !slotBusy[k] {
 				slotBusy[k] = true
 				slotOwner[k] = session
 				slotGen[k]++
-				return slotHold{group: g, slot: i, gen: slotGen[k]}
+				return slotHold{group: g, slot: i, gen: slotGen[k]}, true
 			}
 		}
 		slotCond.Wait()
 	}
+}
+
+// slotWakeAll wakes every acquireSlot waiter so each can re-examine its own
+// cancellation. Takes slotMu rather than broadcasting bare: Cond.Wait registers
+// the waiter and only then releases the lock, so a bare Broadcast can land in
+// the gap between a waiter's last check and its Wait and be missed entirely.
+func slotWakeAll() {
+	slotMu.Lock()
+	slotCond.Broadcast()
+	slotMu.Unlock()
 }
 
 func releaseSlot(h slotHold) {
@@ -258,6 +287,9 @@ func cancelTurn(g, session string, want chan struct{}) bool {
 	default:
 		close(want)
 	}
+	// The cancelled turn may be parked in acquireSlot, which waits on a
+	// condition variable and cannot select on this channel (audit M140).
+	defer slotWakeAll()
 	return true
 }
 
@@ -284,6 +316,7 @@ func requestTurnCancel(g, session string) bool {
 	default:
 		close(c)
 	}
+	defer slotWakeAll() // it may be parked in acquireSlot (audit M140)
 	return true
 }
 
