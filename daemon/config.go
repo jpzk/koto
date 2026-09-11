@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ---- config --------------------------------------------------------------
@@ -197,27 +198,99 @@ var configIdentRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`)
 
 const configMaxIdent = 128
 
-func configCmd(req configReq) configResp {
-	p := filepath.Join(vol(req.Group), ".cs", "config.json")
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+// ---- the one config.json writer -------------------------------------------
+//
+// config.json is read-modify-written WHOLE by three callers — configCmd here,
+// and seedSpawnConfig / ensureProviderConfig in groups.go — each of which
+// parsed the file, changed a couple of keys, and wrote the rest back. With no
+// lock between read and write, the last writer's stale copy of every OTHER key
+// wins: an operator lowering `network` to none, or clearing `root`, could be
+// undone seconds later by a spawn seeding `provider` from a snapshot taken
+// before the change. Posture is admin-only (M7) precisely so it cannot be
+// lowered by a lesser principal; restoring it through a stale rewrite is the
+// same outcome by another route.
+//
+// os.WriteFile also truncates in place, so a concurrent reader could see
+// half a document. groupNetwork/groupRoot fail CLOSED on a parse error, so
+// that window was not an escalation, but a config read that silently answers
+// "default" because it caught a write mid-flight is not something to leave in.
+var cfgMuMap sync.Map // group -> *sync.Mutex
+
+func cfgMu(g string) *sync.Mutex {
+	m, _ := cfgMuMap.LoadOrStore(g, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+func groupConfigPath(g string) string {
+	return filepath.Join(vol(g), ".cs", "config.json")
+}
+
+// updateGroupConfig is the only way config.json changes. It holds the group's
+// config lock across read, mutate and commit, and commits by rename so a
+// reader sees either the old document or the new one. mutate sees the parsed
+// document and edits it in place; the returned map is the committed state.
+func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, error) {
+	mu := cfgMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+
+	p := groupConfigPath(g)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, err
+	}
 	cfg := map[string]any{}
 	oldB, _ := os.ReadFile(p)
 	_ = json.Unmarshal(oldB, &cfg)
+	mutate(cfg)
+	newB, err := json.Marshal(cfg)
+	if err != nil {
+		return cfg, err
+	}
+	if bytes.Equal(oldB, newB) {
+		return cfg, nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".config.json.*")
+	if err != nil {
+		return cfg, err
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(newB); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return cfg, err
+	}
+	if err := tmp.Chmod(0o644); err != nil { // CreateTemp makes it 0600
+		tmp.Close()
+		os.Remove(name)
+		return cfg, err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return cfg, err
+	}
+	if err := os.Rename(name, p); err != nil {
+		os.Remove(name)
+		return cfg, err
+	}
+	return cfg, nil
+}
 
-	applyConfig(cfg, "model", req.Model)
-	applyConfig(cfg, "effort", req.Effort)
-	applyConfig(cfg, "ports", req.Ports)
-	applyConfig(cfg, "provider", req.Provider)
-	// Legacy key first, explicit "network" second — a request carrying both
-	// resolves in favor of the new key.
-	applyConfig(cfg, "internet", req.Internet)
-	applyConfig(cfg, "network", req.Network)
-	applyConfig(cfg, "size", req.Size)
-	applyConfig(cfg, "root", req.Root)
-	applyConfig(cfg, "autostart", req.Autostart)
-
-	if newB, err := json.Marshal(cfg); err == nil && !bytes.Equal(oldB, newB) {
-		_ = os.WriteFile(p, newB, 0o644)
+func configCmd(req configReq) configResp {
+	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
+		applyConfig(cfg, "model", req.Model)
+		applyConfig(cfg, "effort", req.Effort)
+		applyConfig(cfg, "ports", req.Ports)
+		applyConfig(cfg, "provider", req.Provider)
+		// Legacy key first, explicit "network" second — a request carrying
+		// both resolves in favor of the new key.
+		applyConfig(cfg, "internet", req.Internet)
+		applyConfig(cfg, "network", req.Network)
+		applyConfig(cfg, "size", req.Size)
+		applyConfig(cfg, "root", req.Root)
+		applyConfig(cfg, "autostart", req.Autostart)
+	})
+	if err != nil {
+		return configResp{BaseResp: errResp("write config: " + err.Error())}
 	}
 	return configResp{BaseResp: baseResp{OK: true}, Config: effectiveConfig(req.Group, cfg)}
 }

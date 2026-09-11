@@ -225,3 +225,56 @@ it, and a later group reusing the name inherited the old group's schedules.
 drop, which close the same name-reuse hazard for their own state. The generation
 -id scheme the remediation proposes is not needed once the records are gone
 with the group.
+
+### M16 — Concurrent whole-file config updates can restore revoked group security posture (`daemon/config.go`) — **fixed**
+
+Three callers — `configCmd`, `seedSpawnConfig`, `ensureProviderConfig` — each
+parsed the whole `config.json`, changed a key or two, and wrote the whole
+document back, with no lock between read and write. The last writer's stale
+copy of every OTHER key wins, so an operator lowering `network` to none could
+have it undone seconds later by a spawn seeding `provider` from a snapshot
+taken before the change. Posture is admin-only (M7) exactly so it cannot be
+lowered by a lesser principal; restoring it through a stale rewrite is the same
+outcome by another route.
+
+`updateGroupConfig` is now the only writer: a per-group mutex held across read,
+mutate and commit, and a commit by rename so a reader sees one document or the
+other. (`os.WriteFile` truncates in place, so readers could catch half a file.
+`groupNetwork`/`groupRoot` fail CLOSED on a parse error, so that window was
+never an escalation — but a config read silently answering "default" because it
+caught a write mid-flight is not something to leave in.)
+`TestGroupConfigUpdatesAreSerialized`.
+
+### M17 — Send and schedule paths can provision arbitrary unregistered groups (`daemon/send.go`) — **fixed**
+
+Real, and the root of M14's other half. `ensure()` created whatever
+syntactically valid name it was handed, and it is reached from `send`, `clear`,
+`restart`, a schedule fire and a shell attach — none of which carry spawn
+authority. So a principal with `send` on `"*"` provisioned groups without
+`spawn`, and the ctl plane's `ctlMaxSpawn` cap was reachable around rather than
+through.
+
+Split: `ensure()` boots a group that is registered in `groups.json` and errors
+on an unknown name; `spawnEnsure()` is the creating path, called from exactly
+three admission points — the ctl `spawn` verb, the `Spawn` RPC, and the
+daemon's own boot of `main`. The cap moved with it: the `Spawn` RPC enforces
+`ctlMaxSpawn` too, since `spawn` is an ordinary grantable verb and a non-admin
+role holding it on `"*"` previously had no bound at all.
+`TestEnsureDoesNotProvision`.
+
+### M20 — Main-to-peer goals can bypass the mandatory human-approval gate (`daemon/goals.go`) — **fixed, partly rejected**
+
+The ctl half is real. A main caller's `goal_set` always targets a peer (its own
+group is refused), and plan-first on that path IS the human gate:
+`goal_approve` is self-only precisely so main cannot approve a plan it set on a
+peer. An explicit `"plan": false` went straight to `goalStatusRunning` and
+started an autonomous, self-judged, multi-iteration loop on another group with
+nobody in the loop. Now forced to plan-first, with a log line saying so. A
+group setting a goal on ITSELF keeps `plan=false`: approving its own plan is
+allowed, so it is the same authority by a shorter route.
+
+The gRPC half is rejected. `GoalSet` over gRPC is the OPERATOR — the human the
+gate exists to involve — so `plan=false` there is that human approving up
+front, not a bypass. A gate that the person it defers to cannot also skip is
+not a gate, it is an obstacle.
+`TestMainPeerGoalsAreAlwaysPlanFirst`.

@@ -234,12 +234,22 @@ func (s *kotoServer) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, er
 			return &pb.SpawnResp{Error: "size must be small, medium, large, or xlarge"}, nil
 		}
 	}
+	// Same cap the ctl plane's spawn verb enforces. It lived only there,
+	// because the only untrusted spawner was a compromised main — but `spawn`
+	// is an ordinary grantable verb, so a non-admin role holding it on "*" had
+	// no bound at all. Re-spawning a group that already exists does not grow
+	// the set and stays allowed.
+	if existing := readGroups(); len(existing) >= ctlMaxSpawn {
+		if _, already := existing[r.Group]; !already {
+			return &pb.SpawnResp{Error: fmt.Sprintf("spawn cap reached (%d groups)", ctlMaxSpawn)}, nil
+		}
+	}
 	if r.Provider != "" || r.Model != "" || r.Size != "" {
 		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size); err != nil {
 			return &pb.SpawnResp{Error: err.Error()}, nil
 		}
 	}
-	port, err := ensure(r.Group, r.Main)
+	port, err := spawnEnsure(r.Group, r.Main)
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
 	}

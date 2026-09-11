@@ -240,10 +240,18 @@ daemon/              the daemon Go module (module `koto`):
   main.go              entry point dispatching `daemon` / `fcjail` / `ctl` / `claude-login` subcommands
   daemon.go            daemon core: wire-type aliases, path globals, daemonMain (gRPC server bring-up)
   groups.go            group lifecycle: groups.json/port alloc, ensure/stop/list/destroy/restart, provider config, clearCmd
+                       (ensure() BOOTS a registered group and refuses an unknown name; spawnEnsure()
+                        is the only creating path — ctl `spawn`, the Spawn RPC, and the daemon's own
+                        `main`, each quota-checked. Split 2026-09-11: ensure() is reached from send,
+                        clear, restart, a schedule fire and a shell attach, none of which carry spawn
+                        authority, and it used to provision whatever valid name it was handed.)
   send.go              turn delivery: sendNow, turn-done/stall tracking, self-heal, interruptAgent, bg-task tailer
   events.go            event fan-out: subscriber registry + replay ring, state-watch push, daemon log ring
   logtail.go           per-group log tailer (live) + readHistory (replay parser) — the [[marker]] framing parser
-  config.go            config.json command handling (applyConfig validation per key)
+  config.go            config.json command handling (applyConfig validation per key); updateGroupConfig
+                       is the ONE writer — per-group lock across read/mutate/commit, committed by
+                       rename. The three whole-file read-modify-writers used to race, so a stale
+                       snapshot could restore posture an operator had just revoked.
   prompt.go            composeSystemPrompt (global.md + per-group prompt.md + memory)
   metrics.go           metrics.jsonl tail + <koto-context> block injected into prompts
   queue.go             per-SESSION send queues + the per-group slot pool (groupSlots=10 concurrent turns)
