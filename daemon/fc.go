@@ -799,6 +799,12 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			}
 		}
 		fcHostMemRelease(g)
+		// The cgroup is created before cmd.Start and was left behind by both
+		// failure paths (audit 2026-09-11 L136). Distinct group names never
+		// reuse it, so repeated spawn attempts accumulated a kernel cgroup and
+		// its directory per name — only an explicit stop/destroy/restart, or a
+		// reuse of the same name, ever removed one.
+		fcCgroupRemove(g)
 		return err
 	}
 	// Fleet memory cap admission (fchostmem.go): refuse now, with a message
@@ -997,10 +1003,17 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 			// A replacement VM is registered for this group; every cleanup
 			// below is keyed on the group alone, so running them now would
 			// complete a turn the NEW VM is still working on, free slots it
-			// owns, and clear stall flags it raised (audit M59).
+			// owns, and clear stall flags it raised (audit M59). The cgroup is
+			// keyed on the group too, and the replacement is IN it — which is
+			// exactly why it is not removed here either.
 			emitLogfG("fc", g, "info", "[%s] stale vm reaper (boot %d superseded) — leaving the replacement's state alone", g, gen)
 			return
 		}
+		// This boot's cgroup, now that nothing is in it (audit 2026-09-11
+		// L136). fcStop removed it and the exit path did not, so a VM that
+		// crashed, panicked or was OOM-killed left `vms/<group>` behind — one
+		// per group name, for as long as the daemon ran.
+		fcCgroupRemove(g)
 		// The VM is gone, so any turn still parked in sendNow waiting for
 		// [[turn_end]] can never complete. Wake it now instead of letting the
 		// queue worker block for the full turnWaitTimeout — otherwise a crash or

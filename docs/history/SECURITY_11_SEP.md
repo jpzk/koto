@@ -6103,3 +6103,148 @@ kernel releases it when the process exits, so an interrupted provisioning run
 cannot wedge every later one. Pinned by
 `TestConcurrentClientProvisioningKeepsEveryToken` (negative control: the old code
 fails with a rename onto a name another run already consumed).
+
+## L134 — Resources RPC permits unbounded fleet-wide scans — FIXED
+
+`daemon/grpc_server.go`, `daemon/resources.go`. The handler ignored its context
+and ran a full scan per call — stat every image, read every config, read `/proc`
+for every running VM, consult the sample ring, touch the shared CPU trail — with
+no budget of any kind. An authorized monitoring identity could spend the
+daemon's CPU and the host's IO just by asking repeatedly, contending with the
+collector itself. `resourcesSnapshot` now coalesces within `resSnapTTL` (1s,
+shorter than the TUI's own 5s poll and far shorter than the 30s sweep, so no
+consumer sees staler data than it already tolerates) with the lock held across
+the computation, which makes concurrent callers share one scan rather than each
+starting another; the RPC checks `ctx.Err()` first. The cache is keyed on the
+state root as well as the clock, because the whole snapshot is derived from it.
+Pinned by `TestFleetSnapshotIsCoalesced`.
+
+## L135 — Unbounded prompt history entries — FIXED
+
+`tui/model.go`. `promptHistoryMax` caps the ring at 200 entries; nothing capped
+one prompt, which may be up to the daemon's `sendMsgMax` (1 MiB) — pasted, or
+echoed back from a scheduler or ctl fire. Opening the ctrl+R picker snapshots
+every entry and renders the visible ones through `strings.ReplaceAll` and
+`lipgloss.Width` on the WHOLE string before any display clipping, and a
+non-empty filter lowercases and scans all of them, once per keystroke, on the
+update loop. `promptEntryMax` (8 KiB) bounds one entry — far longer than any
+picker row or inline ghost can render. Pinned by
+`TestPromptHistoryEntriesAreBounded`.
+
+## L136 — VM exit and startup failure leave cgroups behind — FIXED
+
+`daemon/fc.go`. `fcCgroupCreate` runs before `cmd.Start`, and neither the `fail`
+closure nor the `cmd.Wait` reaper removed it — only an explicit
+stop/destroy/restart, or a reuse of the same NAME, ever did. So repeated spawn
+attempts and crashed VMs accumulated a kernel cgroup and its directory per group
+name. Both paths call `fcCgroupRemove` now; the superseded-generation branch
+deliberately does not, because the replacement VM is in that cgroup.
+
+## L137 — Partial CA state silently replaces the trust anchor — FIXED
+
+`daemon/pki.go`, `daemon/setup_steps.go`.
+
+**Confirmed, and this is the worst outcome in the batch.** `pkiEnsureCA` decided
+whether to reuse by testing for `ca.key` alone. A `ca.crt` with no key therefore
+made it mint a fresh CA and write **both** paths — replacing the trust anchor.
+Every client certificate ever issued then fails verification against the new
+`ca.crt` on the daemon's next start, and any client still holding the old CA
+rejects the new server certificate: a total mTLS outage, from a state the setup
+detector (which checked `ca.crt` and not `ca.key`) read as "PKI missing,
+initialise it".
+
+**Fix:** refuse. This code cannot tell the two causes apart — a key lost by
+accident (the certificate is still the fleet's anchor and the key must be
+restored from backup) or a stray certificate on a genuinely new install (move it
+aside) — and the operator can, so the message spells out both. The setup
+detector lists `ca.key` too, so a half CA is reported as the step that needs
+attention rather than passing as complete. Pinned by
+`TestHalfCAIsRefusedRatherThanReplaced`.
+
+## L138 — Goal-session LLM calls colour group activity — MOSTLY FIXED BY L115, residual accepted
+
+The specific harm the finding names — *"can leave the UI reporting work after
+the goal request finishes"* — is closed by L115: `llmProbe.end()` sets `work` on
+the turns in flight, and a group whose only activity was a goal session has
+none, so it resolves to idle rather than parking in `work`.
+
+The residual is that `llmWait`/`llmRecv`/`retryText` are **group-wide** and a
+goal's upstream call raises them, so a group with an interactive turn in `work`
+and a goal call in flight reports `llm`. **Accepted**: the proxy has one
+listener per group and receives no session (the guest reaches it through
+`ANTHROPIC_BASE_URL`; nothing in the request identifies the conversation), so
+attribution is not available at that layer, and the counters have been
+group-wide by design since activity.go was written — "several upstream calls in
+flight at once, show the most informative" is the documented contract. The
+reported phase is also *true of the group*: it really is waiting on the model.
+Fixing it properly means carrying a session identifier from the guest into every
+proxied request, which is a protocol change well past this finding's weight.
+
+## L139 — Host disconnect can permanently stall guest network redial — FIXED
+
+`fcguest/net.go`.
+
+**Confirmed.** The receive goroutine returned on failure without closing the
+shared connection or telling the TAP loop, and `tapFile.Read` blocks until the
+guest transmits — so after a host-side gateway or daemon restart, a VM waiting
+on INBOUND traffic (a published port's server, a TCP retransmit, anything the
+agent is waiting to receive) sat with a dead connection and no path to the
+redial, indefinitely.
+
+**Fix:** the receive goroutine closes the connection and signals `dead`, and the
+TAP read carries a one-second deadline so the pump can notice it. A TAP fd is
+pollable, so the deadline is real; an idle link pays one timed-out read per
+second. The outer loop then redials, and waits for the receive goroutine to
+retire first so the two never overlap on one connection.
+
+## L140 — Malformed history is treated as empty and then overwritten — FIXED
+
+`sidecar/venice_stream.js`. The transcript lives in `/workspace`, which the
+agent's own bash and file tools can write, and a direct `writeFileSync` is a
+plausible source of a half-written file on its own. Treating unreadable as
+**empty** and then letting `saveHistory` overwrite it destroyed the only copy of
+the conversation — including whatever operational or safety context the turn was
+meant to carry — silently, as a side effect of the next turn. Now a malformed
+file is renamed to `<history>.corrupt-<ts>` before the turn proceeds and the
+failure is said out loud; the turn still starts fresh, because there is nothing
+usable to replay. `saveHistory` also writes through a pid-suffixed temporary and
+renames, so an interruption leaves the previous transcript intact rather than a
+truncated one.
+
+## L141 — Tool payloads grow the TUI transcript unbounded — FIXED
+
+`tui/model.go`. `formatTool`'s unknown-tool fallback returned the **complete raw
+JSON** — the one branch that hands back arbitrary model-chosen bytes, and
+unscrubbed at that — while transcript lines and parsed job-peek entries are
+bounded by count rather than size. Scrubbed and capped at `toolSummaryMax`
+(2 KiB); this line's job is to say which tool ran with roughly what, and the full
+arguments are in the transcript file and the job's own output. Pinned by
+`TestUnknownToolSummaryIsBoundedAndScrubbed`.
+
+## L142 — Raw tabs in live and queued rows corrupt the layout — FIXED
+
+`tui/view.go`. `renderLiveLines` and `renderPendingLines` wrapped raw text
+without `expandTabs`. A tab measures **zero cells** to both `cellWidth` and
+`ansi.StringWidth` while the terminal advances it to the next stop, so
+`padCells` pads a row that is already wider than it looks, the physical line
+crosses its pane, the terminal wraps it, and the frame scrolls — the exact
+failure of 2026-08-29 (commit `5f68d03`), in the two renderers that never got
+the fix. The sanitizer keeps tabs deliberately, so this is where they have to be
+normalised. Pinned by `TestLiveAndPendingRowsExpandTabs`.
+
+## L143 — `cs-job clean` can delete jobs mid-flight — FIXED
+
+`sidecar/cs-job`. Two races, both real:
+
+- The mint takes `$LOCK`; the **clean scan did not**. A directory `mktemp`'d but
+  not yet carrying its `status` file read as "not running" and was deleted out
+  from under the caller, who then got back a job id whose directory was already
+  gone and whose output redirection failed.
+- Completion writes `status=done` **before** `_notify` reads `rc` and `out`, so
+  a clean in that gap lost the very result the agent asked to be woken with.
+
+**Fix:** `clean` takes the same lock, skips a directory with no status yet (a
+mint that has released the lock but is still between files), and skips one
+carrying a `notifying` marker — raised by the job before the status flips and
+cleared after the callback has read its result, so the window is one `clean` can
+see rather than one it can only lose.

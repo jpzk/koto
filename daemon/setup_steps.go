@@ -101,7 +101,14 @@ existing CA is never regenerated — that would invalidate every client you
 have already issued.`,
 		detect: func(sc *setupCtx) (bool, string) {
 			c := sc.credsDir()
-			for _, f := range []string{"ca.crt", "server.crt", "client-tui.crt", "token-tui",
+			// ca.key is in the list (audit 2026-09-11 L137): the detector
+			// decides whether the PKI step needs to RUN, and a state with
+			// ca.crt but no ca.key is not a healthy PKI — it is the one that
+			// must be repaired by hand before anything else is minted.
+			// pkiEnsureCA now refuses it outright; listing it here makes the
+			// detector say so rather than report the step as complete when
+			// some other file is what is missing.
+			for _, f := range []string{"ca.crt", "ca.key", "server.crt", "client-tui.crt", "token-tui",
 				"client-agent.crt", "token-agent"} {
 				if !exists(filepath.Join(c, f)) {
 					return false, "missing creds/" + f

@@ -517,7 +517,12 @@ func (s *kotoServer) Metrics(ctx context.Context, r *pb.MetricsReq) (*pb.Metrics
 // serves the collector's cached samples and never touches a guest, so it is
 // cheap, cannot block on a wedged VM, and stays truthful for groups that are
 // stopped or read-only. See daemon/resources.go.
-func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.ResourcesResp, error) {
+func (s *kotoServer) Resources(ctx context.Context, _ *pb.ResourcesReq) (*pb.ResourcesResp, error) {
+	// A client that has gone gets no scan (audit 2026-09-11 L134); the rest of
+	// the budget is resourcesSnapshot's TTL.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	groups, host := resourcesSnapshot()
 	out := &pb.ResourcesResp{
 		Ok: true,

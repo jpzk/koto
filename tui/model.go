@@ -840,7 +840,12 @@ type pendingPrompt struct {
 	session, text string
 }
 
-const promptHistoryMax = 200
+const (
+	promptHistoryMax = 200
+	// promptEntryMax bounds ONE recalled prompt. Far longer than anything a
+	// picker row or the inline ghost can render, far below what a send permits.
+	promptEntryMax = 8 << 10
+)
 
 // pickerState backs all three overlays: ctrl+r prompt-history recall, the
 // ctrl+p command palette, and the ctrl+t group/session jump (mode selects
@@ -1378,6 +1383,18 @@ func (m *Model) pushHistory(group, session, msg string) {
 	msg = scrubVTStrict(strings.TrimSpace(msg))
 	if group == "" || msg == "" {
 		return
+	}
+	// Bounded per ENTRY, not just in count (audit 2026-09-11 L135).
+	// promptHistoryMax caps the ring at 200; nothing capped one prompt, and a
+	// prompt can be up to the daemon's sendMsgMax (1 MiB) — pasted, or echoed
+	// back from a scheduler or ctl fire. Opening the ctrl+R picker snapshots
+	// every entry and renders the visible ones through strings.ReplaceAll and
+	// lipgloss.Width on the WHOLE string before any display clipping, and a
+	// non-empty filter lowercases and scans all of them, once per keystroke,
+	// on the update loop. What is dropped is the tail of a prompt no picker
+	// row could show; what survives is enough to recognise and re-send.
+	if len(msg) > promptEntryMax {
+		msg = truncBytes(msg, promptEntryMax) + "…"
 	}
 	// Keyed by CONVERSATION, not by group (audit 2026-09-11 L71). A group
 	// multiplexes independent chat sessions and the TUI scopes everything else
@@ -3391,9 +3408,24 @@ func formatTool(name, input string) string {
 			return fmt.Sprintf("WebSearch %s", q)
 		}
 	}
-	// Unknown tool or missing key: render name + raw JSON.
-	return fmt.Sprintf("%s %s", name, input)
+	// Unknown tool or missing key: render name + raw JSON — SCRUBBED and
+	// BOUNDED (audit 2026-09-11 L141). This is the one branch that returns
+	// arbitrary attacker-influenced bytes, and it returned the whole input:
+	// the tool's arguments are model-chosen, the sidecar accumulates them with
+	// its own budget, and a near-limit record per tool call accumulates in the
+	// operator's transcript and job-peek entries, which are bounded by count
+	// rather than by size. A summary line is what this is; the full arguments
+	// are in the transcript file and the job's own output.
+	raw := scrubVTStrict(input)
+	if len(raw) > toolSummaryMax {
+		raw = truncBytes(raw, toolSummaryMax) + "…"
+	}
+	return fmt.Sprintf("%s %s", name, raw)
 }
+
+// toolSummaryMax bounds the raw-JSON fallback above. One screen's worth is
+// generous for a line whose job is to say which tool ran with roughly what.
+const toolSummaryMax = 2 << 10
 
 func formatThought(words int) string {
 	if words <= 0 {

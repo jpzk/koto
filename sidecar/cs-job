@@ -107,8 +107,15 @@ case "$cmd" in
       "$@"
       rc=$?
       echo "$rc" > "'"$D"'/rc"
+      # `notifying` is raised BEFORE the status flips to done and cleared after
+      # the callback has read rc and out, so `clean` has a window it can see
+      # rather than one it can only lose (audit 2026-09-11 L143).
+      [ -f "'"$D"'/notify" ] && : > "'"$D"'/notifying"
       echo done > "'"$D"'/status"
-      [ -f "'"$D"'/notify" ] && /sidecar/cs-job _notify "'"$id"'" || true
+      if [ -f "'"$D"'/notify" ]; then
+        /sidecar/cs-job _notify "'"$id"'" || true
+        rm -f "'"$D"'/notifying"
+      fi
     ' _ "$@" &
     # ^ the setsid child is its own session and process-group leader, so its
     #   pid IS the pgid — recorded so `cs-job rm` can terminate the whole group
@@ -241,12 +248,27 @@ case "$cmd" in
     fi
     rm -rf "$JOBS/$1"; echo removed ;;
   clean)
+    # Under the SAME lock the mint takes (audit 2026-09-11 L143). The scan ran
+    # unlocked, so a directory mktemp'd but not yet carrying its status file
+    # read as "not running" and was deleted out from under the caller — who
+    # then got back a job id whose directory was already gone and whose output
+    # redirection failed.
     n=0
+    exec 9>"$LOCK"; flock 9
     for d in "$JOBS"/*/; do
       [ -d "$d" ] || continue
-      [ "$(cat "$d/status" 2>/dev/null)" = running ] && continue
+      st=$(cat "$d/status" 2>/dev/null)
+      [ "$st" = running ] && continue
+      # No status file at all: still being minted. The lock covers the mint
+      # itself, but a `run` that has released it is between files.
+      [ -z "$st" ] && continue
+      # Marked done but its completion callback has not read rc and out yet
+      # (the second race: `done` is written BEFORE _notify runs, so deleting
+      # here loses the result the agent asked to be woken with).
+      [ -f "$d/notifying" ] && continue
       rm -rf "$d"; n=$((n+1))
     done
+    flock -u 9
     echo "removed $n"
     ;;
   *)

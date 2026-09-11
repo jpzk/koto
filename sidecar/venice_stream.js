@@ -395,14 +395,41 @@ const TOOLS = [
 
 // ---- history --------------------------------------------------------------
 
+// loadHistory reads the transcript, and PRESERVES one that will not parse
+// (audit 2026-09-11 L140).
+//
+// The file lives in /workspace, which the agent's own bash and file tools can
+// write, and a direct writeFileSync is a plausible source of a half-written
+// file on its own (interruption, a full disk). Treating unreadable as EMPTY
+// and then letting saveHistory overwrite it destroyed the only copy of the
+// conversation — including whatever operational or safety context the turn was
+// supposed to carry — and did so silently, as a side effect of the next turn.
+//
+// So a malformed file is moved aside with a timestamp before the turn
+// proceeds: the turn still starts fresh (there is nothing usable to replay),
+// but the bytes survive for an operator to look at, and the failure is said
+// out loud rather than inferred later from a conversation that forgot itself.
 function loadHistory() {
+  let raw;
   try {
-    const raw = fs.readFileSync(HISTORY, 'utf8');
+    raw = fs.readFileSync(HISTORY, 'utf8');
+  } catch { return []; } // no file yet: an ordinary first turn
+  try {
     const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('not a JSON array');
     // Trimmed on load too: a transcript written before the cap existed, or by
     // an older sidecar, must not be replayed whole into the request.
-    return Array.isArray(parsed) ? trimHistory(parsed) : [];
-  } catch { return []; }
+    return trimHistory(parsed);
+  } catch (e) {
+    const aside = `${HISTORY}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(HISTORY, aside);
+      writeErr(`venice: history is unreadable (${e.message}); kept at ${aside} and starting this turn with no prior context`);
+    } catch (re) {
+      writeErr(`venice: history is unreadable (${e.message}) and could not be set aside (${re.message}); it will be overwritten`);
+    }
+    return [];
+  }
 }
 
 // HISTORY_MAX_BYTES bounds the serialized transcript.
@@ -443,8 +470,18 @@ function saveHistory(h) {
     h.length = 0;
     h.push(...trimmed); // keep the caller's in-memory copy in step
   }
-  try { fs.writeFileSync(HISTORY, JSON.stringify(trimmed)); }
-  catch (e) { writeErr(`venice: history write failed: ${e.message}`); }
+  // Written through a temporary file and renamed, so an interruption or a
+  // full disk leaves the PREVIOUS transcript intact instead of a truncated one
+  // (audit 2026-09-11 L140). The rename is atomic within the filesystem; the
+  // temporary name carries the pid so two workers never share it.
+  const tmp = `${HISTORY}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(trimmed));
+    fs.renameSync(tmp, HISTORY);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    writeErr(`venice: history write failed: ${e.message}`);
+  }
 }
 
 // ---- one turn against Venice ---------------------------------------------

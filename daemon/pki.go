@@ -91,6 +91,29 @@ func pkiEnsureCA(credsDir string) (*ecdsa.PrivateKey, *x509.Certificate, bool, e
 		}
 		return key, cert, false, nil
 	}
+	// A ca.crt with no ca.key is a HALF CA, and generating over it is the one
+	// outcome that must not happen (audit 2026-09-11 L137). The reuse test was
+	// `ca.key exists`, so an absent key made this mint a fresh CA and write
+	// BOTH paths — replacing the trust anchor. Every client certificate ever
+	// issued then fails verification against the new ca.crt on the daemon's
+	// next start, and any client still holding the old CA rejects the new
+	// server certificate: a total mTLS outage from a state that reads, to the
+	// setup detector, as "PKI missing, initialise it".
+	//
+	// Refusing is the only safe answer, because this code cannot tell the two
+	// causes apart: a key deleted by accident (the certificate is still the
+	// fleet's anchor and the key must be restored) or a genuinely new install
+	// on top of a stray file (the certificate is junk and should be moved
+	// aside). The operator can, and the message says what each looks like.
+	if _, err := os.Stat(crtPath); err == nil {
+		return nil, nil, false, fmt.Errorf(
+			"%s exists but %s does not — refusing to mint a new CA over it.\n"+
+				"If the key was lost, restore it from a backup: without it no new client or server "+
+				"certificate can be issued, and generating a replacement CA invalidates every "+
+				"certificate already issued to every client.\n"+
+				"If this certificate is a leftover and you really want a fresh PKI, move it aside "+
+				"(mv %s %s.old) and re-run.", crtPath, keyPath, crtPath, crtPath)
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, false, err

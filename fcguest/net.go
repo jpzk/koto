@@ -15,9 +15,11 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"strconv"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -97,7 +99,22 @@ func netPump() {
 	for {
 		conn := dialRetry(portNet)
 		// vsock → TAP: read one length-prefixed frame, write it to the TAP.
+		//
+		// CLOSING the shared connection on the way out is what makes the
+		// redial below reachable (audit 2026-09-11 L139). This goroutine used
+		// to just return: the TAP loop beneath it blocks in a read that only
+		// completes when the GUEST sends a packet, so after a host-side
+		// gateway or daemon restart an idle guest sat there with a dead
+		// connection and no path to conn.Close() — its networking gone until
+		// something inside it happened to transmit, which for an agent
+		// waiting on a reply is never. Closing makes the next Write fail, the
+		// loop break, and the outer for redial.
+		dead := make(chan struct{})
 		go func(c *vconn) {
+			defer func() {
+				c.Close()
+				close(dead)
+			}()
 			hdr := make([]byte, 4)
 			for {
 				if _, err := io.ReadFull(c, hdr); err != nil {
@@ -115,10 +132,27 @@ func netPump() {
 			}
 		}(conn)
 		// TAP → vsock: frame each read and length-prefix it.
+		//
+		// The read carries a DEADLINE so this loop can notice `dead` (audit
+		// 2026-09-11 L139). Without one it blocks until the guest transmits,
+		// which for a VM waiting on inbound traffic — a published port's
+		// server, a TCP retransmit, anything the agent is waiting to receive
+		// — may be never: the connection was gone and nothing redialled it.
+		// A TAP fd is pollable, so the deadline is real; the wakeup costs one
+		// timed-out read per second on an idle link.
 		buf := make([]byte, netFrameMax)
 		hdr := make([]byte, 4)
 		for {
+			_ = tapFile.SetReadDeadline(time.Now().Add(time.Second))
 			n, err := tapFile.Read(buf)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				select {
+				case <-dead:
+					err = io.EOF // the host side is gone; redial
+				default:
+					continue
+				}
+			}
 			if n > 0 {
 				binary.BigEndian.PutUint32(hdr, uint32(n))
 				if _, werr := conn.Write(hdr); werr != nil {
@@ -132,6 +166,8 @@ func netPump() {
 				break
 			}
 		}
+		_ = tapFile.SetReadDeadline(time.Time{})
 		conn.Close()
+		<-dead // let the receive goroutine retire before redialling
 	}
 }

@@ -8588,3 +8588,85 @@ func TestConcurrentClientProvisioningKeepsEveryToken(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 L134: the Resources handler ignored its context and ran a full
+// fleet scan per call — stat every image, read every config, read /proc for
+// every running VM, touch the shared CPU trail — with no budget of any kind, so
+// an authorized monitoring identity could spend the daemon's CPU and the host's
+// IO just by asking repeatedly, contending with the collector itself.
+func TestFleetSnapshotIsCoalesced(t *testing.T) {
+	fcHarness(t)
+	resSnapMu.Lock()
+	resSnapAt = time.Time{}
+	resSnapMu.Unlock()
+
+	_, _ = resourcesSnapshot()
+	resSnapMu.Lock()
+	first := resSnapAt
+	resSnapMu.Unlock()
+	for i := 0; i < 50; i++ {
+		_, _ = resourcesSnapshot()
+	}
+	resSnapMu.Lock()
+	again := resSnapAt
+	resSnapMu.Unlock()
+	if !again.Equal(first) {
+		t.Fatal("50 calls inside the TTL recomputed the snapshot")
+	}
+	// A cancelled RPC does no scan at all.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&kotoServer{}).Resources(ctx, &pb.ResourcesReq{}); err == nil {
+		t.Error("a cancelled Resources call ran anyway")
+	}
+	// The cache is keyed on the state root, so a different fleet is never
+	// answered from another one's snapshot.
+	prev := ROOT
+	ROOT = t.TempDir()
+	defer func() { ROOT = prev }()
+	_, _ = resourcesSnapshot()
+	resSnapMu.Lock()
+	rekeyed := resSnapAt
+	resSnapMu.Unlock()
+	if rekeyed.Equal(again) {
+		t.Error("a different state root was answered from the previous fleet's cache")
+	}
+}
+
+// 2026-09-11 L137: pkiEnsureCA decided to reuse a CA by testing for ca.key
+// alone, so a ca.crt with no key made it mint a fresh CA and write BOTH paths —
+// replacing the trust anchor. Every client certificate ever issued then fails
+// against the new ca.crt, and clients holding the old CA reject the new server
+// cert: a total mTLS outage from a state the setup detector read as "PKI
+// missing, initialise it".
+func TestHalfCAIsRefusedRatherThanReplaced(t *testing.T) {
+	dir := t.TempDir()
+	if err := pkiInit(dir, nil); err != nil {
+		t.Fatalf("pkiInit: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The state the finding describes: the key is gone, the anchor is not.
+	if err := os.Remove(filepath.Join(dir, "ca.key")); err != nil {
+		t.Fatal(err)
+	}
+	err = pkiInit(dir, nil)
+	if err == nil {
+		t.Fatal("a new CA was minted over an existing ca.crt")
+	}
+	for _, want := range []string{"ca.key", "refusing", "move it aside"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	after, rerr := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if rerr != nil || !bytes.Equal(before, after) {
+		t.Fatal("the existing trust anchor was overwritten")
+	}
+	// An intact CA still reuses, and an empty directory still initialises.
+	if err := pkiInit(t.TempDir(), nil); err != nil {
+		t.Errorf("a fresh PKI was refused: %v", err)
+	}
+}
