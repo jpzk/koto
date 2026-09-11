@@ -98,7 +98,7 @@ func writeSessionReg(g string, names []string) {
 	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	b, _ := json.Marshal(names)
 	tmp := p + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
+	if os.WriteFile(tmp, b, 0o600) == nil {
 		_ = os.Rename(tmp, p)
 	}
 }
@@ -288,7 +288,7 @@ func filterLogSession(path, s string) error {
 		os.Remove(name)
 		return err
 	}
-	if err := tmp.Chmod(0o644); err != nil { // CreateTemp makes it 0600
+	if err := tmp.Chmod(0o600); err != nil { // keep the atomic rewrite owner-only too (M113)
 		tmp.Close()
 		os.Remove(name)
 		return err

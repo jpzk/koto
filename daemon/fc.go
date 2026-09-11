@@ -1206,7 +1206,12 @@ func fcLogSinkWait(g string, n int) time.Duration {
 // markers, whose writers open per append, kept landing). Chunk rates are
 // chat-log rates, so the extra open/close is noise.
 func logSinkAppend(p string, b []byte) error {
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600: a transcript holds prompts, model output, tool output, command
+	// output and notifications. The state dir is 0750 and owner-owned, so the
+	// exposure is to the operator's GROUP — but nothing about a transcript
+	// wants to be group-readable, and 0644 was the umask's choice rather than
+	// a decision (audit M113).
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

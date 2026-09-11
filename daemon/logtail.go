@@ -286,8 +286,8 @@ func tailLog(g string) { tailFile(g, groupLogPath(g), true) }
 // tailFile tails one stream. isGroup marks the group stream, which is the only
 // one host-side notification delivery writes into.
 func tailFile(g, p string, isGroup bool) {
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND, 0o644); err == nil {
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 		f.Close()
 	}
 	f, err := os.Open(p)
