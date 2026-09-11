@@ -448,18 +448,41 @@ func startRunScript(group, name, script string) {
 		}
 		logInfo("script", "runscript %s on %s: stream open (%d bytes)", name, group, len(script))
 		prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ▶ " + name})
+		// The partial-line buffer is BOUNDED (audit 2026-09-11 L94). Bytes
+		// left it only at a newline, so a stream with no newline in it grew it
+		// for the life of the stream — and the daemon's sanitizer threshold
+		// and the transport's frame limit are both per-fragment, so neither is
+		// a budget for the stream. A run of output with no line break is not
+		// lines; it is a blob, and the transcript renders it as one entry that
+		// maxLines counts as one.
+		const scriptLineMax = 64 << 10
 		var buf []byte
+		var clipped bool
+		emit := func(text string) {
+			prog.Send(scriptLogMsg{group: group, kind: "script", text: text})
+		}
 		flush := func(final bool) {
 			for {
 				i := bytesIndexByte(buf, '\n')
 				if i < 0 {
 					break
 				}
-				prog.Send(scriptLogMsg{group: group, kind: "script", text: string(buf[:i])})
+				emit(string(buf[:i]))
 				buf = buf[i+1:]
+				clipped = false
+			}
+			if len(buf) > scriptLineMax {
+				// Emit the head as its own line and say so, then discard the
+				// rest of this logical line until a newline arrives. The
+				// alternative — keep buffering — is the unbounded case.
+				if !clipped {
+					emit(string(buf[:scriptLineMax]) + "…[line too long; the rest of it is not shown]")
+					clipped = true
+				}
+				buf = buf[:0]
 			}
 			if final && len(buf) > 0 {
-				prog.Send(scriptLogMsg{group: group, kind: "script", text: string(buf)})
+				emit(string(buf))
 				buf = nil
 			}
 		}

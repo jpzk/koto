@@ -51,7 +51,16 @@ note() { printf 'pre-commit: %s\n' "$*" >&2; }
 # output, verified by `make proto-verify`, not something a commit edits.
 staged_go=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go' | grep -v '\.pb\.go$' || true)
 
-if [ -n "$staged_go" ]; then
+# Staged module manifests. These are checked EVEN WHEN NO .go FILE IS STAGED
+# (audit 2026-09-11 L101): the whole block used to hang off $staged_go, and the
+# manifest discovery inside it could not help because it was itself inside the
+# skipped block — so a commit that changes only go.mod/go.sum/go.work, which is
+# exactly the shape of a dependency bump, ran none of vet, tidy or gofmt. That
+# is the change this project most wants a local check on: the six-week pin rule
+# and the security-fix exception both live in those files.
+staged_mod=$(git diff --cached --name-only --diff-filter=ACMR -- '*go.mod' '*go.sum' 'go.work' 'go.work.sum' || true)
+
+if [ -n "$staged_go" ] || [ -n "$staged_mod" ]; then
 	go=""
 	for cand in "$(command -v go 2>/dev/null || true)" "$HOME/.local/go/bin/go" /usr/local/go/bin/go; do
 		[ -n "$cand" ] && [ -x "$cand" ] && { go=$cand; break; }
@@ -74,8 +83,15 @@ if [ -n "$staged_go" ]; then
 
 		# Modules touched: the first path component is the module dir in this
 		# monorepo (daemon/ fcguest/ tui/ protocol/), each with its own go.mod.
-		mods=$(for f in $staged_go $(git diff --cached --name-only -- '*/go.mod' '*/go.sum'); do
-			d=${f%%/*}; [ -f "$d/go.mod" ] && echo "$d"; done | sort -u)
+		# A root go.work change has no module dir of its own, so it stands in
+		# for every module — a workspace edit can change what any of them
+		# resolves to.
+		if git diff --cached --name-only --diff-filter=ACMR -- 'go.work' 'go.work.sum' | grep -q .; then
+			mods=$(for f in */go.mod; do [ -f "$f" ] && echo "${f%%/*}"; done | sort -u)
+		else
+			mods=$(for f in $staged_go $staged_mod; do
+				d=${f%%/*}; [ -f "$d/go.mod" ] && echo "$d"; done | sort -u)
+		fi
 
 		for m in $mods; do
 			# 2. go vet — the compiler's suspicious-construct pass: printf

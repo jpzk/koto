@@ -1081,6 +1081,18 @@ func (m *Model) dropGroupLiveState(g string) {
 // rendered markdown of its messages, treeRowCache rows built from its name —
 // so dropping the lines without dropping these leaves the text cached under a
 // key a later group of the same name can hit.
+// invalidateAllViewports drops every cached viewport render. It bumps the
+// GLOBAL version rather than replacing the per-group map (audit 2026-09-11
+// L96): every cache key carries both versions, so the bump invalidates
+// everything, while RESETTING the map sent per-group counters back to zero —
+// and a prewarm goroutine that had captured (ver, globalVer) before a /clear
+// could then see its captured pair come round again, have its result accepted,
+// and put the cleared transcript back on screen.
+func (m *Model) invalidateAllViewports() {
+	m.vpCache = map[string]vpCacheEntry{}
+	m.groupVer[""]++
+}
+
 // invalidateHistory marks g's transcript as thrown away and returns the new
 // generation. Every site that drops a group's lines or its pagination state
 // calls it, and every history request carries the generation it saw, so a
@@ -1140,7 +1152,11 @@ func (m *Model) forgetGroup(g string) {
 	delete(m.lastSeq, g)
 	delete(m.activity, g)
 	delete(m.resources, g)
+	// Deleting the counter sends this name back to zero, so the global version
+	// is bumped alongside it — every cache key carries that too, so nothing
+	// built for the previous incarnation can match (audit 2026-09-11 L96).
 	delete(m.groupVer, g)
+	m.groupVer[""]++
 	delete(m.loadedGroups, g)
 	delete(m.prewarming, g)
 	delete(m.pageOldestTs, g)
@@ -2187,8 +2203,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				// Global trim wipes whole-cache state; mirror addLine's
 				// behavior so stale per-group versions don't keep ghost
 				// vpCache entries from a different m.lines layout.
-				m.vpCache = map[string]vpCacheEntry{}
-				m.groupVer = map[string]int{}
+				m.invalidateAllViewports()
 			}
 			m.groupVer[msg.group]++
 			if msg.group == m.cur {
@@ -2264,8 +2279,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Same rationale as addLine and the older-page trim: a global
 			// trim evicts other groups' lines without touching their
 			// groupVer, so stale vpCache entries would keep rendering them.
-			m.vpCache = map[string]vpCacheEntry{}
-			m.groupVer = map[string]int{}
+			m.invalidateAllViewports()
 		}
 		// Bump groupVer to invalidate any stale vpCache entry built before
 		// this history page landed. Without this, an earlier refreshLog
@@ -2997,8 +3011,7 @@ func (m *Model) addLine(l logLine) {
 	if len(m.lines) > maxLines || m.lineBytes > maxLineBytes {
 		m.trimLines()
 		// Trim evicts unknown lines from any group; nuke the whole content cache.
-		m.vpCache = map[string]vpCacheEntry{}
-		m.groupVer = map[string]int{}
+		m.invalidateAllViewports()
 	}
 	m.groupVer[l.group]++
 	if l.group == "" || l.group == m.cur {

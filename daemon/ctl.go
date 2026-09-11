@@ -87,6 +87,15 @@ var (
 	notifyRate   = map[string]*notifyBucket{}
 )
 
+// notifyRateForget drops g's notification bucket. Part of destroy's name-keyed
+// teardown (audit 2026-09-11 L98) — see logAlertForgetGroup for why both maps
+// need one.
+func notifyRateForget(g string) {
+	notifyRateMu.Lock()
+	delete(notifyRate, g)
+	notifyRateMu.Unlock()
+}
+
 type notifyBucket struct {
 	tokens float64
 	last   time.Time

@@ -683,7 +683,64 @@ func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB
 // fcSpawn boots the microVM for group g and wires all host-side plumbing.
 // Mirrors the podman path's contract: on any error everything this call
 // created is torn down (the caller rolls back the proxy listener).
+// fcSpawnInFlight counts spawns between the point a VMM process may exist and
+// the point it is registered in fcVMs. fcStopAll drains it so no live child is
+// missed by the shutdown snapshot (audit 2026-09-11 L93).
+var (
+	fcSpawnMu   sync.Mutex
+	fcSpawnCond = sync.NewCond(&fcSpawnMu)
+	fcSpawnN    int
+)
+
+func fcSpawnBegin() {
+	fcSpawnMu.Lock()
+	fcSpawnN++
+	fcSpawnMu.Unlock()
+}
+
+func fcSpawnEnd() {
+	fcSpawnMu.Lock()
+	fcSpawnN--
+	fcSpawnCond.Broadcast()
+	fcSpawnMu.Unlock()
+}
+
+// fcSpawnDrain waits, bounded, for in-flight spawns to finish. Bounded because
+// a spawn blocked on a wedged guest must not hold the whole shutdown past
+// systemd's TimeoutStopSec — at which point every VM is SIGKILLed anyway,
+// which is the outcome this is trying to avoid, so spending the budget here
+// would be self-defeating.
+func fcSpawnDrain(d time.Duration) {
+	deadline := time.Now().Add(d)
+	// sync.Cond has no timed wait; a waker goroutine gives us one.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		t := time.NewTicker(25 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				fcSpawnCond.Broadcast()
+			}
+		}
+	}()
+	fcSpawnMu.Lock()
+	for fcSpawnN > 0 && time.Now().Before(deadline) {
+		fcSpawnCond.Wait()
+	}
+	left := fcSpawnN
+	fcSpawnMu.Unlock()
+	if left > 0 {
+		emitLogf("fc", "warn", "shutdown: %d spawn(s) still in flight after %s — their VMs may be missed", left, d)
+	}
+}
+
 func fcSpawn(g string, proxyPort int, pubPorts []int) error {
+	fcSpawnBegin()
+	defer fcSpawnEnd()
 	if fcRunning(g) {
 		// Backstop behind ensure()'s own check (both run under groupOpMu, so
 		// this can't fire from that path). Booting a second VM onto the same
@@ -881,6 +938,21 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	console.Close()
 	vm.pid = cmd.Process.Pid
+	// From here there is a live VMM that fcVMs does not know about yet, and
+	// fcStopAll stops what fcVMs knows about (audit 2026-09-11 L93). The
+	// shutdown flag is checked on the way into ensureLocked, but registration
+	// happens at the far end of a spawn that waits for the guest agent — so a
+	// SIGTERM arriving inside that window let the daemon exit while this child
+	// kept running: an orphaned microVM holding its workspace image open, with
+	// nothing left to give the guest its sync-and-unmount window.
+	//
+	// Two halves close it. Here: notice the flag and unwind, because fail()
+	// already kills and reaps this child properly. In fcStopAll: wait for
+	// in-flight spawns before snapshotting, so one that is PAST this check
+	// still gets into the snapshot.
+	if shuttingDown.Load() {
+		return fail(fmt.Errorf("daemon is shutting down"))
+	}
 	if !jailed {
 		// Jailed VMs renice themselves in the shim (fcjailMain); the unjailed
 		// path runs as the daemon uid, so renice from outside. Same-uid raise
@@ -1163,6 +1235,10 @@ func fcStop(g string) {
 // is still in flight (not yet in fcVMs) are left to the pidfile fallback of
 // a future stop — nothing has run in them, so there is nothing to lose.
 func fcStopAll() {
+	// Let any spawn that already has a VMM process finish registering it, or
+	// notice the shutdown flag and unwind itself. Either way the snapshot
+	// below is then complete (audit 2026-09-11 L93).
+	fcSpawnDrain(10 * time.Second)
 	fcMu.Lock()
 	gs := make([]string, 0, len(fcVMs))
 	for g := range fcVMs {

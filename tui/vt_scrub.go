@@ -42,7 +42,7 @@ func scrubVTStrict(s string) string { return scrubVTMode(s, true) }
 func scrubVTMode(s string, strict bool) string {
 	clean := true
 	for _, r := range s {
-		if r == 0x1b || r < 0x20 || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) {
+		if r == 0x1b || r < 0x20 || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) || isHalfwidthMark(r) {
 			if r == '\n' {
 				continue
 			}
@@ -55,8 +55,15 @@ func scrubVTMode(s string, strict bool) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s))
+	// The base has to be the last rune actually WRITTEN, not the previous rune
+	// of the input: an escape or a control between a kana and its mark is
+	// dropped, and the mark would otherwise inherit a base that never reached
+	// the output.
+	lastOut := rune(-1)
 	for i := 0; i < len(s); {
 		r, sz := utf8.DecodeRuneInString(s[i:])
+		prevOut := lastOut
+		lastOut = -1
 		switch {
 		case r == '\n':
 			b.WriteByte('\n')
@@ -77,6 +84,9 @@ func scrubVTMode(s string, strict bool) string {
 					b.WriteString("m")
 				}
 			}
+			// An SGR writes no CELL, so it does not break a kana from its
+			// sound mark: carry the base across it.
+			lastOut = prevOut
 			i = end
 			continue
 		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
@@ -85,18 +95,49 @@ func scrubVTMode(s string, strict bool) string {
 			// column state), DEL, C1. Drop.
 		case isHostileFormat(r):
 			// Drop.
+		case isHalfwidthMark(r):
+			// Halfwidth katakana voiced/semi-voiced sound marks (audit
+			// 2026-09-11 L99). uniseg folds a RUN of these into ONE grapheme
+			// cluster, so lipgloss.Width — and cellWidth, which defers to the
+			// same measurement — report width 1 for a hundred of them, while
+			// a terminal that gives each its own halfwidth cell draws a
+			// hundred. The row then overruns its pane budget and shears the
+			// frame, which is the class of bug the raw-TAB overflow was
+			// (2026-08-29) and the one no width table catches, because every
+			// table agrees and the TERMINAL disagrees.
+			//
+			// Not dropped outright: `ｶﾞ` is ordinary halfwidth Japanese and a
+			// mark after its base is what that text IS. What is dropped is
+			// the unbounded part — a mark with no base in front of it, and
+			// any repeat of one — which caps the possible divergence at the
+			// one cell per base that legitimate text already carries.
+			if isHalfwidthKana(prevOut) {
+				b.WriteString(s[i : i+sz])
+			}
 		case r == utf8.RuneError && sz == 1:
+			lastOut = utf8.RuneError
 			// An invalid byte is replaced, never copied: two of them with a
 			// dropped control between could otherwise fuse into a valid C1
 			// (\xc2 \x1e \x9b -> U+009B, found by FuzzScrubVT).
 			b.WriteRune(utf8.RuneError)
 		default:
 			b.WriteString(s[i : i+sz])
+			lastOut = r
 		}
 		i += sz
 	}
 	return b.String()
 }
+
+// isHalfwidthMark reports the two halfwidth katakana sound marks — the only
+// runes known to make uniseg's cluster width and the terminal's rendered width
+// diverge without bound. See the case in scrubVTMode.
+func isHalfwidthMark(r rune) bool { return r == 0xff9e || r == 0xff9f }
+
+// isHalfwidthKana reports whether r is a halfwidth katakana letter, i.e. a
+// legitimate base for a sound mark. The block is U+FF66-U+FF9D; the two marks
+// themselves are U+FF9E/U+FF9F and are not bases.
+func isHalfwidthKana(r rune) bool { return r >= 0xff66 && r <= 0xff9d }
 
 // isHostileFormat is daemon/sanitize.go's isBidiOrFormat, mirrored for the
 // shell pane: zero-width and direction-control runes that can reorder or

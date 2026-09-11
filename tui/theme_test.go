@@ -6,7 +6,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -786,5 +788,55 @@ func TestMalformedBackgroundSGRStillReassertsTheGround(t *testing.T) {
 	const set = "\x1b[48;2;1;2;3m"
 	if got := reassertBg("a\x1b[0;48mb", set); !strings.Contains(got, set) {
 		t.Errorf("reassertBg dropped the ground after a malformed 48: %q", got)
+	}
+}
+
+// 2026-09-11 L102: theme discovery filtered on IsDir() alone and the reader
+// used os.Open — which BLOCKS INSIDE open(2) on a FIFO until a writer appears,
+// before any check could run. Discovery, the picker's live preview and /themes
+// all run on the single Bubble Tea update loop, so one FIFO dropped in the
+// writable run/tui/themes/ mount hung the whole TUI with no timeout. A byte
+// limit is no defence against a file that never returns a byte.
+func TestThemeLoadingRefusesSpecialFiles(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "trap.svg")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("cannot create a FIFO here: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readFileLimited(fifo, themeMaxBytes)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO was read as a theme file")
+		}
+		if !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("refused for the wrong reason: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readFileLimited blocked on a FIFO — the whole TUI would be wedged")
+	}
+
+	// A directory is refused too, and an ordinary file still reads.
+	if _, err := readFileLimited(dir, themeMaxBytes); err == nil {
+		t.Error("a directory was read as a theme file")
+	}
+	ok := filepath.Join(dir, "real.svg")
+	if err := os.WriteFile(ok, []byte("<svg/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := readFileLimited(ok, themeMaxBytes); err != nil || string(b) != "<svg/>" {
+		t.Fatalf("an ordinary theme file no longer reads: %v %q", err, b)
+	}
+	// And the byte ceiling still holds.
+	big := filepath.Join(dir, "big.svg")
+	if err := os.WriteFile(big, make([]byte, themeMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFileLimited(big, themeMaxBytes); err == nil {
+		t.Error("an oversized theme file was accepted")
 	}
 }

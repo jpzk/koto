@@ -102,3 +102,58 @@ func TestStaleHistoryPagesAreDropped(t *testing.T) {
 }
 
 var errStaleTest = fmt.Errorf("history unavailable")
+
+// 2026-09-11 L96: a global line trim REPLACED groupVer with a fresh zero-valued
+// map, so per-group counters went back to zero. A prewarm goroutine that had
+// captured (ver, globalVer) before a /clear could then see its captured pair
+// come round again, have its result accepted, and put the cleared transcript
+// back on screen.
+func TestViewportVersionsAreMonotonic(t *testing.T) {
+	m := newModel("", 200000)
+	m.groupVer["g"] = 3
+	m.groupVer[""] = 7
+	before := m.groupVer[""]
+
+	m.invalidateAllViewports()
+	if len(m.vpCache) != 0 {
+		t.Error("the viewport cache was not dropped")
+	}
+	if m.groupVer["g"] != 3 {
+		t.Errorf("a per-group version was reset to %d; it must never go backwards", m.groupVer["g"])
+	}
+	if m.groupVer[""] <= before {
+		t.Errorf("the global version did not advance (%d → %d), so nothing is invalidated", before, m.groupVer[""])
+	}
+	// Destroy deletes the per-group counter, which sends that NAME back to
+	// zero — so the global version must advance with it, since a reused name's
+	// cache key carries both.
+	g := m.groupVer[""]
+	m.groups["g"] = GroupInfo{}
+	m.forgetGroup("g")
+	if m.groupVer[""] <= g {
+		t.Error("destroy reset a name's version without advancing the global one")
+	}
+}
+
+// 2026-09-11 L100: shellSplitVisible excluded focusLog but not focusTop, while
+// View() dispatches on BOTH before the shell and returns a whole frame. With
+// the fleet view up and a shell still open, a click inside the pane's stale
+// geometry focused the pty and a wheel event was forwarded into the guest —
+// the operator looking at the fleet table, with every reason to think it owned
+// the input.
+func TestFleetViewDoesNotRouteInputToAStaleShellPane(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 200, 50
+	m.shell = &shellSession{group: "g", cols: 80, rows: 24}
+	m.shellOpen = true
+	m.focus = focusTree
+	if !m.shellSplitVisible() {
+		t.Skip("this terminal geometry does not split; the predicate is not exercised")
+	}
+	for _, f := range []focusZone{focusTop, focusLog} {
+		m.focus = f
+		if m.shellSplitVisible() {
+			t.Errorf("the shell pane claims to be visible under a full-frame view (focus %v)", f)
+		}
+	}
+}

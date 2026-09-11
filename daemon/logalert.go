@@ -63,6 +63,22 @@ func logAlertAllow(subsystem, group string) bool {
 	return b.take(logAlertBurst, logAlertRefill)
 }
 
+// logAlertForgetGroup drops every bucket belonging to g. Called from destroy,
+// with the rest of the name-keyed teardown (audit 2026-09-11 L98): group names
+// are reusable, so a replacement inherited the destroyed group's spent tokens
+// and had its first error banners suppressed — and the map itself had no
+// removal path, so churning distinct names grew it without bound.
+func logAlertForgetGroup(g string) {
+	suffix := "\x00" + g
+	logAlertMu.Lock()
+	for k := range logAlertBuckets {
+		if strings.HasSuffix(k, suffix) {
+			delete(logAlertBuckets, k)
+		}
+	}
+	logAlertMu.Unlock()
+}
+
 // logAlertTitle renders the notification title for a forwarded line:
 // "ERROR fc [dev]", "ERROR daemon". The message carries the line itself.
 func logAlertTitle(subsystem, group, level string) string {

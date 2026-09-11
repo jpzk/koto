@@ -57,6 +57,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -594,10 +595,22 @@ func themeNames(sock string) []string {
 	if dir := userThemeDir(sock); dir != "" {
 		ents, err := os.ReadDir(dir)
 		if err == nil {
+			n := 0
 			for _, e := range ents {
-				if !e.IsDir() {
-					add(e.Name())
+				// Regular files only, and bounded in number: IsDir() alone
+				// admits FIFOs, sockets and devices, and a directory with ten
+				// thousand entries in it is ten thousand synchronous loads in
+				// the picker (audit 2026-09-11 L102). The type comes from the
+				// directory entry here and is re-checked on the descriptor in
+				// readFileLimited, which is where it actually matters.
+				if e.Type()&os.ModeType != 0 {
+					continue
 				}
+				if n++; n > themeMaxFiles {
+					logWarn("theme", "drop-in theme directory holds more than %d files; ignoring the rest", themeMaxFiles)
+					break
+				}
+				add(e.Name())
 			}
 		}
 	}
@@ -635,14 +648,37 @@ func themeNameOK(name string) bool {
 // run/tui is a writable mount (audit L12).
 const themeMaxBytes = 256 << 10
 
+// themeMaxFiles bounds how many drop-in entries the TUI will consider (audit
+// 2026-09-11 L102). Discovery materialises the directory, the picker loads
+// every candidate to preview it, and `/themes list` renders the whole set —
+// all synchronously, on the update loop. The bundled collection is ~45 files.
+const themeMaxFiles = 256
+
 // readFileLimited reads at most max bytes of a file; a larger file is an error
 // rather than a truncated parse.
+//
+// The file is judged on the DESCRIPTOR, and opened with O_NONBLOCK so that it
+// can be (audit 2026-09-11 L102, the same shape as L3 and L34). `os.Open` on a
+// FIFO blocks inside open(2) until a writer appears — before any check could
+// run — and this is reached from theme discovery, the picker's live preview
+// and `/themes`, all of which run on the single Bubble Tea update loop: one
+// FIFO dropped in run/tui/themes/ hung the whole TUI with no timeout and no
+// way out. A byte limit is not a defence against a file that never returns a
+// byte.
 func readFileLimited(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file (%s)", filepath.Base(path), st.Mode().Type())
+	}
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return nil, err
