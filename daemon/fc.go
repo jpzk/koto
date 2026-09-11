@@ -347,16 +347,81 @@ func pidIsFirecracker(pid int) bool {
 // That defeats pidIsFirecracker (same comm) and makes fcRunning report a
 // dead VM as up forever: the lazy boot never fires and the jobs refresher
 // hammers the dead vsock at 1 Hz. Observed live: hhweather.pid from the
-// previous run pointing at BRAVO's new VMM. If VMs ever outlive the daemon
-// (detached spawn), this sweep must learn to skip live ones.
+// previous run pointing at BRAVO's new VMM.
+//
+// "None survived" is a property of the SUPERVISOR, not of this code (audit
+// 2026-09-11 L77). systemd tears the service cgroup down, so under the unit it
+// holds; a dev daemon SIGKILLed out from under its fleet — or one whose VMMs
+// are stuck in the uninterruptible kvm_async_pf state this project has hit
+// before — leaves live VMMs behind. Deleting those pidfiles made a running VMM
+// INVISIBLE to fcRunning, and the next boot of that group then opened the same
+// read-write ext4 image a second time and clobbered its socket and jail dirs:
+// the exact ext4-corruption failure groupOpMu exists to prevent, arriving
+// across a restart instead of across a race.
+//
+// So the sweep RECONCILES. A pidfile whose pid is a live firecracker that this
+// group's own jail (or config path) identifies as its VM is kept, not cleared,
+// and named at error level — the operator has a VM to deal with, and the group
+// stays correctly marked running rather than being booted a second time.
 func fcClearStalePids() {
 	stale, _ := filepath.Glob(filepath.Join(fcRunDir(), "*.pid"))
+	cleared, live := 0, []string{}
 	for _, p := range stale {
+		g := strings.TrimSuffix(filepath.Base(p), ".pid")
+		if pid, err := fcReadPidFile(p); err == nil && pidIsGroupVMM(g, pid) {
+			live = append(live, fmt.Sprintf("%s (pid %d)", g, pid))
+			continue
+		}
 		_ = os.Remove(p)
+		cleared++
 	}
-	if len(stale) > 0 {
-		emitLogf("fc", "info", "cleared %d stale pidfile(s) from previous daemon run", len(stale))
+	if cleared > 0 {
+		emitLogf("fc", "info", "cleared %d stale pidfile(s) from previous daemon run", cleared)
 	}
+	if len(live) > 0 {
+		emitLogf("fc", "error", "microVM(s) from a previous daemon run are STILL RUNNING and were left registered: %s — "+
+			"they are not this daemon's children, so a stop cannot signal them through the usual path; "+
+			"kill them by hand if the group will not respond", strings.Join(live, ", "))
+	}
+}
+
+func fcReadPidFile(p string) (int, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(b)))
+}
+
+// pidIsGroupVMM reports whether pid is a live Firecracker serving THIS group's
+// VM — not merely some live firecracker, which after a pid-space reset may be
+// another group's fresh VMM (the failure the comment above records).
+//
+// Two identifiers, because the two spawn paths look different from /proc: a
+// JAILED VMM is chrooted into the group's own jail dir, which /proc/<pid>/root
+// resolves to, and an unjailed one carries the group's config path on its
+// command line. Neither is forgeable by a guest — both are host paths this
+// daemon chose.
+func pidIsGroupVMM(g string, pid int) bool {
+	if pid <= 0 || !pidIsFirecracker(pid) {
+		return false
+	}
+	if root, err := os.Readlink(fmt.Sprintf("/proc/%d/root", pid)); err == nil {
+		if want, err := filepath.EvalSymlinks(fcJailDir(g)); err == nil && root == want {
+			return true
+		}
+		if root == fcJailDir(g) {
+			return true
+		}
+	}
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		for _, arg := range strings.Split(strings.TrimRight(string(b), "\x00"), "\x00") {
+			if arg == fcCfgPath(g) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---- spawn -----------------------------------------------------------------
@@ -1511,27 +1576,34 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 // write TurnEnd into a sibling session's in-flight stream (audit L4). A turn
 // that never opens leaves its entry until the next send on that slot
 // overwrites it — harmless, the slot is the daemon's to reissue.
+//
+// The entry also carries the SESSION the slot was issued for, so the turn sink
+// can name the one conversation waiting on this stream (audit 2026-09-11 L81).
 var (
 	fcExpectedMu    sync.Mutex
-	fcExpectedTurns = map[string]bool{}
+	fcExpectedTurns = map[string]string{}
 )
 
-func fcExpectTurn(g string, slot int) {
+func fcExpectTurn(g string, slot int, session string) {
 	fcExpectedMu.Lock()
-	fcExpectedTurns[slotKey(g, slot)] = true
+	fcExpectedTurns[slotKey(g, slot)] = session
 	fcExpectedMu.Unlock()
 }
-func fcConsumeExpectedTurn(g string, slot int) bool {
+
+// fcConsumeExpectedTurn claims the slot and returns the session it was issued
+// for. The boolean is the authorization answer; the string is only meaningful
+// when it is true (a session name may legitimately be "").
+func fcConsumeExpectedTurn(g string, slot int) (string, bool) {
 	fcExpectedMu.Lock()
 	defer fcExpectedMu.Unlock()
 	k := slotKey(g, slot)
-	ok := fcExpectedTurns[k]
+	sess, ok := fcExpectedTurns[k]
 	delete(fcExpectedTurns, k)
-	return ok
+	return sess, ok
 }
 
 func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte) error {
-	fcExpectTurn(g, slot)
+	fcExpectTurn(g, slot, session)
 	m := &pb.MsgReq{
 		Msg:          []byte(msg),
 		SystemPrompt: []byte(systemPrompt),

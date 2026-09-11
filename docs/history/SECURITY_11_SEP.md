@@ -5147,3 +5147,191 @@ ones that can be opened. Host-side, `parseJobsTSV` also keeps one record per id,
 first wins, so a duplicate row cannot overwrite a real job's apparent status in
 the tree. Pinned by `TestForgedJobDirectoryNamesAreNotListed`, which runs the
 real script against a staged directory tree.
+
+## L73 — TUI width fast path misclassifies combining and wide runes — FIXED
+
+`tui/width.go`.
+
+**Confirmed, and measured.** `narrowRune`'s ranges are an *assertion* that every
+rune inside them is exactly one cell, and `cellWidth` counts them without
+consulting `ansi.StringWidth`. Walking every rune those ranges claim against
+`ansi.StringWidth` found **eleven** that they get wrong:
+
+| runes | claimed | actual |
+|---|---|---|
+| U+0483–U+0489 (combining Cyrillic) | 1 | **0** |
+| U+2329 U+232A (angle brackets), U+25FD U+25FE (small squares) | 1 | **2** |
+
+The sanitizer deliberately preserves printable Unicode, so guest, model or event
+text can put any of them on screen, and `padCells`/`joinCols`/the themed frame
+padding then produce rows whose real width is not the declared one — clipped
+content, shifted separators and scrollbars, labels detached from their values.
+
+**Fix:** the eleven are excluded. The durable part is the test:
+`TestNarrowRuneRangesAreActuallyNarrow` walks **every** rune the ranges claim
+against the authority `cellWidth` is a fast path for, so widening a range cannot
+quietly admit another one. The existing corpus test could only pin the cases
+someone had thought of, and nobody had thought of these.
+
+## L74 — Attachment staging files readable by the daemon's group — ALREADY FIXED
+
+`daemon/attachments.go` creates the uploads directory `0o700` and writes each
+image `0o600`. The finding describes the pre-fix modes.
+
+## L75 — Goal text and criteria lack size limits — FIXED
+
+`daemon/goals.go`.
+
+**Confirmed.** `goalSet` checked only that both were non-empty. Both are
+**persisted** (goals.json is marshaled and rewritten on every goal mutation),
+copied into every `GoalList` response, and embedded in the plan, worker and
+judge prompt of **every iteration** — so an oversized pair is paid again per
+turn, in provider spend as much as in heap. The agent-authored fields beside
+them (`LastFeedback`, the done note, the handoff) were already bounded by
+`goalNoteMax`; these two were bounded nowhere.
+
+**Fix:** `goalTextMax = 16 KiB` on each, sized like `schedMaxMsg` and for the
+same reason. **Refused, not truncated** — a clipped acceptance criterion is a
+different contract from the one the caller wrote, and the judge would evaluate
+the clipped one with nobody told. Pinned by
+`TestGoalTextAndCriteriaAreBounded`.
+
+## L76 — Background tail writes bypass per-file serialization — ALREADY FIXED (L37)
+
+`tailBackgroundTask` takes `logWriteLock(streamPath)` around the
+size-check-and-append, exactly as `turnWriter.write` does. Closed earlier in this
+same audit (L37); the finding describes the code before it.
+
+## L77 — Startup deletes live Firecracker PID files without reconciliation — FIXED
+
+`daemon/fc.go`.
+
+**Confirmed, and the code said so itself**: the old comment ended *"If VMs ever
+outlive the daemon (detached spawn), this sweep must learn to skip live ones."*
+"None survived" is a property of the **supervisor**, not of this code — systemd
+tears the service cgroup down, but a dev daemon SIGKILLed out from under its
+fleet does not, and this project has already hit VMMs stuck in uninterruptible
+`kvm_async_pf` that survive a `kill -9`. Deleting those pidfiles made a **running**
+VMM invisible to `fcRunning`, and the next boot of that group then opened the
+same read-write ext4 image a second time and clobbered its socket and jail dirs
+— the exact corruption `groupOpMu` exists to prevent, arriving across a restart
+instead of across a race.
+
+**Fix:** the sweep reconciles. `pidIsGroupVMM` identifies a live Firecracker as
+**this group's** VM by either of the two things the two spawn paths leave in
+`/proc` — a jailed VMM's `root` symlink resolving to the group's jail dir, or an
+unjailed one's config path on its command line, both host paths this daemon
+chose and neither forgeable by a guest. A match keeps the pidfile (so the group
+stays correctly marked running) and is named at **error** level, because the
+operator has a VM to deal with by hand: it is not this daemon's child, so a stop
+cannot signal it through the usual path. Everything else is cleared as before —
+including a live process that is merely *some* firecracker, which after a pid
+space reset is the original bug. Pinned by
+`TestStartupKeepsTheLiveVMMsPidfile`.
+
+## L78 — Unbounded synchronous file reads in venice_stream.js — ALREADY FIXED (L3)
+
+`openRegular` opens with `O_NONBLOCK` and judges the **descriptor** with
+`fstat`, refusing a FIFO, socket, device or directory (which is what makes the
+`/workspace/.cs/ctl` FIFO harmless), and `readCapped` reads at most `cap+1` bytes
+so the cap bounds the **allocation** rather than the answer. Closed earlier in
+this audit (L3).
+
+## L79 — Guest-controlled probe can forge per-group telemetry — FIXED (with a stated residual)
+
+`daemon/resources.go`.
+
+**Confirmed.** `resGuestProbe` runs `stat -f` and `cat /proc/meminfo` inside the
+guest, and a `root=yes` group has a writable persistent `/usr` overlay — so it
+can replace both binaries and answer whatever it likes. The daemon checked only
+the exit status and parseability before caching the values, hashing them into
+state frames, and letting the filesystem figure drive the per-group disk alert.
+
+**Fix:** `resValidateGuest` drops any reading that contradicts the envelope the
+**host** gave the VM, or that is not internally coherent — memory above the
+configured `mem_mib`, a `/workspace` larger than the workspace image, `avail >
+total`, `used + avail > total`, negatives. **Dropped, not clamped**: a clamped
+figure is still the guest's number wearing the host's bound, and every consumer
+already has an "unknown" state that degrades honestly (the fleet column says so;
+the disk alert simply does not fire on a figure it does not have). An
+out-of-envelope reading logs once per half hour per subject, at **warn** rather
+than error — a guest lying about its own telemetry has not escaped anything, and
+error lines become operator banners a guest could then raise at will.
+
+**Residual, stated plainly:** a guest can still *under*-report its own usage and
+suppress its own disk alert. The host has no truthful view of guest-internal
+state — that is why this mirror exists at all — and `alloc_bytes` is a
+high-water mark, not fullness, so it cannot be used as a cross-check without
+reintroducing the false alarms that motivated the guest mirror. What is *not*
+affected: the two subjects that decide whether the fleet survives — the host
+filesystem and the host memory budget — are measured host-side.
+
+## L80 — Stop/Destroy retain mutexes for arbitrary nonexistent group names — FIXED
+
+`daemon/groups.go`.
+
+**Confirmed.** `groupOpMu` inserted lazily and never removed, documented as
+*"a stale mutex per destroyed group name is noise, not a leak that matters"* —
+true of destroyed groups, false of names that never existed. `Stop` and
+`Destroy` both take the lock before checking the registry, and `ensureAny` takes
+it before refusing an unregistered name, so any identity granted one of those
+verbs could mint a permanent entry per unique valid name — no group, no VM, no
+spawn grant — for as long as it kept calling.
+
+**Fix:** the entries are **reference-counted** and removed when the last holder
+lets go — the same shape `groupBarrier` already uses. The entry is registered
+before the lock is taken and released after it is dropped, so a *waiter* keeps
+it alive: it can only disappear when nobody holds or wants it. That property is
+what makes removal safe at all, because two callers landing on two different
+mutexes for one name is the double-boot-onto-one-ext4-image bug this lock exists
+to prevent. Pinned by `TestGroupOpLocksAreReleasedNotAccumulated`, which checks
+both halves — 500 cycles leave nothing behind, and a waiter gets the same mutex.
+
+## L81 — Ignored transcript append errors stall a turn and quarantine its slot — FIXED
+
+`daemon/fcturn.go`, `daemon/fc.go`, `daemon/send.go`.
+
+**Confirmed.** `frame()` documents that it returns false *"once the turn has
+ended (or the sink is refusing writes)"* — and the second half was never
+implemented: `write` had no failure result and merely logged. Past the 1 GiB
+ceiling, or on an unwritable transcript, every later guest frame was still
+decoded, formatted, rate-accounted and handed to a sink that would reject it;
+and a failed final `[[turn_end]]` meant no completion marker ever reached the
+tailer, so `sendNow` waited the full 25-minute `turnWaitTimeout` before
+quarantining the slot — with every message queued behind it waiting too.
+
+**Fix, three parts:**
+
+- `write` records the failure on the writer, and `frame` returns false, so the
+  stream closes at the first rejected append instead of processing frames into
+  a sink that is refusing them.
+- The turn sink logs at error naming the group and slot.
+- The parked sender is woken: `fcExpectedTurns` now carries the **session** the
+  slot was issued for, so `failInflightTurn` wakes exactly that conversation.
+  This is deliberately *not* `abortInflightTurn`: a transcript sink refusing
+  writes is that stream's fault (its ceiling, its file), and reporting the
+  group's other, healthy turns as aborted would advance their queues past turns
+  still running in the guest.
+
+Pinned by `TestTranscriptWriteFailureStopsTheStream`, including that a sibling
+conversation is left alone.
+
+## L82 — Stale history responses can restore cleared or destroyed transcripts — FIXED
+
+`tui/model.go`.
+
+**Confirmed.** `historyCmd`/`historyMsg` carried no request generation, and the
+handler unconditionally updated pagination state and prepended or appended the
+returned events. `/clear`, `/destroy`, `/reload` and gap recovery all throw a
+group's lines away, and none of them invalidated an in-flight fetch — so a
+delayed page reinserted exactly what the operator had just cleared, or a page
+belonging to a previous incarnation of a reused group name.
+
+**Fix:** a per-group `histGen`, bumped by `invalidateHistory` at every site that
+drops a group's lines or pagination state, carried on the request and checked on
+the response. A stale message is dropped **whole**, error path included — the
+error path clears `pageLoading`, so a stale failure would otherwise release a
+*newer* request's in-flight guard. On destroy the counter is bumped rather than
+deleted: group names are reusable, and a counter that went back to zero with the
+name would let the old incarnation's page land in the new one's transcript.
+Pinned by `TestStaleHistoryPagesAreDropped`, which covers all four properties.

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -99,5 +100,22 @@ func TestJoinColsMatchesLipgloss(t *testing.T) {
 	wide := joinCols(1, []int{4, 2}, "abcdefgh", "xyz")
 	if wide != "abcdxy" {
 		t.Errorf("over-wide line not cut: %q", wide)
+	}
+}
+
+// 2026-09-11 L73: the fast path's rune ranges are an assertion that every rune
+// in them is exactly one cell, and the corpus-based test could only check the
+// cases someone thought of. This walks all of them against the authority
+// cellWidth is a fast path FOR, so widening a range cannot quietly admit a
+// combining mark (zero cells) or a wide glyph (two) — both of which a guest can
+// put on screen, since the sanitizer preserves printable Unicode.
+func TestNarrowRuneRangesAreActuallyNarrow(t *testing.T) {
+	for r := rune(0); r <= 0x10ffff; r++ {
+		if !utf8.ValidRune(r) || !narrowRune(r) {
+			continue
+		}
+		if w := ansi.StringWidth(string(r)); w != 1 {
+			t.Errorf("U+%04X is claimed narrow but measures %d cells", r, w)
+		}
 	}
 }

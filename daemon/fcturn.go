@@ -64,7 +64,8 @@ func fcTurnSink(g string, c net.Conn) {
 		return
 	}
 	slot := int(open.Slot)
-	if !fcConsumeExpectedTurn(g, slot) {
+	sess, expected := fcConsumeExpectedTurn(g, slot)
+	if !expected {
 		// The daemon told the guest its slot in MsgReq.Slot; a stream for a
 		// slot no turn was handed out on is the guest choosing (audit L4).
 		emitLogfG("fc", g, "warn", "[%s] turn stream opened on slot %d with no outstanding turn — refused", g, slot)
@@ -85,6 +86,17 @@ func fcTurnSink(g string, c net.Conn) {
 			return
 		}
 		if !w.frame(f) {
+			if w.failed {
+				// The transcript sink is refusing writes, so this turn's
+				// [[turn_end]] can never reach the tailer and sendNow would
+				// park on it for the full turnWaitTimeout — 25 minutes during
+				// which every message queued behind it waits too. Wake exactly
+				// the conversation this slot was issued for: the fault is this
+				// stream's (its ceiling, its file), not the group's.
+				emitLogfG("fc", g, "error",
+					"[%s] turn stream slot %d abandoned: the transcript is unwritable, so this turn cannot complete", g, slot)
+				failInflightTurn(g, sess)
+			}
 			return
 		}
 	}
@@ -98,6 +110,12 @@ type turnWriter struct {
 	midline bool // last byte written was not '\n'
 	stamped bool // [ts:] written for this turn
 	ended   bool
+	// failed is set by write() when the sink refuses an append — the ceiling
+	// reached, the file unwritable, the disk full (audit 2026-09-11 L81). It
+	// used to be only logged, so frame()'s documented "or the sink is refusing
+	// writes" was never true: every later guest frame was still decoded,
+	// formatted, rate-accounted and handed to a sink that would reject it.
+	failed bool
 	// hold carries the first few bytes of a logical line when they are still
 	// an AMBIGUOUS marker prefix — "[", "[t", ">>", and so on. See text().
 	hold []byte
@@ -111,7 +129,7 @@ func newTurnWriter(g, p string) *turnWriter {
 // frame renders one frame. Returns false once the turn has ended (or the
 // sink is refusing writes) so the caller can close the connection.
 func (w *turnWriter) frame(f *pb.TurnFrame) bool {
-	if w.ended {
+	if w.ended || w.failed {
 		return false
 	}
 	switch k := f.Kind.(type) {
@@ -296,6 +314,9 @@ func (w *turnWriter) flushHold() {
 }
 
 func (w *turnWriter) write(b []byte) {
+	if w.failed {
+		return
+	}
 	if d := fcLogSinkWait(w.g, len(b)); d > 0 {
 		time.Sleep(d)
 	}
@@ -304,6 +325,7 @@ func (w *turnWriter) write(b []byte) {
 	err := logSinkAppend(w.p, b)
 	mu.Unlock()
 	if err != nil {
+		w.failed = true
 		emitLogfG("fc", w.g, "error", "[%s] turn log append: %v", w.g, err)
 	}
 }

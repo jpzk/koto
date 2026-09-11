@@ -175,14 +175,14 @@ func TestStateDirTrusted(t *testing.T) {
 
 // L4: a turn stream may open only on a slot the daemon handed out.
 func TestExpectedTurnSlots(t *testing.T) {
-	if fcConsumeExpectedTurn("g", 3) {
+	if _, ok := fcConsumeExpectedTurn("g", 3); ok {
 		t.Fatal("slot with no outstanding turn accepted")
 	}
-	fcExpectTurn("g", 3)
-	if !fcConsumeExpectedTurn("g", 3) {
+	fcExpectTurn("g", 3, "")
+	if _, ok := fcConsumeExpectedTurn("g", 3); !ok {
 		t.Fatal("handed-out slot refused")
 	}
-	if fcConsumeExpectedTurn("g", 3) {
+	if _, ok := fcConsumeExpectedTurn("g", 3); ok {
 		t.Fatal("slot accepted twice")
 	}
 }
@@ -2950,8 +2950,7 @@ func TestDestroyHoldsTheGroupLockThroughout(t *testing.T) {
 
 	// Hold the group lock the way a concurrent ensure() would, then check that
 	// destroy blocks on it rather than proceeding to delete state.
-	mu := groupOpMu(g)
-	mu.Lock()
+	unlock := groupOpLock(g)
 	done := make(chan baseResp, 1)
 	go func() { done <- destroy(g) }()
 	select {
@@ -2959,7 +2958,7 @@ func TestDestroyHoldsTheGroupLockThroughout(t *testing.T) {
 		t.Fatal("destroy ran its cleanup while another lifecycle op held the group lock")
 	case <-time.After(150 * time.Millisecond):
 	}
-	mu.Unlock()
+	unlock()
 	select {
 	case r := <-done:
 		if !r.OK {
@@ -7106,11 +7105,15 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 	HERE, ROOT = t.TempDir(), t.TempDir()
 	t.Cleanup(func() { HERE, ROOT = prevHere, prevRoot })
 
+	// Scoped to this test's own group: the daemon log ring is process-global
+	// and other tests' background workers compose prompts of their own.
+	const probe = "l61probe"
 	logged := func() bool {
 		logSubsLock.Lock()
 		defer logSubsLock.Unlock()
 		for _, le := range logRing {
-			if le.Subsystem == "prompt" && le.Level == "error" && strings.Contains(le.Msg, "NO harness policy") {
+			if le.Subsystem == "prompt" && le.Level == "error" &&
+				strings.Contains(le.Msg, "NO harness policy") && strings.Contains(le.Msg, "["+probe+"]") {
 				return true
 			}
 		}
@@ -7123,7 +7126,7 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 	}
 
 	drain()
-	_ = composeSystemPrompt("g")
+	_ = composeSystemPrompt(probe)
 	if !logged() {
 		t.Error("a missing prompts/global.md produced no error-level log line")
 	}
@@ -7136,7 +7139,7 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(HERE, "prompts", "global.md"), []byte("  \n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_ = composeSystemPrompt("g")
+	_ = composeSystemPrompt(probe)
 	if !logged() {
 		t.Error("an empty prompts/global.md produced no error-level log line")
 	}
@@ -7146,7 +7149,7 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(HERE, "prompts", "global.md"), []byte("BE GOOD"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := composeSystemPrompt("g"); !strings.Contains(got, "BE GOOD") {
+	if got := composeSystemPrompt(probe); !strings.Contains(got, "BE GOOD") {
 		t.Errorf("composed prompt lost the policy: %.80q", got)
 	}
 	if logged() {
@@ -7226,15 +7229,27 @@ func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 // the operator had been told the data was gone.
 func TestDestroyReportsAFailedWorkspaceDeletion(t *testing.T) {
 	prevRoot, prevHere := ROOT, HERE
-	HERE = t.TempDir()
+	// NOT t.TempDir(): pointing the globals at it makes every background
+	// worker in the process write under it, and testing's own cleanup FAILS
+	// the test when one of them creates a file while it is unlinking.
+	home, err := os.MkdirTemp("", "koto-destroyfail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	HERE = home
 	ROOT = filepath.Join(HERE, "groups")
 	GROUPS_FILE = filepath.Join(HERE, "groups.json")
-	t.Cleanup(func() { ROOT, HERE = prevRoot, prevHere; initPaths() })
+	t.Cleanup(func() {
+		ROOT, HERE = prevRoot, prevHere
+		initPaths()
+		_ = os.RemoveAll(home)
+	})
 
 	const g = "destroyfail"
 	if err := os.MkdirAll(filepath.Join(ROOT, g, "keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = os.Chmod(filepath.Join(ROOT, g, "keep"), 0o700) }()
 	if err := os.WriteFile(filepath.Join(ROOT, g, "keep", "workspace.img"), []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -7482,5 +7497,242 @@ func TestOversizedLogLineIsNotACleanEnd(t *testing.T) {
 	huge := strings.Repeat("x", 2<<20) // no newline: one token past the limit
 	if got := classify(strings.NewReader(huge)); got != "error:too-long" {
 		t.Fatalf("a 2 MiB unterminated line classified as %q — the daemon would call it an end", got)
+	}
+}
+
+// 2026-09-11 L75: goalSet checked only that text and criteria were non-empty.
+// Both are persisted into goals.json, rewritten on every goal mutation, copied
+// into every GoalList, and embedded in the plan, worker and judge prompt of
+// every iteration — so an oversized pair is paid again per turn, in provider
+// spend as well as heap.
+func TestGoalTextAndCriteriaAreBounded(t *testing.T) {
+	goalTestSetup(t)
+	big := strings.Repeat("x", goalTextMax+1)
+	if _, err := goalSet("g-big-text", big, "1. ok", "", 1, false); err == nil {
+		t.Error("an oversized goal text was accepted")
+	}
+	if _, err := goalSet("g-big-crit", "do it", big, "", 1, false); err == nil {
+		t.Error("oversized acceptance criteria were accepted")
+	}
+	// Refused, not truncated: a clipped criterion is a different contract from
+	// the one the caller wrote, and the judge would evaluate the clipped one.
+	withTurnFn(func(string, string, string) error { return nil }, func() {
+		it, err := goalSet("g-ok", "do it", strings.Repeat("y", goalTextMax), "", 1, false)
+		if err != nil {
+			t.Fatalf("a goal at exactly the limit was refused: %v", err)
+		}
+		if len(it.Criteria) != goalTextMax {
+			t.Errorf("criteria were altered: %d bytes stored, %d given", len(it.Criteria), goalTextMax)
+		}
+		waitGoalTerminal(t, "g-ok")
+	})
+}
+
+// 2026-09-11 L77: the startup sweep deleted every pidfile on the reasoning
+// that FC processes are the daemon's children — which is a property of the
+// SUPERVISOR, not of this code. A dev daemon SIGKILLed out from under its
+// fleet leaves live VMMs, and deleting their pidfiles made them invisible to
+// fcRunning, so the next boot of that group opened the same read-write ext4
+// image a second time.
+func TestStartupKeepsTheLiveVMMsPidfile(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere; initPaths() })
+	if err := os.MkdirAll(fcRunDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A dead pid: the whole point of the sweep, and it must still go.
+	if err := os.WriteFile(fcPidPath("deadgroup"), []byte("2147483646\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A live process that is NOT a firecracker serving this group: also stale,
+	// because a reused pid with the same comm is the bug the sweep exists for.
+	if err := os.WriteFile(fcPidPath("othergroup"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fcClearStalePids()
+	if exists(fcPidPath("deadgroup")) {
+		t.Error("a pidfile for a dead pid survived the sweep")
+	}
+	if exists(fcPidPath("othergroup")) {
+		t.Error("a pidfile whose pid is not this group's VMM survived the sweep")
+	}
+	// And the identification itself: this process is alive but is not a
+	// firecracker, let alone one chrooted into the group's jail.
+	if pidIsGroupVMM("othergroup", os.Getpid()) {
+		t.Error("a non-firecracker process was identified as a group's VMM")
+	}
+	if pidIsGroupVMM("nogroup", 0) || pidIsGroupVMM("nogroup", -1) {
+		t.Error("an impossible pid was identified as a VMM")
+	}
+}
+
+// 2026-09-11 L79: the guest resource probe runs `stat` and `cat` inside the
+// guest, and a root=yes group has a writable /usr overlay, so it can replace
+// both. Nothing can make a guest tell the truth about its own internals — but
+// the host knows the envelope it gave the VM, and a reading outside it is
+// provably a lie rather than data to cache, hash and alert on.
+func TestForgedGuestTelemetryIsDropped(t *testing.T) {
+	prevRoot := ROOT
+	ROOT = t.TempDir()
+	t.Cleanup(func() { ROOT = prevRoot })
+	const g = "telemetry"
+	if err := os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vol(g), ".cs", "config.json"),
+		[]byte(`{"size":"small"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, memMiB, diskBytes := fcResolveSize(g)
+	if memMiB <= 0 || diskBytes <= 0 {
+		t.Fatalf("preset not resolved: mem=%d disk=%d", memMiB, diskBytes)
+	}
+
+	// A plausible reading passes through untouched.
+	mT, mA := int64(memMiB)<<20-(64<<20), int64(memMiB)<<20/2
+	dT, dA, dU := diskBytes, diskBytes/2, diskBytes/4
+	gmT, gmA, gdT, gdA, gdU := resValidateGuest(g, mT, mA, dT, dA, dU)
+	if gmT != mT || gmA != mA || gdT != dT || gdA != dA || gdU != dU {
+		t.Fatalf("an honest reading was rejected: %d %d %d %d %d", gmT, gmA, gdT, gdA, gdU)
+	}
+
+	for _, c := range []struct {
+		name                    string
+		mT, mA, dT, dA, dU      int64
+		wantMemGone, wantFSGone bool
+	}{
+		{"memory larger than the VM was given", int64(memMiB) << 30, 1 << 20, dT, dA, dU, true, false},
+		{"more available than total", mT, mT + 1, dT, dA, dU, true, false},
+		{"a filesystem bigger than the image", mT, mA, diskBytes * 4, 1 << 20, 1 << 20, false, true},
+		{"used plus available past the total", mT, mA, dT, dT, dT, false, true},
+		{"negative figures", mT, mA, dT, -1, dU, false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			om, oa, ot, oav, ou := resValidateGuest(g, c.mT, c.mA, c.dT, c.dA, c.dU)
+			if c.wantMemGone && (om != 0 || oa != 0) {
+				t.Errorf("forged memory survived: total=%d avail=%d", om, oa)
+			}
+			if !c.wantMemGone && om == 0 {
+				t.Errorf("an honest memory reading was dropped")
+			}
+			if c.wantFSGone && (ot != 0 || oav != 0 || ou != 0) {
+				t.Errorf("forged filesystem survived: total=%d avail=%d used=%d", ot, oav, ou)
+			}
+			if !c.wantFSGone && ot == 0 {
+				t.Errorf("an honest filesystem reading was dropped")
+			}
+		})
+	}
+}
+
+// 2026-09-11 L80: groupOpMu inserted a mutex per name and never removed one,
+// while Stop and Destroy both take the lock before checking the registry and
+// ensureAny takes it before refusing an unregistered name. Any identity with
+// one of those verbs could mint an entry per unique valid name — no group, no
+// VM, no spawn grant — for as long as it kept calling.
+func TestGroupOpLocksAreReleasedNotAccumulated(t *testing.T) {
+	groupOpMusMu.Lock()
+	before := len(groupOpMus)
+	groupOpMusMu.Unlock()
+
+	for i := 0; i < 500; i++ {
+		groupOpLock(fmt.Sprintf("ghost%04d", i))()
+	}
+	groupOpMusMu.Lock()
+	after := len(groupOpMus)
+	groupOpMusMu.Unlock()
+	if after > before {
+		t.Fatalf("500 lock/unlock cycles left %d entries behind", after-before)
+	}
+
+	// A waiter keeps the entry alive, and — the part that must not break —
+	// gets the SAME mutex: two holders on two mutexes for one name is the
+	// double-boot this lock exists to prevent.
+	const g = "contended"
+	unlock := groupOpLock(g)
+	groupOpMusMu.Lock()
+	held := groupOpMus[g]
+	groupOpMusMu.Unlock()
+	if held == nil {
+		t.Fatal("a held lock has no entry")
+	}
+	entered := make(chan struct{})
+	go func() {
+		u2 := groupOpLock(g)
+		close(entered)
+		u2()
+	}()
+	// The waiter is queued on the same entry; it cannot proceed yet.
+	select {
+	case <-entered:
+		t.Fatal("a second holder entered while the lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	groupOpMusMu.Lock()
+	same := groupOpMus[g] == held
+	groupOpMusMu.Unlock()
+	if !same {
+		t.Fatal("a waiter created a second mutex for one name")
+	}
+	unlock()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter never acquired the released lock")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		groupOpMusMu.Lock()
+		_, still := groupOpMus[g]
+		groupOpMusMu.Unlock()
+		if !still {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the entry survived the last holder")
+}
+
+// 2026-09-11 L81: turnWriter.write only LOGGED an append failure, so frame()'s
+// documented "or the sink is refusing writes" was never true — every later
+// guest frame was still decoded, formatted and rate-accounted — and a failed
+// [[turn_end]] left sendNow parked for the full 25-minute turnWaitTimeout.
+func TestTranscriptWriteFailureStopsTheStream(t *testing.T) {
+	dir := t.TempDir()
+	// A path whose parent is a FILE: every append fails, at open.
+	if err := os.WriteFile(filepath.Join(dir, "blocked"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := newTurnWriter("wfail", filepath.Join(dir, "blocked", "log.0"))
+	if !w.frame(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("hello")}}) {
+		t.Fatal("the first frame was refused before anything had failed")
+	}
+	if !w.failed {
+		t.Fatal("an append failure was not recorded")
+	}
+	if w.frame(&pb.TurnFrame{Kind: &pb.TurnFrame_Text{Text: []byte("more")}}) {
+		t.Fatal("frames kept being accepted after the sink refused a write")
+	}
+
+	// And the parked sender is woken rather than left for 25 minutes.
+	const g, sess = "wfail-wake", "s1"
+	c := turnDoneCh(g, sess)
+	for len(c) > 0 {
+		<-c
+	}
+	failInflightTurn(g, sess)
+	select {
+	case got := <-c:
+		if got != turnAborted {
+			t.Fatalf("woken with outcome %v, want turnAborted", got)
+		}
+	default:
+		t.Fatal("the waiting sender was not woken")
+	}
+	// Only that conversation: the other sessions' turns are still running.
+	other := turnDoneCh(g, "s2")
+	if len(other) != 0 {
+		t.Fatal("a sibling conversation was reported aborted too")
 	}
 }

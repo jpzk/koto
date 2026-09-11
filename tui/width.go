@@ -31,7 +31,12 @@ import (
 // emoji (with their ZWJ sequences and variation selectors), CJK, combining
 // marks, anything ambiguous. The contract is exactness, not coverage —
 // TestCellWidthMatchesANSI pins it against ansi.StringWidth over the frame's
-// real lines and a corpus of the hard cases.
+// real lines and a corpus of the hard cases, and
+// TestNarrowRuneRangesAreActuallyNarrow walks EVERY rune these ranges claim —
+// the corpus could only pin the cases someone thought of, and the ranges held
+// eleven runes nobody had (audit 2026-09-11 L73: seven combining Cyrillic
+// marks counted as one cell instead of zero, and four wide glyphs — 〈 〉 ◽ ◾ —
+// counted as one instead of two, in content a guest can put on screen).
 func cellWidth(s string) int {
 	w := 0
 	for i := 0; i < len(s); {
@@ -88,6 +93,8 @@ func narrowRune(r rune) bool {
 		return false
 	case r >= 0xa0 && r < 0x300: // Latin-1 supplement, Latin extended A/B
 		return r != 0xad // soft hyphen is zero-width
+	case r >= 0x483 && r <= 0x489: // combining Cyrillic marks — zero width
+		return false
 	case r >= 0x370 && r < 0x530: // Greek, Cyrillic (Σ in the tok/s chip)
 		return true
 	case r >= 0x2010 && r <= 0x2027: // dashes, quotes, ›, ‹, ·-like marks
@@ -97,10 +104,11 @@ func narrowRune(r rune) bool {
 	case r >= 0x2190 && r < 0x2200: // arrows (↑ ↻ ⇥)
 		return true
 	case r >= 0x2300 && r <= 0x23e8: // misc technical (⎋ ⌘ ⌥) — but not the
-		// watch/hourglass pair, and nothing past ⏈: ⏩…⏳ are wide
-		return r != 0x231a && r != 0x231b
+		// watch/hourglass pair, the angle brackets, and nothing past ⏈:
+		// ⏩…⏳ are wide
+		return r != 0x231a && r != 0x231b && r != 0x2329 && r != 0x232a
 	case r >= 0x2500 && r < 0x2600: // box drawing, blocks, geometric shapes
-		return true
+		return r != 0x25fd && r != 0x25fe // …but ◽ ◾ are wide
 	case r >= 0x2800 && r < 0x2900: // braille — the spinner frames
 		return true
 	}
