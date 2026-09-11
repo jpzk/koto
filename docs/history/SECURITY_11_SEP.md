@@ -2123,3 +2123,25 @@ failure.
 An inactivity deadline on established streams is declined for the same reason
 as M103: a published port exists to carry a real service, and a connection idle
 between requests is the normal case for one.
+
+### M115 — Unsolicited guest report requests trigger repeatable host-daemon resource consumption (`daemon/ctl.go`) — **fixed**
+
+Two real orderings, both "expensive work before the authorization decision".
+
+**The report body.** An unsolicited `report` was base64-decoded (up to a 1 MiB
+frame), scrubbed rune by rune by `sanitize`, trimmed and truncated — and THEN
+refused by `deliverReport` for having no armed window. A guest could spend the
+daemon's CPU in a loop on a verb it is not authorized to use at all.
+`reportArmed` is now checked first and is a map lookup. It asks only whether an
+entry EXISTS, deliberately: an expired window carries bookkeeping
+`deliverReport` owns — delete it, log the expiry, answer with the reason — and
+short-circuiting that here would swap a specific answer for a generic one and
+skip the cleanup. It consumes nothing, so `deliverReport` stays authoritative.
+
+**The log line.** `ctlDispatchPB` logged the complete converted request before
+dispatch, and that line is mirrored to stderr, retained in the log ring and
+fanned out to every `SubscribeLogs` subscriber — a megabyte-per-frame amplifier
+on the daemon's own logging path, again before any authorization. Requests are
+now logged in full up to `ctlLogMax` (512 bytes) and elided to verb plus length
+beyond it, which is where a payload stops being a command.
+`TestUnsolicitedReportIsRefusedCheaply`.

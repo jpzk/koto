@@ -461,6 +461,15 @@ func ctlDispatch(owner string, line []byte) any {
 		if owner == ctlMainGroup {
 			return errResp("ctl: main has no delegator to report to")
 		}
+		// The window check comes BEFORE the decode, sanitize and truncate
+		// (audit M115). Those are the expensive part — up to a 1 MiB frame
+		// base64-decoded, scrubbed rune by rune and trimmed — and an
+		// UNSOLICITED report was doing all of it and then being refused, so a
+		// guest could spend the daemon's CPU in a loop on a verb it is not
+		// authorized to use at all. reportArmed is a map lookup.
+		if !reportArmed(owner) {
+			return errResp("no reply pending: main must delegate with reply:true first (one report per delegation)")
+		}
 		var req struct {
 			Msg string `json:"msg"` // base64 (arbitrary bytes)
 		}

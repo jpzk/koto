@@ -56,12 +56,30 @@ func ctlReqEnvelope(req *pb.CtlRequest) ([]byte, string, error) {
 }
 
 // ctlDispatchPB serves one control-plane request from group owner.
+// ctlLogMax is how much of a ctl request body reaches the daemon log.
+const ctlLogMax = 512
+
+func ctlLogLine(line []byte, verb string) string {
+	if len(line) <= ctlLogMax {
+		return string(line)
+	}
+	return fmt.Sprintf("%s (%d bytes, body elided)", verb, len(line))
+}
+
 func ctlDispatchPB(owner string, req *pb.CtlRequest) *pb.CtlResponse {
 	line, verb, err := ctlReqEnvelope(req)
 	if err != nil {
 		return &pb.CtlResponse{Error: err.Error()}
 	}
-	emitLogfG("ctl", owner, "info", "[%s] %s", owner, string(line))
+	// The verb and the envelope's SIZE, not its body. Every ctl request is
+	// guest-authored, and this line is mirrored to stderr, kept in the log
+	// ring and fanned out to every SubscribeLogs subscriber — so logging the
+	// full converted request handed a guest a megabyte-per-frame amplifier on
+	// the daemon's own logging path, and it did so BEFORE any authorization
+	// decision (audit M115). Small requests still log in full, which is what
+	// makes the ctl log useful; the cap is where a payload starts being a
+	// payload rather than a command.
+	emitLogfG("ctl", owner, "info", "[%s] %s", owner, ctlLogLine(line, verb))
 	resp, err := ctlRespToPB(ctlDispatch(owner, line))
 	if err != nil {
 		emitLogfG("ctl", owner, "error", "[%s] %s: %v", owner, verb, err)

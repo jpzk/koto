@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -3801,4 +3802,51 @@ func TestTranscriptFilesAreOwnerOnly(t *testing.T) {
 func ensureGroupDirForTest(g string) (string, error) {
 	d := filepath.Join(vol(g), ".cs")
 	return d, os.MkdirAll(d, 0o700)
+}
+
+// 2026-09-11 M115: an unsolicited report was base64-decoded, scrubbed rune by
+// rune and trimmed BEFORE the authorization check refused it — so a guest
+// could spend the daemon's CPU in a loop on a verb it may not use. And
+// ctlDispatchPB logged the whole converted request, which is mirrored to
+// stderr, kept in the log ring and fanned out to every SubscribeLogs
+// subscriber, before any authorization decision at all.
+func TestUnsolicitedReportIsRefusedCheaply(t *testing.T) {
+	fcHarness(t)
+	const g = "reportcheap"
+	t.Cleanup(func() { disarmReport(g) })
+
+	if reportArmed(g) {
+		t.Fatal("a window is armed with no delegation")
+	}
+	// A 1 MiB body, the frame maximum: refused, and the refusal does not
+	// depend on having processed it.
+	big := base64.StdEncoding.EncodeToString(make([]byte, 700<<10))
+	resp := ctlDispatch(g, ctlLine(t, map[string]any{"cmd": "report", "msg": big}))
+	br, ok := resp.(baseResp)
+	if !ok || br.OK || !strings.Contains(br.Error, "no reply pending") {
+		t.Fatalf("unsolicited report: %+v", resp)
+	}
+
+	// Armed, the same body is accepted as far as the delivery attempt — the
+	// pre-check must not become a second refusal.
+	reportMu.Lock()
+	armLocked(g, "")
+	reportMu.Unlock()
+	if !reportArmed(g) {
+		t.Fatal("the pre-check does not see an armed window")
+	}
+
+	// The ctl log line elides a large body but keeps a small one.
+	small := []byte(`{"cmd":"notify","title":"x"}`)
+	if got := ctlLogLine(small, "notify"); got != string(small) {
+		t.Fatalf("a small request was elided: %q", got)
+	}
+	huge := append([]byte(`{"cmd":"report","msg":"`), make([]byte, ctlLogMax*4)...)
+	got := ctlLogLine(huge, "report")
+	if len(got) > 128 {
+		t.Fatalf("a large request logged %d bytes", len(got))
+	}
+	if !strings.Contains(got, "report") || !strings.Contains(got, "elided") {
+		t.Fatalf("the elided line does not say what it was: %q", got)
+	}
 }
