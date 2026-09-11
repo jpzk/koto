@@ -341,11 +341,26 @@ async function executeToolCall(call) {
   } catch (e) {
     return { error: `tool arg parse failed: ${e.message}`, raw: call.function && call.function.arguments };
   }
+  // PARSED IS NOT THE SAME AS AN OBJECT (audit 2026-09-11 L149). The string
+  // "null" parses fine and yields the value null, and so do "42", "\"x\"" and
+  // "[]"; `args.command` on null then throws a TypeError, the tool loop awaits
+  // this without catching, and node's default unhandled-rejection behaviour
+  // kills the worker — losing the whole response for a turn the model can
+  // reproduce at will.
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+    return { error: 'tool arguments are not a JSON object', raw: call.function && call.function.arguments };
+  }
   const name = call.function && call.function.name;
-  switch (name) {
-    case 'bash': return await execBash(args.command);
-    case 'file': return execFile(args);
-    default:    return { error: `unknown tool: ${name}` };
+  try {
+    switch (name) {
+      case 'bash': return await execBash(args.command);
+      case 'file': return execFile(args);
+      default:    return { error: `unknown tool: ${name}` };
+    }
+  } catch (e) {
+    // A tool that throws is a failed tool call, not a dead worker: the loop
+    // feeds this back to the model as the result and the turn continues.
+    return { error: `tool ${name} failed: ${e && e.message ? e.message : String(e)}` };
   }
 }
 

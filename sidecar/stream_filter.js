@@ -35,6 +35,16 @@ let midline = false;
 // Track block state by index. tool_use has {name, inputBuf}; thinking has
 // {wordsBuf, chars} — wordsBuf accumulates so we can emit a word count
 // summary on stop.
+// Bounds on what ONE streamed block may make this process accumulate (audit
+// 2026-09-11 L151). Neither buffer had a budget of any kind: readline hands
+// over a whole line before this sees it, and both of these then grew for the
+// life of a block that a model — or a subagent run an authenticated caller can
+// invoke — chooses the length of. The tool input additionally becomes a single
+// [[tool]] line the daemon parses, the transcript stores and every client
+// carries.
+const TOOL_INPUT_MAX = 64 * 1024;
+const WORDS_BUF_MAX = 256 * 1024;
+
 const tools = {};
 const thinking = {};
 
@@ -143,14 +153,33 @@ rl.on('line', (line) => {
       fs.writeSync(OUT, e.delta.text);
       midline = !e.delta.text.endsWith('\n');
     } else if (e.delta.type === 'thinking_delta' && thinking[e.index] && e.delta.thinking) {
+      // wordsBuf exists only to COUNT words at the end, so past the cap it
+      // stops growing and the count is reported as approximate (audit
+      // 2026-09-11 L151). It used to accumulate the entire thinking block —
+      // a second full copy of it, in a process that has already written every
+      // byte straight out.
       // Stream thinking text into the log as-is. The daemon's tailer is
       // stateful: anything between [[think_begin]] and [[think_end]] is
       // emitted as `event:"thinking_stream"` (partial) / `"thinking"` (line).
       fs.writeSync(OUT, e.delta.thinking);
-      thinking[e.index].wordsBuf += e.delta.thinking;
+      if (thinking[e.index].wordsBuf.length < WORDS_BUF_MAX) {
+        thinking[e.index].wordsBuf += e.delta.thinking;
+      } else {
+        thinking[e.index].clipped = true;
+      }
       midline = !e.delta.thinking.endsWith('\n');
     } else if (e.delta.type === 'input_json_delta' && tools[e.index]) {
-      tools[e.index].inputBuf += e.delta.partial_json || '';
+      // The tool-input buffer is the one that goes into the log as a single
+      // [[tool]] LINE, so it is bounded at the size a summary line can be
+      // (audit 2026-09-11 L151). Past the cap the fragments are dropped and
+      // the marker says the JSON is clipped, rather than the process holding
+      // an unbounded string and writing an unbounded line for the daemon's
+      // parser, the transcript and every client to carry.
+      if (tools[e.index].inputBuf.length < TOOL_INPUT_MAX) {
+        tools[e.index].inputBuf += e.delta.partial_json || '';
+      } else {
+        tools[e.index].clipped = true;
+      }
     }
     return;
   }
@@ -160,13 +189,14 @@ rl.on('line', (line) => {
       delete tools[e.index];
       stampOnce();
       breakLine();
-      fs.writeSync(OUT, `[[tool]] ${t.name} ${t.inputBuf || '{}'}\n`);
+      const input = t.clipped ? `${t.inputBuf}…[clipped]` : (t.inputBuf || '{}');
+      fs.writeSync(OUT, `[[tool]] ${t.name} ${input}\n`);
     } else if (thinking[e.index]) {
       const t = thinking[e.index];
       delete thinking[e.index];
       const words = (t.wordsBuf.trim().split(/\s+/).filter(Boolean)).length;
       breakLine();
-      fs.writeSync(OUT, `[[think_end]] ${words}\n`);
+      fs.writeSync(OUT, `[[think_end]] ${words}${t.clipped ? '+' : ''}\n`);
     }
     return;
   }

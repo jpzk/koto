@@ -111,11 +111,47 @@ fi
 # mounted read-only. Root inside a rootless container is this user outside,
 # but git still checks the .git owner against the uid it sees, hence
 # safe.directory.
+#
+# The CONTAINER route sees only the directory it mounts — it is handed no
+# GIT_INDEX_FILE, no GIT_DIR and no mount for metadata living outside that
+# directory (audit 2026-09-11 L145). So when git is pointed at an index or a
+# git dir somewhere else, the scanner inside reads the DEFAULT one — empty or
+# stale — reports clean, and the commit carries staged content it never looked
+# at. That is the hook's whole guarantee, lost silently, in the direction that
+# reports success.
+#
+# The test is WHERE, not whether: git sets GIT_INDEX_FILE for every hook it
+# runs, and the ordinary value is this repo's own index, which the mount does
+# contain. Only a path outside the mounted repo is a problem — an alternate
+# index, a separate git dir, or a linked worktree whose real git dir lives in
+# another checkout. The native route inherits the environment and sees exactly
+# what git sees, so none of this applies to it.
+git_state_outside_repo() {
+	_gd=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	_idx=${GIT_INDEX_FILE:-$_gd/index}
+	case $_idx in /*) ;; *) _idx=$PWD/$_idx ;; esac
+	_objs=${GIT_OBJECT_DIRECTORY:-$_gd/objects}
+	case $_objs in /*) ;; *) _objs=$PWD/$_objs ;; esac
+	for _p in "$_gd" "$_idx" "$_objs"; do
+		case $_p in
+			"$repo"/*) ;;
+			*) return 0 ;;
+		esac
+	done
+	return 1
+}
 if command -v betterleaks >/dev/null 2>&1; then
 	exec betterleaks git --pre-commit --staged --no-banner --redact=100 .
 fi
 engine=$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)
 [ -n "$engine" ] || fail "neither betterleaks nor podman/docker found — cannot scan for secrets (install betterleaks, or bypass once: git commit --no-verify)"
+if git_state_outside_repo; then
+	fail "git's index or object store is outside $repo, which is the only thing the
+  containerized scanner can see — it would scan the default index and report clean
+  while this commit stages something else.
+  fix:  install betterleaks natively (it inherits the environment and sees what git
+        sees), or bypass deliberately with: git commit --no-verify"
+fi
 # --network=none is the load-bearing flag here. The scanner needs the repo
 # WITH .git to read the index, so it can read the whole checkout — git history,
 # ignored files, and creds/ among them — and read-only prevents writes, not

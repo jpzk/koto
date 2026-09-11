@@ -8670,3 +8670,134 @@ func TestHalfCAIsRefusedRatherThanReplaced(t *testing.T) {
 		t.Errorf("a fresh PKI was refused: %v", err)
 	}
 }
+
+// 2026-09-11 L144: pkiInit skipped the server certificate whenever the FILE
+// existed, and the setup detector agreed — so an expired certificate (they are
+// minted for a year), one that no longer chains to the current CA, or an
+// unparseable pair survived every `koto setup` and every `koto pki init`. The
+// operator then has a daemon whose clients all refuse it, from a setup run that
+// reported success.
+func TestExpiredServerCertIsReissued(t *testing.T) {
+	dir := t.TempDir()
+	if err := pkiInit(dir, nil); err != nil {
+		t.Fatalf("pkiInit: %v", err)
+	}
+	caCert, err := pkiReadCert(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if why := pkiServerCertNeedsReissue(dir, caCert); why != "" {
+		t.Fatalf("a freshly minted server cert wants reissue: %s", why)
+	}
+	first, err := os.ReadFile(filepath.Join(dir, "server.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A certificate from a DIFFERENT CA: the pair parses, the file exists, and
+	// nothing would have noticed.
+	other := t.TempDir()
+	if err := pkiInit(other, nil); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := os.ReadFile(filepath.Join(other, "server.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "server.crt"), foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if why := pkiServerCertNeedsReissue(dir, caCert); why == "" {
+		t.Error("a server cert from another CA was accepted")
+	}
+	if err := pkiInit(dir, nil); err != nil {
+		t.Fatalf("pkiInit: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "server.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(after, foreign) {
+		t.Fatal("the foreign certificate survived an init")
+	}
+	if bytes.Equal(after, first) {
+		t.Fatal("the certificate was not reissued at all")
+	}
+	if why := pkiServerCertNeedsReissue(dir, caCert); why != "" {
+		t.Errorf("the reissued cert still wants reissue: %s", why)
+	}
+
+	// Unreadable and missing-key states are both reasons, not silent passes.
+	if err := os.WriteFile(filepath.Join(dir, "server.crt"), []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if why := pkiServerCertNeedsReissue(dir, caCert); !strings.Contains(why, "unreadable") {
+		t.Errorf("an unparseable certificate: %q", why)
+	}
+}
+
+// 2026-09-11 L147: every (subsystem, group) pair gets its own bucket and all of
+// them empty into main's single notification queue — so enough distinct pairs
+// (a fleet in trouble is exactly when there are many) fill it between them, and
+// notifyDeliver drops what does not fit without keeping it. What gets lost
+// behind a crowd of forwarded log lines is the resource alert, on the same
+// queue, from the subject that is silent by design until it is catastrophic.
+func TestForwardedAlertsHaveAFleetWideBudget(t *testing.T) {
+	setupNotifyRoot(t, ctlMainGroup)
+	// Distinct pairs, each with its own per-pair bucket: without a global
+	// budget every one of these forwards.
+	for i := 0; i < logAlertGlobalBurst*4; i++ {
+		emitLogfG(fmt.Sprintf("subsys%03d", i), "dev", "error", "failure %d", i)
+	}
+	deliverNotify(ctlMainGroup)
+	notes := notificationEvents(t, ctlMainGroup)
+	forwarded := 0
+	for _, e := range notes {
+		if strings.HasPrefix(e.Title, "ERROR subsys") {
+			forwarded++
+		}
+	}
+	if forwarded > logAlertGlobalBurst {
+		t.Fatalf("%d forwarded banners from distinct subsystems; the fleet-wide burst is %d",
+			forwarded, logAlertGlobalBurst)
+	}
+	if forwarded == 0 {
+		t.Fatal("the global budget is a ban, not a limit")
+	}
+}
+
+// 2026-09-11 L153: goalEnqueue slept between attempts — and after the last one
+// — while looking at nothing. An agent in the group can forge job_done
+// notifications into a reserved goal session and keep the queue full, and while
+// that held, pause, cancel, interrupt and stop could not make the driver
+// return.
+func TestGoalEnqueueGivesUpWhenTheGoalStops(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-enqueue-stop"
+	goalLock.Lock()
+	goals = []goalItem{{ID: "gstopid", Group: g, Name: "n", Text: "t", Criteria: "c",
+		Status: goalStatusCancelled, MaxIterations: 1, CreatedAt: goalNow()}}
+	goalLock.Unlock()
+	if goalStillRunnable("gstopid") {
+		t.Fatal("a cancelled goal reports as runnable")
+	}
+
+	// Admission closed, so every enqueue fails: the loop must notice the goal
+	// is gone rather than sleeping through its whole retry budget.
+	groupBarrierBegin(g)
+	defer groupBarrierEnd(g)
+	t0 := time.Now()
+	if _, err := goalEnqueue(g, "gstopid", "s", "msg"); err == nil {
+		t.Fatal("enqueue succeeded with admission closed")
+	}
+	if d := time.Since(t0); d > time.Duration(goalEnqueueRetries)*goalRetrySleep {
+		t.Errorf("took %v — it slept through the full retry budget for a goal that had stopped", d)
+	}
+	// A running goal still uses its retries.
+	goalLock.Lock()
+	goals[0].Status = goalStatusRunning
+	goalLock.Unlock()
+	if !goalStillRunnable("gstopid") {
+		t.Error("a running goal reports as not runnable")
+	}
+}

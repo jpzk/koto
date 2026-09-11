@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func notifyLine(t *testing.T, sev, title, msg string) []byte {
@@ -42,6 +43,12 @@ func setupNotifyRoot(t *testing.T, g string) {
 	notifyQueueMu.Lock()
 	delete(notifyQueue, g)
 	notifyQueueMu.Unlock()
+	// ...and refill the fleet-wide forwarded-banner budget (audit 2026-09-11
+	// L147). It is process-global by design, so an earlier test's error lines
+	// would otherwise spend it and make this one's banners vanish.
+	logAlertMu.Lock()
+	logAlertGlobal.tokens, logAlertGlobal.last = logAlertGlobalBurst, time.Now()
+	logAlertMu.Unlock()
 }
 
 // markTailed makes ensureTail a no-op for g: the verb under test would

@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 // scriptsDir is where /runscript looks. The cs_tui container mounts the host
@@ -59,6 +61,50 @@ func loadLibraryFile(kind, lib, dir, suffix, arg string) (name, content string, 
 		}
 	}
 	return "", "", fmt.Errorf("no such %s %q in %s", kind, arg, dir)
+}
+
+// libMaxBytes bounds one library entry. A prompt or script is prose and shell;
+// this is far more than either, and far less than a file that would cost the
+// client to hold.
+const libMaxBytes = 1 << 20
+
+// readLibraryFile reads a prompt or script defensively (audit 2026-09-11
+// L152). The name policy below stops traversal; it says nothing about what the
+// filesystem object IS, and these directories are mounted from outside the TUI
+// (scripts/ and prompts/ are host paths, ro but operator- or checkout-owned).
+//
+// os.ReadFile on a FIFO BLOCKS inside open(2) until a writer appears — before
+// any check could run — and both callers are on the interactive path:
+// `/runscript` reads synchronously while handling the command, and `/prompt`
+// reads the whole file before the RPC goes out. One FIFO under a name an
+// operator is likely to type freezes the client with no timeout.
+//
+// Same shape as the theme loader (L102) and the guest's own file tool (L3):
+// O_NONBLOCK so the open returns, O_NOFOLLOW because a library entry is a file
+// and not a pointer at one, the judgement made on the DESCRIPTOR, and a byte
+// ceiling so the read is bounded as well as the wait.
+func readLibraryFile(p string) ([]byte, error) {
+	fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), p)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file (%s)", filepath.Base(p), st.Mode().Type())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, libMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > libMaxBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", filepath.Base(p), libMaxBytes)
+	}
+	return b, nil
 }
 
 // libNameRE bounds a library filename. Same reasoning as themeNameRE: the value

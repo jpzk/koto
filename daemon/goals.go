@@ -1285,7 +1285,7 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 	emit(g, Event{Event: "goal_iter", ID: snap.ID, Text: fmt.Sprintf("%d/%d", snap.Iteration, snap.MaxIterations), Session: work})
 	emitLogfG("goal", g, "info", "iteration %d/%d id=%s", snap.Iteration, snap.MaxIterations, snap.ID)
 
-	done, err := goalEnqueue(g, work, goalWorkerMsg(snap))
+	done, err := goalEnqueue(g, snap.ID, work, goalWorkerMsg(snap))
 	if err != nil {
 		goalPauseWith(g, snap.ID, "stalled", "iteration could not be enqueued: "+err.Error())
 		return false, "", false
@@ -1343,7 +1343,7 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 		emit(g, Event{Event: "goal_judge", ID: snap.ID, Session: goalWorkSessionFor(goalSessionSlug(snap))})
 		emitLogfG("goal", g, "info", "judge check id=%s (attempt %d)", snap.ID, attempt+1)
 
-		done, err := goalEnqueue(g, judge, goalJudgeMsg(snap))
+		done, err := goalEnqueue(g, snap.ID, judge, goalJudgeMsg(snap))
 		var terr error
 		if err == nil {
 			terr = <-done
@@ -1374,17 +1374,43 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 
 // goalEnqueue is enqueueSend with a bounded ride-out of a full queue (the
 // group may be busy with operator chat; the goal can wait a few beats).
-func goalEnqueue(g, session, msg string) (<-chan error, error) {
+// goalEnqueue retries a full queue, and gives up the moment the goal stops
+// being one that should run (audit 2026-09-11 L153).
+//
+// The old loop slept unconditionally between attempts — including after the
+// LAST one, which nobody is waiting through for a reason — and looked at
+// nothing in between. An agent in the group can forge job_done notifications
+// into a reserved goal session and keep the queue full, and while that held,
+// pause, cancel, interrupt and stop could not make the goal driver return: the
+// operator's /goals interrupt did nothing visible until the retry sequence ran
+// out on its own. The state check is the fix; not sleeping after the final
+// failure is just arithmetic nobody had done.
+func goalEnqueue(g, id, session, msg string) (<-chan error, error) {
 	var lastErr error
 	for i := 0; i < goalEnqueueRetries; i++ {
+		if i > 0 && !goalStillRunnable(id) {
+			return nil, fmt.Errorf("goal is no longer running")
+		}
 		done, err := enqueueSend(g, session, msg)
 		if err == nil {
 			return done, nil
 		}
 		lastErr = err
-		time.Sleep(goalRetrySleep)
+		if i < goalEnqueueRetries-1 {
+			time.Sleep(goalRetrySleep)
+		}
 	}
 	return nil, lastErr
+}
+
+// goalStillRunnable reports whether the goal is in a state whose turns should
+// still be delivered. A goal that has been paused, interrupted, cancelled or
+// completed has no business pushing another turn into the queue.
+func goalStillRunnable(id string) bool {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	it := findGoalByIDLocked(id)
+	return it != nil && (it.Status == goalStatusRunning || it.Status == goalStatusPlanning)
 }
 
 func goalSetFeedback(id, feedback string) {

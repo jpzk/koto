@@ -840,6 +840,11 @@ type pendingPrompt struct {
 	session, text string
 }
 
+// streamFirstFrameWait bounds how long a stream that is CONTRACTUALLY
+// immediate may say nothing before it is reopened (audit 2026-09-11 L148).
+// Generous next to a local RPC, far below transport keepalive's ~40s.
+const streamFirstFrameWait = 10 * time.Second
+
 const (
 	promptHistoryMax = 200
 	// promptEntryMax bounds ONE recalled prompt. Far longer than anything a
