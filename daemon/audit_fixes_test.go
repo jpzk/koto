@@ -3590,3 +3590,47 @@ func TestTurnOutcomeDistinguishesAbortFromCompletion(t *testing.T) {
 		t.Fatal("the two outcomes are indistinguishable")
 	}
 }
+
+// 2026-09-11 M103: a CONNECT tunnel is a hijacked connection spliced raw for
+// as long as both ends hold it, and neither it nor the absolute-form path goes
+// through proxyAcquire — that guards the LLM leg and is taken after this branch
+// has already returned. So a networked guest could open policy-permitted
+// tunnels in a loop and leave them idle.
+func TestEgressConnectionsAreBounded(t *testing.T) {
+	t.Cleanup(func() {
+		egressMu.Lock()
+		egressCount = map[string]int{}
+		egressTotal = 0
+		egressMu.Unlock()
+	})
+	const g = "egress"
+	for i := 0; i < egressMaxPerGroup; i++ {
+		if !egressAcquire(g) {
+			t.Fatalf("connection %d refused below the per-group cap of %d", i, egressMaxPerGroup)
+		}
+	}
+	if egressAcquire(g) {
+		t.Fatal("admitted a connection past the per-group cap")
+	}
+	// Another group is unaffected: one guest must not crowd out another's
+	// egress.
+	if !egressAcquire("other") {
+		t.Fatal("a second group was refused by the first group's cap")
+	}
+	egressRelease("other")
+	// A closed tunnel returns its slot — serveEgress defers the release, and
+	// splice blocks for the tunnel's whole life, so this is what happens when
+	// the guest hangs up.
+	egressRelease(g)
+	if !egressAcquire(g) {
+		t.Fatal("a closed tunnel did not return its slot")
+	}
+
+	// The global cap binds across groups.
+	egressMu.Lock()
+	egressCount, egressTotal = map[string]int{}, egressMaxGlobal
+	egressMu.Unlock()
+	if egressAcquire("fresh") {
+		t.Fatal("admitted a connection past the global cap")
+	}
+}

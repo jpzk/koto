@@ -1908,3 +1908,29 @@ closing report does not match the expected shape would pause the goal — the
 harness surfaced exactly that, failing ten goal tests at once. Absence of a
 handoff is not evidence of absence of a plan; the wakeup's provenance is.
 `TestTurnOutcomeDistinguishesAbortFromCompletion`.
+
+### M103 — Unbounded guest-to-egress proxy tunnels enable shared resource exhaustion (`daemon/proxy.go`) — **fixed (admission); idle timeouts declined**
+
+Real, and the reason it slipped past the M2 work is structural: `ServeHTTP`
+dispatches CONNECT and absolute-form requests to `serveEgress` and RETURNS
+before `proxyAcquire` is ever reached — those semaphores guard the LLM leg
+only. So a process in a networked guest could open policy-permitted tunnels in
+a loop and leave them idle, each costing a guest-side bridge with two copy
+goroutines, a vsock connection, a unix socket and a host dial, with a CONNECT
+tunnel held for as long as either end wants it.
+
+`egressAcquire` bounds them per group (64) and globally (512), released by a
+`defer` that fires when the tunnel ends — `splice` blocks for its whole life,
+so the reservation covers exactly the right span. Per group as well as
+globally, so one guest cannot crowd out another's egress. Generous because real
+traffic is parallel: npm and git open many connections at once. The
+guest-side vsock count is separately capped by `fcMaxConnsPerGroup` (M22/M27);
+this bounds the HOST end, which that cap does not reach.
+
+**Declined: idle read/write deadlines and a maximum tunnel lifetime.** A
+`network=full` group is meant to be able to hold a long-lived connection — an
+ssh session, a websocket, a long poll — and those idle by design between
+keepalives. A deadline tuned to catch a parked tunnel would kill working ones
+intermittently, which is the worst kind of bug to attribute, and the
+per-connection cost is already bounded by the admission limit.
+`TestEgressConnectionsAreBounded`.
