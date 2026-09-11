@@ -207,7 +207,17 @@ func groupRoot(g string) bool { return groupConfigBool(g, "root") }
 // fcVM tracks one running microVM's host-side resources so fcStop can tear
 // them down: the FC process pid and the guest→host UDS listeners.
 type fcVM struct {
-	pid       int
+	pid int
+	// gen identifies this BOOT of the group, not the group. The reaper
+	// goroutine captures it and refuses to clean up on behalf of a VM that a
+	// replacement has already succeeded (audit M59): fcStop deletes the old
+	// entry and polls pid liveness without joining cmd.Wait, so a /restart can
+	// register a new VM while the old reaper is still pending — and its
+	// cleanups (abortInflightTurn, releaseGroupQuarantine, clearGroupStalls)
+	// are all keyed on the GROUP, so they would land on the replacement:
+	// completing a turn the new VM is still running, freeing slots it owns,
+	// and clearing stall flags it raised.
+	gen       uint64
 	listeners []net.Listener
 	// memMiB is the guest RAM this VM was booted with; fcHostMemCommittedMiB
 	// sums it across live VMs for the fleet memory cap's admission check.
@@ -218,9 +228,30 @@ type fcVM struct {
 }
 
 var (
-	fcMu  sync.Mutex
-	fcVMs = map[string]*fcVM{}
+	fcMu     sync.Mutex
+	fcVMs    = map[string]*fcVM{}
+	fcGenSeq uint64
 )
+
+// fcNextGen allocates a boot identity. Caller must NOT hold fcMu.
+func fcNextGen() uint64 {
+	fcMu.Lock()
+	defer fcMu.Unlock()
+	fcGenSeq++
+	return fcGenSeq
+}
+
+// fcGenSuperseded reports whether a DIFFERENT VM has since been registered for
+// g — the one case where a reaper's group-keyed cleanup would hit somebody
+// else's state. No VM registered at all (an ordinary stop or crash with no
+// replacement) is not superseded: those cleanups are exactly what that case
+// wants.
+func fcGenSuperseded(g string, gen uint64) bool {
+	fcMu.Lock()
+	defer fcMu.Unlock()
+	vm := fcVMs[g]
+	return vm != nil && vm.gen != gen
+}
 
 // fcRunning reports whether group g's firecracker process is alive. Checks
 // the registry first (normal path), then the pidfile (daemon restarted while
@@ -551,7 +582,10 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	jailed := fcJailEnabled()
 	jailUID := fcJailUID(proxyPort)
 
-	vm := &fcVM{}
+	// The boot identity is allocated before anything can observe this VM, so
+	// the reaper goroutine (started below, well before fcVMs[g] is set) can
+	// capture it.
+	vm := &fcVM{gen: fcNextGen()}
 	fail := func(err error) error {
 		fcHostMemRelease(g)
 		for _, ln := range vm.listeners {
@@ -708,9 +742,18 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	_ = os.WriteFile(fcPidPath(g), []byte(fmt.Sprintf("%d\n", vm.pid)), 0o644)
 	// Reap on exit so a crashed/stopped VM doesn't linger as a zombie and
 	// fcRunning flips promptly.
+	gen := vm.gen
 	go func() {
 		_ = cmd.Wait()
 		emitLogfG("fc", g, "info", "[%s] vm process exited", g)
+		if fcGenSuperseded(g, gen) {
+			// A replacement VM is registered for this group; every cleanup
+			// below is keyed on the group alone, so running them now would
+			// complete a turn the NEW VM is still working on, free slots it
+			// owns, and clear stall flags it raised (audit M59).
+			emitLogfG("fc", g, "info", "[%s] stale vm reaper (boot %d superseded) — leaving the replacement's state alone", g, gen)
+			return
+		}
 		// The VM is gone, so any turn still parked in sendNow waiting for
 		// [[turn_end]] can never complete. Wake it now instead of letting the
 		// queue worker block for the full turnWaitTimeout — otherwise a crash or

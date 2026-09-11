@@ -2147,3 +2147,38 @@ func TestSessionRegistryIsBounded(t *testing.T) {
 		t.Fatalf("registry holds %d entries, cap is %d", n, sessionRegMax)
 	}
 }
+
+// 2026-09-11 M59: a VM's reaper cleanups are keyed on the GROUP, and fcStop
+// does not join cmd.Wait — so a /restart can register a replacement while the
+// old reaper is still pending, and its cleanups would land on the new VM.
+func TestStaleVMReaperIsFenced(t *testing.T) {
+	fcHarness(t)
+	const g = "vmgen"
+	t.Cleanup(func() { fcMu.Lock(); delete(fcVMs, g); fcMu.Unlock() })
+
+	old := fcNextGen()
+	replacement := fcNextGen()
+	if old == replacement {
+		t.Fatal("generations are not distinct")
+	}
+	// No VM registered: an ordinary stop or crash. The cleanups must run —
+	// they are what wakes a turn parked on a [[turn_end]] that can never come.
+	if fcGenSuperseded(g, old) {
+		t.Fatal("a reaper with no registered replacement was fenced off")
+	}
+	// The replacement is up. The old reaper must stand down.
+	fcMu.Lock()
+	fcVMs[g] = &fcVM{gen: replacement, pid: 1}
+	fcMu.Unlock()
+	if !fcGenSuperseded(g, old) {
+		t.Fatal("a stale reaper would have cleaned up the replacement's state")
+	}
+	// The replacement's own reaper is not fenced.
+	if fcGenSuperseded(g, replacement) {
+		t.Fatal("the current VM's own reaper was fenced off")
+	}
+	// Another group is unaffected.
+	if fcGenSuperseded("other", old) {
+		t.Fatal("a different group's VM fenced this reaper")
+	}
+}
