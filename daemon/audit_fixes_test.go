@@ -5031,3 +5031,109 @@ func TestWedgedSessionIsFencedWhenSelfHealFails(t *testing.T) {
 		t.Error("releasing one group's quarantine lifted another group's fence")
 	}
 }
+
+// 2026-09-11 M146: pkiInit asked os.Stat whether acl.json existed, which
+// FOLLOWS a symlink and reports a dangling one as absent, and then wrote with
+// O_CREATE, which follows the same link. So a link planted in (or above) the
+// creds directory before an administrator runs `koto pki init` redirects the
+// ACL seed — and the same stat-then-write shape guarded the CA key, which is
+// the material this whole PKI rests on.
+func TestPKIRefusesToWriteCredentialsThroughASymlink(t *testing.T) {
+	// acl.json via a DANGLING link: the exact shape of the finding, since the
+	// old code's os.Stat called this "absent".
+	t.Run("acl seed", func(t *testing.T) {
+		creds := filepath.Join(t.TempDir(), "creds")
+		if err := os.MkdirAll(creds, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "elsewhere.json")
+		if err := os.Symlink(target, filepath.Join(creds, "acl.json")); err != nil {
+			t.Fatal(err)
+		}
+		err := pkiInit(creds, nil)
+		if err == nil {
+			t.Fatal("pkiInit wrote the ACL seed through a dangling symlink")
+		}
+		if !strings.Contains(err.Error(), "symlink") {
+			t.Errorf("the refusal does not say why: %v", err)
+		}
+		if _, serr := os.Stat(target); serr == nil {
+			t.Error("the seed was created at the link's target")
+		}
+	})
+
+	// The CA private key, same shape.
+	t.Run("ca key", func(t *testing.T) {
+		creds := filepath.Join(t.TempDir(), "creds")
+		if err := os.MkdirAll(creds, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "stolen.key")
+		if err := os.Symlink(target, filepath.Join(creds, "ca.key")); err != nil {
+			t.Fatal(err)
+		}
+		if err := pkiInit(creds, nil); err == nil {
+			t.Fatal("pkiInit wrote the CA private key through a dangling symlink")
+		}
+		if _, serr := os.Stat(target); serr == nil {
+			t.Error("the CA private key was created at the link's target")
+		}
+	})
+
+	// clients.allow is appended to, not created, and an append through a link
+	// writes an allowlist entry into someone else's file.
+	t.Run("clients.allow", func(t *testing.T) {
+		creds := filepath.Join(t.TempDir(), "creds")
+		if err := os.MkdirAll(creds, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := pkiInit(creds, nil); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "victim")
+		if err := os.WriteFile(target, []byte("original\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		os.Remove(filepath.Join(creds, "clients.allow"))
+		if err := os.Symlink(target, filepath.Join(creds, "clients.allow")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pkiClient(creds, "x", []string{"admin"}); err == nil {
+			t.Fatal("pkiClient appended through a symlink")
+		}
+		b, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "original\n" {
+			t.Errorf("the link's target was modified: %q", b)
+		}
+	})
+
+	// And the whole thing still works on an ordinary directory, twice — the
+	// exclusive create must not break idempotence, which is the property
+	// `make pki-init` depends on (an existing CA is REUSED, never regenerated).
+	t.Run("idempotent", func(t *testing.T) {
+		creds := filepath.Join(t.TempDir(), "creds")
+		if err := pkiInit(creds, nil); err != nil {
+			t.Fatalf("first init: %v", err)
+		}
+		before, err := os.ReadFile(filepath.Join(creds, "ca.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pkiInit(creds, nil); err != nil {
+			t.Fatalf("second init: %v", err)
+		}
+		after, err := os.ReadFile(filepath.Join(creds, "ca.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Error("a second pkiInit regenerated the CA — the `make pki-init` footgun")
+		}
+		if _, err := pkiClient(creds, "tui", []string{"admin"}); err != nil {
+			t.Fatalf("pkiClient on a normal tree: %v", err)
+		}
+	})
+}
