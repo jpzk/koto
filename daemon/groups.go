@@ -35,12 +35,22 @@ func writeGroups(m map[string]int) {
 // if no current value duplicates, max+1 doesn't either. Holes left by
 // destroyed groups are never reused, which is fine — at <100 active groups
 // the range grows by ones and never approaches 65535.
-func allocPort(g string) int {
+func allocPort(g string) (int, error) {
 	groupsLock.Lock()
 	defer groupsLock.Unlock()
 	m := readGroups()
 	if p, ok := m[g]; ok {
-		return p
+		return p, nil
+	}
+	// The group cap is enforced HERE, atomically with registration. The ctl
+	// spawn verb and the Spawn RPC each read the registry and compared its
+	// length before calling ensure, with registration happening later under
+	// this lock — so concurrent spawns with distinct names all passed the
+	// check while the registry was still below the limit, and every one of
+	// them then registered (audit M101). Those call-site checks stay as a
+	// fast, specific error; this is the one that is true.
+	if len(m) >= ctlMaxSpawn {
+		return 0, fmt.Errorf("group cap reached (%d groups)", ctlMaxSpawn)
 	}
 	next := PORT_BASE
 	for _, p := range m {
@@ -55,7 +65,7 @@ func allocPort(g string) int {
 	}
 	m[g] = next
 	writeGroups(m)
-	return next
+	return next, nil
 }
 
 // ---- sidecar lifecycle ----------------------------------------------------
@@ -151,7 +161,10 @@ func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 	if err := ensureProviderConfig(g); err != nil {
 		emitLogfG("group", g, "warn", "ensure provider config[%s]: %v", g, err)
 	}
-	port := allocPort(g)
+	port, err := allocPort(g)
+	if err != nil {
+		return 0, err
+	}
 	// Register the proxy listener synchronously. proxyListen is idempotent
 	// for the (port, group) pair already on file, so a re-ensure on a live
 	// group is a no-op; a collision with a *different* group is the hard

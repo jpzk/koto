@@ -1774,3 +1774,19 @@ when the guest read fails.
 `disarmReport` and the event-ring drop. The in-flight refresh marker goes with
 it, so a refresh from the destroyed incarnation cannot repopulate the
 replacement's cache. `TestDestroyDropsTheJobCache`.
+
+### M101 — Concurrent ctl spawn requests bypass the group-count cap (`daemon/ctl.go`) — **fixed**
+
+Real. Both spawn admission points read the registry and compared its length
+before calling `ensure`, while registration happened later inside `allocPort`
+under `groupsLock` — so concurrent spawns with distinct names all passed the
+check while the registry was still below the limit, and every one of them then
+registered. The ctl plane handles each guest connection in its own goroutine,
+so a compromised `main` needed only to issue its spawns in parallel.
+
+The cap now lives WITH the registration, inside `allocPort`'s critical section,
+which makes it true rather than advisory and covers every present and future
+caller. `allocPort` returns an error instead of a bare int; the call-site checks
+stay, because they produce a specific message before any workspace is created.
+`TestGroupCapIsAtomicWithRegistration` runs 200 concurrent allocations and
+asserts exactly `ctlMaxSpawn` are admitted.

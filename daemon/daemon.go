@@ -158,7 +158,7 @@ func daemonMain() {
 	// (including the vms/ parent limit) must be staged before any VM boots.
 	fcHostMemInit()
 	fcCgroupInit()
-	allocPort("main")
+	_, _ = allocPort("main")
 
 	// Proxy runs in-process as goroutines (one per listener). Brings up
 	// listeners for every group already in groups.json; new groups get
