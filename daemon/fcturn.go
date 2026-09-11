@@ -31,6 +31,11 @@ import (
 // by every tailer (audit L5); nothing renders past a few KB of it anyway.
 const fcMarkerMaxBody = 64 << 10
 
+// fcMarkerMaxName bounds a tool NAME. Tool names are short identifiers
+// ("Bash", "WebFetch"); this is generous by three orders of magnitude and
+// exists only so the field cannot be a payload (audit M162).
+const fcMarkerMaxName = 256
+
 // truncateBytes cuts s to at most n bytes on a rune boundary, marking the cut.
 func truncateBytes(s string, n int) string {
 	if len(s) <= n {
@@ -120,10 +125,14 @@ func (w *turnWriter) frame(f *pb.TurnFrame) bool {
 		w.marker(fmt.Sprintf("[[think_end]] %d", k.ThinkEnd))
 	case *pb.TurnFrame_Tool:
 		w.stamp()
+		// Bounded like the input beside it (audit M162). Fields() already
+		// makes the name one token, so a whitespace-free megabyte was one
+		// token — the guest chooses this string and the marker line carries it
+		// whole into the transcript, the replay ring and every client.
 		name := strings.Fields(flattenInline(k.Tool.Name))
 		n := "tool"
 		if len(name) > 0 {
-			n = name[0]
+			n = truncateBytes(name[0], fcMarkerMaxName)
 		}
 		in := truncateBytes(flattenInline(k.Tool.Input), fcMarkerMaxBody)
 		if in == "" {
@@ -136,7 +145,9 @@ func (w *turnWriter) frame(f *pb.TurnFrame) bool {
 	case *pb.TurnFrame_ToolOutEnd:
 		w.marker(fmt.Sprintf("[[tool_out_end]] %d", k.ToolOutEnd))
 	case *pb.TurnFrame_Err:
-		w.marker("[[err]] " + flattenInline(k.Err))
+		// Same bound as the tool body: an error string is guest-authored too,
+		// and this one had no cap at all (audit M162).
+		w.marker("[[err]] " + truncateBytes(flattenInline(k.Err), fcMarkerMaxBody))
 	case *pb.TurnFrame_TurnEnd:
 		w.marker("[[turn_end]]")
 		w.ended = true

@@ -660,6 +660,7 @@ func destroy(g string) baseResp {
 	// destroy/respawn sees since_seq > cur → `gap` → history refetch.
 	delete(eventSeq, g)
 	delete(eventRing, g)
+	delete(eventRingBytes, g)
 	delete(ringFloor, g)
 	delete(ringPartial, g)
 	gone := subscribers[g]
