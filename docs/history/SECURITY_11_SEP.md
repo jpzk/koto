@@ -602,3 +602,42 @@ the debug log, its rotation). This does not harden every component of the path
 — the run directory is the daemon's by design — but it closes the sink the
 daemon can reach without also being able to replace its own state root.
 `TestStateWriteRefusesSymlink`.
+
+### M31 — Goal dispatch proceeds after failed conversation reset (`daemon/goals.go`) — **fixed**
+
+Real, and it breaks the loop's central claim. `clearGoalSession` logged
+`clearSessionContext`'s failure and returned normally, so the plan, worker and
+judge dispatchers enqueued their turn regardless — and the enqueue can still
+succeed, so a failed reset did not reliably stop delivery.
+
+A fresh context per turn is the design, not a nicety: the worker iterates with
+the filesystem as its memory, and the judge must review WITHOUT having watched
+the work. A failed reset lets the plan phase inherit an execution context, an
+iteration inherit the last one's, and — the one that matters — the judge
+inherit the worker's own reasoning and rubber-stamp it, so the loop can end on
+an unverified self-report. That is precisely what the judge exists to prevent.
+
+The error now propagates and each of the three dispatchers pauses the goal with
+`stalled` and a reason naming the reset, which also raises the operator
+notification the pause path already carries. Pausing for a human beats running
+without the isolation the loop advertises. `TestGoalTurnAbortsOnFailedReset`.
+
+### M40 — Slot lifecycle races allow stale cleanup and VM-exit timing to corrupt or strand allocations (`daemon/queue.go`) — **fixed**
+
+Two real windows, one missing concept. `sendNow` deferred `releaseSlot(g,
+slot)` with no record of WHICH acquisition it was releasing:
+
+- A stalled turn quarantines its slot and still runs that deferred release. If
+  the quarantine was lifted in between — by the VM-exit reaper, or by a
+  successful self-heal restart — the release saw an unquarantined slot, freed
+  it, and deleted the busy flag of whichever waiter had since acquired it. Two
+  live turns on one stream, which is the exact corruption slots exist to
+  prevent.
+- In the other order, the reaper cleared the quarantine before the stall path
+  set it; a failed self-heal then left the slot quarantined-and-busy with no
+  owner to free it. One of ten slots gone until the daemon restarted.
+
+`acquireSlot` now returns a `slotHold` carrying a per-slot generation counter,
+and `releaseSlot`/`quarantineSlot` take the hold and act only while it still
+owns the slot. Both stale operations become no-ops.
+`TestSlotHoldGenerations`.

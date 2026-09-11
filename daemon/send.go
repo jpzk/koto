@@ -246,8 +246,10 @@ func sendNow(g, session, msg string) error {
 	// on every exit path. Blocks while all groupSlots are busy, which is the
 	// concurrency cap doing its job — the queue worker for this session is the
 	// only thing waiting.
-	slot := acquireSlot(g, session)
-	defer releaseSlot(g, slot) // no-op if the stall path quarantined it below
+	hold := acquireSlot(g, session)
+	slot := hold.slot
+	defer releaseSlot(hold) // no-op if the stall path quarantined it, or if
+	// the quarantine was lifted and the slot re-handed out (audit M40)
 	ensureSlotTail(g, slot)
 	if turnCanceled(cancelC) {
 		emitLogfG("send", g, "info", "group=%s session=%s: turn canceled before delivery; prompt discarded", g, sessionMarkerName(session))
@@ -350,7 +352,7 @@ drain:
 			// the slot's stream, so the slot must NOT return to the pool —
 			// quarantine it (the deferred releaseSlot sees the flag and
 			// no-ops). It frees on VM death or a successful self-heal restart.
-			quarantineSlot(g, slot)
+			quarantineSlot(hold)
 			emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
 				g, sessionMarkerName(session), turnWaitTimeout)
 			selfHeal(g, time.Now())

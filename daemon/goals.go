@@ -219,7 +219,7 @@ func goalSaveHandoff(g, id, sess string) {
 // production. Not initialized to a closure over clearSessionContext directly
 // — that forms a static initialization cycle (→ ensure → fcSpawn →
 // ctlDispatch → goalSet → … → this var), same trap turnFn documents.
-var clearGoalSessionFn func(g, sess string)
+var clearGoalSessionFn func(g, sess string) error
 
 // clearGoalSession gives the next goal turn fresh context — and NOTHING more.
 // It resets the guest's conversation state only (clearSessionContext), leaving
@@ -232,17 +232,24 @@ var clearGoalSessionFn func(g, sess string)
 // pre-turn clear had deleted the very turn the operator was asked to approve.
 // A session nobody may type into is observable or it is nothing, so the
 // transcript is the one thing the reset must not touch.
-func clearGoalSession(g, sess string) {
+func clearGoalSession(g, sess string) error {
 	if clearGoalSessionFn != nil {
-		clearGoalSessionFn(g, sess)
-		return
+		return clearGoalSessionFn(g, sess)
 	}
 	if r := clearSessionContext(g, sess); !r.OK {
-		// Non-fatal: the subsequent turn still runs, just without the fresh-
-		// context guarantee (e.g. first iteration, where the session doesn't
-		// exist yet — the reset is a no-op wrapped in an ensure()).
-		emitLogfG("goal", g, "warn", "[%s] clear session %s: %s", g, sess, r.Error)
+		// FATAL to the turn, not merely logged (audit M31). A fresh context per
+		// turn is the goal loop's design, not a nicety: the worker iterates
+		// with the filesystem as its memory, and the judge must review without
+		// having watched the work. A failed reset leaves the PREVIOUS turn's
+		// conversation in place, so the plan phase can inherit an execution
+		// context, an iteration can inherit the last one's, and — the one that
+		// matters — the judge can inherit the worker's own reasoning and rubber
+		// -stamp it. The loop can then end on an unverified self-report, which
+		// is exactly what the judge exists to prevent. Better to pause the goal
+		// for an operator than to run it without the isolation it claims.
+		return fmt.Errorf("clear session %s: %s", sess, r.Error)
 	}
+	return nil
 }
 
 func goalNow() float64 { return float64(time.Now().Unix()) }
@@ -1052,7 +1059,10 @@ func goalPlanPhase(g, id string) bool {
 	goalLock.Unlock()
 
 	work := goalWorkSessionFor(goalSessionSlug(snap))
-	clearGoalSession(g, work)
+	if err := clearGoalSession(g, work); err != nil {
+		goalPauseWith(g, id, "stalled", "context reset failed before the plan turn: "+err.Error())
+		return false
+	}
 	emit(g, Event{Event: "goal_plan", ID: snap.ID, Session: work})
 	emitLogfG("goal", g, "info", "plan turn id=%s", snap.ID)
 	done, err := enqueueSend(g, work, goalPlanMsg(snap))
@@ -1087,7 +1097,10 @@ func goalPlanPhase(g, id string) bool {
 // (claimed + note) and ok=false when the driver must exit (pause applied).
 func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool) {
 	work := goalWorkSessionFor(goalSessionSlug(snap))
-	clearGoalSession(g, work)
+	if err := clearGoalSession(g, work); err != nil {
+		goalPauseWith(g, snap.ID, "stalled", "context reset failed before an iteration: "+err.Error())
+		return false, "", false
+	}
 
 	goalLock.Lock()
 	goalDoneOpen[snap.ID] = g
@@ -1150,7 +1163,12 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 		goalLock.Unlock()
 		save.write()
 
-		clearGoalSession(g, judge)
+		if err := clearGoalSession(g, judge); err != nil {
+			// The judge above all: reviewing inside the worker's own
+			// conversation is not an independent check.
+			goalPauseWith(g, snap.ID, "stalled", "context reset failed before the judge turn: "+err.Error())
+			return
+		}
 		goalLock.Lock()
 		goalVerdictOpen[snap.ID] = g
 		delete(goalVerdictMail, snap.ID)

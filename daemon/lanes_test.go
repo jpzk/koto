@@ -38,26 +38,30 @@ func writeStream(t *testing.T, p, body string) {
 // group that never runs concurrent turns only ever touches slot 0.
 func TestSlotPool(t *testing.T) {
 	const g = "slots1"
-	if got := acquireSlot(g, ""); got != 0 {
-		t.Fatalf("first slot = %d, want 0", got)
+	h0 := acquireSlot(g, "")
+	if h0.slot != 0 {
+		t.Fatalf("first slot = %d, want 0", h0.slot)
 	}
-	if got := acquireSlot(g, "b"); got != 1 {
-		t.Fatalf("second slot = %d, want 1", got)
+	h1 := acquireSlot(g, "b")
+	if h1.slot != 1 {
+		t.Fatalf("second slot = %d, want 1", h1.slot)
 	}
-	releaseSlot(g, 0)
-	if got := acquireSlot(g, "c"); got != 0 {
-		t.Fatalf("slot after release = %d, want the freed 0", got)
+	releaseSlot(h0)
+	h0 = acquireSlot(g, "c")
+	if h0.slot != 0 {
+		t.Fatalf("slot after release = %d, want the freed 0", h0.slot)
 	}
 	if n := activeSlots(g); n != 2 {
 		t.Fatalf("activeSlots = %d, want 2", n)
 	}
 	// A different group has its own pool.
-	if got := acquireSlot("slots2", ""); got != 0 {
-		t.Fatalf("other group's first slot = %d, want 0", got)
+	other := acquireSlot("slots2", "")
+	if other.slot != 0 {
+		t.Fatalf("other group's first slot = %d, want 0", other.slot)
 	}
-	releaseSlot("slots2", 0)
-	releaseSlot(g, 0)
-	releaseSlot(g, 1)
+	releaseSlot(other)
+	releaseSlot(h0)
+	releaseSlot(h1)
 	if n := activeSlots(g); n != 0 {
 		t.Fatalf("activeSlots after release = %d, want 0", n)
 	}
@@ -67,29 +71,32 @@ func TestSlotPool(t *testing.T) {
 // instead of piling into the VM.
 func TestSlotPoolCapsConcurrency(t *testing.T) {
 	const g = "slotcap"
+	holds := make([]slotHold, groupSlots)
 	for i := 0; i < groupSlots; i++ {
-		if got := acquireSlot(g, ""); got != i {
-			t.Fatalf("slot %d = %d", i, got)
+		holds[i] = acquireSlot(g, "")
+		if holds[i].slot != i {
+			t.Fatalf("slot %d = %d", i, holds[i].slot)
 		}
 	}
-	got := make(chan int, 1)
+	got := make(chan slotHold, 1)
 	go func() { got <- acquireSlot(g, "waiter") }()
 	select {
-	case s := <-got:
-		t.Fatalf("acquired slot %d beyond the cap of %d", s, groupSlots)
+	case h := <-got:
+		t.Fatalf("acquired slot %d beyond the cap of %d", h.slot, groupSlots)
 	case <-time.After(50 * time.Millisecond):
 	}
-	releaseSlot(g, 4) // free one; the waiter must take exactly it
+	releaseSlot(holds[4]) // free one; the waiter must take exactly it
 	select {
-	case s := <-got:
-		if s != 4 {
-			t.Errorf("waiter got slot %d, want the freed 4", s)
+	case h := <-got:
+		if h.slot != 4 {
+			t.Errorf("waiter got slot %d, want the freed 4", h.slot)
 		}
+		holds[4] = h
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiter never woke after a slot was released")
 	}
-	for i := 0; i < groupSlots; i++ {
-		releaseSlot(g, i)
+	for _, h := range holds {
+		releaseSlot(h)
 	}
 }
 
@@ -189,16 +196,18 @@ func TestConcurrentTurnStreamsStaySeparate(t *testing.T) {
 // heal restart) proves otherwise.
 func TestSlotQuarantine(t *testing.T) {
 	const g = "slotq"
-	s0 := acquireSlot(g, "wedged")
-	quarantineSlot(g, s0)
+	h0 := acquireSlot(g, "wedged")
+	s0 := h0.slot
+	quarantineSlot(h0)
 	// sendNow's deferred release runs unconditionally; the pool itself must
 	// refuse to free a quarantined slot.
-	releaseSlot(g, s0)
+	releaseSlot(h0)
 	if n := activeSlots(g); n != 1 {
 		t.Fatalf("quarantined slot freed by releaseSlot (active=%d)", n)
 	}
 	// The next turn must get a different slot.
-	s1 := acquireSlot(g, "healthy")
+	h1 := acquireSlot(g, "healthy")
+	s1 := h1.slot
 	if s1 == s0 {
 		t.Fatalf("quarantined slot %d was reassigned", s0)
 	}
@@ -207,10 +216,10 @@ func TestSlotQuarantine(t *testing.T) {
 	if n := activeSlots(g); n != 1 {
 		t.Fatalf("activeSlots after quarantine release = %d, want 1 (the healthy turn)", n)
 	}
-	s2 := acquireSlot(g, "next")
-	if s2 != s0 {
-		t.Fatalf("freed slot %d not reused, got %d", s0, s2)
+	h2 := acquireSlot(g, "next")
+	if h2.slot != s0 {
+		t.Fatalf("freed slot %d not reused, got %d", s0, h2.slot)
 	}
-	releaseSlot(g, s1)
-	releaseSlot(g, s2)
+	releaseSlot(h1)
+	releaseSlot(h2)
 }
