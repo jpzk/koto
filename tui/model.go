@@ -5321,7 +5321,18 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// `prompt` event pops it and the real prompt line takes its place). For an
 	// idle group this is a sub-second "sending…" flash; for a busy group it's
 	// the visible backlog of everything typed ahead.
-	m.pending[m.cur] = append(m.pending[m.cur], pendingPrompt{session: m.activeSession(m.cur), text: v})
+	// The LOCAL copy is scrubbed; the one that goes on the wire is not (audit
+	// 2026-09-11 L2). This row is rendered straight through lipgloss, which
+	// styles text without neutralising what is in it, and neither themeFrame
+	// nor monoFrame removes general terminal controls — monoFrame deliberately
+	// preserves OSC and cursor control. Everything else on this screen reaches
+	// it through the daemon's sanitizer; an optimistic row is the one piece of
+	// chat that does not, so a pasted escape sequence rendered raw.
+	//
+	// It also makes the two agree: popPending matches this text against the
+	// daemon's `prompt` event, which IS sanitized, so a control-bearing prompt
+	// used to leave its ⏳ row stranded until reconcilePending swept it.
+	m.pending[m.cur] = append(m.pending[m.cur], pendingPrompt{session: m.activeSession(m.cur), text: scrubVTStrict(v)})
 	m.sendInFlight[m.cur]++
 	m.refreshLog()
 	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": m.activeSession(m.cur)})

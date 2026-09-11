@@ -47,17 +47,33 @@ import (
 // out of the high end so they never collide with the image's service accounts.
 const fcJailBaseUID = 30000
 
+// fcJailMaxUID ends the per-VM uid band.
+const fcJailMaxUID = 60000
+
 // fcJailUID derives a stable, per-group uid from the group's unique proxy port
 // (persisted in groups.json, so it survives restarts — which keeps the
 // workspace image's ownership consistent across boots). Distinct groups get
 // distinct ports and therefore distinct uids: VMs can't touch each other's
 // files, and none of them share the daemon's uid.
-func fcJailUID(proxyPort int) int {
+//
+// An out-of-range port is an ERROR, not a fallback (audit 2026-09-11 L6). It
+// used to clamp to fcJailBaseUID, which is the one outcome the function exists
+// to prevent: every group whose port fell outside the band — after a PROXY_PORT
+// change with existing state in groups.json, after a hand-edited port, or on
+// eventual exhaustion — shared one uid, and that uid owns the workspace image,
+// the vsock socket directory and the jailed VMM process itself. The chroot and
+// mount namespaces make it defence-in-depth rather than immediate cross-VM
+// access today, but "the isolation identity collapsed silently" is not a state
+// to boot into. Refusing names the port and the base, which is the fix.
+func fcJailUID(proxyPort int) (int, error) {
 	uid := fcJailBaseUID + (proxyPort - PORT_BASE)
-	if uid < fcJailBaseUID || uid > 60000 {
-		uid = fcJailBaseUID // fall back into band on an out-of-range port
+	if uid < fcJailBaseUID || uid > fcJailMaxUID {
+		return 0, fmt.Errorf("proxy port %d maps to jail uid %d, outside the %d-%d band "+
+			"(PORT_BASE is %d) — refusing to boot rather than share a VM identity; "+
+			"check PROXY_PORT against groups.json",
+			proxyPort, uid, fcJailBaseUID, fcJailMaxUID, PORT_BASE)
 	}
-	return uid
+	return uid, nil
 }
 
 // fcJailEnabled reports whether Firecracker should be jailed. On by default;

@@ -734,10 +734,16 @@ func clearCmd(req groupReq) baseResp {
 	dropQueuedNotifies(req.Group, "", true)
 	// Every stream: a group-wide clear means the whole transcript, and a slot
 	// file left behind would replay a cleared group's work on the next attach.
-	for _, p := range logPaths(req.Group) {
-		if _, err := os.Stat(p); err == nil {
-			_ = os.WriteFile(p, nil, 0o600)
-		}
+	//
+	// The RESULT counts (audit 2026-09-11 L5). Both the stat and the write used
+	// to be discarded and the function returned OK regardless, so a transcript
+	// that could not be truncated — a read-only filesystem, a permission
+	// problem, the host disk full — reported a successful clear to the operator
+	// and to every client, with the conversation still on disk and still
+	// replayed by the next History. The per-session path already returns
+	// filterLogSession's error; this is the same promise on the wider verb.
+	if err := clearGroupLogs(req.Group); err != nil {
+		return errResp("clear: " + err.Error())
 	}
 	// ...and the in-memory replay ring, which is the OTHER copy (events.go).
 	clearEventRing(req.Group)
@@ -799,6 +805,27 @@ exit $?`
 
 // clearSession is the operator-facing /clear for one session: forget the
 // conversation AND its transcript, and drop the session from the registry.
+// clearGroupLogs truncates every one of g's transcript streams, and REPORTS a
+// failure instead of swallowing it (audit 2026-09-11 L5).
+func clearGroupLogs(g string) error {
+	for _, p := range logPaths(g) {
+		fi, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // never written; nothing to clear
+			}
+			return fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file (%s)", filepath.Base(p), fi.Mode().Type())
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+	}
+	return nil
+}
+
 func clearSession(g, sess string) baseResp {
 	if r := clearSessionContext(g, sess); !r.OK {
 		return r

@@ -72,7 +72,10 @@ func TestFcJailBootsReal(t *testing.T) {
 	run(t, "truncate", "-s", "64M", ws)
 	run(t, "mkfs.ext4", "-qF", ws)
 
-	uid := fcJailUID(8787)
+	uid, err := fcJailUID(8787)
+	if err != nil {
+		t.Fatalf("jail uid: %v", err)
+	}
 	if err := fcJailFixupPerms(g, uid); err != nil {
 		t.Fatalf("fixup perms: %v", err)
 	}
