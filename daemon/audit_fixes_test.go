@@ -2864,3 +2864,50 @@ func TestRefreshJobsSharesTheInFlightGuard(t *testing.T) {
 		t.Fatal("the in-flight marker was cleared by a reader")
 	}
 }
+
+// 2026-09-11 M88: the preflight told the operator to make /dev/kvm
+// world-writable and said nothing about the cost. On Fedora that is the
+// distro default; on a host shipping 0660 root:kvm it opens the KVM interface
+// to every local account, and koto's own check was what asked for it.
+func TestKVMRemediationLeadsWithTheNarrowGrant(t *testing.T) {
+	got := kvmRemediation()
+	narrow := strings.Index(got, "setfacl")
+	broad := strings.Index(got, "0666")
+	if narrow < 0 {
+		t.Fatal("no per-uid ACL remediation offered")
+	}
+	if broad < 0 {
+		t.Fatal("the world-access fallback was dropped entirely; it is most hosts' status quo")
+	}
+	if narrow > broad {
+		t.Fatal("the world-writable option is presented before the narrow one")
+	}
+	if !strings.Contains(got, "EVERY local account") {
+		t.Fatal("the world-access option does not state what it costs")
+	}
+	// The narrow grant names a concrete uid band, not a placeholder, when the
+	// subuid range is readable.
+	if _, _, err := subIDRange("/etc/subuid", currentUsername(t), currentUID(t)); err == nil {
+		if strings.Contains(got, "<subuid-base") {
+			t.Fatalf("subuid range is readable but the band was left as a placeholder:\n%s", got)
+		}
+	}
+}
+
+func currentUsername(t *testing.T) string {
+	t.Helper()
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	return me.Username
+}
+
+func currentUID(t *testing.T) string {
+	t.Helper()
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	return me.Uid
+}

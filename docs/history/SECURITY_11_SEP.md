@@ -1544,3 +1544,26 @@ without limit or swallow the rest of the stream.
 The two other `os.Stdout.Write(ev.Chunk)` sites in this file need nothing:
 `runscript` is sanitized daemon-side unless `-raw` (audit M9a) and `job-tail`
 always is.
+
+### M88 — Preflight remediation makes /dev/kvm globally writable (`daemon/setup_checks.go`) — **fixed**
+
+Real, and it is koto's own preflight doing the asking. `checkKVMAt` told the
+operator to install `KERNEL=="kvm", GROUP="kvm", MODE="0666"` and said nothing
+about what that grants. On Fedora it changes nothing — 0666 is the distro
+default — but on a host shipping `0660 root:kvm` it opens the KVM interface to
+every local account.
+
+The requirement itself is not negotiable and the comment explains why: the VMM
+runs as a per-VM uid inside the daemon's user namespace with a deliberately
+empty supplementary group set, and `newgidmap` can map only the operator's own
+gid and their `/etc/subgid` range — the host's `kvm` gid is in neither, so no
+group membership reaches the jailed process. What DOES reach it is a POSIX ACL
+naming the host uids the VMM actually runs as, and those are a contiguous band:
+the operator's subuid base plus `fcJailBaseUID`, one per possible group port.
+
+So the narrow grant leads now, with the real numbers filled in from
+`/etc/subuid` (rendered on this host as `554288..554388`), and the world-access
+rule is still offered — it is most hosts' status quo — but labelled with its
+cost. `TestKVMRemediationLeadsWithTheNarrowGrant` pins the ordering, the
+presence of both, and that the band is concrete rather than a placeholder when
+the subuid range is readable.
