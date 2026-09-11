@@ -137,6 +137,23 @@ func loadTokenIdentities() map[string]clientIdentity {
 	return parseTokens(b)
 }
 
+// identityByName re-resolves an already-authenticated caller from tokens.json.
+// The map is keyed by credential HASH — the right shape for authenticating a
+// presented token, the wrong one for asking "does this identity still exist,
+// and with which roles", which is what a long-lived stream needs to re-check
+// (auth.go, audit M25). Absent means revoked.
+func identityByName(name string) (clientIdentity, bool) {
+	if name == "" {
+		return clientIdentity{}, false
+	}
+	for _, id := range loadTokenIdentities() {
+		if id.Name == name {
+			return id, true
+		}
+	}
+	return clientIdentity{}, false
+}
+
 // parseTargets converts one grant value — "*", "name", or a list of either —
 // into a targetSet. Unparseable values yield an empty set (grants nothing on
 // targeted verbs) rather than an error: one bad grant must not widen or void
