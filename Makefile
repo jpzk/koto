@@ -649,19 +649,32 @@ proto-verify: proto-gen
 # with group lists, e.g. "send": ["main"].
 SERVER_SAN ?= DNS:koto-daemon,DNS:localhost,IP:127.0.0.1
 ROLE ?= admin
+# Key-generating lines run under `umask 077`, creds/ is 0700, and every key is
+# chmod'd 0600 afterwards. openssl writes a key with whatever the caller's
+# umask allows, and the common 022 leaves ca.key, server.key and every
+# client-*.key readable by every local account (audit M108) — the CA key being
+# the whole trust root, since with it a local user mints a client cert the
+# daemon accepts. The Go PKI (pki.go) already writes 0600; this is the Makefile
+# route catching up, not a new policy.
+#
+# The umask is prefixed PER LINE, not set once: make runs each recipe line in
+# its own shell (no .ONESHELL here), so a standalone `umask 077` line would
+# change nothing for the lines after it. The explicit chmod is the belt to that
+# brace — it also repairs a key generated before this.
 pki-init:
 	@test ! -f creds/ca.key || { echo "creds/ca.key exists — refusing to regenerate the CA (it would silently invalidate every client cert). rm creds/ca.{key,crt} to force."; exit 1; }
-	@mkdir -p creds
+	@mkdir -p creds && chmod 700 creds
 	@command -v openssl >/dev/null || { echo "openssl required"; exit 1; }
-	openssl ecparam -name prime256v1 -genkey -noout -out creds/ca.key
+	umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out creds/ca.key
 	openssl req -x509 -new -key creds/ca.key -sha256 -days 3650 \
 	  -subj "/CN=koto-ca" -out creds/ca.crt
-	openssl ecparam -name prime256v1 -genkey -noout -out creds/server.key
+	umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out creds/server.key
 	openssl req -new -key creds/server.key -subj "/CN=koto-daemon" -out creds/server.csr
 	printf 'subjectAltName=%s\n' "$(SERVER_SAN)" > creds/server.ext
 	openssl x509 -req -in creds/server.csr -CA creds/ca.crt -CAkey creds/ca.key \
 	  -CAcreateserial -sha256 -days 825 -extfile creds/server.ext -out creds/server.crt
 	@rm -f creds/server.csr creds/server.ext
+	@chmod 600 creds/ca.key creds/server.key
 	@[ -f creds/acl.json ] || printf '%s\n' \
 	  '{' \
 	  '  "agent": {' \
@@ -675,11 +688,13 @@ pki-init:
 pki-client:
 	@test -n "$(NAME)" || { echo "usage: make pki-client NAME=<client>"; exit 1; }
 	@test -f creds/ca.key || { echo "run \`make pki-init\` first"; exit 1; }
-	openssl ecparam -name prime256v1 -genkey -noout -out creds/client-$(NAME).key
+	@chmod 700 creds
+	umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out creds/client-$(NAME).key
 	openssl req -new -key creds/client-$(NAME).key -subj "/CN=$(NAME)" -out creds/client-$(NAME).csr
 	openssl x509 -req -in creds/client-$(NAME).csr -CA creds/ca.crt -CAkey creds/ca.key \
 	  -CAcreateserial -sha256 -days 825 -out creds/client-$(NAME).crt
 	@rm -f creds/client-$(NAME).csr
+	@chmod 600 creds/client-$(NAME).key
 	@fp=$$(openssl x509 -in creds/client-$(NAME).crt -noout -fingerprint -sha256 \
 	  | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f'); \
 	  grep -q "$$fp" creds/clients.allow 2>/dev/null || echo "$$fp $(NAME)" >> creds/clients.allow; \
