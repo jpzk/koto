@@ -1901,3 +1901,56 @@ func TestDestroyDropsGoalRecords(t *testing.T) {
 		t.Fatalf("GoalList still serves %d record(s) for a destroyed group", len(resp.Goals))
 	}
 }
+
+// 2026-09-11 M48: every other limit in the parser is per line, per frame or
+// per file; none capped the BODY one open thinking or tool-output block
+// accumulates. The body is joined into a second full-size copy on close and
+// then rides the event into the replay ring, History and the TUI.
+func TestOpenBlockBodiesAreBounded(t *testing.T) {
+	line := strings.Repeat("x", 4096)
+	for _, c := range []struct{ begin, end, doneEvent string }{
+		{"[[think_begin]]", "[[think_end]] 7", "thinking_done"},
+		{"[[tool_out_begin]]", "[[tool_out_end]] 7", "tool_result_done"},
+	} {
+		var lp logParser
+		lp.feedLine(c.begin)
+		// Far more than the budget, fed a line at a time.
+		for i := 0; i < (blockBodyMax/len(line))+64; i++ {
+			if evs := lp.feedLine(line); len(evs) != 1 {
+				t.Fatalf("%s: streaming event lost at line %d", c.begin, i)
+			}
+		}
+		evs := lp.feedLine(c.end)
+		if len(evs) != 1 || evs[0].Event != c.doneEvent {
+			t.Fatalf("%s: close produced %+v", c.begin, evs)
+		}
+		if n := len(evs[0].Body); n > blockBodyMax+64 {
+			t.Fatalf("%s: body is %d bytes, budget is %d", c.begin, n, blockBodyMax)
+		}
+		if !strings.HasSuffix(evs[0].Body, "…[truncated]") {
+			t.Fatalf("%s: truncated body carries no marker", c.begin)
+		}
+		// State is released on close, so the next block starts from zero.
+		if lp.thinkBytes != 0 || lp.toolBytes != 0 || lp.thinkBody != nil || lp.toolOutBody != nil {
+			t.Fatalf("%s: block state survived the close", c.begin)
+		}
+	}
+
+	// An ordinary block is untouched — no marker, exact body.
+	var lp logParser
+	lp.feedLine("[[think_begin]]")
+	lp.feedLine("one")
+	lp.feedLine("two")
+	evs := lp.feedLine("[[think_end]] 2")
+	if len(evs) != 1 || evs[0].Body != "one\ntwo" {
+		t.Fatalf("small block mangled: %+v", evs)
+	}
+	// A turn ending mid-block also releases the budget.
+	lp = logParser{}
+	lp.feedLine("[[tool_out_begin]]")
+	lp.feedLine(line)
+	lp.feedLine("[[turn_end]]")
+	if lp.toolBytes != 0 || lp.toolOutBody != nil {
+		t.Fatal("turn_end left the block budget spent")
+	}
+}
