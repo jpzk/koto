@@ -421,3 +421,48 @@ Two bounds, chosen so each covers what the other cannot:
   shared framing code byte-identical to the guest's.
 
 `TestGuestVsockConnectionsBounded`.
+
+### M24 — Recursive shared root mount allows worker mount events to propagate into fc-agent (`fcguest/main.go`) — **accepted**
+
+True, and largely moot after M23. `earlyInit` marks `/` `MS_REC|MS_SHARED`
+because rootless podman in the guest requires it ("/ is not a shared mount"),
+and the worker has the userns prerequisites to create a mount namespace — so a
+mount it makes can propagate back to the peer group fc-agent lives in. There is
+no mount-namespace separation between the two inside the guest; there never
+was.
+
+It mattered because root-side code read paths the worker controls. It no longer
+does: `exec`/`exec_stream` run as the worker (M23), and `writeWorkerFile` uses
+`O_CREAT|O_EXCL|O_NOFOLLOW` (M13), which refuses a path a mount has made point
+at an existing inode just as it refuses a symlink. What remains is a guest-
+internal `root=no` weakening with no identified consumer, contained by KVM.
+
+Narrowing the shared subtree is the right long-term shape, but it cannot be
+changed blind: the constraint comes from podman's storage layout, and verifying
+it needs a rootfs build and a booted VM with containers actually running. Not
+worth breaking the guest's container support on an untested guess for a hole
+whose consumers have all been closed by other means.
+
+### M25 — Long-lived gRPC streams retain access after authorization revocation (`daemon/auth.go`) — **fixed**
+
+Real, and pointed at exactly the streams revocation is usually about. A
+server-streaming RPC receives its one request and never calls `RecvMsg` again,
+so every check the interceptor made happened at connect time: revoking a role,
+deleting a token, or narrowing `acl.json` left every attached `SubscribeGroup`,
+`WatchState`, `SubscribeLogs`, `JobTail` and `AttachShell` delivering
+transcripts and pty output with the access it had at connect.
+
+`SendMsg` is the one call every delivery path shares — AttachShell's separate
+guest→client goroutine included — so the re-check rides there, on the existing
+`aclStream` wrapper, and covers every streaming RPC at once without touching a
+handler. It re-resolves the identity by NAME from `tokens.json` (a deleted
+entry is a revoked device; an edited one may have narrowed its roles, and
+trusting the connect-time roles would defeat the point) and re-runs
+`rolesAllowed` against the live ACL.
+
+Rate-limited to one re-check per stream per 5s: each reads `acl.json` and
+`tokens.json`, the same per-call reads the unary path already does and the
+reason role edits need no restart. Per frame that would be a file read per
+transcript chunk; per five seconds it is nothing. The cost is a revocation
+taking up to five seconds to reach an attached stream, which is the right trade
+and is pinned by the test. `TestStreamAuthzRevalidates`.

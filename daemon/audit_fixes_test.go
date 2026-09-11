@@ -1255,3 +1255,66 @@ func TestGuestVsockConnectionsBounded(t *testing.T) {
 		t.Fatal("stalled body read never returned; the deadline did not apply")
 	}
 }
+
+// 2026-09-11 M25: a server-streaming RPC receives its one request and never
+// calls RecvMsg again, so every check happened at connect time and revoking a
+// role or deleting a token left attached transcript and pty streams running.
+// The re-check rides SendMsg, the one call every delivery path shares.
+func TestStreamAuthzRevalidates(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere })
+	os.MkdirAll(filepath.Join(HERE, "creds"), 0o700)
+	writeCreds := func(tokens, acl string) {
+		if err := os.WriteFile(credFile("tokens.json"), []byte(tokens), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(credFile("acl.json"), []byte(acl), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCreds(`{"watcher":{"hash":"ab","role":"reader"}}`,
+		`{"reader":{"subscribe_group":["main"]}}`)
+
+	s := &aclStream{
+		id:       clientIdentity{Name: "watcher", Roles: []string{"reader"}},
+		verb:     "subscribe_group",
+		target:   "main",
+		targeted: true,
+	}
+	stale := func() { s.mu.Lock(); s.lastCheck = time.Now().Add(-time.Hour); s.mu.Unlock() }
+
+	stale()
+	if err := s.revalidate(); err != nil {
+		t.Fatalf("live grant refused: %v", err)
+	}
+	// Within the re-check window the answer is cached, so a revocation that
+	// lands a moment later is not seen until the window expires — deliberate,
+	// and the cost of not reading two files per transcript chunk.
+	writeCreds(`{"watcher":{"hash":"ab","role":"reader"}}`, `{"reader":{"subscribe_group":["other"]}}`)
+	if err := s.revalidate(); err != nil {
+		t.Fatalf("re-check ran inside its own window: %v", err)
+	}
+	// Past the window, a narrowed grant closes the stream.
+	stale()
+	if err := s.revalidate(); err == nil {
+		t.Fatal("narrowed grant did not close the stream")
+	} else if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("want PermissionDenied, got %v", err)
+	}
+	// A deleted tokens.json entry revokes the device outright.
+	writeCreds(`{}`, `{"reader":{"subscribe_group":["main"]}}`)
+	stale()
+	if err := s.revalidate(); err == nil {
+		t.Fatal("revoked identity kept its stream")
+	} else if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("want Unauthenticated, got %v", err)
+	}
+	// Roles are re-read, not remembered: a role gaining the grant restores it.
+	writeCreds(`{"watcher":{"hash":"ab","roles":["reader","ops"]}}`,
+		`{"reader":{"subscribe_group":["other"]},"ops":{"subscribe_group":["main"]}}`)
+	stale()
+	if err := s.revalidate(); err != nil {
+		t.Fatalf("widened grant still refused: %v", err)
+	}
+}

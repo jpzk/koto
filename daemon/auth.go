@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"koto-protocol/pb"
 
@@ -299,13 +301,78 @@ type aclStream struct {
 	grpc.ServerStream
 	id   clientIdentity
 	verb string
+
+	mu        sync.Mutex
+	target    string
+	targeted  bool
+	lastCheck time.Time
 }
 
 func (s *aclStream) RecvMsg(m any) error {
 	if err := s.ServerStream.RecvMsg(m); err != nil {
 		return err
 	}
-	return aclCheck(s.Context(), s.id, s.verb, m)
+	if err := aclCheck(s.Context(), s.id, s.verb, m); err != nil {
+		return err
+	}
+	// Remember what was authorized, so SendMsg can re-authorize the same
+	// thing later without the request message in hand.
+	target, targeted := targetOf(m)
+	s.mu.Lock()
+	s.target, s.targeted, s.lastCheck = target, targeted, time.Now()
+	s.mu.Unlock()
+	return nil
+}
+
+// aclStreamRecheck is how stale a long-lived stream's authorization may get.
+//
+// A server-streaming RPC receives its one request and then never calls RecvMsg
+// again, so the interceptor's checks all happened at connect time: revoking a
+// role, deleting a token, or narrowing acl.json left every attached
+// SubscribeGroup, WatchState, SubscribeLogs, JobTail and AttachShell running
+// with the access they had (audit M25) — and these are the streams that carry
+// transcripts and pty output, i.e. exactly what revocation is usually about.
+//
+// SendMsg is the one call every delivery path shares (AttachShell's separate
+// guest→client goroutine included), so the re-check rides there. Five seconds
+// because each one re-reads acl.json and tokens.json — the same per-call reads
+// the unary path already does, and the reason role edits need no restart — and
+// a handful of file reads per attached stream per five seconds is nothing,
+// while per-frame would be a read per transcript chunk.
+const aclStreamRecheck = 5 * time.Second
+
+func (s *aclStream) SendMsg(m any) error {
+	if err := s.revalidate(); err != nil {
+		return err
+	}
+	return s.ServerStream.SendMsg(m)
+}
+
+func (s *aclStream) revalidate() error {
+	s.mu.Lock()
+	if time.Since(s.lastCheck) < aclStreamRecheck {
+		s.mu.Unlock()
+		return nil
+	}
+	s.lastCheck = time.Now()
+	target, targeted := s.target, s.targeted
+	s.mu.Unlock()
+
+	// Re-resolve the identity by name: a deleted tokens.json entry revokes the
+	// device, and an edited one may have narrowed its roles. Falling back to
+	// the connect-time roles would defeat the point.
+	id, ok := identityByName(s.id.Name)
+	if !ok {
+		emitLogf("acl", "warn", "%s: identity no longer in tokens.json — closing %s stream", s.id.Name, s.verb)
+		return status.Errorf(codes.Unauthenticated, "identity %s has been revoked", s.id.Name)
+	}
+	if !rolesAllowed(loadACL(), id.Roles, s.verb, target, targeted) {
+		emitLogfG("acl", aclLogGroup(target), "warn", "%s (roles %s) lost %s on %q — closing the stream",
+			id.Name, strings.Join(id.Roles, ","), s.verb, target)
+		return status.Errorf(codes.PermissionDenied, "roles %s may no longer call %s on %q",
+			strings.Join(id.Roles, ","), s.verb, target)
+	}
+	return nil
 }
 
 func authStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
