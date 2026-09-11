@@ -2300,3 +2300,22 @@ legitimately name anything; nothing else asserted the target was real.
 Both now require `registeredGroup` first. This completes what M17 started:
 `ensure()` refuses to PROVISION an unregistered group, and these refuse to spend
 a descriptor or a byte of disk on one. `TestRPCsRefuseUnregisteredGroups`.
+
+### M123 — Clear RPC ignores guest deletion failures and reports success (`daemon/groups.go`) — **fixed**
+
+Real, and it makes `/clear` lie in the one direction that matters. `fcExec`
+returns the guest shell's exit status SEPARATELY from the Go error — a
+successful agent response carrying `rc=1` is a failed deletion — and both clear
+paths discarded it. A read-only guest filesystem, or anything else that makes
+`rm` fail, told the operator the conversation was forgotten while it was still
+in the VM, ready to be resumed by `--resume` on the next turn.
+
+The session script also ended in `true`, which forced a zero status over
+whatever the `rm`s did — so the caller could not have checked even if it had
+looked. That is gone; the one place a non-zero status is EXPECTED (an id file
+that was never written, i.e. the normal first-turn case) is now an explicit
+`if`, not a `&&` whose false branch would fail the script.
+
+Both callers check `rc` and report the guest's output on failure. Verified
+against the three shapes by hand: no id file → 0, a valid id → 0 with the
+transcript gone, and an undeletable transcript → 1 with the operator told.

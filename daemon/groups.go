@@ -634,9 +634,16 @@ func clearCmd(req groupReq) baseResp {
 	if _, err := ensure(req.Group, req.Group == "main"); err != nil {
 		return errResp("clear: " + err.Error())
 	}
-	if _, _, err := fcExec(req.Group,
+	// The guest's EXIT STATUS counts, not just the transport error (audit
+	// M123). fcExec returns the shell's rc separately, and a successful agent
+	// response carrying rc=1 used to read as a successful clear — so a
+	// read-only guest filesystem, or anything else that makes `rm` fail, told
+	// the operator the conversation was forgotten while it was still there.
+	if out, rc, err := fcExec(req.Group,
 		"rm -rf /workspace/.claude /workspace/.cs/sessions /workspace/.cs/venice-history.json /workspace/.cs/venice-history-*.json", 15*time.Second); err != nil {
 		return errResp("clear: " + err.Error())
+	} else if rc != 0 {
+		return errResp(fmt.Sprintf("clear: guest deletion failed (rc=%d): %s", rc, truncateBytes(strings.TrimSpace(out), 400)))
 	}
 	clearSessionReg(req.Group)
 	// Every stream: a group-wide clear means the whole transcript, and a slot
@@ -683,14 +690,23 @@ func clearSessionContext(g, sess string) baseResp {
 	// this session's project directory into another's (audit M33). fc-agent
 	// validates it on the way in too; this is the use-time half, because the
 	// file is writable by something other than the code that wrote it.
+	// No trailing `true`: it forced a zero exit status over whatever the rm
+	// commands did, so the caller could not have checked the rc even if it had
+	// looked (audit M123). The [ -n "$ID" ] test is the one place a non-zero
+	// status is EXPECTED — an id file that was never written is the normal
+	// first-turn case — so it is written as an if, not as a && whose false
+	// branch would fail the script.
 	script := `I=/workspace/.cs/sessions/` + name + `.id
 ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
 case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
-[ -n "$ID" ] && rm -f /workspace/.claude/projects/*/"$ID".jsonl
+if [ -n "$ID" ]; then rm -f /workspace/.claude/projects/*/"$ID".jsonl || exit 1; fi
 rm -f "$I" ` + vh + `
-true`
-	if _, _, err := fcExec(g, script, 15*time.Second); err != nil {
+
+exit $?`
+	if out, rc, err := fcExec(g, script, 15*time.Second); err != nil {
 		return errResp("clear: " + err.Error())
+	} else if rc != 0 {
+		return errResp(fmt.Sprintf("clear: guest deletion failed (rc=%d): %s", rc, truncateBytes(strings.TrimSpace(out), 400)))
 	}
 	return baseResp{OK: true}
 }
