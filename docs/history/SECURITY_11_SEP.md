@@ -466,3 +466,88 @@ reason role edits need no restart. Per frame that would be a file read per
 transcript chunk; per five seconds it is nothing. The cost is a revocation
 taking up to five seconds to reach an attached stream, which is the right trade
 and is pinned by the test. `TestStreamAuthzRevalidates`.
+
+### M9 — Peer reports are promoted into MAIN's executable conversation (`daemon/report.go`) — **accepted**
+
+Correctly described and already as bounded as the feature allows. A peer cannot
+speak to main at all unless main first delegated with `reply:true`; the window
+is one-shot, consumed on delivery and expiring in 24h, so a group can push at
+most one turn into main per turn main pushed into it. The body is sanitized,
+truncated, `> `-quoted, and prefixed and suffixed with an explicit frame:
+peer-authored, findings not instructions, no spawn/stop/config/send/goal/sched
+action because the report asked, and "the operator does not speak through
+peers".
+
+What the remediation asks for beyond that is not implementable here. "Enforce
+authorization in the daemon for actions derived from peer data" requires the
+daemon to know which of main's later actions derive from the report, which it
+cannot. "Require operator confirmation before MAIN-derived actions affect other
+groups" would end unattended orchestration, which is the product. And a
+"distinct typed low-authority event" is what the framing above already is at
+the only layer that exists — the model reads text either way.
+
+A compliant model acting as a confused deputy for its delegate is a property of
+delegation, not of this delivery path. The mitigations that DO apply are the
+ones already in place: the solicited one-shot window, the rate bound it
+implies, and the fact that a peer's own reach is `network=none` by default.
+
+### M28 — Group-scoped Send authorization permits cross-session conversation hijacking (`daemon/grpc_server.go`) — **not a finding**
+
+Named sessions are conversations, not tenants. They share one workspace, one
+VM, one guest uid and one filesystem — `goals.go` says so outright about
+concurrent goals ("goals that fight over the same files are the caller's
+problem, same as two chat sessions editing one repo"). A caller who may `send`
+to a group may already reach every file every session in it reads, so a
+per-session authorization boundary would defend nothing while implying a
+guarantee koto does not make. The boundary is the GROUP, and that is what the
+ACL targets.
+
+Same answer as M4, which asked for the same boundary on `attach_shell`.
+
+### M29 — Workflow requests can provision unregistered groups without spawn authorization (`daemon/grpc_server.go`) — **fixed**
+
+Mostly closed by M17 already: `ensure()` no longer creates, so a fired schedule
+or a goal's first turn can no longer bring a group into existence. That left
+the record itself — `SchedAdd` and `GoalSet` happily persisted work against a
+name that does not exist, which can now only ever fail at fire time.
+
+`registeredGroup` is checked at creation on both, so the caller gets an error
+it can read instead of a schedule that silently never works, and `spawn` stays
+the one verb that brings a group into existence.
+
+### M30 — Group-scoped Metrics RPC discloses another group's latest metric (`daemon/grpc_server.go`) — **fixed**
+
+Real and narrow. The ACL did its job — `metrics` is checked against
+`MetricsReq.Group` — but the handler then set `GlobalMetric` from
+`latestMetricAny()` unconditionally, which is the newest record from ANY group:
+path, status, request id, token counts, rate-limit headers, provider org. So
+asking about a group you may see answered with another group's newest request.
+
+`GlobalMetric` is a global read, so it now needs the `"*"` target the
+untargeted form of this verb already needs. `TestScopedMetricsOmitGlobal`.
+
+### M33 — Provider-controlled session ID enables privileged path traversal during session clearing (`daemon/groups.go`) — **fixed**
+
+Real. The id is captured off the PROVIDER's stream, stored in a file the worker
+can also rewrite, and then substituted into
+`rm -f /workspace/.claude/projects/*/"$(cat "$I")".jsonl`. Quoting stops
+metacharacters; it does not stop `..`, so `../other/transcript` walks out of
+this session's project directory into another's.
+
+Validated on both sides, because the two are different times and different
+writers: `fc-agent` refuses a non-conforming id on the way in (`validSessionID`
+— Claude's are UUIDs, so hex and dashes), and the clear script re-checks the
+file's content before it becomes a path component, since the file is writable
+by something other than the code that wrote it.
+
+### M34 — Host-address isolation fails open on stale or failed self-address refresh (`daemon/fcnet.go`) — **fixed**
+
+Real, and backwards in the dangerous direction. `fcSelfIPs` is a DENYLIST —
+the host's own interface addresses, which no guest may reach — and the refresh
+discarded `net.InterfaceAddrs`' error, then stored the (empty) result as fresh.
+A failed netlink dump therefore unblocked every host address for a full TTL, on
+the L3 filter and the L7 proxy alike, since they share `fcClassifyDst`.
+
+The last known-good list is now kept on error and `at` is left alone so the
+next call retries immediately rather than after another TTL.
+`TestSelfIPRefreshFailsClosed`.

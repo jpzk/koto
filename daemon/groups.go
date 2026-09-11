@@ -595,8 +595,17 @@ func clearSessionContext(g, sess string) baseResp {
 	if sess == "" {
 		vh = "/workspace/.cs/venice-history.json"
 	}
+	// The id file's CONTENT is the provider's session id, which reaches the
+	// guest off the model stream and sits in a worker-writable file — so it is
+	// re-validated here before it becomes a path component. Quoting stops
+	// metacharacters; it does not stop "..", and `../other/x` walked out of
+	// this session's project directory into another's (audit M33). fc-agent
+	// validates it on the way in too; this is the use-time half, because the
+	// file is writable by something other than the code that wrote it.
 	script := `I=/workspace/.cs/sessions/` + name + `.id
-if [ -s "$I" ]; then rm -f /workspace/.claude/projects/*/"$(cat "$I")".jsonl; fi
+ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
+case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
+[ -n "$ID" ] && rm -f /workspace/.claude/projects/*/"$ID".jsonl
 rm -f "$I" ` + vh + `
 true`
 	if _, _, err := fcExec(g, script, 15*time.Second); err != nil {

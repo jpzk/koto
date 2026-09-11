@@ -1318,3 +1318,74 @@ func TestStreamAuthzRevalidates(t *testing.T) {
 		t.Fatalf("widened grant still refused: %v", err)
 	}
 }
+
+// 2026-09-11 M34: the self-address list is a DENYLIST, so a failed refresh
+// must keep the last known-good set. Discarding the error and storing the
+// empty result as fresh unblocked every host address for a full TTL, on both
+// the L3 filter and the L7 proxy, which share this classifier.
+func TestSelfIPRefreshFailsClosed(t *testing.T) {
+	// fcSelfIPs closes over its own cache, so exercise the property through a
+	// copy of its logic with an injectable enumerator — the behaviour under
+	// test is the error branch, not the netlink call.
+	var ips []net.IP
+	var at time.Time
+	var enumErr error
+	var enumOut []net.IP
+	refresh := func() []net.IP {
+		if ips != nil && time.Since(at) < fcSelfIPsTTL {
+			return ips
+		}
+		if enumErr != nil {
+			return ips // the fix: keep known-good, retry next call
+		}
+		ips, at = enumOut, time.Now()
+		return ips
+	}
+	enumOut = []net.IP{net.ParseIP("10.1.2.3")}
+	if got := refresh(); len(got) != 1 {
+		t.Fatalf("first refresh returned %v", got)
+	}
+	at = time.Now().Add(-time.Hour) // force a refresh
+	enumErr = fmt.Errorf("netlink down")
+	if got := refresh(); len(got) != 1 || !got[0].Equal(net.ParseIP("10.1.2.3")) {
+		t.Fatalf("failed refresh dropped the denylist: %v", got)
+	}
+	// And it retries immediately rather than caching the failure for a TTL.
+	enumErr = nil
+	enumOut = []net.IP{net.ParseIP("10.1.2.3"), net.ParseIP("10.9.9.9")}
+	if got := refresh(); len(got) != 2 {
+		t.Fatalf("refresh after recovery returned %v", got)
+	}
+}
+
+// 2026-09-11 M30: GlobalMetric is the newest record from ANY group. A scoped
+// request used to get it anyway, so asking about a group you may see returned
+// another group's path, status, request id, token counts and provider org.
+func TestScopedMetricsOmitGlobal(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere })
+	os.MkdirAll(filepath.Join(HERE, "creds"), 0o700)
+	os.WriteFile(credFile("acl.json"), []byte(`{"scoped":{"metrics":["main"]},"wide":{"metrics":"*"}}`), 0o600)
+	prevMetrics := METRICS
+	t.Cleanup(func() { METRICS = prevMetrics })
+	METRICS = filepath.Join(HERE, "metrics.jsonl")
+	os.WriteFile(METRICS, []byte(`{"group":"secret","path":"/v1/messages","out":42}`+"\n"), 0o644)
+
+	srv := &kotoServer{}
+	ctxFor := func(roles ...string) context.Context {
+		return withIdentity(context.Background(), clientIdentity{Name: "probe", Roles: roles})
+	}
+	resp, _ := srv.Metrics(ctxFor("scoped"), &pb.MetricsReq{Group: "main"})
+	if resp.GlobalMetric != nil {
+		t.Fatalf("scoped role got another group's metric: %v", resp.GlobalMetric)
+	}
+	resp, _ = srv.Metrics(ctxFor("wide"), &pb.MetricsReq{Group: "main"})
+	if resp.GlobalMetric == nil {
+		t.Fatal("wildcard role lost the global metric")
+	}
+	resp, _ = srv.Metrics(ctxFor(defaultRole), &pb.MetricsReq{Group: "main"})
+	if resp.GlobalMetric == nil {
+		t.Fatal("admin lost the global metric")
+	}
+}

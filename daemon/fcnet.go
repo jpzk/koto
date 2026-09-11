@@ -263,7 +263,19 @@ var fcSelfIPs = func() func() []net.IP {
 		if ips != nil && time.Since(at) < fcSelfIPsTTL {
 			return ips
 		}
-		addrs, _ := net.InterfaceAddrs()
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			// Keep the last known-good list and retry on the next call. The
+			// error used to be discarded and the (empty) result stored as
+			// fresh, which UNBLOCKS every host address for the next TTL —
+			// exactly backwards for a denylist, and on both the L3 and L7
+			// paths since they share this classifier (audit M34). A netlink
+			// dump failing is rare enough that retrying beats caching a
+			// fail-open answer; `at` is left alone so the next call retries
+			// immediately rather than after another TTL.
+			emitLogf("egress", "warn", "self-address refresh failed (%v) — keeping the previous %d address(es)", err, len(ips))
+			return ips
+		}
 		fresh := make([]net.IP, 0, len(addrs))
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok {
