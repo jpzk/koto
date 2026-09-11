@@ -296,7 +296,10 @@ fcguest/             guest agent module — main.go (PID-1 agent), turn.go (runs
 docs/                design docs — firecracker-vsock.md (authoritative microVM runtime doc), kernel-amzn-vs-vanilla.md
 docs/history/        dated point-in-time audits (ANALYSIS_*, SECURITY_*)
 protocol/            the cross-project contract: koto.proto (gRPC, clients) + guest.proto (daemon↔microVM vsock 9002/10000) + committed generated pb ONLY (no hand-written code). Daemon + TUI + fc-agent import koto-protocol/pb; the Android app (maintained out of tree) Wire-generates Kotlin from koto.proto
-sidecar/             guest worker bits — venice_stream.js (the Venice agent loop), stream_filter.js (cs-subagent only), cs-job, cs-notify, cs-subagent (baked into the fc rootfs). entrypoint.sh is gone: fc-agent runs turns (fcguest/turn.go)
+sidecar/             guest worker bits — venice_stream.js (the Venice agent loop), stream_filter.js (cs-subagent only), cs-job, cs-notify, cs-subagent (baked into the fc rootfs).
+                     cs-subagent inherits the TURN's composed system prompt by default (the per-session
+                     .cs/system-prompt-<sess>.md fc-agent writes); `--system` overrides. It used to
+                     default to none, so a background job ran with no harness policy (audit M76). entrypoint.sh is gone: fc-agent runs turns (fcguest/turn.go)
 host/                (empty — the daemon runs on the host; the Dockerfiles and run-host.sh
                      went away with the container runtime)
 tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, go.mod, go.sum
