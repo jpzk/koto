@@ -3020,3 +3020,45 @@ func TestInterruptCancelsOnlyTheObservedTurn(t *testing.T) {
 		t.Fatal("cancelTurn(nil) reported a cancellation")
 	}
 }
+
+// 2026-09-11 M87: the per-group schedule cap is evaded by using more group
+// names. M29 bounds the names at ctlMaxSpawn, but 100 groups x 100 schedules
+// is 10k records marshaled and rewritten on every add, copied and sorted on
+// every list, and walked by cronLoop every minute.
+func TestScheduleStoreHasADaemonWideCap(t *testing.T) {
+	fcHarness(t)
+	prevFile := SCHED_FILE
+	SCHED_FILE = filepath.Join(t.TempDir(), "schedules.json")
+	schedLock.Lock()
+	prev := sched
+	sched = nil
+	schedLock.Unlock()
+	t.Cleanup(func() {
+		SCHED_FILE = prevFile
+		schedLock.Lock()
+		sched = prev
+		schedLock.Unlock()
+	})
+
+	// Fill the store to the daemon-wide cap, spread across many groups so the
+	// per-group cap never binds.
+	schedLock.Lock()
+	for i := 0; i < schedMaxTotal; i++ {
+		sched = append(sched, scheduleItem{ID: fmt.Sprintf("s%d", i), Group: fmt.Sprintf("g%d", i/10)})
+	}
+	schedLock.Unlock()
+
+	if _, err := addSched("fresh", "* * * * *", "hello"); err == nil {
+		t.Fatal("a schedule was accepted past the daemon-wide cap")
+	} else if !strings.Contains(err.Error(), "daemon-wide") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Below the cap it still works.
+	schedLock.Lock()
+	sched = sched[:10]
+	schedLock.Unlock()
+	if _, err := addSched("fresh", "* * * * *", "hello"); err != nil {
+		t.Fatalf("a schedule below the cap was refused: %v", err)
+	}
+}

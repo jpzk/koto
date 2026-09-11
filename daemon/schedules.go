@@ -86,6 +86,12 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	if n := countSched(group); n >= schedMaxPerGroup {
 		return scheduleItem{}, fmt.Errorf("schedule cap reached for %s (%d)", group, schedMaxPerGroup)
 	}
+	schedLock.Lock()
+	total := len(sched)
+	schedLock.Unlock()
+	if total >= schedMaxTotal {
+		return scheduleItem{}, fmt.Errorf("daemon-wide schedule cap reached (%d)", schedMaxTotal)
+	}
 	p, err := parseCron(cronExpr)
 	if err != nil {
 		return scheduleItem{}, err
@@ -119,7 +125,14 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 // plus a permanently full queue. The ctlMaxSpawn pattern, per group.
 const (
 	schedMaxPerGroup = 100
-	schedMaxMsg      = 16 << 10
+	// schedMaxTotal bounds the store across ALL groups. The per-group cap is
+	// evaded by using more group names, and although SchedAdd now requires the
+	// target to be registered (M29) — which bounds the names at ctlMaxSpawn —
+	// 100 groups x 100 schedules is 10k records that are marshaled and
+	// rewritten on every add, copied and sorted on every list, and walked by
+	// cronLoop every minute (audit M87). This is the ceiling on that walk.
+	schedMaxTotal = 2000
+	schedMaxMsg   = 16 << 10
 )
 
 func countSched(group string) int {

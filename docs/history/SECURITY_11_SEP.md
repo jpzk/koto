@@ -1633,3 +1633,20 @@ into a broken one; the trim keeps dropping past orphaned tool replies until the
 surviving head is coherent. Verified directly against the function: a 20 MB
 transcript trims to 4.1 MB, keeps the newest turn, and leaves no leading
 orphan.
+
+### M87 — SchedAdd permits unbounded persistent schedule growth across group names (`daemon/grpc_server.go`) — **fixed**
+
+Half of it was already closed by M29: `SchedAdd` now requires the target group
+to be registered, so the set of usable names is bounded by `ctlMaxSpawn` rather
+than by the caller's imagination.
+
+What that leaves is still worth bounding. 100 groups × `schedMaxPerGroup` is
+10,000 records, and every one of them is marshaled and rewritten to
+`schedules.json` on each add, copied and sorted on each list, and walked by
+`cronLoop` every single minute. `schedMaxTotal` (2000) is the ceiling on that
+walk. `TestScheduleStoreHasADaemonWideCap`.
+
+The remaining suggestions — per-caller ownership of schedules, rate limiting
+creation, bounding due work per tick — are product design rather than this
+finding. A group's schedules fire through `enqueueSend`, which is already
+bounded per session and per group (M70) and closed during stop/destroy (M63).
