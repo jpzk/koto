@@ -45,6 +45,7 @@ package main
 // goroutine blocked on an empty channel (a few KB).
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -90,6 +91,23 @@ var (
 	// (releaseGroupQuarantine, called from the VM-exit reaper and after a
 	// successful self-heal restart).
 	slotQuarantined = map[string]bool{}
+	// sessionWedged marks a CONVERSATION whose guest worker a stalled turn may
+	// have left running, and which self-heal could not clear (audit M145).
+	//
+	// The queue's single-flight guarantee for a session rests on sendNow not
+	// returning until the previous guest worker has stopped. The stall path
+	// says as much in its own comment — "the guest side of this turn may still
+	// be alive and writing" — quarantines the slot, and then calls selfHeal
+	// WITHOUT looking at whether it worked. When the breaker is open or the
+	// restart fails, the turn retires anyway and the session's next prompt
+	// takes a different slot: two claude processes on one conversation id,
+	// sharing a workspace, interleaving tool calls and file writes.
+	//
+	// So a failed heal fences the conversation instead. It lifts the moment
+	// something proves no writer survives — the VM exited or was replaced
+	// (releaseGroupQuarantine), or the wedged worker finally wrote its
+	// [[turn_end]] (notifyTurnDone), which is the group recovering on its own.
+	sessionWedged = map[string]bool{}
 	// slotGen counts ACQUISITIONS of each slot. Every hold carries the
 	// generation it was granted, and release/quarantine act only when the
 	// generation still matches — so an operation from a hold that has already
@@ -187,6 +205,30 @@ func releaseSlot(h slotHold) {
 	slotMu.Unlock()
 }
 
+// markSessionWedged fences a conversation whose guest worker may still be
+// running after a self-heal that did not take. See sessionWedged.
+func markSessionWedged(g, session string) {
+	slotMu.Lock()
+	sessionWedged[sessKey(g, session)] = true
+	slotMu.Unlock()
+}
+
+// clearSessionWedged lifts the fence — the caller knows no writer survives.
+func clearSessionWedged(g, session string) {
+	slotMu.Lock()
+	delete(sessionWedged, sessKey(g, session))
+	slotMu.Unlock()
+}
+
+func sessionIsWedged(g, session string) bool {
+	slotMu.Lock()
+	defer slotMu.Unlock()
+	return sessionWedged[sessKey(g, session)]
+}
+
+var errSessionWedged = errors.New("this conversation's previous turn is wedged and the group could not self-heal — " +
+	"/restart the group (a second turn would run alongside the first, on the same conversation and workspace)")
+
 // quarantineSlot takes a stalled turn's slot out of circulation WITHOUT
 // freeing it — see slotQuarantined. Called instead of releaseSlot on the
 // stall path. A hold that no longer owns the slot quarantines nothing: the
@@ -205,6 +247,11 @@ func quarantineSlot(h slotHold) {
 // replaced it.
 func releaseGroupQuarantine(g string) {
 	slotMu.Lock()
+	for k := range sessionWedged {
+		if grp, _, ok := splitSessKey(k); ok && grp == g {
+			delete(sessionWedged, k)
+		}
+	}
 	freed := false
 	for i := 0; i < groupSlots; i++ {
 		k := slotKey(g, i)
@@ -500,6 +547,9 @@ func enqueue(g string, job sendJob) (<-chan error, error) {
 	if groupBarred(g) {
 		return nil, fmt.Errorf("group %q is stopping; retry once it is down", g)
 	}
+	if sessionIsWedged(g, job.session) {
+		return nil, errSessionWedged
+	}
 	if groupQueuedBytes[g]+int64(len(job.msg)) > sendQueuedBytesMax {
 		return nil, fmt.Errorf("group %q already has %d bytes queued (max %d); retry later",
 			g, groupQueuedBytes[g], sendQueuedBytesMax)
@@ -694,6 +744,14 @@ func sendWorkerTurn(g string, job sendJob) {
 	queuesMu.Unlock()
 	if barred {
 		job.done <- fmt.Errorf("group %q is stopping; turn discarded", g)
+		return
+	}
+	// Same for a conversation fenced by a stall self-heal could not clear: the
+	// fence may have gone up while this job sat in the queue, and starting it
+	// would put a second turn alongside a guest worker that never stopped
+	// (audit M145).
+	if sessionIsWedged(g, job.session) {
+		job.done <- errSessionWedged
 		return
 	}
 	// Reserved-session (goal) turns are re-checked at delivery: the goal

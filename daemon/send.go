@@ -425,7 +425,20 @@ drain:
 			quarantineSlot(hold)
 			emitLogfG("send", g, "warn", "group=%s session=%s: no turn_end within %s; STALLED (guest loop wedged?), advancing queue",
 				g, sessionMarkerName(session), turnWaitTimeout)
-			selfHeal(g, time.Now())
+			// The result matters (audit M145). A self-heal that did NOT happen
+			// — breaker open, or the restart itself failed — leaves the guest
+			// worker this turn started potentially alive, and retiring the turn
+			// regardless lets the session's next prompt run beside it: two
+			// claude processes on one conversation id, sharing a workspace.
+			// The slot quarantine above only protects the log STREAM; the
+			// conversation needs its own fence, lifted when the VM dies or is
+			// replaced, or when the wedged worker finally writes turn_end.
+			if !selfHeal(g, time.Now()) {
+				markSessionWedged(g, session)
+				emitLogfG("send", g, "error",
+					"group=%s session=%s: self-heal did not take; the conversation is fenced until the group restarts",
+					g, sessionMarkerName(session))
+			}
 			// An error, not nil: a successful self-heal CLEARS the stall flags
 			// before this returns, so a caller checking isStalled afterwards
 			// sees a healthy group and concludes the turn ran (M102). It did
@@ -628,6 +641,10 @@ func selfHeal(g string, now time.Time) bool {
 // wrote last.
 func notifyTurnDone(g, sess string) {
 	setStalled(g, sess, false) // a turn completed → that conversation is alive
+	// ...and if it was fenced by a failed self-heal (M145), the worker that
+	// fence existed for has just proved it finished. This is the group
+	// recovering on its own, without the /restart the fence otherwise needs.
+	clearSessionWedged(g, sess)
 	c := turnDoneCh(g, sess)
 	select {
 	case c <- turnCompleted:
