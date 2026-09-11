@@ -1529,3 +1529,47 @@ func TestGoalTurnAbortsOnFailedReset(t *testing.T) {
 		t.Fatalf("%d turn(s) dispatched after a failed reset", enqueued)
 	}
 }
+
+// 2026-09-11 M32: revoking a device is deleting its clients.allow line and its
+// tokens.json entry. An additive merge on every upgrade put both back from a
+// clone that predates the revocation — and the client-*/token-* files are
+// copied too, so the old certificate and token worked again. Once the
+// installed registries exist they are authoritative.
+func TestInstallDoesNotResurrectRevokedIdentities(t *testing.T) {
+	srcCreds := filepath.Join(t.TempDir(), "creds") // the clone
+	dstCreds := filepath.Join(t.TempDir(), "creds") // the installed state dir
+	os.MkdirAll(srcCreds, 0o700)
+	os.MkdirAll(dstCreds, 0o700)
+
+	// The clone still has the revoked device; the install no longer does.
+	os.WriteFile(filepath.Join(srcCreds, "tokens.json"),
+		[]byte(`{"tui":{"hash":"aa","role":"admin"},"revoked":{"hash":"bb","role":"admin"}}`), 0o600)
+	os.WriteFile(filepath.Join(srcCreds, "clients.allow"), []byte("aa tui\nbb revoked\n"), 0o644)
+	os.WriteFile(filepath.Join(dstCreds, "tokens.json"),
+		[]byte(`{"tui":{"hash":"aa","role":"admin"}}`), 0o600)
+	os.WriteFile(filepath.Join(dstCreds, "clients.allow"), []byte("aa tui\n"), 0o644)
+
+	if err := seedIdentityRegistries(srcCreds, dstCreds); err != nil {
+		t.Fatalf("seedIdentityRegistries: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dstCreds, "tokens.json"))
+	if strings.Contains(string(b), "revoked") {
+		t.Fatalf("upgrade resurrected a revoked identity: %s", b)
+	}
+	b, _ = os.ReadFile(filepath.Join(dstCreds, "clients.allow"))
+	if strings.Contains(string(b), "bb") {
+		t.Fatalf("upgrade resurrected a revoked certificate: %s", b)
+	}
+
+	// A FIRST install still imports the clone's identities — that is the
+	// migration path, and there is no installed registry to override.
+	fresh := filepath.Join(t.TempDir(), "creds")
+	os.MkdirAll(fresh, 0o700)
+	if err := seedIdentityRegistries(srcCreds, fresh); err != nil {
+		t.Fatalf("seedIdentityRegistries (fresh): %v", err)
+	}
+	b, _ = os.ReadFile(filepath.Join(fresh, "tokens.json"))
+	if !strings.Contains(string(b), "revoked") || !strings.Contains(string(b), "tui") {
+		t.Fatalf("first install did not carry the clone's identities: %s", b)
+	}
+}

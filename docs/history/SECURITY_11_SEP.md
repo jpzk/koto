@@ -641,3 +641,22 @@ slot)` with no record of WHICH acquisition it was releasing:
 and `releaseSlot`/`quarantineSlot` take the hold and act only while it still
 owns the slot. Both stale operations become no-ops.
 `TestSlotHoldGenerations`.
+
+### M32 — Install migration resurrects revoked client credentials from stale clone (`daemon/install.go`) — **fixed**
+
+Real, and it undoes a security action. Revoking a device is deleting its line
+from `clients.allow` and its entry from `tokens.json`. The additive merge ran on
+every install, so an upgrade from a clone that predates the revocation put both
+back — and the `client-*`/`token-*` files are copied too, so possession of the
+old certificate and bearer token was enough to authenticate again with the old
+roles. The previous audit (L10) had noticed the behavior and settled for
+printing a line about it; printing is not a control.
+
+The merge now runs only on a FIRST install, which is the migration it exists
+for. Once the installed registries exist they are AUTHORITATIVE — and they will
+exist, because the wizard mints into the state dir, so a clone-side identity is
+legacy by construction. Clone identities the installed registry lacks are
+NAMED, with the command that would add one back deliberately: silence would be
+the worse failure of the two, since an operator who really did mint in the clone
+needs to know why it does not work, and one who revoked a device needs to know
+it stayed revoked. `TestInstallDoesNotResurrectRevokedIdentities`.
