@@ -335,6 +335,74 @@ func authOAuthPath(ac *authCtx) string {
 	return filepath.Join(ac.state, ".claude", ".credentials.json")
 }
 
+// authClaudeDirCheck decides whether <state>/.claude is a place koto is willing
+// to have a credential written (audit M139).
+//
+// `claude auth login` writes to $HOME/.claude/.credentials.json, and HOME here
+// is the state dir — so whatever that path resolves to IS where the OAuth
+// bearer token lands. The login used to accept anything already sitting there,
+// for a real reason (a dev clone routinely has its own project-local .claude/
+// directory holding skills and settings, and replacing that would destroy the
+// operator's files) — but "leave it alone" silently included a SYMLINK, which
+// is not the operator's files, it is a redirection of the write. Anyone able to
+// create that entry before the operator logs in — the daemon, which shares the
+// operator's uid and has ReadWritePaths over the state dir, is the interesting
+// one — chooses where the token is written and where it can be read from.
+//
+// Three outcomes, and only the first two continue:
+//
+//   - absent: koto creates the symlink to creds/ itself, which is the state the
+//     installer leaves behind and the one this whole arrangement assumes;
+//   - a real directory, or a symlink that resolves to <state>/creds: accepted,
+//     which covers both the dev clone and every installed host;
+//   - anything else — a symlink somewhere else, a regular file, a socket:
+//     refused, naming what it found. The operator can remove it; koto must not
+//     quietly write a bearer token through it.
+func authClaudeDirCheck(ac *authCtx) error {
+	link := filepath.Join(ac.state, ".claude")
+	fi, err := os.Lstat(link)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("%s: %w", link, err)
+		}
+		if err := os.Symlink("creds", link); err != nil {
+			return fmt.Errorf("link .claude -> creds: %w", err)
+		}
+		return nil
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		if fi.IsDir() {
+			return nil // a clone's own .claude/ — the operator's, and untouched
+		}
+		return fmt.Errorf("%s is a %s, not a directory — refusing to log in through it "+
+			"(remove it, or point it at %s)", link, fi.Mode().Type(), ac.credsDir())
+	}
+	// A symlink: judge it by where it RESOLVES, not by the text of the link,
+	// so "creds", an absolute path and a chain of links are all decided the
+	// same way. A dangling link resolves to nothing and is refused with it.
+	got, gerr := filepath.EvalSymlinks(link)
+	want, werr := filepath.EvalSymlinks(ac.credsDir())
+	if gerr != nil || werr != nil || got != want {
+		target, _ := os.Readlink(link)
+		return fmt.Errorf("%s is a symlink to %q, not to %s — refusing to log in through it, "+
+			"because that is where the OAuth token would be written and read from "+
+			"(remove the link and re-run; koto will recreate it)",
+			link, target, ac.credsDir())
+	}
+	return nil
+}
+
+// authClaudeDirCheckReadOnly is authClaudeDirCheck's judgement without its one
+// side effect, for --status: an absent link is not a problem to report (the
+// login creates it), it is just not yet there.
+func authClaudeDirCheckReadOnly(ac *authCtx) error {
+	link := filepath.Join(ac.state, ".claude")
+	if _, err := os.Lstat(link); err != nil {
+		return nil
+	}
+	return authClaudeDirCheck(ac)
+}
+
 // authResolve walks the proxy's precedence and returns what it would send.
 func authResolve(ac *authCtx) authCred {
 	fileKey := ""
@@ -441,6 +509,12 @@ func authReport(ac *authCtx, probe bool) int {
 	u.printf("%s", u.bold("anthropic credentials"))
 	u.info("state dir %s", ac.state)
 	u.info("credentials file %s", authOAuthPath(ac))
+	// The doctor reports what the login would refuse, rather than refusing:
+	// --status mutates nothing, and an operator whose login is about to fail
+	// should hear why here (audit M139).
+	if err := authClaudeDirCheckReadOnly(ac); err != nil {
+		u.warn("%v", err)
+	}
 	c := authResolve(ac)
 	if c.kind == "" {
 		u.fail("no credential — the proxy has nothing to inject")
@@ -780,22 +854,11 @@ func authOAuthLogin(ac *authCtx) error {
 	if err != nil {
 		return errors.New("`claude` not found on PATH — install it with `npm i -g @anthropic-ai/claude-code`")
 	}
-	// <state>/.claude is where `claude` will write, and the installer makes
-	// it a symlink to creds/ so everything koto owns lives in one directory.
-	// Create it when absent — a dev clone has no installer to have done it.
-	//
-	// When something is ALREADY there, leave it alone: in a clone it is
-	// routinely a real project-local .claude/ directory holding skills and
-	// settings, and replacing that would destroy the operator's own files.
-	// This is safe now only because authOAuthPath resolves to whatever the
-	// daemon reads rather than assuming creds/ — the earlier version assumed,
-	// and a real directory here is exactly what made a successful login look
-	// like a no-op.
-	link := filepath.Join(ac.state, ".claude")
-	if _, err := os.Lstat(link); err != nil {
-		if err := os.Symlink("creds", link); err != nil {
-			return fmt.Errorf("link .claude -> creds: %w", err)
-		}
+	// <state>/.claude is where `claude` will write, so it is where the OAuth
+	// token lands. Establish that boundary rather than inheriting whatever is
+	// there — see authClaudeDirCheck (audit M139).
+	if err := authClaudeDirCheck(ac); err != nil {
+		return err
 	}
 	// Record what the credentials file looked like going in, so "did this
 	// login actually write anything" is answerable afterwards. A stale file

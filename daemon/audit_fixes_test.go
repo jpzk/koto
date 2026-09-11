@@ -4474,3 +4474,90 @@ func TestStateWritersCreateOwnerOnlyFiles(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M139: `claude auth login` writes to $HOME/.claude/.credentials.json
+// and HOME here is the state dir, so whatever <state>/.claude resolves to is
+// where the OAuth bearer token lands. The login accepted anything already there
+// — for a real reason (a dev clone's own project-local .claude/ directory holds
+// the operator's skills and settings) — but "leave it alone" silently included a
+// SYMLINK, which is not the operator's files but a redirection of the write.
+func TestAuthClaudeDirRefusesARedirectedLink(t *testing.T) {
+	newCtx := func(t *testing.T) *authCtx {
+		t.Helper()
+		state := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(state, "creds"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return &authCtx{state: state}
+	}
+
+	// Absent: koto establishes the boundary itself, as the installer would.
+	ac := newCtx(t)
+	if err := authClaudeDirCheck(ac); err != nil {
+		t.Fatalf("absent .claude: %v", err)
+	}
+	link := filepath.Join(ac.state, ".claude")
+	if target, err := os.Readlink(link); err != nil || target != "creds" {
+		t.Fatalf("link = %q, err = %v; want a symlink to creds", target, err)
+	}
+	// ...and a second call is happy with what the first created.
+	if err := authClaudeDirCheck(ac); err != nil {
+		t.Errorf("re-check of koto's own link: %v", err)
+	}
+
+	// A real directory: the dev clone's own .claude/. Accepted and untouched.
+	ac = newCtx(t)
+	own := filepath.Join(ac.state, ".claude")
+	if err := os.MkdirAll(filepath.Join(own, "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := authClaudeDirCheck(ac); err != nil {
+		t.Errorf("a real .claude/ directory was refused: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(own, "skills")); err != nil {
+		t.Errorf("the operator's own .claude/ was disturbed: %v", err)
+	}
+
+	// The finding: a symlink aimed somewhere else. Refused, and the message
+	// has to name the target the token would have gone to.
+	ac = newCtx(t)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(ac.state, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	err := authClaudeDirCheck(ac)
+	if err == nil {
+		t.Fatal("a .claude symlink pointing outside the state dir was accepted")
+	}
+	if !strings.Contains(err.Error(), elsewhere) {
+		t.Errorf("refusal does not name the redirect target: %v", err)
+	}
+
+	// A dangling link resolves to nothing, and is refused with it.
+	ac = newCtx(t)
+	if err := os.Symlink(filepath.Join(ac.state, "gone"), filepath.Join(ac.state, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := authClaudeDirCheck(ac); err == nil {
+		t.Error("a dangling .claude symlink was accepted")
+	}
+
+	// Not a directory at all.
+	ac = newCtx(t)
+	if err := os.WriteFile(filepath.Join(ac.state, ".claude"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := authClaudeDirCheck(ac); err == nil {
+		t.Error("a regular file at .claude was accepted")
+	}
+
+	// An absolute symlink that lands on creds/ anyway is fine — the judgement
+	// is where it RESOLVES, not the text of the link.
+	ac = newCtx(t)
+	if err := os.Symlink(filepath.Join(ac.state, "creds"), filepath.Join(ac.state, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := authClaudeDirCheck(ac); err != nil {
+		t.Errorf("an absolute link to creds/ was refused: %v", err)
+	}
+}
