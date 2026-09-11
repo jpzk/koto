@@ -403,6 +403,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// up a dev clone's identities on first install. Never overwrites.
 	srcCreds := filepath.Join(o.root, "creds")
 	dstCreds := filepath.Join(o.stateDir, "creds")
+	tightenSecretDir(dstCreds)
 	// anthropic-api-key belongs in this list: writeEnvFile reads it from the
 	// STATE dir to fold into koto.env, so omitting it silently produced an
 	// install with no credentials at all — the daemon starts and the API
@@ -410,7 +411,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// a clean machine; keep this list and writeEnvFile's reader in step.
 	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
 		"acl.json", ".credentials.json", "venice.key", "anthropic-api-key"} {
-		_ = copyIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
+		_ = copySecretIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
 	}
 	// clients.allow and tokens.json are cumulative REGISTRIES, not one-shot
 	// files: copy-if-absent left an upgrade's newly minted identities with a
@@ -436,7 +437,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 		for _, e := range entries {
 			n := e.Name()
 			if strings.HasPrefix(n, "client-") || strings.HasPrefix(n, "token-") {
-				_ = copyIfAbsent(filepath.Join(srcCreds, n), filepath.Join(dstCreds, n))
+				_ = copySecretIfAbsent(filepath.Join(srcCreds, n), filepath.Join(dstCreds, n))
 			}
 		}
 	}
@@ -1047,6 +1048,49 @@ func copyIfAbsent(src, dst string) error {
 		return nil
 	}
 	return copyFile(src, dst)
+}
+
+// copySecretIfAbsent migrates a credential with a FIXED owner-only mode.
+//
+// copyFile preserves the source's permissions, which is right for the guest
+// assets (the firecracker binary has to stay executable) and wrong for
+// secrets: a clone whose creds/ was created under a loose umask, or copied off
+// another machine, materialized a group- or world-readable CA key, client
+// private key or bearer token in the installed state dir (audit M72). The
+// destination mode is a property of what the file IS, not of where it came
+// from.
+//
+// O_EXCL|O_NOFOLLOW rather than os.WriteFile: this runs against a path under a
+// directory the installer just created, and "create it fresh or not at all" is
+// both the containment and the already-present check.
+func copySecretIfAbsent(src, dst string) error {
+	if exists(dst) || !exists(src) {
+		return nil
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(dst)
+		return err
+	}
+	return f.Close()
+}
+
+// tightenSecretDir forces an owner-only mode on a credential directory that
+// already exists. MkdirAll leaves an existing directory's mode alone, so a
+// state dir seeded before this (or by hand) kept whatever it had — and the
+// directory's mode is the last line of defense for every file in it.
+func tightenSecretDir(dir string) {
+	if fi, err := os.Lstat(dir); err == nil && fi.IsDir() && fi.Mode().Perm() != 0o700 {
+		_ = os.Chmod(dir, 0o700)
+	}
 }
 
 // installStatus reports the service state for the wizard's detect/verify.
