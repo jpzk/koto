@@ -1973,3 +1973,25 @@ and two workloads that need isolating get two groups, which costs one microVM.
 
 The genuinely wrong behaviour in this area was an interrupt hitting a turn the
 caller never observed — a race, not a permission — and that is M85, fixed.
+
+### M108 — Makefile PKI generation leaves private keys readable by other local users (`Makefile`) — **fixed**
+
+Real. `openssl` writes a key with whatever the caller's umask allows, and the
+common 022 left `ca.key`, `server.key` and every `client-*.key` mode 0644. The
+CA key is the whole trust root: a local user holding it mints a client cert the
+daemon accepts. `pki.go` already writes 0600, so the Makefile route was the
+only one exposed — and it is the route `make pki-init` / `make pki-client`
+documents.
+
+Three changes: `creds/` is created 0700, each key-generating line is prefixed
+`umask 077 &&`, and every key is `chmod 600`'d afterwards.
+
+The umask is prefixed PER LINE rather than set once, and that matters: make
+runs each recipe line in its own shell (there is no `.ONESHELL` here), so a
+standalone `umask 077` line changes nothing for the lines after it. I wrote it
+that way first. The explicit chmod is the belt to that brace and also repairs a
+key generated before this.
+
+Verified end to end under `umask 022` in a scratch tree: after `pki-init` and
+`pki-client`, `creds/` is 0700, every `.key` and token is 0600, and the
+certificates stay world-readable as they should.
