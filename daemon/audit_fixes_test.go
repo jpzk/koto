@@ -3850,3 +3850,45 @@ func TestUnsolicitedReportIsRefusedCheaply(t *testing.T) {
 		t.Fatalf("the elided line does not say what it was: %q", got)
 	}
 }
+
+// 2026-09-11 M112: purgeRefusal works on a PATHNAME and RemoveAll resolves
+// that name again. With a custom -state under a writable parent, the parent
+// can be renamed and replaced with a symlink in between — the confirmation
+// shows one directory and the deletion walks another. The prompt is the wide
+// part of that window: it waits on a human.
+func TestPurgeIdentityDetectsSubstitution(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "state")
+	other := filepath.Join(base, "elsewhere")
+	os.MkdirAll(real, 0o750)
+	os.MkdirAll(other, 0o750)
+
+	before, err := dirIdentity(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same, _ := dirIdentity(real); same != before {
+		t.Fatal("identity is not stable across reads")
+	}
+	if o, _ := dirIdentity(other); o == before {
+		t.Fatal("two directories share an identity")
+	}
+
+	// The substitution: rename the validated directory away and drop a
+	// symlink to somewhere else in its place.
+	os.Rename(real, filepath.Join(base, "moved"))
+	if err := os.Symlink(other, real); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	after, err := dirIdentity(real)
+	if err != nil {
+		// Lstat on a symlink reports a link, not a directory — also a refusal.
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	if after == before {
+		t.Fatal("a substituted path kept the validated identity")
+	}
+}

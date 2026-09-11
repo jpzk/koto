@@ -34,6 +34,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 type uninstallOpts struct {
@@ -192,6 +193,17 @@ func uninstallPurge(o uninstallOpts, state string) error {
 	if !exists(state) {
 		u.info("%s does not exist — nothing to purge", state)
 	} else {
+		// Identity, taken BEFORE the guards and re-checked after the prompt.
+		// purgeRefusal works on a PATHNAME, and RemoveAll resolves that name
+		// again — with a custom -state under a writable parent, the parent can
+		// be renamed and replaced with a symlink in between, so the
+		// confirmation shows one directory and the deletion walks another
+		// (audit M112). The prompt is the wide part of that window: it waits
+		// on a human.
+		stateID, idErr := dirIdentity(state)
+		if idErr != nil {
+			return fmt.Errorf("stat %s: %w", state, idErr)
+		}
 		if why := purgeRefusal(state); why != "" {
 			return fmt.Errorf("refusing to delete %s: %s", state, why)
 		}
@@ -217,6 +229,15 @@ func uninstallPurge(o uninstallOpts, state string) error {
 		// needs root, the path is not a koto state dir and the guards above
 		// were the wrong ones.
 		if !o.dry {
+			// The same directory the guards passed and the operator saw, or
+			// nothing: an rm -rf on a path that changed identity under a
+			// confirmation prompt is exactly what this must not do.
+			if now, err := dirIdentity(state); err != nil {
+				return fmt.Errorf("stat %s before deleting: %w", state, err)
+			} else if now != stateID {
+				return fmt.Errorf("%s is not the directory that was checked "+
+					"(it was replaced while the confirmation was open) — refusing to delete it", state)
+			}
 			if err := os.RemoveAll(state); err != nil {
 				return fmt.Errorf("remove %s: %w", state, err)
 			}
@@ -235,6 +256,25 @@ func uninstallPurge(o uninstallOpts, state string) error {
 		}
 	}
 	return nil
+}
+
+// dirIdentity is a directory's (device, inode) pair — stable across renames of
+// the path that names it, and different for any other directory. Lstat, not
+// Stat: a symlink swapped in for the validated directory must read as a
+// different object, not as whatever it points at.
+func dirIdentity(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", path)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("cannot read the identity of %s", path)
+	}
+	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
 }
 
 // purgeRefusal returns why a path must not be deleted, or "" when it may be.

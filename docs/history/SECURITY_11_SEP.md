@@ -2145,3 +2145,40 @@ on the daemon's own logging path, again before any authorization. Requests are
 now logged in full up to `ctlLogMax` (512 bytes) and elided to verb plus length
 beyond it, which is where a payload stops being a command.
 `TestUnsolicitedReportIsRefusedCheaply`.
+
+### M112 — Purge can be redirected by a path-substitution race (`daemon/uninstall.go`) — **fixed**
+
+Real, and the confirmation prompt is what makes the window wide: `purgeRefusal`
+validates a PATHNAME — `EvalSymlinks`, marker checks, ancestry — and then
+`os.RemoveAll` resolves that name AGAIN, with a human's answer in between. With
+a custom `-state` under a writable parent, the parent can be renamed and
+replaced with a symlink in the meantime, so the prompt shows one directory and
+the `rm -rf` walks another.
+
+`dirIdentity` takes the directory's `(device, inode)` before the guards and
+re-checks it immediately before the deletion; a mismatch refuses and says why.
+`Lstat`, not `Stat`, so a symlink swapped in for the validated directory reads
+as a different object rather than as whatever it points at.
+
+This does not make the operation race-free in the abstract — only a
+descriptor-relative deletion would, and Go's `RemoveAll` takes a path. It does
+mean the substitution has to win a syscall-width race instead of a
+human-width one, and that the check the operator was shown is the check that
+holds at deletion time. `TestPurgeIdentityDetectsSubstitution`.
+
+### M107 — Sensitive prompts are persisted in job command metadata (`sidecar/cs-job`) — **accepted**
+
+Two claims, and the answers are ones this ledger has already reached.
+
+The GROUP-scoped disclosure is M105/M106 again: `cs-job list` and the Jobs RPCs
+are readable by principals who can also send to that group, attach its shell
+and read its workspace. A job's command line is not something they are being
+kept from.
+
+The argv persistence is M58's residual, which the operator POSTPONED on
+2026-09-11 — the same shape (a prompt on a command line, visible in
+`/proc/<pid>/cmdline` and in the job's `cmd` file), and the same fix would be
+needed: a delivery path that is not argv. `cs-job run` already accepts the
+stdin form; making `spawn` use it would change the documented agent-facing
+interface, which is not a change to make inside an audit pass without the
+operator's call. Recorded here so the two are tracked together.
