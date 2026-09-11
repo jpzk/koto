@@ -1831,3 +1831,25 @@ id propagated onto every lifecycle event, which is a proto change and a
 contract change for every client. The cross-session substitution, which is the
 part another principal can cause, is closed.
 `TestAskSessionNormalization`.
+
+### M100 — Fallback scanner container can read and exfiltrate the entire checkout (`tools/hooks/pre-commit`) — **fixed**
+
+Real, and it is the confidentiality half that the existing precautions do not
+cover. The scanner needs the repo WITH `.git` to read the index, so it can read
+the whole checkout — git history, ignored files, and `creds/` among them — and
+a read-only mount prevents writes, not reads. The digest pin stops a mutable
+tag being swapped, but pinning is not a confidentiality boundary: if the image,
+its build pipeline or the registry account were compromised, the only thing
+between it and the operator's CA key and bearer tokens was somewhere to send
+them.
+
+`--network=none` is the load-bearing flag, and it now has nowhere. Verified,
+not assumed: the container comes up with `lo` alone and no DNS resolution. The
+rest is ordinary least privilege for a process that only reads files —
+`--cap-drop=ALL`, `--security-opt=no-new-privileges`, a read-only root with a
+tmpfs for scratch (also verified: a write to `/` is refused, `/tmp` works).
+
+`label=disable` stays: Fedora's SELinux policy denies the bind mount otherwise,
+which is the same trade the project documents everywhere else. The staged-only
+snapshot the remediation prefers would change what `--staged` reads; with no
+network, reading the checkout costs nothing.
