@@ -769,3 +769,26 @@ critical section, so the check and the insert happen under one acquisition.
 `listSessions` reads a file and is gathered outside the lock
 (`groupSessionSet`). `resolveGoalName` survives as the unlocked wrapper.
 `TestConcurrentGoalSetsGetDistinctNames`.
+
+### M49 — Guest ctl plane can approve delegated goals without human authorization (`daemon/ctl.go`) — **fixed**
+
+The most consequential finding in the batch, and the one that made M20's fix
+decorative. The ctl handler refused `goal_approve` when the request named a
+group other than the caller — but a goal MAIN delegated to a peer is
+self-targeted from the peer's side. So the delegate approved its own delegated
+plan, and the human gate that plan-first exists to open never existed:
+`goals.go`'s own header says "park at awaiting_approval until a HUMAN approves
+(GoalApprove has no ctl-plane counterpart)", and in practice it had one.
+
+Self-targeted was never the question; who SET it is. `GoalItem.CreatedBy`
+records the group that asked — `""` for the operator over gRPC — and the ctl
+plane approves only what the caller itself set. A group's own plan-first goal
+is still its own to approve, which is how a coordinator starts plan-first work
+autonomously; a delegated or operator-set plan needs the human, who has
+`GoalApprove` on the RPC.
+
+A record written before the field existed has no creator and so needs the
+operator too: the safe reading of "unknown provenance", and self-limiting since
+goals turn over. The field is loop-internal and deliberately absent from the pb
+conversions — it is an authorization fact, not something a client renders.
+`TestCtlApprovesOnlySelfSetGoals`.
