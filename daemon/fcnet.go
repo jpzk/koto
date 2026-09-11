@@ -628,8 +628,21 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 		if len(frame) < 34 {
 			return fcFlow{}, false
 		}
+		// The header's own fields are CHECKED, not assumed (audit 2026-09-11
+		// L126). A guest writes these bytes, and the flow log is an audit
+		// record: a frame the netstack will reject must not produce one, both
+		// because the record would be false and because its tuple then
+		// suppresses a LATER, real flow to the same destination for the whole
+		// dedup TTL. Version 4, and a total length that covers the header it
+		// claims.
+		if frame[14]>>4 != 4 {
+			return fcFlow{}, false
+		}
 		ihl := int(frame[14]&0x0f) * 4
 		if ihl < 20 || len(frame) < 14+ihl {
+			return fcFlow{}, false
+		}
+		if totLen := int(binary.BigEndian.Uint16(frame[16:18])); totLen < ihl || 14+totLen > len(frame) {
 			return fcFlow{}, false
 		}
 		proto = frame[23]
@@ -640,6 +653,12 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 		}
 	case 0x86DD: // IPv6
 		if len(frame) < 54 {
+			return fcFlow{}, false
+		}
+		if frame[14]>>4 != 6 {
+			return fcFlow{}, false
+		}
+		if payLen := int(binary.BigEndian.Uint16(frame[18:20])); 54+payLen > len(frame) {
 			return fcFlow{}, false
 		}
 		proto = frame[20]
@@ -654,13 +673,26 @@ func fcParseFlow(frame []byte) (fcFlow, bool) {
 	}
 	switch proto {
 	case 6: // TCP — log connection starts only: SYN set, ACK clear
-		if len(l4) < 14 || l4[13]&0x12 != 0x02 {
+		// A full 20-byte header, and a data offset that is inside the frame:
+		// 14 bytes was enough to READ the flags, not enough to know this is a
+		// TCP segment the netstack would accept (audit 2026-09-11 L126).
+		if len(l4) < 20 {
+			return fcFlow{}, false
+		}
+		if off := int(l4[12]>>4) * 4; off < 20 || off > len(l4) {
+			return fcFlow{}, false
+		}
+		if l4[13]&0x12 != 0x02 {
 			return fcFlow{}, false
 		}
 		return fcFlow{proto: "TCP", src: src, dst: dst,
 			dstPort: int(binary.BigEndian.Uint16(l4[2:4])), hasPort: true}, true
 	case 17: // UDP
-		if len(l4) < 4 {
+		// The declared length includes the 8-byte header and must fit.
+		if len(l4) < 8 {
+			return fcFlow{}, false
+		}
+		if dl := int(binary.BigEndian.Uint16(l4[4:6])); dl < 8 || dl > len(l4) {
 			return fcFlow{}, false
 		}
 		return fcFlow{proto: "UDP", src: src, dst: dst,

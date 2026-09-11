@@ -337,6 +337,7 @@ func tailFile(g, p string, isGroup bool) {
 	if err != nil {
 		return
 	}
+	defer f.Close()
 	_, _ = f.Seek(0, io.SeekEnd)
 	ino := inode(p)
 	buf := ""
@@ -346,6 +347,17 @@ func tailFile(g, p string, isGroup bool) {
 	// and the tailer-specific side effects (bg-task tailing).
 	lp := logParser{}
 	for {
+		// The tailer's CLAIM is its lifetime (audit 2026-09-11 L128). This
+		// loop had no exit at all: destroy deletes the claim and the
+		// workspace, and the goroutine went on stat()ing a path that no
+		// longer exists, forever, holding its open descriptor — so group
+		// churn accumulated a goroutine and a file descriptor per group,
+		// and a reused name could not start a replacement tailer because
+		// (since M104) the claim is what gates one.
+		if !tailClaimed(p) {
+			emitLogfG("tail", g, "info", "[%s] tailer for %s stopped: the group is gone", g, filepath.Base(p))
+			return
+		}
 		st, err := os.Stat(p)
 		if err != nil {
 			time.Sleep(100 * time.Millisecond)
@@ -528,6 +540,14 @@ func dropGroupTailState(g string) {
 	notifyExpectMu.Unlock()
 }
 
+// tailClaimed reports whether p is still a registered tail. dropGroupTailState
+// removing the entry is how a tailer is told to stop.
+func tailClaimed(p string) bool {
+	subsLock.Lock()
+	defer subsLock.Unlock()
+	return tails[p]
+}
+
 func markTail(p string) bool {
 	subsLock.Lock()
 	defer subsLock.Unlock()
@@ -598,7 +618,39 @@ func readHistoryCtx(ctx context.Context, g string, limit int, before float64) ([
 		more = true
 		events = events[len(events)-limit:]
 	}
+	// ...and by BYTES as well as by count (audit 2026-09-11 L130). The count
+	// bounds how many events; nothing bounded how big they are, and each can
+	// carry up to eventTextMax of guest-authored body. Eleven streams times
+	// historyTailCap is ~44 MiB that one request would marshal, one client
+	// would unmarshal, and that client would then keep in its transcript —
+	// whose own limits are a line count and a markdown-cache size, neither of
+	// which is this. Trimmed from the OLDEST end, like the count, so the page
+	// stays the recent one the reader asked for; `more` then tells the client
+	// there is older content, which is what it means.
+	total := 0
+	cut := 0
+	for i := len(events) - 1; i >= 0; i-- {
+		total += historyEventBytes(events[i])
+		if total > historyBytesMax {
+			cut = i + 1
+			more = true
+			break
+		}
+	}
+	if cut > 0 {
+		events = events[cut:]
+	}
 	return events, more
+}
+
+// historyBytesMax bounds one History response's payload. Generous next to a
+// real transcript page and far below what eleven streams can hold.
+const historyBytesMax = 8 << 20
+
+// historyEventBytes is the rough wire cost of one event: the free-text fields,
+// which are the only ones that can be large.
+func historyEventBytes(ev Event) int {
+	return len(ev.Msg) + len(ev.Text) + len(ev.Body) + len(ev.Input) + len(ev.Name) + len(ev.Title) + 64
 }
 
 // readStreamHistory parses one stream file. Returns nothing when the file has

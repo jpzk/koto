@@ -191,11 +191,13 @@ func TestFcEgressConnWANDropsLAN(t *testing.T) {
 func tcpFrame(dst string, port uint16, flags byte) []byte {
 	f := make([]byte, 14+20+20)
 	binary.BigEndian.PutUint16(f[12:14], 0x0800)
-	f[14] = 0x45 // v4, IHL 5
-	f[23] = 6    // TCP
+	f[14] = 0x45                             // v4, IHL 5
+	binary.BigEndian.PutUint16(f[16:18], 40) // IP total length: 20 + 20
+	f[23] = 6                                // TCP
 	copy(f[26:30], net.ParseIP("192.168.127.2").To4())
 	copy(f[30:34], net.ParseIP(dst).To4())
 	binary.BigEndian.PutUint16(f[36:38], port) // TCP dst port
+	f[46] = 0x50                               // data offset: 5 words
 	f[47] = flags                              // TCP flags
 	return f
 }
@@ -205,10 +207,12 @@ func udpFrame(dst string, port uint16) []byte {
 	f := make([]byte, 14+20+8)
 	binary.BigEndian.PutUint16(f[12:14], 0x0800)
 	f[14] = 0x45
-	f[23] = 17 // UDP
+	binary.BigEndian.PutUint16(f[16:18], 28) // IP total length: 20 + 8
+	f[23] = 17                               // UDP
 	copy(f[26:30], net.ParseIP("192.168.127.2").To4())
 	copy(f[30:34], net.ParseIP(dst).To4())
 	binary.BigEndian.PutUint16(f[36:38], port) // UDP dst port
+	binary.BigEndian.PutUint16(f[38:40], 8)    // UDP length: header only
 	return f
 }
 

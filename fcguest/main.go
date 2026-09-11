@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -890,15 +891,84 @@ func untarInto(raw []byte, dest string, chownWorker bool) error {
 // runReaped runs a short helper through the tracked-pid reaper (a bare
 // cmd.Run would race the central wait4(-1) loop for the exit status).
 func runReaped(name string, args ...string) error {
+	_, _, err := runReapedOut(name, args...)
+	return err
+}
+
+// runReapedOut is runReaped that also collects stdout, through the same
+// explicit pipe handleExec uses — os/exec's own capture needs Cmd.Wait(),
+// which this agent never calls (audit 2026-09-11 L110).
+func runReapedOut(name string, args ...string) (string, int, error) {
 	cmd := exec.Command(name, args...)
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return "", -1, perr
+	}
+	cmd.Stdout = pw
 	_, ch, err := startTracked(cmd)
+	pw.Close()
 	if err != nil {
-		return err
+		pr.Close()
+		return "", -1, err
 	}
-	if ws := <-ch; ws.ExitStatus() != 0 {
-		return fmt.Errorf("%s exit %d", name, ws.ExitStatus())
+	var out bytes.Buffer
+	copied := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&out, io.LimitReader(pr, 1<<20))
+		_, _ = io.Copy(io.Discard, pr)
+		close(copied)
+	}()
+	ws := <-ch
+	select {
+	case <-copied:
+	case <-time.After(execDrain):
+		pr.Close()
+		<-copied
 	}
-	return nil
+	pr.Close()
+	rc := ws.ExitStatus()
+	if rc != 0 {
+		return out.String(), rc, fmt.Errorf("%s exit %d", name, rc)
+	}
+	return out.String(), rc, nil
+}
+
+// shellSessionMax bounds how many tmux sessions one guest will hold (audit
+// 2026-09-11 L127). `tmux new-session -A -s <name>` is create-or-attach and
+// detaching deliberately leaves the session (and everything running in it)
+// alive — that persistence is the feature — so every previously unused name
+// is a new shell, a new pty and permanent tmux state. The daemon pins the
+// NAME's shape but a name is not a quota, and the group has as many names as
+// it likes.
+//
+// A generous ceiling: one per chat session (groupSlots is 10) with room for
+// the operator's own, well below anything that strains the VM. Attaching to a
+// session that already exists is always allowed — the cap is on CREATING one,
+// which is what accumulates.
+const shellSessionMax = 24
+
+// tmuxSessionAdmit reports whether a `new-session -A -s name` may run: yes if
+// the session already exists (that is an attach), yes if the guest is under
+// the cap, no otherwise. A tmux that is not running yet has no sessions, which
+// is the first attach and must succeed.
+func tmuxSessionAdmit(name string) (bool, int) {
+	out, _, err := runReapedOut("tmux", "list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		// No server yet (or tmux failed): nothing to be over the cap with.
+		return true, 0
+	}
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if line == name {
+			return true, n // already there: this is an attach
+		}
+		n++
+	}
+	return n < shellSessionMax, n
 }
 
 // portBridge exposes an in-guest TCP service on a guest vsock port: the
@@ -1402,6 +1472,13 @@ func handleShellAttach(c *vconn, r *bufio.Reader, req *pb.ShellAttachReq) {
 	// redraw leg checks LC_ALL/LC_CTYPE/LANG and fell back to ASCII. LANG
 	// below covers the same for the server env this client may spawn (pane
 	// shells inherit it).
+	if ok, n := tmuxSessionAdmit(session); !ok {
+		frameError(c, fmt.Sprintf("this VM already holds %d shell sessions (max %d) — "+
+			"close one with `tmux kill-session -t <name>` before opening another", n, shellSessionMax))
+		ptmx.Close()
+		slave.Close()
+		return
+	}
 	cmd := exec.Command("tmux", "-u", "new-session", "-A", "-s", session, ";", "set-option", "-g", "mouse", "on")
 	cmd.Dir = wsDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{

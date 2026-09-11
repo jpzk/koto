@@ -8116,6 +8116,7 @@ func TestOpaqueEgressIsStillLogged(t *testing.T) {
 	// IPv4, fragment continuation (offset != 0): no L4 header in this packet.
 	v4 := make([]byte, 20)
 	v4[0] = 0x45
+	binary.BigEndian.PutUint16(v4[2:4], 40)     // total length: header + 20 bytes
 	binary.BigEndian.PutUint16(v4[6:8], 0x0001) // fragment offset 1
 	v4[9] = 6                                   // TCP
 	copy(v4[12:16], net.IPv4(10, 0, 0, 1).To4())
@@ -8143,6 +8144,7 @@ func TestOpaqueEgressIsStillLogged(t *testing.T) {
 	hop[1] = 0 // 8 bytes total
 	tcp := make([]byte, 20)
 	binary.BigEndian.PutUint16(tcp[2:4], 443)
+	tcp[12] = 0x50 // data offset 5 words
 	tcp[13] = 0x02 // SYN
 	fl, ok = fcParseFlow(eth(0x86DD, append(append(v6, hop...), tcp...)...))
 	if !ok {
@@ -8364,6 +8366,225 @@ func TestOversizedSGRParametersAreRejected(t *testing.T) {
 	for _, ok := range []string{"\x1b[0m", "\x1b[m", "\x1b[1;31m", "\x1b[38;5;208m", "\x1b[48;2;10;20;30m"} {
 		if got := sanitize("x" + ok + "y"); got != "x"+ok+"y" {
 			t.Errorf("%q was altered → %q", ok, got)
+		}
+	}
+}
+
+// 2026-09-11 L124: proxyMaxBody caps the request and the inflight semaphores
+// cap how many, but nothing capped one non-streaming RESPONSE — and both
+// provider branches buffer it whole before a byte reaches the guest, with the
+// Venice branch unmarshalling the same buffer on top.
+func TestNonStreamingResponseIsBounded(t *testing.T) {
+	body := strings.NewReader(strings.Repeat("x", proxyMaxResponse+4096))
+	got := proxyReadResponse("g", body)
+	if len(got) != proxyMaxResponse {
+		t.Fatalf("buffered %d bytes for a %d cap", len(got), proxyMaxResponse)
+	}
+	// An ordinary response passes through whole.
+	small := strings.Repeat("y", 4096)
+	if got := proxyReadResponse("g", strings.NewReader(small)); string(got) != small {
+		t.Errorf("a %d-byte response was altered (%d bytes out)", len(small), len(got))
+	}
+}
+
+// 2026-09-11 L126: the flow logger is an AUDIT record, and it recorded flows
+// from frames the netstack would reject — fcParseFlow checked a 14-byte TCP
+// payload and a 4-byte UDP payload and nothing about the IP version, the total
+// length, TCP's data offset or UDP's declared length. A false record is bad on
+// its own, and its tuple then suppresses a later real flow to the same
+// destination for the whole dedup TTL.
+func TestMalformedFramesDoNotProduceFlowRecords(t *testing.T) {
+	base := func() []byte {
+		f := make([]byte, 14+20+20)
+		binary.BigEndian.PutUint16(f[12:14], 0x0800)
+		f[14] = 0x45
+		binary.BigEndian.PutUint16(f[16:18], 40)
+		f[23] = 6
+		copy(f[26:30], net.ParseIP("192.168.127.2").To4())
+		copy(f[30:34], net.ParseIP("1.1.1.1").To4())
+		binary.BigEndian.PutUint16(f[36:38], 443)
+		f[46] = 0x50
+		f[47] = 0x02
+		return f
+	}
+	if _, ok := fcParseFlow(base()); !ok {
+		t.Fatal("a well-formed SYN stopped parsing")
+	}
+	for name, mangle := range map[string]func([]byte){
+		"version 6 in an IPv4 frame": func(f []byte) { f[14] = 0x65 },
+		"total length under the header": func(f []byte) {
+			binary.BigEndian.PutUint16(f[16:18], 4)
+		},
+		"total length past the frame": func(f []byte) {
+			binary.BigEndian.PutUint16(f[16:18], 60000)
+		},
+		"tcp data offset of zero":  func(f []byte) { f[46] = 0 },
+		"tcp data offset past end": func(f []byte) { f[46] = 0xf0 },
+	} {
+		f := base()
+		mangle(f)
+		if fl, ok := fcParseFlow(f); ok {
+			t.Errorf("%s produced a flow record: %+v", name, fl)
+		}
+	}
+	// UDP's declared length is checked too.
+	u := make([]byte, 14+20+8)
+	binary.BigEndian.PutUint16(u[12:14], 0x0800)
+	u[14] = 0x45
+	binary.BigEndian.PutUint16(u[16:18], 28)
+	u[23] = 17
+	copy(u[26:30], net.ParseIP("192.168.127.2").To4())
+	copy(u[30:34], net.ParseIP("9.9.9.9").To4())
+	binary.BigEndian.PutUint16(u[36:38], 53)
+	binary.BigEndian.PutUint16(u[38:40], 8)
+	if _, ok := fcParseFlow(u); !ok {
+		t.Fatal("a well-formed UDP datagram stopped parsing")
+	}
+	binary.BigEndian.PutUint16(u[38:40], 4) // shorter than the header
+	if fl, ok := fcParseFlow(u); ok {
+		t.Errorf("a UDP length under 8 produced a record: %+v", fl)
+	}
+}
+
+// 2026-09-11 L128: destroy drops the tailer's CLAIM, but tailFile had no exit —
+// it went on stat()ing a path that no longer exists, forever, holding its open
+// descriptor. Group churn accumulated a goroutine and a descriptor per group,
+// and a reused name could not start a replacement, because the claim is what
+// gates one.
+func TestTailerStopsWhenItsClaimIsDropped(t *testing.T) {
+	prevRoot := ROOT
+	ROOT = t.TempDir()
+	t.Cleanup(func() { ROOT = prevRoot })
+	const g = "tailexit"
+	p := groupLogPath(g)
+	if !markTail(p) {
+		t.Fatal("the path was already claimed")
+	}
+	done := make(chan struct{})
+	go func() { tailFile(g, p, false); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("the tailer returned while its claim stood")
+	case <-time.After(150 * time.Millisecond):
+	}
+	dropGroupTailState(g)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tailer outlived its claim — a goroutine and a descriptor per destroyed group")
+	}
+}
+
+// 2026-09-11 L129: the published-port list was range-checked and deduped but
+// unbounded in COUNT, and every entry becomes a host listener with its own
+// accept loop plus a guest-side bridge — so one valid config write could hand a
+// group 64,000 of them.
+func TestPublishedPortListIsBounded(t *testing.T) {
+	ports := make([]int, 0, 5000)
+	for p := 1024; p < 1024+5000; p++ {
+		ports = append(ports, p)
+	}
+	raw, err := json.Marshal(ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{}
+	applyConfig(cfg, "ports", json.RawMessage(raw))
+	got, _ := cfg["ports"].([]int)
+	if len(got) != configMaxPorts {
+		t.Fatalf("stored %d ports, want the cap %d", len(got), configMaxPorts)
+	}
+	// A normal list is untouched.
+	cfg = map[string]any{}
+	applyConfig(cfg, "ports", json.RawMessage(`[8080,3000]`))
+	if got, _ := cfg["ports"].([]int); len(got) != 2 {
+		t.Errorf("an ordinary list was altered: %v", cfg["ports"])
+	}
+}
+
+// 2026-09-11 L131: logSinkAppend checked only the path it was handed, and a
+// group's turn output goes to eleven independent streams — so the real
+// per-group ceiling was eleven times the per-file one, reachable by ordinary
+// turn output with no file ever exceeding its own limit.
+func TestGroupLogsHaveAnAggregateCeiling(t *testing.T) {
+	dir := t.TempDir()
+	// Two streams, each well under the per-file ceiling, together over the
+	// group one. Sparse files: the check reads sizes, not contents.
+	for _, n := range []string{"log.0", "log.1"} {
+		f, err := os.Create(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(fcLogGroupMaxBytes/2 + 1); err != nil {
+			t.Skipf("cannot stage a sparse file here: %v", err)
+		}
+		f.Close()
+	}
+	total, err := groupLogBytes(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total <= fcLogGroupMaxBytes {
+		t.Fatalf("staged %d bytes, expected to be over the %d ceiling", total, fcLogGroupMaxBytes)
+	}
+	if err := logSinkAppend(filepath.Join(dir, "log.2"), []byte("more\n")); err == nil {
+		t.Fatal("a third stream accepted a write with the group already over its ceiling")
+	} else if !strings.Contains(err.Error(), "group ceiling") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// A group under the ceiling writes normally.
+	fresh := t.TempDir()
+	if err := logSinkAppend(filepath.Join(fresh, "log.0"), []byte("hello\n")); err != nil {
+		t.Errorf("an ordinary append was refused: %v", err)
+	}
+}
+
+// 2026-09-11 L133: each `koto pki client` read tokens.json, added its own entry
+// and renamed a FIXED temporary name into place. Two runs with overlapping
+// snapshots left the loser's token hash out of the file authentication reads —
+// and its token-<name> file still existed, so it looked like a working
+// credential the daemon inexplicably rejects.
+func TestConcurrentClientProvisioningKeepsEveryToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := pkiInit(dir, nil); err != nil {
+		t.Fatalf("pkiInit: %v", err)
+	}
+	const n = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := pkiClient(dir, fmt.Sprintf("c%02d", i), []string{"reader"}); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("pkiClient: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toks map[string]json.RawMessage
+	if err := json.Unmarshal(b, &toks); err != nil {
+		t.Fatalf("tokens.json is not parseable: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("c%02d", i)
+		if _, ok := toks[name]; !ok {
+			t.Errorf("%s has a token file but no registry entry — it would authenticate as unknown", name)
+		}
+	}
+	// And no temporary files left behind.
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".tokens.json.") {
+			t.Errorf("leftover temporary registry file %q", e.Name())
 		}
 	}
 }

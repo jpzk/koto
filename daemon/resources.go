@@ -262,8 +262,21 @@ func resParseMemInfo(s string) (total, avail int64) {
 // didn't answer in time keeps its last reading until resGuestMaxAge — see
 // resGuestMem for why bounded staleness beats a flapping column. Never boots
 // a VM: fcExec only dials, and the running check filters the rest.
+// resSweepDeadline bounds the WHOLE guest leg of a sweep (audit 2026-09-11
+// L125). The semaphore bounded how many probes run at once; it did nothing
+// about how long the queue behind it takes, and resourcesLoop calls
+// resCheckThresholds only after resSweep returns. With enough unresponsive
+// guests — ceil(N/resGuestExecPar) x resGuestExecTimeout — the threshold check
+// that exists to catch a filling disk was simply not running, which is the
+// 2026-08-03 outage's exact shape: the metrics were fine, nobody was reading
+// them. A probe that misses its slot is a MISSED READING, which the staleness
+// policy (resGuestRetain) already handles honestly; a delayed alert is not
+// handled anywhere.
+const resSweepDeadline = 20 * time.Second
+
 func resSweepGuestMem(groups []string) {
 	now := time.Now()
+	deadline := time.After(resSweepDeadline)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, resGuestExecPar)
 	for _, g := range groups {
@@ -272,8 +285,22 @@ func resSweepGuestMem(groups []string) {
 			defer wg.Done()
 			running := fcRunning(g)
 			var total, avail, dTotal, dAvail, dUsed int64
+			probe := running
 			if running {
-				sem <- struct{}{} // bound concurrent probes (resGuestExecPar)
+				select {
+				case sem <- struct{}{}: // bound concurrent probes (resGuestExecPar)
+				case <-deadline:
+					// Out of time: skip the probe rather than hold the sweep —
+					// and with it every threshold check — behind a queue of
+					// guests that are not answering. `running` stays TRUE:
+					// this is a MISSED READING, not a stopped VM, and
+					// resGuestRetain already distinguishes them (a stopped VM
+					// drops immediately; a running one that did not answer
+					// keeps its last reading until resGuestMaxAge).
+					probe = false
+				}
+			}
+			if probe {
 				out, rc, err := fcExec(g, resGuestProbe, resGuestExecTimeout)
 				<-sem
 				if err == nil && rc == 0 {

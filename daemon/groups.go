@@ -740,6 +740,8 @@ func destroy(g string) baseResp {
 	notifyRateForget(g)
 	ctlPollForget(g)
 	logAlertForgetGroup(g)
+	proxyForgetGroup(g)
+	logBytesForget(g)
 	subsLock.Lock()
 	// Drop the seq counter + ring with the group: a later group of the same
 	// name starts a fresh sequence, and a client resuming across the

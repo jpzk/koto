@@ -5976,3 +5976,130 @@ is 107; truecolor components reach 255); the **empty** field stays valid, since
 ECMA-48's default parameter is 0 and `ESC[m` is the reset every styled span ends
 with. Fixed in both, because the two sanitizers are deliberate mirrors. Pinned
 by `TestOversizedSGRParametersAreRejected`.
+
+## L124 — Non-streaming LLM responses are buffered unbounded — FIXED
+
+`daemon/proxy.go`. `proxyMaxBody` caps the request and the inflight semaphores
+cap how many, but nothing capped **one response** — and both provider branches
+`io.ReadAll` it whole before a byte reaches the guest, with the Venice branch
+unmarshalling the same buffer on top. A guest that can use its group's relay
+picks non-streaming inference and asks for a large output; 128 global slots
+times an unbounded response is the arithmetic M15 already wrote about for
+request bodies. `proxyReadResponse` bounds it at the same 64 MiB, relays a
+truncated body as-is (the guest sees a malformed reply from its provider, which
+is what happened) and logs the reason. Pinned by
+`TestNonStreamingResponseIsBounded`.
+
+## L125 — Queued guest probes delay threshold evaluation — FIXED
+
+`daemon/resources.go`. The semaphore bounded how many probes run at once and
+said nothing about how long the queue behind it takes, while `resourcesLoop`
+calls `resCheckThresholds` only after `resSweep` returns. With enough
+unresponsive guests — ceil(N / `resGuestExecPar`) × `resGuestExecTimeout` — the
+threshold check that exists to catch a filling disk simply was not running,
+which is the 2026-08-03 outage's exact shape: the metrics were fine, nobody was
+reading them. `resSweepDeadline` (20s) bounds the whole guest leg; a group that
+misses its slot is recorded as a **missed reading**, not a stopped VM —
+`resGuestRetain` already distinguishes them, and a missed reading is handled
+honestly while a delayed alert is not handled anywhere.
+
+## L126 — Malformed guest frames poison the egress flow log — FIXED
+
+`daemon/fcnet.go`. The flow log is an audit record, and it recorded flows from
+frames the netstack would reject: `fcParseFlow` checked a 14-byte TCP payload
+and a 4-byte UDP payload and nothing about the IP version, the IPv4 total
+length, the IPv6 payload length, TCP's 20-byte minimum and data offset, or
+UDP's declared length. A false record is bad on its own, and its tuple then
+**suppresses a later real flow** to the same destination for the whole dedup
+TTL. Every one of those fields is checked now. Pinned by
+`TestMalformedFramesDoNotProduceFlowRecords`; the existing `fcnet_test.go`
+frame builders were made well-formed, which is what they always meant to be.
+
+## L127 — AttachShell permits unbounded persistent tmux sessions — FIXED
+
+`fcguest/main.go`. The daemon pins the session NAME's shape (an earlier audit
+fix), but a name is not a quota: `tmux new-session -A -s <name>` is
+create-or-attach, and detaching deliberately leaves the session and everything
+in it alive — that persistence is the feature — so every previously unused name
+is a new shell, a new pty and permanent tmux state. `tmuxSessionAdmit` caps
+CREATION at `shellSessionMax` (24 — one per chat session with room to spare)
+while always allowing an attach to a session that already exists, which is what
+does not accumulate. The refusal names the fix (`tmux kill-session`).
+
+## L128 — Destroyed groups leave tailers and descriptors running — FIXED
+
+`daemon/logtail.go`.
+
+**The key mismatch the finding describes was already fixed** (M104's
+`dropGroupTailState` deletes by PATH). The residual is the real one: `tailFile`
+had **no exit at all**. Its claim was dropped and the workspace deleted, and the
+goroutine went on `os.Stat`ing a path that no longer exists, forever, holding
+its open descriptor — so group churn accumulated a goroutine and a descriptor
+per group, and a reused name could not start a replacement tailer, because since
+M104 the claim is exactly what gates one.
+
+**Fix:** the claim IS the lifetime. `tailFile` checks `tailClaimed(p)` at the top
+of each iteration and returns, closing its file, when the claim is gone — so
+`dropGroupTailState` is how a tailer is told to stop rather than merely how it is
+forgotten. Pinned by `TestTailerStopsWhenItsClaimIsDropped`.
+
+## L129 — Unbounded published-port fan-out — FIXED
+
+`daemon/config.go`. The list was range-checked and deduped but unbounded in
+**count**, and each entry becomes a host listener with its own accept loop plus a
+guest-side bridge, serialised into the guest's init request. One valid config
+write could hand a group 64,000 of them — spending the daemon's descriptors and
+goroutines, and quite possibly stopping that VM from booting. `configMaxPorts =
+32`; publishing a few services is what this is for. Pinned by
+`TestPublishedPortListIsBounded`.
+
+## L130 — History has no aggregate byte budget — FIXED
+
+`daemon/logtail.go`. The page limit bounds how MANY events; nothing bounded how
+big they are, and each can carry up to `eventTextMax` of guest-authored body.
+Eleven streams times `historyTailCap` is ~44 MiB that one request marshals, one
+client unmarshals, and that client then keeps in its transcript — whose own
+limits are a line count and a markdown-cache size, neither of which is this.
+`historyBytesMax` (8 MiB) trims from the **oldest** end, like the count, so the
+page stays the recent one the reader asked for, and sets `more`, which is exactly
+what "there is older content" means.
+
+## L131 — Per-slot log ceilings allow aggregate exhaustion — FIXED
+
+`daemon/fc.go`. `logSinkAppend` checked only the path it was handed, while a
+group's turn output goes to eleven independent streams (`.cs/log` plus
+`log.0`…`log.9`) — so the real per-group ceiling was **eleven times** the
+per-file one, reachable by ordinary turn output with no file ever exceeding its
+own limit. The token bucket delays a burst; it is not a cumulative budget. A
+group-wide ceiling (`fcLogGroupMaxBytes`, 2 GiB) is checked alongside the
+per-file one, from a per-directory total cached for 5s — a cache miss costs
+eleven stats, a hit a map lookup, and the error the cache can make is bounded by
+one TTL's writes. The cached total joins destroy's teardown. Pinned by
+`TestGroupLogsHaveAnAggregateCeiling`.
+
+## L132 — Per-group proxy semaphores are never reclaimed — FIXED
+
+`daemon/proxy.go`. `proxyInflightGroup` was keyed by group name and pruned by
+nothing — neither destroy nor `proxyUnlisten` reached it — so churning uniquely
+named groups retained a channel and its key per group for the daemon's lifetime,
+reachable from the map and therefore not collectable. `proxyForgetGroup` joins
+the name-keyed teardown beside L80's and L98's. Safe at destroy time because the
+listener is already closed and the VM is down, so nothing can hold a slot.
+
+## L133 — Concurrent client provisioning loses token entries — FIXED
+
+`daemon/pki.go`.
+
+**Confirmed.** Each `koto pki client` run read `tokens.json`, added its own entry
+and renamed a **fixed** temporary name into place, with no locking. Two runs with
+overlapping snapshots left the loser's token hash out of the file authentication
+reads — and its `token-<name>` file still existed, so the failure presented as a
+working credential the daemon inexplicably rejects. `make pki-client` in a loop,
+or two terminals, is all it takes.
+
+**Fix:** the read-modify-write is under an `flock` on `<creds>/.tokens.lock`, and
+the temporary file is unique. flock rather than a lockfile-by-rename because the
+kernel releases it when the process exits, so an interrupted provisioning run
+cannot wedge every later one. Pinned by
+`TestConcurrentClientProvisioningKeepsEveryToken` (negative control: the old code
+fails with a rename onto a name another run already consumed).

@@ -545,6 +545,34 @@ func metricsAppend(b []byte) {
 	_, _ = f.Write(b)
 }
 
+// proxyMaxResponse bounds a NON-STREAMING upstream response (audit 2026-09-11
+// L124). proxyMaxBody caps the request and the inflight semaphores cap how
+// many, but nothing capped one response — and both provider branches buffer it
+// whole before a byte reaches the guest, with the Venice branch unmarshalling
+// the same buffer on top. A guest that can use its group's relay chooses
+// non-streaming inference and asks for a large output; 128 global slots times
+// an unbounded response is the same arithmetic M15 wrote about for bodies.
+//
+// Deliberately the same 64 MiB as proxyMaxBody: far above any real completion
+// (Anthropic's own output ceiling is orders of magnitude below it), so this is
+// an OOM backstop rather than a limit a turn can meet.
+const proxyMaxResponse = 64 << 20
+
+// proxyReadResponse buffers a non-streaming response under that bound. A
+// truncated body is relayed as-is and logged: the guest sees a malformed reply
+// from its provider, which is what happened, and the operator gets the reason.
+func proxyReadResponse(group string, body io.Reader) []byte {
+	data, err := io.ReadAll(io.LimitReader(body, proxyMaxResponse+1))
+	if len(data) > proxyMaxResponse {
+		emitLogfG("llm", group, "warn",
+			"upstream returned more than %d MiB in one non-streaming response — truncated", proxyMaxResponse>>20)
+		data = data[:proxyMaxResponse]
+	} else if err != nil {
+		emitLogfG("llm", group, "warn", "reading the upstream response: %v", err)
+	}
+	return data
+}
+
 // retryableStatus reports whether an upstream status warrants a transparent
 // proxy-side retry. 529 (Anthropic "Overloaded") and 503 are capacity signals;
 // 429 is rate-limit. These are the only ones that can change on a re-send. We
@@ -876,6 +904,23 @@ func proxyGroupSem(group string) chan struct{} {
 		proxyInflightGroup[group] = c
 	}
 	return c
+}
+
+// proxyForgetGroup drops a destroyed group's semaphore (audit 2026-09-11
+// L132). The map was keyed by group name and never pruned — neither destroy
+// nor proxyUnlisten reached it — so churning uniquely named groups retained a
+// channel and its key per group for the daemon's lifetime, reachable from the
+// map and therefore not collectable. The same name-keyed teardown L80 and L98
+// added elsewhere.
+//
+// Safe at destroy time because the group's listener is already closed
+// (proxyUnlisten runs first) and the guest's VM is down, so nothing can be
+// holding a slot; a request that somehow arrived afterwards would simply get a
+// fresh semaphore.
+func proxyForgetGroup(group string) {
+	proxyInflightMu.Lock()
+	delete(proxyInflightGroup, group)
+	proxyInflightMu.Unlock()
 }
 
 // --- 2026-09-11 M15: an aggregate byte budget, not just a request count ------
@@ -1269,7 +1314,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
 		}
 	} else {
-		data, _ := io.ReadAll(resp.Body)
+		data := proxyReadResponse(h.group, resp.Body)
 		probe.firstByte()
 		_, _ = out.Write(data)
 		var parsed map[string]any
@@ -1423,7 +1468,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
 		}
 	} else {
-		data, _ := io.ReadAll(resp.Body)
+		data := proxyReadResponse(h.group, resp.Body)
 		probe.firstByte()
 		_, _ = out.Write(data)
 		var parsed map[string]any
