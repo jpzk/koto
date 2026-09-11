@@ -49,6 +49,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const sendQueueDepth = 64
@@ -386,26 +387,78 @@ func dropQueued(g string) int {
 // order and single-flight within a conversation. How many workers may be
 // mid-turn at once is the slot pool's business, not this loop's: sendNow
 // blocks on acquireSlot.
+// sessionIdleMax is how long a session's queue and worker survive with nothing
+// to do. See retireQueue.
+const sessionIdleMax = 30 * time.Minute
+
+// retireQueue drops an idle session's queue, and reports whether the worker
+// should exit. Takes queuesMu, which enqueue holds across BOTH the map lookup
+// and the channel send — so a job cannot slip into a queue that is being
+// retired, and a queue with anything buffered is never retired.
+func retireQueue(g, session string, q chan sendJob) bool {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	if len(q) > 0 {
+		return false // work arrived while the timer was firing
+	}
+	k := sessKey(g, session)
+	if queues[k] != q {
+		return true // already replaced; this worker is the old one
+	}
+	delete(queues, k)
+	return true
+}
+
 func sendWorker(g, session string, q chan sendJob) {
-	for job := range q {
-		// Reserved-session (goal) turns are re-checked at delivery: the goal
-		// may have been paused/interrupted/cancelled while this turn sat
-		// queued behind operator chat. See goalTurnShouldRun.
-		if isReservedSession(job.session) && !goalTurnShouldRun(g, job.session) {
-			job.done <- fmt.Errorf("goal turn skipped (goal no longer active)")
+	// An idle session gives its queue and worker back (audit M54). The session
+	// name is caller-chosen and the map had no teardown, so every distinct one
+	// ever sent to cost a channel and a goroutine for the daemon's lifetime —
+	// and nothing bounded how many a Send-authorized caller could mint. A cap
+	// alone would have been the wrong fix: a group that legitimately uses many
+	// session names over weeks would wedge on it, whereas reclaiming what is
+	// idle bounds the steady state without bounding the vocabulary.
+	idle := time.NewTimer(sessionIdleMax)
+	defer idle.Stop()
+	for {
+		var job sendJob
+		select {
+		case job = <-q:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(sessionIdleMax)
+		case <-idle.C:
+			if retireQueue(g, session, q) {
+				return
+			}
+			idle.Reset(sessionIdleMax)
 			continue
 		}
-		k := sessKey(g, job.session)
-		queuesMu.Lock()
-		inFlightSess[k] = true
-		turnCancels[k] = make(chan struct{})
-		queuesMu.Unlock()
-		job.done <- runTurn(g, job.session, job.msg)
-		queuesMu.Lock()
-		delete(inFlightSess, k)
-		delete(turnCancels, k)
-		queuesMu.Unlock()
+		sendWorkerTurn(g, job)
 	}
+}
+
+func sendWorkerTurn(g string, job sendJob) {
+	// Reserved-session (goal) turns are re-checked at delivery: the goal
+	// may have been paused/interrupted/cancelled while this turn sat
+	// queued behind operator chat. See goalTurnShouldRun.
+	if isReservedSession(job.session) && !goalTurnShouldRun(g, job.session) {
+		job.done <- fmt.Errorf("goal turn skipped (goal no longer active)")
+		return
+	}
+	k := sessKey(g, job.session)
+	queuesMu.Lock()
+	inFlightSess[k] = true
+	turnCancels[k] = make(chan struct{})
+	queuesMu.Unlock()
+	job.done <- runTurn(g, job.session, job.msg)
+	queuesMu.Lock()
+	delete(inFlightSess, k)
+	delete(turnCancels, k)
+	queuesMu.Unlock()
 }
 
 // All producers — the gRPC Send handler, the ctl plane, and the scheduler —

@@ -2082,3 +2082,68 @@ func TestConsoleSinkIsBounded(t *testing.T) {
 		t.Error("a capped console carries no notice saying so")
 	}
 }
+
+// 2026-09-11 M54: a session name is caller-chosen and every distinct one used
+// to cost a channel and a goroutine for the daemon's lifetime, plus a registry
+// entry rewritten and hashed on every tick. Idle sessions give the queue and
+// worker back; the registry is bounded.
+func TestIdleSessionsAreReclaimed(t *testing.T) {
+	prev := turnFn
+	turnFn = func(string, string, string) error { return nil }
+	t.Cleanup(func() { turnFn = prev })
+
+	const g = "sessreclaim"
+	live := func() int {
+		queuesMu.Lock()
+		defer queuesMu.Unlock()
+		n := 0
+		for k := range queues {
+			if strings.HasPrefix(k, g+"\x00") {
+				n++
+			}
+		}
+		return n
+	}
+	done, err := enqueueSend(g, "ephemeral", "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if live() != 1 {
+		t.Fatalf("%d queues after one send, want 1", live())
+	}
+	// The worker's own retirement path, without waiting out the idle timer.
+	queuesMu.Lock()
+	q := queues[sessKey(g, "ephemeral")]
+	queuesMu.Unlock()
+	if !retireQueue(g, "ephemeral", q) {
+		t.Fatal("an idle queue refused to retire")
+	}
+	if live() != 0 {
+		t.Fatalf("%d queues after retirement, want 0", live())
+	}
+	// A queue with buffered work is never retired.
+	queuesMu.Lock()
+	q2 := make(chan sendJob, sendQueueDepth)
+	queues[sessKey(g, "busy")] = q2
+	q2 <- sendJob{session: "busy", msg: "x", done: make(chan error, 1)}
+	queuesMu.Unlock()
+	if retireQueue(g, "busy", q2) {
+		t.Fatal("a queue with buffered work was retired")
+	}
+	queuesMu.Lock()
+	delete(queues, sessKey(g, "busy"))
+	queuesMu.Unlock()
+}
+
+func TestSessionRegistryIsBounded(t *testing.T) {
+	fcHarness(t)
+	const g = "sessreg"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	for i := 0; i < sessionRegMax+50; i++ {
+		registerSession(g, fmt.Sprintf("s%d", i))
+	}
+	if n := len(readSessionReg(g)); n > sessionRegMax {
+		t.Fatalf("registry holds %d entries, cap is %d", n, sessionRegMax)
+	}
+}

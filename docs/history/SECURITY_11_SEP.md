@@ -939,3 +939,29 @@ log, writing at most 8 MiB. Two decisions worth naming:
 
 `TestConsoleSinkIsBounded` writes far past the cap and fails if the writer ever
 blocks.
+
+### M54 / M75 — Authorized Send callers can exhaust daemon resources with unbounded session creation (`daemon/send.go`, `daemon/queue.go`) — **fixed**
+
+One finding, filed twice. The session name is caller-chosen and validated only
+for shape, and nothing reclaimed what a name allocated: `enqueue` created a
+buffered channel and a worker goroutine per `(group, session)` that lived for
+the daemon's lifetime, and `registerSession` appended to a file that is
+rewritten in full on every new name, copied into every group snapshot and
+folded into the state hash — so an accumulated registry is work on every tick,
+not just bytes on disk.
+
+**Reclamation, not a cap, for the queues.** A quota alone would have been the
+wrong fix: a group that legitimately uses many session names over weeks would
+eventually wedge on it, and the failure would look like "sends stopped
+working". `sendWorker` now retires its queue after `sessionIdleMax` (30 min)
+with nothing to do, and `enqueue` recreates it on demand — so the steady state
+is bounded by concurrency rather than by vocabulary. The teardown is safe
+because `enqueue` holds `queuesMu` across BOTH the map lookup and the channel
+send, so a job cannot slip into a queue being retired, and a queue with
+anything buffered is never retired.
+
+**A cap for the registry**, which is different in kind: it is advisory UI state
+whose job is to populate a tree, so `sessionRegMax` (256) simply stops listing
+past the cap. The session still works.
+
+`TestIdleSessionsAreReclaimed`, `TestSessionRegistryIsBounded`.
