@@ -556,9 +556,26 @@ func userThemeDir(sock string) string {
 func themeNames(sock string) []string {
 	seen := map[string]bool{}
 	add := func(fname string) {
-		if n, ok := strings.CutSuffix(fname, ".svg"); ok && n != "" {
-			seen[n] = true
+		n, ok := strings.CutSuffix(fname, ".svg")
+		if !ok || n == "" {
+			return
 		}
+		// Enumeration applies the SAME name policy loadTheme does, so the
+		// listed set is exactly the loadable set (audit M131). A drop-in
+		// filename is the one string in this list koto did not author — the
+		// directory is the TUI's one writable mount — and it was being
+		// concatenated into transcript text and into picker titles unchecked,
+		// by which point a name carrying OSC/CSI bytes reaches the terminal:
+		// `sys` lines are not scrubbed on the way into addLine (only `err`
+		// lines are, M111) and the frame transforms preserve every non-SGR
+		// sequence. Dropping the file is also the honest answer on its own
+		// terms — loadTheme would refuse the name anyway, so listing it only
+		// promised a theme that cannot be selected.
+		if !themeNameOK(n) {
+			logWarn("theme", "ignoring drop-in theme file %q: name outside the permitted character set", fname)
+			return
+		}
+		seen[n] = true
 	}
 	if ents, err := themeFS.ReadDir("themes"); err == nil {
 		for _, e := range ents {
@@ -597,6 +614,14 @@ func pickableThemes(sock string) []string {
 // "solarised.dark", hence dots being legal at all.)
 var themeNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+// themeNameOK is the one name policy, shared by enumeration and loading so the
+// two cannot drift (audit M131). The ".." check is separate from the regex
+// because dots are legal mid-name ("solarised.dark") and only the traversal
+// SEQUENCE is not.
+func themeNameOK(name string) bool {
+	return themeNameRE.MatchString(name) && !strings.Contains(name, "..")
+}
+
 // themeMaxBytes bounds a drop-in theme file: the upstream SVGs are ~1 KB, and
 // run/tui is a writable mount (audit L12).
 const themeMaxBytes = 256 << 10
@@ -622,7 +647,7 @@ func readFileLimited(path string, max int64) ([]byte, error) {
 // loadTheme reads and parses a theme by name, user directory first.
 func loadTheme(sock, name string) (*themePalette, error) {
 	name = strings.TrimSpace(name)
-	if !themeNameRE.MatchString(name) || strings.Contains(name, "..") {
+	if !themeNameOK(name) {
 		return nil, fmt.Errorf("bad theme name %q", name)
 	}
 	if dir := userThemeDir(sock); dir != "" {

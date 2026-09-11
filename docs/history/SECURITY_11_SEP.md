@@ -2439,3 +2439,38 @@ Test: `TestGoalInterruptCancelsTheReservedTurn` in `daemon/audit_fixes_test.go`
 takes the in-flight turn's channel identity via `sessionTurn`, interrupts, and
 asserts that exact channel is closed. Verified to fail with the
 `requestTurnCancel` call removed.
+
+## M131 — Untrusted custom-theme filenames reach terminal output — FIXED
+
+`tui/theme.go`, `themeNames`.
+
+**Confirmed.** `themeNames` accepted any non-directory entry in the drop-in
+directory whose name ended `.svg`, with no name policy applied — while
+`loadTheme` enforced `themeNameRE` + a `..` check on the same string. So the
+listed set was strictly larger than the loadable set, and the extra entries
+were arbitrary bytes from a filename.
+
+Both consumers render the name before anything tries to load it:
+
+- `themeListing` concatenates it into a `sys` transcript line. `addLine` scrubs
+  `err` lines only (M111), so `sys` text reaches the frame as written, and
+  `themeFrame`/`monoFrame` rewrite SGR sequences only — OSC, CSI, CR and the
+  rest pass through to the terminal.
+- The `/themes` picker renders it as a row title through lipgloss, same story.
+
+Demonstrated in the negative control: a file named
+`$'\e]0;pwned\aplain.svg'` put a live OSC title-set sequence into the `/themes
+list` output, and `a\e[2J\e[Hclear.svg` an erase-display. Reach is a local
+writer of `run/tui/themes` (the TUI's one writable mount), so this is terminal
+manipulation and visual spoofing against the operator, not code execution.
+
+**Fix:** one policy, `themeNameOK`, applied at enumeration as well as at load,
+so the list is exactly what can be selected; a rejected file is named in the
+TUI debug log (`%q`, so the log line is escaped too) rather than dropped in
+silence. `loadTheme` now calls the same helper, which is what keeps the two
+from drifting again.
+
+Test: `TestThemeNamesRejectHostileDropInFilenames` in `tui/theme_test.go`
+writes hostile filenames into a drop-in directory and asserts both that no
+listed name carries a control byte and that the rendered listing string does
+not either. Verified to fail with the check removed.
