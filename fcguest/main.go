@@ -985,25 +985,35 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 // descriptor we just created rather than on a name that can change under us.
 // The rename is safe as-is: it replaces `path` rather than following it.
 func writeWorkerFile(path string, data []byte) {
-	tmp := path + ".tmp"
-	_ = os.Remove(tmp) // a leftover from a crashed write; ours must be fresh
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o644)
+	// A UNIQUE temporary name per write (audit 2026-09-11 L118). The daemon
+	// delivers turns concurrently across sessions and every delivery
+	// materialises the same config.json, so two writers shared one
+	// "<path>.tmp": the second's `os.Remove` unlinked the first's inode
+	// mid-write, its O_EXCL open then succeeded on a name the first still had
+	// open, and the two renames raced — leaving a turn reading a truncated,
+	// half-written or missing config and silently falling back to defaults.
+	// The rename onto `path` is atomic; what was not atomic was getting there.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
 	if err != nil {
-		logf("write %s: %v", tmp, err)
+		logf("write %s: %v", path, err)
 		return
 	}
+	tmpName := tmp.Name()
+	f := tmp
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		_ = os.Remove(tmpName)
 		return
 	}
+	// CreateTemp makes the file 0600; the worker reads these.
+	_ = f.Chmod(0o644)
 	_ = f.Chown(workerUID, workerGID)
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		_ = os.Remove(tmpName)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
 	}
 }
 

@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 2026-09-11 L71: the prompt ring was keyed by GROUP while a group multiplexes
@@ -155,5 +157,131 @@ func TestFleetViewDoesNotRouteInputToAStaleShellPane(t *testing.T) {
 		if m.shellSplitVisible() {
 			t.Errorf("the shell pane claims to be visible under a full-frame view (focus %v)", f)
 		}
+	}
+}
+
+// 2026-09-11 L114: mdCache was evicted on entry COUNT alone, which is not a
+// budget — the key is a block's source text and the value its rendered form,
+// both chosen by a guest, a job or a model, and the daemon's per-event cap is
+// 1 MiB. 1024 entries could be a gigabyte.
+func TestMarkdownCacheIsBoundedByBytes(t *testing.T) {
+	mdCacheReset()
+	c := map[string]string{}
+
+	// An entry too large to be worth keeping is not cached at all — the
+	// render still happened and is still displayed; only the saving is lost.
+	big := strings.Repeat("x", mdEntryMax+1)
+	mdCachePut(c, "k", big)
+	if len(c) != 0 {
+		t.Errorf("an oversized entry was cached (%d bytes)", len(big))
+	}
+
+	// The aggregate holds under many ordinary entries.
+	entry := strings.Repeat("y", 128<<10)
+	for i := 0; i < 2000; i++ {
+		mdCachePut(c, strconv.Itoa(i), entry)
+		total := 0
+		for k, v := range c {
+			total += len(k) + len(v)
+		}
+		if total > mdCacheBytesMax {
+			t.Fatalf("cache reached %d bytes, past the %d budget", total, mdCacheBytesMax)
+		}
+		if len(c) > mdCacheMax {
+			t.Fatalf("cache reached %d entries, past the %d cap", len(c), mdCacheMax)
+		}
+	}
+	// It is still a cache: the most recent put is there.
+	if _, ok := c[strconv.Itoa(1999)]; !ok {
+		t.Error("the newest entry was not retained")
+	}
+}
+
+// 2026-09-11 L119: startPrewarm only COUNTED jobs — it rejected nothing and
+// queued nothing — so a settled resize fanned out one renderer per loaded
+// group, each scanning the whole transcript and running glamour over every
+// response body in it, competing with the update loop it exists to keep free.
+func TestPrewarmConcurrencyIsBounded(t *testing.T) {
+	m := newModel("", 200000)
+	m.cur = "cur"
+	m.width, m.height = 200, 50
+	m.groups["cur"] = GroupInfo{}
+	m.lines = append(m.lines, logLine{kind: "response", group: "cur", text: "hello"})
+
+	started := 0
+	for i := 0; i < 50; i++ {
+		g := fmt.Sprintf("g%02d", i)
+		m.groups[g] = GroupInfo{}
+		m.lines = append(m.lines, logLine{kind: "response", group: g, text: "hello"})
+		if cmd := m.startPrewarm(g, 80, false); cmd != nil {
+			started++
+		}
+	}
+	if started > prewarmMaxInFlight {
+		t.Fatalf("%d prewarms started at once; the bound is %d", started, prewarmMaxInFlight)
+	}
+	if started == 0 {
+		t.Fatal("no prewarm started at all — the bound is not a ban")
+	}
+	// The CURRENT group is exempt: it is the one on screen, and refreshLog's
+	// plain-build fallback is waiting for exactly this prewarm.
+	if cmd := m.startPrewarm("cur", 80, false); cmd == nil {
+		t.Error("the current group's prewarm was refused")
+	}
+	// One group cannot stack them without limit either.
+	m.prewarming = map[string]int{}
+	g := "g00"
+	n := 0
+	for i := 0; i < 10; i++ {
+		if cmd := m.startPrewarm(g, 80, false); cmd != nil {
+			n++
+		}
+	}
+	if n > prewarmMaxPerGroup {
+		t.Errorf("%d prewarms stacked on one group; the per-group bound is %d", n, prewarmMaxPerGroup)
+	}
+}
+
+// 2026-09-11 L120: allBlocks merged consecutive same-kind lines with
+// `text += "\n" + l.text`, which copies the whole accumulated block on every
+// line — quadratic in the block's length. addLine bumps the group version per
+// line, so the viewport cache misses and this rebuild runs again: a sustained
+// stream in the group on screen re-paid a cost growing with what it had
+// already sent.
+func TestBlockMergeIsLinear(t *testing.T) {
+	build := func(n int) time.Duration {
+		m := newModel("", 200000)
+		m.cur = "g"
+		m.groups["g"] = GroupInfo{}
+		line := strings.Repeat("z", 200)
+		for i := 0; i < n; i++ {
+			m.lines = append(m.lines, logLine{kind: "response", group: "g", text: line})
+		}
+		t0 := time.Now()
+		blocks := m.allBlocks(80, true)
+		d := time.Since(t0)
+		if len(blocks) != 1 {
+			t.Fatalf("%d lines merged into %d blocks, want 1", n, len(blocks))
+		}
+		return d
+	}
+	small := build(1000)
+	large := build(8000)
+	// 8x the lines. Linear would be ~8x the time; the quadratic form is ~64x.
+	// The gate is deliberately loose — this is a timing test on a shared
+	// machine, and it only has to tell 8 from 64.
+	if large > 25*small+50*time.Millisecond {
+		t.Errorf("8x the lines took %v vs %v for 1x — that is superlinear", large, small)
+	}
+	// The content is still correct.
+	m := newModel("", 200000)
+	m.cur = "g"
+	m.groups["g"] = GroupInfo{}
+	for _, s := range []string{"one", "two", "three"} {
+		m.lines = append(m.lines, logLine{kind: "response", group: "g", text: s})
+	}
+	if b := m.allBlocks(80, true); len(b) != 1 || !strings.Contains(b[0].rendered, "one") ||
+		!strings.Contains(b[0].rendered, "three") {
+		t.Errorf("merged block lost content: %+v", b)
 	}
 }

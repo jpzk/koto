@@ -179,6 +179,16 @@ func sgrApproved(params string) (string, bool) {
 		if f == "" {
 			return 0, true // an empty parameter is 0 per ECMA-48
 		}
+		// Bounded by LENGTH as well as by value (audit 2026-09-11 L122).
+		// Atoi accepts any number of leading zeros, so `ESC[0000…0m` was a
+		// valid SGR 0 of unlimited length — a zero-width payload copied
+		// verbatim into the transcript, the replay ring and every client, and
+		// re-scanned and re-emitted at each hop before the operator's terminal
+		// parsed it too. No real parameter needs more than four digits (the
+		// largest attribute is 107; truecolor components reach 255).
+		if len(f) > 4 {
+			return 0, false
+		}
 		n, err := strconv.Atoi(f)
 		if err != nil || n < 0 {
 			return 0, false

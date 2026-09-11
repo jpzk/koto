@@ -5834,3 +5834,145 @@ is what the operator is asking the agent about, so delivering the wrong one is
 worse than failing. Now 64 bits of `crypto/rand` in the name **and**
 `O_CREATE|O_EXCL|O_NOFOLLOW`, which makes it an invariant rather than a
 probability. Pinned by `TestAttachmentNamesCannotCollide`.
+
+## L113 — Unthrottled main-only tail polling — FIXED
+
+`daemon/ctl.go`. The `tail` verb was gated on main-only and a valid group name,
+and on nothing else. `main` is a guest running an agent on
+attacker-influenceable input, and every call stats and reads up to 256 KiB,
+parses it and builds a response — synchronously on the ctl goroutine, so a poll
+loop is free host CPU and IO *and* starves that group's own control plane. Now a
+per-group token bucket (`ctlPollAllow`: burst 30, then 2/s) — far above any sane
+polling interval for a log tail, far below a loop — and the bucket joins
+destroy's name-keyed teardown. Pinned by `TestCtlTailIsRateLimited`.
+
+## L114 — Count-only markdown caching can exhaust the TUI — FIXED
+
+`tui/model.go`. `mdCache` was evicted on entry count alone, which is not a
+budget: the key is a block's source text and the value its rendered form, both
+chosen by a guest, a job or a model, and the daemon's per-event cap is 1 MiB —
+so 1024 entries could be a gigabyte. `mdCachePut` now bounds both, with a
+per-entry cap (`mdEntryMax`, 256 KiB) that is the more useful of the two: a
+block nobody can read on one screen is not worth keeping to save one re-render,
+and refusing to cache it costs only that. Pinned by
+`TestMarkdownCacheIsBoundedByBytes`.
+
+## L115 — Concurrent turn completion hides another in-flight turn — FIXED
+
+`daemon/activity.go`.
+
+**Confirmed.** `activityState` held ONE group-wide `turnActive`/`session`/`base`
+triple while `sendNow` runs turns concurrently across sessions (up to
+`groupSlots` of them). A later `activityTurnBegin` overwrote the earlier turn's
+state and ANY `activityTurnEnd` cleared it — so session B finishing while
+session A was still running left the group reading **idle** with A in flight.
+The TUI uses activity as its fallback signal for whether a live-only attached
+turn is interruptible, so a turn hidden this way loses that fallback.
+
+**Fix:** `turns` is a map of session → guest-side phase. `turnActive` is "the
+map is non-empty"; the phase is the most informative across the turns in flight
+(the same spirit as the existing counters); and the frame's session is the
+single turn's when there is one and **empty** when there are several — the phase
+is then a property of the group, and naming one conversation would attribute it
+to a turn that may not be causing it. The proxy still cannot attribute an
+upstream call to a session (one listener per group), so `end()`'s `work` applies
+to every turn in flight, which is what it meant before. Pinned by
+`TestConcurrentTurnsKeepTheGroupActive`.
+
+## L116 — Provider-controlled streaming can exhaust the sidecar — FIXED
+
+`sidecar/venice_stream.js`. The worker watchdog bounds elapsed **time**, not
+bytes, and the proxy's scanner bounds one relayed **line**, not a request's
+total — so a compromised or malfunctioning provider could grow the SSE line
+buffer, the retained reply and the accumulated tool-call arguments without limit
+inside one turn, and the non-200 path buffered the whole body before slicing 500
+bytes out of it. Four bounds added: `SSE_BUF_CAP`, `REPLY_CAP_BYTES`,
+`TOOLARG_CAP_BYTES`, and a 4 KiB ceiling while the error body accumulates. The
+reply cap is on the **retained** copy (it goes into the history file replayed on
+every later turn); streaming to the operator has its own budget and is
+unaffected, and the truncation is reported through `[[err]]`.
+
+## L117 — Unvalidated guest filesystem counters corrupt disk telemetry — FIXED
+
+`daemon/resources.go`. `resParseGuestFS` turned guest-authored counters into
+byte values checking only `freeBlocks > blocks`. Negative counts, available
+above the filesystem size, and products that **wrap to a negative byte count**
+all reached the cache, the per-group disk alert and the TUI — whose own validity
+test asks only for a positive total. Every relationship is checked now and the
+multiplication goes through `mulNoOverflow`; `resParseMemInfo` likewise rejects
+a shifted value that would wrap and an available above total. This is the
+parse-site half of L79's envelope check — a guest that controls the probe can
+still submit *plausible* false values, and the ledger for L79 says so. Pinned by
+`TestGuestFilesystemCountersAreValidated`.
+
+## L118 — Concurrent config materialization corrupts the guest config — FIXED
+
+`fcguest/main.go`.
+
+**Confirmed.** The daemon delivers turns concurrently across sessions and every
+delivery materialises the same `config.json`, while `writeWorkerFile` used ONE
+shared `<path>.tmp`: the second writer's `os.Remove` unlinked the first's inode
+mid-write, its `O_EXCL` open then succeeded on a name the first still had open,
+and the two renames raced — so a rename could put a **partially written** file
+into place and a concurrent turn read malformed, incomplete or missing
+configuration and fell back to defaults with nothing said.
+
+**Fix:** `os.CreateTemp` gives each write its own name (and the mode is restored
+to 0644, since CreateTemp makes 0600). The rename onto the final path was always
+atomic; what was not atomic was getting there. Pinned by
+`TestWriteWorkerFileIsConcurrencySafe` — the timing race itself is narrow, so
+the test pins the invariants plus the deterministic consequence: another
+writer's temporary file is never destroyed (negative control: the old code
+deletes it).
+
+## L119 — Unbounded concurrent prewarming can exhaust the TUI — FIXED
+
+`tui/model.go`. `startPrewarm` only **counted** jobs — it rejected nothing,
+queued nothing and cancelled nothing — so a settled resize fanned out one
+renderer per loaded group, each scanning the whole transcript and running
+glamour over every response body in it, with history and navigation able to
+stack more on top. On a fleet of twenty groups that is twenty concurrent
+renderers competing with the update loop they exist to keep free. Bounded now at
+`prewarmMaxInFlight` (4) and `prewarmMaxPerGroup` (2), with the CURRENT group
+exempt because it is the one on screen and `refreshLog`'s plain-build fallback
+is waiting for exactly its prewarm. Over the bound the prewarm is **skipped**,
+not queued: that group keeps its stale-width cache and pays a synchronous render
+when the operator actually visits it — which is what a group that was never
+prewarmed already does. Pinned by `TestPrewarmConcurrencyIsBounded`.
+
+## L120 — Repeated same-kind transcript merging is quadratic — FIXED
+
+`tui/model.go`. `allBlocks` merged consecutive same-kind lines with `text +=
+"\n" + l.text`, which copies the whole accumulated block on **every** line —
+quadratic in the block's length. `addLine` bumps the group version per line, so
+the viewport cache misses and this rebuild runs again: a sustained stream in the
+group on screen re-paid a cost that grows with what it had already sent, and the
+16 ms debounce coalesces repaints, not the merge. Collected into a slice and
+joined once, which is linear. Pinned by `TestBlockMergeIsLinear` — 8× the lines
+must not cost 25× the time; the old code measured **51×**.
+
+## L121 — Full send queue can permanently suppress a job notification — FIXED
+
+`daemon/notify.go`. The debounce callback deletes its own timer entry before
+calling `flushNotify`, so a queue-full `enqueueSend` left the results buffered
+with **nothing scheduled** to retry them — the comment said "will retry on next
+job_done", and that was the whole mechanism: the queue draining on its own
+caused no second attempt, so a completion could stay unreported indefinitely and
+was lost outright on a daemon restart. The arming is now a shared helper and the
+failure path re-arms it at `notifyRetryDelay` (30s), under the same generation
+fence, so a later `job_done` still supersedes it. Pinned by
+`TestNotifyRearmsItselfWhenTheQueueIsFull`.
+
+## L122 — Unbounded leading-zero SGR parameters — FIXED
+
+`tui/sgr.go`, `daemon/sanitize.go`. Both parsers bounded a parameter's **value**
+and not its length — and `strconv.Atoi` accepts any number of leading zeros — so
+`ESC[0000…0m` was a valid SGR 0 of unlimited size. Both sanitizers keep pure
+SGR, so the raw field was copied verbatim into the transcript, the replay ring
+and every client, re-scanned and re-emitted at each hop, and finally parsed again
+by the operator's terminal: a zero-width payload that costs CPU, allocations and
+frame bandwidth all the way along. Four digits is the cap (the largest attribute
+is 107; truecolor components reach 255); the **empty** field stays valid, since
+ECMA-48's default parameter is 0 and `ESC[m` is the reset every styled span ends
+with. Fixed in both, because the two sanitizers are deliberate mirrors. Pinned
+by `TestOversizedSGRParametersAreRejected`.
