@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"koto-protocol/pb"
@@ -107,6 +108,15 @@ func dirBytes(dir string) int64 {
 	return n
 }
 
+// uploadsMu serializes the quota check and the write that follows it.
+//
+// dirBytes-then-WriteFile is a check and a use with nothing between them, and
+// gRPC serves unary RPCs concurrently — so N image-bearing Sends could all
+// read the same under-quota total and all write, putting the spool
+// arbitrarily far past maxUploadsPending (audit M55). One lock is the whole
+// fix: the write is a few tens of KB and the contention is per group.
+var uploadsMu sync.Mutex
+
 func saveImage(g string, data []byte, mime string) (string, error) {
 	if len(data) > maxImageBytes {
 		return "", fmt.Errorf("image too large (%d bytes; max %d)", len(data), maxImageBytes)
@@ -115,6 +125,8 @@ func saveImage(g string, data []byte, mime string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	uploadsMu.Lock()
+	defer uploadsMu.Unlock()
 	// Pending (not yet delivered) uploads are bounded per group: every Send
 	// with an image costs host disk before the queue applies any
 	// backpressure, and host disk exhaustion is the fleet-wide failure

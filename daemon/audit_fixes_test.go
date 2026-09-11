@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1952,5 +1953,38 @@ func TestOpenBlockBodiesAreBounded(t *testing.T) {
 	lp.feedLine("[[turn_end]]")
 	if lp.toolBytes != 0 || lp.toolOutBody != nil {
 		t.Fatal("turn_end left the block budget spent")
+	}
+}
+
+// 2026-09-11 M55: the pending-upload quota was a check with nothing between it
+// and the write, and gRPC serves unary RPCs concurrently — so N image-bearing
+// Sends all read the same under-quota total and all wrote.
+func TestUploadQuotaHoldsUnderConcurrency(t *testing.T) {
+	fcHarness(t)
+	g := "quota"
+	dir := filepath.Join(vol(g), ".cs", "uploads")
+	os.MkdirAll(dir, 0o755)
+
+	// Each image is a sixteenth of the budget; 64 concurrent senders would
+	// blow it four times over if the check and the write could interleave.
+	img := make([]byte, maxUploadsPending/16)
+	var wg sync.WaitGroup
+	var okCount atomic.Int64
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := saveImage(g, img, "image/png"); err == nil {
+				okCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := dirBytes(dir); n > maxUploadsPending {
+		t.Fatalf("spool holds %d bytes, quota is %d (%d writes admitted)", n, maxUploadsPending, okCount.Load())
+	}
+	if okCount.Load() == 0 {
+		t.Fatal("no upload was admitted at all")
 	}
 }
