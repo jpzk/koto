@@ -3649,3 +3649,37 @@ above this code.
 Test: `TestLoginChildEnvironmentIsDecidedByKoto` in `daemon/audit_fixes_test.go`
 asserts the three variables are gone, HOME points at the state dir, unrelated
 entries survive, and no key is duplicated.
+
+## M164 — Untrusted job output is parsed as authenticated daemon framing — FIXED
+
+`daemon/grpc_server.go`, `JobTail`.
+
+**Confirmed.** Parsed mode runs each line of `/workspace/.cs/jobs/<id>/out`
+through `logParser.feedLine` — the grammar written for a stream the **daemon**
+authors. That file has no trusted writer: any `cs-job run` command writes to it,
+and so does model-controlled sidecar output. The parser's nesting rule is a
+marker-injection defense for the *transcript* and says nothing about provenance
+here; sanitizing afterwards does not restore any.
+
+So a job could emit `>>> ` and have it render as a prompt the operator typed,
+`[[turn_end]]` to assert a turn boundary, `[[notify]]` to raise a notification
+event on a path the live tailer's `notifyExpected` allowlist does not cover, or
+`[[session]]` to stamp every later event of that tail with a conversation of its
+choosing.
+
+**Parsed mode is not the problem and stays**: a `cs-subagent` job writes its
+output through `stream_filter.js`, so its `out` carries exactly this framing, and
+the peek pane renders thinking and tool blocks from it. That is what the mode
+exists for.
+
+**Fix:** the display vocabulary passes; the assertions about the daemon's own
+state do not. `jobTailEventAllowed` drops `prompt`, `turn_end`, `notification`
+and `bg`, and the handler clears `Session` on every event it forwards —
+`[[session]]` is parser *state* rather than an event, so an allowlist over event
+names cannot reach it.
+
+Test: `TestJobTailParsedVocabularyIsRestricted` in `daemon/audit_fixes_test.go`
+checks both halves of the vocabulary, then drives the real grammar over a forged
+job output carrying all four markers plus a legitimate `[[tool]]`, asserting
+none of the forbidden events (and no forged attribution) survives while the real
+tool frame does.
