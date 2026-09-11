@@ -2773,3 +2773,47 @@ only after `make rootfs` and a `/restart`. Same carry-over as the M46
 claude-code pin — the rootfs has deliberately not been rebuilt in this session,
 because `make rootfs` replaces the live `fcassets/rootfs.img` under running
 groups.
+
+## M139 — OAuth login follows an untrusted pre-existing `.claude` symlink — FIXED
+
+`daemon/claude_login.go`, `authOAuthLogin`.
+
+**Confirmed.** `claude auth login` writes to `$HOME/.claude/.credentials.json`,
+and koto points HOME at the state dir — so whatever `<state>/.claude` resolves
+to is where the OAuth bearer token lands, and `authOAuthPath` then reads it back
+through the same link. The login created the symlink to `creds/` when the entry
+was absent and otherwise **left whatever was there alone**.
+
+That "leave it alone" had a real motive — a dev clone routinely has its own
+project-local `.claude/` *directory* holding Claude Code's skills and settings,
+and replacing it would destroy the operator's files — but it silently covered a
+**symlink**, which is not the operator's files, it is a redirection of the
+write. Anyone who can create that entry before the operator logs in chooses
+where the token is written and where it can be read from. The interesting
+"anyone" is the daemon: same uid, `ReadWritePaths` over the state dir.
+
+**Fix:** `authClaudeDirCheck` establishes the boundary instead of inheriting it.
+Three outcomes, two of which continue:
+
+- absent → koto creates the `creds` symlink itself (what the installer leaves,
+  and what this whole arrangement assumes);
+- a real directory, or a symlink that **resolves** to `<state>/creds` → accepted,
+  which covers the dev clone and every installed host. Judged by `EvalSymlinks`,
+  not by the link text, so a relative link, an absolute one and a chain are all
+  decided alike, and a dangling link fails with it;
+- anything else — a symlink elsewhere, a regular file, a socket → **refused**,
+  naming the target the token would have gone to and telling the operator to
+  remove it.
+
+`--status` reports the same judgement as a warning rather than enforcing it: the
+doctor mutates nothing, and an operator whose next login is going to fail should
+hear why while diagnosing. An absent link is not reported there — the login
+creates it.
+
+Checked against the live install (`/var/lib/koto/.claude -> creds`): accepted.
+
+Test: `TestAuthClaudeDirRefusesARedirectedLink` in `daemon/audit_fixes_test.go`
+covers all six shapes — absent, idempotent re-check, the clone's own directory
+(asserting it is left untouched), a link outside the state dir (asserting the
+message names the target), a dangling link, a regular file, and an absolute link
+that lands on `creds/` anyway.
