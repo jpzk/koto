@@ -5137,3 +5137,83 @@ func TestPKIRefusesToWriteCredentialsThroughASymlink(t *testing.T) {
 		}
 	})
 }
+
+// 2026-09-11 M147: the credential flow trusted <state>/creds as a filesystem
+// object. MkdirAll is happy with an existing symlink in the path, os.Stat
+// follows one, and os.WriteFile follows a pre-existing destination link — so an
+// OAuth refresh token, an API key, and through the wizard a CA private key and
+// a bearer token could all be written into a directory of somebody else's
+// choosing by anyone able to write the state tree first. `koto install` already
+// refused that shape for the state dir (stateDirTrusted); the check had simply
+// never been applied to the standalone paths, which are the ones that write the
+// secrets.
+func TestCredentialFlowRefusesAnUntrustedCredsDir(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	newCtx := func(t *testing.T) *authCtx {
+		t.Helper()
+		return &authCtx{state: t.TempDir(), ui: newSetupUI(true, true)}
+	}
+
+	// A symlink at creds/ — the shape the finding names.
+	ac := newCtx(t)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, ac.credsDir()); err != nil {
+		t.Fatal(err)
+	}
+	err = authConnect(ac, "api-key", true)
+	if err == nil {
+		t.Fatal("authConnect accepted a symlinked creds dir")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+
+	// A real directory owned by someone else cannot be built here without
+	// root, so the owner rule is checked directly on the shared predicate the
+	// flow uses — the same one install has always used.
+	fi, err := os.Lstat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateDirTrusted(fi, me); err != nil {
+		t.Fatalf("a directory this test just made is untrusted: %v", err)
+	}
+	other := *me
+	other.Uid = "999999"
+	if err := stateDirTrusted(fi, &other); err == nil {
+		t.Error("a directory owned by another uid was accepted")
+	}
+
+	// Group/other-writable is refused too: a creds dir anyone can write is a
+	// creds dir anyone can replace a file in.
+	loose := t.TempDir()
+	if err := os.Chmod(loose, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	lfi, err := os.Lstat(loose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stateDirTrusted(lfi, me); err == nil {
+		t.Error("a world-writable creds dir was accepted")
+	}
+
+	// ...and an ordinary state dir still works: the flow creates creds/ itself
+	// and is happy with what it made.
+	ac = newCtx(t)
+	if err := authTrustedCredsDirAfterCreate(ac); err != nil {
+		t.Errorf("a freshly created creds dir was refused: %v", err)
+	}
+}
+
+// authTrustedCredsDirAfterCreate mirrors authConnect's first two steps, so the
+// happy path is asserted without driving the interactive flow.
+func authTrustedCredsDirAfterCreate(ac *authCtx) error {
+	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
+		return err
+	}
+	return authTrustedCredsDir(ac)
+}

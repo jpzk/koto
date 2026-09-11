@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -808,6 +809,26 @@ func authErrText(b []byte) string {
 
 // --- connecting ------------------------------------------------------------
 
+// authTrustedCredsDir requires <state>/creds to be a real, privately-owned
+// directory — the same rule seedStateDir applies to the state dir at install
+// time (stateDirTrusted), applied where the credentials are actually written.
+func authTrustedCredsDir(ac *authCtx) error {
+	dir := ac.credsDir()
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("creds dir %s: %w", dir, err)
+	}
+	me, err := user.Current()
+	if err != nil {
+		return fmt.Errorf("resolve the current user: %w", err)
+	}
+	if err := stateDirTrusted(fi, me); err != nil {
+		return fmt.Errorf("%s: %v — refusing to write credentials there "+
+			"(remove it, or point -state somewhere you own)", dir, err)
+	}
+	return nil
+}
+
 // authConnect is the shared credential flow: `koto claude-login` runs it
 // directly and the setup wizard's auth step calls it too, so there is one
 // implementation of "how a credential gets connected" rather than two that
@@ -816,6 +837,25 @@ func authConnect(ac *authCtx, method string, keyStdin bool) error {
 	u := ac.ui
 	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
 		return fmt.Errorf("creds dir: %w", err)
+	}
+	// ...and then check what is actually there (audit M147). MkdirAll is happy
+	// with an existing SYMLINK in the path, os.Stat follows one, and
+	// os.WriteFile follows a pre-existing destination link — so every
+	// credential this flow writes (an OAuth refresh token, an API key, and via
+	// the wizard a CA private key and a bearer token) could be planted into a
+	// directory of somebody else's choosing by anyone who can write the state
+	// tree before the operator runs this. `koto install` already refuses that
+	// shape for the state dir; the check was simply never applied to the
+	// standalone credential paths, which are the ones that write the secrets.
+	//
+	// Checking the creds CHILD is what matters and is enough: a symlink there
+	// is caught as a symlink, and swapping in a directory of one's own is
+	// caught by the owner test — both regardless of what the parent allows.
+	// The state dir itself is deliberately not held to the mode rule, because
+	// it is the operator's chosen location (a 0755 checkout on a shared dev
+	// box is ordinary) and it holds no secrets outside this child.
+	if err := authTrustedCredsDir(ac); err != nil {
+		return err
 	}
 	if method == "" {
 		if !isTTY(os.Stdin) {
@@ -974,7 +1014,9 @@ func authStoreKey(ac *authCtx, fromStdin bool) error {
 		u.warn("that doesn't look like an Anthropic key, storing it anyway")
 	}
 	p := authKeyPath(ac)
-	if err := os.WriteFile(p, []byte(key), 0o600); err != nil {
+	// pkiWriteFile, not os.WriteFile: O_NOFOLLOW, so a link planted at
+	// creds/anthropic-api-key cannot redirect the key (audit M146/M147).
+	if err := pkiWriteFile(p, []byte(key), 0o600); err != nil {
 		return err
 	}
 	u.ok("stored in %s (0600); the daemon reads it from there per request", p)
