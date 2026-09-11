@@ -52,6 +52,12 @@ type jobResult struct {
 // ones the job actually belongs to.
 func notifyKey(group, session string) string { return group + "\x00" + session }
 
+// splitNotifyKey is notifyKey's inverse.
+func splitNotifyKey(k string) (group, session string, ok bool) {
+	group, session, ok = strings.Cut(k, "\x00")
+	return group, session, ok
+}
+
 // notifyGroupKeys counts group's distinct pending keys for NAMED sessions. The
 // default session is exempt: it is the fold target when the cap is reached, so
 // counting it would make the cap refuse its own fallback. Caller holds notifyMu.
@@ -164,6 +170,38 @@ func recordJobDone(group string, res jobResult) {
 		notifyMu.Unlock()
 		flushNotify(group, session)
 	})
+}
+
+// dropPendingJobNotifications discards a group's buffered job results and
+// disarms their debounce timers (audit 2026-09-11 L46).
+//
+// stopGroup discards the queued messages and cancels the in-flight turns — its
+// whole purpose is that the VM stays down — but a job completion that arrived
+// just before the stop sat here in notifyPending with a timer already ticking,
+// and the flush that followed was an enqueueSend, whose first act is ensure().
+// So the group booted again seconds after the operator stopped it, from a send
+// the operator did not make. The "a future send boots a stopped group" rule is
+// about work someone chooses to do; this was work already in flight.
+func dropPendingJobNotifications(g string) {
+	notifyMu.Lock()
+	defer notifyMu.Unlock()
+	n := 0
+	for key := range notifyPending {
+		if grp, _, ok := splitNotifyKey(key); ok && grp == g {
+			n += len(notifyPending[key])
+			delete(notifyPending, key)
+			if t, had := notifyTimers[key]; had {
+				t.Stop()
+				delete(notifyTimers, key)
+			}
+			// The generation goes too, so a callback Stop() could not
+			// unschedule finds itself superseded and returns (L30).
+			delete(notifyTimerGen, key)
+		}
+	}
+	if n > 0 {
+		emitLogfG("group", g, "info", "stop group=%s: discarded %d pending job notification(s)", g, n)
+	}
 }
 
 // flushNotify coalesces every buffered result for one (group, session) into

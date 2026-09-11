@@ -9,6 +9,13 @@ import (
 // resetRingState clears the seq/ring globals so each test starts clean.
 func resetRingState(t *testing.T) {
 	t.Helper()
+	// Sequences start at 1 here so these tests can keep their explicit
+	// arithmetic; production randomises the base per incarnation so a cursor
+	// from an earlier one cannot be mistaken for a position in this one (audit
+	// 2026-09-11 L47).
+	prev := seqBaseFn
+	seqBaseFn = func() uint64 { return 0 }
+	t.Cleanup(func() { seqBaseFn = prev })
 	subsLock.Lock()
 	eventSeq = map[string]uint64{}
 	eventRing = map[string][]*pb.Event{}

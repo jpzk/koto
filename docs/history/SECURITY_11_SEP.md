@@ -4606,3 +4606,167 @@ to all of them.
 branch does the teardown — now `forgetGroup` (M155), which is a superset of the
 hand-written wipe it replaces — and moves the focus; the failure branch changes
 nothing at all.
+
+## L43 — OAuth credential path mismatch can make the daemon use an unintended account — FIXED
+
+`daemon/proxy.go`, `proxyInitPaths`.
+
+**Confirmed.** `authOAuthPath` (what `koto claude-login` writes and verifies)
+derives from `KOTO_HOME`; `proxyInitPaths` derived from `os.UserHomeDir()`. The
+unit and the Make targets keep those consistent, but nothing enforced it for a
+daemon started by hand — and the divergence is silent and expensive: an operator
+could log in, watch it verify, and have the live proxy go on using a **different
+account's** token from their personal `~/.claude`. Other identity, other quota,
+other bill, with nothing on either side saying so.
+
+**Fix:** prefer `<state>/.claude/.credentials.json` when it exists, so the daemon
+agrees with the command that writes it whatever `HOME` happens to be. The `$HOME`
+fallback stays for a state dir with no credential, and `CRED_PATH` still
+overrides both. Checked against the live install, where `<state>/.claude` is the
+installer's symlink to `creds/` and the file is there.
+
+## L44 — Authenticated SubscribeLogs clients can retain unbounded subscribers — ALREADY FIXED (M95, L156)
+
+Every streaming RPC goes through `authStream`, whose `streamAdmit` caps
+concurrent streams at 512 per identity and 2048 globally — SubscribeLogs
+included, and named as such in that code's own comment. A subscriber that stops
+reading is no longer silent either: L156 added the per-subscriber drop counter
+and the notice. The residual — a handler blocked inside `stream.Send` cannot be
+reclaimed from this side — is the grpc-go limit recorded under M154.
+
+## L45 — Unbounded cron representation enables schedule-store resource exhaustion — FIXED
+
+`daemon/schedules.go`, `addSched`.
+
+**Confirmed.** `parseCron` `TrimSpace`/`Fields` its way past arbitrary
+whitespace, so a megabyte of blanks around `* * * * *` is a *valid* expression —
+and `addSched` stored it verbatim, in a file `saveSched` rewrites in **full** on
+every addition, so the cost is paid again on each one.
+
+**Fix:** `schedCronMax` (256 bytes) in `addSched`, which is where both the RPC
+and the ctl plane's `sched_add` arrive.
+
+## L46 — Pending job notification can restart a group after `/stop` — FIXED
+
+`daemon/notify.go`, `daemon/groups.go`.
+
+**Confirmed.** `stopGroup` discards the queued messages and cancels the in-flight
+turns — the whole point being that the VM stays down — but a job completion that
+arrived just before the stop sat in `notifyPending` with its debounce timer
+ticking, and the flush that followed is an `enqueueSend`, whose first act is
+`ensure()`. So the group booted again seconds after the operator stopped it,
+from a send the operator never made. The documented "a future send boots a
+stopped group" rule is about work someone *chooses* to do.
+
+**Fix:** `dropPendingJobNotifications` in `stopGroupPrepare`, beside the
+autostart revocation that is there for the same reason — results discarded,
+timers stopped, and their generations dropped so a callback `Stop` could not
+unschedule finds itself superseded (L30).
+
+## L47 — Sequence cursor is reused across daemon/group lifecycles — FIXED
+
+`daemon/events.go`.
+
+**Confirmed.** The sequence space is process-local: destroy deletes the counter,
+a daemon restart recreates the map empty, and group names are reusable. And
+`replayFrom` answered `since == cur` with "you are up to date" **before** proving
+the cursor belonged to this sequence space at all. A client holding N from a
+previous incarnation, against a new one that had emitted exactly N events, got
+neither replay nor a `gap` — and went on believing its transcript was current.
+
+**Fix, without a protocol change:** each incarnation's sequence space starts at a
+random base, and `ringFloor` starts with it, so a cursor from an earlier
+incarnation lands **below the floor** and is answered with the `gap` the client
+already knows how to handle. The continuity check now runs before the
+up-to-date check, which is what makes the floor decisive.
+
+The ring tests pin the base to 1 through `seqBaseFn` so their explicit
+arithmetic survives; one existing test of mine that assumed sequences start at 1
+was corrected to take its cursor from the floor.
+
+Test: `TestStaleCursorAcrossIncarnationsGetsAGap` in
+`daemon/audit_fixes_test.go` stages exactly the coincidence — ten events, a
+destroy-and-recreate, ten more — and asserts a gap, while a live cursor still
+replays and a head cursor is still up to date.
+
+## L48 — Scheduled occurrences are committed before queue admission — FIXED
+
+`daemon/schedules.go`.
+
+**Confirmed.** `cronLoop` recorded the occurrence as fired and advanced
+`NextDueAt` **before** delivery, and `fireSchedule` discarded the enqueue error.
+So an occurrence the live queue refused was skipped until the next cron
+recurrence — and a `@daily` or one-shot schedule could simply never run. The
+documented no-catch-up rule covers daemon **downtime**, not work the delivery
+queue rejected.
+
+**Fix:** `rearmSchedule` puts it back due for the next tick, and only when the
+schedule still exists, is still enabled, and still carries the due time this
+fire advanced it to — a concurrent `sched_del` or re-time owns its own state.
+
+## L49 — Goal handoff capture replays and sorts every active log stream — ACCEPTED
+
+`daemon/goals.go`, `goalCaptureHandoff`.
+
+The facts are right: it calls `readHistory(g, 0, 0)`, which reads, parses, merges
+and sorts **every** stream of the group, and then keeps one session's events.
+
+**Accepted, because the cheap fixes do not work and the real one is a design
+change.** A session's turns run in whichever slot was free, so there is no
+subset of streams that can be read instead; `limit` is applied after the merge,
+so a small page does not reduce the read; and the events are only attributable
+to a session *after* they are parsed. Making this O(1 stream) means indexing the
+transcript by session — a change to how koto stores conversations, not an audit
+fix.
+
+What bounds it is already in place and is what keeps this low: `historyTailCap`
+caps each stream at 4 MiB, `groupSlots` caps the streams at eleven, the goal cap
+is eight per group, and `fcLogSinkWait` rate-limits what a guest can put in them
+in the first place. The cost is one bounded read at the end of a goal turn,
+which is the slowest thing in the loop by orders of magnitude already.
+
+## L50 — Per-command Bash timeout does not terminate descendant processes — FIXED
+
+`sidecar/venice_stream.js`.
+
+**Confirmed and demonstrated.** The tool spawned bash without its own process
+group and signalled the bash pid alone on timeout, so a command that forked or
+backgrounded anything left those children running — free to keep burning the
+guest's CPU and writing to `/workspace` after the tool call had reported a
+timeout. And a descendant holding the inherited stdout or stderr keeps the pipe
+open, so the `close` event the Promise waits on does not arrive until **it**
+exits either.
+
+Measured, same command both ways (`(sleep 5; touch marker) & sleep 30`):
+
+| | `close` event | descendant |
+|---|---|---|
+| signal the pid (old) | **never arrived** | **survived**, wrote its marker |
+| signal the group (new) | arrived promptly | died with it |
+
+**Fix:** `detached: true` puts bash in its own process group, and the timeout
+signals the negative pid — the whole tree — falling back to the bare pid if the
+group is already gone.
+
+## L51 — Concurrent clear can resurrect deleted Venice history — ALREADY FIXED (M60)
+
+`clearFence` closes admission for the scope, discards its queued messages,
+**cancels its in-flight turns and waits for them to retire**, and only then is
+the guest state deleted. A Venice worker whose turn is cancelled is signalled
+(SIGINT, escalating to SIGKILL) and gone before `clearSessionContext` removes the
+history file, so there is no worker left to write a stale array back. The
+residual is the one `clearFence` already documents and logs: a turn that will not
+die inside `clearFenceWait` is the stall path's problem.
+
+## L52 — Untrusted PATH controls `du` execution during uninstall — FIXED
+
+`daemon/uninstall.go`.
+
+**Confirmed.** `exec.Command("du", …)` resolves through `PATH`, and this runs
+**before** the confirmation prompt and before any sudo, as the operator — so a
+`du` planted in a writable `PATH` directory executed with their privileges purely
+because they typed `koto uninstall`.
+
+**Fix:** an absolute path (`/usr/bin/du`, then `/bin/du`), checked to be a
+regular file. The size is a courtesy line in the prompt; if `du` is not where it
+belongs, the uninstall does without it rather than resolving one.

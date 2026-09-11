@@ -80,6 +80,16 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	if msg == "" {
 		return scheduleItem{}, fmt.Errorf("msg is required")
 	}
+	// A cron expression is five fields; anything longer is padding (audit
+	// 2026-09-11 L45). parseCron TrimSpace/Fields its way past arbitrary
+	// whitespace, so a megabyte of blanks around "* * * * *" validated fine and
+	// was then stored verbatim — and saveSched rewrites schedules.json in FULL
+	// on every addition, so the cost is paid again on each one. Bounded here
+	// rather than at the RPC, because the ctl plane's sched_add reaches the
+	// same store.
+	if len(cronExpr) > schedCronMax {
+		return scheduleItem{}, fmt.Errorf("cron expression too long (%d bytes; max %d)", len(cronExpr), schedCronMax)
+	}
 	if len(msg) > schedMaxMsg {
 		return scheduleItem{}, fmt.Errorf("msg too long (%d bytes; max %d)", len(msg), schedMaxMsg)
 	}
@@ -133,6 +143,10 @@ const (
 	// cronLoop every minute (audit M87). This is the ceiling on that walk.
 	schedMaxTotal = 2000
 	schedMaxMsg   = 16 << 10
+	// schedCronMax bounds a stored cron expression. Five fields with generous
+	// ranges and step syntax fit in well under a hundred bytes (audit
+	// 2026-09-11 L45).
+	schedCronMax = 256
 )
 
 func countSched(group string) int {
@@ -269,6 +283,43 @@ func fireSchedule(it scheduleItem, manual bool) {
 	emit(it.Group, ev)
 	if _, err := enqueueSend(it.Group, "", it.Msg); err != nil {
 		emitLogfG("sched", it.Group, "error", "fire id=%s group=%s: %v", it.ID, it.Group, err)
+		// The occurrence was recorded as fired BEFORE delivery was accepted,
+		// and this error was then discarded — so a queue that was full when the
+		// minute came round skipped the occurrence until the next cron
+		// recurrence, and an @daily or one-shot schedule could simply never run
+		// (audit 2026-09-11 L48). The documented no-catch-up rule covers daemon
+		// DOWNTIME, not work the live delivery queue refused.
+		//
+		// Put it back due, so the next tick retries. Only when the schedule
+		// still exists and still points at this occurrence — a concurrent
+		// sched_del or toggle owns its own state.
+		if !manual {
+			rearmSchedule(it.ID, it.NextDueAt)
+		}
+	}
+}
+
+// rearmSchedule makes a schedule due again after a delivery that was refused,
+// restoring the due time the fire consumed. Silent when the schedule has since
+// been deleted, disabled or re-timed by someone else.
+func rearmSchedule(id string, wasDue float64) {
+	schedLock.Lock()
+	defer schedLock.Unlock()
+	for i := range sched {
+		s := &sched[i]
+		if s.ID != id || !s.Enabled {
+			continue
+		}
+		// Only if nothing else has moved it since: the fire set NextDueAt to
+		// the NEXT occurrence, so that is what this must still see.
+		if s.NextDueAt != wasDue {
+			return
+		}
+		s.LastFiredAt = 0
+		s.NextDueAt = float64(time.Now().Add(-time.Second).Unix())
+		saveSched()
+		emitLogfG("sched", s.Group, "warn", "fire id=%s deferred: the group's queue refused it; retrying on the next tick", id)
+		return
 	}
 }
 
@@ -301,7 +352,6 @@ func cronLoop() {
 			if due == 0 || due > now.Unix() {
 				continue
 			}
-			toFire = append(toFire, *s)
 			s.LastFiredAt = float64(now.Unix())
 			if nx, ok := p.next(now); ok {
 				s.NextDueAt = float64(nx.Unix())
@@ -309,6 +359,9 @@ func cronLoop() {
 				s.NextDueAt = 0
 				s.Enabled = false
 			}
+			// The COPY carries the advanced due time, so a refused delivery can
+			// tell whether anything has moved the schedule since (L48).
+			toFire = append(toFire, *s)
 		}
 		if len(toFire) > 0 {
 			saveSched()

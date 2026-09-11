@@ -2426,13 +2426,15 @@ func TestClearInvalidatesTheReplayRing(t *testing.T) {
 		emit(g, Event{Event: "response", Text: fmt.Sprintf("secret %d", i)})
 	}
 	subsLock.Lock()
-	cur := eventSeq[g]
+	cur, floor := eventSeq[g], ringFloor[g]
 	subsLock.Unlock()
 	if cur == 0 {
 		t.Fatal("nothing was recorded")
 	}
-	// Before the clear, an old cursor replays the transcript.
-	if evs := replayFrom(g, 1); len(evs) == 0 || evs[0].Event == "gap" {
+	// Before the clear, a cursor from INSIDE this incarnation's sequence space
+	// replays the transcript. (The space starts at a random base since L47, so
+	// the cursor comes from the floor rather than from a literal 1.)
+	if evs := replayFrom(g, floor+1); len(evs) == 0 || evs[0].Event == "gap" {
 		t.Fatalf("replay before the clear returned %d frame(s), first %v", len(evs), evs)
 	}
 
@@ -6815,4 +6817,156 @@ func diskBlocks(t *testing.T, p string) int64 {
 		t.Fatal(err)
 	}
 	return st.Blocks
+}
+
+// 2026-09-11 L47: the sequence space is process-local — destroy deletes the
+// counter, a daemon restart recreates the map empty, and group names are
+// reusable. `since == cur` answered "you are up to date" before proving the
+// cursor belonged to this sequence space at all, so a client holding N from a
+// previous incarnation, against a new one that had emitted exactly N events,
+// got neither replay nor gap and went on believing its transcript was current.
+func TestStaleCursorAcrossIncarnationsGetsAGap(t *testing.T) {
+	const g = "l47"
+	reset := func() {
+		subsLock.Lock()
+		delete(eventSeq, g)
+		delete(eventRing, g)
+		delete(ringFloor, g)
+		delete(ringPartial, g)
+		delete(eventRingBytes, g)
+		subsLock.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+
+	// First incarnation: ten events.
+	for i := 0; i < 10; i++ {
+		emit(g, Event{Event: "done", Text: "first"})
+	}
+	subsLock.Lock()
+	staleCursor := eventSeq[g]
+	subsLock.Unlock()
+
+	// It is destroyed and recreated under the same name, and the replacement
+	// emits exactly as many events — the coincidence that used to be silent.
+	reset()
+	for i := 0; i < 10; i++ {
+		emit(g, Event{Event: "done", Text: "second"})
+	}
+
+	subsLock.Lock()
+	got := replayFrom(g, staleCursor)
+	cur, floor := eventSeq[g], ringFloor[g]
+	subsLock.Unlock()
+
+	if len(got) != 1 || got[0].Event != "gap" {
+		t.Errorf("a cursor from the previous incarnation got %d frames (first %v), want a gap",
+			len(got), func() string {
+				if len(got) == 0 {
+					return "none"
+				}
+				return got[0].Event
+			}())
+	}
+	// The replacement has its own space, well away from zero.
+	if floor == 0 || cur <= floor {
+		t.Errorf("the new incarnation did not get its own sequence space: floor=%d cur=%d", floor, cur)
+	}
+
+	// A cursor from INSIDE this incarnation still replays normally.
+	subsLock.Lock()
+	live := replayFrom(g, floor+3)
+	subsLock.Unlock()
+	if len(live) == 0 || live[0].Event == "gap" {
+		t.Errorf("a live cursor was answered with a gap: %d frames", len(live))
+	}
+	// ...and a cursor at the head is still "up to date".
+	subsLock.Lock()
+	head := replayFrom(g, cur)
+	subsLock.Unlock()
+	if head != nil {
+		t.Errorf("a cursor at the head replayed %d frames, want none", len(head))
+	}
+}
+
+// 2026-09-11 L45, L46, L48, L52: four guards on the scheduler, the stop path
+// and the uninstall helper.
+func TestSchedulerAndStopGuards(t *testing.T) {
+	// L45 — a cron expression is five fields; parseCron TrimSpace/Fields its
+	// way past arbitrary whitespace, so a megabyte of blanks around a valid
+	// expression validated and was then stored verbatim in a file saveSched
+	// rewrites in FULL on every addition.
+	padded := strings.Repeat(" ", schedCronMax+1) + "* * * * *"
+	if _, err := parseCron(padded); err != nil {
+		t.Fatalf("the padded expression is still VALID cron (that is the point): %v", err)
+	}
+	if _, err := addSched("g", padded, "hi"); err == nil {
+		t.Error("addSched stored a cron expression past the length bound")
+	} else if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("unexpected refusal: %v", err)
+	}
+
+	// L46 — a job completion buffered just before a stop used to flush after
+	// it, and the flush is an enqueueSend whose first act is ensure(): the
+	// group booted again from a send the operator never made.
+	const g = "l46"
+	key := notifyKey(g, "")
+	recordJobDone(g, jobResult{ID: "j1", RC: "0", Out: "done"})
+	notifyMu.Lock()
+	pend, _ := len(notifyPending[key]), 0
+	notifyMu.Unlock()
+	if pend == 0 {
+		t.Fatal("staging a pending notification failed")
+	}
+	dropPendingJobNotifications(g)
+	notifyMu.Lock()
+	pend = len(notifyPending[key])
+	_, timer := notifyTimers[key]
+	_, gen := notifyTimerGen[key]
+	notifyMu.Unlock()
+	if pend != 0 || timer || gen {
+		t.Errorf("after a stop: %d pending, timer=%v generation=%v — want none", pend, timer, gen)
+	}
+
+	// L48 — an occurrence recorded as fired before delivery was accepted, with
+	// the queue-full error discarded, was skipped until the next recurrence;
+	// a @daily or one-shot schedule could simply never run.
+	prevSched := sched
+	t.Cleanup(func() { schedLock.Lock(); sched = prevSched; schedLock.Unlock() })
+	due := float64(time.Now().Add(time.Hour).Unix())
+	schedLock.Lock()
+	sched = append(sched, scheduleItem{ID: "sched1", Group: g, Enabled: true,
+		Cron: "0 * * * *", Msg: "hi", NextDueAt: due, LastFiredAt: float64(time.Now().Unix())})
+	schedLock.Unlock()
+	rearmSchedule("sched1", due)
+	schedLock.Lock()
+	var got scheduleItem
+	for _, s := range sched {
+		if s.ID == "sched1" {
+			got = s
+		}
+	}
+	schedLock.Unlock()
+	if got.NextDueAt >= due {
+		t.Errorf("a refused delivery did not make the schedule due again: NextDueAt %v, was %v", got.NextDueAt, due)
+	}
+	if got.LastFiredAt != 0 {
+		t.Errorf("a refused delivery still counts as fired: LastFiredAt %v", got.LastFiredAt)
+	}
+	// A schedule someone else has since re-timed is left alone.
+	schedLock.Lock()
+	for i := range sched {
+		if sched[i].ID == "sched1" {
+			sched[i].NextDueAt = 12345
+		}
+	}
+	schedLock.Unlock()
+	rearmSchedule("sched1", due)
+	schedLock.Lock()
+	for _, s := range sched {
+		if s.ID == "sched1" && s.NextDueAt != 12345 {
+			t.Error("rearm overwrote a schedule that had been re-timed concurrently")
+		}
+	}
+	schedLock.Unlock()
 }
