@@ -530,12 +530,38 @@ func ctlForward() {
 		return
 	}
 	fifo := os.NewFile(uintptr(fd), "ctl-fifo")
-	sc := bufio.NewScanner(fifo)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	r := bufio.NewReaderSize(fifo, 64*1024)
 	var conn *vconn
 	var connR *bufio.Reader
-	for sc.Scan() {
-		line := sc.Bytes()
+	errs := 0
+	for {
+		line, over, rerr := readCtlLine(r)
+		if over {
+			// An oversized record USED to end the forwarder for good: the
+			// scanner returned false with ErrTooLong, the loop exited without
+			// checking sc.Err(), and the FIFO's only reader was gone — so every
+			// later notification, job_done and report from this guest went
+			// nowhere until the VM was restarted, and writers blocked on a pipe
+			// nobody was draining. The worker owns this FIFO, so writing one
+			// long line was the whole attack (audit 2026-09-11 L1).
+			logf("ctl: discarding a control record over %d bytes", ctlLineMax)
+			appendCtlOut(ctlErrorJSON(fmt.Errorf("control record exceeds %d bytes", ctlLineMax)))
+			continue
+		}
+		if rerr != nil {
+			// The FIFO is held open O_RDWR by this process, so there is no EOF
+			// to reach: any error here is unexpected. Ride it out rather than
+			// exiting — but not forever, since a spin on a broken descriptor
+			// would be its own denial of service.
+			if errs++; errs > ctlReadErrMax {
+				logf("FATAL ctl fifo unreadable after %d attempts: %v", errs, rerr)
+				return
+			}
+			logf("ctl fifo read: %v", rerr)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		errs = 0
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
@@ -567,6 +593,39 @@ func ctlForward() {
 			appendCtlOut(ctlResponseJSON(resp))
 			break
 		}
+	}
+}
+
+// ctlLineMax bounds one control record, and ctlReadErrMax how many consecutive
+// read failures the forwarder rides out before giving up (audit 2026-09-11 L1).
+const (
+	ctlLineMax    = 1 << 20
+	ctlReadErrMax = 100
+)
+
+// readCtlLine reads one newline-terminated control record. An oversized record
+// is DISCARDED through its terminator and reported as over=true, so the stream
+// resynchronises on the next line instead of the forwarder dying — the previous
+// reader was a bufio.Scanner, whose ErrTooLong ends the iteration permanently
+// and leaves the rest of the record in the pipe either way.
+func readCtlLine(r *bufio.Reader) (line []byte, over bool, err error) {
+	for {
+		chunk, rerr := r.ReadSlice('\n')
+		if len(chunk) > 0 {
+			if !over && len(line)+len(chunk) > ctlLineMax {
+				over, line = true, nil // stop accumulating; keep draining
+			}
+			if !over {
+				line = append(line, chunk...)
+			}
+		}
+		if rerr == bufio.ErrBufferFull {
+			continue // a long line arriving in buffer-sized pieces
+		}
+		if rerr != nil {
+			return nil, over, rerr
+		}
+		return line, over, nil
 	}
 }
 

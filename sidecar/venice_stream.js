@@ -177,6 +177,58 @@ function execBash(command) {
   });
 }
 
+// openRegular opens a path and refuses anything that is not a plain regular
+// file, judged on the DESCRIPTOR rather than on a prior stat of the path
+// (audit 2026-09-11 L3).
+//
+// The old check was `statSync().isDirectory()`, which lets a FIFO or a
+// character device through — and readFileSync/writeFileSync on one of those
+// blocks the Node event loop with no timeout and no cancellation. The bash
+// tool's 30-second budget cannot help, because a blocked event loop cannot run
+// the timer that would enforce it; the guest watchdog needs up to twenty
+// minutes and the daemon's turn wait twenty-five. `/workspace/.cs/ctl` is a
+// FIFO the worker can name, so this was one tool call away.
+//
+// O_NONBLOCK is what makes the refusal possible rather than academic: it lets
+// the open of a FIFO or device RETURN so fstat can judge it. O_NOFOLLOW is
+// deliberately NOT set — the agent's own workspace is its own, and a symlinked
+// file is an ordinary thing to edit; what this refuses is a file that is not a
+// file.
+function openRegular(p, flags) {
+  const fd = fs.openSync(p, flags | fs.constants.O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) {
+      fs.closeSync(fd);
+      const kind = st.isDirectory() ? 'a directory'
+        : st.isFIFO() ? 'a FIFO'
+        : st.isSocket() ? 'a socket'
+        : st.isCharacterDevice() || st.isBlockDevice() ? 'a device'
+        : 'not a regular file';
+      return { error: `${p} is ${kind}` };
+    }
+  } catch (e) {
+    try { fs.closeSync(fd); } catch (_) {}
+    throw e;
+  }
+  return { fd };
+}
+
+// readCapped reads at most cap+1 bytes from an open descriptor, so the cap
+// bounds the ALLOCATION and not just the answer. readFileSync used to read the
+// whole file and slice afterwards, which makes a large file a memory cost the
+// worker pays in full before anything is truncated.
+function readCapped(fd, cap) {
+  const buf = Buffer.allocUnsafe(cap + 1);
+  let n = 0;
+  while (n < buf.length) {
+    const got = fs.readSync(fd, buf, n, buf.length - n, null);
+    if (got <= 0) break;
+    n += got;
+  }
+  return buf.subarray(0, n);
+}
+
 function execFile(args) {
   const op = args && args.op;
   const p = args && args.path;
@@ -184,14 +236,15 @@ function execFile(args) {
   try {
     switch (op) {
       case 'read': {
-        const st = fs.statSync(p);
-        if (st.isDirectory()) return { error: `file read: ${p} is a directory` };
-        const buf = fs.readFileSync(p);
+        const o = openRegular(p, fs.constants.O_RDONLY);
+        if (o.error) return { error: `file read: ${o.error}` };
+        let buf;
+        try { buf = readCapped(o.fd, FILE_READ_CAP_BYTES); }
+        finally { fs.closeSync(o.fd); }
         if (buf.length > FILE_READ_CAP_BYTES) {
           return {
             content: buf.subarray(0, FILE_READ_CAP_BYTES).toString('utf8'),
             truncated: true,
-            total_bytes: buf.length,
           };
         }
         return { content: buf.toString('utf8'), bytes: buf.length };
@@ -199,7 +252,10 @@ function execFile(args) {
       case 'write': {
         const content = typeof args.content === 'string' ? args.content : '';
         fs.mkdirSync(path.dirname(p), { recursive: true });
-        fs.writeFileSync(p, content);
+        const o = openRegular(p, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC);
+        if (o.error) return { error: `file write: ${o.error}` };
+        try { fs.writeSync(o.fd, content); }
+        finally { fs.closeSync(o.fd); }
         return { ok: true, bytes_written: Buffer.byteLength(content, 'utf8') };
       }
       case 'edit': {
@@ -208,14 +264,25 @@ function execFile(args) {
         if (typeof oldS !== 'string' || typeof newS !== 'string') {
           return { error: 'file edit: old and new must be strings' };
         }
-        const orig = fs.readFileSync(p, 'utf8');
+        const oe = openRegular(p, fs.constants.O_RDONLY);
+        if (oe.error) return { error: `file edit: ${oe.error}` };
+        let origBuf;
+        try { origBuf = readCapped(oe.fd, FILE_READ_CAP_BYTES); }
+        finally { fs.closeSync(oe.fd); }
+        if (origBuf.length > FILE_READ_CAP_BYTES) {
+          return { error: `file edit: ${p} exceeds the ${FILE_READ_CAP_BYTES}-byte edit limit` };
+        }
+        const orig = origBuf.toString('utf8');
         const first = orig.indexOf(oldS);
         if (first === -1) return { error: `file edit: old string not found in ${p}` };
         if (orig.indexOf(oldS, first + oldS.length) !== -1) {
           return { error: `file edit: old string is not unique in ${p}` };
         }
         const next = orig.slice(0, first) + newS + orig.slice(first + oldS.length);
-        fs.writeFileSync(p, next);
+        const ow = openRegular(p, fs.constants.O_WRONLY | fs.constants.O_TRUNC);
+        if (ow.error) return { error: `file edit: ${ow.error}` };
+        try { fs.writeSync(ow.fd, next); }
+        finally { fs.closeSync(ow.fd); }
         return { ok: true };
       }
       default:
