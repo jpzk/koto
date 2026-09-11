@@ -168,6 +168,35 @@ func delSched(id string) error {
 	return fmt.Errorf("no schedule with id %q", id)
 }
 
+// delSchedsFor drops every schedule targeting g, and reports how many. Called
+// from destroy(): the two lifecycles used to be independent, so a destroyed
+// group's schedules kept firing — and a fire is an enqueueSend, whose sendNow
+// calls ensure(), which RECREATED the group and its VM minutes after the
+// operator deleted it. A later group reusing the name inherited the old
+// group's schedules as its own, which is the same name-reuse hazard
+// disarmReport and the event-ring drop already close in destroy().
+func delSchedsFor(g string) int {
+	schedLock.Lock()
+	defer schedLock.Unlock()
+	kept := sched[:0]
+	n := 0
+	for _, it := range sched {
+		if it.Group == g {
+			delete(parsed, it.ID)
+			n++
+			continue
+		}
+		kept = append(kept, it)
+	}
+	if n == 0 {
+		return 0
+	}
+	sched = kept
+	saveSched()
+	emitLogfG("sched", g, "info", "dropped %d schedule(s) with the group", n)
+	return n
+}
+
 func toggleSched(id string, enabled bool) (scheduleItem, error) {
 	schedLock.Lock()
 	defer schedLock.Unlock()

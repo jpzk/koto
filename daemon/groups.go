@@ -473,6 +473,9 @@ func destroy(g string) baseResp {
 	// THIS instance — a later group reusing the name must not inherit a
 	// stale push-one-turn-to-main token.
 	disarmReport(g)
+	// Schedules outlive nothing: a fire is an enqueueSend, and sendNow's
+	// ensure() would rebuild the VM and the workspace the line below deletes.
+	delSchedsFor(g)
 	stopGroup(g)
 	groupsLock.Lock()
 	m := readGroups()

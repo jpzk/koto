@@ -766,12 +766,34 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 // writeWorkerFile writes atomically (tmp + rename) so a reader in the guest
 // never observes the truncated middle of a rewrite — reachable now that two
 // turns are delivered concurrently and both rewrite these files.
+//
+// fc-agent is PID 1, i.e. guest root, and every path it writes here lives
+// under a worker-owned directory (.cs and its session dirs are chowned to uid
+// 1000). The temporary name is predictable, so the worker could pre-create it
+// as a symlink: os.WriteFile follows one, and so does os.Chown — which would
+// let uid 1000 pick a root-owned file anywhere in the guest, have root
+// truncate it, and then take ownership of it. O_EXCL|O_NOFOLLOW refuses to
+// open anything that already exists (symlink or not), and fchown acts on the
+// descriptor we just created rather than on a name that can change under us.
+// The rename is safe as-is: it replaces `path` rather than following it.
 func writeWorkerFile(path string, data []byte) {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	_ = os.Remove(tmp) // a leftover from a crashed write; ours must be fresh
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o644)
+	if err != nil {
+		logf("write %s: %v", tmp, err)
 		return
 	}
-	_ = os.Chown(tmp, workerUID, workerGID)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	_ = f.Chown(workerUID, workerGID)
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 	}

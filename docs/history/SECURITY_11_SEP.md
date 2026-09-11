@@ -153,3 +153,75 @@ reaches it, `"*"` included. Reads and delegable-key writes stay `config`. This
 is the gRPC twin of the ctl plane's posture refusal (audit H1, 2026-09-05);
 the invariant is the same one, that `network=none` must not be voidable by
 anything the default contains. `TestConfigPostureIsAdminOnly`.
+
+### M5 — Security-sensitive helpers are resolved from an untrusted PATH (`daemon/install.go`) — **not a finding**
+### M8 — `koto tui` executes an attacker-selected executable with administrator credentials (`daemon/tui_cmd.go`) — **not a finding**
+
+Both reduce to "an attacker can write to a directory on the operator's PATH".
+That attacker already executes as the operator on their next shell command —
+`ls`, `git`, `make` — with no koto involved. koto's trust model names the host
+user as tier 1 by definition; a defense here would protect nothing, because the
+thing it protects runs as the principal it is defending against.
+
+The one part of M8 with a distinct shape — resolving `koto-tui` from somewhere
+the DAEMON can write, which is a tier-2→tier-1 crossing rather than a tier-1
+one — was found and closed by the previous audit (L10, 2026-09-06): the
+`<state>/koto-tui` fallback is gone, and the surviving dev-clone convenience
+requires a cwd carrying a koto checkout's markers, which `ProtectSystem=strict`
+keeps the daemon out of. The rationale is in the comment at `tuiMain`.
+
+### M11 — Unvalidated cs-job IDs enable path traversal outside the jobs directory (`sidecar/cs-job`) — **fixed (hygiene)**
+
+Correct as a bug, not as a boundary: `cs-job` runs as the guest worker in the
+guest's own workspace, so `cs-job rm ../..` destroys exactly what `rm -rf
+/workspace` already would. Fixed anyway, because no verb here has business
+resolving outside `$JOBS`, and the realistic trigger is a model repeating a
+malformed id back at itself rather than an adversary.
+
+`chkid` rejects anything but a bare alphanumeric before the path is built, on
+`_notify`, `wait`, `peek`, `status`, `logs` and `rm`. It is called as a
+STATEMENT, never inside `$(...)`: a command substitution runs in a subshell, so
+an `exit` there ends only the subshell and the caller proceeds with an empty id
+— which for `rm -rf "$JOBS/$id"` is worse than the traversal. (Written the
+wrong way first; the smoke test caught it.)
+
+### M12 — Claude worker permanently bypasses all permission checks (`fcguest/turn.go`) — **accepted**
+
+`--dangerously-skip-permissions` is not an oversight, it is the product. koto
+runs unattended agents; an approval prompt with nobody to answer it is a hang,
+and the flag is why every group is a microVM with no NIC by default rather than
+a process on the host. The boundary is KVM plus the `network` and `root`
+profiles, not the model's own tool gate — which is exactly why those two
+profiles default closed and why posture is admin-only (M7).
+
+The workspace-destruction consequence is the group's own workspace, which the
+agent is supposed to own. The remediation's "run workers in least-privilege
+disposable workspaces, keep network access disabled by default" is a
+description of what koto already does.
+
+### M13 — Root agent follows worker-controlled temporary-file symlinks (`fcguest/main.go`) — **fixed**
+
+Real, and it crosses the one boundary inside the guest that `root=no` claims to
+hold. `writeWorkerFile` wrote `path + ".tmp"` with `os.WriteFile` (which follows
+symlinks) and then `os.Chown`ed it (which also follows), under directories that
+are chowned to uid 1000 — so the worker could pre-create the predictable
+temporary name as a symlink, have PID 1 truncate an arbitrary root-owned guest
+file, and then take ownership of it.
+
+Now `O_CREAT|O_EXCL|O_NOFOLLOW` — which refuses an existing entry of any kind,
+closing the race rather than sampling it — plus `fchown` on the descriptor
+rather than on a name that can change underneath. The `os.Rename` needed no
+change: it replaces `path`, it does not follow it.
+
+### M14 — Destroyed groups retain executable schedules and can resurrect a reused group (`daemon/groups.go`) — **fixed**
+
+Real, and not only as a security matter: `destroy()` cancelled goals and
+disarmed the report window but left schedules alone, and a schedule fire is an
+`enqueueSend` whose `sendNow` calls `ensure()` — so a destroyed group's cron
+line rebuilt its VM and a blank workspace minutes after the operator deleted
+it, and a later group reusing the name inherited the old group's schedules.
+
+`delSchedsFor(g)` in `destroy()`, next to `disarmReport` and the event-ring
+drop, which close the same name-reuse hazard for their own state. The generation
+-id scheme the remediation proposes is not needed once the records are gone
+with the group.
