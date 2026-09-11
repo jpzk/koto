@@ -121,3 +121,120 @@ func TestCursorReanchorsOnOutOfBandSwitch(t *testing.T) {
 			at.group, at.session, at.job)
 	}
 }
+
+// 2026-09-11 M155: client-side deletion was incomplete across every lifecycle
+// path. A destroyed group left its transcript lines, viewport cache, resume
+// cursor, paging state, job-linger state and — the privacy part — the PROMPTS
+// the operator had typed into it, still one Up-arrow or ctrl+R away. Group names
+// are reusable, so a later group of the same name inherited all of it.
+func TestDestroyedGroupIsForgottenCompletely(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 200, 40
+	const g = "ghost"
+	const other = "keeper"
+	m.groups = map[string]GroupInfo{g: {Running: true}, other: {Running: true}}
+	m.cur = other
+
+	// Populate every shape of state the model keys by group name.
+	m.addLine(logLine{kind: "user", group: g, text: "secret prompt"})
+	m.addLine(logLine{kind: "resp", group: g, text: "secret answer"})
+	m.addLine(logLine{kind: "user", group: other, text: "keep me"})
+	m.pushHistory(g, "rm -rf /tmp/secret")
+	m.pushHistory(other, "innocuous")
+	m.histNav[g] = 1
+	m.histDraft[g] = "half-typed secret"
+	m.lastSeq[g] = 42
+	m.subscribed[g] = true
+	m.activity[g] = activityInfo{}
+	m.busy[turnKey(g, "")] = true
+	m.unread[unreadKey(g, "work")] = true
+	m.streamBuf[turnKey(g, "")] = "partial"
+	m.loadedGroups[g] = true
+	m.pageOldestTs[g] = 1
+	m.session[g] = "work"
+	m.jobStatusSeen[jobKey(g, "j1")] = "running"
+	m.jobsOpen[sessKey(g, "")] = true
+	m.vpCache[g] = vpCacheEntry{}
+	m.groupVer[g] = 3
+
+	// The group disappears from the daemon's snapshot — a destroy, from here
+	// or from any other client.
+	nm, _ := m.Update(listMsg{groups: map[string]GroupInfo{other: {Running: true}}})
+	m = nm.(Model)
+
+	if h := m.promptHistory[g]; len(h) != 0 {
+		t.Errorf("the destroyed group's prompts are still recallable: %q", h)
+	}
+	if _, ok := m.histNav[g]; ok {
+		t.Error("history cursor survived")
+	}
+	if d := m.histDraft[g]; d != "" {
+		t.Errorf("an unsent draft survived: %q", d)
+	}
+	for _, l := range m.lines {
+		if l.group == g {
+			t.Errorf("a transcript line survived: %q", l.text)
+		}
+	}
+	for name, present := range map[string]bool{
+		"lastSeq":       mapHas(m.lastSeq, g),
+		"subscribed":    mapHas(m.subscribed, g),
+		"activity":      mapHas(m.activity, g),
+		"loadedGroups":  mapHas(m.loadedGroups, g),
+		"pageOldestTs":  mapHas(m.pageOldestTs, g),
+		"session":       mapHas(m.session, g),
+		"vpCache":       mapHas(m.vpCache, g),
+		"groupVer":      mapHas(m.groupVer, g),
+		"busy":          mapHas(m.busy, turnKey(g, "")),
+		"unread":        mapHas(m.unread, unreadKey(g, "work")),
+		"streamBuf":     mapHas(m.streamBuf, turnKey(g, "")),
+		"jobStatusSeen": mapHas(m.jobStatusSeen, jobKey(g, "j1")),
+		"jobsOpen":      mapHas(m.jobsOpen, sessKey(g, "")),
+	} {
+		if present {
+			t.Errorf("%s still holds the destroyed group", name)
+		}
+	}
+
+	// The surviving group is untouched — this is a targeted forget, not a wipe.
+	if h := m.promptHistory[other]; len(h) != 1 || h[0] != "innocuous" {
+		t.Errorf("the other group's prompt history was disturbed: %q", h)
+	}
+	// (Its transcript is not asserted here: the first listMsg treats every
+	// group as newly subscribed and refetches history, which drops the local
+	// lines for ALL of them by design — nothing to do with this fix.)
+}
+
+// A group-wide /clear is the operator saying "forget this conversation". The
+// prompts they typed into it are part of that (audit M155).
+func TestGroupClearForgetsThePrompts(t *testing.T) {
+	m := newModel("", 200000)
+	m.width, m.height = 200, 40
+	const g = "cleared"
+	m.groups = map[string]GroupInfo{g: {Running: true}}
+	m.cur = g
+	m.addLine(logLine{kind: "user", group: g, text: "secret prompt"})
+	m.pushHistory(g, "a secret I typed")
+	m.histDraft[g] = "half-typed"
+	m.histNav[g] = 1
+
+	nm, _ := m.Update(daemonRespMsg{op: "clear", group: g, session: ""})
+	m = nm.(Model)
+
+	if h := m.promptHistory[g]; len(h) != 0 {
+		t.Errorf("a group-wide clear left the prompts recallable: %q", h)
+	}
+	if m.histDraft[g] != "" || mapHas(m.histNav, g) {
+		t.Error("a group-wide clear left the history cursor/draft behind")
+	}
+	for _, l := range m.lines {
+		if l.group == g && chatKind(l.kind) {
+			t.Errorf("a chat line survived the clear: %q", l.text)
+		}
+	}
+}
+
+func mapHas[V any](m map[string]V, k string) bool {
+	_, ok := m[k]
+	return ok
+}

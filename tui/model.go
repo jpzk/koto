@@ -1051,6 +1051,100 @@ func (m *Model) dropGroupLiveState(g string) {
 	}
 }
 
+// forgetGroupHistory drops what the OPERATOR would call "this group's
+// conversation" from client-side state: the prompts ↑ and ctrl+R recall, and
+// every rendered copy of its text (audit M155).
+//
+// dropGroupLiveState beside it handles the in-flight turn state. This handles
+// the remembered kind, which is the half a /clear was leaving behind: the
+// transcript lines went, and the prompts the operator had typed into that
+// group stayed one Up-arrow away. The render caches go with them because they
+// are content-keyed — vpCache holds the group's rendered viewport, mdCache the
+// rendered markdown of its messages, treeRowCache rows built from its name —
+// so dropping the lines without dropping these leaves the text cached under a
+// key a later group of the same name can hit.
+func (m *Model) forgetGroupHistory(g string) {
+	delete(m.promptHistory, g)
+	delete(m.histNav, g)
+	delete(m.histDraft, g)
+	m.vpCache = map[string]vpCacheEntry{}
+	m.mdCache = map[string]string{}
+	m.treeRowCache = map[string]string{}
+	m.groupVer[g]++
+}
+
+// forgetGroup drops EVERY piece of client state keyed by a group's name. Called
+// when the group stops existing — a destroy from here or from any other client,
+// observed as its disappearance from the daemon's snapshot (audit M155).
+//
+// Group names are reusable, and that is what makes an incomplete wipe more than
+// untidiness: transcript lines, a viewport cache, a resume cursor, the prompt
+// history and the job-linger state are all keyed by name alone, so a later group
+// called `main` inherited the previous one's. The list is exhaustive on purpose
+// — the old pruning covered activity, busy and unread, which were the three that
+// caused a VISIBLE bug (a pinned spinner, a phantom unread dot), and stopped
+// there.
+func (m *Model) forgetGroup(g string) {
+	kept := m.lines[:0]
+	for _, l := range m.lines {
+		if l.group != g {
+			kept = append(kept, l)
+		}
+	}
+	m.lines = kept
+	m.recountLineBytes()
+
+	m.dropGroupLiveState(g)
+	m.forgetGroupHistory(g)
+
+	delete(m.groups, g)
+	delete(m.subscribed, g)
+	delete(m.lastSeq, g)
+	delete(m.activity, g)
+	delete(m.resources, g)
+	delete(m.groupVer, g)
+	delete(m.loadedGroups, g)
+	delete(m.prewarming, g)
+	delete(m.pageOldestTs, g)
+	delete(m.pageLoading, g)
+	delete(m.pageExhausted, g)
+	delete(m.historyRetries, g)
+	delete(m.jobsPrimed, g)
+	delete(m.session, g)
+	delete(m.pending, g)
+	delete(m.sendInFlight, g)
+	delete(m.sendAckAt, g)
+
+	// The composite-keyed maps. Every one of them is "<group>\x00<rest>" —
+	// turnKey, unreadKey, sessKey and jobKey are the same shape.
+	pre := g + "\x00"
+	for k := range m.unread {
+		if strings.HasPrefix(k, pre) {
+			delete(m.unread, k)
+		}
+	}
+	for k := range m.jobStatusSeen {
+		if strings.HasPrefix(k, pre) {
+			delete(m.jobStatusSeen, k)
+		}
+	}
+	for k := range m.jobDoneAt {
+		if strings.HasPrefix(k, pre) {
+			delete(m.jobDoneAt, k)
+		}
+	}
+	for k := range m.jobsOpen {
+		if strings.HasPrefix(k, pre) {
+			delete(m.jobsOpen, k)
+		}
+	}
+	for r := range m.peekCache {
+		if r.group == g {
+			delete(m.peekCache, r)
+		}
+	}
+}
+
 func lineInSession(l logLine, active string) bool {
 	if chatKind(l.kind) {
 		return l.session == active
@@ -1748,15 +1842,25 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// frame — its stream just dies). A stale activity entry alone keeps
 		// anyActivity() true, which pins the 80ms spinner tick chain on
 		// forever.
-		for g := range m.activity {
+		// forgetGroup, not three targeted deletes: a group that has left the
+		// snapshot is gone, and every piece of state keyed by its NAME has to
+		// go with it — names are reusable (audit M155). The three that used to
+		// be pruned here were the ones with a visible symptom; the rest
+		// (transcript lines, the resume cursor, the prompt history the
+		// operator can still ↑ into, the paging and job state) simply stayed.
+		var vanished []string
+		for g := range m.groups {
 			if _, ok := msg.groups[g]; !ok {
-				delete(m.activity, g)
+				vanished = append(vanished, g)
 			}
 		}
-		for g := range m.busy {
-			if _, ok := msg.groups[g]; !ok {
-				delete(m.busy, g)
+		for g := range m.activity {
+			if _, ok := msg.groups[g]; !ok && !slices.Contains(vanished, g) {
+				vanished = append(vanished, g)
 			}
+		}
+		for _, g := range vanished {
+			m.forgetGroup(g)
 		}
 		// Unread markers too: an entry surviving an external destroy
 		// resurrects as a phantom pink dot when a same-named group (or
@@ -3578,6 +3682,11 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		m.lines = out
 		if all {
 			m.dropGroupLiveState(msg.group)
+			// The prompts the operator typed into this group are part of "the
+			// conversation" they just asked to be rid of; leaving them one
+			// Up-arrow away is the same incomplete deletion as leaving the
+			// transcript (audit M155).
+			m.forgetGroupHistory(msg.group)
 			delete(m.session, msg.group)
 		} else {
 			delete(m.streamBuf, turnKey(msg.group, target))
