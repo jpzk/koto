@@ -2218,3 +2218,47 @@ func TestAmbiguousDeliveryQuarantinesTheSlot(t *testing.T) {
 		t.Fatalf("activeSlots = %d after the VM died, want 0", n)
 	}
 }
+
+// 2026-09-11 M63: a stop drains the queues and cancels in-flight turns, but
+// nothing stopped work being ADMITTED across that window — and a job pulled
+// off the channel but not yet recorded in inFlightSess escapes both halves.
+func TestStopBarrierClosesAdmission(t *testing.T) {
+	const g = "barrier"
+	prev := turnFn
+	turnFn = func(string, string, string) error { return nil }
+	t.Cleanup(func() {
+		turnFn = prev
+		queuesMu.Lock()
+		delete(groupBarrier, g)
+		delete(queues, sessKey(g, ""))
+		queuesMu.Unlock()
+	})
+
+	// Ordinary admission works.
+	if _, err := enqueueSend(g, "", "before"); err != nil {
+		t.Fatalf("enqueue before the barrier: %v", err)
+	}
+
+	groupBarrierBegin(g)
+	if _, err := enqueueSend(g, "", "during"); err == nil {
+		t.Fatal("a send was admitted while the group was stopping")
+	}
+	// A job that got past admission is still refused at the worker, which is
+	// the gap between the channel pull and the inFlightSess record.
+	job := sendJob{session: "", msg: "escaped", done: make(chan error, 1)}
+	sendWorkerTurn(g, job)
+	if err := <-job.done; err == nil || !strings.Contains(err.Error(), "stopping") {
+		t.Fatalf("an escaped job ran during the stop: %v", err)
+	}
+
+	// destroy nests inside stop, so the barrier must survive the inner end.
+	groupBarrierBegin(g)
+	groupBarrierEnd(g)
+	if _, err := enqueueSend(g, "", "still stopping"); err == nil {
+		t.Fatal("the nested barrier lifted early")
+	}
+	groupBarrierEnd(g)
+	if _, err := enqueueSend(g, "", "after"); err != nil {
+		t.Fatalf("admission stayed closed after the stop: %v", err)
+	}
+}

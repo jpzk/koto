@@ -221,6 +221,11 @@ func autostartGroups() {
 }
 
 func stopGroup(g string) {
+	// Close admission FIRST, and keep it closed until the VM is down: the
+	// drain below is pointless if a producer can enqueue behind it (queue.go,
+	// audit M63).
+	groupBarrierBegin(g)
+	defer groupBarrierEnd(g)
 	// A running goal would silently re-boot the VM on its next iteration,
 	// overriding the operator's stop — pause it first (no-op otherwise).
 	goalPauseOnStop(g)
@@ -468,6 +473,12 @@ func destroy(g string) baseResp {
 	// Cancel before stopGroup so the stop hook sees a terminal goal and
 	// doesn't raise a spurious "paused (group stopped), resume later" alert
 	// for a goal that is about to be deleted with its group.
+	// The barrier spans the WHOLE destroy, not just the inner stopGroup: the
+	// workspace removal and the groups.json delete below are the window where
+	// an escaped turn would re-register the name it is being removed under
+	// (queue.go, audit M63).
+	groupBarrierBegin(g)
+	defer groupBarrierEnd(g)
 	goalCancelOnDestroy(g)
 	// ...then remove the records. Cancelling alone left them in goals.json for
 	// GoalList to serve, and group names are reusable (audit M50).
