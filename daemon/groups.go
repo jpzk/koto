@@ -226,6 +226,18 @@ func stopGroup(g string) {
 	// audit M63).
 	groupBarrierBegin(g)
 	defer groupBarrierEnd(g)
+	stopGroupPrepare(g)
+	mu := groupOpMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+	stopGroupLocked(g)
+}
+
+// stopGroupPrepare is everything a stop does BEFORE the power-off: pause the
+// goals, discard the queued traffic, disarm the report window, cancel the
+// in-flight turns. Split from the power-off so destroy can run it while
+// already holding groupOpMu. Callers must hold the group barrier.
+func stopGroupPrepare(g string) {
 	// A running goal would silently re-boot the VM on its next iteration,
 	// overriding the operator's stop — pause it first (no-op otherwise).
 	goalPauseOnStop(g)
@@ -265,9 +277,12 @@ func stopGroup(g string) {
 				g, sessionMarkerName(sess))
 		}
 	}
-	mu := groupOpMu(g)
-	mu.Lock()
-	defer mu.Unlock()
+}
+
+// stopGroupLocked is stopGroup's power-off step; callers hold groupOpMu(g).
+// Split out so destroy can hold the lock across its WHOLE cleanup (audit M89)
+// rather than letting stopGroup take and release it in the middle.
+func stopGroupLocked(g string) {
 	fcStop(g)
 }
 
@@ -487,6 +502,17 @@ func destroy(g string) baseResp {
 	// (queue.go, audit M63).
 	groupBarrierBegin(g)
 	defer groupBarrierEnd(g)
+	// And groupOpMu spans it too. The barrier closes the SEND queue; spawn and
+	// restart come in through ensure(), which serializes on this mutex instead
+	// — and stopGroup used to take it, power the VM off, and RELEASE it before
+	// destroy had removed anything. In that window ensure() saw a group that
+	// was merely not running, registered a replacement VM, and then destroy
+	// deleted the replacement's workspace and runtime artifacts while its VM
+	// stayed registered and alive (audit M89). Taken here, so the group cannot
+	// be recreated until the name is gone from groups.json.
+	mu := groupOpMu(g)
+	mu.Lock()
+	defer mu.Unlock()
 	goalCancelOnDestroy(g)
 	// ...then remove the records. Cancelling alone left them in goals.json for
 	// GoalList to serve, and group names are reusable (audit M50).
@@ -498,7 +524,8 @@ func destroy(g string) baseResp {
 	// Schedules outlive nothing: a fire is an enqueueSend, and sendNow's
 	// ensure() would rebuild the VM and the workspace the line below deletes.
 	delSchedsFor(g)
-	stopGroup(g)
+	stopGroupPrepare(g)
+	stopGroupLocked(g) // already holding groupOpMu(g)
 	groupsLock.Lock()
 	m := readGroups()
 	port, hadPort := m[g]

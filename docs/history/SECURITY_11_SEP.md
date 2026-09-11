@@ -1567,3 +1567,21 @@ rule is still offered — it is most hosts' status quo — but labelled with its
 cost. `TestKVMRemediationLeadsWithTheNarrowGrant` pins the ordering, the
 presence of both, and that the band is concrete rather than a placeholder when
 the subuid range is readable.
+
+### M89 — Concurrent group recreation during destroy can corrupt replacement VM state (`daemon/groups.go`) — **fixed**
+
+Real, and the complement to M63. That closed admission on the SEND queue;
+spawn and restart come in through `ensure()`, which serializes on `groupOpMu`
+instead — and `stopGroup` took that mutex, powered the VM off, and RELEASED it
+before `destroy` had removed anything. In the window, `ensure()` saw a group
+that was merely not running, created the workspace, allocated a port and
+registered a replacement VM; `destroy` then continued on the group NAME alone
+and deleted the replacement's workspace and runtime artifacts while its VM
+stayed registered and alive.
+
+`destroy` now holds `groupOpMu` across its whole cleanup, so the group cannot
+be recreated until its name is gone from `groups.json`. That needed `stopGroup`
+split into `stopGroupPrepare` (pause goals, discard queued traffic, disarm the
+report window, cancel in-flight turns) and `stopGroupLocked` (the power-off),
+since Go mutexes are not reentrant and `destroy` calls both from inside the
+lock. `TestDestroyHoldsTheGroupLockThroughout`.
