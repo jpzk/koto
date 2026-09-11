@@ -382,6 +382,10 @@ const logRingMax = 200
 
 type logSub struct {
 	ch chan *pb.LogEvent
+	// dropped counts this subscriber's lost lines — non-zero only while it is
+	// behind (audit M156). Guarded by logSubsLock, which logDeliver already
+	// holds for the ring append.
+	dropped int
 }
 
 var (
@@ -446,15 +450,43 @@ func logDeliver(subsystem, group, level, msg string) {
 	if len(logRing) > logRingMax {
 		logRing = logRing[len(logRing)-logRingMax:]
 	}
-	subs := append([]*logSub(nil), logSubs...)
-	logSubsLock.Unlock()
-
-	for _, s := range subs {
+	// Fan out under the lock, because the drop counters are per subscriber and
+	// this is the only writer of them. The sends are non-blocking, so the
+	// critical section is bounded by the subscriber count.
+	for _, s := range logSubs {
+		// A subscriber that fell behind gets told so before it gets more
+		// lines. The daemon log is the record an operator checks after the
+		// fact — a resource alert, an auth rejection, a forwarded error — and
+		// dropping from it silently made "nothing was logged" and "you did not
+		// receive what was logged" look identical at the one consumer that
+		// renders it (audit M156). Unlike the group event stream there are no
+		// sequence numbers here to notice a gap with, and the 200-line replay
+		// ring only covers a reconnect that happens before the lines age out.
+		//
+		// The count is never lost, only deferred: if the notice itself does
+		// not fit, the counter keeps climbing and the notice goes out when the
+		// subscriber catches up.
+		if s.dropped > 0 {
+			notice := &pb.LogEvent{
+				Event: "log", Level: "warn", Subsystem: "log", Ts: pbev.Ts,
+				Msg: fmt.Sprintf("log stream fell behind: %d line(s) were not delivered to this subscriber "+
+					"(they are in the daemon's own log; `koto ctl logs` re-reads it)", s.dropped),
+			}
+			select {
+			case s.ch <- notice:
+				s.dropped = 0
+			default:
+				s.dropped++
+				continue
+			}
+		}
 		select {
 		case s.ch <- pbev:
 		default:
+			s.dropped++
 		}
 	}
+	logSubsLock.Unlock()
 }
 
 func emitLogf(subsystem, level, format string, args ...any) {
