@@ -2093,9 +2093,8 @@ func TestConsoleSinkIsBounded(t *testing.T) {
 // entry rewritten and hashed on every tick. Idle sessions give the queue and
 // worker back; the registry is bounded.
 func TestIdleSessionsAreReclaimed(t *testing.T) {
-	prev := turnFn
-	turnFn = func(string, string, string) error { return nil }
-	t.Cleanup(func() { turnFn = prev })
+	prev := setTurnFn(func(string, string, string) error { return nil })
+	t.Cleanup(func() { setTurnFn(prev) })
 
 	const g = "sessreclaim"
 	live := func() int {
@@ -2229,10 +2228,9 @@ func TestAmbiguousDeliveryQuarantinesTheSlot(t *testing.T) {
 // off the channel but not yet recorded in inFlightSess escapes both halves.
 func TestStopBarrierClosesAdmission(t *testing.T) {
 	const g = "barrier"
-	prev := turnFn
-	turnFn = func(string, string, string) error { return nil }
+	prev := setTurnFn(func(string, string, string) error { return nil })
 	t.Cleanup(func() {
-		turnFn = prev
+		setTurnFn(prev)
 		queuesMu.Lock()
 		delete(groupBarrier, g)
 		delete(queues, sessKey(g, ""))
@@ -2275,10 +2273,9 @@ func TestStopBarrierClosesAdmission(t *testing.T) {
 // waits for them to retire.
 func TestClearFencesQueuedAndActiveWork(t *testing.T) {
 	const g = "clearfence"
-	prev := turnFn
-	turnFn = func(string, string, string) error { return nil }
+	prev := setTurnFn(func(string, string, string) error { return nil })
 	t.Cleanup(func() {
-		turnFn = prev
+		setTurnFn(prev)
 		queuesMu.Lock()
 		delete(groupBarrier, g)
 		for k := range queues {

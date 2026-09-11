@@ -521,14 +521,39 @@ func enqueue(g string, job sendJob) (<-chan error, error) {
 }
 
 // turnFn, when non-nil, replaces sendNow as the per-turn function. Solely a
-// test seam (sendNow spawns containers); nil in production. Not initialized to
+// test seam (sendNow boots microVMs); nil in production. Not initialized to
 // sendNow directly because that would form a static initialization cycle
 // (sendNow → … → sendWorker → turnFn).
-var turnFn func(g, session, msg string) error
+//
+// Guarded, because the seam is read from every send worker and written by every
+// test that installs a stub. The old comment argued it was safe on the grounds
+// that tests use unique group names, so a group's dedicated worker only reads
+// turnFn after the enqueue that follows the swap. That is true of the worker a
+// test creates and false of the ones it INHERITS: a worker outlives the test
+// that made it (sessionIdleMax, retireQueue), so a previous test's worker
+// draining its last job reads this variable while the next test writes it —
+// which -race reports, and which then masks every real race behind it (found
+// while pinning M144, fixed here because a suite that cannot be run under
+// -race is not much of an audit instrument).
+var (
+	turnFnMu sync.RWMutex
+	turnFn   func(g, session, msg string) error
+)
+
+func setTurnFn(fn func(g, session, msg string) error) func(g, session, msg string) error {
+	turnFnMu.Lock()
+	defer turnFnMu.Unlock()
+	prev := turnFn
+	turnFn = fn
+	return prev
+}
 
 func runTurn(g, session, msg string) error {
-	if turnFn != nil {
-		return turnFn(g, session, msg)
+	turnFnMu.RLock()
+	fn := turnFn
+	turnFnMu.RUnlock()
+	if fn != nil {
+		return fn(g, session, msg)
 	}
 	return sendNow(g, session, msg)
 }
