@@ -703,3 +703,37 @@ the mapped forms of loopback, unspecified, IMDS, RFC1918, tailnet and public.
 The property is load-bearing and invisible in the code — `fcClassifyDst` reads
 as though it only handled the v6 spellings — which is presumably how the
 finding arose, and is reason enough for the test to exist.
+
+### M42 — Guest-controlled job_done callbacks can inject turns into same-group sessions and exhaust notification state (`daemon/ctl.go`) — **fixed (the two halves that matter)**
+
+Two real defects, both closed; the third ask is declined with a reason.
+
+**The authorization half is real and specific.** `job_done` is self-attributed —
+any group may report its OWN job — so the group is not the problem. The SESSION
+is: it comes off the guest and was only charset-normalized. The ordinary send
+path refuses reserved `goal-*` names; this callback did not, so a forged
+completion landed in a live goal's worker or judge conversation. Those are the
+sessions the design calls follow-only, and the judge's independence rests on
+nobody else writing into them. Reserved names now fold into the group's default
+session, with a warn line — folding rather than dropping, because the job result
+still belongs to the operator.
+
+**The exhaustion half is real.** The per-key buffer was bounded by the previous
+audit (M4); the number of KEYS was not, and the name is the guest's to choose.
+Each distinct one costs a pending slice, a debounce timer, and after the flush a
+send queue and a worker goroutine that live for the daemon's lifetime.
+`notifyMaxKeysPerGroup` (32 named sessions per group — a group runs at most
+`groupSlots` = 10 concurrent turns) folds the overflow into the default session.
+The default key is exempt from the count, since it is the fold target.
+
+**Declined: authenticating the job ID.** The remediation wants the daemon to
+record each job at mint and reject unknown ids. It cannot: under Firecracker the
+job dir lives inside `workspace.img`, which is why the rc and output tail travel
+IN the payload at all — `daemon/jobs.go` mirrors guest state on a TTL and is
+routinely stale, so "require a matching live job" would drop legitimate
+completions whenever the mirror had not refreshed. A callback token would have
+to be minted by the guest-side `cs-job` and handed back by the same guest, which
+authenticates nothing. What a forged `job_done` can now do is make its own group
+wake its own default session with text the operator sees quoted and fenced —
+which is what `cs-notify` already permits by design.
+`TestJobDoneSessionGuards`.
