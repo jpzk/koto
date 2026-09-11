@@ -646,6 +646,9 @@ func clearCmd(req groupReq) baseResp {
 		return errResp(fmt.Sprintf("clear: guest deletion failed (rc=%d): %s", rc, truncateBytes(strings.TrimSpace(out), 400)))
 	}
 	clearSessionReg(req.Group)
+	// Before the truncation, not after: a queued marker appended in between
+	// would survive it (M133).
+	dropQueuedNotifies(req.Group, "", true)
 	// Every stream: a group-wide clear means the whole transcript, and a slot
 	// file left behind would replay a cleared group's work on the next attach.
 	for _, p := range logPaths(req.Group) {
@@ -717,6 +720,9 @@ func clearSession(g, sess string) baseResp {
 	if r := clearSessionContext(g, sess); !r.OK {
 		return r
 	}
+	// Queued-but-unwritten markers first: the filter below rewrites the file,
+	// so anything still in the queue would be appended after it (M133).
+	dropQueuedNotifies(g, sess, false)
 	// A session's turns may have run in any slot, so every stream is filtered.
 	for _, p := range logPaths(g) {
 		if _, err := os.Stat(p); err != nil {

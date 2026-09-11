@@ -252,6 +252,21 @@ func filterLogSession(path, s string) error {
 			out = append(out, line)
 			continue
 		}
+		// A [[notify]] line states its OWN session and is appended to the
+		// group stream out-of-band, with no [[session]] marker around it
+		// (audit M133). Judging it by the enclosing segment was wrong in both
+		// directions: the group stream carries no [[session]] markers at all,
+		// so clearing a NAMED session kept every one of its notifications —
+		// title and message intact, and History replays them as notification
+		// events — while clearing the DEFAULT session swept away the
+		// notifications of every other conversation in the group.
+		if ns, ok := notifyMarkerSession(line); ok {
+			if ns == s {
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
 		if cur == s {
 			continue
 		}

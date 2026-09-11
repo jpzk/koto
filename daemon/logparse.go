@@ -36,6 +36,39 @@ func notifyMarker(unixMs int64, severity, session, title, msg string) string {
 		" " + sess + " " + enc(title) + " " + enc(msg)
 }
 
+// notifyMarkerSession reports the session a [[notify]] line belongs to, and
+// whether the line is a notify marker at all.
+//
+// A notification is NOT part of the surrounding turn: notifyDeliver queues it
+// and tryFlushNotify appends it to the GROUP stream at whatever line boundary
+// comes next, with no [[session]] marker around it. So the only statement of
+// which conversation it belongs to is the field inside the marker, and any
+// reader that infers the session from the enclosing segment gets it wrong
+// (audit M133).
+//
+// Returns "" — the default session — for the 4-field pre-session shape, which
+// is where those transcripts' notifications genuinely belong.
+func notifyMarkerSession(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, "[[notify]] ")
+	if !ok {
+		return "", false
+	}
+	f := strings.Fields(rest)
+	if len(f) != 4 && len(f) != 5 {
+		return "", false // malformed: not a marker any consumer will render
+	}
+	if len(f) == 4 {
+		return "", true
+	}
+	sess, err := normalizeSession(f[2])
+	if err != nil {
+		// Same fallback the parser takes: junk is attributed to the default
+		// session rather than carried as an arbitrary string.
+		return "", true
+	}
+	return sess, true
+}
+
 // flattenInline collapses line/column control whitespace to plain spaces.
 // Notification titles and messages render into single banner rows in
 // clients that size their frame by row count — an embedded \n would make

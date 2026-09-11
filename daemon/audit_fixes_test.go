@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -4123,4 +4124,119 @@ func TestGoalInterruptCancelsTheReservedTurn(t *testing.T) {
 		close(release)
 		waitGoal(t, g, goalStatusPaused)
 	})
+}
+
+// 2026-09-11 M133: a per-session clear must take that session's NOTIFICATIONS
+// with it — and leave every other session's alone.
+//
+// A [[notify]] marker states its own session and is appended to the group
+// stream out-of-band, with no [[session]] marker around it. filterLogSession
+// tracked deletion state from [[session]] markers only, so it judged every
+// notify line by the enclosing segment: on the group stream (which has no
+// segment markers at all) that meant clearing a named session kept all of its
+// notifications, title and message intact, for History to replay — and
+// clearing the default session swept away everyone else's.
+func TestClearSessionFiltersNotificationsByTheirOwnSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "log")
+	lines := []string{
+		notifyMarker(1000, "normal", "", "default-note", "d"),
+		notifyMarker(1001, "high", "alpha", "alpha-secret", "a"),
+		notifyMarker(1002, "normal", "beta", "beta-note", "b"),
+		"[[session]] alpha",
+		">>> alpha prompt",
+		"[[session]] -",
+		">>> default prompt",
+		// A notify for alpha landing inside the DEFAULT session's segment:
+		// exactly the interleaving the group stream cannot express and the
+		// slot streams can produce, since the flush appends wherever the
+		// tailer happens to be at a line boundary.
+		notifyMarker(1003, "normal", "alpha", "alpha-secret-2", "a2"),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := filterLogSession(path, "alpha"); err != nil {
+		t.Fatalf("filterLogSession: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(got)
+	for _, gone := range []string{"alpha-secret", "alpha-secret-2", ">>> alpha prompt"} {
+		if strings.Contains(out, base64.StdEncoding.EncodeToString([]byte(gone))) || strings.Contains(out, gone) {
+			t.Errorf("clear of session alpha kept %q:\n%s", gone, out)
+		}
+	}
+	for _, kept := range []string{"default-note", "beta-note"} {
+		if !strings.Contains(out, base64.StdEncoding.EncodeToString([]byte(kept))) {
+			t.Errorf("clear of session alpha also dropped %q:\n%s", kept, out)
+		}
+	}
+	if !strings.Contains(out, ">>> default prompt") {
+		t.Errorf("clear of session alpha dropped the default session's turn:\n%s", out)
+	}
+
+	// ...and the other direction: clearing the DEFAULT session must not take
+	// the named sessions' notifications with it.
+	if err := filterLogSession(path, ""); err != nil {
+		t.Fatalf("filterLogSession(default): %v", err)
+	}
+	got, _ = os.ReadFile(path)
+	out = string(got)
+	if strings.Contains(out, base64.StdEncoding.EncodeToString([]byte("default-note"))) {
+		t.Errorf("clear of the default session kept its own notification:\n%s", out)
+	}
+	if !strings.Contains(out, base64.StdEncoding.EncodeToString([]byte("beta-note"))) {
+		t.Errorf("clear of the default session dropped beta's notification:\n%s", out)
+	}
+}
+
+// 2026-09-11 M133 (second half): a marker still QUEUED when the clear runs is
+// appended by the next tryFlushNotify — i.e. lands after the rewrite, in a
+// conversation that has just been erased. Both clear scopes drop the queue.
+func TestClearDropsQueuedNotifications(t *testing.T) {
+	const g = "m133-queue"
+	t.Cleanup(func() { dropQueuedNotifies(g, "", true) })
+
+	queue := func() {
+		dropQueuedNotifies(g, "", true)
+		for _, s := range []string{"", "alpha", "beta"} {
+			if !queueNotify(g, notifyMarker(1000, "normal", s, "t-"+sessionMarkerName(s), "m")) {
+				t.Fatalf("queueNotify(%q) refused", s)
+			}
+		}
+	}
+	pendingSessions := func() []string {
+		notifyQueueMu.Lock()
+		defer notifyQueueMu.Unlock()
+		var out []string
+		for _, m := range notifyQueue[g] {
+			s, ok := notifyMarkerSession(m)
+			if !ok {
+				t.Fatalf("queued a line that is not a notify marker: %q", m)
+			}
+			out = append(out, sessionMarkerName(s))
+		}
+		return out
+	}
+
+	queue()
+	dropQueuedNotifies(g, "alpha", false)
+	if got := pendingSessions(); !slices.Equal(got, []string{"default", "beta"}) {
+		t.Errorf("after clearing alpha, queued = %v, want [default beta]", got)
+	}
+
+	queue()
+	dropQueuedNotifies(g, "", false)
+	if got := pendingSessions(); !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Errorf("after clearing the default session, queued = %v, want [alpha beta]", got)
+	}
+
+	queue()
+	dropQueuedNotifies(g, "", true)
+	if got := pendingSessions(); len(got) != 0 {
+		t.Errorf("after a group-wide clear, queued = %v, want none", got)
+	}
 }
