@@ -182,7 +182,7 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		// Always main:false — the ctl plane cannot mint a second main
 		// (see wire.SpawnReq: the key isn't even decoded).
-		port, err := ensure(req.Group, false)
+		port, err := spawnEnsure(req.Group, false)
 		if err != nil {
 			return errResp(err.Error())
 		}
@@ -544,6 +544,20 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: invalid group name")
 		}
 		plan := req.Plan == nil || *req.Plan
+		// A main caller always targets a PEER here (its own group is refused
+		// above), and the whole point of plan-first on that path is the human
+		// gate: goal_approve is self-only, so main cannot approve a plan it
+		// set on a peer — a HUMAN must. An explicit "plan": false skipped
+		// straight to goalStatusRunning and started an autonomous,
+		// self-judged, multi-iteration loop on another group with nobody in
+		// the loop, which is the one thing the design refuses. Ignore it.
+		// A non-main caller is setting a goal on itself, where approving its
+		// own plan is allowed, so plan=false there is the same authority by a
+		// shorter route and stays honoured.
+		if isMain && !plan {
+			plan = true
+			emitLogfG("goal", req.Group, "info", "[%s] main set a peer goal with plan=false; forcing plan-first (approval is a human's)", req.Group)
+		}
 		it, err := goalSet(req.Group, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
 		if err != nil {
 			return errResp(err.Error())

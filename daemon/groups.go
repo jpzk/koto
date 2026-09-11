@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,11 +85,27 @@ func groupOpMu(g string) *sync.Mutex {
 	return mu
 }
 
-func ensure(g string, isMain bool) (int, error) {
+// ensure boots an EXISTING group and refuses a name that is not registered in
+// groups.json. Provisioning is spawnEnsure's job, and the split is the whole
+// point: ensure() is called from send, clear, restart, a schedule fire, a
+// shell attach — none of which carry spawn authority — and it used to create
+// whatever syntactically valid name it was handed. So a principal with `send`
+// on "*" provisioned groups without `spawn`, a schedule outlived its group and
+// rebuilt it (M14), and the ctl plane's spawn cap was reachable around rather
+// than through. Name a group that is not there and you now get an error
+// instead of a new VM.
+func ensure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, false) }
+
+// spawnEnsure is ensure plus permission to create the group. Only the three
+// admission points call it: the ctl plane's `spawn` verb (capped by
+// ctlMaxSpawn), the Spawn RPC, and the daemon's own boot of `main`.
+func spawnEnsure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, true) }
+
+func ensureAny(g string, isMain, create bool) (int, error) {
 	mu := groupOpMu(g)
 	mu.Lock()
 	defer mu.Unlock()
-	return ensureLocked(g, isMain)
+	return ensureLockedCreate(g, isMain, create)
 }
 
 // ensureLocked is ensure's body; callers must hold groupOpMu(g). Split out so
@@ -99,6 +114,10 @@ func ensure(g string, isMain bool) (int, error) {
 // same-group operations serialize behind it, and "second caller waits for the
 // boot, then sees fcRunning and returns" is exactly the wanted semantics.
 func ensureLocked(g string, isMain bool) (int, error) {
+	return ensureLockedCreate(g, isMain, false)
+}
+
+func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 	// Refuse to boot anything once the shutdown handler is stopping VMs — a
 	// queued turn or cron fire racing fcStopAll would re-boot the VM it just
 	// synced down, and the boot would die dirty with the container.
@@ -114,6 +133,11 @@ func ensureLocked(g string, isMain bool) (int, error) {
 		// enforce; checked again here, the chokepoint every spawn/restart/clear
 		// path funnels through, so no future caller can reopen this.
 		return 0, fmt.Errorf("invalid group name")
+	}
+	if !create {
+		if _, known := readGroups()[g]; !known {
+			return 0, fmt.Errorf("no such group %q — spawn it first", g)
+		}
 	}
 	v := vol(g)
 	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
@@ -285,24 +309,12 @@ const defaultVeniceModel = "kimi-k2.5"
 // the invariant "every group has an explicit provider" holds even for groups
 // created before this code existed.
 func ensureProviderConfig(g string) error {
-	p := filepath.Join(vol(g), ".cs", "config.json")
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	cfg := map[string]any{}
-	oldB, _ := os.ReadFile(p)
-	_ = json.Unmarshal(oldB, &cfg)
-	if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
-		cfg["provider"] = defaultProvider
-	}
-	newB, err := json.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(oldB, newB) {
-		return nil
-	}
-	return os.WriteFile(p, newB, 0o644)
+	_, err := updateGroupConfig(g, func(cfg map[string]any) {
+		if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
+			cfg["provider"] = defaultProvider
+		}
+	})
+	return err
 }
 
 // seedSpawnConfig writes provider/model/size into a group's config.json before
@@ -311,30 +323,18 @@ func ensureProviderConfig(g string) error {
 // kicks in (and before fcResolveSize reads the size). Empty arguments are
 // skipped (preserving any existing value).
 func seedSpawnConfig(g, provider, model, size string) error {
-	p := filepath.Join(vol(g), ".cs", "config.json")
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	cfg := map[string]any{}
-	oldB, _ := os.ReadFile(p)
-	_ = json.Unmarshal(oldB, &cfg)
-	if provider != "" {
-		cfg["provider"] = provider
-	}
-	if model != "" {
-		cfg["model"] = model
-	}
-	if size != "" {
-		cfg["size"] = size
-	}
-	newB, err := json.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(oldB, newB) {
-		return nil
-	}
-	return os.WriteFile(p, newB, 0o644)
+	_, err := updateGroupConfig(g, func(cfg map[string]any) {
+		if provider != "" {
+			cfg["provider"] = provider
+		}
+		if model != "" {
+			cfg["model"] = model
+		}
+		if size != "" {
+			cfg["size"] = size
+		}
+	})
+	return err
 }
 
 // groupConfig is one group's parsed config.json snapshot. loadGroupConfig

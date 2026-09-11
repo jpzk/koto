@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -243,20 +244,34 @@ func TestFcParseFlow(t *testing.T) {
 
 func TestFcFlowLoggerDedup(t *testing.T) {
 	l := newFcFlowLogger("testgroup")
-	n0 := len(logRing)
+	// Count this logger's own lines rather than the ring's length: logRing is
+	// bounded (logRingMax), so once the suite has filled it, appends stop
+	// growing len() and every delta below reads zero. Measured by content, the
+	// assertions hold wherever this test runs in the order.
+	mine := func() int {
+		n := 0
+		for _, le := range logRing {
+			if le.Subsystem == "egress" && strings.Contains(le.Msg, "[testgroup]") {
+				n++
+			}
+		}
+		return n
+	}
+	n0 := 0
+	_ = n0
 
 	l.record(tcpFrame("1.1.1.1", 443, 0x02), fcNetWAN, true)
 	l.record(tcpFrame("1.1.1.1", 443, 0x02), fcNetWAN, true) // SYN retransmit — deduped
-	if got := len(logRing) - n0; got != 1 {
+	if got := mine(); got != 1 {
 		t.Errorf("same tuple logged %d times, want 1", got)
 	}
 	l.record(tcpFrame("1.1.1.1", 80, 0x02), fcNetWAN, true) // new port — new tuple
-	if got := len(logRing) - n0; got != 2 {
+	if got := mine(); got != 2 {
 		t.Errorf("second tuple: %d lines, want 2", got)
 	}
 	// Gateway-subnet traffic (DNS to .1) is not egress — never logged.
 	l.record(udpFrame("192.168.127.1", 53), fcNetWAN, true)
-	if got := len(logRing) - n0; got != 2 {
+	if got := mine(); got != 2 {
 		t.Errorf("gw-subnet flow logged; %d lines, want 2", got)
 	}
 	// Blocked flow logs at warn with the profile in the message. Search the
@@ -265,7 +280,7 @@ func TestFcFlowLoggerDedup(t *testing.T) {
 	// lands in the ring right after it.
 	l.record(tcpFrame("192.168.1.5", 445, 0x02), fcNetWAN, false)
 	var blocked bool
-	for _, le := range logRing[n0:] {
+	for _, le := range logRing {
 		if le.Level == "warn" && le.Subsystem == "egress" &&
 			bytes.Contains([]byte(le.Msg), []byte("BLOCKED flow TCP 192.168.127.2 -> 192.168.1.5:445")) {
 			blocked = true

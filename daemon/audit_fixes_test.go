@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -807,5 +808,143 @@ func TestShellSessionNamePinned(t *testing.T) {
 		if shellSessionRE.MatchString(bad) {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// 2026-09-11 M16: config.json has ONE writer. Concurrent read-modify-write of
+// the whole document let a stale snapshot restore posture an operator had just
+// revoked, and os.WriteFile's in-place truncate showed readers half a file.
+func TestGroupConfigUpdatesAreSerialized(t *testing.T) {
+	fcHarness(t)
+	g := "cfgrace"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	if _, err := updateGroupConfig(g, func(c map[string]any) {
+		c["network"] = "none"
+		c["root"] = "no"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Many concurrent writers, each touching only its own key. If any of them
+	// commits a whole-document snapshot taken before another's write, a key
+	// goes missing — which is exactly how revoked posture came back.
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("k%d", i)
+			updateGroupConfig(g, func(c map[string]any) { c[key] = i })
+		}(i)
+	}
+	// ...while a reader watches for a torn document.
+	stop := make(chan struct{})
+	torn := make(chan string, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(groupConfigPath(g))
+			if err != nil {
+				continue // rename window: the old inode is gone, never truncated
+			}
+			var m map[string]any
+			if json.Unmarshal(b, &m) != nil {
+				select {
+				case torn <- string(b):
+				default:
+				}
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(stop)
+	select {
+	case b := <-torn:
+		t.Fatalf("reader observed a torn config.json: %q", b)
+	default:
+	}
+
+	b, err := os.ReadFile(groupConfigPath(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final map[string]any
+	if err := json.Unmarshal(b, &final); err != nil {
+		t.Fatalf("final config is not valid JSON: %v", err)
+	}
+	if final["network"] != "none" || final["root"] != "no" {
+		t.Fatalf("posture lost by a concurrent writer: %v", final)
+	}
+	for i := 0; i < 32; i++ {
+		if _, ok := final[fmt.Sprintf("k%d", i)]; !ok {
+			t.Fatalf("writer %d's key was overwritten by a stale snapshot: %v", i, final)
+		}
+	}
+}
+
+// 2026-09-11 M17: booting a group and provisioning one are different
+// authorities. ensure() refuses an unregistered name; only the three spawn
+// admission points may create.
+func TestEnsureDoesNotProvision(t *testing.T) {
+	fcHarness(t)
+	if _, err := ensure("ghost", false); err == nil {
+		t.Fatal("ensure provisioned an unregistered group")
+	} else if !strings.Contains(err.Error(), "no such group") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(vol("ghost")); err == nil {
+		t.Fatal("ensure created the workspace of a group it refused")
+	}
+	if _, known := readGroups()["ghost"]; known {
+		t.Fatal("ensure registered a group it refused")
+	}
+	// restart goes through ensureLocked and must refuse the same way.
+	if _, err := restart("ghost"); err == nil {
+		t.Fatal("restart provisioned an unregistered group")
+	}
+}
+
+// 2026-09-11 M20: plan-first on a main-to-peer goal IS the human gate —
+// goal_approve is self-only, so main cannot approve what it set on a peer. An
+// explicit plan=false skipped straight to running; it is now ignored.
+func TestMainPeerGoalsAreAlwaysPlanFirst(t *testing.T) {
+	goalTestSetup(t)
+	fcHarness(t)
+	// The driver would start a planning turn for the peer goal; the goal
+	// records are all this test looks at, so keep turns out of it.
+	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		mainPeerGoalPlanFirst(t)
+	})
+}
+
+func mainPeerGoalPlanFirst(t *testing.T) {
+	no := false
+	resp := ctlDispatch("main", ctlLine(t, map[string]any{
+		"cmd": "goal_set", "group": "peer", "text": "do the thing",
+		"criteria": "1. done", "name": "p1", "plan": no,
+	}))
+	gr, ok := resp.(goalResp)
+	if !ok || !gr.OK {
+		t.Fatalf("goal_set refused: %+v", resp)
+	}
+	if gr.Item.Status != goalStatusPlanning {
+		t.Fatalf("main-to-peer goal with plan=false started as %q, want %q", gr.Item.Status, goalStatusPlanning)
+	}
+	// A group setting a goal on ITSELF may skip planning: approving its own
+	// plan is allowed, so plan=false is the same authority by a shorter route.
+	resp = ctlDispatch("peer", ctlLine(t, map[string]any{
+		"cmd": "goal_set", "group": "peer", "text": "self work",
+		"criteria": "1. done", "name": "p2", "plan": no,
+	}))
+	gr, ok = resp.(goalResp)
+	if !ok || !gr.OK {
+		t.Fatalf("self goal_set refused: %+v", resp)
+	}
+	if gr.Item.Status != goalStatusRunning {
+		t.Fatalf("self-set goal with plan=false started as %q, want %q", gr.Item.Status, goalStatusRunning)
 	}
 }

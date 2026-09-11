@@ -171,7 +171,7 @@ func daemonMain() {
 	}
 	proxyStart(bind)
 
-	if _, err := ensure("main", true); err != nil {
+	if _, err := spawnEnsure("main", true); err != nil {
 		emitLogf("daemon", "error", "ensure main: %v", err)
 	}
 	// Groups with autostart=yes come up with the daemon rather than lazily on
