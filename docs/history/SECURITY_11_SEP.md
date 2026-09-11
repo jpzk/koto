@@ -3104,3 +3104,39 @@ private key is not written through it), an append-through-a-link at
 `clients.allow` (the victim file is byte-identical afterwards), and idempotence
 on an ordinary tree, since the exclusive create must not break the property
 `make pki-init` depends on — an existing CA is reused, never regenerated.
+
+## M143 — Guest-controlled PTY backpressure can freeze the operator TUI — FIXED
+
+`tui/shell_view.go`.
+
+**Confirmed, and it is the same freeze the drain goroutine was introduced to fix,
+one layer further down.** `shellSession.send` took `sendMu` and called
+`stream.Send` under it. Two goroutines call it: the Update goroutine
+(keystrokes, pastes, resizes) and the goroutine that drains `term.Read()` for
+the emulator's own protocol responses — which exists precisely because a
+blocking emulator pipe once froze the event loop on the first `/shell` attach.
+
+`stream.Send` blocks when the chain below it stops draining: daemon → vsock →
+fc-agent → the guest's pty master. The guest controls **both** ends of that — it
+decides what the pty emits *and* whether anything reads the pty's input — so it
+can emit terminal queries forever while reading nothing, wedge the drain
+goroutine inside `Send`, and leave the Update goroutine blocked on the mutex
+behind it. That is the whole Bubble Tea event loop: no redraw, no `ctrl+]` to
+detach, no `/exit`, no way out but killing the TUI.
+
+**Fix:** one writer goroutine owns `stream.Send`, fed by a bounded queue
+(`shellOutQueue`, 256 messages — one per keystroke, paste or resize, so ordinary
+use never approaches it). `enqueue` never blocks: a full queue means the guest
+has stopped reading its pty entirely, so the bytes were not going to arrive
+anyway, and they are dropped with a log line naming the group rather than paid
+for with the operator's UI. The single writer is also what makes the mutex
+unnecessary — grpc-go only forbids *concurrent* senders.
+
+A session with no queue (no writer goroutine) sends inline. That is the
+degenerate case of the same rule rather than an exception to it: with nothing to
+hand the message to, there is nothing to be blocked by.
+
+Test: `TestShellSendNeverBlocksOnAWedgedGuest` in `tui/shell_keys_test.go` wedges
+a stub stream inside `Send`, then fires three queues' worth of keystrokes plus a
+resize and asserts they all return — and that the queue stays bounded. Run under
+`-race` as well.

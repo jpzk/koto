@@ -22,7 +22,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,14 +64,50 @@ type shellSession struct {
 	// log line to one per session (see feed).
 	panics int
 
-	// sendMu serializes stream.Send calls: the Update goroutine sends
-	// keystrokes/resizes, while a separate goroutine (started in
-	// startShellAttach) drains term.Read() and sends those bytes too — see
-	// the reader goroutine's doc comment for why that second sender exists.
-	// grpc-go forbids concurrent Send calls on the same stream from
-	// different goroutines (only Send-concurrent-with-Recv is safe).
-	sendMu sync.Mutex
+	// out is the session's outbound queue, drained by ONE writer goroutine
+	// that owns stream.Send. Two senders exist — the Update goroutine
+	// (keystrokes, pastes, resizes) and the goroutine that drains term.Read()
+	// for the emulator's own protocol responses — and grpc-go forbids
+	// concurrent Send calls on the same side of a stream, so they used to
+	// share a mutex.
+	//
+	// A mutex was the wrong shape (audit M143). stream.Send BLOCKS when the
+	// chain below it stops draining: daemon → vsock → fc-agent → the guest's
+	// pty master. The guest controls both ends of that — it decides what the
+	// pty emits AND whether anything reads the pty's input — so it can emit
+	// terminal queries forever while reading nothing, wedge the drain
+	// goroutine inside Send, and leave the UPDATE goroutine blocked on the
+	// mutex behind it. That is the whole Bubble Tea event loop: no redraw, no
+	// ctrl+] to detach, no way out but killing the TUI. The same freeze the
+	// drain goroutine itself was introduced to fix, one layer further down.
+	//
+	// A queue with one writer means no sender ever waits on the transport.
+	// When it fills, the guest is not reading its pty at all and the bytes
+	// were going nowhere regardless, so they are dropped with a log line
+	// rather than paid for with the operator's UI.
+	out chan *pb.ShellInput
 }
+
+// shellWriter drains one session's queue, and is the only thing that calls
+// stream.Send. Returns when the stream ctx is cancelled — which close() does,
+// and which also unblocks a Send already in flight.
+func (s *shellSession) writer(ctx context.Context, stream pb.Koto_AttachShellClient) {
+	for {
+		select {
+		case msg := <-s.out:
+			if err := stream.Send(msg); err != nil {
+				return // the Recv goroutine reports the death
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// shellOutQueue is how many outbound messages may be in flight. One per
+// keystroke, paste or resize, so ordinary use never comes near it; reaching it
+// means the far end has stopped draining entirely.
+const shellOutQueue = 256
 
 // shellFrameMsg carries one AttachShell server frame (or the stream's
 // terminal error) into the Update loop. id ties it to the shellSession that
@@ -130,7 +165,12 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 		session: session,
 		cols:    cols,
 		rows:    rows,
+		out:     make(chan *pb.ShellInput, shellOutQueue),
 	}
+
+	// The one writer. Everything outbound goes through it, so nothing else
+	// ever touches stream.Send and nothing else can be blocked by it (M143).
+	go sess.writer(ctx, stream)
 
 	id := sess.id
 	go func() {
@@ -212,12 +252,30 @@ func startShellAttach(group, session string, cols, rows int) (*shellSession, err
 // can call this (Update() and the term.Read() drain loop) and grpc-go
 // forbids concurrent Send calls on the same stream.
 func (s *shellSession) send(b []byte) {
+	s.enqueue(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Data{Data: b}})
+}
+
+// enqueue hands one message to the writer goroutine, and NEVER blocks — that
+// is its whole contract (audit M143). A full queue means the guest has stopped
+// reading its pty, so the message was not going to arrive anyway; dropping it
+// costs nothing the operator had, whereas waiting costs them the event loop.
+func (s *shellSession) enqueue(msg *pb.ShellInput) {
 	if s.stream == nil {
-		return // test stubs build a shellSession with no live stream (see resize)
+		return // a session built with no live stream (see resize)
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	_ = s.stream.Send(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Data{Data: b}})
+	if s.out == nil {
+		// No queue means no writer goroutine, so there is nothing to hand the
+		// message to and nothing to be blocked by — send it here. The
+		// degenerate case of the same rule, not an exception to it.
+		_ = s.stream.Send(msg)
+		return
+	}
+	select {
+	case s.out <- msg:
+	default:
+		logWarn("shell", "[%s] outbound queue full (%d) — the guest is not draining its pty; dropping input",
+			s.group, shellOutQueue)
+	}
 }
 
 // feed parses one chunk of raw guest pty output into the local emulator —
@@ -283,9 +341,7 @@ func (s *shellSession) resize(cols, rows int) {
 	if s.stream == nil {
 		return // test stubs build a shellSession with no live stream
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	_ = s.stream.Send(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Resize{
+	s.enqueue(&pb.ShellInput{Group: s.group, Input: &pb.ShellInput_Resize{
 		Resize: &pb.ShellResize{Cols: uint32(cols), Rows: uint32(rows)},
 	}})
 }
