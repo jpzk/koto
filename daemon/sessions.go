@@ -118,6 +118,14 @@ func listSessions(g string) []string {
 // ordinary chat session — one the operator cannot type into. Today's ingress
 // paths refuse the reserved namespace before reaching here; this makes a
 // future one unable to leak it.
+// sessionRegMax bounds the registry. It is advisory UI state (see above), and
+// it is rewritten in full on every new name, copied into every group snapshot
+// and folded into the state hash — so an unbounded list is work on every tick,
+// not just bytes on disk, and the names come from whoever may Send (audit M54).
+// Past the cap a session still works; it is just not listed, which is the right
+// degradation for a list whose purpose is to populate a tree.
+const sessionRegMax = 256
+
 func registerSession(g, s string) {
 	if s == "" || isReservedSession(s) {
 		return
@@ -129,6 +137,10 @@ func registerSession(g, s string) {
 		if x == s {
 			return
 		}
+	}
+	if len(cur) >= sessionRegMax {
+		emitLogfG("session", g, "warn", "[%s] session registry is full (%d); %q will not be listed", g, sessionRegMax, s)
+		return
 	}
 	cur = append(cur, s)
 	sort.Strings(cur)
