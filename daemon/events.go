@@ -79,6 +79,27 @@ func drainSub(s *groupSub) {
 // aged out gets a synthetic `gap` event and refetches history instead.
 const eventRingMax = 1024
 
+// eventRingBytesMax bounds the same ring by SIZE, because a count is not a
+// bound on memory (audit M162). A single event's body is capped at 1 MiB
+// (blockBodyMax, logparse.go), so 1024 entries is up to a gigabyte per group —
+// and the guest chooses the sizes. At the sink's 1 MiB/s that is reachable in
+// about seventeen minutes of sustained maximum-size output, per group, retained
+// until 1024 more events push it out.
+//
+// 64 MiB is far above real traffic (a busy turn's frames are kilobytes) and far
+// below anything that threatens the daemon. Whichever bound bites first wins;
+// the eviction is the same one, from the oldest end, so a client that resumes
+// past it gets the `gap` it already knows how to handle.
+const eventRingBytesMax = 64 << 20
+
+// eventSize is what one ring entry costs, near enough: the free-text fields a
+// guest can grow. The fixed scalars and the struct header are noise beside a
+// body that may be a megabyte.
+func eventSize(ev *pb.Event) int {
+	return len(ev.Body) + len(ev.Text) + len(ev.Msg) + len(ev.Input) +
+		len(ev.Name) + len(ev.Title) + len(ev.Session)
+}
+
 var (
 	subsLock    sync.Mutex
 	subscribers = map[string][]*groupSub{}
@@ -97,6 +118,9 @@ var (
 	// ringPartial tracks the one live partial per (group, session) the
 	// ring holds, so recordEvent can evict it without scanning.
 	ringPartial = map[string]map[string]*pb.Event{}
+	// eventRingBytes carries each ring's free-text weight so the byte bound
+	// costs O(1) per event rather than a scan (audit M162).
+	eventRingBytes = map[string]int{}
 )
 
 // isPartial reports whether ev is a cumulative in-progress line — the
@@ -138,6 +162,7 @@ func recordEvent(g string, pbev *pb.Event) []*groupSub {
 		for i := len(ring) - 1; i >= 0; i-- {
 			if ring[i] == live {
 				ring = append(ring[:i], ring[i+1:]...)
+				eventRingBytes[g] -= eventSize(live) // the running total follows every removal
 				break
 			}
 		}
@@ -150,7 +175,24 @@ func recordEvent(g string, pbev *pb.Event) []*groupSub {
 		ringPartial[g][pbev.Session] = pbev
 	}
 	ring = append(ring, pbev)
-	if n := len(ring) - eventRingMax; n > 0 {
+	eventRingBytes[g] += eventSize(pbev)
+	// How many entries have to go: enough to satisfy BOTH bounds. The byte
+	// total is carried rather than re-summed, because this runs on every
+	// streamed partial — twenty a second per turn, ten turns per group.
+	n := len(ring) - eventRingMax
+	if n < 0 {
+		n = 0 // the count bound is not biting; start the byte scan at the oldest
+	}
+	// Never evict the entry just appended: an event larger than the whole
+	// budget still has to be delivered and replayable, and dropping it here
+	// would lose it silently rather than bound anything.
+	for bytes := eventRingBytes[g]; bytes > eventRingBytesMax && n < len(ring)-1; n++ {
+		bytes -= eventSize(ring[n])
+	}
+	if n > 0 {
+		for _, e := range ring[:n] {
+			eventRingBytes[g] -= eventSize(e)
+		}
 		ringFloor[g] = ring[n-1].Seq
 		// Reconcile ringPartial with the trim. The index is what keeps a
 		// session's live partial FINDABLE for supersession, and it holds a
@@ -211,6 +253,7 @@ func partialInPrefix(prefix []*pb.Event, live *pb.Event) bool {
 func clearEventRing(g string) {
 	subsLock.Lock()
 	delete(eventRing, g)
+	delete(eventRingBytes, g)
 	delete(ringPartial, g)
 	ringFloor[g] = eventSeq[g]
 	subsLock.Unlock()

@@ -3683,3 +3683,47 @@ checks both halves of the vocabulary, then drives the real grammar over a forged
 job output carrying all four markers plus a legitimate `[[tool]]`, asserting
 none of the forbidden events (and no forged attribution) survives while the real
 tool frame does.
+
+## M162 — Guest-controlled payloads, unbudgeted parsing and replay retention — FIXED (the parser half was already closed)
+
+`daemon/fcturn.go`, `daemon/events.go`.
+
+Three claims; one was already closed and two were real.
+
+**Already closed:** *"while thinking or tool-output blocks are open, the parser
+retains every line and later materializes the complete body"*. `logParser` has
+carried `blockBodyMax` (1 MiB, with `appendBounded` marking the cut) since an
+earlier finding in this audit; a block's body cannot exceed it.
+
+**Real, fixed:** *"Tool.Name and TurnFrame.Err are incorporated into marker lines
+without the truncation used for Tool.Input."* Both are guest-authored and both
+went into the marker line whole — and `strings.Fields` makes the name one token,
+so a whitespace-free megabyte *was* one token. `Name` is now capped at
+`fcMarkerMaxName` (256 — tool names are `Bash` and `WebFetch`; the bound exists
+so the field cannot be a payload) and `Err` at the same `fcMarkerMaxBody` as the
+tool input beside it.
+
+**Real, fixed:** *"parsed events are retained in each group's replay ring, which
+evicts only after 1024 entries."* A count is not a bound on memory: with each
+body capped at 1 MiB, 1024 entries is up to a **gigabyte per group**, and the
+guest chooses the sizes. At the sink's 1 MiB/s that is reachable in about
+seventeen minutes of sustained maximum-size output, retained until 1024 more
+events push it out.
+
+`eventRingBytesMax` (64 MiB) bounds the same ring by size — far above real
+traffic, far below anything that threatens the daemon. Whichever bound bites
+first wins, the eviction is the same one from the oldest end, and a client that
+resumes past it gets the `gap` it already handles. The total is **carried**
+rather than re-summed, because this runs on every streamed partial (twenty a
+second per turn, ten turns per group), and it follows every removal — including
+the mid-ring one where a partial is superseded, which would otherwise let the
+total climb forever under streaming and silently over-trim the ring.
+
+One deliberate exception: an event larger than the whole budget is still kept.
+Dropping it would lose it silently rather than bound anything, so it evicts its
+neighbours and stands alone.
+
+Test: `TestEventRingIsBoundedByBytesAndCount` in `daemon/audit_fixes_test.go`
+offers 200 MiB against the 64 MiB budget, asserts both bounds hold and that the
+byte bound is what bit; checks the carried total against a fresh sum both after
+plain appends and after partial supersession; and pins the oversized-event case.

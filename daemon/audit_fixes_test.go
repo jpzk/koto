@@ -6025,3 +6025,81 @@ func TestJobTailParsedVocabularyIsRestricted(t *testing.T) {
 		t.Errorf("the job's real tool frame was filtered out too: %+v", passed)
 	}
 }
+
+// 2026-09-11 M162: the replay ring evicted by COUNT alone, and a count is not a
+// bound on memory. One event's body is capped at 1 MiB (blockBodyMax), so 1024
+// entries is up to a gigabyte per group — and the guest chooses the sizes.
+func TestEventRingIsBoundedByBytesAndCount(t *testing.T) {
+	const g = "m162"
+	t.Cleanup(func() {
+		subsLock.Lock()
+		delete(eventRing, g)
+		delete(eventRingBytes, g)
+		delete(eventSeq, g)
+		delete(ringFloor, g)
+		delete(ringPartial, g)
+		subsLock.Unlock()
+	})
+
+	big := strings.Repeat("x", 1<<20) // one maximum-size body
+	for i := 0; i < 200; i++ {        // 200 MiB offered against a 64 MiB budget
+		recordEvent(g, &pb.Event{Event: "thinking_done", Body: big})
+	}
+	subsLock.Lock()
+	n, bytes := len(eventRing[g]), eventRingBytes[g]
+	subsLock.Unlock()
+	if bytes > eventRingBytesMax {
+		t.Errorf("ring holds %d bytes, budget is %d", bytes, eventRingBytesMax)
+	}
+	if n > eventRingMax {
+		t.Errorf("ring holds %d entries, cap is %d", n, eventRingMax)
+	}
+	// The count bound alone would have kept all 200.
+	if n >= 200 {
+		t.Errorf("the byte bound did not bite: %d entries held", n)
+	}
+
+	// The carried total must equal a fresh sum — a drift either over-trims the
+	// ring or stops trimming it.
+	subsLock.Lock()
+	sum := 0
+	for _, e := range eventRing[g] {
+		sum += eventSize(e)
+	}
+	drift := sum != eventRingBytes[g]
+	subsLock.Unlock()
+	if drift {
+		t.Errorf("carried byte total drifted from the real one (%d vs %d)", eventRingBytes[g], sum)
+	}
+
+	// Supersession removes from the MIDDLE of the ring; the total has to
+	// follow that too, or it climbs forever under streaming.
+	for i := 0; i < 50; i++ {
+		recordEvent(g, &pb.Event{Event: "stream", Session: "s", Text: strings.Repeat("y", 4096)})
+	}
+	subsLock.Lock()
+	sum = 0
+	for _, e := range eventRing[g] {
+		sum += eventSize(e)
+	}
+	drift = sum != eventRingBytes[g]
+	subsLock.Unlock()
+	if drift {
+		t.Errorf("the total drifted across partial supersession (%d vs %d)", eventRingBytes[g], sum)
+	}
+
+	// An event larger than the whole budget is still delivered and replayable:
+	// dropping it would lose it silently rather than bound anything.
+	huge := strings.Repeat("z", eventRingBytesMax+1<<20)
+	recordEvent(g, &pb.Event{Event: "thinking_done", Body: huge})
+	subsLock.Lock()
+	last := eventRing[g][len(eventRing[g])-1]
+	held := len(eventRing[g])
+	subsLock.Unlock()
+	if len(last.Body) != len(huge) {
+		t.Error("an oversized event was dropped from the ring instead of evicting its neighbours")
+	}
+	if held != 1 {
+		t.Errorf("the oversized event did not evict everything else: %d entries", held)
+	}
+}
