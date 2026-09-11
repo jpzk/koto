@@ -807,3 +807,20 @@ judge feedback, all agent-authored.
 a terminal status and exit through their normal path, then remove. It sits
 beside `delSchedsFor`, `disarmReport` and the event-ring drop, which close the
 same hazard for their own state. `TestDestroyDropsGoalRecords`.
+
+### M48 — Unbounded streamed transcript blocks permit daemon and TUI resource exhaustion (`daemon/logparse.go`) — **fixed**
+
+Real. Every other limit around the parser is per line, per frame, per rate or
+per file; none capped the BODY one open thinking or tool-output block
+accumulates. On close `strings.Join` materializes a second full-size copy, and
+that body then rides the event into the replay ring, History and the TUI — so
+an unterminated (or merely enormous) block grew the daemon's heap by the size
+of the guest's output, twice, per open block, with a copy retained downstream.
+
+`blockBodyMax` (1 MiB) bounds the retained body. Past the budget the block keeps
+STREAMING — the per-line `thinking` and `tool_result` events are unaffected, so
+the operator still watches it arrive — and only the accumulation stops, ending
+with an explicit `…[truncated]` marker so a clipped body is never mistaken for
+a complete one. The budget is released on every exit from a block: the close
+marker, and a `[[turn_end]]` arriving mid-block.
+`TestOpenBlockBodiesAreBounded`.

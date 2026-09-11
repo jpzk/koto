@@ -66,14 +66,48 @@ type logParser struct {
 	pendingTS   float64
 	inThinking  bool
 	thinkBody   []string
+	thinkBytes  int
 	inToolOut   bool
 	toolOutBody []string
+	toolBytes   int
 	// curSession attributes frames to the session of the current turn, set
 	// by the [[session]] marker sendNow writes before each turn ("" =
 	// default, which is also what everything before the first marker is).
 	// Sticky between markers: turns are serialized per group, so every line
 	// until the next marker belongs to this turn's session.
 	curSession string
+}
+
+// blockBodyMax bounds the BODY one open thinking or tool-output block may
+// accumulate before the parser stops keeping it.
+//
+// Every other limit here is per line, per frame or per file; none of them caps
+// one block's total (audit M48). The block closes into a `Body` that
+// strings.Join materializes a second time, and that body then rides the event
+// into the replay ring, History and the TUI — so an unterminated (or merely
+// enormous) block grew the daemon's heap by the size of the guest's output,
+// twice, per open block, with a copy retained downstream.
+//
+// Past the budget the block keeps STREAMING — the per-line `thinking` and
+// `tool_result` events are unaffected, so the operator still watches it arrive
+// — and only the retained body stops growing, ending with an explicit marker
+// so a truncated body is never mistaken for a complete one. 1 MiB is far above
+// any real thinking block or tool result; the `[[tool_out_end]] N` count
+// already tells the client the true size.
+const blockBodyMax = 1 << 20
+
+// appendBounded adds line to a block body until the budget is spent, returning
+// the new byte count. At the moment it is exceeded it appends one truncation
+// marker and nothing after.
+func appendBounded(body []string, n int, line string) ([]string, int) {
+	switch {
+	case n > blockBodyMax:
+		return body, n // already truncated; the marker is in place
+	case n+len(line)+1 > blockBodyMax:
+		return append(body, "…[truncated]"), blockBodyMax + 1
+	default:
+		return append(body, line), n + len(line) + 1
+	}
 }
 
 // feedLine consumes one complete log line (no trailing newline) and returns
@@ -125,10 +159,10 @@ func (p *logParser) feedLine(line string) []Event {
 		out := []Event{}
 		if p.inThinking {
 			out = append(out, ev(Event{Event: "thinking_done", Body: strings.Join(p.thinkBody, "\n")}))
-			p.inThinking, p.thinkBody = false, nil
+			p.inThinking, p.thinkBody, p.thinkBytes = false, nil, 0
 		} else if p.inToolOut {
 			out = append(out, ev(Event{Event: "tool_result_done", Body: strings.Join(p.toolOutBody, "\n")}))
-			p.inToolOut, p.toolOutBody = false, nil
+			p.inToolOut, p.toolOutBody, p.toolBytes = false, nil, 0
 		}
 		return append(out, ev(Event{Event: "turn_end"}))
 	}
@@ -136,11 +170,11 @@ func (p *logParser) feedLine(line string) []Event {
 		if strings.HasPrefix(line, "[[think_end]] ") {
 			words, _ := strconv.Atoi(strings.TrimSpace(line[len("[[think_end]] "):]))
 			body := strings.Join(p.thinkBody, "\n")
-			p.inThinking, p.thinkBody = false, nil
+			p.inThinking, p.thinkBody, p.thinkBytes = false, nil, 0
 			return []Event{ev(Event{Event: "thinking_done", Words: words, Body: body})}
 		}
 		if line != "" {
-			p.thinkBody = append(p.thinkBody, line)
+			p.thinkBody, p.thinkBytes = appendBounded(p.thinkBody, p.thinkBytes, line)
 			return []Event{ev(Event{Event: "thinking", Text: line})}
 		}
 		return nil
@@ -148,20 +182,20 @@ func (p *logParser) feedLine(line string) []Event {
 	if p.inToolOut {
 		if strings.HasPrefix(line, "[[tool_out_end]] ") {
 			body := strings.Join(p.toolOutBody, "\n")
-			p.inToolOut, p.toolOutBody = false, nil
+			p.inToolOut, p.toolOutBody, p.toolBytes = false, nil, 0
 			return []Event{ev(Event{Event: "tool_result_done", Body: body})}
 		}
-		p.toolOutBody = append(p.toolOutBody, line)
+		p.toolOutBody, p.toolBytes = appendBounded(p.toolOutBody, p.toolBytes, line)
 		return []Event{ev(Event{Event: "tool_result", Text: line})}
 	}
 	switch {
 	case line == "[[think_begin]]":
 		p.inThinking = true
-		p.thinkBody = nil
+		p.thinkBody, p.thinkBytes = nil, 0
 		return []Event{ev(Event{Event: "thinking_begin"})}
 	case line == "[[tool_out_begin]]":
 		p.inToolOut = true
-		p.toolOutBody = nil
+		p.toolOutBody, p.toolBytes = nil, 0
 		return []Event{ev(Event{Event: "tool_result_begin"})}
 	case strings.HasPrefix(line, ">>> "):
 		return []Event{ev(Event{Event: "prompt", Msg: line[4:]})}
