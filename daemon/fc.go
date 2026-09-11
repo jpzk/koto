@@ -65,6 +65,8 @@ import (
 	"time"
 
 	"koto-protocol/pb"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -575,7 +577,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		return fail(err)
 	}
 	vm.listeners = append(vm.listeners, lnProxy)
-	go fcAcceptLoop(lnProxy, func(c net.Conn) { fcSpliceToProxy(c, proxyPort) })
+	go fcAcceptLoop(g, lnProxy, func(c net.Conn) { fcSpliceToProxy(c, proxyPort) })
 
 	// No 9001 listener any more: the guest has no raw-text path into a host
 	// file. Every turn's output arrives as TurnFrames on 9004.
@@ -584,14 +586,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		return fail(err)
 	}
 	vm.listeners = append(vm.listeners, lnTurn)
-	go fcAcceptLoop(lnTurn, func(c net.Conn) { fcTurnSink(g, c) })
+	go fcAcceptLoop(g, lnTurn, func(c net.Conn) { fcTurnSink(g, c) })
 
 	lnCtl, err := listenUnix(fmt.Sprintf("%s_%d", base, fcPortCtl))
 	if err != nil {
 		return fail(err)
 	}
 	vm.listeners = append(vm.listeners, lnCtl)
-	go fcAcceptLoop(lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
+	go fcAcceptLoop(g, lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
 
 	// network=wan|lan|full: attach the L3 gVisor gateway. The guest's fc-agent
 	// dials vsock 9003 once net="l3" is delivered at init; each accepted
@@ -612,7 +614,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		vm.listeners = append(vm.listeners, lnNet)
 		ctx, cancel := context.WithCancel(context.Background())
 		vm.netCancel = cancel
-		go fcAcceptLoop(lnNet, func(c net.Conn) {
+		go fcAcceptLoop(g, lnNet, func(c net.Conn) {
 			if err := fcNetServe(ctx, vn, c, g, netPol); err != nil && ctx.Err() == nil {
 				emitLogfG("fc", g, "warn", "[%s] l3 gateway conn: %v", g, err)
 			}
@@ -786,7 +788,11 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		}
 		vm.listeners = append(vm.listeners, ln)
 		guestPort := p
-		go fcAcceptLoop(ln, func(c net.Conn) {
+		// Its own bucket: these connections arrive from the HOST side (a
+		// client of the published port), not from the guest, so charging them
+		// to the guest's cap would let an outside caller starve the group's
+		// own ctl and turn channels.
+		go fcAcceptLoop(g+"\x00ports", ln, func(c net.Conn) {
 			gc, err := fcHostDial(g, uint32(guestPort), 5*time.Second)
 			if err != nil {
 				c.Close()
@@ -885,13 +891,69 @@ func listenUnix(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
 
-func fcAcceptLoop(ln net.Listener, handle func(net.Conn)) {
+// fcMaxConnsPerGroup bounds how many guest→host vsock connections one group
+// may hold open at once, across all of its listeners.
+//
+// Every accepted connection used to get an untracked goroutine and, on the
+// framed channels, a reader that allocates whatever length the peer declares
+// (up to 16 MiB on 9004) and then blocks in ReadFull with no deadline — so a
+// guest could open connections in a loop, declare a large frame on each, send
+// nothing, and pin host goroutines, file descriptors and heap indefinitely.
+// Since every one of those costs is per CONNECTION, capping connections caps
+// all of them at once, which is why there is no separate frame-memory budget
+// here (audit M22, M27).
+//
+// The number is an exhaustion backstop, not a scheduler: a group's real
+// traffic is one proxy connection per upstream request, one ctl connection,
+// one gateway link and up to groupSlots (10) turn streams. 64 leaves a wide
+// margin over the busiest legitimate moment while keeping the worst case small
+// and per-group, so one guest cannot starve another.
+const fcMaxConnsPerGroup = 64
+
+var (
+	fcConnMu    sync.Mutex
+	fcConnCount = map[string]int{}
+)
+
+func fcConnAdmit(g string) bool {
+	fcConnMu.Lock()
+	defer fcConnMu.Unlock()
+	if fcConnCount[g] >= fcMaxConnsPerGroup {
+		return false
+	}
+	fcConnCount[g]++
+	return true
+}
+
+func fcConnRelease(g string) {
+	fcConnMu.Lock()
+	defer fcConnMu.Unlock()
+	if n := fcConnCount[g] - 1; n > 0 {
+		fcConnCount[g] = n
+	} else {
+		delete(fcConnCount, g)
+	}
+}
+
+func fcAcceptLoop(g string, ln net.Listener, handle func(net.Conn)) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return // listener closed by fcStop
 		}
-		go handle(c)
+		if !fcConnAdmit(g) {
+			// TTL-deduped like the flow log: a guest can loop on this, and an
+			// error line per attempt would banner the operator forever.
+			if llmFlowSeen.allow("vsockconns|" + g) {
+				emitLogfG("fc", g, "warn", "[%s] refusing guest vsock connection: %d already open (per-group cap)", g, fcMaxConnsPerGroup)
+			}
+			c.Close()
+			continue
+		}
+		go func() {
+			defer fcConnRelease(g)
+			handle(c)
+		}()
 	}
 }
 
@@ -981,12 +1043,43 @@ func logSinkAppend(p string, b []byte) error {
 // fcCtlConn serves the guest's ctl plane: JSON lines in, JSON lines out on
 // the same connection. Reuses ctlDispatch verbatim — authorization by group
 // identity is identical to the FIFO path.
+// fcFrameBodyWait bounds the gap between a frame's LENGTH and its payload.
+//
+// The header is waited on with no deadline, deliberately: both guest→host
+// framed channels are long-lived and legitimately idle between frames — the
+// ctl connection for the VM's lifetime, a turn stream for as long as the model
+// thinks — so an idle timeout there would kill working connections. Once a
+// header has been read the payload is already allocated (up to 16 MiB on
+// 9004), and no honest peer pauses mid-frame: the writer emits header and body
+// in ONE write. So the deadline starts exactly where the peer's obligation
+// does, and "declare a large frame, then stall" costs a minute instead of the
+// VM's lifetime (audit M22, M27).
+const fcFrameBodyWait = 60 * time.Second
+
+// fcFrameBodyWaitForTest lets the test shorten that wait; production reads it
+// as fcFrameBodyWait.
+var fcFrameBodyWaitForTest = fcFrameBodyWait
+
+// fcReadFrameBounded is fcReadFrame with that deadline. Peek, don't read: the
+// four header bytes stay in the bufio buffer for fcReadFrame to consume, so
+// the shared framing code (byte-identical to the guest's, fcframe.go) needs no
+// daemon-only variant.
+func fcReadFrameBounded(br *bufio.Reader, c net.Conn, max uint32, m proto.Message) error {
+	if _, err := br.Peek(4); err != nil {
+		return err
+	}
+	if err := c.SetReadDeadline(time.Now().Add(fcFrameBodyWaitForTest)); err == nil {
+		defer c.SetReadDeadline(time.Time{})
+	}
+	return fcReadFrame(br, max, m)
+}
+
 func fcCtlConn(g string, c net.Conn) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	for {
 		req := &pb.CtlRequest{}
-		if err := fcReadFrame(br, fcFrameMaxCtl, req); err != nil {
+		if err := fcReadFrameBounded(br, c, fcFrameMaxCtl, req); err != nil {
 			if err != io.EOF {
 				emitLogfG("ctl", g, "warn", "[%s] ctl frame: %v", g, err)
 			}
