@@ -47,6 +47,23 @@ MAX=${CS_MAX_JOBS:-8}
 PEEK_MAX=${CS_PEEK_MAX:-8000}
 mkdir -p "$JOBS"
 
+# Job ids are minted as bare alphanumerics (mktemp -u style, see `run`), but
+# every id-taking verb took $1 verbatim and pasted it into "$JOBS/$id". Shell
+# quoting stops metacharacters; it does not stop "..", so `cs-job rm ../..`
+# was an rm -rf of /workspace. The agent owns that directory anyway — this is
+# containment of a typo and of a model repeating a malformed id back at
+# itself, not of an adversary — but no verb here has any business resolving
+# outside $JOBS.
+# Called as a STATEMENT, never inside $(...): a command substitution runs in a
+# subshell, so an `exit` there only ends the subshell and the caller would go
+# on with an empty id — i.e. "$JOBS/" — which for `rm` is worse than the
+# traversal being fixed.
+chkid() {
+  case "${1:-}" in
+    ''|.|..|*[!A-Za-z0-9]*) echo "cs-job: invalid job id: ${1:-}" >&2; exit 2 ;;
+  esac
+}
+
 jstatus() { cat "$JOBS/$1/status" 2>/dev/null || echo unknown; }
 count_running() { c=0; for d in "$JOBS"/*/; do [ "$(cat "$d/status" 2>/dev/null)" = running ] && c=$((c+1)); done; echo "$c"; }
 
@@ -102,7 +119,7 @@ case "$cmd" in
     # daemon's old on-host trim; the full output stays readable via cs-job logs.
     # Bounded by timeout so a down ctl reader (daemon stopped) can't hang the
     # detached job — best-effort; the result is still on disk regardless.
-    id=${1:?}; D=$JOBS/$id
+    id=${1:?}; chkid "$id"; D=$JOBS/$id
     rc=$(cat "$D/rc" 2>/dev/null || echo '?')
     sess=$(cat "$D/session" 2>/dev/null || echo '')
     # The value lands inside a JSON string; anything outside the session
@@ -136,7 +153,7 @@ case "$cmd" in
     done
     ;;
   wait)
-    id=${1:?cs-job wait <id> [secs]}; budget=${2:-600}
+    id=${1:?cs-job wait <id> [secs]}; chkid "$id"; budget=${2:-600}
     [ -d "$JOBS/$id" ] || { echo "cs-job: no such job $id" >&2; exit 2; }
     # The caller is consuming the result in-turn — cancel the completion
     # callback so the daemon doesn't ALSO wake the session with a result it
@@ -169,7 +186,7 @@ case "$cmd" in
         *) break ;;
       esac
     done
-    id=${1:?cs-job peek [-n LINES|-new] <id>}; D=$JOBS/$id
+    id=${1:?cs-job peek [-n LINES|-new] <id>}; chkid "$id"; D=$JOBS/$id
     [ -d "$D" ] || { echo "cs-job: no such job $id" >&2; exit 2; }
     # 2>/dev/null BEFORE the input redirect: redirections apply left to right,
     # so this is what silences the shell's own error on a job whose `out` does
@@ -197,9 +214,9 @@ case "$cmd" in
       tail -n "$lines" "$D/out" 2>/dev/null | tail -c "$PEEK_MAX" || true
     fi
     ;;
-  status)  jstatus "${1:?cs-job status <id>}" ;;
-  logs)    cat "$JOBS/${1:?cs-job logs <id>}/out" 2>/dev/null || { echo "cs-job: no output for $1" >&2; exit 2; } ;;
-  rm)      rm -rf "$JOBS/${1:?cs-job rm <id>}"; echo removed ;;
+  status)  chkid "${1:?cs-job status <id>}"; jstatus "$1" ;;
+  logs)    chkid "${1:?cs-job logs <id>}"; cat "$JOBS/$1/out" 2>/dev/null || { echo "cs-job: no output for $1" >&2; exit 2; } ;;
+  rm)      chkid "${1:?cs-job rm <id>}"; rm -rf "$JOBS/$1"; echo removed ;;
   clean)
     n=0
     for d in "$JOBS"/*/; do
