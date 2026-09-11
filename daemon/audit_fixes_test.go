@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -946,5 +947,174 @@ func mainPeerGoalPlanFirst(t *testing.T) {
 	}
 	if gr.Item.Status != goalStatusRunning {
 		t.Fatalf("self-set goal with plan=false started as %q, want %q", gr.Item.Status, goalStatusRunning)
+	}
+}
+
+// 2026-09-11 M18: List and WatchState are verb-only in the ACL, so the
+// handler used to serialize the whole fleet — every group, and every group's
+// job records (command text, session, rc, timings) — to a role confined to one
+// group by its other grants. They now project through the caller's own grant.
+func TestAggregateViewsProjectByGrant(t *testing.T) {
+	gs := map[string]GroupInfo{
+		"main": {Port: 1, Jobs: []JobInfo{{ID: "j1", Cmd: "secret-main-cmd"}}},
+		"dev":  {Port: 2, Jobs: []JobInfo{{ID: "j2", Cmd: "secret-dev-cmd"}}},
+		"ops":  {Port: 3},
+	}
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere })
+	if err := os.MkdirAll(filepath.Join(HERE, "creds"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withACL := func(t *testing.T, doc string) {
+		t.Helper()
+		if err := os.WriteFile(credFile("acl.json"), []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctxFor := func(roles ...string) context.Context {
+		return withIdentity(context.Background(), clientIdentity{Name: "probe", Roles: roles})
+	}
+
+	// A role scoped to main sees main alone.
+	withACL(t, `{"scoped":{"list":["main"],"watch_state":["main"],"jobs":["main"]}}`)
+	got := projectGroups(ctxFor("scoped"), "list", gs)
+	if len(got) != 1 || got["main"].Port != 1 {
+		t.Fatalf("scoped role saw %v, want only main", keysOf(got))
+	}
+	if len(got["main"].Jobs) != 1 {
+		t.Fatal("scoped role lost the jobs it is granted")
+	}
+
+	// Seeing a group and reading the commands running in it are different
+	// asks: no `jobs` grant means no job records, group still visible.
+	withACL(t, `{"nojobs":{"list":"*","watch_state":"*"}}`)
+	got = projectGroups(ctxFor("nojobs"), "list", gs)
+	if len(got) != 3 {
+		t.Fatalf("list:* saw %v, want all three", keysOf(got))
+	}
+	for g, gi := range got {
+		if len(gi.Jobs) != 0 {
+			t.Fatalf("%s: job records leaked to a role with no jobs grant: %+v", g, gi.Jobs)
+		}
+	}
+
+	// A "*" grant is unchanged — every seeded role writes one.
+	withACL(t, `{"wide":{"*":"*"}}`)
+	if got = projectGroups(ctxFor("wide"), "list", gs); len(got) != 3 || len(got["main"].Jobs) != 1 {
+		t.Fatalf("wildcard role was narrowed: %v", keysOf(got))
+	}
+	// Admin is hardcoded and never narrowed by the file.
+	if got = projectGroups(ctxFor(defaultRole), "list", gs); len(got) != 3 || len(got["main"].Jobs) != 1 {
+		t.Fatalf("admin was narrowed: %v", keysOf(got))
+	}
+	// A role granted neither verb sees nothing (the interceptor would have
+	// refused the call first; the projection must not be the only gate).
+	withACL(t, `{"none":{"send":["main"]}}`)
+	if got = projectGroups(ctxFor("none"), "list", gs); len(got) != 0 {
+		t.Fatalf("role with no list grant saw %v", keysOf(got))
+	}
+	// No interceptor ran (an in-process caller): nothing to project.
+	if got = projectGroups(context.Background(), "list", gs); len(got) != 3 {
+		t.Fatalf("unauthenticated in-process caller was narrowed: %v", keysOf(got))
+	}
+}
+
+func keysOf(m map[string]GroupInfo) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// 2026-09-11 M19: a background tailer outlives the turn that spawned it (that
+// is the point), so by the time a line lands the slot's stream may belong to
+// another conversation. The record carries its own session rather than
+// inheriting the parser's sticky one.
+func TestBackgroundRecordsCarryTheirSession(t *testing.T) {
+	var lp logParser
+	feed := func(line string) []Event { return lp.feedLine(line) }
+	feed("[[session]] work")
+	evs := feed("[[bg]] abc123:work building...")
+	if len(evs) != 1 || evs[0].Event != "bg" || evs[0].Name != "abc123" ||
+		evs[0].Session != "work" || evs[0].Text != "building..." {
+		t.Fatalf("bg record parsed as %+v", evs)
+	}
+	// The slot is reused by another conversation; a late record from the old
+	// task must NOT follow the stream.
+	feed("[[session]] -")
+	evs = feed("[[bg]] abc123:work still building...")
+	if len(evs) != 1 || evs[0].Session != "work" {
+		t.Fatalf("late record attributed to %q, want %q", evs[0].Session, "work")
+	}
+	// A task started in the default session says so explicitly.
+	feed("[[session]] other")
+	evs = feed("[[bg]] def456: done")
+	if len(evs) != 1 || evs[0].Name != "def456" || evs[0].Session != "" {
+		t.Fatalf("default-session record parsed as %+v", evs[0])
+	}
+	// Legacy transcripts have no colon and keep the sticky behavior.
+	evs = feed("[[bg]] old789 legacy line")
+	if len(evs) != 1 || evs[0].Name != "old789" || evs[0].Session != "other" {
+		t.Fatalf("legacy record parsed as %+v", evs[0])
+	}
+}
+
+// 2026-09-11 M15: proxyMaxBody bounds one body and the semaphores bound how
+// many; their PRODUCT is ~8 GiB of live heap in the process that also holds
+// the credentials and the control plane. The budget is charged as the body is
+// read, and returned when the body stops being referenced.
+func TestProxyBodyBudgetBounded(t *testing.T) {
+	if n := proxyBodyCharged.Load(); n != 0 {
+		t.Fatalf("budget starts at %d, not 0", n)
+	}
+	t.Cleanup(func() { proxyBodyCharged.Store(0) })
+
+	read := func(size int) (int, func()) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(make([]byte, size)))
+		rec := httptest.NewRecorder()
+		body, rel, ok := readRequestBody(rec, req, "tg")
+		if !ok {
+			return rec.Code, func() {}
+		}
+		return len(body), rel
+	}
+
+	// An ordinary body is admitted and charged, then refunded.
+	n, rel := read(1024)
+	if n != 1024 {
+		t.Fatalf("read %d bytes, want 1024", n)
+	}
+	if got := proxyBodyCharged.Load(); got != 1024 {
+		t.Fatalf("charged %d, want 1024", got)
+	}
+	rel()
+	if got := proxyBodyCharged.Load(); got != 0 {
+		t.Fatalf("after release charged %d, want 0", got)
+	}
+
+	// With the budget already spoken for, the next request is refused with a
+	// 503 — the same "come back" the slot wait answers with, not a 5xx from
+	// an OOM that took the fleet's control plane with it.
+	proxyBodyCharged.Store(proxyBodyBudget)
+	code, _ := read(1024)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("over budget: got %d, want 503", code)
+	}
+	// The refused read charges nothing net.
+	if got := proxyBodyCharged.Load(); got != proxyBodyBudget {
+		t.Fatalf("refused read leaked %d bytes of budget", got-proxyBodyBudget)
+	}
+	proxyBodyCharged.Store(0)
+
+	// The per-request cap still applies and still reads as 413, not 503.
+	code, _ = read(proxyMaxBody + 1)
+	if code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body: got %d, want 413", code)
+	}
+	if got := proxyBodyCharged.Load(); got != 0 {
+		t.Fatalf("rejected oversize body left %d charged", got)
 	}
 }

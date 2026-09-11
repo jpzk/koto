@@ -278,3 +278,61 @@ gate exists to involve — so `plan=false` there is that human approving up
 front, not a bypass. A gate that the person it defers to cannot also skip is
 not a gate, it is an obstacle.
 `TestMainPeerGoalsAreAlwaysPlanFirst`.
+
+### M15 — Proxy concurrency limits do not impose an aggregate request-body memory budget (`daemon/proxy.go`) — **fixed**
+
+The previous audit bounded one body (`proxyMaxBody`, 64 MiB) and how many
+(32 per group / 128 global). Their PRODUCT is the number that matters: ~8 GiB
+of live heap in the process that also holds the OAuth token, every group's log
+tailer and the whole control plane — and the bodies stay live across up to 7
+retry attempts, with `injectThinkingDisplay` unmarshalling one on top. No
+exploit is needed, only large valid-looking requests in parallel, which
+`cs-subagent` already fans out.
+
+`proxyBodyBudget` (512 MiB) is charged as the body is READ — not guessed from
+`Content-Length`, which the guest sets and a chunked request omits — and
+returned when the body stops being referenced. Over budget answers 503, the
+same "come back" the slot wait already answers with. Both providers go through
+one `readRequestBody`; the Venice path buffers and retries identically and had
+the identical hole. Deliberately far above real traffic (a turn's body is
+kilobytes; 512 MiB still admits sixteen simultaneous maximum-size ones): an OOM
+backstop like the semaphores beside it, never a scheduler.
+`TestProxyBodyBudgetBounded`.
+
+### M18 — List and WatchState bypass group ACLs and disclose unauthorized job metadata (`daemon/grpc_server.go`) — **fixed**
+
+`list` and `watch_state` are verb-only in the ACL, so the interceptor
+authorized the CALL and the handler then serialized the whole fleet — every
+group, and with it every group's job records: command text, session, rc,
+timings, output size. A role confined to one group by `"send": ["main"]` still
+enumerated and continuously watched everything.
+
+Rather than invent a second grammar, these two verbs now PROJECT through their
+own grant's target set — something `acl.json` could already express and which
+every seeded role writes as `"*"`, so a broad grant behaves exactly as before
+and `"list": ["main"]` finally means what it reads as. Jobs are narrowed a
+second time by the `jobs` grant: seeing that a group exists and reading the
+command lines running inside it are different asks.
+
+Mechanically this needed the caller in the handler, so the interceptors now put
+the identity in the context (`withIdentity`; `idStream` does the same for
+streaming handlers, which grpc-go gives no hook for). `WatchState` keeps the
+shared-frame fast path for unnarrowed watchers and gives a narrowed one its own
+frame and its own hash — its view changes on a different schedule.
+`TestAggregateViewsProjectByGrant`.
+
+### M19 — Stale background tailer writes into a reused slot and misattributes output to a new session (`daemon/send.go`) — **fixed**
+
+Real. `tailBackgroundTask` runs for up to ten minutes and the turn that spawned
+it usually ends first — that is the feature, the operator watches the output
+accumulate — after which the slot is released and a LATER turn, possibly
+another conversation, writes its own session marker into the same stream. The
+`[[bg]]` record carried no session, and the parser's attribution is sticky, so
+the late line landed in whichever conversation owned the stream by then.
+
+Fixed by writing the session INTO the record: `[[bg]] <id>:<session> <text>`.
+Explicit beats sticky here, and it needs no slot-generation bookkeeping —
+the tailer is *supposed* to outlive its turn, so cancelling it at turn end (the
+other obvious fix) would have removed the feature. Legacy transcripts have no
+colon and keep the old behavior, so replayed history still parses.
+`TestBackgroundRecordsCarryTheirSession`.

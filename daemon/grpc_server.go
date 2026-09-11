@@ -301,12 +301,45 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *kotoServer) List(_ context.Context, _ *pb.ListReq) (*pb.ListResp, error) {
+func (s *kotoServer) List(ctx context.Context, _ *pb.ListReq) (*pb.ListResp, error) {
 	groups := map[string]*pb.GroupInfo{}
-	for g, gi := range listGroups() {
+	for g, gi := range projectGroups(ctx, "list", listGroups()) {
 		groups[g] = toPBGroupInfo(gi)
 	}
 	return &pb.ListResp{Ok: true, Groups: groups}, nil
+}
+
+// projectGroups narrows an aggregate snapshot to what the caller may see.
+// `list` and `watch_state` are verb-only in the ACL, so the interceptor
+// authorized the CALL and the handler then serialized the whole fleet — a role
+// confined to one group by its other grants still enumerated every group, and
+// with it every group's job records: command text, session, rc, timings,
+// output size. The projection uses the caller's own grant for this verb
+// (visibleTargets), which acl.json could always express and which every seeded
+// role writes as "*", so a broad grant is unchanged.
+//
+// Jobs are narrowed a second time, by the `jobs` grant: seeing that a group
+// exists and reading the command lines running inside it are different asks,
+// and `jobs` is the verb that says the latter.
+func projectGroups(ctx context.Context, verb string, gs map[string]GroupInfo) map[string]GroupInfo {
+	id := identityOf(ctx)
+	if id.Name == "" {
+		return gs // no interceptor ran (in-process caller); nothing to project
+	}
+	acl := loadACL()
+	vis := visibleTargets(acl, id.Roles, verb)
+	jobsVis := visibleTargets(acl, id.Roles, "jobs")
+	out := make(map[string]GroupInfo, len(gs))
+	for g, gi := range gs {
+		if !vis.covers(g) {
+			continue
+		}
+		if len(gi.Jobs) > 0 && !jobsVis.covers(g) {
+			gi.Jobs = nil
+		}
+		out[g] = gi
+	}
+	return out
 }
 
 func (s *kotoServer) Stop(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
@@ -1005,7 +1038,24 @@ func (s *kotoServer) WatchState(_ *pb.WatchReq, stream pb.Koto_WatchStateServer)
 	// this compute and the registration is not lost — lastSent still holds
 	// the pre-change hash, so the next tick pushes the newer frame.
 	gs := listGroups()
-	sub := &stateSub{ch: make(chan *pb.StateFrame, 4), lastSent: stateHash(gs)}
+	// Same projection List applies, per watcher: the broadcaster shares one
+	// frame across watchers, so a narrowed one must carry its own filter (and
+	// its own hash — its view changes on a different schedule).
+	ctxID := stream.Context()
+	var project func(map[string]GroupInfo) map[string]GroupInfo
+	if id := identityOf(ctxID); id.Name != "" {
+		acl := loadACL()
+		if vis := visibleTargets(acl, id.Roles, "watch_state"); !vis.any ||
+			!visibleTargets(acl, id.Roles, "jobs").any {
+			project = func(in map[string]GroupInfo) map[string]GroupInfo {
+				return projectGroups(ctxID, "watch_state", in)
+			}
+		}
+	}
+	if project != nil {
+		gs = project(gs)
+	}
+	sub := &stateSub{ch: make(chan *pb.StateFrame, 4), lastSent: stateHash(gs), project: project}
 	stateSubsLock.Lock()
 	stateSubs = append(stateSubs, sub)
 	stateSubsLock.Unlock()

@@ -363,7 +363,7 @@ func tailFile(g, p string, isGroup bool) {
 					if m := bgTaskRE.FindStringSubmatch(ev.Text); m != nil {
 						// Into the same stream as the turn that spawned it, so
 						// the [[bg]] lines stay in that conversation.
-						go tailBackgroundTask(g, p, m[1], m[2])
+						go tailBackgroundTask(g, p, lp.curSession, m[1], m[2])
 					}
 				}
 				emit(g, ev)

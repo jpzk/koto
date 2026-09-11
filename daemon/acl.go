@@ -476,6 +476,37 @@ func rolesAllowed(acl aclTable, roles []string, verb, target string, targeted bo
 	return false
 }
 
+// visibleTargets is the UNION of the target sets some role grants for verb —
+// the caller's view, as opposed to rolesAllowed's yes/no on one target.
+//
+// It exists because `list` and `watch_state` are verb-only: the interceptor
+// checks the verb and the handler then serialized every group on the host,
+// job records included (command text, session, rc, timings). A role confined
+// to one group by `"send": ["main"]` still enumerated and continuously watched
+// the whole fleet. Rather than invent a second grammar, these two verbs now
+// PROJECT through their own grant's target set, which acl.json could already
+// express and which the seeded roles already write as "*" — so a `"list": "*"`
+// grant behaves exactly as before, and `"list": ["main"]` finally means what
+// it reads as.
+func visibleTargets(acl aclTable, roles []string, verb string) targetSet {
+	out := targetSet{names: map[string]bool{}}
+	for _, r := range roles {
+		ts, ok := grantFor(acl, r, verb)
+		if !ok {
+			continue
+		}
+		if ts.any {
+			return targetSet{any: true}
+		}
+		for n := range ts.names {
+			out.names[n] = true
+		}
+	}
+	return out
+}
+
+func (ts targetSet) covers(name string) bool { return ts.any || ts.names[name] }
+
 // anyGrant reports whether any of the user's roles grants the verb in any
 // form (used as the streaming pre-gate, before the target is known).
 func anyGrant(acl aclTable, roles []string, verb string) bool {
