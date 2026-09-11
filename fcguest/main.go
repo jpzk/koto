@@ -186,7 +186,30 @@ func mountWorkspace() error {
 // host-side). A stale regular `log` file — e.g. a workspace image migrated
 // from the podman runtime — is replaced.
 func setupCS() {
+	// .cs must be a real directory under /workspace, not whatever the worker
+	// left in its place.
+	//
+	// /workspace is worker-owned and PERSISTS across boots, so uid 1000 can
+	// remove .cs and drop a symlink there before the next one. Every call
+	// below then operates on a pathname that resolves wherever that link
+	// points, as PID 1: MkdirAll, Chown, Mkfifo and OpenFile would chown a
+	// directory of the worker's choosing to the worker, and create or replace
+	// `ctl` and `ctl.out` inside it (audit M118). /run is the obvious target —
+	// it is a tmpfs the agent set up, and handing it to uid 1000 is a
+	// guest-local escalation from worker to what PID 1 controls.
+	//
+	// The rootfs being read-only bounds this (nothing under / can be changed)
+	// and KVM bounds it further — but "no path to root" is what root=no
+	// promises inside the guest, and this was one.
+	if fi, err := os.Lstat(csDir); err == nil && !fi.IsDir() {
+		logf("%s is not a directory (mode %s) — replacing it", csDir, fi.Mode().Type())
+		_ = os.Remove(csDir)
+	}
 	_ = os.MkdirAll(csDir, 0o755)
+	if fi, err := os.Lstat(csDir); err != nil || !fi.IsDir() {
+		logf("FATAL %s could not be established as a directory: %v", csDir, err)
+		return
+	}
 	_ = os.Chown(csDir, workerUID, workerGID)
 	// Only the ctl FIFO remains: turns are delivered over the agent RPC and
 	// their output leaves as TurnFrames (turn.go); no in/log FIFOs.
@@ -203,8 +226,17 @@ func setupCS() {
 		_ = os.Chown(p, workerUID, workerGID)
 	}
 	out := filepath.Join(csDir, "ctl.out")
-	if f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+	if f, err := openCtlOut(out, os.O_CREATE|os.O_WRONLY); err == nil {
 		f.Close()
+	} else {
+		// Not a regular file (the worker left a FIFO or a symlink) — replace
+		// it, then try once more. A FIFO here is the interesting case: see
+		// openCtlOut.
+		logf("ctl.out unusable (%v) — replacing it", err)
+		_ = os.Remove(out)
+		if f, err := openCtlOut(out, os.O_CREATE|os.O_WRONLY); err == nil {
+			f.Close()
+		}
 	}
 	_ = os.Chown(out, workerUID, workerGID)
 	_ = os.MkdirAll(filepath.Join(wsDir, "memory"), 0o755)
@@ -470,12 +502,46 @@ var ctlOutMu sync.Mutex
 func appendCtlOut(line []byte) {
 	ctlOutMu.Lock()
 	defer ctlOutMu.Unlock()
-	f, err := os.OpenFile(filepath.Join(csDir, "ctl.out"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := openCtlOut(filepath.Join(csDir, "ctl.out"), os.O_APPEND|os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	_, _ = f.Write(line)
+}
+
+// openCtlOut opens the ctl response file, refusing anything that is not a
+// plain regular file.
+//
+// .cs is chowned to the worker, so uid 1000 can unlink ctl.out and put a FIFO
+// there. Opening an existing FIFO write-only BLOCKS until someone opens the
+// read end — which at boot means setupCS never returns and the agent RPC and
+// ctl forwarder never start, and at runtime means the single response loop
+// stops answering (audit M120). O_NONBLOCK makes that open fail instead, and
+// fstat on the resulting descriptor rejects a FIFO, device or directory that
+// got there another way. O_NOFOLLOW covers the symlink case.
+//
+// O_NONBLOCK is cleared afterwards: it affects subsequent writes on the
+// descriptor, and a regular file should be written the ordinary blocking way.
+func openCtlOut(path string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(path, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		if err == nil {
+			err = fmt.Errorf("%s is not a regular file (%s)", path, fi.Mode().Type())
+		}
+		return nil, err
+	}
+	if fd := int(f.Fd()); fd >= 0 {
+		if fl, e := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0); e == nil {
+			_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, fl&^unix.O_NONBLOCK)
+		}
+	}
+	return f, nil
 }
 
 // ---- agent RPC server ----------------------------------------------------------
