@@ -1405,3 +1405,26 @@ and turn channels, so letting job tails exhaust it would take the group's
 control plane down with them. The numbers are an exhaustion backstop, not a
 scheduler: the TUI opens one tail per hovered row, so several attached
 operators stay far below. `TestJobTailsAreBounded`.
+
+### M81 — Concurrent session clearing can discard active log writes and misattribute later output (`daemon/sessions.go`) — **fixed**
+
+Real. `filterLogSession` is a read-rewrite-rename TRANSACTION on a file that
+the turn-frame appenders write concurrently — and it took none of the per-path
+locks they use. A line appended after the snapshot is dropped by the rename,
+and losing a `[[turn_end]]` that way parks its send worker until the stall
+timeout, which is the expensive failure this codebase keeps running into.
+
+Now held under the same `logWriteLock(path)` every append takes, across the
+READ as well as the write: the snapshot is what the rename asserts is current,
+so it has to be inside the transaction.
+
+The shared `<path>.tmp` is gone too. The lock serializes clears of one STREAM,
+but a group has ten, and two clears racing through one shared temp name could
+install each other's stale content — `os.CreateTemp` costs nothing and removes
+the case. `TestFilterLogSessionIsSerializedWithAppends` runs 200 concurrent
+appends against a filter and fails if any completed append is lost.
+
+The finding's last clause — a targeted clear removing a session marker while
+that session has an ACTIVE turn — is closed from the other end by M60, which
+cancels the scope's in-flight turns and waits for them before deleting
+anything.

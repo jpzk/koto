@@ -225,6 +225,15 @@ func parseSessionMarker(line string) (string, bool) {
 // surviving history. Clients that held lines for the cleared session drop
 // them locally (the TUI does) or catch up on their next History fetch.
 func filterLogSession(path, s string) error {
+	// Under the SAME per-path lock every append takes (logWriteLock,
+	// logtail.go). Read-rewrite-rename is a whole transaction on this file:
+	// without the lock a line appended after the snapshot is dropped by the
+	// rename, and losing a [[turn_end]] that way parks its send worker until
+	// the stall timeout (audit M81). Held across the read too, not just the
+	// write, because the snapshot is what the rename is asserting is current.
+	mu := logWriteLock(path)
+	mu.Lock()
+	defer mu.Unlock()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -265,9 +274,32 @@ func filterLogSession(path, s string) error {
 	if content == string(b) {
 		return nil
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+	// A uniquely named temp, not "<path>.tmp": two clears of the same group
+	// race through a shared name and can install each other's stale content.
+	// The lock above serializes clears of one STREAM, but a group has ten, and
+	// a unique name costs nothing.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".clear.*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil { // CreateTemp makes it 0600
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
