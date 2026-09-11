@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"koto-protocol/pb"
 
@@ -2768,6 +2769,41 @@ func TestFilterLogSessionIsSerializedWithAppends(t *testing.T) {
 	for _, e := range ents {
 		if strings.Contains(e.Name(), ".clear.") || strings.HasSuffix(e.Name(), ".tmp") {
 			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+// 2026-09-11 M82: the partial-line frame is rebuilt, protobuf-converted,
+// sequenced and fanned out to every subscriber on EVERY read, so emitting the
+// whole cumulative buffer meant megabytes of that work per read. The retained
+// buffer stays large (a real line still has to parse); the wire payload does not.
+func TestPartialLineEventsAreBounded(t *testing.T) {
+	if tailMaxLiveEvent >= tailMaxPartial {
+		t.Fatalf("the wire bound (%d) must be far below the parse buffer (%d)", tailMaxLiveEvent, tailMaxPartial)
+	}
+	big := strings.Repeat("x", tailMaxPartial)
+	got := tailBytes(big, tailMaxLiveEvent)
+	if len(got) != tailMaxLiveEvent {
+		t.Fatalf("tail is %d bytes, want %d", len(got), tailMaxLiveEvent)
+	}
+	// It is the TAIL — what a renderer would show of an unterminated line.
+	if !strings.HasSuffix(big, got) {
+		t.Fatal("tailBytes did not return a suffix")
+	}
+	// Short input is returned untouched.
+	if got := tailBytes("hello", tailMaxLiveEvent); got != "hello" {
+		t.Fatalf("short input mangled: %q", got)
+	}
+	// Cut on a rune boundary: a truncated partial must not carry half a code
+	// point into a renderer.
+	multi := strings.Repeat("é", 100) // two bytes each
+	for _, max := range []int{1, 2, 3, 7, 50, 101} {
+		got := tailBytes(multi, max)
+		if !utf8.ValidString(got) {
+			t.Errorf("tailBytes(max=%d) produced invalid UTF-8: %q", max, got)
+		}
+		if len(got) > max {
+			t.Errorf("tailBytes(max=%d) returned %d bytes", max, len(got))
 		}
 	}
 }
