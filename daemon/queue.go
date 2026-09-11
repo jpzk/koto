@@ -294,10 +294,48 @@ func enqueueSend(g, session, msg string) (<-chan error, error) {
 	return enqueue(g, sendJob{session: session, msg: msg})
 }
 
+// ---- the stop/destroy barrier -----------------------------------------------
+//
+// A stop drains the queues and cancels in-flight turns (stopGroup), but there
+// was nothing to stop work being ADMITTED across that window (audit M63):
+// a producer enqueuing after the drain gets a worker whose first act is
+// ensure(), which boots the VM the operator just powered off — and a job
+// already pulled off the channel but not yet recorded in inFlightSess is
+// invisible to BOTH dropQueued and inFlightSessions, so it escapes the drain
+// and the cancel alike.
+//
+// A counter, not a flag, because destroy() wraps stopGroup: the barrier has to
+// survive the inner call and cover the workspace removal and the groups.json
+// delete that follow it, which is the window where an escaped turn would
+// re-register the name it is being removed under.
+var groupBarrier = map[string]int{} // guarded by queuesMu
+
+func groupBarrierBegin(g string) {
+	queuesMu.Lock()
+	groupBarrier[g]++
+	queuesMu.Unlock()
+}
+
+func groupBarrierEnd(g string) {
+	queuesMu.Lock()
+	if n := groupBarrier[g] - 1; n > 0 {
+		groupBarrier[g] = n
+	} else {
+		delete(groupBarrier, g)
+	}
+	queuesMu.Unlock()
+}
+
+// groupBarred reports whether g is mid stop/destroy. Caller holds queuesMu.
+func groupBarred(g string) bool { return groupBarrier[g] > 0 }
+
 func enqueue(g string, job sendJob) (<-chan error, error) {
 	job.done = make(chan error, 1)
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
+	if groupBarred(g) {
+		return nil, fmt.Errorf("group %q is stopping; retry once it is down", g)
+	}
 	k := sessKey(g, job.session)
 	q, ok := queues[k]
 	if !ok {
@@ -442,6 +480,18 @@ func sendWorker(g, session string, q chan sendJob) {
 }
 
 func sendWorkerTurn(g string, job sendJob) {
+	// Re-checked here, not only at enqueue: a job is pulled off the channel
+	// before it is recorded in inFlightSess, so one taken in that gap is
+	// invisible to dropQueued AND to inFlightSessions and escapes both halves
+	// of a stop. Its first act would be sendNow's ensure(), booting the VM the
+	// operator just powered off (audit M63).
+	queuesMu.Lock()
+	barred := groupBarred(g)
+	queuesMu.Unlock()
+	if barred {
+		job.done <- fmt.Errorf("group %q is stopping; turn discarded", g)
+		return
+	}
 	// Reserved-session (goal) turns are re-checked at delivery: the goal
 	// may have been paused/interrupted/cancelled while this turn sat
 	// queued behind operator chat. See goalTurnShouldRun.

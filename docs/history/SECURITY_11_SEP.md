@@ -1094,3 +1094,25 @@ when the VM's death proves no writer survived
 (`releaseGroupQuarantine`), not before. With M40's holds in place this composes
 correctly — `sendNow`'s deferred release still runs and is correctly a no-op.
 `TestAmbiguousDeliveryQuarantinesTheSlot`.
+
+### M63 — Stop/Destroy can be bypassed by work admitted across the group lifecycle barrier (`daemon/queue.go`) — **fixed**
+
+Real, and it undermines a property the docs already promise ("a stop DISCARDS
+the group's pending traffic — so the VM stays down"). `stopGroup` drains the
+queues and cancels in-flight turns, but nothing closed ADMISSION across that
+window:
+
+- A producer enqueuing after the drain gets a worker whose first act is
+  `sendNow`'s `ensure()`, which boots the VM the operator just powered off.
+- A job pulled off the channel but not yet recorded in `inFlightSess` is
+  invisible to BOTH `dropQueued` and `inFlightSessions`, so it escapes the
+  drain and the cancel alike.
+
+`groupBarrier` closes admission for the duration. Checked in `enqueue` (which
+already holds `queuesMu`) and again in `sendWorkerTurn`, because the second
+check is the one that covers the channel-pull gap.
+
+A COUNTER rather than a flag: `destroy` wraps `stopGroup`, and the barrier has
+to survive the inner call and span the workspace removal and the `groups.json`
+delete that follow it — the window where an escaped turn would re-register the
+very name it is being removed under. `TestStopBarrierClosesAdmission`.
