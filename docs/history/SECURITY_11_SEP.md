@@ -1368,3 +1368,25 @@ One part of the description is simply wrong about the consequence: `.claude` is
 a symlink to `creds/` the installer creates, and `claude_login.go` already
 treats an existing non-symlink there as the normal dev-clone case and resolves
 credentials the way the proxy does rather than trusting the path.
+
+### M76 — Background subagents omit the harness system prompt (`sidecar/cs-job`, fixed in `sidecar/cs-subagent`) — **fixed**
+
+Real. `--system` was optional and `cs-job spawn` passed none, so a background
+subagent ran with NO harness policy — no `prompts/global.md`, no per-group
+`prompt.md`, no memory — while still carrying
+`--dangerously-skip-permissions` on the claude path and tool execution on the
+venice path. A delegated prompt is exactly the content most likely to carry an
+injection, and it was the one call that ran unguided.
+
+`cs-subagent` now defaults to the TURN's composed prompt, which `fc-agent`
+already writes per session as `.cs/system-prompt-<session>.md` before every
+turn, selected by `$KOTO_SESSION` from the turn env. An explicit `--system`
+still wins. Verified against a stubbed provider: default session, named
+session, and explicit override all resolve correctly.
+
+The severity framing in the finding is right and worth keeping: this is
+behavioral guidance, not an authorization boundary. What contains a subagent is
+the microVM, the `network` profile and the `root` profile, exactly as for every
+other turn. But "the harness is the only source of context" is a stated
+property of this system — `--bare` exists for it — and a background job is not
+an exception to it.

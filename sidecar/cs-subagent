@@ -25,6 +25,24 @@ set -e
 CFG=/workspace/.cs/config.json
 SYS=""
 if [ "$1" = "--system" ]; then SYS="$2"; shift 2; fi
+# No --system given: inherit the TURN's composed system prompt (global.md +
+# the group's prompt.md + memory), which fc-agent writes per session before
+# every turn. It used to default to NOTHING (audit M76), so a background
+# subagent ran with no harness policy at all — while still holding
+# --dangerously-skip-permissions on the claude path and tool execution on the
+# venice path. A delegated prompt is exactly the content most likely to carry
+# an injection, and it was the one call that ran unguided.
+#
+# Behavioral guidance, not an authorization boundary: what actually contains a
+# subagent is the microVM, the network profile and the root profile, same as
+# every other turn. But "the harness is the only source of context" is a
+# stated property of this system (the --bare flag exists for it), and a
+# background job is not an exception to it.
+if [ -z "$SYS" ]; then
+  SESSFILE="/workspace/.cs/system-prompt-${KOTO_SESSION:-default}.md"
+  [ -z "${KOTO_SESSION:-}" ] && SESSFILE=/workspace/.cs/system-prompt-default.md
+  [ -r "$SESSFILE" ] && SYS=$(cat "$SESSFILE")
+fi
 PROMPT="$*"
 [ -z "$PROMPT" ] && PROMPT=$(cat)
 [ -z "$PROMPT" ] && { echo "cs-subagent: empty prompt" >&2; exit 2; }
