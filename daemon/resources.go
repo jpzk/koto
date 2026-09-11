@@ -1124,7 +1124,45 @@ func roundPct(v float64) float64 { return math.Round(v*10) / 10 }
 // resourcesSnapshot builds the full report. Reads of cached samples, config
 // lookups, and (for running VMs) one fresh /proc read per group for live
 // CPU/RSS — all host-side; it never touches a guest and never boots a VM.
+// resSnapTTL coalesces concurrent and rapid-fire snapshots (audit 2026-09-11
+// L134). A snapshot walks every configured group — stat the image, read the
+// config, read /proc for a running VM, consult the sample ring, touch the
+// shared CPU trail — and the Resources RPC ran one per call with no budget of
+// any kind, so an authorized monitoring identity could spend the daemon's CPU
+// and the host's IO just by asking repeatedly, contending with the collector
+// itself. One second is shorter than the 5s the TUI polls at and far shorter
+// than the 30s sweep, so no consumer sees staler data than it already
+// tolerates; what it removes is the ability to ask faster than the answer can
+// change.
+const resSnapTTL = time.Second
+
+var (
+	resSnapMu     sync.Mutex
+	resSnapGroups []groupResources
+	resSnapHost   hostResources
+	resSnapAt     time.Time
+	resSnapRoot   string // the state root the cached snapshot describes
+)
+
+// resourcesSnapshot returns the fleet snapshot, reusing one computed within
+// resSnapTTL. The lock is held across the computation deliberately: concurrent
+// callers wait for the one in flight and then share its result, which is the
+// single-flight behaviour, not a second scan each.
 func resourcesSnapshot() ([]groupResources, hostResources) {
+	resSnapMu.Lock()
+	defer resSnapMu.Unlock()
+	// Keyed on the state root as well as the clock: the whole snapshot is
+	// derived from it, so a cache entry from a different one describes a
+	// different fleet (tests repoint ROOT; nothing in production does).
+	if resSnapRoot == ROOT && !resSnapAt.IsZero() && time.Since(resSnapAt) < resSnapTTL {
+		return resSnapGroups, resSnapHost
+	}
+	groups, host := resourcesSnapshotLocked()
+	resSnapGroups, resSnapHost, resSnapAt, resSnapRoot = groups, host, time.Now(), ROOT
+	return groups, host
+}
+
+func resourcesSnapshotLocked() ([]groupResources, hostResources) {
 	names := []string{}
 	for g := range readGroups() {
 		names = append(names, g)

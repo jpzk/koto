@@ -1224,7 +1224,15 @@ func renderLiveLines(liveText, liveKind string, tick, contentCols int) []string 
 		bodyStyle = lipgloss.NewStyle()
 	}
 	indent := "   "
-	stLines := strings.Split(liveText, "\n")
+	// expandTabs, like every other transcript path (audit 2026-09-11 L142).
+	// A raw tab measures ZERO cells to both cellWidth and ansi.StringWidth
+	// while the terminal advances it to the next stop, so padCells pads a row
+	// that is already wider than it looks, the physical line crosses its pane,
+	// the terminal wraps it and the whole frame scrolls — the exact failure of
+	// 2026-08-29, in the two renderers that had not been given the fix. The
+	// sanitizer keeps tabs deliberately (they are whitespace, not a control
+	// sequence), so this is where they have to be normalised.
+	stLines := strings.Split(expandTabs(liveText), "\n")
 	out := make([]string, 0, len(stLines))
 	first := true
 	for _, ln := range stLines {
@@ -1252,7 +1260,7 @@ func renderPendingLines(pending []string, contentCols int) []string {
 	out := make([]string, 0, len(pending))
 	for _, p := range pending {
 		first := true
-		for _, ln := range strings.Split(p, "\n") {
+		for _, ln := range strings.Split(expandTabs(p), "\n") {
 			// Same wrap treatment as the started-prompt case in
 			// renderBlockLines — a queued prompt is the same raw user text.
 			for _, seg := range wrapLine(ln, contentCols) {

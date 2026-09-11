@@ -161,3 +161,25 @@ func TestExpandTabsMeasuresSpansNotRunes(t *testing.T) {
 		t.Errorf("multiline expansion = %q", got)
 	}
 }
+
+// 2026-09-11 L142: renderLiveLines and renderPendingLines wrapped raw text
+// without expandTabs. A tab measures ZERO cells to both cellWidth and
+// ansi.StringWidth while the terminal advances it to the next stop, so padCells
+// pads a row already wider than it looks, the physical line crosses its pane,
+// the terminal wraps it and the frame scrolls — the failure of 2026-08-29, in
+// the two renderers that never got the fix.
+func TestLiveAndPendingRowsExpandTabs(t *testing.T) {
+	for _, rows := range [][]string{
+		renderLiveLines("col1\tcol2\tcol3", "response", 0, 60),
+		renderPendingLines([]string{"a\tb\tc"}, 60),
+	} {
+		if len(rows) == 0 {
+			t.Fatal("no rows rendered")
+		}
+		for _, r := range rows {
+			if strings.Contains(r, "\t") {
+				t.Errorf("a raw tab reached the frame: %q", r)
+			}
+		}
+	}
+}

@@ -285,3 +285,55 @@ func TestBlockMergeIsLinear(t *testing.T) {
 		t.Errorf("merged block lost content: %+v", b)
 	}
 }
+
+// 2026-09-11 L135: promptHistoryMax caps the ring at 200 entries and nothing
+// capped ONE prompt, which may be up to the daemon's 1 MiB send limit. Opening
+// the ctrl+R picker snapshots every entry and renders the visible ones through
+// lipgloss.Width on the whole string before any display clipping; a non-empty
+// filter lowercases and scans all of them, once per keystroke, on the update
+// loop.
+func TestPromptHistoryEntriesAreBounded(t *testing.T) {
+	m := newModel("", 200000)
+	m.cur = "g"
+	huge := strings.Repeat("p", promptEntryMax*4)
+	m.pushHistory("g", "", huge)
+	h := m.promptHistory[turnKey("g", "")]
+	if len(h) != 1 {
+		t.Fatalf("ring holds %d entries", len(h))
+	}
+	if len(h[0]) > promptEntryMax+8 {
+		t.Fatalf("a %d-byte prompt was retained whole (%d bytes)", len(huge), len(h[0]))
+	}
+	if !strings.HasPrefix(h[0], "pppp") {
+		t.Errorf("the recognisable head was lost: %.20q", h[0])
+	}
+	// An ordinary prompt is untouched, so ↑ still re-sends exactly what was
+	// typed.
+	m.pushHistory("g", "", "deploy the thing")
+	h = m.promptHistory[turnKey("g", "")]
+	if h[len(h)-1] != "deploy the thing" {
+		t.Errorf("an ordinary prompt was altered: %q", h[len(h)-1])
+	}
+}
+
+// 2026-09-11 L141: formatTool's unknown-tool fallback returned the complete raw
+// JSON — the one branch that hands back arbitrary model-chosen bytes — and
+// unscrubbed at that, while transcript lines and job-peek entries are bounded
+// by count rather than size.
+func TestUnknownToolSummaryIsBoundedAndScrubbed(t *testing.T) {
+	big := strings.Repeat("a", toolSummaryMax*4)
+	got := formatTool("MysteryTool", `{"blob":"`+big+`"}`)
+	if len(got) > toolSummaryMax+64 {
+		t.Fatalf("summary is %d bytes for a %d cap", len(got), toolSummaryMax)
+	}
+	if !strings.HasPrefix(got, "MysteryTool ") {
+		t.Errorf("the tool name was lost: %.40q", got)
+	}
+	if esc := formatTool("MysteryTool", "{\"x\":\"\x1b]0;pwned\x07\"}"); strings.Contains(esc, "\x1b") {
+		t.Errorf("an escape survived the fallback: %q", esc)
+	}
+	// A known tool still renders its key.
+	if got := formatTool("Bash", `{"command":"ls -la"}`); got != "Bash $ ls -la" {
+		t.Errorf("known-tool rendering changed: %q", got)
+	}
+}
