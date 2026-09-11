@@ -1637,3 +1637,41 @@ func TestUploadsAreOwnedByTheirTurn(t *testing.T) {
 		t.Fatal("the sweep took a fresh upload")
 	}
 }
+
+// 2026-09-11 M41: the claim was that fcClassifyDst misses IPv4-mapped IPv6
+// (`::ffff:127.0.0.2`) because Go's IsLoopback only knows `::1`. Measured
+// false — net.IP's IsLoopback, IsPrivate and IsLinkLocalUnicast all call
+// To4() first, so the mapped forms classify as their IPv4 selves. Pinned
+// here because the property is load-bearing and invisible in the code: the
+// classifier reads as if it only handled the v6 spellings.
+func TestMappedIPv4DestinationsClassifyAsIPv4(t *testing.T) {
+	for _, c := range []struct {
+		ip   string
+		want fcDstClass
+	}{
+		{"127.0.0.1", fcDstCtl},
+		{"127.0.0.2", fcDstCtl},
+		{"::1", fcDstCtl},
+		{"::ffff:127.0.0.2", fcDstCtl},       // the finding's exact case
+		{"::ffff:169.254.169.254", fcDstCtl}, // v4 IMDS, mapped
+		{"::ffff:0.0.0.0", fcDstCtl},         // unspecified, mapped
+		{"::ffff:10.0.0.1", fcDstLAN},        // RFC1918, mapped
+		{"::ffff:100.64.0.1", fcDstLAN},      // tailnet, mapped
+		{"::ffff:93.184.216.34", fcDstWAN},   // public, mapped
+	} {
+		if got := fcClassifyDst(net.ParseIP(c.ip)); got != c.want {
+			t.Errorf("fcClassifyDst(%s) = %v, want %v", c.ip, got, c.want)
+		}
+	}
+	// The frame filter sees a raw 16-byte address, not a parsed string — the
+	// shape the finding assumed would slip through.
+	raw := net.IP(append(append(make([]byte, 10), 0xff, 0xff), 127, 0, 0, 2))
+	if fcClassifyDst(raw) != fcDstCtl {
+		t.Error("a raw 4-in-6 loopback frame was not control plane")
+	}
+	for _, pol := range []string{fcNetWAN, fcNetLAN, fcNetFull} {
+		if fcDstAllowed(raw, pol) {
+			t.Errorf("raw 4-in-6 loopback allowed under %s", pol)
+		}
+	}
+}
