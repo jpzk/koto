@@ -3218,3 +3218,32 @@ missing file and the empty group name, asserting the result AND that the proxy's
 reader and the canonical one never disagree. `cs-subagent`'s one-liner was smoke
 tested directly against the same four shapes: `venice` only for an explicit
 `venice`, `claudesdk` for a truncated document, an empty one and a missing file.
+
+## M149 — Guest can forge notification session attribution — FIXED
+
+`daemon/ctl.go`, the `notify` verb.
+
+**Confirmed.** The verb ran the payload's session through `normalizeSession`,
+which validates the **charset** and nothing else — and `goal-anything` passes
+it. So a group could attribute a notification to a live goal's worker or judge
+conversation, the two the design calls follow-only. The ordinary `send` path
+refuses reserved names outright, and `job_done` folds them to the default
+session (audit M42, with a warn line); `notify` had neither check.
+
+It is worse than a misattribution. A goal session's leaf in the tree comes from
+`goalLiveSessions`, which shows it exactly while the run is live and drops it
+when the goal ends, and the operator cannot type into or open it — so a
+notification parked there is **hidden**, not just misfiled. That is the
+suppression the finding names.
+
+**Fix:** the same treatment `job_done` already gets — fold to the default
+session with a warn line naming the group and the attempted name. Fold rather
+than drop, because the notification is still the operator's to see; ordinary
+named sessions are untouched, since attribution within the group's own
+conversations is exactly what the field is for.
+
+Test: `TestCtlNotifyCannotClaimAReservedSession` in `daemon/audit_fixes_test.go`
+drives the real `ctlDispatch` → `tryFlushNotify` → parser round trip, asserting
+an ordinary session keeps its attribution and that four shapes of reserved name
+land on the default session with their content intact. Verified to fail with the
+check removed.

@@ -431,6 +431,21 @@ func ctlDispatch(owner string, line []byte) any {
 		if serr != nil {
 			sess = "" // malformed attribution → default session, never an error
 		}
+		// ...and the reserved namespace is not the guest's to name (audit
+		// M149). normalizeSession validates the CHARSET, and "goal-anything"
+		// passes it — so a group could attribute a notification to a live
+		// goal's worker or judge conversation, the two the design calls
+		// follow-only. The ordinary send path refuses those names and
+		// job_done folds them to the default (M42); notify had neither check.
+		// Which also made it a way to HIDE a notification rather than only to
+		// misattribute one: a goal session's leaf exists only while the run
+		// does, and the operator cannot open it afterwards. Fold rather than
+		// drop — the notification is still theirs to see.
+		if isReservedSession(sess) {
+			emitLogfG("ctl", owner, "warn",
+				"[%s] notify named the reserved session %q — raising it on the default session instead", owner, sess)
+			sess = ""
+		}
 		// Flatten + truncate before encoding so the on-disk marker line
 		// stays bounded; the parser re-applies the same clamps on the way
 		// out (its copy also covers forged markers).

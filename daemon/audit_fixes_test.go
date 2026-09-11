@@ -5279,3 +5279,57 @@ func TestProviderResolutionFailsClosed(t *testing.T) {
 		t.Errorf("defaultProvider is %q — this test assumes the documented default", defaultProvider)
 	}
 }
+
+// 2026-09-11 M149: the ctl `notify` verb accepted any session name that passed
+// normalizeSession's CHARSET check — including the reserved "goal-" namespace.
+// The ordinary send path refuses those names and job_done folds them to the
+// default (M42); notify had neither check. Which made it more than a
+// misattribution: a goal session's leaf exists only while the run does and the
+// operator cannot open it afterwards, so parking a notification there HIDES it.
+func TestCtlNotifyCannotClaimAReservedSession(t *testing.T) {
+	notifySessionLine := func(sev, sess, title, msg string) []byte {
+		b, err := json.Marshal(map[string]string{
+			"cmd": "notify", "severity": sev, "session": sess,
+			"title": base64.StdEncoding.EncodeToString([]byte(title)),
+			"msg":   base64.StdEncoding.EncodeToString([]byte(msg)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	// An ordinary named session is still honoured — this is attribution within
+	// the group's own conversations, which is what the field is for.
+	g := "m149-ok"
+	setupNotifyRoot(t, g)
+	if br, ok := ctlDispatch(g, notifySessionLine("high", "work", "t", "m")).(baseResp); !ok || !br.OK {
+		t.Fatal("a notification for an ordinary session was refused")
+	}
+	deliverNotify(g)
+	evs := readGroupLog(t, g)
+	if len(evs) != 1 || evs[0].Session != "work" {
+		t.Fatalf("ordinary attribution lost: %+v", evs)
+	}
+
+	// The reserved namespace is folded to the default session, and the
+	// notification still reaches the operator.
+	for _, sess := range []string{"goal-abc", "goal-abc-judge", "goal-", "goal-x"} {
+		g := "m149-" + strings.ReplaceAll(sess, "-", "_")
+		setupNotifyRoot(t, g)
+		if br, ok := ctlDispatch(g, notifySessionLine("high", sess, "hidden", "m")).(baseResp); !ok || !br.OK {
+			t.Fatalf("%s: the notification was dropped instead of folded", sess)
+		}
+		deliverNotify(g)
+		evs := readGroupLog(t, g)
+		if len(evs) != 1 {
+			t.Fatalf("%s: want 1 event, got %v", sess, names(evs))
+		}
+		if evs[0].Session != "" {
+			t.Errorf("%s: notification kept the reserved attribution %q", sess, evs[0].Session)
+		}
+		if evs[0].Title != "hidden" {
+			t.Errorf("%s: the notification lost its content: %+v", sess, evs[0])
+		}
+	}
+}
