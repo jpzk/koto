@@ -965,3 +965,57 @@ whose job is to populate a tree, so `sessionRegMax` (256) simply stops listing
 past the cap. The session still works.
 
 `TestIdleSessionsAreReclaimed`, `TestSessionRegistryIsBounded`.
+
+### M52 — Symlinked group state escapes the trusted state root during VM staging (`daemon/fc.go`) — **not a finding (with one part already fixed)**
+
+Every sink it names requires write access to the state tree or to the clone —
+`groups/`, a group directory, `prompt.md`, the migration source. That is tier 1
+by definition: the state dir is `0750` and owned by the operator, and a clone
+is the operator's checkout. An attacker who can plant a symlink under either
+can also edit `koto.env`, replace the binary, or read `creds/` directly. The
+premise "a malicious checkout or state tree that an operator installs" is the
+operator installing an attacker's software, which no path check survives.
+
+The one part that was NOT tier 1 — `workspace.img` itself, which the podman-era
+migration path deliberately treats as pre-existing untrusted input — is H1, and
+is fixed.
+
+`stateDirTrusted` is worth being clear about: it checks the state ROOT, and
+that is all it claims to check (audit L9 added it for a pre-created `/tmp`
+directory wearing the name). Extending it to a recursive descendant walk would
+suggest a guarantee the trust model does not make, and would still lose to a
+symlink planted after the check.
+
+### M53 — Unbound guest turn streams let a compromised guest spoof turn lifecycle (`daemon/fcturn.go`) — **accepted**
+
+Accurate, and already narrowed once. The previous audit (L4) closed the part
+that was a boundary: a guest used to pick any slot in `[0, groupSlots)`, so
+`fcExpectTurn`/`fcConsumeExpectedTurn` now require the daemon to have handed
+that slot out, and a stream for an unissued slot is refused.
+
+What remains is a guest forging its OWN group's transcript. That is not a
+crossing: every byte in that transcript is guest-authored to begin with — the
+guest runs the model, the tools and the output — so "forge text, tool and error
+frames" describes a guest lying about work it alone performs, which no frame
+protocol can prevent. The cross-SESSION effects stay inside one group, and
+sessions are conversations sharing a VM, a uid and a filesystem, not tenants
+(M4, M28, M45). Ending its own turn early or holding its own stream open is
+self-inflicted: it costs that group a slot, and the slot pool, the stall
+timeout and the quarantine path already bound that.
+
+The per-turn capability would need a new field in `MsgReq` — a proto change and
+a regenerated contract across daemon, guest and the out-of-tree Android client
+— to authenticate the guest to itself. Declined on that basis, not on effort:
+there is no second principal here for the capability to distinguish.
+
+### M57 — Non-admin ACL grants can stop the protected main orchestrator (`daemon/grpc_server.go`) — **not a finding**
+
+`stop: ["main"]` in `acl.json` is the operator writing down that this role may
+stop main. Honouring it is not a bypass. The protection the finding compares
+against is on the ctl plane, where the principal is a GROUP — a peer must not be
+able to stop the orchestrator — and it still holds.
+
+`destroy` refuses `main` because it is irreversible and takes the workspace
+with it. `stop` is neither: the next send boots the group again, and the
+operator's own TUI `/stop` with `main` focused is a routine action that this
+change would break. Different verbs, different answers, for a reason.
