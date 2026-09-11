@@ -389,3 +389,35 @@ Steps are now bounded by the field's own span. Rejected rather than clamped: a
 step wider than the range can only ever select `from`, so anything above the
 span is a typo and accepting it silently would hide the typo.
 `TestCronStepBounded`.
+
+### M22 — Guest-facing framed channels permit resource exhaustion with incomplete frames (`daemon/fcframe.go`) — **fixed**
+### M27 — Guest-facing vsock listeners allow unbounded resource retention (`daemon/fc.go`) — **fixed**
+
+One finding twice. `fcAcceptLoop` spawned an untracked goroutine per accepted
+connection with no admission limit, and the framed readers allocate whatever
+length the peer declares (16 MiB on the turn channel) and then block in
+`ReadFull` with no deadline. A guest could open connections in a loop,
+declare a large frame on each, send nothing, and pin host goroutines,
+descriptors and heap for the VM's lifetime.
+
+Two bounds, chosen so each covers what the other cannot:
+
+- **`fcMaxConnsPerGroup` (64), per group.** Every cost here is per connection,
+  so capping connections caps all of them at once — which is why there is no
+  separate frame-memory budget. Real traffic is one proxy connection per
+  upstream request, one ctl connection, one gateway link and up to `groupSlots`
+  (10) turn streams, so 64 is a wide margin. Per GROUP, so one guest cannot
+  starve another; published-port connections get their own bucket because they
+  arrive from the host side, and charging them here would let an outside caller
+  starve the group's control channels.
+- **`fcFrameBodyWait` (60s), from header to payload.** The header is waited on
+  with NO deadline, deliberately: both channels are legitimately idle between
+  frames — the ctl connection for the VM's lifetime, a turn stream for as long
+  as the model thinks — so an idle timeout there would kill working
+  connections. Once a header is read the payload is already allocated and no
+  honest peer pauses mid-frame (the writer emits header and body in one write),
+  so the deadline starts exactly where the peer's obligation does.
+  `fcReadFrameBounded` peeks the header rather than reading it, which keeps the
+  shared framing code byte-identical to the guest's.
+
+`TestGuestVsockConnectionsBounded`.

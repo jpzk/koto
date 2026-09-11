@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -1200,5 +1201,57 @@ func TestTurnMarkerEscapingSpansFrames(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	if string(b) != "[\n[[turn_end]]\n" {
 		t.Fatalf("held byte + marker wrote %q, want %q", b, "[\n[[turn_end]]\n")
+	}
+}
+
+// 2026-09-11 M22/M27: a guest's vsock connections are capped per group, and a
+// frame's payload has a deadline once its LENGTH has been read. Together those
+// bound goroutines, descriptors and declared-but-unsent frame memory, all of
+// which were per-connection and unbounded.
+func TestGuestVsockConnectionsBounded(t *testing.T) {
+	g := "conncap"
+	t.Cleanup(func() { fcConnMu.Lock(); delete(fcConnCount, g); fcConnMu.Unlock() })
+	for i := 0; i < fcMaxConnsPerGroup; i++ {
+		if !fcConnAdmit(g) {
+			t.Fatalf("refused connection %d, below the cap of %d", i, fcMaxConnsPerGroup)
+		}
+	}
+	if fcConnAdmit(g) {
+		t.Fatal("admitted a connection past the cap")
+	}
+	// Another group is unaffected — the cap is per group so one guest cannot
+	// starve another.
+	if !fcConnAdmit("other") {
+		t.Fatal("a second group was refused by the first group's cap")
+	}
+	fcConnRelease("other")
+	// Releasing frees exactly one slot.
+	fcConnRelease(g)
+	if !fcConnAdmit(g) {
+		t.Fatal("release did not free a slot")
+	}
+	fcConnRelease(g)
+
+	// A peer that declares a frame and then stalls is cut off rather than
+	// pinning the allocation for the VM's lifetime.
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	defer srv.Close()
+	prev := fcFrameBodyWaitForTest
+	fcFrameBodyWaitForTest = 50 * time.Millisecond
+	t.Cleanup(func() { fcFrameBodyWaitForTest = prev })
+	go func() { cli.Write([]byte{0, 0, 0x10, 0}) }() // 4 KiB declared, never sent
+	done := make(chan error, 1)
+	go func() {
+		req := &pb.CtlRequest{}
+		done <- fcReadFrameBounded(bufio.NewReader(srv), srv, fcFrameMaxCtl, req)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("stalled body read returned success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled body read never returned; the deadline did not apply")
 	}
 }

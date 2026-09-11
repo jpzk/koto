@@ -48,7 +48,7 @@ func fcTurnSink(g string, c net.Conn) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	first := &pb.TurnFrame{}
-	if err := fcReadFrame(br, fcFrameMaxGuest, first); err != nil {
+	if err := fcReadFrameBounded(br, c, fcFrameMaxGuest, first); err != nil {
 		return
 	}
 	open := first.GetOpen()
@@ -73,7 +73,7 @@ func fcTurnSink(g string, c net.Conn) {
 	defer w.flushHold()
 	for {
 		f := &pb.TurnFrame{}
-		if err := fcReadFrame(br, fcFrameMaxGuest, f); err != nil {
+		if err := fcReadFrameBounded(br, c, fcFrameMaxGuest, f); err != nil {
 			if err != io.EOF {
 				emitLogfG("fc", g, "warn", "[%s] turn stream slot %d: %v", g, slot, err)
 			}
