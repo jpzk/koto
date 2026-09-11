@@ -2560,3 +2560,44 @@ Tests: `TestClearSessionFiltersNotificationsByTheirOwnSession` (both
 directions, plus an alpha notification interleaved inside the default session's
 segment) and `TestClearDropsQueuedNotifications` (both clear scopes), in
 `daemon/audit_fixes_test.go`. Verified to fail with the notify branch removed.
+
+## M134 — Stale autostart decisions can resurrect stopped groups — FIXED (destroy half was already closed)
+
+`daemon/groups.go`, `autostartGroups`.
+
+**Half confirmed.** `autostartGroups` reads `groups.json` and each group's
+`autostart` key once, then boots the fleet **sequentially** — deliberately, so
+a fleet does not contend for KVM and RAM all at once, but it means the last
+group's `ensure` runs minutes after the decision to boot it was taken. Nothing
+re-examined that decision.
+
+- **Stop: real.** A stop leaves the group registered in `groups.json` on
+  purpose, so the stale `ensure(g, false)` succeeded and booted the group back
+  up after the stop had completed and reported success. The operator's stop
+  silently undid itself — the same failure mode `stopGroupPrepare` already
+  guards against for queued messages, in-flight turns and running goals, with
+  the one producer it did not know about.
+- **Destroy: already closed, by two fixes that predate this finding.** `destroy`
+  holds `groupOpMu` across the `groups.json` delete (audit M89, this audit), and
+  `ensure` with `create=false` refuses a name that is no longer registered. So
+  the sweep cannot recreate a destroyed group's workspace or re-register its
+  name; it gets `no such group`. Checked rather than assumed.
+
+**Fix:** the sweep publishes its intended list (`autostartBegin`) and re-takes
+each decision immediately before booting — **inside the `groupOpMu` critical
+section the boot itself runs in**, via `ensureLocked`. Checking outside the lock
+would only move the race to the gap between the check and `ensure`'s own
+`Lock`. `stopGroupPrepare` revokes the claim, which puts the revocation *before*
+the stop takes `groupOpMu`, so both interleavings end with the group down: a
+sweep already inside its critical section finishes the boot and the stop powers
+it off right after; a sweep that has not reached the group yet skips it and says
+so in the log.
+
+The pending set is bounded by the sweep's own list — `autostartCancel` only
+forgets a name the sweep put there — and is emptied when the sweep ends, so
+every call is inert outside it.
+
+Test: `TestAutostartSweepYieldsToAnOperatorStop` in `daemon/audit_fixes_test.go`
+drives the claim protocol through each interleaving, including the one-shot
+property (no double boot) and inertness outside a sweep. Verified to fail with
+the `autostartCancel` call removed from `stopGroupPrepare`.

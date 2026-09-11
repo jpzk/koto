@@ -226,13 +226,89 @@ func autostartGroups() {
 		}
 	}
 	sort.Strings(names)
+	autostartBegin(names)
+	defer autostartEnd()
 	for _, g := range names {
-		if _, err := ensure(g, false); err != nil {
+		// The decision to boot g was taken when the list was built, and a
+		// sequential sweep of a real fleet finishes minutes later — so it is
+		// re-taken here, under the same mutex the lifecycle verbs serialize
+		// on, and ensureLocked runs inside that same critical section (audit
+		// M134). Checking outside it would only move the race: the operator's
+		// stop could land between the check and ensure's own Lock.
+		//
+		// Only a STOP needs this. A destroy already loses the race by
+		// construction: it holds groupOpMu across the groups.json delete
+		// (audit M89) and ensure with create=false refuses a name that is no
+		// longer registered. A stop leaves the group registered, on purpose —
+		// so without the claim the sweep booted it straight back up and the
+		// operator's stop silently undid itself.
+		mu := groupOpMu(g)
+		mu.Lock()
+		if !autostartTake(g) {
+			mu.Unlock()
+			emitLogfG("group", g, "info", "autostart %s: skipped — the group was stopped while the boot sweep was running", g)
+			continue
+		}
+		_, err := ensureLocked(g, false)
+		mu.Unlock()
+		if err != nil {
 			emitLogfG("group", g, "error", "autostart %s: %v", g, err)
 			continue
 		}
 		emitLogfG("group", g, "info", "autostart %s: up", g)
 	}
+}
+
+// autostartPending is the set of groups the boot sweep still intends to start.
+// A name is removed when the sweep starts it (autostartTake) or when an
+// operator lifecycle verb claims it first (autostartCancel, from
+// stopGroupPrepare) — whichever gets there first wins, and the loser does
+// nothing.
+//
+// Bounded by the autostart groups themselves: autostartCancel only forgets a
+// name the sweep put here, so a flood of stop calls adds nothing. Empty
+// outside the sweep, which makes every call a no-op once it is over.
+var (
+	autostartMu      sync.Mutex
+	autostartPending = map[string]bool{}
+)
+
+func autostartBegin(names []string) {
+	autostartMu.Lock()
+	defer autostartMu.Unlock()
+	for _, g := range names {
+		autostartPending[g] = true
+	}
+}
+
+func autostartEnd() {
+	autostartMu.Lock()
+	defer autostartMu.Unlock()
+	autostartPending = map[string]bool{}
+}
+
+// autostartTake claims g for the sweep, reporting whether the sweep may still
+// boot it. Callers hold groupOpMu(g).
+func autostartTake(g string) bool {
+	autostartMu.Lock()
+	defer autostartMu.Unlock()
+	if !autostartPending[g] {
+		return false
+	}
+	delete(autostartPending, g)
+	return true
+}
+
+// autostartCancel revokes a pending autostart because the operator has just
+// stopped (or destroyed) the group. Called from stopGroupPrepare, which runs
+// BEFORE the stop takes groupOpMu — so a sweep already inside its critical
+// section finishes its boot and the stop powers it off immediately after,
+// while a sweep that has not reached g yet skips it. Either order ends with
+// the group down, which is what the operator asked for.
+func autostartCancel(g string) {
+	autostartMu.Lock()
+	defer autostartMu.Unlock()
+	delete(autostartPending, g)
 }
 
 func stopGroup(g string) {
@@ -253,6 +329,10 @@ func stopGroup(g string) {
 // in-flight turns. Split from the power-off so destroy can run it while
 // already holding groupOpMu. Callers must hold the group barrier.
 func stopGroupPrepare(g string) {
+	// Revoke any pending autostart for this name first (audit M134): the boot
+	// sweep is still running for its first minutes and would otherwise start
+	// the group back up after this stop completes.
+	autostartCancel(g)
 	// A running goal would silently re-boot the VM on its next iteration,
 	// overriding the operator's stop — pause it first (no-op otherwise).
 	goalPauseOnStop(g)

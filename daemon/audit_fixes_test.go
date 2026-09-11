@@ -4240,3 +4240,53 @@ func TestClearDropsQueuedNotifications(t *testing.T) {
 		t.Errorf("after a group-wide clear, queued = %v, want none", got)
 	}
 }
+
+// 2026-09-11 M134: the autostart boot sweep takes its decision once, then boots
+// the fleet sequentially — minutes, for a real fleet. An operator stop landing
+// in that window used to undo itself: the stale decision reached ensure() after
+// the stop completed and brought the group back up. The claim protocol is what
+// closes it, and it is checked inside the same groupOpMu critical section the
+// boot runs in, so there is no gap for the stop to land in.
+func TestAutostartSweepYieldsToAnOperatorStop(t *testing.T) {
+	t.Cleanup(autostartEnd)
+
+	autostartEnd()
+	// A name the sweep never claimed is not bootable, and canceling one does
+	// not conjure an entry (the map is bounded by the sweep's own list).
+	if autostartTake("never-listed") {
+		t.Error("a group outside the sweep's list was claimed as bootable")
+	}
+	autostartCancel("stranger")
+	autostartMu.Lock()
+	n := len(autostartPending)
+	autostartMu.Unlock()
+	if n != 0 {
+		t.Errorf("autostartPending grew to %d entries outside a sweep", n)
+	}
+
+	autostartBegin([]string{"alpha", "beta", "gamma"})
+
+	// The operator stops beta before the sweep reaches it: skipped.
+	stopGroupPrepare("beta")
+	if autostartTake("beta") {
+		t.Error("the sweep booted a group the operator had just stopped")
+	}
+	// Its neighbours are untouched.
+	if !autostartTake("alpha") {
+		t.Error("the sweep refused to boot alpha, which nobody stopped")
+	}
+	// And a claim is one-shot: a second pass must not double-boot.
+	if autostartTake("alpha") {
+		t.Error("alpha was claimed twice")
+	}
+	// A stop AFTER the sweep has already claimed the group is not this
+	// mechanism's business — stopGroup powers the booted VM off behind it.
+	stopGroupPrepare("alpha")
+
+	// Once the sweep is over every call is inert, so a later stop cannot be
+	// mistaken for a revocation of anything.
+	autostartEnd()
+	if autostartTake("gamma") {
+		t.Error("the sweep still claimed gamma after it ended")
+	}
+}
