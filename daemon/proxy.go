@@ -858,6 +858,44 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 
 var errProxyBodyBudget = errors.New("proxy body budget exhausted")
 
+// proxyReadStall is how long a single read of a request body may block before
+// the connection is torn down. The mirror image of proxyWriteStall, and for
+// the same reason: re-armed per read, so it bounds a client that has STOPPED
+// SENDING rather than one sending a large body slowly. The peer here is a
+// guest handing over a prompt across a vsock splice — memory speed, kilobytes
+// — so two minutes without a single byte is already far past anything real.
+var proxyReadStall = 120 * time.Second
+
+// proxyStallReader re-arms the read deadline before every read (audit M135).
+//
+// The slot proxyAcquire took is held until the handler returns, and the body
+// is read inside it. Nothing bounded the TIME that read could take:
+// MaxBytesReader caps the size, ReadHeaderTimeout has already expired by the
+// time headers are in, and IdleTimeout only covers a connection parked between
+// requests. So a guest could hold all 32 of its group's slots indefinitely by
+// opening POSTs and dribbling their bodies — every other request for that
+// group waiting out proxyInflightWait and answering 503, which for a group's
+// own turns is a total outage of the one egress it has.
+type proxyStallReader struct {
+	r  io.Reader
+	rc *http.ResponseController
+}
+
+func newProxyStallReader(w http.ResponseWriter, r io.Reader) *proxyStallReader {
+	return &proxyStallReader{r: r, rc: http.NewResponseController(w)}
+}
+
+func (s *proxyStallReader) Read(p []byte) (int, error) {
+	// Best-effort, like the writer: a ResponseWriter with no deadline support
+	// returns ErrNotSupported and the read proceeds undeadlined.
+	_ = s.rc.SetReadDeadline(time.Now().Add(proxyReadStall))
+	return s.r.Read(p)
+}
+
+// clear disarms it. The deadline lives on the CONNECTION, which keep-alive
+// hands to the next request — same trap proxyStallWriter.clear avoids.
+func (s *proxyStallReader) clear() { _ = s.rc.SetReadDeadline(time.Time{}) }
+
 // readRequestBody buffers a request body under both bounds — per request
 // (proxyMaxBody) and fleet-wide (proxyBodyBudget) — and returns the release
 // that gives the bytes back. The release must run when the body stops being
@@ -866,11 +904,22 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, group string) (body
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		return nil, func() {}, true
 	}
-	br := &budgetReader{r: http.MaxBytesReader(w, r.Body, proxyMaxBody)}
+	sr := newProxyStallReader(w, http.MaxBytesReader(w, r.Body, proxyMaxBody))
+	defer sr.clear()
+	br := &budgetReader{r: sr}
 	b, err := io.ReadAll(br)
 	rel := func() { proxyBodyCharged.Add(-br.n) }
 	if err != nil {
 		rel()
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			if llmFlowSeen.allow("bodystall|" + group) {
+				emitLogfG("llm", group, "warn",
+					"[%s] refusing request: no request-body bytes for %s — the slot it held is back",
+					group, proxyReadStall)
+			}
+			http.Error(w, "koto proxy: request body stalled", http.StatusRequestTimeout)
+			return nil, nil, false
+		}
 		if br.failed {
 			if llmFlowSeen.allow("bodybudget|" + group) {
 				emitLogfG("llm", group, "warn",

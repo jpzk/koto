@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -4288,5 +4289,73 @@ func TestAutostartSweepYieldsToAnOperatorStop(t *testing.T) {
 	autostartEnd()
 	if autostartTake("gamma") {
 		t.Error("the sweep still claimed gamma after it ended")
+	}
+}
+
+// 2026-09-11 M135: the in-flight slot is taken before the request body is read
+// and released only when the handler returns, and nothing bounded how long that
+// read could take — MaxBytesReader caps the size, ReadHeaderTimeout is already
+// over once headers are in, and IdleTimeout covers only a connection parked
+// between requests. So a guest could hold all 32 of its group's slots for as
+// long as it liked by opening POSTs and never finishing their bodies, and every
+// other request for that group — including its own turns, whose only egress
+// this is — waited out proxyInflightWait and got a 503.
+func TestProxyStalledRequestBodyReleasesTheSlot(t *testing.T) {
+	prev := proxyReadStall
+	proxyReadStall = 200 * time.Millisecond
+	t.Cleanup(func() { proxyReadStall = prev })
+
+	const g = "m135"
+	sem := proxyGroupSem(g)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		release, ok := proxyAcquire(r.Context(), g)
+		if !ok {
+			http.Error(w, "no slot", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		_, releaseBody, bodyOK := readRequestBody(w, r, g)
+		if !bodyOK {
+			return
+		}
+		defer releaseBody()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// A body that opens, sends a byte, and then goes quiet forever — the
+	// cheapest possible slow-body hold.
+	pr, pw := io.Pipe()
+	quiet := make(chan struct{})
+	t.Cleanup(func() { close(quiet); pw.Close() })
+	go func() {
+		_, _ = pw.Write([]byte("{"))
+		<-quiet // and then nothing, until the test is done with it
+	}()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("the stalled request never came back: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestTimeout {
+		t.Errorf("status = %d, want %d (request timeout)", resp.StatusCode, http.StatusRequestTimeout)
+	}
+	if el := time.Since(start); el > 10*time.Second {
+		t.Errorf("the stalled body held the handler for %s", el)
+	}
+
+	// ...and the slot it held is back. Without the deadline this request would
+	// still be sitting in io.ReadAll with the slot charged to it.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sem) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(sem); n != 0 {
+		t.Errorf("%d of the group's in-flight slots are still held after the stall", n)
 	}
 }
