@@ -31,11 +31,11 @@ func destroyGroupForTest(g string) {
 // induction; this proves it on the exact sequence that produced the bug.
 func TestAllocPortChurn(t *testing.T) {
 	allocPortHarness(t)
-	a := allocPort("a")
-	_ = allocPort("b")
-	c := allocPort("c")
+	a, _ := allocPort("a")
+	_, _ = allocPort("b")
+	c, _ := allocPort("c")
 	destroyGroupForTest("b")
-	d := allocPort("d")
+	d, _ := allocPort("d")
 	if d == a || d == c {
 		t.Fatalf("allocPort reused port: a=%d b(destroyed) c=%d d=%d", a, c, d)
 	}
@@ -47,8 +47,8 @@ func TestAllocPortChurn(t *testing.T) {
 // TestAllocPortIdempotent — same group name returns same port.
 func TestAllocPortIdempotent(t *testing.T) {
 	allocPortHarness(t)
-	p1 := allocPort("foo")
-	p2 := allocPort("foo")
+	p1, _ := allocPort("foo")
+	p2, _ := allocPort("foo")
 	if p1 != p2 {
 		t.Fatalf("allocPort not idempotent: %d != %d", p1, p2)
 	}
@@ -61,13 +61,13 @@ func TestAllocPortNoDupesOverChurn(t *testing.T) {
 	allocPortHarness(t)
 	groups := []string{"g0", "g1", "g2", "g3", "g4"}
 	for _, g := range groups {
-		allocPort(g)
+		_, _ = allocPort(g)
 	}
 	// Destroy + recreate the middle three, twice each.
 	for round := 0; round < 2; round++ {
 		for _, g := range groups[1:4] {
 			destroyGroupForTest(g)
-			allocPort(g)
+			_, _ = allocPort(g)
 		}
 	}
 	m := readGroups()

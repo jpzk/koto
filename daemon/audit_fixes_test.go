@@ -3362,3 +3362,43 @@ func TestDestroyDropsTheJobCache(t *testing.T) {
 		t.Fatalf("jobsSnapshot still returns %d job(s) for a destroyed group", len(snap))
 	}
 }
+
+// 2026-09-11 M101: the group cap was a read-then-compare at each call site,
+// with registration happening later under groupsLock — so concurrent spawns
+// with distinct names all passed while the registry was below the limit, and
+// every one then registered. The cap now lives with the registration.
+func TestGroupCapIsAtomicWithRegistration(t *testing.T) {
+	fcHarness(t)
+	var wg sync.WaitGroup
+	var admitted atomic.Int64
+	start := make(chan struct{})
+	// Far more concurrent allocations than the cap, all distinct names.
+	for i := 0; i < ctlMaxSpawn*2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			if _, err := allocPort(fmt.Sprintf("g%03d", i)); err == nil {
+				admitted.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if n := len(readGroups()); n > ctlMaxSpawn {
+		t.Fatalf("%d groups registered, cap is %d", n, ctlMaxSpawn)
+	}
+	if admitted.Load() != int64(ctlMaxSpawn) {
+		t.Fatalf("%d allocations admitted, want exactly the cap (%d)", admitted.Load(), ctlMaxSpawn)
+	}
+	// An ALREADY-registered group still resolves at the cap — re-spawning one
+	// does not grow the set, so it must not be refused.
+	name := "g000"
+	if _, known := readGroups()[name]; !known {
+		t.Skip("the first allocation lost its race; nothing to re-resolve")
+	}
+	if _, err := allocPort(name); err != nil {
+		t.Fatalf("an existing group was refused at the cap: %v", err)
+	}
+}
