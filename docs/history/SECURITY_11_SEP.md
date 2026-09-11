@@ -3012,3 +3012,43 @@ either draining every background goroutine between tests or making the path
 globals atomic, which is a structural change to the daemon's most basic state
 and its own piece of work. None of it reproduces in isolation, and the suite is
 green in its normal (non-`-race`) mode.
+
+## M145 — Failed self-heal advances a session while the stalled guest worker may remain alive — FIXED
+
+`daemon/send.go` (the stall branch), `daemon/queue.go`.
+
+**Confirmed.** The queue's single-flight guarantee for a conversation rests on
+`sendNow` not returning until the previous guest worker has stopped. The stall
+branch says as much in its own comment — *"the guest side of this turn may still
+be alive and writing"* — quarantines the slot for exactly that reason, and then
+called `selfHeal(g, now)` **without looking at the result**.
+
+`selfHeal` returns false in two ordinary situations: the circuit breaker is open
+(`healMaxAttempts` restarts inside `healWindow`, which logs "leaving STALLED —
+manual /restart needed") and the restart itself failed. In both, the VM is still
+up and the wedged worker may still be running — and the turn retired anyway, so
+the session's next queued prompt took a different, non-quarantined slot. Two
+claude processes on one conversation id, sharing one workspace: interleaved
+responses, interleaved tool calls, interleaved file writes.
+
+The slot quarantine only protects the log **stream**. The conversation needed its
+own fence.
+
+**Fix:** a failed self-heal marks the conversation wedged (`sessionWedged`,
+beside the slot quarantine and under the same lock, since it has the same
+lifecycle). Both admission points refuse it: `enqueueSend`, so a caller hears
+about it synchronously, and `sendWorkerTurn`, for whatever was already queued
+when the fence went up. The refusal names `/restart` — the same remedy the
+breaker's own log line names.
+
+**It lifts by itself wherever something proves no writer survives:**
+`releaseGroupQuarantine` (the VM exited or a restart replaced it — group-scoped,
+and only that group's), and `notifyTurnDone` (the wedged worker finally wrote its
+`[[turn_end]]`, so the group recovered without the restart). Per session, because
+the wedged worker is: a group's other conversations are untouched.
+
+Test: `TestWedgedSessionIsFencedWhenSelfHealFails` in
+`daemon/audit_fixes_test.go` covers both admission points, the message naming
+`/restart`, both lift paths, that a sibling conversation is untouched, and that
+one group's quarantine release does not lift another group's fence. Verified to
+fail with the admission checks removed.

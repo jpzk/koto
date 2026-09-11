@@ -4965,3 +4965,69 @@ func TestFilterLogSessionIsStreamed(t *testing.T) {
 		t.Errorf("kept %d lines, want %d", n, lines/2)
 	}
 }
+
+// 2026-09-11 M145: the queue's single-flight guarantee for a conversation rests
+// on sendNow not returning until the previous guest worker has stopped. The
+// stall path says so in its own comment — "the guest side of this turn may
+// still be alive and writing" — quarantines the slot, and then called selfHeal
+// WITHOUT looking at whether it worked. With the breaker open or the restart
+// failing, the turn retired anyway and the session's next prompt took a
+// different slot: two claude processes on one conversation id, sharing a
+// workspace, interleaving tool calls and file writes.
+func TestWedgedSessionIsFencedWhenSelfHealFails(t *testing.T) {
+	const g = "m145"
+	const sess = "victim"
+	t.Cleanup(func() { clearSessionWedged(g, sess); releaseGroupQuarantine(g) })
+
+	if sessionIsWedged(g, sess) {
+		t.Fatal("a fresh conversation is already fenced")
+	}
+	markSessionWedged(g, sess)
+
+	// Both admission points refuse: the Send RPC's, so the caller hears about
+	// it synchronously, and the worker's, for whatever was already queued when
+	// the fence went up.
+	if _, err := enqueueSend(g, sess, "next prompt"); err == nil {
+		t.Error("enqueueSend admitted a turn for a fenced conversation")
+	} else if !strings.Contains(err.Error(), "/restart") {
+		t.Errorf("the refusal does not tell the operator what to do: %v", err)
+	}
+	done := make(chan error, 1)
+	sendWorkerTurn(g, sendJob{session: sess, msg: "queued before the fence", done: done})
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("the worker ran a turn for a fenced conversation")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendWorkerTurn neither ran nor refused")
+	}
+
+	// The group's OTHER conversations are untouched: the fence is per-session
+	// because the wedged worker is.
+	if sessionIsWedged(g, "bystander") {
+		t.Error("the fence spread to another conversation in the group")
+	}
+
+	// A turn_end for the fenced session lifts it: the worker the fence existed
+	// for has just proved it finished, so the group recovered on its own.
+	notifyTurnDone(g, sess)
+	if sessionIsWedged(g, sess) {
+		t.Error("a turn_end did not lift the fence")
+	}
+
+	// ...and so does the VM going away or being replaced.
+	markSessionWedged(g, sess)
+	markSessionWedged(g, "other")
+	releaseGroupQuarantine(g)
+	if sessionIsWedged(g, sess) || sessionIsWedged(g, "other") {
+		t.Error("releasing the group's quarantine left a conversation fenced")
+	}
+	// A different group's fence is not collateral.
+	markSessionWedged("m145-other", sess)
+	t.Cleanup(func() { clearSessionWedged("m145-other", sess) })
+	releaseGroupQuarantine(g)
+	if !sessionIsWedged("m145-other", sess) {
+		t.Error("releasing one group's quarantine lifted another group's fence")
+	}
+}
