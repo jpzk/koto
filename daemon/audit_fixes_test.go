@@ -3976,3 +3976,38 @@ func TestBackgroundTailersAreBounded(t *testing.T) {
 		t.Fatal("admitted a tailer past the global cap")
 	}
 }
+
+// 2026-09-11 M117: the budget that matters is the SERIALIZED request, not the
+// raw file bytes. maxUploadsPending bounds what is pending on disk; tar
+// headers, block padding, the end blocks and the rest of the MsgReq land on
+// top, and the guest refuses the whole frame before unmarshalling — leaving
+// the turn undeliverable and the files pending, so every later turn in that
+// group retried the same doomed frame.
+func TestOversizeFramesAreRefusedBeforeSending(t *testing.T) {
+	// fcWriteFrame refuses rather than producing a frame no peer can read.
+	var buf bytes.Buffer
+	big := &pb.MsgReq{Msg: make([]byte, fcFrameMaxWrite+1024)}
+	if err := fcWriteFrame(&buf, big); err == nil {
+		t.Fatal("an oversize frame was written")
+	} else if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("%d bytes were written despite the refusal", buf.Len())
+	}
+	// An ordinary frame still goes out, header included.
+	buf.Reset()
+	if err := fcWriteFrame(&buf, &pb.MsgReq{Msg: []byte("hello")}); err != nil {
+		t.Fatalf("a normal frame was refused: %v", err)
+	}
+	if buf.Len() < 5 {
+		t.Fatalf("frame is %d bytes", buf.Len())
+	}
+	// And the size check is on the SERIALIZED message, so a request just
+	// under the limit passes while the same payload plus framing does not.
+	buf.Reset()
+	edge := &pb.MsgReq{Msg: make([]byte, fcFrameMaxWrite-1024)}
+	if err := fcWriteFrame(&buf, edge); err != nil {
+		t.Fatalf("a request under the limit was refused: %v", err)
+	}
+}

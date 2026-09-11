@@ -24,10 +24,21 @@ const (
 	fcFrameMaxHost  = 64 << 20 // host→guest request (attachments ride in MsgReq)
 )
 
+// fcFrameMaxWrite is the largest frame this side will PUT on a channel. Both
+// peers refuse a declared length above their channel maximum, and the host's is
+// the biggest of the three — so a frame larger than that cannot be read by
+// anyone, and writing it produces a peer that hangs up rather than an error
+// naming the size (audit M117). Checking here means the caller gets a message
+// it can act on, whatever the caller is.
+const fcFrameMaxWrite = fcFrameMaxHost
+
 func fcWriteFrame(w io.Writer, m proto.Message) error {
 	b, err := proto.Marshal(m)
 	if err != nil {
 		return err
+	}
+	if len(b) > fcFrameMaxWrite {
+		return fmt.Errorf("frame of %d bytes exceeds the %d-byte channel maximum", len(b), fcFrameMaxWrite)
 	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(b)))
