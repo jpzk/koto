@@ -658,54 +658,96 @@ func authRefreshReport(u *setupUI, installed bool) bool {
 		u.hint("re-run `koto install` to re-resolve it, or fix " + claudeBinEnv + " in " + authEnvFile)
 		return false
 	}
-	if installed && protectHomeHides(bin) && !authUnitShows(bin) {
-		u.fail("token refresh: %s is under a home directory the unit's ProtectHome hides", bin)
-		u.hint("re-run `koto install` — it switches the unit to ProtectHome=tmpfs and binds the\n" +
-			"claude directories read-only, so the daemon can exec it")
-		return false
+	if installed && protectHomeHides(bin) {
+		switch ok, why := authUnitShows(unitPath, bin); {
+		case ok:
+		case why == "":
+			u.fail("token refresh: %s is under a home directory the unit's ProtectHome hides", bin)
+			u.hint("re-run `koto install` — it switches the unit to ProtectHome=tmpfs and binds the\n" +
+				"claude directories read-only, so the daemon can exec it")
+			return false
+		default:
+			u.fail("token refresh: %s", why)
+			u.hint("re-run `koto install` to restore the read-only bind, or fix the unit by hand")
+			return false
+		}
 	}
 	u.ok("token refresh via %s (%s)", bin, how)
 	return true
 }
 
 // authUnitShows reads the installed unit and says whether bin, which lives
-// under a ProtectHome'd directory, is bound through. An unreadable or absent
-// unit answers true: the report accuses only on evidence.
-func authUnitShows(bin string) bool {
-	b, err := os.ReadFile(unitPath)
+// under a ProtectHome'd directory, is bound through READ-ONLY. An unreadable or
+// absent unit answers true: the report accuses only on evidence. The second
+// return value is a specific complaint when there is one; "" means the plain
+// "not bound at all" case, which the caller words itself. The unit PATH is a
+// parameter rather than the package constant so this is testable against a
+// rendered unit without an installed system.
+//
+// The two bind directives are tracked SEPARATELY (audit 2026-09-11 L68). They
+// used to be appended to one list, so a writable `BindPaths=` covering the
+// claude directory satisfied a check whose entire subject is that the daemon
+// can execute the binary WITHOUT being able to modify it — tier 2 handed write
+// access into the operator's home, reported as correctly hardened. A writable
+// bind is worse than a missing one, so it is named rather than waved through.
+func authUnitShows(unit, bin string) (bool, string) {
+	b, err := os.ReadFile(unit)
 	if err != nil {
-		return true
+		return true, ""
 	}
 	protect := ""
-	var binds []string
+	var ro, rw []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if v, ok := strings.CutPrefix(line, "ProtectHome="); ok {
 			protect = strings.TrimSpace(v)
 		}
-		for _, key := range []string{"BindReadOnlyPaths=", "BindPaths="} {
-			if v, ok := strings.CutPrefix(line, key); ok {
-				binds = append(binds, strings.Fields(v)...)
-			}
+		if v, ok := strings.CutPrefix(line, "BindReadOnlyPaths="); ok {
+			ro = append(ro, unitBindSources(v)...)
+		}
+		if v, ok := strings.CutPrefix(line, "BindPaths="); ok {
+			rw = append(rw, unitBindSources(v)...)
 		}
 	}
 	if protect == "" || protect == "no" || protect == "read-only" {
-		return true
+		return true, ""
 	}
-	for _, need := range claudeBindDirs(bin, protectHomeHides) {
-		covered := false
-		for _, have := range binds {
-			have = strings.TrimPrefix(have, "-")
+	covers := func(list []string, need string) bool {
+		for _, have := range list {
 			if need == have || strings.HasPrefix(need, have+"/") {
-				covered = true
-				break
+				return true
 			}
 		}
-		if !covered {
-			return false
+		return false
+	}
+	for _, need := range claudeBindDirs(bin, protectHomeHides) {
+		if covers(rw, need) {
+			return false, fmt.Sprintf("%s is bound into the unit WRITABLE (BindPaths=), not read-only — "+
+				"the daemon can modify the claude installation in your home", need)
+		}
+		if !covers(ro, need) {
+			return false, ""
 		}
 	}
-	return true
+	return true, ""
+}
+
+// unitBindSources splits one bind directive's value into the SOURCE paths it
+// names. systemd accepts a space-separated list whose entries are
+// `[-]source[:destination[:options]]`, so neither the optional leading `-` nor
+// anything after the first colon is part of the path being exposed.
+func unitBindSources(v string) []string {
+	var out []string
+	for _, f := range strings.Fields(v) {
+		f = strings.TrimPrefix(f, "-")
+		if i := strings.IndexByte(f, ':'); i >= 0 {
+			f = f[:i]
+		}
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // claudeCodeSystem is the first system block every turn koto proxies carries,

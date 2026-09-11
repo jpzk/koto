@@ -426,6 +426,15 @@ func sgrClearsBg(params string) bool {
 	touched, bgSet := false, false
 	forEachSGRAttr(params, func(a sgrAttr) bool {
 		switch {
+		// A BAD attribute sets nothing (audit 2026-09-11 L63). sgrExtended
+		// marks an incomplete or unknown 38/48/58 introducer bad without
+		// changing its code, so `ESC[0;48m` — the reset clearing the ground,
+		// then a `48` with no selector — read as "a background was set" and
+		// reassertBg skipped the theme ground, leaving the rest of the line on
+		// the terminal's default background. Guest-authored output reaches
+		// here: the daemon's sanitizer deliberately preserves digit-and-
+		// semicolon SGR sequences, malformed ones included.
+		case a.bad:
 		case a.code == 48, a.code >= 40 && a.code <= 47, a.code >= 100 && a.code <= 107:
 			touched, bgSet = true, true
 		case a.code == 0, a.code == 49:

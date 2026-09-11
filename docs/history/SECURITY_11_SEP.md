@@ -4953,3 +4953,197 @@ removes color parameters, not OSC or CSI.
 **Fix:** `loadState` scrubs `Cur` and every `Sessions` key and value with the
 same function `Draft` already went through. Pinned by
 `TestPersistedNamesAndDebugLogAreScrubbed`, which covers L53 as well.
+
+## L63 — Malformed extended-background SGR bypasses the theme ground — FIXED
+
+`tui/theme.go`.
+
+**Confirmed.** `sgrExtended` marks an incomplete or unknown `38`/`48`/`58`
+introducer *bad* without changing its code, and `sgrClearsBg` treated every `48`
+as a background setter. So in `ESC[0;48m` the reset cleared the tracked
+background and the malformed `48` then re-marked one as set; `reassertBg` omitted
+the theme ground and the rest of the line rendered on the terminal's default
+background. Guest output reaches this — the daemon's sanitizer deliberately
+preserves digit-and-semicolon SGR sequences, malformed ones included.
+
+**Fix:** a bad attribute sets nothing. A sequence that touches no background at
+all still reads as "not a clear", since there is nothing to reassert after it.
+Pinned by `TestMalformedBackgroundSGRStillReassertsTheGround`.
+
+## L64 — Destroy reports success even when workspace deletion fails — FIXED
+
+`daemon/groups.go`.
+
+**Confirmed.** `_ = os.RemoveAll(vol(g))`. `fcEnsureWorkspaceImg` treats an
+existing `groups/<name>/workspace.img` as authoritative and reuses or grows it,
+and **group names are reusable** — so a permission, EIO, immutable-flag or busy-
+mount failure left the destroyed group's entire workspace in place for the *next*
+group of that name to mount, while the operator had been told the data was gone.
+
+**Fix:** the error is checked, and the *name* is what carries the hazard, so a
+surviving directory is renamed to `<g>.undeleted-<unix>`. A later spawn then
+starts clean even though the bytes are still on disk, and the response says so
+rather than answering OK — `group destroyed, but its data was not deleted: …`,
+naming the quarantine path, with an error-level log line behind it. Everything
+else has genuinely been torn down by that point, so this is not a failed destroy;
+it is a destroy the caller must not read as a deletion. Pinned by
+`TestDestroyReportsAFailedWorkspaceDeletion`.
+
+## L65 — Existing permissive TUI state files keep their mode — FIXED
+
+`tui/persist.go`.
+
+**Confirmed.** `O_CREATE` with `0600` sets the mode only when the call *creates*
+the file. A `tui-state.json` already at `0644` — copied, restored from a backup,
+migrated, or left by an older build — keeps that mode through every later write,
+and what is written includes the operator's unsubmitted input bar.
+
+**Fix:** the mode is repaired through the **descriptor**, not the path, so it
+cannot be redirected between the open and the chmod, and only when it is actually
+too broad. Same reasoning as the daemon's `hardenStatePaths()`: `MkdirAll` and
+`OpenFile` never fix an existing mode. Pinned by
+`TestStateFilePermissionsAreRepairedOnWrite`.
+
+## L66 — Unbounded schedule listing can exhaust daemon resources — ALREADY FIXED (M87), residual accepted
+
+The two premises the finding rests on are both closed already:
+
+- *"Schedule creation is capped only per group"* — `schedMaxTotal = 2000` bounds
+  the store across all groups (audit M87), on exactly this reasoning: the
+  per-group cap is evaded by using more group names.
+- *"does not impose the inbound control-frame maximum on outbound data"* —
+  `fcWriteFrame` refuses a frame over `fcFrameMaxWrite`, so an oversized ctl
+  response errors rather than being written.
+
+The residual is a full unfiltered `SchedList`: at most 2000 records of a bounded
+cron (`schedCronMax`) and message (`schedMaxMsg`). **Accepted.** The caller must
+already hold `sched_add` *and* `sched_list` on the `"*"` target, which is an
+operator grant, and the alternative — silently truncating a schedule listing —
+trades a bounded allocation for an operator not seeing a schedule that will fire.
+That is the worse failure.
+
+## L67 — Queue-full recovery can resurrect a stale report window — FIXED
+
+`daemon/report.go`.
+
+**Confirmed.** The window was **deleted** under `reportMu`, the enqueue happened
+with the lock released, and a queue-full failure re-acquired the lock and
+restored the saved window "if the group has no current entry". With two
+deliveries overlapping, the older one's recovery could run last, find the map
+empty, and restore the window a *newer* delegation had already superseded — main
+waiting on delegation B, the window pointing at delegation A's `mainSession`, and
+the next report landing in the wrong conversation.
+
+**Fix:** the window is **claimed**, not consumed. `pendingReport` gains a `gen`
+(assigned per arming) and a `claimed` flag; a delivery marks it claimed, and the
+single `finish(delivered)` helper only touches a window that still carries *its*
+generation. There is no longer any path that writes a window back into the map,
+so a superseded one cannot return. A second concurrent report now finds the
+window claimed and is refused by name, which is the one-report-per-delegation
+rule stated explicitly rather than as a side effect of the delete.
+
+Pinned by `TestReportWindowIsClaimedNotResurrected` — white-box, because the race
+needs two deliveries overlapping inside a failing `enqueueSend` and the test
+pins the invariants that make the race unreachable instead of staging it.
+
+## L68 — Read-write systemd binds satisfy the read-only coverage check — FIXED
+
+`daemon/claude_login.go`.
+
+**Confirmed.** `authUnitShows` appended both `BindReadOnlyPaths=` and
+`BindPaths=` values to one list. A writable `BindPaths=` covering the claude
+directory therefore satisfied a check whose *entire subject* is that the daemon
+can execute the binary without being able to modify it — tier 2 given write
+access into the operator's home, reported as correctly hardened.
+
+**Fix:** the two directives are tracked separately; coverage comes from the
+read-only list alone, and a path covered by a **writable** bind is named as its
+own failure rather than waved through (it is worse than a missing bind, not
+equivalent to one). While in there, `unitBindSources` parses systemd's real
+syntax — `[-]source[:destination[:options]]` — so a bind with a destination is
+judged by its source. The unit path became a parameter so this is testable
+against a rendered unit with no installed system. Pinned by
+`TestWritableBindDoesNotPassAsReadOnly`.
+
+## L69 — Guest transcript text can exhaust the operator TUI's rendering — FIXED
+
+`daemon/sanitize.go`.
+
+**Partly covered already, with a real residual.** Multi-line blocks are bounded
+at `blockBodyMax` (1 MiB, M48), a live partial at `tailMaxLiveEvent` (64 KiB,
+M82), and the TUI holds an aggregate byte budget (`maxLineBytes`, 64 MiB, M122).
+What nothing bounded was **one completed line**: the tailer's buffer allows 8 MiB
+and the guest chooses where its newlines go. That single event is retained in the
+replay ring, re-served by `History`, and materialised by every attached TUI —
+stored, markdown-rendered, tab-expanded, wrapped into viewport rows. An aggregate
+budget does not help: one such entry evicts the whole transcript and is still
+rendered.
+
+**Fix:** `eventTextMax` bounds each free-text field in `sanitizeEvent`, which is
+the single choke point every outbound event passes (live `emit`, the replay ring,
+`History`, `JobTail`). It is **1 MiB deliberately** — the same number as
+`blockBodyMax` and `sendMsgMax` — so an operator's maximum-size prompt passes
+through byte for byte, which the TUI's pending-row match depends on. Truncation
+is rune-safe and marked with the parser's own `…[truncated]`. Pinned by
+`TestOneEventsTextIsBounded`, including the maximum-size-prompt case.
+
+## L70 — JobTail reports an oversized log line as a clean end — FIXED
+
+`daemon/grpc_server.go`, and the same pattern in `daemon/send.go` and
+`daemon/proxy.go`.
+
+**Confirmed.** `JobTail` looped on `sc.Scan()` and checked only the RPC context
+afterwards, never `sc.Err()`. A job's `out` has no trusted writer, so more than
+1 MiB without a newline stops the scanner; the deferred cleanup kills the guest
+tail and the daemon sends `ScriptEvent{"end"}`. The CLI returns 0 and the TUI
+draws a clean finish — output that was never observed reads as successfully
+observed, which is the worst shape a monitoring failure can take.
+
+**Fix:** `sc.Err()` is checked and answered as an `error` event, with
+`bufio.ErrTooLong` given its own sentence (*"the tail stopped here, it did not
+end"*). The sweep found two more of the same shape, both fixed to log rather than
+end silently: the background-job tailer in `send.go` (a guest line over the limit
+killed a ten-minute tailer while the agent's "output is being written to" notice
+kept naming the file) and the proxy's two SSE relays (a scanner error there means
+the guest got a truncated response and sees only a stream that stops).
+`TestOversizedLogLineIsNotACleanEnd` pins the classification.
+
+## L71 — Prompt history leaks prompts across chat sessions — FIXED
+
+`tui/model.go`.
+
+**Confirmed.** A group multiplexes independent chat sessions, and the TUI scopes
+everything else about them — transcript, unread marks, live-turn state — but
+`promptHistory` (and the `histNav`/`histDraft` recall cursors) were keyed by
+group alone. Switching sessions exposed the other conversation's prompts through
+↑, the inline ghost completion and the ctrl+R picker, and a recalled prompt could
+then be sent into the wrong conversation.
+
+**Fix:** all three are keyed by `turnKey(group, session)` — the key the rest of
+the model already uses for per-conversation state — and `forgetGroupHistory`
+drops every session of the group, since group names are reusable. Pinned by
+`TestPromptHistoryIsPerSession`.
+
+## L72 — Guest job metadata can forge records by breaking TSV framing — FIXED
+
+`daemon/jobs.go`.
+
+**Mostly closed by M160, with one field missed — and it was the load-bearing
+one.** `fld()` already strips tabs and newlines from status, rc, session and
+started, and `cmd` squashes them to spaces. The **id** did not go through any of
+it, and the id comes from a directory name the guest creates:
+
+    mkdir $'/workspace/.cs/jobs/aaaaaaaa\tdone\t0\t\t99\t0\tall clean'
+
+puts a fully forged record on the wire whose first field still passes `jobIDRE`,
+and a name containing a newline produces an entire extra record with an id of the
+guest's choosing.
+
+**Fix:** the script skips any directory whose basename is not the shape cs-job
+mints (`[A-Za-z0-9]{1,32}`). **Rejected rather than stripped**, deliberately: a
+mangled id would name a directory that does not exist, so `JobLogs` and `JobTail`
+would resolve it to nothing — this way the ids the daemon reports are exactly the
+ones that can be opened. Host-side, `parseJobsTSV` also keeps one record per id,
+first wins, so a duplicate row cannot overwrite a real job's apparent status in
+the tree. Pinned by `TestForgedJobDirectoryNamesAreNotListed`, which runs the
+real script against a staged directory tree.

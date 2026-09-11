@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -7215,5 +7216,271 @@ func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 	start(cwdDir, []string{"KOTO_HOME=" + envDir})
 	if _, ok := find(envDir); !ok {
 		t.Error("a daemon located by KOTO_HOME went unnoticed")
+	}
+}
+
+// 2026-09-11 L64: destroy discarded the workspace-removal error and answered
+// OK. fcEnsureWorkspaceImg treats an existing groups/<name>/workspace.img as
+// authoritative, and group names are reusable — so a failed deletion left the
+// old group's entire workspace for the NEXT group of that name to mount, while
+// the operator had been told the data was gone.
+func TestDestroyReportsAFailedWorkspaceDeletion(t *testing.T) {
+	prevRoot, prevHere := ROOT, HERE
+	HERE = t.TempDir()
+	ROOT = filepath.Join(HERE, "groups")
+	GROUPS_FILE = filepath.Join(HERE, "groups.json")
+	t.Cleanup(func() { ROOT, HERE = prevRoot, prevHere; initPaths() })
+
+	const g = "destroyfail"
+	if err := os.MkdirAll(filepath.Join(ROOT, g, "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ROOT, g, "keep", "workspace.img"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory the owner cannot write is one RemoveAll cannot empty.
+	if err := os.Chmod(filepath.Join(ROOT, g, "keep"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(ROOT, g, "keep"), 0o700) })
+
+	resp := destroy(g)
+	if resp.OK {
+		t.Fatal("destroy reported success with the workspace still on disk")
+	}
+	if !strings.Contains(resp.Error, "not deleted") {
+		t.Errorf("the error does not say the data survived: %q", resp.Error)
+	}
+	if exists(vol(g)) {
+		t.Error("the undeletable workspace was left under the group's own name, where a respawn reuses it")
+	}
+	// Moved aside, not silently dropped: the operator is told where it went.
+	ents, err := os.ReadDir(ROOT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := ""
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), g+".undeleted-") {
+			found = e.Name()
+		}
+	}
+	if found == "" {
+		t.Fatal("the workspace was neither deleted nor quarantined")
+	}
+	if !strings.Contains(resp.Error, found) {
+		t.Errorf("the error does not name the quarantine directory %q: %q", found, resp.Error)
+	}
+	_ = os.Chmod(filepath.Join(ROOT, found, "keep"), 0o700)
+}
+
+// 2026-09-11 L67: the report window was DELETED before the enqueue and put
+// back on failure, so an older delivery could restore a window a newer
+// delegation had already superseded — main waiting on delegation B while the
+// window pointed at delegation A's session. It is now CLAIMED instead, and a
+// claim is only ever finished by the delivery that made it.
+func TestReportWindowIsClaimedNotResurrected(t *testing.T) {
+	reportRoot(t)
+	const g = "rep-claim"
+	rec := newTurnRecorder()
+	withTurnFn(rec.fn, func() {
+		// A window whose delivery is in flight refuses a second report, and —
+		// the part that matters — is still there afterwards.
+		armReport(g, "S1")
+		reportMu.Lock()
+		p := reportPending[g]
+		p.claimed = true
+		reportPending[g] = p
+		gen1 := p.gen
+		reportMu.Unlock()
+
+		br, _ := ctlDispatch(g, reportLine(t, "second")).(baseResp)
+		if br.OK {
+			t.Fatal("a second concurrent report was accepted")
+		}
+		if !strings.Contains(br.Error, "already being delivered") {
+			t.Errorf("refusal does not name the reason: %q", br.Error)
+		}
+		reportMu.Lock()
+		still, ok := reportPending[g]
+		reportMu.Unlock()
+		if !ok || still.mainSession != "S1" {
+			t.Fatalf("the in-flight window was consumed by the refused report: %+v", still)
+		}
+
+		// A newer delegation supersedes the claimed window outright — new gen,
+		// unclaimed — so the older delivery's bookkeeping can no longer match
+		// and cannot write the old session back.
+		armReport(g, "S2")
+		reportMu.Lock()
+		now := reportPending[g]
+		reportMu.Unlock()
+		if now.gen == gen1 {
+			t.Fatal("re-arming reused the superseded window's generation")
+		}
+		if now.claimed {
+			t.Fatal("a fresh delegation inherited the previous window's claim")
+		}
+
+		// And a delivery that succeeds consumes the window rather than
+		// leaving it open for a second report.
+		if br, _ := ctlDispatch(g, reportLine(t, "done")).(baseResp); !br.OK {
+			t.Fatalf("report refused: %+v", br)
+		}
+		rec.wait(t)
+		if _, sess, _ := rec.last(t); sess != "S2" {
+			t.Fatalf("report went to session %q, want the newest delegation's S2", sess)
+		}
+		reportMu.Lock()
+		_, leftover := reportPending[g]
+		reportMu.Unlock()
+		if leftover {
+			t.Error("a delivered report left its window armed")
+		}
+	})
+}
+
+// 2026-09-11 L68: authUnitShows appended BindReadOnlyPaths= and BindPaths=
+// values to one list, so a WRITABLE bind satisfied a check whose whole subject
+// is that the daemon can exec the claude binary without being able to modify
+// it — tier 2 handed write access into the operator's home and the report
+// called it hardened.
+func TestWritableBindDoesNotPassAsReadOnly(t *testing.T) {
+	// A synthetic path under a ProtectHome'd root: nothing here touches the
+	// filesystem for the binary, and the whole question is what the UNIT says
+	// about it.
+	const bin = "/home/kototest/.local/bin/claude"
+	unit := filepath.Join(t.TempDir(), "koto.service")
+	need := claudeBindDirs(bin, protectHomeHides)
+	if len(need) == 0 {
+		t.Fatalf("claudeBindDirs found nothing to bind for %s", bin)
+	}
+	write := func(body string) {
+		if err := os.WriteFile(unit, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("[Service]\nProtectHome=tmpfs\nBindPaths=" + strings.Join(need, " ") + "\n")
+	ok, why := authUnitShows(unit, bin)
+	if ok {
+		t.Error("a writable BindPaths= satisfied the read-only coverage check")
+	}
+	if !strings.Contains(why, "WRITABLE") {
+		t.Errorf("the complaint does not name the problem: %q", why)
+	}
+
+	write("[Service]\nProtectHome=tmpfs\nBindReadOnlyPaths=" + strings.Join(need, " ") + "\n")
+	if ok, _ := authUnitShows(unit, bin); !ok {
+		t.Error("a correct read-only bind was rejected")
+	}
+	// A source:destination:options entry names the SOURCE as the exposed path.
+	write("[Service]\nProtectHome=tmpfs\nBindReadOnlyPaths=-" + need[0] + ":/mnt/x:norbind\n")
+	if _, why := authUnitShows(unit, bin); strings.Contains(why, "WRITABLE") {
+		t.Error("a read-only bind with a destination was read as writable")
+	}
+
+	write("[Service]\nProtectHome=tmpfs\n")
+	if ok, why := authUnitShows(unit, bin); ok || why != "" {
+		t.Errorf("a missing bind must be the plain not-exposed case, got ok=%v why=%q", ok, why)
+	}
+}
+
+// 2026-09-11 L69: a COMPLETED transcript line was bounded only by the tailer's
+// 8 MiB buffer, and the guest chooses where its newlines go. That one event is
+// held in the replay ring, re-served by History, and materialised by every TUI
+// — stored, markdown-rendered, tab-expanded and wrapped. The TUI's own budget
+// caps the aggregate, not one entry.
+func TestOneEventsTextIsBounded(t *testing.T) {
+	big := strings.Repeat("x", eventTextMax+4096)
+	ev := sanitizeEvent(Event{Event: "done", Text: big, Msg: big, Body: big, Input: big})
+	for name, got := range map[string]string{"Text": ev.Text, "Msg": ev.Msg, "Body": ev.Body, "Input": ev.Input} {
+		if len(got) > eventTextMax+len("…[truncated]") {
+			t.Errorf("%s is %d bytes, past the %d cap", name, len(got), eventTextMax)
+		}
+		if !strings.HasSuffix(got, "…[truncated]") {
+			t.Errorf("%s was cut without saying so", name)
+		}
+	}
+	// An operator's maximum-size prompt must pass through byte for byte: the
+	// TUI matches its pending row against the daemon's echo.
+	max := strings.Repeat("y", sendMsgMax)
+	if got := sanitizeEvent(Event{Event: "prompt", Msg: max}).Msg; got != max {
+		t.Errorf("a %d-byte prompt (sendMsgMax) was altered: %d bytes out", sendMsgMax, len(got))
+	}
+	// And truncation never splits a rune.
+	multi := strings.Repeat("é", eventTextMax)
+	if got := sanitizeEvent(Event{Event: "done", Text: multi}).Text; !utf8.ValidString(got) {
+		t.Error("truncation split a rune")
+	}
+}
+
+// 2026-09-11 L72: jobsListScript stripped tabs and newlines from every field
+// EXCEPT the id, which is a directory name the guest creates. A name carrying
+// tab-separated fields forged a whole record whose first field still passed
+// jobIDRE; one carrying a newline produced an extra record outright.
+func TestForgedJobDirectoryNamesAreNotListed(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string, fields map[string]string) {
+		d := filepath.Join(dir, name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Skipf("filesystem rejects the name %q: %v", name, err)
+		}
+		for k, v := range fields {
+			if err := os.WriteFile(filepath.Join(d, k), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk("realjob01", map[string]string{"status": "running", "rc": "", "session": "", "started": "10", "cmd": "make"})
+	mk("aaaaaaaa\tdone\t0\t\t99\t0\tall clean", map[string]string{"status": "running"})
+	mk("bbbbbbbb\ncccccccc\tdone\t0\t\t99\t0\tphantom", map[string]string{"status": "running"})
+
+	script := strings.ReplaceAll(jobsListScript, "/workspace/.cs/jobs", dir)
+	out, err := exec.Command("/bin/sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("run jobsListScript: %v", err)
+	}
+	jobs := parseJobsTSV(string(out))
+	if len(jobs) != 1 || jobs[0].ID != "realjob01" {
+		t.Fatalf("forged directory names reached the mirror: %+v", jobs)
+	}
+	if jobs[0].Status != "running" {
+		t.Errorf("the real job's status was overwritten: %q", jobs[0].Status)
+	}
+	// Defence in depth: a duplicate row cannot displace one already read.
+	dup := parseJobsTSV("aaaaaaaa\treal\t0\t\t1\t0\tone\naaaaaaaa\tforged\t1\t\t2\t0\ttwo\n")
+	if len(dup) != 1 || dup[0].Status != "real" {
+		t.Fatalf("a duplicate id overwrote the first record: %+v", dup)
+	}
+}
+
+// 2026-09-11 L70: JobTail looped on sc.Scan() and never checked sc.Err(). A
+// job writing more than the 1 MiB token limit with no newline stopped the
+// scanner; the deferred Close killed the guest tail and the daemon sent
+// ScriptEvent{"end"} — the CLI returned 0 and the TUI drew a clean finish, so
+// output that was never observed read as successfully observed.
+func TestOversizedLogLineIsNotACleanEnd(t *testing.T) {
+	// The loop and its two exits, reproduced over the same scanner
+	// configuration JobTail uses.
+	classify := func(r io.Reader) string {
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+		}
+		if err := sc.Err(); err != nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				return "error:too-long"
+			}
+			return "error:" + err.Error()
+		}
+		return "end"
+	}
+	if got := classify(strings.NewReader("one\ntwo\n")); got != "end" {
+		t.Fatalf("a complete tail classified as %q", got)
+	}
+	huge := strings.Repeat("x", 2<<20) // no newline: one token past the limit
+	if got := classify(strings.NewReader(huge)); got != "error:too-long" {
+		t.Fatalf("a 2 MiB unterminated line classified as %q — the daemon would call it an end", got)
 	}
 }

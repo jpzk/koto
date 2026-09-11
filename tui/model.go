@@ -1070,9 +1070,16 @@ func (m *Model) dropGroupLiveState(g string) {
 // so dropping the lines without dropping these leaves the text cached under a
 // key a later group of the same name can hit.
 func (m *Model) forgetGroupHistory(g string) {
-	delete(m.promptHistory, g)
-	delete(m.histNav, g)
-	delete(m.histDraft, g)
+	// Keyed per conversation since L71, so every session of the group goes —
+	// a later group of the same name must not inherit any of them.
+	pre := g + "\x00"
+	for k := range m.promptHistory {
+		if strings.HasPrefix(k, pre) {
+			delete(m.promptHistory, k)
+			delete(m.histNav, k)
+			delete(m.histDraft, k)
+		}
+	}
 	m.vpCache = map[string]vpCacheEntry{}
 	m.mdCache = map[string]string{}
 	m.treeRowCache = map[string]string{}
@@ -1287,7 +1294,7 @@ func (m *Model) reconcilePending(groups map[string]GroupInfo) bool {
 // fuzzy picker. Adjacent-dedup only: avoids the double-count when a local
 // send (logged from dispatchInput) is later mirrored back by the daemon's
 // own subscribe event. Capped at promptHistoryMax per group.
-func (m *Model) pushHistory(group, msg string) {
+func (m *Model) pushHistory(group, session, msg string) {
 	// Scrubbed on the way IN, so every consumer is clean at once: ↑/↓ recall,
 	// the ctrl+R picker, and the inline suggestion ghost, none of which has a
 	// sanitising boundary of its own (audit 2026-09-11 L8). It also keeps this
@@ -1297,7 +1304,15 @@ func (m *Model) pushHistory(group, msg string) {
 	if group == "" || msg == "" {
 		return
 	}
-	h := m.promptHistory[group]
+	// Keyed by CONVERSATION, not by group (audit 2026-09-11 L71). A group
+	// multiplexes independent chat sessions and the TUI scopes everything else
+	// about them — the transcript, the unread marks, the live-turn state — but
+	// the prompt ring was group-wide, so ↑, the inline ghost and the ctrl+R
+	// picker all offered another session's prompts, and a recalled one could
+	// be sent into the wrong conversation. The ring is a per-conversation
+	// shell history; that is how it is presented and that is what it now is.
+	key := turnKey(group, session)
+	h := m.promptHistory[key]
 	if n := len(h); n > 0 && h[n-1] == msg {
 		return
 	}
@@ -1305,8 +1320,8 @@ func (m *Model) pushHistory(group, msg string) {
 	if len(h) > promptHistoryMax {
 		h = h[len(h)-promptHistoryMax:]
 	}
-	m.promptHistory[group] = h
-	if group == m.cur {
+	m.promptHistory[key] = h
+	if key == m.curKey() {
 		m.refreshSuggestions()
 	}
 }
@@ -1323,7 +1338,7 @@ func (m *Model) refreshSuggestions() {
 		m.input.SetSuggestions(nil)
 		return
 	}
-	hist := m.promptHistory[m.cur]
+	hist := m.promptHistory[m.curKey()]
 	out := make([]string, 0, len(hist))
 	for i := len(hist) - 1; i >= 0; i-- {
 		p := hist[i]
@@ -2008,7 +2023,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 					// echoes. Older-page replays must not touch this state —
 					// they describe earlier moments in the conversation.
 					delete(m.lastThoughtBody, turnKey(msg.group, ev.Session))
-					m.pushHistory(msg.group, ev.Msg)
+					m.pushHistory(msg.group, ev.Session, ev.Msg)
 				}
 				batch = append(batch, logLine{kind: "prompt", group: msg.group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts), tsF: ev.Ts})
 			case "done":
@@ -2432,7 +2447,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// originate, e.g. ctl/scheduler fires).
 			m.popPending(ev.Group, ev.Session, ev.Msg)
 			m.addLine(logLine{kind: "prompt", group: ev.Group, session: ev.Session, text: ev.Msg, ts: int64(ev.Ts)})
-			m.pushHistory(ev.Group, ev.Msg)
+			m.pushHistory(ev.Group, ev.Session, ev.Msg)
 		case "stream":
 			m.streamBuf[turnKey(ev.Group, ev.Session)] = ev.Text
 		case "done":
@@ -4178,8 +4193,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
 		m.refreshSuggestions()
-		delete(m.histNav, m.cur)
-		delete(m.histDraft, m.cur)
+		delete(m.histNav, m.curKey())
+		delete(m.histDraft, m.curKey())
 		if v == "" {
 			return m, nil
 		}
@@ -4204,29 +4219,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch s {
 	case "up":
-		hist := m.promptHistory[m.cur]
+		ck := m.curKey()
+		hist := m.promptHistory[ck]
 		if n := len(hist); n > 0 {
-			steps := m.histNav[m.cur]
+			steps := m.histNav[ck]
 			if steps == 0 {
-				m.histDraft[m.cur] = m.input.Value()
+				m.histDraft[ck] = m.input.Value()
 				steps = 1
 			} else if steps < n {
 				steps++
 			}
-			m.histNav[m.cur] = steps
+			m.histNav[ck] = steps
 			m.input.SetValue(hist[n-steps])
 			m.input.CursorEnd()
 		}
 		return m, nil
 	case "down":
-		if steps := m.histNav[m.cur]; steps > 0 {
+		ck := m.curKey()
+		if steps := m.histNav[ck]; steps > 0 {
 			steps--
-			m.histNav[m.cur] = steps
+			m.histNav[ck] = steps
 			if steps == 0 {
-				m.input.SetValue(m.histDraft[m.cur])
-				delete(m.histDraft, m.cur)
+				m.input.SetValue(m.histDraft[ck])
+				delete(m.histDraft, ck)
 			} else {
-				hist := m.promptHistory[m.cur]
+				hist := m.promptHistory[ck]
 				m.input.SetValue(hist[len(hist)-steps])
 			}
 			m.input.CursorEnd()
@@ -4269,7 +4286,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // snapshotted at open time so background subscribe events arriving mid-
 // session don't shuffle the result list under the user's fingers.
 func (m *Model) openPicker() {
-	src := m.promptHistory[m.cur]
+	src := m.promptHistory[m.curKey()]
 	items := make([]string, 0, len(src))
 	for i := len(src) - 1; i >= 0; i-- {
 		items = append(items, src[i])
@@ -5315,7 +5332,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			text: fmt.Sprintf("unknown command: /%s (ctrl+h for the cheatsheet)", name)})
 		return nil
 	}
-	m.pushHistory(m.cur, v)
+	m.pushHistory(m.cur, m.activeSession(m.cur), v)
 	// Goal sessions are follow-only: the daemon refuses sends into them (the
 	// driver clears the session before every iteration, so an injected
 	// message would be wiped anyway). Say so locally instead of bouncing the

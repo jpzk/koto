@@ -109,6 +109,18 @@ func saveState(sock string, s persistedState) {
 		logWarn("persist", "state save failed: %v", err)
 		return
 	}
+	// The 0600 above applies only when this call CREATES the file (audit
+	// 2026-09-11 L65). A tui-state.json that already exists at 0644 — copied,
+	// restored from a backup, migrated, or left by an older build — keeps that
+	// mode through every later write, and what is written is the operator's
+	// unsubmitted input bar. Repaired through the DESCRIPTOR, not the path, so
+	// this cannot be redirected onto another file between the open and the
+	// chmod, and only when it is actually too broad.
+	if st, serr := f.Stat(); serr == nil && st.Mode().Perm()&0o077 != 0 {
+		if cerr := f.Chmod(0o600); cerr != nil {
+			logWarn("persist", "state file is mode %04o and could not be tightened: %v", st.Mode().Perm(), cerr)
+		}
+	}
 	if _, err := f.Write(b); err != nil {
 		logWarn("persist", "state save failed: %v", err)
 	}

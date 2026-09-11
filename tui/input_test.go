@@ -166,8 +166,8 @@ func TestInputRowAndGhostAreScrubbed(t *testing.T) {
 
 	// Prompt history is scrubbed on the way in, so recall, the picker and the
 	// ghost are all clean at once.
-	m.pushHistory("g", "deploy \x1b]0;pwned\x07 prod\x1b[2J")
-	h := m.promptHistory["g"]
+	m.pushHistory("g", "", "deploy \x1b]0;pwned\x07 prod\x1b[2J")
+	h := m.promptHistory[turnKey("g", "")]
 	if len(h) != 1 {
 		t.Fatalf("history = %v", h)
 	}

@@ -644,7 +644,29 @@ func destroy(g string) baseResp {
 		// until a daemon restart.
 		proxyUnlisten(port)
 	}
-	_ = os.RemoveAll(vol(g))
+	// A failed workspace deletion used to be discarded (audit 2026-09-11 L64).
+	// That is the one error in here that changes what destroy MEANS:
+	// fcEnsureWorkspaceImg treats an existing groups/<name>/workspace.img as
+	// authoritative and reuses or grows it, and group names are reusable — so a
+	// permission, EIO or busy-mount failure left the old group's entire
+	// workspace in place to be mounted by the NEXT group of that name, while
+	// the operator was told the data was gone.
+	//
+	// The name is what carries the hazard, so if the directory survives it is
+	// moved out of the way: a later spawn then starts clean even though the
+	// bytes are still on disk, and the operator is told exactly where they are.
+	destroyErr := ""
+	if err := os.RemoveAll(vol(g)); err != nil || exists(vol(g)) {
+		quarantine := vol(g) + fmt.Sprintf(".undeleted-%d", time.Now().Unix())
+		if rerr := os.Rename(vol(g), quarantine); rerr == nil {
+			destroyErr = fmt.Sprintf("workspace could not be deleted (%v); it has been moved aside to %s — "+
+				"delete it by hand", err, quarantine)
+		} else {
+			destroyErr = fmt.Sprintf("workspace could not be deleted (%v) and could not be moved aside (%v): "+
+				"%s still holds this group's data, and a new group of the same name WILL reuse it", err, rerr, vol(g))
+		}
+		emitLogfG("group", g, "error", "destroy group=%s: %s", g, destroyErr)
+	}
 	// Firecracker droppings (cfg/pid/console/vsock sockets) live under
 	// run/fc, not the workspace — sweep them so a name reuse starts clean.
 	for _, p := range []string{fcCfgPath(g), fcPidPath(g), fcConsolePath(g),
@@ -683,6 +705,13 @@ func destroy(g string) baseResp {
 		// ...and free what it will never read. A handler blocked mid-Send
 		// does not come back to do it (audit M154).
 		drainSub(c)
+	}
+	if destroyErr != "" {
+		// Everything else HAS been torn down — the group is deregistered, its
+		// VM is off, its schedules and goals are gone — so this is not a
+		// failure to destroy, it is a destroy the caller must not read as a
+		// deletion of the data.
+		return errResp("group destroyed, but its data was not deleted: " + destroyErr)
 	}
 	return baseResp{OK: true}
 }
