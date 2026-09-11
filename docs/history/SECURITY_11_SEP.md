@@ -4323,3 +4323,135 @@ Test: `TestTruncatedPartialLineCannotBecomeFraming` in
 `daemon/audit_fixes_test.go` puts all seven markers at a synthetic start,
 asserting none becomes an event or opens a parser block, that the text still
 arrives as text, and that a real marker at a real line start still frames.
+
+## L23 — Guest-controlled newlines inject forged daemon log records — FIXED
+
+`daemon/events.go`, `logDeliver`.
+
+**Confirmed in the general case; the specific one was already closed.** The
+`job_done` `id`/`rc` half was fixed by M56 (`ctlJobField` bounds and strips
+them). What remained is the rule itself: `sanitize` deliberately **keeps**
+newlines, because most of what it guards is prose that legitimately has them —
+but a log **record** is not prose. It goes to stderr with one terminating
+newline, is held as one ring entry and rendered as one row, so an embedded LF
+forged a whole extra record: a convincing continuation line for any
+line-oriented collector reading the daemon's stderr, and an extra row in the TUI
+attributed to the daemon itself.
+
+**Fix:** `flattenInline` at the funnel every producer already passes, so the
+invariant is stated once instead of being re-fixed per field. Checked first that
+no call site emits a deliberately multi-line message — there are none.
+
+Test: `TestDaemonLogRecordIsOneLine` in `daemon/audit_fixes_test.go`.
+
+## L24 — Workspace images are created with insecure permissions — ALREADY FIXED (M136)
+
+The temp image is created `0600` and the rename carries that mode; the startup
+repair pass (`hardenStatePaths`) clears group/other bits from images an older
+koto created. Measured before that fix: every booted group's `workspace.img` was
+`-rw-r--r--` owned by its per-VM subuid — which is the headline of M136.
+
+## L25 / L28 — Guest control payloads logged globally; oversized log events — ALREADY FIXED (M115)
+
+`ctlDispatchPB` logs the **verb and the envelope's size**, not its body, past
+`ctlLogMax` — and it did so before any authorization decision, which is exactly
+what M115 addressed. Small requests still log in full, which is what makes the
+ctl log useful; the cap is where a payload starts being a payload rather than a
+command. Verified rather than assumed.
+
+## L26 / L123 — govulncheck scans the workspace graph, and not the release build configuration — FIXED
+
+`.github/workflows/govulncheck.yml`.
+
+**Confirmed and measured.** `go.work` ties all four modules together, and a go
+command run from a module *beneath* it uses workspace mode, where minimal
+version selection runs across the union. The manifests genuinely diverge —
+`daemon` requires `x/text v0.41.0`; `fcguest`, `protocol` and `tui` require
+`v0.40.0`. Measured: `go list -m golang.org/x/text` in `fcguest` returns
+**v0.41.0** under the workspace and **v0.40.0** with `GOWORK=off`. So three of
+the four modules were scanned at a version they do not ship, and a vulnerability
+fixed in v0.41.0 but reachable in v0.40.0 would have passed the release gate.
+The workflow comment claiming each module is scanned with its own go.mod was
+simply not true.
+
+**Fix:** `GOWORK: "off"` for the scan step, plus `CGO_ENABLED: "0"` to match how
+the release binaries are actually built (L123) — cgo changes which files build,
+the cgo-guarded variants of `net` and `os/user` among them, so a scan with it
+enabled analyses a call graph that is not the one being released. The loop also
+prints each module's resolved `x/text` so the log shows which graph was scanned.
+
+## L27 / L32 — Collector and activity state survive same-name group recreation — FIXED
+
+`daemon/resources.go`, `daemon/activity.go`, `daemon/groups.go`.
+
+**Confirmed.** `resSweep` prunes against a snapshot taken **before** its
+asynchronous guest probes and never takes `groupOpMu`, and `destroy` invalidated
+neither the collector's caches nor the activity registry. Group names are
+reusable, so a group destroyed and recreated inside one sweep — or a probe
+landing after the recreation — handed the replacement the previous group's
+samples. The activity map is worse: unbounded, created by any non-empty
+transition, never reclaimed by idle completion, so destroyed groups accumulated
+forever and a callback from an older incarnation could write into a newer
+group's phase.
+
+The alert state is the part with a security consequence rather than a tidiness
+one: an alert fires only on a level **increase**, so a replacement inheriting
+`critical` gets **no alert** on its own first genuine disk or CPU crossing.
+
+**Fix:** `resForgetGroup` and `activityForget`, called from `destroy` beside
+the teardowns already there (`delGoalsFor`, `disarmReport`, `delSchedsFor`,
+`dropJobsCache`, `dropGroupTailState`).
+
+Test: `TestDestroyForgetsCollectorAndActivityState` in
+`daemon/audit_fixes_test.go`, including that the recreated group's first
+crossing fires again.
+
+## L29 — Configuration write failures are silently acknowledged — ALREADY FIXED
+
+`configCmd` calls `updateGroupConfig`, checks its error and returns
+`errResp("write config: …")`; `updateGroupConfig` returns an error from every
+step (temp create, write, chmod, close, rename) and commits by **rename**, so
+the non-atomic truncate-and-write the finding also names is gone too. Both
+halves were closed by the earlier config work; verified against the code.
+
+## L30 — Notification timer race allows duplicate autonomous turns — FIXED
+
+`daemon/notify.go`, `recordJobDone`.
+
+**Confirmed.** `Timer.Stop` does not unschedule a callback that is already
+runnable, and the old callback carried no identity: it could acquire `notifyMu`
+after the replacement was stored, delete the **replacement's** map entry, and
+flush. Deleting the entry does not cancel the replacement's own callback, so
+both ran, both snapshotted the same pending results before either cleared them,
+and one job's completion woke the session twice. A guest that can produce
+notify-enabled completions could turn that into extra model turns in its own
+group — self-amplification on the one path that exists to wake an agent.
+
+**Fix:** each arming takes a generation, recorded per key; a callback that is no
+longer the registered arming returns without flushing, leaving the live one to
+do it.
+
+Test: `TestNotifyTimerSupersessionIsOneFlush` in `daemon/audit_fixes_test.go`.
+
+## L31 — AttachShell retains handlers and vsock resources after guest termination — PARTLY FIXED, with the limit stated
+
+`daemon/grpc_server.go`, `AttachShell`.
+
+**Confirmed.** The guest→client forwarding goroutine returns on guest EOF, a
+read failure, an `End` or `Error` frame, or a `Send` the client would not take —
+and closed nothing. The handler's deferred `c.Close()` runs only when the
+handler returns, and the handler is parked in `stream.Recv()` until the
+**client** closes or cancels. An authenticated caller with `attach_shell` could
+hold request streams open and accumulate one vsock connection, one guest file
+descriptor and one of the group's bounded connection slots per dead attach.
+
+**Fixed:** the forwarder closes the guest connection on the way out, whichever
+way it ends. That releases every guest-side resource immediately and also
+unwedges the receive loop at the next client message, since `fcWriteFrame` on a
+closed connection fails and the handler returns.
+
+**Not fixed, and why:** the handler goroutine and its gRPC stream. A server
+cannot cancel a stream context it does not own, and returning with a `Recv` in
+flight is outside what grpc-go permits — the same limit recorded under M154.
+Their count is bounded by `streamAdmit` (M95): 512 streams per identity, 2048
+globally.

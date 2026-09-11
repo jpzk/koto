@@ -63,6 +63,17 @@ var (
 	activities = map[string]*activityState{}
 )
 
+// activityForget drops a group's phase state. The map is process-global and
+// unbounded, an entry is created by any non-empty transition, and idle
+// completion does not reclaim it — so destroyed groups accumulated forever, and
+// because probe callbacks carry only the NAME, one from an older incarnation
+// could write into a newer group's state (audit 2026-09-11 L32).
+func activityForget(g string) {
+	activityMu.Lock()
+	delete(activities, g)
+	activityMu.Unlock()
+}
+
 // resolve collapses the inputs into the one phase worth showing. Retry wins
 // outright: it is the only phase that explains a *stall*, and burying it under
 // a concurrent subagent's stream would hide exactly the case this exists for.

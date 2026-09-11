@@ -476,7 +476,19 @@ func logDeliver(subsystem, group, level, msg string) {
 	// Log lines quote guest-authored bytes (ctl JSON, job_done fields, exec
 	// output) and reach stderr and the TUI log pane unframed — scrub them
 	// here, the one funnel, rather than at every emit site.
-	msg = sanitize(msg)
+	//
+	// flattenInline as well as sanitize (audit 2026-09-11 L23): sanitize
+	// deliberately KEEPS newlines, because most of what it guards is prose that
+	// legitimately has them. A log record is not prose — it is one line, written
+	// to stderr with a single terminating newline, held as one ring entry and
+	// rendered as one row. An embedded LF therefore forged a whole extra record:
+	// a convincing continuation line for any line-oriented collector reading
+	// the daemon's stderr, and an extra row in the TUI's log pane attributed to
+	// the daemon itself. Individual sites had been fixed one at a time (M56's
+	// job id and rc); this is the same invariant stated once, at the funnel
+	// every producer already passes. No call site emits a deliberately
+	// multi-line message — checked, there are none.
+	msg = flattenInline(sanitize(msg))
 	pbev := &pb.LogEvent{
 		Event:     "log",
 		Level:     level,

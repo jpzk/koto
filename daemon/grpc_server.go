@@ -1112,6 +1112,23 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 
 	// guest -> client: pty output / end / error frames.
 	go func() {
+		// Whichever way this loop ends — guest EOF, a read failure, an End or
+		// Error frame, or a Send the client would not take — the guest side of
+		// this attach is finished, so its connection goes now (audit
+		// 2026-09-11 L31). It used to wait for the handler's deferred
+		// c.Close(), and the handler is parked in stream.Recv() until the
+		// CLIENT closes or cancels: an authenticated caller could hold the
+		// request stream open and accumulate one vsock connection, one guest
+		// file descriptor and one of the group's bounded connection slots per
+		// dead attach.
+		//
+		// It also unwedges the receive loop below at the next client message,
+		// since fcWriteFrame on a closed conn fails and returns. What is NOT
+		// reclaimed here is the handler goroutine and its gRPC stream — a
+		// server cannot cancel a stream context it does not own, and returning
+		// with a Recv in flight is outside what grpc-go permits. Their count is
+		// bounded by streamAdmit (audit M95), same as M154.
+		defer c.Close()
 		for {
 			f, ferr := fcReadAgentFrame(c)
 			if ferr != nil {
