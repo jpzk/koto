@@ -2092,3 +2092,34 @@ reports how many artifacts it verified and names the ones it could not, because
 "nothing was verified" and "everything verified" should not look identical to
 an operator. `TestArtifactVerificationCoversEveryManifestEntry` tampers with
 each of the five in turn.
+
+### M113 — Transcript files are created with permissions readable by other local users (`daemon/logtail.go`) — **fixed**
+
+Real, and uniform: every writer asked for 0644 and every directory for 0755 —
+the umask's choice rather than a decision. A transcript holds prompts, model
+output, tool output, command output, proxy errors and notifications, and
+nothing about it wants to be group-readable.
+
+Changed across all of the paths the finding identifies, since fixing one would
+leave the file at whichever mode created it first: the turn sink
+(`logSinkAppend`), the tailer's create, the prompt echo, the clear/rewrite
+truncate, the session-filter rewrite, the session registry, and `config.json`.
+`.cs/` itself is 0700 — it holds the transcripts, the config and the uploads.
+
+The exposure was to the operator's GROUP rather than the world (the state dir
+is 0750 and owner-owned), which is why this is a tightening rather than an
+emergency. `TestTranscriptFilesAreOwnerOnly`.
+
+### M114 — Published-port forwarding permits unbounded idle connection exhaustion (`daemon/fc.go`) — **already fixed (M22/M27)**
+
+The published-port accept loop is one of the `fcAcceptLoop` call sites, and it
+was given its OWN admission bucket when that cap went in — deliberately
+separate from the guest's, because these connections arrive from the host side
+and charging them to the guest's budget would let an outside caller starve the
+group's ctl and turn channels. So the unbounded goroutine-per-client is bounded
+at `fcMaxConnsPerGroup`, released on every handler exit including a dial
+failure.
+
+An inactivity deadline on established streams is declined for the same reason
+as M103: a published port exists to carry a real service, and a connection idle
+between requests is the normal case for one.

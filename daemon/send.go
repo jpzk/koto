@@ -264,7 +264,7 @@ func sendNow(g, session, msg string) error {
 	// and in History replay. Written unconditionally (default = "-") so a
 	// default turn after a named one resets the attribution. The slot is what
 	// makes the sticky marker safe again: no other turn writes here.
-	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
 		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), fencePromptEcho(msg))
 		f.Close()
 	}

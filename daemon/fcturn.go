@@ -99,7 +99,7 @@ type turnWriter struct {
 }
 
 func newTurnWriter(g, p string) *turnWriter {
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	return &turnWriter{g: g, p: p}
 }
 

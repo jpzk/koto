@@ -3747,3 +3747,58 @@ func TestArtifactVerificationCoversEveryManifestEntry(t *testing.T) {
 		t.Fatalf("a missing manifest was fatal: %v", err)
 	}
 }
+
+// 2026-09-11 M113: a transcript holds prompts, model output, tool output,
+// command output and notifications. Every writer requested 0644 — the umask's
+// choice rather than a decision — across the tailer, the prompt echo, the
+// guest turn sink, the clear/rewrite path and the session filter.
+func TestTranscriptFilesAreOwnerOnly(t *testing.T) {
+	fcHarness(t)
+	const g = "perms"
+	if _, err := ensureGroupDirForTest(g); err != nil {
+		t.Fatal(err)
+	}
+	cs := filepath.Join(vol(g), ".cs")
+	if fi, err := os.Stat(cs); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf(".cs is mode %04o — group/other can reach the transcripts", fi.Mode().Perm())
+	}
+
+	// Every path that creates a transcript file.
+	p := slotLogPath(g, 0)
+	if err := logSinkAppend(p, []byte("[[session]] -\n")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(p); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("slot transcript is mode %04o", fi.Mode().Perm())
+	}
+
+	// The session registry and the atomic rewrites that replace these files.
+	registerSession(g, "work")
+	if fi, err := os.Stat(sessionRegPath(g)); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("session registry is mode %04o", fi.Mode().Perm())
+	}
+	if err := filterLogSession(p, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("transcript is mode %04o after a session filter rewrite", fi.Mode().Perm())
+	}
+	// And config.json, which the same .cs dir holds.
+	if _, err := updateGroupConfig(g, func(c map[string]any) { c["model"] = "x" }); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(groupConfigPath(g)); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		t.Errorf("config.json is mode %04o after an atomic rewrite", fi.Mode().Perm())
+	}
+}
+
+// ensureGroupDirForTest creates a group's .cs the way ensureLocked does,
+// without booting anything.
+func ensureGroupDirForTest(g string) (string, error) {
+	d := filepath.Join(vol(g), ".cs")
+	return d, os.MkdirAll(d, 0o700)
+}

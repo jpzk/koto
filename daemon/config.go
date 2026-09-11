@@ -248,7 +248,7 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 	defer mu.Unlock()
 
 	p := groupConfigPath(g)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, err
 	}
 	cfg := map[string]any{}
@@ -272,7 +272,7 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 		os.Remove(name)
 		return cfg, err
 	}
-	if err := tmp.Chmod(0o644); err != nil { // CreateTemp makes it 0600
+	if err := tmp.Chmod(0o600); err != nil { // keep the atomic rewrite owner-only too (M113)
 		tmp.Close()
 		os.Remove(name)
 		return cfg, err

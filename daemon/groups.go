@@ -150,7 +150,9 @@ func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 		}
 	}
 	v := vol(g)
-	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o755); err != nil {
+	// 0700: .cs holds the group's transcripts, its config and its uploads
+	// (audit M113).
+	if err := os.MkdirAll(filepath.Join(v, ".cs"), 0o700); err != nil {
 		return 0, err
 	}
 	// Provider is mandatory in config.json. Auto-fill on first ensure() so
@@ -641,7 +643,7 @@ func clearCmd(req groupReq) baseResp {
 	// file left behind would replay a cleared group's work on the next attach.
 	for _, p := range logPaths(req.Group) {
 		if _, err := os.Stat(p); err == nil {
-			_ = os.WriteFile(p, nil, 0o644)
+			_ = os.WriteFile(p, nil, 0o600)
 		}
 	}
 	// ...and the in-memory replay ring, which is the OTHER copy (events.go).
