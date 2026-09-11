@@ -53,14 +53,23 @@ var (
 // id \t status \t rc \t session \t started \t out_size \t cmd
 // cmd is last because it's the only field that may contain runs of
 // arbitrary text; its tabs/newlines are squashed to spaces first.
-const jobsListScript = `for d in /workspace/.cs/jobs/*/; do
+//
+// EVERY field is read with a bound, and the size with stat rather than wc
+// (audit M160). All of these files are written by the WORKER — cs-job mints the
+// directory but uid 1000 owns it — and `cat` inlined whatever was there into a
+// TSV line that comes back through the exec buffer, is parsed into per-group
+// state, folded into the state hash and republished in every state frame. `cmd`
+// was already capped at 200 bytes, which is the shape; the other four were not.
+// `wc -c < file` also READS the file to count it; stat asks the inode.
+const jobsListScript = `fld() { head -c 64 "$1" 2>/dev/null | tr -d '\t\n'; }
+for d in /workspace/.cs/jobs/*/; do
   [ -d "$d" ] || continue
   id=$(basename "$d")
-  st=$(cat "$d/status" 2>/dev/null || echo unknown)
-  rc=$(cat "$d/rc" 2>/dev/null || echo '')
-  sess=$(cat "$d/session" 2>/dev/null || echo '')
-  start=$(cat "$d/started" 2>/dev/null || echo 0)
-  sz=$(wc -c < "$d/out" 2>/dev/null || echo 0)
+  st=$(fld "$d/status"); [ -n "$st" ] || st=unknown
+  rc=$(fld "$d/rc")
+  sess=$(fld "$d/session")
+  start=$(fld "$d/started"); [ -n "$start" ] || start=0
+  sz=$(stat -c %s "$d/out" 2>/dev/null || echo 0)
   cmd=$(head -c 200 "$d/cmd" 2>/dev/null | tr '\t\n' '  ')
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$rc" "$sess" "$start" "$sz" "$cmd"
 done
@@ -242,12 +251,15 @@ func fcJobLogs(g, id string, tail int64) (*jobLogsResult, error) {
 	}
 	script := `D=/workspace/.cs/jobs/` + id + `
 [ -d "$D" ] || { echo NOJOB; exit 0; }
+fld() { head -c 64 "$1" 2>/dev/null | tr -d '\t\n'; }
+st=$(fld "$D/status"); [ -n "$st" ] || st=unknown
+start=$(fld "$D/started"); [ -n "$start" ] || start=0
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "$(cat "$D/status" 2>/dev/null || echo unknown)" \
-  "$(cat "$D/rc" 2>/dev/null || echo '')" \
-  "$(cat "$D/session" 2>/dev/null || echo '')" \
-  "$(cat "$D/started" 2>/dev/null || echo 0)" \
-  "$(wc -c < "$D/out" 2>/dev/null || echo 0)" \
+  "$st" \
+  "$(fld "$D/rc")" \
+  "$(fld "$D/session")" \
+  "$start" \
+  "$(stat -c %s "$D/out" 2>/dev/null || echo 0)" \
   "$(head -c 200 "$D/cmd" 2>/dev/null | tr '\t\n' '  ')"
 tail -c ` + strconv.FormatInt(tail, 10) + ` "$D/out" 2>/dev/null | base64
 true`
