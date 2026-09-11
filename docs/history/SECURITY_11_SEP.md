@@ -1035,3 +1035,27 @@ terminal the moment they hovered the row.
 shell pane — now runs on every raw frame. A client cannot rely on the
 sanitization of a peer it is explicitly written to be compatible with.
 `TestJobTailRawFramesAreScrubbed`.
+
+### M58 — Prompt data is inherited by Venice workspace commands (`sidecar/venice_stream.js`) — **fixed (with a named residual)**
+
+Real. The turn's message and system prompt arrive as `MSG_B64`/`SP_B64`, and
+the bash tool spawned with `env: process.env` handed both to every command it
+ran and to all their descendants. That tool runs attacker-influenceable
+workspace code — a repository's build script, an npm `postinstall` — which
+could read the operator's system prompt (`prompts/global.md` + the group's
+`prompt.md` + memory) out of its own environment without the model ever
+choosing to reveal it, and exfiltrate it over whatever egress the group's
+`network` profile allows. Base64 is an encoding, not a confidentiality control.
+
+Both variables are now deleted from `process.env` immediately after they are
+read. Deleting rather than filtering at the spawn site keeps it true for every
+child, including ones added later. Verified by loading the script with the
+variables set and checking they are gone by the time it exits.
+
+**Residual, stated rather than fixed:** the claude path has the same exposure by
+a different route — `runClaude` passes the composed system prompt as
+`--append-system-prompt <text>` on ARGV, which any process of the same uid
+reads from `/proc/<pid>/cmdline` for the turn's duration. (The message body
+goes over stdin and is not exposed.) Closing it needs the CLI to accept the
+prompt from a file or stdin; that is an upstream capability question, not a
+change koto can make on its own, so it is recorded here rather than guessed at.

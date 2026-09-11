@@ -55,6 +55,17 @@ function decodeB64(s) {
 }
 const USER_MSG = decodeB64(process.env.MSG_B64);
 const SYS_PROMPT = decodeB64(process.env.SP_B64);
+// Read once, then removed from this process's environment — every child
+// inherits process.env, and the bash tool runs attacker-influenceable
+// workspace code (a repo's build script, an npm postinstall) in /workspace. It
+// could read the turn's prompt and system prompt straight out of its own
+// environment, without the model ever choosing to reveal them, and exfiltrate
+// them over whatever egress the group's network profile allows (audit M58).
+// Base64 is an encoding, not a confidentiality control. Deleting here rather
+// than filtering at each spawn keeps it true for every child, including ones
+// added later.
+delete process.env.MSG_B64;
+delete process.env.SP_B64;
 
 // VENICE_ONESHOT: sub-agent mode (driven by cs-subagent). The streaming deltas
 // and tool framing are progress, not the return value, so they go to stderr;
