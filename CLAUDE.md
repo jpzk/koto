@@ -554,7 +554,18 @@ worker user (`node`, uid 1000, cwd `/workspace`) — direct code execution
 outside the agent loop, deliberately reserved for the operator rather than
 grantable. Its output is sanitized by default (`RunScriptReq.raw` opts out;
 see `chunkSanitizer`) — the operator picks the script, the guest picks the
-bytes. Mutations validate shape server-side, refuse to define/delete
+bytes. **Setting a POSTURE key is admin-only too, via a synthetic verb**:
+`ConfigReq` is one message carrying both the delegable settings (`model`,
+`effort`, `provider`) and the ones that decide what a group's VM may reach and
+hold (`network`/`internet`, `root`, `ports`, `size`, `autostart`), so one
+coarse `config` grant covered both — a role delegated "may set this group's
+model" could also give it WAN egress, passwordless guest sudo, a published
+host port, more of the host's RAM, or a boot at daemon start. `postureVerb`
+(auth.go) re-labels such a request as `config_posture`, which is in
+`adminOnlyVerbs`; a request touching only the delegable keys, or reading,
+stays `config`. Same rule the ctl plane already enforces against the agent
+principal (audit H1, 2026-09-05), now on the plane the docs always said
+posture lived on. Mutations validate shape server-side, refuse to define/delete
 `admin`, refuse to touch a corrupt file (fix on disk instead), and write
 atomically. This governs the gRPC plane only; the
 in-guest ctl plane (ctl.go) stays hardcoded on group identity because its

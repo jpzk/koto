@@ -832,6 +832,10 @@ func (s *kotoServer) RunScript(r *pb.RunScriptReq, stream pb.Koto_RunScriptServe
 // later messages naming a different group are a protocol error (the vsock
 // conn was dialed once, to one group), even though ACL would independently
 // authorize that other group on its own.
+// shellSessionRE is the tmux session namespace the daemon mints: "koto-shell"
+// plus an optional "-<chat session>", whose charset is sessionNameRE's.
+var shellSessionRE = regexp.MustCompile(`^koto-shell(-[A-Za-z0-9][A-Za-z0-9_-]{0,31})?$`)
+
 func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 	first, err := stream.Recv()
 	if err != nil {
@@ -848,6 +852,17 @@ func (s *kotoServer) AttachShell(stream pb.Koto_AttachShellServer) error {
 	session := open.Session
 	if session == "" {
 		session = "koto-shell"
+	}
+	// The value is a raw tmux selector: the guest runs `tmux new-session -A
+	// -s <session>`, so an unconstrained one creates an unmanaged session
+	// outside the group's namespace, and a newline forges daemon log records
+	// on the line below. Pin it to the two shapes the daemon itself mints —
+	// "koto-shell" for the default chat session, "koto-shell-<name>" for a
+	// named one (shellSessionName in the TUI, turn.go in the guest). This is
+	// hygiene, not a boundary: attach_shell on a group already yields a shell
+	// as the guest worker, from which `tmux attach` reaches any session in it.
+	if !shellSessionRE.MatchString(session) {
+		return status.Error(codes.InvalidArgument, "invalid shell session name")
 	}
 	if _, err := ensure(group, group == "main"); err != nil {
 		return status.Errorf(codes.FailedPrecondition, "%v", err)

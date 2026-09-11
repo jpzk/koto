@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"koto-protocol/pb"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -204,10 +206,30 @@ func aclLogGroup(target string) string {
 	return target
 }
 
+// postureVerb re-labels a Config request that sets a POSTURE key as the
+// synthetic admin-only verb config_posture (acl.go). ConfigReq is one message
+// carrying both the delegable settings (model, effort, provider) and the ones
+// that decide what the group's VM may reach and hold, so a single `config`
+// grant authorized both. The target check is unaffected — the request is still
+// group-scoped, and admin passes everything.
+func postureVerb(verb string, req any) string {
+	cr, ok := req.(*pb.ConfigReq)
+	if verb != "config" || !ok {
+		return verb
+	}
+	for _, p := range []*string{cr.Network, cr.Internet, cr.Root, cr.Ports, cr.Size, cr.Autostart} {
+		if p != nil {
+			return "config_posture"
+		}
+	}
+	return verb
+}
+
 // aclCheck is the authorization decision for one decoded request: some role
 // of the caller must grant the verb, and — for group-scoped verbs — that
 // grant must cover the request's target group (acl.go; union semantics).
 func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) error {
+	verb = postureVerb(verb, req)
 	target, targeted := targetOf(req)
 	roles := strings.Join(id.Roles, ",")
 	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
