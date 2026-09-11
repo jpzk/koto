@@ -3378,3 +3378,49 @@ limit, the tightest wins wherever it sits, **a child naming more than its parent
 allows loses to the parent** (the hierarchy property the finding turns on), a
 missing `memory.max` is not a limit of zero, the resolved cap takes the smaller
 of the two bounds, and `KOTO_HOST_MEM_MIB` overrules both.
+
+## M154 — SubscribeGroup can retain streams after subscriber shutdown — PARTLY FIXED, with the limit stated
+
+`daemon/events.go`, `daemon/groups.go`.
+
+**Confirmed, in the part that is this side's to fix.** The handler's select
+returns on `sub.done` and `ctx.Done()` — **between** sends. A `stream.Send`
+already in flight blocks on HTTP/2 flow control for as long as the client keeps
+the connection open without reading it, and closing a channel does not
+interrupt that. So `shut()` — called by the overflow path and by `destroy()` —
+left the subscriber **registered**, with its 256 queued frames held and `emit()`
+still walking it on every event of that group.
+
+**Fixed:** `dropSub` is `shut()` plus the cleanup that used to wait on the
+handler noticing — deregister, then drain the queue. The overflow path uses it,
+and `destroy()` drains each subscriber it deregisters. The channel is
+deliberately **not closed**: the handler may still be selecting on it, and a
+closed channel would hand it a nil event to `Send`.
+
+**Not fixed, and why:** the handler goroutine and its stream. Returning from a
+server handler with a `Send` in flight, and calling `Send` from a second
+goroutine so the first can be abandoned, are both outside what grpc-go permits,
+and the server cannot cancel a stream context it does not own. So a stuck stream
+holds its own goroutine until the transport dies.
+
+**What bounds that is already in place**: `streamAdmit` (audit M95, this same
+audit) caps concurrent streams at 512 per identity and 2048 globally, across
+every streaming RPC. The finding's "consume daemon goroutines … to degrade or
+deny service" is therefore already bounded in count; what this fix removes is
+the *memory* behind them — up to 256 events each, which for streamed chunk
+frames is the part that actually adds up — and the correctness bug where
+`destroy()` could not get rid of a subscriber.
+
+**Considered and rejected:** a server-wide `MaxConnectionAge`. It would
+eventually reclaim any stuck stream, and the protocol is built for reconnection
+(`since_seq` resumes gaplessly). But it tears down every healthy long-lived
+stream on a timer, for every client including the out-of-tree Android app, to
+reclaim a goroutine whose count is already capped. That is a behaviour change to
+every client for a bounded gain, and it should be an operator's decision rather
+than a side effect of this finding.
+
+Test: `TestShutSubscriberIsDeregisteredAndDrained` in
+`daemon/audit_fixes_test.go` overflows a subscriber through the real `emit`
+path, then asserts it is shut, deregistered, drained, its channel still open,
+and that later events do not reach it. Verified to fail with `dropSub` reverted
+to a bare `shut()`.
