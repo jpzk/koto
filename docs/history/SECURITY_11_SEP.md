@@ -3551,3 +3551,39 @@ plus transcript, prompts, cursor and draft, makes the group disappear from a
 `listMsg`, and asserts every one is gone while a sibling group's prompt history
 is untouched; `TestGroupClearForgetsThePrompts` drives the real `clear` response
 path. Both verified to fail with the wiring reverted.
+
+## M156 — SubscribeLogs silently drops audit events under backpressure — FIXED
+
+`daemon/events.go`, `logDeliver`.
+
+**Confirmed.** The fan-out sent non-blocking into each subscriber's 256-entry
+channel and took the `default` branch on a full one — no marker, no stream
+termination, nothing. The daemon log is the record an operator checks *after*
+the fact (a resource alert, an auth rejection, an error forwarded from
+`logalert`), and unlike the group event stream it carries no sequence numbers to
+notice a gap with, so at the one consumer that renders it "nothing was logged"
+and "you did not receive what was logged" looked identical. The 200-line replay
+ring only helps a reconnect that happens before the lines age out.
+
+**Fix:** the subscriber is told. Each `logSub` counts its own dropped lines, and
+the next line it *can* receive is preceded by a `warn` frame naming the count
+and pointing at `koto ctl logs`, which re-reads the daemon's own log. The count
+is never lost, only deferred: if the notice itself does not fit, the counter
+keeps climbing and the notice goes out when the subscriber catches up.
+
+The fan-out moved inside `logSubsLock` — which `logDeliver` already takes for
+the ring append — because the counters are per subscriber and this is their only
+writer. The sends stay non-blocking, so the critical section is bounded by the
+subscriber count.
+
+Not changed: the drop itself. Blocking the emitter on a slow subscriber would
+let one client stall every log line in the daemon, and `emit`'s answer for the
+group stream (shut the stream, resume with `since_seq`) needs sequence numbers
+this stream does not have. The record itself is never lost either way — every
+line is mirrored to stderr and to the ring before the fan-out.
+
+Test: `TestLogSubscriberIsToldWhatItMissed` in `daemon/audit_fixes_test.go`
+overflows a subscriber, asserts the exact count, drains it, and asserts the
+notice arrives **before** the next content line and resets the counter — then
+repeats the overflow to pin that a notice which cannot fit is deferred rather
+than lost.

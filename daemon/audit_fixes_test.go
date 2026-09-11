@@ -5788,3 +5788,75 @@ func BenchmarkCronNextImpossible(b *testing.B) {
 		p.next(from)
 	}
 }
+
+// 2026-09-11 M156: logDeliver's fan-out dropped a line into the default branch
+// when a subscriber's 256-entry channel was full, with no marker and no stream
+// termination. The daemon log is the record an operator checks after the fact —
+// a resource alert, an auth rejection, a forwarded error — and unlike the group
+// event stream it has no sequence numbers to notice a gap with, so "nothing was
+// logged" and "you did not receive what was logged" looked identical.
+func TestLogSubscriberIsToldWhatItMissed(t *testing.T) {
+	sub := &logSub{ch: make(chan *pb.LogEvent, 4)}
+	logSubsLock.Lock()
+	prev := logSubs
+	logSubs = []*logSub{sub}
+	logSubsLock.Unlock()
+	t.Cleanup(func() {
+		logSubsLock.Lock()
+		logSubs = prev
+		logSubsLock.Unlock()
+	})
+
+	// Overflow it: four fit, four are lost.
+	for i := 0; i < 8; i++ {
+		emitLogfQuiet("m156", "info", "line %d", i)
+	}
+	logSubsLock.Lock()
+	dropped := sub.dropped
+	logSubsLock.Unlock()
+	if dropped != 4 {
+		t.Fatalf("dropped = %d, want 4", dropped)
+	}
+
+	// Drain, then let one more line through: the subscriber must be told about
+	// the gap BEFORE it gets more content.
+	for i := 0; i < 4; i++ {
+		<-sub.ch
+	}
+	emitLogfQuiet("m156", "info", "after the gap")
+
+	first := <-sub.ch
+	if first.Level != "warn" || !strings.Contains(first.Msg, "4 line(s)") {
+		t.Fatalf("first frame after the gap is not the notice: level=%q msg=%q", first.Level, first.Msg)
+	}
+	second := <-sub.ch
+	if !strings.Contains(second.Msg, "after the gap") {
+		t.Errorf("the line after the notice is %q", second.Msg)
+	}
+	logSubsLock.Lock()
+	dropped = sub.dropped
+	logSubsLock.Unlock()
+	if dropped != 0 {
+		t.Errorf("the drop counter was not reset after the notice: %d", dropped)
+	}
+
+	// The count is never lost, only deferred: if the notice itself does not
+	// fit, it keeps climbing and goes out when the subscriber catches up.
+	for i := 0; i < 8; i++ {
+		emitLogfQuiet("m156", "info", "burst %d", i)
+	}
+	logSubsLock.Lock()
+	dropped = sub.dropped
+	logSubsLock.Unlock()
+	if dropped == 0 {
+		t.Error("a second overflow was not counted")
+	}
+	for len(sub.ch) > 0 {
+		<-sub.ch
+	}
+	emitLogfQuiet("m156", "info", "recovered")
+	notice := <-sub.ch
+	if notice.Level != "warn" || !strings.Contains(notice.Msg, "fell behind") {
+		t.Errorf("the deferred notice never arrived: %q", notice.Msg)
+	}
+}
