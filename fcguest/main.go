@@ -23,8 +23,9 @@ package main
 //           shutdown. One JSON line request; JSON line response
 //           (exec_stream: raw output; run_script: framed output).
 //
-// As PID 1 the agent also owns early boot (mounts, loopback up, /dev/vdb
-// workspace mount with mkfs fallback) and zombie reaping. All children are
+// As PID 1 the agent also owns early boot (mounts, loopback up, the /dev/vdb
+// workspace mount — which formats the device only when it is provably blank,
+// see mountWorkspace) and zombie reaping. All children are
 // started via startTracked() so the central wait4(-1) reaper can route exit
 // statuses back to whoever is waiting (Go's per-cmd Wait would race a
 // global reaper).
@@ -154,22 +155,93 @@ func earlyInit() {
 	_ = unix.Sethostname([]byte("koto-vm"))
 }
 
-// mountWorkspace mounts the per-group virtio-block workspace. The daemon
-// normally pre-formats the image (mkfs.ext4 on the sparse file); the in-guest
-// mkfs fallback covers images created by hand or on hosts without e2fsprogs.
+// wsBlankProbe is how much of the device must be zero for it to count as never
+// written. A freshly truncated sparse image reads as zeros throughout; an ext4
+// filesystem has its primary superblock at offset 1024 and its group
+// descriptors right behind it, so a megabyte is far more than enough to tell
+// the two apart — and unlike a bare magic-number check it also refuses to
+// declare "blank" a device whose superblock is damaged but whose data is not.
+const wsBlankProbe = 1 << 20
+
+// workspaceIsBlank reports whether the device has never been written: the only
+// state in which formatting it destroys nothing.
+func workspaceIsBlank(dev string) (bool, error) {
+	f, err := os.Open(dev)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	buf := make([]byte, wsBlankProbe)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		// Short read means the device is smaller than the probe, which no
+		// workspace image is. Refuse to guess rather than call it blank.
+		return false, fmt.Errorf("read %s: %w", dev, err)
+	}
+	for _, b := range buf {
+		if b != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// mountWorkspace mounts the group's persistent disk, and REFUSES to reformat a
+// device that has anything on it (audit M138).
+//
+// This used to run `mkfs.ext4 -F` on any non-nil error from the first mount,
+// which turned every transient or recoverable mount failure into permanent loss
+// of the group's whole workspace: the conversation transcripts, the pinned
+// claude session ids, the agent's memory, its jobs, its uploads and whatever the
+// user put there. A dirty journal, a kernel without ext4, a wrong flag, an
+// e2fsck-able inconsistency — all of them read as "no filesystem here" and all
+// of them were answered by destroying the filesystem that was there.
+//
+// The host already formats a new image before the VM ever sees it
+// (fcEnsureWorkspaceImg runs mkfs.ext4 on it, with -d to migrate an old
+// workspace in), so a blank device reaching this point means the host's own
+// format did not happen. That is the one case where formatting here is both
+// necessary and free of consequence, and it is now the only case.
+//
+// Everything else gets e2fsck and a second attempt. If that does not produce a
+// mountable filesystem the boot FAILS, loudly: an unbootable group whose data is
+// intact is recoverable by the operator (backup superblocks, a host-side fsck,
+// a copy of the image), and a booted group whose data was just erased is not.
 func mountWorkspace() error {
 	_ = os.MkdirAll(wsDir, 0o755)
 	// nosuid,nodev: /workspace is node-writable and root-side code reads
 	// under it; a setuid binary or device node there must not be one latent
-	// bug away from mattering (audit L11).
-	err := unix.Mount(wsDev, wsDir, "ext4", unix.MS_NOSUID|unix.MS_NODEV, "")
+	// bug away from mattering (audit L11). Every mount attempt below carries
+	// the same flags — the old retry-after-mkfs dropped them, so a workspace
+	// that had just been reformatted also came back without the hardening.
+	const wsMountFlags = unix.MS_NOSUID | unix.MS_NODEV
+	err := unix.Mount(wsDev, wsDir, "ext4", wsMountFlags, "")
 	if err != nil {
-		logf("mount %s: %v — trying mkfs.ext4", wsDev, err)
-		if out, merr := exec.Command("mkfs.ext4", "-F", "-q", wsDev).CombinedOutput(); merr != nil {
-			return fmt.Errorf("mkfs.ext4: %v: %s", merr, bytes.TrimSpace(out))
+		blank, perr := workspaceIsBlank(wsDev)
+		if perr != nil {
+			return fmt.Errorf("mount %s: %v; refusing to format because the device could not be examined: %w", wsDev, err, perr)
 		}
-		if err = unix.Mount(wsDev, wsDir, "ext4", 0, ""); err != nil {
-			return fmt.Errorf("mount after mkfs: %w", err)
+		if !blank {
+			logf("mount %s: %v — the device is NOT blank, so it will not be reformatted; running e2fsck", wsDev, err)
+			// -p fixes what can be fixed without asking; -f forces the check
+			// even on a filesystem marked clean, which a failed mount makes a
+			// claim worth doubting. A non-zero exit here is normal (1 = errors
+			// were corrected), so the retry decides, not the status.
+			out, ferr := exec.Command("e2fsck", "-p", "-f", wsDev).CombinedOutput()
+			logf("e2fsck %s: %v: %s", wsDev, ferr, bytes.TrimSpace(out))
+			if err = unix.Mount(wsDev, wsDir, "ext4", wsMountFlags, ""); err != nil {
+				return fmt.Errorf("mount %s failed and e2fsck did not repair it: %w — "+
+					"the workspace has NOT been reformatted; recover it host-side "+
+					"(e2fsck on groups/<g>/workspace.img) or move it aside to start fresh", wsDev, err)
+			}
+			logf("mount %s: recovered by e2fsck", wsDev)
+		} else {
+			logf("mount %s: %v — the device is blank, formatting", wsDev, err)
+			if out, merr := exec.Command("mkfs.ext4", "-F", "-q", wsDev).CombinedOutput(); merr != nil {
+				return fmt.Errorf("mkfs.ext4: %v: %s", merr, bytes.TrimSpace(out))
+			}
+			if err = unix.Mount(wsDev, wsDir, "ext4", wsMountFlags, ""); err != nil {
+				return fmt.Errorf("mount after mkfs: %w", err)
+			}
 		}
 	}
 	// entrypoint.sh runs as uid 1000 with HOME=/workspace; a root-owned
