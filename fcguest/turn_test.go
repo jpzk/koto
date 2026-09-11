@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,4 +185,112 @@ func TestTurnConnStallKillsWorkerNotProducer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("close hung on a stalled writer")
 	}
+}
+
+// 2026-09-11 M150: the parser's retained state had no bound. A provider can
+// emit any number of valid stream events, for any number of content-block
+// indices, with no stop event ever arriving — and the scanner's 16 MiB limit
+// bounds one JSON RECORD, not the accumulation across records. Nothing
+// downstream constrains it either: the turn queue is bounded but a tool input
+// is not framed until its stop event, and the host's frame-size and transcript
+// checks happen after the guest has already allocated the value.
+func TestClaudeParserStateIsBounded(t *testing.T) {
+	newParser := func(t *testing.T) (*claudeParser, *bytes.Buffer) {
+		t.Helper()
+		var buf bytes.Buffer
+		return newClaudeParser(&turnConn{c: &buf}, t.TempDir()+"/default.id"), &buf
+	}
+	delta := func(idx int, chunk string) string {
+		b, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf(
+			`{"type":"stream_event","event":{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}}`,
+			idx, b)
+	}
+	start := func(idx int, typ string) string {
+		return fmt.Sprintf(
+			`{"type":"stream_event","event":{"type":"content_block_start","index":%d,"content_block":{"type":%q,"name":"Bash"}}}`,
+			idx, typ)
+	}
+
+	// One block, deltas forever: capped, and the cap is reported.
+	t.Run("per block", func(t *testing.T) {
+		p, buf := newParser(t)
+		p.line([]byte(start(0, "tool_use")))
+		chunk := strings.Repeat("x", 64<<10)
+		for i := 0; i < 64; i++ { // 4 MiB offered against a 1 MiB cap
+			p.line([]byte(delta(0, chunk)))
+		}
+		if got := p.tools[0].input.Len(); got != claudeToolInputMax {
+			t.Errorf("retained %d bytes for one block, cap is %d", got, claudeToolInputMax)
+		}
+		if !p.tools[0].truncated {
+			t.Error("the block was capped without being marked truncated")
+		}
+		p.line([]byte(`{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`))
+		if p.held != 0 {
+			t.Errorf("a closed block still holds %d bytes of the budget", p.held)
+		}
+		fs := decodeFrames(t, buf)
+		last := fs[len(fs)-1].GetTool()
+		if last == nil || !strings.HasSuffix(last.Input, "…[truncated]") {
+			t.Errorf("the emitted tool frame does not say it was cut: %.80q", last)
+		}
+	})
+
+	// Many blocks, none of them stopped: both the map and the aggregate are
+	// bounded, and the aggregate is the tighter of the two.
+	t.Run("many blocks", func(t *testing.T) {
+		p, _ := newParser(t)
+		chunk := strings.Repeat("y", 64<<10)
+		for i := 0; i < claudeMaxOpenBlocks*2; i++ {
+			p.line([]byte(start(i, "tool_use")))
+			for j := 0; j < 8; j++ { // 512 KiB offered per block, 64 MiB in all
+				p.line([]byte(delta(i, chunk)))
+			}
+		}
+		if n := len(p.tools) + len(p.thinking); n > claudeMaxOpenBlocks {
+			t.Errorf("%d blocks open, cap is %d", n, claudeMaxOpenBlocks)
+		}
+		if p.held > claudeToolInputBudget {
+			t.Errorf("retained %d bytes across blocks, budget is %d", p.held, claudeToolInputBudget)
+		}
+	})
+
+	// Thinking retains NOTHING: the body streams straight through and only the
+	// word count is kept, so an endless reasoning trace costs no memory. The
+	// count must still match strings.Fields across arbitrary chunk splits.
+	t.Run("thinking", func(t *testing.T) {
+		p, _ := newParser(t)
+		p.line([]byte(start(0, "thinking")))
+		const text = "  the quick   brown\nfox\tjumps over  "
+		for i := 0; i < len(text); i += 3 { // split mid-word, mid-space
+			end := i + 3
+			if end > len(text) {
+				end = len(text)
+			}
+			p.line([]byte(fmt.Sprintf(
+				`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":%s}}}`,
+				mustJSON(t, text[i:end]))))
+		}
+		if got, want := p.thinking[0].words, len(strings.Fields(text)); got != want {
+			t.Errorf("incremental word count = %d, strings.Fields = %d", got, want)
+		}
+		// ...and none of it was retained: thinking never charges the budget,
+		// because there is nothing to charge it for.
+		if p.held != 0 {
+			t.Errorf("a thinking block retained %d bytes — it must keep only the count", p.held)
+		}
+	})
+}
+
+func mustJSON(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
