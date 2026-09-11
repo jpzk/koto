@@ -374,18 +374,45 @@ func stateHash(gs map[string]GroupInfo) string {
 	}
 	sort.Strings(names)
 	var b strings.Builder
+	// Every variable-length field is written LENGTH-PREFIXED (audit 2026-09-11
+	// L55). The old form joined them with ':' and '|', which are ordinary
+	// characters in values that come from guest-writable files — so
+	// status="running", rc="0:1" and status="running:0", rc="1" serialised
+	// identically, and a change between two such states pushed no frame. Job
+	// metadata is exactly the guest-writable part, so the collision was
+	// reachable on purpose.
+	//
+	// Cmd and Started are hashed too: they are sent in the frame, so leaving
+	// them out meant a change a client can SEE was one the daemon decided not
+	// to tell it about.
+	fld := func(v string) {
+		fmt.Fprintf(&b, "%d:%s|", len(v), v)
+	}
 	for _, g := range names {
 		gi := gs[g]
+		fld(g)
 		// tok/s is hashed at integer resolution: enough for the display,
 		// while sub-token jitter doesn't push a frame every tick forever.
-		fmt.Fprintf(&b, "%s|%d|%t|%s|%s|%s|%t|%d|%.0f|%s|%s|%t", g, gi.Port, gi.Running, gi.Provider, gi.Model, gi.Effort, gi.Stalled, gi.Queued, gi.TokPerSec, strings.Join(gi.Sessions, ","), gi.Network, gi.Root)
+		fmt.Fprintf(&b, "%d|%t|%t|%d|%.0f|%t|", gi.Port, gi.Running, gi.Stalled, gi.Queued, gi.TokPerSec, gi.Root)
+		fld(gi.Provider)
+		fld(gi.Model)
+		fld(gi.Effort)
+		fld(gi.Network)
+		fld(strings.Join(gi.Sessions, "\x00"))
 		for _, j := range gi.Jobs {
-			// id/status/rc/size cover every observable transition (a running
-			// job's growing output bumps size, so watchers see progress).
-			fmt.Fprintf(&b, "|%s:%s:%s:%s:%d", j.ID, j.Session, j.Status, j.RC, j.OutSize)
+			fld(j.ID)
+			fld(j.Session)
+			fld(j.Status)
+			fld(j.RC)
+			fld(j.Cmd)
+			fmt.Fprintf(&b, "%d|%d|", j.OutSize, j.Started)
 		}
 		b.WriteString(";")
 	}
+	// The fleet-wide rate rides in the same frame, so a change in it alone is
+	// still a change worth pushing.
+	_, global := tokRates()
+	fmt.Fprintf(&b, "g%.0f", global)
 	return b.String()
 }
 

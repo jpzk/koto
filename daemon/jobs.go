@@ -86,6 +86,15 @@ func fcReadJobs(g string) ([]JobInfo, error) {
 	return parseJobsTSV(out), nil
 }
 
+// jobsMaxPerGroup bounds how many job records the daemon will carry for one
+// group (audit 2026-09-11 L58). CS_MAX_JOBS limits jobs RUNNING at once, not
+// jobs that have ever run, and a completed directory stays listable until
+// `cs-job clean` — so a caller could mint short-lived jobs indefinitely and
+// every one of them would be parsed, cached, hashed on each state tick,
+// serialised into every List and changed WatchState frame, and copied by every
+// TUI. The newest are kept, because that is what the tree shows.
+const jobsMaxPerGroup = 256
+
 // parseJobsTSV decodes jobsListScript's output. Malformed lines (and ids
 // outside jobIDRE) are dropped rather than erroring — the job dir is
 // agent-writable, so junk in it must degrade to "not listed", never break
@@ -116,6 +125,10 @@ func parseJobsTSV(out string) []JobInfo {
 		}
 		return jobs[i].ID < jobs[j].ID
 	})
+	if len(jobs) > jobsMaxPerGroup {
+		// Sorted oldest-first just above, so the tail is the newest.
+		jobs = jobs[len(jobs)-jobsMaxPerGroup:]
+	}
 	return jobs
 }
 

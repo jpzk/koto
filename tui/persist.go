@@ -70,7 +70,23 @@ func loadState(sock string) persistedState {
 	// The draft goes straight into the input bar; the file is under a
 	// writable mount, so it gets the same scrub as any other outside bytes
 	// (audit L12).
-	s.Draft = scrubVT(s.Draft)
+	// Every value that reaches the frame, not just the draft (audit
+	// 2026-09-11 L62). The state file is under a writable mount, and `cur` and
+	// the session names are copied straight into the live model by newModel and
+	// then rendered by renderStatusLeft and the empty-conversation banner —
+	// through lipgloss, which styles text without neutralising what is in it.
+	// Mono mode is not a defence either: it strips SGR COLOUR parameters and
+	// passes every other escape through.
+	s.Draft = scrubVTStrict(s.Draft)
+	s.Cur = scrubVTStrict(s.Cur)
+	for k, v := range s.Sessions {
+		if ck, cv := scrubVTStrict(k), scrubVTStrict(v); ck != k || cv != v {
+			delete(s.Sessions, k)
+			if ck != "" {
+				s.Sessions[ck] = cv
+			}
+		}
+	}
 	logDbg("persist", "loaded state: cur=%q draft_len=%d sessions=%d", s.Cur, len(s.Draft), len(s.Sessions))
 	return s
 }

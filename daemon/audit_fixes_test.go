@@ -6970,3 +6970,250 @@ func TestSchedulerAndStopGuards(t *testing.T) {
 	}
 	schedLock.Unlock()
 }
+
+// 2026-09-11 L55: stateHash joined variable-length fields with ':' and '|',
+// which are ordinary characters in guest-writable job metadata — so two
+// genuinely different fleet states hashed identically and the daemon pushed no
+// WatchState frame for the change. It also omitted Cmd and Started, which ride
+// in the frame, so a change a client can SEE was one it was never told about.
+func TestStateHashCannotBeCollidedByJobMetadata(t *testing.T) {
+	mk := func(status, rc string) map[string]GroupInfo {
+		return map[string]GroupInfo{"g": {Jobs: []JobInfo{{ID: "j1", Status: status, RC: rc}}}}
+	}
+	if a, b := stateHash(mk("running", "0:1")), stateHash(mk("running:0", "1")); a == b {
+		t.Fatalf("field-boundary collision survives: %q", a)
+	}
+	// The same for the fields that were simply absent from the hash.
+	base := map[string]GroupInfo{"g": {Jobs: []JobInfo{{ID: "j1", Cmd: "make", Started: 100}}}}
+	alt := map[string]GroupInfo{"g": {Jobs: []JobInfo{{ID: "j1", Cmd: "rm -rf /", Started: 100}}}}
+	if stateHash(base) == stateHash(alt) {
+		t.Error("a changed job command pushes no state frame")
+	}
+	alt2 := map[string]GroupInfo{"g": {Jobs: []JobInfo{{ID: "j1", Cmd: "make", Started: 101}}}}
+	if stateHash(base) == stateHash(alt2) {
+		t.Error("a changed job start time pushes no state frame")
+	}
+	// And a state that really is unchanged must still hash equal, or every
+	// tick would push a frame.
+	if stateHash(base) != stateHash(map[string]GroupInfo{"g": {Jobs: []JobInfo{{ID: "j1", Cmd: "make", Started: 100}}}}) {
+		t.Error("stateHash is not stable across identical snapshots")
+	}
+}
+
+// 2026-09-11 L56: only a non-positive History limit was replaced, so a
+// client-chosen 2147483647 disabled tail trimming entirely and one request
+// serialised every parsed event across all eleven streams.
+func TestHistoryLimitIsBoundedAtBothEnds(t *testing.T) {
+	if historyLimitMax <= 0 || historyLimitMax > 100000 {
+		t.Fatalf("historyLimitMax = %d is not a bound", historyLimitMax)
+	}
+	dir := t.TempDir()
+	prev := ROOT
+	ROOT = dir
+	t.Cleanup(func() { ROOT = prev })
+	const g = "histcap"
+	cs := filepath.Join(dir, g, ".cs")
+	if err := os.MkdirAll(cs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	for i := 0; i < historyLimitMax+250; i++ {
+		fmt.Fprintf(&buf, "[[msg]] %d\nline %d\n", i, i)
+	}
+	if err := os.WriteFile(filepath.Join(cs, "log.0"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	evs, _ := readHistory(g, 1<<31-1, 0)
+	if len(evs) > historyLimitMax {
+		t.Fatalf("an int32-max limit returned %d events; cap is %d", len(evs), historyLimitMax)
+	}
+}
+
+// 2026-09-11 L58: CS_MAX_JOBS caps jobs RUNNING, not jobs that have ever run,
+// and a completed job dir stays listable until `cs-job clean` — so the parsed
+// mirror grew without limit and was re-hashed, re-serialised and re-copied to
+// every client on every state tick.
+func TestParsedJobMirrorIsBounded(t *testing.T) {
+	var b strings.Builder
+	const n = jobsMaxPerGroup + 500
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "job%06d\tdone\t0\t\t%d\t0\tcmd\n", i, i)
+	}
+	jobs := parseJobsTSV(b.String())
+	if len(jobs) != jobsMaxPerGroup {
+		t.Fatalf("parsed %d job records, want the cap %d", len(jobs), jobsMaxPerGroup)
+	}
+	// The NEWEST are what survive — a cap that kept the oldest would make the
+	// mirror stop reporting the jobs an operator is actually watching.
+	if jobs[len(jobs)-1].ID != fmt.Sprintf("job%06d", n-1) {
+		t.Fatalf("newest job missing from the mirror; last = %q", jobs[len(jobs)-1].ID)
+	}
+	if jobs[0].ID != fmt.Sprintf("job%06d", n-jobsMaxPerGroup) {
+		t.Fatalf("cap did not trim from the oldest end; first = %q", jobs[0].ID)
+	}
+}
+
+// 2026-09-11 L60: every guest frame costs the daemon an allocation, a policy
+// classification, flow accounting and a netstack parse, and vsock backpressure
+// bounds only what is QUEUED — so a networked guest could demand host CPU
+// without limit. The budget throttles rather than drops; a dropped frame would
+// be indistinguishable from the egress filter's own DROP.
+func TestGuestFramePumpHasAWorkBudget(t *testing.T) {
+	// A bucket with no tokens must make the caller wait, and the wait must be
+	// proportional to the shortfall rather than a fixed spin.
+	now := time.Unix(0, 0)
+	var slept time.Duration
+	b := newFcTokenBucket(1000, 10)
+	b.nowFn = func() time.Time { return now }
+	b.sleepFn = func(d time.Duration) { slept += d; now = now.Add(d) }
+	for i := 0; i < 10; i++ {
+		b.take(1) // drains the burst without sleeping
+	}
+	if slept != 0 {
+		t.Fatalf("the burst itself throttled: slept %v", slept)
+	}
+	b.take(5)
+	if slept <= 0 {
+		t.Fatal("an exhausted bucket did not throttle")
+	}
+	// Refill is by elapsed time, so waiting buys tokens back.
+	slept, now = 0, now.Add(time.Second)
+	b.take(10)
+	if slept != 0 {
+		t.Fatalf("a refilled bucket still throttled: slept %v", slept)
+	}
+	// A charge larger than the burst must not wedge the link forever.
+	done := make(chan struct{})
+	go func() { b.take(1 << 30); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an oversized charge never returned")
+	}
+	// And the conn wires both buckets up, so the pump is charged at all.
+	e := fcNewEgressConn(nil, "g", fcNetFull)
+	if e.bytes == nil || e.frames == nil {
+		t.Fatal("fcEgressConn has no work budget")
+	}
+}
+
+// 2026-09-11 L61: composeSystemPrompt discarded the global.md read error, so a
+// missing harness policy was indistinguishable from a loaded one and the turn
+// went to a guest running claude with --dangerously-skip-permissions.
+func TestMissingHarnessPolicyIsLoud(t *testing.T) {
+	prevHere, prevRoot := HERE, ROOT
+	HERE, ROOT = t.TempDir(), t.TempDir()
+	t.Cleanup(func() { HERE, ROOT = prevHere, prevRoot })
+
+	logged := func() bool {
+		logSubsLock.Lock()
+		defer logSubsLock.Unlock()
+		for _, le := range logRing {
+			if le.Subsystem == "prompt" && le.Level == "error" && strings.Contains(le.Msg, "NO harness policy") {
+				return true
+			}
+		}
+		return false
+	}
+	drain := func() {
+		logSubsLock.Lock()
+		logRing = nil
+		logSubsLock.Unlock()
+	}
+
+	drain()
+	_ = composeSystemPrompt("g")
+	if !logged() {
+		t.Error("a missing prompts/global.md produced no error-level log line")
+	}
+
+	// An EMPTY policy file is the same failure wearing a readable disguise.
+	if err := os.MkdirAll(filepath.Join(HERE, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	if err := os.WriteFile(filepath.Join(HERE, "prompts", "global.md"), []byte("  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = composeSystemPrompt("g")
+	if !logged() {
+		t.Error("an empty prompts/global.md produced no error-level log line")
+	}
+
+	// A real policy is silent, and is actually in the composed prompt.
+	drain()
+	if err := os.WriteFile(filepath.Join(HERE, "prompts", "global.md"), []byte("BE GOOD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := composeSystemPrompt("g"); !strings.Contains(got, "BE GOOD") {
+		t.Errorf("composed prompt lost the policy: %.80q", got)
+	}
+	if logged() {
+		t.Error("a healthy global.md still logged an error")
+	}
+}
+
+// 2026-09-11 L54: the uninstall's stop step was gated on `exists(unitPath)`
+// alone — a question about a file, not about whether a daemon is running. With
+// the unit gone (removed by hand, an interrupted earlier uninstall, a daemon
+// started straight from the binary) the stop was skipped and the run went on to
+// delete the binaries and, under --purge, the state directory out from under a
+// LIVE daemon: every guest's workspace image left dirty, which is exactly what
+// the stop-first ordering exists to prevent.
+func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
+	// A stand-in daemon: argv[0]'s basename is "koto" and argv[1] is "daemon",
+	// which is what /proc shows for the real thing. sh invoked with that argv
+	// runs the file named "daemon" in its cwd; two statements keep it from
+	// exec-optimising itself into `sleep` and changing its own cmdline.
+	start := func(dir string, env []string) *exec.Cmd {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "daemon"), []byte("sleep 30\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := &exec.Cmd{Path: "/bin/sh", Args: []string{"koto", "daemon"}, Dir: dir, Env: env}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start stand-in daemon: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		return cmd
+	}
+	find := func(state string) (int, bool) {
+		// The child is scanned for as soon as it exists, but Start returning
+		// does not guarantee /proc has its cmdline yet.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if pid, _, ok := runningKotoDaemon(state); ok {
+				return pid, true
+			}
+			if time.Now().After(deadline) {
+				return 0, false
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	state, other := t.TempDir(), t.TempDir()
+	cmd := start(state, []string{}) // no KOTO_HOME → the state root is its cwd
+	pid, ok := find(state)
+	if !ok {
+		t.Fatal("a running koto daemon with no unit file went unnoticed")
+	}
+	if pid != cmd.Process.Pid {
+		t.Fatalf("found pid %d, want %d", pid, cmd.Process.Pid)
+	}
+	// A daemon serving a DIFFERENT state dir must not block this uninstall —
+	// a dev-clone daemon under .dev/ and an installed one coexist by design.
+	if _, _, ok := runningKotoDaemon(other); ok {
+		t.Error("a daemon serving another state dir was reported as this one's")
+	}
+
+	// KOTO_HOME outranks the cwd, exactly as kotoHome() resolves it.
+	envDir, cwdDir := t.TempDir(), t.TempDir()
+	start(cwdDir, []string{"KOTO_HOME=" + envDir})
+	if _, ok := find(envDir); !ok {
+		t.Error("a daemon located by KOTO_HOME went unnoticed")
+	}
+}

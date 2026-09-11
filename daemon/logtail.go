@@ -581,8 +581,17 @@ func readHistoryCtx(ctx context.Context, g string, limit int, before float64) ([
 		}
 		events = events[:cut]
 	}
-	if limit <= 0 {
-		limit = 1000
+	// Bounded at BOTH ends (audit 2026-09-11 L56). Only non-positive values
+	// were replaced; a client-chosen 2147483647 therefore disabled tail
+	// trimming entirely, so the whole parsed result — up to historyTailCap per
+	// stream across eleven streams — was copied into protobuf objects and
+	// serialised for one request, and repeated calls multiplied it.
+	if limit <= 0 || limit > historyLimitMax {
+		if limit > historyLimitMax {
+			limit = historyLimitMax
+		} else {
+			limit = 1000
+		}
 	}
 	more := false
 	if len(events) > limit {
@@ -595,6 +604,11 @@ func readHistoryCtx(ctx context.Context, g string, limit int, before float64) ([
 // readStreamHistory parses one stream file. Returns nothing when the file has
 // never been written (a group that has never run concurrent turns has no
 // log.3).
+// historyLimitMax bounds a client-chosen page size. Generous next to what any
+// client renders — the TUI pages at a few hundred — and small enough that one
+// request cannot ask for every event in eleven streams at once.
+const historyLimitMax = 5000
+
 // historyTailCap bounds how much of one stream file readStreamHistory
 // reads: the last 4 MiB. History used to os.ReadFile the WHOLE file — the
 // parser is stateful from the start, so paging could not shrink the read —

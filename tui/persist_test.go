@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,5 +211,72 @@ func TestShellErrorTextIsScrubbed(t *testing.T) {
 	}
 	if got := scrubVT("session ended: connection reset"); got != "session ended: connection reset" {
 		t.Errorf("a plain shell error was mangled: %q", got)
+	}
+}
+
+// 2026-09-11 L53 and L62: the TUI's own diagnostic log and its persisted state
+// are both operator-facing surfaces that took outside bytes verbatim. dbgWrite
+// interpolated daemon, provider and guest text into a line-oriented record
+// without escaping the delimiter — and the daemon's sanitizer deliberately
+// keeps newlines, so an influenced string forged whole extra records. loadState
+// scrubbed only Draft, while `cur` and the session names go straight into the
+// live model and are rendered by renderStatusLeft and the empty-conversation
+// banner.
+func TestPersistedNamesAndDebugLogAreScrubbed(t *testing.T) {
+	const esc = "\x1b"
+	const bel = "\x07"
+
+	// L53 — one record stays one line, and carries no terminal control.
+	got := flattenLogValue("job done\n[ERR] daemon: override accepted" + esc + "]0;pwned" + bel + " tail")
+	if strings.ContainsAny(got, "\n\r"+esc+bel) {
+		t.Errorf("a debug record carries a break or a control: %q", got)
+	}
+	for _, want := range []string{"job done", "override accepted", "tail"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("flattening lost %q: %q", want, got)
+		}
+	}
+
+	// L62 — a state file under the writable mount cannot put escapes on screen.
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "koto.sock")
+	if err := os.MkdirAll(filepath.Dir(statePath(sock)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := persistedState{
+		Cur:      "main" + esc + "]0;pwned" + bel,
+		Draft:    "d" + esc + "[2J",
+		Sessions: map[string]string{"main" + esc + "[H": "work" + esc + "]0;x" + bel},
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath(sock), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := loadState(sock)
+	if strings.ContainsAny(s.Cur, esc+bel) {
+		t.Errorf("cur kept a terminal control: %q", s.Cur)
+	}
+	if strings.ContainsAny(s.Draft, esc+bel) {
+		t.Errorf("draft kept a terminal control: %q", s.Draft)
+	}
+	for k, v := range s.Sessions {
+		if strings.ContainsAny(k, esc+bel) || strings.ContainsAny(v, esc+bel) {
+			t.Errorf("session %q=%q kept a terminal control", k, v)
+		}
+	}
+	if !strings.HasPrefix(s.Cur, "main") {
+		t.Errorf("scrubbing ate the group name: %q", s.Cur)
+	}
+
+	// End to end: a restored state must not put an escape into the frame.
+	m := newModel(sock, 200000)
+	m.width, m.height = 100, 24
+	m.groups = map[string]GroupInfo{s.Cur: {Running: true}}
+	m.cur = s.Cur
+	if f := m.View(); strings.Contains(f, esc+"]0;") || strings.Contains(f, bel) {
+		t.Error("a restored group name put an OSC into the rendered frame")
 	}
 }

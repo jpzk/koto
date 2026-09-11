@@ -4770,3 +4770,186 @@ because they typed `koto uninstall`.
 **Fix:** an absolute path (`/usr/bin/du`, then `/bin/du`), checked to be a
 regular file. The size is a courtesy line in the prompt; if `du` is not where it
 belongs, the uninstall does without it rather than resolving one.
+
+## L53 — TUI debug log accepts unescaped control characters — FIXED
+
+`tui/debuglog.go`.
+
+**Confirmed.** `dbgWrite` wrote group names, session names, slash-command
+arguments and daemon error strings into `run/tui/tui.log` verbatim. That file is
+read with `tail -f` in a real terminal — the one thing the TUI's own renderer
+cannot sanitize on the operator's behalf, because it never passes through it.
+
+**Fix:** `flattenLogValue` — `scrubVTStrict` plus folding every line break to a
+space, so one logged value is one log line and carries no escape.
+
+## L54 — Uninstall can purge a running daemon when the unit file is absent — FIXED
+
+`daemon/uninstall.go`.
+
+**Confirmed.** The stop step was guarded by `exists(unitPath)` alone — a question
+about a *file*, not about whether a daemon is running. With the unit gone
+(removed by hand, an interrupted earlier uninstall, systemd still holding it
+loaded after a `rm` with no `daemon-reload`, or a daemon started straight from
+the binary) the stop was skipped silently and the run went on to delete the
+binaries and, under `--purge`, `os.RemoveAll(state)` — out from under a live
+daemon and its live microVMs. Every workspace image left dirty, which is exactly
+the failure the stop-first ordering documented at the top of that file exists to
+prevent.
+
+**Fix:** three signals instead of one.
+
+- The stop runs when the unit file exists **or** `systemctl is-active koto` says
+  systemd still has it running.
+- A **post-stop verification** scans `/proc` for a live `koto daemon` and refuses
+  the whole uninstall if one is serving this state directory — a successful
+  `systemctl stop` is not the sentence "no daemon is serving this state dir".
+- The scan reads `/proc` directly rather than shelling out to `pgrep`, because
+  that is what lets it tell *which* state dir a daemon serves (`KOTO_HOME` from
+  its environ, else its cwd — exactly how `kotoHome()` resolves it). A dev-clone
+  daemon under `.dev/` must not block the uninstall of an installed one, and the
+  two coexist by design.
+
+Under `--dry-run` it warns rather than refusing, since nothing was stopped.
+Pinned by `TestUninstallSeesADaemonWithNoUnitFile`, which starts a stand-in with
+the real thing's `/proc` shape and checks both the match and the non-match.
+
+## L55 — `stateHash` field boundaries are forgeable — FIXED
+
+`daemon/events.go`.
+
+**Confirmed.** The hash joined variable-length fields with `':'` and `'|'`, both
+of which occur naturally in job metadata — and job metadata is written by the
+*guest*, in agent-writable files. `status="running"`,`rc="0:1"` and
+`status="running:0"`,`rc="1"` hashed identically, so a transition between two
+such states pushed **no** `WatchState` frame: every attached client kept
+rendering the stale one until some other field happened to move.
+
+Two fields were also simply missing from the hash while riding in the frame —
+`Cmd` and `Started` — so a change a client can see was one the daemon had
+decided not to tell it about.
+
+**Fix:** a length-prefixed field writer (`%d:%s|`), so no value can impersonate
+a boundary, plus `Cmd`, `Started` and the fleet-wide tok/s rate. Pinned by
+`TestStateHashCannotBeCollidedByJobMetadata`.
+
+## L56 — `History` page size is unbounded above — FIXED
+
+`daemon/logtail.go`.
+
+**Confirmed.** Only a *non-positive* limit was replaced with the 1000 default; a
+client-chosen `2147483647` therefore disabled tail trimming entirely, so a single
+request parsed, copied into protobuf objects and serialised everything eleven
+streams' `historyTailCap` could yield — and repeated calls multiplied it.
+
+**Fix:** `historyLimitMax = 5000`, generous next to anything a client renders.
+Pinned by `TestHistoryLimitIsBoundedAtBothEnds`.
+
+## L57 — Goal resume refills the iteration budget — FIXED
+
+`daemon/goals.go`.
+
+**Confirmed.** `goalResume` set `it.Iteration = 0`. The driver stops when
+`Iteration` reaches `MaxIterations`, so zeroing it made the configured budget
+unreachable — and this is *not* only an operator's own foot: a non-main group may
+`goal_pause` and `goal_resume` its **own** goal over the ctl plane (the
+self-scoped `goal_*` verbs), so alternating the two keeps a goal iterating
+forever, burning worker slots, provider spend and the group's own capacity with
+the limit never arriving.
+
+**Fix:** the count carries across the pause. Resume means "carry on", and
+carrying on includes the count. `TestGoalResumeKeepsTheIterationBudget` pins it
+(negative control: the old line runs 6 work turns where the fix runs the 1 left
+in the budget); `TestCtlGoalSetAndStatusFromMain` asserted the old reset and was
+corrected.
+
+## L58 — Parsed job mirror grows without limit — FIXED
+
+`daemon/jobs.go`.
+
+**Confirmed.** `CS_MAX_JOBS` caps jobs **running**, not jobs that have ever run,
+and a completed job directory stays listable until `cs-job clean` — so an agent
+minting short-lived jobs grows a list that is parsed, cached, hashed on every
+state tick, serialised into every `List` and changed `WatchState` frame, and
+copied by every attached TUI.
+
+**Fix:** `jobsMaxPerGroup = 256`, trimmed from the oldest end after the sort, so
+the mirror keeps the jobs the tree actually shows. Pinned by
+`TestParsedJobMirrorIsBounded`.
+
+## L59 — Schedule quota checked outside the append lock — FIXED
+
+`daemon/schedules.go`. The per-group and daemon-wide caps were read in one
+`schedLock` acquisition and the append made in another, so concurrent `sched_add`
+calls could each observe `n < cap` and all commit. Both caps are now re-checked
+inside the same acquisition as the append.
+
+## L60 — Network-enabled guest traffic has no per-guest work budget — FIXED
+
+`daemon/fcnet.go`.
+
+**Confirmed.** Every frame a networked guest emits costs the daemon an
+allocation, a policy classification, a flow-table lookup and a netstack parse —
+all in the daemon process, beside the gRPC server and the proxy every *other*
+group depends on. vsock backpressure bounds what is **queued**, not the work rate
+a guest may demand, so a guest with code execution could take a share of the
+host's scheduling capacity simply by sending. Denied frames are not cheaper:
+rejecting costs the classification too.
+
+**Fix:** a per-connection token bucket on both frames and bytes
+(`fcTokenBucket`), charged before the frame is judged. Two deliberate choices:
+
+- It **throttles rather than drops** — the reader stops reading until its tokens
+  refill and the pressure propagates back down vsock to the guest's own pump.
+  Dropping would be indistinguishable from the egress filter's DROP and would
+  turn a permitted TCP stream into a retransmit storm: more host work, not less.
+- The numbers are **loose on purpose** — 64 MiB/s and 100k frames/s per guest,
+  an OOM/CPU backstop rather than a shaper, the same call the proxy's
+  concurrency caps made (M2). A networked group exists to do real work (a clone,
+  an `npm install`, a container pull) and a limit tight enough to shape that
+  traffic would make ordinary turns mysteriously slow. The frame cap is the one
+  that binds, because the cheapest flood is the smallest frame.
+
+Pinned by `TestGuestFramePumpHasAWorkBudget`, including that an oversized charge
+cannot wedge the link forever.
+
+## L61 — Global security prompt failure is fail-open — FIXED
+
+`daemon/prompt.go`, `daemon/install.go`.
+
+**Confirmed, and it is the worst of this batch.** `composeSystemPrompt`
+discarded the `os.ReadFile` error for `prompts/global.md`; the empty string was
+then simply not appended, `sendNow` called `fcSendMsg` unconditionally, and the
+guest launched `claude --dangerously-skip-permissions` with **no harness
+policy** — indistinguishable, from every observable, from a healthy turn. The
+installer's prompt copy discarded every error it could produce (`ReadDir`,
+`ReadFile`, both `WriteFile`s), so an install that never delivered the file
+reported success.
+
+**Fix, both halves:**
+
+- `composeSystemPrompt` logs at **error** — which reaches the operator as a
+  banner through `logalert`, and is rate-limited there — naming the path, for an
+  unreadable file *and* for an empty one, since an empty policy is the same
+  failure wearing a readable disguise. It cannot refuse the turn from where it
+  sits (it returns a string, and its callers treat it as one), so saying so
+  loudly on every turn until it is fixed is the available answer.
+- `koto install` treats `global.md` as **required**: a read or write failure is
+  returned as an error, the other prompt files warn, and the step ends by
+  asserting the file exists rather than reporting a successful install that left
+  every group unpoliced.
+
+`TestMissingHarnessPolicyIsLoud` pins all three cases (missing, empty, healthy).
+
+## L62 — Persisted group and session names permit terminal escape injection — FIXED
+
+`tui/persist.go`.
+
+**Confirmed.** `loadState` scrubbed only `Draft`; `newModel` copied `Cur` and
+every `Sessions` entry straight into the live model, and `renderStatusLeft` and
+the empty-conversation banner emitted them. Mono mode is not a defense — it
+removes color parameters, not OSC or CSI.
+
+**Fix:** `loadState` scrubs `Cur` and every `Sessions` key and value with the
+same function `Draft` already went through. Pinned by
+`TestPersistedNamesAndDebugLogAreScrubbed`, which covers L53 as well.
