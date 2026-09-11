@@ -3052,3 +3052,55 @@ Test: `TestWedgedSessionIsFencedWhenSelfHealFails` in
 `/restart`, both lift paths, that a sibling conversation is untouched, and that
 one group's quarantine release does not lift another group's fence. Verified to
 fail with the admission checks removed.
+
+## M146 — `pki init` follows attacker-controlled symlinks — FIXED
+
+`daemon/pki.go`.
+
+**Confirmed, and wider than the finding states.** `pkiInit` asked
+`os.Stat(aclPath)` whether `acl.json` existed — which **follows** a symlink and
+reports a dangling one as an error, i.e. as absent — and then wrote with
+`os.WriteFile`, which follows the same link with `O_CREATE`. A link planted in
+the creds directory before an administrator runs `koto pki init` therefore
+redirects the seed.
+
+The same stat-then-write shape guarded **`ca.key`**, which is the material this
+entire PKI rests on: a dangling link there sent a freshly generated CA private
+key to a path of somebody else's choosing. `clients.allow` was appended to with
+`O_APPEND|O_CREATE` and no `O_NOFOLLOW`, so a link there writes an allowlist
+entry into someone else's file. And `pkiReadKey`/`pkiReadCert` followed links on
+the way *in*, which for `acl.json` is the worse direction — that is the file
+`loadACL` reads, so accepting a link means taking the authorization policy from
+wherever it points.
+
+**Fix, three parts:**
+
+- `pkiWriteFile` — `O_WRONLY|O_CREATE|O_TRUNC|O_NOFOLLOW`. Overwrite is still
+  fine (a server cert is reissued in place); only the link is refused. Used by
+  every PEM write, the token file and the `tokens.json` temp.
+- `pkiCreateNew` — `O_WRONLY|O_CREATE|O_EXCL|O_NOFOLLOW`, and **`O_EXCL` is the
+  absence check**, which is the point: the stat-then-write it replaces had both
+  halves of the problem at once, the following stat and the window after it.
+- `pkiNoSymlink` for the paths that are *read* as well as written (`ca.key`,
+  `ca.crt`, and the `acl.json` seed). Needed because **`O_EXCL` outranks
+  `O_NOFOLLOW`**: a symlink at the final component comes back `EEXIST`, not
+  `ELOOP`, so it is indistinguishable from the ordinary "already seeded" case
+  that must pass — the one the CA's reuse-never-regenerate property depends on.
+  An `Lstat` in that branch tells them apart.
+
+A refusal says "is a symlink" rather than surfacing a bare `ELOOP`, which on a
+path the operator just typed reads as nonsense.
+
+**Not changed:** `koto pki` accepting an arbitrary `-creds` directory. That is
+the operator naming where their own credentials live, the same decision
+`KOTO_HOME` is, and the trust model does not second-guess tier 1 about it. What
+it must not do is write *outside* the directory it was given, which is what the
+above fixes.
+
+Test: `TestPKIRefusesToWriteCredentialsThroughASymlink` in
+`daemon/audit_fixes_test.go` — four subtests: a dangling link at `acl.json`
+(refused, and nothing created at the target), the same at `ca.key` (the CA
+private key is not written through it), an append-through-a-link at
+`clients.allow` (the victim file is byte-identical afterwards), and idempotence
+on an ordinary tree, since the exclusive create must not break the property
+`make pki-init` depends on — an existing CA is reused, never regenerated.

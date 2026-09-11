@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"math/big"
@@ -30,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -59,9 +61,7 @@ func pkiInit(credsDir string, serverSANs []string) error {
 			return err
 		}
 	}
-	aclPath := filepath.Join(credsDir, "acl.json")
-	if _, err := os.Stat(aclPath); err != nil {
-		seed := `{
+	seed := `{
   "agent": {
     "list": "*", "send": "*", "history": "*", "metrics": "*",
     "sched_list": "*",
@@ -69,9 +69,8 @@ func pkiInit(credsDir string, serverSANs []string) error {
   }
 }
 `
-		if err := os.WriteFile(aclPath, []byte(seed), 0o600); err != nil {
-			return err
-		}
+	if _, err := pkiCreateNew(filepath.Join(credsDir, "acl.json"), []byte(seed), 0o600); err != nil {
+		return err
 	}
 	return nil
 }
@@ -108,8 +107,19 @@ func pkiEnsureCA(credsDir string) (*ecdsa.PrivateKey, *x509.Certificate, bool, e
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if err := pkiWriteKey(keyPath, key); err != nil {
+	// EXCLUSIVE: this is the one file in the tree that must never be written
+	// twice or written through a link. The os.Stat above is a fast path for
+	// "already there", not the check — a dangling symlink at ca.key makes Stat
+	// say absent, and O_CREATE alone would then have put the CA private key
+	// wherever the link pointed (audit M146).
+	created, err := pkiCreateNew(keyPath, pem.EncodeToMemory(&pem.Block{
+		Type: "EC PRIVATE KEY", Bytes: pkiMustMarshalKey(key)}), 0o600)
+	if err != nil {
 		return nil, nil, false, err
+	}
+	if !created {
+		return nil, nil, false, fmt.Errorf("%s appeared while this CA was being generated — "+
+			"refusing to overwrite it; re-run to use the existing CA", keyPath)
 	}
 	if err := pkiWritePEM(crtPath, "CERTIFICATE", der, 0o644); err != nil {
 		return nil, nil, false, err
@@ -210,9 +220,12 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 	allowPath := filepath.Join(credsDir, "clients.allow")
 	existing, _ := os.ReadFile(allowPath)
 	if !strings.Contains(string(existing), fpHex) {
-		f, err := os.OpenFile(allowPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		// O_NOFOLLOW for the same reason as everything else here: an append
+		// through a planted link writes an allowlist entry into somebody
+		// else's file (audit M146).
+		f, err := os.OpenFile(allowPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 		if err != nil {
-			return "", err
+			return "", pkiSymlinkErr(allowPath, err)
 		}
 		if _, err := fmt.Fprintf(f, "%s %s\n", fpHex, name); err != nil {
 			f.Close()
@@ -229,7 +242,7 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 		return "", err
 	}
 	token = hex.EncodeToString(raw)
-	if err := os.WriteFile(filepath.Join(credsDir, "token-"+name), []byte(token), 0o600); err != nil {
+	if err := pkiWriteFile(filepath.Join(credsDir, "token-"+name), []byte(token), 0o600); err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(token))
@@ -247,7 +260,7 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 		return "", err
 	}
 	tmp := tokPath + ".tmp"
-	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
+	if err := pkiWriteFile(tmp, append(out, '\n'), 0o600); err != nil {
 		return "", err
 	}
 	return token, os.Rename(tmp, tokPath)
@@ -263,6 +276,17 @@ func pkiSerial() *big.Int {
 	return n
 }
 
+// pkiMustMarshalKey is MarshalECPrivateKey for a key this process just
+// generated: the only error it can return is an unsupported curve, and the
+// curve is P-256 three lines up.
+func pkiMustMarshalKey(key *ecdsa.PrivateKey) []byte {
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		panic("pki: P-256 key failed to marshal: " + err.Error())
+	}
+	return der
+}
+
 func pkiWriteKey(path string, key *ecdsa.PrivateKey) error {
 	der, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
@@ -272,10 +296,84 @@ func pkiWriteKey(path string, key *ecdsa.PrivateKey) error {
 }
 
 func pkiWritePEM(path, typ string, der []byte, mode os.FileMode) error {
-	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode)
+	return pkiWriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode)
+}
+
+// pkiWriteFile writes one credential file, REFUSING to write through a symlink
+// (audit M146). os.WriteFile follows the final component, so a link planted at
+// creds/<name> before the operator runs `koto pki` sends a private key, a
+// certificate or an allowlist entry to a path of somebody else's choosing.
+// O_NOFOLLOW makes that an ELOOP instead. Overwrite is still allowed — a server
+// cert is reissued in place — it is only the LINK that is refused.
+func pkiWriteFile(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return pkiSymlinkErr(path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// pkiCreateNew writes a file that must not already exist, and reports whether
+// it did the writing. O_EXCL is the absence check — which is the point: the
+// stat-then-write it replaces had both halves of the problem, since os.Stat
+// FOLLOWS a symlink and reported a dangling one as "absent", after which
+// O_CREATE followed the same link and created the file at its target (audit
+// M146). With O_EXCL|O_NOFOLLOW an existing path is an existing path, symlink
+// included, and there is no window between the question and the answer.
+func pkiCreateNew(path string, data []byte, mode os.FileMode) (bool, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		if os.IsExist(err) {
+			// O_EXCL outranks O_NOFOLLOW, so a symlink at the final component
+			// comes back EEXIST rather than ELOOP — indistinguishable from the
+			// ordinary "already seeded" case that must pass. Nothing was
+			// written either way; the question is whether to keep going, and
+			// for acl.json the answer is no: this is the file loadACL READS,
+			// so accepting a link means taking the authorization policy from
+			// wherever it points.
+			return false, pkiNoSymlink(path)
+		}
+		return false, pkiSymlinkErr(path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return false, err
+	}
+	return true, f.Close()
+}
+
+// pkiNoSymlink refuses a path whose final component is a symlink. Used where
+// the file is READ as well as written — the CA key and certificate, the ACL
+// seed — since following a link there takes the material from somewhere the
+// operator did not choose, which is the same defect as writing through one.
+func pkiNoSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil // absent, or unreadable for reasons the caller will hit anyway
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink — refusing to use credential material through it", path)
+	}
+	return nil
+}
+
+// pkiSymlinkErr names the cause when the refusal was a symlink, because ELOOP
+// on a path the operator just typed reads as nonsense otherwise.
+func pkiSymlinkErr(path string, err error) error {
+	if errors.Is(err, syscall.ELOOP) {
+		return fmt.Errorf("%s is a symlink — refusing to write credential material through it", path)
+	}
+	return err
 }
 
 func pkiReadKey(path string) (*ecdsa.PrivateKey, error) {
+	if err := pkiNoSymlink(path); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -288,6 +386,9 @@ func pkiReadKey(path string) (*ecdsa.PrivateKey, error) {
 }
 
 func pkiReadCert(path string) (*x509.Certificate, error) {
+	if err := pkiNoSymlink(path); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
