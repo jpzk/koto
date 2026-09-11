@@ -1300,14 +1300,20 @@ func proxyStart(bind string) {
 // out as a var so tests can stub DNS without a network.
 var egressLookupIP = net.LookupIP
 
-// egressClient forwards plain-HTTP (absolute-form) requests for full-internet
-// groups. Redirects are NOT followed — we forward exactly what the guest asked
-// for and let the guest's client decide, so a redirect can't smuggle the guest
-// to a host it didn't name (and thus didn't get egress-logged for).
-var egressClient = &http.Client{
-	Timeout:       0, // large downloads (npm/pip tarballs) must not time out mid-stream
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+// egressDial is the dialer both egress paths use. Split out as a var for the
+// same reason as egressLookupIP: a test can observe exactly what address the
+// forward path dials, which is the whole property the vetted IP exists to pin.
+var egressDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, addr)
 }
+
+// egressNoRedirect is the redirect policy for plain-HTTP (absolute-form)
+// egress: redirects are NOT followed — we forward exactly what the guest asked
+// for and let the guest's client decide, so a redirect can't smuggle the guest
+// to a host it didn't name (and thus didn't get egress-logged for). The client
+// itself is built per request in egressHTTP, because its dialer is pinned to
+// that request's vetted IP.
+func egressNoRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // serveEgress handles forward-proxy requests (CONNECT tunnel or absolute-form
 // HTTP) from a group whose bash/curl/git points HTTP_PROXY at us. Gated by the
@@ -1319,6 +1325,16 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 	target := r.Host // authority form for CONNECT; URL host for absolute-form
 	if target == "" {
 		target = r.URL.Host
+	}
+	// Absolute-form may omit the port ("http://host/x"); CONNECT never does.
+	// Default it from the scheme so the vetted address the dial is pinned to
+	// is a complete ip:port rather than a bare "ip:".
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		port := "80"
+		if r.URL != nil && r.URL.Scheme == "https" {
+			port = "443"
+		}
+		target = net.JoinHostPort(strings.Trim(target, "[]"), port)
 	}
 	// Two profiles, both must allow: the one the VM BOOTED with (snapshot,
 	// see proxySetBootNetwork) and the one in config.json now. Raising the
@@ -1333,13 +1349,16 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress denied: this group's network profile is 'none' (a raised profile applies on /restart)", http.StatusForbidden)
 		return
 	}
-	ok, vetted := egressTargetAllowed(target, pol)
-	if ok {
-		ok, _ = egressTargetAllowed(target, boot)
-		if !ok {
-			pol = boot + " (booted; config says " + pol + " — apply with /restart)"
-		}
+	// ONE check against the intersection of the two profiles, not two checks
+	// against each. Checking separately meant two independent DNS lookups and
+	// a vetted IP taken from the first: a rebinding name answering LAN then
+	// WAN passed `full` on lookup one and `wan` on lookup two, and the dial
+	// then went to the LAN address the booted profile forbids.
+	eff := egressIntersect(pol, boot)
+	if eff != pol {
+		pol = eff + " (booted " + boot + "; config says " + pol + " — apply with /restart)"
 	}
+	ok, vetted := egressTargetAllowed(target, eff)
 	if !ok {
 		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (network profile '%s')", h.group, r.Method, target, pol)
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)
@@ -1349,7 +1368,27 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		h.egressConnect(w, r, target, vetted)
 		return
 	}
-	h.egressHTTP(w, r, target)
+	h.egressHTTP(w, r, target, vetted)
+}
+
+// egressIntersect returns the profile allowing exactly the destination classes
+// both a and b allow. The profiles are a lattice over {LAN, WAN}: full is
+// both, none is neither, and wan∩lan is none — so a group that booted `wan`
+// and now reads `lan` reaches nothing until the /restart, which is the
+// stricter-of-the-two rule the boot snapshot exists to enforce.
+func egressIntersect(a, b string) string {
+	lan := func(p string) bool { return p == fcNetLAN || p == fcNetFull }
+	wan := func(p string) bool { return p == fcNetWAN || p == fcNetFull }
+	switch l, w := lan(a) && lan(b), wan(a) && wan(b); {
+	case l && w:
+		return fcNetFull
+	case l:
+		return fcNetLAN
+	case w:
+		return fcNetWAN
+	default:
+		return fcNetNone
+	}
 }
 
 // egressTargetAllowed decides whether a group under network profile `pol` may
@@ -1440,7 +1479,7 @@ func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target, 
 		http.Error(w, "egress blocked: target not permitted", http.StatusForbidden)
 		return
 	}
-	dst, err := net.DialTimeout("tcp", dialTo, 15*time.Second)
+	dst, err := egressDial(r.Context(), "tcp", dialTo)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1465,14 +1504,30 @@ func (h *handler) egressConnect(w http.ResponseWriter, r *http.Request, target, 
 	splice(client, dst) // shared with fc.go: bidirectional copy, closes both
 }
 
-func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target string) {
-	// Absolute-form (plain-HTTP) egress re-resolves the host inside
-	// egressClient.Do, so a narrow DNS-rebind window exists between the
-	// allow-check and this dial (unlike CONNECT, which pins the vetted IP).
-	// Pinning here would need a per-request Transport.DialContext; deferred
-	// because plain-HTTP egress is rare (curl/git/npm use HTTPS→CONNECT) and
-	// the control-plane blocks are name-based, so a rebind could at most reach
-	// a same-class host, not the daemon. Revisit if plain-HTTP egress grows.
+func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target, vetted string) {
+	// Pin the dial to the vetted IP, exactly as egressConnect does. Left to
+	// a shared transport, absolute-form egress re-resolved the
+	// host inside Do() and dialed whatever came back — a DNS-rebind window
+	// between the allow-check and the connect, and a wide one, since the
+	// daemon's own dial is not behind the guest's L3 frame filter. A
+	// per-request transport is the price; the Host header rides r.URL
+	// unchanged, so the origin still sees the name it was asked for.
+	if ip := egressDialIP(vetted); ip == nil || fcClassifyDst(ip) == fcDstCtl {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED dial %s (control plane)", h.group, vetted)
+		http.Error(w, "egress blocked: target not permitted", http.StatusForbidden)
+		return
+	}
+	client := &http.Client{
+		Timeout:       0, // large downloads must not time out mid-stream
+		CheckRedirect: egressNoRedirect,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return egressDial(ctx, network, vetted)
+			},
+		},
+	}
+	defer client.CloseIdleConnections()
 	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1487,7 +1542,7 @@ func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target stri
 		}
 	}
 	emitLogfG("egress", h.group, "info", "[%s] %s %s", h.group, r.Method, target)
-	resp, err := egressClient.Do(out)
+	resp, err := client.Do(out)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
