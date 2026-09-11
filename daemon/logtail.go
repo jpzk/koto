@@ -134,7 +134,9 @@ func tryFlushNotify(g string, lp *logParser, atBoundary bool) {
 	}
 	for _, m := range pending {
 		notifyExpect(g, m)
-		logAppend(g, []byte(m+"\n"))
+		// Locked variant: the group stream's write lock is held above, and
+		// streamLogAppend takes it (M119).
+		logAppendLocked(g, []byte(m+"\n"))
 	}
 }
 

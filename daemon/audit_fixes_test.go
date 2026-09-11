@@ -3892,3 +3892,40 @@ func TestPurgeIdentityDetectsSubstitution(t *testing.T) {
 		t.Fatal("a substituted path kept the validated identity")
 	}
 }
+
+// 2026-09-11 M119: proxy error records and notifications go to the group
+// stream, and that writer was a bare O_APPEND — exempt from the 1 GiB ceiling
+// and the per-group byte-rate bucket the guest turn sink uses. The proxy-error
+// path is the sharp one: every non-200/404 upstream response writes a line,
+// the concurrency semaphore bounds simultaneous REQUESTS rather than
+// cumulative responses, and a guest can sustain failing requests indefinitely.
+func TestGroupStreamAppendsAreBounded(t *testing.T) {
+	fcHarness(t)
+	const g = "streamcap"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o700)
+	p := groupLogPath(g)
+
+	// The path→group recovery the rate bucket keys on.
+	if got := groupOfLogPath(p); got != g {
+		t.Fatalf("groupOfLogPath(%q) = %q, want %q", p, got, g)
+	}
+	if got := groupOfLogPath(slotLogPath(g, 3)); got != g {
+		t.Fatalf("groupOfLogPath(slot) = %q, want %q", got, g)
+	}
+
+	// The ceiling is enforced: a stream at fcLogSinkMaxBytes takes no more.
+	big := make([]byte, 4096)
+	logAppend(g, big)
+	if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+		t.Fatalf("nothing was appended: %v", err)
+	}
+	if err := os.Truncate(p, fcLogSinkMaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(p)
+	logAppend(g, []byte("one more line\n"))
+	after, _ := os.Stat(p)
+	if after.Size() != before.Size() {
+		t.Fatalf("the group stream grew past its ceiling: %d -> %d", before.Size(), after.Size())
+	}
+}
