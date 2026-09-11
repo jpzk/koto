@@ -143,6 +143,44 @@ func checkPlatform() checkResult {
 // a bare EACCES buried in a Firecracker console log. Check the mode.
 func checkKVM() checkResult { return checkKVMAt("/dev/kvm") }
 
+// kvmRemediation explains how to let the jailed VMM open /dev/kvm.
+//
+// It used to hand the operator MODE="0666" and nothing else. That is Fedora's
+// own default, so on Fedora it changes nothing — but on a distro shipping
+// 0660 root:kvm it opens the host's KVM interface to EVERY local account, and
+// koto's own preflight was the thing telling them to do it without saying so
+// (audit M88). The narrow grant goes first now; the broad one is still offered,
+// because it is what most hosts already have, but it is labelled with its cost.
+//
+// Why a GROUP cannot be the answer: the VMM runs as a per-VM uid inside the
+// daemon's user namespace with a deliberately empty supplementary group set
+// (fcjail.go), and newgidmap can map only the operator's own gid and their
+// /etc/subgid range — the host's kvm gid is in neither, so no group membership
+// reaches the jailed process. What does reach it is a POSIX ACL naming the host
+// uids the VMM actually runs as, which are a contiguous band: the operator's
+// subuid base plus fcJailBaseUID, one per possible group port.
+func kvmRemediation() string {
+	lo, hi := "<subuid-base+30000>", "<that+100>"
+	if me, err := user.Current(); err == nil {
+		if start, _, err := subIDRange("/etc/subuid", me.Username, me.Uid); err == nil {
+			lo = fmt.Sprintf("%d", start+fcJailBaseUID)
+			hi = fmt.Sprintf("%d", start+fcJailBaseUID+ctlMaxSpawn)
+		}
+	}
+	return "The jailed microVM monitor runs as an unprivileged per-VM id with no\n" +
+		"supplementary groups, so being in the kvm group does not reach it.\n" +
+		"\n" +
+		"Preferred — grant only the ids koto's VMMs run as (" + lo + ".." + hi + "):\n" +
+		"  for u in $(seq " + lo + " " + hi + "); do sudo setfacl -m u:$u:rw /dev/kvm; done\n" +
+		"  # /dev/kvm is recreated at boot, so re-run this from a boot unit or a\n" +
+		"  # udev RUN+= rule to make it persistent.\n" +
+		"\n" +
+		"Fallback — world access. This is Fedora's default, but on a multi-user\n" +
+		"host it lets EVERY local account open /dev/kvm, not only koto:\n" +
+		"  echo 'KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\"' | sudo tee /etc/udev/rules.d/99-kvm.rules\n" +
+		"  sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm"
+}
+
 func checkKVMAt(path string) checkResult {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -152,11 +190,7 @@ func checkKVMAt(path string) checkResult {
 	mode := fi.Mode().Perm()
 	if mode&0o006 != 0o006 {
 		return failCheck("/dev/kvm", fmt.Sprintf("mode %04o — not world-accessible", mode),
-			"The jailed microVM monitor runs as an unprivileged id with no groups, so\n"+
-				"it needs the world bits on /dev/kvm; being in the kvm group is not enough.\n"+
-				"Grant them persistently with a udev rule (this is Fedora's default):\n"+
-				`  echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules`+"\n"+
-				"  sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm")
+			kvmRemediation())
 	}
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
