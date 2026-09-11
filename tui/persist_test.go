@@ -67,3 +67,32 @@ func TestJobTailRawFramesAreScrubbed(t *testing.T) {
 		t.Errorf("SGR dropped: %q", scrubVT(sgr))
 	}
 }
+
+// 2026-09-11 M73: sanitizeEvent runs on Event.Input while it is still
+// serialized JSON, where an escape is the six printable bytes \\u001b --
+// nothing for a control-character scrub to find. json.Unmarshal turns them
+// back into real control bytes, and the value goes into the rendered tool
+// line, which lipgloss preserves verbatim.
+func TestToolInputControlsAreScrubbedAfterDecoding(t *testing.T) {
+	for _, c := range []struct{ tool, input string }{
+		{"Bash", `{"command":"echo \u001b]52;c;cGF5bG9hZA==\u0007"}`},
+		{"Read", `{"file_path":"/tmp/\u001b[2J\u001b[H"}`},
+		{"WebFetch", `{"url":"http://x/\u001b]0;retitled\u0007"}`},
+		{"Grep", `{"pattern":"\u009bC1","path":"/w"}`},
+		{"Task", `{"description":"benign\u202e reversed"}`},
+	} {
+		got := formatTool(c.tool, c.input)
+		for _, r := range got {
+			if r == 0x1b || (r < 0x20 && r != '\n') || (r >= 0x7f && r <= 0x9f) || isHostileFormat(r) {
+				t.Errorf("formatTool(%s, %s) left %q in %q", c.tool, c.input, r, got)
+			}
+		}
+	}
+	// Ordinary arguments are untouched.
+	if got := formatTool("Bash", `{"command":"ls -la /workspace"}`); got != "Bash $ ls -la /workspace" {
+		t.Errorf("plain command mangled: %q", got)
+	}
+	if got := formatTool("Read", `{"file_path":"/workspace/a b.txt"}`); got != "Read /workspace/a b.txt" {
+		t.Errorf("plain path mangled: %q", got)
+	}
+}

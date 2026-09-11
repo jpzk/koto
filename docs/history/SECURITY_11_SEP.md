@@ -1261,3 +1261,20 @@ codebase already had for exactly this problem, and it was missing here.
 The goal's own `Text` and `Criteria` stay unfenced, deliberately: they ARE the
 instruction, supplied by the operator or by main under `goal_set`, which is
 authorized. Fencing them would mean the worker has no instruction left.
+
+### M73 — JSON-escaped terminal controls bypass event sanitization in tool rendering (`tui/view.go`, fixed in `tui/model.go`) — **fixed**
+
+Real, and a genuinely good catch: the sanitizer ran on the wrong side of a
+decoding boundary. `sanitizeEvent` scrubs `Event.Input` while it is still
+SERIALIZED JSON, and in JSON an escape is the six printable bytes `\u001b` —
+nothing for a terminal-control scrub to find. `formatTool` then
+`json.Unmarshal`s it, turning them back into real control bytes, and drops the
+value straight into the rendered tool line, which lipgloss preserves verbatim.
+So a Bash command, a file path or a WebFetch url could carry OSC 52, a title
+set or cursor control through to the operator's terminal.
+
+Fixed at the decoding boundary — `pick` scrubs every value it extracts — which
+is the one place guaranteed to run after the decode and before the format. The
+fallback path that renders raw JSON needs nothing: there the escapes are still
+literal `\u001b` text, which is exactly what should be displayed.
+`TestToolInputControlsAreScrubbedAfterDecoding`.

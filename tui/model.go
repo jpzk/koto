@@ -3042,10 +3042,18 @@ func formatTool(name, input string) string {
 	if input != "" {
 		_ = json.Unmarshal([]byte(input), &args)
 	}
+	// scrubVT at the DECODING boundary, which is where the daemon's
+	// sanitizer could not reach. sanitizeEvent runs on Event.Input while it is
+	// still serialized JSON, and in JSON an escape is the six printable bytes
+	// \u001b — nothing for a terminal-control scrub to find. json.Unmarshal
+	// then turns them back into a real ESC, and the value goes straight into
+	// the rendered tool line, where lipgloss preserves it (audit M73). So a
+	// tool argument — a Bash command, a file path, a WebFetch url — could
+	// carry OSC or CSI through to the operator's terminal.
 	pick := func(keys ...string) string {
 		for _, k := range keys {
 			if v, ok := args[k].(string); ok && v != "" {
-				return v
+				return scrubVT(v)
 			}
 		}
 		return ""
