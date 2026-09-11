@@ -3512,3 +3512,42 @@ matters most for a rewrite like this — **equivalence with an exhaustive minute
 walk**: ten expressions from five different starting points, each crossing month,
 day and hour boundaries, must return the same FIRST matching minute. Verified to
 fail on the timing bound with the old body restored.
+
+## M155 — TUI retains deleted group data across clear, destroy and same-name reuse — FIXED
+
+`tui/model.go`.
+
+**Confirmed.** The client-side deletion boundary covered the state with a
+*visible* symptom and stopped there. When a group left the daemon's snapshot —
+a destroy, from this client or any other — the prune loop dropped `activity`
+(a stale entry pins the 80 ms spinner tick chain on forever), `busy`, and
+`unread` (a phantom pink dot). Everything else keyed by the group's **name**
+stayed: the transcript lines, the viewport cache, the resume cursor (`lastSeq`),
+the subscription flag, the paging and job-linger state, and — the privacy part —
+`promptHistory`, `histNav` and `histDraft`, so the prompts the operator typed
+into that group were still one Up-arrow or ctrl+R away. Group names are
+reusable, so a later group of the same name inherited all of it.
+
+A group-wide `/clear` had the same gap from the other direction: the transcript
+lines went and the prompts stayed.
+
+**Fix:** two functions, because the two paths mean different things.
+
+- `forgetGroup(g)` — everything keyed by the name, called from the prune loop
+  when a group vanishes from the snapshot. The list is exhaustive rather than
+  symptom-driven, and the composite-keyed maps are swept by prefix, which works
+  uniformly because `turnKey`, `unreadKey`, `sessKey` and `jobKey` are all
+  `"<group>\x00<rest>"`.
+- `forgetGroupHistory(g)` — what the operator would call "this conversation":
+  the recallable prompts, the history cursor, the unsent draft, and the three
+  **content-keyed render caches** (`vpCache` holds the group's rendered
+  viewport, `mdCache` the rendered markdown of its messages, `treeRowCache` rows
+  built from its name). Dropping the lines without those leaves the text cached
+  under a key a later same-named group can hit. Called by `forgetGroup` and by
+  the group-wide `/clear`.
+
+Tests: `TestDestroyedGroupIsForgottenCompletely` populates thirteen state maps
+plus transcript, prompts, cursor and draft, makes the group disappear from a
+`listMsg`, and asserts every one is gone while a sibling group's prompt history
+is untouched; `TestGroupClearForgetsThePrompts` drives the real `clear` response
+path. Both verified to fail with the wiring reverted.
