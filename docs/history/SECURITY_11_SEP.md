@@ -3140,3 +3140,41 @@ Test: `TestShellSendNeverBlocksOnAWedgedGuest` in `tui/shell_keys_test.go` wedge
 a stub stream inside `Send`, then fires three queues' worth of keystrokes plus a
 resize and asserts they all return — and that the queue stays bounded. Run under
 `-race` as well.
+
+## M147 — Credential writes follow attacker-controlled state-directory symlinks — FIXED
+
+`daemon/claude_login.go`, `authConnect`.
+
+**Confirmed, and it is M146's other half.** The credential flow trusted
+`<state>/creds` as a filesystem object: `os.MkdirAll` is happy with an existing
+**symlink** in the path, `os.Stat` follows one, and `os.WriteFile` follows a
+pre-existing destination link. So every secret this flow produces — the OAuth
+refresh token, an entered API key, and through the wizard a CA private key and a
+bearer token — could be written into a directory of somebody else's choosing by
+anyone able to write the state tree before the operator runs it.
+
+The predicate that catches this already existed: `stateDirTrusted` (real
+directory, owned by the invoking user, no group/other write), introduced at
+audit L9 for exactly this reason — *"a pre-created one under /tmp or a symlink is
+another user's directory wearing the name"*. It was just confined to
+`seedStateDir`, i.e. to `koto install`, and never applied to the standalone
+paths, which are the ones that actually write the secrets.
+
+**Fix:** `authConnect` creates `creds/` and then checks what is *there*
+(`Lstat` after `MkdirAll`, so an existing symlink is seen as a symlink), through
+the same `stateDirTrusted`. The API key write moved to `pkiWriteFile`, so the
+final component cannot be a link either (M146).
+
+**Scope, deliberately:** the **creds child**, not the state dir. Checking the
+child is enough — a symlink there is caught as a symlink, and swapping in a
+directory of one's own is caught by the owner test, both regardless of what the
+parent allows — and holding the state dir to the mode rule as well would refuse
+an ordinary 0755 checkout on a shared dev box for no credential-bearing reason.
+
+Checked against the live install (`/var/lib/koto/creds`, `drwxr-x---`, owned by
+the operator): accepted.
+
+Test: `TestCredentialFlowRefusesAnUntrustedCredsDir` in
+`daemon/audit_fixes_test.go` drives `authConnect` against a symlinked creds dir
+(refused, with the reason named), exercises the owner and mode rules on the
+shared predicate, and asserts that a freshly created creds dir passes.
