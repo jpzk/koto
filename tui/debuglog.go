@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -94,9 +95,17 @@ func dbgWrite(level int, tag, subsys, format string, args []any) {
 	if dbgFile == nil || level < dbgLevel {
 		return
 	}
+	// The message is FLATTENED and SCRUBBED (audit 2026-09-11 L53). This is a
+	// line-oriented record — one per line, read back with tail(1) or an editor
+	// — and the values interpolated into it include daemon, provider and guest
+	// error text, which the daemon's sanitizer deliberately leaves newlines in.
+	// So an influenced string forged whole extra records in the operator's own
+	// diagnostic log, and an escape sequence in one reached whatever they read
+	// it with. Same invariant as the daemon's own log (L23), stated at this
+	// logger's single write.
 	line := fmt.Sprintf("%s %s %s: %s\n",
 		time.Now().Format("2006-01-02 15:04:05.000"), tag, subsys,
-		fmt.Sprintf(format, args...))
+		flattenLogValue(fmt.Sprintf(format, args...)))
 	n, err := dbgFile.WriteString(line)
 	if err != nil {
 		// Mount went away / disk full: disable rather than retry per line.
@@ -127,4 +136,17 @@ func dbgRotate() {
 	dbgFile.Close()
 	dbgFile = f
 	dbgSize = 0
+}
+
+// flattenLogValue makes one debug-log record one line: terminal controls out,
+// line breaks folded to spaces. See dbgWrite.
+func flattenLogValue(s string) string {
+	s = scrubVTStrict(s)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\v', '\f', 0x85, 0x2028, 0x2029:
+			return ' '
+		}
+		return r
+	}, s)
 }

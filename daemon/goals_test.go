@@ -912,12 +912,14 @@ func TestCtlGoalSetAndStatusFromMain(t *testing.T) {
 
 		// goal_resume via ctl from main: seed a genuinely PAUSED goal (operator
 		// pause, the only resumable state — the cap no longer produces one) and
-		// resume it, which grants a fresh budget (iteration reset to 0). The
-		// resumed run then spends that budget and terminates as exhausted.
+		// resume it. The resume CARRIES the iteration count rather than
+		// granting a fresh budget (audit 2026-09-11 L57), so the goal is seeded
+		// with its budget unspent and the resumed run spends it and terminates
+		// as exhausted.
 		goalLock.Lock()
 		goals = []goalItem{{ID: "cccccccccccc", Group: g, Name: "resumeme", Text: "t", Criteria: "c",
 			Status: goalStatusPaused, PausedFrom: goalStatusRunning, PausedReason: "operator",
-			MaxIterations: 1, Iteration: 1, CreatedAt: goalNow()}}
+			MaxIterations: 1, Iteration: 0, CreatedAt: goalNow()}}
 		snap := snapshotGoalsLocked()
 		goalLock.Unlock()
 		snap.write()
@@ -1643,5 +1645,47 @@ func TestGoalReplacedWhileDriverParked(t *testing.T) {
 		// clean cancel or a cap self-termination is an acceptable terminal end.
 		_, _ = goalCancel(g, "") // may fail if already terminal — fine
 		waitGoalTerminal(t, g)
+	})
+}
+
+// 2026-09-11 L57: goalResume zeroed Iteration, so the MaxIterations budget was
+// unreachable — and a non-main group may pause and resume its OWN goal over
+// the ctl plane, so alternating the two kept a goal iterating forever, burning
+// worker slots and provider spend with the configured limit never arriving.
+// Resume means "carry on", and carrying on includes the count.
+func TestGoalResumeKeepsTheIterationBudget(t *testing.T) {
+	goalTestSetup(t)
+	const g = "goal-resumebudget1"
+	rec := &turnRec{}
+	withTurnFn(func(_, session, msg string) error {
+		rec.add(session, msg)
+		return nil // never claims completion
+	}, func() {
+		// plan=true parks the goal at awaiting_approval with no driver
+		// running, which is where the count can be staged deterministically.
+		if _, err := goalSet(g, "grind", "1. impossible", "", 6, true); err != nil {
+			t.Fatalf("goalSet: %v", err)
+		}
+		waitGoal(t, g, goalStatusAwaiting)
+		goalLock.Lock()
+		it := soleGoalLocked(g)
+		it.Iteration = 5 // five of six already spent before the pause
+		it.Status = goalStatusPaused
+		it.PausedFrom = goalStatusRunning
+		it.PausedReason = "operator"
+		goalLock.Unlock()
+
+		before := len(rec.byRole(roleWork))
+		if _, err := goalResume(g, ""); err != nil {
+			t.Fatalf("goalResume: %v", err)
+		}
+		got := waitGoal(t, g, goalStatusExhausted)
+		if got.Iteration != 6 {
+			t.Fatalf("exhausted at iteration %d, want the configured 6", got.Iteration)
+		}
+		if n := len(rec.byRole(roleWork)) - before; n != 1 {
+			t.Fatalf("resume ran %d work turns, want the 1 iteration left in the budget "+
+				"(a reset budget would have run 6)", n)
+		}
 	})
 }

@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -132,7 +133,21 @@ func runUninstall(o uninstallOpts) error {
 
 	// 1. Stop, before anything is removed. This is the step that lets every
 	// guest sync and unmount; the rest is just files.
-	if exists(unitPath) {
+	//
+	// Whether to stop used to be decided by `exists(unitPath)` ALONE (audit
+	// 2026-09-11 L54), which is a question about a file, not about whether a
+	// daemon is running. With the unit gone — removed by hand, an interrupted
+	// earlier uninstall, a daemon started straight from a binary — the stop
+	// was skipped silently and the run went on to delete the binaries and,
+	// under --purge, the state directory out from under a LIVE daemon and its
+	// live microVMs: every workspace image dirty, which is precisely the
+	// failure the ordering at the top of this file exists to prevent.
+	//
+	// So the unit file is only one of three signals. systemd may still hold
+	// the unit loaded after the file is gone (no daemon-reload), and a daemon
+	// may be running with no unit at all.
+	unitActive := systemctlIsActive("koto")
+	if exists(unitPath) || unitActive {
 		u.info("stopping the daemon — each guest gets up to 25s to unmount its workspace")
 		if err := o.step("systemctl", "stop", "koto"); err != nil {
 			// A stop that fails leaves VMs running against a service we are
@@ -151,6 +166,22 @@ func runUninstall(o uninstallOpts) error {
 		_ = o.step("systemctl", "reset-failed", "koto")
 		if !o.dry {
 			u.ok("service stopped and removed")
+		}
+	}
+
+	// Post-stop verification: `systemctl stop` succeeding is not the same
+	// sentence as "no daemon is serving this state dir". Under --dry-run
+	// nothing was stopped, so this reports rather than refuses.
+	if pid, cmd, found := runningKotoDaemon(state); found {
+		if o.dry {
+			u.warn("a koto daemon is running against %s (pid %d: %s) — "+
+				"a real run would refuse until it is stopped", state, pid, cmd)
+		} else {
+			return fmt.Errorf("a koto daemon is still running against %s (pid %d: %s).\n"+
+				"Removing files under a live daemon leaves every guest's workspace image dirty — "+
+				"each one needs the daemon's SIGTERM handler to sync and unmount.\n"+
+				"Stop it first (`sudo systemctl stop koto`, or `kill %d` for a daemon started by hand), then re-run",
+				state, pid, cmd, pid)
 		}
 	}
 
@@ -184,6 +215,89 @@ func runUninstall(o uninstallOpts) error {
 		return nil
 	}
 	return uninstallPurge(o, state)
+}
+
+// systemctlIsActive answers whether systemd currently has the unit running.
+// Read-only, so it needs no sudo, and a missing systemctl (or a unit systemd
+// has never heard of) is simply "not active" — the caller has two other
+// signals.
+func systemctlIsActive(unit string) bool {
+	out, err := exec.Command("systemctl", "is-active", unit).Output()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "active"
+}
+
+// runningKotoDaemon looks for a live `koto daemon` process serving the given
+// state directory. It reads /proc directly rather than shelling out to pgrep:
+// no dependency, and — the part that matters — it can tell WHICH state dir a
+// daemon is serving, so a dev-clone daemon under .dev/ does not block the
+// uninstall of an installed one, and vice versa.
+//
+// A daemon resolves its state root exactly as kotoHome() does: KOTO_HOME when
+// set, otherwise its cwd. Both are readable from /proc for our own processes;
+// when they are not (another user's daemon), the process is reported anyway —
+// refusing on a daemon that might not be ours is the safe direction, and the
+// message names the pid so the operator can judge.
+func runningKotoDaemon(state string) (int, string, bool) {
+	want := resolvePath(state)
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, "", false
+	}
+	self := os.Getpid()
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue // gone, or not ours to read
+		}
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if len(argv) < 2 || filepath.Base(argv[0]) != "koto" || argv[1] != "daemon" {
+			continue
+		}
+		home, known := procKotoHome(pid)
+		if known && resolvePath(home) != want {
+			continue // a different koto (a dev clone, another state dir)
+		}
+		return pid, strings.Join(argv, " "), true
+	}
+	return 0, "", false
+}
+
+// procKotoHome reports the state root of a running daemon, and whether it
+// could be determined at all.
+func procKotoHome(pid int) (string, bool) {
+	env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err == nil {
+		for _, kv := range strings.Split(strings.TrimRight(string(env), "\x00"), "\x00") {
+			if v, ok := strings.CutPrefix(kv, "KOTO_HOME="); ok && v != "" {
+				return v, true
+			}
+		}
+	}
+	// No KOTO_HOME: the daemon resolved its root from its cwd.
+	cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return "", false
+	}
+	return cwd, true
+}
+
+// resolvePath canonicalises for comparison, falling back to the cleaned
+// absolute form when the path cannot be resolved (it may not exist yet).
+func resolvePath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return filepath.Clean(p)
 }
 
 // uninstallPurge deletes the state dir and /etc/koto, behind the guards that

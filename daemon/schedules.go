@@ -93,6 +93,11 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 	if len(msg) > schedMaxMsg {
 		return scheduleItem{}, fmt.Errorf("msg too long (%d bytes; max %d)", len(msg), schedMaxMsg)
 	}
+	// The caps are CHECKED AGAIN under the append lock, below. These two are
+	// the early, cheap refusal — they stop the cron parse for a caller that is
+	// obviously over — but they release the lock before the append, so a burst
+	// of concurrent callers all passed them on the same count (audit
+	// 2026-09-11 L59).
 	if n := countSched(group); n >= schedMaxPerGroup {
 		return scheduleItem{}, fmt.Errorf("schedule cap reached for %s (%d)", group, schedMaxPerGroup)
 	}
@@ -121,6 +126,24 @@ func addSched(group, cronExpr, msg string) (scheduleItem, error) {
 		NextDueAt: float64(nx.Unix()),
 	}
 	schedLock.Lock()
+	// The decisive check: same acquisition as the append, so two callers cannot
+	// both pass it on one count (audit 2026-09-11 L59). Both the gRPC SchedAdd
+	// and the guest ctl plane's sched_add arrive here, and the excess records
+	// were persisted, walked by the cron loop and fired.
+	inGroup := 0
+	for i := range sched {
+		if sched[i].Group == group {
+			inGroup++
+		}
+	}
+	if inGroup >= schedMaxPerGroup {
+		schedLock.Unlock()
+		return scheduleItem{}, fmt.Errorf("schedule cap reached for %s (%d)", group, schedMaxPerGroup)
+	}
+	if len(sched) >= schedMaxTotal {
+		schedLock.Unlock()
+		return scheduleItem{}, fmt.Errorf("daemon-wide schedule cap reached (%d)", schedMaxTotal)
+	}
 	parsed[it.ID] = p
 	sched = append(sched, it)
 	saveSched()

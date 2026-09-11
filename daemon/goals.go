@@ -861,8 +861,8 @@ func goalInterrupt(g, name string) (goalItem, error) {
 	return it, nil
 }
 
-// goalResume restarts a paused goal with a fresh iteration budget, back into
-// the PHASE the pause interrupted: a pause that landed during the plan turn
+// goalResume restarts a paused goal — keeping its iteration count, see below —
+// back into the PHASE the pause interrupted: a pause that landed during the plan turn
 // (group stopped, plan turn stalled) resumes into `planning` — the driver
 // re-runs the plan and parks at awaiting_approval, same as a daemon restart
 // would. Resuming to `running` unconditionally skipped both the plan and the
@@ -875,7 +875,13 @@ func goalResume(g, name string) (goalItem, error) {
 		}
 		it.PausedFrom = ""
 		it.PausedReason = ""
-		it.Iteration = 0
+		// The iteration count is NOT reset (audit 2026-09-11 L57). The driver
+		// stops when Iteration reaches MaxIterations, so zeroing it here made
+		// the budget unreachable: a non-main group may pause and resume its own
+		// goal through the ctl plane, so alternating the two kept a goal
+		// iterating forever — burning worker slots, provider spend and the
+		// group's own capacity, with the configured limit never arriving.
+		// Resume means "carry on", and carrying on includes the count.
 	})
 	if err != nil {
 		return it, err

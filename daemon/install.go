@@ -558,33 +558,71 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// operator has edited it. The .dist copy is how we tell those apart.
 	srcPrompts := filepath.Join(o.root, "prompts")
 	dstPrompts := filepath.Join(o.stateDir, "prompts")
+	//
+	// Every failure in here used to be discarded (audit 2026-09-11 L61): an
+	// unreadable source directory, an unreadable file, a failed write. The
+	// daemon then composed its system prompt from whatever survived, and a
+	// MISSING global.md is indistinguishable from an empty one on that path —
+	// so an install could report success and hand every group a turn with no
+	// harness policy at all. Copying a file is not a best-effort nicety here;
+	// global.md is the policy every guest runs under.
 	entries, err := os.ReadDir(srcPrompts)
-	if err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			src := filepath.Join(srcPrompts, e.Name())
-			dst := filepath.Join(dstPrompts, e.Name())
-			dist := dst + ".dist"
-			newContent, err := os.ReadFile(src)
-			if err != nil {
-				continue
-			}
-			cur, curErr := os.ReadFile(dst)
-			prev, prevErr := os.ReadFile(dist)
-			switch {
-			case curErr != nil: // first install
-				_ = os.WriteFile(dst, newContent, 0o644)
-			case prevErr == nil && string(cur) == string(prev):
-				// untouched since the last install — safe to refresh
-				_ = os.WriteFile(dst, newContent, 0o644)
-			case string(cur) != string(newContent):
-				u.warn("%s differs from the shipped version — keeping yours (compare with %s)",
-					dst, filepath.Base(dist))
-			}
-			_ = os.WriteFile(dist, newContent, 0o644)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", srcPrompts, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
+		src := filepath.Join(srcPrompts, e.Name())
+		dst := filepath.Join(dstPrompts, e.Name())
+		dist := dst + ".dist"
+		// global.md is the harness policy; the rest are advisory, so only it
+		// is fatal. The others warn, which is at least visible.
+		required := e.Name() == "global.md"
+		fail := func(format string, a ...any) error {
+			if required {
+				return fmt.Errorf(format, a...)
+			}
+			u.warn(format, a...)
+			return nil
+		}
+		newContent, err := os.ReadFile(src)
+		if err != nil {
+			if ferr := fail("read %s: %v", src, err); ferr != nil {
+				return ferr
+			}
+			continue
+		}
+		cur, curErr := os.ReadFile(dst)
+		prev, prevErr := os.ReadFile(dist)
+		var werr error
+		switch {
+		case curErr != nil: // first install
+			werr = os.WriteFile(dst, newContent, 0o644)
+		case prevErr == nil && string(cur) == string(prev):
+			// untouched since the last install — safe to refresh
+			werr = os.WriteFile(dst, newContent, 0o644)
+		case string(cur) != string(newContent):
+			u.warn("%s differs from the shipped version — keeping yours (compare with %s)",
+				dst, filepath.Base(dist))
+		}
+		if werr != nil {
+			if ferr := fail("write %s: %v", dst, werr); ferr != nil {
+				return ferr
+			}
+			continue
+		}
+		if err := os.WriteFile(dist, newContent, 0o644); err != nil {
+			// The .dist copy only decides whether a later upgrade may refresh
+			// the file; losing it costs an unnecessary "differs" warning, not
+			// a policy.
+			u.warn("write %s: %v", dist, err)
+		}
+	}
+	if !exists(filepath.Join(dstPrompts, "global.md")) {
+		return fmt.Errorf("%s is missing after the prompt copy — refusing to report a successful install "+
+			"(the daemon would run every group with no harness policy)", filepath.Join(dstPrompts, "global.md"))
 	}
 
 	// fcassets: link or copy the big three from the clone if they're there,

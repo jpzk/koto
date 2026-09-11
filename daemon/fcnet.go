@@ -298,10 +298,18 @@ type fcEgressConn struct {
 	policy string        // network profile: fcNetWAN | fcNetLAN | fcNetFull
 	buf    []byte        // leftover allowed [len][frame] bytes not yet consumed by Read
 	flows  *fcFlowLogger // summarized per-flow egress log
+	bytes  *fcTokenBucket
+	frames *fcTokenBucket
 }
 
 func fcNewEgressConn(c net.Conn, group, policy string) *fcEgressConn {
-	return &fcEgressConn{Conn: c, policy: policy, flows: newFcFlowLogger(group)}
+	return &fcEgressConn{
+		Conn:   c,
+		policy: policy,
+		flows:  newFcFlowLogger(group),
+		bytes:  newFcTokenBucket(fcNetBytesPerSec, fcNetBytesBurst),
+		frames: newFcTokenBucket(fcNetFramesPerSec, fcNetFramesBurst),
+	}
 }
 
 func (e *fcEgressConn) Read(p []byte) (int, error) {
@@ -310,6 +318,14 @@ func (e *fcEgressConn) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		// Charge the guest for the work its frame is about to cost —
+		// classification, flow accounting, and the netstack's own parse —
+		// BEFORE doing any of it (audit 2026-09-11 L60). A dropped frame is
+		// charged too: rejecting costs host CPU as surely as forwarding, so
+		// exempting the denied ones would make the flood profile the cheap
+		// one. See fcTokenBucket for why this throttles rather than drops.
+		e.frames.take(1)
+		e.bytes.take(len(frame) + 4)
 		allowed := fcFrameAllowed(frame, e.policy)
 		e.flows.record(frame, e.policy, allowed)
 		if allowed {
@@ -339,6 +355,92 @@ func (e *fcEgressConn) readFrame() ([]byte, error) {
 		return nil, err
 	}
 	return frame, nil
+}
+
+// ---- per-guest work budget --------------------------------------------------
+//
+// A networked guest pumps frames into the daemon process as fast as vsock will
+// carry them, and every one of them costs an allocation, a classification, a
+// flow-table lookup and a netstack parse — all on the daemon's CPU, beside the
+// gRPC server and the proxy every other group depends on (audit 2026-09-11
+// L60). vsock backpressure bounds how much is QUEUED, not how much work a
+// guest may demand per second, so a guest with code execution could take a
+// share of the host's scheduling capacity simply by sending.
+//
+// The budget is deliberately loose — an OOM/CPU backstop, not a shaper, the
+// same call the proxy's concurrency caps made (M2). A networked group exists
+// to do real work (a git clone, an npm install, a container pull), and a limit
+// tight enough to shape that traffic would make ordinary turns mysteriously
+// slow. The bytes cap sits well above any single host NIC; the frame cap is
+// what actually binds, because the cheapest flood is the smallest frame and
+// frames — not bytes — are what the per-frame cost scales with.
+//
+// It THROTTLES rather than drops: the reader simply stops reading until its
+// tokens refill, so the pressure propagates back down the vsock connection to
+// the guest's own pump. Dropping would be indistinguishable from the egress
+// filter's DROP and would silently corrupt a permitted TCP stream into a
+// retransmit storm — more host work, not less.
+const (
+	fcNetBytesPerSec  = 64 << 20 // 64 MiB/s sustained, per guest
+	fcNetBytesBurst   = 64 << 20 // one second of slack
+	fcNetFramesPerSec = 100_000  // ~1.5x MTU-sized line rate at the byte cap
+	fcNetFramesBurst  = 100_000
+)
+
+// fcTokenBucket is a plain refill-on-read token bucket. It is not safe for
+// concurrent use and does not have to be: one lives per fcEgressConn, charged
+// only from that conn's single Read goroutine.
+type fcTokenBucket struct {
+	rate    float64 // tokens per second
+	burst   float64 // ceiling
+	tokens  float64
+	last    time.Time
+	nowFn   func() time.Time
+	sleepFn func(time.Duration)
+}
+
+func newFcTokenBucket(rate, burst float64) *fcTokenBucket {
+	return &fcTokenBucket{
+		rate: rate, burst: burst, tokens: burst,
+		nowFn: time.Now, sleepFn: time.Sleep,
+	}
+}
+
+// take charges n tokens, sleeping until they are available. A single charge
+// larger than the burst would never be satisfiable, so it is clamped — the
+// caller's unit (one frame, or one frame's bytes) is always far below both
+// ceilings, and wedging the guest's link forever is not an acceptable answer
+// to arithmetic.
+func (b *fcTokenBucket) take(n int) {
+	want := float64(n)
+	if want > b.burst {
+		want = b.burst
+	}
+	for {
+		now := b.nowFn()
+		if !b.last.IsZero() {
+			b.tokens += now.Sub(b.last).Seconds() * b.rate
+			if b.tokens > b.burst {
+				b.tokens = b.burst
+			}
+		}
+		b.last = now
+		if b.tokens >= want {
+			b.tokens -= want
+			return
+		}
+		// Wait for the shortfall, but wake up regularly: a closed conn is
+		// noticed by the next readFrame, and a long uninterruptible sleep
+		// here would hold a teardown open for no reason.
+		wait := time.Duration((want - b.tokens) / b.rate * float64(time.Second))
+		if wait > 100*time.Millisecond {
+			wait = 100 * time.Millisecond
+		}
+		if wait <= 0 {
+			wait = time.Millisecond
+		}
+		b.sleepFn(wait)
+	}
 }
 
 // ---- summarized flow logging ------------------------------------------------
