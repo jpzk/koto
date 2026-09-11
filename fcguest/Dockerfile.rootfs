@@ -15,6 +15,19 @@
 #   podman manifest inspect docker.io/library/fedora:44
 FROM docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
 
+# The agent CLI every guest runs, PINNED — the base image above is pinned by
+# digest for exactly this reason and the npm install underneath it was not, so
+# a rootfs rebuild silently adopted whatever `latest` was that day, and a
+# compromised publish would have entered every guest on the next rebuild
+# (audit M46). npm runs lifecycle scripts as root during the build, before the
+# `node` account exists, and the result is exported as the shared read-only
+# root drive attached to every VM.
+#
+# Bump deliberately, then `make rootfs` and `/restart` the groups:
+#   npm view @anthropic-ai/claude-code version
+# 2.1.268 sha512-DSRUVAbRRH7WaHm99OErT4FJQDkbhIUb8mIaevcFrXtKCZwA9UmKY5+SOFWmgyeEUj2Uh1pFw0Rk/gYffmUEUw==
+ARG CLAUDE_CODE_VERSION=2.1.268
+
 RUN dnf install -y --setopt=install_weak_deps=False \
       bash \
       ca-certificates \
@@ -44,7 +57,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       shadow-utils \
       sudo \
  && dnf clean all \
- && npm i -g @anthropic-ai/claude-code \
+ && npm i -g @anthropic-ai/claude-code@"$CLAUDE_CODE_VERSION" \
  && npm cache clean --force
 
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
