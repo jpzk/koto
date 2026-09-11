@@ -102,6 +102,7 @@ case "$cmd" in
     # On completion a notify job posts {"cmd":"job_done"} to the group ctl FIFO;
     # the daemon debounces + coalesces those into one self-send (notify.go).
     setsid sh -c '
+      echo $$ > "'"$D"'/pgid"
       exec >"'"$D"'/out" 2>&1
       "$@"
       rc=$?
@@ -109,6 +110,11 @@ case "$cmd" in
       echo done > "'"$D"'/status"
       [ -f "'"$D"'/notify" ] && /sidecar/cs-job _notify "'"$id"'" || true
     ' _ "$@" &
+    # ^ the setsid child is its own session and process-group leader, so its
+    #   pid IS the pgid — recorded so `cs-job rm` can terminate the whole group
+    #   rather than only deleting the bookkeeping (audit M83). Without it a
+    #   removed job kept running, kept writing to a now-unreferenced out file,
+    #   and was invisible to `cs-job list`.
     echo "$id"
     ;;
   _notify)
@@ -216,7 +222,24 @@ case "$cmd" in
     ;;
   status)  chkid "${1:?cs-job status <id>}"; jstatus "$1" ;;
   logs)    chkid "${1:?cs-job logs <id>}"; cat "$JOBS/$1/out" 2>/dev/null || { echo "cs-job: no output for $1" >&2; exit 2; } ;;
-  rm)      chkid "${1:?cs-job rm <id>}"; rm -rf "$JOBS/$1"; echo removed ;;
+  rm)
+    chkid "${1:?cs-job rm <id>}"
+    # Terminate before forgetting. A detached job outlives its turn by design,
+    # so deleting only the metadata left it running against a directory nobody
+    # tracks: still consuming CPU and workspace disk, and no longer listed
+    # (audit M83). TERM then KILL, to the process GROUP — setsid made the job
+    # its own leader, so the negative pid reaches its descendants too.
+    PG=$(cat "$JOBS/$1/pgid" 2>/dev/null || echo '')
+    case "$PG" in ''|*[!0-9]*) PG='' ;; esac
+    if [ -n "$PG" ] && kill -0 "-$PG" 2>/dev/null; then
+      kill -TERM "-$PG" 2>/dev/null || true
+      n=0
+      while [ "$n" -lt 20 ] && kill -0 "-$PG" 2>/dev/null; do
+        sleep 0.1; n=$((n+1))
+      done
+      kill -0 "-$PG" 2>/dev/null && kill -KILL "-$PG" 2>/dev/null || true
+    fi
+    rm -rf "$JOBS/$1"; echo removed ;;
   clean)
     n=0
     for d in "$JOBS"/*/; do
