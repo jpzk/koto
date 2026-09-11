@@ -78,6 +78,41 @@ func queueNotify(g, marker string) bool {
 	return true
 }
 
+// dropQueuedNotifies discards g's queued-but-unwritten markers: every one of
+// them when all is true, otherwise only those belonging to `session`.
+//
+// The transcript rewrite a clear performs can only remove what is already in
+// the file. A marker still sitting in notifyQueue is appended by the next
+// tryFlushNotify — i.e. lands AFTER the clear, in a conversation the operator
+// has just erased (audit M133).
+//
+// Boundary, stated rather than papered over: a flush that has already taken
+// its batch out of the queue can still append it. That window is the few
+// microseconds between the dequeue and the write, so what survives it is a
+// notification delivered concurrently with the clear, not one the clear was
+// asked to erase.
+func dropQueuedNotifies(g, session string, all bool) {
+	notifyQueueMu.Lock()
+	defer notifyQueueMu.Unlock()
+	if all {
+		delete(notifyQueue, g)
+		return
+	}
+	pending := notifyQueue[g]
+	kept := pending[:0]
+	for _, m := range pending {
+		if ns, ok := notifyMarkerSession(m); ok && ns == session {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	if len(kept) == 0 {
+		delete(notifyQueue, g)
+		return
+	}
+	notifyQueue[g] = kept
+}
+
 // notifyDeliver is the one funnel every notification producer goes through
 // (ctl `notify` verb, resource alerts, forwarded log lines): flatten +
 // truncate, queue the [[notify]] marker, arm the group's tailer, and mirror

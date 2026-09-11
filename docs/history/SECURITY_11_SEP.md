@@ -2520,3 +2520,43 @@ the unit with `InaccessiblePaths=`. The daemon process genuinely never reads it
 outside the unit), so it would apply cleanly — but a compromised daemon does
 not need to mint a fresh identity when it can read the operator's, and it would
 add a directive whose failure mode is a daemon that will not start.
+
+## M133 — Per-session clear retains named-session notification markers — FIXED
+
+`daemon/sessions.go` (`filterLogSession`), `daemon/logtail.go`, `daemon/groups.go`.
+
+**Confirmed, and wrong in both directions.** A `[[notify]]` marker carries its
+own session field and is appended by `tryFlushNotify` to the GROUP stream at
+whatever line boundary comes next — out-of-band, with no `[[session]]` marker
+around it. `filterLogSession` updated its deletion state from `[[session]]`
+markers only, so it judged every notify line by the enclosing segment:
+
+- **Clearing a NAMED session kept all of its notifications.** The group stream
+  contains no `[[session]]` markers at all, so `cur` stays `""` for the whole
+  file and nothing in it is ever attributed to a named session. `History` then
+  re-parses the retained marker into a `notification` event carrying that
+  session's title and message — the conversation the operator cleared is still
+  quoting itself.
+- **Clearing the DEFAULT session swept away every other session's.** Same
+  cause, the other way round: every notify line read as `""`.
+
+**Fix:** `notifyMarkerSession` (logparse.go) states the session a notify line
+belongs to — the marker's own field, `""` for the 4-field pre-session shape —
+and `filterLogSession` decides notify lines with it, before the segment rule.
+No other line type is affected.
+
+**Second half of the finding, also real and also fixed:** a marker still in
+`notifyQueue` when the clear runs is appended by the next flush, i.e. lands
+*after* the rewrite. `dropQueuedNotifies(g, session, all)` discards the
+session's queued markers on a per-session clear and the whole queue on a
+group-wide one, called before the transcript is rewritten/truncated in both
+scopes. What that does NOT cover, stated rather than papered over: a flush that
+has already taken its batch out of the queue can still append it — a window of
+the few microseconds between the dequeue and the write, so what survives is a
+notification delivered concurrently with the clear, not one the clear was asked
+to erase.
+
+Tests: `TestClearSessionFiltersNotificationsByTheirOwnSession` (both
+directions, plus an alpha notification interleaved inside the default session's
+segment) and `TestClearDropsQueuedNotifications` (both clear scopes), in
+`daemon/audit_fixes_test.go`. Verified to fail with the notify branch removed.
