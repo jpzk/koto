@@ -2949,3 +2949,42 @@ absent / `unreleased` against a full, partial, entry-less, missing and
 unreadable manifest, and pins that a pre-release tree keeps every exception it
 had. The existing `TestArtifactVerificationCoversEveryManifestEntry` (M116) still
 passes unchanged.
+
+## M144 — Per-session log clear can exhaust daemon memory — FIXED
+
+`daemon/sessions.go`, `filterLogSession`.
+
+**Confirmed.** The rewrite was `os.ReadFile` → `string(b)` → `strings.Split` →
+`strings.Join` → `[]byte(content)`: four full-size allocations alive at once,
+plus a string header per line all pinning the original. Per-file ceiling is
+1 GiB and a per-session clear sweeps **all eleven** of a group's streams, so a
+client authorized to operate a group could grow a permitted log and then call
+`Clear` on it.
+
+**Fix: streamed, in two passes, and allocation-free per line.**
+`filterSessionScan` reads with `bufio.Reader.ReadSlice`, so the slices it hands
+out point into the reader's own buffer and not even a line is allocated — only
+the two marker shapes are converted to strings, matched by byte prefix first,
+and both are short by construction. A line longer than the buffer arrives in
+several chunks; only the first carries the decision and the rest follow it, so
+an unbroken megabyte streams rather than being assembled.
+
+**Two passes rather than one**, to keep the property that matters more than the
+I/O: a stream with nothing to drop is **not rewritten**. The rename bumps the
+inode, every live tailer then reopens at EOF, and bytes landing in that gap — a
+`[[turn_end]]` among them — are lost to the live view, stalling a healthy turn
+for the full wait window (the reason that check exists at all). A session's
+segments live in a few of a group's streams; the rest must pass untouched,
+especially the ones an active turn is writing this instant. Pass one only
+decides, reading and discarding; pass two runs only when the answer is yes.
+
+Measured by the test: clearing a **23.7 MB** log allocates **199 KB** — the read
+and write buffers, and the marker lines. The old shape's peak was several times
+the file.
+
+Test: `TestFilterLogSessionIsStreamed` in `daemon/audit_fixes_test.go` pins the
+allocation bound, byte-for-byte equivalence with the buffered implementation
+across seven shapes (empty, nothing to drop, all-target, leading default
+segment, clearing the default, no trailing newline, unterminated target tail),
+that an untouched stream keeps its **inode**, and that a 300 KiB unbroken line
+survives the chunked path intact.
