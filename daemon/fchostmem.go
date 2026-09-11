@@ -28,6 +28,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -220,4 +221,54 @@ func fcHostMemRelease(g string) {
 	fcHostMemMu.Lock()
 	delete(fcHostMemPending, g)
 	fcHostMemMu.Unlock()
+}
+
+// ---- 2026-09-11 M163: host-disk admission -----------------------------------
+//
+// The memory side of this file refuses a spawn that will not fit beside the
+// running VMs. The DISK side had nothing: fcEnsureWorkspaceImg created a sparse
+// image and Truncate'd it to its apparent size, guest writes materialised real
+// blocks afterwards, and fcGrowWorkspaceImg extended an existing image without
+// looking at the filesystem at all. With up to 100 registered groups, images
+// that survive a stop, and a reporting path (resources.go) that only WATCHES
+// the number go up, a caller able to spawn groups could fill the host's
+// filesystem — at which point every guest remounts read-only, the daemon cannot
+// write its own state, VM startup and shutdown fail, and unrelated host
+// services fail with them.
+//
+// This is the same friendly-failure principle fcHostMemAdmit states: refusing a
+// spawn with a message that says why is better than the kernel, or ENOSPC,
+// choosing for us.
+//
+// It is a FLOOR, not an accounting model, and the difference is the point.
+// Images are sparse and grow by guest writes, so no reservation arithmetic can
+// predict consumption the way memory admission can — what it can do is stop
+// adding NEW consumers to a filesystem that is already nearly full. The
+// threshold is the same one the resource alerts fire at (resCritPct), so the
+// operator has been told twice before this refuses anything.
+
+// fcHostDiskAdmit refuses to create or grow a workspace image when the
+// filesystem holding the group tree is already past the critical threshold.
+// what names the operation for the error message.
+func fcHostDiskAdmit(g, what string) error {
+	total, free := hostFSStats()
+	if total <= 0 {
+		return nil // unmeasurable (statfs failed) — do not invent a refusal
+	}
+	usedPct := float64(total-free) / float64(total) * 100
+	if usedPct < resCritPct {
+		return nil
+	}
+	return errors.New(fcHostDiskAdmitMsg(g, what, total, free))
+}
+
+// fcHostDiskAdmitMsg is the refusal text. Split out so it can be exercised
+// without a full filesystem — an operator who hits this is already in trouble
+// and needs the sentence, not an errno.
+func fcHostDiskAdmitMsg(g, what string, total, free int64) string {
+	usedPct := float64(total-free) / float64(total) * 100
+	return fmt.Sprintf("%s for %s refused: the filesystem holding %s is %.0f%% full (%.1f GiB free) — "+
+		"free space, destroy an unused group, or move the state dir; "+
+		"at 100%% every guest remounts read-only and the fleet wedges",
+		what, g, ROOT, usedPct, float64(free)/(1<<30))
 }

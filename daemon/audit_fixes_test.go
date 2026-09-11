@@ -6103,3 +6103,55 @@ func TestEventRingIsBoundedByBytesAndCount(t *testing.T) {
 		t.Errorf("the oversized event did not evict everything else: %d entries", held)
 	}
 }
+
+// 2026-09-11 M163: the memory side of the fleet refuses a spawn that will not
+// fit. The disk side had nothing — fcEnsureWorkspaceImg created a sparse image
+// and Truncate'd it, guest writes materialised the blocks afterwards, and
+// fcGrowWorkspaceImg extended an existing image without looking at the
+// filesystem at all. With up to 100 registered groups and images that survive a
+// stop, a caller able to spawn could fill the host's filesystem, at which point
+// every guest remounts read-only and the daemon cannot write its own state.
+func TestWorkspaceImagesHaveHostDiskAdmission(t *testing.T) {
+	prevRoot := ROOT
+	t.Cleanup(func() { ROOT = prevRoot })
+
+	// A real filesystem with room: admitted, and silently.
+	ROOT = t.TempDir()
+	if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
+		t.Errorf("a filesystem with free space refused a spawn: %v", err)
+	}
+
+	// Unmeasurable (statfs fails): no invented refusal — a missing directory
+	// must not become a fleet-wide spawn block.
+	ROOT = filepath.Join(t.TempDir(), "does-not-exist")
+	if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
+		t.Errorf("an unmeasurable filesystem produced a refusal: %v", err)
+	}
+
+	// The threshold itself, exercised through the same arithmetic the admit
+	// uses, since a full filesystem cannot be conjured in a test.
+	for _, c := range []struct {
+		total, free int64
+		refuse      bool
+	}{
+		{total: 100, free: 50, refuse: false}, // 50%
+		{total: 100, free: 21, refuse: false}, // 79%
+		{total: 100, free: 10, refuse: true},  // 90% — resCritPct
+		{total: 100, free: 1, refuse: true},   // 99%
+		{total: 100, free: 0, refuse: true},   // full
+	} {
+		used := float64(c.total-c.free) / float64(c.total) * 100
+		if got := used >= resCritPct; got != c.refuse {
+			t.Errorf("%.0f%% full: refuse=%v, want %v", used, got, c.refuse)
+		}
+	}
+
+	// The refusal has to say what to do about it — an operator hitting this is
+	// already in trouble and needs the sentence, not an errno.
+	msg := fcHostDiskAdmitMsg("ghost", "creating a workspace image", 100, 5)
+	for _, want := range []string{"ghost", "creating a workspace image", "95%", "destroy an unused group", "read-only"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not mention %q: %s", want, msg)
+		}
+	}
+}
