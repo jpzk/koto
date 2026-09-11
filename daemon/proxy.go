@@ -477,9 +477,12 @@ func retryDelay(h http.Header, attempt int) time.Duration {
 // fleet weather (independent of our own concurrency/quota) and empirically
 // resolves within ~1–2 min — so a longer budget converts what were terminal
 // 529s into slightly-delayed successes rather than dead turns.
-func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request, error)) (*http.Response, error) {
+func doWithRetry(ctx context.Context, client *http.Client, group string, mkReq func() (*http.Request, error)) (*http.Response, error) {
 	const maxRetries = 6
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err // the guest is gone; don't start another attempt
+		}
 		req, err := mkReq()
 		if err != nil {
 			return nil, err
@@ -503,7 +506,20 @@ func doWithRetry(client *http.Client, group string, mkReq func() (*http.Request,
 		// needs to distinguish from a wedged turn.
 		activityRetry(group, fmt.Sprintf("upstream %d · retry %d/%d · %s",
 			resp.StatusCode, attempt+1, maxRetries, delay.Round(time.Second)))
-		time.Sleep(delay)
+		// Waited ON the request context, not slept through. A guest that has
+		// disconnected is not owed another attempt, and the slot it holds
+		// (proxyAcquire) is not released until this returns — so an
+		// unconditional sleep parked a per-group slot for the whole backoff on
+		// behalf of a client that had gone (audit M92). Retries here reach
+		// tens of seconds.
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			activityRetryDone(group)
+			return nil, ctx.Err()
+		}
 		activityRetryDone(group)
 	}
 }
@@ -971,7 +987,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mergedBeta := strings.Trim(strings.Trim(strings.Join([]string{clientBeta, ah["anthropic-beta"]}, ","), ","), ",")
 
 	mkReq := func() (*http.Request, error) {
-		req, err := http.NewRequest(r.Method, upstream+r.URL.RequestURI(), bytes.NewReader(body))
+		// WithContext: the upstream call inherits the GUEST's request, so a
+		// disconnect cancels the credentialed work it was doing on its behalf
+		// rather than running it to completion against the provider (M92).
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstream+r.URL.RequestURI(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -1006,7 +1025,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer probe.end()
 	}
 	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := doWithRetry(client, h.group, mkReq)
+	resp, err := doWithRetry(r.Context(), client, h.group, mkReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1134,7 +1153,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mkReq := func() (*http.Request, error) {
-		req, err := http.NewRequest(r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -1167,7 +1186,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		defer probe.end()
 	}
 	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := doWithRetry(client, h.group, mkReq)
+	resp, err := doWithRetry(r.Context(), client, h.group, mkReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

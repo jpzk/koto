@@ -1737,3 +1737,24 @@ All five now pass `Name`. Pinned by a test that reads the call sites, because
 the failure is an omitted FIELD — nothing a behavioural test of the RPC would
 catch, since a single-goal group resolves the same either way.
 `TestGoalLifecycleRPCsCarryTheName`.
+
+### M92 — Guest disconnects do not cancel credentialed upstream proxy work (`daemon/proxy.go`) — **fixed**
+
+Real, and the slot accounting is what makes it matter. The upstream request
+builders used `http.NewRequest`, so the call did not inherit `r.Context()`, and
+`doWithRetry`'s backoff was an unconditional `time.Sleep`. A guest that sent a
+complete body and then disconnected left the proxy running credentialed work
+against the provider on its behalf — and `proxyAcquire`'s slot is released when
+the handler RETURNS, so one of the group's 32 slots stayed held for the whole
+backoff, which with `retry-after` reaches tens of seconds.
+
+Both upstream builders now use `http.NewRequestWithContext(r.Context(), …)`,
+`doWithRetry` takes the context, checks it before starting another attempt, and
+waits on a timer selected against `ctx.Done()` instead of sleeping. A
+disconnected guest cancels the provider call it was paying for and frees its
+slot immediately. `TestUpstreamWorkFollowsTheGuestContext`.
+
+(This is the same propagation M80 declined for the JOB-observability path, and
+the difference is the reason: there the guest call is bounded by a 15s timeout
+and an admission cap, so the context buys latency on slot return. Here the wait
+is attacker-influenced through `retry-after` and the slot is one of 32.)
