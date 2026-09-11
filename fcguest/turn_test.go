@@ -371,3 +371,63 @@ func TestRunWorkerDoesNotWaitOnADetachedDescendant(t *testing.T) {
 		t.Errorf("the worker's own output was lost: %q", lines)
 	}
 }
+
+// 2026-09-11 M160: `exec` accumulated the child's whole combined output before
+// framing it, so the channel's 16 MiB maximum was enforced on the HOST — after
+// the guest had read, allocated and held every byte, and after a frame too large
+// to send made the call fail outright instead of returning what it had. Its
+// callers are the daemon's own control execs (a jobs listing, /proc/meminfo, a
+// df, an rm), every one of which answers in kilobytes and reads files the WORKER
+// can write.
+func TestExecOutputBufferIsBounded(t *testing.T) {
+	w := &boundedBuf{cap: 1024}
+
+	// A short write is stored whole and reports no truncation.
+	n, err := w.Write([]byte("hello"))
+	if n != 5 || err != nil {
+		t.Fatalf("Write = %d, %v", n, err)
+	}
+	if w.truncated {
+		t.Error("a short write was marked truncated")
+	}
+
+	// The overflowing write is clipped, but REPORTS the full length: a short
+	// write would make the child see an I/O error on stdout, and the point is
+	// to stop storing the bytes, not to break the command producing them.
+	n, err = w.Write(bytes.Repeat([]byte("x"), 4096))
+	if n != 4096 || err != nil {
+		t.Fatalf("overflowing Write = %d, %v — a short count would break the child", n, err)
+	}
+	if !w.truncated {
+		t.Error("the overflow was not marked")
+	}
+	if got := w.b.Len(); got != 1024 {
+		t.Errorf("buffered %d bytes, cap is 1024", got)
+	}
+
+	// Everything after the cap is dropped without growing anything, and the
+	// count stays honest.
+	for i := 0; i < 1000; i++ {
+		if n, err := w.Write(bytes.Repeat([]byte("y"), 4096)); n != 4096 || err != nil {
+			t.Fatalf("post-cap Write = %d, %v", n, err)
+		}
+	}
+	if got := w.b.Len(); got != 1024 {
+		t.Errorf("the buffer grew past its cap to %d", got)
+	}
+	if !strings.HasPrefix(w.b.String(), "hello") {
+		t.Errorf("the head of the output was not the part kept: %.20q", w.b.String())
+	}
+
+	// A zero-length write past the cap is not a truncation event.
+	fresh := &boundedBuf{cap: 4}
+	if _, err := fresh.Write(nil); err != nil || fresh.truncated {
+		t.Error("an empty write was treated as overflow")
+	}
+	// The real bound the daemon runs with is far above any control exec's
+	// answer (kilobytes) and comfortably inside the 16 MiB the daemon accepts
+	// on the guest→host channel (fcFrameMaxGuest, daemon/fcframe.go).
+	if execOutMax > 16<<20 {
+		t.Errorf("execOutMax (%d) exceeds the guest→host channel maximum", execOutMax)
+	}
+}

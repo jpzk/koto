@@ -6155,3 +6155,47 @@ func TestWorkspaceImagesHaveHostDiskAdmission(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M160 (host side): every field the jobs scripts read is written by
+// the WORKER — cs-job mints the directory but uid 1000 owns it — and four of
+// them were read with a bare `cat`, which inlined whatever was there into a TSV
+// line that comes back through the exec buffer, is parsed into per-group state,
+// folded into the state hash and republished in every state frame. Only `cmd`
+// was capped. The parse has to hold up against what the bounded script now
+// produces, and against what an unbounded one used to.
+func TestJobsTSVParseSurvivesHostileMetadata(t *testing.T) {
+	// What the script produces after bounding: 64 bytes per field, no tabs or
+	// newlines inside one, size from stat.
+	line := strings.Join([]string{
+		"j2",
+		strings.Repeat("A", 64),
+		strings.Repeat("0", 64),
+		strings.Repeat("w", 64),
+		strings.Repeat("9", 64),
+		"200000",
+		strings.Repeat("c", 200),
+	}, "\t")
+	jobs := parseJobsTSV(line + "\n")
+	if len(jobs) != 1 {
+		t.Fatalf("parsed %d jobs, want 1", len(jobs))
+	}
+	if jobs[0].ID != "j2" || jobs[0].OutSize != 200000 {
+		t.Errorf("fields misparsed: %+v", jobs[0])
+	}
+	for _, f := range []string{jobs[0].Status, jobs[0].RC, jobs[0].Session, jobs[0].Cmd} {
+		if strings.ContainsAny(f, "\t\n") {
+			t.Errorf("a field carries framing: %q", f)
+		}
+	}
+
+	// And the shape the OLD script could emit: a metadata file with embedded
+	// tabs and newlines split one job across several lines and invented
+	// fields. Whatever the parser does with that, it must not produce a job
+	// whose id is attacker-chosen text from another field.
+	forged := "j3\trunning\tx\ty\t0\t0\tcmd\nnot-a-job-line\n>>> forged\n"
+	for _, j := range parseJobsTSV(forged) {
+		if strings.ContainsAny(j.ID, " \t>") {
+			t.Errorf("a forged line became a job id: %q", j.ID)
+		}
+	}
+}

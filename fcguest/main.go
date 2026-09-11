@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -980,11 +981,46 @@ func execAsWorker(script string) *exec.Cmd {
 	return cmd
 }
 
+// execOutMax bounds what one `exec` buffers before replying (audit M160).
+//
+// The output was accumulated whole and only then framed, so the channel's
+// 16 MiB maximum was enforced on the HOST — after the guest had already read,
+// allocated and held every byte, and after a frame too large to send made the
+// call fail outright rather than return what it had. The guest's callers here
+// are the daemon's own control execs: a jobs listing, /proc/meminfo, a `df`, an
+// `rm`. All of them answer in kilobytes, and every one of them reads files the
+// WORKER can write. 4 MiB is four orders of magnitude above the real answers
+// and comfortably inside the frame limit.
+const execOutMax = 4 << 20
+
+// boundedBuf stops at cap and remembers that it did.
+type boundedBuf struct {
+	b         bytes.Buffer
+	cap       int
+	truncated bool
+}
+
+func (w *boundedBuf) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := w.cap - w.b.Len(); room > 0 {
+		if len(p) > room {
+			p, w.truncated = p[:room], true
+		}
+		w.b.Write(p)
+	} else if n > 0 {
+		w.truncated = true
+	}
+	// Report the FULL length, not what was stored: a short write makes the
+	// child see an I/O error on stdout, and the point is to stop storing the
+	// bytes rather than to break the command producing them.
+	return n, nil
+}
+
 func handleExec(c *vconn, script string) {
 	cmd := execAsWorker(script)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	out := &boundedBuf{cap: execOutMax}
+	cmd.Stdout = out
+	cmd.Stderr = out
 	pid, ch, err := startTracked(cmd)
 	if err != nil {
 		replyErr(c, err)
@@ -993,7 +1029,13 @@ func handleExec(c *vconn, script string) {
 	timer := time.AfterFunc(execCap, func() { killGroup(pid, syscall.SIGKILL) })
 	ws := <-ch
 	timer.Stop()
-	reply(c, &pb.AgentResponse{Ok: true, Rc: int32(ws.ExitStatus()), Out: out.Bytes()})
+	body := out.b.Bytes()
+	if out.truncated {
+		logf("exec: output exceeded %d bytes — truncated", execOutMax)
+		body = append(body, []byte("\n[koto] exec output truncated at "+
+			strconv.Itoa(execOutMax)+" bytes\n")...)
+	}
+	reply(c, &pb.AgentResponse{Ok: true, Rc: int32(ws.ExitStatus()), Out: body})
 }
 
 // handleExecStream pipes the child's combined output straight down the

@@ -3803,3 +3803,44 @@ did not before) **and** that the worker's own output still arrived.
 
 **Carry-over:** guest-side, so it reaches a group after `make rootfs` and a
 `/restart` — with M138 and M150.
+
+## M160 — Job inspection performs unbounded guest-controlled reads — FIXED
+
+`daemon/jobs.go`, `fcguest/main.go`.
+
+**Confirmed on both sides.**
+
+**Guest-side buffering.** `handleExec` accumulated the child's whole combined
+output in a `bytes.Buffer` and only then framed it, so the channel's 16 MiB
+maximum was enforced on the **host** — after the guest had read, allocated and
+held every byte, and after a frame too large to send made the call fail outright
+rather than return what it had. `execOutMax` (4 MiB) now bounds it in the guest,
+through a `boundedBuf` that reports the **full** write length so a capped
+buffer stops *storing* bytes rather than handing the child an I/O error on
+stdout, and marks the output truncated so the reply says so. Every caller here
+is one of the daemon's own control execs — a jobs listing, `/proc/meminfo`, a
+`df`, an `rm` — all of which answer in kilobytes.
+
+**Host-side scripts.** Each job's `status`, `rc`, `session` and `started` is a
+file the **worker** writes (cs-job mints the directory; uid 1000 owns it), and
+all four were read with a bare `cat`. Whatever was in them went into a TSV line
+that comes back through the exec buffer, is parsed into per-group state, folded
+into the state hash and republished in every state frame — and a metadata file
+containing tabs or newlines could invent fields and split one job across several
+lines. Only `cmd` was capped, at 200 bytes, which is the shape the rest now
+follow: `head -c 64 | tr -d '\t\n'` with the existing defaults preserved.
+
+`wc -c < "$d/out"` also **reads** the file to count it; `stat -c %s` asks the
+inode.
+
+Measured on a scratch tree before and after: a job with 100 KB of `status`,
+50 KB of `session` (with an embedded newline and a forged `>>> ` line) and 100 KB
+of `cmd` produced a **150,023-byte line carrying 5 fields** under the old script
+and a **470-byte line carrying exactly 7** under the new one, with a
+metadata-less job still defaulting to `unknown`/`0`.
+
+Tests: `TestExecOutputBufferIsBounded` in `fcguest/turn_test.go` (the cap, the
+full-length write contract, that post-cap writes grow nothing, that the head is
+what is kept, and that `execOutMax` stays inside the channel maximum) and
+`TestJobsTSVParseSurvivesHostileMetadata` in `daemon/audit_fixes_test.go` (the
+bounded line parses, carries no framing, and no forged line becomes a job id).
