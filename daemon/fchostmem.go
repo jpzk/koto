@@ -30,6 +30,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,13 +84,77 @@ func fcHostMemInit() {
 		}
 	}
 	total := fcHostMemTotalMiB()
-	if total == 0 {
-		emitLogf("fc", "warn", "fleet memory cap: /proc/meminfo unreadable; unlimited")
+	limit := fcCgroupMemLimitMiB()
+	if total == 0 && limit == 0 {
+		emitLogf("fc", "warn", "fleet memory cap: /proc/meminfo unreadable and no cgroup limit; unlimited")
 		return
 	}
-	fcHostMemCapMiB = total * fcHostMemDefaultPct / 100
-	emitLogf("fc", "info", "fleet memory cap: %d MiB (%d%% of host %d MiB; KOTO_HOST_MEM_MIB overrides, 0 = unlimited)",
-		fcHostMemCapMiB, fcHostMemDefaultPct, total)
+	// The SMALLER of the two bounds, because both are real (audit M153).
+	// MemTotal is what the machine has; the cgroup limit is what this service
+	// is allowed to use of it, and a fleet cap derived from the machine while
+	// the daemon sits inside a tighter ancestor is a cap that cannot be
+	// honoured. The vms/ memory.max is then written from that oversized figure
+	// and admission keeps saying yes until the ANCESTOR hits its limit —
+	// where the kernel's victim is chosen from the whole subtree, the daemon
+	// and its proxy included. Which is the one outcome the vms/-vs-main/ split
+	// exists to prevent: an OOM-killed daemon is a fleet outage.
+	src := fmt.Sprintf("%d%% of host %d MiB", fcHostMemDefaultPct, total)
+	cap := 0
+	if total > 0 {
+		cap = total * fcHostMemDefaultPct / 100
+	}
+	if limit > 0 {
+		fromLimit := limit * fcHostMemDefaultPct / 100
+		if cap == 0 || fromLimit < cap {
+			cap = fromLimit
+			src = fmt.Sprintf("%d%% of the daemon's cgroup limit %d MiB", fcHostMemDefaultPct, limit)
+		}
+	}
+	fcHostMemCapMiB = cap
+	emitLogf("fc", "info", "fleet memory cap: %d MiB (%s; KOTO_HOST_MEM_MIB overrides, 0 = unlimited)",
+		fcHostMemCapMiB, src)
+}
+
+// fcCgroupMemLimitMiB reports the tightest memory.max in effect on the daemon —
+// its own cgroup and every ancestor up to the mount root — or 0 when nothing
+// limits it (audit M153).
+//
+// cgroup limits are hierarchical: a child may name a number larger than its
+// parent allows, and the kernel simply enforces the parent's. So the vms/
+// parent limit and the admission arithmetic both have to be derived from the
+// smallest limit actually in force, not from what the machine has installed.
+//
+// Best effort throughout — an unreadable file, a missing controller or a
+// cgroup path this process cannot see all mean "nothing known here", which
+// leaves the /proc/meminfo default exactly as it was.
+func fcCgroupMemLimitMiB() int {
+	self, err := fcCgroupSelf()
+	if err != nil {
+		return 0
+	}
+	best := 0
+	dir := filepath.Join(fcCgroupMount, self)
+	root := filepath.Clean(fcCgroupMount)
+	for {
+		b, err := os.ReadFile(filepath.Join(dir, "memory.max"))
+		if err == nil {
+			if v := strings.TrimSpace(string(b)); v != "max" {
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+					if mib := int(n >> 20); mib > 0 && (best == 0 || mib < best) {
+						best = mib
+					}
+				}
+			}
+		}
+		if filepath.Clean(dir) == root {
+			return best
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir { // defensive: never loop at "/"
+			return best
+		}
+		dir = parent
+	}
 }
 
 // fcHostMemPending holds reservations for spawns that passed admission but

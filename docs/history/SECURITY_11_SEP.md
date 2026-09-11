@@ -3342,3 +3342,39 @@ whose `/proc/<pid>/comm` is `firecracker`, confirms the pidfile alone makes
 pidfile and the registry entry both survive, the group still reads as running)
 and the kill that does (both are cleaned up). `TestFcAwaitExitJudgesIdentity`
 pins that a live pid which is *not* ours does not hold a stop open.
+
+## M153 — Default fleet memory cap ignores the daemon's effective cgroup limit — FIXED
+
+`daemon/fchostmem.go`, `fcHostMemInit`.
+
+**Confirmed.** The derived cap was 90% of `/proc/meminfo`'s `MemTotal` and
+nothing else. cgroup limits are **hierarchical** — a child may name a number
+larger than its parent allows, and the kernel enforces the parent's — so a
+daemon running under a tighter ancestor (a slice with `MemoryMax`, a container,
+a delegated scope) got a `vms/` `memory.max` it could never honour, and
+admission went on saying yes until the **ancestor** hit its limit. At that point
+the kernel picks its victim from that whole subtree, daemon and proxy included
+— which is the one outcome the `vms/`-vs-`main/` split exists to prevent, as the
+file's own header says: *"an OOM-killed daemon is a fleet outage."*
+
+**Fix:** take the **smaller** of the two bounds, because both are real —
+`MemTotal` is what the machine has, the cgroup limit is what this service may
+use of it. `fcCgroupMemLimitMiB` walks the daemon's own cgroup and every
+ancestor up to the mount root and returns the tightest `memory.max` in force
+(`max` and unreadable levels contribute nothing). The same
+`fcHostMemDefaultPct` applies to whichever bound wins, and the startup log line
+now names which one it was. `KOTO_HOST_MEM_MIB` still outranks both: it is the
+operator's call.
+
+Best effort throughout — an unreadable file, a missing controller, or a cgroup
+path this process cannot see all mean "nothing known here" and leave the
+`/proc/meminfo` default exactly as it was, so nothing regresses on a host with
+no limits (which is what this machine reads today: no `memory.max` at the root,
+`max` on `system.slice`).
+
+Test: `TestFleetMemoryCapHonoursTheCgroupLimit` in `daemon/audit_fixes_test.go`
+builds a fake three-level hierarchy and pins each case: an all-`max` tree is no
+limit, the tightest wins wherever it sits, **a child naming more than its parent
+allows loses to the parent** (the hierarchy property the finding turns on), a
+missing `memory.max` is not a limit of zero, the resolved cap takes the smaller
+of the two bounds, and `KOTO_HOST_MEM_MIB` overrules both.

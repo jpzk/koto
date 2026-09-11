@@ -5458,3 +5458,83 @@ func TestFcAwaitExitJudgesIdentity(t *testing.T) {
 		t.Error("pid 0 was treated as alive")
 	}
 }
+
+// 2026-09-11 M153: the derived fleet cap was 90% of /proc/meminfo's MemTotal and
+// nothing else. cgroup limits are hierarchical — a child may name a number
+// larger than its parent allows and the kernel enforces the parent's — so a
+// daemon running under a tighter ancestor got a vms/ memory.max it could never
+// honour, and admission kept saying yes until the ANCESTOR hit its limit. The
+// kernel's victim is then chosen from that whole subtree, daemon and proxy
+// included, which is the one outcome the vms/-vs-main/ split exists to prevent.
+func TestFleetMemoryCapHonoursTheCgroupLimit(t *testing.T) {
+	// A fake cgroup tree: <root>/a/b, with limits at different depths, and the
+	// "daemon" sitting at the leaf.
+	root := t.TempDir()
+	leaf := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevMount, prevSelf := fcCgroupMount, fcCgroupSelfFn
+	fcCgroupMount = root
+	fcCgroupSelfFn = func() (string, error) { return "a/b", nil }
+	t.Cleanup(func() { fcCgroupMount, fcCgroupSelfFn = prevMount, prevSelf })
+
+	write := func(dir, v string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(v+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const mib = 1 << 20
+
+	// Nothing limits it.
+	write(root, "max")
+	write(filepath.Join(root, "a"), "max")
+	write(leaf, "max")
+	if got := fcCgroupMemLimitMiB(); got != 0 {
+		t.Errorf("an unlimited tree reported %d MiB", got)
+	}
+
+	// The tightest limit wins, wherever in the chain it sits — including an
+	// ANCESTOR the daemon's own cgroup knows nothing about, which is the whole
+	// point.
+	write(filepath.Join(root, "a"), fmt.Sprint(4096*mib))
+	if got := fcCgroupMemLimitMiB(); got != 4096 {
+		t.Errorf("an ancestor limit of 4096 MiB read as %d", got)
+	}
+	write(leaf, fmt.Sprint(2048*mib))
+	if got := fcCgroupMemLimitMiB(); got != 2048 {
+		t.Errorf("the tighter leaf limit read as %d MiB, want 2048", got)
+	}
+	write(leaf, fmt.Sprint(8192*mib)) // a child naming more than its parent allows
+	if got := fcCgroupMemLimitMiB(); got != 4096 {
+		t.Errorf("a child limit above its parent's won: %d MiB, want the parent's 4096", got)
+	}
+	// A missing memory.max at some level is not a limit of zero.
+	os.Remove(filepath.Join(leaf, "memory.max"))
+	if got := fcCgroupMemLimitMiB(); got != 4096 {
+		t.Errorf("a missing memory.max changed the answer: %d MiB", got)
+	}
+
+	// And the cap itself takes the smaller of the two bounds.
+	prevCap := fcHostMemCapMiB
+	t.Cleanup(func() { fcHostMemCapMiB = prevCap })
+	t.Setenv("KOTO_HOST_MEM_MIB", "")
+	fcHostMemInit()
+	total := fcHostMemTotalMiB()
+	want := 4096 * fcHostMemDefaultPct / 100
+	if total > 0 && total*fcHostMemDefaultPct/100 < want {
+		want = total * fcHostMemDefaultPct / 100 // a tiny test machine
+	}
+	if fcHostMemCapMiB != want {
+		t.Errorf("fleet cap = %d MiB, want %d (the smaller of host memory and the cgroup limit)",
+			fcHostMemCapMiB, want)
+	}
+
+	// The explicit override still outranks both — it is the operator's call.
+	t.Setenv("KOTO_HOST_MEM_MIB", "99999")
+	fcHostMemInit()
+	if fcHostMemCapMiB != 99999 {
+		t.Errorf("KOTO_HOST_MEM_MIB was overruled: cap = %d", fcHostMemCapMiB)
+	}
+}

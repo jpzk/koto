@@ -41,7 +41,7 @@ import (
 	"time"
 )
 
-const fcCgroupMount = "/sys/fs/cgroup"
+var fcCgroupMount = "/sys/fs/cgroup"
 
 // fcCgroupWeightPerVCPU scales a VM cgroup's cpu.weight by its vCPU count, so
 // under host CPU contention the size presets keep their meaning: an xlarge
@@ -79,7 +79,12 @@ func fcCgroupState() string {
 // mount root ("" when the daemon sits at the namespace root). With
 // --cgroupns=host this is the full host path (…/libpod-<id>.scope); with a
 // private namespace it is "/" and the scope IS the visible root.
-func fcCgroupSelf() (string, error) {
+// A var so a test can stand up a fake hierarchy; see fcCgroupMemLimitMiB.
+var fcCgroupSelfFn = fcCgroupSelfImpl
+
+func fcCgroupSelf() (string, error) { return fcCgroupSelfFn() }
+
+func fcCgroupSelfImpl() (string, error) {
 	b, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		return "", err
