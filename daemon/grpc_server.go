@@ -701,6 +701,15 @@ func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) err
 	for sc.Scan() {
 		if r.Parsed {
 			for _, ev := range lp.feedLine(sc.Text()) {
+				if !jobTailEventAllowed(ev.Event) {
+					continue
+				}
+				// Attribution is not a job's to set either: [[session]] is
+				// parser STATE rather than an event, so the allowlist above
+				// cannot reach it, and a forged one would stamp every later
+				// event in this tail with a conversation of the job's
+				// choosing.
+				ev.Session = ""
 				if serr := stream.Send(&pb.ScriptEvent{Event: "event", Parsed: toPBEvent(sanitizeEvent(ev))}); serr != nil {
 					return serr
 				}
@@ -717,6 +726,36 @@ func (s *kotoServer) JobTail(r *pb.JobTailReq, stream pb.Koto_JobTailServer) err
 	}
 	// Guest side went away (VM stopped/restarted mid-tail).
 	return stream.Send(&pb.ScriptEvent{Event: "end"})
+}
+
+// jobTailEventAllowed decides which parsed events may come out of a JOB's own
+// output file (audit M164).
+//
+// Parsed mode exists for a real reason: a cs-subagent job writes its output
+// through stream_filter.js, so its `out` carries the same [[marker]] framing the
+// transcript does, and the peek pane renders thinking and tool blocks from it.
+// But that file has NO trusted writer — any `cs-job run` command writes to it,
+// and so does model-controlled sidecar output — while the grammar it is fed to
+// was designed for a stream the daemon authors. The parser's nesting rule is a
+// marker-injection defense for the TRANSCRIPT; it says nothing about provenance
+// here, and sanitizing afterwards does not restore any.
+//
+// So the display vocabulary passes and the assertions about the daemon's own
+// state do not:
+//
+//	prompt        — a job's output is not somebody's prompt. `>>> ` at a line
+//	                start would have rendered as one.
+//	turn_end      — turn lifecycle. Not a job's to declare.
+//	notification  — an operator alert. The live tailer has an allowlist for
+//	                exactly this (notifyExpected, only markers the daemon itself
+//	                queued), and it does not cover this path.
+//	bg            — a background-task announcement, which is daemon bookkeeping.
+func jobTailEventAllowed(name string) bool {
+	switch name {
+	case "prompt", "turn_end", "notification", "bg":
+		return false
+	}
+	return true
 }
 
 func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
