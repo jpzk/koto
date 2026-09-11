@@ -73,6 +73,25 @@ func uploadsDir(g string) (string, error) {
 // between Sends (audit M10).
 const maxUploadsPending = 64 << 20
 
+// uploadsOrphanMaxAge is how long a staged-but-undelivered upload may sit.
+const uploadsOrphanMaxAge = 24 * time.Hour
+
+// sweepStaleUploads removes regular files under dir older than age.
+func sweepStaleUploads(dir string, age time.Duration) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cut := time.Now().Add(-age)
+	for _, e := range ents {
+		fi, err := e.Info()
+		if err != nil || !fi.Mode().IsRegular() || !fi.ModTime().Before(cut) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
+}
+
 // dirBytes sums the regular files directly under dir (0 when absent).
 func dirBytes(dir string) int64 {
 	ents, err := os.ReadDir(dir)
@@ -100,6 +119,13 @@ func saveImage(g string, data []byte, mime string) (string, error) {
 	// with an image costs host disk before the queue applies any
 	// backpressure, and host disk exhaustion is the fleet-wide failure
 	// (audit M10). Delivered uploads are removed by fcSendMsg.
+	// Sweep orphans first. An upload is staged before the queue accepts the
+	// send, and delivery is now per-turn and exact (fcTurnUploads), so a file
+	// whose turn never ran — a daemon restart between staging and delivery —
+	// has no later turn that will claim it. Without this it would hold the
+	// group's quota until someone noticed (audit M36). A day is far longer
+	// than any legitimate staging-to-delivery gap.
+	sweepStaleUploads(dir, uploadsOrphanMaxAge)
 	if used := dirBytes(dir); used+int64(len(data)) > maxUploadsPending {
 		return "", fmt.Errorf("too many pending uploads for %s (%d bytes waiting; max %d) — send a turn first", g, used, maxUploadsPending)
 	}
