@@ -122,6 +122,29 @@ func recordEvent(g string, pbev *pb.Event) []*groupSub {
 // (daemon restart, destroy+respawn). After a gap the client's view is stale
 // beyond replay — it refetches via History. Must be called with subsLock
 // held; the returned slice is a copy.
+// clearEventRing drops g's in-memory replay state after a transcript clear.
+//
+// The clear handlers rewrote the persistent logs and deleted the guest's
+// conversation, and left the RING alone (audit M64) — so a client reconnecting
+// with a pre-clear since_seq was replayed the frames the clear had just
+// erased, out of memory, with no trace of them on disk. Destroy already did
+// this; clear did not, and clear is the one people run expecting the
+// transcript to be gone.
+//
+// The ring is dropped rather than filtered, and ringFloor is raised to the
+// current seq, so any cursor from before the clear replays as `gap` — the
+// client's cue to drop its view and refetch History, which is exactly right:
+// History now reflects the cleared log. A session-scoped clear takes the same
+// route, because a partial frame's session attribution is sticky and a
+// half-filtered ring would be a worse answer than a refetch.
+func clearEventRing(g string) {
+	subsLock.Lock()
+	delete(eventRing, g)
+	delete(ringPartial, g)
+	ringFloor[g] = eventSeq[g]
+	subsLock.Unlock()
+}
+
 func replayFrom(g string, since uint64) []*pb.Event {
 	cur := eventSeq[g]
 	if since == cur {

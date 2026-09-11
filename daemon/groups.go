@@ -589,6 +589,8 @@ func clearCmd(req groupReq) baseResp {
 			_ = os.WriteFile(p, nil, 0o644)
 		}
 	}
+	// ...and the in-memory replay ring, which is the OTHER copy (events.go).
+	clearEventRing(req.Group)
 	return baseResp{OK: true}
 }
 
@@ -651,6 +653,7 @@ func clearSession(g, sess string) baseResp {
 			return errResp("clear: " + err.Error())
 		}
 	}
+	clearEventRing(g)
 	removeSession(g, sess)
 	return baseResp{OK: true}
 }

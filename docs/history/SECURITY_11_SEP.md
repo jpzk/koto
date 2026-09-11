@@ -1188,3 +1188,26 @@ does not declare every running VM dead. `pidStartTime` parses from the last
 `)`, because field 2 is the comm and may contain spaces and parens — the detail
 behind a long line of `/proc` parsing bugs.
 `TestVMIdentityGuardsAgainstPIDReuse`.
+
+### M64 — Transcript clear does not invalidate in-memory replay and subscriber delivery (`daemon/events.go`) — **fixed**
+
+Real, and the complement to M60: that one fenced the WRITERS, this one is the
+second copy. The clear handlers rewrote the persistent logs and deleted the
+guest's conversation state, and left the replay ring alone — so a client
+reconnecting with a pre-clear `since_seq` was replayed exactly the frames the
+clear had just erased, out of memory, with nothing on disk to show for them.
+`destroy` already dropped the ring; `clear` did not, and `clear` is the one
+people run *expecting* the transcript to be gone.
+
+`clearEventRing` drops the ring and raises `ringFloor` to the current seq, so
+any older cursor replays as `gap` — the client's cue to drop its view and
+refetch `History`, which is exactly right because History now reflects the
+cleared log. Dropped rather than filtered, session-scoped clears included: a
+partial frame's session attribution is sticky, so a half-filtered ring would be
+a worse answer than a refetch. `TestClearInvalidatesTheReplayRing`.
+
+The finding's last clause — frames already queued in a subscriber's channel —
+is left alone deliberately. Those are at most a buffer's worth of frames the
+client had already been sent moments earlier, the `gap` that follows tells it
+to discard its view anyway, and reaching into live subscriber channels to
+rewrite history in flight buys nothing for the complexity.

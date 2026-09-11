@@ -2403,3 +2403,50 @@ func TestVMIdentityGuardsAgainstPIDReuse(t *testing.T) {
 		t.Fatal("a nil VM read as alive")
 	}
 }
+
+// 2026-09-11 M64: a clear rewrote the persistent logs and left the in-memory
+// replay ring alone, so a client reconnecting with a pre-clear cursor was
+// replayed the frames the clear had just erased — out of memory, with no trace
+// of them on disk.
+func TestClearInvalidatesTheReplayRing(t *testing.T) {
+	const g = "ringclear"
+	t.Cleanup(func() {
+		subsLock.Lock()
+		delete(eventRing, g)
+		delete(eventSeq, g)
+		delete(ringFloor, g)
+		delete(ringPartial, g)
+		subsLock.Unlock()
+	})
+	for i := 0; i < 5; i++ {
+		emit(g, Event{Event: "response", Text: fmt.Sprintf("secret %d", i)})
+	}
+	subsLock.Lock()
+	cur := eventSeq[g]
+	subsLock.Unlock()
+	if cur == 0 {
+		t.Fatal("nothing was recorded")
+	}
+	// Before the clear, an old cursor replays the transcript.
+	if evs := replayFrom(g, 1); len(evs) == 0 || evs[0].Event == "gap" {
+		t.Fatalf("replay before the clear returned %d frame(s), first %v", len(evs), evs)
+	}
+
+	clearEventRing(g)
+
+	// After it, the same cursor gets `gap` — drop your view and refetch
+	// History, which now reflects the cleared log.
+	evs := replayFrom(g, 1)
+	if len(evs) != 1 || evs[0].Event != "gap" {
+		t.Fatalf("a pre-clear cursor replayed %d frame(s) after the clear: %+v", len(evs), evs)
+	}
+	for _, ev := range evs {
+		if strings.Contains(ev.Text, "secret") {
+			t.Fatal("cleared transcript text was replayed out of the ring")
+		}
+	}
+	// A cursor at the current seq is simply up to date, not a gap.
+	if evs := replayFrom(g, cur); len(evs) != 0 {
+		t.Fatalf("an up-to-date cursor got %+v", evs)
+	}
+}
