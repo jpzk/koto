@@ -1059,3 +1059,21 @@ reads from `/proc/<pid>/cmdline` for the turn's duration. (The message body
 goes over stdin and is not exposed.) Closing it needs the CLI to accept the
 prompt from a file or stdin; that is an upstream capability question, not a
 change koto can make on its own, so it is recorded here rather than guessed at.
+
+### M59 — Stale Firecracker reaper corrupts replacement VM state after restart (`daemon/fc.go`) — **fixed**
+
+Real, and the same missing concept as M40 one level up. Each VM's reaper
+goroutine waits on `cmd.Wait` and then calls `abortInflightTurn`,
+`releaseGroupQuarantine` and `clearGroupStalls` — all keyed on the GROUP alone.
+`fcStop` deletes the registry entry and polls pid liveness without joining that
+goroutine, so a `/restart` can register a replacement while the old reaper is
+still pending. The old callback then lands on the new VM: completing a turn it
+is still running (and `sendNow` treats any completion token as success, so the
+queue advances before the real `turn_end`), freeing slots it owns, and clearing
+stall flags it raised.
+
+`fcVM.gen` identifies the BOOT rather than the group, and the reaper stands down
+when `fcGenSuperseded` says a different VM is registered. Deliberately not "no
+VM registered" — an ordinary stop or crash with no replacement still needs those
+cleanups, and they are what wakes a turn parked on a `[[turn_end]]` that can
+never come. `TestStaleVMReaperIsFenced`.
