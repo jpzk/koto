@@ -67,7 +67,9 @@ func initDebugLog(env func(string) string, sock string) {
 	if level == dbgLvlOff {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// O_NOFOLLOW: this path is under the daemon's writable state tree while
+	// the TUI runs as the operator — see openNoFollow (audit M39).
+	f, err := openNoFollow(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return // no writable mount — stay disabled
 	}
@@ -116,7 +118,7 @@ func dbgRotate() {
 		dbgSize = 0 // don't retry the rename on every subsequent write
 		return
 	}
-	f, err := os.OpenFile(dbgPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := openNoFollow(dbgPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		// Keep writing to the renamed fd; better than going dark.
 		dbgSize = 0

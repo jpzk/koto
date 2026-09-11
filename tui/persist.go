@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // persistedState is the small chunk of TUI-local state that survives a
@@ -32,11 +34,34 @@ func statePath(sock string) string {
 	return filepath.Join(filepath.Dir(sock), "tui-state.json")
 }
 
+// openNoFollow opens a TUI-owned file under the run directory, refusing to
+// follow a symlink at the final component.
+//
+// That directory lives inside the DAEMON's state tree — it is the one path
+// systemd's ReadWritePaths= leaves the daemon able to write — while the TUI
+// runs as the operator, unconfined. So the daemon (tier 2) picks the names
+// under which the operator (tier 1) opens files for writing, which is a
+// crossing in the wrong direction: a symlink dropped at tui-state.json or
+// tui.log would redirect the operator's write onto an operator-owned file
+// (audit M39). O_NOFOLLOW makes that fail instead. It does not harden every
+// component of the path — the run dir itself is the daemon's by design — but
+// it closes the sink the daemon can actually reach without also being able to
+// replace its own state root.
+func openNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flag|syscall.O_NOFOLLOW, perm)
+}
+
 func loadState(sock string) persistedState {
 	var s persistedState
-	b, err := os.ReadFile(statePath(sock))
+	f, err := openNoFollow(statePath(sock), os.O_RDONLY, 0)
 	if err != nil {
 		logDbg("persist", "no state file (%v) — fresh defaults", err)
+		return s
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	f.Close()
+	if err != nil {
+		logWarn("persist", "state file unreadable: %v", err)
 		return s
 	}
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -63,7 +88,13 @@ func saveState(sock string, s persistedState) {
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(statePath(sock), b, 0o600); err != nil {
+	f, err := openNoFollow(statePath(sock), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		logWarn("persist", "state save failed: %v", err)
+		return
+	}
+	if _, err := f.Write(b); err != nil {
 		logWarn("persist", "state save failed: %v", err)
 	}
+	f.Close()
 }

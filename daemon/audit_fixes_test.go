@@ -1389,3 +1389,52 @@ func TestScopedMetricsOmitGlobal(t *testing.T) {
 		t.Fatal("admin lost the global metric")
 	}
 }
+
+// 2026-09-11 M35: `null` and "" unmarshal into the same empty string, and
+// storing that as a target name granted the EMPTY target — which targetOf
+// returns for the read-across-every-group form that is documented to need "*".
+func TestEmptyACLTargetGrantsNothing(t *testing.T) {
+	for _, doc := range []string{
+		`{"r":{"metrics":null}}`,
+		`{"r":{"metrics":""}}`,
+		`{"r":{"metrics":"   "}}`,
+		`{"r":{"metrics":[""]}}`,
+		`{"r":{"metrics":[null]}}`,
+	} {
+		acl := parseACL([]byte(doc))
+		if rolesAllowed(acl, []string{"r"}, "metrics", "", true) {
+			t.Errorf("%s: granted the global (empty-target) read", doc)
+		}
+		if rolesAllowed(acl, []string{"r"}, "metrics", "main", true) {
+			t.Errorf("%s: granted a concrete group", doc)
+		}
+	}
+	// The real forms still work.
+	acl := parseACL([]byte(`{"r":{"metrics":"*"},"s":{"metrics":["main"]}}`))
+	if !rolesAllowed(acl, []string{"r"}, "metrics", "", true) {
+		t.Error(`"*" lost the global read`)
+	}
+	if !rolesAllowed(acl, []string{"s"}, "metrics", "main", true) {
+		t.Error("a named target was refused")
+	}
+	if rolesAllowed(acl, []string{"s"}, "metrics", "", true) {
+		t.Error("a named target granted the global read")
+	}
+}
+
+// 2026-09-11 M38: no goal on main, on any plane. main holds the cross-group
+// orchestration verbs, so an autonomous self-judged loop there is the
+// judge-and-iterate machinery pointed at the fleet.
+func TestNoGoalOnMain(t *testing.T) {
+	goalTestSetup(t)
+	if _, err := goalSet("main", "run the fleet", "1. done", "", 0, true); err == nil {
+		t.Fatal("goalSet accepted a goal on main")
+	}
+	srv := &kotoServer{}
+	resp, _ := srv.GoalSet(context.Background(), &pb.GoalSetReq{
+		Group: "main", Text: "run the fleet", Criteria: "1. done",
+	})
+	if resp.Ok {
+		t.Fatal("GoalSet RPC accepted a goal on main")
+	}
+}
