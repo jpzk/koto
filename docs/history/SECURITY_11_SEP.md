@@ -2066,3 +2066,29 @@ coverage of paths that are already sanitized at the producer, where the code
 actually knows whether the bytes are trusted. The existing frame-level pass
 (`monoFrame`) is a deliberate exception: it STRIPS colour rather than judging
 sequences, so it cannot mangle anything.
+
+### M116 — Installer promotes unverified Firecracker runtime and guest assets (`daemon/install.go`) — **fixed**
+
+Real, and backwards in a way worth naming: `verifyArtifacts` checked `koto` and
+`koto-tui` and stopped, while the manifest vouches for FIVE files — and the
+other three are the runtime boundary itself. The Firecracker binary is exec'd
+and bind-mounted into the jail; `vmlinux` and `rootfs.img` are the VM's boot
+inputs, and the guest kernel is what makes `CONFIG_VSOCKETS_LOOPBACK=n` (M2)
+true. Verifying the two that run as the operator but not the three that define
+the sandbox is the wrong half.
+
+Every artifact the manifest covers is now held to it. Two non-failures are kept
+deliberately, both already documented in the manifest's own header:
+
+- **No entry → skipped, not refused.** `vmlinux` and `rootfs.img` embed build
+  timestamps and resolved package versions, so they do not reproduce
+  bit-for-bit. Failing closed would break `make build` → `make install`, the
+  build-from-source route the project offers on purpose.
+- **No entries at all → not an error.** The manifest is committed but empty
+  until the first release.
+
+What changed about those cases is that they are now SAID: the installer
+reports how many artifacts it verified and names the ones it could not, because
+"nothing was verified" and "everything verified" should not look identical to
+an operator. `TestArtifactVerificationCoversEveryManifestEntry` tampers with
+each of the five in turn.

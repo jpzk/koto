@@ -3672,3 +3672,78 @@ func TestVMConfigUsesTheAdmittedShape(t *testing.T) {
 			cfg.Machine.VcpuCount, cfg.Machine.MemSizeMib, vcpus, memMiB)
 	}
 }
+
+// 2026-09-11 M116: the install-time integrity check covered `koto` and
+// `koto-tui` and stopped, while the manifest vouches for five files — and the
+// other three ARE the runtime boundary: the Firecracker binary is exec'd and
+// bind-mounted into the jail, and vmlinux/rootfs.img are the VM's boot inputs.
+func TestArtifactVerificationCoversEveryManifestEntry(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "dist"), 0o755)
+	os.MkdirAll(filepath.Join(root, "fcassets"), 0o755)
+
+	write := func(rel, body string) string {
+		p := filepath.Join(root, rel)
+		os.WriteFile(p, []byte(body), 0o644)
+		sum, err := fileSHA256(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	sums := map[string]string{}
+	for _, a := range artifacts {
+		sums[a] = write(a, "content of "+a)
+	}
+	manifest := func(entries ...string) {
+		body := "# comment line\n" + strings.Join(entries, "\n") + "\n"
+		os.WriteFile(filepath.Join(root, "dist", "artifacts.sha256"), []byte(body), 0o644)
+	}
+	all := []string{}
+	for _, a := range artifacts {
+		all = append(all, sums[a]+"  "+a)
+	}
+
+	// Everything matches: accepted.
+	manifest(all...)
+	if err := verifyArtifacts(root); err != nil {
+		t.Fatalf("a matching tree was refused: %v", err)
+	}
+
+	// Each of the five, tampered in turn, must be caught — including the
+	// three the old check ignored.
+	for _, a := range artifacts {
+		os.WriteFile(filepath.Join(root, a), []byte("tampered"), 0o644)
+		err := verifyArtifacts(root)
+		if err == nil {
+			t.Errorf("a tampered %s was accepted", a)
+		} else if !strings.Contains(err.Error(), a) {
+			t.Errorf("the refusal for %s does not name it: %v", a, err)
+		}
+		os.WriteFile(filepath.Join(root, a), []byte("content of "+a), 0o644)
+	}
+
+	// An artifact with NO entry is skipped, not refused — vmlinux and
+	// rootfs.img do not reproduce bit-for-bit, so `make build` legitimately
+	// produces bytes the published manifest cannot match.
+	manifest(sums["koto"]+"  koto", sums["fcassets/firecracker"]+"  fcassets/firecracker")
+	os.WriteFile(filepath.Join(root, "fcassets/vmlinux"), []byte("locally built, different bytes"), 0o644)
+	if err := verifyArtifacts(root); err != nil {
+		t.Fatalf("an uncovered artifact was refused: %v", err)
+	}
+	// ...but a covered one is still held to it.
+	os.WriteFile(filepath.Join(root, "fcassets/firecracker"), []byte("tampered"), 0o644)
+	if err := verifyArtifacts(root); err == nil {
+		t.Fatal("a tampered covered artifact was accepted alongside an uncovered one")
+	}
+
+	// An empty manifest, and a missing one, are both non-fatal (pre-release).
+	manifest()
+	if err := verifyArtifacts(root); err != nil {
+		t.Fatalf("an entry-less manifest was fatal: %v", err)
+	}
+	os.Remove(filepath.Join(root, "dist", "artifacts.sha256"))
+	if err := verifyArtifacts(root); err != nil {
+		t.Fatalf("a missing manifest was fatal: %v", err)
+	}
+}
