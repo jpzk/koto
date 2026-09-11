@@ -2474,3 +2474,49 @@ Test: `TestThemeNamesRejectHostileDropInFilenames` in `tui/theme_test.go`
 writes hostile filenames into a drop-in directory and asserts both that no
 listed name carries a control byte and that the rendered listing string does
 not either. Verified to fail with the check removed.
+
+## M132 — Daemon can read and replace the TUI's administrator credentials — ACCEPTED, no change
+
+`daemon/install.go` (unit), `daemon/tui_cmd.go`.
+
+**The facts are right and the conclusion is wrong.** The unit runs the daemon
+as the operator account with `ReadWritePaths=<state>`, and `creds/` lives under
+the state dir, so yes: the daemon process can read `client-tui.key` and
+`token-tui` despite their 0600 modes, and can rewrite `ca.crt` before a later
+TUI launch. The 0600 bits were never the boundary — same uid.
+
+What the finding claims this buys is "administrative access beyond the
+already-compromised daemon", and there is no such beyond:
+
+- **The stolen identity authenticates TO the daemon.** A client cert plus
+  bearer token is only ever presented to the koto gRPC server, and the
+  compromised process IS that server. Every verb the TUI identity could invoke,
+  the daemon already executes. Replaying `client-tui` against "reachable
+  endpoints" means replaying it against itself.
+- **Replacing the CA is the same non-gain.** A rewritten `ca.crt` makes the TUI
+  trust a rogue server; the attacker already holds `server.key` and answers on
+  `:8443`. There is nothing to redirect the TUI to that it is not already
+  talking to.
+- **The one path that WAS an escalation is closed.** `koto tui` resolving the
+  `koto-tui` binary out of the daemon-writable state dir would have turned
+  state-dir write into code execution as the operator on the next attach. That
+  fallback was removed in audit L10 (`cef445d`); today the binary comes from
+  `PATH`, or from a checkout the operator is standing in.
+
+So the finding describes the trust model rather than a violation of it: tier 2
+holds the credential material, which is exactly what the "trust model addendum:
+installed mode" section says ("The state dir … blast radius equals a clone's").
+Narrowing it is real work with a real name — **give the TUI its own uid and its
+own least-privilege role, and mount it only `ca.crt`, `client-tui.*` and
+`token-tui`** — which CLAUDE.md already records as the open item under the
+cs_tui addendum. Doing it as a reaction to this finding would be doing it for
+the wrong reason: the payoff is containing a TUI dependency compromise (the
+Charm tree is ~40 pinned modules), not containing a daemon that is already the
+authority.
+
+**Considered and rejected as security theater:** masking `creds/ca.key` from
+the unit with `InaccessiblePaths=`. The daemon process genuinely never reads it
+(only `koto pki` and the `koto setup` wizard do, both separate invocations
+outside the unit), so it would apply cleanly — but a compromised daemon does
+not need to mint a fresh identity when it can read the operator's, and it would
+add a directive whose failure mode is a daemon that will not start.
