@@ -2988,3 +2988,27 @@ across seven shapes (empty, nothing to drop, all-target, leading default
 segment, clearing the default, no trailing newline, unterminated target tail),
 that an untouched stream keeps its **inode**, and that a 300 KiB unbroken line
 survives the chunked path intact.
+
+### Aside — the `-race` suite (found while pinning M144)
+
+Running the daemon suite under `-race` reported a data race on the **`turnFn`
+test seam** itself. The seam's comment argued it was safe because tests use
+unique group names, so a group's dedicated worker only reads `turnFn` after the
+enqueue that follows the swap. That is true of the worker a test *creates* and
+false of the ones it *inherits*: a worker outlives the test that made it
+(`sessionIdleMax`, `retireQueue`), so a previous test's worker draining its last
+job reads the variable while the next test writes it. A second one sat in
+`turnRec`, which the goal tests read without the lock its own writers take.
+
+Both are fixed — `setTurnFn` behind an `RWMutex`, and a locked `all()` snapshot —
+because a suite that cannot be run under `-race` masks every real race behind
+the first reported one, which is a poor instrument to audit with.
+
+**Residual, stated rather than left silent:** `-race` over the whole suite still
+reports cross-test races on the daemon's path globals (`HERE`, `ROOT`,
+`SOCK_DIR`, `GROUPS_FILE`), which `fcHarness` and friends re-point per test while
+tailers and workers from earlier tests are still running. Fixing that means
+either draining every background goroutine between tests or making the path
+globals atomic, which is a structural change to the daemon's most basic state
+and its own piece of work. None of it reproduces in isolation, and the suite is
+green in its normal (non-`-race`) mode.

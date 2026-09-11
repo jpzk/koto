@@ -129,6 +129,16 @@ func (r *turnRec) add(session, msg string) {
 	r.mu.Unlock()
 }
 
+// all is a snapshot under the lock. The driver goroutines append to r.turns
+// while the test reads it, so a bare `len(rec.turns)` or range over it is a
+// data race — reported by -race, and previously masked by the turnFn seam's
+// own race (queue.go).
+func (r *turnRec) all() []struct{ session, msg string } {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]struct{ session, msg string }(nil), r.turns...)
+}
+
 func (r *turnRec) byRole(role string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -780,7 +790,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 		snap.write()
 		resumeGoalDrivers()
 		waitGoal(t, "goal-resume-run", goalStatusExhausted) // cap=1
-		if len(rec.turns) == 0 {
+		if len(rec.all()) == 0 {
 			t.Fatal("running goal was not re-driven")
 		}
 		goalLock.Lock()
@@ -790,7 +800,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 		if st != goalStatusAwaiting {
 			t.Fatalf("awaiting_approval goal must not be driven, status=%q", st)
 		}
-		for _, x := range rec.turns {
+		for _, x := range rec.all() {
 			if strings.Contains(x.msg, "bbbbbbbbbbbb") {
 				t.Fatal("awaiting goal received a turn")
 			}

@@ -17,13 +17,12 @@ func sessionDepth(g, session string) int {
 }
 
 // withTurnFn swaps the worker's turn function for the duration of fn and
-// restores it after. Tests use unique group names so their dedicated workers
-// never read turnFn concurrently with the swap (each read is ordered after the
-// enqueue that follows the swap).
+// restores it after. Through setTurnFn, because a worker outlives the test that
+// created it and so can be draining a job — reading the seam — while the next
+// test writes it.
 func withTurnFn(stub func(g, session, msg string) error, fn func()) {
-	prev := turnFn
-	turnFn = stub
-	defer func() { turnFn = prev }()
+	prev := setTurnFn(stub)
+	defer setTurnFn(prev)
 	fn()
 }
 
