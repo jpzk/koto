@@ -36,6 +36,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"koto-protocol/pb"
 
@@ -378,11 +379,61 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	runWorker(tw, w, p.line)
 }
 
+// The stream parser's retained state is bounded three ways (audit M150). The
+// provider can emit any number of valid stream events, for any number of
+// content-block indices, with no stop event ever arriving — and the scanner's
+// 16 MiB limit bounds one JSON RECORD, not the accumulation across records.
+// Nothing downstream constrains it either: the turn queue is bounded but a tool
+// input is not framed until its stop event, and the host's frame-size and
+// transcript checks happen after the guest has already allocated the value.
+const (
+	// claudeToolInputMax bounds ONE tool call's accumulated input JSON.
+	// Deliberately far above what survives the trip: the daemon truncates a
+	// [[tool]] marker's body to fcMarkerMaxBody (64 KiB) for display, which is
+	// the only thing this value is ever used for, so a megabyte is already
+	// sixteen times more than can be seen. Past it the block is marked
+	// truncated and further deltas cost nothing.
+	claudeToolInputMax = 1 << 20
+	// claudeToolInputBudget bounds every OPEN tool block of one turn together,
+	// since the per-block cap alone still multiplies by the block count.
+	claudeToolInputBudget = 8 << 20
+	// claudeMaxOpenBlocks bounds how many content blocks may be open at once.
+	// A real stream has a handful; this is the map's ceiling, so an index
+	// sequence with no stop events cannot grow it without limit.
+	claudeMaxOpenBlocks = 64
+)
+
 type toolState struct {
-	name  string
-	input strings.Builder
+	name      string
+	input     strings.Builder
+	truncated bool
 }
-type thinkState struct{ words strings.Builder }
+
+// thinkState counts words WITHOUT retaining the text (audit M150). The thinking
+// body is streamed straight through to the host as it arrives (p.tw.text); the
+// only thing the block itself needs at stop time is the word COUNT, so the old
+// strings.Builder was accumulating a whole reasoning trace to call
+// strings.Fields on it once. Counting incrementally is exact — Fields splits on
+// runs of unicode space, which is the same as counting space→non-space
+// transitions with the boundary state carried between chunks — and retains
+// nothing at all, which is a better answer than a cap.
+type thinkState struct {
+	words  int
+	inWord bool
+}
+
+func (t *thinkState) count(s string) {
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			t.inWord = false
+			continue
+		}
+		if !t.inWord {
+			t.words++
+			t.inWord = true
+		}
+	}
+}
 
 // validSessionID accepts the provider's opaque conversation id: a UUID in
 // practice, so hex and dashes. Deliberately narrow — this value becomes a path
@@ -412,6 +463,35 @@ type claudeParser struct {
 	wroteID  bool
 	tools    map[int]*toolState
 	thinking map[int]*thinkState
+
+	// held is the total tool-input bytes currently retained across open
+	// blocks, and warnedBlocks keeps the open-block notice to one per turn
+	// (audit M150).
+	held         int
+	warnedBlocks bool
+}
+
+// charge appends as much of a tool-input delta as both bounds allow — the
+// block's own cap and the turn-wide budget — and marks the block truncated once
+// either bites. Silently dropping the overflow is right: the value exists only
+// to be displayed, and the daemon cuts it to 64 KiB before it is.
+func (p *claudeParser) charge(t *toolState, s string) {
+	if s == "" || t.truncated {
+		return
+	}
+	room := claudeToolInputMax - t.input.Len()
+	if left := claudeToolInputBudget - p.held; left < room {
+		room = left
+	}
+	if room <= 0 {
+		t.truncated = true
+		return
+	}
+	if len(s) > room {
+		s, t.truncated = s[:room], true
+	}
+	t.input.WriteString(s)
+	p.held += len(s)
 }
 
 func (p *claudeParser) line(b []byte) {
@@ -475,6 +555,17 @@ func (p *claudeParser) line(b []byte) {
 		if e.ContentBlock == nil {
 			return
 		}
+		// One ceiling over both maps: a stream that opens blocks and never
+		// stops them must not be able to grow them without limit (M150).
+		// Re-opening an index already held is not a new block.
+		if len(p.tools)+len(p.thinking) >= claudeMaxOpenBlocks &&
+			p.tools[e.Index] == nil && p.thinking[e.Index] == nil {
+			if !p.warnedBlocks {
+				p.warnedBlocks = true
+				logf("stream: %d content blocks open with no stop events — ignoring further blocks this turn", claudeMaxOpenBlocks)
+			}
+			return
+		}
 		switch e.ContentBlock.Type {
 		case "tool_use":
 			name := e.ContentBlock.Name
@@ -496,24 +587,28 @@ func (p *claudeParser) line(b []byte) {
 		case "thinking_delta":
 			if t := p.thinking[e.Index]; t != nil && e.Delta.Thinking != "" {
 				p.tw.text([]byte(e.Delta.Thinking))
-				t.words.WriteString(e.Delta.Thinking)
+				t.count(e.Delta.Thinking) // counts, retains nothing (M150)
 			}
 		case "input_json_delta":
 			if t := p.tools[e.Index]; t != nil {
-				t.input.WriteString(e.Delta.PartialJSON)
+				p.charge(t, e.Delta.PartialJSON)
 			}
 		}
 	case "content_block_stop":
 		if t := p.tools[e.Index]; t != nil {
 			delete(p.tools, e.Index)
+			p.held -= t.input.Len() // the block's bytes go back to the budget
 			in := t.input.String()
+			if t.truncated {
+				in += "…[truncated]"
+			}
 			if in == "" {
 				in = "{}"
 			}
 			p.tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Tool{Tool: &pb.ToolUse{Name: t.name, Input: in}}})
 		} else if t := p.thinking[e.Index]; t != nil {
 			delete(p.thinking, e.Index)
-			p.tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_ThinkEnd{ThinkEnd: int32(len(strings.Fields(t.words.String())))}})
+			p.tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_ThinkEnd{ThinkEnd: int32(t.words)}})
 		}
 	case "message_stop":
 		p.tw.text([]byte("\n"))

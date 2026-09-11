@@ -3247,3 +3247,45 @@ drives the real `ctlDispatch` → `tryFlushNotify` → parser round trip, assert
 an ordinary session keeps its attribution and that four shapes of reserved name
 land on the default session with their content intact. Verified to fail with the
 check removed.
+
+## M150 — Unbounded Claude stream parser state permits guest memory exhaustion — FIXED
+
+`fcguest/turn.go`, `claudeParser`.
+
+**Confirmed.** The parser retained three things without any bound: a
+`strings.Builder` per open tool block (`input`), a `strings.Builder` per open
+thinking block (`words`), and the two maps keyed by content-block index. A
+provider can emit any number of valid stream events, for any number of indices,
+with no `content_block_stop` ever arriving — and nothing else caught it: the
+scanner's 16 MiB limit bounds one JSON **record**, not the accumulation across
+records; the turn queue is bounded but a tool input is not framed until its stop
+event; and the host's frame-size and transcript checks happen only *after* the
+guest has allocated, serialized and transmitted the value. The watchdog is a
+time limit, not a memory one.
+
+**Fix — three bounds, one of which removes the need for a bound entirely:**
+
+- **Thinking retains nothing.** The body is already streamed straight to the
+  host as it arrives; the only thing the block needed at stop time was the word
+  **count**, so the builder was accumulating a whole reasoning trace to call
+  `strings.Fields` on it once. `thinkState` now counts incrementally — exact,
+  because `Fields` splits on runs of Unicode space, which is the same as
+  counting space→non-space transitions with the boundary state carried between
+  chunks — and keeps two words of state whatever arrives.
+- **Tool input is capped per block and per turn**: `claudeToolInputMax` (1 MiB)
+  and `claudeToolInputBudget` (8 MiB across all open blocks). 1 MiB is
+  deliberately far above what survives the trip — the daemon truncates a
+  `[[tool]]` marker body to 64 KiB for display, which is the only use this value
+  has — so nothing visible is lost, and a capped block is marked so the emitted
+  frame says `…[truncated]`. A block's bytes return to the budget when it stops.
+- **Open blocks are capped** at `claudeMaxOpenBlocks` (64), over both maps
+  together, with a one-per-turn log line. A real stream has a handful.
+
+Test: `TestClaudeParserStateIsBounded` in `fcguest/turn_test.go` — 4 MiB offered
+into one block (capped, marked, and released on stop), 64 MiB offered across
+128 blocks with no stop events (both the map and the aggregate hold), and a
+thinking trace split mid-word and mid-space across chunks (count matches
+`strings.Fields` exactly, and nothing is retained).
+
+**Carry-over:** guest-side, so it reaches a group only after `make rootfs` and a
+`/restart` — same as M138 and M46.
