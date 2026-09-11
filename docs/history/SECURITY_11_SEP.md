@@ -1758,3 +1758,19 @@ slot immediately. `TestUpstreamWorkFollowsTheGuestContext`.
 the difference is the reason: there the guest call is bounded by a 15s timeout
 and an admission cap, so the context buys latency on slot return. Here the wait
 is attacker-influenced through `retry-after` and the slot is one of 32.)
+
+### M98 — Destroyed group job cache is reused after same-name recreation (`daemon/groups.go`) — **fixed**
+
+The fourth member of the name-reuse family (after the report window, the
+schedules M14, the goal records M50, and the event ring). `jobsCache` is keyed
+by group NAME and carries no incarnation, and `destroy` did not clear it — so a
+later group reusing the name inherited the destroyed one's job list, command
+text included. Two publication paths reach it without a guest read:
+`listGroups` attaches `jobsSnapshot` to every configured group without a
+synchronous refresh, and `refreshJobs` deliberately serves the retained cache
+when the guest read fails.
+
+`dropJobsCache` in `destroy`, alongside `delSchedsFor`, `delGoalsFor`,
+`disarmReport` and the event-ring drop. The in-flight refresh marker goes with
+it, so a refresh from the destroyed incarnation cannot repopulate the
+replacement's cache. `TestDestroyDropsTheJobCache`.

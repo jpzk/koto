@@ -166,6 +166,20 @@ func refreshJobsNow(g string) []JobInfo {
 	return jobs
 }
 
+// dropJobsCache forgets g's job mirror. Called from destroy, before the name
+// can be reused (audit M98): the cache key is the group NAME and carries no
+// incarnation, so a replacement group of the same name inherited the destroyed
+// one's job list — command text included — through listGroups, which attaches
+// jobsSnapshot to every configured group without a synchronous refresh, and
+// through refreshJobs, which deliberately serves the retained cache when the
+// guest read fails.
+func dropJobsCache(g string) {
+	jobsMu.Lock()
+	delete(jobsCache, g)
+	delete(jobsRefreshing, g)
+	jobsMu.Unlock()
+}
+
 // kickJobsRefresh starts one background refresh for g unless the mirror is
 // fresh enough or a refresh is already in flight. force skips the TTL check
 // (job_done trigger). Called from stateWatchLoop's tick and the ctl plane.
