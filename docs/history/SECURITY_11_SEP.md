@@ -1428,3 +1428,24 @@ The finding's last clause — a targeted clear removing a session marker while
 that session has an ACTIVE turn — is closed from the other end by M60, which
 cancels the scope's in-flight turns and waits for them before deleting
 anything.
+
+### M82 — Cumulative partial-line events amplify guest output into resource exhaustion (`daemon/logtail.go`) — **fixed**
+
+Real, and an amplifier rather than a leak: the retained buffer was already
+bounded (`tailMaxPartial`, audit L5), but the whole cumulative buffer was
+turned into an EVENT on every read — rebuilt, protobuf-converted, sequenced,
+and fanned out to every subscriber. A newline-free stream therefore cost
+multi-megabyte frames per read iteration, multiplied by subscriber count,
+against a 1 MiB/s input throttle.
+
+Fixed by bounding what goes on the WIRE (`tailMaxLiveEvent`, 64 KiB) while
+leaving the parse buffer large, since a real line that eventually ends still
+has to parse.
+
+Truncated rather than sent as a delta, deliberately: the frame's semantics are
+REPLACE — `recordEvent` keeps one live partial per session and supersedes it,
+and the TUI assigns rather than appends (`streamBuf[key] = ev.Text`) — so a
+delta would render as a fragment for anyone who joined mid-line. The tail is
+what a client can display of an unterminated line anyway. Cut on a rune
+boundary, so a truncated partial never carries half a code point into a
+renderer. `TestPartialLineEventsAreBounded`.

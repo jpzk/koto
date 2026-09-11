@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- notify marker delivery -------------------------------------------------
@@ -258,6 +259,28 @@ func logPaths(g string) []string {
 // tailMaxPartial caps the tailer's partial-line buffer (audit L5).
 const tailMaxPartial = 8 << 20
 
+// tailMaxLiveEvent bounds the partial-line text put on the wire per read. Far
+// more than any terminal renders of one unterminated line, far less than the
+// buffer the parser keeps.
+const tailMaxLiveEvent = 64 << 10
+
+// tailBytes returns the last max bytes of s, cut on a rune boundary so a
+// truncated partial never carries half a code point into a renderer.
+func tailBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	s = s[len(s)-max:]
+	for i := 0; i < len(s) && i < 4; i++ {
+		if utf8.RuneStart(s[i]) {
+			return s[i:]
+		}
+	}
+	// The whole slice is continuation bytes — only reachable when max is
+	// smaller than one rune, which production never does. Empty beats invalid.
+	return ""
+}
+
 func tailLog(g string) { tailFile(g, groupLogPath(g), true) }
 
 // tailFile tails one stream. isGroup marks the group stream, which is the only
@@ -372,7 +395,20 @@ func tailFile(g, p string, isGroup bool) {
 			i += j + 1
 		}
 		if buf != "" && !strings.HasPrefix(buf, ">") && !strings.HasPrefix(buf, "[ts:") && !strings.HasPrefix(buf, "[[tool]]") && !strings.HasPrefix(buf, "[[tool_out") && !strings.HasPrefix(buf, "[[think") && !strings.HasPrefix(buf, "[[turn") && !strings.HasPrefix(buf, "[[sess") && !strings.HasPrefix(buf, "[[notify") {
-			pev := Event{Event: "stream", Text: buf, Session: lp.curSession}
+			// Only the TAIL of the partial goes on the wire. The retained
+			// buffer stays large (tailMaxPartial) because a real line that
+			// eventually ends still has to parse — but the EVENT is rebuilt,
+			// protobuf-converted, sequenced and fanned out to every subscriber
+			// on every read, so emitting the whole cumulative buffer meant
+			// megabytes of that work per read (audit M82).
+			//
+			// Truncating rather than sending a delta, because the frame's
+			// semantics are REPLACE: recordEvent keeps one live partial per
+			// session and supersedes it, and the TUI assigns rather than
+			// appends (streamBuf[key] = ev.Text). A delta would render as a
+			// fragment for anyone who joined mid-line. The tail is what a
+			// client can display of an unterminated line anyway.
+			pev := Event{Event: "stream", Text: tailBytes(buf, tailMaxLiveEvent), Session: lp.curSession}
 			if lp.inThinking {
 				pev.Event = "thinking_stream"
 			} else if lp.inToolOut {
