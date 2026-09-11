@@ -2204,3 +2204,34 @@ filesystem used to make "the transcript stopped" indistinguishable from
 `logAppendLocked` variant — Go mutexes are not reentrant, and taking it twice
 deadlocked the daemon. The test suite caught that as a hang, which is how it
 should be caught. `TestGroupStreamAppendsAreBounded`.
+
+### M118 — PID 1 follows a worker-controlled `/workspace/.cs` symlink during privileged setup (`fcguest/main.go`) — **fixed**
+### M120 — Worker-controlled `ctl.out` FIFO can block the guest control plane (`fcguest/main.go`) — **fixed**
+
+The same directory, two ways in, and both turn on the fact that `/workspace` is
+worker-owned and PERSISTS across boots — so uid 1000 can stage something and
+wait for the next VM start, when PID 1 walks it.
+
+**M118, the symlink.** `setupCS` used `MkdirAll`, `Chown`, `Stat`, `Remove`,
+`Mkfifo` and `OpenFile` on pathname strings under `csDir`. Replace `.cs` with a
+symlink and all of that happens wherever it points, as PID 1: a directory of
+the worker's choosing gets chowned to the worker, with `ctl` and `ctl.out`
+created inside it. `/run` is the obvious target — a tmpfs the agent set up, and
+handing it to uid 1000 is a worker→PID-1 escalation inside the guest. `.cs` is
+now `Lstat`ed and replaced if it is not a real directory, and the setup aborts
+rather than continuing on a path it could not establish.
+
+**M120, the FIFO.** `.cs` is chowned to the worker by design, so `ctl.out`
+itself can be unlinked and replaced with a FIFO. Opening an existing FIFO
+write-only BLOCKS until a reader appears — at boot that means `setupCS` never
+returns, so the agent RPC and the ctl forwarder never start and the group is
+dead on every subsequent boot; at runtime it stops the single response loop.
+`openCtlOut` opens `O_NOFOLLOW|O_NONBLOCK`, `fstat`s the DESCRIPTOR and
+requires a regular file, and `setupCS` replaces a bad endpoint and retries
+once. `O_NONBLOCK` is cleared afterwards, since a regular file should be
+written the ordinary blocking way.
+
+Both fixes are the shape M13, M23 and M109 established: no privileged operation
+on a worker-controlled pathname without a no-follow open and a descriptor-based
+type check. `TestOpenCtlOutRefusesNonRegularFiles` covers the FIFO with a
+timeout, because the failure is a hang.
