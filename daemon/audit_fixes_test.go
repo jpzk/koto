@@ -3324,3 +3324,41 @@ func TestUpstreamWorkFollowsTheGuestContext(t *testing.T) {
 		t.Fatalf("attempts went from %d to %d after cancellation", n, attempts.Load())
 	}
 }
+
+// 2026-09-11 M98: the job mirror is keyed by group NAME with no incarnation,
+// so a group reusing a destroyed name inherited its job list — command text
+// included — through listGroups (which attaches the snapshot without a
+// synchronous refresh) and through refreshJobs (which serves the retained
+// cache when the guest read fails).
+func TestDestroyDropsTheJobCache(t *testing.T) {
+	fcHarness(t)
+	const g = "jobcache"
+	os.MkdirAll(filepath.Join(vol(g), ".cs"), 0o755)
+	groupsLock.Lock()
+	m := readGroups()
+	m[g] = PORT_BASE + 901
+	writeGroups(m)
+	groupsLock.Unlock()
+
+	jobsMu.Lock()
+	jobsCache[g] = jobsCacheEntry{jobs: []JobInfo{{ID: "j1", Cmd: "secret-command"}}, at: time.Now()}
+	jobsRefreshing[g] = true
+	jobsMu.Unlock()
+
+	if r := destroy(g); !r.OK {
+		t.Fatalf("destroy: %s", r.Error)
+	}
+	jobsMu.Lock()
+	_, cached := jobsCache[g]
+	_, refreshing := jobsRefreshing[g]
+	jobsMu.Unlock()
+	if cached {
+		t.Fatal("a destroyed group's job mirror survived — a reused name inherits it")
+	}
+	if refreshing {
+		t.Fatal("the in-flight refresh marker survived destroy")
+	}
+	if snap := jobsSnapshot(g); len(snap) != 0 {
+		t.Fatalf("jobsSnapshot still returns %d job(s) for a destroyed group", len(snap))
+	}
+}

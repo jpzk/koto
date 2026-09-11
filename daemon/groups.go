@@ -524,6 +524,10 @@ func destroy(g string) baseResp {
 	// Schedules outlive nothing: a fire is an enqueueSend, and sendNow's
 	// ensure() would rebuild the VM and the workspace the line below deletes.
 	delSchedsFor(g)
+	// The job mirror is keyed by group NAME with no incarnation, so a later
+	// group reusing the name would inherit this one's job list, command text
+	// included (audit M98).
+	dropJobsCache(g)
 	stopGroupPrepare(g)
 	stopGroupLocked(g) // already holding groupOpMu(g)
 	groupsLock.Lock()
