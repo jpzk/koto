@@ -52,6 +52,20 @@ type jobResult struct {
 // ones the job actually belongs to.
 func notifyKey(group, session string) string { return group + "\x00" + session }
 
+// notifyGroupKeys counts group's distinct pending keys for NAMED sessions. The
+// default session is exempt: it is the fold target when the cap is reached, so
+// counting it would make the cap refuse its own fallback. Caller holds notifyMu.
+func notifyGroupKeys(group string) int {
+	prefix := group + "\x00"
+	n := 0
+	for k := range notifyPending {
+		if strings.HasPrefix(k, prefix) && len(k) > len(prefix) {
+			n++
+		}
+	}
+	return n
+}
+
 var (
 	notifyMu      sync.Mutex
 	notifyTimers  = map[string]*time.Timer{}
@@ -60,6 +74,18 @@ var (
 	notifyMaxPending = 64
 )
 
+// notifyMaxKeysPerGroup caps how many DISTINCT sessions of one group may hold
+// pending job results at once. Beyond it a completion is folded into the
+// group's default session rather than opening another key.
+//
+// The per-key buffer was already bounded (audit M4); the number of keys was
+// not, and the session on a job_done is chosen by the GUEST. Distinct names
+// each allocated a pending slice, a debounce timer, and — once flushed —
+// a send queue and a worker goroutine that live for the daemon's lifetime
+// (audit M42). A group runs at most groupSlots concurrent turns, so 32 is far
+// above any real fan-out while keeping the worst case small and per-group.
+const notifyMaxKeysPerGroup = 32
+
 // recordJobDone buffers one completed job's result and (re)arms the
 // per-conversation debounce timer. Called from the ctl loop (serialized per
 // group); the mutex covers cross-group races on the maps.
@@ -67,7 +93,22 @@ func recordJobDone(group string, res jobResult) {
 	notifyMu.Lock()
 	defer notifyMu.Unlock()
 
+	// A guest may not push a turn into a goal's sessions. The ordinary send
+	// path refuses reserved names; this callback did not, so a forged
+	// job_done landed in a live goal's worker or judge conversation — the
+	// sessions the design calls follow-only, and on which the judge's
+	// independence rests (audit M42). Fold to the default session rather than
+	// dropping: the job result still belongs to the operator.
+	if isReservedSession(res.Session) {
+		emitLogfG("ctl", group, "warn", "[%s] job_done named the reserved session %q — delivering to the default session instead", group, res.Session)
+		res.Session = ""
+	}
 	key := notifyKey(group, res.Session)
+	if _, open := notifyPending[key]; !open && notifyGroupKeys(group) >= notifyMaxKeysPerGroup {
+		emitLogfG("ctl", group, "warn", "[%s] job_done: %d distinct sessions already pending — folding %q into the default session", group, notifyMaxKeysPerGroup, res.Session)
+		res.Session = ""
+		key = notifyKey(group, "")
+	}
 	// Dedup by id so a job that somehow posts twice doesn't double-report.
 	pend := notifyPending[key]
 	replaced := false
@@ -88,10 +129,10 @@ func recordJobDone(group string, res jobResult) {
 		notifyPending[key] = append(pend, res)
 	}
 
+	session := res.Session
 	if t, ok := notifyTimers[key]; ok {
 		t.Stop()
 	}
-	session := res.Session
 	notifyTimers[key] = time.AfterFunc(notifyDebounce, func() {
 		notifyMu.Lock()
 		delete(notifyTimers, key)

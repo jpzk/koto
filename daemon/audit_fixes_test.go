@@ -1675,3 +1675,63 @@ func TestMappedIPv4DestinationsClassifyAsIPv4(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M42: job_done is guest-authored. It may not name a goal session —
+// those are follow-only and the judge's independence rests on it — and the
+// number of distinct sessions it can open must be bounded, since each one
+// costs a pending buffer, a timer, and after the flush a queue and a worker
+// goroutine for the daemon's lifetime.
+func TestJobDoneSessionGuards(t *testing.T) {
+	reset := func() {
+		notifyMu.Lock()
+		notifyPending = map[string][]jobResult{}
+		for k, tm := range notifyTimers {
+			tm.Stop()
+			delete(notifyTimers, k)
+		}
+		notifyMu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+
+	recordJobDone("g", jobResult{ID: "j1", RC: "0", Session: "goal-abc"})
+	recordJobDone("g", jobResult{ID: "j2", RC: "0", Session: "goal-abc-judge"})
+	notifyMu.Lock()
+	_, leakedWork := notifyPending[notifyKey("g", "goal-abc")]
+	_, leakedJudge := notifyPending[notifyKey("g", "goal-abc-judge")]
+	def := len(notifyPending[notifyKey("g", "")])
+	notifyMu.Unlock()
+	if leakedWork || leakedJudge {
+		t.Fatal("a forged job_done opened a goal session")
+	}
+	if def != 2 {
+		t.Fatalf("default session holds %d results, want both folded in", def)
+	}
+
+	reset()
+	for i := 0; i < notifyMaxKeysPerGroup+20; i++ {
+		recordJobDone("g", jobResult{ID: fmt.Sprintf("j%d", i), Session: fmt.Sprintf("s%d", i)})
+	}
+	notifyMu.Lock()
+	keys := notifyGroupKeys("g")
+	notifyMu.Unlock()
+	if keys > notifyMaxKeysPerGroup {
+		t.Fatalf("%d distinct NAMED session keys, cap is %d", keys, notifyMaxKeysPerGroup)
+	}
+	// The overflow went to the default session, not nowhere.
+	notifyMu.Lock()
+	folded := len(notifyPending[notifyKey("g", "")])
+	notifyMu.Unlock()
+	if folded == 0 {
+		t.Fatal("results past the cap were dropped instead of folded")
+	}
+	// An ordinary named session still gets its own conversation.
+	reset()
+	recordJobDone("g", jobResult{ID: "j1", Session: "work"})
+	notifyMu.Lock()
+	n := len(notifyPending[notifyKey("g", "work")])
+	notifyMu.Unlock()
+	if n != 1 {
+		t.Fatalf("a named session lost its own key (%d pending)", n)
+	}
+}
