@@ -569,9 +569,13 @@ func fcWorkspaceDiskBytes(g string) int64 {
 // unjailed). Both drives carry the group's resolved rate limiter — the rootfs
 // is read-only but `dd if=/dev/vda` still generates host reads, so it gets
 // the same buckets as the workspace drive.
-func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string) []byte {
-	vcpus, memMiB := fcMachineCfg(g)
-	bwBytes, ops := fcResolveIO(g)
+// The machine shape is PASSED IN, not re-read. fcSpawn resolves it once,
+// before the fleet-memory admission, and every consumer downstream — this
+// config, vm.memMiB, the cgroup — uses that same snapshot. Re-reading here let
+// a concurrent Config or Spawn raise the size preset AFTER admission had
+// reserved the smaller one, so the VM and its cgroup were built from the
+// larger value while the fleet accounting still held the smaller (audit M110).
+func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB int, bwBytes, ops int64) []byte {
 	rateLimiter := func() map[string]any {
 		return map[string]any{
 			"bandwidth": map[string]any{"size": bwBytes, "one_time_burst": fcIOBurstBytes, "refill_time": 1000},
@@ -653,8 +657,11 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// that says why, rather than boot into the vms/ memory.max and let the
 	// kernel pick a VM to kill. Reserves g's share until registration; every
 	// later exit goes through fail(), which releases it.
-	_, admitMiB := fcMachineCfg(g)
-	if err := fcHostMemAdmit(g, admitMiB); err != nil {
+	// ONE resolution of the machine shape, taken here and used by everything
+	// below: admission, vm.memMiB, the VM config and the cgroup (audit M110).
+	vcpus, memMiB, _ := fcResolveSize(g)
+	bwBytes, ioOps := fcResolveIO(g)
+	if err := fcHostMemAdmit(g, memMiB); err != nil {
 		return fail(err)
 	}
 
@@ -732,9 +739,8 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if jailed {
 		kernelPath, rootfsPath, wsPath, udsPath = "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v"
 	}
-	vcpus, memMiB := fcMachineCfg(g)
 	vm.memMiB = memMiB
-	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath)
+	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath, vcpus, memMiB, bwBytes, ioOps)
 
 	console, err := fcConsoleSink(g)
 	if err != nil {
@@ -912,7 +918,6 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	fcVMs[g] = vm
 	fcMu.Unlock()
 	fcHostMemRelease(g) // counted from fcVMs from here on
-	bwBytes, ioOps := fcResolveIO(g)
 	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB io=%dMiB/s,%dops nice=%d cgroup=%s ports=%v",
 		g, vm.pid, vcpus, memMiB, bwBytes>>20, ioOps, fcVMNice, fcCgroupState(), pubPorts)
 	return nil

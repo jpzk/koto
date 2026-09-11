@@ -3634,3 +3634,41 @@ func TestEgressConnectionsAreBounded(t *testing.T) {
 		t.Fatal("admitted a connection past the global cap")
 	}
 }
+
+// 2026-09-11 M110: the machine shape is resolved ONCE per spawn and threaded
+// through admission, vm.memMiB, the VM config and the cgroup. fcVMConfig used
+// to re-read config.json, so a concurrent Config or Spawn could raise the size
+// preset AFTER fcHostMemAdmit had reserved the smaller one — leaving the fleet
+// accounting short of what the VM and its cgroup were actually built with.
+func TestVMConfigUsesTheAdmittedShape(t *testing.T) {
+	fcHarness(t)
+	const g = "sizerace"
+	d := filepath.Join(vol(g), ".cs")
+	os.MkdirAll(d, 0o755)
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"size":"small"}`), 0o644)
+
+	vcpus, memMiB, _ := fcResolveSize(g)
+	bw, ops := fcResolveIO(g)
+
+	// The config raises the preset between the snapshot and the render — the
+	// window a concurrent /config or spawn seeding occupies.
+	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"size":"xlarge"}`), 0o644)
+	if v2, m2, _ := fcResolveSize(g); v2 == vcpus && m2 == memMiB {
+		t.Fatal("setup: the preset change was not observable")
+	}
+
+	var cfg struct {
+		Machine struct {
+			VcpuCount  int `json:"vcpu_count"`
+			MemSizeMib int `json:"mem_size_mib"`
+		} `json:"machine-config"`
+	}
+	blob := fcVMConfig(g, "/k", "/r", "/w", "/v", vcpus, memMiB, bw, ops)
+	if err := json.Unmarshal(blob, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Machine.MemSizeMib != memMiB || cfg.Machine.VcpuCount != vcpus {
+		t.Fatalf("VM built with %d vCPU/%d MiB, admitted %d/%d — the config was re-read",
+			cfg.Machine.VcpuCount, cfg.Machine.MemSizeMib, vcpus, memMiB)
+	}
+}
