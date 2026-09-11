@@ -2601,3 +2601,43 @@ Test: `TestAutostartSweepYieldsToAnOperatorStop` in `daemon/audit_fixes_test.go`
 drives the claim protocol through each interleaving, including the one-shot
 property (no double boot) and inertness outside a sweep. Verified to fail with
 the `autostartCancel` call removed from `stopGroupPrepare`.
+
+## M135 — Slow request bodies exhaust proxy concurrency slots — FIXED
+
+`daemon/proxy.go`, `readRequestBody`.
+
+**Confirmed.** `proxyAcquire` takes the slot before the body is buffered — on
+purpose, since the buffered body is the memory being bounded (M2) — and the
+release is deferred to the handler's return. Nothing bounded the *time* that
+read could take:
+
+- `MaxBytesReader` caps the size, not the duration;
+- `ReadHeaderTimeout` has already expired by the time the handler runs;
+- `IdleTimeout` covers a keep-alive connection parked *between* requests, not
+  an active body read.
+
+So a guest could hold all 32 of its group's slots for as long as it liked by
+opening POSTs and dribbling their bodies. Every other request for that group
+then waits out `proxyInflightWait` (60 s) and answers 503 — and for a
+`network=none` group the proxy is the *only* egress it has, so this is a total
+outage of the group's own turns, self-inflicted by anything that can reach its
+proxy socket. Coordinated across groups it also drains the 128-slot global pool.
+
+**Fix:** `proxyStallReader`, the mirror image of the `proxyStallWriter` M2
+already added on the write side, and for the same reason: the deadline is
+**re-armed before every read**, so it bounds a peer that has stopped sending
+rather than one sending a large body slowly. 120 s, which for a guest handing
+a prompt across a vsock splice (kilobytes, at memory speed) is already far past
+anything real. It clears the deadline on the way out, because the deadline
+lives on the connection and keep-alive hands that to the next request — the
+same trap `proxyStallWriter.clear` exists for. A stalled body now answers **408**
+with a rate-limited warn line naming the group, rather than the generic 413.
+
+Both providers go through `readRequestBody`, so the Anthropic and Venice legs
+are covered by the one change.
+
+Test: `TestProxyStalledRequestBodyReleasesTheSlot` in
+`daemon/audit_fixes_test.go` drives a real `httptest` server with a body that
+sends one byte and goes quiet, asserting the 408 and that the group's semaphore
+is empty afterwards. Verified against the unfixed code, where it hangs until the
+suite's own timeout kills it.
