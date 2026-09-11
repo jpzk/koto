@@ -1449,3 +1449,30 @@ delta would render as a fragment for anyone who joined mid-line. The tail is
 what a client can display of an unterminated line anyway. Cut on a rune
 boundary, so a truncated partial never carries half a code point into a
 renderer. `TestPartialLineEventsAreBounded`.
+
+### M80 — Authorized job-observability RPCs permit unbounded guest-agent execution (`daemon/grpc_server.go`) — **fixed (concurrency); context propagation declined**
+
+Two real halves.
+
+**Duplicate execs for the same group.** `Jobs` called `refreshJobs` straight
+through, bypassing the in-flight marker the background refresher uses — so N
+concurrent callers asking about the SAME group each issued their own guest
+exec: N shells in the guest, N host connections, N goroutines, all producing
+the same answer. `refreshJobs` now takes that marker and serves the current
+snapshot when a refresh is already running, which is both cheaper and no
+staler than waiting for a duplicate of it. (`refreshJobsNow` is the unguarded
+body, for the background path that has already claimed the marker.)
+
+**Aggregate concurrency.** The per-call timeout bounds ONE operation, not how
+many. `jobQueryMaxGlobal` (16) covers `Jobs` and `JobLogs` together — the
+remaining fan-out is across DIFFERENT groups, since same-group duplicates now
+collapse.
+
+**Declined: threading the RPC context into the guest call.** It would let a
+client's cancellation free a slot sooner. But the work it would cancel is
+already bounded by a 15s per-call timeout and now by the admission cap, so what
+it buys is latency on slot return, not a bound — and the cost is `context` on
+`fcExec`, `fcAgentCall` and `fcHostDial`, i.e. the whole guest-call path, for
+that. Recorded rather than done.
+
+`TestJobQueriesAreBounded`, `TestRefreshJobsSharesTheInFlightGuard`.

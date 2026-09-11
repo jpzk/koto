@@ -508,10 +508,35 @@ func (s *kotoServer) Resources(_ context.Context, _ *pb.ResourcesReq) (*pb.Resou
 // running group (ACL-wise that's the read-across-all form, like global
 // metrics). Stopped groups simply contribute nothing: their job dirs are
 // unreachable inside workspace.img, and observability must not boot VMs.
+// jobQueryMaxGlobal bounds concurrent job-observability guest calls. Jobs and
+// JobLogs each cost a host→guest connection, a guest shell and a response
+// buffer, and the per-call timeout bounds one of them but not how many (audit
+// M80). refreshJobs additionally shares the background refresher's in-flight
+// marker now, so N concurrent callers asking about the SAME group cost one
+// exec; this bounds N spread across DIFFERENT groups.
+const jobQueryMaxGlobal = 16
+
+var jobQuerySem = make(chan struct{}, jobQueryMaxGlobal)
+
+func jobQueryAdmit() bool {
+	select {
+	case jobQuerySem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func jobQueryRelease() { <-jobQuerySem }
+
 func (s *kotoServer) Jobs(_ context.Context, r *pb.JobsReq) (*pb.JobsResp, error) {
 	if r.Group != "" && !validGroupName(r.Group) {
 		return &pb.JobsResp{Error: "invalid group name"}, nil
 	}
+	if !jobQueryAdmit() {
+		return &pb.JobsResp{Error: "too many concurrent job queries; retry shortly"}, nil
+	}
+	defer jobQueryRelease()
 	groups := []string{r.Group}
 	if r.Group == "" {
 		groups = groups[:0]
@@ -540,6 +565,10 @@ func (s *kotoServer) JobLogs(_ context.Context, r *pb.JobLogsReq) (*pb.JobLogsRe
 	if !fcRunning(r.Group) {
 		return &pb.JobLogsResp{Error: "group not running"}, nil
 	}
+	if !jobQueryAdmit() {
+		return &pb.JobLogsResp{Error: "too many concurrent job queries; retry shortly"}, nil
+	}
+	defer jobQueryRelease()
 	res, err := fcJobLogs(r.Group, r.Id, r.Tail)
 	if err != nil {
 		return &pb.JobLogsResp{Error: err.Error()}, nil

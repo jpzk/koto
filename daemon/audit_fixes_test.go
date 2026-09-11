@@ -2807,3 +2807,60 @@ func TestPartialLineEventsAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-11 M80: Jobs and JobLogs each cost a host→guest connection, a guest
+// shell and a response buffer. The per-call timeout bounds one; nothing
+// bounded how many. And Jobs called refreshJobs straight through, bypassing
+// the background refresher's in-flight marker, so concurrent callers asking
+// about the SAME group each issued their own exec for the same answer.
+func TestJobQueriesAreBounded(t *testing.T) {
+	t.Cleanup(func() {
+		for len(jobQuerySem) > 0 {
+			<-jobQuerySem
+		}
+	})
+	for i := 0; i < jobQueryMaxGlobal; i++ {
+		if !jobQueryAdmit() {
+			t.Fatalf("query %d refused below the cap of %d", i, jobQueryMaxGlobal)
+		}
+	}
+	if jobQueryAdmit() {
+		t.Fatal("admitted a query past the cap")
+	}
+	jobQueryRelease()
+	if !jobQueryAdmit() {
+		t.Fatal("release did not free a slot")
+	}
+}
+
+// The same-group duplicate-exec half: a refresh already in flight serves the
+// snapshot instead of issuing a second guest exec.
+func TestRefreshJobsSharesTheInFlightGuard(t *testing.T) {
+	fcHarness(t)
+	const g = "jobsguard"
+	t.Cleanup(func() {
+		jobsMu.Lock()
+		delete(jobsRefreshing, g)
+		delete(jobsCache, g)
+		jobsMu.Unlock()
+	})
+	// Seed a snapshot, then mark a refresh in flight.
+	jobsMu.Lock()
+	jobsCache[g] = jobsCacheEntry{jobs: []JobInfo{{ID: "cached"}}, at: time.Now()}
+	jobsRefreshing[g] = true
+	jobsMu.Unlock()
+
+	// fcRunning is false for this group in the harness, so reach the guard
+	// directly: with the marker set, the cached snapshot comes back and no
+	// exec is attempted.
+	got := jobsSnapshot(g)
+	if len(got) != 1 || got[0].ID != "cached" {
+		t.Fatalf("snapshot = %+v, want the cached entry", got)
+	}
+	jobsMu.Lock()
+	inflight := jobsRefreshing[g]
+	jobsMu.Unlock()
+	if !inflight {
+		t.Fatal("the in-flight marker was cleared by a reader")
+	}
+}

@@ -129,6 +129,32 @@ func refreshJobs(g string) []JobInfo {
 		jobsMu.Unlock()
 		return nil
 	}
+	// Share the in-flight guard with the background refresher (audit M80).
+	// The Jobs RPC called straight through, so concurrent callers each issued
+	// their own guest exec for the same group — N shells in the guest, N host
+	// connections, N daemon goroutines, all producing the same answer. A
+	// refresh already running will publish that answer momentarily; serving
+	// the current snapshot is both cheaper and no staler than waiting for a
+	// duplicate of it.
+	jobsMu.Lock()
+	if jobsRefreshing[g] {
+		jobsMu.Unlock()
+		return jobsSnapshot(g)
+	}
+	jobsRefreshing[g] = true
+	jobsMu.Unlock()
+	defer func() {
+		jobsMu.Lock()
+		delete(jobsRefreshing, g)
+		jobsMu.Unlock()
+	}()
+	return refreshJobsNow(g)
+}
+
+// refreshJobsNow is the guest exec itself. Callers must already hold the
+// per-group in-flight marker — refreshJobs takes it, and kickJobsRefresh sets
+// it before spawning its goroutine.
+func refreshJobsNow(g string) []JobInfo {
 	jobs, err := fcReadJobs(g)
 	if err != nil {
 		emitLogfG("jobs", g, "debug", "[%s] refresh: %v", g, err)
@@ -157,7 +183,7 @@ func kickJobsRefresh(g string, force bool) {
 			delete(jobsRefreshing, g)
 			jobsMu.Unlock()
 		}()
-		refreshJobs(g)
+		refreshJobsNow(g)
 	}()
 }
 
