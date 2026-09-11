@@ -69,7 +69,7 @@ func pkiInit(credsDir string, serverSANs []string) error {
   }
 }
 `
-		if err := os.WriteFile(aclPath, []byte(seed), 0o644); err != nil {
+		if err := os.WriteFile(aclPath, []byte(seed), 0o600); err != nil {
 			return err
 		}
 	}
@@ -210,7 +210,7 @@ func pkiClient(credsDir, name string, roles []string) (token string, err error) 
 	allowPath := filepath.Join(credsDir, "clients.allow")
 	existing, _ := os.ReadFile(allowPath)
 	if !strings.Contains(string(existing), fpHex) {
-		f, err := os.OpenFile(allowPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(allowPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return "", err
 		}

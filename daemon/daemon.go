@@ -147,8 +147,13 @@ func daemonMain() {
 		os.Exit(1)
 	}
 	initPaths()
-	_ = os.MkdirAll(ROOT, 0o755)
-	_ = os.MkdirAll(SOCK_DIR, 0o755)
+	_ = os.MkdirAll(ROOT, 0o700)
+	_ = os.MkdirAll(SOCK_DIR, 0o700)
+	// The modes above only govern paths this daemon CREATES. A state tree an
+	// older koto built keeps what it was given — which included a 0644
+	// workspace.img per group — and MkdirAll/WriteFile never repair an
+	// existing mode, so the repair is explicit (audit M136).
+	hardenStatePaths()
 	// Before anything can consult fcRunning: pidfiles from the previous
 	// daemon run are stale by construction (VMs die with the daemon) and a
 	// recycled pid would read as a live VM. See fcClearStalePids.

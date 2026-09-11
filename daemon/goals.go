@@ -321,7 +321,7 @@ func (s goalSnap) write() {
 		return // a newer snapshot already reached the file
 	}
 	goalWriteSeq = s.seq
-	if err := os.WriteFile(GOALS_FILE, b, 0o644); err != nil {
+	if err := os.WriteFile(GOALS_FILE, b, 0o600); err != nil {
 		emitLogf("goal", "error", "save write: %v", err)
 	}
 }

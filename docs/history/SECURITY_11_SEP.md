@@ -2641,3 +2641,70 @@ Test: `TestProxyStalledRequestBodyReleasesTheSlot` in
 sends one byte and goes quiet, asserting the 408 and that the group's semaphore
 is empty afterwards. Verified against the unfixed code, where it hangs until the
 suite's own timeout kills it.
+
+## M136 — Daemon creates sensitive state with permissive modes — FIXED
+
+`daemon/statemodes.go` (new), plus sixteen creation sites across the daemon.
+
+**Confirmed, and measured on the live install before changing anything:**
+
+```
+drwxr-x---  /var/lib/koto/                     ← the installer's 0750
+drwxr-xr-x  /var/lib/koto/groups/
+drwxr-xr-x  /var/lib/koto/groups/<g>/
+-rw-r--r--  1 554374 554374  8.0G  groups/KEEB/workspace.img
+-rw-r--r--  goals.json  schedules.json  groups.json  metrics.jsonl (170 MB)
+```
+
+`workspace.img` is the finding. It is the ext4 image behind the guest's
+`/workspace`: every transcript, every `.claude` session file, the agent's
+memory, anything it wrote down — mode 0644, owned by the per-VM subuid, one
+per group. Any local uid that can traverse the state dir reads all of it
+straight off a stopped VM, with no daemon, no credential and no VM involved.
+The installed root's 0750 narrows "any uid" to "members of the root
+directory's group"; a dev clone in a 0755 home does not narrow it at all.
+
+**Two halves, because a creation-time fix alone fixes nothing that exists.**
+`MkdirAll`, `WriteFile` and `OpenFile` do not repair the mode of a path that is
+already there, so an upgraded install would have kept every 0644 image forever.
+
+1. **Creation sites tightened** (16): `groups/` and `run/` to 0700;
+   `goals.json`, `schedules.json`, `groups.json`, `metrics.jsonl`, `acl.json`
+   (both writers), `clients.allow` to 0600; the workspace image's temp file,
+   the per-VM console log, `fc.json` and the migration staging dir; the
+   attachments directory and the attachments themselves; the per-VM socket
+   directory; and `sessions.json`'s `.cs` MkdirAll, which was still 0755 while
+   `ensure()` had been creating the same directory 0700 since M113.
+2. **`hardenStatePaths()`**, run once at daemon start, walks the group tree and
+   the top-level state files and clears group/other bits. It only ever CLEARS
+   (`mode &^ 0o077`), never sets, so it cannot open anything up and cannot
+   disturb owner access; symlinks are skipped rather than followed.
+
+**What keeps this invisible to the two processes that use these files:** a
+jailed VMM reaches its workspace image as the file's own owner (`fcjail`
+chowns it to the per-VM uid) and its sockets through a bind mount into the
+chroot, never by traversing the host path; the daemon is root in its own user
+namespace over that uid range, so it keeps access to files it does not own.
+
+**One deliberate exclusion:** the state ROOT itself. The installer already makes
+it 0750, and in a dev clone it is the operator's git checkout — a daemon that
+silently chmods the directory you are working in has overstepped what it was
+asked to protect.
+
+**Operator-visible consequence, flagged rather than buried:** after the next
+daemon restart, `groups/<g>/workspace.img` becomes 0600 owned by the per-VM
+subuid, so the operator's own uid can no longer read a stopped group's image
+directly. The offline-reclaim and EROFS-recovery workflows already run under
+`unshare`/`sudo` for the same ownership reason, so this changes the mode they
+need rather than introducing the need.
+
+**Not a finding, and left alone:** "`kotoHome()` trusts an environment-controlled
+path or the current working directory". `KOTO_HOME` is set by the operator, in
+the unit or their shell, and the working directory is the dev clone by design —
+this is tier 1 choosing where its own state lives, which is the one decision the
+trust model does not try to second-guess.
+
+Tests: `TestHardenStatePathsClearsGroupAndOtherBits` (the repair, including that
+it preserves the owner triad, skips nothing it should tighten, and never widens
+an already-tight file) and `TestStateWritersCreateOwnerOnlyFiles` (the creation
+side, since the repair only runs at startup), in `daemon/audit_fixes_test.go`.

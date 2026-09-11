@@ -474,7 +474,7 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	}
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
-	f, err := os.OpenFile(METRICS, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(METRICS, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}

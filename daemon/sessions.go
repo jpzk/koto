@@ -95,7 +95,7 @@ func readSessionReg(g string) []string {
 
 func writeSessionReg(g string, names []string) {
 	p := sessionRegPath(g)
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	b, _ := json.Marshal(names)
 	tmp := p + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
