@@ -5597,3 +5597,85 @@ func TestShutSubscriberIsDeregisteredAndDrained(t *testing.T) {
 		t.Errorf("a deregistered subscriber received %d more frames", q)
 	}
 }
+
+// 2026-09-11 M157: both sanitizers dropped a finite, hand-maintained list of
+// fourteen runes and copied every other rune unchanged. The list leaked —
+// U+00AD, U+034F, U+180E, the invisible operators U+2061–U+2064, U+2065, the
+// Hangul fillers, and the whole TAG block U+E0000–U+E007F, which encodes
+// arbitrary ASCII invisibly. And the daemon and the TUI kept SEPARATE lists, so
+// fixing one would have left the other sink open.
+func TestSanitizeDropsEveryInvisibleRune(t *testing.T) {
+	drop := []struct {
+		r    rune
+		name string
+	}{
+		{0x00ad, "SOFT HYPHEN"},
+		{0x034f, "COMBINING GRAPHEME JOINER"},
+		{0x180e, "MONGOLIAN VOWEL SEPARATOR"},
+		{0x2061, "FUNCTION APPLICATION"},
+		{0x2062, "INVISIBLE TIMES"},
+		{0x2063, "INVISIBLE SEPARATOR"},
+		{0x2064, "INVISIBLE PLUS"},
+		{0x2065, "unassigned default-ignorable"},
+		{0x115f, "HANGUL CHOSEONG FILLER"},
+		{0x1160, "HANGUL JUNGSEONG FILLER"},
+		{0x3164, "HANGUL FILLER"},
+		{0xffa0, "HALFWIDTH HANGUL FILLER"},
+		{0xe0001, "LANGUAGE TAG"},
+		{0xe0041, "TAG LATIN CAPITAL A"},
+		{0xe007f, "CANCEL TAG"},
+		// ...and everything the old list already named, which must not regress.
+		{0x200b, "ZERO WIDTH SPACE"},
+		{0x200e, "LRM"},
+		{0x202e, "RLO"},
+		{0x2060, "WORD JOINER"},
+		{0x2066, "LRI"},
+		{0x061c, "ARABIC LETTER MARK"},
+		{0xfeff, "BOM"},
+		{0x2028, "LINE SEPARATOR"},
+		{0x2029, "PARAGRAPH SEPARATOR"},
+	}
+	for _, c := range drop {
+		in := "a" + string(c.r) + "b"
+		if got := sanitize(in); got != "ab" {
+			t.Errorf("%s (U+%04X) survived sanitize: %q", c.name, c.r, got)
+		}
+		if !isBidiOrFormat(c.r) {
+			t.Errorf("%s (U+%04X) is not classified as hostile", c.name, c.r)
+		}
+	}
+
+	// The exemptions, and they must stay exempt: both are load-bearing in real
+	// text and neither can move the cursor or hide anything.
+	keep := []struct {
+		r    rune
+		name string
+	}{
+		{0x200d, "ZWJ (emoji clusters)"},
+		{0x200c, "ZWNJ (Persian/Indic word separation)"},
+		{0xfe0f, "VARIATION SELECTOR-16 (emoji presentation)"},
+		{0xfe00, "VARIATION SELECTOR-1"},
+		{0xe0100, "VARIATION SELECTOR-17"},
+	}
+	for _, c := range keep {
+		in := "a" + string(c.r) + "b"
+		if got := sanitize(in); got != in {
+			t.Errorf("%s (U+%04X) was dropped: %q", c.name, c.r, got)
+		}
+	}
+	// The whole emoji sequence this protects, end to end.
+	const family = "\U0001F468‍\U0001F469‍\U0001F467"
+	if got := sanitize(family); got != family {
+		t.Errorf("an emoji ZWJ sequence did not survive: %q", got)
+	}
+	if got := sanitize("👍️"); got != "👍️" {
+		t.Errorf("an emoji presentation selector did not survive: %q", got)
+	}
+
+	// Ordinary text is untouched, including scripts that use combining marks.
+	for _, ok := range []string{"hello", "naïve", "日本語", "مرحبا", "देवनागरी", "é"} {
+		if got := sanitize(ok); got != ok {
+			t.Errorf("ordinary text was altered: %q → %q", ok, got)
+		}
+	}
+}

@@ -3424,3 +3424,49 @@ Test: `TestShutSubscriberIsDeregisteredAndDrained` in
 path, then asserts it is shut, deregistered, drained, its channel still open,
 and that later events do not reach it. Verified to fail with `dropSub` reverted
 to a bare `shut()`.
+
+## M157 — Incomplete Unicode format filtering permits operator-facing text spoofing — FIXED
+
+`daemon/sanitize.go` (`isBidiOrFormat`), `tui/vt_scrub.go` (`isHostileFormat`).
+
+**Confirmed, and the finding's last sentence is the important one:** the daemon
+and the TUI kept **separate** hand-maintained lists of fourteen runes each, so a
+rune only one of them dropped still reached the operator's terminal through the
+other sink. Both lists leaked the same way — a `switch` somebody has to remember
+to extend, against a character set that keeps growing.
+
+What got through: `U+00AD` SOFT HYPHEN, `U+034F` COMBINING GRAPHEME JOINER,
+`U+180E` MONGOLIAN VOWEL SEPARATOR, the invisible operators `U+2061`–`U+2064`,
+`U+2065`, the Hangul fillers (`U+115F`, `U+1160`, `U+3164`, `U+FFA0` — blank,
+but not space, so no width check catches them), and the whole **TAG block**
+`U+E0000`–`U+E007F`, which encodes arbitrary ASCII invisibly.
+
+**Fix:** derive the set from Unicode's own tables instead of a list.
+
+- `unicode.Cf` — every format character: the bidi overrides and isolates, the
+  zero-width set, the BOM, the Arabic marks, the tag block.
+- `unicode.Other_Default_Ignorable_Code_Point` — the invisible runes that are
+  *not* `Cf`, which is precisely where the hand list leaked.
+- `U+2028`/`U+2029` stay listed: they are `Zl`/`Zp`, not format characters, and
+  a rendered row must stay one row.
+
+**Two exemptions, both kept deliberately:** `ZWJ` (emoji grapheme clusters — the
+existing carve-out) and `ZWNJ` (Persian and Indic word separation). Neither can
+move the cursor, reorder anything or hide anything; ZWNJ's effect is to make
+text look *more* separated, which is the wrong direction for a spoof. Variation
+selectors are in neither table — they carry the `Variation_Selector` property —
+so emoji presentation survives; checked against `U+FE00`, `U+FE0F` and
+`U+E0100` rather than assumed.
+
+**The cost, stated rather than hidden:** `Cf` also holds the Arabic number-sign
+prefixes (`U+0600`–`U+0605`, `U+06DD`, `U+08E2`), so text using them loses a
+rendering hint. That is the same trade the old list already made for ZWSP and
+the bidi marks — invisible characters do not get to stay on the grounds that
+some of them are innocent.
+
+Tests: `TestSanitizeDropsEveryInvisibleRune` (daemon) and
+`TestScrubVTDropsEveryInvisibleRune` (TUI) walk the same 24 runes — the fifteen
+the old lists missed plus the nine they caught, so neither can regress — and
+assert the exemptions, a real ZWJ family emoji, a presentation selector, and
+that Arabic, Devanagari, Japanese and accented Latin pass through unaltered. The
+TUI case covers both `scrubVT` and `scrubVTStrict`.
