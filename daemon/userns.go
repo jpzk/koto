@@ -268,6 +268,11 @@ func usernsAwaitParent() error {
 // able to chown into the per-VM band. It is the honest end-to-end answer to
 // "can this host run jailed microVMs without a container", and it is what the
 // integration test drives.
+//
+// It also reports clone3, which is not a privilege but is the other thing a
+// hardened unit can take away from a VM launch (see fccgroup.go's header): the
+// probe is meant to be run INSIDE the unit's own sandbox, so it should say
+// everything that sandbox changes about spawning.
 func usernsProbeMain() {
 	if err := usernsEnsure(); err != nil {
 		ctlFatal(1, "userns: %v", err)
@@ -286,6 +291,12 @@ func usernsProbeMain() {
 	}
 	fmt.Printf("userns ok: euid=%d, chown to %d works — jailed microVMs are supported\n",
 		os.Geteuid(), fcJailBaseUID)
+	if fcClone3Available() {
+		fmt.Println("clone3 ok: VMs are placed in their cgroup at clone time")
+	} else {
+		fmt.Println("clone3 blocked (seccomp — systemd RestrictNamespaces=): " +
+			"VMs are placed in their cgroup after fork instead")
+	}
 }
 
 // usernsEnsure is the single entry point callers use: bootstrap if needed,
