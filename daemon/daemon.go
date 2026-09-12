@@ -268,6 +268,12 @@ func daemonMain() {
 	// Ungated by watchers on purpose: resource exhaustion has to be visible
 	// exactly when nobody is attached (see daemon/resources.go).
 	go resourcesLoop()
+	// Same reasoning, different subject: the claude binary the proxy execs to
+	// rotate the OAuth token can stop being reachable long before anything
+	// notices, because the unit's filesystem namespace is fixed at install
+	// time and the first symptom is a refresh failing up to ~8h later, with
+	// the whole fleet 401ing by then (claudebin.go).
+	go claudeBinWatch(nil)
 
 	// Closed once the shutdown sequence has actually finished. srv.Stop()
 	// below releases srv.Serve() in the main goroutine, and a main goroutine

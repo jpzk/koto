@@ -27,10 +27,12 @@ package main
 // where the binary was fine).
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // claudeBinEnv names the claude executable the daemon runs for token
@@ -165,4 +167,96 @@ func claudeBindDirs(bin string, hidden func(string) bool) []string {
 		add(filepath.Dir(real))
 	}
 	return out
+}
+
+// claudeBinCheck reports whether the claude the daemon would exec for OAuth
+// token refresh is reachable and executable FROM INSIDE THE UNIT.
+//
+// The vantage point is the whole point. `koto setup --check` resolves claude on
+// the OPERATOR's PATH, where it is nearly always fine, which is exactly the
+// check that missed the 2026-09-03 breakage (see this file's header). The
+// daemon, by contrast, is already inside the unit's mount namespace and PATH,
+// so a plain stat from here answers the only question that matters: can the
+// process that has to run it, run it?
+//
+// Errors are phrased for someone who did nothing wrong, because that is the
+// usual case — the binary moved under them (an nvm major-version bump, a
+// reinstall landing elsewhere, a version directory garbage-collected). The
+// unit's filesystem namespace is fixed at install time, so no amount of
+// re-resolution here can reach a binary that moved outside the bound
+// directories; re-running `koto install` to re-render the unit is the fix, and
+// the message says so rather than leaving the operator to infer it.
+func claudeBinCheck() (string, error) {
+	bin := claudeBin()
+	if !filepath.IsAbs(bin) {
+		p, err := exec.LookPath(bin)
+		if err != nil {
+			return bin, fmt.Errorf("%q is not on the daemon's PATH (%s) and %s is unset — "+
+				"re-run `koto install` with claude installed so the path is recorded",
+				bin, os.Getenv("PATH"), claudeBinEnv)
+		}
+		bin = p
+	}
+	// Stat, not Lstat: a dangling symlink is precisely the nvm/version-bump
+	// failure this exists to catch, and it must read as broken, not as present.
+	fi, err := os.Stat(bin)
+	if err != nil {
+		return bin, fmt.Errorf("%s is not reachable from inside the service "+
+			"(ProtectHome/BindReadOnlyPaths are rendered at install time) — "+
+			"re-run `koto install`: %w", bin, err)
+	}
+	if fi.IsDir() || fi.Mode()&0o111 == 0 {
+		return bin, fmt.Errorf("%s is not executable", bin)
+	}
+	return bin, nil
+}
+
+// claudeBinWatch alerts the operator while the token is still valid, instead of
+// letting a broken refresh be discovered by the fleet 401ing.
+//
+// refreshOnce already reports a failed refresh at error level, but only when a
+// refresh is actually due — up to ~8h after the binary became unreachable, by
+// which point every turn is failing. The condition is silent, static and
+// entirely knowable before then, so it is worth a cheap stat.
+//
+// It alerts on TRANSITION only. The condition persists until someone fixes it,
+// and logalert's token bucket would otherwise turn a standing fault into a
+// recurring banner, which trains operators to dismiss it — the same reasoning
+// as the resource alerts' hysteresis. Recovery is reported too, so the operator
+// learns their fix worked without having to go looking.
+func claudeBinWatch(stop <-chan struct{}) {
+	const every = 30 * time.Minute
+	broken := false
+	check := func() {
+		// An API key outranks OAuth in authHeaders and never execs claude, so
+		// alerting on a host that authenticates with one would be noise about
+		// a binary it has no use for.
+		if currentAPIKey() != "" {
+			return
+		}
+		if _, err := readCreds(); err != nil {
+			return // no OAuth credential to refresh either
+		}
+		bin, err := claudeBinCheck()
+		switch {
+		case err != nil && !broken:
+			broken = true
+			emitLogf("proxy", "error", "claude is not usable by the daemon, so the OAuth token "+
+				"cannot be refreshed and turns will 401 once it expires: %v", err)
+		case err == nil && broken:
+			broken = false
+			emitLogf("proxy", "info", "claude is reachable again (%s); token refresh restored", bin)
+		}
+	}
+	check()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			check()
+		case <-stop:
+			return
+		}
+	}
 }
