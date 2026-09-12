@@ -163,8 +163,12 @@ func kvmRemediation() string {
 	lo, hi := "<subuid-base+30000>", "<that+100>"
 	if me, err := user.Current(); err == nil {
 		if start, _, err := subIDRange("/etc/subuid", me.Username, me.Uid); err == nil {
-			lo = fmt.Sprintf("%d", start+fcJailBaseUID)
-			hi = fmt.Sprintf("%d", start+fcJailBaseUID+ctlMaxSpawn)
+			// fcJailHostUID, not start+fcJailBaseUID: the jail uid is a
+			// NAMESPACE id and the uid_map puts ns id 1 on `start`, so the
+			// host band sits one lower. Printing the unshifted band grants
+			// every uid except main's.
+			lo = fmt.Sprintf("%d", fcJailHostUID(start, fcJailBaseUID))
+			hi = fmt.Sprintf("%d", fcJailHostUID(start, fcJailBaseUID+ctlMaxSpawn))
 		}
 	}
 	return "The jailed microVM monitor runs as an unprivileged per-VM id with no\n" +
