@@ -244,7 +244,7 @@ DIST_DIR       = dist/$(DIST_VERSION)
 # The release this checkout points at. Was dist/VERSION; it lives here now
 # because nothing under dist/ is checked in — dist/ is build output.
 # "unreleased" makes `make fetch` say so plainly instead of 404ing.
-DIST_VERSION  ?= unreleased
+DIST_VERSION  ?= 1.0.0
 
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.
