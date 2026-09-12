@@ -2936,24 +2936,35 @@ func TestKVMRemediationOffersBothAndStatesTheirCosts(t *testing.T) {
 // The userns remediation was reordered for the same reason, and the same
 // property has to hold: the option koto leads with must be the one that makes
 // this check pass, and the scoped alternative must say that it does not.
-func TestUsernsRemediationLeadsWithWhatSatisfiesTheCheck(t *testing.T) {
+// 2026-09-12, second revision. This test twice asserted an ordering that the
+// next measurement overturned, which is itself the lesson: first it required
+// the scoped profile to lead (audit L9), then — after the profile proved
+// unverifiable by the preflight — that the sysctl lead. Both premises are now
+// gone, because the profile is no longer ADVICE at all: koto installs it and
+// verifies it (daemon/apparmor.go), and checkUserns answers by probing the
+// installed binary rather than reading the sysctl.
+//
+// So the invariant is no longer about order. What must hold is that this text,
+// which is now only reached when the offer was declined or apparmor_parser is
+// missing, still points at the narrow route and still states what the host-wide
+// switch costs.
+func TestUsernsRemediationOffersTheNarrowRouteAndPricesTheWideOne(t *testing.T) {
 	r := usernsRemediation()
-	sysctl := strings.Index(r, "apparmor_restrict_unprivileged_userns=0")
-	profile := strings.Index(r, "apparmor.d/koto")
-	if sysctl < 0 {
-		t.Fatal("no sysctl remediation offered — it is the only one this check can observe")
+	if !strings.Contains(r, "AppArmor profile") || !strings.Contains(r, "ALONE") {
+		t.Error("the fallback text must still point at the koto-only profile")
 	}
-	if profile < 0 {
-		t.Fatal("the scoped AppArmor profile option was dropped entirely")
-	}
-	if sysctl > profile {
-		t.Fatal("the option that actually satisfies this check must be presented first")
+	if !strings.Contains(r, "apparmor_restrict_unprivileged_userns=0") {
+		t.Error("the host-wide switch must still be offered as the fallback")
 	}
 	if !strings.Contains(r, "EVERY local program") {
-		t.Fatal("the host-wide option does not state what it costs")
+		t.Error("the host-wide switch must state what it costs")
 	}
-	if !strings.Contains(r, "keep reporting") {
-		t.Fatal("the profile option does not warn that the preflight cannot see it")
+	// The claim that the preflight cannot observe a profile was true this
+	// morning and is now false — checkUserns probes the installed binary. A
+	// remediation that still says otherwise would send operators to the sysctl
+	// for no reason.
+	if strings.Contains(r, "keep reporting") {
+		t.Error("the text still claims the preflight cannot see the profile; it can now")
 	}
 }
 
@@ -6512,10 +6523,18 @@ func TestSetupHintsDoNotTellOperatorsToWeakenTheHost(t *testing.T) {
 	// pinned here: koto must never hand over a host-weakening command without
 	// saying what it costs, and must not drop the narrower option. Ordering is
 	// no longer the assertion — being honest about both is.
-	prof := strings.Index(body, "/etc/apparmor.d/koto")
+	// 2026-09-12: the per-binary profile stopped being merely PRINTED and
+	// became something koto installs and verifies itself (daemon/apparmor.go),
+	// so the profile path is no longer in this file. What must not regress is
+	// that the narrow route is still offered rather than the host-wide switch
+	// being the only option on the table.
 	wide := strings.Index(body, "apparmor_restrict_unprivileged_userns=0")
-	if prof < 0 {
-		t.Fatal("the AppArmor hint no longer offers a per-binary profile")
+	if !strings.Contains(usernsRemediation(), "AppArmor profile") ||
+		!strings.Contains(usernsRemediation(), "ALONE") {
+		t.Fatal("the userns remediation no longer offers a koto-only AppArmor profile")
+	}
+	if !strings.Contains(apparmorProfileText(installedKotoBin), "userns,") {
+		t.Fatal("the installable profile no longer grants userns")
 	}
 	if wide >= 0 && !strings.Contains(body, "EVERY local program") {
 		t.Error("the host-wide switch is offered without saying what it costs")

@@ -28,13 +28,13 @@ make wizard     # 3. mint the TLS identities, connect your Anthropic credentials
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
 
-**On Ubuntu two host checks fail on a stock image**, and `make install` prints
-the fix for each. `/dev/kvm` ships `0660`, so a udev rule is needed to make it
-world-accessible; and unprivileged user namespaces — which the microVM jailer
-needs — are blocked by AppArmor, which a sysctl re-enables. The userns one is
-the blocking failure, so expect the first run to refuse before it ever asks
-about KVM. Applying exactly what it prints works with no reboot. Fedora and
-Arch need neither: their preflight is green out of the box.
+**On Ubuntu the preflight flags two things, and `make install` handles one of
+them for you.** Unprivileged user namespaces — which the microVM jailer needs —
+are blocked by AppArmor, and install offers to grant them **to the koto binary
+alone** with an AppArmor profile: say yes and Ubuntu's protection stays on for
+every other program on the machine. `/dev/kvm` ships `0660`, so that one still
+needs the udev rule install prints, applied by hand. Neither needs a reboot.
+Fedora and Arch need neither: their preflight is green out of the box.
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
 an install without changing anything. `make fetch` replaces `make build` once
