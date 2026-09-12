@@ -81,7 +81,7 @@ mode `0666`.
 SSH: `ssh -i $VMDIR/id_vm -p 2222 fedora@127.0.0.1`
 (add `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR`).
 
-### Ubuntu variant — verified 2026-09-03 on 24.04.4 LTS
+### Ubuntu variant — verified 2026-09-12 on 24.04.5 LTS
 
 Same QEMU invocation; three things change. Swap the image and the login user:
 
@@ -105,16 +105,71 @@ cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns    # 1 → restricted
 `PATH`, podman 4.9.3 with pasta at `/usr/bin/pasta`. Nothing else is needed
 for build or install.
 
-Then §4's preflight fails both checks and prints Ubuntu-specific remediation.
-**Applying exactly what it prints works verbatim, with no reboot** — verified;
-`/dev/kvm` goes 0660 → 0666 and the sysctl 1 → 0, after which preflight reads
-`✓ /dev/kvm usable (mode 0666)` and `✓ nested userns allowed`.
+Then §4's preflight fails **two** checks — `✗ /dev/kvm mode 0660` and
+`✗ nested userns restricted by AppArmor` — and prints Ubuntu-specific
+remediation for each. **Applying exactly what it prints works verbatim, with no
+reboot** — re-verified 2026-09-12 against a VM reset to genuinely stock state;
+`/dev/kvm` goes 0660 → 0666 via the udev rule and the sysctl 1 → 0, after which
+preflight reads `✓ /dev/kvm usable (mode 0666)` and `✓ nested userns allowed`.
 
-Note the failure count reads `1 unmet requirement(s)` while **two** `✗` marks
-and two remediation blocks are shown. That is correct, not a bug:
-`/dev/kvm` failures go to a separate soft bucket (`setup_checks.go`, the
-"Continue without KVM?" path) and the count reports hard blockers only. A
-non-empty hard list returns before the KVM prompt is ever reached.
+The two `!` lines (`claude not found`, `disk space`) are warnings, not failures,
+and are not counted.
+
+Ordering matters and will confuse you if you don't know it: a non-empty HARD
+list returns *before* the "Continue without KVM?" prompt is reached. So on a
+stock image the first `make install` exits 2 with no prompt, and only a second
+run — after the userns sysctl is set — offers the KVM prompt. `/dev/kvm` is the
+soft bucket; `nested userns` is the hard blocker.
+
+The failure line reads `2 unmet requirement(s), all shown above — fix all of
+them (1 blocking, plus /dev/kvm)`. **An older version of this skill said it
+reads `1 unmet requirement(s)` and called that correct-not-a-bug.** It was
+changed deliberately (see the comment in `preflightGate`, setup_checks.go):
+counting only hard blockers printed `1` under two `✗` marks and two remediation
+blocks, leaving it ambiguous which one to fix. Don't re-rationalize the old
+behavior if you meet it in an old binary.
+
+**Do not expect the ACL remediation.** Until 2026-09-12 the `/dev/kvm` hint led
+with a per-uid POSIX ACL over the VMM band (audit M88). That was reversed after
+measuring it here, and the udev rule leads now — the ACL survives only as a
+documented alternative with its caveats. All three reasons are Ubuntu-specific
+and all three are silent:
+
+- `setfacl` is not installed on a stock cloud image (`acl` package absent).
+- `/dev/kvm` is tagged `uaccess`, so **systemd-logind owns its ACL and rewrites
+  it on session changes** — a manual grant disappears within minutes of an ssh
+  login, and the next VM to boot dies with "Error creating KVM object:
+  Permission denied … configured on the /dev/kvm file's ACL". The old text said
+  "recreated at boot"; it is every login.
+- `checkKVMAt` reads the mode bits, which an ACL never sets, so even a working
+  grant reads as `✗` and blocks the install.
+
+The `nested userns` hint was reversed the same day and for the same shape of
+reason (audit L9): the AppArmor profile it led with genuinely works, but
+`checkUserns` reads the sysctl and cannot observe a profile, so the preflight
+kept refusing a correctly-configured host. The sysctl leads now.
+
+**`make install` succeeding is NOT the same as the daemon running — assert both
+on Ubuntu.** The distro difference that caused this is permanent: Fedora ships
+`newuidmap` with file capabilities (`cap_setuid=ep`, mode 0755), Ubuntu ships it
+**setuid-root** (mode 4755, no caps). Under a setuid-root helper the unit's
+`CapabilityBoundingSet` is the helper's entire permitted set rather than a
+filter over a small one, so M13's tight `CAP_SETUID CAP_SETGID` starved it: the
+install completed, the unit was enabled, and the daemon crash-looped every 5s
+with `newuidmap: open of uid_map failed: Permission denied` while no group could
+ever boot. Fixed 2026-09-12 by rendering the set from the host, but check it
+every run — this is exactly the class of breakage that hides behind a clean
+install:
+
+```sh
+systemctl is-active koto          # must be `active`, not `activating`
+journalctl -u koto -n 20 | grep -i newuidmap    # must be empty
+ps -eo uid,args | grep firecracker              # VMM uid = subuid base + 29999
+```
+
+Note that last number: the per-VM jail uid is a **namespace** id and the uid_map
+puts ns id 1 on the subuid base, so the host uid is `base + 30000 - 1`. On
+Ubuntu's default base of 100000 that is **129999**, not 130000.
 
 Clean build time on 4 vCPU / 8 G was **~24 min** (fcassets ~18, Go binaries
 ~6), not the ~40 min the Fedora note estimates.
@@ -247,11 +302,28 @@ claude-code declares `"node": ">=22.0.0"`, but npm installs it anyway with
 only an `EBADENGINE` warning and `claude --version` works, so nothing looks
 wrong until the proxy shells out to refresh a token. Verified trap on 24.04:
 
+Use the official tarball — it needs no third-party apt repo and lands npm's
+global prefix in `/usr/local`, which keeps the unit on plain `ProtectHome=yes`
+(a claude under `$HOME` is the other path, and makes `koto install` render
+`ProtectHome=tmpfs` + `BindReadOnlyPaths=` instead — worth testing at least
+once, but it is not what this leg is for):
+
 ```sh
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs tmux              # node 22.x, not the distro's 18
-sudo npm i -g @anthropic-ai/claude-code
+V=$(curl -fsSL https://nodejs.org/dist/latest-v22.x/ | grep -o 'node-v22[0-9.]*-linux-x64.tar.xz' | head -1)
+curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/latest-v22.x/$V
+sudo tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+  --exclude=README.md --exclude=LICENSE --exclude=CHANGELOG.md
+sudo apt install -y tmux
+sudo /usr/local/bin/npm i -g @anthropic-ai/claude-code   # verified: 2.1.269
 ```
+
+**This used to say `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E
+bash -`.** Don't restore it: koto's own preflight hint deliberately refuses to
+print that one-liner, on the grounds that it makes a third party's HTTPS content
+a root shell — a release test that instructs the opposite of the thing under
+test is worse than no instruction. `koto setup --check` offers `snap install
+node --classic --channel=22` and nvm; both work, but snap's read-only
+`/snap/node` makes `npm -g` land somewhere the unit's PATH does not see.
 
 On Fedora:
 
@@ -445,11 +517,38 @@ group when list membership matters.
   bug. Pre-pull every pinned image with a hard per-attempt deadline before
   running `make build`, so a stall is killed and retried instead of hanging:
 
+  **Use a PROGRESS-based watchdog, not a fixed deadline.** This snippet used
+  to wrap each attempt in `timeout --signal=KILL 420`. Do not go back to that:
+  the fcuvm image is multi-GB and SLIRP moves ~70 MB/min, so a perfectly
+  healthy pull legitimately runs well past seven minutes and the deadline
+  simply killed it, over and over, looking exactly like the stall it was meant
+  to catch (burned ~40 min on 2026-09-12 before the loop was identified as the
+  culprit rather than the network). Elapsed time cannot separate "stalled" from
+  "slow"; bytes landing on disk can.
+
   ```sh
   for img in $(grep -rohE "(public\.ecr\.aws|docker\.io)/[a-zA-Z0-9._/-]+@sha256:[0-9a-f]{64}" Makefile */*.sh); do
-    for a in 1 2 3 4 5 6; do timeout --signal=KILL 420 podman pull -q "$img" && break; sleep 5; done
+    for a in 1 2 3; do
+      podman pull -q "$img" & pid=$!
+      last=$(df --output=used / | tail -1); quiet=0
+      while kill -0 $pid 2>/dev/null; do
+        sleep 30
+        now=$(df --output=used / | tail -1)
+        if [ "$now" -gt "$last" ]; then quiet=0; else quiet=$((quiet + 1)); fi
+        last=$now
+        [ $quiet -ge 10 ] && { kill -9 $pid; break; }   # 5 min with zero growth
+      done
+      wait $pid && break
+    done
   done
   ```
+
+  **Measure growth with `df`, never `du`.** Rootless podman's layer directories
+  are owned by mapped subuids, so `du` on `~/.local/share/containers` hits
+  permission-denied on nearly everything and reports a constant figure —
+  verified: 62 MB of real growth over 40 s read as 0. A watchdog built on `du`
+  therefore declares a false stall and kills the healthy pull, which is the
+  identical bug one layer down.
 
 - **Log silence is NOT a stall signal — check CPU.** The kernel build buffers
   its output, so `build.log` can go 10+ minutes without a write while the
