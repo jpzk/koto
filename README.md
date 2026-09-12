@@ -9,15 +9,16 @@ koto also has ACL with roles and permissions on system configuration and groups.
 ## Quick start
 
 Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
-host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora, Ubuntu
-24.04+ or Arch, and git, make and podman or docker (just for building).
+host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora 44+,
+Ubuntu 24.04+ or Arch (rolling), and git, make and podman or docker (just for
+building).
 
 ```sh
-# Fedora
+# Fedora 44+
 sudo dnf install -y git make podman
 # Ubuntu 24.04+
 sudo apt install -y git make podman passt uidmap
-# Arch Linux
+# Arch (rolling)
 sudo pacman -S --needed git make podman passt
 
 git clone https://github.com/jpzk/koto && cd koto
