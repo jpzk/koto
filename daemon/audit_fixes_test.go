@@ -2889,21 +2889,40 @@ func TestRefreshJobsSharesTheInFlightGuard(t *testing.T) {
 // world-writable and said nothing about the cost. On Fedora that is the
 // distro default; on a host shipping 0660 root:kvm it opens the KVM interface
 // to every local account, and koto's own check was what asked for it.
-func TestKVMRemediationLeadsWithTheNarrowGrant(t *testing.T) {
+// 2026-09-12: this used to assert the NARROW grant came first (audit M88).
+// Reversed after measuring M88's advice on the distro it was written for. On a
+// stock Ubuntu 24.04.5 image the ACL route needs a package that is not
+// installed, is wiped by systemd-logind because /dev/kvm is `uaccess`-tagged,
+// and cannot be seen by checkKVMAt, which reads mode bits — so leading with it
+// sent operators down a path that silently fails while labelling the working
+// option as the reckless one. The udev rule leads now; the ACL stays, with its
+// real caveats attached. What must NOT regress is that both are offered and
+// each states its cost.
+func TestKVMRemediationOffersBothAndStatesTheirCosts(t *testing.T) {
 	got := kvmRemediation()
-	narrow := strings.Index(got, "setfacl")
-	broad := strings.Index(got, "0666")
-	if narrow < 0 {
-		t.Fatal("no per-uid ACL remediation offered")
+	udev := strings.Index(got, "0666")
+	acl := strings.Index(got, "setfacl")
+	if udev < 0 {
+		t.Fatal("no udev remediation offered — it is the one that works on a stock image")
 	}
-	if broad < 0 {
-		t.Fatal("the world-access fallback was dropped entirely; it is most hosts' status quo")
+	if acl < 0 {
+		t.Fatal("the narrow per-uid ACL option was dropped entirely")
 	}
-	if narrow > broad {
-		t.Fatal("the world-writable option is presented before the narrow one")
+	if udev > acl {
+		t.Fatal("the option that actually satisfies this check must be presented first")
 	}
+	// The world-access cost must still be stated — reordering is not licence to
+	// stop saying what it buys the rest of the machine.
 	if !strings.Contains(got, "EVERY local account") {
 		t.Fatal("the world-access option does not state what it costs")
+	}
+	// And the ACL option must carry the two facts that make it fail silently,
+	// or it is a trap rather than an alternative.
+	if !strings.Contains(got, "uaccess") {
+		t.Fatal("the ACL option does not warn that logind rewrites the ACL")
+	}
+	if !strings.Contains(got, "mode bits") {
+		t.Fatal("the ACL option does not warn that this check cannot see it")
 	}
 	// The narrow grant names a concrete uid band, not a placeholder, when the
 	// subuid range is readable.
@@ -2911,6 +2930,30 @@ func TestKVMRemediationLeadsWithTheNarrowGrant(t *testing.T) {
 		if strings.Contains(got, "<subuid-base") {
 			t.Fatalf("subuid range is readable but the band was left as a placeholder:\n%s", got)
 		}
+	}
+}
+
+// The userns remediation was reordered for the same reason, and the same
+// property has to hold: the option koto leads with must be the one that makes
+// this check pass, and the scoped alternative must say that it does not.
+func TestUsernsRemediationLeadsWithWhatSatisfiesTheCheck(t *testing.T) {
+	r := usernsRemediation()
+	sysctl := strings.Index(r, "apparmor_restrict_unprivileged_userns=0")
+	profile := strings.Index(r, "apparmor.d/koto")
+	if sysctl < 0 {
+		t.Fatal("no sysctl remediation offered — it is the only one this check can observe")
+	}
+	if profile < 0 {
+		t.Fatal("the scoped AppArmor profile option was dropped entirely")
+	}
+	if sysctl > profile {
+		t.Fatal("the option that actually satisfies this check must be presented first")
+	}
+	if !strings.Contains(r, "EVERY local program") {
+		t.Fatal("the host-wide option does not state what it costs")
+	}
+	if !strings.Contains(r, "keep reporting") {
+		t.Fatal("the profile option does not warn that the preflight cannot see it")
 	}
 }
 
@@ -6457,18 +6500,29 @@ func TestSetupHintsDoNotTellOperatorsToWeakenTheHost(t *testing.T) {
 		}
 	}
 
-	// The AppArmor hint leads with the scoped profile and keeps the host-wide
-	// switch as an explicitly-labelled fallback.
+	// The AppArmor hint. This used to require that the SCOPED profile led and
+	// the host-wide switch was the labelled fallback. That ordering was
+	// reversed on 2026-09-12 after measuring it on the distro it was written
+	// for: checkUserns reads the sysctl and cannot observe the profile, so
+	// leading with the profile blocked `make install` on a correctly-configured
+	// stock Ubuntu 24.04.5 host and gave the operator no way forward that the
+	// preflight would accept.
+	//
+	// What this finding was actually about survives intact, and is what is
+	// pinned here: koto must never hand over a host-weakening command without
+	// saying what it costs, and must not drop the narrower option. Ordering is
+	// no longer the assertion — being honest about both is.
 	prof := strings.Index(body, "/etc/apparmor.d/koto")
 	wide := strings.Index(body, "apparmor_restrict_unprivileged_userns=0")
 	if prof < 0 {
 		t.Fatal("the AppArmor hint no longer offers a per-binary profile")
 	}
-	if wide >= 0 && prof > wide {
-		t.Error("the host-wide AppArmor switch is offered before the scoped profile")
-	}
-	if wide >= 0 && !strings.Contains(body, "EVERY local\\n") {
+	if wide >= 0 && !strings.Contains(body, "EVERY local program") {
 		t.Error("the host-wide switch is offered without saying what it costs")
+	}
+	// Same rule for the other host-weakening hint this file prints.
+	if strings.Contains(body, "MODE=\"0666\"") && !strings.Contains(body, "EVERY local account") {
+		t.Error("the world-accessible /dev/kvm rule is offered without saying what it costs")
 	}
 }
 

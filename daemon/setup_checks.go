@@ -145,22 +145,39 @@ func checkKVM() checkResult { return checkKVMAt("/dev/kvm") }
 
 // kvmRemediation explains how to let the jailed VMM open /dev/kvm.
 //
-// It used to hand the operator MODE="0666" and nothing else. That is Fedora's
-// own default, so on Fedora it changes nothing — but on a distro shipping
-// 0660 root:kvm it opens the host's KVM interface to EVERY local account, and
-// koto's own preflight was the thing telling them to do it without saying so
-// (audit M88). The narrow grant goes first now; the broad one is still offered,
-// because it is what most hosts already have, but it is labelled with its cost.
+// The udev rule goes FIRST, and that reverses audit M88, which put the
+// per-uid ACL grant first on the grounds that MODE="0666" opens the host's
+// KVM interface to every local account. That reasoning still stands as far as
+// it goes — the cost is stated below and the ACL is still offered — but M88
+// was never tested end to end on a distro that actually needs the advice, and
+// on Ubuntu 24.04 the narrow grant fails three separate ways (measured
+// 2026-09-12, stock cloud image):
 //
-// Why a GROUP cannot be the answer: the VMM runs as a per-VM uid inside the
-// daemon's user namespace with a deliberately empty supplementary group set
-// (fcjail.go), and newgidmap can map only the operator's own gid and their
+//  1. setfacl is not installed. The `acl` package is not on a stock cloud
+//     image, so the command koto prints is `command not found` 101 times.
+//  2. It does not survive. /dev/kvm is tagged `uaccess` (70-uaccess.rules),
+//     so systemd-logind owns its ACL and rewrites it on session changes —
+//     the manual entries were gone within minutes and the next VM to boot
+//     failed with "Error creating KVM object: Permission denied … configured
+//     on the /dev/kvm file's ACL". The old "recreated at boot" caveat badly
+//     understated this: it is every login, not every boot.
+//  3. checkKVMAt cannot see it. The check tests the mode bits, which an ACL
+//     never sets, so even a working grant reads as `✗ /dev/kvm` and blocks
+//     the install — and `koto setup --check` calls a healthy host broken.
+//
+// So leading with it sent operators down a path that is silently wrong, and
+// sent them there while telling them the alternative was the risky one. The
+// rule that works is the one that ships as Fedora's default; it persists
+// across boots by construction, needs no extra package, and is what the check
+// actually tests for.
+//
+// Why a GROUP cannot be the answer either: the VMM runs as a per-VM uid inside
+// the daemon's user namespace with a deliberately empty supplementary group
+// set (fcjail.go), and newgidmap can map only the operator's own gid and their
 // /etc/subgid range — the host's kvm gid is in neither, so no group membership
-// reaches the jailed process. What does reach it is a POSIX ACL naming the host
-// uids the VMM actually runs as, which are a contiguous band: the operator's
-// subuid base plus fcJailBaseUID, one per possible group port.
+// reaches the jailed process.
 func kvmRemediation() string {
-	lo, hi := "<subuid-base+30000>", "<that+100>"
+	lo, hi := "<subuid-base+30000-1>", "<that+100>"
 	if me, err := user.Current(); err == nil {
 		if start, _, err := subIDRange("/etc/subuid", me.Username, me.Uid); err == nil {
 			// fcJailHostUID, not start+fcJailBaseUID: the jail uid is a
@@ -174,15 +191,21 @@ func kvmRemediation() string {
 	return "The jailed microVM monitor runs as an unprivileged per-VM id with no\n" +
 		"supplementary groups, so being in the kvm group does not reach it.\n" +
 		"\n" +
-		"Preferred — grant only the ids koto's VMMs run as (" + lo + ".." + hi + "):\n" +
-		"  for u in $(seq " + lo + " " + hi + "); do sudo setfacl -m u:$u:rw /dev/kvm; done\n" +
-		"  # /dev/kvm is recreated at boot, so re-run this from a boot unit or a\n" +
-		"  # udev RUN+= rule to make it persistent.\n" +
-		"\n" +
-		"Fallback — world access. This is Fedora's default, but on a multi-user\n" +
-		"host it lets EVERY local account open /dev/kvm, not only koto:\n" +
 		"  echo 'KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\"' | sudo tee /etc/udev/rules.d/99-kvm.rules\n" +
-		"  sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm"
+		"  sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm\n" +
+		"\n" +
+		"This is Fedora's default and it persists across reboots. The cost: on a\n" +
+		"multi-user host it lets EVERY local account open /dev/kvm, not only koto.\n" +
+		"\n" +
+		"If that matters more to you than the trouble it takes, grant only the ids\n" +
+		"koto's VMMs run as (" + lo + ".." + hi + ") with a POSIX ACL instead:\n" +
+		"  sudo apt install -y acl   # not on a stock cloud image\n" +
+		"  for u in $(seq " + lo + " " + hi + "); do sudo setfacl -m u:$u:rw /dev/kvm; done\n" +
+		"Be aware of what that costs you in return, because koto cannot smooth it\n" +
+		"over: /dev/kvm is usually tagged `uaccess`, so systemd-logind rewrites its\n" +
+		"ACL on session changes and wipes the grant — you need a udev rule that\n" +
+		"re-applies it, not a one-off command. And this check reads the mode bits,\n" +
+		"so it will keep reporting /dev/kvm as unusable even once the grant works."
 }
 
 func checkKVMAt(path string) checkResult {
@@ -288,6 +311,50 @@ func checkContainerEngine() []checkResult {
 	return res
 }
 
+// usernsRemediation explains how to give the VMM jail unprivileged user
+// The host-wide sysctl goes FIRST, reversing audit L9 (2026-09-11) for
+// the same reason M88 was reversed in kvmRemediation: the scoped remedy
+// it led with cannot satisfy this check, so it blocked the install it was
+// meant to unblock. Measured 2026-09-12 on a stock Ubuntu 24.04.5 image:
+// the AppArmor profile genuinely WORKS — /usr/local/bin/koto reports
+// `userns ok … clone3 ok` with this sysctl still at 1 — but this check
+// reads the sysctl, not the profile, so it keeps answering "restricted"
+// and `make install` keeps exiting 2. There is no way to verify the
+// profile from here either: /sys/kernel/security/apparmor/profiles is
+// root-only, and the binary the profile names does not exist yet on a
+// first install, so an empirical probe would fail for a host that is in
+// fact configured correctly.
+//
+// So koto leads with the thing that works on a stock image and states
+// what it costs, and keeps the profile as the narrower option for
+// operators willing to live with a preflight that under-reports it.
+func usernsRemediation() string {
+	return "Ubuntu 23.10+ blocks unprivileged user namespaces, which the microVM\n" +
+		"monitor's jail needs. Give them back:\n" +
+		"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n" +
+		"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n" +
+		"\n" +
+		"The cost: this is host-wide, so EVERY local program gets unprivileged\n" +
+		"user namespaces back, not just koto.\n" +
+		"\n" +
+		"The narrower alternative is an AppArmor profile granting the capability\n" +
+		"to the koto binary alone. It works — but this check reads the sysctl\n" +
+		"above and cannot see the profile, so it will keep reporting `restricted`\n" +
+		"and `koto install` will keep refusing. Use it only if you are prepared\n" +
+		"to install with the sysctl set to 0 and then restore it afterwards:\n" +
+		"  sudo tee /etc/apparmor.d/koto >/dev/null <<'EOF'\n" +
+		"  abi <abi/4.0>,\n" +
+		"  include <tunables/global>\n" +
+		"  profile koto /usr/local/bin/koto flags=(unconfined) {\n" +
+		"    userns,\n" +
+		"  }\n" +
+		"  EOF\n" +
+		"  sudo apparmor_parser -r /etc/apparmor.d/koto\n" +
+		"\n" +
+		"Running the VMM unjailed (KOTO_FC_NOJAIL=1) avoids the restriction too,\n" +
+		"but drops a layer of host protection."
+}
+
 // checkUserns covers the nested-userns requirement: the Firecracker VMM jail
 // (fcjail.go) re-execs into a fresh user namespace from inside a rootless
 // container, which some distros disable outright.
@@ -302,34 +369,7 @@ func checkUserns() checkResult {
 	}
 	if r, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil &&
 		strings.TrimSpace(string(r)) == "1" {
-		// The SCOPED remedy first (audit 2026-09-11 L9). The sysctl this used
-		// to lead with turns Ubuntu's AppArmor gate off for the whole machine —
-		// every local program gets unprivileged user namespaces back, not just
-		// koto — which is a poor trade to make on an operator's behalf for one
-		// daemon's needs, and it is not scoped by the koto unit, its
-		// RestrictNamespaces allowlist, or the daemon's uid. An AppArmor
-		// profile granting `userns,` to this one binary is the same capability
-		// with none of the reach.
-		return failCheck("nested userns", "restricted by AppArmor",
-			"Ubuntu 23.10+ blocks unprivileged user namespaces, which the microVM\n"+
-				"monitor's jail needs. Grant them to koto ALONE with an AppArmor profile:\n"+
-				"  sudo tee /etc/apparmor.d/koto >/dev/null <<'EOF'\n"+
-				"  abi <abi/4.0>,\n"+
-				"  include <tunables/global>\n"+
-				"  profile koto /usr/local/bin/koto flags=(unconfined) {\n"+
-				"    userns,\n"+
-				"  }\n"+
-				"  EOF\n"+
-				"  sudo apparmor_parser -r /etc/apparmor.d/koto\n"+
-				"\n"+
-				"If your kernel is too old for per-profile userns rules, the host-wide\n"+
-				"switch works but gives unprivileged user namespaces back to EVERY local\n"+
-				"program, not just koto — a deliberate weakening of the machine:\n"+
-				"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"+
-				"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n"+
-				"\n"+
-				"Running the VMM unjailed (KOTO_FC_NOJAIL=1) avoids the restriction too,\n"+
-				"but drops a layer of host protection — prefer the profile.")
+		return failCheck("nested userns", "restricted by AppArmor", usernsRemediation())
 	}
 	return okCheck("nested userns", "allowed ("+strings.TrimSpace(string(b))+")")
 }
