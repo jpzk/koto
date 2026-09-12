@@ -1,6 +1,6 @@
 ---
 name: release-test
-description: Clean-machine release test — provision a throwaway Fedora VM and take koto through all three stages (build from source → install → wizard), asserting the invariants at each boundary. Use before tagging a release, or after changing the Makefile stages, koto install, or the setup wizard.
+description: Clean-machine release test — provision a throwaway VM (Fedora, Ubuntu or Arch Linux) and take koto through all three stages (build from source → install → wizard), asserting the invariants at each boundary. Use before tagging a release, or after changing the Makefile stages, koto install, or the setup wizard.
 ---
 
 # Clean-machine release test
@@ -13,6 +13,19 @@ install bugs have historically come from (`8d1e33c`).
 Do this in a throwaway VM, never on the dev host: the install stage writes
 root-owned system state (`/var/lib/koto`, `/etc/koto/koto.env`, a systemd unit)
 and the build stage is a ~40-minute kernel compile.
+
+**Three distro targets, and they are not interchangeable.** The install bugs
+this test exists to catch have all been distro-shaped — where `/dev/kvm`'s mode
+comes from, how `newuidmap` carries its privilege, whether unprivileged user
+namespaces are gated, whether `/etc/subuid` is populated at all. Fedora alone
+proves almost nothing about the other two, which is exactly how a daemon that
+could not start on Ubuntu shipped (see the Ubuntu variant below).
+
+| target | status | section |
+|---|---|---|
+| Fedora 44 | verified, the default path below | §1 |
+| Ubuntu 24.04 LTS | verified 2026-09-12 on 24.04.5 | §1 → Ubuntu variant |
+| Arch Linux | **NOT YET RUN** — expectations derived from the code only | §1 → Arch variant |
 
 ## The three stages under test
 
@@ -174,6 +187,64 @@ Ubuntu's default base of 100000 that is **129999**, not 130000.
 Clean build time on 4 vCPU / 8 G was **~24 min** (fcassets ~18, Go binaries
 ~6), not the ~40 min the Fedora note estimates.
 
+### Arch variant — NOT YET RUN (expectations derived from the code, 2026-09-12)
+
+**Nothing below has been observed on a real Arch host.** It is written from the
+check implementations in `setup_checks.go` / `userns.go` so that whoever runs it
+first has a set of predictions to falsify rather than a blank page. Treat every
+"expect" as a hypothesis, and **rewrite this section with what actually
+happened** — including the predictions that held, since a confirmed expectation
+is the only thing that turns this into a verified target.
+
+Same QEMU invocation; swap the image and the login user:
+
+```sh
+# Official Arch cloud image (cloud-init capable, qcow2, signed).
+# Verified 2026-09-12 that this URL serves a real qcow2; dated build behind it
+# was Arch-Linux-x86_64-cloudimg-20260901.583572.qcow2.
+IMG_URL=https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2
+# Verify the signature before use — Arch publishes .SHA256 and .sig alongside.
+# cloud-init user: arch (confirm this; do not assume it matches Fedora/Ubuntu)
+```
+
+Dependencies — the preflight probes `git make curl`, `mkfs.ext4 e2fsck
+resize2fs`, `tar`, `newuidmap newgidmap`, `podman` + rootless + `pasta`:
+
+```sh
+sudo pacman -Sy --needed --noconfirm git make curl tar e2fsprogs shadow podman passt
+```
+
+What to expect, and why:
+
+- **`✗ subuid/subgid` is the one that is likely to differ from both other
+  distros, and is the interesting prediction.** Fedora and Ubuntu both populate
+  `/etc/subuid` for the first user; Arch is not expected to. `subIDRange`
+  fails closed and prints its own fix, so confirm the preflight says
+  `no range for <user>` and that applying what it prints is sufficient:
+  `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>`.
+  If that is needed, the VMM's host uid becomes `100000 + 30000 - 1 = 129999`,
+  the same as Ubuntu — see the uid note in the Ubuntu variant.
+- **`✗ /dev/kvm mode 0660`** is expected, since the 0660 root:kvm node comes
+  from systemd's own `50-udev-default.rules` rather than anything
+  distro-specific. The udev remediation koto prints should apply unchanged.
+  Worth checking whether Arch also tags `/dev/kvm` with `uaccess` — if it does,
+  the ACL alternative is as fragile there as it is on Ubuntu.
+- **`✓ nested userns` is expected to pass outright.** Arch has no AppArmor by
+  default, so `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` should
+  not exist and `checkUserns` falls through to `user.max_user_namespaces`.
+  If you are on `linux-hardened`, expect the opposite and a different
+  remediation path.
+- **`newuidmap`'s privilege source is the thing to record.** Write down what
+  `ls -l /usr/bin/newuidmap` and `getcap /usr/bin/newuidmap` say. The installer
+  now adapts either way (`installCapBounding` branches on the setuid bit), so
+  this should not break — but it is exactly the axis that broke Ubuntu, and
+  Arch is a third data point for whether the detection is right. Then assert
+  the daemon actually came up, using the same three commands the Ubuntu section
+  lists: `systemctl is-active koto`, an empty `journalctl -u koto | grep -i
+  newuidmap`, and the VMM uid from `ps`.
+
+Everything from §2 onward is distro-independent and applies unchanged.
+
 ## 2. Ship the source — and nothing else
 
 ```sh
@@ -217,7 +288,9 @@ over.
 ## 3. Stage 1 — build from source
 
 ```sh
-sudo dnf install -y git make          # cloud image has podman, not these
+sudo dnf install -y git make          # Fedora: cloud image has podman, not these
+# Ubuntu: sudo apt install -y git make podman passt uidmap
+# Arch:   sudo pacman -S --needed --noconfirm git make curl tar e2fsprogs shadow podman passt
 cd ~/koto && nohup setsid make build > ~/build.log 2>&1 < /dev/null &
 ```
 
@@ -325,10 +398,10 @@ test is worse than no instruction. `koto setup --check` offers `snap install
 node --classic --channel=22` and nvm; both work, but snap's read-only
 `/snap/node` makes `npm -g` land somewhere the unit's PATH does not see.
 
-On Fedora:
+On Fedora (and Arch, which also ships a current node):
 
 ```sh
-sudo dnf install -y nodejs npm tmux
+sudo dnf install -y nodejs npm tmux          # Fedora; Arch: sudo pacman -S nodejs npm tmux
 sudo npm i -g @anthropic-ai/claude-code      # preflight's `! claude not found`
 # npm -g lands claude in /usr/local/bin, on the unit's PATH. A claude from the
 # NATIVE installer (~/.local/bin) is what `koto install` must record as
