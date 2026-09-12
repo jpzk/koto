@@ -25,7 +25,7 @@ could not start on Ubuntu shipped (see the Ubuntu variant below).
 |---|---|---|
 | Fedora 44 | verified, the default path below | §1 |
 | Ubuntu 24.04 LTS | verified 2026-09-12 on 24.04.5 | §1 → Ubuntu variant |
-| Arch Linux | **NOT YET RUN** — expectations derived from the code only | §1 → Arch variant |
+| Arch Linux | verified 2026-09-12 (kernel 7.2.4, systemd 261.3) | §1 → Arch variant |
 
 ## The three stages under test
 
@@ -187,63 +187,100 @@ Ubuntu's default base of 100000 that is **129999**, not 130000.
 Clean build time on 4 vCPU / 8 G was **~24 min** (fcassets ~18, Go binaries
 ~6), not the ~40 min the Fedora note estimates.
 
-### Arch variant — NOT YET RUN (expectations derived from the code, 2026-09-12)
+### Arch variant — verified 2026-09-12 (kernel 7.2.4, systemd 261.3)
 
-**Nothing below has been observed on a real Arch host.** It is written from the
-check implementations in `setup_checks.go` / `userns.go` so that whoever runs it
-first has a set of predictions to falsify rather than a blank page. Treat every
-"expect" as a hypothesis, and **rewrite this section with what actually
-happened** — including the predictions that held, since a confirmed expectation
-is the only thing that turns this into a verified target.
+This section used to hold predictions derived from the code. It has been
+rewritten with what actually happened, as it instructed. **Two of the four
+predictions were wrong**, and they were wrong in the direction that matters:
+Arch turned out to need LESS remediation than guessed, while breaking something
+no prediction covered. Worth remembering the next time a section like this is
+written from reading rather than running.
 
 Same QEMU invocation; swap the image and the login user:
 
 ```sh
-# Official Arch cloud image (cloud-init capable, qcow2, signed).
-# Verified 2026-09-12 that this URL serves a real qcow2; dated build behind it
-# was Arch-Linux-x86_64-cloudimg-20260901.583572.qcow2.
+# Official cloud image. Verify it — upstream publishes .SHA256 and .sig.
 IMG_URL=https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2
-# Verify the signature before use — Arch publishes .SHA256 and .sig alongside.
-# cloud-init user: arch (confirm this; do not assume it matches Fedora/Ubuntu)
+curl -fsSL -o img.sha256 "$IMG_URL.SHA256" && sha256sum -c img.sha256
+# cloud-init works; define the user explicitly rather than relying on the
+# image default — `arch`, groups `wheel`. The base image is 533 MB / 2 GiB
+# virtual, so the overlay must supply the room (30 G, as elsewhere).
 ```
 
-Dependencies — the preflight probes `git make curl`, `mkfs.ext4 e2fsck
-resize2fs`, `tar`, `newuidmap newgidmap`, `podman` + rootless + `pasta`:
+**Dependencies — `rsync` is NOT in base, and §2 fails without it.** The source
+transfer dies with `bash: line 1: rsync: command not found` before anything
+koto-related runs. Nor are git, make, podman or passt:
 
 ```sh
-sudo pacman -Sy --needed --noconfirm git make curl tar e2fsprogs shadow podman passt
+sudo pacman -Syu --noconfirm --needed git make podman passt tmux rsync
 ```
 
-What to expect, and why:
+**pacman needs a resume-capable transfer over QEMU's SLIRP, or it will not
+complete.** The first attempt failed outright — `Recv failure: Connection reset
+by peer`, `OpenSSL ... unexpected eof while reading`, `Operation too slow. Less
+than 1 bytes/sec` — across a 306 MiB upgrade, and pacman has no retry of its
+own. This is the same user-mode-NAT flow-state drop documented under Gotchas for
+`podman pull`, not an Arch or mirror problem. Fix it before installing anything:
 
-- **`✗ subuid/subgid` is the one that is likely to differ from both other
-  distros, and is the interesting prediction.** Fedora and Ubuntu both populate
-  `/etc/subuid` for the first user; Arch is not expected to. `subIDRange`
-  fails closed and prints its own fix, so confirm the preflight says
-  `no range for <user>` and that applying what it prints is sufficient:
-  `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 <user>`.
-  If that is needed, the VMM's host uid becomes `100000 + 30000 - 1 = 129999`,
-  the same as Ubuntu — see the uid note in the Ubuntu variant.
-- **`✗ /dev/kvm mode 0660`** is expected, since the 0660 root:kvm node comes
-  from systemd's own `50-udev-default.rules` rather than anything
-  distro-specific. The udev remediation koto prints should apply unchanged.
-  Worth checking whether Arch also tags `/dev/kvm` with `uaccess` — if it does,
-  the ACL alternative is as fragile there as it is on Ubuntu.
-- **`✓ nested userns` is expected to pass outright.** Arch has no AppArmor by
-  default, so `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` should
-  not exist and `checkUserns` falls through to `user.max_user_namespaces`.
-  If you are on `linux-hardened`, expect the opposite and a different
-  remediation path.
-- **`newuidmap`'s privilege source is the thing to record.** Write down what
-  `ls -l /usr/bin/newuidmap` and `getcap /usr/bin/newuidmap` say. The installer
-  now adapts either way (`installCapBounding` branches on the setuid bit), so
-  this should not break — but it is exactly the axis that broke Ubuntu, and
-  Arch is a third data point for whether the detection is right. Then assert
-  the daemon actually came up, using the same three commands the Ubuntu section
-  lists: `systemctl is-active koto`, an empty `journalctl -u koto | grep -i
-  newuidmap`, and the VMM uid from `ps`.
+```sh
+sudo sed -i "/^\[options\]/a XferCommand = /usr/bin/curl -L -C - -f -o %o %u --retry 20 --retry-delay 3 --retry-all-errors --connect-timeout 20 --speed-time 30 --speed-limit 1000" /etc/pacman.conf
+```
 
-Everything from §2 onward is distro-independent and applies unchanged.
+With that in place the same transaction completed with zero errors.
+
+**Reboot after the upgrade.** `-Syu` pulls systemd and the kernel on a rolling
+distro (261.3 and 7.2.4 here). This test is partly ABOUT systemd directive
+behaviour, so measuring against a systemd that is installed but not running
+makes the result meaningless.
+
+What the predictions got right and wrong:
+
+- **`/etc/subuid` — WRONG.** Predicted unpopulated; it is populated,
+  `arch:100000:65536`, same base as Ubuntu. So the VMM host uid is **129999**,
+  not Fedora's 554287. No `usermod --add-subuids` needed.
+- **`/dev/kvm` — WRONG.** Predicted 0660 from systemd's own default rule; it
+  ships **0666**, like Fedora. No udev remediation needed, and the preflight
+  passes it outright.
+- **nested userns — right.** No AppArmor, `max_user_namespaces=15388`,
+  `✓ nested userns allowed`.
+- **`newuidmap` — file capabilities** (`cap_setuid=ep`, mode 0755), i.e.
+  Fedora-shaped, not Ubuntu's setuid-root. `installCapBounding` therefore
+  renders the tight `CapabilityBoundingSet=CAP_SETUID CAP_SETGID`. Third data
+  point for that branch, and it confirms Ubuntu is the outlier.
+
+Net: **Arch's preflight is all green out of the box**, like Fedora and unlike
+Ubuntu. Nothing in §4 needs remediation.
+
+**The thing no prediction covered, and the reason this run was worth doing:
+`~/.local/bin` is not on Arch's default login PATH**, and the claude native
+installer modifies no shell rc file. Arch's default is
+`/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/bin/site_perl:...` — no
+`$HOME/.local/bin`, where Fedora supplies it from `/etc/profile.d` and Ubuntu's
+`~/.profile` adds it when the directory exists. So a correctly installed claude
+was invisible to koto, and `koto install` reported `! claude not found`,
+recorded no `KOTO_CLAUDE_BIN` and rendered `ProtectHome=yes` with no bind —
+breaking OAuth refresh on a machine where the operator had done everything
+right. Fixed 2026-09-12 (claudeBinResolve falls back to the native installer's
+location; install, preflight, login and the daemon probe now share one
+resolver). **Assert it rather than assuming**, since this is the distro that
+proves the fallback works:
+
+```sh
+grep -E "^ProtectHome|^BindReadOnlyPaths" /etc/systemd/system/koto.service
+#   ProtectHome=tmpfs
+#   BindReadOnlyPaths=/home/arch/.local/bin /home/arch/.local/share/claude/versions
+sudo grep ^KOTO_CLAUDE_BIN /etc/koto/koto.env
+koto claude-login --status      # token refresh via … (KOTO_CLAUDE_BIN …)
+```
+
+**clone3 is BLOCKED here** (`clone3 is blocked (seccomp — systemd
+RestrictNamespaces=); placing VMs in their cgroup after fork instead`), on
+systemd 261 — siding with Fedora against Ubuntu 24.04, which allowed it. So the
+post-fork placement fallback is the common case across distros and clone-time
+placement the exception; `cgroup=on` either way.
+
+Timing on 4 vCPU / 4 G: pre-pull ~18 min (the 4.63 GB fcuvm image, at ~29
+MB/min over SLIRP — the slow leg by far), `make build` 25m48s.
 
 ## 2. Ship the source — and nothing else
 
