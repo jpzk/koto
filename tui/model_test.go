@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // 2026-09-11 L71: the prompt ring was keyed by GROUP while a group multiplexes
@@ -483,5 +485,73 @@ func TestSkippedPrewarmStillMarksLoaded(t *testing.T) {
 		if m.prewarming[g] == 0 {
 			t.Errorf("%s is neither loaded nor prewarming — the bar would hang on it", g)
 		}
+	}
+}
+
+// drainStartupCmds runs the cmds a startup history wave produces, feeding
+// every vpPrewarmMsg back through Update the way bubbletea would. Only
+// BatchMsg is unwrapped and only vpPrewarmMsg is fed back — a tea.Tick would
+// otherwise sleep for real, and no other message matters to the progress bar.
+func drainStartupCmds(t *testing.T, m Model, cmds []tea.Cmd) Model {
+	t.Helper()
+	for i := 0; i < 500 && len(cmds) > 0; i++ {
+		cmd := cmds[0]
+		cmds = cmds[1:]
+		if cmd == nil {
+			continue
+		}
+		switch msg := cmd().(type) {
+		case tea.BatchMsg:
+			cmds = append(cmds, msg...)
+		case vpPrewarmMsg:
+			updated, next := m.Update(msg)
+			m = updated.(Model)
+			cmds = append(cmds, next)
+		}
+	}
+	return m
+}
+
+// The launch progress bar must reach N/N on a large fleet. Every group's
+// initial history page lands in one wave at startup, and the prewarm bound
+// (prewarmMaxInFlight) refuses most of them — a refusal that reported nothing
+// hung a deployed 27-group TUI at "loading 13/27" with all 27 History RPCs
+// already answered.
+func TestStartupProgressBarCompletesOnALargeFleet(t *testing.T) {
+	const fleet = 27
+
+	m := newModel("", 200000)
+	m.width, m.height = 200, 50
+	names := make([]string, 0, fleet)
+	for i := 0; i < fleet; i++ {
+		g := fmt.Sprintf("g%02d", i)
+		names = append(names, g)
+		m.groups[g] = GroupInfo{}
+		m.subscribed[g] = true // as listMsg's initial pass leaves it
+	}
+	m.cur = names[0]
+
+	// One history page per group, all in flight together.
+	var cmds []tea.Cmd
+	for _, g := range names {
+		page := historyMsg{group: g, gen: m.histGen[g], before: 0, events: []Event{
+			{Event: "prompt", Text: "hi", Group: g},
+			{Event: "done", Text: "# heading\n\nbody text\n", Group: g},
+		}}
+		updated, cmd := m.Update(page)
+		m = updated.(Model)
+		cmds = append(cmds, cmd)
+	}
+	m = drainStartupCmds(t, m, cmds)
+
+	var missing []string
+	for _, g := range names {
+		if !m.loadedGroups[g] {
+			missing = append(missing, g)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("progress bar stuck at %d/%d — never loaded: %v",
+			len(m.loadedGroups), fleet, missing)
 	}
 }
