@@ -80,15 +80,48 @@ func claudeBinEnviron(bin string) []string {
 // the link is the stable name and the target is not.
 func claudeBinResolve() (string, error) {
 	p, err := exec.LookPath("claude")
-	if err != nil {
-		return "", err
+	if err == nil {
+		if !filepath.IsAbs(p) {
+			if abs, aerr := filepath.Abs(p); aerr == nil {
+				p = abs
+			}
+		}
+		return p, nil
 	}
-	if !filepath.IsAbs(p) {
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
+	// PATH is not the whole answer, because the NORMAL install is the one PATH
+	// is least likely to cover. The native installer writes
+	// ~/.local/bin/claude and modifies no shell rc file, and whether that
+	// directory is on PATH is a distro decision koto has no say in: Fedora
+	// supplies it from /etc/profile.d, Ubuntu's ~/.profile adds it when the
+	// directory exists, and Arch does neither — measured 2026-09-12 on a stock
+	// Arch cloud image, where claude 2.1.269 sat working in ~/.local/bin while
+	// `koto install` reported "claude not found", recorded no KOTO_CLAUDE_BIN,
+	// rendered ProtectHome=yes with no bind, and told the operator to npm-install
+	// a SECOND copy of the thing they already had. OAuth refresh was then broken
+	// on a machine where nothing had been done wrong.
+	//
+	// So a PATH miss falls back to the location the installer actually uses.
+	// Deliberately ONE well-known path rather than a search of plausible
+	// directories: this value is baked into the unit's bind and into koto.env,
+	// so guessing wrong is worse than not guessing, and the native installer's
+	// location is documented rather than inferred.
+	for _, cand := range claudeWellKnownPaths() {
+		if fi, serr := os.Stat(cand); serr == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return cand, nil
 		}
 	}
-	return p, nil
+	return "", err
+}
+
+// claudeWellKnownPaths lists the install locations worth checking when claude
+// is not on PATH. Only the native installer's own location: see
+// claudeBinResolve for why this is not a wider search.
+func claudeWellKnownPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	return []string{filepath.Join(home, ".local", "bin", "claude")}
 }
 
 // protectHomeHides says whether systemd's ProtectHome= makes this path
@@ -189,7 +222,7 @@ func claudeBindDirs(bin string, hidden func(string) bool) []string {
 func claudeBinCheck() (string, error) {
 	bin := claudeBin()
 	if !filepath.IsAbs(bin) {
-		p, err := exec.LookPath(bin)
+		p, err := claudeBinResolve()
 		if err != nil {
 			return bin, fmt.Errorf("%q is not on the daemon's PATH (%s) and %s is unset — "+
 				"re-run `koto install` with claude installed so the path is recorded",
