@@ -8,10 +8,7 @@ koto also has ACL with roles and permissions on system configuration and groups.
 
 ## Quick start
 
-Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
-host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora 44+,
-Ubuntu 24.04+ or Arch (rolling), and git, make and podman or docker (just for
-building). Verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. Verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
 
 ```sh
 # Fedora 44+
@@ -27,14 +24,6 @@ make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks 
 make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
-
-**On Ubuntu the preflight flags two things, and `make install` handles one of
-them for you.** Unprivileged user namespaces — which the microVM jailer needs —
-are blocked by AppArmor, and install offers to grant them **to the koto binary
-alone** with an AppArmor profile: say yes and Ubuntu's protection stays on for
-every other program on the machine. `/dev/kvm` ships `0660`, so that one still
-needs the udev rule install prints, applied by hand. Neither needs a reboot.
-Fedora and Arch need neither: their preflight is green out of the box.
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
 an install without changing anything. `make fetch` replaces `make build` once
