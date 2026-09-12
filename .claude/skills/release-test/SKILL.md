@@ -375,28 +375,53 @@ claude-code declares `"node": ">=22.0.0"`, but npm installs it anyway with
 only an `EBADENGINE` warning and `claude --version` works, so nothing looks
 wrong until the proxy shells out to refresh a token. Verified trap on 24.04:
 
-Use the official tarball — it needs no third-party apt repo and lands npm's
-global prefix in `/usr/local`, which keeps the unit on plain `ProtectHome=yes`
-(a claude under `$HOME` is the other path, and makes `koto install` render
-`ProtectHome=tmpfs` + `BindReadOnlyPaths=` instead — worth testing at least
-once, but it is not what this leg is for):
+**Install claude BEFORE `make install`, using the NATIVE installer, because
+that is the configuration real operators run.** `koto install` resolves claude
+once, at install time, and renders the unit's filesystem namespace from what it
+finds — so installing claude afterwards produces a *different and weaker* setup
+that no reinstall happens automatically to correct.
+
+The native installer puts claude under `$HOME` (`~/.local/bin/claude`, pointing
+into `~/.local/share/claude/versions/<v>`), which `ProtectHome=yes` hides. That
+is the case `installHomeScoping` exists for, and the one to test:
 
 ```sh
-V=$(curl -fsSL https://nodejs.org/dist/latest-v22.x/ | grep -o 'node-v22[0-9.]*-linux-x64.tar.xz' | head -1)
-curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/latest-v22.x/$V
-sudo tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-  --exclude=README.md --exclude=LICENSE --exclude=CHANGELOG.md
-sudo apt install -y tmux
-sudo /usr/local/bin/npm i -g @anthropic-ai/claude-code   # verified: 2.1.269
+curl -fsSL https://claude.ai/install.sh | bash     # → ~/.local/bin/claude
+export PATH="$HOME/.local/bin:$PATH"               # koto install reads THIS shell's PATH
+# ...then run `make install`, and assert the unit picked it up:
+grep -E "^ProtectHome|^BindReadOnlyPaths" /etc/systemd/system/koto.service
+#   ProtectHome=tmpfs
+#   BindReadOnlyPaths=/home/<u>/.local/bin /home/<u>/.local/share/claude/versions
+koto claude-login --status        # must say: token refresh via … (KOTO_CLAUDE_BIN …)
 ```
 
-**This used to say `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E
-bash -`.** Don't restore it: koto's own preflight hint deliberately refuses to
-print that one-liner, on the grounds that it makes a third party's HTTPS content
-a root shell — a release test that instructs the opposite of the thing under
-test is worse than no instruction. `koto setup --check` offers `snap install
-node --classic --channel=22` and nvm; both work, but snap's read-only
-`/snap/node` makes `npm -g` land somewhere the unit's PATH does not see.
+Both directories must be bound — the PATH entry's dir *and* the symlink
+target's dir — and they must be DIRECTORIES, so a native-installer update that
+writes a new `versions/<v>` and re-points the link keeps working without a
+reinstall. Verified as the production configuration on the dev host 2026-09-12.
+
+**The npm -g variant (`sudo npm i -g @anthropic-ai/claude-code`) is the
+EXCEPTION, not the default.** It lands claude in `/usr/local/bin`, which
+`ProtectHome` does not hide, so the unit stays on plain `ProtectHome=yes` and
+the whole bind path goes untested. Both 2026-09-12 Ubuntu runs used it and
+therefore did **not** exercise the normal configuration — don't repeat that. If
+you do test this variant, note that installing it *after* `make install`
+records no `KOTO_CLAUDE_BIN` at all and the daemon falls back to resolving a
+bare `claude` against the unit's PATH; that happens to work from
+`/usr/local/bin` and would not from anywhere else.
+
+Two traps that are not about location:
+
+- **`apt install nodejs` gives v18.** claude-code declares `"node": ">=22.0.0"`
+  but npm installs anyway with only an `EBADENGINE` warning and
+  `claude --version` works, so nothing looks wrong until the proxy shells out
+  to refresh a token. Get node 22 first (tarball from nodejs.org into
+  `/usr/local`, or `snap install node --classic --channel=22`, or nvm).
+- **Do not use `curl … | sudo -E bash -` for the NodeSource repo**, which an
+  older version of this skill printed. koto's own preflight deliberately
+  refuses to print that one-liner, on the grounds that it makes a third
+  party's HTTPS content a root shell; a release test instructing the opposite
+  of the thing under test is worse than no instruction.
 
 On Fedora (and Arch, which also ships a current node):
 
