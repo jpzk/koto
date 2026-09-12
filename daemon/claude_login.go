@@ -937,9 +937,17 @@ func authOAuthLogin(ac *authCtx) error {
 	// name-based execution is a defect on its own terms: it makes the check
 	// mean less than it reads as, and this child inherits the operator's
 	// terminal for an interactive credential flow.
-	claudeBin, err := exec.LookPath("claude")
+	// claudeBinResolve, not a bare LookPath: the native installer's
+	// ~/.local/bin is off PATH on some distros (Arch), and this was the THIRD
+	// place resolving claude independently — the install action and the
+	// preflight had already been unified on it, so the login step still
+	// refusing to start meant `koto setup` reported `✓ claude` and then failed
+	// its own auth step over the same binary.
+	claudeBin, err := claudeBinResolve()
 	if err != nil {
-		return errors.New("`claude` not found on PATH — install it with `npm i -g @anthropic-ai/claude-code`")
+		return errors.New("`claude` not found on PATH, nor at the native installer's " +
+			"~/.local/bin/claude — install it from https://claude.ai/install.sh, " +
+			"or with `npm i -g @anthropic-ai/claude-code`")
 	}
 	// <state>/.claude is where `claude` will write, so it is where the OAuth
 	// token lands. Establish that boundary rather than inheriting whatever is
