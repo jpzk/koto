@@ -55,6 +55,10 @@ func TestClaudeBinEnvironPrependsDir(t *testing.T) {
 func TestClaudeBinCheckAnswersFromTheDaemonsVantagePoint(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)
+	// HOME must be isolated too, or claudeBinResolve's native-installer
+	// fallback finds the REAL claude on the developer's machine and "absent"
+	// stops meaning absent.
+	t.Setenv("HOME", t.TempDir())
 
 	// Absent entirely: must name KOTO_CLAUDE_BIN as the fix, since a bare
 	// PATH lookup is the weaker fallback configuration.
@@ -107,5 +111,63 @@ func TestClaudeBinCheckAnswersFromTheDaemonsVantagePoint(t *testing.T) {
 		t.Error("a dangling symlink must read as broken — this is the nvm bump case")
 	} else if !strings.Contains(err.Error(), "koto install") {
 		t.Errorf("the error must name the actual remedy (re-render the unit), got: %v", err)
+	}
+}
+
+// 2026-09-12: PATH is not the whole answer, and the normal install is the one
+// PATH is least likely to cover. The native installer writes ~/.local/bin/claude
+// and touches no shell rc file; whether that directory is on PATH is a distro
+// decision — Fedora supplies it via /etc/profile.d, Ubuntu's ~/.profile adds it
+// when present, Arch does neither. Measured on a stock Arch cloud image: a
+// working claude 2.1.269 in ~/.local/bin while `koto install` said "claude not
+// found", recorded no KOTO_CLAUDE_BIN, rendered ProtectHome=yes with no bind,
+// and advised installing a SECOND copy via npm. OAuth refresh was broken on a
+// machine where the operator had done everything right.
+func TestClaudeBinResolveFallsBackToTheNativeInstallerPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	empty := t.TempDir()
+	t.Setenv("PATH", empty) // nothing on PATH, as on Arch
+
+	if _, err := claudeBinResolve(); err == nil {
+		t.Fatal("with claude nowhere at all, resolution must fail")
+	}
+
+	// The native installer's layout: ~/.local/bin/claude, no rc file touched.
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	native := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(native, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := claudeBinResolve()
+	if err != nil {
+		t.Fatalf("a claude in the native installer's location must be found even off PATH: %v", err)
+	}
+	if got != native {
+		t.Errorf("resolved %q, want %q", got, native)
+	}
+
+	// PATH still WINS when it has an answer — the fallback must not override an
+	// operator's deliberate choice of a different claude.
+	onPath := filepath.Join(empty, "claude")
+	if err := os.WriteFile(onPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := claudeBinResolve(); err != nil || got != onPath {
+		t.Errorf("PATH must take precedence over the fallback: got %q, %v", got, err)
+	}
+
+	// A non-executable file at the well-known path is not a claude.
+	if err := os.Remove(onPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(native, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claudeBinResolve(); err == nil {
+		t.Error("a non-executable file at the well-known path must not resolve")
 	}
 }

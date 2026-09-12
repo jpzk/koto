@@ -434,7 +434,13 @@ func checkRuntimeTools() []checkResult {
 	// and ProtectHome cannot see ~/.local/bin, execs it by absolute path
 	// (claudebin.go). Whether the DAEMON can run it is `koto claude-login
 	// --status`'s check, not this one's.
-	if p, err := exec.LookPath("claude"); err == nil {
+	// claudeBinResolve, not a bare exec.LookPath: it also knows the native
+	// installer's location, which is where the NORMAL install puts claude and
+	// which some distros leave off PATH entirely (Arch). Using a different
+	// resolver here than installClaudeBin uses meant the preflight reported
+	// "claude not found" about a binary the very next step went on to find,
+	// record in koto.env and bind into the unit — measured 2026-09-12.
+	if p, err := claudeBinResolve(); err == nil {
 		out = append(out, okCheck("claude", p))
 	} else {
 		hint := "Needed only for Claude-subscription (OAuth) auth, where the proxy shells\n" +
