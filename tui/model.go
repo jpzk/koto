@@ -529,7 +529,10 @@ type Model struct {
 	// render-pre-warm so the status bar can show a launch progress bar
 	// until everything is hot. Set on vpPrewarmMsg — every history page
 	// (current group included) renders on a prewarm goroutine now, so the
-	// arrival of the prewarm result IS the load-complete signal.
+	// arrival of the prewarm result IS the load-complete signal. The one
+	// other setter is startPrewarm's SKIP path: a prewarm refused by the
+	// in-flight bound sends no vpPrewarmMsg, and the bar must not wait on a
+	// goroutine that was deliberately never started.
 	// The bar disappears once len(loadedGroups) == len(m.groups). On
 	// listMsg's toReload pass, any reloading groups are removed so they
 	// re-enter the loading state.
@@ -1719,6 +1722,14 @@ func (m Model) prewarmGroupCmd(group string, cols int, older bool) tea.Cmd {
 // visits it — exactly what a group that was never prewarmed already does. The
 // current group is exempt, because it is the one on screen and its prewarm is
 // what refreshLog's plain-build fallback is waiting for.
+//
+// A SKIP MUST STILL MARK THE GROUP LOADED. loadedGroups is set on
+// vpPrewarmMsg, so a skipped prewarm sends no completion signal and the
+// launch progress bar sticks forever — observed on a 27-group fleet, where
+// the four in-flight slots meant every history page past the first wave was
+// skipped and the TUI hung at "loading 13/27" with all 27 History RPCs long
+// since answered. Skipping the render is a decision that the group will not
+// be prewarmed, which is exactly the "loaded enough" the bar is asking about.
 const (
 	prewarmMaxInFlight = 4
 	prewarmMaxPerGroup = 2
@@ -1735,6 +1746,7 @@ func (m *Model) prewarmInFlight() int {
 func (m *Model) startPrewarm(group string, cols int, older bool) tea.Cmd {
 	if group != m.cur {
 		if m.prewarming[group] >= prewarmMaxPerGroup || m.prewarmInFlight() >= prewarmMaxInFlight {
+			m.loadedGroups[group] = true
 			return nil
 		}
 	}

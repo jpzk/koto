@@ -439,3 +439,49 @@ func TestInputLayoutIsWindowed(t *testing.T) {
 		t.Errorf("an ordinary value was windowed: %d runes, cursor %d", len(got), p)
 	}
 }
+
+// A prewarm refused by the L119 bound must still mark the group loaded.
+// loadedGroups is otherwise set only on vpPrewarmMsg, so a skipped prewarm
+// left the launch progress bar waiting on a goroutine that was deliberately
+// never started: observed on a deployed 27-group fleet, where every history
+// page past the first wave of four was skipped and the TUI hung at
+// "loading 13/27" with all 27 History RPCs already answered.
+func TestSkippedPrewarmStillMarksLoaded(t *testing.T) {
+	m := newModel("", 200000)
+	m.cur = "cur"
+	m.width, m.height = 200, 50
+	m.groups["cur"] = GroupInfo{}
+	m.lines = append(m.lines, logLine{kind: "response", group: "cur", text: "hello"})
+
+	names := []string{"cur"}
+	for i := 0; i < 30; i++ {
+		g := fmt.Sprintf("g%02d", i)
+		names = append(names, g)
+		m.groups[g] = GroupInfo{}
+		m.lines = append(m.lines, logLine{kind: "response", group: g, text: "hello"})
+	}
+	// Every group's initial history page lands before any prewarm completes,
+	// so all but the first few are refused by the in-flight bound.
+	skipped := 0
+	for _, g := range names {
+		if cmd := m.startPrewarm(g, 80, false); cmd == nil {
+			skipped++
+			if !m.loadedGroups[g] {
+				t.Fatalf("%s: prewarm skipped but the group was not marked loaded", g)
+			}
+		}
+	}
+	if skipped == 0 {
+		t.Fatal("no prewarm was skipped — the test never reached the path it pins")
+	}
+	// The progress bar completes once every group is loaded; the ones that
+	// DID start a prewarm report through vpPrewarmMsg as before.
+	for _, g := range names {
+		if m.loadedGroups[g] {
+			continue
+		}
+		if m.prewarming[g] == 0 {
+			t.Errorf("%s is neither loaded nor prewarming — the bar would hang on it", g)
+		}
+	}
+}
