@@ -1,13 +1,10 @@
 # koto
 
-**koto is a microVM-based agent sandbox harness which runs under Linux with KVM capability.**
+**koto is a microVM-based and hardware-isolated agent sandbox harness.** It runs under Linux with KVM capability and CPU with hardware virtualization (Intel VT or AMD-V). koto uses the well-established and reputable Firecracker VM solution developed and used by AWS. Currently it's based on Anthropic's Claude CLI. 
 
-Every claude-based group (1 agent runtime = 1 linux kernel = 1 workspace = 1 shared terminal) runs in its own **Firecracker microVM** — hardware-isolated by **KVM**,
-so the guest kernel is the security boundary — with **no network by default**;
-a credential-injecting proxy is the only path to the LLM API, and agents never
-see a real credential. Host side is a Go daemon running as a rootless
-systemd service; the TUI and `koto ctl` are plain host binaries speaking gRPC
-over mTLS with the daemon. It's simply superior to OpenClaw, NanoClaw at least with respect to security ;).
+Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and 1 shared terminal. The group can be configured in different sizes with different vCPUs, memory and storage. Other configurations include LLM model, network access, root sudo. The daemon speaks a gRPC protocol and can be commanded by `koto ctl` or `koto tui`. 
+
+koto also has ACL with roles and permissions on system configuration and groups. koto is not a batteries included personal agent but an open source, self-host able secure foundation to compartmentalize different prototypes.
 
 ## Quick start
 
