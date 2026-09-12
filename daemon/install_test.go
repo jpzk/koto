@@ -350,3 +350,81 @@ func TestProtectHomeHides(t *testing.T) {
 		t.Error("no bind dirs for an empty or bare-name claude")
 	}
 }
+
+// 2026-09-12: the capability bounding set has to be rendered from the host,
+// because newuidmap gets its privilege two different ways and the directive
+// means something different in each. Fedora ships it with file capabilities,
+// where CAP_SETUID+CAP_SETGID is tight and sufficient. Debian/Ubuntu ship it
+// setuid-root, where the bounding set IS the helper's whole permitted set —
+// and clamped to those two it cannot open or write /proc/<pid>/uid_map, so
+// the DAEMON NEVER STARTS (measured on 24.04.5: newuidmap: open of uid_map
+// failed: Permission denied, crash-looping every 5s). A release test that
+// predated the directive is how that shipped, so pin both renderings.
+func TestCapBoundingFollowsNewuidmapPrivilege(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user")
+	}
+	orig := newuidmapIsSetuid
+	defer func() { newuidmapIsSetuid = orig }()
+
+	newuidmapIsSetuid = func() bool { return false }
+	fileCaps := renderUnit(me, stateDirOf(), "")
+	if !strings.Contains(fileCaps, "CapabilityBoundingSet=CAP_SETUID CAP_SETGID\n") {
+		t.Errorf("file-capability host should get the tight set\n---\n%s", fileCaps)
+	}
+
+	newuidmapIsSetuid = func() bool { return true }
+	setuid := renderUnit(me, stateDirOf(), "")
+	if !strings.Contains(setuid, "CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SYS_ADMIN") {
+		t.Errorf("setuid-root host needs DAC_OVERRIDE (open uid_map) and SYS_ADMIN (write it)\n---\n%s", setuid)
+	}
+	// Widening is not surrender: the capabilities koto never wants raised by
+	// anything it execs stay out of the set on both kinds of host.
+	for _, unit := range []string{fileCaps, setuid} {
+		for _, never := range []string{"CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_MODULE", "CAP_SYS_BOOT", "CAP_SYS_RAWIO"} {
+			if strings.Contains(unit, never) {
+				t.Errorf("bounding set must never include %s\n---\n%s", never, unit)
+			}
+		}
+	}
+	// NoNewPrivileges=no matters MORE on a setuid host, not less: `yes` makes
+	// the kernel ignore the setuid bit outright.
+	if !strings.Contains(setuid, "NoNewPrivileges=no") {
+		t.Error("setuid-root host still needs NoNewPrivileges=no")
+	}
+}
+
+// 2026-09-12: the /dev/kvm remediation printed a uid band one higher than the
+// one the VMMs actually run as, so applying it verbatim left main — the group
+// that always exists — unable to open /dev/kvm. fcJailUID returns a NAMESPACE
+// id; unsBootstrap maps ns id 1 onto the subuid base, so the host uid is one
+// lower. Pin the conversion and pin that the printed band covers main.
+func TestKVMRemediationBandCoversMainsVMMUID(t *testing.T) {
+	const subuidStart = 100000 // Ubuntu 24.04's default base for the first user
+
+	// main is always at PORT_BASE, so its jail uid is the bottom of the band.
+	nsUID, err := fcJailUID(PORT_BASE)
+	if err != nil {
+		t.Fatalf("fcJailUID(PORT_BASE): %v", err)
+	}
+	if nsUID != fcJailBaseUID {
+		t.Fatalf("main's jail uid = %d, want the band base %d", nsUID, fcJailBaseUID)
+	}
+
+	hostUID := fcJailHostUID(subuidStart, nsUID)
+	if want := subuidStart + fcJailBaseUID - 1; hostUID != want {
+		t.Errorf("host uid for main = %d, want %d (ns id 1 maps to the subuid base, so the band sits one lower)", hostUID, want)
+	}
+
+	lo := fcJailHostUID(subuidStart, fcJailBaseUID)
+	hi := fcJailHostUID(subuidStart, fcJailBaseUID+ctlMaxSpawn)
+	if hostUID < lo || hostUID > hi {
+		t.Errorf("main's VMM uid %d is outside the granted band %d..%d — the ACL would apply cleanly and the fleet still could not boot", hostUID, lo, hi)
+	}
+	// The last spawnable group must be covered too, or the band is short at
+	// the top instead of the bottom.
+	if last := fcJailHostUID(subuidStart, fcJailBaseUID+ctlMaxSpawn); last > hi {
+		t.Errorf("band top %d does not cover the last group's uid %d", hi, last)
+	}
+}
