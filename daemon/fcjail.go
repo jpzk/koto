@@ -95,6 +95,25 @@ func fcJailUID(proxyPort int) (int, error) {
 	return uid, nil
 }
 
+// fcJailHostUID maps a per-VM jail uid — which fcJailUID returns as a
+// NAMESPACE id — to the host uid the VMM process actually runs as.
+//
+// The -1 is the whole reason this exists in one place. unsBootstrap installs a
+// two-entry uid_map (userns.go): ns id 0 → the operator's own uid, then ns ids
+// 1..count → the /etc/subuid range starting at `start`. So namespace id n lands
+// on start+n-1, not start+n, and the per-VM band on the host is
+// [start+fcJailBaseUID-1, …] rather than [start+fcJailBaseUID, …].
+//
+// Getting that off by one is not cosmetic: the /dev/kvm preflight prints an ACL
+// grant for exactly this band (kvmRemediation), and a band shifted up by one
+// excludes the FIRST group's uid — which is `main`, the group that always
+// exists — so the grant looks right, applies cleanly, and the fleet still
+// cannot boot. Measured 2026-09-12 on Ubuntu 24.04.5: the remediation granted
+// 130000..130100 while main's VMM ran as 129999 and Firecracker exited with
+// "Error creating KVM object: Permission denied … configured on the /dev/kvm
+// file's ACL".
+func fcJailHostUID(subuidStart, nsUID int) int { return subuidStart + nsUID - 1 }
+
 // fcJailEnabled reports whether Firecracker should be jailed. On by default;
 // KOTO_FC_NOJAIL=1 opts out (unjailed, VMM runs as the daemon uid) for
 // environments that can't create nested user namespaces or for debugging.
