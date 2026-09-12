@@ -184,16 +184,52 @@ setup:
 KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download
 MANIFEST      := dist/artifacts.sha256
 
-# Release assets are named <installed basename>-<arch>.zst — one mechanical
-# rule with no exceptions, so `koto` becomes koto-x86_64.zst and
-# fcassets/rootfs.img becomes rootfs.img-x86_64.zst. The arch is in the name so
-# a future arm64 build can sit in the same release rather than needing a second
-# one; koto is x86_64-only today and checkPlatform enforces that, so this is
+# Release assets are named <basename>-<version>-<arch>.zst, and the VERSION is
+# the one that belongs to the thing inside, not koto's:
+#
+#   koto-1.0.0-x86_64.zst            koto's own release version
+#   koto-tui-1.0.0-x86_64.zst        ditto
+#   firecracker-1.16.1-x86_64.zst    from `firecracker --version`
+#   vmlinux-6.1.176-x86_64.zst       from the "Linux version" string in the image
+#   rootfs.img-fedora44-x86_64.zst   from /usr/lib/os-release inside the image
+#
+# Each is READ BACK OUT of the built artifact rather than copied from the build
+# script's pin, so a name can never claim a version the bytes do not have —
+# which is the only failure mode that matters for a file people download and
+# trust. (/etc/os-release is a symlink on Fedora and debugfs does not follow
+# links, hence /usr/lib/os-release.)
+#
+# The arch is in the name so an arm64 build can sit in the same release later;
+# koto is x86_64-only today and checkPlatform enforces that, so it is
 # forward-looking rather than currently variable. Everything is zstd-compressed,
-# including the binaries: the rootfs goes 2.0G -> ~240M (it is mostly sparse and
-# highly compressible), and doing the same to the rest costs nothing and keeps
-# one code path instead of two.
+# including the binaries: the rootfs goes 2.0G -> 216M, and doing the same to
+# the rest costs seconds and keeps one code path instead of two.
 DIST_ARCH     ?= x86_64
+
+# assetver <path> — the version that belongs in that artifact's asset name.
+define assetver
+$$(case "$(1)" in \
+  */firecracker) ./$(1) --version 2>/dev/null | head -1 | sed 's/^Firecracker v//' ;; \
+  */vmlinux)     grep -a -m1 -oE 'Linux version [0-9][^ ]*' $(1) | cut -d' ' -f3 ;; \
+  */rootfs.img)  debugfs -R "cat /usr/lib/os-release" $(1) 2>/dev/null | \
+                   awk -F= '/^ID=/{gsub(/"/,"",$$2);i=$$2} /^VERSION_ID=/{gsub(/"/,"",$$2);v=$$2} END{print i v}' ;; \
+  *)             echo "$(DIST_VERSION)" | sed 's/^v//' ;; \
+esac)
+endef
+
+# Release signing. SHA256SUMS travels with the assets, so on its own it catches
+# corruption and nothing else: whoever can replace an asset can replace it too.
+# What makes it mean something is a detached signature verified against a key
+# that arrives over GIT rather than over the same connection as the bytes —
+# the same reasoning that makes dist/artifacts.sha256 worth committing.
+#
+# RELEASE_KEY_FPR is pinned deliberately. `gpg --verify` succeeds for a good
+# signature from ANY key in the keyring, so verifying without checking WHICH key
+# signed is close to not verifying at all; fetch matches the VALIDSIG line
+# against this fingerprint and rejects anything else.
+RELEASE_PUBKEY := dist/koto-release.pub.asc
+RELEASE_KEY_FPR ?= $(strip $(shell sed -n 's/^# *fingerprint: *//p' $(RELEASE_PUBKEY) 2>/dev/null))
+KOTO_SIGN_KEY  ?= $(RELEASE_KEY_FPR)
 # Compression level for release assets. Measured on the 2 GiB rootfs, which
 # dominates a release: -3 gives 242 MiB in 3s, -12 gives 216 MiB in 16s. The
 # 11% is worth 13 seconds once per release; the levels above that trade a lot
@@ -222,22 +258,53 @@ fetch:
 	@# next `make install` to copy to /usr/local/bin as root. --proto pins
 	@# https on the request and on every redirect (curl's default lets a
 	@# redirect downgrade to http).
+	@command -v gpg >/dev/null || { echo "gpg is required to verify the release signature"; exit 1; }
+	@test -s $(RELEASE_PUBKEY) || { \
+	  echo "$(RELEASE_PUBKEY) is missing - cannot verify who signed this release."; \
+	  echo "build from source instead: make build"; exit 1; }
+	@test -n "$(RELEASE_KEY_FPR)" || { \
+	  echo "$(RELEASE_PUBKEY) has no '# fingerprint: <FPR>' line - refusing to"; \
+	  echo "accept a signature from whatever key happens to be in it"; exit 1; }
 	@stage=$$(mktemp -d .fetch.XXXXXX) && trap 'rm -rf "$$stage"' EXIT && \
 	base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
-	echo "==> fetching koto $(DIST_VERSION) ($(DIST_ARCH)) from $$base (staging in $$stage)"; \
+	echo "==> fetching koto $(DIST_VERSION) ($(DIST_ARCH)) from $$base"; \
 	mkdir -p "$$stage/$(FCASSETS)"; \
+	get() { curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$2" "$$1" || { \
+	  echo "failed to fetch $$1"; exit 1; }; }; \
+	get "$$base/SHA256SUMS" "$$stage/SHA256SUMS"; \
+	get "$$base/SHA256SUMS.asc" "$$stage/SHA256SUMS.asc"; \
+	echo "==> verifying the signature on SHA256SUMS"; \
+	GNUPGHOME="$$stage/gnupg"; export GNUPGHOME; mkdir -p -m 700 "$$GNUPGHOME"; \
+	gpg --batch --quiet --import "$(CURDIR)/$(RELEASE_PUBKEY)" || { \
+	  echo "could not import $(RELEASE_PUBKEY)"; exit 1; }; \
+	gpg --batch --status-fd=1 --verify "$$stage/SHA256SUMS.asc" "$$stage/SHA256SUMS" 2>/dev/null \
+	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
+	  echo "!! SHA256SUMS is not signed by $(RELEASE_KEY_FPR)"; \
+	  echo "   Nothing was downloaded into the tree. Do not use these artifacts."; exit 1; }; \
+	echo "    good signature from $(RELEASE_KEY_FPR)"; \
+	echo "==> fetching the assets it names"; \
 	for dest in $(ARTIFACTS); do \
-	  asset=$$(basename $$dest)-$(DIST_ARCH).zst; \
+	  n=$$(basename $$dest); \
+	  asset=$$(awk -v p="$$n-" -v s="-$(DIST_ARCH).zst" \
+	    'index($$2,p)==1 && $$2 ~ s"$$" {print $$2}' "$$stage/SHA256SUMS" | head -1); \
+	  test -n "$$asset" || { echo "SHA256SUMS names no asset for $$dest"; exit 1; }; \
 	  echo "    $$asset -> $$dest"; \
-	  curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/$$asset" "$$base/$$asset" || { \
-	    echo "failed to fetch $$asset from $$base"; exit 1; }; \
+	  get "$$base/$$asset" "$$stage/$$asset"; \
+	done; \
+	echo "==> checking the assets against the signed SHA256SUMS"; \
+	( cd "$$stage" && sha256sum -c SHA256SUMS ) >/dev/null || { \
+	  echo "!! an asset does not match the signed SHA256SUMS"; exit 1; }; \
+	for dest in $(ARTIFACTS); do \
+	  n=$$(basename $$dest); \
+	  asset=$$(awk -v p="$$n-" -v s="-$(DIST_ARCH).zst" \
+	    'index($$2,p)==1 && $$2 ~ s"$$" {print $$2}' "$$stage/SHA256SUMS" | head -1); \
 	  zstd -qdf --sparse "$$stage/$$asset" -o "$$stage/$$dest" || exit 1; \
 	  rm -f "$$stage/$$asset"; \
 	done; \
 	chmod +x "$$stage/koto" "$$stage/koto-tui" "$$stage/$(FCASSETS)/firecracker" "$$stage/$(FCASSETS)/vmlinux"; \
-	echo "==> verifying in $$stage"; \
+	echo "==> checking the unpacked artifacts against the COMMITTED manifest"; \
 	( cd "$$stage" && sha256sum -c "$(CURDIR)/$(MANIFEST)" ) || { \
-	  echo "!! checksum mismatch — nothing was installed into the tree"; exit 1; }; \
+	  echo "!! checksum mismatch - nothing was installed into the tree"; exit 1; }; \
 	for f in $(ARTIFACTS); do \
 	  mv -f "$$stage/$$f" "$$f"; \
 	done
@@ -284,7 +351,9 @@ dist: $(ARTIFACTS)
 	@mkdir -p $(DIST_DIR)
 	@echo "==> packaging koto $(DIST_VERSION) for $(DIST_ARCH)"
 	@for a in $(ARTIFACTS); do \
-	  out="$(DIST_DIR)/$$(basename $$a)-$(DIST_ARCH).zst"; \
+	  v=$(call assetver,$$a); \
+	  test -n "$$v" || { echo "could not read a version out of $$a"; exit 1; }; \
+	  out="$(DIST_DIR)/$$(basename $$a)-$$v-$(DIST_ARCH).zst"; \
 	  zstd -$(DIST_ZSTD_LVL) -T0 -q -f -o "$$out" "$$a" || exit 1; \
 	  printf '    %-26s %6s MiB -> %s\n' "$$a" \
 	    "$$(( $$(stat -c %s "$$out") / 1048576 ))" "$$out"; \
@@ -299,6 +368,23 @@ dist: $(ARTIFACTS)
 	@# connection as the bytes it vouches for.
 	@( cd $(DIST_DIR) && sha256sum *-$(DIST_ARCH).zst > SHA256SUMS )
 	@echo "    SHA256SUMS over the uploaded assets"
+	@# Signing is SEPARATE and may happen elsewhere. The release key should not
+	@# have to live on a build host, so dist signs only if the secret key
+	@# happens to be here and otherwise tells you what to sign and where to put
+	@# the result. `make release` refuses to publish without the signature, so
+	@# this cannot be forgotten — only deferred.
+	@if gpg --list-secret-keys "$(KOTO_SIGN_KEY)" >/dev/null 2>&1; then \
+	  rm -f $(DIST_DIR)/SHA256SUMS.asc; \
+	  gpg --batch --yes --local-user "$(KOTO_SIGN_KEY)" --armor --detach-sign \
+	    --output $(DIST_DIR)/SHA256SUMS.asc $(DIST_DIR)/SHA256SUMS \
+	    && echo "    SHA256SUMS.asc signed by $(KOTO_SIGN_KEY)"; \
+	else \
+	  echo "    SHA256SUMS is NOT signed - the release key is not on this host."; \
+	  echo "      sign it wherever the key lives:"; \
+	  echo "        gpg --armor --detach-sign -o SHA256SUMS.asc SHA256SUMS"; \
+	  echo "      then save the signature as $(DIST_DIR)/SHA256SUMS.asc"; \
+	  echo "      'make release' verifies it against $(RELEASE_KEY_FPR) before publishing."; \
+	fi
 	@# Preserve the manifest's comment header — it is the documentation for
 	@# what this file is and why it is committed — and replace only the entries.
 	@{ grep '^#' $(MANIFEST) 2>/dev/null || true; sha256sum $(ARTIFACTS); } > $(MANIFEST).new \
@@ -331,15 +417,30 @@ release:
 	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
 	@test -d $(DIST_DIR) || { echo "$(DIST_DIR) does not exist - run 'make dist' first"; exit 1; }
 	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - re-run 'make dist'"; exit 1; }
+	@test -s $(DIST_DIR)/SHA256SUMS.asc || { echo "$(DIST_DIR)/SHA256SUMS.asc is missing - re-run 'make dist'"; exit 1; }
 	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
 	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
 	  echo "describes the bytes you are about to publish"; exit 1; }
+	@# Verify the signature HERE, before anything is published. The signature
+	@# may have been produced on another machine and pasted in, so this is the
+	@# first point at which anyone checks it is (a) valid and (b) from the
+	@# pinned key. Publishing a release nobody can install is worse than not
+	@# publishing one.
+	@command -v gpg >/dev/null || { echo "gpg is required to verify the signature before publishing"; exit 1; }
+	@G=$$(mktemp -d) && trap 'rm -rf "$$G"' EXIT && \
+	GNUPGHOME="$$G" gpg --batch --quiet --import $(RELEASE_PUBKEY) && \
+	GNUPGHOME="$$G" gpg --batch --status-fd=1 --verify \
+	  $(DIST_DIR)/SHA256SUMS.asc $(DIST_DIR)/SHA256SUMS 2>/dev/null \
+	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
+	  echo "!! $(DIST_DIR)/SHA256SUMS.asc is not a good signature from $(RELEASE_KEY_FPR)"; \
+	  echo "   Nothing was published."; exit 1; }
+	@echo "==> signature verified: $(RELEASE_KEY_FPR)"
 	@echo "==> publishing $(DIST_VERSION) ($(DIST_ARCH)):"
-	@for f in $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS; do echo "      $$f"; done
+	@for f in $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc; do echo "      $$f"; done
 	@if gh release view $(DIST_VERSION) >/dev/null 2>&1; then \
 	  if [ "$(FORCE)" = "1" ]; then \
 	    echo "==> release $(DIST_VERSION) exists - uploading with --clobber (FORCE=1)"; \
-	    gh release upload $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS --clobber; \
+	    gh release upload $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc --clobber; \
 	  else \
 	    echo "!! release $(DIST_VERSION) already exists."; \
 	    echo "   Publishing different bytes under a tag people have already checksummed"; \
@@ -348,7 +449,7 @@ release:
 	    exit 1; \
 	  fi; \
 	else \
-	  gh release create $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS \
+	  gh release create $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc \
 	    --title "koto $(DIST_VERSION)" --notes-file $(DIST_DIR)/NOTES.md; \
 	fi
 	@echo "next:  commit dist/VERSION and $(MANIFEST) so 'make fetch' resolves this release"
