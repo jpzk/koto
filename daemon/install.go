@@ -921,18 +921,7 @@ RestrictSUIDSGID=no
 DevicePolicy=closed
 DeviceAllow=/dev/kvm rw
 
-# Capability bounding set. Be precise about what this does and does not buy,
-# because the obvious reading is wrong: the daemon runs as an unprivileged
-# user and holds no capabilities of its own, and the kernel RESETS cap_bset to
-# the full set inside a newly created user namespace (kernel/user_namespace.c),
-# so this does not constrain the daemon after its own userns bootstrap, nor
-# the jailed VMM. What it does constrain is the FILE capabilities of binaries
-# the service execs — which here is exactly newuidmap/newgidmap (cap_setuid,
-# cap_setgid; see userns.go), the one privilege source the daemon genuinely
-# needs. So the set is those two and nothing else, and any OTHER setcap binary
-# on the host stops being usable as a privilege source. NoNewPrivileges must
-# stay "no" for those file caps to be raised at all.
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+%[8]s
 
 # Address families. gRPC/mTLS and the LLM upstream are AF_INET/AF_INET6; every
 # local channel — the per-group proxy sockets, the Firecracker API socket, the
@@ -985,7 +974,7 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, me.Username, me.Uid, gid, envFilePath, stateDir, installCPUQuota(), installHomeScoping(claude))
+`, me.Username, me.Uid, gid, envFilePath, stateDir, installCPUQuota(), installHomeScoping(claude), installCapBounding())
 }
 
 // installHomeScoping renders the unit's view of /home. The default is
@@ -1011,6 +1000,80 @@ func installHomeScoping(claude string) string {
 	b.WriteString("ProtectHome=tmpfs\n")
 	b.WriteString("BindReadOnlyPaths=" + strings.Join(dirs, " "))
 	return b.String()
+}
+
+// installCapBounding renders the capability bounding set, and it has to look
+// at the host to do it, because the two distros koto is tested on hand
+// newuidmap its privilege in two different ways and the directive means
+// something different in each.
+//
+// Be precise about what the bounding set does and does not buy, because the
+// obvious reading is wrong: the daemon runs as an unprivileged user and holds
+// no capabilities of its own, and the kernel RESETS cap_bset to the full set
+// inside a newly created user namespace (kernel/user_namespace.c), so this
+// constrains neither the daemon after its own userns bootstrap nor the jailed
+// VMM. What it constrains is the privilege that binaries the service execs can
+// acquire — which here is exactly newuidmap/newgidmap (userns.go), the one
+// privilege source the daemon genuinely needs.
+//
+// On Fedora those are FILE-CAPABILITY binaries (mode 0755, cap_setuid=ep), so
+// the exec'd helper raises cap_setuid alone and CAP_SETUID+CAP_SETGID is both
+// sufficient and genuinely tight: every OTHER setcap binary on the host stops
+// being usable as a privilege source.
+//
+// On Debian/Ubuntu they are SETUID-ROOT instead (mode 4755, no file caps), and
+// there the bounding set is not a filter on a small file-cap set — it IS the
+// helper's entire permitted set, since a setuid-root exec computes
+// pP' = fP & bset with fP full. Clamped to those same two capabilities the
+// helper cannot even open /proc/<pid>/uid_map (the target sits in an unmapped
+// userns, so the file reads as owned by nobody — needs CAP_DAC_OVERRIDE) and
+// then cannot write it (needs CAP_SYS_ADMIN). Measured 2026-09-12 on 24.04.5:
+// with the tight set the DAEMON NEVER STARTS — `newuidmap: open of uid_map
+// failed: Permission denied` on every restart, a crash-loop with no group able
+// to boot, which is how this shipped unnoticed past a release test that
+// predated the directive.
+//
+// So on a setuid-root host the set is widened to what the helper measurably
+// needs. That is a weaker statement than the Fedora one and is not pretended
+// otherwise — with a setuid-root helper the host has handed it full root and
+// no bounding set can take that back — but it still denies the service the
+// capabilities koto never wants raised by anything it execs (CAP_NET_ADMIN,
+// CAP_NET_RAW, CAP_SYS_MODULE, CAP_SYS_BOOT, CAP_SYS_RAWIO and the rest).
+func installCapBounding() string {
+	caps := "CAP_SETUID CAP_SETGID"
+	note := "# newuidmap/newgidmap carry file capabilities here, so this is the tight set:\n" +
+		"# the helper raises cap_setuid alone and no other setcap binary on the host\n" +
+		"# is usable as a privilege source. NoNewPrivileges must stay \"no\" for those\n" +
+		"# file caps to be raised at all.\n"
+	if newuidmapIsSetuid() {
+		caps += " CAP_DAC_OVERRIDE CAP_SYS_ADMIN"
+		note = "# newuidmap is SETUID-ROOT on this host (Debian/Ubuntu ship it that way),\n" +
+			"# not a file-capability binary, so the bounding set is its entire permitted\n" +
+			"# set rather than a filter over a small one. Clamped to CAP_SETUID+CAP_SETGID\n" +
+			"# it cannot open /proc/<pid>/uid_map (unmapped userns, so the file reads as\n" +
+			"# owned by nobody) or write it, and the daemon crash-loops at startup — see\n" +
+			"# installCapBounding. These four are what it measurably needs; everything\n" +
+			"# koto never wants raised (NET_ADMIN, NET_RAW, SYS_MODULE, SYS_BOOT, …) is\n" +
+			"# still denied. NoNewPrivileges must stay \"no\" or the setuid bit is ignored.\n"
+	}
+	return "# Capability bounding set.\n" + note + "CapabilityBoundingSet=" + caps
+}
+
+// newuidmapIsSetuid reports whether the newuidmap on this host gets its
+// privilege from the setuid bit rather than from file capabilities. A host
+// with no newuidmap at all answers false and gets the tight set: the install
+// preflight already refuses that host, and the tight set is the safer default
+// to leave behind.
+var newuidmapIsSetuid = func() bool {
+	p, err := exec.LookPath("newuidmap")
+	if err != nil {
+		return false
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeSetuid != 0
 }
 
 // stateDirOf is the unit's WorkingDirectory and its one writable path. It is
