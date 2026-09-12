@@ -37,3 +37,6 @@ fcguest/koto-fcagent
 
 # personal todo list, never part of the project
 todo.txt
+
+# release build output (make dist); nothing here is checked in
+/dist/

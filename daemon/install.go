@@ -217,34 +217,52 @@ var reproducibleArtifacts = []string{"koto", "koto-tui"}
 // distReleased reports whether this tree carries a published release, i.e.
 // whether there is a manifest to expect entries in. Mirrors the Makefile's
 // `fetch` guard: dist/VERSION absent, empty or "unreleased" means no.
+// distReleased reports whether this tree corresponds to a published release,
+// which is what decides whether a missing manifest is a warning or a refusal.
+//
+// The signal is the MANIFEST'S OWN CONTENT, not a separate version file. It used
+// to read dist/VERSION; nothing under dist/ is checked in any more (dist/ is
+// build output), and one file that answers both "is this a release" and "what
+// are the hashes" cannot disagree with itself the way two files could.
+// artifactManifest is the committed checksum file, relative to the repo root.
+// It is the trust anchor for `make fetch`: the checksums arrive over git rather
+// than over the same connection as the artifacts they vouch for. It sits at the
+// root rather than under dist/, because dist/ is build output and is gitignored.
+const artifactManifest = "artifacts.sha256"
+
 func distReleased(root string) bool {
-	b, err := os.ReadFile(filepath.Join(root, "dist", "VERSION"))
+	b, err := os.ReadFile(filepath.Join(root, artifactManifest))
 	if err != nil {
 		return false
 	}
-	v := strings.TrimSpace(string(b))
-	return v != "" && v != "unreleased"
+	for _, ln := range strings.Split(string(b), "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "#") {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyArtifactsUI(root string, u *setupUI) error {
 	released := distReleased(root)
-	b, err := os.ReadFile(filepath.Join(root, "dist", "artifacts.sha256"))
+	b, err := os.ReadFile(filepath.Join(root, artifactManifest))
 	if err != nil {
 		// An unreadable manifest is NOT an absent one. A permission error or a
 		// short read on a file that is there says something is wrong with the
 		// tree, and answering it by installing unverified is the failure the
 		// manifest exists to prevent.
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("dist/artifacts.sha256 exists but cannot be read: %w\n"+
-				"  refusing to install unverified artifacts — fix the file (or `git checkout dist/artifacts.sha256`)", err)
+			return fmt.Errorf("%s exists but cannot be read: %w\n"+
+				"  refusing to install unverified artifacts — fix the file (or `git checkout %s`)",
+				artifactManifest, err, artifactManifest)
 		}
 		if released {
-			return fmt.Errorf("no dist/artifacts.sha256 in %s, but dist/VERSION names a release\n"+
+			return fmt.Errorf("no %s in %s, but this tree is a released one\n"+
 				"  the manifest is committed to the repo and is what makes a fetched artifact trustworthy —\n"+
-				"  restore it with `git checkout dist/artifacts.sha256` and re-run", root)
+				"  restore it with `git checkout %s` and re-run", artifactManifest, root, artifactManifest)
 		}
 		if u != nil {
-			u.warn("no dist/artifacts.sha256 in %s — installing artifacts unverified", root)
+			u.warn("no %s in %s — installing artifacts unverified", artifactManifest, root)
 		}
 		return nil // pre-release tree → nothing to hold it to
 	}
@@ -263,11 +281,11 @@ func verifyArtifactsUI(root string, u *setupUI) error {
 			}
 		}
 		if len(uncovered) > 0 {
-			return fmt.Errorf("dist/artifacts.sha256 has no entry for %s, but dist/VERSION names a release\n"+
+			return fmt.Errorf("%s has no entry for %s, but this tree is a released one\n"+
 				"  those are the reproducible artifacts and the ones installed root-owned onto PATH —\n"+
 				"  a manifest that does not cover them verifies nothing that matters.\n"+
-				"  restore it with `git checkout dist/artifacts.sha256` and re-run",
-				strings.Join(uncovered, " and "))
+				"  restore it with `git checkout "+artifactManifest+"` and re-run",
+				artifactManifest, strings.Join(uncovered, " and "))
 		}
 	}
 	checked, skipped := 0, []string{}
@@ -282,7 +300,7 @@ func verifyArtifactsUI(root string, u *setupUI) error {
 			return err
 		}
 		if got != sum {
-			return fmt.Errorf("%s does not match dist/artifacts.sha256 (got %s…, manifest %s…)\n"+
+			return fmt.Errorf("%s does not match "+artifactManifest+" (got %s…, manifest %s…)\n"+
 				"  refusing to install it — re-run `make fetch` (or `make build`) and check `make verify`", a, got[:12], sum[:12])
 		}
 		checked++
@@ -290,12 +308,12 @@ func verifyArtifactsUI(root string, u *setupUI) error {
 	if u != nil {
 		switch {
 		case checked == 0:
-			u.warn("dist/artifacts.sha256 has no entries — installing all %d artifacts unverified", len(artifacts))
+			u.warn("%s has no entries — installing all %d artifacts unverified", artifactManifest, len(artifacts))
 		case len(skipped) > 0:
-			u.warn("verified %d artifact(s) against dist/artifacts.sha256; %s not covered by it",
+			u.warn("verified %d artifact(s) against "+artifactManifest+"; %s not covered by it",
 				checked, strings.Join(skipped, ", "))
 		default:
-			u.info("verified all %d artifacts against dist/artifacts.sha256", checked)
+			u.info("verified all %d artifacts against %s", checked, artifactManifest)
 		}
 	}
 	return nil
