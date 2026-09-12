@@ -303,6 +303,24 @@ cd ~/koto && nohup setsid make build > ~/build.log 2>&1 < /dev/null &
 
 ## 4. Stage 2 — install
 
+**Install claude FIRST — the realistic state is that it is already there.**
+Anyone installing koto is already a Claude Code user, so on a real host claude
+predates koto rather than following it, and `koto install` resolves it once
+from the installing shell's PATH and renders the unit's filesystem namespace
+around what it finds. Install it afterwards and you get a materially different
+unit that nothing will correct on its own. Do this before the command below
+(details and assertions in §6):
+
+```sh
+curl -fsSL https://claude.ai/install.sh | bash     # → ~/.local/bin/claude
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Testing the absent-claude path is also worth doing — it is a real first-run
+state and the preflight warns `! claude not found` rather than failing, since
+API-key auth never execs it. But it is the SECOND case to cover, not the
+default, and if you only run one, run this one.
+
 ```sh
 cd ~/koto && make install < /dev/null
 ```
@@ -312,6 +330,12 @@ Assert:
 - preflight is all green, `/dev/kvm usable (mode 0666)` among it
 - every privileged action is echoed as a discrete `sudo` line before it runs
 - it ends `service enabled (not started — koto setup starts it)` and `next:  make wizard`
+- with claude already installed under `$HOME`, the unit renders
+  `ProtectHome=tmpfs` plus `BindReadOnlyPaths=` of BOTH the PATH entry's
+  directory and the symlink target's directory, and `koto.env` records
+  `KOTO_CLAUDE_BIN`. Plain `ProtectHome=yes` here means claude was NOT found
+  at install time (or lives outside `$HOME`) — check which before continuing,
+  because the rest of the run will then be exercising the weaker setup
 - **`systemctl is-enabled koto` = `enabled` and `is-active` = `inactive`** —
   enabled-but-stopped is the designed state, because the daemon cannot come up
   before the wizard mints `server.crt`
