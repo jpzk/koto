@@ -34,3 +34,6 @@ fcguest/koto-fcagent
 # installed koto. Guest assets in it are hardlinks to fcassets/.
 /.dev
 .fetch.*/
+
+# personal todo list, never part of the project
+todo.txt
