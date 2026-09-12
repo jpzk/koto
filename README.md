@@ -9,14 +9,23 @@ koto also has ACL with roles and permissions on system configuration and groups.
 ## Quick start
 
 Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
-host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora or
-Ubuntu 24.04+, and git, make and podman or docker (just for building).  
+host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), and git, make
+and podman or docker (just for building).
+
+Verified end to end on **Fedora 44**, **Ubuntu 24.04.5 LTS** and **Arch Linux**
+(kernel 7.2.4 / systemd 261.3), each on 2026-09-12 and each taken from a clean
+cloud image through `make build` → `make install` → `make wizard` to a real
+turn against the Anthropic API. Other distributions are likely fine — the
+daemon needs KVM, unprivileged user namespaces and a `/etc/subuid` range — but
+those three are the ones actually exercised.
 
 ```sh
-# Fedora
+# Fedora 44
 sudo dnf install -y git make podman
 # Ubuntu 24.04+
 sudo apt install -y git make podman passt uidmap
+# Arch Linux
+sudo pacman -S --needed git make podman passt
 
 git clone https://github.com/jpzk/koto && cd koto
 make build      # 1. build koto, koto-tui, firecracker, the guest kernel + rootfs (20-40 min cold)
@@ -25,11 +34,17 @@ make wizard     # 3. mint the TLS identities, connect your Anthropic credentials
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
 
-On Ubuntu, make `/dev/kvm` world-accessible first (see [Install](#install));
-`koto setup` checks for it and prints the fix. Every stage is safe to re-run,
-and `koto setup --check` reports the health of an install without changing
-anything. The [Install](#install) section explains what each stage does and
-the `make fetch` route that replaces `make build` once releases exist.
+**On Ubuntu two host checks fail on a stock image**, and `make install` prints
+the fix for each. `/dev/kvm` ships `0660`, so a udev rule is needed to make it
+world-accessible; and unprivileged user namespaces — which the microVM jailer
+needs — are blocked by AppArmor, which a sysctl re-enables. The userns one is
+the blocking failure, so expect the first run to refuse before it ever asks
+about KVM. Applying exactly what it prints works with no reboot. Fedora and
+Arch need neither: their preflight is green out of the box.
+
+Every stage is safe to re-run, and `koto setup --check` reports the health of
+an install without changing anything. `make fetch` replaces `make build` once
+releases exist.
 
 ## Architecture
 
