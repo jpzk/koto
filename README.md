@@ -9,18 +9,11 @@ koto also has ACL with roles and permissions on system configuration and groups.
 ## Quick start
 
 Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
-host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), and git, make
-and podman or docker (just for building).
-
-Verified end to end on **Fedora 44**, **Ubuntu 24.04.5 LTS** and **Arch Linux**
-(kernel 7.2.4 / systemd 261.3), each on 2026-09-12 and each taken from a clean
-cloud image through `make build` → `make install` → `make wizard` to a real
-turn against the Anthropic API. Other distributions are likely fine — the
-daemon needs KVM, unprivileged user namespaces and a `/etc/subuid` range — but
-those three are the ones actually exercised.
+host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora, Ubuntu
+24.04+ or Arch, and git, make and podman or docker (just for building).
 
 ```sh
-# Fedora 44
+# Fedora
 sudo dnf install -y git make podman
 # Ubuntu 24.04+
 sudo apt install -y git make podman passt uidmap
