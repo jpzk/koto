@@ -3760,7 +3760,7 @@ func TestArtifactVerificationCoversEveryManifestEntry(t *testing.T) {
 	}
 	manifest := func(entries ...string) {
 		body := "# comment line\n" + strings.Join(entries, "\n") + "\n"
-		os.WriteFile(filepath.Join(root, "dist", "artifacts.sha256"), []byte(body), 0o644)
+		os.WriteFile(filepath.Join(root, artifactManifest), []byte(body), 0o644)
 	}
 	all := []string{}
 	for _, a := range artifacts {
@@ -3789,7 +3789,11 @@ func TestArtifactVerificationCoversEveryManifestEntry(t *testing.T) {
 	// An artifact with NO entry is skipped, not refused — vmlinux and
 	// rootfs.img do not reproduce bit-for-bit, so `make build` legitimately
 	// produces bytes the published manifest cannot match.
-	manifest(sums["koto"]+"  koto", sums["fcassets/firecracker"]+"  fcassets/firecracker")
+	// koto and koto-tui must be covered in a tree with any entries at all —
+	// they are the two that land root-owned on PATH — so the uncovered one
+	// here is vmlinux, which is the case this is actually about.
+	manifest(sums["koto"]+"  koto", sums["koto-tui"]+"  koto-tui",
+		sums["fcassets/firecracker"]+"  fcassets/firecracker")
 	os.WriteFile(filepath.Join(root, "fcassets/vmlinux"), []byte("locally built, different bytes"), 0o644)
 	if err := verifyArtifacts(root); err != nil {
 		t.Fatalf("an uncovered artifact was refused: %v", err)
@@ -3805,7 +3809,7 @@ func TestArtifactVerificationCoversEveryManifestEntry(t *testing.T) {
 	if err := verifyArtifacts(root); err != nil {
 		t.Fatalf("an entry-less manifest was fatal: %v", err)
 	}
-	os.Remove(filepath.Join(root, "dist", "artifacts.sha256"))
+	os.Remove(filepath.Join(root, artifactManifest))
 	if err := verifyArtifacts(root); err != nil {
 		t.Fatalf("a missing manifest was fatal: %v", err)
 	}
@@ -4799,8 +4803,7 @@ func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
 		}
 		sums[a] = s
 	}
-	manifestPath := filepath.Join(root, "dist", "artifacts.sha256")
-	versionPath := filepath.Join(root, "dist", "VERSION")
+	manifestPath := filepath.Join(root, artifactManifest)
 	writeManifest := func(entries ...string) {
 		body := "# koto artifact manifest\n" + strings.Join(entries, "\n") + "\n"
 		if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
@@ -4813,29 +4816,19 @@ func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
 	}
 
 	// --- a pre-release tree keeps every exception it had -------------------
-	for _, v := range []string{"", "unreleased", "  unreleased \n"} {
-		if err := os.WriteFile(versionPath, []byte(v), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		writeManifest()
-		if err := verifyArtifacts(root); err != nil {
-			t.Errorf("VERSION=%q: an entry-less manifest was fatal: %v", v, err)
-		}
-		os.Remove(manifestPath)
-		if err := verifyArtifacts(root); err != nil {
-			t.Errorf("VERSION=%q: a missing manifest was fatal: %v", v, err)
-		}
-	}
-	os.Remove(versionPath)
+	// 2026-09-12: "released" is now read from the MANIFEST's own content rather
+	// than a dist/VERSION file, since nothing under dist/ is checked in. An
+	// entry-less or absent manifest is a pre-release tree.
 	writeManifest()
 	if err := verifyArtifacts(root); err != nil {
-		t.Errorf("no VERSION at all: an entry-less manifest was fatal: %v", err)
+		t.Errorf("an entry-less manifest was fatal: %v", err)
 	}
-
+	os.Remove(manifestPath)
+	if err := verifyArtifacts(root); err != nil {
+		t.Errorf("a missing manifest was fatal: %v", err)
+	}
 	// --- a released tree does not ------------------------------------------
-	if err := os.WriteFile(versionPath, []byte("0.4.0\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// Writing entries is what makes the tree "released" now.
 
 	writeManifest(full...)
 	if err := verifyArtifacts(root); err != nil {
@@ -4857,13 +4850,21 @@ func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "koto-tui") {
 		t.Errorf("the refusal does not name the uncovered artifact: %v", err)
 	}
+	// 2026-09-12: the "released tree with a gutted manifest" case is no longer
+	// expressible, and that is a REAL consequence of moving the release signal
+	// into the manifest itself rather than a separate dist/VERSION. An
+	// entry-less or missing manifest now IS a pre-release tree by definition,
+	// so emptying it downgrades verification instead of being caught.
+	//
+	// Recorded rather than quietly dropped. What replaced it is stronger for
+	// the threat that matters: `make fetch` verifies a GPG signature over
+	// SHA256SUMS, against a fingerprint pinned in the Makefile, before any
+	// downloaded byte reaches the tree — so bad artifacts from the network are
+	// stopped at the download rather than at install. What is no longer caught
+	// is a self-inflicted mutation of the repo's own manifest.
 	writeManifest()
-	if err := verifyArtifacts(root); err == nil {
-		t.Error("a released tree accepted an entry-less manifest")
-	}
-	os.Remove(manifestPath)
-	if err := verifyArtifacts(root); err == nil {
-		t.Error("a released tree accepted a missing manifest")
+	if err := verifyArtifacts(root); err != nil {
+		t.Errorf("an entry-less manifest is a pre-release tree now, not a refusal: %v", err)
 	}
 
 	// An unreadable manifest is not an absent one, in either world: something
@@ -4877,10 +4878,9 @@ func TestReleasedTreeRefusesAnAbsentOrGuttedManifest(t *testing.T) {
 		if err := verifyArtifacts(root); err == nil {
 			t.Error("an unreadable manifest was treated as absent")
 		}
-		os.Remove(versionPath)
-		if err := verifyArtifacts(root); err == nil {
-			t.Error("an unreadable manifest was treated as absent in a pre-release tree")
-		}
+		// An unreadable manifest must refuse regardless: it cannot be told
+		// apart from a released one, and guessing "pre-release" there is
+		// exactly the install-unverified outcome the check exists to stop.
 	}
 }
 

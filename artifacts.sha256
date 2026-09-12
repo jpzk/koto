@@ -21,5 +21,8 @@
 #   <sha256>  fcassets/vmlinux
 #   <sha256>  fcassets/rootfs.img
 #
-# Empty until the first release is published to kotovm.com; until then
-# dist/VERSION reads "unreleased" and `make fetch` says so rather than 404ing.
+# Empty until the first release is published. Until then DIST_VERSION in the
+# Makefile reads "unreleased" and `make fetch` says so rather than 404ing, and
+# `koto install` treats a tree with no entries here as pre-release.
+#
+# `make dist` regenerates the entries below from the build it packages.

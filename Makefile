@@ -182,7 +182,7 @@ setup:
 # ships compressed and is checked after decompression, so one manifest serves
 # both routes — `make verify` holds a local build to the same line.
 KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download
-MANIFEST      := dist/artifacts.sha256
+MANIFEST      := artifacts.sha256
 
 # Release assets are named <basename>-<version>-<arch>.zst, and the VERSION is
 # the one that belongs to the thing inside, not koto's:
@@ -219,17 +219,21 @@ endef
 
 # Release signing. SHA256SUMS travels with the assets, so on its own it catches
 # corruption and nothing else: whoever can replace an asset can replace it too.
-# What makes it mean something is a detached signature verified against a key
-# that arrives over GIT rather than over the same connection as the bytes —
-# the same reasoning that makes dist/artifacts.sha256 worth committing.
+# What makes it mean something is a detached signature from a known key.
 #
-# RELEASE_KEY_FPR is pinned deliberately. `gpg --verify` succeeds for a good
-# signature from ANY key in the keyring, so verifying without checking WHICH key
-# signed is close to not verifying at all; fetch matches the VALIDSIG line
-# against this fingerprint and rejects anything else.
-RELEASE_PUBKEY := dist/koto-release.pub.asc
-RELEASE_KEY_FPR ?= $(strip $(shell sed -n 's/^# *fingerprint: *//p' $(RELEASE_PUBKEY) 2>/dev/null))
-KOTO_SIGN_KEY  ?= $(RELEASE_KEY_FPR)
+# The KEY is fetched from the keyserver; the FINGERPRINT is pinned here, and that
+# split is the whole point. Fetching a key by email and trusting whatever comes
+# back makes the keyserver the trust anchor. Fetching by fingerprint makes it a
+# delivery mechanism: the anchor is this line, which arrives over git, and a
+# substituted key fails the comparison. `gpg --verify` also succeeds for a good
+# signature from ANY key in the keyring, so fetch additionally requires the
+# VALIDSIG line to name this fingerprint.
+#
+# KOTO_RELEASE_PUBKEY=<file> skips the keyserver for an air-gapped host; the
+# fingerprint check still applies, so it is a delivery choice, not a bypass.
+RELEASE_KEY_FPR   ?= A6E69ED6BC4779F3281721484CC1AFDE15B64EA3
+RELEASE_KEYSERVER ?= https://keys.openpgp.org/vks/v1/by-fingerprint
+KOTO_SIGN_KEY     ?= $(RELEASE_KEY_FPR)
 # Compression level for release assets. Measured on the 2 GiB rootfs, which
 # dominates a release: -3 gives 242 MiB in 3s, -12 gives 216 MiB in 16s. The
 # 11% is worth 13 seconds once per release; the levels above that trade a lot
@@ -237,7 +241,10 @@ KOTO_SIGN_KEY  ?= $(RELEASE_KEY_FPR)
 # Override for a size-critical release.
 DIST_ZSTD_LVL ?= 12
 DIST_DIR       = dist/$(DIST_VERSION)
-DIST_VERSION   = $(strip $(shell cat dist/VERSION 2>/dev/null))
+# The release this checkout points at. Was dist/VERSION; it lives here now
+# because nothing under dist/ is checked in — dist/ is build output.
+# "unreleased" makes `make fetch` say so plainly instead of 404ing.
+DIST_VERSION  ?= unreleased
 
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.
@@ -259,12 +266,9 @@ fetch:
 	@# https on the request and on every redirect (curl's default lets a
 	@# redirect downgrade to http).
 	@command -v gpg >/dev/null || { echo "gpg is required to verify the release signature"; exit 1; }
-	@test -s $(RELEASE_PUBKEY) || { \
-	  echo "$(RELEASE_PUBKEY) is missing - cannot verify who signed this release."; \
-	  echo "build from source instead: make build"; exit 1; }
 	@test -n "$(RELEASE_KEY_FPR)" || { \
-	  echo "$(RELEASE_PUBKEY) has no '# fingerprint: <FPR>' line - refusing to"; \
-	  echo "accept a signature from whatever key happens to be in it"; exit 1; }
+	  echo "RELEASE_KEY_FPR is empty - refusing to accept a signature from"; \
+	  echo "whatever key happens to turn up"; exit 1; }
 	@stage=$$(mktemp -d .fetch.XXXXXX) && trap 'rm -rf "$$stage"' EXIT && \
 	base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
 	echo "==> fetching koto $(DIST_VERSION) ($(DIST_ARCH)) from $$base"; \
@@ -275,8 +279,15 @@ fetch:
 	get "$$base/SHA256SUMS.asc" "$$stage/SHA256SUMS.asc"; \
 	echo "==> verifying the signature on SHA256SUMS"; \
 	GNUPGHOME="$$stage/gnupg"; export GNUPGHOME; mkdir -p -m 700 "$$GNUPGHOME"; \
-	gpg --batch --quiet --import "$(CURDIR)/$(RELEASE_PUBKEY)" || { \
-	  echo "could not import $(RELEASE_PUBKEY)"; exit 1; }; \
+	if [ -n "$(KOTO_RELEASE_PUBKEY)" ]; then \
+	  cp "$(KOTO_RELEASE_PUBKEY)" "$$stage/key.asc"; \
+	else \
+	  get "$(RELEASE_KEYSERVER)/$(RELEASE_KEY_FPR)" "$$stage/key.asc"; \
+	fi; \
+	gpg --batch --quiet --import "$$stage/key.asc" || { echo "could not import the release key"; exit 1; }; \
+	gpg --batch --with-colons --list-keys | awk -F: '/^fpr:/{print $$10; exit}' \
+	  | grep -qx "$(RELEASE_KEY_FPR)" || { \
+	  echo "!! the key delivered for $(RELEASE_KEY_FPR) has a different fingerprint"; exit 1; }; \
 	gpg --batch --status-fd=1 --verify "$$stage/SHA256SUMS.asc" "$$stage/SHA256SUMS" 2>/dev/null \
 	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
 	  echo "!! SHA256SUMS is not signed by $(RELEASE_KEY_FPR)"; \
@@ -428,7 +439,9 @@ release:
 	@# publishing one.
 	@command -v gpg >/dev/null || { echo "gpg is required to verify the signature before publishing"; exit 1; }
 	@G=$$(mktemp -d) && trap 'rm -rf "$$G"' EXIT && \
-	GNUPGHOME="$$G" gpg --batch --quiet --import $(RELEASE_PUBKEY) && \
+	( if [ -n "$(KOTO_RELEASE_PUBKEY)" ]; then cat "$(KOTO_RELEASE_PUBKEY)"; \
+	  else curl -fsSL --proto '=https' "$(RELEASE_KEYSERVER)/$(RELEASE_KEY_FPR)"; fi ) > "$$G/key.asc" && \
+	GNUPGHOME="$$G" gpg --batch --quiet --import "$$G/key.asc" && \
 	GNUPGHOME="$$G" gpg --batch --status-fd=1 --verify \
 	  $(DIST_DIR)/SHA256SUMS.asc $(DIST_DIR)/SHA256SUMS 2>/dev/null \
 	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
@@ -452,7 +465,7 @@ release:
 	  gh release create $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc \
 	    --title "koto $(DIST_VERSION)" --notes-file $(DIST_DIR)/NOTES.md; \
 	fi
-	@echo "next:  commit dist/VERSION and $(MANIFEST) so 'make fetch' resolves this release"
+	@echo "next:  set DIST_VERSION in the Makefile and commit $(MANIFEST)"
 
 verify:
 	@test -s $(MANIFEST) || { echo "$(MANIFEST) is empty — nothing to verify against"; exit 1; }
