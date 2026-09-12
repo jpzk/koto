@@ -31,6 +31,24 @@ package main
 // children. VM processes are placed at clone time via clone3's
 // CLONE_INTO_CGROUP (exec.Cmd UseCgroupFD), so a VM never touches the scope
 // cgroup and there is no move-after-start race.
+//
+// PLACEMENT HAS A SECOND MODE, because clone3 is not always callable and the
+// failure is invisible until a VM tries to boot: systemd's RestrictNamespaces=
+// installs a seccomp rule that fails clone3 with ENOSYS outright (it cannot
+// inspect the flags inside clone3's args struct, so it blocks the syscall and
+// relies on glibc falling back to clone) — and Go's os/exec does NOT fall
+// back, so every UseCgroupFD spawn returns "fork/exec: function not
+// implemented". That is exactly the installed unit's shape (install.go sets
+// both RestrictNamespaces= and Delegate=yes), and it took the whole fleet
+// down: measured 2026-09-12, every group's boot failing with ENOSYS while the
+// same binary ran fine from a dev clone, which has no unit and so no seccomp
+// filter. So availability is PROBED (fcClone3Available) alongside the cgroup
+// tree itself, and when clone3 is blocked the VM is placed the pre-clone3 way
+// — write its pid into cgroup.procs right after Start (fcCgroupPlace). That
+// reintroduces the move-after-start race the clone-time path avoids, which is
+// the honest cost: for the microseconds before the write the VMM is accounted
+// to the daemon's own leaf, and the caps are soft ones on a process that has
+// not yet read its config, let alone allocated guest RAM.
 
 import (
 	"fmt"
@@ -39,6 +57,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var fcCgroupMount = "/sys/fs/cgroup"
@@ -65,6 +85,9 @@ const fcCgroupMemMarginMiB = 512
 var (
 	fcCgroupOn  bool
 	fcCgroupVMs string // absolute path of the vms/ parent, valid when on
+	// fcCgroupClone3 is whether clone-time placement (CLONE_INTO_CGROUP) is
+	// usable; false means place after Start instead. Probed in fcCgroupInit.
+	fcCgroupClone3 bool
 )
 
 // fcCgroupState renders availability for the spawn log line.
@@ -193,14 +216,27 @@ func fcCgroupInit() {
 
 	fcCgroupVMs = vms
 	fcCgroupOn = true
-	emitLogf("fc", "info", "per-VM cgroup caps enabled (cpu.weight=%d/vcpu, memory.high=mem+%dMiB) at %s",
-		fcCgroupWeightPerVCPU, fcCgroupMemMarginMiB, vms)
+	fcCgroupClone3 = fcClone3Available()
+	placement := "clone-time"
+	if !fcCgroupClone3 {
+		// Worth a line of its own: it names the directive responsible, because
+		// the symptom it used to produce (ENOSYS on every spawn) said nothing
+		// about seccomp, and an operator who tightens the unit further should
+		// be able to see this mode switch on.
+		placement = "post-fork"
+		emitLogf("fc", "info", "clone3 is blocked (seccomp — systemd RestrictNamespaces=); "+
+			"placing VMs in their cgroup after fork instead")
+	}
+	emitLogf("fc", "info", "per-VM cgroup caps enabled (cpu.weight=%d/vcpu, memory.high=mem+%dMiB, %s placement) at %s",
+		fcCgroupWeightPerVCPU, fcCgroupMemMarginMiB, placement, vms)
 }
 
 // fcCgroupCreate makes (or refreshes) group g's VM cgroup and returns an open
 // directory fd for clone3 CLONE_INTO_CGROUP placement (caller closes it after
-// Start). Returns fd -1 with nil error when cgroups are off — the caller
-// spawns unplaced, exactly the pre-cgroup behavior.
+// Start). Returns fd -1 with nil error when clone-time placement is not
+// available, which is two different situations the caller separates by reading
+// fcCgroupOn: cgroups off (spawn unplaced, exactly the pre-cgroup behavior),
+// or cgroups on with clone3 blocked (spawn, then fcCgroupPlace the pid).
 func fcCgroupCreate(g string, vcpus, memMiB int) (int, error) {
 	if !fcCgroupOn {
 		return -1, nil
@@ -219,11 +255,40 @@ func fcCgroupCreate(g string, vcpus, memMiB int) (int, error) {
 	if err := os.WriteFile(filepath.Join(dir, "memory.high"), []byte(fmt.Sprint(high)), 0o644); err != nil {
 		return -1, err
 	}
+	if !fcCgroupClone3 {
+		return -1, nil
+	}
 	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, err
 	}
 	return fd, nil
+}
+
+// fcCgroupPlace moves an already-started VM process into group g's cgroup, the
+// fallback for hosts where clone-time placement is unavailable. Writing a pid
+// to cgroup.procs is the pre-clone3 way to do this and needs no privilege
+// beyond write access to the leaf, which the daemon has by construction (it
+// created it).
+func fcCgroupPlace(g string, pid int) error {
+	if !fcCgroupOn {
+		return nil
+	}
+	f := filepath.Join(fcCgroupVMs, g, "cgroup.procs")
+	return os.WriteFile(f, []byte(fmt.Sprint(pid)), 0o644)
+}
+
+// fcClone3Available reports whether clone3(2) reaches the kernel at all.
+//
+// The call passes a zero-sized args struct, which the kernel rejects with
+// EINVAL in its very first check (usize < CLONE_ARGS_SIZE_VER0) before it can
+// clone anything — so the probe has no side effects and distinguishes exactly
+// the one thing asked: a kernel that implements the syscall (EINVAL) from one
+// that does not, or a seccomp filter pretending it does not (ENOSYS). It is
+// the same answer a failing spawn gives, obtained without a spawn.
+func fcClone3Available() bool {
+	_, _, errno := syscall.RawSyscall(unix.SYS_CLONE3, 0, 0, 0)
+	return errno != syscall.ENOSYS
 }
 
 // fcCgroupRemove tears down group g's VM cgroup. Called after the VM process

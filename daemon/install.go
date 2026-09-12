@@ -947,7 +947,19 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 # userns bootstrap (user), and the per-VM jail, which clones
 # user|mnt|pid|net|ipc|uts|cgroup around every Firecracker process
 # (fcjail.go). Dropping any one of these breaks a VM boot, and adding an
-# eighth is not something koto has a use for.
+# eighth is not something koto has a use for (the one this denies today is
+# time).
+#
+# It has ONE effect beyond the allowlist, and it is not optional: systemd
+# cannot read the flags inside clone3's args struct, so setting this AT ALL
+# makes it block clone3 with ENOSYS, expecting a glibc fallback to clone().
+# Go's os/exec does not fall back, so clone-time cgroup placement
+# (CLONE_INTO_CGROUP) fails here and every spawn would return "fork/exec:
+# function not implemented" — which is precisely what took a fleet down on
+# 2026-09-12. The daemon now probes for this and places VMs after fork
+# instead; see fccgroup.go's header. Do not remove that fallback while this
+# directive is set, and do not conclude the directive is broken: everything
+# else about it works.
 RestrictNamespaces=user mnt pid net ipc uts cgroup
 
 # The rest of the standard set, none of which koto needs: no module loading,

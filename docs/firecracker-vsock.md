@@ -419,7 +419,22 @@ layers, all defaults, no new user-facing knobs:
    soft throttle, deliberately **never `memory.max`**: OOM-killing the VMM
    hard-kills the VM with a dirty ext4, and the guest's real ceiling is
    `mem_size_mib` anyway. Unavailable → one info log line and `cgroup=off`
-   in the spawn log; nothing else changes. Enablement is
+   in the spawn log; nothing else changes. **Placement has a second mode**,
+   because clone3 is not always callable: the installed unit sets
+   `RestrictNamespaces=`, and systemd — unable to inspect the flags inside
+   clone3's args struct — blocks the syscall outright with `ENOSYS`, expecting
+   glibc to fall back to `clone()`. Go's `os/exec` does not fall back, so every
+   `UseCgroupFD` spawn failed with `firecracker start: fork/exec: function not
+   implemented` (measured 2026-09-12: an entire installed fleet unable to boot
+   a single VM, while the same binary ran fine from a dev clone, which has no
+   unit and so no seccomp filter). `fcClone3Available` now probes for it at
+   startup — a `clone3(NULL, 0)` that the kernel rejects with `EINVAL` before
+   it can fork, so `ENOSYS` means blocked — and when it is blocked the pid is
+   written into `<leaf>/cgroup.procs` right after `Start` instead
+   (`fcCgroupPlace`), the pre-clone3 way. The cost is the move-after-start race
+   the clone-time path exists to avoid, which is small here: the caps are soft,
+   and the window closes before the VMM has read its config, let alone
+   allocated guest RAM. `koto userns-check` reports which mode a host gets. Enablement is
    `--cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw` in
    `host/run-host.sh` (the daemon evacuates its scope into a `main/` leaf to
    satisfy cgroup v2's no-internal-process rule, then enables `+cpu +memory`

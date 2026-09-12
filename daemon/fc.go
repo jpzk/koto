@@ -925,9 +925,12 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	cmd.Stderr = console
 	// Place the VM in its per-group cgroup at clone time (CLONE_INTO_CGROUP)
 	// when the tree is available — race-free, and the jail child needs no
-	// cgroup write access since placement is inherited through exec. A create
-	// failure degrades to an unplaced spawn: the cap is defense in depth, not
-	// worth refusing to boot over.
+	// cgroup write access since placement is inherited through exec. Where
+	// clone3 is blocked by seccomp the leaf still exists and the pid goes in
+	// after Start instead (see fccgroup.go's header). A create failure degrades
+	// to an unplaced spawn: the cap is defense in depth, not worth refusing to
+	// boot over.
+	cgPlaceAfterStart := false
 	if cgfd, cgerr := fcCgroupCreate(g, vcpus, memMiB); cgerr != nil {
 		emitLogfG("fc", g, "warn", "[%s] cgroup create: %v (spawning unplaced)", g, cgerr)
 	} else if cgfd >= 0 {
@@ -937,6 +940,8 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		cmd.SysProcAttr.UseCgroupFD = true
 		cmd.SysProcAttr.CgroupFD = cgfd
 		defer syscall.Close(cgfd)
+	} else {
+		cgPlaceAfterStart = fcCgroupOn
 	}
 	if err := cmd.Start(); err != nil {
 		console.Close()
@@ -944,6 +949,11 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	console.Close()
 	vm.pid = cmd.Process.Pid
+	if cgPlaceAfterStart {
+		if err := fcCgroupPlace(g, vm.pid); err != nil {
+			emitLogfG("fc", g, "warn", "[%s] cgroup place: %v (running unplaced)", g, err)
+		}
+	}
 	// From here there is a live VMM that fcVMs does not know about yet, and
 	// fcStopAll stops what fcVMs knows about (audit 2026-09-11 L93). The
 	// shutdown flag is checked on the way into ensureLocked, but registration
