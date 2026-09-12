@@ -341,7 +341,8 @@ func runInstall(o installOpts) error {
 	// no newuidmap and no e2fsprogs used to succeed and only fail later, at
 	// the first boot of the first group.
 	u.printf("%s", u.bold("host requirements"))
-	if _, err := preflightGate(u); err != nil {
+	pre, err := preflightGate(u)
+	if err != nil {
 		return err
 	}
 	u.blank()
@@ -353,9 +354,9 @@ func runInstall(o installOpts) error {
 
 	// 2. the binaries on PATH. No image is built: podman is a BUILD-time
 	// dependency now, and an installed koto runs straight on the host.
-	self, err := os.Executable()
-	if err != nil {
-		return err
+	self, err2 := os.Executable()
+	if err2 != nil {
+		return err2
 	}
 	if err := sudoRun(u, "install", "-m", "0755", self, "/usr/local/bin/koto"); err != nil {
 		return fmt.Errorf("install binary: %w", err)
@@ -366,6 +367,27 @@ func runInstall(o installOpts) error {
 		}
 	} else {
 		u.warn("koto-tui not built (run `make tui-build`) — installing without the TUI")
+	}
+
+	// 2b. The AppArmor profile, if the operator accepted it at the gate. It
+	// has to happen HERE and not in the preflight: the profile attaches by
+	// executable path, so it is meaningless until the binary exists at that
+	// path, and it cannot be verified until it can be exec'd. That ordering is
+	// the whole reason this is a post-install step rather than a remediation
+	// the operator applies before running install.
+	// Refresh an EXISTING koto-managed profile on every install, the same way
+	// koto.env and the unit are refreshed, and write a new one only with
+	// consent. Without the refresh a profile written by an older koto is never
+	// corrected: the first version of this shipped without a dbus rule, so
+	// systemctl under the profile returned an empty string and `koto setup
+	// --check` reported a healthy daemon as broken — and re-running install
+	// could not fix it, because the preflight passed (userns worked) and so
+	// never asked. sudoWriteIfChanged makes the no-op case silent.
+	if apparmorUsernsRestricted() && apparmorAvailable() &&
+		(pre.setupAppArmor || exists(apparmorProfilePath)) {
+		if err := installAppArmorProfile(u, installedKotoBin); err != nil {
+			return err
+		}
 	}
 
 	// 3. /etc/koto/koto.env. The claude CLI is resolved HERE, in the

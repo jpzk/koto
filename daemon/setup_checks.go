@@ -330,26 +330,19 @@ func checkContainerEngine() []checkResult {
 // operators willing to live with a preflight that under-reports it.
 func usernsRemediation() string {
 	return "Ubuntu 23.10+ blocks unprivileged user namespaces, which the microVM\n" +
-		"monitor's jail needs. Give them back:\n" +
+		"monitor's jail needs. koto normally offers to grant them to the koto\n" +
+		"binary ALONE with an AppArmor profile, leaving the restriction in place\n" +
+		"for every other program; you are seeing this because that offer was\n" +
+		"declined or apparmor_parser is not installed.\n" +
+		"\n" +
+		"To set the profile up by hand (apparmor_parser required):\n" +
+		"  sudo apt install -y apparmor-utils\n" +
+		"then re-run `koto install` and accept the offer.\n" +
+		"\n" +
+		"The host-wide switch is the fallback. It works, but EVERY local program\n" +
+		"gets unprivileged user namespaces back, not just koto:\n" +
 		"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n" +
 		"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n" +
-		"\n" +
-		"The cost: this is host-wide, so EVERY local program gets unprivileged\n" +
-		"user namespaces back, not just koto.\n" +
-		"\n" +
-		"The narrower alternative is an AppArmor profile granting the capability\n" +
-		"to the koto binary alone. It works — but this check reads the sysctl\n" +
-		"above and cannot see the profile, so it will keep reporting `restricted`\n" +
-		"and `koto install` will keep refusing. Use it only if you are prepared\n" +
-		"to install with the sysctl set to 0 and then restore it afterwards:\n" +
-		"  sudo tee /etc/apparmor.d/koto >/dev/null <<'EOF'\n" +
-		"  abi <abi/4.0>,\n" +
-		"  include <tunables/global>\n" +
-		"  profile koto /usr/local/bin/koto flags=(unconfined) {\n" +
-		"    userns,\n" +
-		"  }\n" +
-		"  EOF\n" +
-		"  sudo apparmor_parser -r /etc/apparmor.d/koto\n" +
 		"\n" +
 		"Running the VMM unjailed (KOTO_FC_NOJAIL=1) avoids the restriction too,\n" +
 		"but drops a layer of host protection."
@@ -367,8 +360,23 @@ func checkUserns() checkResult {
 		return failCheck("nested userns", "user.max_user_namespaces = 0",
 			"Nested user namespaces are disabled; the VMM jailer cannot start.\n  sudo sysctl -w user.max_user_namespaces=15000\nand persist it in /etc/sysctl.d/.")
 	}
-	if r, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil &&
-		strings.TrimSpace(string(r)) == "1" {
+	if apparmorUsernsRestricted() {
+		// Ask the installed binary rather than reading configuration. A
+		// profile granting userns to koto alone satisfies this requirement
+		// completely, and it is the outcome koto sets up on Ubuntu — but it
+		// cannot be OBSERVED from here: /sys/kernel/security/apparmor/profiles
+		// is root-only, so "is a profile loaded" is unanswerable to an
+		// unprivileged preflight. Exec'ing the profiled path answers the real
+		// question exactly, since the profile attaches at exec.
+		//
+		// Before this, the check read the sysctl alone and so kept reporting
+		// "restricted" about a host where koto could create namespaces
+		// perfectly well, refusing an install that had nothing wrong with it
+		// (measured 2026-09-12).
+		if apparmorProfileWorks(installedKotoBin) {
+			return okCheck("nested userns", "granted to koto by AppArmor profile "+
+				"(host-wide restriction still on)")
+		}
 		return failCheck("nested userns", "restricted by AppArmor", usernsRemediation())
 	}
 	return okCheck("nested userns", "allowed ("+strings.TrimSpace(string(b))+")")
@@ -532,8 +540,8 @@ func errText(err error) string {
 //
 // Returns noKVM=true when the operator chose to proceed without KVM: the
 // daemon installs and the API answers, but no group can boot.
-func preflightGate(u *setupUI) (noKVM bool, err error) {
-	var hard, kvm []checkResult
+func preflightGate(u *setupUI) (res preflightResult, err error) {
+	var hard, kvm, aaUserns []checkResult
 	group := ""
 	for _, c := range runPreflight() {
 		if c.group != group {
@@ -552,14 +560,45 @@ func preflightGate(u *setupUI) (noKVM bool, err error) {
 			}
 		default:
 			u.fail("%-18s %s", c.name, c.detail)
-			if c.remedy != "" {
+			// The AppArmor-userns failure gets its remedy from the offer
+			// below, not here: printing the full host-wide-sysctl text and
+			// then immediately offering to do something better reads as koto
+			// contradicting itself.
+			if c.remedy != "" && !(c.name == "nested userns" &&
+				c.detail == "restricted by AppArmor" && apparmorAvailable()) {
 				u.hint(c.remedy)
 			}
-			if c.name == "/dev/kvm" {
+			switch {
+			case c.name == "/dev/kvm":
 				kvm = append(kvm, c)
-			} else {
+			case c.name == "nested userns" && c.detail == "restricted by AppArmor" && apparmorAvailable():
+				// Soft, because koto can FIX this one without weakening the
+				// host: a profile scoped to the koto binary. It stays hard
+				// when apparmor_parser is missing, since then the only remedy
+				// left is the host-wide sysctl and that is the operator's
+				// call, not koto's.
+				aaUserns = append(aaUserns, c)
+			default:
 				hard = append(hard, c)
 			}
+		}
+	}
+	// The AppArmor-userns offer comes BEFORE the hard-list return, because
+	// accepting it removes the only blocker on a stock Ubuntu host and the
+	// operator should not be shown a refusal for something koto is about to
+	// fix. Declining falls through to the normal refusal with the host-wide
+	// remedy printed.
+	if len(aaUserns) > 0 {
+		u.blank()
+		u.prose(`Ubuntu blocks unprivileged user namespaces, which the microVM jailer needs.
+koto can grant them to the koto binary ALONE with an AppArmor profile, leaving
+the restriction in place for every other program on this machine. The
+alternative is a sysctl that turns it off host-wide.`)
+		if u.yesno("Install an AppArmor profile for koto?", true) {
+			res.setupAppArmor = true
+		} else {
+			return res, fmt.Errorf("nested user namespaces are unavailable — " +
+				"see the remediation above, or re-run and accept the AppArmor profile")
 		}
 	}
 	if len(hard) > 0 {
@@ -569,10 +608,10 @@ func preflightGate(u *setupUI) (noKVM bool, err error) {
 		// printed "1 unmet requirement(s)" under two ✗ marks and two
 		// remediation blocks, leaving it ambiguous which one to fix.
 		if len(kvm) > 0 {
-			return false, fmt.Errorf("%d unmet requirement(s), all shown above — fix all of them (%d blocking, plus /dev/kvm)",
+			return res, fmt.Errorf("%d unmet requirement(s), all shown above — fix all of them (%d blocking, plus /dev/kvm)",
 				len(hard)+len(kvm), len(hard))
 		}
-		return false, fmt.Errorf("%d unmet requirement(s) — see the remediation above", len(hard))
+		return res, fmt.Errorf("%d unmet requirement(s) — see the remediation above", len(hard))
 	}
 	if len(kvm) > 0 {
 		u.blank()
@@ -580,9 +619,17 @@ func preflightGate(u *setupUI) (noKVM bool, err error) {
 daemon will install and run, and the API will answer, but no group can
 actually boot until KVM is available.`)
 		if !u.yesno("Continue without KVM?", false) {
-			return false, errSetupAborted
+			return res, errSetupAborted
 		}
-		return true, nil
+		res.noKVM = true
+		return res, nil
 	}
-	return false, nil
+	return res, nil
+}
+
+// preflightResult carries what the gate decided, beyond pass/fail: which
+// remedies the operator agreed to and which degraded mode they accepted.
+type preflightResult struct {
+	noKVM         bool // proceed without KVM; the API answers, no group boots
+	setupAppArmor bool // install the userns profile once the binary is in place
 }
