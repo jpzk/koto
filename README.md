@@ -11,7 +11,7 @@ koto also has ACL with roles and permissions on system configuration and groups.
 Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. The
 host needs Linux x86_64 with KVM (`/dev/kvm` readable by you), Fedora 44+,
 Ubuntu 24.04+ or Arch (rolling), and git, make and podman or docker (just for
-building).
+building). Verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
 
 ```sh
 # Fedora 44+
