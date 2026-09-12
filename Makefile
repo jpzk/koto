@@ -181,8 +181,26 @@ setup:
 # The manifest lists the artifacts as INSTALLED, not as transferred: rootfs.img
 # ships compressed and is checked after decompression, so one manifest serves
 # both routes — `make verify` holds a local build to the same line.
-KOTO_DIST_URL ?= https://kotovm.com/dist
+KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download
 MANIFEST      := dist/artifacts.sha256
+
+# Release assets are named <installed basename>-<arch>.zst — one mechanical
+# rule with no exceptions, so `koto` becomes koto-x86_64.zst and
+# fcassets/rootfs.img becomes rootfs.img-x86_64.zst. The arch is in the name so
+# a future arm64 build can sit in the same release rather than needing a second
+# one; koto is x86_64-only today and checkPlatform enforces that, so this is
+# forward-looking rather than currently variable. Everything is zstd-compressed,
+# including the binaries: the rootfs goes 2.0G -> ~240M (it is mostly sparse and
+# highly compressible), and doing the same to the rest costs nothing and keeps
+# one code path instead of two.
+DIST_ARCH     ?= x86_64
+# Compression level for release assets. Measured on the 2 GiB rootfs, which
+# dominates a release: -3 gives 242 MiB in 3s, -12 gives 216 MiB in 16s. The
+# 11% is worth 13 seconds once per release; the levels above that trade a lot
+# more time for very little, on an image that is mostly zeroes either way.
+# Override for a size-critical release.
+DIST_ZSTD_LVL ?= 12
+DIST_DIR       = dist/$(DIST_VERSION)
 DIST_VERSION   = $(strip $(shell cat dist/VERSION 2>/dev/null))
 
 # Published name -> local path. rootfs is the only one transferred compressed;
@@ -196,7 +214,7 @@ fetch:
 	  exit 1; \
 	fi
 	@command -v curl >/dev/null || { echo "curl is required to fetch artifacts"; exit 1; }
-	@command -v zstd >/dev/null || { echo "zstd is required to unpack rootfs.img.zst"; exit 1; }
+	@command -v zstd >/dev/null || { echo "zstd is required to unpack the release assets"; exit 1; }
 	@mkdir -p $(FCASSETS)
 	@# Fail-CLOSED (audit M12): everything lands in a staging dir and is
 	@# verified THERE; only a clean manifest check moves the five files into
@@ -206,25 +224,21 @@ fetch:
 	@# redirect downgrade to http).
 	@stage=$$(mktemp -d .fetch.XXXXXX) && trap 'rm -rf "$$stage"' EXIT && \
 	base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
-	echo "==> fetching koto $(DIST_VERSION) from $$base (staging in $$stage)"; \
-	mkdir -p "$$stage/fcassets"; \
-	for pair in koto:koto koto-tui:koto-tui \
-	            firecracker:fcassets/firecracker vmlinux:fcassets/vmlinux; do \
-	  name=$${pair%%:*}; dest=$${pair#*:}; \
-	  echo "    $$name -> $$dest"; \
-	  curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/$$dest" "$$base/$$name" || { \
-	    echo "failed to fetch $$name from $$base"; exit 1; }; \
+	echo "==> fetching koto $(DIST_VERSION) ($(DIST_ARCH)) from $$base (staging in $$stage)"; \
+	mkdir -p "$$stage/$(FCASSETS)"; \
+	for dest in $(ARTIFACTS); do \
+	  asset=$$(basename $$dest)-$(DIST_ARCH).zst; \
+	  echo "    $$asset -> $$dest"; \
+	  curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/$$asset" "$$base/$$asset" || { \
+	    echo "failed to fetch $$asset from $$base"; exit 1; }; \
+	  zstd -qdf --sparse "$$stage/$$asset" -o "$$stage/$$dest" || exit 1; \
+	  rm -f "$$stage/$$asset"; \
 	done; \
-	echo "    rootfs.img.zst -> fcassets/rootfs.img (decompressing)"; \
-	curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$stage/rootfs.img.zst" "$$base/rootfs.img.zst" || { \
-	  echo "failed to fetch rootfs.img.zst from $$base"; exit 1; }; \
-	zstd -qdf --sparse "$$stage/rootfs.img.zst" -o "$$stage/fcassets/rootfs.img" || exit 1; \
-	rm -f "$$stage/rootfs.img.zst"; \
-	chmod +x "$$stage/koto" "$$stage/koto-tui" "$$stage/fcassets/firecracker" "$$stage/fcassets/vmlinux"; \
+	chmod +x "$$stage/koto" "$$stage/koto-tui" "$$stage/$(FCASSETS)/firecracker" "$$stage/$(FCASSETS)/vmlinux"; \
 	echo "==> verifying in $$stage"; \
 	( cd "$$stage" && sha256sum -c "$(CURDIR)/$(MANIFEST)" ) || { \
 	  echo "!! checksum mismatch — nothing was installed into the tree"; exit 1; }; \
-	for f in koto koto-tui fcassets/firecracker fcassets/vmlinux fcassets/rootfs.img; do \
+	for f in $(ARTIFACTS); do \
 	  mv -f "$$stage/$$f" "$$f"; \
 	done
 	@echo "verified: $(ARTIFACTS)"
@@ -244,6 +258,101 @@ fetch:
 # identical bytes. The guest kernel and rootfs embed build timestamps and
 # resolved package versions and do NOT reproduce; a mismatch there means your
 # image differs from the published one, which is expected, not alarming.
+# --- dist ------------------------------------------------------------------
+# Package the artifacts in the tree as release assets, and regenerate the
+# manifest from them.
+#
+# The manifest checksums the artifacts AS INSTALLED, not the compressed assets,
+# so one file serves both acquisition routes: `make fetch` verifies what it
+# decompressed, and `make verify` tells you whether a from-source build
+# reproduced the published bytes. Checksumming the .zst files instead would
+# verify the download and say nothing about the build.
+#
+# Run this on the machine whose build you are publishing. koto and koto-tui
+# reproduce bit-for-bit (CGO_ENABLED=0, -trimpath, digest-pinned image);
+# vmlinux and rootfs.img do not, because they embed build timestamps and
+# resolved package versions — so the published checksums have to come from THIS
+# build, not from a later rebuild of the same commit.
+dist: $(ARTIFACTS)
+	@command -v zstd >/dev/null || { echo "zstd is required to package a release"; exit 1; }
+	@test -n "$(DIST_VERSION)" || { echo "dist/VERSION is missing or empty"; exit 1; }
+	@if [ "$(DIST_VERSION)" = "unreleased" ]; then \
+	  echo "dist/VERSION still reads 'unreleased'."; \
+	  echo "set it to the tag you are publishing, then re-run: echo v0.1.0 > dist/VERSION"; \
+	  exit 1; \
+	fi
+	@mkdir -p $(DIST_DIR)
+	@echo "==> packaging koto $(DIST_VERSION) for $(DIST_ARCH)"
+	@for a in $(ARTIFACTS); do \
+	  out="$(DIST_DIR)/$$(basename $$a)-$(DIST_ARCH).zst"; \
+	  zstd -$(DIST_ZSTD_LVL) -T0 -q -f -o "$$out" "$$a" || exit 1; \
+	  printf '    %-26s %6s MiB -> %s\n' "$$a" \
+	    "$$(( $$(stat -c %s "$$out") / 1048576 ))" "$$out"; \
+	done
+	@# SHA256SUMS over the ASSETS AS UPLOADED, so a download can be checked
+	@# before it is decompressed: `sha256sum -c SHA256SUMS` in the download
+	@# directory. Be clear about what this is and is not. It travels with the
+	@# assets, so anyone who can replace an asset can replace this file too —
+	@# it catches corruption and truncated downloads, not a compromised
+	@# release. The security anchor is dist/artifacts.sha256, which is
+	@# COMMITTED and therefore arrives over git rather than over the same
+	@# connection as the bytes it vouches for.
+	@( cd $(DIST_DIR) && sha256sum *-$(DIST_ARCH).zst > SHA256SUMS )
+	@echo "    SHA256SUMS over the uploaded assets"
+	@# Preserve the manifest's comment header — it is the documentation for
+	@# what this file is and why it is committed — and replace only the entries.
+	@{ grep '^#' $(MANIFEST) 2>/dev/null || true; sha256sum $(ARTIFACTS); } > $(MANIFEST).new \
+	  && mv $(MANIFEST).new $(MANIFEST)
+	@echo "==> $(MANIFEST) regenerated from this build:"
+	@grep -v '^#' $(MANIFEST) | sed 's/^/    /'
+	@printf '%s\n' \
+	  "Artifacts for linux/$(DIST_ARCH), zstd-compressed." "" \
+	  "Install with 'make fetch' after setting dist/VERSION to $(DIST_VERSION):" \
+	  "it downloads these, decompresses them, and verifies the result against" \
+	  "dist/artifacts.sha256 - which is committed in the repo, so the checksums" \
+	  "arrive over git rather than over the same connection as the artifacts." "" \
+	  "To check a manual download instead: sha256sum -c SHA256SUMS" \
+	  > $(DIST_DIR)/NOTES.md
+	@echo "next:  make release   (publishes $(DIST_DIR) via gh)"
+
+# --- release ---------------------------------------------------------------
+# Publish what `make dist` produced as a GitHub release. Deliberately a separate
+# command: dist is local and repeatable, this is outward-facing and is not.
+#
+# It refuses rather than guesses. An existing release for this tag is NOT
+# overwritten silently — republishing a version with different bytes is how a
+# checksum file stops meaning anything — so that needs FORCE=1, which uses
+# `gh release upload --clobber`.
+#
+# The assets are listed explicitly rather than globbed, so nothing that happens
+# to be sitting in the directory (release notes, a stray file) is published by
+# accident.
+release:
+	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
+	@test -d $(DIST_DIR) || { echo "$(DIST_DIR) does not exist - run 'make dist' first"; exit 1; }
+	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - re-run 'make dist'"; exit 1; }
+	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
+	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
+	  echo "describes the bytes you are about to publish"; exit 1; }
+	@echo "==> publishing $(DIST_VERSION) ($(DIST_ARCH)):"
+	@for f in $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS; do echo "      $$f"; done
+	@if gh release view $(DIST_VERSION) >/dev/null 2>&1; then \
+	  if [ "$(FORCE)" = "1" ]; then \
+	    echo "==> release $(DIST_VERSION) exists - uploading with --clobber (FORCE=1)"; \
+	    gh release upload $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS --clobber; \
+	  else \
+	    echo "!! release $(DIST_VERSION) already exists."; \
+	    echo "   Publishing different bytes under a tag people have already checksummed"; \
+	    echo "   is how SHA256SUMS stops meaning anything. Bump dist/VERSION, or"; \
+	    echo "   re-run with FORCE=1 if you are certain."; \
+	    exit 1; \
+	  fi; \
+	else \
+	  gh release create $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS \
+	    --title "koto $(DIST_VERSION)" --notes-file $(DIST_DIR)/NOTES.md; \
+	fi
+	@echo "next:  commit dist/VERSION and $(MANIFEST) so 'make fetch' resolves this release"
+
 verify:
 	@test -s $(MANIFEST) || { echo "$(MANIFEST) is empty — nothing to verify against"; exit 1; }
 	@grep -qv '^#' $(MANIFEST) || { \
