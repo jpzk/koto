@@ -6,9 +6,9 @@ Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and
 
 koto also has ACL with roles and permissions on system configuration and groups. koto is not a batteries included personal agent but an open source, self-host able secure foundation to compartmentalize different prototypes. Developer UX is so important and therefore `koto tui` was built, it's leveraging established paradigms and tries to break new ground. 
 
-## Quick start
+## Quick start from sources
 
-Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. Building verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+We encourage also to **run your own AI security review to verify** on the repository. Building verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
 
 ```sh
 # Fedora 44+
