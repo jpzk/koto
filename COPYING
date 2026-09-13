@@ -1,0 +1,65 @@
+koto — copyright and licensing
+
+SPDX-License-Identifier: GPL-2.0-or-later WITH koto-verbs-note
+
+Copyright (C) 2026 Jendrik Poloczek and the koto contributors
+
+koto is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 2 of the License, or (at your option) any later
+version. The full text of version 2 is in the file LICENSE.
+
+koto is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+details.
+
+
+koto-verbs-note
+---------------
+
+(Modelled on the Linux kernel's Linux-syscall-note.)
+
+   NOTE! This copyright does *not* cover programs that use koto services
+ through its verbs - this is merely considered normal use of koto, and
+ does *not* fall under the heading of "derived work". The verbs are:
+
+   - the gRPC API defined in protocol/koto.proto, including the definitions
+     in protocol/guest.proto and code generated from either file, such as
+     the generated code in protocol/pb;
+   - the `koto ctl` command line;
+   - the in-guest control plane: the ctl FIFO and its verbs, the guest-side
+     tools (cs-job, cs-notify, cs-subagent) and the environment a turn
+     exposes to the programs it runs.
+
+   Likewise, agents, prompts, scripts and other workloads that run inside a
+ koto group are not derived works of koto merely because koto runs them.
+
+   This note is an additional permission from the copyright holders. It
+ applies under whichever version of the GNU General Public License you
+ use koto under.
+
+   Also note that the GPL is copyrighted by the Free Software Foundation,
+ but the instance of code that it refers to (koto) is copyrighted by the
+ people who actually wrote it.
+
+
+Why "or later"
+--------------
+
+koto's binaries statically link Apache-2.0 modules (grpc, genproto, gVisor,
+gvisor-tap-vsock, google/btree, inetaf/tcpproxy). Apache-2.0 is compatible
+with version 3 of the GPL but not with version 2 alone, so a binary that
+combines them is distributed under the terms of GPL version 3 or later,
+which the grant above permits. koto's own source remains available under
+version 2 or later.
+
+
+Third-party components
+----------------------
+
+Third-party code keeps its own license: tui/themes/ (MIT, see
+tui/themes/LICENSE), the Go modules compiled into koto, and Firecracker,
+the guest kernel and the guest root filesystem, which ship alongside koto
+as separate programs. The pinned versions are in the go.mod files and in
+fcguest/build-firecracker.sh, build-kernel.sh and Dockerfile.rootfs.
