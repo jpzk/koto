@@ -1,0 +1,20 @@
+# betterleaks configuration — the default ruleset, plus allowlisted false
+# positives. Picked up automatically by the pre-commit hook and by
+# `make secrets-scan` (both run betterleaks from the repo root).
+#
+# Every entry is an exact value, not a rule or a path: a false positive is
+# silenced where it is, and the same rule still fires on anything else.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+The release signing key's OpenPGP FINGERPRINT (RELEASE_KEY_FPR in the Makefile,
+KEY_FPR in install.sh). It is public by design — it is the trust anchor both
+publish so a downloaded SHA256SUMS can be checked against it — and it only
+trips generic-api-key because it is 40 hex characters assigned to a variable
+whose name contains KEY.
+"""
+regexTarget = "secret"
+regexes = ['''^A6E69ED6BC4779F3281721484CC1AFDE15B64EA3$''']
