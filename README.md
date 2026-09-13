@@ -185,4 +185,5 @@ way — many were drafted by the model and edited by the maintainer.
 note modelled on the kernel's syscall note: programs that only use koto
 through its verbs (the gRPC API in `protocol/`, `koto ctl`, the in-guest
 control plane) and the workloads running inside a group are not derived
-works. See [`COPYING`](COPYING) and [`LICENSE`](LICENSE).
+works. See [`COPYING`](COPYING) and [`LICENSE`](LICENSE). 
+
