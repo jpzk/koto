@@ -1,14 +1,18 @@
 # koto
 
-**koto is a microVM-based and hardware-isolated agent sandbox harness.** It runs under Linux with KVM capability and CPU with hardware virtualization (Intel VT or AMD-V). koto uses the well-established and reputable Firecracker VM solution developed and used by AWS. Currently it's based on Anthropic's Claude CLI. 
+**koto is a microVM-based and hardware-isolated agent sandbox harness.** It runs under Linux with KVM capability and CPU with hardware virtualization (Intel VT or AMD-V). koto uses the well-established and reputable Firecracker VM solution developed and used by AWS. Currently it's LLM backend is Anthropic's Claude CLI. 
 
 Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and 1 shared terminal. The group can be configured in different sizes with different vCPUs, memory and storage. Other configurations include LLM model, network access, root sudo. The daemon speaks a gRPC protocol and can be commanded by `koto ctl` or `koto tui`. 
 
 koto also has ACL with roles and permissions on system configuration and groups. koto is not a batteries included personal agent but an open source, self-host able secure foundation to compartmentalize different prototypes. Developer UX is so important and therefore `koto tui` was built, it's leveraging established paradigms and tries to break new ground. 
 
-## Quick start
+## Quick start 
 
-Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. Verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+Building and running verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+
+### From sources
+
+It is encouraged to **run your own AI security review to verify** on the repository and to **build all the components from scratch**. If you feel like becoming a steward, we're looking for more release signers.
 
 ```sh
 # Fedora 44+
@@ -24,6 +28,16 @@ make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks 
 make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
+
+### From signed builds
+
+```sh
+make fetch      # 1. fetch signed artifacts and verify checksum 
+make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
+make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
+koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
+```
+
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
 an install without changing anything. `make fetch` replaces `make build` once
