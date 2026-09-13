@@ -98,12 +98,6 @@ Every group boots the same `fcassets/vmlinux`, built by `fcguest/build-kernel.sh
 `amazonlinux/linux` clone at a pinned tag with its commit sha asserted before
 the build; everything koto adds is `.config`.
 
-**Amazon Linux tree, not vanilla.** It is the tree Firecracker builds its own
-guest kernels from. A vanilla kernel cannot parse Firecracker's ACPI tables
-and needs `acpi=off` — which removes the LAPIC timer, so **every idle microVM
-busy-polls a full host CPU**. The amzn tree boots with ACPI and idles at ~0%.
-See `docs/kernel-amzn-vs-vanilla.md`.
-
 The base `.config` is Firecracker's own CI guest config plus, all built-in
 (the guest has no module loader):
 
