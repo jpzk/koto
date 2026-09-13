@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
+.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -186,14 +186,17 @@ setup:
 KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download
 MANIFEST      := artifacts.sha256
 
-# Release assets are named <basename>-<version>-<arch>.zst, and the VERSION is
+# Release assets are named <basename>_<version>_<arch>.zst, and the VERSION is
 # the one that belongs to the thing inside, not koto's:
 #
-#   koto-1.0.0-x86_64.zst            koto's own release version
-#   koto-tui-1.0.0-x86_64.zst        ditto
-#   firecracker-1.16.1-x86_64.zst    from `firecracker --version`
-#   vmlinux-6.1.176-x86_64.zst       from the "Linux version" string in the image
-#   rootfs.img-fedora44-x86_64.zst   from /usr/lib/os-release inside the image
+#   koto_1.0.0_x86_64.zst            koto's own release version
+#   koto-tui_1.0.0_x86_64.zst        ditto
+#   firecracker_1.17.0_x86_64.zst    from `firecracker --version`
+#   vmlinux_6.1.186_x86_64.zst       from the "Linux version" string in the image
+#   rootfs.img_fedora44_x86_64.zst   from /usr/lib/os-release inside the image
+#
+# Underscores separate the fields because names (koto-tui) and versions never
+# contain one, so install.sh can split a name without knowing the version.
 #
 # Each is READ BACK OUT of the built artifact rather than copied from the build
 # script's pin, so a name can never claim a version the bytes do not have —
@@ -211,6 +214,7 @@ DIST_ARCH     ?= x86_64
 # assetver <path> — the version that belongs in that artifact's asset name.
 define assetver
 $$(case "$(1)" in \
+  koto)          ./koto version 2>/dev/null ;; \
   */firecracker) ./$(1) --version 2>/dev/null | head -1 | sed 's/^Firecracker v//' ;; \
   */vmlinux)     grep -a -m1 -oE 'Linux version [0-9][^ ]*' $(1) | cut -d' ' -f3 ;; \
   */rootfs.img)  debugfs -R "cat /usr/lib/os-release" $(1) 2>/dev/null | \
@@ -293,7 +297,13 @@ dist: $(ARTIFACTS)
 	@for a in $(ARTIFACTS); do \
 	  v=$(call assetver,$$a); \
 	  test -n "$$v" || { echo "could not read a version out of $$a"; exit 1; }; \
-	  out="$(DIST_DIR)/$$(basename $$a)-$$v-$(DIST_ARCH).zst"; \
+	  case "$$v" in *_*) echo "version '$$v' of $$a contains '_', which separates asset-name fields"; exit 1 ;; esac; \
+	  if [ "$$a" = koto ] && [ "$$v" != "$(DIST_VERSION)" ]; then \
+	    echo "koto reports version '$$v', but this is release $(DIST_VERSION)."; \
+	    echo "build it from a clean checkout of tag $(DIST_VERSION), so git describe stamps exactly that."; \
+	    exit 1; \
+	  fi; \
+	  out="$(DIST_DIR)/$$(basename $$a)_$${v}_$(DIST_ARCH).zst"; \
 	  zstd -$(DIST_ZSTD_LVL) -T0 -q -f -o "$$out" "$$a" || exit 1; \
 	  printf '    %-26s %6s MiB -> %s\n' "$$a" \
 	    "$$(( $$(stat -c %s "$$out") / 1048576 ))" "$$out"; \
@@ -306,7 +316,8 @@ dist: $(ARTIFACTS)
 	@# release. The security anchor is dist/artifacts.sha256, which is
 	@# COMMITTED and therefore arrives over git rather than over the same
 	@# connection as the bytes it vouches for.
-	@( cd $(DIST_DIR) && sha256sum *-$(DIST_ARCH).zst > SHA256SUMS )
+	@rm -f $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS.asc
+	@( cd $(DIST_DIR) && sha256sum *_$(DIST_ARCH).zst > SHA256SUMS )
 	@echo "    SHA256SUMS over the uploaded assets"
 	@# Signing is SEPARATE and may happen elsewhere. The release key should not
 	@# have to live on a build host, so dist signs only if the secret key
@@ -331,41 +342,74 @@ dist: $(ARTIFACTS)
 	  && mv $(MANIFEST).new $(MANIFEST)
 	@echo "==> $(MANIFEST) regenerated from this build:"
 	@grep -v '^#' $(MANIFEST) | sed 's/^/    /'
-	@printf '%s\n' \
-	  "Artifacts for linux/$(DIST_ARCH), zstd-compressed." "" \
-	  "Install with 'make fetch' after setting dist/VERSION to $(DIST_VERSION):" \
-	  "it downloads these, decompresses them, and verifies the result against" \
-	  "dist/artifacts.sha256 - which is committed in the repo, so the checksums" \
-	  "arrive over git rather than over the same connection as the artifacts." "" \
-	  "To check a manual download instead: sha256sum -c SHA256SUMS" \
-	  > $(DIST_DIR)/NOTES.md
-	@echo "next:  make release   (publishes $(DIST_DIR) via gh)"
+	@{ printf '%s\n' "koto $(DIST_VERSION) for linux/$(DIST_ARCH)." "" "| component | version |" "|---|---|"; \
+	  for a in $(ARTIFACTS); do printf '| %s | %s |\n' "$$(basename $$a)" "$(call assetver,$$a)"; done; \
+	  printf '%s\n' "" \
+	  "Install: \`curl -fsSL https://kotovm.com/install.sh | sh -s -- --version $(DIST_VERSION)\`," \
+	  "or from a clone of this tag: \`make fetch && make install && make wizard\`." "" \
+	  "SHA256SUMS is signed by $(RELEASE_KEY_FPR) (SHA256SUMS.asc); both routes" \
+	  "verify that signature, and the unpacked bytes against the artifacts.sha256" \
+	  "committed at this tag, before anything is installed."; } > $(DIST_DIR)/NOTES.md
+	@echo "next:  make release-draft   (uploads the assets + SHA256SUMS to a draft release)"
 
 # --- release ---------------------------------------------------------------
-# Publish what `make dist` produced as a GitHub release. Deliberately a separate
-# command: dist is local and repeatable, this is outward-facing and is not.
+# Publish what `make dist` produced as a GitHub release, in three commands that
+# follow the order the bytes become trustworthy in. Deliberately separate from
+# dist: dist is local and repeatable, these are outward-facing and are not.
+# The `release` skill (.claude/skills/release) walks through all of it.
 #
-# It refuses rather than guesses. An existing release for this tag is NOT
-# overwritten silently — republishing a version with different bytes is how a
-# checksum file stops meaning anything — so that needs FORCE=1, which uses
-# `gh release upload --clobber`.
+#   make release-draft    DRAFT release: the assets and SHA256SUMS, no tag yet
+#   make release          verify SHA256SUMS.asc against the pinned key, upload it
+#   make release-publish  the tag is on GitHub and matches: take it out of draft
 #
-# The assets are listed explicitly rather than globbed, so nothing that happens
-# to be sitting in the directory (release notes, a stray file) is published by
-# accident.
-release:
+# A draft is invisible to install.sh and `make fetch` (its download URLs do not
+# resolve), so nothing can install a release before its signature is attached
+# and its tag points at the commit carrying the matching artifacts.sha256.
+#
+# It refuses rather than guesses. A PUBLISHED release is never re-uploaded —
+# republishing a version with different bytes is how a checksum file stops
+# meaning anything. A draft can be refreshed with FORCE=1 (`--clobber`).
+#
+# The assets are listed explicitly rather than globbed across the directory, so
+# nothing that happens to be sitting in it is published by accident.
+GH_REPO        ?= jpzk/koto
+RELEASE_TARGET ?= release/$(DIST_VERSION)
+DIST_ASSETS     = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)
+GH_RELEASE      = gh release --repo $(GH_REPO)
+
+release-draft:
 	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
-	@test -d $(DIST_DIR) || { echo "$(DIST_DIR) does not exist - run 'make dist' first"; exit 1; }
-	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - re-run 'make dist'"; exit 1; }
-	@test -s $(DIST_DIR)/SHA256SUMS.asc || { echo "$(DIST_DIR)/SHA256SUMS.asc is missing - re-run 'make dist'"; exit 1; }
+	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - run 'make dist' first"; exit 1; }
+	@test -n "$(DIST_ASSETS)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
 	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
 	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
 	  echo "describes the bytes you are about to publish"; exit 1; }
-	@# Verify the signature HERE, before anything is published. The signature
-	@# may have been produced on another machine and pasted in, so this is the
-	@# first point at which anyone checks it is (a) valid and (b) from the
-	@# pinned key. Publishing a release nobody can install is worse than not
-	@# publishing one.
+	@echo "==> draft release $(DIST_VERSION) on $(GH_REPO) (target $(RELEASE_TARGET)):"
+	@for f in $(DIST_ASSETS) $(DIST_DIR)/SHA256SUMS; do echo "      $$f"; done
+	@state=$$($(GH_RELEASE) view $(DIST_VERSION) --json isDraft --jq .isDraft 2>/dev/null || echo none); \
+	case "$$state" in \
+	none) $(GH_RELEASE) create $(DIST_VERSION) --draft --target $(RELEASE_TARGET) \
+	        --title "koto $(DIST_VERSION)" --notes-file $(DIST_DIR)/NOTES.md \
+	        $(DIST_ASSETS) $(DIST_DIR)/SHA256SUMS ;; \
+	true) if [ "$(FORCE)" = "1" ]; then \
+	        $(GH_RELEASE) upload $(DIST_VERSION) $(DIST_ASSETS) $(DIST_DIR)/SHA256SUMS --clobber; \
+	      else echo "!! a draft for $(DIST_VERSION) already exists - FORCE=1 replaces its assets"; exit 1; fi ;; \
+	*)    echo "!! release $(DIST_VERSION) is already PUBLISHED. Publishing different bytes under a"; \
+	      echo "   version people have already checksummed is how SHA256SUMS stops meaning anything."; \
+	      exit 1 ;; \
+	esac
+	@echo "next:  sign $(DIST_DIR)/SHA256SUMS as $(DIST_DIR)/SHA256SUMS.asc, then 'make release'"
+
+release:
+	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
+	@test -s $(DIST_DIR)/SHA256SUMS.asc || { \
+	  echo "$(DIST_DIR)/SHA256SUMS.asc is missing. Sign it wherever the release key lives:"; \
+	  echo "    gpg --local-user $(RELEASE_KEY_FPR) --armor --detach-sign -o SHA256SUMS.asc SHA256SUMS"; \
+	  exit 1; }
+	@# Verify the signature HERE, before it is attached. It may have been made
+	@# on another machine and copied in, so this is the first point at which
+	@# anyone checks it is (a) valid and (b) from the pinned key. A release
+	@# nobody can install is worse than not publishing one.
 	@command -v gpg >/dev/null || { echo "gpg is required to verify the signature before publishing"; exit 1; }
 	@G=$$(mktemp -d) && trap 'rm -rf "$$G"' EXIT && \
 	( if [ -n "$(KOTO_RELEASE_PUBKEY)" ]; then cat "$(KOTO_RELEASE_PUBKEY)"; \
@@ -375,26 +419,32 @@ release:
 	  $(DIST_DIR)/SHA256SUMS.asc $(DIST_DIR)/SHA256SUMS 2>/dev/null \
 	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
 	  echo "!! $(DIST_DIR)/SHA256SUMS.asc is not a good signature from $(RELEASE_KEY_FPR)"; \
-	  echo "   Nothing was published."; exit 1; }
+	  echo "   Nothing was uploaded."; exit 1; }
 	@echo "==> signature verified: $(RELEASE_KEY_FPR)"
-	@echo "==> publishing $(DIST_VERSION) ($(DIST_ARCH)):"
-	@for f in $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc; do echo "      $$f"; done
-	@if gh release view $(DIST_VERSION) >/dev/null 2>&1; then \
-	  if [ "$(FORCE)" = "1" ]; then \
-	    echo "==> release $(DIST_VERSION) exists - uploading with --clobber (FORCE=1)"; \
-	    gh release upload $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc --clobber; \
-	  else \
-	    echo "!! release $(DIST_VERSION) already exists."; \
-	    echo "   Publishing different bytes under a tag people have already checksummed"; \
-	    echo "   is how SHA256SUMS stops meaning anything. Bump dist/VERSION, or"; \
-	    echo "   re-run with FORCE=1 if you are certain."; \
-	    exit 1; \
-	  fi; \
-	else \
-	  gh release create $(DIST_VERSION) $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc \
-	    --title "koto $(DIST_VERSION)" --notes-file $(DIST_DIR)/NOTES.md; \
-	fi
-	@echo "next:  set DIST_VERSION in the Makefile and commit $(MANIFEST)"
+	@test "$$($(GH_RELEASE) view $(DIST_VERSION) --json isDraft --jq .isDraft 2>/dev/null)" = true || { \
+	  echo "!! no draft release $(DIST_VERSION) on $(GH_REPO) - run 'make release-draft' first"; exit 1; }
+	@# The uploaded SHA256SUMS must be the file that was signed.
+	@d=$$(mktemp -d) && trap 'rm -rf "$$d"' EXIT && \
+	$(GH_RELEASE) download $(DIST_VERSION) --pattern SHA256SUMS --dir "$$d" && \
+	cmp -s "$$d/SHA256SUMS" $(DIST_DIR)/SHA256SUMS || { \
+	  echo "!! the SHA256SUMS on the draft is not the one that was signed - re-run 'make release-draft FORCE=1'"; exit 1; }
+	$(GH_RELEASE) upload $(DIST_VERSION) $(DIST_DIR)/SHA256SUMS.asc --clobber
+	@echo "next:  commit $(MANIFEST), tag it $(DIST_VERSION), push the tag, then 'make release-publish'"
+
+release-publish:
+	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
+	@# Publish only once the pushed tag carries the manifest this build wrote:
+	@# install.sh clones the tag and holds the download to that file.
+	@sha=$$(gh api repos/$(GH_REPO)/commits/$(DIST_VERSION) --jq .sha 2>/dev/null) || { \
+	  echo "!! tag $(DIST_VERSION) is not on $(GH_REPO) - push it first"; exit 1; }; \
+	remote=$$(gh api "repos/$(GH_REPO)/contents/$(MANIFEST)?ref=$$sha" --jq .content | base64 -d); \
+	echo "$$remote" | cmp -s - $(MANIFEST) || { \
+	  echo "!! $(MANIFEST) at tag $(DIST_VERSION) ($$sha) differs from this build's - nothing published"; exit 1; }; \
+	echo "==> tag $(DIST_VERSION) -> $$sha carries this build's $(MANIFEST)"
+	@$(GH_RELEASE) view $(DIST_VERSION) --json assets --jq '.assets[].name' | grep -qx SHA256SUMS.asc || { \
+	  echo "!! the draft has no SHA256SUMS.asc - run 'make release' first"; exit 1; }
+	$(GH_RELEASE) edit $(DIST_VERSION) --draft=false --latest --tag $(DIST_VERSION)
+	@echo "published: https://github.com/$(GH_REPO)/releases/tag/$(DIST_VERSION)"
 
 # Guard for targets that consume the artifacts without producing them.
 # Presence only. Verification happens where bytes ARRIVE — `make fetch` checks
