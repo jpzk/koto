@@ -149,8 +149,8 @@ and the `release`-branch govulncheck action are the checks behind both.
 
 | component | pin |
 |---|---|
-| Firecracker | v1.16.1, built from source at `2038188f145fb81b8d098147a10e9d9f392fd22f`; `FC_PREBUILT=1` fetches the release, sha256 `382a02a8…c242e6` |
-| guest kernel | `amazonlinux/linux` `microvm-kernel-6.1.176-43.358.amzn2023` at `0f7eec7689f13075e603ae2e86d3353c6cb13b24`, no patches |
+| Firecracker | v1.17.0, built from source at `95f868c8e345b1cc8faccd1a3c910b4989dc3f58`; `FC_PREBUILT=1` fetches the release, sha256 `06094a11…de558` |
+| guest kernel | `amazonlinux/linux` `microvm-kernel-6.1.186-50.374.amzn2023` at `8a40ca92bfa9b706b76287942c89b13884928cb0`, no patches |
 | protoc plugins | `protoc-gen-go` v1.36.11 · `protoc-gen-go-grpc` v1.6.1 |
 
 **Container images** (all by digest; only the rootfs ships, the rest are build-only):

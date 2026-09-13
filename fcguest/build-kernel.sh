@@ -33,11 +33,33 @@ OUT="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
 CACHE="$HERE/.kernelcache"
 mkdir -p "$OUT" "$CACHE"
 
-# Pins. microvm-kernel tag from amazonlinux/linux (6.1.176 base, tagged 2026-07-02, >6 weeks old).
-KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.176-43.358.amzn2023}"
+# Pins. microvm-kernel tag from amazonlinux/linux (6.1.186 base, tagged
+# 2026-09-07).
+#
+# This one is a DELIBERATE EXCEPTION to the six-week dependency lag, taken for
+# 1.0.0. The lag exists so a broken or compromised release is noticed before we
+# adopt it; the trade here runs the other way. The previous pin (6.1.176, tagged
+# 2026-07-02) was eleven stable point releases behind 6.1 upstream by the time
+# 1.0.0 was cut, and shipping a release with a knowingly stale guest kernel is
+# the thing the rule is meant to prevent, not an instance of following it.
+#
+# Two things make the exception cheap. This is the GUEST kernel, behind the KVM
+# boundary: a bug here escalates inside a VM the trust model already allows to
+# run root (root=yes is a supported profile), not on the host. And the amzn tree
+# is what Amazon Linux 2023 ships to production, so a tag has been exercised at
+# a scale no six-week soak here would add to.
+#
+# NOT 6.18. microvm-kernel-6.18.25-57.115.amzn2023 exists and carries a higher
+# version, but it was tagged 2026-05-20 and sits ~26 point releases behind its
+# own 6.18 longterm branch — newer number, older and staler code. 6.1 is also
+# the series docs/kernel-amzn-vs-vanilla.md reasons about.
+KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.186-50.374.amzn2023}"
 # The commit the annotated tag dereferences to (git checkout resolves HEAD to
 # this, not the f3ba04a… tag-object sha from `git ls-remote refs/tags/…`).
-KERNEL_COMMIT="${KERNEL_COMMIT:-0f7eec7689f13075e603ae2e86d3353c6cb13b24}"
+# The tag resolves to this commit, verified independently against the GitHub API
+# rather than taken from the clone — a pin the clone supplies proves nothing.
+# annotated tag e4a14d4b1d1131d7952f1005eed2f82c4c6b060b -> commit below.
+KERNEL_COMMIT="${KERNEL_COMMIT:-8a40ca92bfa9b706b76287942c89b13884928cb0}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
 # Pinned by DIGEST: the builder image decides the compiler that produces
 # vmlinux, so a moving tag means a moving kernel binary.
