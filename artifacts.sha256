@@ -26,3 +26,8 @@
 # `koto install` treats a tree with no entries here as pre-release.
 #
 # `make dist` regenerates the entries below from the build it packages.
+165d0c58f628384f5d4fba7708d8e3d028a0715065b4c5b7a154a876dc3cdc7f  koto
+b3fc48ad2ac214fb4d3983691a27ac1ec027b675aa70707ee0b502a17f67ee96  koto-tui
+98ad7b3a21255fb9227dfe564a8c3e170d9272a6b1ac726a0e2f10a2d050e678  fcassets/firecracker
+04d3d9a78331b94cf7f43bc47de20092ab91fabbbdc2235bd4497c3379e53d6f  fcassets/vmlinux
+917ead018bc474234fb92be4adbd118c2b6e18a7a346653201c8a20d3b848485  fcassets/rootfs.img

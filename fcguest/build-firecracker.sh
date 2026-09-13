@@ -45,8 +45,8 @@ mkdir -p "$OUT"
 # it from upstream's OWN published file rather than from whatever you happened
 # to download —
 #   curl -fsSL "$FC_REPO_URL/$V/firecracker-$V-x86_64.tgz.sha256.txt"
-FC_VERSION="${FC_VERSION:-v1.16.1}"   # latest release as of 2026-08-31
-FC_SHA256="${FC_SHA256:-382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6}"
+FC_VERSION="${FC_VERSION:-v1.17.0}"   # latest release as of 2026-09-13
+FC_SHA256="${FC_SHA256:-06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558}"
 FC_REPO_URL="https://github.com/firecracker-microvm/firecracker/releases/download"
 ARCH=$(uname -m)                      # x86_64
 
@@ -56,13 +56,13 @@ ARCH=$(uname -m)                      # x86_64
 # refreshing it — ls-remote on the bare ref gives the tag OBJECT, not the
 # commit, and pinning that fails the check every time:
 #   git ls-remote "$FC_GIT" "refs/tags/vX.Y.Z^{}"
-FC_COMMIT="${FC_COMMIT:-2038188f145fb81b8d098147a10e9d9f392fd22f}"
+FC_COMMIT="${FC_COMMIT:-95f868c8e345b1cc8faccd1a3c910b4989dc3f58}"
 FC_GIT="${FC_GIT:-https://github.com/firecracker-microvm/firecracker}"
 # Upstream's build container, pinned by DIGEST. The tag tracks the Firecracker
-# release: tools/devtool in v1.16.1 pins DEVCTR_IMAGE_TAG=v90, so bump both
+# release: tools/devtool in v1.17.0 pins DEVCTR_IMAGE_TAG=v93, so bump both
 # together. We invoke cargo in it directly rather than running devtool, which
 # is itself a docker wrapper and would nest engines for no gain.
-DEVCTR="${DEVCTR:-public.ecr.aws/firecracker/fcuvm@sha256:a716905776133b78c72c1992a79d346a1088ce2981e206b960b1912522423042}"
+DEVCTR="${DEVCTR:-public.ecr.aws/firecracker/fcuvm@sha256:36d81dd62f79c2f3ae5f97429d4c1504999539daa27c4797c993efc799702720}"
 FC_TARGET=x86_64-unknown-linux-musl
 
 if [ -x "$OUT/firecracker" ] && [ "${FC_FORCE:-}" != "1" ]; then
