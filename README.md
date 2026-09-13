@@ -4,7 +4,7 @@
 
 Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and 1 shared terminal. The group can be configured in different sizes with different vCPUs, memory and storage. Other configurations include LLM model, network access, root sudo. The daemon speaks a gRPC protocol and can be commanded by `koto ctl` or `koto tui`. 
 
-koto also has ACL with roles and permissions on system configuration and groups. koto is not a batteries included personal agent but an open source, self-host able secure foundation to compartmentalize different prototypes. Developer UX is so important and therefore `koto tui` was built, it's leveraging established paradigms and tries to break new ground. 
+Not a batteries-included personal agent: an open-source, self-hosted foundation for compartmentalizing prototypes, with role-based ACLs over groups and configuration.
 
 ## Quick start 
 
