@@ -49,7 +49,14 @@ everything else derives from the globals.
   2. **integrate** — `make install` → `koto install`: preflight, then the
      state dir, the binaries on PATH, `/etc/koto/koto.env`, the unit.
      `requireArtifacts()` gates it, so a missing rootfs is caught before the
-     first `sudo` write rather than after three of them.
+     first `sudo` write rather than after three of them. **Presence only —
+     install does NOT hold the tree to `artifacts.sha256`** (decided
+     2026-09-13): the builds are not reproducible (koto stamps `git describe`,
+     vmlinux/rootfs.img embed timestamps and package versions), so the
+     release-time manifest turned every `make build` install into a refusal
+     — found by the Fedora 44 release test. Verification lives where bytes
+     arrive: `make fetch` and `install.sh` check the signed `SHA256SUMS` (fetch
+     also the committed manifest) in a staging dir. `make verify` is gone.
   3. **configure** — `make wizard` → `koto setup`: a 6-step wizard
      (installed? → PKI → credentials → start → smoke → handoff).
   `make setup` still runs all three in order; it is the only thing that knows
@@ -306,7 +313,7 @@ tui/                 Go (Bubble Tea) TUI module — Dockerfile (scratch), *.go, 
 prompts/             harness-controlled system prompts (global.md delivered into every group)
 groups/<g>/prompt.md per-group system prompt — HOST-side and host-authoritative; the guest cannot write it (no shared FS)
 groups/<g>/workspace.img  [firecracker] ext4 image = the guest's /workspace (gitignored)
-Makefile             three stages: fetch|build (acquire) → install (integrate) → wizard (configure); setup = all three; verify = checksums vs dist/artifacts.sha256; install / release-build / host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / assets (= firecracker + kernel + rootfs)
+Makefile             three stages: fetch|build (acquire) → install (integrate) → wizard (configure); setup = all three; install / release-build / host-build / ctl-build / login / host-run / tui-build / tui / stop / metrics / proto-gen / pki-init / pki-client / clean (safe) / clean-groups (destructive, prompted) / assets (= firecracker + kernel + rootfs)
 scripts/             POSIX shell scripts for the TUI's /runscript (mounted ro
                      into cs_tui at /koto-scripts; run in the focused group's
                      microVM as node via the admin-only RunScript RPC)
