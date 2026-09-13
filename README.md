@@ -33,33 +33,49 @@ releases exist.
 
 ```
 ╔═ TIER 1 · host user (full authority) ═══════════════════════════════════════╗
-║  gRPC clients: koto tui · koto ctl · Android — host processes, no container ║
-║  /var/lib/koto/creds: OAuth token · PKI (ca, client-*, tokens) · acl.json   ║
+║  gRPC clients: koto tui · koto ctl (host binaries)                          ║
+║  /var/lib/koto/creds: OAuth token · API keys · PKI · tokens · acl.json      ║
 ╚═══════════════╤═══════════════════════════════════════════╤═════════════════╝
                 │ gRPC :8443  (mTLS + bearer token)         │ read per request
                 ▼                                           ▼ (proxy memory only)
 ╔═ TIER 2 · koto daemon — systemd service, rootless as the host user ═════════╗
-║  own userns (newuidmap) · ProtectSystem=strict · ProtectHome=yes · CPUQuota ║
+║  own userns · ProtectSystem=strict · ProtectHome · DevicePolicy · CPUQuota  ║
 ║  ┌─ role ACL ─────────┐   ┌─ daemon (Go) ─────────────┐   ┌─ LLM proxy ───┐ ║
-║  │ admin · operator   │──▶│ lifecycle · session queues│   │ per-group port│═╬═▶ LLM API
-║  │ reader · agent     │   │ log tailer · replay ring  │   │ injects key   │ ║   (real credential)
-║  │ verb × target      │   │ cron · goals · ctl verbs  │   └───────▲───────┘ ║
-║  └────────────────────┘   └──────▲────────────┬───────┘   ┌───────┼───────┐ ║
+║  │ admin (built in)   │──▶│ lifecycle · session queues│   │ unix socket   │═╬═▶ LLM API
+║  │ agent (seeded)     │   │ log tailer · replay ring  │   │ per group,    │ ║   (real credential)
+║  │ verb × target      │   │ cron · goals · ctl verbs  │   │ injects key   │ ║
+║  └────────────────────┘   └──────▲────────────┬───────┘   └───────▲───────┘ ║
+║                                  │            │           ┌───────┼───────┐ ║
 ║                                  │            │           │ gVisor gateway│┄╬┄▶ internet / LAN
 ║                                  │            │           │ wan/lan/full  │ ║   (filtered NAT)
 ║                                  │            │           └───────▲───────┘ ║
 ╚══════════════════════════════════╪════════════╪═══════════════════╪═════════╝
-        vsock 9001 log ·  9002 ctl │            │ vsock 10000       │ vsock 9000 (sentinel key)
-              9004 turn streams    │            │ agent RPC         ┆ vsock 9003 (L2 frames)
+                    vsock 9002 ctl │            │ vsock 10000       │ vsock 9000 (sentinel key)
+           vsock 9004 turn streams │            ▼ agent RPC         ┆ vsock 9003 (L2 frames)
 ╔═ TIER 3 · one jailed Firecracker VMM per group ═════════════════════════════╗
 ║  fcjail: userns+mnt+pid+net+ipc+uts · per-VM chroot · unprivileged uid ·    ║
-║          no_new_privs · seccomp                                             ║
+║          no_new_privs · seccomp · per-VM cgroup                             ║
 ║  ┌┄ KVM boundary · guest kernel ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐  ║
-║  ┆  microVM <g>: fc-agent (PID 1) → claude -p --bare loop as uid 1000    ┆  ║
+║  ┆  microVM <g>: fc-agent (PID 1) runs each turn: claude -p, uid 1000    ┆  ║
 ║  ┆  /workspace = workspace.img · rootless podman · no NIC by default     ┆  ║
 ║  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  ║
 ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
+
+**Defense in depth.** No single boundary is trusted to hold on its own. An
+agent runs behind the **KVM boundary** with its own guest kernel, no network
+interface by default, and no credentials — the proxy injects them host-side,
+per request. Should the guest escape into the Firecracker VMM, it lands in
+**fcjail**: fresh user, mount, PID, network, IPC and UTS namespaces, an empty
+per-VM chroot, a distinct unprivileged uid, `no_new_privs`, Firecracker's own
+**seccomp** filter, and a per-VM cgroup that weights its CPU and bounds its
+memory. The daemon around it holds no root either: it bootstraps its own
+**user namespace** through `newuidmap`/`newgidmap` from `/etc/subuid`, and
+runs inside a **systemd sandbox** — `ProtectSystem=strict`, `ProtectHome`,
+`DevicePolicy=closed` with only `/dev/kvm` added, and seccomp-enforced
+restrictions on address families, namespaces, realtime scheduling and
+personality, plus a capability bounding set that leaves only what
+`newuidmap` needs. Each layer assumes the one inside it has already failed.
 
 ## Guest kernel & Root FS
 
@@ -104,8 +120,8 @@ What is in it:
 
 | | |
 |---|---|
-| base | `fedora`, pinned by digest, 27 dnf packages with weak deps off |
-| agent runtime | `nodejs` + `npm` + `@anthropic-ai/claude-code` (installed unpinned — the one floating part), `python3`, `git`, `ripgrep`, `jq`, `curl`, `tmux` |
+| base | `fedora` 44, pinned by digest, 27 dnf packages with weak deps off |
+| agent runtime | `nodejs` + `npm` + `@anthropic-ai/claude-code` 2.1.268 (pinned), `python3`, `git`, `ripgrep`, `jq`, `curl`, `tmux` |
 | PID 1 | `/usr/local/bin/fc-agent`, the static Go guest agent selected by `init=` on the kernel command line; it runs every turn, bridges vsock, and mounts `/workspace` |
 | worker scripts | `/sidecar/` — `cs-job`, `cs-notify`, `cs-subagent`, `venice_stream.js` (baked in: a microVM has no bind mounts) |
 | user | `node`, uid 1000 — everything runs as it, because `claude --dangerously-skip-permissions` refuses root |
@@ -126,7 +142,7 @@ overlay is reset.
 want on the new image — the deliberate cost of having no shared filesystem
 between host and guest.
 
-## Supply chain
+## SBOM (supply chain)
 
 Everything is pinned; `go.sum` locks the module trees, build containers are
 pinned by digest, and source checkouts by commit. Go pins follow a 6-week
@@ -140,10 +156,13 @@ and the `release`-branch govulncheck action are the checks behind both.
 
 | module | dependencies | indirect |
 |---|---|---|
-| `daemon/` | `containers/gvisor-tap-vsock` v0.8.8 · `golang.org/x/sys` v0.40.0 · `grpc` v1.80.0 · `protobuf` v1.36.11 · `koto-protocol` (local) | 19 |
-| `tui/` | charmbracelet `bubbletea` v1.3.10 · `bubbles` v1.0.0 · `glamour` v1.0.0 · `lipgloss` v1.1.1-pre · `log` v1.0.0 · `x/ansi` v0.11.7 · `x/vt` (2026-04-30) · `muesli/termenv` v0.16.0 · `grpc` v1.80.0 · `protobuf` v1.36.11 · `koto-protocol` | 37 |
-| `fcguest/` | `golang.org/x/sys` v0.40.0 · `protobuf` v1.36.11 · `koto-protocol` | 4 |
-| `protocol/` | `grpc` v1.80.0 · `protobuf` v1.36.11 | 4 |
+| `daemon/` | `containers/gvisor-tap-vsock` v0.8.9 · `golang.org/x/sys` v0.47.0 · `grpc` v1.82.1 · `protobuf` v1.36.11 · `koto-protocol` (local) | 19 |
+| `tui/` | charmbracelet `bubbletea` v1.3.10 · `bubbles` v1.0.0 · `glamour` v1.0.0 · `lipgloss` v1.1.1-pre (2025-04-04) · `log` v1.0.0 · `x/ansi` v0.11.7 · `x/vt` (2026-04-30) · `muesli/termenv` v0.16.0 · `grpc` v1.82.1 · `protobuf` v1.36.11 · `koto-protocol` (local) | 37 |
+| `fcguest/` | `golang.org/x/sys` v0.47.0 · `protobuf` v1.36.11 · `koto-protocol` (local) | 4 |
+| `protocol/` | `grpc` v1.82.1 · `protobuf` v1.36.11 | 4 |
+
+All four modules build with Go **1.26.8** (`toolchain` line, and the golang
+image below).
 
 **Source and binaries:**
 
@@ -151,19 +170,24 @@ and the `release`-branch govulncheck action are the checks behind both.
 |---|---|
 | Firecracker | v1.17.0, built from source at `95f868c8e345b1cc8faccd1a3c910b4989dc3f58`; `FC_PREBUILT=1` fetches the release, sha256 `06094a11…de558` |
 | guest kernel | `amazonlinux/linux` `microvm-kernel-6.1.186-50.374.amzn2023` at `8a40ca92bfa9b706b76287942c89b13884928cb0`, no patches |
+| claude-code | `@anthropic-ai/claude-code` 2.1.268 (npm, in the rootfs) |
 | protoc plugins | `protoc-gen-go` v1.36.11 · `protoc-gen-go-grpc` v1.6.1 |
 
 **Container images** (all by digest; only the rootfs ships, the rest are build-only):
 
 | image | used for | digest |
 |---|---|---|
-| `docker.io/library/fedora` | guest rootfs base, guest kernel build | `sha256:be9d65e2…babbd19` |
-| `docker.io/library/golang` | daemon, TUI, fc-agent, protoc | `sha256:757779ac…077282a` |
+| `docker.io/library/fedora` (44) | guest rootfs base, guest kernel build | `sha256:be9d65e2…babbd19` |
+| `docker.io/library/golang` (1.26.8-alpine) | daemon, TUI, fc-agent, protoc | `sha256:6e5de3f5…0a623be` |
 | `docker.io/library/alpine` | mkfs stage of the rootfs build | `sha256:7c8cb692…5eb2e6` |
-| `public.ecr.aws/firecracker/fcuvm` | Firecracker source build | `sha256:a7169057…423042` |
+| `public.ecr.aws/firecracker/fcuvm` (v93) | Firecracker source build | `sha256:36d81dd6…9702720` |
+| `ghcr.io/betterleaks/betterleaks` | pre-commit hook, `make secrets-scan` | `sha256:06d60954…725a633a` |
+| `docker.io/trufflesecurity/trufflehog` | `make secrets-scan` | `sha256:aa821cf4…6a52577` |
 
-**Floating:** `@anthropic-ai/claude-code` (npm, latest at rootfs build time)
-and the 27 dnf packages inside the pinned fedora image.
+**Floating:** the versions of the 27 dnf packages (and their dependencies)
+installed on top of the pinned fedora image — resolved from the Fedora
+repositories at rootfs build time, which is also why `rootfs.img` does not
+reproduce bit-for-bit.
 
 ## Credentials and Anthropic's terms
 
