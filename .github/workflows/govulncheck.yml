@@ -7,12 +7,12 @@
 # not a failure. It also covers the standard library, so it flags a fix that
 # only a Go toolchain bump delivers.
 #
-# It runs on pushes to `release` (and by hand via workflow_dispatch), NOT on
-# every push to main: this is a release gate, the moment to decide whether a
-# pinned dependency's six-week soak (CLAUDE.md, "Conventions") has to be cut
-# short for a reachable vulnerability — the same call the project already made
-# explicitly for Firecracker. It needs network for the database, which is why
-# it is not a pre-commit hook.
+# It runs on pushes to `release` and `release/<version>` (and by hand via
+# workflow_dispatch), NOT on every push to main: this is a release gate, the
+# moment to decide whether a pinned dependency's six-week soak (CLAUDE.md,
+# "Conventions") has to be cut short for a reachable vulnerability — the same
+# call the project already made explicitly for Firecracker. It needs network
+# for the database, which is why it is not a pre-commit hook.
 #
 # Go version: pinned to the exact version the release binaries are BUILT with
 # (the Makefile's GO_IMAGE digest — `podman run --rm $GO_IMAGE go version`), so
@@ -28,7 +28,9 @@ name: govulncheck
 
 on:
   push:
-    branches: [release]
+    # `release` is the original long-lived branch; `release/<version>` is what
+    # the release skill cuts per release (.claude/skills/release).
+    branches: [release, "release/**"]
   workflow_dispatch:
 
 permissions:

@@ -44,8 +44,8 @@
 #      WHICH key signed is close to not verifying at all.
 #
 #   3. Take the asset NAMES from the now-trusted SHA256SUMS. Release assets
-#      carry the version of the thing inside them (firecracker-1.17.0-…,
-#      vmlinux-6.1.186-…, rootfs.img-fedora44-…), so the names cannot be
+#      carry the version of the thing inside them (firecracker_1.17.0_…,
+#      vmlinux_6.1.186_…, rootfs.img_fedora44_…), so the names cannot be
 #      guessed ahead of time — and taking them from a signed file means a
 #      tampered index cannot point us at something else.
 #
@@ -252,8 +252,10 @@ gpg --batch --status-fd=1 --verify "$STAGE/SHA256SUMS.asc" "$STAGE/SHA256SUMS" 2
 	die "SHA256SUMS is not signed by $KEY_FPR — nothing was installed"
 echo "    good signature from $KEY_FPR"
 
-# Asset names come out of the signed file. Map each back to the path koto
-# expects by stripping the -<version>-<arch>.zst tail.
+# Asset names come out of the signed file: <name>_<version>_<arch>.zst, where
+# the version is the component's own (firecracker_1.17.0, vmlinux_6.1.186,
+# rootfs.img_fedora44). Map each back to the path koto expects by stripping
+# the _<version>_<arch>.zst tail.
 assets="$(awk '{print $2}' "$STAGE/SHA256SUMS")"
 [ -n "$assets" ] || die "SHA256SUMS lists no assets"
 n=$(echo "$assets" | wc -w)
@@ -261,7 +263,7 @@ step "downloading $n assets"
 i=0
 for a in $assets; do
 	case "$a" in
-	*-"$ARCH".zst) ;;
+	*_"$ARCH".zst) ;;
 	*) die "SHA256SUMS names $a, which is not a $ARCH asset" ;;
 	esac
 	i=$((i + 1))
@@ -279,8 +281,8 @@ step "unpacking into $DEST"
 mkdir -p "$STAGE/out/fcassets"
 outs=""
 for a in $assets; do
-	base="${a%-"$ARCH".zst}"    # koto-1.0.0        / rootfs.img-fedora44
-	name="${base%-*}"           # koto              / rootfs.img
+	base="${a%_"$ARCH".zst}"    # koto-tui_1.0.0    / rootfs.img_fedora44
+	name="${base%_*}"           # koto-tui          / rootfs.img
 	case "$name" in
 	koto | koto-tui) rel="$name" ;;
 	firecracker | vmlinux | rootfs.img) rel="fcassets/$name" ;;
