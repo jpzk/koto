@@ -263,10 +263,20 @@ What that means for you as a reader or user:
 - **Dependencies were still chosen deliberately.** The ≥6-week pin rule and
   the small dependency tree (see [SBOM](#sbom-supply-chain)) were human
   constraints, not model defaults.
-- **Licensing.** The project is MIT-licensed by the maintainer. AI-generated
-  code has an unsettled copyright status in some jurisdictions; if that
-  matters to you, factor it in.
+- **Licensing.** The project is licensed by the maintainer under
+  `GPL-2.0-or-later WITH koto-verbs-note` (see [License](#license)).
+  AI-generated code has an unsettled copyright status in some
+  jurisdictions; if that matters to you, factor it in.
 
 If you contribute with AI assistance, that is fine — say so in the commit
 message or PR so the provenance stays visible.
 
+## License
+
+`GPL-2.0-or-later WITH koto-verbs-note` — the Linux kernel's license, plus
+"or later" because koto's binaries link Apache-2.0 code (grpc, gVisor), and a
+note modelled on the kernel's syscall note: programs that only use koto
+through its verbs (the gRPC API in `protocol/`, `koto ctl`, the in-guest
+control plane) and the workloads running inside a group are not derived
+works. See [`COPYING`](COPYING) and [`LICENSE`](LICENSE). Releases up to and
+including 1.0.0 are MIT.
