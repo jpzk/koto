@@ -176,7 +176,8 @@ setup:
 # committed to this repo, so the checksums reach you over git — with whatever
 # review and signing the repo has — rather than over the same connection as
 # the bytes they vouch for. KOTO_DIST_URL can point anywhere, a mirror or a
-# file:// path included; the check does not change.
+# file:// path included; the check does not change. The work itself is
+# install.sh's — `make fetch` is that script run against the clone.
 #
 # The manifest lists the artifacts as INSTALLED, not as transferred: rootfs.img
 # ships compressed and is checked after decompression. It vouches for the
@@ -250,78 +251,21 @@ DIST_VERSION  ?= 1.0.0
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.
 fetch:
-	@test -n "$(DIST_VERSION)" || { echo "dist/VERSION is missing or empty"; exit 1; }
 	@if [ "$(DIST_VERSION)" = "unreleased" ]; then \
 	  echo "no koto release has been published yet, so there is nothing to fetch."; \
 	  echo "build the artifacts from source instead:"; \
 	  echo "    make build && make install && make wizard"; \
 	  exit 1; \
 	fi
-	@command -v curl >/dev/null || { echo "curl is required to fetch artifacts"; exit 1; }
-	@command -v zstd >/dev/null || { echo "zstd is required to unpack the release assets"; exit 1; }
-	@mkdir -p $(FCASSETS)
-	@# Fail-CLOSED (audit M12): everything lands in a staging dir and is
-	@# verified THERE; only a clean manifest check moves the five files into
-	@# the tree. A failed download used to leave executables behind for the
-	@# next `make install` to copy to /usr/local/bin as root. --proto pins
-	@# https on the request and on every redirect (curl's default lets a
-	@# redirect downgrade to http).
-	@command -v gpg >/dev/null || { echo "gpg is required to verify the release signature"; exit 1; }
-	@test -n "$(RELEASE_KEY_FPR)" || { \
-	  echo "RELEASE_KEY_FPR is empty - refusing to accept a signature from"; \
-	  echo "whatever key happens to turn up"; exit 1; }
-	@stage=$$(mktemp -d .fetch.XXXXXX) && trap 'rm -rf "$$stage"' EXIT && \
-	base="$(KOTO_DIST_URL)/$(DIST_VERSION)"; \
-	echo "==> fetching koto $(DIST_VERSION) ($(DIST_ARCH)) from $$base"; \
-	mkdir -p "$$stage/$(FCASSETS)"; \
-	get() { curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$$2" "$$1" || { \
-	  echo "failed to fetch $$1"; exit 1; }; }; \
-	get "$$base/SHA256SUMS" "$$stage/SHA256SUMS"; \
-	get "$$base/SHA256SUMS.asc" "$$stage/SHA256SUMS.asc"; \
-	echo "==> verifying the signature on SHA256SUMS"; \
-	GNUPGHOME="$$stage/gnupg"; export GNUPGHOME; mkdir -p -m 700 "$$GNUPGHOME"; \
-	if [ -n "$(KOTO_RELEASE_PUBKEY)" ]; then \
-	  cp "$(KOTO_RELEASE_PUBKEY)" "$$stage/key.asc"; \
-	else \
-	  get "$(RELEASE_KEYSERVER)/$(RELEASE_KEY_FPR)" "$$stage/key.asc"; \
-	fi; \
-	gpg --batch --quiet --import "$$stage/key.asc" || { echo "could not import the release key"; exit 1; }; \
-	gpg --batch --with-colons --list-keys | awk -F: '/^fpr:/{print $$10; exit}' \
-	  | grep -qx "$(RELEASE_KEY_FPR)" || { \
-	  echo "!! the key delivered for $(RELEASE_KEY_FPR) has a different fingerprint"; exit 1; }; \
-	gpg --batch --status-fd=1 --verify "$$stage/SHA256SUMS.asc" "$$stage/SHA256SUMS" 2>/dev/null \
-	  | grep -q "^\[GNUPG:\] VALIDSIG $(RELEASE_KEY_FPR)" || { \
-	  echo "!! SHA256SUMS is not signed by $(RELEASE_KEY_FPR)"; \
-	  echo "   Nothing was downloaded into the tree. Do not use these artifacts."; exit 1; }; \
-	echo "    good signature from $(RELEASE_KEY_FPR)"; \
-	echo "==> fetching the assets it names"; \
-	for dest in $(ARTIFACTS); do \
-	  n=$$(basename $$dest); \
-	  asset=$$(awk -v p="$$n-" -v s="-$(DIST_ARCH).zst" \
-	    'index($$2,p)==1 && $$2 ~ s"$$" {print $$2}' "$$stage/SHA256SUMS" | head -1); \
-	  test -n "$$asset" || { echo "SHA256SUMS names no asset for $$dest"; exit 1; }; \
-	  echo "    $$asset -> $$dest"; \
-	  get "$$base/$$asset" "$$stage/$$asset"; \
-	done; \
-	echo "==> checking the assets against the signed SHA256SUMS"; \
-	( cd "$$stage" && sha256sum -c SHA256SUMS ) >/dev/null || { \
-	  echo "!! an asset does not match the signed SHA256SUMS"; exit 1; }; \
-	for dest in $(ARTIFACTS); do \
-	  n=$$(basename $$dest); \
-	  asset=$$(awk -v p="$$n-" -v s="-$(DIST_ARCH).zst" \
-	    'index($$2,p)==1 && $$2 ~ s"$$" {print $$2}' "$$stage/SHA256SUMS" | head -1); \
-	  zstd -qdf --sparse "$$stage/$$asset" -o "$$stage/$$dest" || exit 1; \
-	  rm -f "$$stage/$$asset"; \
-	done; \
-	chmod +x "$$stage/koto" "$$stage/koto-tui" "$$stage/$(FCASSETS)/firecracker" "$$stage/$(FCASSETS)/vmlinux"; \
-	echo "==> checking the unpacked artifacts against the COMMITTED manifest"; \
-	( cd "$$stage" && sha256sum -c "$(CURDIR)/$(MANIFEST)" ) || { \
-	  echo "!! checksum mismatch - nothing was installed into the tree"; exit 1; }; \
-	for f in $(ARTIFACTS); do \
-	  mv -f "$$stage/$$f" "$$f"; \
-	done
-	@echo "verified: $(ARTIFACTS)"
-	@echo "next:  make install"
+	@# install.sh is the one implementation of fetch-and-verify (key by
+	@# fingerprint, signed SHA256SUMS, staged download, fail-closed move). This
+	@# only points it at the clone and adds the committed manifest, the check
+	@# whose checksums arrive over git rather than with the assets.
+	@KOTO_BASE_URL="$(KOTO_DIST_URL)/$(DIST_VERSION)" \
+	  KOTO_KEY_FPR="$(RELEASE_KEY_FPR)" KOTO_KEYSERVER="$(RELEASE_KEYSERVER)" \
+	  KOTO_ARCH="$(DIST_ARCH)" KOTO_RELEASE_PUBKEY="$(KOTO_RELEASE_PUBKEY)" \
+	  sh ./install.sh --version "$(DIST_VERSION)" --dest . --manifest $(MANIFEST) \
+	    --download-only --next "make install"
 
 # --- dist ------------------------------------------------------------------
 # Package the artifacts in the tree as release assets, and regenerate the
