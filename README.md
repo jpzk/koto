@@ -32,6 +32,7 @@ koto tui        # attach the TUI: /new <name> spawns your first agent, /exit det
 ### From signed builds
 
 ```sh
+git clone https://github.com/jpzk/koto && cd koto
 make fetch      # 1. fetch signed artifacts and verify checksum 
 make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
 make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
