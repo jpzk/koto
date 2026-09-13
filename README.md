@@ -4,8 +4,6 @@
 
 Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and 1 shared terminal. The group can be configured in different sizes with different vCPUs, memory and storage. Other configurations include LLM model, network access, root sudo. The daemon speaks a gRPC protocol and can be commanded by `koto ctl` or `koto tui`. 
 
-Not a batteries-included personal agent: an open-source, self-hosted foundation for compartmentalizing prototypes, with role-based ACLs over groups and configuration.
-
 ## Quick start 
 
 ### From signed builds
@@ -37,7 +35,6 @@ make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks 
 make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
-
 
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
@@ -151,86 +148,18 @@ overlay is reset.
 want on the new image — the deliberate cost of having no shared filesystem
 between host and guest.
 
-## SBOM (supply chain)
-
-Everything is pinned; `go.sum` locks the module trees, build containers are
-pinned by digest, and source checkouts by commit. Go pins follow a 6-week
-dependency-lag rule, with one exception: a pin that closes a *reachable*
-govulncheck finding is taken at once (the Go toolchain included — a
-supported series' newest patch is the standard library's security fix).
-The `go.mod` ledgers name every pin taken under it. `make secrets-scan`
-and the `release`-branch govulncheck action are the checks behind both.
-
-**Go modules** (direct):
-
-| module | dependencies | indirect |
-|---|---|---|
-| `daemon/` | `containers/gvisor-tap-vsock` v0.8.9 · `golang.org/x/sys` v0.47.0 · `grpc` v1.82.1 · `protobuf` v1.36.11 · `koto-protocol` (local) | 19 |
-| `tui/` | charmbracelet `bubbletea` v1.3.10 · `bubbles` v1.0.0 · `glamour` v1.0.0 · `lipgloss` v1.1.1-pre (2025-04-04) · `log` v1.0.0 · `x/ansi` v0.11.7 · `x/vt` (2026-04-30) · `muesli/termenv` v0.16.0 · `grpc` v1.82.1 · `protobuf` v1.36.11 · `koto-protocol` (local) | 37 |
-| `fcguest/` | `golang.org/x/sys` v0.47.0 · `protobuf` v1.36.11 · `koto-protocol` (local) | 4 |
-| `protocol/` | `grpc` v1.82.1 · `protobuf` v1.36.11 | 4 |
-
-All four modules build with Go **1.26.8** (`toolchain` line, and the golang
-image below).
-
-**Source and binaries:**
-
-| component | pin |
-|---|---|
-| Firecracker | v1.17.0, built from source at `95f868c8e345b1cc8faccd1a3c910b4989dc3f58`; `FC_PREBUILT=1` fetches the release, sha256 `06094a11…de558` |
-| guest kernel | `amazonlinux/linux` `microvm-kernel-6.1.186-50.374.amzn2023` at `8a40ca92bfa9b706b76287942c89b13884928cb0`, no patches |
-| claude-code | `@anthropic-ai/claude-code` 2.1.268 (npm, in the rootfs) |
-| protoc plugins | `protoc-gen-go` v1.36.11 · `protoc-gen-go-grpc` v1.6.1 |
-
-**Container images** (all by digest; only the rootfs ships, the rest are build-only):
-
-| image | used for | digest |
-|---|---|---|
-| `docker.io/library/fedora` (44) | guest rootfs base, guest kernel build | `sha256:be9d65e2…babbd19` |
-| `docker.io/library/golang` (1.26.8-alpine) | daemon, TUI, fc-agent, protoc | `sha256:6e5de3f5…0a623be` |
-| `docker.io/library/alpine` | mkfs stage of the rootfs build | `sha256:7c8cb692…5eb2e6` |
-| `public.ecr.aws/firecracker/fcuvm` (v93) | Firecracker source build | `sha256:36d81dd6…9702720` |
-| `ghcr.io/betterleaks/betterleaks` | pre-commit hook, `make secrets-scan` | `sha256:06d60954…725a633a` |
-| `docker.io/trufflesecurity/trufflehog` | `make secrets-scan` | `sha256:aa821cf4…6a52577` |
-
-**Floating:** the versions of the 27 dnf packages (and their dependencies)
-installed on top of the pinned fedora image — resolved from the Fedora
-repositories at rootfs build time, which is also why `rootfs.img` does not
-reproduce bit-for-bit.
-
 ## Credentials and Anthropic's terms
 
 koto runs the **unmodified** `claude` binary and never hands a real credential
 to a guest: the proxy injects one of two things on the host side
 (`daemon/proxy.go` `authHeaders`):
 
-1. **An API key** — `export ANTHROPIC_API_KEY=sk-ant-…` before `make host-run`.
-   **Recommended.** Anthropic's guidance is that developers building agent
-   systems on Claude Code / the Agent SDK use API-key authentication; `claude
-   -p --bare` (what every group runs) is documented as an API-key mode; and
-   API traffic falls under the Commercial Terms, so business use is fine.
-   Billing is per token to the key owner.
-2. **A Claude subscription login** — `koto claude-login` (or `make login`)
-   runs `claude auth login` (Anthropic's own flow) and the proxy forwards the
-   resulting OAuth token, refreshing it via `claude` itself — so the installed
-   daemon needs a `claude` it can exec: `koto install` records the one on your
-   PATH as `KOTO_CLAUDE_BIN` in `/etc/koto/koto.env` and, for a claude under
-   your home, binds its directories read-only through the unit's `ProtectHome`.
-   `koto claude-login --status` verifies that path from the daemon's side.
-   **This works, but read the fine print before relying on it:**
-   - OAuth is "intended exclusively for purchasers of … subscription plans
+OAuth is "intended exclusively for purchasers of … subscription plans
      and designed to support ordinary use of Claude Code"; advertised Pro/Max
      limits "assume ordinary, individual usage". A fleet of scheduled,
      autonomous agents is a stretch of "ordinary individual usage", and
      Anthropic "reserves the right to take measures to enforce these
      restrictions … without prior notice".
-   - The Consumer Terms (Free/Pro/Max) allow **personal, non-commercial use
-     only**. Commercial work belongs on an API key or a Team/Enterprise plan.
-   - Anthropic prohibits developers from collecting, storing, or
-     intermediating Claude.ai credentials **on behalf of other users**. koto
-     is a single-operator tool: the credential is yours, the agents are
-     yours. **Do not run koto as a shared or hosted service on a subscription
-     login** — that is exactly the pattern the clause forbids.
 
 Sources: [Claude Code legal & compliance](https://code.claude.com/docs/en/legal-and-compliance)
 (authentication and credential use, running Claude Code in agent
@@ -248,28 +177,6 @@ maintainer. The human decided *what* to build and what the trust model must
 guarantee, read and pushed back on the output, and ran it; the models wrote
 most of the lines. Commit messages record the design rationale in the same
 way — many were drafted by the model and edited by the maintainer.
-
-What that means for you as a reader or user:
-
-- **Review it like code from a fast, confident contractor you don't know.**
-  The isolation claims (KVM boundary, no-NIC default, jailed VMM, credential
-  proxy) were verified by running them, and the security-relevant parts have
-  been audited more than once (`docs/history/` holds the dated audits), but
-  no part of this repository has been reviewed line-by-line by a second
-  human. Treat it as unaudited from a third-party standpoint.
-- **Prose may overstate.** Model-written docs tend toward completeness and
-  certainty; where the README or `CLAUDE.md` and the code disagree, the code
-  is right and a doc fix is welcome.
-- **Dependencies were still chosen deliberately.** The ≥6-week pin rule and
-  the small dependency tree (see [SBOM](#sbom-supply-chain)) were human
-  constraints, not model defaults.
-- **Licensing.** The project is licensed by the maintainer under
-  `GPL-2.0-or-later WITH koto-verbs-note` (see [License](#license)).
-  AI-generated code has an unsettled copyright status in some
-  jurisdictions; if that matters to you, factor it in.
-
-If you contribute with AI assistance, that is fine — say so in the commit
-message or PR so the provenance stays visible.
 
 ## License
 
