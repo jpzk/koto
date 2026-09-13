@@ -2500,7 +2500,7 @@ already-compromised daemon", and there is no such beyond:
 - **The one path that WAS an escalation is closed.** `koto tui` resolving the
   `koto-tui` binary out of the daemon-writable state dir would have turned
   state-dir write into code execution as the operator on the next attach. That
-  fallback was removed in audit L10 (`cef445d`); today the binary comes from
+  fallback was removed in audit L10 (`0cce767`); today the binary comes from
   `PATH`, or from a checkout the operator is standing in.
 
 So the finding describes the trust model rather than a violation of it: tier 2
