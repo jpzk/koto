@@ -157,14 +157,6 @@ done
 chmod +x "$STAGE/out/koto" "$STAGE/out/koto-tui" \
 	"$STAGE/out/fcassets/firecracker" "$STAGE/out/fcassets/vmlinux" 2>/dev/null || true
 
-# Record what we verified, so `koto install` can hold the bytes to it rather
-# than warning that they are unverified. Be clear about what this is: the
-# hashes are taken from files this script has just checked against a signed
-# manifest, so it pins the VERIFIED STATE across the gap between unpacking and
-# installing. It is not independent evidence — the signature above is that.
-(cd "$STAGE/out" && sha256sum koto koto-tui fcassets/firecracker fcassets/vmlinux fcassets/rootfs.img) \
-	>"$STAGE/out/artifacts.sha256"
-
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"
 mv "$STAGE/out" "$DEST"

@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch verify wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
+.PHONY: hooks secrets-scan build fetch wizard require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-06-14 via proxy.golang.org:
@@ -39,8 +39,8 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.1
 # builds the daemon, the TUI, the Firecracker VMM, the guest kernel and the
 # guest rootfs from source, sequentially, each inside a digest-pinned
 # container, so the host needs no toolchain of its own — only git, make and
-# podman/docker. `make verify` closes the loop: build from source, then check
-# the bytes you produced against the checksums published for the release.
+# podman/docker. The builds are not reproducible, so a from-source build is
+# trusted because you built it, not because it matches the release.
 #
 # WHY THE WIZARD IS LAST. It configures an INSTALLED system — it mints the PKI
 # and connects credentials straight into the state dir, so there is one place
@@ -179,8 +179,9 @@ setup:
 # file:// path included; the check does not change.
 #
 # The manifest lists the artifacts as INSTALLED, not as transferred: rootfs.img
-# ships compressed and is checked after decompression, so one manifest serves
-# both routes — `make verify` holds a local build to the same line.
+# ships compressed and is checked after decompression. It vouches for the
+# download route only — a local `make build` does not reproduce these bytes
+# and is not held to them.
 KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download
 MANIFEST      := artifacts.sha256
 
@@ -322,35 +323,19 @@ fetch:
 	@echo "verified: $(ARTIFACTS)"
 	@echo "next:  make install"
 
-# --- verify -----------------------------------------------------------------
-# Holds whatever is in the working tree — fetched or locally built — to the
-# checksums published for this release. Run it after `make build` and you are
-# checking that building from source reproduces the bytes on kotovm.com; run
-# it after `make fetch` (which does, automatically) and you are checking the
-# download.
-#
-# CAVEAT, stated because a verify step that quietly always fails is worse than
-# none: only koto and koto-tui are expected to reproduce bit-for-bit. They are
-# CGO_ENABLED=0 and -trimpath, built in a digest-pinned image, with the version
-# string the only input that varies — so two builds of the same commit give
-# identical bytes. The guest kernel and rootfs embed build timestamps and
-# resolved package versions and do NOT reproduce; a mismatch there means your
-# image differs from the published one, which is expected, not alarming.
 # --- dist ------------------------------------------------------------------
 # Package the artifacts in the tree as release assets, and regenerate the
 # manifest from them.
 #
-# The manifest checksums the artifacts AS INSTALLED, not the compressed assets,
-# so one file serves both acquisition routes: `make fetch` verifies what it
-# decompressed, and `make verify` tells you whether a from-source build
-# reproduced the published bytes. Checksumming the .zst files instead would
-# verify the download and say nothing about the build.
+# The manifest checksums the artifacts AS INSTALLED, not the compressed assets:
+# `make fetch` verifies what it decompressed, i.e. the exact bytes it is about
+# to move into the tree.
 #
-# Run this on the machine whose build you are publishing. koto and koto-tui
-# reproduce bit-for-bit (CGO_ENABLED=0, -trimpath, digest-pinned image);
-# vmlinux and rootfs.img do not, because they embed build timestamps and
-# resolved package versions — so the published checksums have to come from THIS
-# build, not from a later rebuild of the same commit.
+# Run this on the machine whose build you are publishing. The builds do not
+# reproduce bit-for-bit (koto stamps `git describe`, vmlinux and rootfs.img
+# embed build timestamps and resolved package versions), so the published
+# checksums have to come from THIS build, not from a later rebuild of the same
+# commit — and a from-source build is never held to them.
 dist: $(ARTIFACTS)
 	@command -v zstd >/dev/null || { echo "zstd is required to package a release"; exit 1; }
 	@test -n "$(DIST_VERSION)" || { echo "dist/VERSION is missing or empty"; exit 1; }
@@ -467,22 +452,12 @@ release:
 	fi
 	@echo "next:  set DIST_VERSION in the Makefile and commit $(MANIFEST)"
 
-verify:
-	@test -s $(MANIFEST) || { echo "$(MANIFEST) is empty — nothing to verify against"; exit 1; }
-	@grep -qv '^#' $(MANIFEST) || { \
-	  echo "no checksums published yet ($(MANIFEST) has no entries)."; \
-	  echo "there is nothing to verify against until a release exists."; \
-	  exit 1; }
-	@sha256sum -c $(MANIFEST)
-
 # Guard for targets that consume the artifacts without producing them.
+# Presence only. Verification happens where bytes ARRIVE — `make fetch` checks
+# the signature and the manifest before anything reaches the tree — and a
+# local `make build` has nothing to be held to, since the builds do not
+# reproduce the published bytes.
 require-artifacts:
-	@# With a published manifest, present is not enough (audit M12): hold the
-	@# two reproducible binaries to it before anything installs them as root.
-	@if grep -qv '^#' $(MANIFEST) 2>/dev/null; then \
-	  grep -E ' \*?(koto|koto-tui)$$' $(MANIFEST) | sha256sum -c - || { \
-	    echo "!! koto/koto-tui do not match $(MANIFEST) — re-run make fetch or make build"; exit 1; }; \
-	fi
 	@missing=""; for a in $(ARTIFACTS); do [ -e "$$a" ] || missing="$$missing $$a"; done; \
 	if [ -n "$$missing" ]; then \
 	  echo "missing artifact(s):$$missing"; \

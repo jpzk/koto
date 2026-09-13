@@ -1,18 +1,17 @@
-# koto artifact manifest — the trust anchor for `make fetch` and `make verify`.
+# koto artifact manifest — the trust anchor for `make fetch`.
 #
 # Plain sha256sum(1) format over the artifacts AS INSTALLED, relative to the
-# repo root, so `sha256sum -c dist/artifacts.sha256` works verbatim and one
-# file serves both acquisition routes: it checks a download, and it checks
-# whether building from source reproduced the published bytes.
+# repo root: `make fetch` checks what it decompressed against it, in a staging
+# dir, before anything moves into the tree.
 #
 # This file is COMMITTED ON PURPOSE. It is what makes `make fetch` safe: the
 # checksums arrive over git, not over the same connection as the artifacts
 # they vouch for, so a compromised mirror cannot vouch for itself.
 #
-# Not every artifact reproduces bit-for-bit. koto and koto-tui do — they are
-# CGO_ENABLED=0, -trimpath, built in a digest-pinned image. fcassets/vmlinux
-# and fcassets/rootfs.img embed build timestamps and resolved package
-# versions and do not; a mismatch on those after `make build` is expected.
+# It vouches for the DOWNLOAD route only. The builds are not reproducible (koto
+# stamps `git describe`; vmlinux and rootfs.img embed build timestamps and
+# resolved package versions), so `make build` output will not match these
+# lines, and nothing holds it to them — `make install` checks presence only.
 #
 # Entries look like:
 #   <sha256>  koto
@@ -22,8 +21,7 @@
 #   <sha256>  fcassets/rootfs.img
 #
 # Empty until the first release is published. Until then DIST_VERSION in the
-# Makefile reads "unreleased" and `make fetch` says so rather than 404ing, and
-# `koto install` treats a tree with no entries here as pre-release.
+# Makefile reads "unreleased" and `make fetch` says so rather than 404ing.
 #
 # `make dist` regenerates the entries below from the build it packages.
 165d0c58f628384f5d4fba7708d8e3d028a0715065b4c5b7a154a876dc3cdc7f  koto
