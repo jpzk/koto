@@ -8,11 +8,20 @@ koto also has ACL with roles and permissions on system configuration and groups.
 
 ## Quick start 
 
-Building and running verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+### From signed builds
+
+```sh
+git clone https://github.com/jpzk/koto && cd koto
+make fetch      # 1. fetch signed artifacts and verify checksum 
+make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
+make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
+koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
+```
+
 
 ### From sources
 
-It is encouraged to **run your own AI security review to verify** on the repository and to **build all the components from scratch**. If you feel like becoming a steward, we're looking for more release signers.
+It is encouraged to **run your own AI security review to verify** on the repository and to **build all the components from scratch**. If you feel like becoming a steward, we're looking for more release signers. Building and running verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
 
 ```sh
 # Fedora 44+
@@ -29,15 +38,6 @@ make wizard     # 3. mint the TLS identities, connect your Anthropic credentials
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
 
-### From signed builds
-
-```sh
-git clone https://github.com/jpzk/koto && cd koto
-make fetch      # 1. fetch signed artifacts and verify checksum 
-make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
-make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
-koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
-```
 
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
