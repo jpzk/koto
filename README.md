@@ -8,7 +8,7 @@ koto also has ACL with roles and permissions on system configuration and groups.
 
 ## Quick start
 
-Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. Verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
+Until the first release is published, build the artifacts from source. We encourage also to **run your own AI security review to verify** on the repository. Building verified on Fedora 44, Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Arch.
 
 ```sh
 # Fedora 44+
