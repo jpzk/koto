@@ -10,13 +10,26 @@ toolchain go1.26.8
 //     x/crypto/ssh channels, reached from gvisor-tap-vsock's virtualnetwork.New
 //     (fcnet.go). Requires go >= 1.26, which is why the toolchain is 1.26.x.
 //   golang.org/x/text v0.41.0 — 2026-08-11: required by that x/crypto.
+// And 2026-09-14, taken BEFORE govulncheck's DB carries the advisory (it
+// reported nothing): the daemon is a gRPC server, so it is the module the
+// fix actually matters to:
+//   google.golang.org/grpc v1.83.2 — 2026-08-25: GHSA-vp52-pcj8-j9qc
+//     (CVE-2026-84304, fixed in 1.83.1), heap exhaustion from a stream split
+//     into many tiny HTTP/2 DATA frames, in the server transport :8443 uses.
+//     Exposure is narrow — the client-cert allowlist is enforced at the TLS
+//     handshake (auth.go), before any HTTP/2 frame, and the bind is loopback
+//     — so the worst case is an allowlisted client OOMing the daemon. The
+//     other two advisories in this range (GHSA-2v4p-qf9q-27wj,
+//     GHSA-qc2q-p7wx-3px3) are xDS-only and do not apply.
+//   golang.org/x/net v0.58.0 — 2026-08-12, genproto/googleapis/rpc
+//     v0.0.0-20260526163538 — 2026-05-26: required by that grpc.
 // Everything else follows the ordinary rule (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25).
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.82.1
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.11
 	koto-protocol v0.0.0
 )
@@ -34,12 +47,12 @@ require (
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
 )
 

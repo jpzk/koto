@@ -11,6 +11,9 @@ toolchain go1.26.8
 // (`go work sync` — daemon and tui pin it too), keeping module-mode and
 // workspace-mode builds identical.
 //
+// The indirect grpc v1.83.2 / x/net v0.58.0 / x/text v0.41.0 come from
+// koto-protocol's 2026-09-14 security-fix bump (see daemon/go.mod).
+//
 // koto-protocol is the in-repo contract module (protocol/guest.proto): the
 // daemon↔guest vsock messages. Resolved by path so the rootfs build (which
 // runs with GOWORK=off inside a container) sees the same source the daemon
@@ -22,10 +25,10 @@ require (
 )
 
 require (
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/grpc v1.82.1 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/grpc v1.83.2 // indirect
 )
 
 replace koto-protocol => ../protocol
