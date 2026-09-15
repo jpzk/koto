@@ -4,6 +4,10 @@
 
 Every group/sandbox has 1 linux kernel, 1 overlay workspace, 1 agent runtime and 1 shared terminal. The group can be configured in different sizes with different vCPUs, memory and storage. Other configurations include LLM model, network access, root sudo. The daemon speaks a gRPC protocol and can be commanded by `koto ctl` or `koto tui`. 
 
+## Brief walkthrough
+
+https://github.com/user-attachments/assets/cdf0ea33-c52d-4106-81a2-f6be49efe918
+
 ## Quick start 
 
 ### From signed builds
