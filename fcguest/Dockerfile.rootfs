@@ -23,10 +23,31 @@ FROM docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b435
 # `node` account exists, and the result is exported as the shared read-only
 # root drive attached to every VM.
 #
+# The version alone is not a pin: npm resolves it through the registry on
+# every build, and the bytes that actually run are not in this package at all —
+# @anthropic-ai/claude-code is a wrapper whose postinstall copies the binary
+# out of an optionalDependency (@anthropic-ai/claude-code-linux-x64) that npm
+# fetched with nothing here vouching for it. So both tarballs are downloaded
+# directly and checked against the SHA-512s below (the same digests npm
+# publishes as `dist.integrity`, in hex), the wrapper is unpacked where
+# `npm i -g` would put it, and the native binary is placed over its stub by
+# hand — exactly what its postinstall does. Not `npm i -g` itself: npm 10
+# ignores --omit=optional for a global install and fetches the 223 MB native
+# package from the registry anyway, unverified by us and then unused. The install path stays
+# .../@anthropic-ai/claude-code/bin/claude.exe: interruptAgent finds the turn
+# worker by that "claude-code" marker in /proc/PID/exe (agentWorkerPattern,
+# daemon/send.go).
+#
 # Bump deliberately, then `make rootfs` and `/restart` the groups:
-#   npm view @anthropic-ai/claude-code version
-# 2.1.268 sha512-DSRUVAbRRH7WaHm99OErT4FJQDkbhIUb8mIaevcFrXtKCZwA9UmKY5+SOFWmgyeEUj2Uh1pFw0Rk/gYffmUEUw==
-ARG CLAUDE_CODE_VERSION=2.1.268
+#   V=$(npm view @anthropic-ai/claude-code version)
+#   for p in claude-code claude-code-linux-x64; do
+#     curl -fsSL "https://registry.npmjs.org/@anthropic-ai/$p/-/$p-$V.tgz" | sha512sum
+#   done
+# and cross-check each against `npm view @anthropic-ai/<p>@$V dist.integrity`
+# (base64 of the same digest).
+ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
+ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
 
 RUN dnf install -y --setopt=install_weak_deps=False \
       bash \
@@ -56,9 +77,22 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       slirp4netns \
       shadow-utils \
       sudo \
- && dnf clean all \
- && npm i -g @anthropic-ai/claude-code@"$CLAUDE_CODE_VERSION" \
- && npm cache clean --force
+ && dnf clean all
+
+RUN set -eu; cd /tmp; \
+    reg=https://registry.npmjs.org/@anthropic-ai; v="$CLAUDE_CODE_VERSION"; \
+    curl -fsSL -o wrapper.tgz "$reg/claude-code/-/claude-code-$v.tgz"; \
+    curl -fsSL -o native.tgz "$reg/claude-code-linux-x64/-/claude-code-linux-x64-$v.tgz"; \
+    printf '%s  wrapper.tgz\n%s  native.tgz\n' \
+      "$CLAUDE_CODE_SHA512" "$CLAUDE_CODE_LINUX_X64_SHA512" | sha512sum -c -; \
+    dir="$(npm root -g)/@anthropic-ai/claude-code"; \
+    mkdir -p "$dir"; \
+    tar -xzf wrapper.tgz -C "$dir" --strip-components=1 --no-same-owner; \
+    tar -xzOf native.tgz package/claude > "$dir/bin/claude.exe"; \
+    chmod 0755 "$dir/bin/claude.exe"; \
+    ln -sf "$dir/bin/claude.exe" /usr/local/bin/claude; \
+    rm -f wrapper.tgz native.tgz; \
+    claude --version | grep -qF "$v"
 
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
