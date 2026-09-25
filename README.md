@@ -45,6 +45,11 @@ Every stage is safe to re-run, and `koto setup --check` reports the health of
 an install without changing anything. `make fetch` replaces `make build` once
 releases exist.
 
+To upgrade an installed koto: `koto update --check` says whether a newer release
+exists, and `koto update` installs it. It verifies the release the same way the
+installer does, stops the daemon (and every running agent VM) with your OK,
+replaces the binaries and guest images, and starts it again.
+
 ## Architecture
 
 ```

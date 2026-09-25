@@ -131,8 +131,12 @@ ARTIFACTS := koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux $(FCASSET
 # bump or a GO_IMAGE change produces different bytes with not one *.go touched,
 # and until 2026-09-05 `make koto` silently kept the stale binary after exactly
 # that (a Go 1.25 → 1.26 move; caught by `go version -m koto`).
-koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go) daemon/go.mod daemon/go.sum protocol/go.mod protocol/go.sum go.work Makefile
+# install.sh is EMBEDDED in koto (koto update runs it; see daemon/update.go),
+# so the copy under daemon/installer/ is refreshed before every build —
+# TestEmbeddedInstallerMatchesTheRepoCopy fails if the two ever drift.
+koto: $(wildcard daemon/*.go) $(wildcard protocol/pb/*.go) daemon/go.mod daemon/go.sum protocol/go.mod protocol/go.sum go.work Makefile install.sh
 	$(need-container)
+	cp install.sh daemon/installer/install.sh
 	$(GO_BUILD_RUN) \
 	  go build -trimpath -ldflags "-s -w -X main.kotoVersion=$(KOTO_VERSION)" -o koto ./daemon
 

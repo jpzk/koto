@@ -123,6 +123,28 @@ everything else derives from the globals.
   ABSENT, so an upgrade replaced the daemon and never the guest: the dev host
   was found on 2026-09-25 still booting its 2026-09-03 rootfs through several
   upgrades. The service is started at the end.
+- **`koto update` (`update.go`) checks for a newer release and installs it**
+  (2026-09-25). `--check` reports only (exit 0 up to date, 3 update
+  available): the installed version is asked of `/usr/local/bin/koto version`
+  (what the service runs, not the clone's `./koto`), the latest is read off
+  GitHub's `/releases/latest` redirect exactly as `install.sh` resolves it, and
+  a development build (`1.0.0-6-g…-dirty`) counts as its base release, so a
+  host on main is "up to date" rather than offered a downgrade. A downgrade, or
+  a release over a dev build of the same version, needs `--version X`.
+  Installing does NO fetching or verifying of its own: it runs `install.sh
+  --version X --no-attach [--yes]`, the one fetch-and-verify implementation,
+  which then runs the NEW release's `koto install` (stop, replace, start) and
+  `koto setup`. **That `install.sh` is EMBEDDED in the binary**
+  (`daemon/installer/install.sh`, refreshed by the Makefile's `koto` target
+  and pinned byte-identical to the root copy by
+  `TestEmbeddedInstallerMatchesTheRepoCopy`), because both alternatives move
+  the trust anchor: downloaded from the new release, its pinned key
+  fingerprint arrives over the channel it vouches for; read from the state
+  dir, it is writable by the daemon (`ReadWritePaths`), so a compromised
+  daemon could rewrite a script the operator later runs with `sudo`.
+  `/usr/local/bin/koto` is root-owned. `install.sh` gained `--no-attach`
+  (stop after setup instead of opening the TUI) and `--yes` (`-y` to install
+  and setup) for this.
 - **The API key resolves from the state dir**, not only from `koto.env`:
   `proxyInitPaths()` falls back to `<state>/creds/anthropic-api-key` when
   `ANTHROPIC_API_KEY` is unset. Necessary because auth now happens after
