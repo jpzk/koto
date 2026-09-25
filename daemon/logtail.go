@@ -324,22 +324,61 @@ func tailBytes(s string, max int) string {
 	return ""
 }
 
-func tailLog(g string) { tailFile(g, groupLogPath(g), true) }
-
 // tailFile tails one stream. isGroup marks the group stream, which is the only
 // one host-side notification delivery writes into.
 func tailFile(g, p string, isGroup bool) {
+	f, ino, err := openTailAtEOF(p)
+	if err != nil {
+		return
+	}
+	tailFrom(g, p, isGroup, f, ino)
+}
+
+// openTailAtEOF opens a stream for tailing, positioned at its current end —
+// the point from which the tailer reports. The ensure* callers run it
+// SYNCHRONOUSLY and hand the file to the goroutine, and that split is the
+// whole fix for a lost-marker race: sendNow calls ensureSlotTail and then at
+// once writes the turn's [[session]] marker into the slot. When the open and
+// the seek happened inside the goroutine, they usually landed AFTER that
+// write, so the tailer never saw the marker and attributed the turn —
+// [[turn_end]] included — to the default session. The named session's
+// sendNow then waited on a completion delivered to another lane: its queue
+// froze, and turnWaitTimeout later the group was marked STALLED and
+// self-healed, i.e. its VM restarted under every other running turn. Only a
+// slot's FIRST tailer can lose the race, which is why it took two sessions
+// running at once: the second one is what gets a fresh slot.
+func openTailAtEOF(p string) (*os.File, uint64, error) {
 	_ = os.MkdirAll(filepath.Dir(p), 0o700)
 	if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND, 0o600); err == nil {
 		f.Close()
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return
+		return nil, 0, err
 	}
-	defer f.Close()
-	_, _ = f.Seek(0, io.SeekEnd)
-	ino := inode(p)
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	// The inode of the file actually opened, not of whatever the path names a
+	// moment later: a rewrite (filterLogSession) in between would otherwise
+	// go unnoticed, and the tailer would follow an unlinked file.
+	var ino uint64
+	if st, err := f.Stat(); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			ino = sys.Ino
+		}
+	}
+	return f, ino, nil
+}
+
+// tailFrom is the tailing loop over a stream openTailAtEOF positioned. It
+// owns f and closes it.
+func tailFrom(g, p string, isGroup bool, f *os.File, ino uint64) {
+	// A closure, not `defer f.Close()`: the loop reopens f when the log is
+	// rewritten, and a deferred call would close the first file (already
+	// closed by then) and leak the one actually open when the tailer exits.
+	defer func() { f.Close() }()
 	buf := ""
 	// The marker grammar lives in logParser (logparse.go) — shared with
 	// readHistory and the parsed JobTail stream. This loop owns only the
@@ -489,18 +528,30 @@ func tailFile(g, p string, isGroup bool) {
 // ensureSlotTail when a turn actually claims that slot — a group that never
 // runs concurrent turns only ever uses slot 0, and the other nine cost nothing
 // rather than nine polling goroutines each.
-func ensureTail(g string) {
-	if markTail(groupLogPath(g)) {
-		go tailLog(g)
-	}
-}
+func ensureTail(g string) { startTail(g, groupLogPath(g), true) }
 
-// ensureSlotTail starts the tailer for one slot's stream. Idempotent.
-func ensureSlotTail(g string, slot int) {
-	p := slotLogPath(g, slot)
-	if markTail(p) {
-		go tailFile(g, p, false)
+// ensureSlotTail starts the tailer for one slot's stream. Idempotent. When it
+// returns, the tailer is positioned: anything written to the slot from then on
+// is seen, which is what sendNow's [[session]] marker relies on (see
+// openTailAtEOF).
+func ensureSlotTail(g string, slot int) { startTail(g, slotLogPath(g, slot), false) }
+
+// startTail claims p and starts its tailer, opening the stream before it
+// returns. A stream that cannot be opened gives its claim back, so the next
+// ensure* retries instead of finding a claim with no tailer behind it.
+func startTail(g, p string, isGroup bool) {
+	if !markTail(p) {
+		return
 	}
+	f, ino, err := openTailAtEOF(p)
+	if err != nil {
+		subsLock.Lock()
+		delete(tails, p)
+		subsLock.Unlock()
+		emitLogfG("tail", g, "warn", "[%s] cannot tail %s: %v", g, filepath.Base(p), err)
+		return
+	}
+	go tailFrom(g, p, isGroup, f, ino)
 }
 
 // markTail claims a stream for tailing, reporting whether the caller is the
