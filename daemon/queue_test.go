@@ -1,10 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"koto-protocol/pb"
+
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // sessionDepth is queueDepth for one conversation. Test-only: the wire
@@ -407,4 +414,225 @@ func TestDropQueuedDiscardsBacklog(t *testing.T) {
 		case <-time.After(300 * time.Millisecond):
 		}
 	})
+}
+
+// TestDrainDiscardsOnlyTheBacklog pins the Drain verb's contract at the queue
+// layer: it empties the WAITING backlog of the sessions in scope, leaves the
+// in-flight turn running (that one is Interrupt's job), and leaves other
+// sessions and other groups alone.
+func TestDrainDiscardsOnlyTheBacklog(t *testing.T) {
+	const g = "q-drain"
+	const other = "q-drain-other"
+
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	processed := make(chan string, 16)
+
+	// Every session holds its first turn in flight so what follows stays
+	// QUEUED — the only thing a drain is about.
+	stub := func(grp, session, msg string) error {
+		processed <- grp + "/" + session + "/" + msg
+		if msg == "work" {
+			started <- grp + "/" + session
+			<-release
+		}
+		return nil
+	}
+
+	withTurnFn(stub, func() {
+		type lane struct{ g, sess string }
+		lanes := []lane{{g, ""}, {g, "alpha"}, {other, ""}}
+		for _, l := range lanes {
+			if _, err := enqueueSend(l.g, l.sess, "work"); err != nil {
+				t.Fatalf("enqueue %s/%s work: %v", l.g, l.sess, err)
+			}
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s/%s: in-flight turn never started", l.g, l.sess)
+			}
+		}
+		// One queued message behind each in-flight turn.
+		var dones []<-chan error
+		for _, l := range lanes {
+			d, err := enqueueSend(l.g, l.sess, "queued")
+			if err != nil {
+				t.Fatalf("enqueue %s/%s queued: %v", l.g, l.sess, err)
+			}
+			if l.g == g {
+				dones = append(dones, d)
+			}
+		}
+		if got := queueDepth(g); got != 2 {
+			t.Fatalf("queueDepth before drain = %d, want 2", got)
+		}
+
+		// Session-scoped: only the default session's backlog goes.
+		if n := dropQueuedDrain(g, "", true); n != 1 {
+			t.Fatalf("session drain dropped %d, want 1", n)
+		}
+		if got := queueDepth(g); got != 1 {
+			t.Fatalf("queueDepth after session drain = %d, want 1 (alpha survives)", got)
+		}
+
+		// Group-wide: alpha's goes too.
+		if n := dropQueuedDrain(g, "", false); n != 1 {
+			t.Fatalf("group drain dropped %d, want 1", n)
+		}
+		if got := queueDepth(g); got != 0 {
+			t.Fatalf("queueDepth after group drain = %d, want 0", got)
+		}
+		if got := queueDepth(other); got != 1 {
+			t.Fatalf("other group's depth = %d, want 1 (untouched)", got)
+		}
+
+		// Each discarded producer is told, rather than waiting on a turn that
+		// will never run.
+		for i, d := range dones {
+			select {
+			case err := <-d:
+				if err == nil {
+					t.Fatalf("drained job %d: nil error, want a discard error", i)
+				}
+			default:
+				t.Fatalf("drained job %d: no result delivered", i)
+			}
+		}
+
+		// The in-flight turns are still running: a drain is not an interrupt.
+		close(release)
+		want := map[string]bool{
+			g + "//work": true, g + "/alpha/work": true,
+			other + "//work": true, other + "//queued": true,
+		}
+		deadline := time.After(3 * time.Second)
+		for len(want) > 0 {
+			select {
+			case got := <-processed:
+				if !want[got] {
+					t.Fatalf("worker ran %q, which the drain should have discarded", got)
+				}
+				delete(want, got)
+			case <-deadline:
+				t.Fatalf("timed out; still waiting on %v", want)
+			}
+		}
+	})
+}
+
+// TestDrainSkipsGoalSessions pins the one way a drain differs from a stop's
+// drain: even the group-wide form leaves a goal session's queued iteration
+// alone. stopGroup can take it because stopGroupPrepare pauses the goal first;
+// a drain has no such lever, so draining it would only hand the driver an
+// error and have it enqueue the next iteration into the queue just emptied.
+// /goals interrupt is the verb that addresses a goal.
+//
+// The queue is built directly, with no worker behind it: a reserved-session
+// turn is dropped at delivery when no goal is active (goalTurnShouldRun), so
+// enqueueSend could not hold one in the backlog deterministically.
+func TestDrainSkipsGoalSessions(t *testing.T) {
+	const g = "q-drain-goal"
+	goalSess := goalSessionPrefix + "work"
+
+	put := func(session string) {
+		queuesMu.Lock()
+		defer queuesMu.Unlock()
+		k := sessKey(g, session)
+		q := make(chan sendJob, sendQueueDepth)
+		queues[k] = q
+		q <- sendJob{session: session, msg: "iteration", done: make(chan error, 1)}
+	}
+	put(goalSess)
+	put("")
+	t.Cleanup(func() {
+		queuesMu.Lock()
+		delete(queues, sessKey(g, goalSess))
+		delete(queues, sessKey(g, ""))
+		queuesMu.Unlock()
+	})
+
+	if got := queueDepth(g); got != 2 {
+		t.Fatalf("queueDepth = %d, want 2", got)
+	}
+	if n := dropQueuedDrain(g, "", false); n != 1 {
+		t.Fatalf("group-wide drain dropped %d, want 1 (the ordinary session only)", n)
+	}
+	if got := queueDepth(g); got != 1 {
+		t.Fatalf("queueDepth after drain = %d, want 1 (the goal iteration survives)", got)
+	}
+	// The stop path is the contrast: it pauses the goal first, so it may take
+	// the same message.
+	if n := dropQueued(g); n != 1 {
+		t.Fatalf("dropQueued after the drain = %d, want 1 (a stop does take the goal's)", n)
+	}
+}
+
+// TestDrainHandlerReportsCount covers the Drain RPC handler itself: the count
+// it reports is what the TUI renders and what tells the operator whether
+// there was anything to discard, an empty backlog is a SUCCESS rather than an
+// error, and an unregistered group is refused instead of answering the
+// cheerful "dropped 0" that an empty backlog also gives.
+func TestDrainHandlerReportsCount(t *testing.T) {
+	const g = "drain-rpc"
+	dir := t.TempDir()
+	oldHere, oldGroups := HERE, GROUPS_FILE
+	HERE, GROUPS_FILE = dir, filepath.Join(dir, "groups.json")
+	t.Cleanup(func() { HERE, GROUPS_FILE = oldHere, oldGroups })
+	writeGroups(map[string]int{g: 8787})
+
+	srv := &kotoServer{}
+	ctx := context.Background()
+
+	// Empty backlog: ok, zero, no error.
+	resp, err := srv.Drain(ctx, &pb.GroupReq{Group: g})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if !resp.Ok || resp.Error != "" || resp.Dropped != 0 {
+		t.Fatalf("empty backlog → %+v, want ok with dropped=0", resp)
+	}
+
+	// Two queued messages, no worker behind the queue so they stay put.
+	queuesMu.Lock()
+	k := sessKey(g, "")
+	q := make(chan sendJob, sendQueueDepth)
+	queues[k] = q
+	for _, m := range []string{"one", "two"} {
+		q <- sendJob{msg: m, done: make(chan error, 1)}
+	}
+	queuesMu.Unlock()
+	t.Cleanup(func() {
+		queuesMu.Lock()
+		delete(queues, k)
+		queuesMu.Unlock()
+	})
+
+	resp, err = srv.Drain(ctx, &pb.GroupReq{Group: g, Session: "-"})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if !resp.Ok || resp.Dropped != 2 {
+		t.Fatalf("→ %+v, want ok with dropped=2", resp)
+	}
+	if got := queueDepth(g); got != 0 {
+		t.Fatalf("queueDepth after the drain = %d, want 0", got)
+	}
+
+	// The count is what the TUI reads off the wire, by this exact key.
+	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"dropped":2`) {
+		t.Fatalf("protojson = %s, want a \"dropped\" field the TUI can read", b)
+	}
+
+	// An unknown group is refused, not reported as an empty backlog.
+	resp, err = srv.Drain(ctx, &pb.GroupReq{Group: "drain-rpc-nope"})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if resp.Ok || !strings.Contains(resp.Error, "no such group") {
+		t.Fatalf("unknown group → %+v, want a refusal", resp)
+	}
 }

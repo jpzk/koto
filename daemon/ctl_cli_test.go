@@ -162,3 +162,97 @@ func TestCtlCLI(t *testing.T) {
 		}
 	})
 }
+
+// TestCtlDrainVerb takes the Drain verb end to end through the real stack —
+// the built `koto ctl` binary, mTLS, the auth + ACL interceptors, and the
+// handler — because most of what makes a new verb work is mechanical and
+// therefore unasserted anywhere else: the ACL name comes from the method name
+// (Drain → drain), the target comes from the request TYPE (GroupReq), and
+// neither would fail to compile if either were wrong.
+//
+// Needs only the admin identity, unlike TestCtlCLI, so it runs in a dev clone
+// that never minted the `agent` client.
+func TestCtlDrainVerb(t *testing.T) {
+	initPaths()
+	for _, f := range []string{"server.crt", "client-tui.crt", "token-tui"} {
+		if _, err := os.Stat(credFile(f)); err != nil {
+			t.Skipf("missing %s — mint test PKI first (make pki-init && make pki-client NAME=tui)", f)
+		}
+	}
+
+	tlsCfg, err := serverTLSConfig()
+	if err != nil {
+		t.Fatalf("serverTLSConfig: %v", err)
+	}
+	srv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsCfg)),
+		grpc.ChainUnaryInterceptor(authUnary),
+		grpc.ChainStreamInterceptor(authStream),
+	)
+	pb.RegisterKotoServer(srv, &kotoServer{})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(l)
+	defer srv.Stop()
+
+	bin := filepath.Join(t.TempDir(), "koto")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	run := func(args ...string) (string, string, error) {
+		cmd := exec.Command(bin, append([]string{"ctl"}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"KOTO_ADDR="+l.Addr().String(),
+			"KOTO_CREDS_DIR="+filepath.Join(HERE, "creds"),
+			"KOTO_CLIENT=tui",
+			"KOTO_SERVER_NAME=localhost",
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+
+	// An in-band {ok:false} is exit 1 with the message on stderr (ctlPrint's
+	// contract for every verb). Reaching that answer at all is the point:
+	// it proves the verb authorized, targeted and dispatched.
+	//
+	// A typo must not read as "dropped 0", which is what an empty backlog
+	// reports — hence a refusal rather than a cheerful zero.
+	t.Run("unknown-group", func(t *testing.T) {
+		_, stderr, err := run("drain", "definitely-no-such-group")
+		if err == nil {
+			t.Fatal("drain of an unknown group should exit non-zero")
+		}
+		if !strings.Contains(stderr, "no such group") {
+			t.Fatalf("expected a no-such-group refusal, got: %s", stderr)
+		}
+	})
+
+	// Goal sessions are the driver's; /goals interrupt is their verb. Asked
+	// of a group that does not exist either, so this also pins the ordering:
+	// a request that may not be made at all is refused on its SHAPE, not on
+	// whichever check the fleet's current state happens to trip first.
+	t.Run("goal-session-refused", func(t *testing.T) {
+		_, stderr, err := run("drain", "-session", goalSessionPrefix+"x", "definitely-no-such-group")
+		if err == nil {
+			t.Fatal("draining a goal session should exit non-zero")
+		}
+		if !strings.Contains(stderr, "reserved for the goal loop") {
+			t.Fatalf("expected the reserved-session refusal, got: %s", stderr)
+		}
+	})
+
+	// Usage errors exit 2, like every other ctl verb.
+	t.Run("usage", func(t *testing.T) {
+		_, stderr, err := run("drain")
+		if err == nil {
+			t.Fatal("bare `drain` should be a usage error")
+		}
+		if !strings.Contains(stderr, "usage: koto ctl drain") {
+			t.Fatalf("stderr = %s", stderr)
+		}
+	})
+}

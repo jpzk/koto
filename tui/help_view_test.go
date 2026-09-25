@@ -151,7 +151,7 @@ func TestCheatsheetCoversEveryVerb(t *testing.T) {
 	body := helpContent(200)
 	for _, v := range []string{"/new", "/sw", "/ls", "/session", "/prompt", "/goals",
 		"/sched", "/restart", "/stop", "/destroy", "/clear", "/config",
-		"/runscript", "/shell", "/themes", "/reload", "/interrupt", "/exit"} {
+		"/runscript", "/shell", "/themes", "/reload", "/interrupt", "/drain", "/exit"} {
 		if !strings.Contains(body, v) {
 			t.Errorf("%s is dispatchable but is not in the cheatsheet", v)
 		}

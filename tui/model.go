@@ -3873,6 +3873,59 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.refreshLog()
 		}
 		return nil
+	case "drain":
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("drain: %v", msg.err)})
+			return nil
+		}
+		// Drop our optimistic ⏳ rows for the drained scope now rather than
+		// waiting for reconcilePending to trim them against the next
+		// WatchState frame (up to a second away, recomputed at 1Hz). That
+		// trim is still the authority — it only ever removes rows, so doing
+		// it early here cannot disagree with it.
+		all := msg.session == ""
+		target := msg.session
+		if target == "-" || target == "default" {
+			target = ""
+		}
+		if p := m.pending[msg.group]; len(p) > 0 {
+			if all {
+				delete(m.pending, msg.group)
+			} else {
+				keep := p[:0]
+				for _, pp := range p {
+					if pp.session != target {
+						keep = append(keep, pp)
+					}
+				}
+				if len(keep) == 0 {
+					delete(m.pending, msg.group)
+				} else {
+					m.pending[msg.group] = keep
+				}
+			}
+		}
+		n := 0
+		if v, ok := asFloat(msg.resp["dropped"]); ok {
+			n = int(v)
+		}
+		scope := msg.group
+		if !all {
+			scope = msg.group + ":" + sessionDisplay(target)
+		}
+		text := fmt.Sprintf("%s: no queued prompts to discard", scope)
+		if n > 0 {
+			s := "s"
+			if n == 1 {
+				s = ""
+			}
+			text = fmt.Sprintf("%s: discarded %d queued prompt%s (the running turn is untouched — esc to interrupt it)",
+				scope, n, s)
+		}
+		m.addLine(logLine{kind: "sys", group: msg.group, text: text})
+		m.groupVer[msg.group]++
+		m.refreshLog()
+		return nil
 	case "clear":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("clear: %v", msg.err)})
@@ -5351,6 +5404,28 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			sess = "-"
 		}
 		return daemonCmd(m.sock, "clear", m.cur, map[string]any{"session": sess})
+	}
+	if v == "/drain" || v == "/drain all" {
+		// Discard the QUEUED prompts — the tree's ⏳N badge — and nothing
+		// else. The VM keeps running, the conversation keeps its memory, and
+		// the turn already in flight keeps going: that one is Esc /
+		// /interrupt, and the two compose (drain, then interrupt) when the
+		// operator wants the group completely idle. Before this verb the only
+		// ways to drop a backlog were /stop (powers the VM off) and /clear
+		// (forgets the conversation), both of which charge for something a
+		// mistyped queue never asked to spend.
+		//
+		// Scoped like /clear: bare = the session on screen, `all` = every
+		// session in the group. Goal sessions are excluded by the daemon
+		// either way (/goals interrupt addresses those).
+		if v == "/drain all" {
+			return daemonCmd(m.sock, "drain", m.cur, nil)
+		}
+		sess := m.activeSession(m.cur)
+		if sess == "" {
+			sess = "-" // the wire alias; "" means the whole group
+		}
+		return daemonCmd(m.sock, "drain", m.cur, map[string]any{"session": sess})
 	}
 	if v == "/session" || strings.HasPrefix(v, "/session ") {
 		arg := strings.TrimSpace(strings.TrimPrefix(v, "/session"))

@@ -37,7 +37,7 @@ package main
 // from the ACL, or malformed acl.json all fail closed too.
 //
 // TARGETS apply only to verbs whose request carries a group (targetOf):
-// spawn, send, stop, interrupt, destroy, restart, clear, history, config,
+// spawn, send, stop, interrupt, drain, destroy, restart, clear, history, config,
 // metrics, sched_add, sched_list, subscribe_group, attach_shell
 // (every ShellInput message repeats `group` — see koto.proto's AttachShell
 // comment for why the target check must ride every message, not just the
@@ -266,7 +266,7 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.SendReq:
 		return r.Group, true
-	case *pb.GroupReq: // Stop, Interrupt, Destroy, Restart, Clear
+	case *pb.GroupReq: // Stop, Interrupt, Drain, Destroy, Restart, Clear
 		return r.Group, true
 	case *pb.HistoryReq:
 		return r.Group, true

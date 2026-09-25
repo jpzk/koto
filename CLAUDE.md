@@ -496,6 +496,30 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        /themes list names them, /themes terminal reverts.
 #   /runscript <file> -> run scripts/<file> in the focused group's microVM
 #                        (admin-only RunScript RPC), output streamed into chat
+#   /drain [all]      -> discard the group's QUEUED prompts — the tree's ⏳N
+#                        badge — and NOTHING else: the VM stays up, the
+#                        conversation keeps its memory, and the in-flight turn
+#                        keeps running. It is the complement of /interrupt
+#                        (which aborts the running turn and lets the queue
+#                        advance); run both to leave a group completely idle.
+#                        Until it existed the backlog could only be dropped as
+#                        a side effect of something bigger — /stop powers the
+#                        VM off, /clear forgets the conversation, /destroy
+#                        deletes the group — so "I queued three prompts by
+#                        mistake" had no answer that cost nothing else.
+#                        Scoped like /clear: bare = the session on screen,
+#                        `all` = every session in the group. GOAL SESSIONS ARE
+#                        NEVER DRAINED, not even by `all`: /stop can take a
+#                        goal's queued iteration because stopGroupPrepare
+#                        pauses the goal first, and a drain has no such lever —
+#                        the driver would refill the queue it just emptied.
+#                        /goals interrupt is the verb that addresses a goal.
+#                        The one message it cannot reach is one a worker has
+#                        already taken off the channel but not yet registered
+#                        as in-flight; that becomes the running turn, which is
+#                        /interrupt's subject. (Drain RPC; `koto ctl drain
+#                        [-session S] <group>`; daemon/queue.go
+#                        dropQueuedDrain.)
 #   /stop [g]         -> power off the group's microVM (daemon `stop` verb;
 #                        current group when no arg). VM boots again on next
 #                        send or /restart; workspace + history persist.
@@ -510,7 +534,8 @@ make stop          # tear down cs_host + all groups (podman sidecars); microVMs 
 #                        can never come from a VM that is gone, so sendNow
 #                        waits out turnWaitTimeout, marks the group STALLED,
 #                        and selfHeal restarts it). Discarded, not re-queued:
-#                        /restart is the verb that keeps the backlog.
+#                        /restart is the verb that keeps the backlog, and
+#                        /drain the one that discards it WITHOUT the power-off.
 #                        Interrupting the in-flight turn is Ctrl+C or Esc (or
 #                        /interrupt) — /stop no longer means that. An
 #                        interrupt discards the prompt being worked on
@@ -591,7 +616,7 @@ rules (non-main → sched_* with self-forced target) aren't expressible as a
 verb list.
 
 - **Unary RPCs** map 1:1 to the old JSON verbs: `Spawn`, `Send`, `List`,
-  `Stop`, `Interrupt`, `Destroy`, `Restart`, `Clear`, `History`, `Config`,
+  `Stop`, `Interrupt`, `Drain`, `Destroy`, `Restart`, `Clear`, `History`, `Config`,
   `Metrics`, `Sched*`. Application failures
   come back in-band as `{ok:false, error}` response fields; gRPC status codes
   are reserved for transport/auth faults. `Send` enqueues and returns
@@ -1059,7 +1084,7 @@ the identity's role lacks comes back as a `PermissionDenied` (exit 1). Creds
 and endpoint resolve from `KOTO_*` env (`KOTO_ADDR`, `KOTO_CREDS_DIR`,
 `KOTO_CLIENT` → `client-<name>.{crt,key}`+`token-<name>`, `KOTO_SERVER_NAME`).
 Every gRPC RPC has a `ctl` verb. Group lifecycle
-(`list`/`spawn`/`stop`/`interrupt`/`destroy`/`restart`/`clear`), conversation
+(`list`/`spawn`/`stop`/`interrupt`/`drain`/`destroy`/`restart`/`clear`), conversation
 (`send`, `ask`, `history`), `config`, streams (`metrics`, `tail`, `logs`, `watch`), `resources`
 (host-side fleet disk/mem/cpu — see below), `sched *`, and
 admin-only `acl get|set|del` + `runscript [-raw] <group> <script>`

@@ -647,15 +647,37 @@ func dropQueued(g string) int { return dropQueuedScope(g, "", false) }
 // `session`. Split out for the clear barrier, which fences one conversation
 // rather than the whole group.
 func dropQueuedScope(g, session string, onlySession bool) int {
+	return dropQueuedWhere(g, "stopped", func(sess string) bool {
+		return !onlySession || sess == session
+	})
+}
+
+// dropQueuedDrain is the Drain verb's backlog discard: the same drain, scoped
+// the same way, minus the goal sessions. Every other caller of this machinery
+// is a lifecycle edge that has already dealt with the goal loop — stopGroup
+// pauses it first, clearFence is refused on a reserved session — whereas a
+// drain does nothing to the driver, which would simply enqueue the next
+// iteration into the queue just emptied. So the group-wide form means "every
+// conversation a human types into"; a goal is addressed with /goals interrupt.
+func dropQueuedDrain(g, session string, onlySession bool) int {
+	return dropQueuedWhere(g, "drained", func(sess string) bool {
+		if isReservedSession(sess) {
+			return false
+		}
+		return !onlySession || sess == session
+	})
+}
+
+// dropQueuedWhere is the shared drain: it empties the queue of every session
+// of g that `match` accepts and reports how many jobs it discarded. `verb`
+// names the cause in the error each producer waiting on its job receives.
+func dropQueuedWhere(g, verb string, match func(session string) bool) int {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
 	n := 0
 	for k, q := range queues {
 		gg, sess, ok := splitSessKey(k)
-		if !ok || gg != g {
-			continue
-		}
-		if onlySession && sess != session {
+		if !ok || gg != g || !match(sess) {
 			continue
 		}
 	drain:
@@ -663,7 +685,7 @@ func dropQueuedScope(g, session string, onlySession bool) int {
 			select {
 			case job := <-q:
 				releaseQueuedBytesLocked(g, len(job.msg))
-				job.done <- fmt.Errorf("group %q stopped; queued message discarded", g)
+				job.done <- fmt.Errorf("group %q %s; queued message discarded", g, verb)
 				n++
 			default:
 				break drain

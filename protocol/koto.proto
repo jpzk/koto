@@ -32,6 +32,24 @@ service Koto {
   rpc Config      (ConfigReq)      returns (ConfigResp);
   rpc Metrics     (MetricsReq)     returns (MetricsResp);
   rpc Clear       (GroupReq)       returns (BaseResp);
+  // Drain discards a group's WAITING backlog — the queued prompts that
+  // GroupInfo.queued counts — and leaves everything else alone: the VM stays
+  // up, the conversation keeps its memory, and the in-flight turn keeps
+  // running. It is the complement of Interrupt, which aborts the running turn
+  // and lets the queue advance; run both to empty a group completely.
+  //
+  // Until this verb existed the backlog could only be dropped as a side
+  // effect of something bigger — Stop (powers the VM off), Clear (forgets the
+  // conversation) or Destroy — so "I queued three prompts by mistake" had no
+  // answer that cost nothing else.
+  //
+  // Scopes by GroupReq.session exactly as Clear does: "" = every session in
+  // the group, "-"/"default" = the default session, a name = that session.
+  // Goal sessions are never drained, not even by the group-wide form: a
+  // goal's queued iteration belongs to the driver, and unlike Stop (which
+  // pauses the goal first) a drain has nothing to stop it re-enqueueing —
+  // /goals interrupt is the verb that addresses a goal.
+  rpc Drain       (GroupReq)       returns (DrainResp);
   // Jobs lists a group's background jobs (cs-job) fresh from the guest —
   // group "" reads across all running groups (needs the "*" target, like
   // global metrics). JobLogs returns one job's metadata + an output tail.
@@ -498,6 +516,10 @@ message GoalListResp {
 message BaseResp { bool ok = 1; string error = 2; }
 
 message SpawnResp { bool ok = 1; string error = 2; int32 port = 3; }
+
+// dropped is how many queued prompts the drain discarded (0 is a success,
+// not an error — the backlog was already empty).
+message DrainResp { bool ok = 1; string error = 2; int32 dropped = 3; }
 
 message ListResp {
   bool ok = 1; string error = 2;

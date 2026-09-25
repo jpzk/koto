@@ -44,6 +44,7 @@ const (
 	Koto_Config_FullMethodName         = "/koto.Koto/Config"
 	Koto_Metrics_FullMethodName        = "/koto.Koto/Metrics"
 	Koto_Clear_FullMethodName          = "/koto.Koto/Clear"
+	Koto_Drain_FullMethodName          = "/koto.Koto/Drain"
 	Koto_Jobs_FullMethodName           = "/koto.Koto/Jobs"
 	Koto_JobLogs_FullMethodName        = "/koto.Koto/JobLogs"
 	Koto_JobTail_FullMethodName        = "/koto.Koto/JobTail"
@@ -86,6 +87,24 @@ type KotoClient interface {
 	Config(ctx context.Context, in *ConfigReq, opts ...grpc.CallOption) (*ConfigResp, error)
 	Metrics(ctx context.Context, in *MetricsReq, opts ...grpc.CallOption) (*MetricsResp, error)
 	Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// Drain discards a group's WAITING backlog — the queued prompts that
+	// GroupInfo.queued counts — and leaves everything else alone: the VM stays
+	// up, the conversation keeps its memory, and the in-flight turn keeps
+	// running. It is the complement of Interrupt, which aborts the running turn
+	// and lets the queue advance; run both to empty a group completely.
+	//
+	// Until this verb existed the backlog could only be dropped as a side
+	// effect of something bigger — Stop (powers the VM off), Clear (forgets the
+	// conversation) or Destroy — so "I queued three prompts by mistake" had no
+	// answer that cost nothing else.
+	//
+	// Scopes by GroupReq.session exactly as Clear does: "" = every session in
+	// the group, "-"/"default" = the default session, a name = that session.
+	// Goal sessions are never drained, not even by the group-wide form: a
+	// goal's queued iteration belongs to the driver, and unlike Stop (which
+	// pauses the goal first) a drain has nothing to stop it re-enqueueing —
+	// /goals interrupt is the verb that addresses a goal.
+	Drain(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*DrainResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -300,6 +319,16 @@ func (c *kotoClient) Clear(ctx context.Context, in *GroupReq, opts ...grpc.CallO
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
 	err := c.cc.Invoke(ctx, Koto_Clear_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Drain(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*DrainResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DrainResp)
+	err := c.cc.Invoke(ctx, Koto_Drain_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -610,6 +639,24 @@ type KotoServer interface {
 	Config(context.Context, *ConfigReq) (*ConfigResp, error)
 	Metrics(context.Context, *MetricsReq) (*MetricsResp, error)
 	Clear(context.Context, *GroupReq) (*BaseResp, error)
+	// Drain discards a group's WAITING backlog — the queued prompts that
+	// GroupInfo.queued counts — and leaves everything else alone: the VM stays
+	// up, the conversation keeps its memory, and the in-flight turn keeps
+	// running. It is the complement of Interrupt, which aborts the running turn
+	// and lets the queue advance; run both to empty a group completely.
+	//
+	// Until this verb existed the backlog could only be dropped as a side
+	// effect of something bigger — Stop (powers the VM off), Clear (forgets the
+	// conversation) or Destroy — so "I queued three prompts by mistake" had no
+	// answer that cost nothing else.
+	//
+	// Scopes by GroupReq.session exactly as Clear does: "" = every session in
+	// the group, "-"/"default" = the default session, a name = that session.
+	// Goal sessions are never drained, not even by the group-wide form: a
+	// goal's queued iteration belongs to the driver, and unlike Stop (which
+	// pauses the goal first) a drain has nothing to stop it re-enqueueing —
+	// /goals interrupt is the verb that addresses a goal.
+	Drain(context.Context, *GroupReq) (*DrainResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -752,6 +799,9 @@ func (UnimplementedKotoServer) Metrics(context.Context, *MetricsReq) (*MetricsRe
 }
 func (UnimplementedKotoServer) Clear(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Clear not implemented")
+}
+func (UnimplementedKotoServer) Drain(context.Context, *GroupReq) (*DrainResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Drain not implemented")
 }
 func (UnimplementedKotoServer) Jobs(context.Context, *JobsReq) (*JobsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Jobs not implemented")
@@ -1040,6 +1090,24 @@ func _Koto_Clear_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).Clear(ctx, req.(*GroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Drain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Drain(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Drain_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Drain(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1480,6 +1548,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Clear",
 			Handler:    _Koto_Clear_Handler,
+		},
+		{
+			MethodName: "Drain",
+			Handler:    _Koto_Drain_Handler,
 		},
 		{
 			MethodName: "Jobs",

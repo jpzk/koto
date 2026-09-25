@@ -100,6 +100,7 @@ func helpSections() []helpSection {
 			{"/restart [g]", "restart the VM (applies network/size/root config)"},
 			{"/destroy <g>", "destroy the group and its workspace"},
 			{"/interrupt", "interrupt the in-flight turn (same as ctrl+c / esc)"},
+			{"/drain [all]", "discard the session's queued prompts (all = the whole group)"},
 			{"/config [k=v ..]", "show or set group config (network, size, root, ports, ..)"},
 			{"/sched ...", "schedules: list / add <cron> <msg> / on / off / del / run"},
 			{"/goals ...", "goals: list / interrupt / .."},

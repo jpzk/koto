@@ -64,6 +64,9 @@ group lifecycle
   list                                     all groups + state
   spawn [-provider P] [-model M] <group>   create/start a group
   stop | interrupt | destroy | restart | clear  <group>
+  drain [-session S] <group>               discard the queued prompts
+                                           (VM, conversation and the
+                                            in-flight turn untouched)
 
 conversation
   send <group> <msg...>        enqueue a message, return immediately ("-" = stdin)
@@ -385,6 +388,20 @@ func ctlCliMain(args []string) {
 		groupVerb(func(ctx context.Context, cl pb.KotoClient, g string) (proto.Message, error) {
 			return cl.Restart(ctx, &pb.GroupReq{Group: g})
 		})
+	case "drain":
+		// The backlog only, never the running turn: that is `interrupt`.
+		fs := flag.NewFlagSet("drain", flag.ExitOnError)
+		session := fs.String("session", "", "drain only this chat session (\"-\" or \"default\" = the default session); omit for every session in the group")
+		fs.Parse(rest)
+		if fs.NArg() != 1 {
+			ctlFatal(2, "usage: koto ctl drain [-session S] <group>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Drain(ctx, &pb.GroupReq{Group: fs.Arg(0), Session: *session})
+		ctlPrint(resp, err)
+
 	case "clear":
 		fs := flag.NewFlagSet("clear", flag.ExitOnError)
 		session := fs.String("session", "", "clear only this chat session (\"-\" or \"default\" = the default session); omit for the whole group")

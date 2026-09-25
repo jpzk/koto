@@ -195,6 +195,11 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.Restart(ctx, &pb.GroupReq{Group: s("group")})
 	case "clear":
 		return cl.Clear(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
+	case "drain":
+		// Same session convention as clear ("" = the whole group), and the
+		// same reason for it: the operator is addressing one conversation or
+		// all of them, never "whichever the daemon picks".
+		return cl.Drain(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "history":
 		r := &pb.HistoryReq{Group: s("group")}
 		if v, ok := asFloat(extra["before"]); ok {

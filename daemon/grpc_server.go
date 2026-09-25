@@ -827,6 +827,59 @@ func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, err
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
+// Drain discards a group's waiting backlog and nothing else — the VM stays up,
+// the conversation keeps its memory, and the in-flight turn keeps running.
+// The backlog could previously only be dropped as a side effect of Stop,
+// Clear or Destroy, each of which costs something the operator emptying a
+// mistyped queue did not ask to spend.
+//
+// Scoped by GroupReq.session exactly as Clear is ("" = the whole group), and
+// like Clear it refuses to address a goal session directly. Unlike Clear the
+// group-wide form SKIPS goal sessions rather than including them
+// (dropQueuedDrain): Stop can drain a goal's queue because it pauses the goal
+// first, and a drain has no such lever — the driver would enqueue the next
+// iteration into the queue just emptied.
+//
+// No group barrier, deliberately. The barrier exists so a stop stays stopped;
+// a prompt sent a moment after a drain is an ordinary new prompt, not the
+// backlog reasserting itself. The one thing this cannot reach is a message a
+// worker has already taken off the channel but not yet registered as
+// in-flight — that message becomes the running turn, which is Interrupt's
+// subject, not this verb's.
+func (s *kotoServer) Drain(_ context.Context, r *pb.GroupReq) (*pb.DrainResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.DrainResp{Error: "invalid group name"}, nil
+	}
+	// SHAPE before EXISTENCE: a request that may not be made at all is
+	// refused the same way whether or not the group happens to exist, so the
+	// answer doesn't depend on fleet state.
+	if isReservedSession(r.Session) {
+		return &pb.DrainResp{Error: "session " + r.Session + " is reserved for the goal loop — use /goals interrupt"}, nil
+	}
+	onlySession := r.Session != ""
+	session := ""
+	if onlySession {
+		var err error
+		if session, err = normalizeSession(r.Session); err != nil {
+			return &pb.DrainResp{Error: "drain: " + err.Error()}, nil
+		}
+	}
+	if !registeredGroup(r.Group) {
+		// A typo must not read as "dropped 0" — that is indistinguishable
+		// from an empty backlog, which is the answer the operator came for.
+		return &pb.DrainResp{Error: "no such group " + r.Group}, nil
+	}
+	n := dropQueuedDrain(r.Group, session, onlySession)
+	if n > 0 {
+		scope := "group=" + r.Group
+		if onlySession {
+			scope += " session=" + sessionMarkerName(session)
+		}
+		emitLogfG("group", r.Group, "info", "drain %s: discarded %d queued message(s)", scope, n)
+	}
+	return &pb.DrainResp{Ok: true, Dropped: int32(n)}, nil
+}
+
 // registeredGroup reports whether g is a live group. Both deferred-work verbs
 // check it: a schedule or a goal is a promise to send LATER, and ensure() no
 // longer provisions on a send (M17), so an unregistered target used to persist
