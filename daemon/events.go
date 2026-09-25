@@ -338,7 +338,7 @@ func emit(g string, ev Event) {
 	subs := recordEvent(g, pbev)
 	for _, s := range subs {
 		// Non-blocking: a slow consumer whose buffer is full must not stall
-		// the tailLog goroutine for every other subscriber of the group. But
+		// the tailer goroutine for every other subscriber of the group. But
 		// instead of silently dropping the frame (the old behavior — the
 		// client had no way to notice), shut the stream: the client sees it
 		// close, reconnects with since_seq, and the ring replays exactly the

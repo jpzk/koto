@@ -20,7 +20,7 @@ package main
 //           (TurnFrame): TurnOpen{slot} first, then the turn's events, then
 //           TurnEnd. fcTurnSink (fcturn.go) renders them into the [[marker]]
 //           text grammar in HOST .cs/log.<slot>, which stays the single
-//           source of truth (tailLog, History, /clear, `>>>` markers all
+//           source of truth (the log tailer, History, /clear, `>>>` markers all
 //           unchanged) — but the guest can't author a marker: text is bytes,
 //           markers are frame types, marker-shaped text lines are escaped.
 //

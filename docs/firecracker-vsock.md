@@ -82,7 +82,7 @@ uid, audit 2026-09-04 M1).
 Key insight that kept the diff small: **the host log file stays the single
 source of truth.** The turn-stream handler (`fcTurnSink`) renders the guest's
 typed frames into `groups/<g>/.cs/log.<slot>` in the marker grammar — so
-`tailLog`, History, `/clear` truncation, proxy `logAppend`, and sendNow's
+the log tailer (`tailFrom`), History, `/clear` truncation, proxy `logAppend`, and sendNow's
 `>>>` markers are all runtime-oblivious. No parser refactor. Similarly the 9000 handler splices into the group's *existing*
 proxy listener, so credential injection and metrics attribution are unchanged.
 
@@ -136,7 +136,7 @@ stream):
 - vcpus/mem/disk per group: config.json `size` preset (default `small` =
   2 vCPU / 1024 MiB / 8 GiB). See "VM size profile" below. Raw `vcpus` /
   `mem_mib` keys still override the preset (legacy escape hatch).
-- turn lifecycle: `[[turn_end]]` arrives via vsock → host log → tailLog →
+- turn lifecycle: `[[turn_end]]` arrives via vsock → host log → its tailer (`tailFrom`) →
   `notifyTurnDone`, feeding sendNow's wait/stall/selfHeal logic
   (restart() = stopGroup + ensure).
 

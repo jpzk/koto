@@ -223,7 +223,7 @@ func parseSessionMarker(line string) (string, bool) {
 // (that's exactly what pre-session logs are). Used by per-session clear —
 // a full-group clear truncates the file instead.
 //
-// The rename gives the log a new inode; tailLog notices and reopens at EOF
+// The rename gives the log a new inode; the tailer notices and reopens at EOF
 // (not offset 0), so subscribers are not flooded with a re-emit of the
 // surviving history. Clients that held lines for the cleared session drop
 // them locally (the TUI does) or catch up on their next History fetch.

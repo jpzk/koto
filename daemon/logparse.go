@@ -2,7 +2,7 @@ package main
 
 // logparse.go — the [[marker]] framing grammar, extracted into one stateful
 // parser so every consumer of a group-log-shaped byte stream parses it
-// identically: the live tailer (tailLog), history replay (readHistory), and
+// identically: the live tailer (tailFrom), history replay (readHistory), and
 // the parsed JobTail stream (a cs-subagent job's out file carries the same
 // framing via stream_filter.js/venice_stream.js). This is the single source
 // of truth for the grammar — change it here, never fork it per call site.
