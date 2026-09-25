@@ -13,12 +13,13 @@ https://github.com/user-attachments/assets/cdf0ea33-c52d-4106-81a2-f6be49efe918
 ### From signed builds
 
 ```sh
-git clone https://github.com/jpzk/koto && cd koto
-make fetch      # 1. fetch signed artifacts and verify checksum 
-make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
-make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
-koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
+curl -fsSL https://kotovm.com/install.sh | sh
 ```
+
+Downloads the latest signed release, verifies the signature and checksums,
+installs koto as a systemd service, then runs the setup wizard and opens the
+TUI: `/new <name>` spawns your first agent, `/exit` detaches. Every sudo
+command is printed before it runs.
 
 
 ### From sources
@@ -42,8 +43,7 @@ koto tui        # attach the TUI: /new <name> spawns your first agent, /exit det
 
 
 Every stage is safe to re-run, and `koto setup --check` reports the health of
-an install without changing anything. `make fetch` replaces `make build` once
-releases exist.
+an install without changing anything.
 
 To upgrade an installed koto: `koto update --check` says whether a newer release
 exists, and `koto update` installs it. It verifies the release the same way the
