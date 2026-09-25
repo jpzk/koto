@@ -173,7 +173,6 @@ func fcUDS(g string) string     { return filepath.Join(fcSockDir(g), "v") }
 func fcJailDir(g string) string { return filepath.Join(fcRunDir(), g+".jail") }
 
 func fcPidPath(g string) string      { return filepath.Join(fcRunDir(), g+".pid") }
-func fcCfgPath(g string) string      { return filepath.Join(fcRunDir(), g+".cfg.json") }
 func fcConsolePath(g string) string  { return filepath.Join(fcRunDir(), g+".console.log") }
 func fcWorkspaceImg(g string) string { return filepath.Join(vol(g), "workspace.img") }
 
@@ -397,11 +396,9 @@ func fcReadPidFile(p string) (int, error) {
 // VM — not merely some live firecracker, which after a pid-space reset may be
 // another group's fresh VMM (the failure the comment above records).
 //
-// Two identifiers, because the two spawn paths look different from /proc: a
-// JAILED VMM is chrooted into the group's own jail dir, which /proc/<pid>/root
-// resolves to, and an unjailed one carries the group's config path on its
-// command line. Neither is forgeable by a guest — both are host paths this
-// daemon chose.
+// The identifier is the chroot: a VMM is jailed into the group's own jail
+// dir, which /proc/<pid>/root resolves to. A guest cannot forge it — it is a
+// host path this daemon chose.
 func pidIsGroupVMM(g string, pid int) bool {
 	if pid <= 0 || !pidIsFirecracker(pid) {
 		return false
@@ -412,13 +409,6 @@ func pidIsGroupVMM(g string, pid int) bool {
 		}
 		if root == fcJailDir(g) {
 			return true
-		}
-	}
-	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-		for _, arg := range strings.Split(strings.TrimRight(string(b), "\x00"), "\x00") {
-			if arg == fcCfgPath(g) {
-				return true
-			}
 		}
 	}
 	return false
@@ -641,8 +631,7 @@ func fcWorkspaceDiskBytes(g string) int64 {
 }
 
 // fcVMConfig builds the static --config-file blob for group g. Paths are the
-// caller's problem (chroot-relative under the jail, absolute host paths
-// unjailed). Both drives carry the group's resolved rate limiter — the rootfs
+// caller's problem (chroot-relative: the bind targets fcStageJail stages). Both drives carry the group's resolved rate limiter — the rootfs
 // is read-only but `dd if=/dev/vda` still generates host reads, so it gets
 // the same buckets as the workspace drive.
 // The machine shape is PASSED IN, not re-read. fcSpawn resolves it once,
@@ -769,9 +758,8 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		return err
 	}
 	base := fcUDS(g)
-	jailed := fcJailEnabled()
 	jailUID, err := fcJailUID(proxyPort)
-	if err != nil && jailed {
+	if err != nil {
 		return err
 	}
 
@@ -870,31 +858,24 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		})
 	}
 
-	// When jailed, Firecracker runs as the unprivileged per-VM uid inside a
-	// chroot + private mount namespace. It reaches its vsock sockets and its
+	// Firecracker runs as the unprivileged per-VM uid inside a chroot +
+	// private mount namespace. It reaches its vsock sockets and its
 	// workspace image through bind mounts, so the underlying host inodes must
 	// be accessible to that uid: hand it the socket directory (it creates its
 	// own "uds" listener there) and its workspace image, and make the
 	// daemon-created "uds_<port>" listener sockets connectable (they are owned
 	// by the daemon uid; a cross-uid connect needs write permission). Scoped to
 	// this group's own dir, so 0666 exposes nothing to other VMs.
-	if jailed {
-		if err := fcJailFixupPerms(g, jailUID); err != nil {
-			return fail(err)
-		}
+	if err := fcJailFixupPerms(g, jailUID); err != nil {
+		return fail(err)
 	}
 
 	// VM config. Root drive is the shared golden rootfs, read-only, so one
 	// image safely backs every group. console → per-group log file for boot
-	// debugging (quiet keeps it small in steady state). Under the jailer the
-	// paths are chroot-relative (bind targets staged by fcStageJail); unjailed
-	// they are absolute host paths.
-	kernelPath, rootfsPath, wsPath, udsPath := fcKernelPath(), fcRootfsPath(), fcWorkspaceImg(g), base
-	if jailed {
-		kernelPath, rootfsPath, wsPath, udsPath = "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v"
-	}
+	// debugging (quiet keeps it small in steady state). The paths are
+	// chroot-relative: bind targets staged by fcStageJail.
 	vm.memMiB = memMiB
-	cb := fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath, vcpus, memMiB, bwBytes, ioOps)
+	cb := fcVMConfig(g, "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v", vcpus, memMiB, bwBytes, ioOps)
 
 	console, err := fcConsoleSink(g)
 	if err != nil {
@@ -902,24 +883,15 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	// --no-api: fully static config; lifecycle is process-level (the agent's
 	// shutdown op powers the guest off, which exits the FC process).
-	var cmd *exec.Cmd
-	if jailed {
-		spec, serr := fcStageJail(g, cb, jailUID)
-		if serr != nil {
-			console.Close()
-			return fail(serr)
-		}
-		cmd, serr = fcJailCommand(spec)
-		if serr != nil {
-			console.Close()
-			return fail(serr)
-		}
-	} else {
-		if err := os.WriteFile(fcCfgPath(g), cb, 0o600); err != nil {
-			console.Close()
-			return fail(err)
-		}
-		cmd = exec.Command(fcBinPath(), "--no-api", "--config-file", fcCfgPath(g))
+	spec, err := fcStageJail(g, cb, jailUID)
+	if err != nil {
+		console.Close()
+		return fail(err)
+	}
+	cmd, err := fcJailCommand(spec)
+	if err != nil {
+		console.Close()
+		return fail(err)
 	}
 	cmd.Stdout = console
 	cmd.Stderr = console
@@ -968,14 +940,6 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// still gets into the snapshot.
 	if shuttingDown.Load() {
 		return fail(fmt.Errorf("daemon is shutting down"))
-	}
-	if !jailed {
-		// Jailed VMs renice themselves in the shim (fcjailMain); the unjailed
-		// path runs as the daemon uid, so renice from outside. Same-uid raise
-		// is unprivileged; failure degrades, never blocks the spawn.
-		if err := syscall.Setpriority(syscall.PRIO_PROCESS, vm.pid, fcVMNice); err != nil {
-			emitLogfG("fc", g, "warn", "[%s] setpriority nice=%d: %v", g, fcVMNice, err)
-		}
 	}
 	vm.start, _ = pidStartTime(vm.pid)
 	_ = os.WriteFile(fcPidPath(g), []byte(fmt.Sprintf("%d\n", vm.pid)), 0o644)

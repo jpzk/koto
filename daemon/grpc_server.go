@@ -27,7 +27,7 @@ import (
 // DELTA), so this only excludes what's actually dangerous — path
 // separators, "..", and control characters — which is what let an
 // unvalidated group name reach vol(g) (== filepath.Join(ROOT, g)) or any of
-// the fc.go path helpers that concatenate g directly (fcPidPath, fcCfgPath,
+// the fc.go path helpers that concatenate g directly (fcPidPath,
 // fcConsolePath, fcJailDir) and escape their intended directory. Every RPC
 // that takes a bare group name must check this before the name reaches any
 // of those helpers.

@@ -8746,27 +8746,11 @@ func TestNotificationFieldsAreBoundedBeforeDecoding(t *testing.T) {
 	}
 }
 
-// 2026-09-11 L158: the failure message has always offered KOTO_FC_NOJAIL=1 as
-// the way past a host that will not allow the userns bootstrap — and it was not
-// one, because the bootstrap ran unconditionally and consulted neither
-// fcJailEnabled() nor the variable. An operator following the advice got the
-// identical failure and no microVMs at all.
-func TestNoJailSkipsTheUsernsBootstrap(t *testing.T) {
-	prev, had := os.LookupEnv("KOTO_FC_NOJAIL")
-	t.Cleanup(func() {
-		if had {
-			os.Setenv("KOTO_FC_NOJAIL", prev)
-		} else {
-			os.Unsetenv("KOTO_FC_NOJAIL")
-		}
-	})
-	os.Setenv("KOTO_FC_NOJAIL", "1")
-	if fcJailEnabled() {
-		t.Fatal("KOTO_FC_NOJAIL=1 did not disable the jail")
-	}
-	os.Unsetenv("KOTO_FC_NOJAIL")
-	if !fcJailEnabled() {
-		t.Fatal("the jail is not on by default")
+// The diagnostics must not send an operator toward the removed mode: the
+// userns remediation used to end by offering to run the VMM unjailed.
+func TestUsernsRemediationOffersNoUnjailedMode(t *testing.T) {
+	if r := usernsRemediation(); strings.Contains(strings.ToLower(r), "unjailed") {
+		t.Errorf("remediation still offers the unjailed mode:\n%s", r)
 	}
 }
 

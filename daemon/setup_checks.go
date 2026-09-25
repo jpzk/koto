@@ -342,10 +342,7 @@ func usernsRemediation() string {
 		"The host-wide switch is the fallback. It works, but EVERY local program\n" +
 		"gets unprivileged user namespaces back, not just koto:\n" +
 		"  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n" +
-		"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf\n" +
-		"\n" +
-		"Running the VMM unjailed (KOTO_FC_NOJAIL=1) avoids the restriction too,\n" +
-		"but drops a layer of host protection."
+		"  echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-koto.conf"
 }
 
 // checkUserns covers the nested-userns requirement: the Firecracker VMM jail

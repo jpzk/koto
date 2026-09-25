@@ -976,7 +976,9 @@ network — **it cannot reach the creds mount** (and there is no longer a podman
 socket to reach either — see below). Upstream's `jailer` binary isn't usable here
 (it `mknod`s devices, needing `CAP_MKNOD` in the init userns that a rootless
 `cs_host` lacks), so this reimplements its model with rootless-safe primitives;
-verified booting real FC to KVM. Opt out with `KOTO_FC_NOJAIL=1`. See
+verified booting real FC to KVM. **There is no opt-out** (since 2026-09-25):
+the old environment switch for running unjailed is gone, and a host that
+refuses the userns bootstrap is fixed at the host, not by dropping the layer. See
 `docs/firecracker-vsock.md` → "Jailer".
 
 The "we trust the host user" decision was deliberate. **The DooD podman socket has been removed** — it used to be mounted into `cs_host` and equalled host authority, but its only remaining user was the whisper STT container, so removing whisper let us drop the mount entirely (and podman from the `cs_host` image). A `cs_host` compromise can now reach the koto OAuth token + workspaces, but has **no path to the host's podman daemon** and so cannot spawn privileged containers or mount the host root. This was tier 2's single largest blast-radius reduction. (If voice notes come back, run whisper as a pre-started `--network=none` sidecar the daemon talks to over a private socket — not by re-mounting the DooD socket.)

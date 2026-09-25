@@ -711,9 +711,9 @@ func destroy(g string) baseResp {
 		}
 		emitLogfG("group", g, "error", "destroy group=%s: %s", g, destroyErr)
 	}
-	// Firecracker droppings (cfg/pid/console/vsock sockets) live under
-	// run/fc, not the workspace — sweep them so a name reuse starts clean.
-	for _, p := range []string{fcCfgPath(g), fcPidPath(g), fcConsolePath(g),
+	// Firecracker droppings (pid/console/vsock sockets) live under run/fc,
+	// not the workspace — sweep them so a name reuse starts clean.
+	for _, p := range []string{fcPidPath(g), fcConsolePath(g),
 		fcUDS(g),
 		fmt.Sprintf("%s_%d", fcUDS(g), fcPortProxy),
 		fmt.Sprintf("%s_%d", fcUDS(g), fcPortLog),

@@ -157,8 +157,6 @@ run/fc/
                       this VM's sockets into its chroot (as /vsock).
   <g>.jail/            per-VM chroot root the jailer stages (bind targets for
                       firecracker/kernel/rootfs/workspace/dev/vsock + fc.json)
-  <g>.cfg.json         unjailed only (KOTO_FC_NOJAIL=1); jailed config is
-                      written into <g>.jail/fc.json instead
   <g>.pid / <g>.console.log
 fcassets/             (gitignored) firecracker binary, vmlinux, rootfs.img
 ```
@@ -404,7 +402,7 @@ layers, all defaults, no new user-facing knobs:
    rootless delegation excludes the cgroup `io` controller, and `network`
    egress is a vsock channel, not a virtio device.
 2. **`nice=10` on the VMM process** — the jail shim renices itself before the
-   uid drop (`fcjailMain`; the unjailed path renices post-`Start`), so the
+   uid drop (`fcjailMain`), so the
    daemon/proxy at nice 0 always preempt runaway VMs. CPU *capacity* is
    already bounded by `vcpu_count`; this fixes *priority*.
 3. **Per-VM cgroups** (`fccgroup.go`) — probed once at startup; when cs_host
@@ -604,7 +602,7 @@ daemon uid, in the daemon's namespaces, with the creds mount + all group
 workspaces + the daemon's own control-plane authority reachable). Note the
 podman DooD socket — historically the worst thing reachable here — has since
 been removed outright (its last user, whisper STT, is gone), so it no longer
-factors in either the jailed or unjailed case:
+factors in:
 
 | Axis        | Jailed VMM |
 |-------------|-----------|
@@ -633,9 +631,15 @@ later resize/migration still works.
 > on, so `main`'s socket was `main`'s full verb set. Audit M7 replaced it with
 > the chown; this paragraph described the removed behavior until 2026-09-11.
 
-**Opt-out.** `KOTO_FC_NOJAIL=1` runs FC unjailed as the daemon uid with the
-absolute-path config at `<g>.cfg.json` (the pre-jailer behavior) — for
-environments that can't create nested user namespaces, or for debugging.
+**No opt-out.** Every VMM is jailed. There used to be an environment switch
+that ran FC unjailed as the daemon uid (absolute-path config at
+`<g>.cfg.json`, the pre-jailer behavior), offered for hosts that refuse the
+userns bootstrap. It was removed 2026-09-25: it put a VMM compromise on the
+operator's account, and it did not even work as the escape hatch it was
+offered as. An existing state dir's images are owned by the per-VM ids, and
+the workspace build chowns to the guest uid, which needs the namespace. A host
+that refuses the bootstrap is fixed at the host (`koto userns-check` says
+why).
 
 **Resource caps.** Upstream's jailer also manages cgroups; our equivalent
 lives in `fccgroup.go` — per-VM `cpu.weight`/`memory.high` applied at clone

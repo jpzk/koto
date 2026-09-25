@@ -114,12 +114,12 @@ func fcJailUID(proxyPort int) (int, error) {
 // file's ACL".
 func fcJailHostUID(subuidStart, nsUID int) int { return subuidStart + nsUID - 1 }
 
-// fcJailEnabled reports whether Firecracker should be jailed. On by default;
-// KOTO_FC_NOJAIL=1 opts out (unjailed, VMM runs as the daemon uid) for
-// environments that can't create nested user namespaces or for debugging.
-func fcJailEnabled() bool {
-	return os.Getenv("KOTO_FC_NOJAIL") != "1"
-}
+// There is no unjailed mode, and no switch for one. An unjailed VMM would run
+// as the daemon's own uid, with no user namespace, chroot or per-VM uid, so a
+// VMM compromise would land on the operator's account (creds/, every
+// workspace) instead of on a nobody uid in an empty chroot. A host that refuses
+// the userns bootstrap is fixed at the host (`koto userns-check`), not by
+// removing the layer.
 
 // fcBind is one bind mount from a host path (src) to a chroot-relative path
 // (dst, joined onto the chroot dir before the chroot call). ro binds get
