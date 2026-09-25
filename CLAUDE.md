@@ -752,6 +752,26 @@ verb list.
   producers go through), so a missed transient banner/desktop popup stays
   checkable afterwards via `koto ctl logs`, even after a group `/clear`
   erases the group-log marker it persisted in.
+- **Every restriction is verified, and a missing one is LOUD** (`daemon/posture.go`,
+  2026-09-25). Each missing layer is an `error` line on the `posture` subsystem
+  plus ONE `high` notification titled `RESTRICTION INACTIVE: <what>` (banner,
+  desktop popup, BEL). Warnings, not refusals: the fleet keeps running, but
+  running with a layer missing is now a known decision rather than an audit
+  finding. Checked in two places:
+  - **At startup** (`postureStartup`, after the cgroup/memory probes, before any
+    VM boots): per-VM cgroup caps unavailable (with the reason), fleet memory
+    cap unlimited (`KOTO_HOST_MEM_MIB=0`) or its kernel-side `memory.max` write
+    failed, the systemd sandbox absent (daemon seccomp mode ≠ 2; says whether
+    the daemon is outside `koto.service`), and gRPC not bound to loopback.
+  - **After every VM boot** (`postureVM`, at "microVM up", once the shim has
+    exec'd Firecracker): the RUNNING VMM, read from `/proc`, must have its jail
+    chroot as root, the per-VM uid in all four Uid slots, `NoNewPrivs 1`,
+    `Seccomp 2` (Firecracker's own filter), a net namespace other than the
+    daemon's, nice ≥ 10, and (when cgroups are on) sit in its `vms/<g>` leaf.
+    It checks what the kernel applied, not what the setup code intended; an
+    unreadable VMM is itself a finding.
+  A dev daemon always reports two findings (no cgroup delegation, no unit
+  sandbox); that is expected. An installed daemon should report none.
 - **A `notification` event also reaches the window manager, not just the TUI
   banner** (`tui/notify_osc.go`). `cs_tui` runs `--network=none` with one
   socket mounted — no D-Bus, no `notify-send` — so the only channel out is an

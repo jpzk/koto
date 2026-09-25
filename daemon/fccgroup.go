@@ -127,9 +127,10 @@ func fcCgroupSelfImpl() (string, error) {
 // before any VM exists. Never fatal.
 func fcCgroupInit() {
 	off := func(format string, args ...any) {
+		fcCgroupOffReason = fmt.Sprintf(format, args...)
 		emitLogf("fc", "info",
 			"per-VM cgroup caps unavailable (%s); relying on vcpu bound + FC io limiter + nice",
-			fmt.Sprintf(format, args...))
+			fcCgroupOffReason)
 	}
 	self, err := fcCgroupSelf()
 	if err != nil {
@@ -190,8 +191,10 @@ func fcCgroupInit() {
 			high = capBytes
 		}
 		if err := os.WriteFile(filepath.Join(vms, "memory.max"), []byte(fmt.Sprint(capBytes)), 0o644); err != nil {
+			fcHostMemCapErr = "memory.max: " + err.Error()
 			emitLogf("fc", "warn", "fleet memory cap: vms/memory.max write failed (%v); admission check only", err)
 		} else if err := os.WriteFile(filepath.Join(vms, "memory.high"), []byte(fmt.Sprint(high)), 0o644); err != nil {
+			fcHostMemCapErr = "memory.high: " + err.Error()
 			emitLogf("fc", "warn", "fleet memory cap: vms/memory.high write failed (%v)", err)
 		} else {
 			emitLogf("fc", "info", "fleet memory cap enforced on %s: memory.max=%dMiB memory.high=%dMiB", vms, fcHostMemCapMiB, high>>20)

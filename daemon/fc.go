@@ -1086,6 +1086,9 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	fcHostMemRelease(g) // counted from fcVMs from here on
 	emitLogfG("fc", g, "info", "[%s] microVM up pid=%d vcpus=%d mem=%dMiB io=%dMiB/s,%dops nice=%d cgroup=%s ports=%v",
 		g, vm.pid, vcpus, memMiB, bwBytes>>20, ioOps, fcVMNice, fcCgroupState(), pubPorts)
+	// The agent answered, so the shim has exec'd Firecracker and the process
+	// is in its final state: verify the jail the kernel actually applied.
+	postureVM(g, vm.pid, jailUID)
 	return nil
 }
 

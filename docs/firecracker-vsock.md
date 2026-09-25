@@ -631,6 +631,12 @@ later resize/migration still works.
 > on, so `main`'s socket was `main`'s full verb set. Audit M7 replaced it with
 > the chown; this paragraph described the removed behavior until 2026-09-11.
 
+**Verified after every boot.** `postureVM` (`daemon/posture.go`) reads the
+running VMM out of `/proc` once the guest agent answers and checks every layer
+below (chroot, per-VM uid, `no_new_privs`, Firecracker's seccomp, its own net
+namespace, `nice`, cgroup leaf). Any layer not in effect raises an error line
+and a high `RESTRICTION INACTIVE` notification.
+
 **No opt-out.** Every VMM is jailed. There used to be an environment switch
 that ran FC unjailed as the daemon uid (absolute-path config at
 `<g>.cfg.json`, the pre-jailer behavior), offered for hosts that refuse the

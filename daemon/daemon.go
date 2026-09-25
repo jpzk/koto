@@ -166,6 +166,9 @@ func daemonMain() {
 	// (including the vms/ parent limit) must be staged before any VM boots.
 	fcHostMemInit()
 	fcCgroupInit()
+	// Every host-wide restriction is now in its final state: say loudly
+	// which ones are not in effect, before the first VM boots (posture.go).
+	postureStartup()
 	_, _ = allocPort("main")
 
 	// Proxy runs in-process as goroutines (one per listener). Brings up
