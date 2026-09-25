@@ -201,6 +201,13 @@ func runInstall(o installOpts) error {
 	}
 	u.blank()
 
+	// 0. Nothing below may run under a live daemon: it replaces the binary the
+	// service execs and the guest images every VM boots from (see
+	// installStopDaemon).
+	if err := installStopDaemon(o); err != nil {
+		return err
+	}
+
 	// 1. state directory
 	if err := seedStateDir(o, me); err != nil {
 		return err
@@ -278,12 +285,13 @@ func runInstall(o installOpts) error {
 	// here would only crash-loop the unit from the moment it exists — and a
 	// service that is red on arrival teaches operators to ignore it. The
 	// wizard's service step performs the first start. An upgrade has its
-	// credentials already, so it restarts as it always did.
+	// credentials already, and installStopDaemon stopped it, so it starts
+	// again — on the new binary and the new guest assets.
 	if upgrade {
-		if err := sudoRun(u, "systemctl", "restart", "koto"); err != nil {
+		if err := sudoRun(u, "systemctl", "start", "koto"); err != nil {
 			return err
 		}
-		u.ok("service restarted")
+		u.ok("service started")
 	} else {
 		if err := sudoRun(u, "systemctl", "enable", "koto"); err != nil {
 			return err
@@ -501,18 +509,26 @@ func seedStateDir(o installOpts, me *user.User) error {
 			"(the daemon would run every group with no harness policy)", filepath.Join(dstPrompts, "global.md"))
 	}
 
-	// fcassets: link or copy the big three from the clone if they're there,
-	// otherwise build them into the state dir.
+	// fcassets: bring the big three in from the clone — copied when absent,
+	// REPLACED when they differ. They used to be copied only when absent, so
+	// an upgrade replaced the daemon and never the guest: a host installed on
+	// 2026-09-03 was still booting that day's rootfs (guest agent,
+	// claude-code) weeks and several upgrades later. Replacing is safe
+	// because installStopDaemon has already stopped the service, so no VM is
+	// booting from these files.
 	dstAssets := filepath.Join(o.stateDir, "fcassets")
 	for _, a := range []string{"firecracker", "vmlinux", "rootfs.img"} {
 		src := filepath.Join(o.root, "fcassets", a)
 		dst := filepath.Join(dstAssets, a)
-		if exists(dst) || !exists(src) {
+		if !exists(src) {
 			continue
 		}
-		u.info("copying fcassets/%s into the state dir", a)
-		if err := copyFile(src, dst); err != nil {
-			return fmt.Errorf("copy %s: %w", a, err)
+		replaced, err := installAsset(src, dst)
+		if err != nil {
+			return fmt.Errorf("fcassets/%s: %w", a, err)
+		}
+		if replaced {
+			u.ok("fcassets/%s updated", a)
 		}
 	}
 	var missing []string
@@ -1325,4 +1341,134 @@ func installStatus() (active bool, detail string) {
 	out, _ := exec.Command("systemctl", "is-active", "koto").Output()
 	state := strings.TrimSpace(string(out))
 	return state == "active", "service " + state
+}
+
+// installStopDaemon stops the running daemon before install changes anything.
+//
+// An install onto a live system used to replace the binary under the running
+// service and restart it at the END — and it could not replace the guest
+// assets at all, because every running VM boots from them. So the stop comes
+// FIRST, with consent: it shuts down every running microVM (each gets the
+// daemon's sync-and-unmount window), which is the operator's call to make.
+// Declining leaves the system exactly as it was.
+//
+// `systemctl stop` succeeding is not the same sentence as "no daemon serves
+// this state dir": a daemon started by hand has no unit to stop. So the stop is
+// followed by the same /proc check uninstall uses, and install refuses while
+// any daemon still serves the state dir it is about to change.
+func installStopDaemon(o installOpts) error {
+	u := o.ui
+	if systemctlIsActive("koto") {
+		u.warn("the koto service is running. Installing replaces its binary and the guest images,")
+		u.warn("so it has to be stopped first: every running microVM is shut down (each gets its")
+		u.warn("sync-and-unmount window), and the service is started again once install finishes.")
+		if !u.yesno("Stop koto now?", true) {
+			return fmt.Errorf("not stopped — nothing was changed. Re-run when the fleet can be stopped")
+		}
+		u.info("stopping the daemon — each guest gets up to 25s to unmount its workspace")
+		if err := sudoRun(u, "systemctl", "stop", "koto"); err != nil {
+			return fmt.Errorf("stop koto: %w — nothing was changed", err)
+		}
+		u.ok("service stopped")
+	}
+	if pid, cmd, found := runningKotoDaemon(o.stateDir); found {
+		return fmt.Errorf("a koto daemon still serves %s (pid %d: %s) — stop it, then re-run; nothing was changed",
+			o.stateDir, pid, cmd)
+	}
+	return nil
+}
+
+// installAsset puts src at dst unless dst already holds the same bytes, and
+// reports whether it wrote. The write goes to dst.new and is renamed into
+// place, so dst is never a half-copied image: an interrupted install leaves
+// either the old asset or the new one.
+func installAsset(src, dst string) (bool, error) {
+	same, err := filesEqual(src, dst)
+	if err != nil {
+		return false, err
+	}
+	if same {
+		return false, nil
+	}
+	tmp := dst + ".new"
+	_ = os.Remove(tmp)
+	if err := copyFile(src, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return false, err
+	}
+	return true, nil
+}
+
+// filesEqual compares two files byte for byte, stopping at the first
+// difference. A missing dst is simply "not equal". Size is checked first, so
+// the common "different build" case costs one stat each.
+func filesEqual(a, b string) (bool, error) {
+	fa, err := openRegular(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := openRegular(b)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	sa, err := fa.Stat()
+	if err != nil {
+		return false, err
+	}
+	sb, err := fb.Stat()
+	if err != nil {
+		return false, err
+	}
+	if sa.Size() != sb.Size() {
+		return false, nil
+	}
+	const chunk = 1 << 20
+	ba, bb := make([]byte, chunk), make([]byte, chunk)
+	for {
+		na, ea := io.ReadFull(fa, ba)
+		nb, eb := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		if ea == io.EOF || ea == io.ErrUnexpectedEOF {
+			return eb == io.EOF || eb == io.ErrUnexpectedEOF, nil
+		}
+		if ea != nil {
+			return false, ea
+		}
+		if eb != nil {
+			return false, eb
+		}
+	}
+}
+
+// openRegular opens path for reading only if it is a regular file, judging the
+// DESCRIPTOR: opened O_NONBLOCK, so a FIFO is refused instead of blocking the
+// installer at open(2) — the guard copyFile already has, which filesEqual runs
+// before it and so needs too.
+func openRegular(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s: not a regular file (%s)", path, fi.Mode().Type())
+	}
+	return f, nil
 }

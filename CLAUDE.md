@@ -99,8 +99,8 @@ everything else derives from the globals.
   constraint the whole shape rests on: `serverTLSConfig()` loads `server.crt`,
   which the wizard has not minted yet, so `enable --now` at install time would
   crash-loop the unit from the moment it exists. The wizard's `service` step
-  performs the first start. An upgrade already has credentials, so it
-  restarts as before.
+  performs the first start. An upgrade already has credentials, so it is
+  started again once install finishes (see the next bullet for the stop).
 - **`koto install`** seeds the state dir and writes four root-owned things (the
   `koto` and `koto-tui` binaries, `/etc/koto/koto.env`, the unit) via discrete
   echoed `sudo` execs, then enables the service. No image is built: the daemon
@@ -109,6 +109,20 @@ everything else derives from the globals.
   untouched (compared against a `.dist` copy). The creds-copy in
   `seedStateDir` is MIGRATION ONLY now — the wizard writes to the state dir
   directly.
+  **An install onto a running system STOPS THE DAEMON FIRST** (since
+  2026-09-25, `installStopDaemon`): before it changes anything it asks (default
+  yes, `-y` accepts) to `systemctl stop koto`, which shuts down every running
+  microVM with its sync-and-unmount window; declining aborts with nothing
+  changed. Then it checks `/proc` (`runningKotoDaemon`, shared with uninstall)
+  and refuses while ANY daemon still serves the state dir, since a
+  hand-started one has no unit to stop. Only then does it replace the binaries
+  and the **guest assets**: `firecracker`, `vmlinux`, `rootfs.img` are compared
+  byte for byte with the clone's (`filesEqual`) and replaced when they differ,
+  via `.new` + rename, so an interrupted install leaves the old image or the
+  new one and never a half-copied one. They used to be copied only when
+  ABSENT, so an upgrade replaced the daemon and never the guest: the dev host
+  was found on 2026-09-25 still booting its 2026-09-03 rootfs through several
+  upgrades. The service is started at the end.
 - **The API key resolves from the state dir**, not only from `koto.env`:
   `proxyInitPaths()` falls back to `<state>/creds/anthropic-api-key` when
   `ANTHROPIC_API_KEY` is unset. Necessary because auth now happens after
