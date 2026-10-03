@@ -21,6 +21,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -38,9 +39,24 @@ const jobsRefreshTTL = 3 * time.Second
 // rejected before an id is ever spliced into a guest shell script.
 var jobIDRE = regexp.MustCompile(`^[A-Za-z0-9]{1,32}$`)
 
+// A failed refresh backs off for jobsFailBackoff before the watcher tick may
+// try again. It is the guest's execCap: the agent keeps running an exec the
+// daemon has stopped waiting for until that cap kills it, so retrying at the
+// TTL stacked abandoned walks in an already-slow guest — about four at once,
+// each making the next one slower. After jobsFailWarnAfter consecutive
+// failures the streak is logged once at warn, and its end at info: a group
+// whose job list cannot be read used to look exactly like a group with no
+// jobs, with nothing but a debug line to tell them apart.
+const (
+	jobsFailBackoff   = 60 * time.Second
+	jobsFailWarnAfter = 3
+)
+
 type jobsCacheEntry struct {
-	jobs []JobInfo
-	at   time.Time
+	jobs     []JobInfo
+	at       time.Time // last SUCCESSFUL read
+	failedAt time.Time // last failed read, zero after a success
+	fails    int       // consecutive failures
 }
 
 var (
@@ -71,20 +87,41 @@ var (
 // state, folded into the state hash and republished in every state frame. `cmd`
 // was already capped at 200 bytes, which is the shape; the other four were not.
 // `wc -c < file` also READS the file to count it; stat asks the inode.
-const jobsListScript = `fld() { head -c 64 "$1" 2>/dev/null | tr -d '\t\n'; }
+//
+// And the walk FORKS NOTHING PER DIRECTORY (2026-10-03). It used to run five
+// command substitutions, each a `head | tr` pipeline, plus a `stat`, for every
+// job dir — about eight processes per directory ever minted, and nothing
+// prunes finished ones but `cs-job clean`. A goal-driven group had 653 of them;
+// on a guest at load 7 a third of the walk took 72s, so every refresh hit the
+// 15s exec timeout, the mirror was never filled, and the TUI showed no jobs
+// for that group at all — a running one included. Fields are now read with
+// bash's `read -N` (bounded, a builtin, and it ignores the delimiter so a
+// newline cannot end a field early) behind a `[ -f ]` test (a FIFO named
+// `status` would otherwise block the read), stripped with parameter expansion,
+// and the sizes come from one `stat` per 512 VALIDATED paths, emitted as
+// separate `#sz` lines the parser joins by id. Only validated paths reach
+// stat, so a size line cannot carry a forged record (L72). The guest's
+// /bin/sh is bash (Fedora rootfs); LC_ALL=C makes -N count bytes, as head -c
+// did.
+const jobsListScript = `LC_ALL=C
+fld() { REPLY=; [ -f "$1" ] && read -r -N "$2" REPLY < "$1" 2>/dev/null; REPLY=${REPLY//[$'\t\n\r']/}; }
+outs=()
+flush() { [ ${#outs[@]} -gt 0 ] && stat --printf '#sz\t%s\t%n\n' -- "${outs[@]}" 2>/dev/null; outs=(); }
 for d in /workspace/.cs/jobs/*/; do
   [ -d "$d" ] || continue
-  id=$(basename "$d")
+  id=${d%/}; id=${id##*/}
   case "$id" in ""|*[!A-Za-z0-9]*) continue ;; esac
   [ ${#id} -le 32 ] || continue
-  st=$(fld "$d/status"); [ -n "$st" ] || st=unknown
-  rc=$(fld "$d/rc")
-  sess=$(fld "$d/session")
-  start=$(fld "$d/started"); [ -n "$start" ] || start=0
-  sz=$(stat -c %s "$d/out" 2>/dev/null || echo 0)
-  cmd=$(head -c 200 "$d/cmd" 2>/dev/null | tr '\t\n' '  ')
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$rc" "$sess" "$start" "$sz" "$cmd"
+  fld "$d/status" 64; st=${REPLY:-unknown}
+  fld "$d/rc" 64; rc=$REPLY
+  fld "$d/session" 64; sess=$REPLY
+  fld "$d/started" 64; start=${REPLY:-0}
+  cmd=; [ -f "$d/cmd" ] && read -r -N 200 cmd < "$d/cmd" 2>/dev/null; cmd=${cmd//[$'\t\n\r']/ }
+  printf '%s\t%s\t%s\t%s\t%s\t\t%s\n' "$id" "$st" "$rc" "$sess" "$start" "$cmd"
+  [ -f "$d/out" ] && outs+=("$d/out")
+  [ ${#outs[@]} -ge 512 ] && flush
 done
+flush
 true`
 
 // fcReadJobs reads the group's job dirs fresh from the guest. Only call for
@@ -113,7 +150,21 @@ const jobsMaxPerGroup = 256
 // the whole mirror.
 func parseJobsTSV(out string) []JobInfo {
 	jobs := []JobInfo{}
+	sizes := map[string]int64{}
 	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "#sz\t"); ok {
+			// `#sz \t <bytes> \t <jobdir>/out` — the script stats only paths
+			// whose id it already validated; the id is re-checked here and
+			// the first size for an id wins, like the records themselves.
+			n, file, ok := strings.Cut(rest, "\t")
+			id := path.Base(path.Dir(file))
+			if sz, err := strconv.ParseInt(n, 10, 64); ok && path.Base(file) == "out" && err == nil && jobIDRE.MatchString(id) {
+				if _, dup := sizes[id]; !dup {
+					sizes[id] = sz
+				}
+			}
+			continue
+		}
 		f := strings.SplitN(line, "\t", 7)
 		if len(f) < 7 || !jobIDRE.MatchString(f[0]) {
 			continue
@@ -147,6 +198,11 @@ func parseJobsTSV(out string) []JobInfo {
 		uniq = append(uniq, j)
 	}
 	jobs = uniq
+	for i := range jobs {
+		if sz, ok := sizes[jobs[i].ID]; ok {
+			jobs[i].OutSize = sz
+		}
+	}
 	sort.Slice(jobs, func(i, j int) bool {
 		if jobs[i].Started != jobs[j].Started {
 			return jobs[i].Started < jobs[j].Started
@@ -206,11 +262,24 @@ func refreshJobs(g string) []JobInfo {
 // it before spawning its goroutine.
 func refreshJobsNow(g string) []JobInfo {
 	jobs, err := fcReadJobs(g)
+	jobsMu.Lock()
+	e := jobsCache[g]
 	if err != nil {
-		emitLogfG("jobs", g, "debug", "[%s] refresh: %v", g, err)
+		e.fails++
+		e.failedAt = time.Now()
+		fails, have := e.fails, len(e.jobs)
+		jobsCache[g] = e
+		jobsMu.Unlock()
+		if fails == jobsFailWarnAfter {
+			emitLogfG("jobs", g, "warn", "[%s] job list unreadable (%d attempts in a row, last: %v); clients show the last good list (%d jobs) until a read succeeds", g, fails, err, have)
+		} else {
+			emitLogfG("jobs", g, "debug", "[%s] refresh: %v", g, err)
+		}
 		return jobsSnapshot(g)
 	}
-	jobsMu.Lock()
+	if e.fails >= jobsFailWarnAfter {
+		defer emitLogfG("jobs", g, "info", "[%s] job list readable again after %d failed attempts (%d jobs)", g, e.fails, len(jobs))
+	}
 	jobsCache[g] = jobsCacheEntry{jobs: jobs, at: time.Now()}
 	jobsMu.Unlock()
 	return jobs
@@ -235,7 +304,8 @@ func dropJobsCache(g string) {
 // (job_done trigger). Called from stateWatchLoop's tick and the ctl plane.
 func kickJobsRefresh(g string, force bool) {
 	jobsMu.Lock()
-	if jobsRefreshing[g] || (!force && time.Since(jobsCache[g].at) < jobsRefreshTTL) {
+	e := jobsCache[g]
+	if jobsRefreshing[g] || (!force && (time.Since(e.at) < jobsRefreshTTL || time.Since(e.failedAt) < jobsFailBackoff)) {
 		jobsMu.Unlock()
 		return
 	}
