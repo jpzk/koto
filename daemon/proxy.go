@@ -419,8 +419,12 @@ func logProxyError(group, path string, status int, dur time.Duration, reqID stri
 	}
 	// `[[err]] ` prefix routes through the daemon's log tailer as an
 	// `err` event so the TUI renders with the red glyph instead of
-	// pretending the model said it.
-	logAppend(group, []byte("[[err]] "+msg+"\n"))
+	// pretending the model said it. The `[ts:]` stamp is load-bearing: the
+	// group stream otherwise carries no ts markers (only [[notify]] lines
+	// have their own), so on replay an unstamped error took the file mtime —
+	// which every later notification bumps — and weeks-old errors sorted to
+	// the newest position of every History page.
+	logAppend(group, []byte(fmt.Sprintf("[ts:%d]\n[[err]] %s\n", time.Now().UnixMilli(), msg)))
 }
 
 // normalizeVeniceUsage maps Venice's OpenAI-shape usage block onto the

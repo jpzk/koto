@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestReadStreamHistorySmallFileComplete: a file under historyTailCap parses
@@ -82,5 +83,50 @@ func TestReadStreamHistoryTailBounded(t *testing.T) {
 	}
 	if want := []string{"recent-0", "recent-1", "recent-2"}; !reflect.DeepEqual(prompts, want) {
 		t.Fatalf("prompts = %v, want %v", prompts, want)
+	}
+}
+
+// TestReadStreamHistoryUnstampedLineKeepsItsPlace: the group stream's
+// [[err]] lines predating their [ts:] stamp sit between [[notify]] lines. On
+// replay they must inherit the preceding event's ts, not the file mtime —
+// every later notification bumps the mtime, which re-sorted weeks-old proxy
+// errors to the newest position of every History page.
+func TestReadStreamHistoryUnstampedLineKeepsItsPlace(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "log")
+	content := "[[notify]] 1000000 normal - dA== bQ==\n" +
+		"[[err]] [koto-proxy] /v1/messages → 429 Too Many Requests in 5ms\n" +
+		"[[notify]] 9000000 normal - dA== bQ==\n"
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var errTS float64
+	for _, ev := range readStreamHistory("g", p) {
+		if ev.Event == "err" {
+			errTS = ev.Ts
+		}
+	}
+	if errTS != 1000 {
+		t.Fatalf("unstamped err ts = %v, want 1000 (the preceding notify's)", errTS)
+	}
+}
+
+// TestLogProxyErrorIsStamped: the proxy's error line carries its own [ts:],
+// so replay dates it at write time.
+func TestLogProxyErrorIsStamped(t *testing.T) {
+	ROOT = filepath.Join(t.TempDir(), "groups")
+	const g = "perr"
+	if err := os.MkdirAll(filepath.Dir(groupLogPath(g)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := float64(time.Now().UnixMilli()) / 1000
+	logProxyError(g, "/v1/messages", 429, 5*time.Millisecond, "")
+	var errTS float64
+	for _, ev := range readStreamHistory(g, groupLogPath(g)) {
+		if ev.Event == "err" {
+			errTS = ev.Ts
+		}
+	}
+	if errTS < before || errTS > before+5 {
+		t.Fatalf("proxy err ts = %v, want ≈ %v", errTS, before)
 	}
 }

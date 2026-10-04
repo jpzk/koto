@@ -755,6 +755,13 @@ func readStreamHistory(g, p string) []Event {
 	// have no renderable content in a replay), and (c) stamps
 	// Group/Historical plus the file-mtime fallback ts on every event.
 	lp := logParser{}
+	// lastTS is the newest ts seen so far in THIS stream. An event without
+	// one inherits it rather than the mtime: file order is time order, so
+	// "no later than the next stamped event, no earlier than the last" is
+	// the honest bound, whereas the mtime moves with every later append
+	// (proxy [[err]] lines written before they carried [ts:] sat between
+	// [[notify]] lines and re-sorted to "now" on each notification).
+	var lastTS float64
 	for _, line := range strings.Split(string(b), "\n") {
 		if line == "" {
 			continue
@@ -764,14 +771,18 @@ func readStreamHistory(g, p string) []Event {
 			case "thinking", "tool_result", "thinking_begin", "tool_result_begin", "turn_end":
 				continue
 			}
-			if truncated && ev.Ts == 0 {
+			if truncated && ev.Ts == 0 && lastTS == 0 {
 				continue // boundary-turn fragment; mtime-stamping it would missort it
 			}
 			ev.Group = g
 			ev.Historical = true
 			if ev.Ts == 0 {
+				ev.Ts = lastTS
+			}
+			if ev.Ts == 0 {
 				ev.Ts = fallbackTS
 			}
+			lastTS = max(lastTS, ev.Ts)
 			events = append(events, ev)
 		}
 	}
