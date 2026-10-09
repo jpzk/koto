@@ -9027,3 +9027,76 @@ func (s *logStreamRec) Send(ev *pb.LogEvent) error {
 	s.msgs = append(s.msgs, ev.Msg)
 	return nil
 }
+
+// Fuzz 2026-10-09 F4: Restart ignored its context, and Spawn/Destroy did not
+// honour it while waiting on the group's operation lock — so a call whose
+// client had long since timed out still stopped/rebooted, booted or deleted
+// the group once whatever held the lock let go. Each now gives up with its
+// client, does nothing, and leaves the lock usable.
+func TestGroupOpsHonourCancelWhileWaitingOnLock(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere })
+	const g = "fzcancel"
+	unlock := groupOpLock(g) // another operation holds the group
+
+	s := &kotoServer{}
+	calls := map[string]func(context.Context) error{
+		"Restart": func(ctx context.Context) error {
+			_, err := s.Restart(ctx, &pb.GroupReq{Group: g})
+			return err
+		},
+		"Destroy": func(ctx context.Context) error {
+			_, err := s.Destroy(ctx, &pb.GroupReq{Group: g})
+			return err
+		},
+		"Spawn": func(ctx context.Context) error {
+			_, err := s.Spawn(ctx, &pb.SpawnReq{Group: g})
+			return err
+		},
+	}
+	for name, call := range calls {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		done := make(chan error, 1)
+		go func() { done <- call(ctx) }()
+		select {
+		case err := <-done:
+			if status.Code(err) != codes.DeadlineExceeded {
+				t.Fatalf("%s: err = %v, want DeadlineExceeded", name, err)
+			}
+		case <-time.After(3 * time.Second):
+			// Deliberately NOT releasing the lock: the abandoned call would
+			// then go on to act on the group, which is the bug.
+			t.Fatalf("%s still waiting on the group lock 3s after its client gave up", name)
+		}
+		cancel()
+	}
+	if _, known := readGroups()[g]; known {
+		t.Fatal("an abandoned Spawn registered the group")
+	}
+
+	// The abandoned waiters hand the lock straight back: it is takeable, and
+	// the refcounted entry disappears once the last holder lets go.
+	unlock()
+	got := make(chan func(), 1)
+	go func() { got <- groupOpLock(g) }()
+	select {
+	case u := <-got:
+		u()
+	case <-time.After(3 * time.Second):
+		t.Fatal("group lock never came free after the abandoned calls")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		groupOpMusMu.Lock()
+		_, left := groupOpMus[g]
+		groupOpMusMu.Unlock()
+		if !left {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("group lock entry leaked after the abandoned calls")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

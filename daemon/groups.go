@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -130,6 +131,40 @@ func groupOpLock(g string) func() {
 	}
 }
 
+// groupOpLockCtx is groupOpLock for a caller that can give up: it waits for the
+// lock OR ctx, whichever comes first (fuzz 2026-10-09 F4). groupOpLock waits
+// for as long as the holder takes — a boot, a stop's guest sync window, a
+// destroy's workspace removal — and the RPCs that took it ignored their
+// context, so a Restart whose client had timed out minutes ago still stopped
+// and rebooted the VM once the lock came free, and a queue of abandoned calls
+// replayed one after another. A waiter that gives up still owes the lock one
+// acquisition (the mutex has no cancellable wait), so a helper goroutine takes
+// it and hands it straight back.
+//
+// ctx is checked again once the lock is held: when both are ready, select may
+// pick either, and the caller's cancellation must win.
+func groupOpLockCtx(ctx context.Context, g string) (func(), error) {
+	if ctx.Done() == nil {
+		return groupOpLock(g), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	got := make(chan func(), 1)
+	go func() { got <- groupOpLock(g) }()
+	select {
+	case unlock := <-got:
+		if err := ctx.Err(); err != nil {
+			unlock()
+			return nil, err
+		}
+		return unlock, nil
+	case <-ctx.Done():
+		go func() { (<-got)() }()
+		return nil, ctx.Err()
+	}
+}
+
 // ensure boots an EXISTING group and refuses a name that is not registered in
 // groups.json. Provisioning is spawnEnsure's job, and the split is the whole
 // point: ensure() is called from send, clear, restart, a schedule fire, a
@@ -144,7 +179,21 @@ func ensure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, fa
 // spawnEnsure is ensure plus permission to create the group. Only the three
 // admission points call it: the ctl plane's `spawn` verb (capped by
 // ctlMaxSpawn), the Spawn RPC, and the daemon's own boot of `main`.
-func spawnEnsure(g string, isMain bool) (int, error) { return ensureAny(g, isMain, true) }
+func spawnEnsure(g string, isMain bool) (int, error) {
+	return spawnEnsureCtx(context.Background(), g, isMain)
+}
+
+// spawnEnsureCtx is spawnEnsure for an RPC: a caller that gives up while
+// another operation holds the group gets no boot. Once the lock is held the
+// spawn is committed (see the Spawn RPC for why a boot is not interruptible).
+func spawnEnsureCtx(ctx context.Context, g string, isMain bool) (int, error) {
+	unlock, err := groupOpLockCtx(ctx, g)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	return ensureLockedCreate(g, isMain, true)
+}
 
 func ensureAny(g string, isMain, create bool) (int, error) {
 	defer groupOpLock(g)()
@@ -627,7 +676,13 @@ func groupConfigBool(g, key string) bool { return loadGroupConfig(g).boolYes(key
 
 func groupConfigString(g, key string) string { return loadGroupConfig(g).str(key) }
 
-func destroy(g string) baseResp {
+func destroy(g string) baseResp { return destroyCtx(context.Background(), g) }
+
+// destroyCtx is destroy for an RPC: a caller that gives up while another
+// operation holds the group deletes nothing. Once the lock is held the destroy
+// runs to completion — a half-removed group is the state destroy exists to
+// avoid.
+func destroyCtx(ctx context.Context, g string) baseResp {
 	if g == "main" {
 		return errResp("main group is protected; use `make stop` to tear everything down")
 	}
@@ -637,7 +692,6 @@ func destroy(g string) baseResp {
 		// directory instead of just this group's.
 		return errResp("invalid group name")
 	}
-	emitLogfG("group", g, "warn", "destroy group=%s (workspace will be deleted)", g)
 	// Cancel before stopGroup so the stop hook sees a terminal goal and
 	// doesn't raise a spurious "paused (group stopped), resume later" alert
 	// for a goal that is about to be deleted with its group.
@@ -655,7 +709,12 @@ func destroy(g string) baseResp {
 	// deleted the replacement's workspace and runtime artifacts while its VM
 	// stayed registered and alive (audit M89). Taken here, so the group cannot
 	// be recreated until the name is gone from groups.json.
-	defer groupOpLock(g)()
+	unlock, err := groupOpLockCtx(ctx, g)
+	if err != nil {
+		return errResp("destroy: " + err.Error())
+	}
+	defer unlock()
+	emitLogfG("group", g, "warn", "destroy group=%s (workspace will be deleted)", g)
 	goalCancelOnDestroy(g)
 	// ...then remove the records. Cancelling alone left them in goals.json for
 	// GoalList to serve, and group names are reusable (audit M50).
@@ -770,15 +829,24 @@ func destroy(g string) baseResp {
 	return baseResp{OK: true}
 }
 
-func restart(g string) (int, error) {
+func restart(g string) (int, error) { return restartCtx(context.Background(), g) }
+
+// restartCtx is restart for an RPC: a caller that gives up while another
+// operation holds the group gets no stop and no reboot. Once the lock is held
+// the stop+boot pair is committed.
+func restartCtx(ctx context.Context, g string) (int, error) {
 	if !validGroupName(g) {
 		return 0, fmt.Errorf("invalid group name")
 	}
-	emitLogfG("group", g, "info", "restart group=%s", g)
 	// One lock across stop+ensure: a send arriving mid-restart blocks until
 	// the new VM is up instead of slipping into the stopped-but-not-yet-
 	// spawned window and booting a second one (see groupOpMu).
-	defer groupOpLock(g)()
+	unlock, err := groupOpLockCtx(ctx, g)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	emitLogfG("group", g, "info", "restart group=%s", g)
 	fcStop(g)
 	return ensureLocked(g, g == "main")
 }

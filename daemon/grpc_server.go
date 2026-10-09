@@ -276,7 +276,10 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	port, err := spawnEnsure(r.Group, r.Main)
+	port, err := spawnEnsureCtx(ctx, r.Group, r.Main)
+	if ctxErr := ctx.Err(); ctxErr != nil && err != nil && errors.Is(err, ctxErr) {
+		return nil, status.FromContextError(err).Err()
+	}
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
 	}
@@ -440,19 +443,25 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 	return &pb.BaseResp{Ok: true}, nil
 }
 
-func (s *kotoServer) Destroy(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+func (s *kotoServer) Destroy(ctx context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil
 	}
-	br := destroy(r.Group)
+	br := destroyCtx(ctx, r.Group)
+	if err := ctx.Err(); err != nil && !br.OK {
+		return nil, status.FromContextError(err).Err()
+	}
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
 }
 
-func (s *kotoServer) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
+func (s *kotoServer) Restart(ctx context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name"}, nil
 	}
-	port, err := restart(r.Group)
+	port, err := restartCtx(ctx, r.Group)
+	if ctxErr := ctx.Err(); ctxErr != nil && err != nil && errors.Is(err, ctxErr) {
+		return nil, status.FromContextError(err).Err()
+	}
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
 	}
