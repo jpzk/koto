@@ -96,7 +96,9 @@ endif
 # give identical binaries, except for the version string stamped below.
 # Update deliberately: podman/docker pull golang:1.26-alpine, then
 #   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
-# golang:1.26.8-alpine (2026-09-01). Go 1.24 fell out of support when 1.26
+# golang:1.26.9-alpine (2026-10-08; 1.26.9 is the stdlib fix for the HTTP/2
+# advisories GO-2026-6603/6611/6612/6617, whose x/net half is pinned in the
+# go.mod files). Go 1.24 fell out of support when 1.26
 # shipped, so its stdlib no longer receives security fixes: govulncheck on the
 # then-shipped toolchain (2026-09-05) reported 13 reachable stdlib
 # vulnerabilities. 1.26 rather than 1.25 because x/crypto v0.56.0 — the fix for
@@ -105,7 +107,7 @@ endif
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/govulncheck.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:6e5de3f5b9fb7e30b8bb2ffe8dcbcbdaa2990f0f31267456eabe83f870a623be
+GO_IMAGE ?= docker.io/library/golang@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \

@@ -6,7 +6,7 @@
 // its runtime dirs (groups/, creds/, fcassets/, run/) relative to cwd.
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 use (
 	./daemon

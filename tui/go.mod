@@ -2,7 +2,7 @@ module koto-tui
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 // 6-week dependency lag rule (see /home/<user>/.claude/CLAUDE.md):
 // All five pins are stable releases at least 6 weeks old as of 2026-05-11.
@@ -52,6 +52,11 @@ require (
 //   github.com/yuin/goldmark v1.7.17 — 2026-03-19  (GO-2026-5320, reachable via
 //     glamour's renderer; indirect — bumped with `go get`, glamour unchanged)
 //   golang.org/x/net v0.57.0, x/text v0.40.0 — 2026-07-08
+//
+// 2026-10-09, security-fix exception:
+//   golang.org/x/net v0.60.0 — 2026-10-08 (GO-2026-6603/6611/6612/6617,
+//     reachable; see daemon/go.mod), with x/sys v0.48.0, x/term v0.46.0,
+//     x/text v0.42.0
 replace koto-protocol => ../protocol
 
 require (
@@ -91,10 +96,10 @@ require (
 	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )

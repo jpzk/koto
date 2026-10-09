@@ -2,7 +2,7 @@ module koto-protocol
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 // This module is the entire cross-project contract: koto.proto plus its
 // committed generated code in ./pb — nothing hand-written. The daemon and
@@ -14,6 +14,9 @@ toolchain go1.26.8
 //     GHSA-vp52-pcj8-j9qc, HTTP/2 server-transport heap exhaustion — see
 //     daemon/go.mod for the exposure analysis). Moved in all four modules
 //     together so the workspace selects one grpc.
+//   golang.org/x/net v0.60.0 — 2026-10-08, taken 2026-10-09 under the
+//     security-fix exception (GO-2026-6603/6611/6612/6617, HTTP/2; see
+//     daemon/go.mod), with x/sys v0.48.0 and x/text v0.42.0.
 //   google.golang.org/protobuf v1.36.11 — 2025-12-12 (verified >=6 weeks old)
 require (
 	google.golang.org/grpc v1.83.2
@@ -21,8 +24,8 @@ require (
 )
 
 require (
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )

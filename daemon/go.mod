@@ -2,7 +2,7 @@ module koto
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 // Pins taken under the security-fix exception to the 6-week lag (CLAUDE.md,
 // Conventions), 2026-09-05 — each closes a REACHABLE govulncheck finding:
@@ -23,12 +23,21 @@ toolchain go1.26.8
 //     GHSA-qc2q-p7wx-3px3) are xDS-only and do not apply.
 //   golang.org/x/net v0.58.0 — 2026-08-12, genproto/googleapis/rpc
 //     v0.0.0-20260526163538 — 2026-05-26: required by that grpc.
+// And 2026-10-09, same exception (GOWORK=off govulncheck, all four modules):
+//   golang.org/x/net v0.60.0 — 2026-10-08: GO-2026-6603/6611/6612/6617
+//     (HTTP/2 server memory exhaustion via trailers, window-update CPU burn,
+//     double flow-control refund, HPACK encoder race crash), reachable through
+//     grpc's http2 transport — the :8443 server here. The stdlib half of the
+//     same advisories is closed by toolchain go1.26.9. Taken with exactly
+//     what it requires: x/crypto v0.57.0, x/sys v0.48.0, x/term v0.46.0,
+//     x/text v0.42.0 (and x/text's x/mod v0.41.0, x/sync v0.23.0,
+//     x/tools v0.49.0). Moved in all four modules together.
 // Everything else follows the ordinary rule (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25).
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.11
 	koto-protocol v0.0.0
@@ -45,13 +54,13 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
-	golang.org/x/crypto v0.56.0 // indirect
-	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
 )
