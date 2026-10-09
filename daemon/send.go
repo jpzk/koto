@@ -90,6 +90,49 @@ func bgTailRelease(key string) {
 	bgActiveLock.Unlock()
 }
 
+// streamLineAppend appends whole marker lines to a slot stream that a guest
+// turn may be writing at the same moment. Under the same per-path lock every
+// other writer of the stream takes (audit 2026-09-11 L37): without it the
+// ceiling check inside logSinkAppend and the write that follows are not atomic
+// against the turn sink, and a line landing between another writer's open and
+// write could split a marker.
+//
+// If the stream ends mid-line — the guest's text is in the middle of a line —
+// the lines go on a fresh one. Appended bare they were glued onto the guest's
+// partial line and lost to the parser, and the turn writer's idea of where the
+// line stood went stale (fuzz 2026-10-09 F1; the turn writer now reads the
+// file too, see turnWriter).
+func streamLineAppend(p string, b []byte) error {
+	mu := logWriteLock(p)
+	mu.Lock()
+	defer mu.Unlock()
+	if mid, known := logEndsMidline(p); mid || !known {
+		b = append([]byte{'\n'}, b...)
+	}
+	return logSinkAppend(p, b)
+}
+
+// writeTurnHeader opens a turn in its slot stream: the [[session]] marker that
+// attributes everything up to the next marker to this turn's session, then the
+// prompt's [ts:] and echo. The previous turn on this slot may have died
+// mid-line (VM crash, stream cut before TurnEnd); appended bare, the header was
+// glued onto that partial line, the parser never saw the [[session]] marker,
+// and the whole new turn — its turn_end included — was attributed to the
+// previous session (fuzz 2026-10-09 F7).
+func writeTurnHeader(p, session, msg string) {
+	h := fmt.Sprintf("%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), fencePromptEcho(msg))
+	mu := logWriteLock(p)
+	mu.Lock()
+	defer mu.Unlock()
+	if mid, known := logEndsMidline(p); mid || !known {
+		h = "\n" + h
+	}
+	if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		f.WriteString(h)
+		f.Close()
+	}
+}
+
 func tailBackgroundTask(g, streamPath, session, id, path string) {
 	key := g + "\x00" + id
 	if !bgTailAdmit(g, key) {
@@ -134,17 +177,7 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 		if d := fcLogSinkWait(g, len(b)); d > 0 {
 			time.Sleep(d)
 		}
-		// Under the same per-path lock every other writer of this stream takes
-		// (audit 2026-09-11 L37). Without it the ceiling check inside
-		// logSinkAppend and the write that follows are not atomic against the
-		// turn sink and the marker flush, so two writers could both see a
-		// below-limit size and both append past it — and a [[bg]] line landing
-		// between another writer's open and write could split a marker.
-		mu := logWriteLock(streamPath)
-		mu.Lock()
-		err := logSinkAppend(streamPath, b)
-		mu.Unlock()
-		if err != nil {
+		if err := streamLineAppend(streamPath, b); err != nil {
 			emitLogfG("send", g, "warn", "[%s] bg-tail %s: %v", g, id, err)
 			return
 		}
@@ -335,10 +368,7 @@ func sendNow(g, session, msg string) error {
 	// and in History replay. Written unconditionally (default = "-") so a
 	// default turn after a named one resets the attribution. The slot is what
 	// makes the sticky marker safe again: no other turn writes here.
-	if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
-		fmt.Fprintf(f, "%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), fencePromptEcho(msg))
-		f.Close()
-	}
+	writeTurnHeader(logPath, session, msg)
 
 	sp := composeSystemPrompt(g)
 	augmented := msg

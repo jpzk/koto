@@ -102,12 +102,19 @@ func fcTurnSink(g string, c net.Conn) {
 	}
 }
 
-// turnWriter renders TurnFrames as marker text. It owns the line state the
+// turnWriter renders TurnFrames as marker text. It enforces the line rules the
 // grammar needs: markers must start a line, and a text line that begins like
 // a marker must not be one.
+//
+// It does NOT remember whether the line is open. That used to be a field set
+// after every write, and it went stale whenever another writer of the same
+// stream — the [[bg]] tailer, the next turn's header — appended a whole line:
+// the file was at a line start while the writer still believed it was mid-line,
+// so the guest's next line skipped the escape and could forge [[session]],
+// ">>> " prompts and [[turn_end]] (fuzz 2026-10-09 F1). The line state is read
+// from the file's last byte under the stream's write lock instead (write()).
 type turnWriter struct {
 	g, p    string
-	midline bool // last byte written was not '\n'
 	stamped bool // [ts:] written for this turn
 	ended   bool
 	// failed is set by write() when the sink refuses an append — the ceiling
@@ -189,14 +196,14 @@ func (w *turnWriter) stamp() {
 
 func (w *turnWriter) marker(line string) {
 	w.flushHold()
-	var b strings.Builder
-	if w.midline {
-		b.WriteByte('\n')
-	}
-	b.WriteString(line)
-	b.WriteByte('\n')
-	w.write([]byte(b.String()))
-	w.midline = false
+	w.write(len(line)+2, func(mid, known bool) []byte {
+		b := make([]byte, 0, len(line)+2)
+		if mid || !known {
+			b = append(b, '\n')
+		}
+		b = append(b, line...)
+		return append(b, '\n')
+	})
 }
 
 // text writes body bytes, escaping every line start that would parse as a
@@ -224,40 +231,41 @@ func (w *turnWriter) text(b []byte) {
 		b = append(append([]byte(nil), w.hold...), b...)
 		w.hold = nil
 	}
-	var out []byte
-	atStart := !w.midline
-	for len(b) > 0 {
-		if atStart {
-			// Decide the line start, or hold for more bytes.
-			n := len(b)
-			if n > markerPrefixMax {
-				n = markerPrefixMax
+	w.write(len(b), func(mid, known bool) []byte {
+		var out []byte
+		// An unreadable tail is treated as a line start: escaping a line that
+		// was really a continuation costs one stray backslash, skipping the
+		// escape on a real line start forges a marker.
+		atStart := !mid || !known
+		for len(b) > 0 {
+			if atStart {
+				// Decide the line start, or hold for more bytes.
+				n := len(b)
+				if n > markerPrefixMax {
+					n = markerPrefixMax
+				}
+				head := b[:n]
+				if markerAmbiguous(head) && !bytes.ContainsRune(head, '\n') {
+					w.hold = append([]byte(nil), b...)
+					break
+				}
+				if markerLike(head) {
+					out = append(out, '\\')
+				}
+				atStart = false
 			}
-			head := b[:n]
-			if markerAmbiguous(head) && !bytes.ContainsRune(head, '\n') {
-				w.hold = append([]byte(nil), b...)
+			i := bytes.IndexByte(b, '\n')
+			if i < 0 {
+				out = append(out, b...)
+				b = nil
 				break
 			}
-			if markerLike(head) {
-				out = append(out, '\\')
-			}
-			atStart = false
+			out = append(out, b[:i+1]...)
+			b = b[i+1:]
+			atStart = true
 		}
-		i := bytes.IndexByte(b, '\n')
-		if i < 0 {
-			out = append(out, b...)
-			b = nil
-			break
-		}
-		out = append(out, b[:i+1]...)
-		b = b[i+1:]
-		atStart = true
-	}
-	if len(out) == 0 {
-		return
-	}
-	w.write(out)
-	w.midline = !atStart
+		return out
+	})
 }
 
 // markerPrefixes are the three line starts the grammar reserves. markerLike
@@ -305,24 +313,30 @@ func (w *turnWriter) flushHold() {
 	if markerLike(b) {
 		b = append([]byte{'\\'}, b...)
 	}
-	w.write(b)
-	// text() only holds bytes that contain no newline (it holds at most three,
-	// at a line start), so the stream is mid-line after this. marker() reads
-	// midline to decide whether to open a fresh line — stale here, it would
-	// glue the held bytes onto the marker and the parser would lose it.
-	w.midline = true
+	// Held bytes contain no newline (text() holds at most three, at a line
+	// start), so the stream is mid-line after this — which the next marker()
+	// reads back from the file and opens a fresh line for.
+	w.write(len(b), func(bool, bool) []byte { return b })
 }
 
-func (w *turnWriter) write(b []byte) {
+// write appends render's bytes under the stream's write lock. render is told
+// whether the file ends mid-line RIGHT NOW (logEndsMidline), so the escape and
+// fresh-line decisions are made against what is actually on disk, atomically
+// with the append — no other writer can land between the read and the write.
+// size is the rate-limiter estimate; render may add a few bytes to it.
+func (w *turnWriter) write(size int, render func(mid, known bool) []byte) {
 	if w.failed {
 		return
 	}
-	if d := fcLogSinkWait(w.g, len(b)); d > 0 {
+	if d := fcLogSinkWait(w.g, size); d > 0 {
 		time.Sleep(d)
 	}
 	mu := logWriteLock(w.p)
 	mu.Lock()
-	err := logSinkAppend(w.p, b)
+	var err error
+	if b := render(logEndsMidline(w.p)); len(b) > 0 {
+		err = logSinkAppend(w.p, b)
+	}
 	mu.Unlock()
 	if err != nil {
 		w.failed = true

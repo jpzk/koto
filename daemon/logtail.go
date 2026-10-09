@@ -218,21 +218,38 @@ func notifyExpected(g, marker string) bool {
 // logAtLineBoundary reports whether the group's log file currently ends at a
 // line boundary (empty/missing counts — the marker can open the file).
 func logAtLineBoundary(g string) bool {
-	p := filepath.Join(vol(g), ".cs", "log")
+	mid, known := logEndsMidline(filepath.Join(vol(g), ".cs", "log"))
+	return known && !mid
+}
+
+// logEndsMidline reads whether the log at p currently ends without a newline —
+// i.e. whether the next byte appended to it would continue a line rather than
+// start one. known is false when the tail could not be read; callers choose the
+// safe reading for their own purpose (escape as if at a line start, AND open a
+// fresh line as if mid-line). A missing or empty file is a line start.
+//
+// Every writer of a slot stream asks the FILE, under logWriteLock, instead of
+// remembering what it last wrote itself (fuzz 2026-10-09 F1): the stream has
+// several writers, and one writer's memory of "the line is open" goes stale the
+// moment another appends a whole line.
+func logEndsMidline(p string) (mid, known bool) {
 	f, err := os.Open(p)
 	if err != nil {
-		return os.IsNotExist(err)
+		return false, os.IsNotExist(err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || st.Size() == 0 {
-		return err == nil
+	if err != nil {
+		return false, false
+	}
+	if st.Size() == 0 {
+		return false, true
 	}
 	var b [1]byte
 	if _, err := f.ReadAt(b[:], st.Size()-1); err != nil {
-		return false
+		return false, false
 	}
-	return b[0] == '\n'
+	return b[0] != '\n', true
 }
 
 var tsRE = regexp.MustCompile(`^\[ts:(\d+)\]$`)
