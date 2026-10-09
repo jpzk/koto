@@ -13,12 +13,12 @@
 .PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
-# >=6 weeks old as of 2026-06-14 via proxy.golang.org:
-#   protobuf            v1.36.11 — 2025-12-12
-#   protoc-gen-go-grpc  v1.6.1   — 2026-02-04
-# (grpc runtime v1.80.0 / 2026-04-01 is pinned in the go.mod files.)
-PROTOC_GEN_GO_VER      := v1.36.11
-PROTOC_GEN_GO_GRPC_VER := v1.6.1
+# >=6 weeks old as of 2026-10-09 via proxy.golang.org:
+#   protobuf            v1.36.12 — 2026-08-10
+#   protoc-gen-go-grpc  v1.6.2   — 2026-05-07
+# (the grpc and protobuf runtimes are pinned in the go.mod files.)
+PROTOC_GEN_GO_VER      := v1.36.12
+PROTOC_GEN_GO_GRPC_VER := v1.6.2
 
 # --- first run ---------------------------------------------------------------
 # GETTING koto RUNNING IS THREE STAGES, and each one owns exactly its own job:

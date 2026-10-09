@@ -17,10 +17,10 @@ toolchain go1.26.9
 // koto-protocol is the in-repo contract module (protocol/guest.proto): the
 // daemon↔guest vsock messages. Resolved by path so the rootfs build (which
 // runs with GOWORK=off inside a container) sees the same source the daemon
-// compiles against. protobuf v1.36.11 is the protocol module's own pin.
+// compiles against. protobuf v1.36.12 is the protocol module's own pin.
 require (
 	golang.org/x/sys v0.48.0
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	koto-protocol v0.0.0
 )
 

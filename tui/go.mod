@@ -31,10 +31,10 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	// x/ansi was already an indirect pin (same org/version); promoted to a
 	// direct dep by shell_view.go's cursor overlay (ansi.Cut/StringWidth).
-	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/vt v0.0.0-20260430013151-79116d1f37bd
 	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	koto-protocol v0.0.0
 )
 
@@ -57,6 +57,11 @@ require (
 //   golang.org/x/net v0.60.0 — 2026-10-08 (GO-2026-6603/6611/6612/6617,
 //     reachable; see daemon/go.mod), with x/sys v0.48.0, x/term v0.46.0,
 //     x/text v0.42.0
+//
+// 2026-10-09 routine bump (cutoff 2026-08-28):
+//   github.com/charmbracelet/x/ansi v0.11.8 — 2026-08-11 (v0.11.9 too new),
+//     pulling github.com/mattn/go-runewidth v0.0.24 — 2026-05-29
+//   google.golang.org/protobuf v1.36.12 — 2026-08-10 (all four modules)
 replace koto-protocol => ../protocol
 
 require (
@@ -86,7 +91,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
-	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

@@ -33,13 +33,14 @@ toolchain go1.26.9
 //     x/text v0.42.0 (and x/text's x/mod v0.41.0, x/sync v0.23.0,
 //     x/tools v0.49.0). Moved in all four modules together.
 // Everything else follows the ordinary rule (verified via
-// proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25).
+// proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25; protobuf v1.36.12 —
+// 2026-08-10, re-checked 2026-10-09 against cutoff 2026-08-28).
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	koto-protocol v0.0.0
 )
 

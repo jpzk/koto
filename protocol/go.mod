@@ -17,10 +17,11 @@ toolchain go1.26.9
 //   golang.org/x/net v0.60.0 — 2026-10-08, taken 2026-10-09 under the
 //     security-fix exception (GO-2026-6603/6611/6612/6617, HTTP/2; see
 //     daemon/go.mod), with x/sys v0.48.0 and x/text v0.42.0.
-//   google.golang.org/protobuf v1.36.11 — 2025-12-12 (verified >=6 weeks old)
+//   google.golang.org/protobuf v1.36.12 — 2026-08-10 (verified >=6 weeks old
+//     2026-10-09; cutoff 2026-08-28). Moved in all four modules together.
 require (
 	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
