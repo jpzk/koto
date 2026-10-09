@@ -309,6 +309,8 @@ types.
   superuser. `adminOnlyVerbs` (no grant can cover them): `acl_get/set/del`,
   `run_script`, `config_posture`. `targetOf` decides which verbs are
   group-scoped; a group-scoped request without a group needs target `"*"`.
+  Aggregate verbs (`list`, `watch_state`, `resources`, `subscribe_logs`)
+  project their answer through the caller's own grant (`visibleTargets`).
   The in-guest ctl plane is separate (group identity).
 - **Unary RPCs**: Spawn, Send (enqueue, returns at once), List, Stop,
   Interrupt, Drain, Destroy, Restart, Clear, History, Config, Metrics,
@@ -333,7 +335,7 @@ types.
   running guests each sweep (held ≤3 sweeps), and THOSE drive the TUI `mem`/
   `space` chips and the per-group disk alert. Fullness = `used/(used+avail)`
   (df's ratio). Stopped VMs fall back to host figures, no alert. Untargeted,
-  grantable verb; `main` reads it via ctl too. Threshold alerts: 80% normal,
+  grantable verb, projected by grant; `main` reads it via ctl too. Threshold alerts: 80% normal,
   90% high, 5-point hysteresis; subjects = host fs, each guest fs, CPU.
 - **tok/s** (`tokrate.go`): measured in the proxy's `logMetric`, spread over
   each request's span, 60s window; `GroupInfo.tok_per_sec` +

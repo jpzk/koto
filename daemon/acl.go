@@ -42,8 +42,10 @@ package main
 // (every ShellInput message repeats `group` — see koto.proto's AttachShell
 // comment for why the target check must ride every message, not just the
 // first). The rest (list,
-// watch_state, subscribe_logs, sched_del/toggle/run)
-// are verb-only — a grant's target set is ignored for them. A group-scoped
+// watch_state, resources, subscribe_logs, sched_del/toggle/run)
+// are verb-only — the interceptor ignores a grant's target set for them;
+// list, watch_state, resources and subscribe_logs then PROJECT their answer
+// through it (visibleTargets). A group-scoped
 // request that *omits* the group (global metrics, unfiltered sched_list)
 // reads across every group, so it requires the "*" target grant.
 //

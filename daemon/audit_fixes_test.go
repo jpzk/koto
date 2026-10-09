@@ -8939,3 +8939,91 @@ func TestZeroMemAvailableIsAReading(t *testing.T) {
 		t.Fatalf("avail = %d, want the reported 0", gmA)
 	}
 }
+
+// Fuzz 2026-10-09 F3: Resources and SubscribeLogs are untargeted verbs, so the
+// interceptor authorized the call and the handler answered for the whole
+// fleet — a role confined to main by `"resources": ["main"]` /
+// `"subscribe_logs": ["main"]` still read every group's sizes, RSS, CPU and
+// guest memory, and every group's fc/egress/send log lines. Both now project
+// through the caller's own grant, as List and WatchState do (M18).
+func TestResourcesAndLogsProjectByGrant(t *testing.T) {
+	prevHere := HERE
+	HERE = t.TempDir()
+	t.Cleanup(func() { HERE = prevHere })
+	if err := os.MkdirAll(filepath.Join(HERE, "creds"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withACL := func(doc string) {
+		t.Helper()
+		if err := os.WriteFile(credFile("acl.json"), []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctxFor := func(roles ...string) context.Context {
+		return withIdentity(context.Background(), clientIdentity{Name: "probe", Roles: roles})
+	}
+
+	groups := []groupResources{
+		{Group: "main", Running: true, AllocBytes: 10, DeclaredBytes: 100, MemCommittedMiB: 1536},
+		{Group: "dev", Running: true, AllocBytes: 20, DeclaredBytes: 200, MemCommittedMiB: 2560},
+		{Group: "ops", AllocBytes: 40, DeclaredBytes: 400},
+	}
+	host := hostResources{FSTotalBytes: 1000, FSFreeBytes: 500, AllocTotalBytes: 70, ProvisionedBytes: 700,
+		Groups: 3, RunningGroups: 2, MemCapMiB: 8192, MemCommittedMiB: 4096, MemHostTotalMiB: 16384}
+
+	withACL(`{"scoped":{"resources":["main"],"subscribe_logs":["main"]},"wide":{"*":"*"}}`)
+	gs, h := projectResources(ctxFor("scoped"), groups, host)
+	if len(gs) != 1 || gs[0].Group != "main" {
+		t.Fatalf("scoped role saw %d groups, want only main: %+v", len(gs), gs)
+	}
+	if h.Groups != 1 || h.RunningGroups != 1 || h.AllocTotalBytes != 10 || h.ProvisionedBytes != 100 || h.MemCommittedMiB != 1536 {
+		t.Fatalf("rollup still counts hidden groups: %+v", h)
+	}
+	if h.FSTotalBytes != 1000 || h.MemCapMiB != 8192 || h.MemHostTotalMiB != 16384 {
+		t.Fatalf("host-intrinsic figures were altered: %+v", h)
+	}
+	for _, ctx := range []context.Context{ctxFor("wide"), ctxFor(defaultRole), context.Background()} {
+		if gs, h := projectResources(ctx, groups, host); len(gs) != 3 || h != host {
+			t.Fatalf("broad caller was narrowed: %d groups, %+v", len(gs), h)
+		}
+	}
+
+	// SubscribeLogs, through the handler: the replayed ring is filtered.
+	logSubsLock.Lock()
+	prevRing := logRing
+	logRing = []*pb.LogEvent{
+		{Event: "log", Msg: "main line", Group: "main"},
+		{Event: "log", Msg: "dev egress to 203.0.113.9", Group: "dev"},
+		{Event: "log", Msg: "fc[ops]: booted", Group: ""},
+	}
+	logSubsLock.Unlock()
+	t.Cleanup(func() { logSubsLock.Lock(); logRing = prevRing; logSubsLock.Unlock() })
+	replay := func(ctx context.Context) []string {
+		t.Helper()
+		ctx, cancel := context.WithCancel(ctx)
+		cancel() // replay the ring, then return at the live loop
+		st := &logStreamRec{ctx: ctx}
+		if err := (&kotoServer{}).SubscribeLogs(&pb.LogsReq{}, st); err != nil {
+			t.Fatal(err)
+		}
+		return st.msgs
+	}
+	if got := replay(ctxFor("scoped")); len(got) != 1 || got[0] != "main line" {
+		t.Fatalf("scoped role's log replay = %q, want only main's line", got)
+	}
+	if got := replay(ctxFor("wide")); len(got) != 3 {
+		t.Fatalf("wildcard role's log replay = %q, want all three", got)
+	}
+}
+
+type logStreamRec struct {
+	grpc.ServerStream
+	ctx  context.Context
+	msgs []string
+}
+
+func (s *logStreamRec) Context() context.Context { return s.ctx }
+func (s *logStreamRec) Send(ev *pb.LogEvent) error {
+	s.msgs = append(s.msgs, ev.Msg)
+	return nil
+}

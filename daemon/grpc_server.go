@@ -524,6 +524,7 @@ func (s *kotoServer) Resources(ctx context.Context, _ *pb.ResourcesReq) (*pb.Res
 		return nil, err
 	}
 	groups, host := resourcesSnapshot()
+	groups, host = projectResources(ctx, groups, host)
 	out := &pb.ResourcesResp{
 		Ok: true,
 		Host: &pb.HostResources{
@@ -1413,7 +1414,67 @@ func (s *kotoServer) WatchState(_ *pb.WatchReq, stream pb.Koto_WatchStateServer)
 	}
 }
 
+// projectResources narrows the Resources snapshot to the caller's `resources`
+// grant, the treatment List and WatchState already get (projectGroups). The
+// verb is untargeted, so the interceptor authorized the call and the handler
+// returned every group on the host — names, sizes, RSS, CPU, guest memory and
+// disk — to a role confined to one group by `"resources": ["main"]`.
+//
+// The host rollup's fleet sums (group counts, alloc, provisioned, committed
+// memory) are recomputed from the visible groups so the narrowed answer is
+// self-consistent and does not count what it hides. Host-intrinsic figures
+// (filesystem size/free, memory cap, MemTotal) stay: they describe the
+// machine, not other groups.
+func projectResources(ctx context.Context, groups []groupResources, host hostResources) ([]groupResources, hostResources) {
+	id := identityOf(ctx)
+	if id.Name == "" {
+		return groups, host // in-process caller; nothing to project
+	}
+	vis := visibleTargets(loadACL(), id.Roles, "resources")
+	if vis.any {
+		return groups, host
+	}
+	out := make([]groupResources, 0, len(groups))
+	host.Groups, host.RunningGroups = 0, 0
+	host.AllocTotalBytes, host.ProvisionedBytes, host.MemCommittedMiB = 0, 0, 0
+	for _, g := range groups {
+		if !vis.covers(g.Group) {
+			continue
+		}
+		out = append(out, g)
+		host.Groups++
+		host.AllocTotalBytes += g.AllocBytes
+		host.ProvisionedBytes += g.DeclaredBytes
+		if g.Running {
+			host.RunningGroups++
+			host.MemCommittedMiB += g.MemCommittedMiB
+		}
+	}
+	return out, host
+}
+
+// logVisible returns the SubscribeLogs filter for the caller: nil (everything)
+// for an in-process caller or a "*" grant, else a predicate admitting only
+// lines attributed to a group the `subscribe_logs` grant names. The stream was
+// verb-only and replayed the daemon-wide log — every group's fc, egress
+// (destinations), send and shell lines — to any role holding the verb.
+// Unattributed lines (group "") are withheld from a scoped role: plenty of
+// them still name a group in their text, so admitting them would leak exactly
+// what the projection hides.
+func logVisible(ctx context.Context) func(*pb.LogEvent) bool {
+	id := identityOf(ctx)
+	if id.Name == "" {
+		return nil
+	}
+	vis := visibleTargets(loadACL(), id.Roles, "subscribe_logs")
+	if vis.any {
+		return nil
+	}
+	return func(ev *pb.LogEvent) bool { return ev.Group != "" && vis.covers(ev.Group) }
+}
+
 func (s *kotoServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Koto_SubscribeLogsServer) error {
+	visible := logVisible(stream.Context())
 	sub := &logSub{ch: make(chan *pb.LogEvent, 256)}
 	// Snapshot the ring and register under one lock so no frame is dropped or
 	// duplicated across the replay/live boundary.
@@ -1433,6 +1494,9 @@ func (s *kotoServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Koto_SubscribeLogsSe
 		logSubsLock.Unlock()
 	}()
 	for _, ev := range ring {
+		if visible != nil && !visible(ev) {
+			continue
+		}
 		if err := stream.Send(ev); err != nil {
 			return err
 		}
@@ -1441,6 +1505,9 @@ func (s *kotoServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Koto_SubscribeLogsSe
 	for {
 		select {
 		case ev := <-sub.ch:
+			if visible != nil && !visible(ev) {
+				continue
+			}
 			if err := stream.Send(ev); err != nil {
 				return err
 			}
