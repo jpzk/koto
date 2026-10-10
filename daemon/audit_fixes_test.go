@@ -7202,15 +7202,18 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 // the stop-first ordering exists to prevent.
 func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 	// A stand-in daemon: argv[0]'s basename is "koto" and argv[1] is "daemon",
-	// which is what /proc shows for the real thing. sh invoked with that argv
-	// runs the file named "daemon" in its cwd; two statements keep it from
-	// exec-optimising itself into `sleep` and changing its own cmdline.
+	// which is what /proc shows for the real thing. It is this test binary
+	// re-exec'd in TestMain's stand-in mode (it just sleeps). Not /bin/sh: a
+	// busybox sh (the alpine golang image) dispatches on argv[0] and dies with
+	// "koto: applet not found", so the scan only won a race against its exit.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := func(dir string, env []string) *exec.Cmd {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, "daemon"), []byte("sleep 30\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		cmd := &exec.Cmd{Path: "/bin/sh", Args: []string{"koto", "daemon"}, Dir: dir, Env: env}
+		env = append(append([]string{}, env...), standInDaemonEnv+"=1")
+		cmd := &exec.Cmd{Path: self, Args: []string{"koto", "daemon"}, Dir: dir, Env: env}
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start stand-in daemon: %v", err)
 		}
