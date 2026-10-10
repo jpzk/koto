@@ -7488,7 +7488,19 @@ func TestForgedJobDirectoryNamesAreNotListed(t *testing.T) {
 	mk("bbbbbbbb\ncccccccc\tdone\t0\t\t99\t0\tphantom", map[string]string{"status": "running"})
 
 	script := strings.ReplaceAll(jobsListScript, "/workspace/.cs/jobs", dir)
-	out, err := exec.Command("/bin/sh", "-c", script).Output()
+	// The guest runs this via /bin/sh, which is bash there (fc-agent
+	// handleExec); the script uses bash arrays and ${v//…}. A test host whose
+	// sh is dash/busybox (e.g. the alpine golang image) runs it with bash, or
+	// skips when there is none.
+	sh := "/bin/sh"
+	if v, _ := exec.Command(sh, "-c", "echo \"$BASH_VERSION\"").Output(); strings.TrimSpace(string(v)) == "" {
+		p, lerr := exec.LookPath("bash")
+		if lerr != nil {
+			t.Skip("jobsListScript is a bash script (the guest's /bin/sh is bash); no bash on this host")
+		}
+		sh = p
+	}
+	out, err := exec.Command(sh, "-c", script).Output()
 	if err != nil {
 		t.Fatalf("run jobsListScript: %v", err)
 	}
@@ -8807,11 +8819,17 @@ func TestGoalEnqueueGivesUpWhenTheGoalStops(t *testing.T) {
 	// is gone rather than sleeping through its whole retry budget.
 	groupBarrierBegin(g)
 	defer groupBarrierEnd(g)
+	// The fixed loop sleeps once (after the first failed attempt) and then sees
+	// the stopped goal; the old one slept between every attempt, i.e.
+	// goalEnqueueRetries-1 times. A sleep long enough to dwarf scheduler jitter
+	// keeps the two apart on a loaded host (the 1ms test default did not).
+	defer func(old time.Duration) { goalRetrySleep = old }(goalRetrySleep)
+	goalRetrySleep = 100 * time.Millisecond
 	t0 := time.Now()
 	if _, err := goalEnqueue(g, "gstopid", "s", "msg"); err == nil {
 		t.Fatal("enqueue succeeded with admission closed")
 	}
-	if d := time.Since(t0); d > time.Duration(goalEnqueueRetries)*goalRetrySleep {
+	if d := time.Since(t0); d >= time.Duration(goalEnqueueRetries-1)*goalRetrySleep {
 		t.Errorf("took %v — it slept through the full retry budget for a goal that had stopped", d)
 	}
 	// A running goal still uses its retries.
