@@ -21,7 +21,8 @@ Each surface has its own verb set and its own rules. Both are described below.
 
 `koto ctl` dials the daemon with mTLS plus a bearer token (`ctlClient`,
 `newKotoClient`, `tokenCreds` in `daemon/ctl_cli.go`). See
-[configuration.md](configuration.md) §2.3 for every env var involved. In brief:
+[configuration.md](configuration.md) §2.3 for every env var involved. Roles, the ACL and the PKI are covered in
+[acl-and-auth.md](acl-and-auth.md). In brief:
 
 - `KOTO_ADDR`: default `127.0.0.1:8443` (`ctlClient`).
 - `KOTO_CLIENT`: client identity. Default `agent` (`ctlClient`).
@@ -228,7 +229,8 @@ helper is given.
 #### Admin role only
 
 The usage text puts these under "admin role only". The comment on `ctlAcl`
-says the `acl_*` verbs are hardcoded admin-only server-side.
+says the `acl_*` verbs are hardcoded admin-only server-side. For the
+authorization model, see [acl-and-auth.md](acl-and-auth.md).
 
 - **`runscript [-raw] <group> <script...>`**: runs a POSIX script in the
   group's microVM as `node`. Output streams live to stdout. RPC `RunScript`.
