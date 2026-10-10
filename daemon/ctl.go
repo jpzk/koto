@@ -193,6 +193,7 @@ func configPostureKey(req configReq) string {
 	}{
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
+		{"kvm", req.KVM},
 	} {
 		if len(k.raw) > 0 {
 			return k.name
@@ -369,7 +370,7 @@ func ctlDispatch(owner string, line []byte) any {
 		// the only egress — was voidable by the tier-3 principal it exists to
 		// contain: main could write network=full into its own config and the
 		// proxy honoured it on the next request, or into a peer's and reboot
-		// it with a NIC. Root, published ports, VM size and autostart are the
+		// it with a NIC. Root, published ports, VM size, autostart and kvm are the
 		// same class. What remains is what main legitimately tunes on a peer:
 		// model, effort, provider.
 		if k := configPostureKey(req); k != "" {

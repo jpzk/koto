@@ -7,7 +7,7 @@
 # `git clone amazonlinux/linux` + `git checkout $(get_tag …)`). We add the
 # options koto needs on top of FC's guest config: CONFIG_TUN (L3 TAP +
 # rootless-podman pasta), FUSE_FS + NF_TABLES (rootless podman storage/net),
-# IKCONFIG (verification).
+# KVM (the kvm=yes nested-virtualization profile), IKCONFIG (verification).
 #
 # Why NOT kernel.org vanilla: a vanilla kernel can't parse Firecracker's ACPI
 # tables (AE_BAD_PARAMETER at boot), which forced an `acpi=off` workaround —
@@ -142,7 +142,11 @@ echo "${FC_CONFIG_SHA256:-adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326b
   -e CONFIG_NF_NAT \
   -e CONFIG_BRIDGE_NF_EBTABLES \
   -e CONFIG_IKCONFIG \
-  -e CONFIG_IKCONFIG_PROC
+  -e CONFIG_IKCONFIG_PROC \
+  -e CONFIG_VIRTUALIZATION \
+  -e CONFIG_KVM \
+  -e CONFIG_KVM_INTEL \
+  -e CONFIG_KVM_AMD
 make olddefconfig >/dev/null
 
 grep -q '^CONFIG_TUN=y'     .config || { echo "!! CONFIG_TUN missing";     exit 1; }
@@ -156,6 +160,11 @@ grep -q '^CONFIG_VSOCKETS_LOOPBACK=y' .config && { echo "!! CONFIG_VSOCKETS_LOOP
 grep -q '^CONFIG_VHOST_VSOCK=y'       .config && { echo "!! CONFIG_VHOST_VSOCK must stay off"; exit 1; }
 true
 grep -q '^CONFIG_NFT_NAT=y' .config || { echo "!! CONFIG_NFT_NAT missing (netavark bridged NAT)"; exit 1; }
+# KVM for the kvm=yes profile (nested virtualization). Inert in a kvm=no guest:
+# the daemon masks VMX/SVM out of its CPUID, so kvm_intel/kvm_amd decline to
+# load and /dev/kvm never exists.
+grep -q '^CONFIG_KVM_INTEL=y' .config || { echo "!! CONFIG_KVM_INTEL missing (kvm=yes)"; exit 1; }
+grep -q '^CONFIG_KVM_AMD=y'   .config || { echo "!! CONFIG_KVM_AMD missing (kvm=yes)"; exit 1; }
 grep -q '^CONFIG_NFT_MASQ=y' .config || { echo "!! CONFIG_NFT_MASQ missing (netavark masquerade)"; exit 1; }
 
 make -j"$(nproc)" vmlinux >/dev/null

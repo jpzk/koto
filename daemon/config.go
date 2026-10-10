@@ -129,6 +129,22 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "kvm" {
+		// Nested virtualization: yes|no. Applies on the next spawn (/restart):
+		// fcVMConfig masks VMX/SVM out of the guest's CPUID unless this is
+		// yes (see groupKVM). Unknown values are silently rejected, same shape
+		// as root.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "yes", "no":
+			cfg[key] = s
+		}
+		return
+	}
 	if key == "autostart" {
 		// Boot this group's VM with the daemon: yes|no. Read once at daemon
 		// startup (autostartGroups), so unlike the other spawn-time knobs a
@@ -333,6 +349,7 @@ func configCmd(req configReq) configResp {
 		applyConfig(cfg, "size", req.Size)
 		applyConfig(cfg, "root", req.Root)
 		applyConfig(cfg, "autostart", req.Autostart)
+		applyConfig(cfg, "kvm", req.KVM)
 	})
 	if err != nil {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
@@ -359,6 +376,11 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 		eff["root"] = "yes"
 	} else {
 		eff["root"] = "no"
+	}
+	if groupKVM(g) {
+		eff["kvm"] = "yes"
+	} else {
+		eff["kvm"] = "no"
 	}
 	if groupAutostart(g) {
 		eff["autostart"] = "yes"

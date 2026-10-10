@@ -197,6 +197,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Size = optRaw(r.Size)
 	out.Root = optRaw(r.Root)
 	out.Autostart = optRaw(r.Autostart)
+	out.KVM = optRaw(r.Kvm)
 	return out
 }
 

@@ -187,6 +187,10 @@ type ConfigReq struct {
 	// the daemon starts, instead of lazily on its first message. Read only at
 	// daemon startup, so setting it takes effect on the next daemon restart.
 	Autostart json.RawMessage `json:"autostart,omitempty"`
+	// KVM is nested virtualization: "yes" | "no" (default). "yes" exposes the
+	// host CPU's VMX/SVM to the guest so it can run its own KVM guests; "no"
+	// masks it in the guest's CPUID. Applies on /restart.
+	KVM json.RawMessage `json:"kvm,omitempty"`
 }
 
 // ---- Response envelopes ---------------------------------------------------

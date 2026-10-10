@@ -1177,6 +1177,7 @@ type InitReq struct {
 	Net           string                 `protobuf:"bytes,3,opt,name=net,proto3" json:"net,omitempty"`                                                                           // "" | "l3" — bring the TAP up (network ≠ none)
 	Root          bool                   `protobuf:"varint,4,opt,name=root,proto3" json:"root,omitempty"`                                                                        // root=yes profile
 	Group         string                 `protobuf:"bytes,5,opt,name=group,proto3" json:"group,omitempty"`                                                                       // hostname koto-vm-<group>
+	Kvm           bool                   `protobuf:"varint,6,opt,name=kvm,proto3" json:"kvm,omitempty"`                                                                          // kvm=yes profile: open /dev/kvm to node
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1244,6 +1245,13 @@ func (x *InitReq) GetGroup() string {
 		return x.Group
 	}
 	return ""
+}
+
+func (x *InitReq) GetKvm() bool {
+	if x != nil {
+		return x.Kvm
+	}
+	return false
 }
 
 type MsgReq struct {
@@ -2309,13 +2317,14 @@ const file_guest_proto_rawDesc = "" +
 	"\x05sched\x18\n" +
 	" \x01(\v2\x12.koto.SchedAddRespH\x00R\x05sched\x12-\n" +
 	"\x06scheds\x18\v \x01(\v2\x13.koto.SchedListRespH\x00R\x06schedsB\b\n" +
-	"\x06result\"\xbd\x01\n" +
+	"\x06result\"\xcf\x01\n" +
 	"\aInitReq\x12\x14\n" +
 	"\x05ports\x18\x01 \x03(\x05R\x05ports\x12(\n" +
 	"\x03env\x18\x02 \x03(\v2\x16.koto.InitReq.EnvEntryR\x03env\x12\x10\n" +
 	"\x03net\x18\x03 \x01(\tR\x03net\x12\x12\n" +
 	"\x04root\x18\x04 \x01(\bR\x04root\x12\x14\n" +
-	"\x05group\x18\x05 \x01(\tR\x05group\x1a6\n" +
+	"\x05group\x18\x05 \x01(\tR\x05group\x12\x10\n" +
+	"\x03kvm\x18\x06 \x01(\bR\x03kvm\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaf\x01\n" +

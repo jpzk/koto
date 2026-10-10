@@ -422,6 +422,7 @@ message ConfigReq {
   optional string root     = 11;  // yes|no — passwordless sudo in guest; applies on /restart
   optional string network  = 12;  // none|wan|lan|full — egress profile; applies on /restart
   optional string autostart = 13; // yes|no — boot this group's VM when the daemon starts
+  optional string kvm      = 14;  // yes|no — expose VMX/SVM (nested virtualization); applies on /restart
 }
 
 message JobsReq { string group = 1; } // "" = all running groups

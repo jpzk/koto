@@ -567,6 +567,37 @@ daemon does.
 - **Failures are logged, not fatal.** A group that fails to boot logs at `error`
   on its own group subsystem and the loop continues to the next one.
 
+## Nested virtualization profile (`kvm`: `yes` | `no`)
+
+Per-group posture key giving the guest a usable `/dev/kvm`, so it can run its
+own VMs (a nested Firecracker, `podman --device /dev/kvm`, a CI emulator).
+Default `no`. Applies on `/restart`.
+
+- **The default had to become a restriction.** Firecracker's CPUID
+  normalization does not touch VMX (Intel, CPUID.1:ECX[5]) or SVM (AMD,
+  CPUID.80000001h:ECX[2]), so on a host with `kvm_intel nested=Y` every guest
+  already saw VMX. That was inert only because the guest kernel had no KVM. Now
+  that it does, `kvm=no` boots with an inline custom CPU template
+  (`fcNoNestedCPUTemplate`, `"cpu-config"` in the config file) that clears
+  exactly those two bits. KVM refuses VMXON / `EFER.SVME` to a vCPU whose CPUID
+  lacks the bit, so the mask is enforced by the host kernel, not the guest.
+  `kvm=yes` boots with no template.
+- **Guest kernel.** `build-kernel.sh` builds in `CONFIG_KVM`, `KVM_INTEL` and
+  `KVM_AMD` (no module loader). In a `kvm=no` guest the vendor module declines
+  to load, and `/dev/kvm` never appears. `VHOST_VSOCK` stays off; nested
+  guests need none of the vhost drivers.
+- **Guest side.** devtmpfs creates `/dev/kvm` root-only and the guest has no
+  udev, so `handleInit` chmods it 0666 when `InitReq.kvm` is set, matching
+  Fedora's udev rule.
+- **Host requirement.** `kvm_intel`/`kvm_amd` `nested=Y`. If it is off,
+  `fcHostNested` makes the spawn log an error (so a notification goes out). The
+  VM still boots, without `/dev/kvm`.
+- **Why it is posture.** The guest gains access to the host kernel's
+  nested-VMX/SVM emulation, which is a larger and historically bug-dense
+  attack surface than a plain KVM guest's. The jailed VMM and its other
+  restrictions are unchanged. Nested guests consume the group's own memory and
+  vCPUs; nothing is allocated outside the size preset.
+
 ## Jailer (host-side isolation of the Firecracker process)
 
 The KVM boundary protects the host *from the guest*. The **jailer** protects

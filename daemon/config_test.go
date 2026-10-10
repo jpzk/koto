@@ -152,3 +152,84 @@ func TestEffectiveConfigAutostart(t *testing.T) {
 		t.Errorf("effectiveConfig autostart = %v, want yes", eff["autostart"])
 	}
 }
+
+// TestApplyConfigKVM: kvm takes yes/no only; a typo keeps the prior value and
+// "" clears — same contract as autostart.
+func TestApplyConfigKVM(t *testing.T) {
+	cfg := map[string]any{}
+	applyConfig(cfg, "kvm", json.RawMessage(`" YES "`))
+	if cfg["kvm"] != "yes" {
+		t.Fatalf("kvm=YES stored %v, want yes", cfg["kvm"])
+	}
+	applyConfig(cfg, "kvm", json.RawMessage(`"nested"`))
+	if cfg["kvm"] != "yes" {
+		t.Errorf("rejected value clobbered prior: %v", cfg["kvm"])
+	}
+	applyConfig(cfg, "kvm", json.RawMessage(`""`))
+	if _, ok := cfg["kvm"]; ok {
+		t.Errorf("clear left the key set: %v", cfg["kvm"])
+	}
+}
+
+// TestKVMProfileReachesVMConfig: groupKVM fails closed, the effective view
+// reports it, and fcVMConfig masks VMX/SVM unless kvm=yes.
+func TestKVMProfileReachesVMConfig(t *testing.T) {
+	ROOT = filepath.Join(t.TempDir(), "groups")
+	writeGroupConfig(t, "plain", `{}`)
+	writeGroupConfig(t, "typo", `{"kvm":"on"}`)
+	writeGroupConfig(t, "nested", `{"kvm":"yes"}`)
+	if groupKVM("plain") || groupKVM("typo") || groupKVM("missing") || !groupKVM("nested") {
+		t.Fatal("groupKVM must be true only for an explicit yes")
+	}
+	if eff := effectiveConfig("plain", map[string]any{}); eff["kvm"] != "no" {
+		t.Errorf("effectiveConfig kvm = %v, want no", eff["kvm"])
+	}
+	if eff := effectiveConfig("nested", map[string]any{"kvm": "yes"}); eff["kvm"] != "yes" {
+		t.Errorf("effectiveConfig kvm = %v, want yes", eff["kvm"])
+	}
+
+	type mod struct{ Register, Bitmap string }
+	type leaf struct {
+		Leaf      string
+		Modifiers []mod
+	}
+	parse := func(kvm bool) []leaf {
+		var cfg struct {
+			CPU *struct {
+				Cpuid []leaf `json:"cpuid_modifiers"`
+			} `json:"cpu-config"`
+		}
+		if err := json.Unmarshal(fcVMConfig("g", "/k", "/r", "/w", "/v", 2, 1024, 1, 1, kvm), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CPU == nil {
+			return nil
+		}
+		return cfg.CPU.Cpuid
+	}
+	if got := parse(true); got != nil {
+		t.Errorf("kvm=yes carries a cpu-config: %+v", got)
+	}
+	// Leaf → the one bit that must be cleared (VMX, SVM), and nothing else.
+	want := map[string]int{"0x1": 5, "0x80000001": 2}
+	leaves := parse(false)
+	if len(leaves) != len(want) {
+		t.Fatalf("kvm=no: %d cpuid leaves, want %d", len(leaves), len(want))
+	}
+	for _, l := range leaves {
+		bit, ok := want[l.Leaf]
+		if !ok || len(l.Modifiers) != 1 || l.Modifiers[0].Register != "ecx" {
+			t.Fatalf("unexpected modifier %+v", l)
+		}
+		bm := l.Modifiers[0].Bitmap
+		if len(bm) != 34 || bm[:2] != "0b" {
+			t.Fatalf("%s: malformed bitmap %q", l.Leaf, bm)
+		}
+		for i, c := range bm[2:] {
+			pos := 31 - i
+			if pos == bit && c != '0' || pos != bit && c != 'x' {
+				t.Errorf("%s: bitmap %q touches bit %d, want only bit %d cleared", l.Leaf, bm, pos, bit)
+			}
+		}
+	}
+}

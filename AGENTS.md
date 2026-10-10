@@ -66,7 +66,7 @@ referenced below point there.
 ### Per-group profiles (`groups/<g>/.cs/config.json`)
 
 All apply on `/restart` unless noted. **Posture keys** (`network`, `root`,
-`ports`, `size`, `autostart`) are operator-only: refused on the in-guest ctl
+`ports`, `size`, `autostart`, `kvm`) are operator-only: refused on the in-guest ctl
 plane (H1) and, on gRPC, re-labelled `config_posture` (admin-only,
 `postureVerb` in auth.go). Delegable keys: `model`, `effort`, `provider`.
 `updateGroupConfig` (config.go) is the ONE writer — per-group lock, rename
@@ -104,6 +104,11 @@ commit.
 - **`autostart`** = `no` (default) | `yes`: boot with the daemon instead of
   lazily. **Read only at daemon start**, not on `/restart`
   (`autostartGroups`, sequential, sorted, `main` skipped).
+- **`kvm`** = `no` (default) | `yes`: nested virtualization — `/dev/kvm` in
+  the guest (0666). `no` boots with an inline FC CPU template clearing VMX/SVM
+  (`fcNoNestedCPUTemplate`; FC itself passes them through, and KVM gates nested
+  on guest CPUID). Needs host `kvm_intel`/`kvm_amd` `nested=Y` (else an error
+  at spawn) and the KVM-enabled guest kernel (`make kernel`).
 - **`ports`** = `[8080, …]` (1024–65535): vsock↔TCP bridge per port, bound by
   the daemon.
 

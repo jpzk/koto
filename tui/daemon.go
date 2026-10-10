@@ -353,6 +353,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("size", &r.Size)
 	setOpt("root", &r.Root)
 	setOpt("autostart", &r.Autostart)
+	setOpt("kvm", &r.Kvm)
 	return r
 }
 

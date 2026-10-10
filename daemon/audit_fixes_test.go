@@ -192,7 +192,7 @@ func TestExpectedTurnSlots(t *testing.T) {
 // on main itself and on a peer, and still takes model/effort/provider.
 func TestCtlConfigSetRefusesPosture(t *testing.T) {
 	fcHarness(t)
-	for _, key := range []string{"network", "internet", "root", "ports", "size", "autostart"} {
+	for _, key := range []string{"network", "internet", "root", "ports", "size", "autostart", "kvm"} {
 		for _, target := range []string{"main", "tg"} {
 			val := any("full")
 			if key == "ports" {
@@ -782,6 +782,7 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 		{"ports", &pb.ConfigReq{Group: "g", Ports: s("8080")}, "config_posture"},
 		{"size", &pb.ConfigReq{Group: "g", Size: s("xlarge")}, "config_posture"},
 		{"autostart", &pb.ConfigReq{Group: "g", Autostart: s("yes")}, "config_posture"},
+		{"kvm", &pb.ConfigReq{Group: "g", Kvm: s("yes")}, "config_posture"},
 		{"mixed", &pb.ConfigReq{Group: "g", Model: s("x"), Root: s("yes")}, "config_posture"},
 		// Clearing a posture key is setting it.
 		{"clear network", &pb.ConfigReq{Group: "g", Network: s("")}, "config_posture"},
@@ -3821,7 +3822,7 @@ func TestVMConfigUsesTheAdmittedShape(t *testing.T) {
 			MemSizeMib int `json:"mem_size_mib"`
 		} `json:"machine-config"`
 	}
-	blob := fcVMConfig(g, "/k", "/r", "/w", "/v", vcpus, memMiB, bw, ops)
+	blob := fcVMConfig(g, "/k", "/r", "/w", "/v", vcpus, memMiB, bw, ops, false)
 	if err := json.Unmarshal(blob, &cfg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

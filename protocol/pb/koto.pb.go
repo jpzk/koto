@@ -1645,6 +1645,7 @@ type ConfigReq struct {
 	Root          *string                `protobuf:"bytes,11,opt,name=root,proto3,oneof" json:"root,omitempty"`           // yes|no — passwordless sudo in guest; applies on /restart
 	Network       *string                `protobuf:"bytes,12,opt,name=network,proto3,oneof" json:"network,omitempty"`     // none|wan|lan|full — egress profile; applies on /restart
 	Autostart     *string                `protobuf:"bytes,13,opt,name=autostart,proto3,oneof" json:"autostart,omitempty"` // yes|no — boot this group's VM when the daemon starts
+	Kvm           *string                `protobuf:"bytes,14,opt,name=kvm,proto3,oneof" json:"kvm,omitempty"`             // yes|no — expose VMX/SVM (nested virtualization); applies on /restart
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1745,6 +1746,13 @@ func (x *ConfigReq) GetNetwork() string {
 func (x *ConfigReq) GetAutostart() string {
 	if x != nil && x.Autostart != nil {
 		return *x.Autostart
+	}
+	return ""
+}
+
+func (x *ConfigReq) GetKvm() string {
+	if x != nil && x.Kvm != nil {
+		return *x.Kvm
 	}
 	return ""
 }
@@ -4123,7 +4131,7 @@ const file_koto_proto_rawDesc = "" +
 	"HistoryReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06before\x18\x03 \x01(\x01R\x06before\"\x9b\x03\n" +
+	"\x06before\x18\x03 \x01(\x01R\x06before\"\xba\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x00R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -4135,7 +4143,8 @@ const file_koto_proto_rawDesc = "" +
 	" \x01(\tH\x05R\x04size\x88\x01\x01\x12\x17\n" +
 	"\x04root\x18\v \x01(\tH\x06R\x04root\x88\x01\x01\x12\x1d\n" +
 	"\anetwork\x18\f \x01(\tH\aR\anetwork\x88\x01\x01\x12!\n" +
-	"\tautostart\x18\r \x01(\tH\bR\tautostart\x88\x01\x01B\b\n" +
+	"\tautostart\x18\r \x01(\tH\bR\tautostart\x88\x01\x01\x12\x15\n" +
+	"\x03kvm\x18\x0e \x01(\tH\tR\x03kvm\x88\x01\x01B\b\n" +
 	"\x06_modelB\t\n" +
 	"\a_effortB\b\n" +
 	"\x06_portsB\v\n" +
@@ -4146,7 +4155,8 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"\b_networkB\f\n" +
 	"\n" +
-	"_autostartJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
+	"_autostartB\x06\n" +
+	"\x04_kvmJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
 	"\aJobsReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"S\n" +
 	"\bJobsResp\x12\x0e\n" +

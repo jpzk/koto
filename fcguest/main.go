@@ -771,6 +771,16 @@ func handleInit(c *vconn, req *pb.InitReq) {
 			rootEnabled = true
 		}
 	}
+	// config kvm=yes: the host left VMX/SVM in this vCPU's CPUID, so the
+	// built-in KVM registered /dev/kvm — but devtmpfs creates it root-only and
+	// there is no udev. 0666, as Fedora's udev rule has it, so node (the agent,
+	// rootless podman --device, a nested firecracker) can open it. kvm=no
+	// boots with the bits masked, so the node never appears. Idempotent.
+	if req.Kvm {
+		if err := os.Chmod("/dev/kvm", 0o666); err != nil {
+			logf("kvm=yes: %v (host nested virtualization off?)", err)
+		}
+	}
 	for _, p32 := range req.Ports {
 		p := int(p32)
 		if p < 1024 || p > 65535 || portsUp[p] {

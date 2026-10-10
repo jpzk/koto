@@ -49,3 +49,10 @@ func TestBuildConfigReqScalarKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildConfigReqKVM: /config kvm=yes reaches the wire.
+func TestBuildConfigReqKVM(t *testing.T) {
+	if r := buildConfigReq(map[string]any{"group": "g", "kvm": "yes"}); r.Kvm == nil || *r.Kvm != "yes" {
+		t.Fatalf("kvm=yes did not reach the request: %v", r.Kvm)
+	}
+}

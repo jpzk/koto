@@ -125,6 +125,7 @@ message InitReq {
   string              net   = 3; // "" | "l3" — bring the TAP up (network ≠ none)
   bool                root  = 4; // root=yes profile
   string              group = 5; // hostname koto-vm-<group>
+  bool                kvm   = 6; // kvm=yes profile: open /dev/kvm to node
 }
 message MsgReq {
   bytes  msg           = 1; // the turn's message body (raw)

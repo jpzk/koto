@@ -498,7 +498,7 @@ func TestFcVMConfigRateLimiter(t *testing.T) {
 		}
 		tvcpus, tmem, _ := fcResolveSize("tg")
 		tbw, tops := fcResolveIO("tg")
-		if err := json.Unmarshal(fcVMConfig("tg", "/k", "/r", "/w", "/v", tvcpus, tmem, tbw, tops), &cfg); err != nil {
+		if err := json.Unmarshal(fcVMConfig("tg", "/k", "/r", "/w", "/v", tvcpus, tmem, tbw, tops, false), &cfg); err != nil {
 			t.Fatalf("%s: unmarshal: %v", name, err)
 		}
 		if len(cfg.Drives) != 2 {

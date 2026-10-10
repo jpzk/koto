@@ -846,6 +846,7 @@ func ctlConfig(args []string) {
 	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
+	kvm := fs.String("kvm", "", "yes|no — nested virtualization (/dev/kvm in the guest)")
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -877,6 +878,9 @@ func ctlConfig(args []string) {
 	}
 	if seen["autostart"] {
 		req.Autostart = autostart
+	}
+	if seen["kvm"] {
+		req.Kvm = kvm
 	}
 
 	cl := ctlClient()

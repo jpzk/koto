@@ -202,6 +202,16 @@ func groupNetwork(g string) string { return loadGroupConfig(g).network() }
 // Applies on /restart. Accepts a bool too, for a hand-edited config.json.
 func groupRoot(g string) bool { return groupConfigBool(g, "root") }
 
+// groupKVM reads config.json's "kvm" profile: "yes" lets the guest see the
+// host CPU's VMX/SVM so it can run KVM guests of its own (nested
+// virtualization); anything else (including missing) means "no" — the
+// default, where fcVMConfig masks those bits out of the guest's CPUID. KVM
+// gates VMXON/EFER.SVME on the guest's CPUID, so the mask is enforcement, not
+// cosmetics. Read at spawn; applies on /restart. A posture key: nested
+// virtualization puts the host kernel's nested-VMX/SVM emulation inside the
+// guest's reach, which is a larger attack surface than a plain guest's.
+func groupKVM(g string) bool { return groupConfigBool(g, "kvm") }
+
 // ---- VM registry -----------------------------------------------------------
 
 // fcVM tracks one running microVM's host-side resources so fcStop can tear
@@ -640,7 +650,8 @@ func fcWorkspaceDiskBytes(g string) int64 {
 // a concurrent Config or Spawn raise the size preset AFTER admission had
 // reserved the smaller one, so the VM and its cgroup were built from the
 // larger value while the fleet accounting still held the smaller (audit M110).
-func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB int, bwBytes, ops int64) []byte {
+// kvm is the group's kvm profile (groupKVM), snapshotted by fcSpawn the same way.
+func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB int, bwBytes, ops int64, kvm bool) []byte {
 	rateLimiter := func() map[string]any {
 		return map[string]any{
 			"bandwidth": map[string]any{"size": bwBytes, "one_time_burst": fcIOBurstBytes, "refill_time": 1000},
@@ -665,8 +676,49 @@ func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB
 		"machine-config": map[string]any{"vcpu_count": vcpus, "smt": false, "mem_size_mib": memMiB},
 		"vsock":          map[string]any{"guest_cid": 3, "uds_path": udsPath},
 	}
+	if !kvm {
+		cfg["cpu-config"] = fcNoNestedCPUTemplate
+	}
 	cb, _ := json.Marshal(cfg)
 	return cb
+}
+
+// fcNoNestedCPUTemplate is the inline Firecracker custom CPU template every
+// kvm=no guest boots with. It only clears bits: CPUID.1:ECX[5] (VMX) and
+// CPUID.80000001h:ECX[2] (SVM). Firecracker's own CPUID normalization leaves
+// both alone, so on a host with kvm_intel/kvm_amd nested=1 every guest saw
+// VMX — harmless only while the guest kernel had no KVM. KVM refuses VMXON
+// and EFER.SVME to a vCPU whose CPUID lacks the bit, so this is what makes
+// kvm=no a restriction rather than a convention. Both leaves exist on every
+// x86_64 part, and each bit is reserved-zero on the other vendor, so one
+// template covers Intel and AMD. Bitmaps are MSB first: 32 positions, bit 0
+// rightmost.
+var fcNoNestedCPUTemplate = map[string]any{
+	"cpuid_modifiers": []map[string]any{
+		{"leaf": "0x1", "subleaf": "0x0", "flags": 0, "modifiers": []map[string]any{
+			{"register": "ecx", "bitmap": "0b" + strings.Repeat("x", 26) + "0" + strings.Repeat("x", 5)},
+		}},
+		{"leaf": "0x80000001", "subleaf": "0x0", "flags": 0, "modifiers": []map[string]any{
+			{"register": "ecx", "bitmap": "0b" + strings.Repeat("x", 29) + "0" + strings.Repeat("x", 2)},
+		}},
+	},
+}
+
+// fcHostNested reports whether the host's KVM module allows nested
+// virtualization (kvm_intel or kvm_amd `nested` = Y/1). Without it kvm=yes
+// boots fine but the guest gets no VMX/SVM and no /dev/kvm.
+func fcHostNested() bool {
+	for _, mod := range []string{"kvm_intel", "kvm_amd"} {
+		b, err := os.ReadFile("/sys/module/" + mod + "/parameters/nested")
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(string(b)) {
+		case "Y", "y", "1":
+			return true
+		}
+	}
+	return false
 }
 
 // fcSpawn boots the microVM for group g and wires all host-side plumbing.
@@ -875,7 +927,13 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// debugging (quiet keeps it small in steady state). The paths are
 	// chroot-relative: bind targets staged by fcStageJail.
 	vm.memMiB = memMiB
-	cb := fcVMConfig(g, "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v", vcpus, memMiB, bwBytes, ioOps)
+	// One read of the kvm profile feeds both the CPUID template and the
+	// guest's init (/dev/kvm permissions), so they can't disagree.
+	kvm := groupKVM(g)
+	if kvm && !fcHostNested() {
+		emitLogfG("fc", g, "error", "[%s] kvm=yes but host nested virtualization is off (kvm_intel/kvm_amd nested=N): the guest gets no /dev/kvm", g)
+	}
+	cb := fcVMConfig(g, "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v", vcpus, memMiB, bwBytes, ioOps, kvm)
 
 	console, err := fcConsoleSink(g)
 	if err != nil {
@@ -1030,6 +1088,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		// prompts identify which group's VM they're in.
 		Group: g,
 		Root:  groupRoot(g),
+		Kvm:   kvm,
 	}
 	for _, p := range pubPorts {
 		init.Ports = append(init.Ports, int32(p))

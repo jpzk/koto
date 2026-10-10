@@ -381,7 +381,7 @@ through these verbs:
   Valid keys: model, effort, provider — and only those. A group's POSTURE is
   the operator's decision, never an agent's: `network` (egress profile),
   `root` (passwordless sudo), `ports` (published TCP ports), `size` (VM
-  preset) and `autostart` are refused on this plane with an error naming
+  preset), `autostart` and `kvm` (nested virtualization) are refused on this plane with an error naming
   the operator path. If a task needs a peer with network access or sudo,
   say so and let the operator set it (TUI `/config`, or `koto ctl config`);
   do not try to work around the refusal. Posture changes apply on that
