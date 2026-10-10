@@ -21,10 +21,17 @@ import (
 	"time"
 )
 
-const (
-	upstream       = "https://api.anthropic.com"
-	veniceUpstream = "https://api.venice.ai"
-)
+const veniceUpstream = "https://api.venice.ai"
+
+// upstream is the Anthropic API origin. KOTO_UPSTREAM overrides it — used to
+// run koto nested inside a koto guest, chaining to the outer guest's local
+// LLM bridge (e.g. http://127.0.0.1:18888) instead of the public API.
+var upstream = func() string {
+	if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
+		return u
+	}
+	return "https://api.anthropic.com"
+}()
 
 // proxyMaxBody bounds a buffered LLM-leg request body (audit M2).
 const proxyMaxBody = 64 << 20
