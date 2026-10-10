@@ -1276,16 +1276,29 @@ func renderPendingLines(pending []string, contentCols int) []string {
 	return out
 }
 
-// wrapLine hard-wraps one logical line to cols terminal columns (ANSI- and
+// wrapLine wraps one logical line to cols terminal columns (ANSI- and
 // width-aware) and returns the resulting rows — at least one, so an empty
 // line still occupies a row. Used for tool command/output lines, which are
 // raw shell text: unlike response blocks (pre-wrapped by glamour) they'd
 // otherwise exceed the viewport width and be clipped at the pane edge.
+//
+// Breaks at word boundaries (spaces, hyphens, "/") so prose in sys/notify/
+// prompt rows doesn't split mid-word; tokens longer than cols (URLs, hashes)
+// still hard-wrap. Any segment ansi.Wrap leaves over budget is hard-wrapped
+// as a safety net, so the width invariant (FuzzWrapLine) holds.
 func wrapLine(ln string, cols int) []string {
 	if cols <= 0 || ansi.StringWidth(ln) <= cols {
 		return []string{ln}
 	}
-	return strings.Split(ansi.Hardwrap(ln, cols, true), "\n")
+	out := make([]string, 0, 2)
+	for _, seg := range strings.Split(ansi.Wrap(ln, cols, "/"), "\n") {
+		if ansi.StringWidth(seg) > cols {
+			out = append(out, strings.Split(ansi.Hardwrap(seg, cols, true), "\n")...)
+			continue
+		}
+		out = append(out, seg)
+	}
+	return out
 }
 
 func renderBlockLines(b renderedBlock, contentCols int) []string {
