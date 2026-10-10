@@ -471,7 +471,7 @@ func (m Model) renderStatusBar(spin string) string {
 	// here — see renderMetricsBar. No reserved edge cells: the koto banner
 	// sits flush against the left edge.
 	left := m.renderStatusLeft()
-	right := m.renderStatusRight(spin)
+	right := m.renderStatusRightFit(spin, m.width-lipgloss.Width(left))
 	rightW := lipgloss.Width(right)
 	// Live notification, inlaid into the gap between the left segments and
 	// the progress indicator — same row, so the frame's height never moves.
@@ -533,7 +533,78 @@ func (m Model) renderLoadingSegment() string {
 }
 
 func (m Model) renderStatusRight(spin string) string {
-	var parts []string
+	return m.renderStatusRightFit(spin, -1)
+}
+
+// renderStatusRightFit renders the status bar's right side within avail
+// cells (avail < 0 = unbounded). On a narrow pane the corner chip degrades
+// down a ladder of WHOLE variants — full "N tok/s · Σ M tok/s", then the
+// focused group's rate alone, then a compact "Nt/s", then nothing — instead
+// of the old behaviour where renderStatusBar's MaxWidth sliced the chip
+// mid-figure ("· Σ 0 t"). The activity segment is shed last: it is the
+// one that says the VM is booting / the turn is running. A disconnected
+// daemon's rpc-error chip shortens but outranks the (stale) activity text.
+func (m Model) renderStatusRightFit(spin string, avail int) string {
+	act := m.renderActivitySeg(spin)
+	// Top-right corner: normally the tok/s chip — daemon-measured
+	// output-token throughput over its trailing window: the focused group,
+	// then the fleet (Σ). Always shown, zeros included, so the chip is a
+	// fixture the eye can find rather than an element that pops in and out.
+	// Signature amber, matching the koto accent. While the daemon is
+	// UNREACHABLE the corner swaps to the RPC error instead (red — this IS
+	// an alert): the probe loop is retrying, so a stale tok/s figure would
+	// be a lie, and the corner is the one fixed spot the eye already
+	// checks. The chip carries the compacted error (rpcErrShort), the
+	// retry count, and the spinner; the full error is in the chat as an
+	// err line. Bold so mono terminals keep the emphasis once the strip
+	// removes the red.
+	var corners []string
+	if !m.connected {
+		msg := "rpc error"
+		if m.lastRPCErr != "" {
+			msg += ": " + m.lastRPCErr
+		}
+		st := lipgloss.NewStyle().Foreground(cRed).Bold(true)
+		corners = []string{
+			st.Render(fmt.Sprintf("  %s · retry %d %s ", msg, m.reconnectAttempt, spin)),
+			st.Render(fmt.Sprintf("  rpc error · retry %d %s ", m.reconnectAttempt, spin)),
+			st.Render(fmt.Sprintf(" rpc err %d ", m.reconnectAttempt)),
+		}
+	} else {
+		st := lipgloss.NewStyle().Foreground(cAmber)
+		rate := m.groups[m.cur].TokPerSec
+		corners = []string{
+			st.Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", rate, m.globalTokRate)),
+			st.Render(fmt.Sprintf("  %.0f tok/s ", rate)),
+			st.Render(fmt.Sprintf(" %.0ft/s ", rate)),
+		}
+	}
+	if avail < 0 {
+		return act + corners[0]
+	}
+	actW := lipgloss.Width(act)
+	for _, c := range corners {
+		if actW+lipgloss.Width(c) <= avail {
+			return act + c
+		}
+	}
+	if !m.connected {
+		// The outage outranks a stale activity line: keep the error alone.
+		for _, c := range corners {
+			if lipgloss.Width(c) <= avail {
+				return c
+			}
+		}
+		return ""
+	}
+	if actW <= avail {
+		return act
+	}
+	return ""
+}
+
+// renderActivitySeg is the status bar's spelled-out progress segment.
+func (m Model) renderActivitySeg(spin string) string {
 	// Activity segment — the spelled-out progress line (phase, both clocks,
 	// retry detail), which used to live in the hint bar. The daemon's phase
 	// (activity.go) is authoritative when present — it covers the stretches
@@ -561,34 +632,7 @@ func (m Model) renderStatusRight(spin string) string {
 		act = lipgloss.NewStyle().Foreground(cGray).
 			Render("   idle ")
 	}
-	parts = append(parts, act)
-
-	// Top-right corner: normally the tok/s chip — daemon-measured
-	// output-token throughput over its trailing window: the focused group,
-	// then the fleet (Σ). Always shown, zeros included, so the chip is a
-	// fixture the eye can find rather than an element that pops in and out.
-	// Signature amber, matching the koto accent. While the daemon is
-	// UNREACHABLE the corner swaps to the RPC error instead (red — this IS
-	// an alert): the probe loop is retrying, so a stale tok/s figure would
-	// be a lie, and the corner is the one fixed spot the eye already
-	// checks. The chip carries the compacted error (rpcErrShort), the
-	// retry count, and the spinner; the full error is in the chat as an
-	// err line. (This replaces the old "reconnecting" chip that sat left
-	// of the activity segment.) Bold so mono terminals keep the emphasis
-	// once the strip removes the red.
-	if !m.connected {
-		msg := "rpc error"
-		if m.lastRPCErr != "" {
-			msg += ": " + m.lastRPCErr
-		}
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).
-			Render(fmt.Sprintf("  %s · retry %d %s ", msg, m.reconnectAttempt, spin)))
-	} else {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).
-			Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
-	}
-
-	return strings.Join(parts, "")
+	return act
 }
 
 // renderMetricsBar draws the bottom-most line: the focus indicator dot on
