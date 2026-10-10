@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // helpEntry is one cheatsheet row: the key/command on the left, what it does
@@ -115,12 +116,34 @@ func helpSections() []helpSection {
 	}
 }
 
+// helpMinDesc is the narrowest description column helpContent will lay out
+// beside a key before stacking the key on its own row instead.
+const helpMinDesc = 18
+
 // helpContent renders the sections into viewport lines at a given width.
+//
+// Every row fits width WITHOUT clipping: a description too long for the space
+// beside its key wraps onto continuation rows aligned under the description
+// column, and a key too wide to share a row (the long /new form at phone
+// width) gets a row of its own with the description indented below it. The
+// old renderer MaxWidth-clipped each row, which at 40 columns cut every
+// description to ~16 chars ("jump to any grou") — useless on exactly the
+// narrow screens where the cheatsheet is the only discoverable door.
 func helpContent(width int) string {
 	title := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
 	keySt := lipgloss.NewStyle().Foreground(cWhite).Bold(true)
 	desc := lipgloss.NewStyle().Foreground(cGray)
-	clip := lipgloss.NewStyle().MaxWidth(max(1, width))
+	width = max(1, width)
+	clip := lipgloss.NewStyle().MaxWidth(width)
+
+	// wrapDesc word-wraps plain desc text to cols and styles each row.
+	wrapDesc := func(s string, cols int, st lipgloss.Style) []string {
+		segs := wrapLine(s, max(1, cols))
+		for i, seg := range segs {
+			segs[i] = st.Render(strings.TrimRight(seg, " "))
+		}
+		return segs
+	}
 
 	var lines []string
 	for i, sec := range helpSections() {
@@ -133,9 +156,11 @@ func helpContent(width int) string {
 				keyW = n
 			}
 		}
-		// Narrow frame: give half to each column rather than starving the desc.
-		if keyW > width/2 {
-			keyW = max(8, width/2)
+		// Narrow frame: cap the key column so the description keeps at
+		// least helpMinDesc columns beside it; keys wider than the cap go on
+		// their own row (below) instead of being truncated.
+		if keyW > width-4-helpMinDesc {
+			keyW = max(6, width-4-helpMinDesc)
 		}
 		if i > 0 {
 			lines = append(lines, "")
@@ -143,15 +168,32 @@ func helpContent(width int) string {
 		lines = append(lines, clip.Render(title.Render(sec.title)))
 		for _, e := range sec.entries {
 			if e.key == "" {
-				lines = append(lines, clip.Render("  "+desc.Italic(true).Render(e.desc)))
+				for _, seg := range wrapDesc(e.desc, width-2, desc.Italic(true)) {
+					lines = append(lines, "  "+seg)
+				}
 				continue
 			}
 			k := e.key
-			if len(k) > keyW {
-				k = truncRunes(k, keyW)
+			if n := len([]rune(k)); n > keyW {
+				// Key on its own row (hard-wrapped if wider than the frame),
+				// description indented beneath it.
+				for _, seg := range wrapLine(k, max(1, width-2)) {
+					lines = append(lines, "  "+keySt.Render(seg))
+				}
+				for _, seg := range wrapDesc(e.desc, width-4, desc) {
+					lines = append(lines, "    "+seg)
+				}
+				continue
 			}
 			pad := strings.Repeat(" ", keyW-len([]rune(k))+2)
-			lines = append(lines, clip.Render("  "+keySt.Render(k)+pad+desc.Render(e.desc)))
+			gutter := strings.Repeat(" ", 2+keyW+2)
+			for j, seg := range wrapDesc(e.desc, width-len(gutter), desc) {
+				if j == 0 {
+					lines = append(lines, "  "+keySt.Render(k)+pad+seg)
+				} else {
+					lines = append(lines, gutter+seg)
+				}
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -237,8 +279,23 @@ func (m Model) renderHelpView() string {
 	if m.helpVPReady && m.helpVP.TotalLineCount() > m.helpVP.VisibleLineCount() {
 		scrollHint = gl(" · ↑↓ scroll", " . up/dn scroll")
 	}
-	hint := lipgloss.NewStyle().Foreground(cGray).Render(
-		"esc/ctrl+h close" + scrollHint + " · ctrl+p palette")
+	// The footer must stay ONE row: the viewport height budgets exactly one
+	// (helpViewportSize), and a footer that wrapped to two made the box
+	// taller than MaxHeight, which then clipped off the bottom border. Shed
+	// the palette pointer, then shorten, until it fits the inner width.
+	innerW := max(1, bw-4)
+	hintText := "esc/ctrl+h close" + scrollHint + " · ctrl+p palette"
+	for _, cand := range []string{
+		"esc/ctrl+h close" + scrollHint,
+		"esc close" + scrollHint,
+		"esc close",
+	} {
+		if ansi.StringWidth(hintText) <= innerW {
+			break
+		}
+		hintText = cand
+	}
+	hint := lipgloss.NewStyle().Foreground(cGray).Render(ansi.Truncate(hintText, innerW, ""))
 	body := ""
 	if m.helpVPReady {
 		body = m.helpVP.View()
