@@ -393,7 +393,6 @@ func (m Model) renderLogHint() string {
 		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%",
 			int((1.0-m.logVP.ScrollPercent())*100))))
 	}
-	parts = append(parts, "^c exit")
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 

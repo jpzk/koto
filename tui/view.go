@@ -1792,74 +1792,103 @@ func (m Model) renderHint() string {
 			styled + strings.Repeat(" ", gap) + right + " ",
 		)
 	}
-	var parts []string
+	// Chips carry a priority; when the row is wider than the terminal the
+	// lowest-priority chips are dropped WHOLE (display order is kept) rather
+	// than the row being clipped at the right edge. Clipping used to cut the
+	// live state chips — ↑N%, loading older…, ⎋ stop — which sit at the end
+	// of the row, so on an 80-col terminal they were never visible. Lower
+	// number = kept longer.
+	const (
+		pState   = 0 // live state: streaming, scroll %, stop, paging
+		pCore    = 1 // send + the two discoverability doors (^p, ^h)
+		pNav     = 2 // scroll / tree
+		pToggle  = 3 // toggles that are ON (magenta) — they're state too
+		pBinding = 4 // plain bindings, all listed in ^h anyway
+	)
+	type chip struct {
+		s    string
+		prio int
+	}
+	var chips []chip
+	add := func(s string, p int) { chips = append(chips, chip{s, p}) }
+	magenta := lipgloss.NewStyle().Foreground(cMagenta)
+	toggle := func(on bool, off, onText string) {
+		if on {
+			add(magenta.Render(onText), pToggle)
+		} else {
+			add(off, pBinding)
+		}
+	}
 	_, streaming := m.streamBuf[m.curKey()]
 	_, thinking := m.thinkingBuf[m.curKey()]
 	// The progress line lives in the status bar (renderStatusRight); the hint
 	// bar stays keyboard hints only.
 	if streaming || thinking {
-		parts = append(parts, " streaming…")
+		add(" streaming…", pState)
 	} else {
-		parts = append(parts, gl(" ↩ send", " enter send"))
+		add(gl(" ↩ send", " enter send"), pCore)
 	}
-	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⇥/⎋ tree", "tab/esc tree"))
-	if m.shellFocusable() {
-		parts = append(parts, gl("⌥→ term", "alt-right term"))
+	// ctrl+c interrupts the turn (model.go handleKey) — it never quit the
+	// TUI, so the old trailing "^c exit" chip contradicted the binding.
+	if streaming || thinking || m.busy[m.curKey()] {
+		add(lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")), pState)
 	}
-	// alt+t, not ^t: ctrl+t is the group/session jump now.
-	thoughtsHint := gl("⌥t thoughts", "alt-t thoughts")
-	if m.expandedThoughts {
-		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render(gl("⌥t hide", "alt-t hide"))
-	}
-	parts = append(parts, thoughtsHint)
-	toolOutsHint := "^d output"
-	if m.expandedToolOuts {
-		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
-	}
-	parts = append(parts, toolOutsHint)
-	selectHint := "^s scroll"
-	if m.selectMode {
-		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^s SELECT")
-	}
-	parts = append(parts, selectHint)
-	parts = append(parts, "^l log")
-	shellHint := "^] shell"
-	if m.shellSplitVisible() {
-		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
-	}
-	parts = append(parts, shellHint)
-	fullHint := "^f full"
-	if m.fullscreen {
-		fullHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
-	}
-	parts = append(parts, fullHint)
 	if !m.vp.AtBottom() && m.focus == focusInput {
-		yellow := lipgloss.NewStyle().Foreground(cYellow)
-		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))
+		add(lipgloss.NewStyle().Foreground(cYellow).
+			Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))), pState)
 	}
 	if m.pageLoading[m.cur] {
 		spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).
-			Render(spin+" loading older…"))
+		add(lipgloss.NewStyle().Foreground(cYellow).Render(spin+" loading older…"), pState)
 	} else if m.pageExhausted[m.cur] && m.vp.AtTop() {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cGray).
-			Render("◆ history start"))
+		add(lipgloss.NewStyle().Foreground(cGray).Render("◆ history start"), pState)
 	}
-	if streaming || thinking || m.busy[m.curKey()] {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")))
+	add("^p palette", pCore)
+	add("^h help", pCore)
+	add(gl("↑↓ scroll", "up/dn scroll"), pNav)
+	add(gl("⇥/⎋ tree", "tab/esc tree"), pNav)
+	if m.shellFocusable() {
+		add(gl("⌥→ term", "alt-right term"), pBinding)
 	}
-	parts = append(parts, "^c exit")
+	// alt+t, not ^t: ctrl+t is the group/session jump now.
+	toggle(m.expandedThoughts, gl("⌥t thoughts", "alt-t thoughts"), gl("⌥t hide", "alt-t hide"))
+	toggle(m.expandedToolOuts, "^d output", "^d hide")
+	toggle(m.selectMode, "^s scroll", "^s SELECT")
+	add("^l log", pBinding)
+	toggle(m.shellSplitVisible(), "^] shell", "^] shell")
+	toggle(m.fullscreen, "^f full", "^f full")
 	// Dim each still-plain part individually rather than wrapping the joined
 	// row in one dim.Render: the already-styled parts (magenta toggles,
 	// yellow ⎋ stop) end in a full SGR reset, which would terminate the
 	// outer gray and leave every hint after the first active toggle in the
 	// terminal's default foreground.
-	for i, p := range parts {
-		if !strings.Contains(p, "\x1b") {
-			parts[i] = dim.Render(p)
+	for i, c := range chips {
+		if !strings.Contains(c.s, "\x1b") {
+			chips[i].s = dim.Render(c.s)
 		}
 	}
-	left := " " + strings.Join(parts, dim.Render("  ·  "))
+	sep := dim.Render("  ·  ")
+	join := func() string {
+		ss := make([]string, len(chips))
+		for i, c := range chips {
+			ss[i] = c.s
+		}
+		return " " + strings.Join(ss, sep)
+	}
+	left := join()
+	// Shed lowest-priority chips (last-added first within a priority) until
+	// the row fits. The provider/model segment on the right is only shown
+	// when every chip fits beside it.
+	for lipgloss.Width(left) > m.width && len(chips) > 1 {
+		drop := len(chips) - 1
+		for i := len(chips) - 1; i >= 0; i-- {
+			if chips[i].prio > chips[drop].prio {
+				drop = i
+			}
+		}
+		chips = append(chips[:drop], chips[drop+1:]...)
+		left = join()
+	}
 	right := m.renderProviderModel()
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
