@@ -192,7 +192,7 @@ func spawnEnsureCtx(ctx context.Context, g string, isMain bool) (int, error) {
 		return 0, err
 	}
 	defer unlock()
-	return ensureLockedCreate(g, isMain, true)
+	return ensureLockedCreateCtx(ctx, g, isMain, true)
 }
 
 func ensureAny(g string, isMain, create bool) (int, error) {
@@ -210,6 +210,12 @@ func ensureLocked(g string, isMain bool) (int, error) {
 }
 
 func ensureLockedCreate(g string, isMain, create bool) (int, error) {
+	return ensureLockedCreateCtx(context.Background(), g, isMain, create)
+}
+
+// ensureLockedCreateCtx: ctx bounds only the wait for a boot slot (see
+// fcSpawnCtx); a boot that has started runs to completion.
+func ensureLockedCreateCtx(ctx context.Context, g string, isMain, create bool) (int, error) {
 	// Refuse to boot anything once the shutdown handler is stopping VMs — a
 	// queued turn or cron fire racing fcStopAll would re-boot the VM it just
 	// synced down, and the boot would die dirty with the container.
@@ -286,7 +292,7 @@ func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 		}
 	}
 	emitLogfG("group", g, "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
-	if err := fcSpawn(g, port, pubPorts); err != nil {
+	if err := fcSpawnCtx(ctx, g, port, pubPorts); err != nil {
 		proxyUnlisten(port)
 		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
 		return 0, err

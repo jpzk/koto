@@ -275,6 +275,8 @@ func daemonMain() {
 		s := <-sig
 		emitLogf("daemon", "info", "%v: shutting down", s)
 		shuttingDown.Store(true)
+		// Queued boots have nothing to save and must not hold up fcSpawnDrain.
+		fcBootGate().close()
 		// Hard bound UNDER podman stop's grace window (Makefile/run-host.sh
 		// use -t 15): a wedged agent call in one group's fcStop must not turn
 		// the whole container's stop into a SIGKILL for every other group.
