@@ -198,16 +198,22 @@ func TestBootGateCloseFailsQueuedBoots(t *testing.T) {
 // The failure this gate exists for, as a model: a boot's wall time grows
 // with the number of boots sharing the CPU (fair share), the agent deadline
 // does not. Ungated, N simultaneous boots all miss it; gated, all make it.
+//
+// Deterministic: each boot's modeled duration is work·max(1, peak/cpus),
+// where peak is the most boots it saw in flight at once (sampled on entry
+// and exit of an overlap window), not a wall-clock measurement.
 func TestBootGateKeepsConcurrentBootsUnderDeadline(t *testing.T) {
 	const (
 		n        = 8
 		cpus     = 2
-		work     = 20 * time.Millisecond // solo boot time
-		deadline = 60 * time.Millisecond // fixed agent-up deadline (3× solo)
+		work     = 12 * time.Second // solo boot (vCPU-bound)
+		deadline = 30 * time.Second // fixed agent-up deadline
 	)
-	run := func(gate *bootGate) (ok int) {
-		var active int32
-		var okN int32
+	run := func(gate *bootGate) (ok, peakAll int) {
+		var active, peakAllN, okN int32
+		var arrived, sampled sync.WaitGroup // ungated: hold until the burst overlaps
+		arrived.Add(n)
+		sampled.Add(n)
 		var wg sync.WaitGroup
 		for i := 0; i < n; i++ {
 			wg.Add(1)
@@ -223,24 +229,44 @@ func TestBootGateKeepsConcurrentBootsUnderDeadline(t *testing.T) {
 					release = r
 				}
 				defer release()
-				// Deadline starts at admission, like fcSpawn's agent wait.
-				start := time.Now()
-				a := atomic.AddInt32(&active, 1)
-				time.Sleep(time.Duration(float64(work) * max(1, float64(a)/cpus)))
+				peak := atomic.AddInt32(&active, 1)
+				if gate == nil {
+					arrived.Done()
+					arrived.Wait()
+				} else {
+					time.Sleep(time.Millisecond) // overlap with any co-admitted boot
+				}
+				if a := atomic.LoadInt32(&active); a > peak {
+					peak = a
+				}
+				for {
+					p := atomic.LoadInt32(&peakAllN)
+					if peak <= p || atomic.CompareAndSwapInt32(&peakAllN, p, peak) {
+						break
+					}
+				}
+				if gate == nil {
+					sampled.Done()
+					sampled.Wait()
+				}
 				atomic.AddInt32(&active, -1)
-				if time.Since(start) <= deadline {
+				if time.Duration(float64(work)*max(1, float64(peak)/cpus)) <= deadline {
 					atomic.AddInt32(&okN, 1)
 				}
 			}()
-			time.Sleep(time.Millisecond) // ramp so 'active' reflects the burst
 		}
 		wg.Wait()
-		return int(okN)
+		return int(okN), int(peakAllN)
 	}
-	if ok := run(nil); ok == n {
-		t.Fatalf("model sanity: ungated burst of %d should miss the deadline, %d made it", n, ok)
+	if ok, peak := run(nil); ok != 0 || peak != n {
+		t.Fatalf("model sanity: ungated burst of %d: %d made the deadline (peak %d in flight), want 0", n, ok, peak)
 	}
-	if ok := run(newBootGate(bootConcurrencyFor(cpus, 1))); ok != n {
+	k := bootConcurrencyFor(cpus, 1)
+	ok, peak := run(newBootGate(k))
+	if peak > k {
+		t.Fatalf("gate admitted %d boots at once, limit %d", peak, k)
+	}
+	if ok != n {
 		t.Fatalf("gated: %d/%d boots made the deadline", ok, n)
 	}
 }
