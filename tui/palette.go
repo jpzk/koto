@@ -82,11 +82,16 @@ func (m Model) paletteItems() []paletteItem {
 	if m.focus == focusTop {
 		topTitle = "close fleet view"
 	}
+	schedTitle := "open schedules view"
+	if m.focus == focusSched {
+		schedTitle = "close schedules view"
+	}
 
 	items := []paletteItem{
 		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
 		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
 		{title: topTitle, hint: "ctrl+k", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
+		{title: schedTitle, hint: "ctrl+e", act: func(m *Model) tea.Cmd { return m.toggleSchedView() }},
 		{title: "cheatsheet (keys + commands)", hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleHelp(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},

@@ -92,6 +92,10 @@ const (
 	// (shellOpen, split mode) — a click on the chat column detaches focus
 	// that way, and a click on the grid takes it back.
 	focusShell
+	// focusSched is the schedules view, opened with ctrl+E: one row per
+	// daemon cron schedule, with toggle/run/delete/edit wired to the
+	// Sched* RPCs. Handled by handleSchedKey (sched_view.go).
+	focusSched
 )
 
 type logLine struct {
@@ -639,6 +643,37 @@ type Model struct {
 	topVPReady  bool
 	preTopFocus focusZone
 	topSort     topSortKey
+
+	// Schedules view (focusSched / ctrl+E — sched_view.go). The list is a
+	// poll, not a push: fetched on open, on g, and after every mutation
+	// (toggle/run/delete/edit respond with schedSimpleMsg, whose handler
+	// refreshes). schedConfirm is the armed delete's target id — the first
+	// keypress of the two-keypress confirm; schedEditing opens the inline
+	// cron+msg editor (its own textinput so the chat draft survives);
+	// schedEditPending carries the old schedule between the edit's add and
+	// its del (no sched_edit verb exists — edit composes add→del, add first
+	// so a rejected cron leaves the original intact). preSchedFocus mirrors
+	// preLogFocus. schedErr is the last RPC failure, rendered in the
+	// summary line (ACL denials land there; they never crash the view).
+	schedVP          viewport.Model
+	schedVPReady     bool
+	preSchedFocus    focusZone
+	schedItems       []schedItem
+	schedIdx         int
+	schedErr         string
+	schedLoading     bool
+	schedConfirm     string
+	schedEditing     bool
+	schedInput       textinput.Model
+	schedEditPending *schedItem
+	// / search (sched_view.go): schedSearching means the prompt owns every
+	// key; schedFilter is the live fuzzy query (persists after enter);
+	// schedMatches maps visible rows to schedItems indices, nil = unfiltered
+	// (a non-nil empty slice is a filter that matched nothing).
+	schedSearching bool
+	schedFilter    string
+	schedSearch    textinput.Model
+	schedMatches   []int
 
 	// vpLines is the chat viewport's content as the slice it was built from
 	// — the same lines m.vp holds after SetContent, kept here so the visible
@@ -1892,6 +1927,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeTopViewport()
 			m.refreshTopViewport()
 		}
+		if m.schedVPReady {
+			m.resizeSchedViewport()
+			m.refreshSchedViewport()
+		}
 		m.resizeHelpViewport()
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
@@ -2855,6 +2894,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case schedListMsg:
+		if m.focus == focusSched {
+			// The schedules view consumes list responses into its table;
+			// the chat rendering below is the /sched list path.
+			m.schedConsumeList(msg)
+			return m, nil
+		}
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched list: %v", msg.err)})
 			return m, nil
@@ -2887,6 +2932,26 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case schedAddMsg:
+		if old := m.schedEditPending; old != nil {
+			// Second half of the schedules view's edit composition
+			// (sched_view.go submitSchedEdit): the add either failed —
+			// old schedule untouched, render the error — or succeeded, so
+			// delete the old one now (and re-disable the replacement when
+			// the original was off; sched_add creates enabled). Keyed on
+			// the pending marker, not focus, so the swap completes even if
+			// the view was closed while the RPC was in flight.
+			m.schedEditPending = nil
+			if msg.err != nil {
+				m.schedErr = "edit: " + msg.err.Error()
+				m.refreshSchedViewport()
+				return m, nil
+			}
+			cmds := []tea.Cmd{schedDelCmd(m.sock, old.ID)}
+			if !old.Enabled {
+				cmds = append(cmds, schedToggleCmd(m.sock, msg.item.ID, false))
+			}
+			return m, tea.Batch(cmds...)
+		}
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched add: %v", msg.err)})
 			return m, nil
@@ -2896,6 +2961,18 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case schedSimpleMsg:
+		if m.focus == focusSched {
+			// Mutations from the schedules view: render the failure inline
+			// (ACL denials included) or clear it, then re-poll so the table
+			// shows the daemon's truth rather than an optimistic guess.
+			if msg.err != nil {
+				m.schedErr = fmt.Sprintf("%s %s: %v", msg.op, msg.id, msg.err)
+				m.refreshSchedViewport()
+				return m, nil
+			}
+			m.schedErr = ""
+			return m, schedListCmd(m.sock, "")
+		}
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched %s %s: %v", msg.op, msg.id, msg.err)})
 			return m, nil
@@ -3051,6 +3128,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Fleet view owns the middle pane — scroll its table, not the
 			// hidden chat viewport.
 			m.topVP, cmd = m.topVP.Update(msg)
+			return m, cmd
+		}
+		if m.focus == focusSched && m.schedVPReady {
+			// Same for the schedules view's table.
+			m.schedVP, cmd = m.schedVP.Update(msg)
 			return m, cmd
 		}
 		if m.focus == focusLog && m.logVPReady {
@@ -4205,6 +4287,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleTopView()
 		return m, nil
 	}
+	if s == "ctrl+e" {
+		// Toggle the schedules view (sched_view.go). Same tradeoff as
+		// ctrl+k: the message bar loses bubbles' default jump-to-line-end —
+		// the "end" key still does that — for a reachable schedules view.
+		return m, m.toggleSchedView()
+	}
 	if s == "ctrl+]" {
 		return m, m.toggleShellPane()
 	}
@@ -4218,6 +4306,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusTop {
 		// Same read-only routing for the fleet view.
 		return m.handleTopKey(msg)
+	}
+	if m.focus == focusSched {
+		// The schedules view owns everything else: list navigation, the
+		// armed delete confirm, and the inline edit box's text entry.
+		return m.handleSchedKey(msg)
 	}
 	if s == "ctrl+f" {
 		m.toggleFullscreen()
