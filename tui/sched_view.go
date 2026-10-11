@@ -7,7 +7,10 @@ package main
 // fixed header, scrolling viewport, hint, metrics bar. Unlike the fleet view
 // it is NOT read-only: t toggles, r fires now, d+y deletes (two-keypress
 // inline confirm — no modal stack exists in this codebase and none is
-// invented here), e edits cron+message through an inline input box.
+// invented here), e edits cron+message through an inline input box, and /
+// opens an inline fuzzy search (vim/less muscle memory) that filters rows
+// as you type — matched primarily on message, then group and id, through
+// the shared scorer in fuzzy.go.
 //
 // Everything is wired to the Sched* verbs that already exist in protocol/
 // (sched_list / sched_toggle / sched_run / sched_del / sched_add) through the
@@ -203,47 +206,101 @@ func (m *Model) resizeSchedViewport() {
 	m.schedVP.Width = w
 	m.schedVP.Height = h
 	m.schedInput.Width = max(10, w-4)
+	m.schedSearch.Width = max(10, min(40, w-4))
 }
 
-// refreshSchedViewport rebuilds the table body from m.schedItems.
+// refreshSchedViewport rebuilds the table body from the visible rows — the
+// whole of m.schedItems, or the filtered subset while a search is applied.
 func (m *Model) refreshSchedViewport() {
 	if !m.schedVPReady {
 		return
 	}
 	w, _ := m.schedPaneSize()
 	set, msgW := schedCols(w)
-	lines := make([]string, 0, len(m.schedItems))
-	for i, it := range m.schedItems {
-		lines = append(lines, renderSchedRow(it, set, msgW, i == m.schedIdx))
+	n := m.schedVisibleLen()
+	lines := make([]string, 0, n)
+	for row := 0; row < n; row++ {
+		lines = append(lines, renderSchedRow(*m.schedItemAt(row), set, msgW, row == m.schedIdx))
 	}
 	content := strings.Join(lines, "\n")
-	if len(m.schedItems) == 0 {
+	if n == 0 {
 		txt := "no schedules — /sched add <cron> <msg> creates one"
-		if m.schedLoading {
+		switch {
+		case m.schedLoading:
 			txt = "loading schedules…"
+		case len(m.schedItems) > 0 && m.schedFilter != "":
+			// Filter matched nothing: the list is NOT empty, the query is.
+			txt = fmt.Sprintf("no matches for %q — esc clears", m.schedFilter)
 		}
-		content = lipgloss.NewStyle().Foreground(cGray).Render(txt)
+		content = lipgloss.NewStyle().Foreground(cGray).Render(schedTrunc(txt, w))
 	}
 	m.schedVP.SetContent(content)
 }
 
 // schedSelected is the schedule under the cursor, nil when the list is empty.
 func (m Model) schedSelected() *schedItem {
-	if m.schedIdx < 0 || m.schedIdx >= len(m.schedItems) {
+	return m.schedItemAt(m.schedIdx)
+}
+
+// schedVisibleLen is the number of rows the table shows: the whole list, or
+// the filtered subset while a / search is applied.
+func (m Model) schedVisibleLen() int {
+	if m.schedMatches == nil {
+		return len(m.schedItems)
+	}
+	return len(m.schedMatches)
+}
+
+// schedItemAt maps a visible row to its schedule, through the filter when one
+// is applied. Every mutation (toggle/run/delete/edit) resolves its target
+// here, so acting on a filtered row hits the schedule the cursor shows, not
+// the one that happens to share its row number in the full list.
+func (m Model) schedItemAt(row int) *schedItem {
+	if row < 0 || row >= m.schedVisibleLen() {
 		return nil
 	}
-	return &m.schedItems[m.schedIdx]
+	if m.schedMatches != nil {
+		return &m.schedItems[m.schedMatches[row]]
+	}
+	return &m.schedItems[row]
+}
+
+// applySchedFilter recomputes schedMatches from schedFilter via the shared
+// fuzzy matcher (fuzzy.go — the ctrl+R/palette scorer, reused verbatim). The
+// haystack per schedule is "msg group id": tier-1 substring scoring rewards
+// earlier matches, so message hits naturally outrank group and id hits —
+// "match primarily against msg" without a second scorer. Rows come back in
+// rank order, best match on top, like every other picker in this codebase.
+func (m *Model) applySchedFilter() {
+	if m.schedFilter == "" {
+		m.schedMatches = nil
+	} else {
+		hay := make([]string, len(m.schedItems))
+		for i, it := range m.schedItems {
+			hay[i] = it.Msg + " " + it.Group + " " + it.ID
+		}
+		ranked := fuzzyRank(m.schedFilter, hay, 0)
+		idx := make([]int, 0, len(ranked))
+		for _, mt := range ranked {
+			idx = append(idx, mt.Idx)
+		}
+		m.schedMatches = idx
+	}
+	if m.schedIdx >= m.schedVisibleLen() {
+		m.schedIdx = max(0, m.schedVisibleLen()-1)
+	}
+	m.schedConfirm = "" // the armed delete may target a now-hidden row
 }
 
 // moveSchedSel moves the cursor one row and scrolls it into view.
 func (m *Model) moveSchedSel(up bool) {
-	if len(m.schedItems) == 0 {
+	if m.schedVisibleLen() == 0 {
 		return
 	}
 	switch {
 	case up && m.schedIdx > 0:
 		m.schedIdx--
-	case !up && m.schedIdx < len(m.schedItems)-1:
+	case !up && m.schedIdx < m.schedVisibleLen()-1:
 		m.schedIdx++
 	default:
 		return
@@ -278,20 +335,32 @@ func (m *Model) schedConsumeList(msg schedListMsg) {
 	}
 	m.schedErr = ""
 	m.schedItems = msg.items
-	if m.schedIdx >= len(m.schedItems) {
-		m.schedIdx = max(0, len(m.schedItems)-1)
+	m.applySchedFilter() // a g-refresh or post-mutation poll keeps the filter
+	if m.schedIdx >= m.schedVisibleLen() {
+		m.schedIdx = max(0, m.schedVisibleLen()-1)
 	}
 	m.refreshSchedViewport()
 	m.followSchedSel()
 }
 
-// renderSchedSummary is the rollup line above the table: counts, or the
-// last RPC error (ACL denials land here — rendered, never fatal).
+// renderSchedSummary is the rollup line above the table: counts (matched/total
+// while a filter is applied), or the last RPC error (ACL denials land here —
+// rendered, never fatal). Narrow widths degrade whole — first the word
+// "schedules" goes, then the query text truncates on a cell boundary with an
+// ellipsis — never a mid-cell clip.
 func (m Model) renderSchedSummary() string {
 	if m.schedErr != "" {
 		return lipgloss.NewStyle().Foreground(cRed).Render("error: " + m.schedErr)
 	}
 	gray := lipgloss.NewStyle().Foreground(cGray)
+	if m.schedFilter != "" {
+		w, _ := m.schedPaneSize()
+		s := fmt.Sprintf("%d/%d schedules · filter: %s", m.schedVisibleLen(), len(m.schedItems), m.schedFilter)
+		if cellWidth(s) > w {
+			s = fmt.Sprintf("%d/%d · %s", m.schedVisibleLen(), len(m.schedItems), m.schedFilter)
+		}
+		return gray.Render(schedTrunc(s, w))
+	}
 	on := 0
 	for _, it := range m.schedItems {
 		if it.Enabled {
@@ -357,8 +426,20 @@ func (m Model) renderSchedScrollbar() string {
 }
 
 // renderSchedHint mirrors renderTopHint; while a delete is armed it becomes
-// the confirm prompt (the second keypress of the two-keypress confirm).
+// the confirm prompt (the second keypress of the two-keypress confirm), and
+// while a / search is open it becomes the search prompt itself — the same
+// row-reuse the confirm established, so searching costs no table height.
 func (m Model) renderSchedHint() string {
+	if m.schedSearching {
+		// The textinput scrolls long queries inside its own width, so the
+		// prompt never clips mid-cell; the key help is dropped WHOLE on
+		// narrow terminals rather than truncated into noise.
+		line := " " + m.schedSearch.View()
+		if m.width >= 56 {
+			line += lipgloss.NewStyle().Foreground(cGray).Render("  enter keep · esc clear")
+		}
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(line)
+	}
 	if m.schedConfirm != "" {
 		return lipgloss.NewStyle().Foreground(cYellow).MaxWidth(m.width).
 			Render(fmt.Sprintf(" delete %s? y/d confirm · esc cancel", m.schedConfirm))
@@ -367,7 +448,7 @@ func (m Model) renderSchedHint() string {
 	if m.schedEditing {
 		return dim.MaxWidth(m.width).Render(" edit: <m h dom mon dow | @alias> <msg> · enter save · esc cancel")
 	}
-	parts := []string{" schedules", gl("↑↓ select", "up/dn select"), "t toggle", "r run", "e edit", "d delete", "g refresh", "^e close"}
+	parts := []string{" schedules", gl("↑↓ select", "up/dn select"), "t toggle", "r run", "e edit", "d delete", "/ search", "g refresh", "^e close"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
@@ -394,6 +475,9 @@ func (m *Model) enterSched() tea.Cmd {
 		ti := textinput.New()
 		ti.Prompt = ""
 		m.schedInput = ti
+		si := textinput.New()
+		si.Prompt = "/" // the vim/less idiom: the keypress IS the prompt
+		m.schedSearch = si
 		m.schedVPReady = true
 	}
 	if m.focus != focusSched {
@@ -403,6 +487,9 @@ func (m *Model) enterSched() tea.Cmd {
 	m.input.Blur()
 	m.schedConfirm = ""
 	m.schedEditing = false
+	m.schedSearching = false
+	m.schedFilter = ""
+	m.schedMatches = nil
 	m.schedLoading = true
 	m.resizeSchedViewport()
 	m.refreshSchedViewport()
@@ -415,7 +502,20 @@ func (m *Model) exitSched() {
 	m.schedConfirm = ""
 	m.schedEditing = false
 	m.schedInput.Blur()
+	m.schedSearching = false
+	m.schedSearch.Blur()
 	m.restoreChatFocus(m.preSchedFocus)
+}
+
+// startSchedSearch opens the / prompt, seeded with the applied filter so a
+// second / resumes refining instead of starting over.
+func (m *Model) startSchedSearch() {
+	m.schedConfirm = ""
+	m.schedSearching = true
+	m.schedErr = ""
+	m.schedSearch.SetValue(m.schedFilter)
+	m.schedSearch.CursorEnd()
+	m.schedSearch.Focus()
 }
 
 // startSchedEdit opens the inline editor prefilled with the selected
@@ -479,12 +579,41 @@ func (m *Model) submitSchedEdit() tea.Cmd {
 	return schedAddCmd(m.sock, old.Group, cron, msg)
 }
 
-// handleSchedKey routes keys while the schedules view is focused. Three
-// layers, checked in order: the edit box (text entry owns everything but
-// enter/esc), the armed delete confirm (y/d confirm, anything else disarms),
-// then the normal bindings.
+// handleSchedKey routes keys while the schedules view is focused. Four
+// layers, checked in order: the / search prompt (text entry owns EVERY key
+// except enter/esc — t/r/d/e while typing are query characters, never ops),
+// the edit box (same ownership), the armed delete confirm (y/d confirm,
+// anything else disarms), then the normal bindings.
 func (m Model) handleSchedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := msg.String()
+	if m.schedSearching {
+		switch s {
+		case "esc":
+			// Esc abandons the search: filter cleared, full list restored.
+			m.schedSearching = false
+			m.schedSearch.Blur()
+			m.schedFilter = ""
+			m.applySchedFilter()
+			m.refreshSchedViewport()
+			m.followSchedSel()
+			return m, nil
+		case "enter":
+			// Enter keeps the filter and hands the keys back to the list.
+			m.schedSearching = false
+			m.schedSearch.Blur()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.schedSearch, cmd = m.schedSearch.Update(msg)
+		if v := m.schedSearch.Value(); v != m.schedFilter {
+			m.schedFilter = v
+			m.schedIdx = 0 // rank order: best match on top after every edit
+			m.applySchedFilter()
+			m.refreshSchedViewport()
+			m.schedVP.GotoTop()
+		}
+		return m, cmd
+	}
 	if m.schedEditing {
 		switch s {
 		case "esc":
@@ -512,7 +641,18 @@ func (m Model) handleSchedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch s {
 	case "esc":
+		if m.schedFilter != "" {
+			// First esc clears an applied filter; the next one closes.
+			m.schedFilter = ""
+			m.applySchedFilter()
+			m.refreshSchedViewport()
+			m.followSchedSel()
+			return m, nil
+		}
 		m.exitSched()
+		return m, nil
+	case "/":
+		m.startSchedSearch()
 		return m, nil
 	case "up", "down":
 		m.moveSchedSel(s == "up")

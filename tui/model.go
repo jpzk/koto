@@ -666,6 +666,14 @@ type Model struct {
 	schedEditing     bool
 	schedInput       textinput.Model
 	schedEditPending *schedItem
+	// / search (sched_view.go): schedSearching means the prompt owns every
+	// key; schedFilter is the live fuzzy query (persists after enter);
+	// schedMatches maps visible rows to schedItems indices, nil = unfiltered
+	// (a non-nil empty slice is a filter that matched nothing).
+	schedSearching bool
+	schedFilter    string
+	schedSearch    textinput.Model
+	schedMatches   []int
 
 	// vpLines is the chat viewport's content as the slice it was built from
 	// — the same lines m.vp holds after SetContent, kept here so the visible

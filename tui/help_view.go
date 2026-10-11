@@ -97,6 +97,7 @@ func helpSections() []helpSection {
 			{"r", "fire it now, out of band"},
 			{"e / enter", "edit cron + message (new id: add-then-delete swap)"},
 			{"d", "delete - then y/d confirms, any other key cancels"},
+			{"/", "fuzzy search (msg/group/id) - enter keeps, esc clears"},
 			{"g", "refresh the list"},
 			{"esc / ctrl+e", "close"},
 		}},
