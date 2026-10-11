@@ -7,6 +7,13 @@ be grepped in this repository; where the code was ambiguous the docs say
 "unverified" instead of guessing. If a doc and the code disagree, the code
 wins — please fix the doc.
 
+## Languages
+
+- [简体中文](zh/README.md)
+- [한국어](ko/README.md)
+- [Русский](ru/README.md)
+- [Español](es/README.md)
+
 ## Start here
 
 - [getting-started.md](getting-started.md) — build and runtime
