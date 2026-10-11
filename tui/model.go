@@ -92,6 +92,12 @@ const (
 	// (shellOpen, split mode) — a click on the chat column detaches focus
 	// that way, and a click on the grid takes it back.
 	focusShell
+	// focusAcl is the ACL view, opened with ctrl+A (or /acl): one row per
+	// role with its verb/target grants. Admin-only RPCs behind it — a
+	// non-admin token sees the error in the view's summary line. Handled by
+	// handleAclKey (acl_view.go); mostly read-only, with guarded
+	// edit/delete flows routed through the message bar.
+	focusAcl
 )
 
 type logLine struct {
@@ -639,6 +645,24 @@ type Model struct {
 	topVPReady  bool
 	preTopFocus focusZone
 	topSort     topSortKey
+
+	// ACL view (focusAcl / ctrl+A — acl_view.go). aclRoles is the parsed
+	// document from the last acl_get / mutation response; aclErr the last
+	// RPC error (a non-admin token's PermissionDenied lives here and the
+	// view stays usable read-empty). aclArm/aclArmRole is the delete
+	// confirmation state machine (d → y → labeled lockout y). preAclFocus
+	// mirrors preTopFocus.
+	aclVP       viewport.Model
+	aclVPReady  bool
+	preAclFocus focusZone
+	aclRoles    []aclRole
+	aclLoaded   bool
+	aclErr      string
+	aclStatus   string
+	aclIdx      int
+	aclDetail   bool
+	aclArm      aclArmStage
+	aclArmRole  string
 
 	// vpLines is the chat viewport's content as the slice it was built from
 	// — the same lines m.vp holds after SetContent, kept here so the visible
@@ -1892,6 +1916,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeTopViewport()
 			m.refreshTopViewport()
 		}
+		if m.aclVPReady {
+			m.resizeAclViewport()
+			m.refreshAclViewport()
+		}
 		m.resizeHelpViewport()
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
@@ -2854,6 +2882,49 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("prompt ▶ %s", msg.name)})
 		return m, nil
 
+	case aclListMsg:
+		m.aclLoaded = true
+		m.aclStatus = ""
+		if msg.err != nil {
+			// A non-admin token lands here (PermissionDenied). Render in
+			// the summary line; the view stays open and usable read-empty.
+			m.aclErr = msg.err.Error()
+		} else {
+			m.aclErr = ""
+			m.aclRoles = msg.roles
+			if m.aclIdx >= len(m.aclRoles) {
+				m.aclIdx = max(0, len(m.aclRoles)-1)
+			}
+		}
+		m.refreshAclViewport()
+		return m, nil
+
+	case aclOpMsg:
+		if msg.err != nil {
+			if m.focus == focusAcl {
+				m.aclErr = fmt.Sprintf("%s %s: %v", msg.op, msg.role, msg.err)
+				m.refreshAclViewport()
+			} else {
+				m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/acl %s %s: %v", msg.op, msg.role, msg.err)})
+			}
+			return m, nil
+		}
+		// AclResp carries the full document after the operation — refresh
+		// from it directly, no second round-trip.
+		m.aclLoaded = true
+		m.aclErr = ""
+		m.aclRoles = msg.roles
+		if m.aclIdx >= len(m.aclRoles) {
+			m.aclIdx = max(0, len(m.aclRoles)-1)
+		}
+		m.aclStatus = fmt.Sprintf("%s %s ok", msg.op, msg.role)
+		if m.focus == focusAcl {
+			m.refreshAclViewport()
+		} else {
+			m.addLine(logLine{kind: "sys", group: m.cur, text: fmt.Sprintf("/acl %s %s ok", msg.op, msg.role)})
+		}
+		return m, nil
+
 	case schedListMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/sched list: %v", msg.err)})
@@ -3051,6 +3122,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Fleet view owns the middle pane — scroll its table, not the
 			// hidden chat viewport.
 			m.topVP, cmd = m.topVP.Update(msg)
+			return m, cmd
+		}
+		if m.focus == focusAcl && m.aclVPReady {
+			// ACL view: same reason.
+			m.aclVP, cmd = m.aclVP.Update(msg)
 			return m, cmd
 		}
 		if m.focus == focusLog && m.logVPReady {
@@ -4208,6 +4284,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s == "ctrl+]" {
 		return m, m.toggleShellPane()
 	}
+	if s == "ctrl+a" {
+		// Toggle the ACL view, mirroring ctrl+k's shape. The message bar
+		// loses bubbles' default jump-to-line-start — the same tradeoff
+		// ctrl+k already made for the fleet view (kill-to-end-of-line).
+		return m, m.toggleAclView()
+	}
 	if m.focus == focusLog {
 		// Read-only mode while the log view is open. No textinput routing
 		// here — esc / ctrl+L close, arrows scroll, everything else is
@@ -4218,6 +4300,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusTop {
 		// Same read-only routing for the fleet view.
 		return m.handleTopKey(msg)
+	}
+	if m.focus == focusAcl {
+		// Same full-frame routing for the ACL view (bare letters are free
+		// here too — nothing types; edits route through the message bar).
+		return m.handleAclKey(msg)
 	}
 	if s == "ctrl+f" {
 		m.toggleFullscreen()
@@ -5378,6 +5465,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		// The exit path (ctrl+c interrupts the agent now, it doesn't quit).
 		m.persistUIState()
 		return tea.Quit
+	}
+	if v == "/acl" || strings.HasPrefix(v, "/acl ") {
+		rest := ""
+		if len(v) > 4 {
+			rest = strings.TrimSpace(v[4:])
+		}
+		return m.handleAclCmd(rest)
 	}
 	if v == "/sched" || strings.HasPrefix(v, "/sched ") {
 		rest := ""

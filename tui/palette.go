@@ -82,11 +82,16 @@ func (m Model) paletteItems() []paletteItem {
 	if m.focus == focusTop {
 		topTitle = "close fleet view"
 	}
+	aclTitle := "open ACL view (roles/grants)"
+	if m.focus == focusAcl {
+		aclTitle = "close ACL view"
+	}
 
 	items := []paletteItem{
 		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
 		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
 		{title: topTitle, hint: "ctrl+k", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
+		{title: aclTitle, hint: "ctrl+a", act: func(m *Model) tea.Cmd { return m.toggleAclView() }},
 		{title: "cheatsheet (keys + commands)", hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleHelp(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
@@ -109,6 +114,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "set config value", hint: "/config <k>=<v>", run: "/config ", edit: true},
 		{title: "run a script in the VM", hint: "/runscript <file>", run: "/runscript ", edit: true},
 		{title: "list schedules", hint: "/sched", run: "/sched list"},
+		{title: "set ACL role grants", hint: "/acl set <role> <verb=targets>", run: "/acl set ", edit: true},
 		{title: "list goals", hint: "/goals", run: "/goals list"},
 		{title: "interrupt goal (pause now)", hint: "/goals interrupt", run: "/goals interrupt"},
 		{title: "fire a prompt file", hint: "/prompt <name>", run: "/prompt ", edit: true},
