@@ -847,6 +847,7 @@ func ctlConfig(args []string) {
 	root := fs.String("root", "", "yes|no")
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
 	kvm := fs.String("kvm", "", "yes|no — nested virtualization (/dev/kvm in the guest)")
+	rootfs := fs.String("rootfs", "", "root filesystem flavor: fedora (default) or an installed one, e.g. kali")
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -881,6 +882,9 @@ func ctlConfig(args []string) {
 	}
 	if seen["kvm"] {
 		req.Kvm = kvm
+	}
+	if seen["rootfs"] {
+		req.Rootfs = rootfs
 	}
 
 	cl := ctlClient()

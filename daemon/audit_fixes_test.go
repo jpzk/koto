@@ -783,6 +783,7 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 		{"size", &pb.ConfigReq{Group: "g", Size: s("xlarge")}, "config_posture"},
 		{"autostart", &pb.ConfigReq{Group: "g", Autostart: s("yes")}, "config_posture"},
 		{"kvm", &pb.ConfigReq{Group: "g", Kvm: s("yes")}, "config_posture"},
+		{"rootfs", &pb.ConfigReq{Group: "g", Rootfs: s("kali")}, "config_posture"},
 		{"mixed", &pb.ConfigReq{Group: "g", Model: s("x"), Root: s("yes")}, "config_posture"},
 		// Clearing a posture key is setting it.
 		{"clear network", &pb.ConfigReq{Group: "g", Network: s("")}, "config_posture"},

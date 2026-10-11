@@ -198,6 +198,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Root = optRaw(r.Root)
 	out.Autostart = optRaw(r.Autostart)
 	out.KVM = optRaw(r.Kvm)
+	out.Rootfs = optRaw(r.Rootfs)
 	return out
 }
 

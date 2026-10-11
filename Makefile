@@ -951,7 +951,20 @@ $(FCASSETS)/rootfs.img: $(FCGUEST_SRC)
 	./fcguest/build-rootfs.sh
 	$(prune-dangling)
 
+# Other flavors are opt-in and NOT part of a release: `make rootfs FLAVOR=kali`
+# builds fcguest/Dockerfile.rootfs.<flavor> into fcassets/rootfs-<flavor>.img,
+# which the daemon offers per group with `koto ctl config <g> -rootfs <flavor>`.
+# Phony (no file prerequisite) so it always rebuilds — a flavor image is never
+# a release input and the manifest does not track it.
+ifneq ($(filter-out fedora,$(FLAVOR)),)
+.PHONY: rootfs
+rootfs:
+	FLAVOR=$(FLAVOR) ./fcguest/build-rootfs.sh
+	$(prune-dangling)
+else
+# Default flavor (fedora) → fcassets/rootfs.img, the released artifact.
 rootfs: $(FCASSETS)/rootfs.img
+endif
 
 assets: firecracker kernel rootfs
 

@@ -354,6 +354,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("root", &r.Root)
 	setOpt("autostart", &r.Autostart)
 	setOpt("kvm", &r.Kvm)
+	setOpt("rootfs", &r.Rootfs)
 	return r
 }
 

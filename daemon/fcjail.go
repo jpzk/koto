@@ -198,7 +198,7 @@ func fcJailFixupPerms(g string, uid int) error {
 // (read-only), this VM's workspace image and vsock socket directory
 // (read-write), and the two device nodes Firecracker needs. Nothing else from
 // the host is visible after the chroot.
-func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
+func fcStageJail(g string, cfgJSON []byte, uid int, rootfsPath string) (fcJailSpec, error) {
 	root := fcJailDir(g)
 	for _, d := range []string{root, filepath.Join(root, "a"), filepath.Join(root, "dev"), filepath.Join(root, "vsock")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -227,7 +227,7 @@ func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
 		Binds: []fcBind{
 			{Src: fcBinPath(), Dst: "/firecracker", RO: true},
 			{Src: fcKernelPath(), Dst: "/a/vmlinux", RO: true},
-			{Src: fcRootfsPath(), Dst: "/a/rootfs.img", RO: true},
+			{Src: rootfsPath, Dst: "/a/rootfs.img", RO: true},
 			{Src: fcWorkspaceImg(g), Dst: "/a/workspace.img"},
 			{Src: fcSockDir(g), Dst: "/vsock"},
 			// Device nodes stay read-write binds: a read-only remount of a bind

@@ -129,6 +129,30 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		}
 		return
 	}
+	if key == "rootfs" {
+		// Root filesystem flavor (see groupRootfs). Applies on /restart. A
+		// name that isn't well-formed, or whose image isn't installed, is
+		// silently rejected and the prior value kept — the same shape as the
+		// other posture keys; the effective config read back shows what
+		// stuck. "fedora" is stored as a clear: it IS the default.
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == defaultRootfs {
+			delete(cfg, key)
+			return
+		}
+		if !validRootfsName(s) {
+			return
+		}
+		if _, err := os.Stat(fcRootfsPathFor(s)); err != nil {
+			return
+		}
+		cfg[key] = s
+		return
+	}
 	if key == "kvm" {
 		// Nested virtualization: yes|no. Applies on the next spawn (/restart):
 		// fcVMConfig masks VMX/SVM out of the guest's CPUID unless this is
@@ -350,6 +374,7 @@ func configCmd(req configReq) configResp {
 		applyConfig(cfg, "root", req.Root)
 		applyConfig(cfg, "autostart", req.Autostart)
 		applyConfig(cfg, "kvm", req.KVM)
+		applyConfig(cfg, "rootfs", req.Rootfs)
 	})
 	if err != nil {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
@@ -382,6 +407,7 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 	} else {
 		eff["kvm"] = "no"
 	}
+	eff["rootfs"] = groupRootfs(g)
 	if groupAutostart(g) {
 		eff["autostart"] = "yes"
 	} else {

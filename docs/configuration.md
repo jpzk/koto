@@ -223,6 +223,18 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
   `-kvm` exists (`daemon/ctl_cli.go`, `fs.String("kvm", …)`).
 - `autostart` — `yes` | `no`. Default `no`. Read only at daemon start
   (`autostartGroups`); a group `/restart` does not apply it.
+- `rootfs` — flavor name. Default `fedora`. Chooses which golden root
+  filesystem the group's microVM boots; applies on next spawn
+  (`daemon/fc.go` `groupRootfs`). `fedora` is the released image
+  (`fcassets/rootfs.img`); any other `<name>` is `fcassets/rootfs-<name>.img`,
+  built locally with `make rootfs FLAVOR=<name>` from
+  `fcguest/Dockerfile.rootfs.<name>` (a `kali` flavor ships in the tree). The
+  name is validated (`^[a-z0-9][a-z0-9-]{0,31}$`) before it becomes a path, so
+  a config value can never point the jail bind outside `fcassets/`; an invalid
+  or uninstalled name is rejected on write and read back as `fedora`, and a
+  spawn whose configured image is missing fails loudly rather than silently
+  falling back. Flavor images are NOT release artifacts — they are not in the
+  manifest and `make fetch` does not download them.
 - `ports` — JSON int array or comma string (`8080,3000`). Each port must be
   in `[1024, 65535]`; duplicates and out-of-range entries are dropped; at
   most 32 kept (`configMaxPorts`). Published on `KOTO_PORTS_BIND` (default
@@ -235,7 +247,7 @@ The yes/no keys fail closed: absent, unparsable or any other value is
 ### Who may set what
 
 - **Posture keys** = `network`, `internet`, `root`, `ports`, `size`,
-  `autostart`, `kvm`. On gRPC, a Config request carrying any of them is
+  `autostart`, `kvm`, `rootfs`. On gRPC, a Config request carrying any of them is
   authorized as the synthetic admin-only verb `config_posture` —
   `daemon/auth.go` `postureVerb`, `daemon/acl.go` `adminOnlyVerbs`.
 - On the in-guest ctl plane, `config_set` is main-only (`ctl: verb not
