@@ -263,14 +263,19 @@ Only `admin` passes:
   delegatable through the ACL itself.
 - `run_script`: direct code execution in a guest VM.
 - `config_posture`: a synthetic verb, covered in the next section.
+- `spawn_posture`: the same rule on `Spawn`, also covered in the next section.
 
 ### 3.6 `config` vs `config_posture` (`postureVerb`, `daemon/auth.go`)
 
 - A `Config` request that sets any **posture** key is re-labelled
   `config_posture`, which is admin-only. The posture keys are `network`,
-  `internet`, `root`, `ports`, `size`, `autostart` and `kvm`.
+  `internet`, `root`, `ports`, `size`, `autostart`, `kvm` and `rootfs`.
 - A `config` grant therefore covers only the remaining settings: `model`,
   `effort` and `provider`.
+- A `Spawn` request carrying `size`, `rootfs` or `root` seeds those keys into
+  the new group's config before its first boot, so it is re-labelled
+  `spawn_posture`, also admin-only. A plain `spawn` grant still covers a spawn
+  with only `provider` and `model`.
 - The target check still applies. The in-guest ctl plane refuses posture keys
   on its own (`configPostureKey` in `daemon/ctl.go`; see
   [configuration.md](configuration.md)).

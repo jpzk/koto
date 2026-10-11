@@ -62,7 +62,11 @@ const ctlUsage = `usage: koto ctl <verb> [flags] [args]
 
 group lifecycle
   list                                     all groups + state
-  spawn [-provider P] [-model M] <group>   create/start a group
+  spawn [-provider P] [-model M] [-size S] [-rootfs F] [-root yes|no] <group>
+                                           create/start a group; -size,
+                                           -rootfs (fedora|<installed flavor>)
+                                           and -root seed its config before
+                                           the FIRST boot (admin only)
   stop | interrupt | destroy | restart | clear  <group>
   drain [-session S] <group>               discard the queued prompts
                                            (VM, conversation and the
@@ -318,14 +322,18 @@ func ctlCliMain(args []string) {
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		provider := fs.String("provider", "", "claudesdk|venice")
 		model := fs.String("model", "", "model override")
+		size := fs.String("size", "", "small|medium|large|xlarge (admin only)")
+		rootfs := fs.String("rootfs", "", "root filesystem flavor: fedora (default) or an installed one, e.g. kali (admin only)")
+		root := fs.String("root", "", "yes|no: passwordless sudo in the guest (admin only)")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] <group>")
+			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] [-size S] [-rootfs F] [-root yes|no] <group>")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
 		defer cancel()
-		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: fs.Arg(0), Provider: *provider, Model: *model})
+		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: fs.Arg(0), Provider: *provider, Model: *model,
+			Size: *size, Rootfs: *rootfs, Root: *root})
 		ctlPrint(resp, err)
 
 	case "send":

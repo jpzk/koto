@@ -5401,41 +5401,9 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 	}
 	if strings.HasPrefix(v, "/new ") {
-		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"
-		extra := map[string]any{}
-		// Pull the optional size=<preset> token out first; the rest stay
-		// positional (group / provider / model).
-		var positional []string
-		for _, tok := range strings.Fields(v[5:]) {
-			if s, ok := strings.CutPrefix(tok, "size="); ok {
-				s = strings.ToLower(strings.TrimSpace(s))
-				if s != "small" && s != "medium" && s != "large" && s != "xlarge" {
-					m.addLine(logLine{kind: "err", text: "size must be small, medium, large, or xlarge"})
-					return nil
-				}
-				extra["size"] = s
-				continue
-			}
-			positional = append(positional, tok)
-		}
-		if len(positional) == 0 {
-			m.addLine(logLine{kind: "err", text: usage})
-			return nil
-		}
-		g := positional[0]
-		if len(positional) >= 2 {
-			p := positional[1]
-			if p != "claudesdk" && p != "venice" {
-				m.addLine(logLine{kind: "err", text: "provider must be claudesdk or venice"})
-				return nil
-			}
-			extra["provider"] = p
-		}
-		if len(positional) >= 3 {
-			extra["model"] = positional[2]
-		}
-		if len(positional) > 3 {
-			m.addLine(logLine{kind: "err", text: usage})
+		g, extra, errText := parseNewArgs(v[5:])
+		if errText != "" {
+			m.addLine(logLine{kind: "err", text: errText})
 			return nil
 		}
 		return daemonCmd(m.sock, "spawn", g, extra)
@@ -5850,4 +5818,64 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// newUsage is /new's usage line (also shown on any malformed invocation).
+const newUsage = "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge] [rootfs=fedora|<flavor>] [root=yes|no]"
+
+// newRootfsRE mirrors the daemon's rootfsNameRE. The TUI checks only the
+// shape — whether the flavor is INSTALLED is the daemon's answer, which comes
+// back as a loud spawn error rather than a silent fedora boot.
+var newRootfsRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// parseNewArgs parses the argument string of `/new`: up to three positional
+// tokens (group, provider, model) plus key=value tokens anywhere — size=,
+// rootfs= and root= — which ride to the daemon in the spawn RPC's extra map
+// and are seeded into the group's config before its first boot. A non-empty
+// errText is the message to show; nothing is sent.
+func parseNewArgs(arg string) (group string, extra map[string]any, errText string) {
+	extra = map[string]any{}
+	var positional []string
+	for _, tok := range strings.Fields(arg) {
+		if s, ok := strings.CutPrefix(tok, "size="); ok {
+			s = strings.ToLower(strings.TrimSpace(s))
+			if s != "small" && s != "medium" && s != "large" && s != "xlarge" {
+				return "", nil, "size must be small, medium, large, or xlarge"
+			}
+			extra["size"] = s
+			continue
+		}
+		if s, ok := strings.CutPrefix(tok, "rootfs="); ok {
+			s = strings.ToLower(strings.TrimSpace(s))
+			if !newRootfsRE.MatchString(s) {
+				return "", nil, "rootfs must be fedora or an installed flavor name (e.g. kali)"
+			}
+			extra["rootfs"] = s
+			continue
+		}
+		if s, ok := strings.CutPrefix(tok, "root="); ok {
+			s = strings.ToLower(strings.TrimSpace(s))
+			if s != "yes" && s != "no" {
+				return "", nil, "root must be yes or no"
+			}
+			extra["root"] = s
+			continue
+		}
+		positional = append(positional, tok)
+	}
+	if len(positional) == 0 || len(positional) > 3 {
+		return "", nil, newUsage
+	}
+	group = positional[0]
+	if len(positional) >= 2 {
+		p := positional[1]
+		if p != "claudesdk" && p != "venice" {
+			return "", nil, "provider must be claudesdk or venice"
+		}
+		extra["provider"] = p
+	}
+	if len(positional) >= 3 {
+		extra["model"] = positional[2]
+	}
+	return group, extra, ""
 }

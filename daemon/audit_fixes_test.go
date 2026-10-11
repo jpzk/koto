@@ -8112,11 +8112,11 @@ func TestSpawnModelGoesThroughTheConfigValidation(t *testing.T) {
 		"claude opus 5",
 		"model\nname",
 	} {
-		if err := seedSpawnConfig("tg", "", bad, ""); err == nil {
+		if err := seedSpawnConfig("tg", "", bad, "", "", ""); err == nil {
 			t.Errorf("spawn accepted the model %q", bad)
 		}
 	}
-	if err := seedSpawnConfig("tg", "", "claude-opus-5", ""); err != nil {
+	if err := seedSpawnConfig("tg", "", "claude-opus-5", "", "", ""); err != nil {
 		t.Fatalf("a valid model was refused: %v", err)
 	}
 	if got := groupModelName("tg"); got != "claude-opus-5" {

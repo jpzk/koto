@@ -66,9 +66,10 @@ referenced below point there.
 ### Per-group profiles (`groups/<g>/.cs/config.json`)
 
 All apply on `/restart` unless noted. **Posture keys** (`network`, `root`,
-`ports`, `size`, `autostart`, `kvm`) are operator-only: refused on the in-guest ctl
+`ports`, `size`, `autostart`, `kvm`, `rootfs`) are operator-only: refused on the in-guest ctl
 plane (H1) and, on gRPC, re-labelled `config_posture` (admin-only,
-`postureVerb` in auth.go). Delegable keys: `model`, `effort`, `provider`.
+`postureVerb` in auth.go); a Spawn carrying `size`/`rootfs`/`root` is likewise
+`spawn_posture` (they are seeded before first boot; ctl spawn takes no keys). Delegable keys: `model`, `effort`, `provider`.
 `updateGroupConfig` (config.go) is the ONE writer — per-group lock, rename
 commit.
 
@@ -264,7 +265,7 @@ map from admission arithmetic, not RSS) · **ctrl+]** shared terminal
 stacked boundary fixed at half) · **ctrl+o** fold/unfold job rows (→/← with an
 empty bar) · **ctrl+@** cycle unread.
 
-Slash commands: `/new <g> [provider] [model] size=…`, `/sw <g>`,
+Slash commands: `/new <g> [provider] [model] size=… rootfs=… root=…`, `/sw <g>`,
 `/session [name]`, `/ls`, `/config k=v`, `/restart`, `/clear [all]`,
 `/themes [name|list|terminal]`, `/runscript <file>`, `/shell`, `/sched …`,
 `/goals …`, `/interrupt`, `/destroy`, and:
@@ -312,7 +313,7 @@ types.
 - **Authorization** (`acl.go`): user → roles → {verb → targets}, union.
   `creds/acl.json`, re-read per call, fails closed. `admin` is a hardcoded
   superuser. `adminOnlyVerbs` (no grant can cover them): `acl_get/set/del`,
-  `run_script`, `config_posture`. `targetOf` decides which verbs are
+  `run_script`, `config_posture`, `spawn_posture`. `targetOf` decides which verbs are
   group-scoped; a group-scoped request without a group needs target `"*"`.
   Aggregate verbs (`list`, `watch_state`, `resources`, `subscribe_logs`)
   project their answer through the caller's own grant (`visibleTargets`).

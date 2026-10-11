@@ -214,7 +214,20 @@ func aclLogGroup(target string) string {
 // that decide what the group's VM may reach and hold, so a single `config`
 // grant authorized both. The target check is unaffected — the request is still
 // group-scoped, and admin passes everything.
+//
+// SpawnReq is the other door to the same keys: size, rootfs and root are
+// seeded into config.json BEFORE first boot (seedSpawnConfig), so a role
+// holding only the delegable `spawn` grant could otherwise create a group with
+// more host RAM, an offensive userland, or passwordless guest sudo. Such a
+// spawn is relabelled spawn_posture; provider/model stay delegable, exactly
+// as they are on ConfigReq.
 func postureVerb(verb string, req any) string {
+	if sr, ok := req.(*pb.SpawnReq); ok && verb == "spawn" {
+		if sr.Size != "" || sr.Rootfs != "" || sr.Root != "" {
+			return "spawn_posture"
+		}
+		return verb
+	}
 	cr, ok := req.(*pb.ConfigReq)
 	if verb != "config" || !ok {
 		return verb

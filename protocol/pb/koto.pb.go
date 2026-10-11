@@ -1102,6 +1102,8 @@ type SpawnReq struct {
 	Provider      string                 `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
 	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
 	Size          string                 `protobuf:"bytes,5,opt,name=size,proto3" json:"size,omitempty"`
+	Rootfs        string                 `protobuf:"bytes,6,opt,name=rootfs,proto3" json:"rootfs,omitempty"`
+	Root          string                 `protobuf:"bytes,7,opt,name=root,proto3" json:"root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1167,6 +1169,20 @@ func (x *SpawnReq) GetModel() string {
 func (x *SpawnReq) GetSize() string {
 	if x != nil {
 		return x.Size
+	}
+	return ""
+}
+
+func (x *SpawnReq) GetRootfs() string {
+	if x != nil {
+		return x.Rootfs
+	}
+	return ""
+}
+
+func (x *SpawnReq) GetRoot() string {
+	if x != nil {
+		return x.Root
 	}
 	return ""
 }
@@ -4100,13 +4116,15 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x06 \x01(\x01R\tcreatedAt\x12\"\n" +
 	"\rlast_fired_at\x18\a \x01(\x01R\vlastFiredAt\x12\x1e\n" +
-	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"z\n" +
+	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"\xa6\x01\n" +
 	"\bSpawnReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04main\x18\x02 \x01(\bR\x04main\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x14\n" +
 	"\x05model\x18\x04 \x01(\tR\x05model\x12\x12\n" +
-	"\x04size\x18\x05 \x01(\tR\x04size\"\xb5\x01\n" +
+	"\x04size\x18\x05 \x01(\tR\x04size\x12\x16\n" +
+	"\x06rootfs\x18\x06 \x01(\tR\x06rootfs\x12\x12\n" +
+	"\x04root\x18\a \x01(\tR\x04root\"\xb5\x01\n" +
 	"\aSendReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x14\n" +

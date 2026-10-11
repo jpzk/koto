@@ -523,12 +523,13 @@ func ensureProviderConfig(g string) error {
 	return err
 }
 
-// seedSpawnConfig writes provider/model/size into a group's config.json before
-// ensure() runs. Used by the spawn dispatch so `/new <g> <provider> <model>
-// size=<preset>` lands its choice on disk before ensureProviderConfig's default
-// kicks in (and before fcResolveSize reads the size). Empty arguments are
-// skipped (preserving any existing value).
-func seedSpawnConfig(g, provider, model, size string) error {
+// seedSpawnConfig writes provider/model/size/rootfs/root into a group's
+// config.json before ensure() runs. Used by the spawn dispatch so
+// `/new <g> <provider> <model> size=<preset> rootfs=<flavor>` lands its choice
+// on disk before ensureProviderConfig's default kicks in (and before
+// fcResolveSize / groupRootfs read it at boot). Empty arguments are skipped
+// (preserving any existing value).
+func seedSpawnConfig(g, provider, model, size, rootfs, root string) error {
 	// The model identifier goes through the SAME validation the /config path
 	// applies (audit 2026-09-11 L105). Spawn wrote it verbatim, and the value
 	// persists into config.json and is handed to the guest on every later turn
@@ -554,6 +555,19 @@ func seedSpawnConfig(g, provider, model, size string) error {
 		}
 		if size != "" {
 			cfg["size"] = size
+		}
+		// rootfs and root arrive pre-validated (spawnPostureArgs). "fedora" is
+		// stored as a clear, exactly as the config path stores it: it IS the
+		// default, and a re-spawn naming it must undo an earlier flavor.
+		switch rootfs {
+		case "":
+		case defaultRootfs:
+			delete(cfg, "rootfs")
+		default:
+			cfg["rootfs"] = rootfs
+		}
+		if root != "" {
+			cfg["root"] = root
 		}
 	})
 	return err

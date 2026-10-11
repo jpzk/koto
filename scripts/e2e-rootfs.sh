@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # e2e for per-group rootfs selection. Drives the installed daemon via ctl.
 # Reuses `kalitest` (rootfs=kali, root=yes); spawns+destroys a scratch fedora
-# group for isolation + negative cases. Run from the guest with the nested
+# group for isolation + negative cases, and a scratch kali group spawned with
+# -rootfs kali -root yes (first-boot check). Run from the guest with the nested
 # daemon up.
 set -u
 export HOME=/var/lib/koto KOTO_HOME=/var/lib/koto KOTO_ADDR=127.0.0.1:8443 \
@@ -80,8 +81,36 @@ mv "$IMG.e2e-bak" "$IMG"
 case "$OUT" in *SHOULD_NOT_RUN*) no "boot ran without its rootfs image";; *) ok "boot refused without rootfs image";; esac
 chk "error carries a build hint"      "make rootfs"   "$OUT"
 
-hdr "cleanup: destroy scratch fedora group, stop kali"
-$K ctl destroy "$FED" >/dev/null 2>&1; $K ctl stop kalitest >/dev/null 2>&1
+hdr "9. spawn -rootfs kali -root yes: right on FIRST boot, no restart"
+SK=e2ek
+$K ctl destroy "$SK" >/dev/null 2>&1   # leftover from an aborted run
+OUT=$($K ctl spawn -rootfs kali -root yes "$SK" 2>&1); RC=$?; echo "$OUT"
+[ "$RC" -eq 0 ] && ok "spawn -rootfs kali -root yes accepted" || no "spawn -rootfs kali -root yes rc=$RC"
+OUT=$(run "$SK" 'grep ^ID= /etc/os-release; echo "UID=$(sudo -n id -u 2>/dev/null)"')
+echo "$OUT"
+chk "first boot os-release ID=kali"   "ID=kali"       "$OUT"
+chk "first boot sudo uid 0"           "UID=0"         "$OUT"
+OUT=$($K ctl config "$SK" 2>&1)
+chk "spawned config rootfs=kali"      '"rootfs":"kali"' "$OUT"
+chk "spawned config root=yes"         '"root":"yes"'  "$OUT"
+$K ctl destroy "$SK" >/dev/null 2>&1
+
+hdr "10. negative: spawn -rootfs nosuch / malformed / bad root error loudly"
+SN=e2en
+OUT=$($K ctl spawn -rootfs nosuch "$SN" 2>&1); RC=$?; echo "rc=$RC $OUT"
+[ "$RC" -ne 0 ] && ok "spawn -rootfs nosuch exits non-zero" || no "spawn -rootfs nosuch succeeded"
+chk "error says not installed"        "not installed" "$OUT"
+OUT=$($K ctl spawn -rootfs '../etc' "$SN" 2>&1); RC=$?; echo "rc=$RC $OUT"
+[ "$RC" -ne 0 ] && ok "spawn -rootfs ../etc exits non-zero" || no "spawn -rootfs ../etc succeeded"
+OUT=$($K ctl spawn -root maybe "$SN" 2>&1); RC=$?; echo "rc=$RC $OUT"
+[ "$RC" -ne 0 ] && ok "spawn -root maybe exits non-zero" || no "spawn -root maybe succeeded"
+OUT=$($K ctl list 2>&1)
+case "$OUT" in *"$SN"*) no "rejected spawn left group $SN registered"; $K ctl destroy "$SN" >/dev/null 2>&1;;
+               *) ok "rejected spawns registered nothing";; esac
+
+hdr "cleanup: destroy scratch groups, stop kali"
+$K ctl destroy "$FED" >/dev/null 2>&1; $K ctl destroy e2ek >/dev/null 2>&1
+$K ctl stop kalitest >/dev/null 2>&1
 
 printf '\n==== e2e-rootfs: %d passed, %d failed ====\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

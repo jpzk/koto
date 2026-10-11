@@ -257,6 +257,14 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 			return &pb.SpawnResp{Error: "size must be small, medium, large, or xlarge"}, nil
 		}
 	}
+	rootfs, err := spawnRootfsArg(r.Rootfs)
+	if err != nil {
+		return &pb.SpawnResp{Error: err.Error()}, nil
+	}
+	root, err := spawnRootArg(r.Root)
+	if err != nil {
+		return &pb.SpawnResp{Error: err.Error()}, nil
+	}
 	// Same cap the ctl plane's spawn verb enforces. It lived only there,
 	// because the only untrusted spawner was a compromised main — but `spawn`
 	// is an ordinary grantable verb, so a non-admin role holding it on "*" had
@@ -267,8 +275,8 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 			return &pb.SpawnResp{Error: fmt.Sprintf("spawn cap reached (%d groups)", ctlMaxSpawn)}, nil
 		}
 	}
-	if r.Provider != "" || r.Model != "" || r.Size != "" {
-		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size); err != nil {
+	if r.Provider != "" || r.Model != "" || r.Size != "" || rootfs != "" || root != "" {
+		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size, rootfs, root); err != nil {
 			return &pb.SpawnResp{Error: err.Error()}, nil
 		}
 	}
@@ -1526,4 +1534,35 @@ func (s *kotoServer) SubscribeLogs(_ *pb.LogsReq, stream pb.Koto_SubscribeLogsSe
 			return nil
 		}
 	}
+}
+
+// spawnRootfsArg normalizes and validates a spawn-time rootfs flavor. Unlike
+// the config path — which silently keeps the prior value, a posture-key shape
+// the effective config read-back makes visible — spawn has no prior value to
+// show and boots immediately, so a typo would otherwise come up as fedora with
+// nothing said. A malformed or uninstalled name is therefore a loud error.
+// "" means "not given"; "fedora" is the default and always acceptable.
+func spawnRootfsArg(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || s == defaultRootfs {
+		return s, nil
+	}
+	if !validRootfsName(s) {
+		return "", fmt.Errorf("rootfs %q is malformed (must match %s)", truncateRunes(s, 40), rootfsNameRE.String())
+	}
+	if _, err := os.Stat(fcRootfsPathFor(s)); err != nil {
+		return "", fmt.Errorf("rootfs %q is not installed (installed: %s; build one with make rootfs FLAVOR=%s)",
+			s, strings.Join(fcRootfsFlavors(), ", "), s)
+	}
+	return s, nil
+}
+
+// spawnRootArg validates a spawn-time root (guest passwordless sudo) setting.
+func spawnRootArg(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", "yes", "no":
+		return s, nil
+	}
+	return "", fmt.Errorf("root must be yes or no, not %q", truncateRunes(s, 20))
 }
