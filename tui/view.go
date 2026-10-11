@@ -278,6 +278,11 @@ func (m Model) view() string {
 		// one row per group (space/cpu/mem/tok/s/network/root/model).
 		return m.withPicker(m.renderTopView())
 	}
+	if m.focus == focusAcl {
+		// ACL view: same full-frame replacement, one row per role
+		// (verbs/targets), guarded edit/delete via the message bar.
+		return m.withPicker(m.renderAclView())
+	}
 	if m.shellViewActive() {
 		// Shared shell: fullscreen while focused on a narrow terminal, or
 		// the chat-column + message-bar + pty split whenever the pane is

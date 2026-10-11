@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // The wire contract shared with the daemon is the proto alone (generated
@@ -260,6 +261,20 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_cancel":
 		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
+	// ---- ACL management (hardcoded admin-only daemon-side; a non-admin
+	// token gets PermissionDenied, which the ACL view renders in its summary
+	// line rather than treating as fatal — see acl_view.go) ----
+	case "acl_get":
+		return cl.AclGet(ctx, &pb.AclGetReq{})
+	case "acl_set_role":
+		grants, _ := extra["grants"].(map[string]any)
+		st, err := structpb.NewStruct(grants)
+		if err != nil {
+			return nil, fmt.Errorf("acl grants: %w", err)
+		}
+		return cl.AclSetRole(ctx, &pb.AclSetRoleReq{Role: s("role"), Grants: st})
+	case "acl_del_role":
+		return cl.AclDelRole(ctx, &pb.AclDelRoleReq{Role: s("role")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }
