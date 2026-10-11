@@ -78,7 +78,7 @@ config
   config <group>                           print effective config (no flags = read)
   config <group> [-model M] [-provider P] [-network none|wan|lan|full]
          [-size small|medium|large|xlarge] [-root yes|no] [-effort E] [-ports P]
-         [-autostart yes|no]
+         [-autostart yes|no] [-rootfs fedora|<flavor>]
                                            set keys ("" clears a key)
 
 streams
