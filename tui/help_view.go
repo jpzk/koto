@@ -54,6 +54,7 @@ func helpSections() []helpSection {
 			{"ctrl+r", "recall prompt history for the current group"},
 			{"ctrl+h", "this cheatsheet"},
 			{"ctrl+k", "fleet view - space/cpu/mem/tok-s per group"},
+			{"ctrl+e", "schedules view - manage daemon cron schedules"},
 			{"ctrl+l", "daemon log view"},
 			{"ctrl+]", "shared terminal (tmux) for the active session"},
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
@@ -89,6 +90,15 @@ func helpSections() []helpSection {
 			{"shift+up/down", "move the tree cursor row-by-row (also in the log view)"},
 			{"pgup/pgdn", "scroll the table"},
 			{"esc / ctrl+k", "close"},
+		}},
+		{"SCHEDULES VIEW (ctrl+e)", []helpEntry{
+			{"up/down", "move the selection"},
+			{"t / space", "enable/disable the schedule"},
+			{"r", "fire it now, out of band"},
+			{"e / enter", "edit cron + message (new id: add-then-delete swap)"},
+			{"d", "delete - then y/d confirms, any other key cancels"},
+			{"g", "refresh the list"},
+			{"esc / ctrl+e", "close"},
 		}},
 		{"SLASH COMMANDS", []helpEntry{
 			{"/new <g> [provider] [model] [size=..]", "spawn a group (microVM)"},
