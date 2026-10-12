@@ -268,9 +268,12 @@ Only `admin` passes:
 
 - A `Config` request that sets any **posture** key is re-labelled
   `config_posture`, which is admin-only. The posture keys are `network`,
-  `internet`, `root`, `ports`, `size`, `autostart` and `kvm`.
+  `internet`, `root`, `ports`, `size`, `autostart`, `kvm` and `rootfs`.
 - A `config` grant therefore covers only the remaining settings: `model`,
   `effort` and `provider`.
+- `Spawn` is deliberately NOT posture-gated: a role holding `spawn` (e.g.
+  main orchestrating peers) may seed `size`, `rootfs` and `root` on the NEW
+  group it creates. The gate above applies to changing an EXISTING group.
 - The target check still applies. The in-guest ctl plane refuses posture keys
   on its own (`configPostureKey` in `daemon/ctl.go`; see
   [configuration.md](configuration.md)).

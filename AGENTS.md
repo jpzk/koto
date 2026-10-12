@@ -66,9 +66,9 @@ referenced below point there.
 ### Per-group profiles (`groups/<g>/.cs/config.json`)
 
 All apply on `/restart` unless noted. **Posture keys** (`network`, `root`,
-`ports`, `size`, `autostart`, `kvm`) are operator-only: refused on the in-guest ctl
+`ports`, `size`, `autostart`, `kvm`, `rootfs`) are operator-only: refused on the in-guest ctl
 plane (H1) and, on gRPC, re-labelled `config_posture` (admin-only,
-`postureVerb` in auth.go). Delegable keys: `model`, `effort`, `provider`.
+`postureVerb` in auth.go). Spawn is delegable by design: a `spawn` grant may seed `size`/`rootfs`/`root` on a NEW group (ctl-plane spawn takes no keys). Delegable keys: `model`, `effort`, `provider`.
 `updateGroupConfig` (config.go) is the ONE writer — per-group lock, rename
 commit.
 
@@ -264,7 +264,7 @@ map from admission arithmetic, not RSS) · **ctrl+]** shared terminal
 stacked boundary fixed at half) · **ctrl+o** fold/unfold job rows (→/← with an
 empty bar) · **ctrl+@** cycle unread.
 
-Slash commands: `/new <g> [provider] [model] size=…`, `/sw <g>`,
+Slash commands: `/new <g> [provider] [model] size=… rootfs=… root=…`, `/sw <g>`,
 `/session [name]`, `/ls`, `/config k=v`, `/restart`, `/clear [all]`,
 `/themes [name|list|terminal]`, `/runscript <file>`, `/shell`, `/sched …`,
 `/goals …`, `/interrupt`, `/destroy`, and:

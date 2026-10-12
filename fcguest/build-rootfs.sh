@@ -21,11 +21,31 @@
 #
 # Output: fcassets/rootfs.img — attached read-only as every group VM's root
 # drive. Rebuild whenever sidecar/*.{sh,js} or fcguest/ change: `make rootfs`.
+#
+# FLAVOR selects WHICH golden image to build. The default, "fedora", uses
+# fcguest/Dockerfile.rootfs and writes fcassets/rootfs.img — the released
+# artifact, unchanged. Any other flavor <name> uses Dockerfile.rootfs.<name>
+# and writes fcassets/rootfs-<name>.img, which the daemon offers per group via
+# `-rootfs <name>`. e.g. FLAVOR=kali -> Dockerfile.rootfs.kali -> rootfs-kali.img.
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+FLAVOR="${FLAVOR:-fedora}"
+case "$FLAVOR" in
+  *[!a-z0-9-]*|'') echo "FLAVOR must match [a-z0-9-]+ (got '$FLAVOR')"; exit 2 ;;
+esac
+if [ "$FLAVOR" = fedora ]; then
+  DOCKERFILE="$HERE/fcguest/Dockerfile.rootfs"
+  IMGNAME="rootfs.img"
+  IMGTAG="koto-fcrootfs"
+else
+  DOCKERFILE="$HERE/fcguest/Dockerfile.rootfs.$FLAVOR"
+  IMGNAME="rootfs-$FLAVOR.img"
+  IMGTAG="koto-fcrootfs-$FLAVOR"
+fi
+[ -f "$DOCKERFILE" ] || { echo "no Dockerfile for flavor '$FLAVOR' at $DOCKERFILE"; exit 2; }
 # KOTO_FCASSETS_OUT: see fetch-assets.sh.
 OUTDIR="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
-OUT="$OUTDIR/rootfs.img"
+OUT="$OUTDIR/$IMGNAME"
 mkdir -p "$OUTDIR"
 
 # Either engine. Docker first when both are present, matching the Makefile so
@@ -67,11 +87,14 @@ mkdir -p "$HERE/.gocache/mod"
   "$GO_IMAGE" \
   sh -c 'GOWORK=off CGO_ENABLED=0 go build -ldflags="-s -w" -o fc-agent .'
 
-echo "==> building rootfs image"
-"$CONTAINER" build -t koto-fcrootfs -f "$HERE/fcguest/Dockerfile.rootfs" "$HERE"
+echo "==> building rootfs image ($FLAVOR)"
+# KALI_TOOLS (kali flavor only) overrides the Dockerfile's default tool list.
+set -- 
+if [ -n "${KALI_TOOLS:-}" ]; then set -- --build-arg "KALI_TOOLS=$KALI_TOOLS"; fi
+"$CONTAINER" build "$@" -t "$IMGTAG" -f "$DOCKERFILE" "$HERE"
 
 echo "==> exporting filesystem + mkfs.ext4"
-CID=$("$CONTAINER" create koto-fcrootfs)
+CID=$("$CONTAINER" create "$IMGTAG")
 trap '"$CONTAINER" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 
 # Stream the export straight into the builder's stdin so the tar never lands
@@ -79,7 +102,7 @@ trap '"$CONTAINER" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
 "$CONTAINER" export "$CID" | "$CONTAINER" run --rm -i \
   --security-opt label=disable \
   -v "$OUTDIR:/out" \
-  -e CHOWN_TO="$CHOWN_TO" \
+  -e CHOWN_TO="$CHOWN_TO" -e IMGNAME="$IMGNAME" \
   "$MKFS_IMAGE" sh -eu -c '
     apk add --no-cache e2fsprogs >/dev/null
     TMP=$(mktemp -d)
@@ -98,14 +121,14 @@ trap '"$CONTAINER" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
     MB=$(( KB / 1024 ))
     SIZE=$(( MB + MB / 5 + 256 ))
     [ "$SIZE" -lt 2048 ] && SIZE=2048
-    rm -f /out/rootfs.img
-    truncate -s "${SIZE}M" /out/rootfs.img
-    mkfs.ext4 -F -q -d "$TMP" /out/rootfs.img
+    rm -f "/out/$IMGNAME"
+    truncate -s "${SIZE}M" "/out/$IMGNAME"
+    mkfs.ext4 -F -q -d "$TMP" "/out/$IMGNAME"
     rm -rf "$TMP"
     # See CHOWN_TO above: 0:0 under a rootless engine (a deliberate no-op),
     # our real id under a rootful one.
-    chown "$CHOWN_TO" /out/rootfs.img
+    chown "$CHOWN_TO" "/out/$IMGNAME"
   '
 
 ls -lh "$OUT"
-echo "rootfs.img ready"
+echo "$IMGNAME ready"

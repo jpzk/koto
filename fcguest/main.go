@@ -847,7 +847,7 @@ func enableRoot() error {
 // failure every overlay mounted so far is unwound — a retried or fallen-back
 // init must never stack a second overlay on a half-applied set.
 func overlayRootDirs() error {
-	base := filepath.Join(wsDir, ".rootovl")
+	base := filepath.Join(wsDir, rootOverlayDirName(osReleaseID()))
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return err
 	}
@@ -1131,7 +1131,7 @@ const execCap = 60 * time.Second
 // If some future exec genuinely needs root, give it its own op rather than
 // raising this one back: the privilege should be named at the call site.
 func execAsWorker(script string) *exec.Cmd {
-	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd := exec.Command(scriptShell(), "-c", script)
 	cmd.Dir = wsDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
@@ -1355,7 +1355,7 @@ func handleRunScript(c *vconn, script string) {
 		frameError(c, err.Error())
 		return
 	}
-	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd := exec.Command(scriptShell(), "-c", script)
 	cmd.Dir = wsDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},

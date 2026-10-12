@@ -1,0 +1,132 @@
+# Kali Linux golden rootfs for koto Firecracker microVM groups.
+#
+# A FLAVOR, not the default: built with `make rootfs FLAVOR=kali`, installed as
+# fcassets/rootfs-kali.img, and selected per group with
+# `koto ctl config <g> -rootfs kali` (operator-only, applies on /restart).
+# The default rootfs stays Fedora (Dockerfile.rootfs) — this adds the option of
+# an offensive-security userland without changing anyone's default.
+#
+# Same contract as the Fedora image: never run as a container, exported into an
+# ext4 image Firecracker attaches read-only as the shared root drive; ships
+# rootless podman so the agent can run containers inside the VM; the pinned
+# claude-code CLI as the agent; node (uid 1000) as the worker; fc-agent as PID 1.
+#
+# Pinned by DIGEST — `kalilinux/kali-last-release` is a moving tag (the quarterly
+# ISO release, more stable than kali-rolling). Bump deliberately, then rebuild:
+#   podman manifest inspect docker.io/kalilinux/kali-last-release:latest
+# Snapshot pinned: 2026-10-11 (tracks the Kali 2026.2 release, 29 Jun 2026).
+FROM docker.io/kalilinux/kali-last-release@sha256:b7f0cefd4f9f5ea0d601d37c4300d148b9a8168934cfc66e5279dd3a09aef281
+
+# claude-code pin — identical mechanism and digests to the Fedora image. See
+# Dockerfile.rootfs for the full rationale (audit M46): both tarballs are
+# downloaded directly, checked against the SHA-512s npm publishes as
+# dist.integrity, the wrapper unpacked where `npm i -g` would put it, and the
+# native binary placed over its stub by hand.
+ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
+ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
+
+# Debian-family userland. kali-last-release is a BASE image (no metapackages),
+# so this installs the same capabilities the Fedora image has, by their Debian
+# names, plus KALI_TOOLS. The default is a lean, explicit tool list (a few
+# hundred MB) that boots on a small build host; pass
+#   --build-arg KALI_TOOLS=kali-linux-headless
+# (KALI_TOOLS=kali-linux-headless make rootfs FLAVOR=kali) for the full headless
+# metapackage — several GB, metasploit included. KALI_TOOLS is word-split on
+# purpose: it is a package list.
+#
+# DEBIAN_FRONTEND keeps apt non-interactive; --no-install-recommends mirrors
+# Fedora's install_weak_deps=False. nodejs/npm come from the Kali repo.
+ARG KALI_TOOLS="nmap sqlmap hydra nikto gobuster ffuf netcat-traditional dnsutils whois tcpdump socat"
+ENV DEBIAN_FRONTEND=noninteractive
+# Pin ONE mirror: the default http.kali.org redirector picks a random mirror per
+# file, so a single dead mirror fails the build at random. kali.download is
+# Kali's own CDN. Packages are GPG-verified by apt regardless of mirror, so this
+# changes reliability, not trust. Retries cover transient fetch errors.
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do \
+      [ -f "$f" ] && sed -i 's|http://http.kali.org/kali|http://kali.download/kali|g' "$f"; done; \
+    cat /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null | grep kali.download \
+ && printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      coreutils \
+      curl \
+      e2fsprogs \
+      git \
+      iproute2 \
+      jq \
+      util-linux \
+      nodejs \
+      npm \
+      procps \
+      python3 \
+      ripgrep \
+      tar \
+      gzip \
+      tmux \
+      debianutils \
+      podman \
+      crun \
+      conmon \
+      fuse-overlayfs \
+      passt \
+      slirp4netns \
+      uidmap \
+      login \
+      sudo \
+      $KALI_TOOLS \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -u /usr/bin/sudo
+
+RUN set -eu; cd /tmp; \
+    reg=https://registry.npmjs.org/@anthropic-ai; v="$CLAUDE_CODE_VERSION"; \
+    curl -fsSL -o wrapper.tgz "$reg/claude-code/-/claude-code-$v.tgz"; \
+    curl -fsSL -o native.tgz "$reg/claude-code-linux-x64/-/claude-code-linux-x64-$v.tgz"; \
+    printf '%s  wrapper.tgz\n%s  native.tgz\n' \
+      "$CLAUDE_CODE_SHA512" "$CLAUDE_CODE_LINUX_X64_SHA512" | sha512sum -c -; \
+    dir="$(npm root -g)/@anthropic-ai/claude-code"; \
+    mkdir -p "$dir"; \
+    tar -xzf wrapper.tgz -C "$dir" --strip-components=1 --no-same-owner; \
+    tar -xzOf native.tgz package/claude > "$dir/bin/claude.exe"; \
+    chmod 0755 "$dir/bin/claude.exe"; \
+    ln -sf "$dir/bin/claude.exe" /usr/local/bin/claude; \
+    rm -f wrapper.tgz native.tgz; \
+    claude --version | grep -qF "$v"
+
+# node (uid 1000) — the worker every agent process runs as. On Debian a uid
+# 1000 may already exist in the base image; reuse it under the name node if so,
+# otherwise create it. claude --dangerously-skip-permissions refuses root.
+RUN if id -u 1000 >/dev/null 2>&1; then \
+      u=$(getent passwd 1000 | cut -d: -f1); \
+      [ "$u" = node ] || usermod -l node -d /home/node -m "$u"; \
+    else useradd -u 1000 -m -s /bin/bash node; fi \
+ && getent group node >/dev/null || groupmod -n node "$(getent group 1000 | cut -d: -f1)" || true
+
+# Rootless podman for node — identical to the Fedora image. fuse-overlayfs
+# storage, cgroupfs + file logger (no systemd in the guest), pasta networking.
+RUN printf 'node:100000:65536\n' > /etc/subuid \
+ && printf 'node:100000:65536\n' > /etc/subgid \
+ && mkdir -p /etc/containers \
+ && printf '[storage]\ndriver = "overlay"\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' > /etc/containers/storage.conf \
+ && printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\nruntime = "crun"\n[network]\ndefault_rootless_network_cmd = "pasta"\n' > /etc/containers/containers.conf \
+ && chmod u+s /usr/bin/newuidmap /usr/bin/newgidmap
+
+# Kali's containers-common ships a registries.conf with unqualified-search
+# registries already; leave it. tmux status bar off for /shell attaches.
+RUN printf 'set -g status off\n' > /etc/tmux.conf
+
+# Sidecar loop scripts, baked in (no bind mounts in a microVM).
+COPY sidecar/ /sidecar/
+RUN chmod -R a+rX /sidecar
+
+# The PID-1 agent. Same contract as Fedora: boot_args select it via
+# init=/usr/local/bin/fc-agent; /workspace and /skills pre-exist as mount
+# points because the root drive is attached read-only.
+COPY fcguest/fc-agent /usr/local/bin/fc-agent
+RUN chmod 755 /usr/local/bin/fc-agent \
+ && mkdir -p /workspace /skills \
+ && printf '127.0.0.1 localhost koto-vm\n' > /etc/hosts
+# /etc/resolv.conf is fixed up in build-rootfs.sh (staging tree), not here.

@@ -102,7 +102,7 @@ func helpSections() []helpSection {
 			{"esc / ctrl+e", "close"},
 		}},
 		{"SLASH COMMANDS", []helpEntry{
-			{"/new <g> [provider] [model] [size=..]", "spawn a group (microVM)"},
+			{"/new <g> [prov] [model] [k=v]", "spawn a group (microVM); k = size, rootfs (fedora|kali|..), root (yes|no) - admin only, seeded before first boot"},
 			{"/sw <group>", "switch active group"},
 			{"/session [name]", "switch chat session (default or - returns)"},
 			{"/ls", "refresh the group list"},

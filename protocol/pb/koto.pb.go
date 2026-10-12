@@ -1102,6 +1102,8 @@ type SpawnReq struct {
 	Provider      string                 `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`
 	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
 	Size          string                 `protobuf:"bytes,5,opt,name=size,proto3" json:"size,omitempty"`
+	Rootfs        string                 `protobuf:"bytes,6,opt,name=rootfs,proto3" json:"rootfs,omitempty"`
+	Root          string                 `protobuf:"bytes,7,opt,name=root,proto3" json:"root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1167,6 +1169,20 @@ func (x *SpawnReq) GetModel() string {
 func (x *SpawnReq) GetSize() string {
 	if x != nil {
 		return x.Size
+	}
+	return ""
+}
+
+func (x *SpawnReq) GetRootfs() string {
+	if x != nil {
+		return x.Rootfs
+	}
+	return ""
+}
+
+func (x *SpawnReq) GetRoot() string {
+	if x != nil {
+		return x.Root
 	}
 	return ""
 }
@@ -1646,6 +1662,7 @@ type ConfigReq struct {
 	Network       *string                `protobuf:"bytes,12,opt,name=network,proto3,oneof" json:"network,omitempty"`     // none|wan|lan|full — egress profile; applies on /restart
 	Autostart     *string                `protobuf:"bytes,13,opt,name=autostart,proto3,oneof" json:"autostart,omitempty"` // yes|no — boot this group's VM when the daemon starts
 	Kvm           *string                `protobuf:"bytes,14,opt,name=kvm,proto3,oneof" json:"kvm,omitempty"`             // yes|no — expose VMX/SVM (nested virtualization); applies on /restart
+	Rootfs        *string                `protobuf:"bytes,15,opt,name=rootfs,proto3,oneof" json:"rootfs,omitempty"`       // fedora (default) | installed flavor name, e.g. kali — guest root filesystem; applies on /restart
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1753,6 +1770,13 @@ func (x *ConfigReq) GetAutostart() string {
 func (x *ConfigReq) GetKvm() string {
 	if x != nil && x.Kvm != nil {
 		return *x.Kvm
+	}
+	return ""
+}
+
+func (x *ConfigReq) GetRootfs() string {
+	if x != nil && x.Rootfs != nil {
+		return *x.Rootfs
 	}
 	return ""
 }
@@ -4092,13 +4116,15 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x06 \x01(\x01R\tcreatedAt\x12\"\n" +
 	"\rlast_fired_at\x18\a \x01(\x01R\vlastFiredAt\x12\x1e\n" +
-	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"z\n" +
+	"\vnext_due_at\x18\b \x01(\x01R\tnextDueAt\"\xa6\x01\n" +
 	"\bSpawnReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04main\x18\x02 \x01(\bR\x04main\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x14\n" +
 	"\x05model\x18\x04 \x01(\tR\x05model\x12\x12\n" +
-	"\x04size\x18\x05 \x01(\tR\x04size\"\xb5\x01\n" +
+	"\x04size\x18\x05 \x01(\tR\x04size\x12\x16\n" +
+	"\x06rootfs\x18\x06 \x01(\tR\x06rootfs\x12\x12\n" +
+	"\x04root\x18\a \x01(\tR\x04root\"\xb5\x01\n" +
 	"\aSendReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x14\n" +
@@ -4131,7 +4157,7 @@ const file_koto_proto_rawDesc = "" +
 	"HistoryReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06before\x18\x03 \x01(\x01R\x06before\"\xba\x03\n" +
+	"\x06before\x18\x03 \x01(\x01R\x06before\"\xe2\x03\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x00R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -4144,7 +4170,9 @@ const file_koto_proto_rawDesc = "" +
 	"\x04root\x18\v \x01(\tH\x06R\x04root\x88\x01\x01\x12\x1d\n" +
 	"\anetwork\x18\f \x01(\tH\aR\anetwork\x88\x01\x01\x12!\n" +
 	"\tautostart\x18\r \x01(\tH\bR\tautostart\x88\x01\x01\x12\x15\n" +
-	"\x03kvm\x18\x0e \x01(\tH\tR\x03kvm\x88\x01\x01B\b\n" +
+	"\x03kvm\x18\x0e \x01(\tH\tR\x03kvm\x88\x01\x01\x12\x1b\n" +
+	"\x06rootfs\x18\x0f \x01(\tH\n" +
+	"R\x06rootfs\x88\x01\x01B\b\n" +
 	"\x06_modelB\t\n" +
 	"\a_effortB\b\n" +
 	"\x06_portsB\v\n" +
@@ -4156,7 +4184,8 @@ const file_koto_proto_rawDesc = "" +
 	"\b_networkB\f\n" +
 	"\n" +
 	"_autostartB\x06\n" +
-	"\x04_kvmJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
+	"\x04_kvmB\t\n" +
+	"\a_rootfsJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
 	"\aJobsReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"S\n" +
 	"\bJobsResp\x12\x0e\n" +

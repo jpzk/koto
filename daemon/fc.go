@@ -60,6 +60,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +212,58 @@ func groupRoot(g string) bool { return groupConfigBool(g, "root") }
 // virtualization puts the host kernel's nested-VMX/SVM emulation inside the
 // guest's reach, which is a larger attack surface than a plain guest's.
 func groupKVM(g string) bool { return groupConfigBool(g, "kvm") }
+
+// Root filesystem flavors. Every group VM boots a shared, read-only golden
+// rootfs; "rootfs" in config.json picks WHICH one. The default flavor
+// ("fedora") is fcassets/rootfs.img — the released artifact, unchanged path —
+// and every other flavor <name> is fcassets/rootfs-<name>.img, built with
+// `make rootfs FLAVOR=<name>` from fcguest/Dockerfile.rootfs.<name>.
+//
+// The name is validated before it ever becomes a path (no "/", no "..", no
+// leading dash), so a config value cannot point the jail bind at an arbitrary
+// host file. A posture key, operator-only like kvm: the image decides the
+// guest userland the agent runs in — kali, for one, ships offensive tooling.
+const defaultRootfs = "fedora"
+
+var rootfsNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+func validRootfsName(name string) bool { return rootfsNameRE.MatchString(name) }
+
+// fcRootfsPathFor maps a flavor name to its image. An invalid name resolves
+// to the default image, never to a path built from it.
+func fcRootfsPathFor(name string) string {
+	if name == "" || name == defaultRootfs || !validRootfsName(name) {
+		return fcRootfsPath()
+	}
+	return filepath.Join(fcAssetsDir(), "rootfs-"+name+".img")
+}
+
+// groupRootfs is the group's configured flavor, defaulted. An invalid stored
+// value (a hand-edited config.json) reads as the default, not as a path.
+func groupRootfs(g string) string {
+	s := strings.ToLower(strings.TrimSpace(groupConfigString(g, "rootfs")))
+	if s == "" || !validRootfsName(s) {
+		return defaultRootfs
+	}
+	return s
+}
+
+// fcRootfsFlavors lists the flavors installed under fcassets/, default first.
+func fcRootfsFlavors() []string {
+	var out []string
+	if _, err := os.Stat(fcRootfsPath()); err == nil {
+		out = append(out, defaultRootfs)
+	}
+	m, _ := filepath.Glob(filepath.Join(fcAssetsDir(), "rootfs-*.img"))
+	sort.Strings(m)
+	for _, p := range m {
+		n := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "rootfs-"), ".img")
+		if validRootfsName(n) && n != defaultRootfs {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // ---- VM registry -----------------------------------------------------------
 
@@ -793,6 +846,16 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if err := fcPreflight(); err != nil {
 		return err
 	}
+	// The rootfs flavor is read ONCE here and the resolved path is what the
+	// jail binds, so a config edit mid-spawn can't split the decision. A
+	// non-default flavor whose image is missing fails the boot loudly rather
+	// than quietly falling back to fedora: the operator chose a userland.
+	rootfsName := groupRootfs(g)
+	rootfsPath := fcRootfsPathFor(rootfsName)
+	if _, err := os.Stat(rootfsPath); err != nil {
+		return fmt.Errorf("group %s: rootfs %q is not installed (%s missing; installed: %s) — build it with `make rootfs FLAVOR=%s`, or set rootfs back to %s", g, rootfsName, rootfsPath, strings.Join(fcRootfsFlavors(), ", "), rootfsName, defaultRootfs)
+	}
+	emitLogfG("fc", g, "info", "[%s] rootfs=%s", g, rootfsName)
 	if err := fcEnsureRunDir(); err != nil {
 		return err
 	}
@@ -941,7 +1004,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	// --no-api: fully static config; lifecycle is process-level (the agent's
 	// shutdown op powers the guest off, which exits the FC process).
-	spec, err := fcStageJail(g, cb, jailUID)
+	spec, err := fcStageJail(g, cb, jailUID, rootfsPath)
 	if err != nil {
 		console.Close()
 		return fail(err)

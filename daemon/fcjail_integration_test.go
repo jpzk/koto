@@ -86,7 +86,7 @@ func TestFcJailBootsReal(t *testing.T) {
 		`"machine-config":{"vcpu_count":1,"smt":false,"mem_size_mib":512},` +
 		`"vsock":{"guest_cid":3,"uds_path":"/vsock/v"}}`)
 
-	spec, err := fcStageJail(g, cfg, uid)
+	spec, err := fcStageJail(g, cfg, uid, fcRootfsPath())
 	if err != nil {
 		t.Fatalf("stage jail: %v", err)
 	}

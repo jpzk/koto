@@ -191,6 +191,9 @@ type ConfigReq struct {
 	// host CPU's VMX/SVM to the guest so it can run its own KVM guests; "no"
 	// masks it in the guest's CPUID. Applies on /restart.
 	KVM json.RawMessage `json:"kvm,omitempty"`
+	// Rootfs is the root filesystem flavor: "fedora" (default) or the name of
+	// an installed fcassets/rootfs-<name>.img (e.g. "kali"). Applies on /restart.
+	Rootfs json.RawMessage `json:"rootfs,omitempty"`
 }
 
 // ---- Response envelopes ---------------------------------------------------

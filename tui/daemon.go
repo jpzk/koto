@@ -175,7 +175,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "list":
 		return cl.List(ctx, &pb.ListReq{})
 	case "spawn":
-		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size")}
+		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size"),
+			Rootfs: s("rootfs"), Root: s("root")}
 		if b, ok := extra["main"].(bool); ok {
 			r.Main = b
 		}
@@ -354,6 +355,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("root", &r.Root)
 	setOpt("autostart", &r.Autostart)
 	setOpt("kvm", &r.Kvm)
+	setOpt("rootfs", &r.Rootfs)
 	return r
 }
 

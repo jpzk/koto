@@ -354,7 +354,8 @@ disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
 | large  | 4    | 4096 MiB | 16 GiB        |
 | xlarge | 8    | 8192 MiB | 24 GiB        |
 
-- Set at spawn (`/new <g> [provider] [model] size=large`) or on an existing
+- Set at spawn (`/new <g> [provider] [model] size=large`, or
+  `koto ctl spawn -size large <g>`; any role holding `spawn`) or on an existing
   group (`/config size=large`), then **applies on `/restart`** — `fcResolveSize`
   is read by `fcMachineCfg` (machine-config) and `fcWorkspaceDiskBytes` (disk)
   at the next `fcSpawn`.

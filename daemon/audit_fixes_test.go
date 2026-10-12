@@ -783,6 +783,7 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 		{"size", &pb.ConfigReq{Group: "g", Size: s("xlarge")}, "config_posture"},
 		{"autostart", &pb.ConfigReq{Group: "g", Autostart: s("yes")}, "config_posture"},
 		{"kvm", &pb.ConfigReq{Group: "g", Kvm: s("yes")}, "config_posture"},
+		{"rootfs", &pb.ConfigReq{Group: "g", Rootfs: s("kali")}, "config_posture"},
 		{"mixed", &pb.ConfigReq{Group: "g", Model: s("x"), Root: s("yes")}, "config_posture"},
 		// Clearing a posture key is setting it.
 		{"clear network", &pb.ConfigReq{Group: "g", Network: s("")}, "config_posture"},
@@ -8111,11 +8112,11 @@ func TestSpawnModelGoesThroughTheConfigValidation(t *testing.T) {
 		"claude opus 5",
 		"model\nname",
 	} {
-		if err := seedSpawnConfig("tg", "", bad, ""); err == nil {
+		if err := seedSpawnConfig("tg", "", bad, "", "", ""); err == nil {
 			t.Errorf("spawn accepted the model %q", bad)
 		}
 	}
-	if err := seedSpawnConfig("tg", "", "claude-opus-5", ""); err != nil {
+	if err := seedSpawnConfig("tg", "", "claude-opus-5", "", "", ""); err != nil {
 		t.Fatalf("a valid model was refused: %v", err)
 	}
 	if got := groupModelName("tg"); got != "claude-opus-5" {
