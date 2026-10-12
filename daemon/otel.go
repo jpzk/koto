@@ -188,7 +188,8 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 		return nil, fmt.Errorf("log exporter: %w", err)
 	}
 	s := &otelState{cfg: cfg}
-	s.tp = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(texp))
+	s.tp = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(texp),
+		sdktrace.WithIDGenerator(otelIDGen{}))
 	s.mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(cfg.MetricInterval))))
 	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)))

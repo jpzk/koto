@@ -13,7 +13,7 @@ import (
 func otelTestPipeline(t *testing.T) *tracetest.InMemoryExporter {
 	t.Helper()
 	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp), sdktrace.WithIDGenerator(otelIDGen{}))
 	s := &otelState{tp: tp, tracer: tp.Tracer("koto-test"), logger: lognoop.NewLoggerProvider().Logger("t")}
 	otelCur.Store(s)
 	t.Cleanup(func() {
@@ -42,7 +42,7 @@ func TestOtelTurnParentsLLMRequest(t *testing.T) {
 	if otelLiveTurn("g1", 2) != ot {
 		t.Fatal("turn not registered live on its slot")
 	}
-	ctx, sp := otelLLMStart(context.Background(), "g1", "anthropic", "POST", "/v1/messages")
+	ctx, sp := otelLLMStart(context.Background(), "g1", "anthropic", "POST", "/v1/messages", "")
 	otelLLMAnnotate(ctx, 200, "req_abc", map[string]any{"input_tokens": float64(10), "output_tokens": float64(5)})
 	sp.End()
 	ot.end(nil)
@@ -89,7 +89,7 @@ func TestOtelLLMAmbiguousIsRoot(t *testing.T) {
 	a, b := otelTurnBegin("g2", "a"), otelTurnBegin("g2", "b")
 	a.bindSlot(0)
 	b.bindSlot(1)
-	_, sp := otelLLMStart(context.Background(), "g2", "anthropic", "POST", "/v1/messages")
+	_, sp := otelLLMStart(context.Background(), "g2", "anthropic", "POST", "/v1/messages", "")
 	sp.End()
 	for _, s := range exp.GetSpans() {
 		if s.Name == "koto.llm.request" {
@@ -110,7 +110,7 @@ func TestOtelLLMOtherGroupNotParented(t *testing.T) {
 	exp := otelTestPipeline(t)
 	ot := otelTurnBegin("ga", "")
 	ot.bindSlot(0)
-	_, sp := otelLLMStart(context.Background(), "gb", "anthropic", "POST", "/v1/messages")
+	_, sp := otelLLMStart(context.Background(), "gb", "anthropic", "POST", "/v1/messages", "")
 	sp.End()
 	for _, s := range exp.GetSpans() {
 		if s.Name == "koto.llm.request" && s.Parent.IsValid() {
@@ -131,7 +131,7 @@ func TestOtelSpansOffAreNoops(t *testing.T) {
 	if otelLiveTurn("g", 0) != nil {
 		t.Fatal("registered while off")
 	}
-	ctx, sp := otelLLMStart(context.Background(), "g", "anthropic", "POST", "/v1/messages")
+	ctx, sp := otelLLMStart(context.Background(), "g", "anthropic", "POST", "/v1/messages", "")
 	if sp.IsRecording() || otelTraceparent(ctx) != "" || otelTraceparent(ot.Ctx()) != "" {
 		t.Fatal("recording while off")
 	}

@@ -9,8 +9,12 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +32,8 @@ type otelTurn struct {
 	session string
 	id      string // koto.turn_id; also the turn's request_id
 	start   time.Time
+	// key derives the host ids guest spans are re-exported under (hostSpanID).
+	key [32]byte
 
 	mu   sync.Mutex
 	slot int // -1 until bound
@@ -51,6 +57,7 @@ func otelTurnBegin(g, session string) *otelTurn {
 		return nil
 	}
 	t := &otelTurn{group: g, session: session, id: otelNewID(), start: time.Now(), slot: -1}
+	_, _ = rand.Read(t.key[:])
 	t.ctx, t.span = otelTracer().Start(context.Background(), "koto.turn",
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(
@@ -123,29 +130,96 @@ func otelLiveTurn(g string, slot int) *otelTurn {
 }
 
 // otelLLMParent picks the parent context for a proxied LLM request from
-// group g. The proxy sees only the group, not the slot: with exactly one live
-// turn the request is unambiguously that turn's, so it becomes its child. With
-// several, attributing it to one would be a guess; it is exported as a root
-// span carrying koto.live_turns so the ambiguity is visible, not hidden.
-func otelLLMParent(g string) (context.Context, int) {
+// group g. tp is the request's traceparent header (the guest's worker sets it
+// to its guest.worker span, see fcguest ANTHROPIC_CUSTOM_HEADERS). It is
+// guest input, so it is trusted only as far as it can be checked: its
+// trace_id must be the trace of a turn that is live in THIS group right now.
+// Then the request is that turn's, exactly, even with several turns live, and
+// its parent is the host id the guest.worker span will be re-exported under
+// (otelTurn.hostSpanID). A guest can therefore only attach the request to
+// one of its own live turns, never to another group's trace. Otherwise
+// (no/invalid/mismatched header) the group fallback applies: with exactly one
+// live turn the request is unambiguously its child; with several, attributing
+// it would be a guess, so it is a root span carrying koto.live_turns.
+// src names which rule decided, for the koto.parent_source attribute.
+func otelLLMParent(g, tp string) (ctx context.Context, live int, src string) {
+	tid, sid, ok := otelParseTraceparent(tp)
 	otelTurnsMu.Lock()
 	defer otelTurnsMu.Unlock()
 	m := otelTurns[g]
-	if len(m) == 1 {
+	if ok {
 		for _, t := range m {
-			return t.ctx, 1
+			if sc := trace.SpanContextFromContext(t.ctx); sc.TraceID() == tid {
+				psc := sc.WithSpanID(t.hostSpanID(string(sid)))
+				return trace.ContextWithSpanContext(context.Background(), psc), len(m), "traceparent"
+			}
 		}
 	}
-	return context.Background(), len(m)
+	src = "group"
+	if tp != "" {
+		src = "group_traceparent_rejected"
+	}
+	if len(m) == 1 {
+		for _, t := range m {
+			return t.ctx, 1, src
+		}
+	}
+	return context.Background(), len(m), src
 }
 
-// otelLLMStart opens the proxy's span for one LLM request. The returned ctx
-// carries the span; finish it with otelLLMEnd.
-func otelLLMStart(ctx context.Context, g, provider, method, path string) (context.Context, trace.Span) {
+// otelParseTraceparent parses a W3C traceparent (version 00 only). The span
+// id comes back as raw bytes: it is a guest span-id label, mapped to a host id
+// by otelTurn.hostSpanID.
+func otelParseTraceparent(s string) (trace.TraceID, []byte, bool) {
+	var tid trace.TraceID
+	p := strings.Split(strings.TrimSpace(s), "-")
+	if len(p) != 4 || p[0] != "00" || len(p[1]) != 32 || len(p[2]) != 16 || len(p[3]) != 2 {
+		return tid, nil, false
+	}
+	tb, err1 := hex.DecodeString(p[1])
+	sb, err2 := hex.DecodeString(p[2])
+	_, err3 := hex.DecodeString(p[3])
+	if err1 != nil || err2 != nil || err3 != nil {
+		return tid, nil, false
+	}
+	copy(tid[:], tb)
+	if !tid.IsValid() || !trace.SpanID(sb).IsValid() {
+		return tid, nil, false
+	}
+	return tid, sb, true
+}
+
+// otelTraceStrip removes the W3C trace-context headers from a guest request
+// and returns the traceparent it carried. Called for EVERY proxied request,
+// export on or off: the guest's trace context is for this proxy only and must
+// never reach Anthropic or Venice.
+func otelTraceStrip(h http.Header) string {
+	var tps []string
+	// By key, case-insensitively: a Header built by hand need not be canonical.
+	for k, vs := range h {
+		switch strings.ToLower(k) {
+		case "traceparent":
+			tps = append(tps, vs...)
+			delete(h, k)
+		case "tracestate":
+			delete(h, k)
+		}
+	}
+	if len(tps) != 1 {
+		return "" // none, or several: ambiguous, honour none
+	}
+	return tps[0]
+}
+
+// otelLLMStart opens the proxy's span for one LLM request. tp is the
+// traceparent header the guest sent ("" for none; strip it from the request
+// with otelTraceStrip first). The returned ctx carries the span; finish it
+// with otelLLMEnd.
+func otelLLMStart(ctx context.Context, g, provider, method, path, tp string) (context.Context, trace.Span) {
 	if !otelOn() {
 		return ctx, trace.SpanFromContext(context.Background())
 	}
-	parent, live := otelLLMParent(g)
+	parent, live, src := otelLLMParent(g, tp)
 	// Keep the request's cancellation, take the turn's span as parent.
 	ctx = trace.ContextWithSpanContext(ctx, trace.SpanContextFromContext(parent))
 	return otelTracer().Start(ctx, "koto.llm.request",
@@ -157,6 +231,7 @@ func otelLLMStart(ctx context.Context, g, provider, method, path string) (contex
 			attribute.String("http.request.method", method),
 			attribute.String("url.path", path),
 			attribute.Int("koto.live_turns", live),
+			attribute.String("koto.parent_source", src),
 		))
 }
 
@@ -198,4 +273,53 @@ func otelEnd(sp trace.Span, err error) {
 		sp.SetStatus(codes.Error, err.Error())
 	}
 	sp.End()
+}
+
+// hostSpanID maps a guest span-id label to the host span id it is exported
+// under: HMAC-SHA256(turn key, label)[:8]. Deterministic within the turn, so
+// the proxy (which sees the guest.worker id in a traceparent header while the
+// worker runs) and the guest-span ingest (which re-creates guest.worker when
+// the turn ends) agree on the id without sharing state; keyed per turn, so the
+// guest can neither predict nor choose a host id, and cannot collide with the
+// host turn span or another turn's spans.
+func (t *otelTurn) hostSpanID(label string) trace.SpanID {
+	mac := hmac.New(sha256.New, t.key[:])
+	mac.Write([]byte(label))
+	var id trace.SpanID
+	copy(id[:], mac.Sum(nil))
+	if !id.IsValid() {
+		id[7] = 1
+	}
+	return id
+}
+
+// otelIDGen is the tracer provider's ID generator: random ids (crypto/rand),
+// except a span started under otelWithSpanID gets that id. Only the guest-
+// span ingest forces ids, always ones from hostSpanID.
+type otelIDGen struct{}
+
+type otelForcedIDKey struct{}
+
+// otelWithSpanID makes the next span started from ctx take id.
+func otelWithSpanID(ctx context.Context, id trace.SpanID) context.Context {
+	return context.WithValue(ctx, otelForcedIDKey{}, id)
+}
+
+func (otelIDGen) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
+	var tid trace.TraceID
+	for !tid.IsValid() {
+		_, _ = rand.Read(tid[:])
+	}
+	return tid, otelIDGen{}.NewSpanID(ctx, tid)
+}
+
+func (otelIDGen) NewSpanID(ctx context.Context, _ trace.TraceID) trace.SpanID {
+	if id, ok := ctx.Value(otelForcedIDKey{}).(trace.SpanID); ok && id.IsValid() {
+		return id
+	}
+	var sid trace.SpanID
+	for !sid.IsValid() {
+		_, _ = rand.Read(sid[:])
+	}
+	return sid
 }

@@ -54,7 +54,7 @@ func TestOtelE2EAllSignalsReachReceiver(t *testing.T) {
 	ot := otelTurnBegin(g, "")
 	ot.bindSlot(0)
 	turnSC := ot.span.SpanContext()
-	rctx, sp := otelLLMStart(ctx, g, "anthropic", "POST", "/v1/messages")
+	rctx, sp := otelLLMStart(ctx, g, "anthropic", "POST", "/v1/messages", "")
 	usage := map[string]any{"input_tokens": float64(11), "output_tokens": float64(7),
 		"cache_read_input_tokens": float64(3), "cache_creation_input_tokens": float64(2)}
 	otelLLMAnnotate(rctx, 200, "req_e2e_1", usage)

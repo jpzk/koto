@@ -1156,9 +1156,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	// The request's span: a child of the group's live turn when exactly one
-	// is open (otel_spans.go). r carries it so the retire point can annotate.
-	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path)
+	// The request's span: a child of the turn its traceparent names (checked
+	// against the group's live turns), else of the group's only live turn
+	// (otel_spans.go otelLLMParent). r carries it so the retire point can annotate.
+	// The guest's trace context (guest.worker's traceparent) is read and then
+	// stripped here, export on or off, so it never travels upstream.
+	tp := otelTraceStrip(r.Header)
+	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path, tp)
 	defer llmSp.End()
 	r = r.WithContext(spCtx)
 	if provider == "venice" {

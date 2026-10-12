@@ -355,6 +355,7 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 
 	cfg := readGroupConfig()
 	tr.workerStart(cfg.Provider, cfg.Model)
+	env = withTraceHeaders(env, tr.workerTraceparent())
 	defer func() { tr.workerEnd(tw.stalled.Load(), "") }()
 	switch cfg.Provider {
 	case "venice":

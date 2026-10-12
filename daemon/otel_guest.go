@@ -9,8 +9,9 @@ package main
 //   - trace: the guest never chooses one. Spans are re-created under the
 //     host turn span's trace, so a forged trace id is simply ignored.
 //   - ids: guest span ids are only labels for parent links within the turn.
-//     Every re-exported span gets a fresh host-generated id, so a guest cannot
-//     collide with (or impersonate) the host turn span or any other span.
+//     Every re-exported span gets a host id keyed by a per-turn secret
+//     (otelTurn.hostSpanID), so a guest cannot choose, predict or collide
+//     with the host turn span or any other span id.
 //   - parents: a parent that is not another span of this turn (missing,
 //     unknown, the span itself, a cycle) becomes the host turn span.
 //   - bounds: spans per turn, attrs per span, key/value/name length, and
@@ -257,7 +258,9 @@ func (gi *guestIngest) finish() {
 		}
 		s := gi.spans[i]
 		attrs := append(append([]attribute.KeyValue{}, s.attrs...), common...)
-		ctxs[i], started[i] = tracer.Start(parent, s.name,
+		// The id is hostSpanID(guest label), the one the proxy already used
+		// as parent for this turn's LLM requests (guest.worker's traceparent).
+		ctxs[i], started[i] = tracer.Start(otelWithSpanID(parent, gi.turn.hostSpanID(s.id)), s.name,
 			trace.WithTimestamp(s.start), trace.WithAttributes(attrs...))
 		for _, k := range kids[i] {
 			walk(k, ctxs[i])

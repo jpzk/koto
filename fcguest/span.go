@@ -19,6 +19,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,7 @@ type openSpan struct {
 // guestTracer records one turn's spans. nil = tracing off.
 type guestTracer struct {
 	mu      sync.Mutex
+	traceID string // 32 hex, from the daemon's traceparent
 	tw      *turnConn
 	root    openSpan   // guest.turn
 	worker  *openSpan  // guest.worker while it runs
@@ -83,7 +85,8 @@ func newGuestTracer(traceparent string, start time.Time) *guestTracer {
 	if !validTraceparent(traceparent) {
 		return nil
 	}
-	return &guestTracer{root: openSpan{id: newSpanID(), start: start, name: "guest.turn", attrs: map[string]string{}}}
+	p := strings.Split(traceparent, "-")
+	return &guestTracer{traceID: p[1], root: openSpan{id: newSpanID(), start: start, name: "guest.turn", attrs: map[string]string{}}}
 }
 
 // timed records a finished child of guest.turn that ran before the turn's
@@ -280,4 +283,49 @@ func (t *turnConn) sendSpan(s *pb.GuestSpan) bool {
 		t.release(n)
 		return false
 	}
+}
+
+// workerTraceparent is guest.worker's W3C traceparent ("" when off or before
+// workerStart). The worker sends it on its LLM calls (claude:
+// ANTHROPIC_CUSTOM_HEADERS, venice: KOTO_TRACEPARENT) so the host proxy can
+// parent each request on guest.worker exactly. The proxy treats it as guest
+// input: it is honoured only if its trace is a live turn of this group, and
+// it is stripped before the request goes upstream.
+func (g *guestTracer) workerTraceparent() string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.worker == nil {
+		return ""
+	}
+	return "00-" + g.traceID + "-" + hex.EncodeToString(g.worker.id) + "-01"
+}
+
+// withTraceHeaders adds the worker's traceparent to the turn env: appended to
+// any operator-set ANTHROPIC_CUSTOM_HEADERS (newline-separated "Name: value",
+// verified on the pinned claude 2.1.280: it sends them on /v1/messages), and
+// as KOTO_TRACEPARENT for venice_stream.js. env unchanged when tp == "".
+func withTraceHeaders(env []string, tp string) []string {
+	if tp == "" {
+		return env
+	}
+	const k = "ANTHROPIC_CUSTOM_HEADERS="
+	out := make([]string, 0, len(env)+2)
+	custom := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, k) {
+			custom = strings.TrimRight(strings.TrimPrefix(e, k), "\n")
+			continue
+		}
+		if strings.HasPrefix(e, "KOTO_TRACEPARENT=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	if custom != "" {
+		custom += "\n"
+	}
+	return append(out, k+custom+"traceparent: "+tp, "KOTO_TRACEPARENT="+tp)
 }

@@ -155,3 +155,62 @@ func TestGuestSpansPerTurnCap(t *testing.T) {
 		t.Fatalf("sent=%d dropped=%d", tr.sent, tr.dropped)
 	}
 }
+
+// The worker's LLM calls carry guest.worker's traceparent (same trace as the
+// daemon's, span = the guest.worker label the daemon maps to a host id), and
+// tracing off adds nothing to the worker env.
+func TestWorkerTraceparentHeaders(t *testing.T) {
+	var off *guestTracer
+	if off.workerTraceparent() != "" {
+		t.Fatal("nil tracer produced a traceparent")
+	}
+	base := []string{"PATH=/bin", "ANTHROPIC_CUSTOM_HEADERS=X-Op: 1\n"}
+	if got := withTraceHeaders(base, off.workerTraceparent()); len(got) != len(base) || got[1] != base[1] {
+		t.Fatalf("tracing off changed the env: %q", got)
+	}
+
+	g := newGuestTracer(testTP, time.Now())
+	if g.workerTraceparent() != "" {
+		t.Fatal("traceparent before guest.worker exists")
+	}
+	g.workerStart("claudesdk", "m")
+	tp := g.workerTraceparent()
+	if !validTraceparent(tp) || !strings.HasPrefix(tp, "00-0123456789abcdef0123456789abcdef-") {
+		t.Fatalf("worker traceparent %q", tp)
+	}
+	g.mu.Lock()
+	wid := g.worker.id
+	g.mu.Unlock()
+	if !strings.Contains(tp, "-"+hexOf(wid)+"-") {
+		t.Fatalf("traceparent %q does not name guest.worker %x", tp, wid)
+	}
+	env := withTraceHeaders(base, tp)
+	var custom, ktp string
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "ANTHROPIC_CUSTOM_HEADERS="); ok {
+			if custom != "" {
+				t.Fatal("ANTHROPIC_CUSTOM_HEADERS duplicated")
+			}
+			custom = v
+		}
+		if v, ok := strings.CutPrefix(e, "KOTO_TRACEPARENT="); ok {
+			ktp = v
+		}
+	}
+	if custom != "X-Op: 1\ntraceparent: "+tp {
+		t.Fatalf("ANTHROPIC_CUSTOM_HEADERS=%q (operator header must be kept)", custom)
+	}
+	if ktp != tp {
+		t.Fatalf("KOTO_TRACEPARENT=%q", ktp)
+	}
+}
+
+func hexOf(b []byte) string {
+	const h = "0123456789abcdef"
+	var sb strings.Builder
+	for _, c := range b {
+		sb.WriteByte(h[c>>4])
+		sb.WriteByte(h[c&15])
+	}
+	return sb.String()
+}
