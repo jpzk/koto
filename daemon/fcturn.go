@@ -71,6 +71,10 @@ func fcTurnSink(g string, c net.Conn) {
 		emitLogfG("fc", g, "warn", "[%s] turn stream opened on slot %d with no outstanding turn — refused", g, slot)
 		return
 	}
+	// Guest spans (otel_guest.go): validated, buffered, re-exported under the
+	// live turn span when the stream ends. No live turn => dropped.
+	gi := newGuestIngest(g, sess, slot)
+	defer gi.finish()
 	ensureSlotTail(g, slot)
 	w := newTurnWriter(g, slotLogPath(g, slot))
 	// A stream that dies mid-line may leave a byte or two withheld by text()'s
@@ -84,6 +88,14 @@ func fcTurnSink(g string, c net.Conn) {
 				emitLogfG("fc", g, "warn", "[%s] turn stream slot %d: %v", g, slot, err)
 			}
 			return
+		}
+		if sp, ok := f.Kind.(*pb.TurnFrame_Span); ok {
+			gi.add(sp.Span)
+			continue
+		}
+		if f.GetTurnEnd() {
+			// Export before [[turn_end]] lets sendNow close the host turn span.
+			gi.finish()
 		}
 		if !w.frame(f) {
 			if w.failed {

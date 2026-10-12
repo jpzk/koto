@@ -283,7 +283,7 @@ func otelSeverity(level string) otellog.Severity {
 
 // otelGuestDropped counts a rejected guest span frame.
 func otelGuestDropped(group, reason string) {
-	if s := otelCur.Load(); s != nil {
+	if s := otelCur.Load(); s != nil && s.guestDropped != nil {
 		s.guestDropped.Add(context.Background(), 1, metric.WithAttributes(
 			attribute.String("group", group), attribute.String("reason", reason)))
 	}
