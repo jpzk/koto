@@ -325,10 +325,6 @@ var adminOnlyVerbs = map[string]bool{
 	// voidable by what it contains; this is the same rule on the gRPC plane,
 	// where the docs have always said posture is the operator's.
 	"config_posture": true,
-	// The same rule for SpawnReq: a spawn carrying size, rootfs or root is
-	// relabelled spawn_posture (postureVerb), since spawn seeds those keys into
-	// the new group's config before its first boot.
-	"spawn_posture": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

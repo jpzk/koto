@@ -12,51 +12,37 @@ import (
 	"koto-protocol/pb"
 )
 
-// SpawnReq carries posture (size, rootfs, root) that ConfigReq gates behind
-// the admin-only config_posture verb. Without the same gate on spawn, a role
-// holding only the delegable `spawn` grant could mint a group with more host
-// RAM, the kali userland, or passwordless guest sudo at creation — the
-// config_posture rule bypassed through the other door.
-func TestSpawnPostureIsAdminOnly(t *testing.T) {
+// Spawning is a delegated capability BY DESIGN: a role holding `spawn` (e.g.
+// main orchestrating its peers) picks the new group's shape at creation —
+// size, rootfs, root — without the operator. ConfigReq gates the same keys on
+// an EXISTING group (config_posture); spawn deliberately does not. This pins
+// that, so a future "harden spawn" change has to be a conscious decision.
+func TestSpawnPostureIsDelegable(t *testing.T) {
 	fcHarness(t)
 	if err := os.MkdirAll(filepath.Join(HERE, "creds"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(credFile("acl.json"),
-		[]byte(`{"ops":{"spawn":["*"],"config":["*"]},"wild":{"*":["*"]}}`), 0o600); err != nil {
+		[]byte(`{"ops":{"spawn":["*"]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	ops := clientIdentity{Name: "ops", Roles: []string{"ops"}}
-	wild := clientIdentity{Name: "wild", Roles: []string{"wild"}}
-	admin := clientIdentity{Name: "admin", Roles: []string{defaultRole}}
-
-	plain := []*pb.SpawnReq{
-		{Group: "g"},
-		{Group: "g", Provider: "venice", Model: "m"},
-	}
-	posture := map[string]*pb.SpawnReq{
+	for name, r := range map[string]*pb.SpawnReq{
+		"plain":  {Group: "g"},
 		"size":   {Group: "g", Size: "xlarge"},
 		"rootfs": {Group: "g", Rootfs: "kali"},
 		"root":   {Group: "g", Root: "yes"},
-		"rootno": {Group: "g", Root: "no"},
-		"fedora": {Group: "g", Rootfs: "fedora"},
-		"mixed":  {Group: "g", Model: "m", Size: "small"},
-	}
-	for _, r := range plain {
+		"mixed":  {Group: "g", Model: "m", Size: "small", Rootfs: "kali", Root: "yes"},
+	} {
 		if err := aclCheck(ctx, ops, "spawn", r); err != nil {
-			t.Errorf("non-admin plain spawn %v denied: %v", r, err)
+			t.Errorf("%s: spawn-grant holder denied: %v", name, err)
 		}
 	}
-	for name, r := range posture {
-		for _, id := range []clientIdentity{ops, wild} {
-			if err := aclCheck(ctx, id, "spawn", r); err == nil {
-				t.Errorf("%s: non-admin %s spawn carrying posture was allowed", name, id.Name)
-			}
-		}
-		if err := aclCheck(ctx, admin, "spawn", r); err != nil {
-			t.Errorf("%s: admin spawn denied: %v", name, err)
-		}
+	// The config door stays operator-only.
+	kali := "kali"
+	if err := aclCheck(ctx, ops, "config", &pb.ConfigReq{Group: "g", Rootfs: &kali}); err == nil {
+		t.Error("non-admin config -rootfs was allowed")
 	}
 }
 
