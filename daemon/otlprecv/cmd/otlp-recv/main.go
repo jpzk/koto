@@ -92,6 +92,7 @@ func check(args []string) int {
 	fail := 0
 	rs := otlprecv.CheckTurn(c, *group, *marker)
 	rs = append(rs, otlprecv.CheckCounters(c)...)
+	rs = append(rs, otlprecv.CheckNoBareGroup(c)...)
 	if *metricsPath != "" {
 		rows, err := readWith(*metricsPath, otlprecv.ReadMetricsJSONL)
 		if err != nil {

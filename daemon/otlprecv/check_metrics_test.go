@@ -197,3 +197,45 @@ func TestReadResourcesProtojson(t *testing.T) {
 		t.Fatal("corrupt metrics.jsonl accepted")
 	}
 }
+
+// The e2e destroys its scratch group before the shutdown flush: a final
+// export without the group (host.groups one lower) must not FAIL the stable
+// comparison, which is taken at the latest export still reporting the group.
+func TestCheckResourcesIgnoresExportsAfterGroupGone(t *testing.T) {
+	c := metricCapture()
+	for _, m := range HostGauges {
+		v := find(&c, m, 2, "").Value
+		if m == "koto.host.groups" {
+			v--
+		}
+		c.Points = append(c.Points, Point{Metric: m, Kind: "gauge", Value: v, Batch: 3, TimeNano: 103 * sec, Attrs: map[string]string{}})
+	}
+	if f := failed(checkAll(t, c)); len(f) != 0 {
+		t.Fatalf("post-destroy export broke the check: %v", f)
+	}
+	// ...but a mismatch while the group is alive still FAILs.
+	find(&c, "koto.host.groups", 2, "").Value = 1
+	if f := strings.Join(failed(checkAll(t, c)), "|"); !strings.Contains(f, "stable fields") {
+		t.Fatalf("live mismatch not caught: %q", f)
+	}
+}
+
+func TestCheckNoBareGroup(t *testing.T) {
+	c := metricCapture()
+	c.Spans = []Span{{Name: "koto.turn", Attrs: map[string]string{"koto.group": "g"}}}
+	if f := failed(CheckNoBareGroup(c)); len(f) != 0 {
+		t.Fatalf("clean capture failed: %v", f)
+	}
+	for name, mut := range map[string]func(*Capture){
+		"metric": func(c *Capture) { c.Points[0].Attrs = map[string]string{"koto.group": "g", "group": "g"} },
+		"span":   func(c *Capture) { c.Spans[0].Attrs["group"] = "g" },
+		"log":    func(c *Capture) { c.Logs = []Log{{Attrs: map[string]string{"group": "g"}}} },
+	} {
+		c := metricCapture()
+		c.Spans = []Span{{Name: "koto.turn", Attrs: map[string]string{"koto.group": "g"}}}
+		mut(&c)
+		if len(failed(CheckNoBareGroup(c))) != 1 {
+			t.Errorf("bare group on a %s not caught", name)
+		}
+	}
+}

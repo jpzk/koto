@@ -55,7 +55,9 @@ type otelConfig struct {
 	Protocol       string
 	CaptureContent bool
 	// MetricInterval is the periodic reader's export interval; tests shorten
-	// it, production leaves it at the SDK-ish default of 30s.
+	// it, production defaults to 30s. 0 defers to the SDK, which reads
+	// OTEL_METRIC_EXPORT_INTERVAL (ms) itself: sdkmetric.WithInterval would
+	// override that env var, so it is only passed when MetricInterval > 0.
 	MetricInterval time.Duration
 }
 
@@ -63,6 +65,9 @@ type otelConfig struct {
 // the koto-native knob.
 func otelConfigFrom(getenv func(string) string) (otelConfig, error) {
 	c := otelConfig{MetricInterval: 30 * time.Second}
+	if strings.TrimSpace(getenv("OTEL_METRIC_EXPORT_INTERVAL")) != "" {
+		c.MetricInterval = 0 // the SDK honors the standard env var
+	}
 	c.Endpoint = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	if c.Endpoint == "" {
 		c.Endpoint = strings.TrimSpace(getenv("KOTO_OTEL_ENDPOINT"))
@@ -191,7 +196,7 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 	s.tp = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(texp),
 		sdktrace.WithIDGenerator(otelIDGen{}))
 	s.mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(cfg.MetricInterval))))
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, otelReaderOpts(cfg)...)))
 	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)))
 	s.tracer = s.tp.Tracer("koto")
 	s.logger = s.lp.Logger("koto")
@@ -351,4 +356,13 @@ func otelLogStream(p string, data []byte) {
 			otelLogCtx(ctx, "", group, "info", stream, ln)
 		}
 	}
+}
+
+// otelReaderOpts passes WithInterval only for an explicit interval, so an
+// operator's OTEL_METRIC_EXPORT_INTERVAL reaches the SDK un-overridden.
+func otelReaderOpts(cfg otelConfig) []sdkmetric.PeriodicReaderOption {
+	if cfg.MetricInterval <= 0 {
+		return nil
+	}
+	return []sdkmetric.PeriodicReaderOption{sdkmetric.WithInterval(cfg.MetricInterval)}
 }

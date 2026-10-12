@@ -9,6 +9,12 @@
 #                    for the group, a log record with the turn's output marker,
 #                    and ONE trace koto.turn -> guest.turn -> guest.worker ->
 #                    guest.tool* + koto.llm.request (parent ids compared exactly).
+#                    Metrics are exported every 2s (OTEL_METRIC_EXPORT_INTERVAL) and
+#                    checked against ground truth taken outside the capture:
+#                    <KOTO_HOME>/metrics.jsonl (duration SUM, tokens, request count)
+#                    and a `koto ctl resources` snapshot taken during the turn
+#                    (resource gauges); every counter cumulative, monotonic and
+#                    non-decreasing across >=2 export batches.
 #
 # Builds ONLY via the pinned Go image (same digest as the Makefile). Phase 2
 # snapshots THIS working tree, builds koto + fc-agent from it, patches the new
@@ -158,11 +164,25 @@ if [ -z "$G" ]; then
   fi
 fi
 echo "    group $G (scratch=$SCRATCH)"
+# ctl resources snapshot DURING the run, once the guest sweep has filled in
+# the guest mem/disk figures (0 = unknown until then). Ground truth for the
+# resource-gauge checks; taken by ctl, never recomputed from the capture.
+RES=$W/resources.json; rm -f "$RES"
+snap_res(){ local t=$1 j; for _ in $(seq "$t"); do
+    j=$($K ctl resources 2>/dev/null) && printf '%s' "$j" | jq -e --arg g "$G" \
+      '.groups[]|select(.group==$g and .running and ((.guest_mem_avail_bytes//"0")|tonumber)>0 and ((.guest_disk_used_bytes//"0")|tonumber)>0)' >/dev/null 2>&1 \
+      && { printf '%s\n' "$j" >"$RES"; return 0; }
+    sleep 2; done; return 1; }
+snap_res 280 & SNPID=$!
 REPLY=$(timeout 600 $K ctl ask -timeout 9m "$G" \
   "Use your Bash tool to run exactly this command: uname -a; echo OTELMARK-\$(( $N * 7 )) — then reply with the command's full output verbatim." 2>&1)
 printf '%s\n' "$REPLY" | tail -15 | sed 's/^/    | /'
 case "$REPLY" in *"$MARK"*) ok "turn output carries marker $MARK";; *) no "turn output lacks marker $MARK";; esac
 case "$REPLY" in *Linux*) ok "turn ran uname -a in the guest";; *) no "no uname output in turn";; esac
+wait "$SNPID" 2>/dev/null; [ -s "$RES" ] || snap_res 60
+[ -s "$RES" ] && ok "ctl resources snapshot for $G (guest mem/disk known) saved to $RES" \
+  || no "no ctl resources snapshot with known guest mem/disk for $G"
+sleep 5 # >=2 more 2s metric exports after the snapshot, while $G still runs
 
 hdr "2e. flush: stop daemon (SIGTERM => OTel shutdown flush), stop receiver"
 [ "$SCRATCH" = 1 ] && [ "${E2E_OTEL_KEEP:-0}" != 1 ] && { $K ctl destroy "$G" >>"$W/spawn.log" 2>&1 || echo "    (destroy $G failed; see $W/spawn.log)"; }
@@ -173,7 +193,8 @@ sleep 1; kill -TERM "$RPID" 2>/dev/null; wait "$RPID" 2>/dev/null
 grep -q '"signal":"span"' "$CAP" && ok "receiver captured $(wc -l <"$CAP") records" || no "receiver captured no spans"
 
 hdr "2f. assert metrics, logs and ONE connected trace for group $G"
-"$W/otlp-recv" check -in "$CAP" -group "$G" -marker "$MARK" | tee "$W/check.out"
+"$W/otlp-recv" check -in "$CAP" -group "$G" -marker "$MARK" \
+  -metrics "$KHOME/metrics.jsonl" -resources "$RES" | tee "$W/check.out"
 while read -r st _; do case $st in PASS) pass=$((pass+1));; FAIL) fail=$((fail+1));; esac; done <"$W/check.out"
 ;; esac
 

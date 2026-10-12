@@ -373,15 +373,28 @@ func CheckResources(c Capture, group string, res Resources) []Result {
 			host[p.Metric] = append(host[p.Metric], p)
 		}
 	}
-	latest := func(ps []Point) (float64, bool) {
-		if len(ps) == 0 {
-			return 0, false
+	// The e2e destroys its scratch group before the shutdown flush, so
+	// "latest" is the latest export in which `group` was still reported:
+	// later batches legitimately count one group fewer.
+	alive := 0
+	for _, ps := range byG {
+		for _, p := range ps {
+			alive = max(alive, p.Batch)
 		}
-		b := ps[0]
-		for _, p := range ps[1:] {
-			if p.Batch > b.Batch || p.Batch == b.Batch && p.TimeNano > b.TimeNano {
+	}
+	latest := func(ps []Point) (float64, bool) {
+		var b *Point
+		for i := range ps {
+			p := &ps[i]
+			if p.Batch > alive {
+				continue
+			}
+			if b == nil || p.Batch > b.Batch || p.Batch == b.Batch && p.TimeNano > b.TimeNano {
 				b = p
 			}
+		}
+		if b == nil {
+			return 0, false
 		}
 		return b.Value, true
 	}
@@ -494,4 +507,30 @@ func CheckResources(c Capture, group string, res Resources) []Result {
 	}
 	add("res: no guest.* point emitted as 0 (unknown is skipped)", len(zeros) == 0, "zero points: %v", zeros)
 	return out
+}
+
+// CheckNoBareGroup asserts no metric point, span or log record carries the
+// old duplicate `group` attribute: koto.group is the only group key.
+func CheckNoBareGroup(c Capture) []Result {
+	var bad []string
+	for _, p := range c.Points {
+		if _, ok := p.Attrs["group"]; ok {
+			bad = append(bad, "metric "+p.Metric)
+		}
+	}
+	for _, s := range c.Spans {
+		if _, ok := s.Attrs["group"]; ok {
+			bad = append(bad, "span "+s.Name)
+		}
+	}
+	for _, l := range c.Logs {
+		if _, ok := l.Attrs["group"]; ok {
+			bad = append(bad, "log")
+		}
+	}
+	if len(bad) > 5 {
+		bad = append(bad[:5], fmt.Sprintf("... %d total", len(bad)))
+	}
+	return []Result{{Name: "attrs: no bare `group` attr on metrics, spans or logs (koto.group only)", OK: len(bad) == 0,
+		Detail: fmt.Sprintf("%d points, %d spans, %d logs; offending: %v", len(c.Points), len(c.Spans), len(c.Logs), bad)}}
 }
