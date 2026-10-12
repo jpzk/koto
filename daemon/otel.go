@@ -196,16 +196,45 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 	s.tracer = s.tp.Tracer("koto")
 	s.logger = s.lp.Logger("koto")
 
-	m := s.mp.Meter("koto")
-	s.reqCount, _ = m.Int64Counter("koto.llm.requests", metric.WithDescription("retired upstream LLM requests"))
-	s.reqDur, _ = m.Float64Histogram("koto.llm.request.duration", metric.WithUnit("ms"))
-	s.tokIn, _ = m.Int64Counter("koto.llm.tokens.input", metric.WithUnit("{token}"))
-	s.tokOut, _ = m.Int64Counter("koto.llm.tokens.output", metric.WithUnit("{token}"))
-	s.tokCacheRd, _ = m.Int64Counter("koto.llm.tokens.cache_read", metric.WithUnit("{token}"))
-	s.tokCacheCr, _ = m.Int64Counter("koto.llm.tokens.cache_creation", metric.WithUnit("{token}"))
-	s.guestDropped, _ = m.Int64Counter("koto.guest_spans_dropped", metric.WithDescription("guest span frames rejected by the daemon"))
+	m := otelMeterWrap(s.mp.Meter("koto"))
+	if err := s.instruments(m); err != nil {
+		// A half-built pipeline would silently drop the broken series; fail
+		// the whole init instead so the operator sees it (otelInit logs it
+		// and leaves telemetry off).
+		_ = s.tp.Shutdown(ctx)
+		_ = s.mp.Shutdown(ctx)
+		_ = s.lp.Shutdown(ctx)
+		return nil, fmt.Errorf("instruments: %w", err)
+	}
 	otelCur.Store(s)
 	return s, nil
+}
+
+// otelMeterWrap is a test seam: tests swap it to make instrument creation fail.
+var otelMeterWrap = func(m metric.Meter) metric.Meter { return m }
+
+// instruments creates every synchronous instrument; ALL errors are collected
+// and returned, none are discarded.
+func (s *otelState) instruments(m metric.Meter) error {
+	var errs []error
+	ic := func(name string, opts ...metric.Int64CounterOption) metric.Int64Counter {
+		c, err := m.Int64Counter(name, opts...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+		return c
+	}
+	var err error
+	s.reqCount = ic("koto.llm.requests", metric.WithDescription("retired upstream LLM requests"), metric.WithUnit("{request}"))
+	if s.reqDur, err = m.Float64Histogram("koto.llm.request.duration", metric.WithUnit("ms")); err != nil {
+		errs = append(errs, fmt.Errorf("koto.llm.request.duration: %w", err))
+	}
+	s.tokIn = ic("koto.llm.tokens.input", metric.WithUnit("{token}"))
+	s.tokOut = ic("koto.llm.tokens.output", metric.WithUnit("{token}"))
+	s.tokCacheRd = ic("koto.llm.tokens.cache_read", metric.WithUnit("{token}"))
+	s.tokCacheCr = ic("koto.llm.tokens.cache_creation", metric.WithUnit("{token}"))
+	s.guestDropped = ic("koto.guest_spans_dropped", metric.WithDescription("guest span frames rejected by the daemon"))
+	return errors.Join(errs...)
 }
 
 // flush pushes everything buffered to the receiver (tests, shutdown).
@@ -229,7 +258,6 @@ func otelRecordLLM(group, path string, status int, reqID string, usage map[strin
 	}
 	ctx := context.Background()
 	attrs := metric.WithAttributes(
-		attribute.String("group", group),
 		attribute.String("koto.group", group),
 		attribute.String("path", path),
 		attribute.Int("status", status),
@@ -269,7 +297,7 @@ func otelLogCtx(ctx context.Context, subsystem, group, level, stream, msg string
 	r.SetBody(attribute.StringValue(msg))
 	r.AddAttributes(attribute.String("stream", stream))
 	if group != "" {
-		r.AddAttributes(attribute.String("group", group), attribute.String("koto.group", group))
+		r.AddAttributes(attribute.String("koto.group", group))
 	}
 	if subsystem != "" {
 		r.AddAttributes(attribute.String("subsystem", subsystem))
@@ -294,7 +322,7 @@ func otelSeverity(level string) otellog.Severity {
 func otelGuestDropped(group, reason string) {
 	if s := otelCur.Load(); s != nil && s.guestDropped != nil {
 		s.guestDropped.Add(context.Background(), 1, metric.WithAttributes(
-			attribute.String("group", group), attribute.String("reason", reason)))
+			attribute.String("koto.group", group), attribute.String("reason", reason)))
 	}
 }
 

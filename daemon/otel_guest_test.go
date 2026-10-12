@@ -47,7 +47,7 @@ func droppedMetric(t *testing.T, rd *sdkmetric.ManualReader, group, reason strin
 				continue
 			}
 			for _, dp := range sum.DataPoints {
-				g, _ := dp.Attributes.Value("group")
+				g, _ := dp.Attributes.Value("koto.group")
 				r, _ := dp.Attributes.Value("reason")
 				if g.AsString() == group && r.AsString() == reason {
 					n += dp.Value
@@ -228,7 +228,7 @@ func TestGuestSpanReservedAttrsStripped(t *testing.T) {
 	ot.bindSlot(3)
 	gi := newGuestIngest("g1", "s1", 3)
 	gi.add(gspan("a", "", "guest.turn", map[string]string{
-		"koto.group": "main", "KOTO.source": "host", " koto.slot": "0", "koto.session": "default", "exit_code": "0"}))
+		"koto.group": "main", "KOTO.source": "host", " koto.slot": "0", "koto.session": "default", "group": "main", "exit_code": "0"}))
 	gi.finish()
 	ot.end(nil)
 	s := byName(exp.GetSpans(), "guest.turn")
@@ -239,11 +239,14 @@ func TestGuestSpanReservedAttrsStripped(t *testing.T) {
 		}
 	}
 	for _, a := range s.Attributes {
+		if a.Key == "group" {
+			t.Errorf("guest-supplied bare group survived")
+		}
 		if strings.EqualFold(strings.TrimSpace(string(a.Key)), "koto.source") && string(a.Key) != "koto.source" {
 			t.Errorf("guest-supplied %q survived", a.Key)
 		}
 	}
-	if gi.dropped["attr_reserved"] != 4 || droppedMetric(t, rd, "g1", "attr_reserved") != 4 {
+	if gi.dropped["attr_reserved"] != 5 || droppedMetric(t, rd, "g1", "attr_reserved") != 5 {
 		t.Fatalf("reserved strip not counted: %v", gi.dropped)
 	}
 }

@@ -226,7 +226,6 @@ func otelLLMStart(ctx context.Context, g, provider, method, path, tp string) (co
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("koto.group", g),
-			attribute.String("group", g),
 			attribute.String("llm.provider", provider),
 			attribute.String("http.request.method", method),
 			attribute.String("url.path", path),

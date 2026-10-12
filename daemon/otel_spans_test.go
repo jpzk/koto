@@ -68,7 +68,7 @@ func TestOtelTurnParentsLLMRequest(t *testing.T) {
 	if v, _ := spanAttr(*llm, "request_id"); v != "req_abc" {
 		t.Fatalf("request_id = %q", v)
 	}
-	if v, _ := spanAttr(*llm, "group"); v != "g1" {
+	if v, _ := spanAttr(*llm, "koto.group"); v != "g1" {
 		t.Fatalf("group = %q", v)
 	}
 	if v, _ := spanAttr(*llm, "llm.usage.output_tokens"); v != "5" {

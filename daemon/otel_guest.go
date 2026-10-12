@@ -16,8 +16,8 @@ package main
 //     unknown, the span itself, a cycle) becomes the host turn span.
 //   - bounds: spans per turn, attrs per span, key/value/name length, and
 //     timestamps clamped to [turn start - 1s, now + 1s]. Excess is dropped
-//     and counted in koto.guest_spans_dropped{group,reason}.
-//   - attrs: guest-supplied koto.* keys are stripped; koto.source=guest,
+//     and counted in koto.guest_spans_dropped{koto.group,reason}.
+//   - attrs: guest-supplied koto.* keys and a bare "group" are stripped; koto.source=guest,
 //     koto.group, koto.session, koto.slot are stamped server-side.
 //   - content: by default only the known metadata keys (provider, model,
 //     tool.name) may carry a string; any other key must be numeric or
@@ -181,7 +181,7 @@ func (gi *guestIngest) add(s *pb.GuestSpan) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := s.Attrs[k]
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(k)), "koto.") {
+		if lk := strings.ToLower(strings.TrimSpace(k)); strings.HasPrefix(lk, "koto.") || lk == "group" {
 			gi.drop("attr_reserved")
 			continue
 		}

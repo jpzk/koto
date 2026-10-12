@@ -94,7 +94,7 @@ func TestOtelE2EAllSignalsReachReceiver(t *testing.T) {
 	checks := []check{
 		{"metric koto.llm.tokens.output{koto.group} > 0", func() bool {
 			for _, p := range rcv.Points() {
-				if p.Metric == "koto.llm.tokens.output" && p.Attrs["koto.group"] == g && p.Attrs["group"] == g && p.Value >= 7 {
+				if p.Metric == "koto.llm.tokens.output" && p.Attrs["koto.group"] == g && p.Value >= 7 {
 					return true
 				}
 			}
@@ -144,7 +144,7 @@ func TestOtelE2EAllSignalsReachReceiver(t *testing.T) {
 		}},
 		{"span koto.llm.request{group, request_id} parented to the turn", func() bool {
 			for _, sp := range rcv.Spans() {
-				if sp.Name == "koto.llm.request" && sp.Attrs["group"] == g && sp.Attrs["request_id"] == "req_e2e_1" &&
+				if sp.Name == "koto.llm.request" && sp.Attrs["koto.group"] == g && sp.Attrs["request_id"] == "req_e2e_1" &&
 					sp.TraceID == turnTrace && sp.ParentID == turnSpan {
 					return true
 				}
