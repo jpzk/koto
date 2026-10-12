@@ -1033,7 +1033,6 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 	if len(req.ConfigJson) > 0 {
 		writeWorkerFile(filepath.Join(csDir, "config.json"), req.ConfigJson)
 	}
-	tr.timed("guest.config_write", cfgStart, map[string]string{"config.bytes": strconv.Itoa(len(req.ConfigJson)), "system_prompt.bytes": strconv.Itoa(len(sp))}, nil)
 	tr.timed("guest.config_write", cfgStart, map[string]string{
 		"system_prompt_bytes": strconv.Itoa(len(sp)), "config_bytes": strconv.Itoa(len(req.ConfigJson))}, nil)
 	// Attachments saved host-side by the daemon ride along per turn; the
