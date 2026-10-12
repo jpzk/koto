@@ -7267,6 +7267,11 @@ func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 // old group's entire workspace for the NEXT group of that name to mount, while
 // the operator had been told the data was gone.
 func TestDestroyReportsAFailedWorkspaceDeletion(t *testing.T) {
+	// Root bypasses directory write permission, so RemoveAll succeeds and the
+	// failure cannot be staged (the pinned podman build container runs as root).
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an undeletable directory cannot be staged")
+	}
 	prevRoot, prevHere := ROOT, HERE
 	// NOT t.TempDir(): pointing the globals at it makes every background
 	// worker in the process write under it, and testing's own cleanup FAILS

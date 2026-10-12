@@ -18,6 +18,12 @@ func TestFcDstAllowed(t *testing.T) {
 	// Full destination × profile matrix. cs_host's own IPs are also ctl
 	// (fcSelfIPs), but those depend on the host's interfaces, so this table
 	// covers only the static classes.
+	// Pin the self-address list empty: a host whose own NIC sits in the
+	// gateway /24 (a koto guest running the suite is 192.168.127.2) would
+	// otherwise classify that row as ctl and fail on host luck alone.
+	prevSelf := fcSelfIPs
+	fcSelfIPs = func() []net.IP { return nil }
+	t.Cleanup(func() { fcSelfIPs = prevSelf })
 	cases := []struct {
 		ip             string
 		wan, lan, full bool
