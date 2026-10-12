@@ -352,6 +352,7 @@ func streamLogAppend(p string, data []byte) {
 // write lock — tryFlushNotify takes it across its whole flush so a notification
 // cannot land mid-line.
 func streamLogAppendLocked(p string, data []byte) {
+	otelLogStream(p, data)
 	if d := fcLogSinkWait(groupOfLogPath(p), len(data)); d > 0 {
 		time.Sleep(d)
 	}
@@ -502,6 +503,7 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
+	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 
 // metricsMaxBytes bounds metrics.jsonl (audit 2026-09-11 L95). Every completed
