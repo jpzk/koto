@@ -77,6 +77,8 @@ func fcTurnSink(g string, c net.Conn) {
 	defer gi.finish()
 	ensureSlotTail(g, slot)
 	w := newTurnWriter(g, slotLogPath(g, slot))
+	// Runs after flushHold (defers are LIFO), so held bytes reach OTel too.
+	defer w.otelFlush()
 	// A stream that dies mid-line may leave a byte or two withheld by text()'s
 	// marker-ambiguity hold; they are the guest's output and belong in the
 	// transcript whether or not the turn ended cleanly.
@@ -138,6 +140,10 @@ type turnWriter struct {
 	// hold carries the first few bytes of a logical line when they are still
 	// an AMBIGUOUS marker prefix — "[", "[t", ">>", and so on. See text().
 	hold []byte
+	// ob line-buffers what was written for the OTel log bridge: the sink
+	// appends fragments (text chunks end mid-line), the bridge wants one
+	// record per line. Bounded by otelLineMax; unused when export is off.
+	ob []byte
 }
 
 func newTurnWriter(g, p string) *turnWriter {
@@ -348,10 +354,41 @@ func (w *turnWriter) write(size int, render func(mid, known bool) []byte) {
 	var err error
 	if b := render(logEndsMidline(w.p)); len(b) > 0 {
 		err = logSinkAppend(w.p, b)
+		if err == nil {
+			w.otelLine(b)
+		}
 	}
 	mu.Unlock()
 	if err != nil {
 		w.failed = true
 		emitLogfG("fc", w.g, "error", "[%s] turn log append: %v", w.g, err)
+	}
+}
+
+// otelLineMax bounds the OTel bridge's partial-line buffer; a longer line is
+// exported in pieces rather than held without limit.
+const otelLineMax = 16 << 10
+
+// otelLine feeds written transcript bytes to the OTel log bridge, one record
+// per complete line (otelLogStream). A no-op when export is off.
+func (w *turnWriter) otelLine(b []byte) {
+	if !otelOn() {
+		return
+	}
+	w.ob = append(w.ob, b...)
+	if i := bytes.LastIndexByte(w.ob, '\n'); i >= 0 {
+		otelLogStream(w.p, w.ob[:i+1])
+		w.ob = append(w.ob[:0], w.ob[i+1:]...)
+	}
+	if len(w.ob) >= otelLineMax {
+		w.otelFlush()
+	}
+}
+
+// otelFlush exports a trailing partial line.
+func (w *turnWriter) otelFlush() {
+	if len(w.ob) > 0 {
+		otelLogStream(w.p, w.ob)
+		w.ob = nil
 	}
 }

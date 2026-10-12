@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -228,6 +229,7 @@ func otelRecordLLM(group, path string, status int, reqID string, usage map[strin
 	ctx := context.Background()
 	attrs := metric.WithAttributes(
 		attribute.String("group", group),
+		attribute.String("koto.group", group),
 		attribute.String("path", path),
 		attribute.Int("status", status),
 	)
@@ -247,6 +249,12 @@ func otelRecordLLM(group, path string, status int, reqID string, usage map[strin
 // otelLog bridges one log line. stream names the sink ("daemon", "group",
 // or a slot stream file name).
 func otelLog(subsystem, group, level, stream, msg string) {
+	otelLogCtx(context.Background(), subsystem, group, level, stream, msg)
+}
+
+// otelLogCtx is otelLog emitted within ctx: a ctx carrying a span (a live
+// turn) stamps the record with its trace_id/span_id for correlation.
+func otelLogCtx(ctx context.Context, subsystem, group, level, stream, msg string) {
 	s := otelCur.Load()
 	if s == nil {
 		return
@@ -260,12 +268,12 @@ func otelLog(subsystem, group, level, stream, msg string) {
 	r.SetBody(attribute.StringValue(msg))
 	r.AddAttributes(attribute.String("stream", stream))
 	if group != "" {
-		r.AddAttributes(attribute.String("group", group))
+		r.AddAttributes(attribute.String("group", group), attribute.String("koto.group", group))
 	}
 	if subsystem != "" {
 		r.AddAttributes(attribute.String("subsystem", subsystem))
 	}
-	s.logger.Emit(context.Background(), r)
+	s.logger.Emit(ctx, r)
 }
 
 func otelSeverity(level string) otellog.Severity {
@@ -297,9 +305,17 @@ func otelLogStream(p string, data []byte) {
 		return
 	}
 	group, stream := groupOfLogPath(p), filepath.Base(p)
+	// A slot stream (log.<n>) belongs to the turn live on that slot, if any:
+	// its lines carry that turn's trace context.
+	ctx := context.Background()
+	if n, ok := strings.CutPrefix(stream, "log."); ok {
+		if slot, err := strconv.Atoi(n); err == nil {
+			ctx = otelLiveTurn(group, slot).Ctx()
+		}
+	}
 	for _, ln := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		if ln != "" {
-			otelLog("", group, "info", stream, ln)
+			otelLogCtx(ctx, "", group, "info", stream, ln)
 		}
 	}
 }
