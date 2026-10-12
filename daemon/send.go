@@ -416,7 +416,7 @@ drain:
 	if !isReservedSession(session) {
 		activityTurnDelivering(g, session)
 	}
-	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB); err != nil {
+	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB, otelTraceparent(ot.Ctx())); err != nil {
 		// An error here is an AMBIGUOUS delivery, not a proven non-delivery.
 		// fc-agent starts runTurn BEFORE it replies, so a transport failure,
 		// a lost response or a deadline all leave a turn possibly running in
