@@ -34,13 +34,27 @@ type Span struct {
 }
 
 // Point is one received metric data point. Value is the sum for counters and
-// gauges, the sample count for histograms.
+// gauges, the sample count for histograms (Count/Sum/Bounds/Buckets carry the
+// full histogram). Batch is the 1-based index of the metrics export request
+// the point arrived in, so a checker can follow a cumulative series across
+// periodic exports.
 type Point struct {
-	Metric   string            `json:"metric"`
-	Kind     string            `json:"kind"`
-	Value    float64           `json:"value"`
-	Attrs    map[string]string `json:"attrs"`
-	Resource map[string]string `json:"resource"`
+	Metric      string            `json:"metric"`
+	Kind        string            `json:"kind"`
+	Unit        string            `json:"unit"`
+	Value       float64           `json:"value"`
+	Count       uint64            `json:"count,omitempty"`
+	Sum         float64           `json:"sum,omitempty"`
+	HasSum      bool              `json:"has_sum,omitempty"`
+	Bounds      []float64         `json:"bounds,omitempty"`
+	Buckets     []uint64          `json:"buckets,omitempty"`
+	Temporality string            `json:"temporality,omitempty"` // "cumulative" / "delta" / "unspecified"; sums and histograms only
+	Monotonic   bool              `json:"monotonic,omitempty"`   // sums only
+	StartNano   uint64            `json:"start_time_unix_nano"`
+	TimeNano    uint64            `json:"time_unix_nano"`
+	Batch       int               `json:"batch"`
+	Attrs       map[string]string `json:"attrs"`
+	Resource    map[string]string `json:"resource"`
 }
 
 // Log is one received log record.
@@ -66,6 +80,7 @@ type Receiver struct {
 	spans   []Span
 	points  []Point
 	logs    []Log
+	batches int // metrics export requests seen
 	changed chan struct{}
 	sink    io.Writer // optional JSON-lines dump
 }
@@ -175,12 +190,14 @@ func (m metricsSrv) Export(_ context.Context, req *colmetrics.ExportMetricsServi
 	r := m.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.batches++
 	for _, rm := range req.GetResourceMetrics() {
 		res := attrMap(rm.GetResource().GetAttributes())
 		for _, sm := range rm.GetScopeMetrics() {
 			for _, mt := range sm.GetMetrics() {
 				for _, p := range flattenMetric(mt) {
 					p.Resource = res
+					p.Batch = r.batches
 					r.points = append(r.points, p)
 					r.dump("metric", p)
 				}
@@ -216,10 +233,28 @@ func (l logsSrv) Export(_ context.Context, req *collogs.ExportLogsServiceRequest
 	return &collogs.ExportLogsServiceResponse{}, nil
 }
 
+// MetricsBatches is how many metrics export requests have arrived.
+func (r *Receiver) MetricsBatches() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.batches
+}
+
+func temporality(t metricspb.AggregationTemporality) string {
+	switch t {
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE:
+		return "cumulative"
+	case metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA:
+		return "delta"
+	default:
+		return "unspecified"
+	}
+}
+
 func flattenMetric(m *metricspb.Metric) []Point {
 	var out []Point
-	add := func(kind string, v float64, a []*commonpb.KeyValue) {
-		out = append(out, Point{Metric: m.GetName(), Kind: kind, Value: v, Attrs: attrMap(a)})
+	base := func(kind string, a []*commonpb.KeyValue, start, ts uint64) Point {
+		return Point{Metric: m.GetName(), Kind: kind, Unit: m.GetUnit(), Attrs: attrMap(a), StartNano: start, TimeNano: ts}
 	}
 	numVal := func(d *metricspb.NumberDataPoint) float64 {
 		if _, ok := d.GetValue().(*metricspb.NumberDataPoint_AsInt); ok {
@@ -229,20 +264,45 @@ func flattenMetric(m *metricspb.Metric) []Point {
 	}
 	switch {
 	case m.GetSum() != nil:
-		for _, d := range m.GetSum().GetDataPoints() {
-			add("sum", numVal(d), d.GetAttributes())
+		s := m.GetSum()
+		for _, d := range s.GetDataPoints() {
+			p := base("sum", d.GetAttributes(), d.GetStartTimeUnixNano(), d.GetTimeUnixNano())
+			p.Value = numVal(d)
+			p.Temporality = temporality(s.GetAggregationTemporality())
+			p.Monotonic = s.GetIsMonotonic()
+			out = append(out, p)
 		}
 	case m.GetGauge() != nil:
 		for _, d := range m.GetGauge().GetDataPoints() {
-			add("gauge", numVal(d), d.GetAttributes())
+			p := base("gauge", d.GetAttributes(), d.GetStartTimeUnixNano(), d.GetTimeUnixNano())
+			p.Value = numVal(d)
+			out = append(out, p)
 		}
 	case m.GetHistogram() != nil:
-		for _, d := range m.GetHistogram().GetDataPoints() {
-			add("histogram", float64(d.GetCount()), d.GetAttributes())
+		h := m.GetHistogram()
+		for _, d := range h.GetDataPoints() {
+			p := base("histogram", d.GetAttributes(), d.GetStartTimeUnixNano(), d.GetTimeUnixNano())
+			p.Value = float64(d.GetCount())
+			p.Count = d.GetCount()
+			if d.Sum != nil {
+				p.Sum, p.HasSum = d.GetSum(), true
+			}
+			p.Bounds = append([]float64(nil), d.GetExplicitBounds()...)
+			p.Buckets = append([]uint64(nil), d.GetBucketCounts()...)
+			p.Temporality = temporality(h.GetAggregationTemporality())
+			out = append(out, p)
 		}
 	case m.GetExponentialHistogram() != nil:
-		for _, d := range m.GetExponentialHistogram().GetDataPoints() {
-			add("exp_histogram", float64(d.GetCount()), d.GetAttributes())
+		h := m.GetExponentialHistogram()
+		for _, d := range h.GetDataPoints() {
+			p := base("exp_histogram", d.GetAttributes(), d.GetStartTimeUnixNano(), d.GetTimeUnixNano())
+			p.Value = float64(d.GetCount())
+			p.Count = d.GetCount()
+			if d.Sum != nil {
+				p.Sum, p.HasSum = d.GetSum(), true
+			}
+			p.Temporality = temporality(h.GetAggregationTemporality())
+			out = append(out, p)
 		}
 	}
 	return out
