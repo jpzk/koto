@@ -1156,6 +1156,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	// The request's span: a child of the group's live turn when exactly one
+	// is open (otel_spans.go). r carries it so the retire point can annotate.
+	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path)
+	defer llmSp.End()
+	r = r.WithContext(spCtx)
 	if provider == "venice" {
 		h.serveVenice(w, r)
 		return
@@ -1339,6 +1344,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
+	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
 
 // serveVenice forwards to api.venice.ai with credential injection mirroring
@@ -1487,6 +1493,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	dur := time.Since(t0)
 	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
+	otelLLMAnnotate(r.Context(), resp.StatusCode, resp.Header.Get("x-request-id"), usage)
 }
 
 // proxyListen registers an HTTP listener for group g on port. Idempotent:

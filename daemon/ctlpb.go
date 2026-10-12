@@ -19,11 +19,13 @@ package main
 // a mechanical follow-up; this adapter is what the tests pin.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
 	"koto-protocol/pb"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -80,7 +82,13 @@ func ctlDispatchPB(owner string, req *pb.CtlRequest) *pb.CtlResponse {
 	// makes the ctl log useful; the cap is where a payload starts being a
 	// payload rather than a command.
 	emitLogfG("ctl", owner, "info", "[%s] %s", owner, ctlLogLine(line, verb))
+	_, ctlSp := otelSpan(context.Background(), "koto.ctl", owner,
+		attribute.String("koto.ctl.verb", verb), attribute.String("request_id", otelNewID()))
 	resp, err := ctlRespToPB(ctlDispatch(owner, line))
+	if err == nil && resp.GetError() != "" {
+		ctlSp.SetAttributes(attribute.String("koto.ctl.error", truncateBytes(resp.GetError(), 256)))
+	}
+	otelEnd(ctlSp, err)
 	if err != nil {
 		emitLogfG("ctl", owner, "error", "[%s] %s: %v", owner, verb, err)
 		return &pb.CtlResponse{Error: "ctl: internal: " + err.Error()}

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ---- groups.json ----------------------------------------------------------
@@ -286,7 +288,10 @@ func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 		}
 	}
 	emitLogfG("group", g, "info", "spawning microVM group=%s port=%d main=%t pub=%v", g, port, isMain, pubPorts)
-	if err := fcSpawn(g, port, pubPorts); err != nil {
+	_, spawnSp := otelSpan(context.Background(), "koto.fc.spawn", g, attribute.Bool("koto.main", isMain))
+	spawnErr := fcSpawn(g, port, pubPorts)
+	otelEnd(spawnSp, spawnErr)
+	if err := spawnErr; err != nil {
 		proxyUnlisten(port)
 		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
 		return 0, err

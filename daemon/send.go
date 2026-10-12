@@ -310,6 +310,15 @@ func fencePromptEcho(msg string) string {
 // mix their frames into one unparseable stream, and race on each other's
 // completion signal.
 func sendNow(g, session, msg string) error {
+	// The turn's span (otel_spans.go): nil, and every use a no-op, when
+	// export is off.
+	ot := otelTurnBegin(g, session)
+	err := sendNowTurn(ot, g, session, msg)
+	ot.end(err)
+	return err
+}
+
+func sendNowTurn(ot *otelTurn, g, session, msg string) error {
 	emitLogfG("send", g, "info", "group=%s session=%s bytes=%d", g, sessionMarkerName(session), len(msg))
 	// Phase reporting for clients (activity.go). Opened before ensure() —
 	// booting a stopped microVM is several seconds with nothing else to show —
@@ -330,7 +339,10 @@ func sendNow(g, session, msg string) error {
 	// acquisition); once delivered, the abort loop in the wait below owns it.
 	cancelC := turnCancelCh(g, session)
 
-	if _, err := ensure(g, g == "main"); err != nil {
+	_, ensureSp := otelSpan(ot.Ctx(), "koto.ensure", g)
+	_, err := ensure(g, g == "main")
+	otelEnd(ensureSp, err)
+	if err != nil {
 		emitLogfG("send", g, "error", "ensure group=%s: %v", g, err)
 		return err
 	}
@@ -352,6 +364,7 @@ func sendNow(g, session, msg string) error {
 		return nil
 	}
 	slot := hold.slot
+	ot.bindSlot(slot)
 	defer releaseSlot(hold) // no-op if the stall path quarantined it, or if
 	// the quarantine was lifted and the slot re-handed out (audit M40)
 	ensureSlotTail(g, slot)
