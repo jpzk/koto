@@ -6126,7 +6126,11 @@ func TestWorkspaceImagesHaveHostDiskAdmission(t *testing.T) {
 
 	// A real filesystem with room: admitted, and silently.
 	ROOT = t.TempDir()
-	if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
+	// Host luck: if the test host itself is past resCritPct the admitted case
+	// cannot be exercised; log it and still run the rest.
+	if total, free := hostFSStats(); total > 0 && float64(total-free)/float64(total)*100 >= resCritPct {
+		t.Logf("skipping the admitted case: the test host's filesystem is %.0f%% used (>= resCritPct)", float64(total-free)/float64(total)*100)
+	} else if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
 		t.Errorf("a filesystem with free space refused a spawn: %v", err)
 	}
 
