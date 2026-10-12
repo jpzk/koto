@@ -84,6 +84,14 @@ if [ -n "$UP" ]; then
     && grep -q KOTO_UPSTREAM "$S/daemon/proxy.go" \
     && ok "nested-only patch $UP (KOTO_UPSTREAM) applied to snapshot" || die "apply $UP"
 fi
+# Nested-only: a guest in a nested microVM can take >30s to mount its rootfs
+# on a loaded host, which trips the 30s agent deadline and burns the 9m ask.
+# Widen the deadline in the SNAPSHOT only (the PR's own code is untouched).
+BOOT_S=${E2E_OTEL_AGENT_BOOT_S:-150}
+sed -i "s/deadline := time.Now().Add(30 \* time.Second)/deadline := time.Now().Add($BOOT_S * time.Second)/; s/guest agent didn't come up within 30s/guest agent didn't come up within ${BOOT_S}s/" \
+  "$S/daemon/fc.go"
+grep -q "Add($BOOT_S \* time.Second)" "$S/daemon/fc.go" \
+  && ok "nested-only: guest agent boot deadline ${BOOT_S}s in snapshot" || die "patch agent boot deadline"
 cp "$S/install.sh" "$S/daemon/installer/install.sh"
 VER="otel-e2e-$(cd "$REPO" && git rev-parse --short HEAD)"
 gorun "$S" /src go build -trimpath -ldflags "-s -w -X main.kotoVersion=$VER" -o koto ./daemon \
@@ -164,6 +172,19 @@ if [ -z "$G" ]; then
   fi
 fi
 echo "    group $G (scratch=$SCRATCH)"
+# Boot the guest BEFORE the ask, with bounded retries: a boot failure must
+# fail fast here, not hang the 9m ask on a group that never came up.
+# (ctl spawn may return on its 30s RPC deadline while the boot goes on.)
+running(){ $K ctl list 2>/dev/null | jq -e --arg g "$1" '.groups[$g].running' >/dev/null 2>&1; }
+booted=0
+for a in 1 2 3; do
+  running "$G" && { booted=1; break; }
+  timeout 240 $K ctl spawn "$G" >>"$W/spawn.log" 2>&1 || echo "    boot $G attempt $a: $(tail -1 "$W/spawn.log")"
+  for _ in $(seq 150); do running "$G" && { booted=1; break; }; sleep 1; done
+  [ $booted = 1 ] && break
+done
+[ $booted = 1 ] && ok "guest $G booted (attempt $a)" \
+  || { no "guest $G did not boot in 3 attempts (see $W/daemon.log, /var/lib/koto/run/fc/$G.console.log)"; summary; exit 1; }
 # ctl resources snapshot DURING the run, once the guest sweep has filled in
 # the guest mem/disk figures (0 = unknown until then). Ground truth for the
 # resource-gauge checks; taken by ctl, never recomputed from the capture.
