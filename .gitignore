@@ -40,3 +40,5 @@ todo.txt
 
 # release build output (make dist); nothing here is checked in
 /dist/
+/.e2e-otel/
+/.e2e-otel-bin/
