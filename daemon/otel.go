@@ -213,7 +213,7 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 // otelMeterWrap is a test seam: tests swap it to make instrument creation fail.
 var otelMeterWrap = func(m metric.Meter) metric.Meter { return m }
 
-// instruments creates every synchronous instrument; ALL errors are collected
+// instruments creates every instrument (sync + resource gauges); ALL errors are collected
 // and returned, none are discarded.
 func (s *otelState) instruments(m metric.Meter) error {
 	var errs []error
@@ -234,6 +234,10 @@ func (s *otelState) instruments(m metric.Meter) error {
 	s.tokCacheRd = ic("koto.llm.tokens.cache_read", metric.WithUnit("{token}"))
 	s.tokCacheCr = ic("koto.llm.tokens.cache_creation", metric.WithUnit("{token}"))
 	s.guestDropped = ic("koto.guest_spans_dropped", metric.WithDescription("guest span frames rejected by the daemon"))
+	// Resource gauges (otel_resources.go): same snapshot as ctl `resources`.
+	if _, err := otelResourceInstruments(m); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
