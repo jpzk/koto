@@ -293,7 +293,7 @@ func daemonMain() {
 		// die with the daemon otherwise.
 		fcStopAll()
 		// Flush telemetry last, so the shutdown lines themselves are exported.
-		fctx, fcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		fctx, fcancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
 		_ = otelShutdown(fctx)
 		fcancel()
 		close(shutdownDone)

@@ -55,7 +55,7 @@ func claudeBin() string {
 // (nvm lays out bin/{node,claude}), so the interpreter has to be findable from
 // the unit's PATH, which the operator's shell PATH is not.
 func claudeBinEnviron(bin string) []string {
-	env := os.Environ()
+	env := otelScrubEnv(os.Environ())
 	if !filepath.IsAbs(bin) {
 		return env
 	}

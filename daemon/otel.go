@@ -13,7 +13,8 @@ package main
 //	                             only the gRPC exporters are vendored, and
 //	                             adding the HTTP trio would mean three more
 //	                             pinned modules for no current user.
-//	OTEL_EXPORTER_OTLP_HEADERS   k=v,k=v sent with every export
+//	OTEL_EXPORTER_OTLP_HEADERS   k=v,k=v sent with every export (never logged,
+//	                             see otel_redact.go)
 //	OTEL_SERVICE_NAME            default "koto"
 //	OTEL_RESOURCE_ATTRIBUTES     extra resource attrs
 //	KOTO_OTEL_ENDPOINT           koto-native knob; the OTEL_ variable wins
@@ -148,19 +149,28 @@ func otelTraceparent(ctx context.Context) string {
 func otelInit(ctx context.Context) func(context.Context) error {
 	cfg, err := otelConfigFrom(os.Getenv)
 	if err != nil {
-		emitLogf("otel", "warn", "%v", err)
+		emitLogf("otel", "warn", "%s", otelRedact(err.Error()))
 		return func(context.Context) error { return nil }
 	}
 	if cfg.Endpoint == "" {
 		return func(context.Context) error { return nil }
 	}
+	// Before any exporter exists: they parse the header env vars in New and
+	// the SDK's default logger would print a malformed value raw.
+	otelInstallLogging(os.Getenv)
 	s, err := otelStart(ctx, cfg)
 	if err != nil {
-		emitLogf("otel", "error", "otel init: %v (telemetry off)", err)
+		emitLogf("otel", "error", "otel init: %s (telemetry off)", otelRedactErr(err))
 		return func(context.Context) error { return nil }
 	}
-	emitLogf("otel", "info", "OTLP export on: %s", cfg.Endpoint)
-	return s.shutdown
+	emitLogf("otel", "info", "OTLP export on: %s", otelRedactURL(cfg.Endpoint))
+	return func(ctx context.Context) error {
+		err := s.shutdown(ctx)
+		if err != nil {
+			emitLogfQuiet("otel", "warn", "otel shutdown: %s", otelRedactErr(err))
+		}
+		return err
+	}
 }
 
 // otelStart builds providers + exporters for a non-empty endpoint and makes
@@ -209,9 +219,11 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 		// A half-built pipeline would silently drop the broken series; fail
 		// the whole init instead so the operator sees it (otelInit logs it
 		// and leaves telemetry off).
-		_ = s.tp.Shutdown(ctx)
-		_ = s.mp.Shutdown(ctx)
-		_ = s.lp.Shutdown(ctx)
+		sctx, cancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
+		defer cancel()
+		_ = s.tp.Shutdown(sctx)
+		_ = s.mp.Shutdown(sctx)
+		_ = s.lp.Shutdown(sctx)
 		return nil, fmt.Errorf("instruments: %w", err)
 	}
 	otelCur.Store(s)
@@ -301,6 +313,9 @@ const (
 	otelLogPlaceholder = "[content not captured]"
 	// otelLogMaxBody caps a captured body (capture on).
 	otelLogMaxBody = 8 << 10
+	// otelShutdownTimeout bounds every provider shutdown (daemon exit, failed
+	// init): an unreachable receiver must not hold the daemon up.
+	otelShutdownTimeout = 2 * time.Second
 )
 
 // otelLogBody is the exported body for msg under the content switch.
