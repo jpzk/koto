@@ -258,6 +258,13 @@ func ctlPrint(msg proto.Message, err error) {
 	}
 }
 
+// ctlSpawnTimeout bounds `koto ctl spawn`. A spawn is a boot, and a boot can
+// queue behind others in the daemon's boot gate (fcbootgate.go) before its own
+// ~10-30s of booting starts — 30s (ctlCtx) reported DeadlineExceeded for boots
+// that went on to succeed, and a client that gives up while queued withdraws
+// its boot. Long enough for a full queue on a small host.
+const ctlSpawnTimeout = 5 * time.Minute
+
 func ctlCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
 }
@@ -323,7 +330,7 @@ func ctlCliMain(args []string) {
 			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] <group>")
 		}
 		cl := ctlClient()
-		ctx, cancel := ctlCtx()
+		ctx, cancel := context.WithTimeout(context.Background(), ctlSpawnTimeout)
 		defer cancel()
 		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: fs.Arg(0), Provider: *provider, Model: *model})
 		ctlPrint(resp, err)

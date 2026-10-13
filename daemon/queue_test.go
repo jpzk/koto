@@ -335,6 +335,12 @@ func TestDropQueuedDiscardsBacklog(t *testing.T) {
 	// Both groups hold their first turn in flight so the messages behind it
 	// stay QUEUED (dropQueued's subject) instead of being consumed instantly.
 	stub := func(grp, session, msg string) error {
+		// Turns are routed through the package-global queue, so a background
+		// notifier left by an earlier test (e.g. the job-completion batcher for
+		// group "tg") can land here too. Only this test's groups are evidence.
+		if grp != g && grp != other {
+			return nil
+		}
 		processed <- grp + "/" + msg
 		if msg == "work" {
 			started <- grp

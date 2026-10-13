@@ -132,7 +132,7 @@ func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout(cmd))
 	defer cancel()
 
 	// One log line per unary RPC — the single choke point every command,
@@ -636,4 +636,16 @@ func pbToEvent(p *pb.Event) Event {
 
 func pbToLogEvent(p *pb.LogEvent) LogEvent {
 	return LogEvent{Event: p.Event, Level: p.Level, Msg: p.Msg, Ts: p.Ts, Subsystem: p.Subsystem, Group: p.Group}
+}
+
+// rpcTimeout is the client deadline for one unary RPC. A spawn is a microVM
+// boot, which the daemon may first QUEUE behind other boots (its boot gate
+// admits a bounded number at a time) — under the flat 30s a spawn on a busy
+// host reported DeadlineExceeded and, because a caller that gives up while
+// queued withdraws its boot, never happened at all.
+func rpcTimeout(cmd string) time.Duration {
+	if cmd == "spawn" {
+		return 5 * time.Minute
+	}
+	return 30 * time.Second
 }

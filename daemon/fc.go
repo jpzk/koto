@@ -780,6 +780,13 @@ func fcSpawnDrain(d time.Duration) {
 }
 
 func fcSpawn(g string, proxyPort int, pubPorts []int) error {
+	return fcSpawnCtx(context.Background(), g, proxyPort, pubPorts)
+}
+
+// fcSpawnCtx is fcSpawn for a caller that can give up — but only while the
+// boot is still QUEUED in the boot gate (fcbootgate.go). Once admitted the
+// boot is uninterruptible, for the reasons the Spawn RPC spells out.
+func fcSpawnCtx(ctx context.Context, g string, proxyPort int, pubPorts []int) error {
 	fcSpawnBegin()
 	defer fcSpawnEnd()
 	if fcRunning(g) {
@@ -792,6 +799,30 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	if err := fcPreflight(); err != nil {
 		return err
+	}
+	// Boot admission (fcbootgate.go): at most K VMs boot at once, FIFO. Taken
+	// BEFORE the workspace image work (first-boot migration is mkfs + a copy,
+	// as CPU- and IO-heavy as the guest boot itself) and held until this call
+	// returns, i.e. through the agent-up wait. Every deadline below starts
+	// after admission, so time spent queued never counts against the boot.
+	gate := fcBootGate()
+	release, waited, err := gate.acquire(ctx, g, func(pos, booting int) {
+		_, _, limit := gate.stats()
+		emitLogfG("fc", g, "info", "[%s] boot queued: position %d, %d/%d booting (KOTO_BOOT_CONCURRENCY)", g, pos, booting, limit)
+	})
+	if err != nil {
+		emitLogfG("fc", g, "warn", "[%s] boot abandoned after %s queued: %v", g, waited.Round(time.Millisecond), err)
+		return err
+	}
+	defer release()
+	if waited > 0 {
+		emitLogfG("fc", g, "info", "[%s] boot admitted after %s queued", g, waited.Round(time.Millisecond))
+	}
+	if shuttingDown.Load() {
+		return fmt.Errorf("daemon is shutting down")
+	}
+	if fcRunning(g) {
+		return fmt.Errorf("group %s already has a live firecracker process", g)
 	}
 	if err := fcEnsureRunDir(); err != nil {
 		return err
@@ -1097,14 +1128,27 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		init.Net = "l3"
 	}
 	initReq := &pb.AgentRequest{Op: &pb.AgentRequest_Init{Init: init}}
-	deadline := time.Now().Add(30 * time.Second)
+	// Agent-up wait: progress-aware (fcbootgate.go bootDeadline). A guest that
+	// is still visibly booting under CPU contention is extended up to
+	// fcAgentMaxWait; one that shows no progress for fcAgentStallWait past
+	// fcAgentBaseWait is declared hung, as before.
+	agentT0 := time.Now()
+	dl := newBootDeadline(agentT0, fcBootProgress(vm.pid, fcConsolePath(g)))
+	extended := false
 	for {
 		_, err = fcAgentCall(g, initReq, 5*time.Second)
 		if err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			return fail(fmt.Errorf("guest agent didn't come up within 30s: %w (see %s)", err, fcConsolePath(g)))
+		now := time.Now()
+		if dl.expired(now, fcBootProgress(vm.pid, fcConsolePath(g))) {
+			return fail(fmt.Errorf("guest agent didn't come up within %s: %w (see %s)",
+				now.Sub(agentT0).Round(time.Second), err, fcConsolePath(g)))
+		}
+		if !extended && now.Sub(agentT0) >= dl.base {
+			extended = true
+			emitLogfG("fc", g, "warn", "[%s] guest agent not up after %s but the guest is still making progress — extending (cap %s)",
+				g, dl.base, dl.max)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

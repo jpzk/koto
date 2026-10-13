@@ -5,7 +5,12 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
+
+// standInDaemonEnv switches the test binary into a sleeping stand-in for a
+// running "koto daemon" (see TestMain).
+const standInDaemonEnv = "KOTO_TEST_STANDIN_DAEMON"
 
 // allocPortHarness gives each test its own GROUPS_FILE so they don't stomp
 // on the real one and so they're independent of execution order.
@@ -95,6 +100,12 @@ func TestAllocPortNoDupesOverChurn(t *testing.T) {
 // markTailed). Tests that assert on delivery play the tailer themselves via
 // deliverNotify.
 func TestMain(m *testing.M) {
+	// Stand-in "koto daemon" process for TestUninstallSeesADaemonWithNoUnitFile:
+	// the test re-execs this binary with argv {"koto","daemon"}.
+	if os.Getenv(standInDaemonEnv) == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	markTailed(ctlMainGroup)
 	defer func() {
 		HERE = ""
