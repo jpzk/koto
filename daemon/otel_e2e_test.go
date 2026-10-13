@@ -39,7 +39,9 @@ func TestOtelE2EAllSignalsReachReceiver(t *testing.T) {
 	t.Cleanup(rcv.Stop)
 
 	ctx := context.Background()
-	s, err := otelStart(ctx, otelConfig{Endpoint: rcv.Endpoint(), MetricInterval: time.Hour})
+	// Content capture on: this test asserts the marker reaches the log body
+	// (default-off gating is TestOtelLogContentGated).
+	s, err := otelStart(ctx, otelConfig{Endpoint: rcv.Endpoint(), MetricInterval: time.Hour, CaptureContent: true})
 	if err != nil {
 		t.Fatal(err)
 	}

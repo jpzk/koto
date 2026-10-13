@@ -18,7 +18,9 @@ package main
 //	OTEL_RESOURCE_ATTRIBUTES     extra resource attrs
 //	KOTO_OTEL_ENDPOINT           koto-native knob; the OTEL_ variable wins
 //	KOTO_OTEL_CAPTURE_CONTENT=1  allow truncated tool content in guest spans
-//	                             (default off: sizes/names/durations only)
+//	                             AND raw log line bodies (default off:
+//	                             sizes/names/durations only; log records
+//	                             carry metadata + correlation, no line bytes)
 //
 // An endpoint without a scheme is taken as https:// (TLS); a local receiver
 // is reached with an explicit http:// URL.
@@ -33,6 +35,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
@@ -284,6 +287,44 @@ func otelRecordLLM(group, path string, status int, reqID string, usage map[strin
 	add(s.tokCacheCr, "cache_creation_input_tokens")
 }
 
+// Log content gating (S1). A log line is CONTENT: group/slot streams carry
+// whatever the agent or its tools printed (a `cat .env`, a token in tool
+// output), and daemon event lines interpolate guest-influenced strings
+// (group names, proxy errors, job commands). So, exactly like guest span
+// attrs, the raw line leaves the box only with KOTO_OTEL_CAPTURE_CONTENT=1.
+// Default: the record keeps METADATA only (koto.group, koto.session,
+// koto.slot, stream, subsystem, severity, koto.log.bytes and the trace/span
+// correlation) and its body is otelLogPlaceholder. This applies to every
+// stream, daemon events included: a daemon line cannot be proven free of
+// guest bytes, so it is gated too.
+const (
+	otelLogPlaceholder = "[content not captured]"
+	// otelLogMaxBody caps a captured body (capture on).
+	otelLogMaxBody = 8 << 10
+)
+
+// otelLogBody is the exported body for msg under the content switch.
+func otelLogBody(capture bool, msg string) string {
+	if !capture {
+		return otelLogPlaceholder
+	}
+	if len(msg) > otelLogMaxBody {
+		return truncUTF8(msg, otelLogMaxBody) + "...[truncated]"
+	}
+	return msg
+}
+
+// truncUTF8 cuts s to at most n bytes without splitting a rune.
+func truncUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // otelLog bridges one log line. stream names the sink ("daemon", "group",
 // or a slot stream file name).
 func otelLog(subsystem, group, level, stream, msg string) {
@@ -291,8 +332,9 @@ func otelLog(subsystem, group, level, stream, msg string) {
 }
 
 // otelLogCtx is otelLog emitted within ctx: a ctx carrying a span (a live
-// turn) stamps the record with its trace_id/span_id for correlation.
-func otelLogCtx(ctx context.Context, subsystem, group, level, stream, msg string) {
+// turn) stamps the record with its trace_id/span_id for correlation. extra
+// are daemon-stamped metadata attrs, never content.
+func otelLogCtx(ctx context.Context, subsystem, group, level, stream, msg string, extra ...attribute.KeyValue) {
 	s := otelCur.Load()
 	if s == nil {
 		return
@@ -303,8 +345,9 @@ func otelLogCtx(ctx context.Context, subsystem, group, level, stream, msg string
 	r.SetObservedTimestamp(now)
 	r.SetSeverity(otelSeverity(level))
 	r.SetSeverityText(level)
-	r.SetBody(attribute.StringValue(msg))
-	r.AddAttributes(attribute.String("stream", stream))
+	r.SetBody(attribute.StringValue(otelLogBody(s.cfg.CaptureContent, msg)))
+	r.AddAttributes(attribute.String("stream", stream), attribute.Int("koto.log.bytes", len(msg)))
+	r.AddAttributes(extra...)
 	if group != "" {
 		r.AddAttributes(attribute.String("koto.group", group))
 	}
@@ -346,14 +389,19 @@ func otelLogStream(p string, data []byte) {
 	// A slot stream (log.<n>) belongs to the turn live on that slot, if any:
 	// its lines carry that turn's trace context.
 	ctx := context.Background()
+	var extra []attribute.KeyValue
 	if n, ok := strings.CutPrefix(stream, "log."); ok {
 		if slot, err := strconv.Atoi(n); err == nil {
-			ctx = otelLiveTurn(group, slot).Ctx()
+			extra = append(extra, attribute.Int("koto.slot", slot))
+			if t := otelLiveTurn(group, slot); t != nil {
+				ctx = t.Ctx()
+				extra = append(extra, attribute.String("koto.session", sessionMarkerName(t.session)))
+			}
 		}
 	}
 	for _, ln := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		if ln != "" {
-			otelLogCtx(ctx, "", group, "info", stream, ln)
+			otelLogCtx(ctx, "", group, "info", stream, ln, extra...)
 		}
 	}
 }
