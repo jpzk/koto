@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# ######################################################################
+# ##  WARNING: DEV-ONLY. THIS SCRIPT MODIFIES THE HOST'S KOTO INSTALL. ##
+# ##  Phase 2 stops the running koto daemon, REPLACES                  ##
+# ##  /usr/local/bin/koto (backup: koto.pre-otel) and PATCHES          ##
+# ##  /var/lib/koto/fcassets/rootfs.img (backup: rootfs.img.pre-otel), ##
+# ##  then runs a scratch group. Never run it on a production host.    ##
+# ##  It refuses to start unless E2E_OTEL_ALLOW_INSTALL=1 (exit 2).    ##
+# ######################################################################
+#
 # e2e-otel.sh — prove koto's OpenTelemetry export end to end.
 #
 #   phase 1 DAEMON   go test TestOtelE2E (daemon -> in-process OTLP receiver:
@@ -32,10 +41,29 @@
 #   E2E_OTEL_GROUP    reuse this existing group (default: spawn a scratch group
 #                     oe2eHHMMSS; spawn needs free disk for a workspace image)
 #   E2E_OTEL_KEEP=1   keep the scratch group (default: destroyed)
+#   E2E_OTEL_ALLOW_INSTALL=1  REQUIRED acknowledgement that this run may replace
+#                     the installed koto + rootfs.img (see the warning above)
+#
+# Content capture: phase 1 runs the daemon e2e with capture ON (marker in body)
+# AND the capture-OFF tests (planted secret absent from every exported log
+# body/attr, records still koto.group + trace correlated). Phase 2 runs the
+# daemon with KOTO_OTEL_CAPTURE_CONTENT=1 so the marker-in-log check can see
+# the turn output; a body-independent check covers metadata + correlation.
 #
 # Prints PASS/FAIL per check; exits non-zero on ANY FAIL. A missing signal is
 # a FAIL, never a skip.
 set -u
+if [ "${E2E_OTEL_ALLOW_INSTALL:-}" != 1 ]; then
+  cat >&2 <<'WHY'
+e2e-otel.sh: REFUSING TO RUN (exit 2).
+  This is a dev-only e2e. Its microVM phase stops the koto daemon, replaces
+  /usr/local/bin/koto and patches /var/lib/koto/fcassets/rootfs.img on THIS
+  host (backups: koto.pre-otel, rootfs.img.pre-otel). Only run it on a
+  disposable dev host, and acknowledge that explicitly:
+      E2E_OTEL_ALLOW_INSTALL=1 scripts/e2e-otel.sh
+WHY
+  exit 2
+fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 W=${E2E_OTEL_DIR:-$REPO/.e2e-otel}
 PHASES=${E2E_OTEL_PHASES:-daemon microvm}
@@ -66,11 +94,17 @@ gorun "$REPO" /src/daemon go build -o /src/.e2e-otel-bin/otlp-recv ./otlprecv/cm
 
 case " $PHASES " in *" daemon "*)
 hdr "1. DAEMON phase: daemon/otel_e2e_test.go against an in-process receiver"
-OUT=$(gorun "$REPO" /src/daemon go test -count=1 -run 'TestOtelE2E' -v . 2>&1); rc=$?
+OUT=$(gorun "$REPO" /src/daemon go test -count=1 -run 'TestOtelE2E|TestOtelLogContent' -v . 2>&1); rc=$?
 printf '%s\n' "$OUT" | grep -E '^(=== RUN|--- |ok|FAIL)|PASS |FAIL ' | sed 's/^/    /'
 [ $rc -eq 0 ] && printf '%s' "$OUT" | grep -q -- '--- PASS: TestOtelE2E' \
   && ok "daemon e2e: metric(token+group), log(group), span(group,request_id) received" \
   || no "daemon e2e (go test rc=$rc)"
+printf '%s' "$OUT" | grep -q -- '--- PASS: TestOtelLogContentGated' \
+  && ok "capture OFF (default): planted secret via logAppend+streamLogAppend absent from every exported log body/attr; records keep koto.group + trace/span ids" \
+  || no "capture-off log content gating (TestOtelLogContentGated)"
+printf '%s' "$OUT" | grep -q -- '--- PASS: TestOtelLogContentCaptured' \
+  && ok "capture ON (KOTO_OTEL_CAPTURE_CONTENT=1): planted secret exported in the log body" \
+  || no "capture-on log content (TestOtelLogContentCaptured)"
 ;; esac
 
 case " $PHASES " in *" microvm "*)
@@ -146,13 +180,14 @@ sleep 1; grep -q listening "$W/recv.log" && ok "receiver on 127.0.0.1:$PORT" || 
 (
   set -a; . /etc/koto/koto.env; set +a
   export HOME=$KHOME OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$PORT" OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
-         OTEL_METRIC_EXPORT_INTERVAL=2000 OTEL_BSP_SCHEDULE_DELAY=500
+         OTEL_METRIC_EXPORT_INTERVAL=2000 OTEL_BSP_SCHEDULE_DELAY=500 \
+         KOTO_OTEL_CAPTURE_CONTENT=1
   cd "$KHOME" && exec setsid "$K" daemon
 ) >"$W/daemon.log" 2>&1 &
 DPID=$!
 export HOME=$KHOME KOTO_HOME=$KHOME KOTO_ADDR=127.0.0.1:8443 KOTO_CREDS_DIR=$KHOME/creds KOTO_CLIENT=tui
 up=0; for _ in $(seq 60); do $K ctl list >/dev/null 2>&1 && { up=1; break; }; sleep 1; done
-[ $up = 1 ] && ok "daemon up (pid $DPID) exporting to the receiver" || die "daemon start (see $W/daemon.log)"
+[ $up = 1 ] && ok "daemon up (pid $DPID) exporting to the receiver, KOTO_OTEL_CAPTURE_CONTENT=1 (log bodies carry turn output for the marker check)" || die "daemon start (see $W/daemon.log)"
 
 hdr "2d. one real tool-using turn in a nested microVM"
 SCRATCH=0; G=${E2E_OTEL_GROUP:-}

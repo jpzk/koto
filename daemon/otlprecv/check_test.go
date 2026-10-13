@@ -28,7 +28,7 @@ func goodCapture() Capture {
 			{Metric: "koto.llm.tokens.input", Value: 10, Attrs: map[string]string{"koto.group": "g"}},
 			{Metric: "koto.llm.request.duration", Value: 1, Attrs: map[string]string{"koto.group": "g"}},
 		},
-		Logs: []Log{{Body: "out MARK-1", TraceID: tr, SpanID: "t1", Attrs: map[string]string{"koto.group": "g"}}},
+		Logs: []Log{{Body: "out MARK-1", TraceID: tr, SpanID: "t1", Attrs: map[string]string{"koto.group": "g", "stream": "log.0", "koto.log.bytes": "10"}}},
 	}
 }
 
@@ -64,6 +64,8 @@ func TestCheckTurnFailsEachBrokenLink(t *testing.T) {
 		"metric of another group":        {func(c *Capture) { c.Points[0].Attrs["koto.group"] = "h" }, "token counters"},
 		"no marker log":                  {func(c *Capture) { c.Logs = nil }, "output marker"},
 		"marker log uncorrelated":        {func(c *Capture) { c.Logs[0].TraceID = "" }, "correlated"},
+		"slot log without byte metadata": {func(c *Capture) { delete(c.Logs[0].Attrs, "koto.log.bytes") }, "body-independent"},
+		"slot log off-trace":             {func(c *Capture) { c.Logs[0].TraceID = "cccc" }, "body-independent"},
 		"no host turn":                   {func(c *Capture) { c.Spans[0].Name = "x" }, "host koto.turn"},
 	}
 	for name, tc := range cases {

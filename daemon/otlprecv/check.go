@@ -249,6 +249,18 @@ func CheckTurn(c Capture, group, marker string) []Result {
 	}
 	add("log: marker record correlated to the turn's trace_id", corr >= 1,
 		"%d of %d marker records carry trace %s", corr, len(mlogs), trace)
+	// Body-independent: the turn's slot-stream records exist for the group,
+	// carry the koto.log.bytes metadata and the turn's trace/span ids. This
+	// holds with KOTO_OTEL_CAPTURE_CONTENT off (body = placeholder) too.
+	meta := 0
+	for _, l := range c.Logs {
+		if g(l.Attrs) && strings.HasPrefix(l.Attrs["stream"], "log.") && l.Attrs["koto.log.bytes"] != "" &&
+			trace != "" && l.TraceID == trace && l.SpanID != "" {
+			meta++
+		}
+	}
+	add("log: slot-stream records with koto.group + koto.log.bytes correlated to the turn (body-independent)", meta >= 1,
+		"%d slot-stream records for %s carry koto.log.bytes and trace %s", meta, group, trace)
 	return out
 }
 
