@@ -476,7 +476,7 @@ func (m Model) renderStatusBar(spin string) string {
 	// here — see renderMetricsBar. No reserved edge cells: the koto banner
 	// sits flush against the left edge.
 	left := m.renderStatusLeft()
-	right := m.renderStatusRight(spin)
+	right := m.renderStatusRightFit(spin, m.width-lipgloss.Width(left))
 	rightW := lipgloss.Width(right)
 	// Live notification, inlaid into the gap between the left segments and
 	// the progress indicator — same row, so the frame's height never moves.
@@ -538,7 +538,78 @@ func (m Model) renderLoadingSegment() string {
 }
 
 func (m Model) renderStatusRight(spin string) string {
-	var parts []string
+	return m.renderStatusRightFit(spin, -1)
+}
+
+// renderStatusRightFit renders the status bar's right side within avail
+// cells (avail < 0 = unbounded). On a narrow pane the corner chip degrades
+// down a ladder of WHOLE variants — full "N tok/s · Σ M tok/s", then the
+// focused group's rate alone, then a compact "Nt/s", then nothing — instead
+// of the old behaviour where renderStatusBar's MaxWidth sliced the chip
+// mid-figure ("· Σ 0 t"). The activity segment is shed last: it is the
+// one that says the VM is booting / the turn is running. A disconnected
+// daemon's rpc-error chip shortens but outranks the (stale) activity text.
+func (m Model) renderStatusRightFit(spin string, avail int) string {
+	act := m.renderActivitySeg(spin)
+	// Top-right corner: normally the tok/s chip — daemon-measured
+	// output-token throughput over its trailing window: the focused group,
+	// then the fleet (Σ). Always shown, zeros included, so the chip is a
+	// fixture the eye can find rather than an element that pops in and out.
+	// Signature amber, matching the koto accent. While the daemon is
+	// UNREACHABLE the corner swaps to the RPC error instead (red — this IS
+	// an alert): the probe loop is retrying, so a stale tok/s figure would
+	// be a lie, and the corner is the one fixed spot the eye already
+	// checks. The chip carries the compacted error (rpcErrShort), the
+	// retry count, and the spinner; the full error is in the chat as an
+	// err line. Bold so mono terminals keep the emphasis once the strip
+	// removes the red.
+	var corners []string
+	if !m.connected {
+		msg := "rpc error"
+		if m.lastRPCErr != "" {
+			msg += ": " + m.lastRPCErr
+		}
+		st := lipgloss.NewStyle().Foreground(cRed).Bold(true)
+		corners = []string{
+			st.Render(fmt.Sprintf("  %s · retry %d %s ", msg, m.reconnectAttempt, spin)),
+			st.Render(fmt.Sprintf("  rpc error · retry %d %s ", m.reconnectAttempt, spin)),
+			st.Render(fmt.Sprintf(" rpc err %d ", m.reconnectAttempt)),
+		}
+	} else {
+		st := lipgloss.NewStyle().Foreground(cAmber)
+		rate := m.groups[m.cur].TokPerSec
+		corners = []string{
+			st.Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", rate, m.globalTokRate)),
+			st.Render(fmt.Sprintf("  %.0f tok/s ", rate)),
+			st.Render(fmt.Sprintf(" %.0ft/s ", rate)),
+		}
+	}
+	if avail < 0 {
+		return act + corners[0]
+	}
+	actW := lipgloss.Width(act)
+	for _, c := range corners {
+		if actW+lipgloss.Width(c) <= avail {
+			return act + c
+		}
+	}
+	if !m.connected {
+		// The outage outranks a stale activity line: keep the error alone.
+		for _, c := range corners {
+			if lipgloss.Width(c) <= avail {
+				return c
+			}
+		}
+		return ""
+	}
+	if actW <= avail {
+		return act
+	}
+	return ""
+}
+
+// renderActivitySeg is the status bar's spelled-out progress segment.
+func (m Model) renderActivitySeg(spin string) string {
 	// Activity segment — the spelled-out progress line (phase, both clocks,
 	// retry detail), which used to live in the hint bar. The daemon's phase
 	// (activity.go) is authoritative when present — it covers the stretches
@@ -566,34 +637,7 @@ func (m Model) renderStatusRight(spin string) string {
 		act = lipgloss.NewStyle().Foreground(cGray).
 			Render("   idle ")
 	}
-	parts = append(parts, act)
-
-	// Top-right corner: normally the tok/s chip — daemon-measured
-	// output-token throughput over its trailing window: the focused group,
-	// then the fleet (Σ). Always shown, zeros included, so the chip is a
-	// fixture the eye can find rather than an element that pops in and out.
-	// Signature amber, matching the koto accent. While the daemon is
-	// UNREACHABLE the corner swaps to the RPC error instead (red — this IS
-	// an alert): the probe loop is retrying, so a stale tok/s figure would
-	// be a lie, and the corner is the one fixed spot the eye already
-	// checks. The chip carries the compacted error (rpcErrShort), the
-	// retry count, and the spinner; the full error is in the chat as an
-	// err line. (This replaces the old "reconnecting" chip that sat left
-	// of the activity segment.) Bold so mono terminals keep the emphasis
-	// once the strip removes the red.
-	if !m.connected {
-		msg := "rpc error"
-		if m.lastRPCErr != "" {
-			msg += ": " + m.lastRPCErr
-		}
-		parts = append(parts, lipgloss.NewStyle().Foreground(cRed).Bold(true).
-			Render(fmt.Sprintf("  %s · retry %d %s ", msg, m.reconnectAttempt, spin)))
-	} else {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cAmber).
-			Render(fmt.Sprintf("  %.0f tok/s · Σ %.0f tok/s ", m.groups[m.cur].TokPerSec, m.globalTokRate)))
-	}
-
-	return strings.Join(parts, "")
+	return act
 }
 
 // renderMetricsBar draws the bottom-most line: the focus indicator dot on
@@ -1281,16 +1325,29 @@ func renderPendingLines(pending []string, contentCols int) []string {
 	return out
 }
 
-// wrapLine hard-wraps one logical line to cols terminal columns (ANSI- and
+// wrapLine wraps one logical line to cols terminal columns (ANSI- and
 // width-aware) and returns the resulting rows — at least one, so an empty
 // line still occupies a row. Used for tool command/output lines, which are
 // raw shell text: unlike response blocks (pre-wrapped by glamour) they'd
 // otherwise exceed the viewport width and be clipped at the pane edge.
+//
+// Breaks at word boundaries (spaces, hyphens, "/") so prose in sys/notify/
+// prompt rows doesn't split mid-word; tokens longer than cols (URLs, hashes)
+// still hard-wrap. Any segment ansi.Wrap leaves over budget is hard-wrapped
+// as a safety net, so the width invariant (FuzzWrapLine) holds.
 func wrapLine(ln string, cols int) []string {
 	if cols <= 0 || ansi.StringWidth(ln) <= cols {
 		return []string{ln}
 	}
-	return strings.Split(ansi.Hardwrap(ln, cols, true), "\n")
+	out := make([]string, 0, 2)
+	for _, seg := range strings.Split(ansi.Wrap(ln, cols, "/"), "\n") {
+		if ansi.StringWidth(seg) > cols {
+			out = append(out, strings.Split(ansi.Hardwrap(seg, cols, true), "\n")...)
+			continue
+		}
+		out = append(out, seg)
+	}
+	return out
 }
 
 func renderBlockLines(b renderedBlock, contentCols int) []string {
@@ -1797,74 +1854,103 @@ func (m Model) renderHint() string {
 			styled + strings.Repeat(" ", gap) + right + " ",
 		)
 	}
-	var parts []string
+	// Chips carry a priority; when the row is wider than the terminal the
+	// lowest-priority chips are dropped WHOLE (display order is kept) rather
+	// than the row being clipped at the right edge. Clipping used to cut the
+	// live state chips — ↑N%, loading older…, ⎋ stop — which sit at the end
+	// of the row, so on an 80-col terminal they were never visible. Lower
+	// number = kept longer.
+	const (
+		pState   = 0 // live state: streaming, scroll %, stop, paging
+		pCore    = 1 // send + the two discoverability doors (^p, ^h)
+		pNav     = 2 // scroll / tree
+		pToggle  = 3 // toggles that are ON (magenta) — they're state too
+		pBinding = 4 // plain bindings, all listed in ^h anyway
+	)
+	type chip struct {
+		s    string
+		prio int
+	}
+	var chips []chip
+	add := func(s string, p int) { chips = append(chips, chip{s, p}) }
+	magenta := lipgloss.NewStyle().Foreground(cMagenta)
+	toggle := func(on bool, off, onText string) {
+		if on {
+			add(magenta.Render(onText), pToggle)
+		} else {
+			add(off, pBinding)
+		}
+	}
 	_, streaming := m.streamBuf[m.curKey()]
 	_, thinking := m.thinkingBuf[m.curKey()]
 	// The progress line lives in the status bar (renderStatusRight); the hint
 	// bar stays keyboard hints only.
 	if streaming || thinking {
-		parts = append(parts, " streaming…")
+		add(" streaming…", pState)
 	} else {
-		parts = append(parts, gl(" ↩ send", " enter send"))
+		add(gl(" ↩ send", " enter send"), pCore)
 	}
-	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⇥/⎋ tree", "tab/esc tree"))
-	if m.shellFocusable() {
-		parts = append(parts, gl("⌥→ term", "alt-right term"))
+	// ctrl+c interrupts the turn (model.go handleKey) — it never quit the
+	// TUI, so the old trailing "^c exit" chip contradicted the binding.
+	if streaming || thinking || m.busy[m.curKey()] {
+		add(lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")), pState)
 	}
-	// alt+t, not ^t: ctrl+t is the group/session jump now.
-	thoughtsHint := gl("⌥t thoughts", "alt-t thoughts")
-	if m.expandedThoughts {
-		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render(gl("⌥t hide", "alt-t hide"))
-	}
-	parts = append(parts, thoughtsHint)
-	toolOutsHint := "^d output"
-	if m.expandedToolOuts {
-		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
-	}
-	parts = append(parts, toolOutsHint)
-	selectHint := "^s scroll"
-	if m.selectMode {
-		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^s SELECT")
-	}
-	parts = append(parts, selectHint)
-	parts = append(parts, "^l log")
-	shellHint := "^] shell"
-	if m.shellSplitVisible() {
-		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
-	}
-	parts = append(parts, shellHint)
-	fullHint := "^f full"
-	if m.fullscreen {
-		fullHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^f full")
-	}
-	parts = append(parts, fullHint)
 	if !m.vp.AtBottom() && m.focus == focusInput {
-		yellow := lipgloss.NewStyle().Foreground(cYellow)
-		parts = append(parts, yellow.Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))))
+		add(lipgloss.NewStyle().Foreground(cYellow).
+			Render(fmt.Sprintf("↑%d%%", int((1.0-m.vp.ScrollPercent())*100))), pState)
 	}
 	if m.pageLoading[m.cur] {
 		spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).
-			Render(spin+" loading older…"))
+		add(lipgloss.NewStyle().Foreground(cYellow).Render(spin+" loading older…"), pState)
 	} else if m.pageExhausted[m.cur] && m.vp.AtTop() {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cGray).
-			Render("◆ history start"))
+		add(lipgloss.NewStyle().Foreground(cGray).Render("◆ history start"), pState)
 	}
-	if streaming || thinking || m.busy[m.curKey()] {
-		parts = append(parts, lipgloss.NewStyle().Foreground(cYellow).Render(gl("⎋ stop", "esc stop")))
+	add("^p palette", pCore)
+	add("^h help", pCore)
+	add(gl("↑↓ scroll", "up/dn scroll"), pNav)
+	add(gl("⇥/⎋ tree", "tab/esc tree"), pNav)
+	if m.shellFocusable() {
+		add(gl("⌥→ term", "alt-right term"), pBinding)
 	}
-	parts = append(parts, "^c exit")
+	// alt+t, not ^t: ctrl+t is the group/session jump now.
+	toggle(m.expandedThoughts, gl("⌥t thoughts", "alt-t thoughts"), gl("⌥t hide", "alt-t hide"))
+	toggle(m.expandedToolOuts, "^d output", "^d hide")
+	toggle(m.selectMode, "^s scroll", "^s SELECT")
+	add("^l log", pBinding)
+	toggle(m.shellSplitVisible(), "^] shell", "^] shell")
+	toggle(m.fullscreen, "^f full", "^f full")
 	// Dim each still-plain part individually rather than wrapping the joined
 	// row in one dim.Render: the already-styled parts (magenta toggles,
 	// yellow ⎋ stop) end in a full SGR reset, which would terminate the
 	// outer gray and leave every hint after the first active toggle in the
 	// terminal's default foreground.
-	for i, p := range parts {
-		if !strings.Contains(p, "\x1b") {
-			parts[i] = dim.Render(p)
+	for i, c := range chips {
+		if !strings.Contains(c.s, "\x1b") {
+			chips[i].s = dim.Render(c.s)
 		}
 	}
-	left := " " + strings.Join(parts, dim.Render("  ·  "))
+	sep := dim.Render("  ·  ")
+	join := func() string {
+		ss := make([]string, len(chips))
+		for i, c := range chips {
+			ss[i] = c.s
+		}
+		return " " + strings.Join(ss, sep)
+	}
+	left := join()
+	// Shed lowest-priority chips (last-added first within a priority) until
+	// the row fits. The provider/model segment on the right is only shown
+	// when every chip fits beside it.
+	for lipgloss.Width(left) > m.width && len(chips) > 1 {
+		drop := len(chips) - 1
+		for i := len(chips) - 1; i >= 0; i-- {
+			if chips[i].prio > chips[drop].prio {
+				drop = i
+			}
+		}
+		chips = append(chips[:drop], chips[drop+1:]...)
+		left = join()
+	}
 	right := m.renderProviderModel()
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)

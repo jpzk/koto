@@ -630,7 +630,7 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ select", "up/dn select"), gl("⇧↑↓ tree", "shift-up/dn tree"), "pgup/dn scroll", "tab tree", "^k close", "^c exit"}
+	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ select", "up/dn select"), gl("⇧↑↓ tree", "shift-up/dn tree"), "pgup/dn scroll", "tab tree", "^k close"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 

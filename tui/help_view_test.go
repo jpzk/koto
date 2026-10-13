@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // TestCtrlHTogglesHelp: ctrl+h opens the cheatsheet, a second ctrl+h (or esc)
@@ -154,6 +155,61 @@ func TestCheatsheetCoversEveryVerb(t *testing.T) {
 		"/runscript", "/shell", "/themes", "/reload", "/interrupt", "/drain", "/exit"} {
 		if !strings.Contains(body, v) {
 			t.Errorf("%s is dispatchable but is not in the cheatsheet", v)
+		}
+	}
+}
+
+// TestHelpViewNarrowNoClip: at phone width (40 cols) every description is
+// word-wrapped under its column instead of clipped mid-word, no row runs past
+// the frame, and the box keeps its bottom border (the footer used to wrap to
+// two rows and MaxHeight then cut the border off).
+func TestHelpViewNarrowNoClip(t *testing.T) {
+	for _, w := range []int{20, 34, 40, 60, 80} {
+		body := stripANSI(helpContent(w))
+		squash := func(s string) string { return strings.Join(strings.Fields(s), "") }
+		flat := squash(body)
+		for _, sec := range helpSections() {
+			for _, e := range sec.entries {
+				// Nothing clipped: the whole desc survives (modulo wrap breaks).
+				if !strings.Contains(flat, squash(e.desc)) {
+					t.Errorf("w=%d: desc %q clipped", w, e.desc)
+				}
+				// No mid-word split: every word piece (breaks may follow "/" or "-") is
+				// intact on one row. Only checked where a piece fits the column.
+				for _, f := range strings.Fields(e.desc) {
+					for _, p := range strings.FieldsFunc(f, func(r rune) bool { return r == '/' || r == '-' }) {
+						if p != "" && len(p) < w-4-helpMinDesc && !strings.Contains(body, p) {
+							t.Errorf("w=%d: word %q of %q split mid-word", w, p, e.desc)
+						}
+					}
+				}
+				if e.key != "" && w >= 40 && !strings.Contains(body, e.key) {
+					t.Errorf("w=%d: key %q truncated", w, e.key)
+				}
+			}
+		}
+		for i, ln := range strings.Split(body, "\n") {
+			if n := ansi.StringWidth(ln); n > w {
+				t.Errorf("w=%d: row %d is %d cols wide: %q", w, i, n, ln)
+			}
+		}
+	}
+
+	m := focusModel(t)
+	m.width, m.height = 40, 30
+	m.resizeHelpViewport()
+	m = press(t, m, tea.KeyCtrlH)
+	rows := strings.Split(strings.TrimRight(stripANSI(m.View()), "\n "), "\n")
+	last := strings.TrimSpace(rows[len(rows)-1])
+	if !strings.HasPrefix(last, "╰") && !strings.HasPrefix(last, "+") {
+		t.Errorf("last row is not the bottom border: %q\n%s", last, strings.Join(rows, "\n"))
+	}
+	if !strings.Contains(stripANSI(m.View()), "esc") {
+		t.Error("footer close hint missing at 40 cols")
+	}
+	for i, r := range rows {
+		if n := ansi.StringWidth(r); n > 40 {
+			t.Errorf("frame row %d is %d cols wide", i, n)
 		}
 	}
 }
