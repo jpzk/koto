@@ -206,6 +206,11 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 		return nil, fmt.Errorf("log exporter: %w", err)
 	}
 	s := &otelState{cfg: cfg}
+	// Never blocks the caller (S4, otel_blackhole_test.go): both batch
+	// processors keep the SDK default bounded queue (2048, OTEL_BSP_/
+	// OTEL_BLRP_MAX_QUEUE_SIZE) and DROP when full (no WithBlocking); export
+	// runs on their own goroutines; shutdown is bounded by the caller's ctx
+	// (otelShutdownTimeout).
 	s.tp = sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(texp),
 		sdktrace.WithIDGenerator(otelIDGen{}))
 	s.mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
