@@ -1020,6 +1020,9 @@ func entrypointEnviron(env map[string]string) []string {
 // ---- msg: one turn -----------------------------------------------------------
 
 func handleMsg(c *vconn, req *pb.MsgReq) {
+	// nil unless the daemon sent a traceparent: tracing off costs nothing.
+	tr := newGuestTracer(req.Traceparent, time.Now())
+	cfgStart := time.Now()
 	sp := req.SystemPrompt
 	// The system prompt is PER SESSION on disk: it is composed per turn, and
 	// with concurrent turns a single shared file lets the later delivery
@@ -1030,14 +1033,19 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 	if len(req.ConfigJson) > 0 {
 		writeWorkerFile(filepath.Join(csDir, "config.json"), req.ConfigJson)
 	}
+	tr.timed("guest.config_write", cfgStart, map[string]string{
+		"system_prompt_bytes": strconv.Itoa(len(sp)), "config_bytes": strconv.Itoa(len(req.ConfigJson))}, nil)
 	// Attachments saved host-side by the daemon ride along per turn; the
 	// message body references /workspace/.cs/uploads/<name>, so land them
 	// there (worker-owned) before the FIFO write wakes entrypoint.sh.
 	if len(req.UploadsTar) > 0 {
 		up := filepath.Join(csDir, "uploads")
-		if err := untarInto(req.UploadsTar, up, true); err != nil {
+		untarStart := time.Now()
+		err := untarInto(req.UploadsTar, up, true)
+		if err != nil {
 			logf("uploads untar: %v", err)
 		}
+		tr.timed("guest.uploads_untar", untarStart, map[string]string{"tar_bytes": strconv.Itoa(len(req.UploadsTar))}, err)
 		// ...and prune, because nothing else does (audit 2026-09-11 L35). The
 		// HOST bounds what is staged and undelivered (maxUploadsPending, plus a
 		// 24h orphan sweep), but delivery only removes the host copy: every
@@ -1047,7 +1055,7 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 		// read-only and the agent wedges.
 		pruneUploads(up, uploadsKeepBytes)
 	}
-	go runTurn(req)
+	go runTurn(req, tr)
 	replyOK(c)
 }
 

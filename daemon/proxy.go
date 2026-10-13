@@ -352,6 +352,7 @@ func streamLogAppend(p string, data []byte) {
 // write lock — tryFlushNotify takes it across its whole flush so a notification
 // cannot land mid-line.
 func streamLogAppendLocked(p string, data []byte) {
+	otelLogStream(p, data)
 	if d := fcLogSinkWait(groupOfLogPath(p), len(data)); d > 0 {
 		time.Sleep(d)
 	}
@@ -502,6 +503,7 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
+	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 
 // metricsMaxBytes bounds metrics.jsonl (audit 2026-09-11 L95). Every completed
@@ -1154,6 +1156,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	// The request's span: a child of the turn its traceparent names (checked
+	// against the group's live turns), else of the group's only live turn
+	// (otel_spans.go otelLLMParent). r carries it so the retire point can annotate.
+	// The guest's trace context (guest.worker's traceparent) is read and then
+	// stripped here, export on or off, so it never travels upstream.
+	tp := otelTraceStrip(r.Header)
+	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path, tp)
+	defer llmSp.End()
+	r = r.WithContext(spCtx)
 	if provider == "venice" {
 		h.serveVenice(w, r)
 		return
@@ -1337,6 +1348,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
+	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
 
 // serveVenice forwards to api.venice.ai with credential injection mirroring
@@ -1485,6 +1497,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	dur := time.Since(t0)
 	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
+	otelLLMAnnotate(r.Context(), resp.StatusCode, resp.Header.Get("x-request-id"), usage)
 }
 
 // proxyListen registers an HTTP listener for group g on port. Idempotent:

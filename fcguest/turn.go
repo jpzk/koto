@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,6 +86,9 @@ type turnConn struct {
 	qmu    sync.Mutex
 	queued int
 	room   chan struct{}
+
+	// tr is the turn's span recorder (span.go); nil when tracing is off.
+	tr *guestTracer
 }
 
 // turnQueueFrames bounds the pending frames per turn. Frames are one
@@ -149,6 +153,15 @@ func frameBytes(f *pb.TurnFrame) int {
 		return len(k.Tool.Name) + len(k.Tool.Input)
 	case *pb.TurnFrame_Err:
 		return len(k.Err)
+	case *pb.TurnFrame_Span:
+		if k.Span == nil {
+			return 0
+		}
+		n := len(k.Span.Name) + len(k.Span.StatusMsg) + 32
+		for a, v := range k.Span.Attrs {
+			n += len(a) + len(v)
+		}
+		return n
 	}
 	return 0
 }
@@ -194,6 +207,9 @@ func (t *turnConn) writer() {
 }
 
 func (t *turnConn) send(f *pb.TurnFrame) {
+	if t.tr != nil {
+		t.tr.observe(f)
+	}
 	if t.q == nil {
 		_ = writeFrame(t.c, f)
 		return
@@ -296,7 +312,7 @@ func readGroupConfig() groupConfig {
 // runTurn executes one delivered turn to completion. Called on its own
 // goroutine per delivery: concurrency is the daemon's to bound (it allocates
 // the slot), and a turn blocking the agent would freeze the whole group.
-func runTurn(req *pb.MsgReq) {
+func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	sess := sessionFileName(req.Session)
 	slot := int(req.Slot)
 	if slot < 0 || slot >= guestSlots {
@@ -310,6 +326,10 @@ func runTurn(req *pb.MsgReq) {
 	// Strict-ordering completion marker: the daemon's turn wait keys off
 	// this frame arriving on THIS slot's stream.
 	defer tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_TurnEnd{TurnEnd: true}})
+	// guest.turn goes out BEFORE TurnEnd (defers run last-in first-out): the
+	// daemon drops span frames that arrive after the turn closed.
+	tr.attach(tw)
+	defer tr.turnEnd()
 
 	// Each session pins its own claude conversation via an id file. A
 	// workspace from before sessions existed has no sessions/ dir at all:
@@ -334,6 +354,9 @@ func runTurn(req *pb.MsgReq) {
 	env = append(env, "KOTO_SESSION="+sess, "KOTO_SHELL_SESSION="+shellSess)
 
 	cfg := readGroupConfig()
+	tr.workerStart(cfg.Provider, cfg.Model)
+	env = withTraceHeaders(env, tr.workerTraceparent())
+	defer func() { tr.workerEnd(tw.stalled.Load(), "") }()
 	switch cfg.Provider {
 	case "venice":
 		runVenice(tw, req, cfg, sess, env)
@@ -435,7 +458,8 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	outDone := pump(outR, 16<<20, parse)
 	errDone := pump(errR, 1<<20, func(b []byte) { tw.text(append(b, '\n')) })
 
-	<-ch // the worker itself has exited; whatever still holds the pipes is not it
+	ws := <-ch // the worker itself has exited; whatever still holds the pipes is not it
+	tw.tr.workerAttr("exit_code", strconv.Itoa(ws.ExitStatus()))
 	timer.Stop()
 
 	// Drain what is already in flight, then take the pipes away. Closing the
@@ -459,6 +483,7 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	tmu.Lock()
 	defer tmu.Unlock()
 	if timedOut {
+		tw.tr.workerAttr("timed_out", "true")
 		tw.errf("turn exceeded %ds budget — killed", int(turnTimeout/time.Second))
 	}
 }
@@ -473,6 +498,7 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	// this is the session's first turn and starts fresh.
 	if id, err := os.ReadFile(idf); err == nil && len(bytes.TrimSpace(id)) > 0 {
 		args = append(args, "--resume", string(bytes.TrimSpace(id)))
+		tw.tr.workerAttr("session.resumed", "true")
 	} else if migrateContinue {
 		args = append(args, "--continue")
 	}

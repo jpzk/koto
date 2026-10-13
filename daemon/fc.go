@@ -1804,9 +1804,12 @@ func fcConsumeExpectedTurn(g string, slot int) (string, bool) {
 	return sess, ok
 }
 
-func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte) error {
+func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte, traceparent string) error {
 	fcExpectTurn(g, slot, session)
 	m := &pb.MsgReq{
+		// W3C traceparent of the host turn span; "" when OTel export is off,
+		// which tells the guest to emit no spans at all (zero overhead).
+		Traceparent:  traceparent,
 		Msg:          []byte(msg),
 		SystemPrompt: []byte(systemPrompt),
 		ConfigJson:   cfgJSON,

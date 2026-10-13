@@ -193,7 +193,7 @@ func TestFcAgentCall(t *testing.T) {
 		fcWriteFrame(c, &pb.AgentResponse{Ok: true})
 	})
 	defer ln.Close()
-	if err := fcSendMsg("tg", "", 3, "hi", "system prompt", []byte(`{"provider":"venice"}`)); err != nil {
+	if err := fcSendMsg("tg", "", 3, "hi", "system prompt", []byte(`{"provider":"venice"}`), ""); err != nil {
 		t.Fatalf("fcSendMsg: %v", err)
 	}
 }

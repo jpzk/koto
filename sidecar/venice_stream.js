@@ -527,6 +527,12 @@ function streamTurn(messages) {
         'Accept': 'text/event-stream',
       },
     };
+    // OTel: fc-agent hands over guest.worker's W3C traceparent so the host proxy
+    // can parent this request's span exactly. The proxy validates it against
+    // the group's live turns and strips it before Venice ever sees it.
+    if (/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(process.env.KOTO_TRACEPARENT || '')) {
+      opts.headers['traceparent'] = process.env.KOTO_TRACEPARENT;
+    }
     const client = parsed.protocol === 'https:' ? https : http;
 
     const req = client.request(opts, (resp) => {

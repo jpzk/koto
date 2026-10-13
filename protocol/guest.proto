@@ -134,6 +134,9 @@ message MsgReq {
   bytes  uploads_tar   = 4; // attachments newer than the host watermark
   string session       = 5; // "" = default
   int32  slot          = 6; // which log.<n> stream this turn writes to
+  // W3C traceparent of the host turn span. "" = telemetry off: the guest
+  // emits no GuestSpan frames at all.
+  string traceparent   = 7;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
@@ -186,6 +189,19 @@ message AgentFrame {
 // a host file).
 message TurnOpen { int32 slot = 1; }
 message ToolUse  { string name = 1; string input = 2; } // input: the tool's JSON args
+// GuestSpan is untrusted guest input: the daemon forces the trace id,
+// re-parents, bounds sizes, clamps timestamps and strips koto.* attrs
+// before re-exporting it (daemon/otel_guest.go).
+message GuestSpan {
+  bytes  span_id         = 1;
+  bytes  parent_span_id  = 2; // empty = child of the host turn span
+  string name            = 3;
+  int64  start_unix_nano = 4;
+  int64  end_unix_nano   = 5;
+  map<string, string> attrs = 6;
+  bool   error           = 7;
+  string status_msg      = 8;
+}
 message TurnFrame {
   oneof kind {
     TurnOpen open           = 1;
@@ -197,5 +213,6 @@ message TurnFrame {
     int64    tool_out_end   = 7;  // byte count of the body
     string   err            = 8;  // [[err]] line
     bool     turn_end       = 9;
+    GuestSpan span          = 10; // only when MsgReq.traceparent != ""; droppable
   }
 }

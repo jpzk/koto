@@ -6126,7 +6126,11 @@ func TestWorkspaceImagesHaveHostDiskAdmission(t *testing.T) {
 
 	// A real filesystem with room: admitted, and silently.
 	ROOT = t.TempDir()
-	if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
+	// Host luck: if the test host itself is past resCritPct the admitted case
+	// cannot be exercised; log it and still run the rest.
+	if total, free := hostFSStats(); total > 0 && float64(total-free)/float64(total)*100 >= resCritPct {
+		t.Logf("skipping the admitted case: the test host's filesystem is %.0f%% used (>= resCritPct)", float64(total-free)/float64(total)*100)
+	} else if err := fcHostDiskAdmit("g", "creating a workspace image"); err != nil {
 		t.Errorf("a filesystem with free space refused a spawn: %v", err)
 	}
 
@@ -7202,15 +7206,18 @@ func TestMissingHarnessPolicyIsLoud(t *testing.T) {
 // the stop-first ordering exists to prevent.
 func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 	// A stand-in daemon: argv[0]'s basename is "koto" and argv[1] is "daemon",
-	// which is what /proc shows for the real thing. sh invoked with that argv
-	// runs the file named "daemon" in its cwd; two statements keep it from
-	// exec-optimising itself into `sleep` and changing its own cmdline.
+	// which is what /proc shows for the real thing. It is this test binary
+	// re-exec'd in TestMain's stand-in mode (it just sleeps). Not /bin/sh: a
+	// busybox sh (the alpine golang image) dispatches on argv[0] and dies with
+	// "koto: applet not found", so the scan only won a race against its exit.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := func(dir string, env []string) *exec.Cmd {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, "daemon"), []byte("sleep 30\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		cmd := &exec.Cmd{Path: "/bin/sh", Args: []string{"koto", "daemon"}, Dir: dir, Env: env}
+		env = append(append([]string{}, env...), standInDaemonEnv+"=1")
+		cmd := &exec.Cmd{Path: self, Args: []string{"koto", "daemon"}, Dir: dir, Env: env}
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start stand-in daemon: %v", err)
 		}
@@ -7264,6 +7271,11 @@ func TestUninstallSeesADaemonWithNoUnitFile(t *testing.T) {
 // old group's entire workspace for the NEXT group of that name to mount, while
 // the operator had been told the data was gone.
 func TestDestroyReportsAFailedWorkspaceDeletion(t *testing.T) {
+	// Root bypasses directory write permission, so RemoveAll succeeds and the
+	// failure cannot be staged (the pinned podman build container runs as root).
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an undeletable directory cannot be staged")
+	}
 	prevRoot, prevHere := ROOT, HERE
 	// NOT t.TempDir(): pointing the globals at it makes every background
 	// worker in the process write under it, and testing's own cleanup FAILS
@@ -7488,7 +7500,19 @@ func TestForgedJobDirectoryNamesAreNotListed(t *testing.T) {
 	mk("bbbbbbbb\ncccccccc\tdone\t0\t\t99\t0\tphantom", map[string]string{"status": "running"})
 
 	script := strings.ReplaceAll(jobsListScript, "/workspace/.cs/jobs", dir)
-	out, err := exec.Command("/bin/sh", "-c", script).Output()
+	// The guest runs this via /bin/sh, which is bash there (fc-agent
+	// handleExec); the script uses bash arrays and ${v//…}. A test host whose
+	// sh is dash/busybox (e.g. the alpine golang image) runs it with bash, or
+	// skips when there is none.
+	sh := "/bin/sh"
+	if v, _ := exec.Command(sh, "-c", "echo \"$BASH_VERSION\"").Output(); strings.TrimSpace(string(v)) == "" {
+		p, lerr := exec.LookPath("bash")
+		if lerr != nil {
+			t.Skip("jobsListScript is a bash script (the guest's /bin/sh is bash); no bash on this host")
+		}
+		sh = p
+	}
+	out, err := exec.Command(sh, "-c", script).Output()
 	if err != nil {
 		t.Fatalf("run jobsListScript: %v", err)
 	}
@@ -8807,11 +8831,17 @@ func TestGoalEnqueueGivesUpWhenTheGoalStops(t *testing.T) {
 	// is gone rather than sleeping through its whole retry budget.
 	groupBarrierBegin(g)
 	defer groupBarrierEnd(g)
+	// The fixed loop sleeps once (after the first failed attempt) and then sees
+	// the stopped goal; the old one slept between every attempt, i.e.
+	// goalEnqueueRetries-1 times. A sleep long enough to dwarf scheduler jitter
+	// keeps the two apart on a loaded host (the 1ms test default did not).
+	defer func(old time.Duration) { goalRetrySleep = old }(goalRetrySleep)
+	goalRetrySleep = 100 * time.Millisecond
 	t0 := time.Now()
 	if _, err := goalEnqueue(g, "gstopid", "s", "msg"); err == nil {
 		t.Fatal("enqueue succeeded with admission closed")
 	}
-	if d := time.Since(t0); d > time.Duration(goalEnqueueRetries)*goalRetrySleep {
+	if d := time.Since(t0); d >= time.Duration(goalEnqueueRetries-1)*goalRetrySleep {
 		t.Errorf("took %v — it slept through the full retry budget for a goal that had stopped", d)
 	}
 	// A running goal still uses its retries.

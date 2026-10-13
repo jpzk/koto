@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -150,6 +151,8 @@ func daemonMain() {
 		os.Exit(1)
 	}
 	initPaths()
+	// Opt-in OTLP export (otel.go): a no-op unless an endpoint is configured.
+	otelShutdown := otelInit(context.Background())
 	_ = os.MkdirAll(ROOT, 0o700)
 	_ = os.MkdirAll(SOCK_DIR, 0o700)
 	// The modes above only govern paths this daemon CREATES. A state tree an
@@ -289,6 +292,10 @@ func daemonMain() {
 		// being left to journal replay — the VMMs are container children and
 		// die with the daemon otherwise.
 		fcStopAll()
+		// Flush telemetry last, so the shutdown lines themselves are exported.
+		fctx, fcancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
+		_ = otelShutdown(fctx)
+		fcancel()
 		close(shutdownDone)
 		os.Exit(0)
 	}()

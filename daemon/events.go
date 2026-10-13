@@ -579,6 +579,7 @@ func logDeliver(subsystem, group, level, msg string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", level, subsystem, msg)
+	otelLog(subsystem, group, level, "daemon", msg)
 
 	logSubsLock.Lock()
 	logRing = append(logRing, pbev)
