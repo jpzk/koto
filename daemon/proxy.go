@@ -503,6 +503,11 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
+	// Budget snapshot (otel_budget.go): only a response that carried the
+	// headers updates it; the provider lookup is skipped otherwise.
+	if otelBudgetHasHeaders(rl) {
+		otelBudgetObserve(groupProvider(group), rl)
+	}
 	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 

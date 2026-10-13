@@ -271,6 +271,10 @@ func (s *otelState) instruments(m metric.Meter) error {
 	if _, err := otelResourceInstruments(m); err != nil {
 		errs = append(errs, err)
 	}
+	// Budget gauges (otel_budget.go): latest rate-limit snapshot per provider.
+	if _, err := otelBudgetInstruments(m); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
