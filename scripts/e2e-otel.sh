@@ -69,6 +69,9 @@ W=${E2E_OTEL_DIR:-$REPO/.e2e-otel}
 PHASES=${E2E_OTEL_PHASES:-daemon microvm}
 GO_IMAGE=docker.io/library/golang@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0
 CONTAINER=${CONTAINER:-podman}
+# Go build cache for the pinned container (E2E_OTEL_GOCACHE, e.g. a tmpfs dir
+# when /workspace is short on space; default the repo-local .gocache).
+GOCACHE_DIR=${E2E_OTEL_GOCACHE:-$REPO/.gocache}
 KHOME=/var/lib/koto
 ASSETS=$KHOME/fcassets
 K=/usr/local/bin/koto
@@ -83,10 +86,10 @@ mkdir -p "$W"
 # gorun <dir-inside-/src> <cmd...> — pinned Go image, repo (or snapshot) at /src
 gorun(){ local src=$1 wd=$2; shift 2
   "$CONTAINER" run --rm --security-opt label=disable -v "$src:/src" -w "$wd" \
-    -v "$REPO/.gocache:/gocache" -v "$REPO/.gomodcache:/gomodcache" \
+    -v "$GOCACHE_DIR:/gocache" -v "$REPO/.gomodcache:/gomodcache" \
     -e GOCACHE=/gocache -e GOMODCACHE=/gomodcache -e HOME=/tmp -e CGO_ENABLED=0 -e GOFLAGS= \
     "$GO_IMAGE" "$@"; }
-mkdir -p "$REPO/.gocache" "$REPO/.gomodcache"
+mkdir -p "$GOCACHE_DIR" "$REPO/.gomodcache"
 
 hdr "0. build otlp-recv (pinned Go image)"
 gorun "$REPO" /src/daemon go build -o /src/.e2e-otel-bin/otlp-recv ./otlprecv/cmd/otlp-recv \
@@ -135,13 +138,23 @@ gorun "$S" /src/fcguest sh -c 'GOWORK=off go build -ldflags="-s -w" -o fc-agent 
 
 hdr "2b. install: rootfs.img with the new fc-agent + sidecar, koto binary"
 WAS_UP=0; pgrep -f "^$K daemon" >/dev/null && WAS_UP=1
+NEW=$ASSETS/rootfs.img.otel-new
+DPID=; RPID=
+# Armed BEFORE the daemon is stopped: a failure anywhere below (e.g. ENOSPC
+# while copying rootfs) still restarts a daemon that was up, and never
+# leaves a partial rootfs copy behind.
+cleanup(){ [ -n "$DPID" ] && kill -TERM "$DPID" 2>/dev/null; [ -n "$RPID" ] && kill -TERM "$RPID" 2>/dev/null
+  rm -f "$NEW"
+  if [ "$WAS_UP" = 1 ] && ! pgrep -f "^$K daemon" >/dev/null; then
+    (set -a; . /etc/koto/koto.env; set +a; cd "$KHOME" && HOME=$KHOME setsid "$K" daemon >>"$W/daemon-restored.log" 2>&1 &)
+  fi; }
+trap cleanup EXIT
 stop_daemon(){ local p; p=$(pgrep -f "^$K daemon" | head -1); [ -n "$p" ] || return 0
   kill -TERM "$p"; for _ in $(seq 60); do kill -0 "$p" 2>/dev/null || return 0; sleep 1; done
   echo "    daemon $p did not exit in 60s"; return 1; }
 stop_daemon || die "stop running daemon"
 [ -e "$ASSETS/rootfs.img.pre-otel" ] || cp --sparse=always "$ASSETS/rootfs.img" "$ASSETS/rootfs.img.pre-otel" \
   || die "backup rootfs.img"
-NEW=$ASSETS/rootfs.img.otel-new
 cp --sparse=always "$ASSETS/rootfs.img.pre-otel" "$NEW" || die "copy rootfs"
 debugfs -w "$NEW" >"$W/debugfs.log" 2>&1 <<DBG
 rm /usr/local/bin/fc-agent
@@ -168,12 +181,6 @@ PORT=${E2E_OTEL_PORT:-14317}
 CAP=$W/capture.jsonl
 "$W/otlp-recv" serve -addr "127.0.0.1:$PORT" -out "$CAP" >"$W/recv.log" 2>&1 &
 RPID=$!
-DPID=
-cleanup(){ [ -n "$DPID" ] && kill -TERM "$DPID" 2>/dev/null; kill -TERM "$RPID" 2>/dev/null
-  if [ "$WAS_UP" = 1 ] && ! pgrep -f "^$K daemon" >/dev/null; then
-    (set -a; . /etc/koto/koto.env; set +a; cd "$KHOME" && HOME=$KHOME setsid "$K" daemon >>"$W/daemon-restored.log" 2>&1 &)
-  fi; }
-trap cleanup EXIT
 sleep 1; grep -q listening "$W/recv.log" && ok "receiver on 127.0.0.1:$PORT" || die "receiver start: $(cat "$W/recv.log")"
 [ -e /dev/stdin ] || for l in fd:/proc/self/fd stdin:/proc/self/fd/0 stdout:/proc/self/fd/1 stderr:/proc/self/fd/2; do
   [ -e "/dev/${l%%:*}" ] || sudo ln -s "${l#*:}" "/dev/${l%%:*}"; done
