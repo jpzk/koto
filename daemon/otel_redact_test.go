@@ -94,14 +94,14 @@ func refusedEndpoint(t *testing.T) string {
 	return addr
 }
 
-func setHeaderEnv(t *testing.T, addr string) {
+func setHeaderEnv(t *testing.T, addr, proto string) {
 	// One item fails to unescape (the SDK's default logger prints the raw
 	// value), one has no '=' (it prints the raw item), one is well formed.
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS",
 		"authorization=Bearer "+hdrSecret+"%zz,"+hdrSecret+"-noequals,x-api-key="+hdrSecret)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-trace-key="+hdrSecret+"%zz")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://koto:"+hdrSecret+"@"+addr)
-	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", otelProtoGRPC)
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", proto)
 	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
 }
 
@@ -135,15 +135,43 @@ func assertNoSecret(t *testing.T, out string, want ...string) {
 	}
 }
 
+// redactProtos: every guarantee here must hold for BOTH transports. The http
+// exporters put the full endpoint URL (userinfo included) into their error
+// strings, and a collector's HTTP error body is echoed back verbatim, so the
+// http case is not a formality.
+var redactProtos = []struct {
+	proto string
+	// echo is a receiver/exporter error quoting the secret, shaped like the
+	// transport's real failures.
+	echo string
+	// want: substrings proving the export/shutdown error path actually ran.
+	want []string
+}{
+	{otelProtoGRPC,
+		"rpc error: code = Unauthenticated desc = bad credentials \"Bearer " + hdrSecret + "\"",
+		[]string{"export: rpc error", "traces=grpc http://REDACTED@"}},
+	{otelProtoHTTP,
+		"failed to send to http://koto:" + hdrSecret + "@127.0.0.1:1/v1/traces: 401 Unauthorized (body: invalid token Bearer " + hdrSecret + ")",
+		// "traces export: Post": the REAL http exporter failed against the
+		// refused port (its error carries the URL), not just the injected echo.
+		[]string{"export: failed to send", "traces=http/protobuf http://REDACTED@", "/v1/traces", "traces export: Post \"http://", "connection refused"}},
+}
+
 // Export path: init succeeds against a refused port, lines/spans/metrics are
 // produced, the exports fail, shutdown fails. Nothing printed holds the secret.
 func TestOtelHeadersNeverLoggedExportFail(t *testing.T) {
+	for _, tc := range redactProtos {
+		t.Run(tc.proto, func(t *testing.T) { headersNeverLoggedExportFail(t, tc.proto, tc.echo, tc.want) })
+	}
+}
+
+func headersNeverLoggedExportFail(t *testing.T, proto, echo string, want []string) {
 	home := t.TempDir()
 	prevHere, prevRoot, prevMetrics := HERE, ROOT, METRICS
 	t.Cleanup(func() { HERE, ROOT, METRICS = prevHere, prevRoot, prevMetrics })
 	HERE, ROOT, METRICS = home, filepath.Join(home, "groups"), filepath.Join(home, "metrics.jsonl")
 	_ = os.MkdirAll(filepath.Join(ROOT, "hdr", ".cs"), 0o700)
-	setHeaderEnv(t, refusedEndpoint(t))
+	setHeaderEnv(t, refusedEndpoint(t), proto)
 	resetOtelGlobals(t)
 
 	stop := captureDaemonOutput(t)
@@ -157,8 +185,9 @@ func TestOtelHeadersNeverLoggedExportFail(t *testing.T) {
 	logMetric("hdr", "/v1/messages", 200, http.Header{}, map[string]any{"input_tokens": 1}, 3*time.Millisecond)
 	ot.end(nil)
 	// An exporter/receiver error that echoes the header (a hostile or
-	// misconfigured collector can put anything in a gRPC status message).
-	otel.Handle(errors.New("rpc error: code = Unauthenticated desc = bad credentials \"Bearer " + hdrSecret + "\""))
+	// misconfigured collector can put anything in a gRPC status message or
+	// an HTTP error body).
+	otel.Handle(errors.New(echo))
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	serr := shutdown(ctx)
 	cancel()
@@ -166,14 +195,19 @@ func TestOtelHeadersNeverLoggedExportFail(t *testing.T) {
 	if serr == nil {
 		t.Fatalf("shutdown against a refused port should fail; output:\n%s", out)
 	}
-	assertNoSecret(t, out,
-		"sdk: escape header value", "sdk: parse headers", "otel shutdown:", "export: rpc error", otelRedacted,
-		"traces=grpc http://REDACTED@")
+	assertNoSecret(t, out, append([]string{
+		"sdk: escape header value", "sdk: parse headers", "otel shutdown:", otelRedacted}, want...)...)
 }
 
 // Init path: instrument creation fails with an error quoting the secret.
 func TestOtelHeadersNeverLoggedInitFail(t *testing.T) {
-	setHeaderEnv(t, refusedEndpoint(t))
+	for _, tc := range redactProtos {
+		t.Run(tc.proto, func(t *testing.T) { headersNeverLoggedInitFail(t, tc.proto) })
+	}
+}
+
+func headersNeverLoggedInitFail(t *testing.T, proto string) {
+	setHeaderEnv(t, refusedEndpoint(t), proto)
 	resetOtelGlobals(t)
 	prev := otelMeterWrap
 	otelMeterWrap = func(m metric.Meter) metric.Meter { return echoMeter{m} }
