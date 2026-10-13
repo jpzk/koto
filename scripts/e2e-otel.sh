@@ -162,7 +162,7 @@ DPID=; RPID=
 cleanup(){ [ -n "$DPID" ] && kill -TERM "$DPID" 2>/dev/null; [ -n "$RPID" ] && kill -TERM "$RPID" 2>/dev/null
   rm -f "$NEW"
   if [ "$WAS_UP" = 1 ] && ! pgrep -f "^$K daemon" >/dev/null; then
-    (set -a; . /etc/koto/koto.env; set +a; cd "$KHOME" && HOME=$KHOME setsid "$K" daemon >>"$W/daemon-restored.log" 2>&1 &)
+    (set -a; . /etc/koto/koto.env; set +a; cd "$KHOME" && HOME=$KHOME exec setsid "$K" daemon) >>"$W/daemon-restored.log" 2>&1 </dev/null &
   fi; }
 trap cleanup EXIT
 stop_daemon(){ local p; p=$(pgrep -f "^$K daemon" | head -1); [ -n "$p" ] || return 0
