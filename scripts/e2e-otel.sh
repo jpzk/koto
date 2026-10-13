@@ -10,10 +10,15 @@
 #
 # e2e-otel.sh — prove koto's OpenTelemetry export end to end.
 #
-#   phase 1 DAEMON   go test TestOtelE2E (daemon -> in-process OTLP receiver:
+#   phase 1 DAEMON   go test TestOtelE2E (daemon -> in-process OTLP receivers:
 #                    metric w/ tokens+group, log w/ group, span w/ group+request_id)
-#   phase 2 MICROVM  one REAL tool-using turn in a nested koto guest, exported to
-#                    a local OTLP/gRPC receiver (daemon/otlprecv/cmd/otlp-recv),
+#                    three times: grpc, http/protobuf (protocol unset = the
+#                    default) and mixed per-signal (traces grpc, metrics+logs
+#                    http), each signal checked on its own transport's receiver.
+#   phase 2 MICROVM  one REAL tool-using turn in a nested koto guest, exported
+#                    with the protocol UNSET (default http/protobuf) to a local
+#                    HTTP-only OTLP receiver (daemon/otlprecv/cmd/otlp-recv,
+#                    gRPC listener off, so every record came over OTLP/HTTP),
 #                    then otlp-recv check asserts, for THAT turn: LLM metrics
 #                    for the group, a log record with the turn's output marker,
 #                    and ONE trace koto.turn -> guest.turn -> guest.worker ->
@@ -41,6 +46,7 @@
 #   E2E_OTEL_GROUP    reuse this existing group (default: spawn a scratch group
 #                     oe2eHHMMSS; spawn needs free disk for a workspace image)
 #   E2E_OTEL_KEEP=1   keep the scratch group (default: destroyed)
+#   E2E_OTEL_HTTP_PORT microVM-phase receiver OTLP/HTTP port (default 14318)
 #   E2E_OTEL_ALLOW_INSTALL=1  REQUIRED acknowledgement that this run may replace
 #                     the installed koto + rootfs.img (see the warning above)
 #
@@ -102,6 +108,16 @@ printf '%s\n' "$OUT" | grep -E '^(=== RUN|--- |ok|FAIL)|PASS |FAIL ' | sed 's/^/
 [ $rc -eq 0 ] && printf '%s' "$OUT" | grep -q -- '--- PASS: TestOtelE2E' \
   && ok "daemon e2e: metric(token+group), log(group), span(group,request_id) received" \
   || no "daemon e2e (go test rc=$rc)"
+# One line per transport configuration: each subtest asserts all three
+# signals arrive, each on its own transport's receiver (grpc-only and
+# http-only receivers), and none on the wrong one.
+for tp in "grpc:grpc (all three signals over OTLP/gRPC)" \
+          "http-default:http/protobuf (protocol UNSET, the default; POST /v1/{traces,metrics,logs})" \
+          "mixed:mixed per-signal (traces grpc via OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, metrics+logs http/protobuf)"; do
+  printf '%s' "$OUT" | grep -q -- "--- PASS: TestOtelE2EAllSignalsReachReceiver/${tp%%:*} " \
+    && ok "daemon e2e ${tp#*:}: metrics+logs+spans received" \
+    || no "daemon e2e ${tp#*:}: subtest ${tp%%:*} did not pass"
+done
 printf '%s' "$OUT" | grep -q -- '--- PASS: TestOtelLogContentGated' \
   && ok "capture OFF (default): planted secret via logAppend+streamLogAppend absent from every exported log body/attr; records keep koto.group + trace/span ids" \
   || no "capture-off log content gating (TestOtelLogContentGated)"
@@ -177,16 +193,26 @@ sudo install -m 0755 "$S/koto" "$K" && [ "$($K version)" = "$VER" ] \
   && ok "installed $K version $VER" || die "install koto"
 
 hdr "2c. start OTLP receiver + daemon with OTEL_EXPORTER_OTLP_ENDPOINT"
-PORT=${E2E_OTEL_PORT:-14317}
+# The receiver runs HTTP-ONLY (-addr "" turns its gRPC listener off): there is
+# no gRPC port to land on, so every captured record PROVABLY arrived over
+# OTLP/HTTP protobuf. (Phase 1 covers grpc and mixed.)
+HPORT=${E2E_OTEL_HTTP_PORT:-14318}      # OTLP/HTTP, 4318-style
 CAP=$W/capture.jsonl
-"$W/otlp-recv" serve -addr "127.0.0.1:$PORT" -out "$CAP" >"$W/recv.log" 2>&1 &
+"$W/otlp-recv" serve -addr "" -http-addr "127.0.0.1:$HPORT" -out "$CAP" >"$W/recv.log" 2>&1 &
 RPID=$!
-sleep 1; grep -q listening "$W/recv.log" && ok "receiver on 127.0.0.1:$PORT" || die "receiver start: $(cat "$W/recv.log")"
+sleep 1; grep -q "listening grpc= http=127.0.0.1:$HPORT," "$W/recv.log" \
+  && ok "receiver HTTP-only on 127.0.0.1:$HPORT (gRPC listener off)" || die "receiver start: $(cat "$W/recv.log")"
 [ -e /dev/stdin ] || for l in fd:/proc/self/fd stdin:/proc/self/fd/0 stdout:/proc/self/fd/1 stderr:/proc/self/fd/2; do
   [ -e "/dev/${l%%:*}" ] || sudo ln -s "${l#*:}" "/dev/${l%%:*}"; done
 (
   set -a; . /etc/koto/koto.env; set +a
-  export HOME=$KHOME OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$PORT" OTEL_EXPORTER_OTLP_PROTOCOL=grpc \
+  # Protocol deliberately UNSET (generic and per-signal): the microVM phase
+  # proves the default, http/protobuf, all the way through. The endpoint is
+  # a BASE url: the daemon appends /v1/traces, /v1/metrics, /v1/logs.
+  unset OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_TRACES_PROTOCOL \
+        OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_LOGS_PROTOCOL \
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+  export HOME=$KHOME OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$HPORT" \
          OTEL_METRIC_EXPORT_INTERVAL=2000 OTEL_BSP_SCHEDULE_DELAY=500 \
          KOTO_OTEL_CAPTURE_CONTENT=1
   cd "$KHOME" && exec setsid "$K" daemon
@@ -195,6 +221,10 @@ DPID=$!
 export HOME=$KHOME KOTO_HOME=$KHOME KOTO_ADDR=127.0.0.1:8443 KOTO_CREDS_DIR=$KHOME/creds KOTO_CLIENT=tui
 up=0; for _ in $(seq 60); do $K ctl list >/dev/null 2>&1 && { up=1; break; }; sleep 1; done
 [ $up = 1 ] && ok "daemon up (pid $DPID) exporting to the receiver, KOTO_OTEL_CAPTURE_CONTENT=1 (log bodies carry turn output for the marker check)" || die "daemon start (see $W/daemon.log)"
+EXP="traces=http/protobuf http://127.0.0.1:$HPORT/v1/traces, metrics=http/protobuf http://127.0.0.1:$HPORT/v1/metrics, logs=http/protobuf http://127.0.0.1:$HPORT/v1/logs"
+grep -qF "OTLP export on: $EXP" "$W/daemon.log" \
+  && ok "protocol UNSET -> default http/protobuf for all three signals, base url + /v1/<signal> (daemon: OTLP export on: $EXP)" \
+  || no "daemon did not resolve the default http/protobuf targets (want \"OTLP export on: $EXP\"; see $W/daemon.log)"
 
 hdr "2d. one real tool-using turn in a nested microVM"
 SCRATCH=0; G=${E2E_OTEL_GROUP:-}
