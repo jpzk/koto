@@ -22,6 +22,7 @@ package main
 // only reader is the exporter itself.
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"sort"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
 const otelRedacted = "[redacted]"
@@ -181,33 +183,104 @@ func otelInstallLogging(getenv func(string) string) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(otelHandleErr))
 }
 
-// Export errors repeat every batch while a receiver is down; log the first,
-// then at most one per otelErrEvery with a suppressed count.
+// Export errors repeat every batch while a receiver is down; per signal, log
+// the first, then at most one per otelErrEvery with a suppressed count.
+//
+// One limiter per signal (F6): with a single shared limiter, a burst of
+// metrics/logs failures used up the window and every trace-export failure
+// ended up as "(N similar suppressed)" on another signal's line, so an
+// operator could not tell that traces were failing at all.
 var (
-	otelErrMu         sync.Mutex
-	otelErrLast       time.Time
-	otelErrSuppressed int
-	otelErrEvery      = 30 * time.Second
+	otelErrMu    sync.Mutex
+	otelErrState = map[string]*otelErrLimit{}
+	otelErrEvery = 30 * time.Second
 )
 
+type otelErrLimit struct {
+	last       time.Time
+	suppressed int
+}
+
+// Limiter keys. otelErrOther collects errors that name no signal (config,
+// TLS, instrument errors) so they cannot hide an export failure either.
+const (
+	otelErrTraces  = "traces"
+	otelErrMetrics = "metrics"
+	otelErrLogs    = "logs"
+	otelErrOther   = "other"
+)
+
+// otelErrSignal maps an SDK error to its limiter key from the wrapping the
+// exporters apply: "traces export: ..." (otlptrace, both transports),
+// "failed to upload metrics: ..." (otlpmetric, both), "failed to send logs
+// to ..." (otlploghttp) and "logs export: ..." (otelLogErrTag, which also
+// covers otlploggrpc's bare status errors). An unwrapped HTTP error still
+// names its /v1/<signal> path. Only used as a key, never logged.
+func otelErrSignal(s string) string {
+	switch {
+	case strings.HasPrefix(s, "traces export:"):
+		return otelErrTraces
+	case strings.HasPrefix(s, "logs export:"), strings.HasPrefix(s, "failed to send logs"):
+		return otelErrLogs
+	case strings.HasPrefix(s, "failed to upload metrics"), strings.HasPrefix(s, "failed to upload incomplete metrics"),
+		strings.HasPrefix(s, "failed to send metrics"):
+		return otelErrMetrics
+	case strings.Contains(s, "/v1/traces"):
+		return otelErrTraces
+	case strings.Contains(s, "/v1/metrics"):
+		return otelErrMetrics
+	case strings.Contains(s, "/v1/logs"):
+		return otelErrLogs
+	}
+	return otelErrOther
+}
+
 func otelHandleErr(err error) {
+	if err == nil {
+		return
+	}
+	sig := otelErrSignal(err.Error())
 	otelErrMu.Lock()
+	st := otelErrState[sig]
+	if st == nil {
+		st = &otelErrLimit{}
+		otelErrState[sig] = st
+	}
 	now := time.Now()
-	if !otelErrLast.IsZero() && now.Sub(otelErrLast) < otelErrEvery {
-		otelErrSuppressed++
+	if !st.last.IsZero() && now.Sub(st.last) < otelErrEvery {
+		st.suppressed++
 		otelErrMu.Unlock()
 		return
 	}
-	n := otelErrSuppressed
-	otelErrLast, otelErrSuppressed = now, 0
+	n := st.suppressed
+	st.last, st.suppressed = now, 0
 	otelErrMu.Unlock()
 	msg := otelRedactErr(err)
 	if n > 0 {
-		msg += fmt.Sprintf(" (%d similar suppressed)", n)
+		msg += fmt.Sprintf(" (%d similar %s errors suppressed)", n, sig)
 	}
 	// warn, not error: error lines become operator notifications, and a
 	// down collector is not an emergency for an isolation box.
 	emitLogfQuiet("otel", "warn", "export: %s", msg)
+}
+
+// otelErrReset clears every limiter (tests).
+func otelErrReset() {
+	otelErrMu.Lock()
+	otelErrState = map[string]*otelErrLimit{}
+	otelErrMu.Unlock()
+}
+
+// otelLogErrTag prefixes log-export errors with "logs export: ", as
+// otlptrace does for traces: otlploggrpc returns bare gRPC status errors
+// that would otherwise land in the "other" limiter.
+type otelLogErrTag struct{ sdklog.Exporter }
+
+func (e otelLogErrTag) Export(ctx context.Context, recs []sdklog.Record) error {
+	if err := e.Exporter.Export(ctx, recs); err != nil {
+		return fmt.Errorf("logs export: %w", err)
+	}
+	return nil
 }
 
 // otelLogSink is a logr.LogSink for the SDK's internal logger. It keeps the
