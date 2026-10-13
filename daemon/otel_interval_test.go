@@ -24,6 +24,9 @@ func TestOtelMetricIntervalFromEnv(t *testing.T) {
 		if k == "OTEL_EXPORTER_OTLP_ENDPOINT" {
 			return rcv.Endpoint()
 		}
+		if k == "OTEL_EXPORTER_OTLP_PROTOCOL" {
+			return otelProtoGRPC
+		}
 		return os.Getenv(k)
 	})
 	if err != nil {

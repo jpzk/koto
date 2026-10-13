@@ -36,9 +36,9 @@ func TestOtelConfigResolution(t *testing.T) {
 		t.Fatalf("schemeless endpoint must default to TLS, got %q", c.Endpoint)
 	}
 	if _, err := otelConfigFrom(envMap(map[string]string{
-		"KOTO_OTEL_ENDPOINT": "http://x:1", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+		"KOTO_OTEL_ENDPOINT": "http://x:1", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
 	})); err == nil {
-		t.Fatal("http/protobuf must be refused (only grpc exporters are vendored)")
+		t.Fatal("http/json must be refused (only grpc and http/protobuf are supported)")
 	}
 	if c.CaptureContent {
 		t.Fatal("content capture must default off")

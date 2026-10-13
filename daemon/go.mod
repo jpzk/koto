@@ -45,6 +45,14 @@ toolchain go1.26.9
 //   go.opentelemetry.io/otel/log, /sdk/log, /exporters/otlp/otlplog/
 //     otlploggrpc v0.22.0 — 2026-08-25 (the log signal is still pre-1.0).
 //   The exporters require grpc v1.83.1, so the v1.83.2 pin above holds.
+// OTLP/HTTP protobuf exporters (otel.go), 2026-10-13, same release train,
+// cutoff 2026-08-31 (verified via proxy.golang.org/<mod>/@v/<ver>.info):
+//   /exporters/otlp/otlptrace/otlptracehttp v1.46.0 — 2026-08-25
+//   /exporters/otlp/otlpmetric/otlpmetrichttp v1.46.0 — 2026-08-25
+//   /exporters/otlp/otlplog/otlploghttp v0.22.0 — 2026-08-25
+//   They add NO new module to the graph: every requirement (otlp proto
+//   v1.11.0, backoff v5.0.3, logr v1.4.4, grpc v1.83.1 <= v1.83.2, protobuf
+//   v1.36.12) is already pinned above. Transport is net/http from stdlib.
 // Taken with exactly what they require (MVS, not latest):
 //   go.opentelemetry.io/proto/otlp v1.11.0 — 2026-07-22
 //   google.golang.org/genproto/googleapis/rpc + /api
@@ -62,8 +70,11 @@ require (
 	github.com/go-logr/logr v1.4.4
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.22.0
+	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.22.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.46.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.46.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0
 	go.opentelemetry.io/otel/log v0.22.0
 	go.opentelemetry.io/otel/metric v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0

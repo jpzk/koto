@@ -101,6 +101,7 @@ func setHeaderEnv(t *testing.T, addr string) {
 		"authorization=Bearer "+hdrSecret+"%zz,"+hdrSecret+"-noequals,x-api-key="+hdrSecret)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-trace-key="+hdrSecret+"%zz")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://koto:"+hdrSecret+"@"+addr)
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", otelProtoGRPC)
 	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
 }
 
@@ -167,7 +168,7 @@ func TestOtelHeadersNeverLoggedExportFail(t *testing.T) {
 	}
 	assertNoSecret(t, out,
 		"sdk: escape header value", "sdk: parse headers", "otel shutdown:", "export: rpc error", otelRedacted,
-		"OTLP export on: http://REDACTED@")
+		"traces=grpc http://REDACTED@")
 }
 
 // Init path: instrument creation fails with an error quoting the secret.

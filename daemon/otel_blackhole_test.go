@@ -111,6 +111,7 @@ func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+tc.addr(t))
+			t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", otelProtoGRPC)
 			// Export as often as the SDK allows so the exporters are busy
 			// failing (or hanging) WHILE the hooks run: the worst case.
 			t.Setenv("OTEL_BSP_SCHEDULE_DELAY", "20")

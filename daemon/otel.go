@@ -8,11 +8,12 @@ package main
 // Config, standard variables first (the exporters also read the rest of the
 // OTEL_EXPORTER_OTLP_* family themselves, e.g. _HEADERS):
 //
-//	OTEL_EXPORTER_OTLP_ENDPOINT  receiver URL, e.g. http://127.0.0.1:4317
-//	OTEL_EXPORTER_OTLP_PROTOCOL  grpc (default). http/protobuf is refused:
-//	                             only the gRPC exporters are vendored, and
-//	                             adding the HTTP trio would mean three more
-//	                             pinned modules for no current user.
+//	OTEL_EXPORTER_OTLP_ENDPOINT  receiver BASE URL, e.g. http://127.0.0.1:4318
+//	OTEL_EXPORTER_OTLP_PROTOCOL  http/protobuf (DEFAULT, spec) or grpc; per-signal
+//	                             _TRACES_/_METRICS_/_LOGS_ variants win.
+//	                             DEFAULT CHANGED from grpc on 2026-10-13: one
+//	                             constant, otelDefaultProtocol (otel_proto.go).
+//	OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT  full per-signal URL, as-is
 //	OTEL_EXPORTER_OTLP_HEADERS   k=v,k=v sent with every export (never logged,
 //	                             see otel_redact.go)
 //	OTEL_SERVICE_NAME            default "koto"
@@ -39,9 +40,6 @@ import (
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -55,8 +53,14 @@ import (
 
 // otelConfig is the resolved configuration. Endpoint == "" means disabled.
 type otelConfig struct {
-	Endpoint       string
+	// Endpoint is the generic base endpoint (or, with only per-signal
+	// endpoints configured, the traces URL); non-empty means enabled.
+	Endpoint string
+	// Protocol applies to every signal when Targets is nil (configs built in
+	// code by tests); "" means otelDefaultProtocol. otelConfigFrom always
+	// fills Targets, resolved per signal (otel_proto.go).
 	Protocol       string
+	Targets        map[string]otelTarget
 	CaptureContent bool
 	// MetricInterval is the periodic reader's export interval; tests shorten
 	// it, production defaults to 30s. 0 defers to the SDK, which reads
@@ -66,41 +70,39 @@ type otelConfig struct {
 }
 
 // otelConfigFrom resolves config from an env lookup. Env (OTEL_*) wins over
-// the koto-native knob.
+// the koto-native knob; protocol and endpoint resolve per signal in spec
+// order (otel_proto.go). An error means: log it, telemetry stays off.
 func otelConfigFrom(getenv func(string) string) (otelConfig, error) {
 	c := otelConfig{MetricInterval: 30 * time.Second}
 	if strings.TrimSpace(getenv("OTEL_METRIC_EXPORT_INTERVAL")) != "" {
 		c.MetricInterval = 0 // the SDK honors the standard env var
 	}
-	c.Endpoint = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-	if c.Endpoint == "" {
-		c.Endpoint = strings.TrimSpace(getenv("KOTO_OTEL_ENDPOINT"))
-	}
-	c.Protocol = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_PROTOCOL"))
-	if c.Protocol == "" {
-		c.Protocol = "grpc"
-	}
 	c.CaptureContent = getenv("KOTO_OTEL_CAPTURE_CONTENT") == "1"
-	if c.Endpoint == "" {
+	base, targets, enabled, err := otelResolveTargets(getenv)
+	if err != nil {
+		return otelConfig{}, err
+	}
+	if !enabled {
 		return c, nil
 	}
-	if c.Protocol != "grpc" {
-		return otelConfig{}, fmt.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL=%q unsupported (koto exports OTLP over grpc only); telemetry stays off", c.Protocol)
+	c.Endpoint = base
+	if c.Endpoint == "" {
+		c.Endpoint = targets[otelSigTraces.Name].URL
 	}
-	if !strings.Contains(c.Endpoint, "://") {
-		c.Endpoint = "https://" + c.Endpoint
-	}
+	c.Protocol = targets[otelSigTraces.Name].Protocol
+	c.Targets = targets
 	return c, nil
 }
 
 // otelState is the live pipeline. A nil *otelState (the default) is "off".
 type otelState struct {
-	cfg    otelConfig
-	tp     *sdktrace.TracerProvider
-	mp     *sdkmetric.MeterProvider
-	lp     *sdklog.LoggerProvider
-	tracer trace.Tracer
-	logger otellog.Logger
+	cfg     otelConfig
+	targets map[string]otelTarget // per-signal transport actually built
+	tp      *sdktrace.TracerProvider
+	mp      *sdkmetric.MeterProvider
+	lp      *sdklog.LoggerProvider
+	tracer  trace.Tracer
+	logger  otellog.Logger
 
 	reqCount     metric.Int64Counter
 	reqDur       metric.Float64Histogram
@@ -149,7 +151,8 @@ func otelTraceparent(ctx context.Context) string {
 func otelInit(ctx context.Context) func(context.Context) error {
 	cfg, err := otelConfigFrom(os.Getenv)
 	if err != nil {
-		emitLogf("otel", "warn", "%s", otelRedact(err.Error()))
+		// Bad protocol / partial endpoints: loud, and telemetry stays off.
+		emitLogf("otel", "error", "otel config: %s", otelRedact(err.Error()))
 		return func(context.Context) error { return nil }
 	}
 	if cfg.Endpoint == "" {
@@ -163,7 +166,7 @@ func otelInit(ctx context.Context) func(context.Context) error {
 		emitLogf("otel", "error", "otel init: %s (telemetry off)", otelRedactErr(err))
 		return func(context.Context) error { return nil }
 	}
-	emitLogf("otel", "info", "OTLP export on: %s", otelRedactURL(cfg.Endpoint))
+	emitLogf("otel", "info", "OTLP export on: %s", otelTargetsSummary(s.targets))
 	return func(ctx context.Context) error {
 		err := s.shutdown(ctx)
 		if err != nil {
@@ -174,7 +177,8 @@ func otelInit(ctx context.Context) func(context.Context) error {
 }
 
 // otelStart builds providers + exporters for a non-empty endpoint and makes
-// them current. Exporter construction does not dial: gRPC connects lazily.
+// them current. Exporter construction does not dial: gRPC connects lazily,
+// the HTTP exporters open a connection only on the first export.
 func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 	if cfg.Endpoint == "" {
 		return nil, errors.New("otelStart: empty endpoint")
@@ -190,22 +194,26 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resource: %w", err)
 	}
-	texp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpointURL(cfg.Endpoint))
+	targets, err := otelTargetsFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	texp, err := otelTraceExporter(ctx, targets[otelSigTraces.Name])
 	if err != nil {
 		return nil, fmt.Errorf("trace exporter: %w", err)
 	}
-	mexp, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpointURL(cfg.Endpoint))
+	mexp, err := otelMetricExporter(ctx, targets[otelSigMetrics.Name])
 	if err != nil {
 		_ = texp.Shutdown(ctx)
 		return nil, fmt.Errorf("metric exporter: %w", err)
 	}
-	lexp, err := otlploggrpc.New(ctx, otlploggrpc.WithEndpointURL(cfg.Endpoint))
+	lexp, err := otelLogExporter(ctx, targets[otelSigLogs.Name])
 	if err != nil {
 		_ = texp.Shutdown(ctx)
 		_ = mexp.Shutdown(ctx)
 		return nil, fmt.Errorf("log exporter: %w", err)
 	}
-	s := &otelState{cfg: cfg}
+	s := &otelState{cfg: cfg, targets: targets}
 	// Never blocks the caller (S4, otel_blackhole_test.go): both batch
 	// processors keep the SDK default bounded queue (2048, OTEL_BSP_/
 	// OTEL_BLRP_MAX_QUEUE_SIZE) and DROP when full (no WithBlocking); export

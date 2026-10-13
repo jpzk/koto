@@ -36,6 +36,8 @@ func runLogContent(t *testing.T, capture bool) (logs []otlprecv.Log, turnTrace, 
 		switch k {
 		case "OTEL_EXPORTER_OTLP_ENDPOINT":
 			return rcv.Endpoint()
+		case "OTEL_EXPORTER_OTLP_PROTOCOL":
+			return otelProtoGRPC // otlprecv.Start is the gRPC receiver
 		case "KOTO_OTEL_CAPTURE_CONTENT":
 			if capture {
 				return "1"
