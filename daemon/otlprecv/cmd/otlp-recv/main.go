@@ -1,9 +1,11 @@
-// Command otlp-recv is the OTLP/gRPC receiver behind scripts/e2e-otel.sh.
+// Command otlp-recv is the OTLP receiver (gRPC + HTTP/protobuf) behind scripts/e2e-otel.sh.
 // It is test tooling and is never shipped with koto.
 //
-//	otlp-recv serve -addr 127.0.0.1:4317 -out capture.jsonl
+//	otlp-recv serve -addr 127.0.0.1:4317 [-http-addr 127.0.0.1:4318] -out capture.jsonl
 //	    receive traces/metrics/logs until SIGTERM/SIGINT, appending one
-//	    JSON line per record to -out (Ready line on stdout once listening)
+//	    JSON line per record to -out (Ready line on stdout once listening);
+//	    -addr "" turns the gRPC listener off, -http-addr adds OTLP/HTTP
+//	    protobuf (POST /v1/{traces,metrics,logs}) into the same capture
 //	otlp-recv check -in capture.jsonl -group G -marker M [-metrics FILE] [-resources FILE]
 //	    print one PASS/FAIL line per check of that group's turn; exit 1 on
 //	    any FAIL (and on an unreadable or corrupt capture)
@@ -35,13 +37,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: otlp-recv serve -addr A -out FILE | check -in FILE -group G -marker M [-metrics metrics.jsonl] [-resources res.json]")
+	fmt.Fprintln(os.Stderr, "usage: otlp-recv serve -addr A [-http-addr H] -out FILE | check -in FILE -group G -marker M [-metrics metrics.jsonl] [-resources res.json]")
 	os.Exit(2)
 }
 
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:4317", "listen address (loopback)")
+	addr := fs.String("addr", "127.0.0.1:4317", "OTLP/gRPC listen address (loopback; \"\" = off)")
+	httpAddr := fs.String("http-addr", "", "OTLP/HTTP protobuf listen address (loopback; \"\" = off)")
 	out := fs.String("out", "", "JSON-lines capture file")
 	_ = fs.Parse(args)
 	if *out == "" {
@@ -52,12 +55,12 @@ func serve(args []string) {
 		fmt.Fprintln(os.Stderr, "otlp-recv:", err)
 		os.Exit(1)
 	}
-	r, err := otlprecv.Start(*addr, f)
+	r, err := otlprecv.StartWith(otlprecv.Options{GRPCAddr: *addr, HTTPAddr: *httpAddr}, f)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "otlp-recv:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("otlp-recv: listening on %s, capture %s\n", r.Addr, *out)
+	fmt.Printf("otlp-recv: listening grpc=%s http=%s, capture %s\n", r.Addr, r.HTTPAddr, *out)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	<-sig

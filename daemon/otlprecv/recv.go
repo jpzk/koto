@@ -1,4 +1,4 @@
-// Package otlprecv is a tiny in-process OTLP/gRPC receiver for koto's
+// Package otlprecv is a tiny in-process OTLP receiver (gRPC and HTTP/protobuf) for koto's
 // end-to-end telemetry tests. It implements the three OTLP collector
 // services (traces, metrics, logs), flattens what it receives into plain
 // structs, and can dump them as JSON lines. It is test tooling: it is never
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 
@@ -71,10 +72,13 @@ type Log struct {
 type Receiver struct {
 	coltrace.UnimplementedTraceServiceServer
 
-	Addr string // host:port it listens on
+	Addr     string // host:port of the OTLP/gRPC listener ("" if off)
+	HTTPAddr string // host:port of the OTLP/HTTP listener ("" if off)
 
-	srv *grpc.Server
-	ln  net.Listener
+	srv  *grpc.Server
+	ln   net.Listener
+	hsrv *http.Server
+	hln  net.Listener
 
 	mu      sync.Mutex
 	spans   []Span
@@ -89,23 +93,19 @@ type Receiver struct {
 // sink, if non-nil, receives one JSON object per record as it arrives:
 // {"signal":"span"|"metric"|"log", ...}.
 func Start(addr string, sink io.Writer) (*Receiver, error) {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	r := &Receiver{Addr: ln.Addr().String(), ln: ln, srv: grpc.NewServer(), changed: make(chan struct{}, 1), sink: sink}
-	coltrace.RegisterTraceServiceServer(r.srv, r)
-	colmetrics.RegisterMetricsServiceServer(r.srv, metricsSrv{r: r})
-	collogs.RegisterLogsServiceServer(r.srv, logsSrv{r: r})
-	go func() { _ = r.srv.Serve(ln) }()
-	return r, nil
+	return StartWith(Options{GRPCAddr: addr}, sink)
 }
 
 // Endpoint is the URL to hand an OTLP exporter (plaintext gRPC).
 func (r *Receiver) Endpoint() string { return "http://" + r.Addr }
 
-// Stop shuts the server down.
-func (r *Receiver) Stop() { r.srv.Stop() }
+// Stop shuts the listeners down.
+func (r *Receiver) Stop() {
+	if r.srv != nil {
+		r.srv.Stop()
+	}
+	r.stopHTTP()
+}
 
 // Spans / Points / Logs return snapshots of what has been received.
 func (r *Receiver) Spans() []Span {
