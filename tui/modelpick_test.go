@@ -112,8 +112,11 @@ func TestModelSelectOptionsFollowProvider(t *testing.T) {
 	m = press(t, m, tea.KeyEsc)
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
 	m = nm.(Model)
-	if cmd != nil {
-		t.Error("reopen refetched a cached live list")
+	// The open still asks which providers have a login (that can change
+	// between opens); it must not refetch the cached model list.
+	m = runCmds(t, m, cmd, 4)
+	if n := fk.modelCalls("claudesdk"); n != 1 {
+		t.Errorf("reopen refetched a cached live list (%d fetches)", n)
 	}
 	if len(m.newGroup.mp.opts) != 2 {
 		t.Errorf("reopen options %q", modelOptions(m))

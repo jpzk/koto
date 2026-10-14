@@ -301,7 +301,8 @@ func openaiCredential(ctx context.Context) (openaiCred, error) {
 	defer openaiAuthMu.Unlock()
 
 	f, ferr := openaiReadAuthFile()
-	if ferr == nil && f.Tokens != nil && f.Tokens.AccessToken != "" {
+	kind, key := openaiStoredCred(f, ferr)
+	if kind == "chatgpt" {
 		now := openaiNow()
 		if openaiNeedsRefresh(f, now) {
 			if err := openaiRefresh(ctx, f); err != nil {
@@ -318,18 +319,35 @@ func openaiCredential(ctx context.Context) (openaiCred, error) {
 		}
 		return openaiCred{Kind: "chatgpt", Token: f.Tokens.AccessToken, AccountID: acct}, nil
 	}
-	if ferr == nil && f.APIKey != nil && strings.TrimSpace(*f.APIKey) != "" {
-		return openaiCred{Kind: "api-key", Token: strings.TrimSpace(*f.APIKey)}, nil
-	}
-	if b, err := os.ReadFile(openaiAPIKeyPath()); err == nil {
-		if k := strings.TrimSpace(string(b)); k != "" {
-			return openaiCred{Kind: "api-key", Token: k}, nil
-		}
+	if kind == "api-key" {
+		return openaiCred{Kind: "api-key", Token: key}, nil
 	}
 	if ferr != nil && !errors.Is(ferr, os.ErrNotExist) {
 		return openaiCred{}, ferr
 	}
 	return openaiCred{}, errOpenAINoCred
+}
+
+// openaiStoredCred picks which stored credential openaiCredential uses, in
+// its precedence order, WITHOUT refreshing or touching the network:
+// "chatgpt" (OAuth tokens in openai-auth.json; key is ""), "api-key" (the
+// auth file's OPENAI_API_KEY, else creds/openai-api-key; key is the trimmed
+// key), or "" when there is none. The proxy and the Providers RPC
+// (provider_status.go) both go through it, so they cannot disagree on
+// whether openai is set up.
+func openaiStoredCred(f *openaiAuthFile, ferr error) (kind, key string) {
+	if ferr == nil && f.Tokens != nil && f.Tokens.AccessToken != "" {
+		return "chatgpt", ""
+	}
+	if ferr == nil && f.APIKey != nil && strings.TrimSpace(*f.APIKey) != "" {
+		return "api-key", strings.TrimSpace(*f.APIKey)
+	}
+	if b, err := os.ReadFile(openaiAPIKeyPath()); err == nil {
+		if k := strings.TrimSpace(string(b)); k != "" {
+			return "api-key", k
+		}
+	}
+	return "", ""
 }
 
 // ---- device-code login -------------------------------------------------

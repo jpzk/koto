@@ -601,6 +601,22 @@ func (s *kotoServer) Models(ctx context.Context, r *pb.ModelsReq) (*pb.ModelsRes
 	return out, nil
 }
 
+// Providers serves the new-group / edit-group provider select: which
+// providers have a credential set up on this host (provider_status.go).
+// Built field by field from providerStatus so no credential material can
+// ride along: name, configured, kind.
+func (s *kotoServer) Providers(ctx context.Context, _ *pb.ProvidersReq) (*pb.ProvidersResp, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	st := providerStatuses()
+	out := &pb.ProvidersResp{Ok: true, Providers: make([]*pb.ProviderStatus, 0, len(st))}
+	for _, p := range st {
+		out.Providers = append(out.Providers, &pb.ProviderStatus{Name: p.Name, Configured: p.Configured, Kind: p.Kind})
+	}
+	return out, nil
+}
+
 // Jobs is the fresh "ls" of a group's background jobs — it re-reads the
 // guest (bounded by fcExec's timeout) rather than serving the watch-loop
 // mirror, so `koto ctl jobs` never shows stale state. Group "" sweeps every

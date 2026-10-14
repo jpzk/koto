@@ -41,6 +41,9 @@ type fakeKoto struct {
 	// returns; failRead makes that read fail. Reads are recorded as "read".
 	cfg      map[string]any
 	failRead bool
+	// providers is the Providers RPC answer; nil = Unimplemented (an older
+	// daemon), which the dialog treats as "check unavailable".
+	providers *pb.ProvidersResp
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {

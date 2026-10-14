@@ -118,6 +118,15 @@ service Koto {
   // the in-guest ctl plane — guests never trigger host-credential fetches.
   rpc Models      (ModelsReq)      returns (ModelsResp);
 
+  // Providers lists every known provider with whether a credential for it is
+  // set up on the daemon host, for the TUI new-group / edit-group provider
+  // select. Presence and shape only: nothing is validated against the network
+  // and the answer carries NO secret (no token, key, key prefix, path or
+  // expiry), just name, configured and a coarse kind. Same ACL posture as
+  // Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+  // until acl.json grants `providers`; not on the in-guest ctl plane.
+  rpc Providers   (ProvidersReq)   returns (ProvidersResp);
+
   // ---- ACL management (HARDCODED admin-only: these verbs can never be
   // granted via acl.json — a role granting itself acl_set_role would be
   // privilege escalation to full control; see daemon/acl.go) ----
@@ -702,4 +711,24 @@ message ModelsResp {
   string source = 4;
   string reason = 5;
   repeated ModelInfo models = 6;
+}
+
+// ---- Providers --------------------------------------------------------------
+// Which providers have a credential on the daemon host (daemon/provider_status.go).
+// kind is "" when configured=false, else one of:
+//   subscription  OAuth login (koto claude-login / koto openai-login)
+//   api-key       a key file under the state dir's creds/
+//   env           ANTHROPIC_API_KEY in the daemon's environment
+//   upstream      KOTO_UPSTREAM: an outer koto proxy holds the credential
+message ProvidersReq {}
+
+message ProviderStatus {
+  string name = 1;       // claudesdk | venice | openai
+  bool configured = 2;
+  string kind = 3;
+}
+
+message ProvidersResp {
+  bool ok = 1; string error = 2;
+  repeated ProviderStatus providers = 3;  // every known provider, display order
 }

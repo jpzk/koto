@@ -62,6 +62,7 @@ const (
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_Models_FullMethodName         = "/koto.Koto/Models"
+	Koto_Providers_FullMethodName      = "/koto.Koto/Providers"
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
@@ -170,6 +171,14 @@ type KotoClient interface {
 	// every non-admin role until acl.json grants `models`. Deliberately NOT on
 	// the in-guest ctl plane — guests never trigger host-credential fetches.
 	Models(ctx context.Context, in *ModelsReq, opts ...grpc.CallOption) (*ModelsResp, error)
+	// Providers lists every known provider with whether a credential for it is
+	// set up on the daemon host, for the TUI new-group / edit-group provider
+	// select. Presence and shape only: nothing is validated against the network
+	// and the answer carries NO secret (no token, key, key prefix, path or
+	// expiry), just name, configured and a coarse kind. Same ACL posture as
+	// Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+	// until acl.json grants `providers`; not on the in-guest ctl plane.
+	Providers(ctx context.Context, in *ProvidersReq, opts ...grpc.CallOption) (*ProvidersResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -525,6 +534,16 @@ func (c *kotoClient) Models(ctx context.Context, in *ModelsReq, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *kotoClient) Providers(ctx context.Context, in *ProvidersReq, opts ...grpc.CallOption) (*ProvidersResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProvidersResp)
+	err := c.cc.Invoke(ctx, Koto_Providers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
@@ -742,6 +761,14 @@ type KotoServer interface {
 	// every non-admin role until acl.json grants `models`. Deliberately NOT on
 	// the in-guest ctl plane — guests never trigger host-credential fetches.
 	Models(context.Context, *ModelsReq) (*ModelsResp, error)
+	// Providers lists every known provider with whether a credential for it is
+	// set up on the daemon host, for the TUI new-group / edit-group provider
+	// select. Presence and shape only: nothing is validated against the network
+	// and the answer carries NO secret (no token, key, key prefix, path or
+	// expiry), just name, configured and a coarse kind. Same ACL posture as
+	// Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+	// until acl.json grants `providers`; not on the in-guest ctl plane.
+	Providers(context.Context, *ProvidersReq) (*ProvidersResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -884,6 +911,9 @@ func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*Resou
 }
 func (UnimplementedKotoServer) Models(context.Context, *ModelsReq) (*ModelsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Models not implemented")
+}
+func (UnimplementedKotoServer) Providers(context.Context, *ProvidersReq) (*ProvidersResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Providers not implemented")
 }
 func (UnimplementedKotoServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
@@ -1445,6 +1475,24 @@ func _Koto_Models_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Providers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProvidersReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Providers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Providers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Providers(ctx, req.(*ProvidersReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclGetReq)
 	if err := dec(in); err != nil {
@@ -1668,6 +1716,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Models",
 			Handler:    _Koto_Models_Handler,
+		},
+		{
+			MethodName: "Providers",
+			Handler:    _Koto_Providers_Handler,
 		},
 		{
 			MethodName: "AclGet",
