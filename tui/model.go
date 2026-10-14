@@ -2895,6 +2895,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case newGroupResultMsg:
 		return m, m.handleNewGroupResult(msg)
 
+	case editReadMsg:
+		return m, m.handleEditRead(msg)
+
+	case editResultMsg:
+		return m, m.handleEditResult(msg)
+
 	case modelsLoadedMsg:
 		m.handleModelsLoaded(msg)
 		return m, nil
@@ -4316,9 +4322,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+e" {
-		// Toggle the schedules view (sched_view.go). Same tradeoff as
-		// ctrl+k: the message bar loses bubbles' default jump-to-line-end —
-		// the "end" key still does that — for a reachable schedules view.
+		// Edit-group dialog for the current group (editgroup.go): the
+		// new-group form in edit mode. The message bar loses bubbles' default
+		// jump-to-line-end — the "end" key still does that. Inside the
+		// dialog's own text fields ctrl+e keeps its line-end meaning (the
+		// dialog block above routes keys before this one).
+		return m, m.openEditGroup()
+	}
+	if s == "ctrl+y" {
+		// Toggle the schedules view (sched_view.go). Moved here from ctrl+e,
+		// which the edit-group dialog took. ctrl+y is bound nowhere else:
+		// not in this handler, not in the bubbles v1.0.0 textarea/textinput
+		// keymaps (no yank there), and it is not a tty control character
+		// in raw mode (no ISIG, so no BSD DSUSP; unlike ctrl+s/ctrl+q it is
+		// not flow control). Pinned by TestSchedKeyIsFree.
 		return m, m.toggleSchedView()
 	}
 	if s == "ctrl+]" {

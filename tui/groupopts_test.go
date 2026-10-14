@@ -18,9 +18,11 @@ func TestGroupOptTable(t *testing.T) {
 		"root":      "no|yes",
 		"autostart": "no|yes",
 		"kvm":       "no|yes",
+		"model":     "",
+		"ports":     "",
 	}
 	defaults := map[string]string{"provider": "claudesdk", "effort": "default", "network": "none",
-		"size": "small", "root": "no", "autostart": "no", "kvm": "no"}
+		"size": "small", "root": "no", "autostart": "no", "kvm": "no", "model": "", "ports": ""}
 	if len(groupOptTable) != len(want) {
 		t.Fatalf("table has %d rows, want %d", len(groupOptTable), len(want))
 	}
@@ -84,5 +86,42 @@ func TestParsePortList(t *testing.T) {
 	}
 	if _, err := parsePortList(many); err == nil {
 		t.Error("33 ports accepted")
+	}
+}
+
+// TestGroupOptRestartFlags pins which keys need a VM restart after a
+// config_set — the table above groupOptTable cites the daemon code for each.
+// Text rows are exactly model and ports and are never selects.
+func TestGroupOptRestartFlags(t *testing.T) {
+	want := map[string]bool{
+		"provider": false, "model": false, "effort": false, "autostart": false,
+		"network": true, "size": true, "root": true, "kvm": true, "ports": true,
+	}
+	got := map[string]bool{}
+	for _, o := range groupOptTable {
+		got[o.key] = o.restart
+		if o.restart != groupOptNeedsRestart(o.key) {
+			t.Errorf("%s: groupOptNeedsRestart disagrees with the row", o.key)
+		}
+		if o.text != (o.key == "model" || o.key == "ports") {
+			t.Errorf("%s: text = %v", o.key, o.text)
+		}
+		if o.text && isSelectField(o.key) {
+			t.Errorf("%s: text row reported as a select", o.key)
+		}
+	}
+	for k, w := range want {
+		if g, ok := got[k]; !ok || g != w {
+			t.Errorf("%s restart = %v (present %v), want %v", k, g, ok, w)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("table keys %v, want %v", got, want)
+	}
+	if groupOptNeedsRestart("nope") {
+		t.Error("unknown key needs restart")
+	}
+	if o, _ := groupOptByKey("autostart"); o.note == "" {
+		t.Error("autostart lost its daemon-start note")
 	}
 }
