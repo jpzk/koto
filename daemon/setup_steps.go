@@ -29,6 +29,7 @@ func setupSteps() []setupStep {
 	return []setupStep{
 		stepInstalled(),
 		stepPKI(),
+		stepProvider(),
 		stepAuth(),
 		stepService(),
 		stepSmoke(),
@@ -152,60 +153,7 @@ have already issued.`,
 				}
 				sc.ui.info("minted the 'agent' client identity (role: admin)")
 			}
-			sc.credsChanged = true
-			return nil
-		},
-	}
-}
-
-func stepAuth() setupStep {
-	return setupStep{
-		id:    "auth",
-		title: "Anthropic credentials",
-		explain: `Agents need to reach Claude. koto never hands credentials to an agent: the
-daemon runs a proxy that injects them per request, so a compromised agent
-can talk to the model but cannot read the key.
-
-Two ways to authenticate. A Claude subscription (OAuth) logs in through the
-browser. An API key from console.anthropic.com is billed per token. Check
-Anthropic's terms for which fits your use — the README has the details.
-
-Either way the result lands in the installed system's creds directory, which
-is where the daemon already looks. Nothing is written to your personal
-~/.claude.`,
-		detect: func(sc *setupCtx) (bool, string) {
-			if exists(filepath.Join(sc.credsDir(), ".credentials.json")) {
-				return true, "OAuth credentials present"
-			}
-			if exists(filepath.Join(sc.credsDir(), "anthropic-api-key")) {
-				return true, "API key stored"
-			}
-			if os.Getenv("ANTHROPIC_API_KEY") != "" {
-				return true, "ANTHROPIC_API_KEY set in the environment"
-			}
-			return false, "no credentials"
-		},
-		run: func(sc *setupCtx) error {
-			u := sc.ui
-			// Credentials are required to finish, and both routes need a real
-			// person: a browser for OAuth, a typed secret for the key. Under
-			// -y there is nobody to ask, so say so instead of handing a tty
-			// that isn't there to `claude auth login` and hanging.
-			if u.yes {
-				return errors.New("credentials are required and cannot be set up non-interactively\n" +
-					"  run `koto claude-login` from a terminal, or provide one first:\n" +
-					"    koto claude-login --api-key-stdin < keyfile")
-			}
-			// The flow itself lives in claude_login.go, shared with the
-			// `koto claude-login` subcommand — the wizard is one caller of
-			// it, not a second implementation. What the wizard adds is the
-			// restart: it is already going to start (or restart) the service
-			// in the next step, so credsChanged is its business, not
-			// authConnect's.
-			if err := authConnect(&authCtx{ui: u, state: sc.stateDir()}, "", false); err != nil {
-				return err
-			}
-			sc.credsChanged = true
+			sc.restartOwed = true
 			return nil
 		},
 	}
@@ -224,9 +172,10 @@ The service runs as you, not as root, and starts at boot from here on.`,
 		// Not "did we run this" but "is it running, with what we just wrote".
 		// Credentials minted in this run mean a restart is owed even when the
 		// service is already up: the proxy resolves them once, at startup.
+		// So does a new default provider: the daemon reads koto.env only at start.
 		detect: func(sc *setupCtx) (bool, string) {
-			if sc.credsChanged {
-				return false, "credentials changed this run — restart owed"
+			if sc.restartOwed {
+				return false, "credentials or default provider changed this run — restart owed"
 			}
 			return installStatus()
 		},
@@ -234,7 +183,7 @@ The service runs as you, not as root, and starts at boot from here on.`,
 			if err := sudoRun(sc.ui, "systemctl", "restart", "koto"); err != nil {
 				return err
 			}
-			sc.credsChanged = false
+			sc.restartOwed = false
 			return nil
 		},
 		verify: func(sc *setupCtx) error { return nil }, // the smoke step is the real check
@@ -282,6 +231,9 @@ the same path the TUI and ` + "`koto ctl`" + ` use.`,
 					if !checkKVM().ok {
 						u.warn("no usable /dev/kvm on this host — groups will not boot until that is fixed")
 					}
+					// A warning, not a failure: the daemon is up, and the operator
+					// may have skipped the credential on purpose.
+					smokeProviderCheck(sc)
 					return nil
 				}
 				if time.Now().After(deadline) {

@@ -494,14 +494,14 @@ func listGroups() map[string]GroupInfo {
 	return out
 }
 
-// defaultProvider is the value written into a new group's config.json by
+// defaultProvider() (providers.go: the host-wide KOTO_DEFAULT_PROVIDER, else
+// claudesdk) is the value written into a new group's config.json by
 // ensureProviderConfig. Model is intentionally NOT seeded: the sidecar
 // entrypoint defaults to the per-provider default model when `model` is
 // empty (defaultClaudeModel under claudesdk, defaultVeniceModel under
 // venice). Seeding `model` here would mean `/config provider=venice` on a
 // fresh group leaves a claude model string lying around, which the Venice
 // API would then reject.
-const defaultProvider = "claudesdk"
 
 // defaultClaudeModel / defaultVeniceModel are the single source of truth for
 // the model a group uses when config.json has no `model`. The daemon injects
@@ -533,7 +533,7 @@ const defaultOpenAIModel = "gpt-5.5"
 func ensureProviderConfig(g string) error {
 	_, err := updateGroupConfig(g, func(cfg map[string]any) {
 		if s, ok := cfg["provider"].(string); !ok || !validProvider(s) {
-			cfg["provider"] = defaultProvider
+			cfg["provider"] = defaultProvider()
 		}
 	})
 	return err
@@ -620,7 +620,7 @@ func (c groupConfig) provider() string {
 	if s := c.str("provider"); validProvider(s) {
 		return s
 	}
-	return defaultProvider
+	return defaultProvider()
 }
 
 // model reports the EFFECTIVE model (see groupModelName's comment).

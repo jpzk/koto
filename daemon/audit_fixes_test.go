@@ -5240,6 +5240,9 @@ func authTrustedCredsDirAfterCreate(ac *authCtx) error {
 // group is: defaultProvider, which ensureProviderConfig WRITES into any group
 // whose config is missing or invalid, on every ensure().
 func TestProviderResolutionFailsClosed(t *testing.T) {
+	// Pinned to the built-in default: this test is about the read path, not
+	// about whatever KOTO_DEFAULT_PROVIDER the runner happens to carry.
+	t.Setenv(defaultProviderEnv, "")
 	dir := t.TempDir()
 	prevRoot := ROOT
 	ROOT = dir
@@ -5258,14 +5261,14 @@ func TestProviderResolutionFailsClosed(t *testing.T) {
 	cases := []struct{ name, g, body, want string }{
 		{"explicit venice", "v", `{"provider":"venice"}`, "venice"},
 		{"explicit claudesdk", "c", `{"provider":"claudesdk"}`, "claudesdk"},
-		{"no provider key", "empty", `{"model":"x"}`, defaultProvider},
-		{"empty document", "blank", `{}`, defaultProvider},
-		{"truncated mid-write", "partial", `{"provider":"clau`, defaultProvider},
-		{"not JSON at all", "junk", `garbage`, defaultProvider},
+		{"no provider key", "empty", `{"model":"x"}`, defaultProvider()},
+		{"empty document", "blank", `{}`, defaultProvider()},
+		{"truncated mid-write", "partial", `{"provider":"clau`, defaultProvider()},
+		{"not JSON at all", "junk", `garbage`, defaultProvider()},
 		{"explicit openai", "o", `{"provider":"openai"}`, "openai"},
-		{"unrecognised value", "odd", `{"provider":"gemini"}`, defaultProvider},
-		{"wrong case", "caps", `{"provider":"OpenAI"}`, defaultProvider},
-		{"wrong type", "typed", `{"provider":42}`, defaultProvider},
+		{"unrecognised value", "odd", `{"provider":"gemini"}`, defaultProvider()},
+		{"wrong case", "caps", `{"provider":"OpenAI"}`, defaultProvider()},
+		{"wrong type", "typed", `{"provider":42}`, defaultProvider()},
 	}
 	for _, c := range cases {
 		write(c.g, c.body)
@@ -5281,14 +5284,14 @@ func TestProviderResolutionFailsClosed(t *testing.T) {
 
 	// A group with no config file at all, and the empty group name the proxy
 	// uses before one is known.
-	if got := groupProvider("absent"); got != defaultProvider {
-		t.Errorf("a group with no config.json resolved to %q, want %q", got, defaultProvider)
+	if got := groupProvider("absent"); got != defaultProvider() {
+		t.Errorf("a group with no config.json resolved to %q, want %q", got, defaultProvider())
 	}
-	if got := groupProvider(""); got != defaultProvider {
-		t.Errorf("the empty group resolved to %q, want %q", got, defaultProvider)
+	if got := groupProvider(""); got != defaultProvider() {
+		t.Errorf("the empty group resolved to %q, want %q", got, defaultProvider())
 	}
-	if defaultProvider != "claudesdk" {
-		t.Errorf("defaultProvider is %q — this test assumes the documented default", defaultProvider)
+	if defaultProvider() != "claudesdk" {
+		t.Errorf("defaultProvider() is %q — this test assumes the documented default", defaultProvider())
 	}
 }
 

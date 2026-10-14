@@ -27,8 +27,8 @@ func TestProviderAllowlist(t *testing.T) {
 	if _, ok := normProvider("gemini"); ok {
 		t.Error("normProvider accepted gemini")
 	}
-	if !validProvider(defaultProvider) {
-		t.Fatal("defaultProvider is not on the allowlist")
+	if !validProvider(defaultProvider()) {
+		t.Fatal("defaultProvider() is not on the allowlist")
 	}
 	if got := providerListText(); got != "claudesdk, venice or openai" {
 		t.Errorf("providerListText = %q", got)

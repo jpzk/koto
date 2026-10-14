@@ -66,9 +66,10 @@ func veniceAuth() (string, error) {
 // of the read that answered "venice" for every failure — absent file,
 // unparseable JSON, unrecognised value — on the grounds, true when it was
 // written, that koto was a Venice-first deployment. It has not been for a long
-// time: defaultProvider is claudesdk, and ensureProviderConfig WRITES that into
-// any group whose config is missing or invalid on every ensure(), so a group
-// whose config cannot be read is by koto's own definition a claudesdk group.
+// time: defaultProvider() is the host default (claudesdk unless the operator set
+// KOTO_DEFAULT_PROVIDER), and ensureProviderConfig WRITES that into any group
+// whose config is missing or invalid on every ensure(), so a group whose config
+// cannot be read is by koto's own definition a default-provider group.
 //
 // The divergence was the defect. Three readers, two answers: this one and
 // cs-subagent said venice, the guest turn path said claudesdk. A claudesdk
@@ -77,7 +78,7 @@ func veniceAuth() (string, error) {
 // third party than the operator selected, with the credential for it injected.
 func groupProvider(group string) string {
 	if group == "" {
-		return defaultProvider
+		return defaultProvider()
 	}
 	return groupProviderName(group)
 }
