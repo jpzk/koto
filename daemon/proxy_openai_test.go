@@ -60,7 +60,7 @@ func openaiProxyEnv(t *testing.T) *fakeOpenAIUpstream {
 		w.Header().Set("x-request-id", "req_test")
 		if strings.HasSuffix(r.URL.Path, "/models") {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-5-codex"}]}`)
+			_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-5.5"}]}`)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -83,7 +83,7 @@ func writeTestChatGPTAuth(t *testing.T) string {
 // guestRequest is what codex inside the VM sends: its placeholder bearer
 // plus headers a hostile guest would try to smuggle.
 func guestRequest(method, target string) *http.Request {
-	r := httptest.NewRequest(method, target, strings.NewReader(`{"model":"gpt-5-codex","input":[]}`))
+	r := httptest.NewRequest(method, target, strings.NewReader(`{"model":"gpt-5.5","input":[]}`))
 	r.Header.Set("Authorization", "Bearer "+openaiGuestPlaceholderKey)
 	r.Header.Set("Cookie", "guest=1")
 	r.Header.Set("X-Api-Key", "guest-key")

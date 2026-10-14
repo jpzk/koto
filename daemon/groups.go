@@ -516,7 +516,14 @@ const defaultVeniceModel = "kimi-k2.5"
 
 // defaultOpenAIModel is what an openai (Codex CLI) group runs when config.json
 // has no `model`; injected as KOTO_DEFAULT_OPENAI_MODEL like the others.
-const defaultOpenAIModel = "gpt-5-codex"
+//
+// gpt-5.5 is the newest model in codex 0.152.1's bundled catalog
+// (`codex debug models --bundled`) that drives the plain unified_exec shell
+// tool. The gpt-5.6-* entries rank higher but are tool_mode=code_mode_only:
+// every tool call runs through a separate V8 host binary
+// (codex-code-mode-host) that the plain codex release tarball does not ship,
+// and without it they fail closed. A group can still pick one explicitly.
+const defaultOpenAIModel = "gpt-5.5"
 
 // ensureProviderConfig writes provider and runtime defaults into a group's
 // config.json when missing or invalid. Idempotent — when the field is already
@@ -931,7 +938,8 @@ func clearCmd(req groupReq) baseResp {
 // place — its existence is what keeps entrypoint.sh's one-time `--continue`
 // migration shim from resurrecting a cleared default session.
 // clearSessionContext drops one session's GUEST-side conversation state — the
-// pinned claude session id, its transcript file, and any venice history — so
+// pinned claude session id, its transcript file, the codex thread pointer
+// (sessions/<name>.codex.id), and any venice history — so
 // the next turn in that session starts cold. It does not touch the host log or
 // the session registry.
 //
@@ -965,7 +973,7 @@ func clearSessionContext(g, sess string) baseResp {
 ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
 case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
 if [ -n "$ID" ]; then rm -f /workspace/.claude/projects/*/"$ID".jsonl || exit 1; fi
-rm -f "$I" ` + vh + `
+rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id ` + vh + `
 
 exit $?`
 	if out, rc, err := fcExec(g, script, 15*time.Second); err != nil {

@@ -360,6 +360,8 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	switch cfg.Provider {
 	case "venice":
 		runVenice(tw, req, cfg, sess, env)
+	case "openai":
+		runCodex(tw, req, cfg, sess, env)
 	default:
 		runClaude(tw, req, cfg, idf, migrateContinue, env)
 	}
