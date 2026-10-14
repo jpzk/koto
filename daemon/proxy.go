@@ -815,9 +815,8 @@ var llmRoutesVenice = []llmRoute{
 	{http.MethodGet, "/api/v1/models/", true},
 }
 
-// llmRoutesOpenAI is empty until the openai leg is wired (serveOpenAI):
-// every request is refused at the gate.
-var llmRoutesOpenAI = []llmRoute{}
+// llmRoutesOpenAI: see proxy_openai.go for the hosts/paths and why.
+var llmRoutesOpenAI = llmRoutesOpenAIList
 
 // llmRoutesFor returns the allowlist governing a provider's leg. An
 // unknown provider gets NO routes (fail closed) rather than the Anthropic
@@ -1184,6 +1183,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(spCtx)
 	if provider == providerVenice {
 		h.serveVenice(w, r)
+		return
+	}
+	if provider == providerOpenAI {
+		h.serveOpenAI(w, r)
 		return
 	}
 	if provider != providerClaude {

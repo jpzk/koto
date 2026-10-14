@@ -1,0 +1,200 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"net/http"
+	"path"
+	"strings"
+	"time"
+)
+
+// The openai leg. The guest runs Codex CLI with a custom model provider whose
+// base_url is the koto proxy at /v1 and whose bearer is a placeholder; the
+// REAL credential (ChatGPT OAuth access token or API key, openai_auth.go)
+// lives only on the host and is injected here.
+//
+// Upstream base per credential kind, as Codex 0.152.1 itself picks it
+// (codex-rs/model-provider-info/src/lib.rs, to_api_provider):
+//
+//	chatgpt  -> https://chatgpt.com/backend-api/codex  (CHATGPT_CODEX_BASE_URL)
+//	api-key  -> https://api.openai.com/v1
+//
+// Codex appends a relative path to that base. The guest-facing allowlist is
+// those paths under /v1, and nothing else:
+//
+//	POST /v1/responses          inference (codex-api endpoint/responses.rs "/responses")
+//	POST /v1/responses/compact  history compaction (endpoint/compact.rs "responses/compact")
+//	GET  /v1/models             model catalog, ?client_version= (endpoint/models.rs "models")
+//
+// Deliberately NOT relayed: the Responses websocket transport (the guest
+// config sets supports_websockets=false; an upgrade is a GET on /responses
+// and is refused by the method check), memories/trace_summarize,
+// alpha/search, realtime, and every other chatgpt.com/backend-api route
+// (tasks, wham usage, connectors). Those read or spend account state outside
+// a turn.
+var (
+	openaiChatGPTUpstream = "https://chatgpt.com/backend-api/codex"
+	openaiAPIUpstream     = "https://api.openai.com/v1"
+)
+
+var llmRoutesOpenAIList = []llmRoute{
+	{http.MethodPost, "/v1/responses", false},
+	{http.MethodPost, "/v1/responses/compact", false},
+	{http.MethodGet, "/v1/models", false},
+}
+
+// openaiGuestStrip names every inbound header the guest must not choose.
+// Credentials (authorization, cookie, x-api-key) because the host owns them;
+// chatgpt-account-id and OpenAI-Organization/-Project because they select
+// WHICH account or project the host credential bills, and the guest picking
+// that is a confused deputy. anthropic-* is noise from the other leg.
+var openaiGuestStrip = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"x-api-key":           true,
+	"chatgpt-account-id":  true,
+	"openai-organization": true,
+	"openai-project":      true,
+}
+
+// openaiRespStrip: Set-Cookie from chatgpt.com (Cloudflare / session
+// cookies) is account material too and stays on the host.
+var openaiRespStrip = map[string]bool{
+	"content-encoding":  true,
+	"transfer-encoding": true,
+	"content-length":    true,
+	"connection":        true,
+	"set-cookie":        true,
+}
+
+// openaiUpstreamURL maps an allowlisted guest path onto the base for the
+// credential kind. The path is the CLEANED one, the same form the gate
+// judged, so what is relayed is what was allowed.
+func openaiUpstreamURL(kind, reqPath, rawQuery string) string {
+	clean := path.Clean(reqPath)
+	rel := strings.TrimPrefix(clean, "/v1")
+	base := openaiAPIUpstream
+	if kind == "chatgpt" {
+		base = openaiChatGPTUpstream
+	}
+	u := strings.TrimRight(base, "/") + rel
+	if rawQuery != "" {
+		u += "?" + rawQuery
+	}
+	return u
+}
+
+func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
+	t0 := time.Now()
+	body, releaseBody, bodyOK := readRequestBody(w, r, h.group)
+	if !bodyOK {
+		return
+	}
+	defer releaseBody()
+	cred, err := openaiCredential(r.Context())
+	if err != nil {
+		// Host path and refresh detail go to the operator's log; the guest
+		// learns only that there is no usable credential (audit L83).
+		emitLogfG("llm", h.group, "error", "[%s] openai request refused: %v", h.group, err)
+		http.Error(w, "the openai credential is not available on this host; ask the operator", http.StatusServiceUnavailable)
+		return
+	}
+	target := openaiUpstreamURL(cred.Kind, r.URL.Path, r.URL.RawQuery)
+	// log the real upstream (base + relative path), not base + guest path.
+	llmFlowLog(h.group, r.Method, openaiUpstreamURL(cred.Kind, r.URL.Path, ""), "")
+
+	mkReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		for k, vs := range r.Header {
+			lk := strings.ToLower(k)
+			if hopByHop[lk] || openaiGuestStrip[lk] || strings.HasPrefix(lk, "anthropic-") {
+				continue
+			}
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		req.Header.Set("Authorization", "Bearer "+cred.Token)
+		if cred.Kind == "chatgpt" && cred.AccountID != "" {
+			req.Header.Set("chatgpt-account-id", cred.AccountID)
+		}
+		req.Header.Set("accept-encoding", "identity")
+		return req, nil
+	}
+
+	var probe *llmProbe
+	if r.URL.Path == "/v1/responses" {
+		probe = activityLLMBegin(h.group)
+		defer probe.end()
+	}
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := doWithRetry(r.Context(), client, h.group, mkReq)
+	if err != nil {
+		http.Error(w, scrubSecret(err.Error(), cred.Token), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		if openaiRespStrip[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	flusher, _ := w.(http.Flusher)
+	out := newProxyStallWriter(w)
+	defer out.clear()
+
+	usage := map[string]any{}
+	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if _, err := out.Write(append(line, '\n')); err != nil {
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			s := bytes.TrimSpace(line)
+			if !bytes.HasPrefix(s, []byte("data:")) {
+				continue
+			}
+			probe.firstByte()
+			openaiScanUsage(s[5:], usage)
+		}
+		if err := scanner.Err(); err != nil {
+			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
+		}
+	} else {
+		data := proxyReadResponse(h.group, resp.Body)
+		probe.firstByte()
+		_, _ = out.Write(data)
+		openaiScanUsage(data, usage)
+	}
+	dur := time.Since(t0)
+	reqID := resp.Header.Get("x-request-id")
+	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
+	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
+}
+
+// openaiScanUsage is the usage hook; normalization lands with item 5.
+func openaiScanUsage(_ []byte, _ map[string]any) {}
+
+// scrubSecret removes a secret from text bound for the guest. Go's url.Error
+// carries the URL, never headers, so this is belt and braces.
+func scrubSecret(s, secret string) string {
+	if secret == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "[redacted]")
+}
