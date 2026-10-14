@@ -30,26 +30,68 @@ type groupOpt struct {
 	// (provider, size); the rest go through config_set, which carries the
 	// daemon's posture ACL (network/root are admin-only there).
 	spawn bool
+	// text marks a free-form knob (model, ports): no allowlist, the dialog
+	// renders its own input for it. Such a row exists for the flags below and
+	// for field order, never as a select.
+	text bool
+	// restart is true when a config_set of this key only takes effect after
+	// the group's VM reboots (/restart). See the restart table above
+	// groupOptTable for the daemon code each value is read from.
+	restart bool
+	// note is a short caveat on when a change applies, for keys where neither
+	// "next turn" nor "on restart" is the whole story.
+	note string
 }
 
 // effortDefault is the effort value meaning "leave it unset" — the daemon
 // then runs the provider's own default.
 const effortDefault = "default"
 
+// When a config_set applies (the restart flag), read off the daemon:
+//
+//	provider  next request/turn. proxy.go groupProvider re-reads config.json
+//	          on every proxied request; send.go hands config.json to the
+//	          guest with every turn (fcSendMsg cfgB) and fcguest/turn.go
+//	          readGroupConfig picks provider/model/effort from it per turn.
+//	model     next turn, same path (fcguest/turn.go readGroupConfig).
+//	effort    next turn, same path.
+//	network   restart. daemon/config.go applyConfig: frame filter + guest env
+//	          apply on the next spawn; only a LOWERING to none is enforced
+//	          early, by the proxy's L7 gate (audit H1). Raising waits.
+//	size      restart. fc.go fcSizePresets → vCPU/RAM in the VM config at
+//	          boot (applyConfig "Applies on the next spawn").
+//	root      restart. fc-agent applies it at boot (groupRoot → init "root").
+//	kvm       restart. fcVMConfig masks VMX/SVM at boot (groupKVM).
+//	autostart NO restart: read once at daemon start (groups.go groupAutostart,
+//	          autostartGroups); a /restart of the group does nothing for it.
+//	ports     restart. fc.go pushes the published-port list in the init
+//	          request after boot and opens one host listener per port then.
+//
+// TestGroupOptRestartFlags pins this table.
+//
 // groupOptTable is the single source of truth. Order is the dialog's field
-// order.
+// order (text rows included).
 var groupOptTable = []groupOpt{
 	{key: "provider", values: []string{"claudesdk", "venice", "openai"}, spawn: true},
+	{key: "model", text: true},
 	{key: "effort", values: []string{effortDefault, "low", "medium", "high", "xhigh", "max"}},
-	{key: "network", values: []string{"none", "wan", "lan", "full"}, risky: map[string]string{
+	{key: "network", values: []string{"none", "wan", "lan", "full"}, restart: true, risky: map[string]string{
 		"wan":  "public internet egress",
 		"lan":  "host LAN reachable",
 		"full": "internet + host LAN reachable",
 	}},
-	{key: "size", values: []string{"small", "medium", "large", "xlarge"}, spawn: true},
-	{key: "root", values: []string{"no", "yes"}, risky: map[string]string{"yes": "passwordless sudo in guest"}},
-	{key: "autostart", values: []string{"no", "yes"}},
-	{key: "kvm", values: []string{"no", "yes"}, risky: map[string]string{"yes": "nested virtualization exposed"}},
+	{key: "size", values: []string{"small", "medium", "large", "xlarge"}, spawn: true, restart: true},
+	{key: "root", values: []string{"no", "yes"}, restart: true, risky: map[string]string{"yes": "passwordless sudo in guest"}},
+	{key: "autostart", values: []string{"no", "yes"}, note: "applies at next daemon start"},
+	{key: "kvm", values: []string{"no", "yes"}, restart: true, risky: map[string]string{"yes": "nested virtualization exposed"}},
+	{key: "ports", text: true, restart: true},
+}
+
+// groupOptNeedsRestart reports whether changing key needs a VM restart to
+// take effect (false for unknown keys).
+func groupOptNeedsRestart(key string) bool {
+	o, _ := groupOptByKey(key)
+	return o.restart
 }
 
 // groupOptByKey returns the table row for key (zero value, false if absent).

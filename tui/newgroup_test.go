@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // fakeKoto records every Spawn/Config/Restart as "op k=v k=v" (set fields
@@ -36,6 +37,10 @@ type fakeKoto struct {
 	// so the spawn/config/restart sequences stay exact.
 	models      map[string]*pb.ModelsResp
 	modelsCalls map[string]int
+	// cfg is the effective config a read (a Config call with no key set)
+	// returns; failRead makes that read fail. Reads are recorded as "read".
+	cfg      map[string]any
+	failRead bool
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {
@@ -93,6 +98,17 @@ func (f *fakeKoto) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, e
 	opt("root", r.Root)
 	opt("autostart", r.Autostart)
 	opt("kvm", r.Kvm)
+	if len(kv) == 1 {
+		f.rec("read", kv)
+		if f.failRead {
+			return &pb.ConfigResp{Ok: false, Error: "config: denied"}, nil
+		}
+		s, err := structpb.NewStruct(f.cfg)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.ConfigResp{Ok: true, Config: s}, nil
+	}
 	f.rec("config", kv)
 	if f.failOp == "config" {
 		return &pb.ConfigResp{Ok: false, Error: "network: admin only"}, nil
@@ -102,6 +118,9 @@ func (f *fakeKoto) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, e
 
 func (f *fakeKoto) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, error) {
 	f.rec("restart", map[string]string{"group": r.Group})
+	if f.failOp == "restart" {
+		return &pb.SpawnResp{Ok: false, Error: "boot timeout"}, nil
+	}
 	return &pb.SpawnResp{Ok: true}, nil
 }
 
@@ -260,7 +279,9 @@ func TestNewGroupFieldsFromTable(t *testing.T) {
 	}
 	var tbl []string
 	for _, o := range groupOptTable {
-		tbl = append(tbl, o.key)
+		if !o.text {
+			tbl = append(tbl, o.key)
+		}
 	}
 	if !reflect.DeepEqual(sel, tbl) {
 		t.Fatalf("dialog selects %v != table rows %v", sel, tbl)
@@ -279,6 +300,9 @@ func TestNewGroupCyclesAllowlist(t *testing.T) {
 	m := focusModel(t)
 	m = press(t, m, tea.KeyCtrlN)
 	for _, o := range groupOptTable {
+		if o.text {
+			continue
+		}
 		m = gotoField(t, m, o.key)
 		if got := m.newGroup.value(o.key); got != groupOptDefault(o.key) {
 			t.Errorf("%s default = %q, want %q", o.key, got, groupOptDefault(o.key))

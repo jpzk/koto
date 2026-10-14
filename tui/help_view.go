@@ -55,7 +55,8 @@ func helpSections() []helpSection {
 			{"ctrl+h", "this cheatsheet"},
 			{"ctrl+n", "new group dialog - name, provider, network, size, ..."},
 			{"ctrl+k", "fleet view - space/cpu/mem/tok-s per group"},
-			{"ctrl+e", "schedules view - manage daemon cron schedules"},
+			{"ctrl+e", "edit the current group (provider, model, network, ...)"},
+			{"ctrl+y", "schedules view - manage daemon cron schedules"},
 			{"ctrl+l", "daemon log view"},
 			{"ctrl+]", "shared terminal (tmux) for the active session"},
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
@@ -92,7 +93,7 @@ func helpSections() []helpSection {
 			{"pgup/pgdn", "scroll the table"},
 			{"esc / ctrl+k", "close"},
 		}},
-		{"SCHEDULES VIEW (ctrl+e)", []helpEntry{
+		{"SCHEDULES VIEW (ctrl+y)", []helpEntry{
 			{"up/down", "move the selection"},
 			{"t / space", "enable/disable the schedule"},
 			{"r", "fire it now, out of band"},
@@ -100,7 +101,7 @@ func helpSections() []helpSection {
 			{"d", "delete - then y/d confirms, any other key cancels"},
 			{"/", "fuzzy search (msg/group/id) - enter keeps, esc clears"},
 			{"g", "refresh the list"},
-			{"esc / ctrl+e", "close"},
+			{"esc / ctrl+y", "close"},
 		}},
 		{"SLASH COMMANDS", []helpEntry{
 			{"/new <g> [provider] [model] [size=..]", "spawn a group (microVM)"},

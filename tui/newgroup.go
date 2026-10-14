@@ -34,19 +34,19 @@ const (
 	ngCreate = "create"
 )
 
-// newGroupFields is the dialog's field order: name, then the table's selects
-// in table order with the model select (and its custom-id input) right after
-// provider, then ports and the Create button. Derived from groupOptTable so a
-// new knob there shows up here without a second list.
+// newGroupFields is the dialog's field order: name, then the table's rows in
+// table order (the model text row brings its custom-id input right after it;
+// ports is the last row), then the Create button. Derived from groupOptTable
+// so a new knob there shows up here without a second list.
 func newGroupFields() []string {
 	f := []string{ngName}
 	for _, o := range groupOptTable {
 		f = append(f, o.key)
-		if o.key == "provider" {
-			f = append(f, ngModel, ngCustom)
+		if o.key == ngModel {
+			f = append(f, ngCustom)
 		}
 	}
-	return append(f, ngPorts, ngCreate)
+	return append(f, ngCreate)
 }
 
 type newGroupForm struct {
@@ -65,6 +65,8 @@ type newGroupForm struct {
 	// step failed: a retry with the same name skips spawn (it would now fail
 	// "exists") and redoes only config/restart.
 	spawned string
+	// Edit mode (editgroup.go): the same form editing an existing group.
+	edit editState
 }
 
 func newGroupInput(limit int, placeholder string) textinput.Model {
@@ -128,6 +130,7 @@ func (m *Model) handleModelsLoaded(msg modelsLoadedMsg) {
 		return
 	}
 	m.newGroup.mp.loaded(msg)
+	m.newGroup.syncEditModel()
 	if m.newGroup.field() == ngCustom && !m.newGroup.mp.isCustom() {
 		m.newGroup.move(-1)
 	}
@@ -138,6 +141,9 @@ func (f *newGroupForm) field() string { return f.fields[f.cur] }
 // hidden reports whether field key is currently skipped: the custom-id input
 // only exists while the model select is on "custom…".
 func (f *newGroupForm) hidden(key string) bool {
+	if key == ngName && f.edit.on {
+		return true // read-only in edit mode: shown, never focused
+	}
 	return key == ngCustom && !f.mp.isCustom()
 }
 
@@ -204,8 +210,8 @@ func (f *newGroupForm) cycle(d int) {
 }
 
 func isSelectField(key string) bool {
-	_, ok := groupOptByKey(key)
-	return ok
+	o, ok := groupOptByKey(key)
+	return ok && !o.text
 }
 
 // newGroupPlan is what a submit sends: the spawn request (nil when the group
@@ -218,9 +224,6 @@ type newGroupPlan struct {
 	config  map[string]any
 	restart bool
 }
-
-// restartKeys are the knobs the daemon applies only on the next boot.
-var restartKeys = map[string]bool{"network": true, "root": true, "kvm": true, "ports": true}
 
 // plan validates the form against the known groups and builds the requests.
 // On a validation failure it returns the offending field key and message.
@@ -254,7 +257,7 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	}
 	cfg := map[string]any{}
 	for _, o := range groupOptTable {
-		if o.spawn {
+		if o.spawn || o.text {
 			continue
 		}
 		if v := f.value(o.key); v != o.values[0] {
@@ -265,7 +268,7 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 		cfg["ports"] = ports
 	}
 	for k := range cfg {
-		if restartKeys[k] {
+		if groupOptNeedsRestart(k) {
 			p.restart = true
 		}
 	}
@@ -370,7 +373,10 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	f := &m.newGroup
 	key := f.field()
-	if key == ngModel {
+	// Edit mode: a field whose current value could not be read is shown as
+	// "unknown" and only navigable — never changed, so never sent.
+	locked := f.edit.locked(key)
+	if key == ngModel && !locked {
 		if done, cmd := m.handleModelKey(msg); done {
 			return m, cmd
 		}
@@ -387,24 +393,37 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if key == ngCreate {
+			if f.edit.on {
+				return m, m.submitEditGroup()
+			}
 			return m, m.submitNewGroup()
 		}
 		f.move(1)
 		return m, nil
 	case "left", "right", " ":
 		if isSelectField(key) {
+			if locked {
+				return m, nil
+			}
 			d := 1
 			if s == "left" {
 				d = -1
 			}
 			f.cycle(d)
 			if key == "provider" {
+				f.edit.modelTouched = true // the list (and so the model) changes
 				return m, m.reloadModels()
 			}
 			return m, nil
 		}
 	}
+	if locked {
+		return m, nil
+	}
 	if in := f.input(key); in != nil {
+		if key == ngCustom {
+			f.edit.modelTouched = true
+		}
 		var cmd tea.Cmd
 		*in, cmd = in.Update(msg)
 		if f.errAt == key {
@@ -432,6 +451,7 @@ func (m *Model) handleModelKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				d = -1
 			}
 			p.setSel(p.sel + d)
+			f.edit.modelTouched = true
 			f.clearErr(ngCustom)
 			return true, nil
 		case "enter", " ":
@@ -458,6 +478,7 @@ func (m *Model) handleModelKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		p.cur = n - 1
 	case "enter", " ":
 		p.setSel(p.cur)
+		f.edit.modelTouched = true
 		p.open = false
 		f.clearErr(ngCustom)
 		if p.isCustom() {
@@ -505,7 +526,20 @@ func (m Model) renderNewGroup() string {
 			lines = append(lines, red.Width(inner).Render(gl("✗ ", "x ")+f.err))
 		}
 	}
+	var ep editPlan
+	changed := map[string]bool{}
+	if f.edit.on {
+		ep, _, _ = f.editPlan()
+		for _, k := range ep.changed {
+			changed[k] = true
+		}
+	}
 	for i, key := range f.fields {
+		if key == ngName && f.edit.on {
+			// Read-only: the group being edited, never a field.
+			lines = append(lines, "  "+gray.Render(fmt.Sprintf("%-*s", labelW, key))+"  "+truncCells(f.edit.group, valW-2))
+			continue
+		}
 		if f.hidden(key) {
 			continue
 		}
@@ -526,6 +560,13 @@ func (m Model) renderNewGroup() string {
 			if focused {
 				st = amber.Bold(true)
 			}
+			if f.edit.on {
+				var enabled bool
+				btn, enabled = f.editButton()
+				if !enabled {
+					st = gray.Faint(true)
+				}
+			}
 			lines = append(lines, "", mark+st.Render(btn))
 			if focused {
 				curLine = len(lines) - 1
@@ -537,10 +578,27 @@ func (m Model) renderNewGroup() string {
 		if key == ngCustom {
 			label = fmt.Sprintf("%-*s", labelW, "  id")
 		}
-		if focused {
+		// Edit mode: a changed field gets a "*" and stays lit when unfocused.
+		isChanged := changed[key] || (key == ngCustom && changed[ngModel])
+		if changed[key] {
+			label = fmt.Sprintf("%-*s", labelW, key+"*")
+		}
+		switch {
+		case focused:
 			label = amber.Render(label)
-		} else {
+		case isChanged:
+			label = amber.Bold(true).Render(label)
+		default:
 			label = gray.Render(label)
+		}
+		if f.edit.locked(key) {
+			txt := "unknown"
+			if f.edit.loading {
+				txt = gl("loading…", "loading...")
+			}
+			lines = append(lines, mark+label+"  "+gray.Render(txt))
+			errLine(key)
+			continue
 		}
 		var val string
 		if key == ngModel {
@@ -594,8 +652,9 @@ func (m Model) renderNewGroup() string {
 
 	// Summary: what Create will do, risky picks highlighted with a note.
 	lines = append(lines, "")
-	p, badKey, e := f.plan(m.groups)
-	if e == "" {
+	if f.edit.on {
+		lines = append(lines, f.editSummary(inner)...)
+	} else if p, badKey, e := f.plan(m.groups); e == "" {
 		var parts []string
 		if p.spawn != nil {
 			if mv, ok := p.spawn["model"]; ok {
@@ -621,12 +680,19 @@ func (m Model) renderNewGroup() string {
 		lines = append(lines, gray.Inherit(wrap).Render("fix "+badKey+" to create"))
 	}
 	for _, o := range groupOptTable {
+		if f.edit.locked(o.key) {
+			continue
+		}
 		if note, ok := o.risky[f.value(o.key)]; ok {
 			lines = append(lines, red.Inherit(wrap).Render(fmt.Sprintf("! %s=%s: %s", o.key, f.value(o.key), note)))
 		}
 	}
 	keys := gl("tab/↑↓ move · ←→ change · enter create · esc cancel",
 		"tab/up/dn move . lt/rt change . enter create . esc cancel")
+	if f.edit.on {
+		keys = gl("tab/↑↓ move · ←→ change · enter save · esc cancel",
+			"tab/up/dn move . lt/rt change . enter save . esc cancel")
+	}
 	if f.field() == ngModel {
 		keys = gl("←→ change · enter list · tab next · esc cancel",
 			"lt/rt change . enter list . tab next . esc cancel")
@@ -650,6 +716,9 @@ func (m Model) renderNewGroup() string {
 		bodyLines = bodyLines[start : start+avail]
 	}
 	head := amber.Bold(true).Render("new group")
+	if f.edit.on {
+		head = amber.Bold(true).Render(truncCells("edit "+f.edit.group, inner))
+	}
 	box := lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).
 		BorderForeground(cAmber).

@@ -51,7 +51,7 @@ func schedFixtures100() []schedItem {
 func schedModel100(t *testing.T) Model {
 	t.Helper()
 	m := focusModel(t)
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	nm, _ := m.Update(schedListMsg{items: schedFixtures100()})
 	m = nm.(Model)
 	m.width = 80

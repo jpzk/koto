@@ -1,6 +1,6 @@
 package main
 
-// sched_view_test.go — the schedules view (ctrl+e): toggling it open/closed,
+// sched_view_test.go — the schedules view (ctrl+y): toggling it open/closed,
 // rendering the schedule table (wide and 40-col degraded), the toggle /
 // run-now / delete-confirm / edit key flows against the real sched_cmds
 // commands (executed against an unreachable socket, so the returned message
@@ -30,41 +30,41 @@ func schedFixtures() []schedItem {
 	}
 }
 
-// schedModel: chat model with the schedules view opened (ctrl+e) and the
+// schedModel: chat model with the schedules view opened (ctrl+y) and the
 // fixture list already consumed, as if sched_list had answered.
 func schedModel(t *testing.T) Model {
 	t.Helper()
 	m := focusModel(t)
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	if m.focus != focusSched {
-		t.Fatalf("focus = %v after ctrl+e, want focusSched", m.focus)
+		t.Fatalf("focus = %v after ctrl+y, want focusSched", m.focus)
 	}
 	nm, _ := m.Update(schedListMsg{items: schedFixtures()})
 	return nm.(Model)
 }
 
-// TestCtrlETogglesSchedView: ctrl+e opens the schedules view (dispatching a
-// sched_list fetch), a second ctrl+e / esc closes it back to the pre-open
+// TestCtrlYTogglesSchedView: ctrl+y opens the schedules view (dispatching a
+// sched_list fetch), a second ctrl+y / esc closes it back to the pre-open
 // focus — including tree mode.
-func TestCtrlETogglesSchedView(t *testing.T) {
+func TestCtrlYTogglesSchedView(t *testing.T) {
 	m := focusModel(t)
-	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 	m = nm.(Model)
 	if m.focus != focusSched {
-		t.Fatalf("focus = %v after ctrl+e, want focusSched", m.focus)
+		t.Fatalf("focus = %v after ctrl+y, want focusSched", m.focus)
 	}
 	if cmd == nil {
 		t.Fatalf("opening the schedules view must dispatch a sched_list fetch")
 	}
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	if m.focus != focusInput {
-		t.Fatalf("focus = %v after second ctrl+e, want focusInput", m.focus)
+		t.Fatalf("focus = %v after second ctrl+y, want focusInput", m.focus)
 	}
 	// From tree mode, esc lands back in tree mode.
 	m = press(t, m, tea.KeyTab)
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	if m.focus != focusSched {
-		t.Fatalf("focus = %v after ctrl+e from tree, want focusSched", m.focus)
+		t.Fatalf("focus = %v after ctrl+y from tree, want focusSched", m.focus)
 	}
 	m = press(t, m, tea.KeyEsc)
 	if m.focus != focusTree {
@@ -102,7 +102,7 @@ func TestSchedViewRendersRows(t *testing.T) {
 // mutation keys are no-ops (nil cmd) instead of RPCs against nothing.
 func TestSchedViewEmptyState(t *testing.T) {
 	m := focusModel(t)
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	nm, _ := m.Update(schedListMsg{items: nil})
 	m = nm.(Model)
 	out := stripANSI(m.View())
@@ -122,7 +122,7 @@ func TestSchedViewEmptyState(t *testing.T) {
 // away) renders in the summary line — the view stays up, nothing crashes.
 func TestSchedViewRendersListError(t *testing.T) {
 	m := focusModel(t)
-	m = press(t, m, tea.KeyCtrlE)
+	m = press(t, m, tea.KeyCtrlY)
 	nm, _ := m.Update(schedListMsg{err: errTest})
 	m = nm.(Model)
 	out := stripANSI(m.View())
