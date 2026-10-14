@@ -257,6 +257,9 @@ func (m Model) view() string {
 	if m.width < minW || m.height < 7 {
 		return "terminal too small"
 	}
+	if m.newGroup.open {
+		return m.renderNewGroup()
+	}
 	if m.helpOpen {
 		// Cheatsheet modal (ctrl+h): paints the whole frame, whatever view is
 		// underneath — its key block in handleKey owns input the same way, so
