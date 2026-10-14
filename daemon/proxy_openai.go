@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"math"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -182,13 +185,105 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 	dur := time.Since(t0)
 	reqID := resp.Header.Get("x-request-id")
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logMetric(h.group, r.URL.Path, resp.StatusCode, openaiBudgetHeaders(resp.Header), usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
 
-// openaiScanUsage is the usage hook; normalization lands with item 5.
-func openaiScanUsage(_ []byte, _ map[string]any) {}
+// openaiScanUsage pulls the usage block out of one Responses API payload (an
+// SSE data line or a whole JSON body) and normalizes it into usage.
+//
+// Shapes accepted (codex-api endpoint/responses.rs + the Responses API):
+//
+//	SSE:  {"type":"response.completed","response":{...,"usage":{...}}}
+//	      (also response.incomplete / response.failed, which carry usage)
+//	JSON: {"object":"response",...,"usage":{...}}   (non-stream, compact)
+//
+// Anything else (deltas, keepalives, garbage) leaves usage untouched.
+func openaiScanUsage(data []byte, usage map[string]any) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return
+	}
+	var ev map[string]any
+	if json.Unmarshal(data, &ev) != nil {
+		return
+	}
+	u, _ := ev["usage"].(map[string]any)
+	if u == nil {
+		switch ev["type"] {
+		case "response.completed", "response.incomplete", "response.failed":
+			if r, ok := ev["response"].(map[string]any); ok {
+				u, _ = r["usage"].(map[string]any)
+			}
+		}
+	}
+	if u != nil {
+		normalizeOpenAIUsage(u, usage)
+	}
+}
+
+// normalizeOpenAIUsage maps Responses API usage onto koto's Anthropic keys.
+// input_tokens is the TOTAL prompt and input_tokens_details.cached_tokens a
+// subset of it; Anthropic's input_tokens is the fresh part with cache read as
+// a disjoint bucket — so cached is subtracted out (same reconciliation as
+// normalizeVeniceUsage). OpenAI has no cache-write bucket: it is 0.
+// output_tokens already includes reasoning tokens; it is passed through.
+func normalizeOpenAIUsage(u, usage map[string]any) {
+	in, out, cached := 0, 0, 0
+	if v, ok := anyAsInt(u["input_tokens"]); ok && v > 0 {
+		in = int(v)
+	}
+	if v, ok := anyAsInt(u["output_tokens"]); ok && v > 0 {
+		out = int(v)
+	}
+	if d, ok := u["input_tokens_details"].(map[string]any); ok {
+		if v, ok := anyAsInt(d["cached_tokens"]); ok && v > 0 {
+			cached = int(v)
+		}
+	}
+	if cached > in {
+		cached = in
+	}
+	usage["input_tokens"] = in - cached
+	usage["output_tokens"] = out
+	usage["cache_read_input_tokens"] = cached
+	usage["cache_creation_input_tokens"] = 0
+}
+
+// openaiBudgetWindows maps a Codex rate-limit window length (minutes) onto
+// koto's budget window allowlist. Any other length is dropped, not guessed.
+var openaiBudgetWindows = map[string]string{"300": "5h", "10080": "7d"}
+
+// openaiBudgetHeaders translates the ChatGPT-plan rate-limit headers Codex
+// itself reads (codex-api/src/rate_limits.rs, legacy "codex" family:
+// x-codex-{primary,secondary}-{used-percent,window-minutes,reset-at}) into
+// the anthropic-ratelimit-unified-* keys logMetric / otelBudgetObserve
+// understand. It returns a COPY of h with the synthesized keys added; h is
+// untouched. Values pass through the same validators downstream, so garbage
+// is still dropped there. used-percent is 0..100, utilization is 0..1.
+func openaiBudgetHeaders(h http.Header) http.Header {
+	out := h.Clone()
+	if out == nil {
+		out = http.Header{}
+	}
+	for _, slot := range []string{"primary", "secondary"} {
+		p := "x-codex-" + slot + "-"
+		w, ok := openaiBudgetWindows[strings.TrimSpace(h.Get(p+"window-minutes"))]
+		if !ok {
+			continue
+		}
+		if pct := strings.TrimSpace(h.Get(p + "used-percent")); pct != "" {
+			if f, err := strconv.ParseFloat(pct, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 {
+				out.Set(otelBudgetPrefix+w+"-utilization", strconv.FormatFloat(f/100, 'f', -1, 64))
+			}
+		}
+		if rs := strings.TrimSpace(h.Get(p + "reset-at")); rs != "" {
+			out.Set(otelBudgetPrefix+w+"-reset", rs)
+		}
+	}
+	return out
+}
 
 // scrubSecret removes a secret from text bound for the guest. Go's url.Error
 // carries the URL, never headers, so this is belt and braces.

@@ -4,9 +4,11 @@ package main
 // observable gauges.
 //
 // Source: the anthropic-ratelimit-unified-* response headers logMetric
-// already collects (today only Anthropic/claudesdk sends them; Venice sends
-// none). logMetric hands them to otelBudgetObserve, which keeps the LATEST
-// snapshot per provider. The gauge callback reads that snapshot.
+// already collects (Anthropic/claudesdk sends them natively; Venice sends
+// none; the openai leg translates the x-codex-* plan headers into this
+// family in openaiBudgetHeaders, proxy_openai.go). logMetric hands them
+// to otelBudgetObserve, which keeps the LATEST snapshot per provider.
+// The gauge callback reads that snapshot.
 //
 // Rules:
 //   - A response WITHOUT budget headers changes nothing: the last snapshot
@@ -54,7 +56,7 @@ var otelBudgetStatuses = map[string]bool{"allowed": true, "allowed_warning": tru
 
 // otelBudgetProviders bounds the `provider` attribute (groupProvider
 // already only answers these; this is the belt to that brace).
-var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true}
+var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true, providerOpenAI: true}
 
 type otelBudgetWin struct {
 	util     float64
