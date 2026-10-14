@@ -507,6 +507,7 @@ func logMetricKey(group string, key budgetKey, model string, path string, status
 		"request_id": reqID,
 		"ratelimit":  rl,
 		"usage":      usage,
+		"budget_key": key.String(),
 	}
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
