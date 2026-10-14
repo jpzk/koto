@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 )
 
@@ -184,6 +185,12 @@ type logEntry struct {
 	// one formats once at arrival, which is the right trade for a 2000-line
 	// ring on a live stream but leaves nothing to repaint from.
 	ev LogEvent
+	// wrapW/wrapped cache wrapLogLine(rendered, wrapW): refreshLogViewport runs
+	// on every arriving frame over the whole 2000-line ring, so each entry is
+	// wrapped once per pane width, not once per frame. wrapW == 0 means stale
+	// (restyleLogEntries clears it when the rendered line changes).
+	wrapW   int
+	wrapped []string
 }
 
 // restyleLogEntries re-renders the whole buffered ring after a palette change.
@@ -194,6 +201,7 @@ func (m *Model) restyleLogEntries() {
 	applyLogStyles()
 	for i := range m.logEntries {
 		m.logEntries[i].rendered = formatLogLine(m.logEntries[i].ev)
+		m.logEntries[i].wrapW = 0
 	}
 }
 
@@ -226,28 +234,105 @@ func (m *Model) appendLogEvent(ev LogEvent) {
 	m.refreshLogViewport()
 }
 
-// refreshLogViewport rewraps the buffered lines to the current pane width
-// and pushes them into the viewport. Wrapping by hand (lipgloss.Width
-// would be heavier) — daemon log lines are short, so a naive char-cell
-// wrap based on rune count is fine.
+// logWrapIndent prefixes every continuation row of a wrapped log entry, so
+// one long entry still reads as one entry and not as several short ones.
+const logWrapIndent = "  "
+
+// wrapLogLine wraps one rendered (ANSI-styled) log line to w terminal
+// columns and returns its rows: word-wrap at spaces, hard-break any word
+// longer than the row, continuation rows indented by logWrapIndent. Width
+// is DISPLAY width via x/ansi: escape sequences cost nothing and are never
+// split, wide runes (CJK, emoji) count 2 and are never split either.
+//
+// It wraps one row at a time rather than handing the whole line to
+// ansi.Wrap, for two reasons. Continuation rows are narrower (the indent),
+// so the first row and the rest need different limits. And ansi.Wrap does
+// not carry SGR state across the newlines it inserts — each row here is
+// cut out of the original with ansi.TruncateLeft, which keeps every escape
+// sequence of the skipped prefix, so a style open at the break re-opens on
+// the next row, and a row that ends inside a style gets a reset so the
+// colour cannot bleed into the pane padding / scrollbar.
+func wrapLogLine(s string, w int) []string {
+	if w <= 0 || ansi.StringWidth(s) <= w {
+		return []string{s}
+	}
+	indent := logWrapIndent
+	if w < 2*len(logWrapIndent)+2 {
+		indent = "" // too narrow for an indent to leave room for text
+	}
+	var out []string
+	rest, prefix, limit := s, "", w
+	for {
+		if ansi.StringWidth(rest) <= limit {
+			out = append(out, prefix+rest)
+			return out
+		}
+		row, _, _ := strings.Cut(ansi.Wrap(rest, limit, ""), "\n")
+		cw := ansi.StringWidth(row)
+		if cw == 0 {
+			// Nothing fits (a wide rune on a 1-col limit): emit one grapheme
+			// anyway rather than loop forever.
+			row = ansi.Truncate(rest, 2, "")
+			cw = ansi.StringWidth(row)
+			if cw == 0 {
+				out = append(out, prefix+rest)
+				return out
+			}
+		}
+		if strings.Contains(row, "\x1b") {
+			row += ansi.ResetStyle
+		}
+		out = append(out, prefix+row)
+		rest = ansi.TruncateLeft(rest, cw, "")
+		// The break swallowed the space it broke at (ansi.Wrap drops it);
+		// drop it here too so the next row does not start with a gap.
+		for strings.HasPrefix(ansi.Strip(rest), " ") {
+			rest = ansi.TruncateLeft(rest, 1, "")
+		}
+		if ansi.StringWidth(rest) == 0 {
+			if strings.Contains(rest, "\x1b") {
+				// Only trailing escapes (a reset) left: keep them on the
+				// last row instead of emitting an empty one.
+				out[len(out)-1] += rest
+			}
+			return out
+		}
+		prefix, limit = indent, w-len(indent)
+	}
+}
+
+// refreshLogViewport wraps the buffered lines to the current pane width
+// (wrapLogLine, cached per entry per width) and pushes them into the
+// viewport. The bubbles viewport does not wrap — it clips anything wider
+// than its Width at the pane edge — so every row handed to SetContent must
+// already fit. Called on every arriving frame, on scope changes, and on
+// resize (model.go's WindowSizeMsg runs resizeLogViewport first, so the
+// width read here is the new one and the cache misses once).
 func (m *Model) refreshLogViewport() {
 	if !m.logVPReady {
 		return
 	}
 	scope := m.logScopeFor()
 	m.logScope = scope
+	w := m.logVP.Width
 	lines := make([]string, 0, len(m.logEntries))
-	for _, e := range m.logEntries {
-		if scope == "" || e.group == scope {
-			lines = append(lines, e.rendered)
+	for i := range m.logEntries {
+		e := &m.logEntries[i]
+		if scope != "" && e.group != scope {
+			continue
 		}
+		if e.wrapW != w || e.wrapped == nil {
+			e.wrapped = wrapLogLine(e.rendered, w)
+			e.wrapW = w
+		}
+		lines = append(lines, e.wrapped...)
 	}
 	wasBottom := m.logVP.AtBottom() || m.logAutoFollow
 	content := strings.Join(lines, "\n")
 	if len(lines) == 0 && scope != "" {
-		content = lipgloss.NewStyle().Foreground(cGray).
+		content = strings.Join(wrapLogLine(lipgloss.NewStyle().Foreground(cGray).
 			Render(fmt.Sprintf("no daemon log lines for %s yet — "+
-				"switch to main for the full log", scope))
+				"switch to main for the full log", scope)), w), "\n")
 	}
 	m.logVP.SetContent(content)
 	if wasBottom {
