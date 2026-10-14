@@ -643,6 +643,42 @@ func installClaudeBin(u *setupUI) string {
 // writeEnvFile creates /etc/koto/koto.env, or merges new keys into an
 // existing one without touching values the operator has edited. claude is the
 // resolved CLI path (installClaudeBin), or "" for none.
+// envFileKeys is the set of keys koto.env carries: defaults always present,
+// optional ones commented out until set. Any key NOT listed here is dropped
+// by a reinstall, so every operator-facing knob the daemon reads belongs here.
+func envFileKeys(stateDir, claude string) (defaults, optional [][2]string) {
+	defaults = [][2]string{
+		{"KOTO_HOME", stateDir},
+		// Loopback, not 0.0.0.0. The container set 0.0.0.0 because it was
+		// binding inside its own network namespace and needed a host publish
+		// to be reachable at all; on the host that same value would expose the
+		// control plane on every interface. Widen it deliberately if you want
+		// remote clients, and reissue the server cert with a matching SAN.
+		{"KOTO_BIND", "127.0.0.1"},
+		{"KOTO_PORT", "8443"},
+	}
+	optional = [][2]string{
+		{"KOTO_HOST_CPUS", ""},
+		{"KOTO_HOST_MEM_MIB", ""},
+		{"ANTHROPIC_API_KEY", ""},
+		// The claude CLI the proxy execs to refresh an OAuth token. Resolved
+		// at install time in the operator's shell; the unit's PATH cannot
+		// find it and ProtectHome may hide it (claudebin.go).
+		{claudeBinEnv, claude},
+		// The host default provider (providers.go). Written by `koto setup`'s
+		// provider step; listed here so a reinstall PRESERVES it like every
+		// other operator value instead of dropping a key it does not know.
+		{defaultProviderEnv, ""},
+	}
+	// ANTHROPIC_API_KEY is deliberately NOT seeded from <state>/creds: the
+	// proxy already reads that file per request (currentAPIKey), and a copy
+	// folded in here outlived the key's revocation — `koto claude-login`
+	// renames the creds-dir key aside but cannot touch koto.env, and the env
+	// value outranks everything (audit L7). An operator-set value is still
+	// preserved below like every other key.
+	return defaults, optional
+}
+
 func writeEnvFile(o installOpts, claude string) error {
 	// Every value lands as a KEY=VALUE line, so a newline in one starts an
 	// assignment systemd will honour (audit M67). Only these two can carry
@@ -654,31 +690,7 @@ func writeEnvFile(o installOpts, claude string) error {
 			return fmt.Errorf("koto.env: %w", err)
 		}
 	}
-	defaults := [][2]string{
-		{"KOTO_HOME", o.stateDir},
-		// Loopback, not 0.0.0.0. The container set 0.0.0.0 because it was
-		// binding inside its own network namespace and needed a host publish
-		// to be reachable at all; on the host that same value would expose the
-		// control plane on every interface. Widen it deliberately if you want
-		// remote clients, and reissue the server cert with a matching SAN.
-		{"KOTO_BIND", "127.0.0.1"},
-		{"KOTO_PORT", "8443"},
-	}
-	optional := [][2]string{
-		{"KOTO_HOST_CPUS", ""},
-		{"KOTO_HOST_MEM_MIB", ""},
-		{"ANTHROPIC_API_KEY", ""},
-		// The claude CLI the proxy execs to refresh an OAuth token. Resolved
-		// at install time in the operator's shell; the unit's PATH cannot
-		// find it and ProtectHome may hide it (claudebin.go).
-		{claudeBinEnv, claude},
-	}
-	// ANTHROPIC_API_KEY is deliberately NOT seeded from <state>/creds: the
-	// proxy already reads that file per request (currentAPIKey), and a copy
-	// folded in here outlived the key's revocation — `koto claude-login`
-	// renames the creds-dir key aside but cannot touch koto.env, and the env
-	// value outranks everything (audit L7). An operator-set value is still
-	// preserved below like every other key.
+	defaults, optional := envFileKeys(o.stateDir, claude)
 
 	// A koto.env that EXISTS but cannot be read must stop the rewrite (audit
 	// 2026-09-11 L4). It used to collapse to nil, and since the file is
@@ -692,7 +704,18 @@ func writeEnvFile(o installOpts, claude string) error {
 	if err != nil {
 		return fmt.Errorf("%w\n  refusing to rewrite it: re-running install must preserve the values set there", err)
 	}
+	body := renderEnvFile(existing, defaults, optional)
+	if err := sudoRun(o.ui, "install", "-d", "-m", "0755", "/etc/koto"); err != nil {
+		return err
+	}
+	// 0600: this file can hold an API key.
+	_, werr := sudoWriteIfChanged(o.ui, envFilePath, body, "0600")
+	return werr
+}
 
+// renderEnvFile is writeEnvFile's pure half: the koto.env text for the given
+// defaults and optional keys, every value already in existing preserved.
+func renderEnvFile(existing map[string]string, defaults, optional [][2]string) string {
 	var b strings.Builder
 	b.WriteString("# koto service configuration — read by the systemd unit.\n")
 	b.WriteString("# Edit and `sudo systemctl restart koto` to apply.\n")
@@ -717,12 +740,7 @@ func writeEnvFile(o installOpts, claude string) error {
 			fmt.Fprintf(&b, "#%s=\n", kv[0])
 		}
 	}
-	if err := sudoRun(o.ui, "install", "-d", "-m", "0755", "/etc/koto"); err != nil {
-		return err
-	}
-	// 0600: this file can hold an API key.
-	_, werr := sudoWriteIfChanged(o.ui, envFilePath, b.String(), "0600")
-	return werr
+	return b.String()
 }
 
 // podmanPath resolves podman for the unit's ExecStartPre/ExecStop, which

@@ -37,7 +37,7 @@ sudo pacman -S --needed git make podman passt
 git clone https://github.com/jpzk/koto && cd koto
 make build      # 1. build koto, koto-tui, firecracker, the guest kernel + rootfs (20-40 min cold)
 make install    # 2. install to /var/lib/koto and a systemd user-run unit (asks for sudo, prints each command)
-make wizard     # 3. mint the TLS identities, connect your Anthropic credentials, start the daemon
+make wizard     # 3. mint the TLS identities, pick the default provider + connect its credentials, start the daemon
 koto tui        # attach the TUI: /new <name> spawns your first agent, /exit detaches
 ```
 

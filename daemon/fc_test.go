@@ -429,7 +429,7 @@ func TestEnsureProviderConfigSeedsProvider(t *testing.T) {
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
 	}
-	if p := groupProviderName("tg"); p != defaultProvider {
+	if p := groupProviderName("tg"); p != defaultProvider() {
 		t.Fatalf("provider not seeded: %s", p)
 	}
 	os.WriteFile(filepath.Join(d, "config.json"), []byte(`{"provider":"venice"}`), 0o644)
