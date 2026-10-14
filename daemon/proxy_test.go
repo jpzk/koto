@@ -8,6 +8,22 @@ import (
 	"koto-protocol/pb"
 )
 
+func TestAnthropicUpstreamURL(t *testing.T) {
+	old := upstream
+	t.Cleanup(func() { upstream = old })
+	upstream = "https://api.anthropic.com"
+
+	t.Setenv("KOTO_UPSTREAM", "")
+	if got, want := anthropicUpstreamURL("/v1/messages?beta=true"), "https://api.anthropic.com/v1/messages?beta=true"; got != want {
+		t.Fatalf("default URL = %q, want %q", got, want)
+	}
+
+	t.Setenv("KOTO_UPSTREAM", "http://outer-koto:18888/")
+	if got, want := anthropicUpstreamURL("/v1/messages?beta=true"), "http://outer-koto:18888/v1/messages?beta=true"; got != want {
+		t.Fatalf("override URL = %q, want %q", got, want)
+	}
+}
+
 // TestInjectThinkingDisplay: display="summarized" is added only when thinking
 // is enabled and display is unset; every other shape is passed through
 // unchanged so we never enable thinking or override a client's own choice.

@@ -82,7 +82,13 @@ func openaiUpstreamURL(kind, reqPath, rawQuery string) string {
 	if kind == "chatgpt" {
 		base = openaiChatGPTUpstream
 	}
-	u := strings.TrimRight(base, "/") + rel
+	base, overridden := configuredUpstream(base)
+	if overridden {
+		// An outer Koto bridge receives the guest-facing route, unlike the
+		// provider bases above which already include their API path prefix.
+		rel = clean
+	}
+	u := base + rel
 	if rawQuery != "" {
 		u += "?" + rawQuery
 	}

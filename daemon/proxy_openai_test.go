@@ -270,6 +270,7 @@ func TestOpenAIGuestEnvHasNoRealToken(t *testing.T) {
 }
 
 func TestOpenAIUpstreamURL(t *testing.T) {
+	t.Setenv("KOTO_UPSTREAM", "")
 	pc, pa := openaiChatGPTUpstream, openaiAPIUpstream
 	t.Cleanup(func() { openaiChatGPTUpstream, openaiAPIUpstream = pc, pa })
 	openaiChatGPTUpstream, openaiAPIUpstream = "https://chatgpt.com/backend-api/codex", "https://api.openai.com/v1"
@@ -279,6 +280,19 @@ func TestOpenAIUpstreamURL(t *testing.T) {
 		{"chatgpt", "/v1/models", "client_version=0.152.1", "https://chatgpt.com/backend-api/codex/models?client_version=0.152.1"},
 		{"api-key", "/v1/responses", "", "https://api.openai.com/v1/responses"},
 		{"api-key", "/v1/./responses", "", "https://api.openai.com/v1/responses"},
+	} {
+		if got := openaiUpstreamURL(c.kind, c.p, c.q); got != c.want {
+			t.Errorf("%s %s: %s, want %s", c.kind, c.p, got, c.want)
+		}
+	}
+}
+
+func TestOpenAIUpstreamURLOverride(t *testing.T) {
+	t.Setenv("KOTO_UPSTREAM", "http://outer-koto:18888/")
+	for _, c := range []struct{ kind, p, q, want string }{
+		{"chatgpt", "/v1/responses", "", "http://outer-koto:18888/v1/responses"},
+		{"api-key", "/v1/responses/compact", "", "http://outer-koto:18888/v1/responses/compact"},
+		{"api-key", "/v1/models", "client_version=0.152.1", "http://outer-koto:18888/v1/models?client_version=0.152.1"},
 	} {
 		if got := openaiUpstreamURL(c.kind, c.p, c.q); got != c.want {
 			t.Errorf("%s %s: %s, want %s", c.kind, c.p, got, c.want)
