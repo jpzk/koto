@@ -21,7 +21,8 @@ import (
 	"time"
 )
 
-const (
+// vars, not consts, only so tests can point them at a fake upstream.
+var (
 	upstream       = "https://api.anthropic.com"
 	veniceUpstream = "https://api.venice.ai"
 )
@@ -1233,6 +1234,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/messages" {
 		body = injectThinkingDisplay(body)
 	}
+	// Operator caps: refused here, before any credential is read or upstream
+	// contacted (budget brief).
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, false)
+		return
+	}
 	ah, err := authHeaders()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -1414,6 +1421,10 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseBody()
 	model := budgetModelFromBody(body)
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, true)
+		return
+	}
 	key, err := veniceAuth()
 	if err != nil {
 		// The guest is told THAT there is no key, never where it should be

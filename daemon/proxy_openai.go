@@ -97,6 +97,17 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseBody()
 	model := budgetModelFromBody(body)
+	// Operator caps run BEFORE openaiCredential: that call may refresh the
+	// ChatGPT token against auth.openai.com, and a capped key must not cause
+	// any outbound request. openaiPeekKind has the same precedence without
+	// refreshing (TestOpenAIPeekKindMatchesCredential). No credential at all
+	// falls through to the 503 below.
+	if kind := openaiPeekKind(); kind != "" {
+		if ref := budgetCheckCaps(h.group, budgetKey{providerOpenAI, openaiKindAuth(kind)}); ref != nil {
+			writeBudgetRefusal(w, ref, true)
+			return
+		}
+	}
 	cred, err := openaiCredential(r.Context())
 	if err != nil {
 		// Host path and refresh detail go to the operator's log; the guest
