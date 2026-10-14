@@ -42,10 +42,21 @@ type setupCtx struct {
 	restartOwed bool
 
 	// providerFlag is --provider, already validated; "" when not given.
+	// With --providers and no --provider it is the first one listed.
 	providerFlag string
+	// providersFlag is --providers, validated and deduplicated, in the
+	// order given; nil when not given.
+	providersFlag []string
+	// providerFromList: providerFlag was not given, it is the first of
+	// --providers.
+	providerFromList bool
 	// provider is the default provider chosen (or found) by the provider
 	// step; the auth and smoke steps act on it.
 	provider string
+	// selected is the set of providers chosen in this run's provider step,
+	// in display order; nil when the step did not choose (the auth step
+	// then derives it: the default plus every provider already connected).
+	selected []string
 	// authSkipped: the operator declined to connect a credential. The step
 	// then counts as done for this run, with the warning already printed.
 	authSkipped bool
@@ -86,6 +97,9 @@ flags:
   --from ID      start at this step, skipping earlier ones
   --provider P   default provider for new groups (claudesdk, venice, openai);
                  stored as KOTO_DEFAULT_PROVIDER in /etc/koto/koto.env, no prompt
+  --providers L  providers to set up, comma-separated (e.g. claudesdk,openai);
+                 the auth step connects each. The default is --provider, which
+                 must be one of them, else the first listed
   --no-color     plain output (also honors NO_COLOR)
   --list         print the step ids in order`)
 }
@@ -100,6 +114,7 @@ func setupMain(args []string) {
 	noColor := fs.Bool("no-color", false, "disable color")
 	list := fs.Bool("list", false, "list step ids")
 	provider := fs.String("provider", "", "default provider for new groups")
+	providers := fs.String("providers", "", "comma-separated providers to set up")
 	_ = fs.Parse(args)
 
 	ui := newSetupUI(*assumeYes, *noColor)
@@ -118,12 +133,11 @@ func setupMain(args []string) {
 		ctlFatal(1, "cwd: %v", err)
 	}
 	sc := &setupCtx{ui: ui, root: root, ctx: ctx}
-	if *provider != "" {
-		p, ok := normProvider(*provider)
-		if !ok {
-			ctlFatal(2, "unknown --provider %q (want %s)", *provider, providerListText())
-		}
-		sc.providerFlag = p
+	if list, def, err := parseProviderFlags(*providers, *provider); err != nil {
+		ctlFatal(2, "%v", err)
+	} else {
+		sc.providersFlag, sc.providerFlag = list, def
+		sc.providerFromList = list != nil && *provider == ""
 	}
 	steps := setupSteps()
 

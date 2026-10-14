@@ -388,3 +388,98 @@ func (w *prefixWriter) emit(line string) {
 	// and write where koto's own lines go.
 	fmt.Println(w.ui.dim("  │ ") + uiText(strings.TrimRight(line, "\r")))
 }
+
+// parseMultiChoice reads a multi-select answer over n options: numbers (or
+// option names, via names) separated by commas and/or spaces, or "all".
+// The result is in display order with duplicates dropped. An empty answer
+// returns (nil, nil): the caller keeps its default.
+func parseMultiChoice(ans string, n int, names []string) ([]int, error) {
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return nil, nil
+	}
+	if strings.EqualFold(ans, "all") || ans == "*" {
+		out := make([]int, n)
+		for i := range out {
+			out[i] = i
+		}
+		return out, nil
+	}
+	picked := make([]bool, n)
+	for _, tok := range strings.FieldsFunc(ans, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		i := -1
+		if v, err := strconv.Atoi(tok); err == nil {
+			if v >= 1 && v <= n {
+				i = v - 1
+			}
+		} else {
+			for j, name := range names {
+				if strings.EqualFold(tok, name) {
+					i = j
+				}
+			}
+		}
+		if i < 0 {
+			return nil, fmt.Errorf("%q is not one of the choices: use numbers 1-%d separated by commas (e.g. 1,3), or all", truncateRunes(tok, 20), n)
+		}
+		picked[i] = true
+	}
+	var out []int
+	for i, ok := range picked {
+		if ok {
+			out = append(out, i)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("nothing chosen: use numbers 1-%d separated by commas (e.g. 1,3), or all", n)
+	}
+	return out, nil
+}
+
+// multiChoice presents a numbered menu and returns the chosen indices, in
+// display order. def is preselected (marked *) and is what Enter keeps;
+// under -y it is the answer. An invalid answer is explained and re-asked.
+// marks, when non-nil, is appended to each option (e.g. "✓ connected").
+func (u *setupUI) multiChoice(q string, opts []string, def []int, names []string, marks []string) []int {
+	u.printf("%s", u.bold(q))
+	isDef := make(map[int]bool, len(def))
+	for _, i := range def {
+		isDef[i] = true
+	}
+	for i, o := range opts {
+		mark := " "
+		if isDef[i] {
+			mark = "*"
+		}
+		line := fmt.Sprintf("  %s %d) %s", mark, i+1, o)
+		if marks != nil && marks[i] != "" {
+			line += "  " + u.green(marks[i])
+		}
+		u.printf("%s", line)
+	}
+	defText := make([]string, len(def))
+	for k, i := range def {
+		defText[k] = strconv.Itoa(i + 1)
+	}
+	if u.yes {
+		u.printf("  → %s (-y)", strings.Join(defText, ","))
+		return def
+	}
+	u.printf("%s", u.dim("  several: comma-separated (e.g. 1,3), or all; Enter keeps the * ones"))
+	for {
+		fmt.Printf("choice [%s]: ", strings.Join(defText, ","))
+		ans, err := u.readLine()
+		if err != nil {
+			return def
+		}
+		sel, err := parseMultiChoice(ans, len(opts), names)
+		if err != nil {
+			u.warn("%v", err)
+			continue
+		}
+		if sel == nil {
+			return def
+		}
+		return sel
+	}
+}
