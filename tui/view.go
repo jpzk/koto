@@ -1896,7 +1896,7 @@ func (m Model) renderProviderModel() string {
 	}
 	provider := info.Provider
 	if provider == "" {
-		provider = "claudesdk"
+		provider = groupOptDefault("provider")
 	}
 	model := info.Model
 	if model == "" {
