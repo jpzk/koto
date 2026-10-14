@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"koto-protocol/pb"
@@ -184,5 +187,45 @@ func TestTomlString(t *testing.T) {
 func TestCodexIDFileIsDistinctFromClaudes(t *testing.T) {
 	if got := codexIDFile("default"); !strings.HasSuffix(got, "/sessions/default.codex.id") {
 		t.Errorf("codexIDFile = %q", got)
+	}
+}
+
+// TestEnsureCodexHome: codex refuses a missing CODEX_HOME, so runCodex
+// creates it (worker-owned, 0700); an existing dir is kept as is, and a
+// symlink or file planted there is refused, never followed as root.
+func TestEnsureCodexHome(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown to the worker uid (runs in the pinned container)")
+	}
+	prev := codexHome
+	t.Cleanup(func() { codexHome = prev })
+	dir := t.TempDir()
+	codexHome = filepath.Join(dir, ".codex")
+	if err := ensureCodexHome(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(codexHome)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("codex home: %v %v", fi, err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != workerUID || st.Gid != workerGID {
+		t.Fatalf("owner %d:%d, want worker", st.Uid, st.Gid)
+	}
+	if err := ensureCodexHome(); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "root-owned")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexHome = filepath.Join(dir, "planted")
+	if err := os.Symlink(target, codexHome); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCodexHome(); err == nil {
+		t.Fatal("symlinked CODEX_HOME accepted")
+	}
+	if fi, _ := os.Stat(target); fi.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Fatal("symlink target was chowned")
 	}
 }

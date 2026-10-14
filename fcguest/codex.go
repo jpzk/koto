@@ -44,6 +44,28 @@ var codexHome = filepath.Join(wsDir, ".codex")
 // sessions/<name>.id but distinct from it: a group that switches provider
 // must not hand a claude session id to `codex exec resume` (or vice versa).
 // The daemon's session clear removes both.
+// ensureCodexHome creates CODEX_HOME for the worker on first use: codex
+// refuses to start when CODEX_HOME names a missing path. fc-agent runs as
+// root, so it must not follow a worker-planted symlink: Mkdir + Lchown only
+// on a directory it just created, and a non-directory there is an error.
+func ensureCodexHome() error {
+	err := os.Mkdir(codexHome, 0o700)
+	if err == nil {
+		return os.Lchown(codexHome, workerUID, workerGID)
+	}
+	if !os.IsExist(err) {
+		return err
+	}
+	fi, err := os.Lstat(codexHome)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", codexHome)
+	}
+	return nil
+}
+
 func codexIDFile(sess string) string {
 	return filepath.Join(csDir, "sessions", sess+".codex.id")
 }
@@ -134,6 +156,10 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 			resume = s
 			tw.tr.workerAttr("session.resumed", "true")
 		}
+	}
+	if err := ensureCodexHome(); err != nil {
+		tw.errf("codex: CODEX_HOME: %v", err)
+		return
 	}
 	env = append(env, "CODEX_HOME="+codexHome)
 	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume), env, req.Msg)
