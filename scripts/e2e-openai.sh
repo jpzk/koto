@@ -21,6 +21,13 @@
 #   - the host slot log has the tool call, its output and both replies
 #   - turn 2 was a resume (its upstream request carries turn 1's reply)
 #   - metrics.jsonl recorded normalized usage for tg
+#   - budget: the fake upstream sends x-codex primary/secondary windows and
+#     credits; after the turns the operator budget view (koto budget --json
+#     data) shows them, plus token spend, for openai/apikey only, and the
+#     koto-context line reads them. Then a tokens_per_day cap below the day's
+#     spend is set through the admin path and one more request is sent: it
+#     must get a 429 + x-koto-budget-cap without the upstream seeing it
+#     (hit count unchanged), with no host key, and the view counts the refusal.
 # Builds only via the pinned Go image (Makefile GO_IMAGE).
 #
 # Env: CONTAINER (default podman), E2E_OPENAI_DIR (default <repo>/.e2e-openai),
@@ -62,6 +69,7 @@ $CT run --rm --security-opt label=disable --network none --user 0 \
     KOTO_E2E_OPENAI_PROXY=127.0.0.1:18090 KOTO_E2E_OPENAI_TURN=127.0.0.1:18091 \
       KOTO_E2E_OPENAI_KEY="$KEY" KOTO_E2E_OPENAI_UPSTREAM=http://127.0.0.1:18080/v1 \
       KOTO_E2E_OPENAI_TURNS=2 KOTO_E2E_OPENAI_READY=/e2e/host.ready \
+      KOTO_E2E_OPENAI_BUDGET_DIR=/e2e KOTO_E2E_OPENAI_UPLOG=/e2e/upstream.log \
       ./bin/daemon.test -test.run "^TestE2EOpenAIHostHalf$" -test.v -test.count=1 > host.out 2>&1 &
     HOSTPID=$!
     for i in $(seq 50); do [ -f host.ready ] && break; sleep 0.2; done
@@ -102,5 +110,29 @@ printf '%s' "$last" | grep -q 'tool-ran-in-guest-1000' && printf '%s' "$last" | 
 grep -q 'thread id file: "[0-9a-f-]\{36\}"' "$D/guest.out" && pass "codex thread id persisted" || bad "no thread id"
 grep -q '"group":"tg".*"input_tokens":1000' "$D/host.out" && grep -q '"cache_read_input_tokens":200' "$D/host.out" \
   && pass "metrics.jsonl: normalized usage (1200 in - 200 cached = 1000, cache_read 200)" || bad "metrics usage"
+# ---- budget (provider-aware windows/spend + operator cap), host half phase 2
+for f in budget-render.txt context.txt cap.txt upstream-hits.txt; do echo "----- $f"; cat "$D/$f" 2>/dev/null; done
+echo "-----"
+B="$D/budget-before.json"; A="$D/budget-after.json"
+oa='.keys[] | select(.provider=="openai" and .auth=="apikey")'
+jq -e "$oa | .windows[\"5h\"].used == 0.125 and .windows[\"5h\"].stale == false and .windows[\"7d\"].used == 0.4" "$B" >/dev/null 2>&1 \
+  && pass "budget snapshot: openai/apikey windows from x-codex headers (5h 0.125, 7d 0.4)" || bad "budget snapshot windows"
+jq -e "$oa | .credits.has_credits == true and .credits.unlimited == false and .credits.balance == \"17.5\"" "$B" >/dev/null 2>&1 \
+  && pass "budget snapshot: x-codex-credits (balance 17.5)" || bad "budget snapshot credits"
+jq -e "$oa | .spend.day_tokens >= 1000" "$B" >/dev/null 2>&1 \
+  && pass "budget snapshot: token spend recorded ($(jq -r "$oa | .spend.day_tokens" "$B") tok today)" || bad "budget snapshot spend"
+jq -e '[.keys[] | select(.provider!="openai" or .auth!="apikey")] | length == 0' "$B" >/dev/null 2>&1 \
+  && pass "budget snapshot: no other (provider, auth) key touched" || bad "budget snapshot has foreign keys"
+grep -q '^rate-limit (openai/apikey): 5h=1[23]% .* 7d=40%' "$D/context.txt" \
+  && pass "koto-context: openai/apikey line from the account store" || bad "koto-context line"
+grep -q '^status=429$' "$D/cap.txt" && grep -q '^cap=tokens_per_day$' "$D/cap.txt" && grep -q '^retry=false$' "$D/cap.txt" \
+  && pass "cap refusal: 429, x-koto-budget-cap: tokens_per_day, x-should-retry: false" || bad "cap refusal response"
+grep -q 'koto_budget_cap' "$D/cap.txt" && pass "cap refusal: OpenAI-shaped error body" || bad "cap refusal body shape"
+read -r hb ha < <(sed -n 's/^before=\([0-9]*\) after=\([0-9]*\)$/\1 \2/p' "$D/upstream-hits.txt")
+[ -n "${hb:-}" ] && [ "$hb" -ge 3 ] && [ "$hb" = "$ha" ] \
+  && pass "cap refusal: upstream never contacted (hits $hb -> $ha)" || bad "upstream hits around capped request: ${hb:-?} -> ${ha:-?}"
+grep -q -- "$KEY" "$D/cap.txt" && bad "host key in cap refusal" || pass "cap refusal carries no host key"
+jq -e "$oa | .refused.tokens_per_day == 1 and .caps.tokens_per_day == 1000" "$A" >/dev/null 2>&1 \
+  && pass "budget after: cap 1000 tok/day and refused{tokens_per_day}=1" || bad "budget after: caps/refused"
 [ $fail = 0 ] && echo "E2E-OPENAI: ALL PASS" || echo "E2E-OPENAI: FAIL"
 exit $fail
