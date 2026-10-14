@@ -96,6 +96,7 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	model := budgetModelFromBody(body)
 	cred, err := openaiCredential(r.Context())
 	if err != nil {
 		// Host path and refresh detail go to the operator's log; the guest
@@ -185,7 +186,7 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 	dur := time.Since(t0)
 	reqID := resp.Header.Get("x-request-id")
-	logMetricKey(h.group, budgetKey{providerOpenAI, openaiKindAuth(cred.Kind)}, r.URL.Path, resp.StatusCode, openaiBudgetHeaders(resp.Header), usage, dur)
+	logMetricKey(h.group, budgetKey{providerOpenAI, openaiKindAuth(cred.Kind)}, model, r.URL.Path, resp.StatusCode, openaiBudgetHeaders(resp.Header), usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
