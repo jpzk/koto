@@ -22,18 +22,25 @@ import (
 )
 
 // vars, not consts, only so tests can point them at a fake upstream.
-// KOTO_UPSTREAM overrides the Anthropic origin: used to run koto nested
-// inside a koto guest, chaining to the outer guest's local LLM bridge
-// (e.g. http://127.0.0.1:18888) instead of the public API.
 var (
-	upstream = func() string {
-		if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
-			return u
-		}
-		return "https://api.anthropic.com"
-	}()
+	upstream       = "https://api.anthropic.com"
 	veniceUpstream = "https://api.venice.ai"
 )
+
+// configuredUpstream returns the outer Koto bridge when one is configured,
+// otherwise the provider's normal public base. Resolve it per request so tests
+// and a daemon launched with KOTO_UPSTREAM share exactly the same URL logic.
+func configuredUpstream(providerBase string) (string, bool) {
+	if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
+		return u, true
+	}
+	return strings.TrimRight(providerBase, "/"), false
+}
+
+func anthropicUpstreamURL(reqURI string) string {
+	base, _ := configuredUpstream(upstream)
+	return base + reqURI
+}
 
 // proxyMaxBody bounds a buffered LLM-leg request body (audit M2).
 const proxyMaxBody = 64 << 20
@@ -1220,7 +1227,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "koto proxy: provider "+provider+" has no LLM leg on this host", http.StatusServiceUnavailable)
 		return
 	}
-	llmFlowLog(h.group, r.Method, upstream, r.URL.Path)
+	llmFlowLog(h.group, r.Method, anthropicUpstreamURL(""), r.URL.Path)
 	t0 := time.Now()
 	// Bounded per request (proxyMaxBody — the body lives across up to 7 retry
 	// attempts, so an unbounded read let one guest streaming /dev/zero grow
@@ -1265,7 +1272,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// WithContext: the upstream call inherits the GUEST's request, so a
 		// disconnect cancels the credentialed work it was doing on its behalf
 		// rather than running it to completion against the provider (M92).
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstream+r.URL.RequestURI(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, anthropicUpstreamURL(r.URL.RequestURI()), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
