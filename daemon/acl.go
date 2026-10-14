@@ -314,6 +314,11 @@ var adminOnlyVerbs = map[string]bool{
 	"acl_set_role": true,
 	"acl_del_role": true,
 	"run_script":   true,
+	// budget: caps bound what agents may spend, so whoever could lift them
+	// could void the bound — operator-only like config_posture. Read-only
+	// "show" rides the same verb (one RPC); the ctl plane gives main a
+	// read-only view instead (ctl.go).
+	"budget": true,
 	// Not an RPC: the synthetic verb aclCheck substitutes for `config` when
 	// the request carries a POSTURE setter. ConfigReq mixes model/effort/
 	// provider with network, root, ports, size and autostart, and one coarse

@@ -389,3 +389,23 @@ func budgetSpendReset() {
 	spendLoaded = ""
 	spendMu.Unlock()
 }
+
+// budgetSpendModelsMonth lists key's models (sorted) with tokens spent in
+// the current UTC month.
+func budgetSpendModelsMonth(key budgetKey) []string {
+	month := budgetMonth(spendNow())
+	spendMu.Lock()
+	defer spendMu.Unlock()
+	spendLoadLocked()
+	var out []string
+	for m, ms := range spendStore[key] {
+		for _, c := range ms.Tokens {
+			if c.Month == month && c.MonthTok > 0 {
+				out = append(out, m)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}

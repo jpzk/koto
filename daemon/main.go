@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|install|update|uninstall|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|budget|install|update|uninstall|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -64,6 +64,10 @@ func main() {
 		// subuid range) without a container. Also the integration test's
 		// entry point.
 		usernsProbeMain()
+	case "budget":
+		// Operator budget: windows, spend, caps and prices per (provider,
+		// auth). A gRPC client like ctl; the verb is admin-only.
+		budgetCliMain(os.Args[2:])
 	case "pki":
 		// Private CA / server cert / client identities, in Go — the
 		// openssl-free counterpart of the Makefile's pki-* targets.

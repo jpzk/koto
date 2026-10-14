@@ -1075,6 +1075,16 @@ func (s *kotoServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.Acl
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
 }
 
+// ---- budget (hardcoded admin-only, acl.go) --------------------------------
+
+func (s *kotoServer) Budget(_ context.Context, r *pb.BudgetReq) (*pb.BudgetResp, error) {
+	view, err := budgetAdmin(r.Op, r.Provider, r.Auth, r.Field, r.Value, r.Model, r.Prices)
+	if err != nil {
+		return &pb.BudgetResp{Error: err.Error()}, nil
+	}
+	return &pb.BudgetResp{Ok: true, Budget: toStruct(view)}, nil
+}
+
 // ---- server-streaming RPCs ------------------------------------------------
 
 // RunScript runs a POSIX sh script in the group's microVM as the guest
