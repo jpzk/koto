@@ -22,8 +22,16 @@ import (
 )
 
 // vars, not consts, only so tests can point them at a fake upstream.
+// KOTO_UPSTREAM overrides the Anthropic origin: used to run koto nested
+// inside a koto guest, chaining to the outer guest's local LLM bridge
+// (e.g. http://127.0.0.1:18888) instead of the public API.
 var (
-	upstream       = "https://api.anthropic.com"
+	upstream = func() string {
+		if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
+			return u
+		}
+		return "https://api.anthropic.com"
+	}()
 	veniceUpstream = "https://api.venice.ai"
 )
 
