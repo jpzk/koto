@@ -66,6 +66,7 @@ const (
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
+	Koto_Budget_FullMethodName         = "/koto.Koto/Budget"
 	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
 	Koto_AttachShell_FullMethodName    = "/koto.Koto/AttachShell"
 	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
@@ -185,6 +186,13 @@ type KotoClient interface {
 	AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error)
+	// Budget reads and edits the operator budget (daemon/budget_admin.go):
+	// per-(provider, auth) windows, spend, caps and model prices, kept in
+	// <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+	// caps are how the operator bounds what agents may spend, so a role that
+	// could lift them would void the bound (same class as config_posture).
+	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+	Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error)
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -574,6 +582,16 @@ func (c *kotoClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...
 	return out, nil
 }
 
+func (c *kotoClient) Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BudgetResp)
+	err := c.cc.Invoke(ctx, Koto_Budget_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_RunScript_FullMethodName, cOpts...)
@@ -775,6 +793,13 @@ type KotoServer interface {
 	AclGet(context.Context, *AclGetReq) (*AclResp, error)
 	AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error)
 	AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error)
+	// Budget reads and edits the operator budget (daemon/budget_admin.go):
+	// per-(provider, auth) windows, spend, caps and model prices, kept in
+	// <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+	// caps are how the operator bounds what agents may spend, so a role that
+	// could lift them would void the bound (same class as config_posture).
+	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+	Budget(context.Context, *BudgetReq) (*BudgetResp, error)
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -923,6 +948,9 @@ func (UnimplementedKotoServer) AclSetRole(context.Context, *AclSetRoleReq) (*Acl
 }
 func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclDelRole not implemented")
+}
+func (UnimplementedKotoServer) Budget(context.Context, *BudgetReq) (*BudgetResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Budget not implemented")
 }
 func (UnimplementedKotoServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
 	return status.Error(codes.Unimplemented, "method RunScript not implemented")
@@ -1547,6 +1575,24 @@ func _Koto_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Budget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BudgetReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Budget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Budget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Budget(ctx, req.(*BudgetReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RunScriptReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1732,6 +1778,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AclDelRole",
 			Handler:    _Koto_AclDelRole_Handler,
+		},
+		{
+			MethodName: "Budget",
+			Handler:    _Koto_Budget_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

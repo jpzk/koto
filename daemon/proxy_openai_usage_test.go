@@ -81,10 +81,7 @@ func TestOpenAIBudgetHeadersTranslated(t *testing.T) {
 	for k, vs := range out {
 		rl[strings.ToLower(k)] = vs[0]
 	}
-	if !otelBudgetHasHeaders(rl) {
-		t.Fatal("budget headers not recognized")
-	}
-	otelBudgetObserve(providerOpenAI, rl)
+	otelBudgetObserveT(providerOpenAI, rl)
 	pts, _ := otelBudgetCopy()
 	got := map[string]otelBudgetPoint{}
 	for _, p := range pts {

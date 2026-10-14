@@ -93,7 +93,7 @@ func otelBudgetNoGroupOrOrg(t *testing.T, pts map[string]otelBudgetTestPoint, or
 			t.Fatalf("%s carries koto.group: %v", k, p.attrs)
 		}
 		for _, kv := range p.attrs.ToSlice() {
-			if kv.Key != "provider" && kv.Key != "window" && kv.Key != "status" {
+			if kv.Key != "provider" && kv.Key != "auth" && kv.Key != "window" && kv.Key != "status" {
 				t.Fatalf("%s carries unexpected attr %s", k, kv.Key)
 			}
 			if org != "" && kv.Value.AsString() == org {
@@ -160,8 +160,8 @@ func TestOtelBudgetNoHeadersKeepsSnapshot(t *testing.T) {
 	bare := http.Header{"Request-Id": {"req_bare"}}
 	logMetric("", "/v1/messages", 200, bare, nil, time.Millisecond)
 	logMetric("", "/v1/messages", 500, nil, nil, time.Millisecond)
-	otelBudgetObserve("claudesdk", map[string]string{})
-	otelBudgetObserve("claudesdk", map[string]string{"anthropic-organization-id": "org-x"})
+	otelBudgetObserveT("claudesdk", map[string]string{})
+	otelBudgetObserveT("claudesdk", map[string]string{"anthropic-organization-id": "org-x"})
 	after := otelBudgetCollect(t, rd)
 	if len(after) != len(before) {
 		t.Fatalf("snapshot changed size: %v -> %v", before, after)
@@ -173,7 +173,7 @@ func TestOtelBudgetNoHeadersKeepsSnapshot(t *testing.T) {
 	}
 
 	// Partial update: only the 5h utilization moves; everything else stays.
-	otelBudgetObserve("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "0.5"})
+	otelBudgetObserveT("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "0.5"})
 	pts := otelBudgetCollect(t, rd)
 	otelBudgetWant(t, pts, "koto.llm.ratelimit.utilization|claudesdk|5h", "1", 0.5)
 	otelBudgetWant(t, pts, "koto.llm.ratelimit.utilization|claudesdk|7d", "1", 0.78)
@@ -195,11 +195,11 @@ func TestOtelBudgetEmptyExportsNothing(t *testing.T) {
 // bucketed as "other", and an unknown provider is ignored.
 func TestOtelBudgetDropsGarbage(t *testing.T) {
 	rd := otelBudgetTestReader(t)
-	otelBudgetObserve("claudesdk", map[string]string{
+	otelBudgetObserveT("claudesdk", map[string]string{
 		"anthropic-ratelimit-unified-5h-utilization": "0.25",
 		"anthropic-ratelimit-unified-5h-reset":       "1760371200",
 	})
-	otelBudgetObserve("claudesdk", map[string]string{
+	otelBudgetObserveT("claudesdk", map[string]string{
 		// unknown / attacker-chosen windows
 		"anthropic-ratelimit-unified-1m-utilization":           "0.9",
 		"anthropic-ratelimit-unified-7d_opus-utilization":      "0.9",
@@ -216,9 +216,9 @@ func TestOtelBudgetDropsGarbage(t *testing.T) {
 		"anthropic-ratelimit-unified-7d-reset":       "99999999999999",
 		"anthropic-ratelimit-unified-overage-status": "<script>",
 	})
-	otelBudgetObserve("evilprov", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "0.9"})
-	otelBudgetObserve("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "+Inf"})
-	otelBudgetObserve("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "1e300"})
+	otelBudgetObserveT("evilprov", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "0.9"})
+	otelBudgetObserveT("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "+Inf"})
+	otelBudgetObserveT("claudesdk", map[string]string{"anthropic-ratelimit-unified-5h-utilization": "1e300"})
 
 	pts := otelBudgetCollect(t, rd)
 	otelBudgetWant(t, pts, "koto.llm.ratelimit.utilization|claudesdk|5h", "1", 0.25)
@@ -281,7 +281,17 @@ func TestOtelBudgetInPipeline(t *testing.T) {
 	if err := s.instruments(mp.Meter("koto")); err != nil {
 		t.Fatalf("instruments: %v", err)
 	}
-	otelBudgetObserve("claudesdk", map[string]string{"anthropic-ratelimit-unified-7d-utilization": "0.9"})
+	otelBudgetObserveT("claudesdk", map[string]string{"anthropic-ratelimit-unified-7d-utilization": "0.9"})
 	pts := otelBudgetCollect(t, rd)
 	otelBudgetWant(t, pts, "koto.llm.ratelimit.utilization|claudesdk|7d", "1", 0.9)
+}
+
+// otelBudgetObserveT feeds lower-cased header pairs into the store under
+// (provider, subscription), the key logMetric("") resolves in tests.
+func otelBudgetObserveT(provider string, rl map[string]string) {
+	h := http.Header{}
+	for k, v := range rl {
+		h[k] = []string{v}
+	}
+	budgetObserve(budgetKey{provider, budgetAuthSub}, h)
 }

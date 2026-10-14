@@ -54,6 +54,14 @@ func main() {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("x-codex-primary-used-percent", "12.5")
 		w.Header().Set("x-codex-primary-window-minutes", "300")
+		// Reset times far in the future so the budget snapshot never reads stale.
+		w.Header().Set("x-codex-primary-reset-at", "4102444800")
+		w.Header().Set("x-codex-secondary-used-percent", "40")
+		w.Header().Set("x-codex-secondary-window-minutes", "10080")
+		w.Header().Set("x-codex-secondary-reset-at", "4102444800")
+		w.Header().Set("x-codex-credits-has-credits", "true")
+		w.Header().Set("x-codex-credits-unlimited", "false")
+		w.Header().Set("x-codex-credits-balance", "17.5")
 		sse(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id}})
 		var item map[string]any
 		tool := os.Getenv("FAKEUP_TOOL")

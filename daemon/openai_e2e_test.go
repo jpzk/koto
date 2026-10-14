@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,4 +91,82 @@ func TestE2EOpenAIHostHalf(t *testing.T) {
 	t.Logf("HOST SLOT LOG (tg slot 0):\n%s", log)
 	m, _ := os.ReadFile(METRICS)
 	t.Logf("HOST METRICS.JSONL:\n%s", m)
+	if d := os.Getenv("KOTO_E2E_OPENAI_BUDGET_DIR"); d != "" {
+		e2eOpenAIBudget(t, d, proxyAddr, os.Getenv("KOTO_E2E_OPENAI_UPLOG"))
+	}
+}
+
+// e2eOpenAIBudget is the budget phase of scripts/e2e-openai.sh, run after the
+// guest turns. It writes what the script asserts on into dir:
+//
+//	budget-before.json  the operator budget view (same data `koto budget
+//	                    --json` serves) after the real turns: x-codex windows,
+//	                    credits and token spend for openai/apikey
+//	budget-render.txt   the `koto budget` text rendering of that view
+//	context.txt         the koto-context block group tg would get next turn
+//	cap.txt             status, x-koto-budget-cap and body of one request sent
+//	                    through the proxy AFTER a tokens_per_day cap below the
+//	                    day's spend was set via the admin path (budgetAdmin)
+//	upstream-hits.txt   upstream request count (lines "=== " in uplog) right
+//	                    before and after that request
+//	budget-after.json   the view after the refusal (refused counter)
+func e2eOpenAIBudget(t *testing.T, dir, proxyAddr, uplog string) {
+	t.Helper()
+	writeJSON := func(name string, v any) {
+		b, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), append(b, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upHits := func() int {
+		b, err := os.ReadFile(uplog)
+		if err != nil {
+			t.Fatalf("upstream log: %v", err)
+		}
+		n := 0
+		for _, l := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(l, "=== ") {
+				n++
+			}
+		}
+		return n
+	}
+	v, err := budgetAdmin("show", "", "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON("budget-before.json", v)
+	_ = os.WriteFile(filepath.Join(dir, "budget-render.txt"), []byte(budgetRender(v)), 0o644)
+	key := budgetKeyFor(groupProvider("tg"))
+	_ = os.WriteFile(filepath.Join(dir, "context.txt"), []byte(contextBlock(key, latestMetric("tg"))), 0o644)
+
+	// The day's spend is already > 1000 tokens, so a 1k cap is exceeded.
+	if _, err := budgetAdmin("set", "openai", "apikey", "tokens_per_day", "1k", "", nil); err != nil {
+		t.Fatalf("budget set: %v", err)
+	}
+	before := upHits()
+	req, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/v1/responses",
+		strings.NewReader(`{"model":"gpt-5-codex","input":"over the cap","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer koto-proxied")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("capped request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	time.Sleep(500 * time.Millisecond) // any stray upstream hit would land by now
+	after := upHits()
+	_ = os.WriteFile(filepath.Join(dir, "cap.txt"), []byte(fmt.Sprintf("status=%d\ncap=%s\nretry=%s\nbody=%s\n",
+		resp.StatusCode, resp.Header.Get("x-koto-budget-cap"), resp.Header.Get("x-should-retry"), body)), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "upstream-hits.txt"), []byte(fmt.Sprintf("before=%d after=%d\n", before, after)), 0o644)
+	v, err = budgetAdmin("show", "", "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON("budget-after.json", v)
+	t.Logf("budget phase: capped request status %d, upstream hits %d -> %d", resp.StatusCode, before, after)
 }

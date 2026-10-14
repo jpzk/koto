@@ -21,7 +21,8 @@ import (
 	"time"
 )
 
-const (
+// vars, not consts, only so tests can point them at a fake upstream.
+var (
 	upstream       = "https://api.anthropic.com"
 	veniceUpstream = "https://api.venice.ai"
 )
@@ -471,6 +472,13 @@ func normalizeVeniceUsage(u, usage map[string]any) {
 }
 
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
+	logMetricKey(group, budgetKeyFor(groupProvider(group)), "", path, status, hdrs, usage, dur)
+}
+
+// logMetricKey is logMetric with the budget key already resolved: the openai
+// leg knows which credential it sent (subscription vs api key), so it passes
+// that instead of re-deriving it after the fact.
+func logMetricKey(group string, key budgetKey, model string, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
 	rl := map[string]string{}
 	for k, vs := range hdrs {
 		lk := strings.ToLower(k)
@@ -500,15 +508,23 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 		"request_id": reqID,
 		"ratelimit":  rl,
 		"usage":      usage,
+		"budget_key": key.String(),
 	}
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
-	// Budget snapshot (otel_budget.go): only a response that carried the
-	// headers updates it; the provider lookup is skipped otherwise.
-	if otelBudgetHasHeaders(rl) {
-		otelBudgetObserve(groupProvider(group), rl)
+	// Account budget (budget.go): parsed from the RAW headers for the key's
+	// provider; a response without budget headers changes nothing.
+	budgetObserve(key, hdrs)
+	// Spend (budget_spend.go): prices come from budget.json, read per request
+	// like the credentials. A broken file means no USD this time (tokens still
+	// count); the cap check (budget caps) is what reports the file to the
+	// operator.
+	cfg, cerr := loadBudgetConfig()
+	if cerr != nil {
+		cfg = nil
 	}
+	budgetRecordSpend(key, model, usage, cfg)
 	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 
@@ -1207,6 +1223,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	model := budgetModelFromBody(body)
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
 	// thinking.display to "omitted", so thinking blocks stream with empty text
@@ -1218,6 +1235,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// regardless; display only controls the summary and doesn't change billing.)
 	if r.URL.Path == "/v1/messages" {
 		body = injectThinkingDisplay(body)
+	}
+	// Operator caps: refused here, before any credential is read or upstream
+	// contacted (budget brief).
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, false)
+		return
 	}
 	ah, err := authHeaders()
 	if err != nil {
@@ -1373,7 +1396,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if reqID == "" {
 		reqID = resp.Header.Get("Request-Id")
 	}
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logMetricKey(h.group, budgetKeyFor(groupProvider(h.group)), model, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
@@ -1399,6 +1422,11 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	model := budgetModelFromBody(body)
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, true)
+		return
+	}
 	key, err := veniceAuth()
 	if err != nil {
 		// The guest is told THAT there is no key, never where it should be
@@ -1522,7 +1550,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dur := time.Since(t0)
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logMetricKey(h.group, budgetKeyFor(groupProvider(h.group)), model, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
 	otelLLMAnnotate(r.Context(), resp.StatusCode, resp.Header.Get("x-request-id"), usage)
 }

@@ -134,6 +134,14 @@ service Koto {
   rpc AclSetRole (AclSetRoleReq) returns (AclResp);
   rpc AclDelRole (AclDelRoleReq) returns (AclResp);
 
+  // Budget reads and edits the operator budget (daemon/budget_admin.go):
+  // per-(provider, auth) windows, spend, caps and model prices, kept in
+  // <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+  // caps are how the operator bounds what agents may spend, so a role that
+  // could lift them would void the bound (same class as config_posture).
+  // op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+  rpc Budget (BudgetReq) returns (BudgetResp);
+
   // RunScript executes a POSIX sh script inside a group's microVM as the
   // guest worker user (node, uid 1000, cwd /workspace) and streams its
   // combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -731,4 +739,26 @@ message ProviderStatus {
 message ProvidersResp {
   bool ok = 1; string error = 2;
   repeated ProviderStatus providers = 3;  // every known provider, display order
+}
+
+// Budget (see the Budget rpc comment and daemon/budget_admin.go).
+//   show:  no other field.
+//   set:   provider, [auth], field, value. field is usd_per_day |
+//          usd_per_month | tokens_per_day | max_window_used.<5h|1d|7d|30d>.
+//          auth empty => the provider's current auth on the daemon.
+//   unset: provider, [auth], field ("all" clears the key's caps).
+//   price: provider, model, prices {in,out,cache_read,cache_write} in USD per
+//          million tokens; an empty prices map deletes the model's price.
+message BudgetReq {
+  string op       = 1;
+  string provider = 2;
+  string auth     = 3;
+  string field    = 4;
+  string value    = 5;
+  string model    = 6;
+  map<string, string> prices = 7;
+}
+message BudgetResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct budget = 3;  // full view after the operation
 }

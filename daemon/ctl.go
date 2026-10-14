@@ -184,6 +184,12 @@ type ctlTailResp struct {
 	Text string `json:"text"`
 }
 
+// ctlBudgetResp is main's read-only budget view (budgetView).
+type ctlBudgetResp struct {
+	baseResp
+	Budget map[string]any `json:"budget"`
+}
+
 // configPostureKey names the first posture key a ctl-plane config_set tries
 // to set, or "" when the request touches only model/effort/provider.
 func configPostureKey(req configReq) string {
@@ -346,6 +352,26 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp("ctl: verb not allowed for non-main groups: resources")
 		}
 		return resourcesCtlResp()
+
+	// budget: a READ-ONLY view for main (windows, spend, caps, prices — no
+	// credential, no group data). Changing caps or prices is the operator's
+	// alone (admin-only gRPC verb, `koto budget`): caps bound what agents
+	// spend, so an agent that could lift them would void the bound — the same
+	// reasoning that keeps posture keys out of config_set. Peers get nothing.
+	case "budget":
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: budget")
+		}
+		var req struct {
+			Op string `json:"op"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if req.Op != "" && req.Op != "show" {
+			return errResp("ctl: budget changes are operator-only — ask the operator (koto budget set|unset|price)")
+		}
+		return ctlBudgetResp{baseResp{OK: true}, budgetView(false)}
 
 	// config_set replaces main's podman-era file-mount powers (rw /peers)
 	// under the firecracker runtime, where the only channel is this ctl

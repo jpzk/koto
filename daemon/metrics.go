@@ -113,32 +113,17 @@ func anyAsInt(v any) (int64, bool) {
 	return 0, false
 }
 
-func contextBlock(m map[string]any) string {
-	rl, _ := m["ratelimit"].(map[string]any)
-	if rl == nil {
-		rl = map[string]any{}
-	}
+// contextBlock renders the <koto-context> header for a turn of a group
+// whose budget key is key. m is the group's last metrics record (nil when it
+// never made a call): it feeds only the last-call line (and the window
+// fallback right after a daemon restart, see budgetCtxAccount).
+func contextBlock(key budgetKey, m map[string]any) string {
 	u, _ := m["usage"].(map[string]any)
 	if u == nil {
 		u = map[string]any{}
 	}
 	now := time.Now()
-	util := func(k string) string {
-		if f, ok := anyAsFloat(rl[k]); ok {
-			return fmt.Sprintf("%.0f%%", f*100)
-		}
-		return "?"
-	}
-	resets := func(k string) string {
-		if n, ok := anyAsInt(rl[k]); ok {
-			return fmtDur(n - now.Unix())
-		}
-		return "?"
-	}
-	overage := "?"
-	if s, ok := rl["anthropic-ratelimit-unified-overage-status"].(string); ok {
-		overage = s
-	}
+	acct, _ := budgetCtxAccount(key, m)
 	uget := func(k string) int64 {
 		n, _ := anyAsInt(u[k])
 		return n
@@ -147,21 +132,21 @@ func contextBlock(m map[string]any) string {
 	if n, ok := anyAsInt(m["dur_ms"]); ok {
 		dur = strconv.FormatInt(n, 10)
 	}
-	return fmt.Sprintf(
-		"<koto-context>\n"+
-			"now: %s (%s)\n"+
-			"rate-limit: 5h=%s (resets %s) | 7d=%s (resets %s)\n"+
-			"overage: %s\n"+
-			"last-call: in=%d cache_rd=%d cache_cr=%d out=%d dur=%sms\n"+
-			"</koto-context>",
-		now.Format("2006-01-02T15:04:05-07:00"),
-		now.Format("Monday"),
-		util("anthropic-ratelimit-unified-5h-utilization"),
-		resets("anthropic-ratelimit-unified-5h-reset"),
-		util("anthropic-ratelimit-unified-7d-utilization"),
-		resets("anthropic-ratelimit-unified-7d-reset"),
-		overage,
-		uget("input_tokens"), uget("cache_read_input_tokens"),
-		uget("cache_creation_input_tokens"), uget("output_tokens"), dur,
-	)
+	var b strings.Builder
+	b.WriteString("<koto-context>\n")
+	fmt.Fprintf(&b, "now: %s (%s)\n", now.Format("2006-01-02T15:04:05-07:00"), now.Format("Monday"))
+	b.WriteString(budgetCtxRateLine(key, acct, now) + "\n")
+	if l := budgetCtxExtraLine(key, acct); l != "" {
+		b.WriteString(l + "\n")
+	}
+	if l := budgetCtxBudgetLine(key); l != "" {
+		b.WriteString(l + "\n")
+	}
+	if m != nil {
+		fmt.Fprintf(&b, "last-call: in=%d cache_rd=%d cache_cr=%d out=%d dur=%sms\n",
+			uget("input_tokens"), uget("cache_read_input_tokens"),
+			uget("cache_creation_input_tokens"), uget("output_tokens"), dur)
+	}
+	b.WriteString("</koto-context>")
+	return b.String()
 }

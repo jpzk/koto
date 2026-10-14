@@ -120,6 +120,7 @@ admin role only
                                            groups = comma list or "*" (default "*")
                                            e.g. acl set ops stop:ghost restart:ghost list
   acl del <role>                           remove a role
+  budget [set|unset|price ...]              operator budget (admin-only; see koto budget --help)
 
 env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds, else
      $KOTO_HOME/creds, else /var/lib/koto/creds — the installed default),
@@ -581,6 +582,9 @@ func ctlCliMain(args []string) {
 
 	case "acl":
 		ctlAcl(rest)
+
+	case "budget":
+		budgetCliMain(rest)
 
 	default:
 		fmt.Fprint(os.Stderr, ctlUsage)
