@@ -43,6 +43,11 @@ func openaiProxyEnv(t *testing.T) *fakeOpenAIUpstream {
 	})
 	fcHarness(t)
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
+	// Error lines (no credential, upstream failures) forward a banner to main,
+	// and notifyDeliver would spawn a real tailer for it that outlives the test
+	// and races TempDir cleanup ("directory not empty", flaky under the full
+	// suite). Same remedy as setupNotifyRoot: no real tailer for main.
+	markTailed(ctlMainGroup)
 	d := filepath.Join(vol("tg"), ".cs")
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		t.Fatal(err)
