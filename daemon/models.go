@@ -462,3 +462,8 @@ func modelsReset() {
 	modelsGen++
 	modelsMu.Unlock()
 }
+
+// modelsRPCWait bounds how long the Models RPC waits for a fetch: a little
+// over modelsTimeout so a fetch that finishes inside its own budget is
+// served live, but the dialog never hangs past it (var for tests).
+var modelsRPCWait = modelsTimeout + time.Second

@@ -107,6 +107,17 @@ service Koto {
   // misleading. See daemon/resources.go.
   rpc Resources   (ResourcesReq)   returns (ResourcesResp);
 
+  // Models lists the models a provider offers, for the TUI's new-group
+  // model picker. Fetched HOST-side with the host credential through the
+  // same upstream origins the proxy uses, cached per provider (~10 min),
+  // single-flighted, bounded by a ~5s timeout; every upstream string is
+  // sanitized (see daemon/models.go). On any failure the answer is the
+  // built-in fallback list with source="fallback" and the reason in error.
+  // UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+  // every non-admin role until acl.json grants `models`. Deliberately NOT on
+  // the in-guest ctl plane — guests never trigger host-credential fetches.
+  rpc Models      (ModelsReq)      returns (ModelsResp);
+
   // ---- ACL management (HARDCODED admin-only: these verbs can never be
   // granted via acl.json — a role granting itself acl_set_role would be
   // privilege escalation to full control; see daemon/acl.go) ----
@@ -671,4 +682,24 @@ message AclDelRoleReq { string role = 1; }
 message AclResp {
   bool ok = 1; string error = 2;
   google.protobuf.Struct acl = 3;  // full document after the operation
+}
+
+// ---- Models -----------------------------------------------------------------
+// Per-provider model catalog for the new-group dialog. provider is one of
+// claudesdk|venice|openai. source is "live" or "fallback"; on fallback,
+// reason says why (no credential, upstream error, timeout, still loading).
+// ok=false only for a request error (unknown provider).
+message ModelsReq { string provider = 1; }
+
+message ModelInfo {
+  string id = 1;            // matches ^[A-Za-z0-9._:/-]{1,64}$
+  string display_name = 2;  // <=64 runes, control/escape chars stripped
+}
+
+message ModelsResp {
+  bool ok = 1; string error = 2;
+  string provider = 3;
+  string source = 4;
+  string reason = 5;
+  repeated ModelInfo models = 6;
 }

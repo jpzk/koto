@@ -61,6 +61,7 @@ const (
 	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
+	Koto_Models_FullMethodName         = "/koto.Koto/Models"
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
@@ -159,6 +160,16 @@ type KotoClient interface {
 	// stopped — the failure mode where a guest's own `df` is actively
 	// misleading. See daemon/resources.go.
 	Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error)
+	// Models lists the models a provider offers, for the TUI's new-group
+	// model picker. Fetched HOST-side with the host credential through the
+	// same upstream origins the proxy uses, cached per provider (~10 min),
+	// single-flighted, bounded by a ~5s timeout; every upstream string is
+	// sanitized (see daemon/models.go). On any failure the answer is the
+	// built-in fallback list with source="fallback" and the reason in error.
+	// UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+	// every non-admin role until acl.json grants `models`. Deliberately NOT on
+	// the in-guest ctl plane — guests never trigger host-credential fetches.
+	Models(ctx context.Context, in *ModelsReq, opts ...grpc.CallOption) (*ModelsResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -504,6 +515,16 @@ func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) Models(ctx context.Context, in *ModelsReq, opts ...grpc.CallOption) (*ModelsResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ModelsResp)
+	err := c.cc.Invoke(ctx, Koto_Models_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
@@ -711,6 +732,16 @@ type KotoServer interface {
 	// stopped — the failure mode where a guest's own `df` is actively
 	// misleading. See daemon/resources.go.
 	Resources(context.Context, *ResourcesReq) (*ResourcesResp, error)
+	// Models lists the models a provider offers, for the TUI's new-group
+	// model picker. Fetched HOST-side with the host credential through the
+	// same upstream origins the proxy uses, cached per provider (~10 min),
+	// single-flighted, bounded by a ~5s timeout; every upstream string is
+	// sanitized (see daemon/models.go). On any failure the answer is the
+	// built-in fallback list with source="fallback" and the reason in error.
+	// UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+	// every non-admin role until acl.json grants `models`. Deliberately NOT on
+	// the in-guest ctl plane — guests never trigger host-credential fetches.
+	Models(context.Context, *ModelsReq) (*ModelsResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
@@ -850,6 +881,9 @@ func (UnimplementedKotoServer) GoalCancel(context.Context, *GoalGroupReq) (*Goal
 }
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
+}
+func (UnimplementedKotoServer) Models(context.Context, *ModelsReq) (*ModelsResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Models not implemented")
 }
 func (UnimplementedKotoServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
@@ -1393,6 +1427,24 @@ func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Models_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ModelsReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Models(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Models_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Models(ctx, req.(*ModelsReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclGetReq)
 	if err := dec(in); err != nil {
@@ -1612,6 +1664,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Resources",
 			Handler:    _Koto_Resources_Handler,
+		},
+		{
+			MethodName: "Models",
+			Handler:    _Koto_Models_Handler,
 		},
 		{
 			MethodName: "AclGet",
