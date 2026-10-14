@@ -83,7 +83,7 @@ helper is given.
 
 - **`list`**: all groups and their state. RPC `List`.
 - **`spawn [-provider P] [-model M] <group>`**: create or start a group.
-  `-provider` (help text `claudesdk|venice`), `-model` (model override).
+  `-provider` (help text `claudesdk|venice|openai`), `-model` (model override).
   RPC `Spawn`.
 - **`stop <group>`**: RPC `Stop`.
 - **`interrupt <group>`**: RPC `Interrupt`. Per the comment on `drain`,
@@ -135,7 +135,7 @@ helper is given.
   model while an absent flag leaves it unchanged (`fs.Visit` in `ctlConfig`).
   RPC `Config`. The flags are:
   - `-model M` (`""` clears)
-  - `-provider claudesdk|venice`
+  - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
   - `-size small|medium|large|xlarge`
   - `-root yes|no`

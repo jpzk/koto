@@ -316,7 +316,7 @@ func ctlCliMain(args []string) {
 
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
-		provider := fs.String("provider", "", "claudesdk|venice")
+		provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
 		model := fs.String("model", "", "model override")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
@@ -841,7 +841,7 @@ func ctlConfig(args []string) {
 	model := fs.String("model", "", `model (""=clear)`)
 	effort := fs.String("effort", "", "reasoning effort")
 	ports := fs.String("ports", "", "published ports (comma list)")
-	provider := fs.String("provider", "", "claudesdk|venice")
+	provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
 	network := fs.String("network", "", "none|wan|lan|full")
 	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")
