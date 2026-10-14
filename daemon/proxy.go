@@ -470,6 +470,13 @@ func normalizeVeniceUsage(u, usage map[string]any) {
 }
 
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
+	logMetricKey(group, budgetKeyFor(groupProvider(group)), path, status, hdrs, usage, dur)
+}
+
+// logMetricKey is logMetric with the budget key already resolved: the openai
+// leg knows which credential it sent (subscription vs api key), so it passes
+// that instead of re-deriving it after the fact.
+func logMetricKey(group string, key budgetKey, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
 	rl := map[string]string{}
 	for k, vs := range hdrs {
 		lk := strings.ToLower(k)
@@ -503,11 +510,9 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
-	// Budget snapshot (otel_budget.go): only a response that carried the
-	// headers updates it; the provider lookup is skipped otherwise.
-	if otelBudgetHasHeaders(rl) {
-		otelBudgetObserve(groupProvider(group), rl)
-	}
+	// Account budget (budget.go): parsed from the RAW headers for the key's
+	// provider; a response without budget headers changes nothing.
+	budgetObserve(key, hdrs)
 	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 

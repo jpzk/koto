@@ -185,7 +185,7 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 	dur := time.Since(t0)
 	reqID := resp.Header.Get("x-request-id")
-	logMetric(h.group, r.URL.Path, resp.StatusCode, openaiBudgetHeaders(resp.Header), usage, dur)
+	logMetricKey(h.group, budgetKey{providerOpenAI, openaiKindAuth(cred.Kind)}, r.URL.Path, resp.StatusCode, openaiBudgetHeaders(resp.Header), usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
@@ -258,8 +258,11 @@ var openaiBudgetWindows = map[string]string{"300": "5h", "10080": "7d"}
 // openaiBudgetHeaders translates the ChatGPT-plan rate-limit headers Codex
 // itself reads (codex-api/src/rate_limits.rs, legacy "codex" family:
 // x-codex-{primary,secondary}-{used-percent,window-minutes,reset-at}) into
-// the anthropic-ratelimit-unified-* keys logMetric / otelBudgetObserve
-// understand. It returns a COPY of h with the synthesized keys added; h is
+// the anthropic-ratelimit-unified-* keys of the metrics.jsonl "ratelimit"
+// record, which the TUI reads (5h/7d only, the record's legacy shape). The
+// account budget store does NOT read these: budgetParseCodex (budget.go)
+// parses the raw x-codex-* headers, every allowlisted window plus credits,
+// so the synthesized keys are ignored there. It returns a COPY of h with the synthesized keys added; h is
 // untouched. Values pass through the same validators downstream, so garbage
 // is still dropped there. used-percent is 0..100, utilization is 0..1.
 func openaiBudgetHeaders(h http.Header) http.Header {
