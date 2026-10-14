@@ -156,8 +156,9 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	defer out.clear()
 
 	usage := map[string]any{}
-	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
-		scanner := bufio.NewScanner(resp.Body)
+	respBody := bufio.NewReaderSize(resp.Body, 64*1024)
+	if openaiIsEventStream(resp.Header.Get("Content-Type"), respBody) {
+		scanner := bufio.NewScanner(respBody)
 		scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -178,7 +179,7 @@ func (h *handler) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 			emitLogfG("llm", h.group, "warn", "upstream stream ended early: %v", err)
 		}
 	} else {
-		data := proxyReadResponse(h.group, resp.Body)
+		data := proxyReadResponse(h.group, respBody)
 		probe.firstByte()
 		_, _ = out.Write(data)
 		openaiScanUsage(data, usage)
@@ -292,4 +293,31 @@ func scrubSecret(s, secret string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, secret, "[redacted]")
+}
+
+// openaiIsEventStream decides whether an upstream response is an SSE stream.
+// The Content-Type header is authoritative when present, but the ChatGPT
+// backend (chatgpt.com/backend-api/codex/responses) was observed live
+// (2026-10-14, codex rust-v0.152.1 requests) answering a streaming
+// /responses call with NO Content-Type at all. Without this sniff the relay
+// took the buffered JSON branch: the guest got the whole stream only at the
+// end, and the usage scan of the concatenated SSE text found nothing, so
+// spend, caps and the spend OTel series silently saw zero tokens.
+//
+// With no Content-Type, the first non-blank bytes decide: an SSE stream
+// starts with a field ("event:", "data:", "id:", "retry:") or a comment
+// (":"). Peek never consumes, so the bytes still reach the guest. A JSON or
+// empty body keeps the buffered branch, unchanged.
+func openaiIsEventStream(contentType string, body *bufio.Reader) bool {
+	if contentType != "" {
+		return strings.Contains(strings.ToLower(contentType), "event-stream")
+	}
+	peek, _ := body.Peek(64)
+	s := bytes.TrimLeft(peek, " \t\r\n")
+	for _, p := range []string{"event:", "data:", "id:", "retry:", ":"} {
+		if bytes.HasPrefix(s, []byte(p)) {
+			return true
+		}
+	}
+	return false
 }
