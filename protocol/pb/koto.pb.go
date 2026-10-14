@@ -4348,6 +4348,167 @@ func (x *ProvidersResp) GetProviders() []*ProviderStatus {
 	return nil
 }
 
+// Budget (see the Budget rpc comment and daemon/budget_admin.go).
+//
+//	show:  no other field.
+//	set:   provider, [auth], field, value. field is usd_per_day |
+//	       usd_per_month | tokens_per_day | max_window_used.<5h|1d|7d|30d>.
+//	       auth empty => the provider's current auth on the daemon.
+//	unset: provider, [auth], field ("all" clears the key's caps).
+//	price: provider, model, prices {in,out,cache_read,cache_write} in USD per
+//	       million tokens; an empty prices map deletes the model's price.
+type BudgetReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Op            string                 `protobuf:"bytes,1,opt,name=op,proto3" json:"op,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Auth          string                 `protobuf:"bytes,3,opt,name=auth,proto3" json:"auth,omitempty"`
+	Field         string                 `protobuf:"bytes,4,opt,name=field,proto3" json:"field,omitempty"`
+	Value         string                 `protobuf:"bytes,5,opt,name=value,proto3" json:"value,omitempty"`
+	Model         string                 `protobuf:"bytes,6,opt,name=model,proto3" json:"model,omitempty"`
+	Prices        map[string]string      `protobuf:"bytes,7,rep,name=prices,proto3" json:"prices,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BudgetReq) Reset() {
+	*x = BudgetReq{}
+	mi := &file_koto_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BudgetReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BudgetReq) ProtoMessage() {}
+
+func (x *BudgetReq) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BudgetReq.ProtoReflect.Descriptor instead.
+func (*BudgetReq) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *BudgetReq) GetOp() string {
+	if x != nil {
+		return x.Op
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetAuth() string {
+	if x != nil {
+		return x.Auth
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetField() string {
+	if x != nil {
+		return x.Field
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *BudgetReq) GetPrices() map[string]string {
+	if x != nil {
+		return x.Prices
+	}
+	return nil
+}
+
+type BudgetResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Budget        *structpb.Struct       `protobuf:"bytes,3,opt,name=budget,proto3" json:"budget,omitempty"` // full view after the operation
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BudgetResp) Reset() {
+	*x = BudgetResp{}
+	mi := &file_koto_proto_msgTypes[61]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BudgetResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BudgetResp) ProtoMessage() {}
+
+func (x *BudgetResp) ProtoReflect() protoreflect.Message {
+	mi := &file_koto_proto_msgTypes[61]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BudgetResp.ProtoReflect.Descriptor instead.
+func (*BudgetResp) Descriptor() ([]byte, []int) {
+	return file_koto_proto_rawDescGZIP(), []int{61}
+}
+
+func (x *BudgetResp) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *BudgetResp) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *BudgetResp) GetBudget() *structpb.Struct {
+	if x != nil {
+		return x.Budget
+	}
+	return nil
+}
+
 var File_koto_proto protoreflect.FileDescriptor
 
 const file_koto_proto_rawDesc = "" +
@@ -4699,7 +4860,23 @@ const file_koto_proto_rawDesc = "" +
 	"\rProvidersResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x122\n" +
-	"\tproviders\x18\x03 \x03(\v2\x14.koto.ProviderStatusR\tproviders2\x97\x0e\n" +
+	"\tproviders\x18\x03 \x03(\v2\x14.koto.ProviderStatusR\tproviders\"\xfd\x01\n" +
+	"\tBudgetReq\x12\x0e\n" +
+	"\x02op\x18\x01 \x01(\tR\x02op\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x12\n" +
+	"\x04auth\x18\x03 \x01(\tR\x04auth\x12\x14\n" +
+	"\x05field\x18\x04 \x01(\tR\x05field\x12\x14\n" +
+	"\x05value\x18\x05 \x01(\tR\x05value\x12\x14\n" +
+	"\x05model\x18\x06 \x01(\tR\x05model\x123\n" +
+	"\x06prices\x18\a \x03(\v2\x1b.koto.BudgetReq.PricesEntryR\x06prices\x1a9\n" +
+	"\vPricesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"c\n" +
+	"\n" +
+	"BudgetResp\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12/\n" +
+	"\x06budget\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x06budget2\xc4\x0e\n" +
 	"\x04Koto\x12(\n" +
 	"\x05Spawn\x12\x0e.koto.SpawnReq\x1a\x0f.koto.SpawnResp\x12%\n" +
 	"\x04Send\x12\r.koto.SendReq\x1a\x0e.koto.BaseResp\x12%\n" +
@@ -4737,7 +4914,8 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"AclSetRole\x12\x13.koto.AclSetRoleReq\x1a\r.koto.AclResp\x120\n" +
 	"\n" +
-	"AclDelRole\x12\x13.koto.AclDelRoleReq\x1a\r.koto.AclResp\x124\n" +
+	"AclDelRole\x12\x13.koto.AclDelRoleReq\x1a\r.koto.AclResp\x12+\n" +
+	"\x06Budget\x12\x0f.koto.BudgetReq\x1a\x10.koto.BudgetResp\x124\n" +
 	"\tRunScript\x12\x12.koto.RunScriptReq\x1a\x11.koto.ScriptEvent0\x01\x125\n" +
 	"\vAttachShell\x12\x10.koto.ShellInput\x1a\x10.koto.ShellFrame(\x010\x01\x123\n" +
 	"\x0eSubscribeGroup\x12\x12.koto.SubscribeReq\x1a\v.koto.Event0\x01\x120\n" +
@@ -4757,7 +4935,7 @@ func file_koto_proto_rawDescGZIP() []byte {
 	return file_koto_proto_rawDescData
 }
 
-var file_koto_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
+var file_koto_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
 var file_koto_proto_goTypes = []any{
 	(*Event)(nil),           // 0: koto.Event
 	(*RunScriptReq)(nil),    // 1: koto.RunScriptReq
@@ -4819,116 +4997,123 @@ var file_koto_proto_goTypes = []any{
 	(*ProvidersReq)(nil),    // 57: koto.ProvidersReq
 	(*ProviderStatus)(nil),  // 58: koto.ProviderStatus
 	(*ProvidersResp)(nil),   // 59: koto.ProvidersResp
-	nil,                     // 60: koto.StateFrame.GroupsEntry
-	nil,                     // 61: koto.ListResp.GroupsEntry
-	(*structpb.Struct)(nil), // 62: google.protobuf.Struct
+	(*BudgetReq)(nil),       // 60: koto.BudgetReq
+	(*BudgetResp)(nil),      // 61: koto.BudgetResp
+	nil,                     // 62: koto.StateFrame.GroupsEntry
+	nil,                     // 63: koto.ListResp.GroupsEntry
+	nil,                     // 64: koto.BudgetReq.PricesEntry
+	(*structpb.Struct)(nil), // 65: google.protobuf.Struct
 }
 var file_koto_proto_depIdxs = []int32{
 	0,  // 0: koto.ScriptEvent.parsed:type_name -> koto.Event
 	4,  // 1: koto.ShellInput.open:type_name -> koto.ShellOpen
 	5,  // 2: koto.ShellInput.resize:type_name -> koto.ShellResize
 	9,  // 3: koto.GroupInfo.jobs:type_name -> koto.JobInfo
-	60, // 4: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
+	62, // 4: koto.StateFrame.groups:type_name -> koto.StateFrame.GroupsEntry
 	9,  // 5: koto.JobsResp.jobs:type_name -> koto.JobInfo
 	9,  // 6: koto.JobLogsResp.job:type_name -> koto.JobInfo
 	31, // 7: koto.GoalResp.item:type_name -> koto.GoalItem
 	31, // 8: koto.GoalListResp.goals:type_name -> koto.GoalItem
-	61, // 9: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
+	63, // 9: koto.ListResp.groups:type_name -> koto.ListResp.GroupsEntry
 	0,  // 10: koto.HistoryResp.events:type_name -> koto.Event
-	62, // 11: koto.ConfigResp.config:type_name -> google.protobuf.Struct
-	62, // 12: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
-	62, // 13: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
+	65, // 11: koto.ConfigResp.config:type_name -> google.protobuf.Struct
+	65, // 12: koto.MetricsResp.metric:type_name -> google.protobuf.Struct
+	65, // 13: koto.MetricsResp.global_metric:type_name -> google.protobuf.Struct
 	10, // 14: koto.SchedAddResp.item:type_name -> koto.ScheduleItem
 	10, // 15: koto.SchedListResp.schedules:type_name -> koto.ScheduleItem
 	48, // 16: koto.ResourcesResp.groups:type_name -> koto.GroupResources
 	49, // 17: koto.ResourcesResp.host:type_name -> koto.HostResources
-	62, // 18: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
-	62, // 19: koto.AclResp.acl:type_name -> google.protobuf.Struct
+	65, // 18: koto.AclSetRoleReq.grants:type_name -> google.protobuf.Struct
+	65, // 19: koto.AclResp.acl:type_name -> google.protobuf.Struct
 	55, // 20: koto.ModelsResp.models:type_name -> koto.ModelInfo
 	58, // 21: koto.ProvidersResp.providers:type_name -> koto.ProviderStatus
-	8,  // 22: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
-	8,  // 23: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
-	11, // 24: koto.Koto.Spawn:input_type -> koto.SpawnReq
-	12, // 25: koto.Koto.Send:input_type -> koto.SendReq
-	14, // 26: koto.Koto.List:input_type -> koto.ListReq
-	13, // 27: koto.Koto.Stop:input_type -> koto.GroupReq
-	13, // 28: koto.Koto.Interrupt:input_type -> koto.GroupReq
-	13, // 29: koto.Koto.Destroy:input_type -> koto.GroupReq
-	13, // 30: koto.Koto.Restart:input_type -> koto.GroupReq
-	19, // 31: koto.Koto.History:input_type -> koto.HistoryReq
-	20, // 32: koto.Koto.Config:input_type -> koto.ConfigReq
-	26, // 33: koto.Koto.Metrics:input_type -> koto.MetricsReq
-	13, // 34: koto.Koto.Clear:input_type -> koto.GroupReq
-	13, // 35: koto.Koto.Drain:input_type -> koto.GroupReq
-	21, // 36: koto.Koto.Jobs:input_type -> koto.JobsReq
-	23, // 37: koto.Koto.JobLogs:input_type -> koto.JobLogsReq
-	24, // 38: koto.Koto.JobTail:input_type -> koto.JobTailReq
-	27, // 39: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
-	28, // 40: koto.Koto.SchedList:input_type -> koto.SchedListReq
-	29, // 41: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
-	30, // 42: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
-	29, // 43: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
-	32, // 44: koto.Koto.GoalSet:input_type -> koto.GoalSetReq
-	33, // 45: koto.Koto.GoalList:input_type -> koto.GoalListReq
-	34, // 46: koto.Koto.GoalApprove:input_type -> koto.GoalGroupReq
-	34, // 47: koto.Koto.GoalPause:input_type -> koto.GoalGroupReq
-	34, // 48: koto.Koto.GoalInterrupt:input_type -> koto.GoalGroupReq
-	34, // 49: koto.Koto.GoalResume:input_type -> koto.GoalGroupReq
-	34, // 50: koto.Koto.GoalCancel:input_type -> koto.GoalGroupReq
-	46, // 51: koto.Koto.Resources:input_type -> koto.ResourcesReq
-	54, // 52: koto.Koto.Models:input_type -> koto.ModelsReq
-	57, // 53: koto.Koto.Providers:input_type -> koto.ProvidersReq
-	50, // 54: koto.Koto.AclGet:input_type -> koto.AclGetReq
-	51, // 55: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
-	52, // 56: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
-	1,  // 57: koto.Koto.RunScript:input_type -> koto.RunScriptReq
-	3,  // 58: koto.Koto.AttachShell:input_type -> koto.ShellInput
-	17, // 59: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
-	15, // 60: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
-	16, // 61: koto.Koto.WatchState:input_type -> koto.WatchReq
-	38, // 62: koto.Koto.Spawn:output_type -> koto.SpawnResp
-	37, // 63: koto.Koto.Send:output_type -> koto.BaseResp
-	40, // 64: koto.Koto.List:output_type -> koto.ListResp
-	37, // 65: koto.Koto.Stop:output_type -> koto.BaseResp
-	37, // 66: koto.Koto.Interrupt:output_type -> koto.BaseResp
-	37, // 67: koto.Koto.Destroy:output_type -> koto.BaseResp
-	38, // 68: koto.Koto.Restart:output_type -> koto.SpawnResp
-	41, // 69: koto.Koto.History:output_type -> koto.HistoryResp
-	42, // 70: koto.Koto.Config:output_type -> koto.ConfigResp
-	43, // 71: koto.Koto.Metrics:output_type -> koto.MetricsResp
-	37, // 72: koto.Koto.Clear:output_type -> koto.BaseResp
-	39, // 73: koto.Koto.Drain:output_type -> koto.DrainResp
-	22, // 74: koto.Koto.Jobs:output_type -> koto.JobsResp
-	25, // 75: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
-	2,  // 76: koto.Koto.JobTail:output_type -> koto.ScriptEvent
-	44, // 77: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
-	45, // 78: koto.Koto.SchedList:output_type -> koto.SchedListResp
-	37, // 79: koto.Koto.SchedDel:output_type -> koto.BaseResp
-	37, // 80: koto.Koto.SchedToggle:output_type -> koto.BaseResp
-	37, // 81: koto.Koto.SchedRun:output_type -> koto.BaseResp
-	35, // 82: koto.Koto.GoalSet:output_type -> koto.GoalResp
-	36, // 83: koto.Koto.GoalList:output_type -> koto.GoalListResp
-	35, // 84: koto.Koto.GoalApprove:output_type -> koto.GoalResp
-	35, // 85: koto.Koto.GoalPause:output_type -> koto.GoalResp
-	35, // 86: koto.Koto.GoalInterrupt:output_type -> koto.GoalResp
-	35, // 87: koto.Koto.GoalResume:output_type -> koto.GoalResp
-	35, // 88: koto.Koto.GoalCancel:output_type -> koto.GoalResp
-	47, // 89: koto.Koto.Resources:output_type -> koto.ResourcesResp
-	56, // 90: koto.Koto.Models:output_type -> koto.ModelsResp
-	59, // 91: koto.Koto.Providers:output_type -> koto.ProvidersResp
-	53, // 92: koto.Koto.AclGet:output_type -> koto.AclResp
-	53, // 93: koto.Koto.AclSetRole:output_type -> koto.AclResp
-	53, // 94: koto.Koto.AclDelRole:output_type -> koto.AclResp
-	2,  // 95: koto.Koto.RunScript:output_type -> koto.ScriptEvent
-	6,  // 96: koto.Koto.AttachShell:output_type -> koto.ShellFrame
-	0,  // 97: koto.Koto.SubscribeGroup:output_type -> koto.Event
-	7,  // 98: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
-	18, // 99: koto.Koto.WatchState:output_type -> koto.StateFrame
-	62, // [62:100] is the sub-list for method output_type
-	24, // [24:62] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	64, // 22: koto.BudgetReq.prices:type_name -> koto.BudgetReq.PricesEntry
+	65, // 23: koto.BudgetResp.budget:type_name -> google.protobuf.Struct
+	8,  // 24: koto.StateFrame.GroupsEntry.value:type_name -> koto.GroupInfo
+	8,  // 25: koto.ListResp.GroupsEntry.value:type_name -> koto.GroupInfo
+	11, // 26: koto.Koto.Spawn:input_type -> koto.SpawnReq
+	12, // 27: koto.Koto.Send:input_type -> koto.SendReq
+	14, // 28: koto.Koto.List:input_type -> koto.ListReq
+	13, // 29: koto.Koto.Stop:input_type -> koto.GroupReq
+	13, // 30: koto.Koto.Interrupt:input_type -> koto.GroupReq
+	13, // 31: koto.Koto.Destroy:input_type -> koto.GroupReq
+	13, // 32: koto.Koto.Restart:input_type -> koto.GroupReq
+	19, // 33: koto.Koto.History:input_type -> koto.HistoryReq
+	20, // 34: koto.Koto.Config:input_type -> koto.ConfigReq
+	26, // 35: koto.Koto.Metrics:input_type -> koto.MetricsReq
+	13, // 36: koto.Koto.Clear:input_type -> koto.GroupReq
+	13, // 37: koto.Koto.Drain:input_type -> koto.GroupReq
+	21, // 38: koto.Koto.Jobs:input_type -> koto.JobsReq
+	23, // 39: koto.Koto.JobLogs:input_type -> koto.JobLogsReq
+	24, // 40: koto.Koto.JobTail:input_type -> koto.JobTailReq
+	27, // 41: koto.Koto.SchedAdd:input_type -> koto.SchedAddReq
+	28, // 42: koto.Koto.SchedList:input_type -> koto.SchedListReq
+	29, // 43: koto.Koto.SchedDel:input_type -> koto.SchedIDReq
+	30, // 44: koto.Koto.SchedToggle:input_type -> koto.SchedToggleReq
+	29, // 45: koto.Koto.SchedRun:input_type -> koto.SchedIDReq
+	32, // 46: koto.Koto.GoalSet:input_type -> koto.GoalSetReq
+	33, // 47: koto.Koto.GoalList:input_type -> koto.GoalListReq
+	34, // 48: koto.Koto.GoalApprove:input_type -> koto.GoalGroupReq
+	34, // 49: koto.Koto.GoalPause:input_type -> koto.GoalGroupReq
+	34, // 50: koto.Koto.GoalInterrupt:input_type -> koto.GoalGroupReq
+	34, // 51: koto.Koto.GoalResume:input_type -> koto.GoalGroupReq
+	34, // 52: koto.Koto.GoalCancel:input_type -> koto.GoalGroupReq
+	46, // 53: koto.Koto.Resources:input_type -> koto.ResourcesReq
+	54, // 54: koto.Koto.Models:input_type -> koto.ModelsReq
+	57, // 55: koto.Koto.Providers:input_type -> koto.ProvidersReq
+	50, // 56: koto.Koto.AclGet:input_type -> koto.AclGetReq
+	51, // 57: koto.Koto.AclSetRole:input_type -> koto.AclSetRoleReq
+	52, // 58: koto.Koto.AclDelRole:input_type -> koto.AclDelRoleReq
+	60, // 59: koto.Koto.Budget:input_type -> koto.BudgetReq
+	1,  // 60: koto.Koto.RunScript:input_type -> koto.RunScriptReq
+	3,  // 61: koto.Koto.AttachShell:input_type -> koto.ShellInput
+	17, // 62: koto.Koto.SubscribeGroup:input_type -> koto.SubscribeReq
+	15, // 63: koto.Koto.SubscribeLogs:input_type -> koto.LogsReq
+	16, // 64: koto.Koto.WatchState:input_type -> koto.WatchReq
+	38, // 65: koto.Koto.Spawn:output_type -> koto.SpawnResp
+	37, // 66: koto.Koto.Send:output_type -> koto.BaseResp
+	40, // 67: koto.Koto.List:output_type -> koto.ListResp
+	37, // 68: koto.Koto.Stop:output_type -> koto.BaseResp
+	37, // 69: koto.Koto.Interrupt:output_type -> koto.BaseResp
+	37, // 70: koto.Koto.Destroy:output_type -> koto.BaseResp
+	38, // 71: koto.Koto.Restart:output_type -> koto.SpawnResp
+	41, // 72: koto.Koto.History:output_type -> koto.HistoryResp
+	42, // 73: koto.Koto.Config:output_type -> koto.ConfigResp
+	43, // 74: koto.Koto.Metrics:output_type -> koto.MetricsResp
+	37, // 75: koto.Koto.Clear:output_type -> koto.BaseResp
+	39, // 76: koto.Koto.Drain:output_type -> koto.DrainResp
+	22, // 77: koto.Koto.Jobs:output_type -> koto.JobsResp
+	25, // 78: koto.Koto.JobLogs:output_type -> koto.JobLogsResp
+	2,  // 79: koto.Koto.JobTail:output_type -> koto.ScriptEvent
+	44, // 80: koto.Koto.SchedAdd:output_type -> koto.SchedAddResp
+	45, // 81: koto.Koto.SchedList:output_type -> koto.SchedListResp
+	37, // 82: koto.Koto.SchedDel:output_type -> koto.BaseResp
+	37, // 83: koto.Koto.SchedToggle:output_type -> koto.BaseResp
+	37, // 84: koto.Koto.SchedRun:output_type -> koto.BaseResp
+	35, // 85: koto.Koto.GoalSet:output_type -> koto.GoalResp
+	36, // 86: koto.Koto.GoalList:output_type -> koto.GoalListResp
+	35, // 87: koto.Koto.GoalApprove:output_type -> koto.GoalResp
+	35, // 88: koto.Koto.GoalPause:output_type -> koto.GoalResp
+	35, // 89: koto.Koto.GoalInterrupt:output_type -> koto.GoalResp
+	35, // 90: koto.Koto.GoalResume:output_type -> koto.GoalResp
+	35, // 91: koto.Koto.GoalCancel:output_type -> koto.GoalResp
+	47, // 92: koto.Koto.Resources:output_type -> koto.ResourcesResp
+	56, // 93: koto.Koto.Models:output_type -> koto.ModelsResp
+	59, // 94: koto.Koto.Providers:output_type -> koto.ProvidersResp
+	53, // 95: koto.Koto.AclGet:output_type -> koto.AclResp
+	53, // 96: koto.Koto.AclSetRole:output_type -> koto.AclResp
+	53, // 97: koto.Koto.AclDelRole:output_type -> koto.AclResp
+	61, // 98: koto.Koto.Budget:output_type -> koto.BudgetResp
+	2,  // 99: koto.Koto.RunScript:output_type -> koto.ScriptEvent
+	6,  // 100: koto.Koto.AttachShell:output_type -> koto.ShellFrame
+	0,  // 101: koto.Koto.SubscribeGroup:output_type -> koto.Event
+	7,  // 102: koto.Koto.SubscribeLogs:output_type -> koto.LogEvent
+	18, // 103: koto.Koto.WatchState:output_type -> koto.StateFrame
+	65, // [65:104] is the sub-list for method output_type
+	26, // [26:65] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_koto_proto_init() }
@@ -4950,7 +5135,7 @@ func file_koto_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_koto_proto_rawDesc), len(file_koto_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   62,
+			NumMessages:   65,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
