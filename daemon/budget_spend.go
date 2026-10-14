@@ -409,3 +409,51 @@ func budgetSpendModelsMonth(key budgetKey) []string {
 	sort.Strings(out)
 	return out
 }
+
+// budgetSpendPoint is one lifetime counter (OTel export): tokens per
+// (key, model, type), or USD per (key, model) when Type == "".
+type budgetSpendPoint struct {
+	Key         budgetKey
+	Model, Type string
+	Tokens      int64
+	USD         float64
+}
+
+// budgetSpendLifetime copies the lifetime totals in a stable order. USD
+// points exist only for priced models (USD != nil), so an unpriced model
+// never exports a fake $0.
+func budgetSpendLifetime() (tok, usd []budgetSpendPoint) {
+	spendMu.Lock()
+	defer spendMu.Unlock()
+	spendLoadLocked()
+	for k, models := range spendStore {
+		if !k.valid() {
+			continue
+		}
+		for m, ms := range models {
+			for typ, c := range ms.Tokens {
+				if c != nil && c.Total > 0 {
+					tok = append(tok, budgetSpendPoint{Key: k, Model: m, Type: typ, Tokens: c.Total})
+				}
+			}
+			if ms.USD != nil && budgetFinite(ms.USD.Total) && ms.USD.Total >= 0 {
+				usd = append(usd, budgetSpendPoint{Key: k, Model: m, USD: ms.USD.Total})
+			}
+		}
+	}
+	less := func(p []budgetSpendPoint) func(i, j int) bool {
+		return func(i, j int) bool {
+			a, b := p[i], p[j]
+			if a.Key != b.Key {
+				return a.Key.String() < b.Key.String()
+			}
+			if a.Model != b.Model {
+				return a.Model < b.Model
+			}
+			return a.Type < b.Type
+		}
+	}
+	sort.Slice(tok, less(tok))
+	sort.Slice(usd, less(usd))
+	return tok, usd
+}

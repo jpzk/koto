@@ -275,6 +275,10 @@ func (s *otelState) instruments(m metric.Meter) error {
 	if _, err := otelBudgetInstruments(m); err != nil {
 		errs = append(errs, err)
 	}
+	// Spend / cap / refused series (otel_budget_spend.go).
+	if _, err := otelBudgetSpendInstruments(m); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
