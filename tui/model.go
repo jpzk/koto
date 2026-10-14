@@ -5401,7 +5401,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 	}
 	if strings.HasPrefix(v, "/new ") {
-		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"
+		usage := "usage: /new <group> [provider] [model] [size=" + strings.Join(groupOptValues("size"), "|") + "]"
 		extra := map[string]any{}
 		// Pull the optional size=<preset> token out first; the rest stay
 		// positional (group / provider / model).
@@ -5409,8 +5409,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		for _, tok := range strings.Fields(v[5:]) {
 			if s, ok := strings.CutPrefix(tok, "size="); ok {
 				s = strings.ToLower(strings.TrimSpace(s))
-				if s != "small" && s != "medium" && s != "large" && s != "xlarge" {
-					m.addLine(logLine{kind: "err", text: "size must be small, medium, large, or xlarge"})
+				if !groupOptValid("size", s) {
+					m.addLine(logLine{kind: "err", text: "size must be " + groupOptChoices("size")})
 					return nil
 				}
 				extra["size"] = s
@@ -5425,8 +5425,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		g := positional[0]
 		if len(positional) >= 2 {
 			p := positional[1]
-			if p != "claudesdk" && p != "venice" {
-				m.addLine(logLine{kind: "err", text: "provider must be claudesdk or venice"})
+			if !groupOptValid("provider", p) {
+				m.addLine(logLine{kind: "err", text: "provider must be " + groupOptChoices("provider")})
 				return nil
 			}
 			extra["provider"] = p
