@@ -54,7 +54,7 @@ var otelBudgetStatuses = map[string]bool{"allowed": true, "allowed_warning": tru
 
 // otelBudgetProviders bounds the `provider` attribute (groupProvider
 // already only answers these; this is the belt to that brace).
-var otelBudgetProviders = map[string]bool{"claudesdk": true, "venice": true}
+var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true}
 
 type otelBudgetWin struct {
 	util     float64

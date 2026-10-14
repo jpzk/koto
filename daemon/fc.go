@@ -1067,6 +1067,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	env := map[string]string{
 		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
 		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
+		"KOTO_DEFAULT_OPENAI_MODEL": defaultOpenAIModel,
 		"ANTHROPIC_BASE_URL":        fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
 	}
 	// internet=full: general traffic now has a real L3 route (the gVisor

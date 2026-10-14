@@ -5262,7 +5262,9 @@ func TestProviderResolutionFailsClosed(t *testing.T) {
 		{"empty document", "blank", `{}`, defaultProvider},
 		{"truncated mid-write", "partial", `{"provider":"clau`, defaultProvider},
 		{"not JSON at all", "junk", `garbage`, defaultProvider},
-		{"unrecognised value", "odd", `{"provider":"openai"}`, defaultProvider},
+		{"explicit openai", "o", `{"provider":"openai"}`, "openai"},
+		{"unrecognised value", "odd", `{"provider":"gemini"}`, defaultProvider},
+		{"wrong case", "caps", `{"provider":"OpenAI"}`, defaultProvider},
 		{"wrong type", "typed", `{"provider":42}`, defaultProvider},
 	}
 	for _, c := range cases {

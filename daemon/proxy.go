@@ -815,12 +815,24 @@ var llmRoutesVenice = []llmRoute{
 	{http.MethodGet, "/api/v1/models/", true},
 }
 
-// llmRoutesFor returns the allowlist governing a provider's leg.
+// llmRoutesOpenAI is empty until the openai leg is wired (serveOpenAI):
+// every request is refused at the gate.
+var llmRoutesOpenAI = []llmRoute{}
+
+// llmRoutesFor returns the allowlist governing a provider's leg. An
+// unknown provider gets NO routes (fail closed) rather than the Anthropic
+// list, so a provider admitted by validProvider before its leg exists can
+// never relay to Anthropic with the Anthropic credential.
 func llmRoutesFor(provider string) []llmRoute {
-	if provider == "venice" {
+	switch provider {
+	case providerVenice:
 		return llmRoutesVenice
+	case providerOpenAI:
+		return llmRoutesOpenAI
+	case providerClaude, "":
+		return llmRoutesAnthropic
 	}
-	return llmRoutesAnthropic
+	return nil
 }
 
 // llmPathAllowed decides one request against its provider's list. The path is
@@ -1170,8 +1182,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path, tp)
 	defer llmSp.End()
 	r = r.WithContext(spCtx)
-	if provider == "venice" {
+	if provider == providerVenice {
 		h.serveVenice(w, r)
+		return
+	}
+	if provider != providerClaude {
+		// Belt to llmRoutesFor's brace: only claudesdk continues to the
+		// Anthropic leg below, which injects the Anthropic credential.
+		http.Error(w, "koto proxy: provider "+provider+" has no LLM leg on this host", http.StatusServiceUnavailable)
 		return
 	}
 	llmFlowLog(h.group, r.Method, upstream, r.URL.Path)

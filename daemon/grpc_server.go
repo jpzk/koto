@@ -248,8 +248,8 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name (must match [A-Za-z0-9][A-Za-z0-9_-]{0,31})"}, nil
 	}
-	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
-		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
+	if r.Provider != "" && !validProvider(r.Provider) {
+		return &pb.SpawnResp{Error: "provider must be " + providerListText()}, nil
 	}
 	if r.Size != "" {
 		if _, ok := fcSizePresets[r.Size]; !ok {

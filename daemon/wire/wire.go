@@ -56,8 +56,9 @@ type GroupInfo struct {
 	Running bool `json:"running"`
 	// Provider is the per-group LLM backend, taken from config.json. Empty
 	// or "claudesdk" mean the Claude-via-proxy path; "venice" routes to
-	// api.venice.ai. Exposed in list so clients (TUI) can render per-provider
-	// markers without a second config round-trip per group.
+	// api.venice.ai; "openai" runs Codex CLI against OpenAI/ChatGPT.
+	// Exposed in list so clients (TUI) can render per-provider markers
+	// without a second config round-trip per group.
 	Provider string `json:"provider,omitempty"`
 	// Model is the EFFECTIVE model the group runs (daemon's groupModelName):
 	// the config.json `model` if set, else the provider default —

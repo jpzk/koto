@@ -514,6 +514,10 @@ const defaultProvider = "claudesdk"
 const defaultClaudeModel = "claude-sonnet-5"
 const defaultVeniceModel = "kimi-k2.5"
 
+// defaultOpenAIModel is what an openai (Codex CLI) group runs when config.json
+// has no `model`; injected as KOTO_DEFAULT_OPENAI_MODEL like the others.
+const defaultOpenAIModel = "gpt-5-codex"
+
 // ensureProviderConfig writes provider and runtime defaults into a group's
 // config.json when missing or invalid. Idempotent — when the field is already
 // valid the file is left untouched. Called by ensure() on every spawn/send so
@@ -521,7 +525,7 @@ const defaultVeniceModel = "kimi-k2.5"
 // created before this code existed.
 func ensureProviderConfig(g string) error {
 	_, err := updateGroupConfig(g, func(cfg map[string]any) {
-		if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
+		if s, ok := cfg["provider"].(string); !ok || !validProvider(s) {
 			cfg["provider"] = defaultProvider
 		}
 	})
@@ -606,7 +610,7 @@ func (c groupConfig) boolYes(key string) bool {
 }
 
 func (c groupConfig) provider() string {
-	if s := c.str("provider"); s == "claudesdk" || s == "venice" {
+	if s := c.str("provider"); validProvider(s) {
 		return s
 	}
 	return defaultProvider
@@ -617,8 +621,11 @@ func (c groupConfig) model() string {
 	if m := c.str("model"); m != "" {
 		return m
 	}
-	if c.provider() == "venice" {
+	switch c.provider() {
+	case providerVenice:
 		return defaultVeniceModel
+	case providerOpenAI:
+		return defaultOpenAIModel
 	}
 	return defaultClaudeModel
 }

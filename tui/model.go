@@ -5425,8 +5425,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		g := positional[0]
 		if len(positional) >= 2 {
 			p := positional[1]
-			if p != "claudesdk" && p != "venice" {
-				m.addLine(logLine{kind: "err", text: "provider must be claudesdk or venice"})
+			if p != "claudesdk" && p != "venice" && p != "openai" {
+				m.addLine(logLine{kind: "err", text: "provider must be claudesdk, venice or openai"})
 				return nil
 			}
 			extra["provider"] = p
