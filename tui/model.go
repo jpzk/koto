@@ -632,6 +632,9 @@ type Model struct {
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
 	newGroup newGroupForm
+	// modelsCache is the per-provider model list the new-group dialog has
+	// fetched this session (modelpick.go), shared across dialog opens.
+	modelsCache map[string]modelsLoadedMsg
 
 	// Fleet (top) view (focusTop / ctrl+K). No subscription of its own —
 	// the rows are joined from state the TUI already holds fresh: m.groups
@@ -2892,6 +2895,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case newGroupResultMsg:
 		return m, m.handleNewGroupResult(msg)
 
+	case modelsLoadedMsg:
+		m.handleModelsLoaded(msg)
+		return m, nil
+
 	case promptFireMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/prompt %s: %v", msg.name, msg.err)})
@@ -4255,8 +4262,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// New-group dialog (newgroup.go). Reached only outside the picker
 		// (whose block above keeps ctrl+n = down) and outside shell focus
 		// (where the guest gets it — readline next-history).
-		m.openNewGroup()
-		return m, nil
+		return m, m.openNewGroup()
 	}
 	if s == "alt+t" {
 		// Toggle thought-body expansion globally. Thought blocks render

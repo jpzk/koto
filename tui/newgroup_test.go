@@ -31,6 +31,11 @@ type fakeKoto struct {
 	mu     sync.Mutex
 	calls  []string
 	failOp string
+	// models is the Models RPC answer per provider (fakeModelsDefault when
+	// nil); modelsCalls counts Models calls per provider. Kept out of calls
+	// so the spawn/config/restart sequences stay exact.
+	models      map[string]*pb.ModelsResp
+	modelsCalls map[string]int
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {
@@ -466,9 +471,12 @@ func TestNewGroupCreateChosenFields(t *testing.T) {
 	m = press(t, m, tea.KeyCtrlN)
 	m = typeText(t, m, "lab-1")
 	m = gotoField(t, m, "provider")
-	m = press(t, m, tea.KeyRight) // venice
+	m, cmd := pressCmd(t, m, tea.KeyRight) // venice
+	m = runCmds(t, m, cmd, 2)              // its model list
 	m = gotoField(t, m, ngModel)
-	m = typeText(t, m, "llama-3.3-70b")
+	m = press(t, m, tea.KeyEnter) // open the list
+	m = typeText(t, m, "l")       // type-ahead: Llama
+	m = press(t, m, tea.KeyEnter) // pick
 	m = gotoField(t, m, "effort")
 	m = press(t, m, tea.KeyRight)
 	m = press(t, m, tea.KeyRight)
@@ -493,7 +501,7 @@ func TestNewGroupCreateChosenFields(t *testing.T) {
 	}
 
 	m = gotoField(t, m, ngCreate)
-	m, cmd := pressCmd(t, m, tea.KeyEnter)
+	m, cmd = pressCmd(t, m, tea.KeyEnter)
 	m = runCmds(t, m, cmd, 4)
 	want := []string{
 		"spawn group=lab-1 model=llama-3.3-70b provider=venice size=xlarge",
@@ -620,4 +628,46 @@ func TestNewGroupFits40Cols(t *testing.T) {
 		t.Errorf("short frame %d rows > 12", n)
 	}
 	_ = fmt.Sprint()
+}
+
+// fakeModelsDefault: claudesdk and venice live, openai an offline fallback.
+func fakeModelsDefault() map[string]*pb.ModelsResp {
+	mi := func(kv ...string) []*pb.ModelInfo {
+		var out []*pb.ModelInfo
+		for i := 0; i+1 < len(kv); i += 2 {
+			out = append(out, &pb.ModelInfo{Id: kv[i], DisplayName: kv[i+1]})
+		}
+		return out
+	}
+	return map[string]*pb.ModelsResp{
+		"claudesdk": {Ok: true, Provider: "claudesdk", Source: "live",
+			Models: mi("claude-opus-4-1", "Claude Opus 4.1", "claude-sonnet-4-5", "Claude Sonnet 4.5")},
+		"venice": {Ok: true, Provider: "venice", Source: "live",
+			Models: mi("llama-3.3-70b", "Llama 3.3 70B", "qwen3-235b", "Qwen3 235B")},
+		"openai": {Ok: true, Provider: "openai", Source: "fallback", Reason: "no credential",
+			Models: mi("gpt-5", "gpt-5", "qwen3-235b", "Qwen3 235B")},
+	}
+}
+
+func (f *fakeKoto) Models(_ context.Context, r *pb.ModelsReq) (*pb.ModelsResp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.modelsCalls == nil {
+		f.modelsCalls = map[string]int{}
+	}
+	f.modelsCalls[r.Provider]++
+	tbl := f.models
+	if tbl == nil {
+		tbl = fakeModelsDefault()
+	}
+	if resp, ok := tbl[r.Provider]; ok {
+		return resp, nil
+	}
+	return &pb.ModelsResp{Ok: false, Error: "unknown provider " + r.Provider}, nil
+}
+
+func (f *fakeKoto) modelCalls(p string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.modelsCalls[p]
 }

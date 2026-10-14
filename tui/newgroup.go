@@ -23,24 +23,27 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Field keys that are not table selects.
+// Field keys that are not table selects. ngModel is the model select
+// (modelpick.go); ngCustom is its custom-id input, reachable only while the
+// select is on "custom…".
 const (
 	ngName   = "name"
 	ngModel  = "model"
+	ngCustom = "model-id"
 	ngPorts  = "ports"
 	ngCreate = "create"
 )
 
 // newGroupFields is the dialog's field order: name, then the table's selects
-// in table order with the free-text model right after provider, then ports
-// and the Create button. Derived from groupOptTable so a new knob there shows
-// up here without a second list.
+// in table order with the model select (and its custom-id input) right after
+// provider, then ports and the Create button. Derived from groupOptTable so a
+// new knob there shows up here without a second list.
 func newGroupFields() []string {
 	f := []string{ngName}
 	for _, o := range groupOptTable {
 		f = append(f, o.key)
 		if o.key == "provider" {
-			f = append(f, ngModel)
+			f = append(f, ngModel, ngCustom)
 		}
 	}
 	return append(f, ngPorts, ngCreate)
@@ -51,7 +54,8 @@ type newGroupForm struct {
 	fields []string
 	cur    int
 	name   textinput.Model
-	model  textinput.Model
+	mp     modelPick       // the model select
+	custom textinput.Model // the custom model id (mp on "custom…")
 	ports  textinput.Model
 	sel    map[string]int // select key → index into groupOptValues(key)
 	err    string         // inline error, shown under errAt
@@ -76,13 +80,15 @@ func newGroupInput(limit int, placeholder string) textinput.Model {
 	return ti
 }
 
-// openNewGroup opens a fresh dialog: every select at its table default.
-func (m *Model) openNewGroup() {
+// openNewGroup opens a fresh dialog: every select at its table default, the
+// model select on "provider default" and its list loading for the default
+// provider. The returned cmd fetches that list.
+func (m *Model) openNewGroup() tea.Cmd {
 	f := newGroupForm{
 		open:   true,
 		fields: newGroupFields(),
 		name:   newGroupInput(32, "lowercase, e.g. research"),
-		model:  newGroupInput(80, "provider default"),
+		custom: newGroupInput(64, "model id"),
 		ports:  newGroupInput(200, "e.g. 8080,3000"),
 		sel:    map[string]int{},
 	}
@@ -90,10 +96,60 @@ func (m *Model) openNewGroup() {
 		f.sel[o.key] = 0
 	}
 	f.name.Focus()
+	// The per-provider list cache outlives one dialog: reopening it does not
+	// refetch what this TUI already has (the daemon caches too).
+	f.mp.cache = m.modelsCache
 	m.newGroup = f
+	return m.reloadModels()
+}
+
+// reloadModels points the model select at the dialog's current provider and
+// returns the fetch, or nil when the list came from the cache.
+func (m *Model) reloadModels() tea.Cmd {
+	f := &m.newGroup
+	prov := f.value("provider")
+	if !f.mp.beginLoad(prov) {
+		return nil
+	}
+	if m.modelsCache == nil {
+		m.modelsCache = f.mp.cache
+	}
+	return modelsCmd(m.sock, prov, f.mp.seq)
+}
+
+// handleModelsLoaded feeds a Models result to the open dialog. The cache is
+// shared with the Model so a result that lands after the dialog closed still
+// saves the next open a fetch.
+func (m *Model) handleModelsLoaded(msg modelsLoadedMsg) {
+	if !m.newGroup.open {
+		if msg.cacheable() && m.modelsCache != nil {
+			m.modelsCache[msg.provider] = msg
+		}
+		return
+	}
+	m.newGroup.mp.loaded(msg)
+	if m.newGroup.field() == ngCustom && !m.newGroup.mp.isCustom() {
+		m.newGroup.move(-1)
+	}
 }
 
 func (f *newGroupForm) field() string { return f.fields[f.cur] }
+
+// hidden reports whether field key is currently skipped: the custom-id input
+// only exists while the model select is on "custom…".
+func (f *newGroupForm) hidden(key string) bool {
+	return key == ngCustom && !f.mp.isCustom()
+}
+
+// modelValue is the model the submit sends ("" = provider default) and, for
+// an unusable custom id, the inline error.
+func (f *newGroupForm) modelValue() (string, string) {
+	if f.mp.isCustom() {
+		id := strings.TrimSpace(f.custom.Value())
+		return id, validateModelID(id)
+	}
+	return f.mp.listID(), ""
+}
 
 // value is the current choice for a select key.
 func (f *newGroupForm) value(key string) string {
@@ -108,20 +164,31 @@ func (f *newGroupForm) input(key string) *textinput.Model {
 	switch key {
 	case ngName:
 		return &f.name
-	case ngModel:
-		return &f.model
+	case ngCustom:
+		return &f.custom
 	case ngPorts:
 		return &f.ports
 	}
 	return nil
 }
 
+// move steps the cursor by d visible fields (hidden ones are skipped; d's
+// magnitude counts visible steps only for |d| == 1, which is all the keys
+// use — submit's jump-to-field passes the exact index delta).
 func (f *newGroupForm) move(d int) {
 	if in := f.input(f.field()); in != nil {
 		in.Blur()
 	}
+	f.mp.open = false
 	n := len(f.fields)
 	f.cur = ((f.cur+d)%n + n) % n
+	step := 1
+	if d < 0 {
+		step = -1
+	}
+	for i := 0; i < n && f.hidden(f.field()); i++ {
+		f.cur = ((f.cur+step)%n + n) % n
+	}
 	if in := f.input(f.field()); in != nil {
 		in.Focus()
 	}
@@ -169,9 +236,9 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	if err != nil {
 		return newGroupPlan{}, ngPorts, err.Error()
 	}
-	model := strings.TrimSpace(f.model.Value())
-	if strings.ContainsAny(model, " \t") {
-		return newGroupPlan{}, ngModel, "model: no spaces"
+	model, merr := f.modelValue()
+	if merr != "" {
+		return newGroupPlan{}, ngCustom, merr
 	}
 	p := newGroupPlan{group: g}
 	if g != f.spawned {
@@ -303,6 +370,11 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	f := &m.newGroup
 	key := f.field()
+	if key == ngModel {
+		if done, cmd := m.handleModelKey(msg); done {
+			return m, cmd
+		}
+	}
 	switch s := msg.String(); s {
 	case "esc", "ctrl+c":
 		m.newGroup = newGroupForm{}
@@ -326,6 +398,9 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				d = -1
 			}
 			f.cycle(d)
+			if key == "provider" {
+				return m, m.reloadModels()
+			}
 			return m, nil
 		}
 	}
@@ -338,6 +413,70 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// handleModelKey: keys on the model select. Closed: left/right cycle the
+// options, enter/space open the list. Open: up/down/pgup/pgdn/home/end move,
+// a letter jumps (type-ahead), enter/space pick, esc closes the list only.
+// Picking "custom…" moves focus to the id input. done=false hands the key to
+// the dialog's generic routing (tab, esc on a closed list, …).
+func (m *Model) handleModelKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	f := &m.newGroup
+	p := &f.mp
+	s := msg.String()
+	if !p.open {
+		switch s {
+		case "left", "right":
+			d := 1
+			if s == "left" {
+				d = -1
+			}
+			p.setSel(p.sel + d)
+			f.clearErr(ngCustom)
+			return true, nil
+		case "enter", " ":
+			p.open, p.cur = true, p.sel
+			return true, nil
+		}
+		return false, nil
+	}
+	n := p.count()
+	switch s {
+	case "esc":
+		p.open = false
+	case "up", "ctrl+p", "shift+tab":
+		p.cur = max(0, p.cur-1)
+	case "down", "ctrl+n", "tab":
+		p.cur = min(n-1, p.cur+1)
+	case "pgup":
+		p.cur = max(0, p.cur-modelDropRows)
+	case "pgdown":
+		p.cur = min(n-1, p.cur+modelDropRows)
+	case "home":
+		p.cur = 0
+	case "end":
+		p.cur = n - 1
+	case "enter", " ":
+		p.setSel(p.cur)
+		p.open = false
+		f.clearErr(ngCustom)
+		if p.isCustom() {
+			f.move(1) // onto the id input
+		}
+	case "ctrl+c":
+		return false, nil
+	default:
+		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+			p.jump(msg.Runes[0])
+		}
+	}
+	return true, nil
+}
+
+func (f *newGroupForm) clearErr(key string) {
+	if f.errAt == key {
+		f.err, f.errAt = "", ""
+	}
 }
 
 // newGroupBoxWidth is the dialog's outer width: the frame minus a one-cell
@@ -367,6 +506,9 @@ func (m Model) renderNewGroup() string {
 		}
 	}
 	for i, key := range f.fields {
+		if f.hidden(key) {
+			continue
+		}
 		focused := i == f.cur
 		if focused {
 			curLine = len(lines)
@@ -392,12 +534,38 @@ func (m Model) renderNewGroup() string {
 			continue
 		}
 		label := fmt.Sprintf("%-*s", labelW, key)
+		if key == ngCustom {
+			label = fmt.Sprintf("%-*s", labelW, "  id")
+		}
 		if focused {
 			label = amber.Render(label)
 		} else {
 			label = gray.Render(label)
 		}
 		var val string
+		if key == ngModel {
+			p := &f.mp
+			v := p.label(p.sel)
+			if focused {
+				val = amber.Render(gl("‹ ", "< ")) + truncCells(v, valW-4) + amber.Render(gl(" ›", " >"))
+			} else {
+				val = "  " + truncCells(v, valW-2)
+			}
+			lines = append(lines, mark+label+val)
+			pad := strings.Repeat(" ", 2+labelW+2)
+			if h := p.hint(focused); h != "" {
+				hs := gray
+				if p.state == modelsFallback || p.state == modelsFailed {
+					hs = amber
+				}
+				lines = append(lines, pad+hs.Render(truncCells(h, inner-len(pad))))
+			}
+			if focused && p.open {
+				curLine = m.renderModelList(&lines, inner)
+			}
+			errLine(key)
+			continue
+		}
 		if in := f.input(key); in != nil {
 			in.Width = valW - 3
 			val = "  " + in.View()
@@ -416,6 +584,12 @@ func (m Model) renderNewGroup() string {
 		}
 		lines = append(lines, mark+label+val)
 		errLine(key)
+		if key == ngCustom && f.errAt != ngCustom && f.custom.Value() != "" {
+			// Live check while typing; the submit-time error replaces it.
+			if e := validateModelID(strings.TrimSpace(f.custom.Value())); e != "" {
+				lines = append(lines, red.Width(inner).Render(gl("✗ ", "x ")+e))
+			}
+		}
 	}
 
 	// Summary: what Create will do, risky picks highlighted with a note.
@@ -424,7 +598,11 @@ func (m Model) renderNewGroup() string {
 	if e == "" {
 		var parts []string
 		if p.spawn != nil {
-			parts = append(parts, fmt.Sprintf("spawn %s (%s, %s)", p.group, p.spawn["provider"], p.spawn["size"]))
+			if mv, ok := p.spawn["model"]; ok {
+				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s, %s)", p.group, p.spawn["provider"], mv, p.spawn["size"]))
+			} else {
+				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s)", p.group, p.spawn["provider"], p.spawn["size"]))
+			}
 		}
 		if p.config != nil {
 			kv := make([]string, 0, len(p.config))
@@ -447,9 +625,17 @@ func (m Model) renderNewGroup() string {
 			lines = append(lines, red.Inherit(wrap).Render(fmt.Sprintf("! %s=%s: %s", o.key, f.value(o.key), note)))
 		}
 	}
-	lines = append(lines, gray.Inherit(wrap).Render(
-		gl("tab/↑↓ move · ←→ change · enter create · esc cancel",
-			"tab/up/dn move . lt/rt change . enter create . esc cancel")))
+	keys := gl("tab/↑↓ move · ←→ change · enter create · esc cancel",
+		"tab/up/dn move . lt/rt change . enter create . esc cancel")
+	if f.field() == ngModel {
+		keys = gl("←→ change · enter list · tab next · esc cancel",
+			"lt/rt change . enter list . tab next . esc cancel")
+		if f.mp.open {
+			keys = gl("↑↓ move · a-z jump · enter pick · esc close",
+				"up/dn move . a-z jump . enter pick . esc close")
+		}
+	}
+	lines = append(lines, gray.Inherit(wrap).Render(keys))
 
 	// Short terminal: window the body around the focused row.
 	body := strings.Join(lines, "\n")
@@ -471,4 +657,47 @@ func (m Model) renderNewGroup() string {
 		Width(bw - 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left, head, "", strings.Join(bodyLines, "\n")))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderModelList appends the open model list (a window of modelDropRows
+// options around the cursor, with "↑ n more"/"↓ n more" edges) to lines and
+// returns the line index of the cursor row, so a short terminal's body
+// windowing keeps it on screen. Every row fits inner cells: the display name
+// is plain, the id dimmed, both truncated with … (modelPick.dropRow).
+func (m Model) renderModelList(lines *[]string, inner int) int {
+	p := &m.newGroup.mp
+	amber := lipgloss.NewStyle().Foreground(cAmber)
+	gray := lipgloss.NewStyle().Foreground(cGray)
+	const indent = "    "
+	w := inner - len(indent) - 2
+	start, end := p.window()
+	cur := len(*lines)
+	if start > 0 {
+		*lines = append(*lines, indent+gray.Render(fmt.Sprintf(gl("  ↑ %d more", "  ^ %d more"), start)))
+	}
+	for i := start; i < end; i++ {
+		name, id := p.dropRow(i, w)
+		mark := "  "
+		switch {
+		case i == p.cur:
+			mark = amber.Render(gl("› ", "> "))
+		case i == p.sel:
+			mark = amber.Render(gl("• ", "* "))
+		}
+		row := name
+		if i == p.cur {
+			row = amber.Bold(true).Render(name)
+		}
+		if id != "" {
+			row += " " + gray.Faint(true).Render(id)
+		}
+		if i == p.cur {
+			cur = len(*lines)
+		}
+		*lines = append(*lines, indent+mark+row)
+	}
+	if rest := p.count() - end; rest > 0 {
+		*lines = append(*lines, indent+gray.Render(fmt.Sprintf(gl("  ↓ %d more", "  v %d more"), rest)))
+	}
+	return cur
 }
