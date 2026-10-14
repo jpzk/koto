@@ -629,6 +629,13 @@ type Model struct {
 	helpVP      viewport.Model
 	helpVPReady bool
 
+	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
+	// cheatsheet: owns keys and the frame while newGroup.open.
+	newGroup newGroupForm
+	// modelsCache is the per-provider model list the new-group dialog has
+	// fetched this session (modelpick.go), shared across dialog opens.
+	modelsCache map[string]modelsLoadedMsg
+
 	// Fleet (top) view (focusTop / ctrl+K). No subscription of its own —
 	// the rows are joined from state the TUI already holds fresh: m.groups
 	// (WatchState push: model, tok/s, network, root) and m.resources +
@@ -2885,6 +2892,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case daemonRespMsg:
 		return m, m.handleDaemonResp(msg)
 
+	case newGroupResultMsg:
+		return m, m.handleNewGroupResult(msg)
+
+	case modelsLoadedMsg:
+		m.handleModelsLoaded(msg)
+		return m, nil
+
 	case promptFireMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/prompt %s: %v", msg.name, msg.err)})
@@ -3083,6 +3097,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// Cheatsheet modal: it covers the whole frame, so the wheel scrolls
 		// its content and clicks are swallowed — same reasoning as the
 		// picker gates below (the panes under the pointer aren't visible).
+		if m.newGroup.open {
+			return m, nil // modal form: the panes under the pointer are hidden
+		}
 		if m.helpOpen {
 			if m.helpVPReady {
 				var cmd tea.Cmd
@@ -4097,6 +4114,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handlePickerKey(msg)
 	}
+	if m.newGroup.open {
+		// The new-group dialog (newgroup.go) owns keys like the cheatsheet,
+		// for the same reason: it covers the frame.
+		return m.handleNewGroupKey(msg)
+	}
 	if m.helpOpen {
 		// The cheatsheet modal owns keys like the picker does — ahead of the
 		// shell block too, since the palette can open it from the terminal
@@ -4235,6 +4257,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// so it gets the ctrl-tier binding.
 		m.openGroupPicker()
 		return m, nil
+	}
+	if s == "ctrl+n" {
+		// New-group dialog (newgroup.go). Reached only outside the picker
+		// (whose block above keeps ctrl+n = down) and outside shell focus
+		// (where the guest gets it — readline next-history).
+		return m, m.openNewGroup()
 	}
 	if s == "alt+t" {
 		// Toggle thought-body expansion globally. Thought blocks render
@@ -5401,7 +5429,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 	}
 	if strings.HasPrefix(v, "/new ") {
-		usage := "usage: /new <group> [provider] [model] [size=small|medium|large|xlarge]"
+		usage := "usage: /new <group> [provider] [model] [size=" + strings.Join(groupOptValues("size"), "|") + "]"
 		extra := map[string]any{}
 		// Pull the optional size=<preset> token out first; the rest stay
 		// positional (group / provider / model).
@@ -5409,8 +5437,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		for _, tok := range strings.Fields(v[5:]) {
 			if s, ok := strings.CutPrefix(tok, "size="); ok {
 				s = strings.ToLower(strings.TrimSpace(s))
-				if s != "small" && s != "medium" && s != "large" && s != "xlarge" {
-					m.addLine(logLine{kind: "err", text: "size must be small, medium, large, or xlarge"})
+				if !groupOptValid("size", s) {
+					m.addLine(logLine{kind: "err", text: "size must be " + groupOptChoices("size")})
 					return nil
 				}
 				extra["size"] = s
@@ -5425,8 +5453,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		g := positional[0]
 		if len(positional) >= 2 {
 			p := positional[1]
-			if p != "claudesdk" && p != "venice" && p != "openai" {
-				m.addLine(logLine{kind: "err", text: "provider must be claudesdk, venice or openai"})
+			if !groupOptValid("provider", p) {
+				m.addLine(logLine{kind: "err", text: "provider must be " + groupOptChoices("provider")})
 				return nil
 			}
 			extra["provider"] = p

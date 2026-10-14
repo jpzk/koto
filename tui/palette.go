@@ -98,7 +98,8 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "jump to group/session", hint: "ctrl+t", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},
 		{title: "switch group", hint: "/sw <group>", run: "/sw ", edit: true},
 		{title: "switch chat session", hint: "/session [name]", run: "/session ", edit: true},
-		{title: "new group", hint: "/new <group>", run: "/new ", edit: true},
+		{title: "new group (dialog)", hint: "ctrl+n", act: func(m *Model) tea.Cmd { return m.openNewGroup() }},
+		{title: "new group (command)", hint: "/new <group>", run: "/new ", edit: true},
 		{title: "refresh group list", hint: "/ls", run: "/ls"},
 
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},

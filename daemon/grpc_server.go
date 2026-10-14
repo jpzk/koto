@@ -572,6 +572,35 @@ func (s *kotoServer) Resources(ctx context.Context, _ *pb.ResourcesReq) (*pb.Res
 	return out, nil
 }
 
+// Models serves the new-group dialog's model picker: the provider's model
+// catalog, fetched host-side with the host credential (daemon/models.go).
+// It never fails on upstream trouble — the answer degrades to the built-in
+// fallback list with the reason — and never waits longer than
+// modelsRPCWait, so a slow upstream cannot stall the dialog; a caller that
+// gives up early gets the fallback and the fetch keeps warming the cache.
+func (s *kotoServer) Models(ctx context.Context, r *pb.ModelsReq) (*pb.ModelsResp, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	wctx, cancel := context.WithTimeout(ctx, modelsRPCWait)
+	defer cancel()
+	l, err := modelsFor(wctx, r.GetProvider())
+	if err != nil {
+		return &pb.ModelsResp{Ok: false, Error: err.Error()}, nil
+	}
+	out := &pb.ModelsResp{
+		Ok:       true,
+		Provider: l.Provider,
+		Source:   l.Source,
+		Reason:   l.Error,
+		Models:   make([]*pb.ModelInfo, 0, len(l.Models)),
+	}
+	for _, m := range l.Models {
+		out.Models = append(out.Models, &pb.ModelInfo{Id: m.ID, DisplayName: m.DisplayName})
+	}
+	return out, nil
+}
+
 // Jobs is the fresh "ls" of a group's background jobs — it re-reads the
 // guest (bounded by fcExec's timeout) rather than serving the watch-loop
 // mirror, so `koto ctl jobs` never shows stale state. Group "" sweeps every
