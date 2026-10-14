@@ -96,6 +96,46 @@ RUN set -eu; cd /tmp; \
     rm -f wrapper.tgz native.tgz; \
     claude --version | grep -qF "$v"
 
+# Codex CLI, the agent for provider "openai" (fcguest/codex.go). The official
+# prebuilt Rust binary from the openai/codex GitHub release, NOT the npm
+# package: one static musl executable, no lifecycle scripts, no registry
+# resolution. Pinned by version AND by the SHA-256 of the release tarball,
+# checked here before anything is unpacked.
+#
+# Pin policy: the newest non-prerelease published at least 6 weeks before the
+# build. rust-v0.152.1 was published 2026-09-01T22:33:02Z. The digest is the
+# "digest" GitHub reports for the asset, cross-checked by downloading it:
+#   T=rust-v0.152.1; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
+#     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
+#   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
+#
+# Not shipped: codex-code-mode-host (a separate asset of the same release),
+# which only the code_mode_only models (gpt-5.6-*) need. The default model
+# (gpt-5.5) runs without it, and leaving it out keeps 69 MB off every VM.
+#
+# No self-update: codex's startup update check (check_for_update_on_startup,
+# codex-rs/tui/src/updates.rs) is turned off in /etc/codex/managed_config.toml,
+# the managed layer that outranks the agent-writable $CODEX_HOME/config.toml,
+# so an interactive `codex` in /shell never phones home for a newer release
+# either. Analytics off for the same reason. Turns also pass both as -c flags.
+ARG CODEX_VERSION=0.152.1
+ARG CODEX_SHA256=a0ed1b40b1d597b340f09ae00ecebc46670b06cb52aac315b9dc84fed0289fd0
+
+RUN set -eu; cd /tmp; \
+    a=codex-x86_64-unknown-linux-musl; \
+    curl -fsSL -o codex.tgz \
+      "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$a.tar.gz"; \
+    printf '%s  codex.tgz\n' "$CODEX_SHA256" | sha256sum -c -; \
+    tar -xzOf codex.tgz "$a" > /usr/local/bin/codex; \
+    chmod 0755 /usr/local/bin/codex; \
+    rm -f codex.tgz; \
+    mkdir -p /etc/codex; \
+    printf 'check_for_update_on_startup = false\n\n[analytics]\nenabled = false\n' \
+      > /etc/codex/managed_config.toml; \
+    chmod 0644 /etc/codex/managed_config.toml; \
+    test "$(codex --version)" = "codex-cli $CODEX_VERSION"
+
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
