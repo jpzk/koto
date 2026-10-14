@@ -223,7 +223,7 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 		sdktrace.WithIDGenerator(otelIDGen{}))
 	s.mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, otelReaderOpts(cfg)...)))
-	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)))
+	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(otelLogErrTag{lexp})))
 	s.tracer = s.tp.Tracer("koto")
 	s.logger = s.lp.Logger("koto")
 
