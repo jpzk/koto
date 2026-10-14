@@ -121,7 +121,9 @@ func TestInputWrapCapped(t *testing.T) {
 // indexed matchedSuggestions[-1] — a panic that killed the whole TUI. The
 // bindings are now neutralized and inputGhost guards the index. Ctrl+N is the
 // surviving half of the original repro: ctrl+p is the command palette now
-// (palette.go) and never reaches the textinput.
+// (palette.go) and never reaches the textinput. Since the new-group dialog
+// (newgroup.go) took ctrl+n it no longer reaches the textinput either; the
+// test stays as a guard that a draft with no matches survives the key.
 func TestInputCtrlNWithoutMatchesDoesNotPanic(t *testing.T) {
 	m := inputModel(t, "no history matches this")
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})

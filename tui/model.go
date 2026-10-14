@@ -629,6 +629,10 @@ type Model struct {
 	helpVP      viewport.Model
 	helpVPReady bool
 
+	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
+	// cheatsheet: owns keys and the frame while newGroup.open.
+	newGroup newGroupForm
+
 	// Fleet (top) view (focusTop / ctrl+K). No subscription of its own —
 	// the rows are joined from state the TUI already holds fresh: m.groups
 	// (WatchState push: model, tok/s, network, root) and m.resources +
@@ -2885,6 +2889,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	case daemonRespMsg:
 		return m, m.handleDaemonResp(msg)
 
+	case newGroupResultMsg:
+		return m, m.handleNewGroupResult(msg)
+
 	case promptFireMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/prompt %s: %v", msg.name, msg.err)})
@@ -3083,6 +3090,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// Cheatsheet modal: it covers the whole frame, so the wheel scrolls
 		// its content and clicks are swallowed — same reasoning as the
 		// picker gates below (the panes under the pointer aren't visible).
+		if m.newGroup.open {
+			return m, nil // modal form: the panes under the pointer are hidden
+		}
 		if m.helpOpen {
 			if m.helpVPReady {
 				var cmd tea.Cmd
@@ -4097,6 +4107,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handlePickerKey(msg)
 	}
+	if m.newGroup.open {
+		// The new-group dialog (newgroup.go) owns keys like the cheatsheet,
+		// for the same reason: it covers the frame.
+		return m.handleNewGroupKey(msg)
+	}
 	if m.helpOpen {
 		// The cheatsheet modal owns keys like the picker does — ahead of the
 		// shell block too, since the palette can open it from the terminal
@@ -4234,6 +4249,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// alt+t: a switcher is reached far more often than a display toggle,
 		// so it gets the ctrl-tier binding.
 		m.openGroupPicker()
+		return m, nil
+	}
+	if s == "ctrl+n" {
+		// New-group dialog (newgroup.go). Reached only outside the picker
+		// (whose block above keeps ctrl+n = down) and outside shell focus
+		// (where the guest gets it — readline next-history).
+		m.openNewGroup()
 		return m, nil
 	}
 	if s == "alt+t" {
