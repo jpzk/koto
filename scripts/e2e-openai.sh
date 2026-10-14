@@ -21,10 +21,14 @@
 #   - the host slot log has the tool call, its output and both replies
 #   - turn 2 was a resume (its upstream request carries turn 1's reply)
 #   - metrics.jsonl recorded normalized usage for tg
+#   - code mode: a fresh $CM_MODEL (gpt-5.6-*, code_mode_only) turn prints
+#     no "Code Mode is unavailable" warning, while a negative-control turn
+#     with codex-code-mode-host moved away does (proves the check can fail)
 # Builds only via the pinned Go image (Makefile GO_IMAGE).
 #
 # Env: CONTAINER (default podman), E2E_OPENAI_DIR (default <repo>/.e2e-openai),
-#      ROOTFS_IMAGE (default localhost/koto-fcrootfs)
+#      ROOTFS_IMAGE (default localhost/koto-fcrootfs),
+#      E2E_OPENAI_CM_MODEL (default gpt-5.6-luna)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -48,10 +52,12 @@ $CT run --rm --security-opt label=disable -v "$REPO:/src" -v "$D/bin:/out" -w /s
 # Host key: a fresh random value per run, so a grep hit can only be a leak.
 KEY="sk-e2e-HOSTKEY-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 REPLY1="e2e-reply-after-tool"
+# Any code_mode_only model id; gpt-5.6-luna is the one seen failing live.
+CM_MODEL=${E2E_OPENAI_CM_MODEL:-gpt-5.6-luna}
 echo "[$(ts)] run in $ROOTFS_IMAGE (host key ${KEY:0:15}…)"
 $CT run --rm --security-opt label=disable --network none --user 0 \
   -v "$D:/e2e" --entrypoint /bin/sh \
-  -e KEY="$KEY" -e REPLY1="$REPLY1" \
+  -e KEY="$KEY" -e REPLY1="$REPLY1" -e CM_MODEL="$CM_MODEL" \
   "$ROOTFS_IMAGE" -c '
     set -u
     cd /e2e
@@ -61,7 +67,7 @@ $CT run --rm --security-opt label=disable --network none --user 0 \
       ./bin/fakeopenai > fakeopenai.out 2>&1 &
     KOTO_E2E_OPENAI_PROXY=127.0.0.1:18090 KOTO_E2E_OPENAI_TURN=127.0.0.1:18091 \
       KOTO_E2E_OPENAI_KEY="$KEY" KOTO_E2E_OPENAI_UPSTREAM=http://127.0.0.1:18080/v1 \
-      KOTO_E2E_OPENAI_TURNS=2 KOTO_E2E_OPENAI_READY=/e2e/host.ready \
+      KOTO_E2E_OPENAI_TURNS=4 KOTO_E2E_OPENAI_READY=/e2e/host.ready \
       ./bin/daemon.test -test.run "^TestE2EOpenAIHostHalf$" -test.v -test.count=1 > host.out 2>&1 &
     HOSTPID=$!
     for i in $(seq 50); do [ -f host.ready ] && break; sleep 0.2; done
@@ -71,6 +77,21 @@ $CT run --rm --security-opt label=disable --network none --user 0 \
       KOTO_E2E_OPENAI_PROMPTS="run the e2e tool please|now say what you did" \
       timeout 300 ./bin/fcguest.test -test.run "^TestE2EOpenAIGuestHalf$" -test.v -test.count=1 > guest.out 2>&1
     echo "guest rc=$?" > guest.rc
+    # Code mode (gpt-5.6-* are code_mode_only): two more fresh-thread turns.
+    # First a negative control with the host binary moved away (the warning
+    # must appear, or this harness cannot tell code mode on from off), then
+    # the real check with it in place (the warning must not appear).
+    mv /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host.off
+    env -u KEY KOTO_E2E_OPENAI_TURN=127.0.0.1:18091 KOTO_E2E_OPENAI_BASE_URL=http://127.0.0.1:18090/v1 \
+      KOTO_E2E_OPENAI_MODEL="$CM_MODEL" KOTO_E2E_OPENAI_SESSION=cmoff KOTO_E2E_OPENAI_PROMPTS="code mode check off" \
+      timeout 300 ./bin/fcguest.test -test.run "^TestE2EOpenAIGuestHalf$" -test.v -test.count=1 > guest-cmoff.out 2>&1
+    echo "guest-cmoff rc=$?" > guest-cmoff.rc
+    mv /usr/local/bin/codex-code-mode-host.off /usr/local/bin/codex-code-mode-host
+    test -x /usr/local/bin/codex-code-mode-host && echo present > cmhost.txt || echo missing > cmhost.txt
+    env -u KEY KOTO_E2E_OPENAI_TURN=127.0.0.1:18091 KOTO_E2E_OPENAI_BASE_URL=http://127.0.0.1:18090/v1 \
+      KOTO_E2E_OPENAI_MODEL="$CM_MODEL" KOTO_E2E_OPENAI_SESSION=cm KOTO_E2E_OPENAI_PROMPTS="code mode check on" \
+      timeout 300 ./bin/fcguest.test -test.run "^TestE2EOpenAIGuestHalf$" -test.v -test.count=1 > guest-cm.out 2>&1
+    echo "guest-cm rc=$?" > guest-cm.rc
     ( sleep 30; kill $HOSTPID 2>/dev/null ) & wait $HOSTPID; echo "host rc=$?" > host.rc
     # Leak check over everything the guest side can read or wrote.
     if grep -rl -- "$KEY" /workspace 2>/dev/null; then echo LEAK > leak.txt; else echo none > leak.txt; fi
@@ -96,11 +117,24 @@ grep -q 'tool-ran-in-guest-1000' "$D/host.out" && pass "host slot log has the to
 grep -q '\[\[tool\]\]' "$D/host.out" && pass "host slot log has a [[tool]] marker" || bad "no [[tool]] marker"
 c=$(grep -c "$REPLY1" "$D/host.out"); [ "$c" -ge 2 ] && pass "host slot log has the reply for both turns ($c)" || bad "reply count in host log=$c (<2)"
 [ "$(grep -c '\[\[turn_end\]\]' "$D/host.out")" -ge 2 ] && pass "two [[turn_end]] in host slot log" || bad "turn_end count"
-last=$(awk '/^=== POST \/v1\/responses /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$D/upstream.log")
+# Turn 2's request: the last POST that carries its prompt (code mode turns follow it).
+last=$(awk '/^=== /{if(b ~ /now say what you did/) k=b; b=""} {b=b $0 "\n"} END{if(b ~ /now say what you did/) k=b; printf "%s", k}' "$D/upstream.log")
 printf '%s' "$last" | grep -q 'tool-ran-in-guest-1000' && printf '%s' "$last" | grep -q 'now say what you did' \
   && pass "turn 2 resumed the codex thread (history carried)" || bad "turn 2 not a resume"
 grep -q 'thread id file: "[0-9a-f-]\{36\}"' "$D/guest.out" && pass "codex thread id persisted" || bad "no thread id"
 grep -q '"group":"tg".*"input_tokens":1000' "$D/host.out" && grep -q '"cache_read_input_tokens":200' "$D/host.out" \
   && pass "metrics.jsonl: normalized usage (1200 in - 200 cached = 1000, cache_read 200)" || bad "metrics usage"
+# Code mode checks. Turn segments of the host slot log, split on turn_end:
+# 1-2 the gpt-5.5 session, 3 the negative control, 4 the real check.
+seg(){ awk -v want="$1" 'BEGIN{n=1} n==want{print} /\[\[turn_end\]\]/{n++}' "$D/host.out"; }
+CMW='Code Mode is unavailable'
+[ "$(cat "$D/cmhost.txt" 2>/dev/null)" = present ] && pass "image ships /usr/local/bin/codex-code-mode-host" || bad "codex-code-mode-host missing from image"
+grep -q "\"model\":\"$CM_MODEL\"" "$D/upstream.log" && pass "upstream saw a $CM_MODEL request" || bad "no $CM_MODEL request upstream"
+seg 3 | grep -qF "$CMW" && pass "negative control: host binary removed -> '$CMW' warning" \
+  || bad "negative control: no warning without the host binary (harness cannot see code mode)"
+grep -q "rc=0" "$D/guest-cm.rc" 2>/dev/null && pass "$CM_MODEL turn: $(cat "$D/guest-cm.rc")" || bad "$CM_MODEL turn: $(cat "$D/guest-cm.rc" 2>/dev/null)"
+s4=$(seg 4)
+[ -n "$s4" ] && ! printf '%s' "$s4" | grep -qF "$CMW" && ! grep -qF "$CMW" "$D/guest-cm.out" \
+  && pass "$CM_MODEL with the host binary: no '$CMW' warning" || bad "$CM_MODEL turn warned or produced nothing"
 [ $fail = 0 ] && echo "E2E-OPENAI: ALL PASS" || echo "E2E-OPENAI: FAIL"
 exit $fail

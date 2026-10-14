@@ -45,13 +45,23 @@ func TestE2EOpenAIGuestHalf(t *testing.T) {
 	if cfg.Provider != "openai" {
 		t.Fatalf("provider = %q", cfg.Provider)
 	}
+	// KOTO_E2E_OPENAI_MODEL / _SESSION let the harness run a separate
+	// fresh-thread pass with another model (the gpt-5.6 code mode check).
+	model := os.Getenv("KOTO_E2E_OPENAI_MODEL")
+	if model == "" {
+		model = "gpt-5.5"
+	}
+	sess := os.Getenv("KOTO_E2E_OPENAI_SESSION")
+	if sess == "" {
+		sess = "default"
+	}
 	env := []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=" + wsDir,
 		"KOTO_OPENAI_BASE_URL=" + base,
 		"KOTO_OPENAI_API_KEY=koto-proxied",
-		"KOTO_DEFAULT_OPENAI_MODEL=gpt-5.5",
-		"KOTO_SESSION=default",
+		"KOTO_DEFAULT_OPENAI_MODEL=" + model,
+		"KOTO_SESSION=" + sess,
 	}
 	prompts := strings.Split(os.Getenv("KOTO_E2E_OPENAI_PROMPTS"), "|")
 	for i, p := range prompts {
@@ -61,11 +71,11 @@ func TestE2EOpenAIGuestHalf(t *testing.T) {
 		}
 		tw := newTurnConn(c)
 		tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Open{Open: &pb.TurnOpen{Slot: 0}}})
-		runCodex(tw, &pb.MsgReq{Msg: []byte(p), Session: "default"}, cfg, "default", env)
+		runCodex(tw, &pb.MsgReq{Msg: []byte(p), Session: sess}, cfg, sess, env)
 		tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_TurnEnd{TurnEnd: true}})
 		tw.close()
 		c.Close()
-		id, _ := os.ReadFile(codexIDFile("default"))
+		id, _ := os.ReadFile(codexIDFile(sess))
 		t.Logf("turn %d done; codex thread id file: %q", i+1, strings.TrimSpace(string(id)))
 	}
 }
