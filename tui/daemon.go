@@ -211,6 +211,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.History(ctx, r)
 	case "models":
 		return cl.Models(ctx, &pb.ModelsReq{Provider: s("provider")})
+	case "providers":
+		return cl.Providers(ctx, &pb.ProvidersReq{})
 	case "metrics":
 		return cl.Metrics(ctx, &pb.MetricsReq{Group: s("group")})
 	case "job_logs":

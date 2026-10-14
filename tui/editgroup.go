@@ -92,7 +92,7 @@ func (m *Model) openEditGroup() tea.Cmd {
 	}
 	f.mp.cache = m.modelsCache
 	m.newGroup = f
-	return editReadCmd(m.sock, g)
+	return tea.Batch(editReadCmd(m.sock, g), providersCmd(m.sock))
 }
 
 // editReadMsg carries the effective-config read for group.
@@ -214,11 +214,9 @@ func (m *Model) handleEditRead(msg editReadMsg) tea.Cmd {
 	}
 	for _, o := range groupOptTable {
 		if v, ok := f.edit.orig[o.key]; ok && !o.text {
-			for i, x := range o.values {
-				if x == v {
-					f.sel[o.key] = i
-				}
-			}
+			// f.values, not o.values: the provider select may be filtered
+			// (providers.go), and always keeps the group's own provider.
+			f.selectValue(o.key, v)
 		}
 	}
 	f.ports.SetValue(f.edit.orig[ngPorts])

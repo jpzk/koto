@@ -2905,6 +2905,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleModelsLoaded(msg)
 		return m, nil
 
+	case providersLoadedMsg:
+		return m, m.handleProvidersLoaded(msg)
+
 	case promptFireMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("/prompt %s: %v", msg.name, msg.err)})

@@ -57,7 +57,7 @@ type newGroupForm struct {
 	mp     modelPick       // the model select
 	custom textinput.Model // the custom model id (mp on "custom…")
 	ports  textinput.Model
-	sel    map[string]int // select key → index into groupOptValues(key)
+	sel    map[string]int // select key → index into f.values(key)
 	err    string         // inline error, shown under errAt
 	errAt  string         // field key the error belongs to
 	busy   bool           // a submit is in flight
@@ -67,6 +67,9 @@ type newGroupForm struct {
 	spawned string
 	// Edit mode (editgroup.go): the same form editing an existing group.
 	edit editState
+	// prov is the Providers answer the provider select filters by
+	// (providers.go).
+	prov provChoice
 }
 
 func newGroupInput(limit int, placeholder string) textinput.Model {
@@ -102,7 +105,7 @@ func (m *Model) openNewGroup() tea.Cmd {
 	// refetch what this TUI already has (the daemon caches too).
 	f.mp.cache = m.modelsCache
 	m.newGroup = f
-	return m.reloadModels()
+	return tea.Batch(m.reloadModels(), providersCmd(m.sock))
 }
 
 // reloadModels points the model select at the dialog's current provider and
@@ -110,6 +113,14 @@ func (m *Model) openNewGroup() tea.Cmd {
 func (m *Model) reloadModels() tea.Cmd {
 	f := &m.newGroup
 	prov := f.value("provider")
+	if prov == "" {
+		// No provider to list models for (none has a login): an empty,
+		// settled select rather than a load that never ends.
+		f.mp.provider, f.mp.opts, f.mp.open = "", nil, false
+		f.mp.state, f.mp.reason, f.mp.sel = modelsFailed, "no provider", 0
+		f.mp.seq++
+		return nil
+	}
 	if !f.mp.beginLoad(prov) {
 		return nil
 	}
@@ -159,7 +170,7 @@ func (f *newGroupForm) modelValue() (string, string) {
 
 // value is the current choice for a select key.
 func (f *newGroupForm) value(key string) string {
-	v := groupOptValues(key)
+	v := f.values(key)
 	if len(v) == 0 {
 		return ""
 	}
@@ -202,7 +213,7 @@ func (f *newGroupForm) move(d int) {
 
 func (f *newGroupForm) cycle(d int) {
 	key := f.field()
-	n := len(groupOptValues(key))
+	n := len(f.values(key))
 	if n == 0 {
 		return
 	}
@@ -234,6 +245,9 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	}
 	if _, exists := groups[g]; exists && g != f.spawned {
 		return newGroupPlan{}, ngName, "group " + g + " already exists"
+	}
+	if f.value("provider") == "" {
+		return newGroupPlan{}, "provider", "no provider has a login on this host"
 	}
 	ports, err := parsePortList(f.ports.Value())
 	if err != nil {
@@ -566,6 +580,8 @@ func (m Model) renderNewGroup() string {
 				if !enabled {
 					st = gray.Faint(true)
 				}
+			} else if f.value("provider") == "" {
+				st = gray.Faint(true) // nothing to create with
 			}
 			lines = append(lines, "", mark+st.Render(btn))
 			if focused {
@@ -633,6 +649,8 @@ func (m Model) renderNewGroup() string {
 			vs := lipgloss.NewStyle()
 			if _, risky := o.risky[v]; risky {
 				vs = red.Bold(true)
+			} else if v == "" && key == "provider" {
+				v, vs = "none", gray // no provider has a login
 			}
 			if focused {
 				val = amber.Render(gl("‹ ", "< ")) + vs.Render(v) + amber.Render(gl(" ›", " >"))
@@ -642,6 +660,15 @@ func (m Model) renderNewGroup() string {
 		}
 		lines = append(lines, mark+label+val)
 		errLine(key)
+		if key == "provider" {
+			warn, dim := f.providerHintLines()
+			for _, s := range warn {
+				lines = append(lines, "  "+amber.Width(inner-2).Render(s))
+			}
+			for _, s := range dim {
+				lines = append(lines, "  "+gray.Faint(true).Width(inner-2).Render(s))
+			}
+		}
 		if key == ngCustom && f.errAt != ngCustom && f.custom.Value() != "" {
 			// Live check while typing; the submit-time error replaces it.
 			if e := validateModelID(strings.TrimSpace(f.custom.Value())); e != "" {
@@ -677,7 +704,11 @@ func (m Model) renderNewGroup() string {
 		}
 		lines = append(lines, gray.Inherit(wrap).Render(strings.Join(parts, gl(" → ", " -> "))))
 	} else {
-		lines = append(lines, gray.Inherit(wrap).Render("fix "+badKey+" to create"))
+		msg := "fix " + badKey + " to create"
+		if badKey == "provider" {
+			msg = e + ": cannot create"
+		}
+		lines = append(lines, gray.Inherit(wrap).Render(msg))
 	}
 	for _, o := range groupOptTable {
 		if f.edit.locked(o.key) {
