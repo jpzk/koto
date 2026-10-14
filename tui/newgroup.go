@@ -420,7 +420,8 @@ func (m Model) renderNewGroup() string {
 
 	// Summary: what Create will do, risky picks highlighted with a note.
 	lines = append(lines, "")
-	if p, _, e := f.plan(m.groups); e == "" {
+	p, badKey, e := f.plan(m.groups)
+	if e == "" {
 		var parts []string
 		if p.spawn != nil {
 			parts = append(parts, fmt.Sprintf("spawn %s (%s, %s)", p.group, p.spawn["provider"], p.spawn["size"]))
@@ -439,7 +440,7 @@ func (m Model) renderNewGroup() string {
 		}
 		lines = append(lines, gray.Inherit(wrap).Render(strings.Join(parts, gl(" → ", " -> "))))
 	} else {
-		lines = append(lines, gray.Inherit(wrap).Render("fill in a valid name to create"))
+		lines = append(lines, gray.Inherit(wrap).Render("fix "+badKey+" to create"))
 	}
 	for _, o := range groupOptTable {
 		if note, ok := o.risky[f.value(o.key)]; ok {
