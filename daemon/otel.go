@@ -223,7 +223,7 @@ func otelStart(ctx context.Context, cfg otelConfig) (*otelState, error) {
 		sdktrace.WithIDGenerator(otelIDGen{}))
 	s.mp = sdkmetric.NewMeterProvider(sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, otelReaderOpts(cfg)...)))
-	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)))
+	s.lp = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(otelLogErrTag{lexp})))
 	s.tracer = s.tp.Tracer("koto")
 	s.logger = s.lp.Logger("koto")
 
@@ -273,6 +273,10 @@ func (s *otelState) instruments(m metric.Meter) error {
 	}
 	// Budget gauges (otel_budget.go): latest rate-limit snapshot per provider.
 	if _, err := otelBudgetInstruments(m); err != nil {
+		errs = append(errs, err)
+	}
+	// Spend / cap / refused series (otel_budget_spend.go).
+	if _, err := otelBudgetSpendInstruments(m); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

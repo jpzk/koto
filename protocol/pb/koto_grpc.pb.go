@@ -61,9 +61,12 @@ const (
 	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
+	Koto_Models_FullMethodName         = "/koto.Koto/Models"
+	Koto_Providers_FullMethodName      = "/koto.Koto/Providers"
 	Koto_AclGet_FullMethodName         = "/koto.Koto/AclGet"
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
+	Koto_Budget_FullMethodName         = "/koto.Koto/Budget"
 	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
 	Koto_AttachShell_FullMethodName    = "/koto.Koto/AttachShell"
 	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
@@ -159,12 +162,37 @@ type KotoClient interface {
 	// stopped — the failure mode where a guest's own `df` is actively
 	// misleading. See daemon/resources.go.
 	Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error)
+	// Models lists the models a provider offers, for the TUI's new-group
+	// model picker. Fetched HOST-side with the host credential through the
+	// same upstream origins the proxy uses, cached per provider (~10 min),
+	// single-flighted, bounded by a ~5s timeout; every upstream string is
+	// sanitized (see daemon/models.go). On any failure the answer is the
+	// built-in fallback list with source="fallback" and the reason in error.
+	// UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+	// every non-admin role until acl.json grants `models`. Deliberately NOT on
+	// the in-guest ctl plane — guests never trigger host-credential fetches.
+	Models(ctx context.Context, in *ModelsReq, opts ...grpc.CallOption) (*ModelsResp, error)
+	// Providers lists every known provider with whether a credential for it is
+	// set up on the daemon host, for the TUI new-group / edit-group provider
+	// select. Presence and shape only: nothing is validated against the network
+	// and the answer carries NO secret (no token, key, key prefix, path or
+	// expiry), just name, configured and a coarse kind. Same ACL posture as
+	// Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+	// until acl.json grants `providers`; not on the in-guest ctl plane.
+	Providers(ctx context.Context, in *ProvidersReq, opts ...grpc.CallOption) (*ProvidersResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
 	AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclSetRole(ctx context.Context, in *AclSetRoleReq, opts ...grpc.CallOption) (*AclResp, error)
 	AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...grpc.CallOption) (*AclResp, error)
+	// Budget reads and edits the operator budget (daemon/budget_admin.go):
+	// per-(provider, auth) windows, spend, caps and model prices, kept in
+	// <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+	// caps are how the operator bounds what agents may spend, so a role that
+	// could lift them would void the bound (same class as config_posture).
+	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+	Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error)
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -504,6 +532,26 @@ func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) Models(ctx context.Context, in *ModelsReq, opts ...grpc.CallOption) (*ModelsResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ModelsResp)
+	err := c.cc.Invoke(ctx, Koto_Models_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Providers(ctx context.Context, in *ProvidersReq, opts ...grpc.CallOption) (*ProvidersResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProvidersResp)
+	err := c.cc.Invoke(ctx, Koto_Providers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) AclGet(ctx context.Context, in *AclGetReq, opts ...grpc.CallOption) (*AclResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
@@ -528,6 +576,16 @@ func (c *kotoClient) AclDelRole(ctx context.Context, in *AclDelRoleReq, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AclResp)
 	err := c.cc.Invoke(ctx, Koto_AclDelRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BudgetResp)
+	err := c.cc.Invoke(ctx, Koto_Budget_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -711,12 +769,37 @@ type KotoServer interface {
 	// stopped — the failure mode where a guest's own `df` is actively
 	// misleading. See daemon/resources.go.
 	Resources(context.Context, *ResourcesReq) (*ResourcesResp, error)
+	// Models lists the models a provider offers, for the TUI's new-group
+	// model picker. Fetched HOST-side with the host credential through the
+	// same upstream origins the proxy uses, cached per provider (~10 min),
+	// single-flighted, bounded by a ~5s timeout; every upstream string is
+	// sanitized (see daemon/models.go). On any failure the answer is the
+	// built-in fallback list with source="fallback" and the reason in error.
+	// UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+	// every non-admin role until acl.json grants `models`. Deliberately NOT on
+	// the in-guest ctl plane — guests never trigger host-credential fetches.
+	Models(context.Context, *ModelsReq) (*ModelsResp, error)
+	// Providers lists every known provider with whether a credential for it is
+	// set up on the daemon host, for the TUI new-group / edit-group provider
+	// select. Presence and shape only: nothing is validated against the network
+	// and the answer carries NO secret (no token, key, key prefix, path or
+	// expiry), just name, configured and a coarse kind. Same ACL posture as
+	// Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+	// until acl.json grants `providers`; not on the in-guest ctl plane.
+	Providers(context.Context, *ProvidersReq) (*ProvidersResp, error)
 	// ---- ACL management (HARDCODED admin-only: these verbs can never be
 	// granted via acl.json — a role granting itself acl_set_role would be
 	// privilege escalation to full control; see daemon/acl.go) ----
 	AclGet(context.Context, *AclGetReq) (*AclResp, error)
 	AclSetRole(context.Context, *AclSetRoleReq) (*AclResp, error)
 	AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error)
+	// Budget reads and edits the operator budget (daemon/budget_admin.go):
+	// per-(provider, auth) windows, spend, caps and model prices, kept in
+	// <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+	// caps are how the operator bounds what agents may spend, so a role that
+	// could lift them would void the bound (same class as config_posture).
+	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+	Budget(context.Context, *BudgetReq) (*BudgetResp, error)
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -851,6 +934,12 @@ func (UnimplementedKotoServer) GoalCancel(context.Context, *GoalGroupReq) (*Goal
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
 }
+func (UnimplementedKotoServer) Models(context.Context, *ModelsReq) (*ModelsResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Models not implemented")
+}
+func (UnimplementedKotoServer) Providers(context.Context, *ProvidersReq) (*ProvidersResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Providers not implemented")
+}
 func (UnimplementedKotoServer) AclGet(context.Context, *AclGetReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclGet not implemented")
 }
@@ -859,6 +948,9 @@ func (UnimplementedKotoServer) AclSetRole(context.Context, *AclSetRoleReq) (*Acl
 }
 func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*AclResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method AclDelRole not implemented")
+}
+func (UnimplementedKotoServer) Budget(context.Context, *BudgetReq) (*BudgetResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Budget not implemented")
 }
 func (UnimplementedKotoServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
 	return status.Error(codes.Unimplemented, "method RunScript not implemented")
@@ -1393,6 +1485,42 @@ func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Models_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ModelsReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Models(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Models_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Models(ctx, req.(*ModelsReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Providers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProvidersReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Providers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Providers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Providers(ctx, req.(*ProvidersReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_AclGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AclGetReq)
 	if err := dec(in); err != nil {
@@ -1443,6 +1571,24 @@ func _Koto_AclDelRole_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).AclDelRole(ctx, req.(*AclDelRoleReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Budget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BudgetReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Budget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Budget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Budget(ctx, req.(*BudgetReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1614,6 +1760,14 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Koto_Resources_Handler,
 		},
 		{
+			MethodName: "Models",
+			Handler:    _Koto_Models_Handler,
+		},
+		{
+			MethodName: "Providers",
+			Handler:    _Koto_Providers_Handler,
+		},
+		{
 			MethodName: "AclGet",
 			Handler:    _Koto_AclGet_Handler,
 		},
@@ -1624,6 +1778,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AclDelRole",
 			Handler:    _Koto_AclDelRole_Handler,
+		},
+		{
+			MethodName: "Budget",
+			Handler:    _Koto_Budget_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

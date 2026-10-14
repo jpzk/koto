@@ -110,7 +110,7 @@ func resetOtelGlobals(t *testing.T) {
 	otelErrEvery = 0
 	t.Cleanup(func() {
 		otelErrEvery = prevEvery
-		otelErrLast, otelErrSuppressed = time.Time{}, 0
+		otelErrReset()
 		otelSecrets.Store(nil)
 		if s := otelCur.Load(); s != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)

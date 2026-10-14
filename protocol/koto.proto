@@ -107,12 +107,40 @@ service Koto {
   // misleading. See daemon/resources.go.
   rpc Resources   (ResourcesReq)   returns (ResourcesResp);
 
+  // Models lists the models a provider offers, for the TUI's new-group
+  // model picker. Fetched HOST-side with the host credential through the
+  // same upstream origins the proxy uses, cached per provider (~10 min),
+  // single-flighted, bounded by a ~5s timeout; every upstream string is
+  // sanitized (see daemon/models.go). On any failure the answer is the
+  // built-in fallback list with source="fallback" and the reason in error.
+  // UNTARGETED (no group) and not in adminOnlyVerbs: denied by default to
+  // every non-admin role until acl.json grants `models`. Deliberately NOT on
+  // the in-guest ctl plane — guests never trigger host-credential fetches.
+  rpc Models      (ModelsReq)      returns (ModelsResp);
+
+  // Providers lists every known provider with whether a credential for it is
+  // set up on the daemon host, for the TUI new-group / edit-group provider
+  // select. Presence and shape only: nothing is validated against the network
+  // and the answer carries NO secret (no token, key, key prefix, path or
+  // expiry), just name, configured and a coarse kind. Same ACL posture as
+  // Models: UNTARGETED, not admin-only, denied by default to non-admin roles
+  // until acl.json grants `providers`; not on the in-guest ctl plane.
+  rpc Providers   (ProvidersReq)   returns (ProvidersResp);
+
   // ---- ACL management (HARDCODED admin-only: these verbs can never be
   // granted via acl.json — a role granting itself acl_set_role would be
   // privilege escalation to full control; see daemon/acl.go) ----
   rpc AclGet     (AclGetReq)     returns (AclResp);
   rpc AclSetRole (AclSetRoleReq) returns (AclResp);
   rpc AclDelRole (AclDelRoleReq) returns (AclResp);
+
+  // Budget reads and edits the operator budget (daemon/budget_admin.go):
+  // per-(provider, auth) windows, spend, caps and model prices, kept in
+  // <KOTO_HOME>/budget.json. HARDCODED admin-only like the acl_* verbs:
+  // caps are how the operator bounds what agents may spend, so a role that
+  // could lift them would void the bound (same class as config_posture).
+  // op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
+  rpc Budget (BudgetReq) returns (BudgetResp);
 
   // RunScript executes a POSIX sh script inside a group's microVM as the
   // guest worker user (node, uid 1000, cwd /workspace) and streams its
@@ -671,4 +699,66 @@ message AclDelRoleReq { string role = 1; }
 message AclResp {
   bool ok = 1; string error = 2;
   google.protobuf.Struct acl = 3;  // full document after the operation
+}
+
+// ---- Models -----------------------------------------------------------------
+// Per-provider model catalog for the new-group dialog. provider is one of
+// claudesdk|venice|openai. source is "live" or "fallback"; on fallback,
+// reason says why (no credential, upstream error, timeout, still loading).
+// ok=false only for a request error (unknown provider).
+message ModelsReq { string provider = 1; }
+
+message ModelInfo {
+  string id = 1;            // matches ^[A-Za-z0-9._:/-]{1,64}$
+  string display_name = 2;  // <=64 runes, control/escape chars stripped
+}
+
+message ModelsResp {
+  bool ok = 1; string error = 2;
+  string provider = 3;
+  string source = 4;
+  string reason = 5;
+  repeated ModelInfo models = 6;
+}
+
+// ---- Providers --------------------------------------------------------------
+// Which providers have a credential on the daemon host (daemon/provider_status.go).
+// kind is "" when configured=false, else one of:
+//   subscription  OAuth login (koto claude-login / koto openai-login)
+//   api-key       a key file under the state dir's creds/
+//   env           ANTHROPIC_API_KEY in the daemon's environment
+//   upstream      KOTO_UPSTREAM: an outer koto proxy holds the credential
+message ProvidersReq {}
+
+message ProviderStatus {
+  string name = 1;       // claudesdk | venice | openai
+  bool configured = 2;
+  string kind = 3;
+}
+
+message ProvidersResp {
+  bool ok = 1; string error = 2;
+  repeated ProviderStatus providers = 3;  // every known provider, display order
+}
+
+// Budget (see the Budget rpc comment and daemon/budget_admin.go).
+//   show:  no other field.
+//   set:   provider, [auth], field, value. field is usd_per_day |
+//          usd_per_month | tokens_per_day | max_window_used.<5h|1d|7d|30d>.
+//          auth empty => the provider's current auth on the daemon.
+//   unset: provider, [auth], field ("all" clears the key's caps).
+//   price: provider, model, prices {in,out,cache_read,cache_write} in USD per
+//          million tokens; an empty prices map deletes the model's price.
+message BudgetReq {
+  string op       = 1;
+  string provider = 2;
+  string auth     = 3;
+  string field    = 4;
+  string value    = 5;
+  string model    = 6;
+  map<string, string> prices = 7;
+}
+message BudgetResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct budget = 3;  // full view after the operation
 }

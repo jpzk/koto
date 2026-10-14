@@ -120,6 +120,7 @@ admin role only
                                            groups = comma list or "*" (default "*")
                                            e.g. acl set ops stop:ghost restart:ghost list
   acl del <role>                           remove a role
+  budget [set|unset|price ...]              operator budget (admin-only; see koto budget --help)
 
 env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds, else
      $KOTO_HOME/creds, else /var/lib/koto/creds — the installed default),
@@ -316,7 +317,7 @@ func ctlCliMain(args []string) {
 
 	case "spawn":
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
-		provider := fs.String("provider", "", "claudesdk|venice")
+		provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
 		model := fs.String("model", "", "model override")
 		fs.Parse(rest)
 		if fs.NArg() != 1 {
@@ -582,6 +583,9 @@ func ctlCliMain(args []string) {
 	case "acl":
 		ctlAcl(rest)
 
+	case "budget":
+		budgetCliMain(rest)
+
 	default:
 		fmt.Fprint(os.Stderr, ctlUsage)
 		ctlFatal(2, "unknown verb: %s", verb)
@@ -841,7 +845,7 @@ func ctlConfig(args []string) {
 	model := fs.String("model", "", `model (""=clear)`)
 	effort := fs.String("effort", "", "reasoning effort")
 	ports := fs.String("ports", "", "published ports (comma list)")
-	provider := fs.String("provider", "", "claudesdk|venice")
+	provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
 	network := fs.String("network", "", "none|wan|lan|full")
 	size := fs.String("size", "", "small|medium|large|xlarge")
 	root := fs.String("root", "", "yes|no")

@@ -494,14 +494,14 @@ func listGroups() map[string]GroupInfo {
 	return out
 }
 
-// defaultProvider is the value written into a new group's config.json by
+// defaultProvider() (providers.go: the host-wide KOTO_DEFAULT_PROVIDER, else
+// claudesdk) is the value written into a new group's config.json by
 // ensureProviderConfig. Model is intentionally NOT seeded: the sidecar
 // entrypoint defaults to the per-provider default model when `model` is
 // empty (defaultClaudeModel under claudesdk, defaultVeniceModel under
 // venice). Seeding `model` here would mean `/config provider=venice` on a
 // fresh group leaves a claude model string lying around, which the Venice
 // API would then reject.
-const defaultProvider = "claudesdk"
 
 // defaultClaudeModel / defaultVeniceModel are the single source of truth for
 // the model a group uses when config.json has no `model`. The daemon injects
@@ -514,6 +514,17 @@ const defaultProvider = "claudesdk"
 const defaultClaudeModel = "claude-sonnet-5"
 const defaultVeniceModel = "kimi-k2.5"
 
+// defaultOpenAIModel is what an openai (Codex CLI) group runs when config.json
+// has no `model`; injected as KOTO_DEFAULT_OPENAI_MODEL like the others.
+//
+// gpt-5.5 is the newest model in codex 0.152.1's bundled catalog
+// (`codex debug models --bundled`) that drives the plain unified_exec shell
+// tool. The gpt-5.6-* entries rank higher but are tool_mode=code_mode_only:
+// every tool call runs through a separate V8 host binary
+// (codex-code-mode-host) that the plain codex release tarball does not ship,
+// and without it they fail closed. A group can still pick one explicitly.
+const defaultOpenAIModel = "gpt-5.5"
+
 // ensureProviderConfig writes provider and runtime defaults into a group's
 // config.json when missing or invalid. Idempotent — when the field is already
 // valid the file is left untouched. Called by ensure() on every spawn/send so
@@ -521,8 +532,8 @@ const defaultVeniceModel = "kimi-k2.5"
 // created before this code existed.
 func ensureProviderConfig(g string) error {
 	_, err := updateGroupConfig(g, func(cfg map[string]any) {
-		if s, ok := cfg["provider"].(string); !ok || (s != "claudesdk" && s != "venice") {
-			cfg["provider"] = defaultProvider
+		if s, ok := cfg["provider"].(string); !ok || !validProvider(s) {
+			cfg["provider"] = defaultProvider()
 		}
 	})
 	return err
@@ -606,10 +617,10 @@ func (c groupConfig) boolYes(key string) bool {
 }
 
 func (c groupConfig) provider() string {
-	if s := c.str("provider"); s == "claudesdk" || s == "venice" {
+	if s := c.str("provider"); validProvider(s) {
 		return s
 	}
-	return defaultProvider
+	return defaultProvider()
 }
 
 // model reports the EFFECTIVE model (see groupModelName's comment).
@@ -617,8 +628,11 @@ func (c groupConfig) model() string {
 	if m := c.str("model"); m != "" {
 		return m
 	}
-	if c.provider() == "venice" {
+	switch c.provider() {
+	case providerVenice:
 		return defaultVeniceModel
+	case providerOpenAI:
+		return defaultOpenAIModel
 	}
 	return defaultClaudeModel
 }
@@ -924,7 +938,8 @@ func clearCmd(req groupReq) baseResp {
 // place — its existence is what keeps entrypoint.sh's one-time `--continue`
 // migration shim from resurrecting a cleared default session.
 // clearSessionContext drops one session's GUEST-side conversation state — the
-// pinned claude session id, its transcript file, and any venice history — so
+// pinned claude session id, its transcript file, the codex thread pointer
+// (sessions/<name>.codex.id), and any venice history — so
 // the next turn in that session starts cold. It does not touch the host log or
 // the session registry.
 //
@@ -958,7 +973,7 @@ func clearSessionContext(g, sess string) baseResp {
 ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
 case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
 if [ -n "$ID" ]; then rm -f /workspace/.claude/projects/*/"$ID".jsonl || exit 1; fi
-rm -f "$I" ` + vh + `
+rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id ` + vh + `
 
 exit $?`
 	if out, rc, err := fcExec(g, script, 15*time.Second); err != nil {

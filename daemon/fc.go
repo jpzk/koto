@@ -1064,11 +1064,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// Wait for the guest agent, then push init (ports + env). The
 	// agent starts entrypoint.sh only after init, so a turn can't race an
 	// unconfigured guest.
-	env := map[string]string{
-		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
-		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
-		"ANTHROPIC_BASE_URL":        fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP),
-	}
+	env := fcGuestInitEnv()
 	// internet=full: general traffic now has a real L3 route (the gVisor
 	// gateway attached above), so we do NOT set HTTP(S)_PROXY — curl/git/npm go
 	// out over the NIC, NAT'd by the gateway. The LLM client stays on
@@ -1961,4 +1957,25 @@ func splice(a, b net.Conn) {
 	a.Close()
 	b.Close()
 	<-done
+}
+
+// openaiGuestPlaceholderKey is the ONLY OpenAI "credential" the guest ever
+// holds: codex sends it as its bearer, and the host proxy (serveOpenAI)
+// strips it and injects the real one. It is a constant, not a secret.
+const openaiGuestPlaceholderKey = "koto-proxied"
+
+// fcGuestInitEnv is the env pushed to every guest at init. It carries base
+// URLs and placeholders only: no host credential is read here, by
+// construction (TestOpenAIGuestEnvHasNoRealToken pins that).
+func fcGuestInitEnv() map[string]string {
+	base := fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP)
+	return map[string]string{
+		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
+		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
+		"KOTO_DEFAULT_OPENAI_MODEL": defaultOpenAIModel,
+		"ANTHROPIC_BASE_URL":        base,
+		// codex: custom model provider base_url and env_key value (item 6).
+		"KOTO_OPENAI_BASE_URL": base + "/v1",
+		"KOTO_OPENAI_API_KEY":  openaiGuestPlaceholderKey,
+	}
 }

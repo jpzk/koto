@@ -42,3 +42,4 @@ todo.txt
 /dist/
 /.e2e-otel/
 /.e2e-otel-bin/
+/.e2e-openai/

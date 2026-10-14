@@ -51,7 +51,7 @@ func TestHelpViewRendersSections(t *testing.T) {
 	for _, want := range []string{
 		"koto cheatsheet",
 		"GLOBAL KEYS", "CHAT + TREE", "TERMINAL PANE", "FLEET VIEW", "SCHEDULES VIEW", "SLASH COMMANDS",
-		"ctrl+k", "ctrl+e", "ctrl+p", "/destroy <g>", "/sched", "/config",
+		"ctrl+k", "ctrl+e", "ctrl+y", "SCHEDULES VIEW (ctrl+y)", "ctrl+p", "/destroy <g>", "/sched", "/config",
 		"esc/ctrl+h close",
 	} {
 		if !strings.Contains(out, want) {

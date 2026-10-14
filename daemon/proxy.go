@@ -21,8 +21,17 @@ import (
 	"time"
 )
 
-const (
-	upstream       = "https://api.anthropic.com"
+// vars, not consts, only so tests can point them at a fake upstream.
+// KOTO_UPSTREAM overrides the Anthropic origin: used to run koto nested
+// inside a koto guest, chaining to the outer guest's local LLM bridge
+// (e.g. http://127.0.0.1:18888) instead of the public API.
+var (
+	upstream = func() string {
+		if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
+			return u
+		}
+		return "https://api.anthropic.com"
+	}()
 	veniceUpstream = "https://api.venice.ai"
 )
 
@@ -66,9 +75,10 @@ func veniceAuth() (string, error) {
 // of the read that answered "venice" for every failure — absent file,
 // unparseable JSON, unrecognised value — on the grounds, true when it was
 // written, that koto was a Venice-first deployment. It has not been for a long
-// time: defaultProvider is claudesdk, and ensureProviderConfig WRITES that into
-// any group whose config is missing or invalid on every ensure(), so a group
-// whose config cannot be read is by koto's own definition a claudesdk group.
+// time: defaultProvider() is the host default (claudesdk unless the operator set
+// KOTO_DEFAULT_PROVIDER), and ensureProviderConfig WRITES that into any group
+// whose config is missing or invalid on every ensure(), so a group whose config
+// cannot be read is by koto's own definition a default-provider group.
 //
 // The divergence was the defect. Three readers, two answers: this one and
 // cs-subagent said venice, the guest turn path said claudesdk. A claudesdk
@@ -77,7 +87,7 @@ func veniceAuth() (string, error) {
 // third party than the operator selected, with the credential for it injected.
 func groupProvider(group string) string {
 	if group == "" {
-		return defaultProvider
+		return defaultProvider()
 	}
 	return groupProviderName(group)
 }
@@ -470,6 +480,13 @@ func normalizeVeniceUsage(u, usage map[string]any) {
 }
 
 func logMetric(group, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
+	logMetricKey(group, budgetKeyFor(groupProvider(group)), "", path, status, hdrs, usage, dur)
+}
+
+// logMetricKey is logMetric with the budget key already resolved: the openai
+// leg knows which credential it sent (subscription vs api key), so it passes
+// that instead of re-deriving it after the fact.
+func logMetricKey(group string, key budgetKey, model string, path string, status int, hdrs http.Header, usage map[string]any, dur time.Duration) {
 	rl := map[string]string{}
 	for k, vs := range hdrs {
 		lk := strings.ToLower(k)
@@ -499,15 +516,23 @@ func logMetric(group, path string, status int, hdrs http.Header, usage map[strin
 		"request_id": reqID,
 		"ratelimit":  rl,
 		"usage":      usage,
+		"budget_key": key.String(),
 	}
 	b, _ := json.Marshal(rec)
 	b = append(b, '\n')
 	metricsAppend(b)
-	// Budget snapshot (otel_budget.go): only a response that carried the
-	// headers updates it; the provider lookup is skipped otherwise.
-	if otelBudgetHasHeaders(rl) {
-		otelBudgetObserve(groupProvider(group), rl)
+	// Account budget (budget.go): parsed from the RAW headers for the key's
+	// provider; a response without budget headers changes nothing.
+	budgetObserve(key, hdrs)
+	// Spend (budget_spend.go): prices come from budget.json, read per request
+	// like the credentials. A broken file means no USD this time (tokens still
+	// count); the cap check (budget caps) is what reports the file to the
+	// operator.
+	cfg, cerr := loadBudgetConfig()
+	if cerr != nil {
+		cfg = nil
 	}
+	budgetRecordSpend(key, model, usage, cfg)
 	otelRecordLLM(group, path, status, reqID, usage, dur)
 }
 
@@ -815,12 +840,23 @@ var llmRoutesVenice = []llmRoute{
 	{http.MethodGet, "/api/v1/models/", true},
 }
 
-// llmRoutesFor returns the allowlist governing a provider's leg.
+// llmRoutesOpenAI: see proxy_openai.go for the hosts/paths and why.
+var llmRoutesOpenAI = llmRoutesOpenAIList
+
+// llmRoutesFor returns the allowlist governing a provider's leg. An
+// unknown provider gets NO routes (fail closed) rather than the Anthropic
+// list, so a provider admitted by validProvider before its leg exists can
+// never relay to Anthropic with the Anthropic credential.
 func llmRoutesFor(provider string) []llmRoute {
-	if provider == "venice" {
+	switch provider {
+	case providerVenice:
 		return llmRoutesVenice
+	case providerOpenAI:
+		return llmRoutesOpenAI
+	case providerClaude, "":
+		return llmRoutesAnthropic
 	}
-	return llmRoutesAnthropic
+	return nil
 }
 
 // llmPathAllowed decides one request against its provider's list. The path is
@@ -1170,8 +1206,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	spCtx, llmSp := otelLLMStart(r.Context(), h.group, provider, r.Method, r.URL.Path, tp)
 	defer llmSp.End()
 	r = r.WithContext(spCtx)
-	if provider == "venice" {
+	if provider == providerVenice {
 		h.serveVenice(w, r)
+		return
+	}
+	if provider == providerOpenAI {
+		h.serveOpenAI(w, r)
+		return
+	}
+	if provider != providerClaude {
+		// Belt to llmRoutesFor's brace: only claudesdk continues to the
+		// Anthropic leg below, which injects the Anthropic credential.
+		http.Error(w, "koto proxy: provider "+provider+" has no LLM leg on this host", http.StatusServiceUnavailable)
 		return
 	}
 	llmFlowLog(h.group, r.Method, upstream, r.URL.Path)
@@ -1185,6 +1231,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	model := budgetModelFromBody(body)
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
 	// thinking.display to "omitted", so thinking blocks stream with empty text
@@ -1196,6 +1243,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// regardless; display only controls the summary and doesn't change billing.)
 	if r.URL.Path == "/v1/messages" {
 		body = injectThinkingDisplay(body)
+	}
+	// Operator caps: refused here, before any credential is read or upstream
+	// contacted (budget brief).
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, false)
+		return
 	}
 	ah, err := authHeaders()
 	if err != nil {
@@ -1351,7 +1404,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if reqID == "" {
 		reqID = resp.Header.Get("Request-Id")
 	}
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logMetricKey(h.group, budgetKeyFor(groupProvider(h.group)), model, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, reqID)
 	otelLLMAnnotate(r.Context(), resp.StatusCode, reqID, usage)
 }
@@ -1377,6 +1430,11 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	model := budgetModelFromBody(body)
+	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
+		writeBudgetRefusal(w, ref, true)
+		return
+	}
 	key, err := veniceAuth()
 	if err != nil {
 		// The guest is told THAT there is no key, never where it should be
@@ -1500,7 +1558,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	dur := time.Since(t0)
-	logMetric(h.group, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
+	logMetricKey(h.group, budgetKeyFor(groupProvider(h.group)), model, r.URL.Path, resp.StatusCode, resp.Header, usage, dur)
 	logProxyError(h.group, r.URL.Path, resp.StatusCode, dur, "")
 	otelLLMAnnotate(r.Context(), resp.StatusCode, resp.Header.Get("x-request-id"), usage)
 }

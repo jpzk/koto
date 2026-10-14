@@ -34,10 +34,32 @@ type setupCtx struct {
 	root string // the clone: source of the Makefile, prompts/, fcguest scripts
 	ctx  context.Context
 
-	// credsChanged is carried from the pki/auth steps to the service step:
-	// the proxy resolves credentials once, at startup, so material minted in
-	// this run means a restart is owed even if the daemon is already up.
-	credsChanged bool
+	// restartOwed is carried from the pki/provider/auth steps to the service
+	// step: the proxy resolves credentials once, at startup, and the daemon
+	// reads koto.env (KOTO_DEFAULT_PROVIDER) once, so material minted or a
+	// default changed in this run means a restart is owed even if the daemon
+	// is already up.
+	restartOwed bool
+
+	// providerFlag is --provider, already validated; "" when not given.
+	// With --providers and no --provider it is the first one listed.
+	providerFlag string
+	// providersFlag is --providers, validated and deduplicated, in the
+	// order given; nil when not given.
+	providersFlag []string
+	// providerFromList: providerFlag was not given, it is the first of
+	// --providers.
+	providerFromList bool
+	// provider is the default provider chosen (or found) by the provider
+	// step; the auth and smoke steps act on it.
+	provider string
+	// selected is the set of providers chosen in this run's provider step,
+	// in display order; nil when the step did not choose (the auth step
+	// then derives it: the default plus every provider already connected).
+	selected []string
+	// authSkipped: the operator declined to connect a credential. The step
+	// then counts as done for this run, with the warning already printed.
+	authSkipped bool
 }
 
 type setupStep struct {
@@ -53,22 +75,31 @@ type setupStep struct {
 	// quiet suppresses the trailing "✓ <id> done" line — for the closing
 	// step, whose own output is the message.
 	quiet bool
+	// advisory steps are reported by --check as a warning when pending, not
+	// as a failure: an install that never chose a default provider still
+	// runs, on claudesdk, exactly as before the step existed.
+	advisory bool
 }
 
 func setupUsage() {
 	fmt.Fprintln(os.Stderr, `usage: koto setup [flags]
 
-Configures an installed koto: mints the TLS identities, connects your
-Anthropic credentials, starts the daemon and smoke-tests it. It neither
-builds nor installs — run "make fetch" (or "make build") and then
-"make install" first. Safe to re-run: every step detects whether it is
-already done.
+Configures an installed koto: mints the TLS identities, picks the default
+LLM provider (claudesdk, venice or openai) and connects its credentials,
+starts the daemon and smoke-tests it. It neither builds nor installs —
+run "make fetch" (or "make build") and then "make install" first. Safe
+to re-run: every step detects whether it is already done.
 
 flags:
   --check        report what is and isn't set up, change nothing, exit 0 if ready
   -y             accept defaults; never prompt (steps needing real input fail)
   --only ID      run just one step (e.g. --only rootfs)
   --from ID      start at this step, skipping earlier ones
+  --provider P   default provider for new groups (claudesdk, venice, openai);
+                 stored as KOTO_DEFAULT_PROVIDER in /etc/koto/koto.env, no prompt
+  --providers L  providers to set up, comma-separated (e.g. claudesdk,openai);
+                 the auth step connects each. The default is --provider, which
+                 must be one of them, else the first listed
   --no-color     plain output (also honors NO_COLOR)
   --list         print the step ids in order`)
 }
@@ -82,6 +113,8 @@ func setupMain(args []string) {
 	from := fs.String("from", "", "start at this step")
 	noColor := fs.Bool("no-color", false, "disable color")
 	list := fs.Bool("list", false, "list step ids")
+	provider := fs.String("provider", "", "default provider for new groups")
+	providers := fs.String("providers", "", "comma-separated providers to set up")
 	_ = fs.Parse(args)
 
 	ui := newSetupUI(*assumeYes, *noColor)
@@ -100,6 +133,12 @@ func setupMain(args []string) {
 		ctlFatal(1, "cwd: %v", err)
 	}
 	sc := &setupCtx{ui: ui, root: root, ctx: ctx}
+	if list, def, err := parseProviderFlags(*providers, *provider); err != nil {
+		ctlFatal(2, "%v", err)
+	} else {
+		sc.providersFlag, sc.providerFlag = list, def
+		sc.providerFromList = list != nil && *provider == ""
+	}
 	steps := setupSteps()
 
 	if *list {
@@ -111,7 +150,10 @@ func setupMain(args []string) {
 	if *check {
 		os.Exit(setupCheck(sc, steps))
 	}
-	if !isTTY(os.Stdin) && !*assumeYes {
+	// --only provider --provider X asks nothing, so it needs no terminal: the
+	// scripted way to change the default on a headless host.
+	scripted := *only == "provider" && sc.providerFlag != ""
+	if !isTTY(os.Stdin) && !*assumeYes && !scripted {
 		ctlFatal(2, "setup needs a terminal (or pass -y / --check)")
 	}
 	os.Exit(setupRun(sc, steps, *only, *from))
@@ -155,6 +197,8 @@ func setupCheck(sc *setupCtx, steps []setupStep) int {
 		done, detail := s.detect(sc)
 		if done {
 			u.ok("%-18s %s", s.id, u.dim(detail))
+		} else if s.advisory {
+			u.warn("%-18s %s", s.id, detail)
 		} else {
 			u.fail("%-18s %s", s.id, detail)
 			pending++
@@ -179,8 +223,9 @@ func setupRun(sc *setupCtx, steps []setupStep, only, from string) int {
 		u.blank()
 		u.printf("%s", u.bold("koto setup"))
 		u.prose(`This wizard takes an installed koto to a running one: it mints the TLS
-material the daemon and its clients use, connects your Anthropic
-credentials, starts the service, and proves the result answers.
+material the daemon and its clients use, picks the LLM provider new groups
+use by default and connects its credentials, starts the service, and
+proves the result answers.
 
 It is the last of three stages and owns neither of the others. ` + "`make fetch`" + `
 or ` + "`make build`" + ` acquires the artifacts; ` + "`make install`" + ` integrates them into

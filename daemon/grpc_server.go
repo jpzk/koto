@@ -248,8 +248,8 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 	if !validGroupName(r.Group) {
 		return &pb.SpawnResp{Error: "invalid group name (must match [A-Za-z0-9][A-Za-z0-9_-]{0,31})"}, nil
 	}
-	if r.Provider != "" && r.Provider != "claudesdk" && r.Provider != "venice" {
-		return &pb.SpawnResp{Error: "provider must be claudesdk or venice"}, nil
+	if r.Provider != "" && !validProvider(r.Provider) {
+		return &pb.SpawnResp{Error: "provider must be " + providerListText()}, nil
 	}
 	if r.Size != "" {
 		if _, ok := fcSizePresets[r.Size]; !ok {
@@ -568,6 +568,51 @@ func (s *kotoServer) Resources(ctx context.Context, _ *pb.ResourcesReq) (*pb.Res
 			GuestDiskUsedBytes:  g.GuestDiskUsed,
 			MemCommittedMib:     g.MemCommittedMiB,
 		})
+	}
+	return out, nil
+}
+
+// Models serves the new-group dialog's model picker: the provider's model
+// catalog, fetched host-side with the host credential (daemon/models.go).
+// It never fails on upstream trouble — the answer degrades to the built-in
+// fallback list with the reason — and never waits longer than
+// modelsRPCWait, so a slow upstream cannot stall the dialog; a caller that
+// gives up early gets the fallback and the fetch keeps warming the cache.
+func (s *kotoServer) Models(ctx context.Context, r *pb.ModelsReq) (*pb.ModelsResp, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	wctx, cancel := context.WithTimeout(ctx, modelsRPCWait)
+	defer cancel()
+	l, err := modelsFor(wctx, r.GetProvider())
+	if err != nil {
+		return &pb.ModelsResp{Ok: false, Error: err.Error()}, nil
+	}
+	out := &pb.ModelsResp{
+		Ok:       true,
+		Provider: l.Provider,
+		Source:   l.Source,
+		Reason:   l.Error,
+		Models:   make([]*pb.ModelInfo, 0, len(l.Models)),
+	}
+	for _, m := range l.Models {
+		out.Models = append(out.Models, &pb.ModelInfo{Id: m.ID, DisplayName: m.DisplayName})
+	}
+	return out, nil
+}
+
+// Providers serves the new-group / edit-group provider select: which
+// providers have a credential set up on this host (provider_status.go).
+// Built field by field from providerStatus so no credential material can
+// ride along: name, configured, kind.
+func (s *kotoServer) Providers(ctx context.Context, _ *pb.ProvidersReq) (*pb.ProvidersResp, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	st := providerStatuses()
+	out := &pb.ProvidersResp{Ok: true, Providers: make([]*pb.ProviderStatus, 0, len(st))}
+	for _, p := range st {
+		out.Providers = append(out.Providers, &pb.ProviderStatus{Name: p.Name, Configured: p.Configured, Kind: p.Kind})
 	}
 	return out, nil
 }
@@ -1073,6 +1118,16 @@ func (s *kotoServer) AclDelRole(_ context.Context, r *pb.AclDelRoleReq) (*pb.Acl
 	}
 	emitLogf("acl", "info", "role %s deleted", r.Role)
 	return &pb.AclResp{Ok: true, Acl: toStruct(doc)}, nil
+}
+
+// ---- budget (hardcoded admin-only, acl.go) --------------------------------
+
+func (s *kotoServer) Budget(_ context.Context, r *pb.BudgetReq) (*pb.BudgetResp, error) {
+	view, err := budgetAdmin(r.Op, r.Provider, r.Auth, r.Field, r.Value, r.Model, r.Prices)
+	if err != nil {
+		return &pb.BudgetResp{Error: err.Error()}, nil
+	}
+	return &pb.BudgetResp{Ok: true, Budget: toStruct(view)}, nil
 }
 
 // ---- server-streaming RPCs ------------------------------------------------

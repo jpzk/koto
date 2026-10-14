@@ -29,7 +29,7 @@ There are three configuration surfaces:
 - Parsing: `KEY=VALUE` per line, blanks and `#` comments ignored, key and
   value whitespace-trimmed — `daemon/install.go` `parseEnvFile`.
 
-Keys written by `writeEnvFile` (the `defaults` and `optional` slices):
+Keys written by `writeEnvFile` (the `defaults` and `optional` slices of `envFileKeys`):
 
 Always written (value preserved if already set):
 
@@ -47,6 +47,9 @@ Optional (written commented-out as `#KEY=` when empty):
 - `KOTO_CLAUDE_BIN` — set to the claude CLI path resolved at install time
   (`installClaudeBin`); unlike the other keys, the freshly resolved value is
   written rather than the file's old value (`kv[0] != claudeBinEnv` branch).
+- `KOTO_DEFAULT_PROVIDER` — the host default provider (see 2.1). Written by
+  `koto setup`'s `provider` step; listed in `envFileKeys` so a reinstall
+  preserves it.
 
 The unit also sets `Environment=HOME=<state dir>`, `WorkingDirectory=<state
 dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
@@ -79,6 +82,14 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `KOTO_CLAUDE_BIN` — claude CLI executed for OAuth token refresh. Default
   bare `claude` (PATH lookup) — `daemon/claudebin.go` `claudeBin`, const
   `claudeBinEnv`.
+- `KOTO_DEFAULT_PROVIDER` — provider written into a group's `config.json` when
+  it has none or an invalid one: every new group (main included) and
+  pre-provider groups on their next ensure(). `claudesdk` | `venice` |
+  `openai` (case-insensitive); unset or unknown = `claudesdk` —
+  `daemon/providers.go` `defaultProvider()`. Groups that already name a valid
+  provider are never rewritten. Host-only: it is not a `config.json` key, not
+  a ctl field and not settable by a guest; set it with `koto setup --only
+  provider` (or edit koto.env) and restart the daemon.
 - `ANTHROPIC_API_KEY` — if set, outranks the key file
   `<state>/creds/anthropic-api-key` — `daemon/proxy.go` `currentAPIKey`,
   `proxyInitPaths`. The file is re-read per request.
@@ -192,8 +203,9 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 
 ### Keys
 
-- `provider` — `claudesdk` | `venice`. Default `claudesdk`
-  (`daemon/groups.go` const `defaultProvider`, `ensureProviderConfig`).
+- `provider` — `claudesdk` | `venice` | `openai`. Default: the host's
+  `KOTO_DEFAULT_PROVIDER`, else `claudesdk` (`daemon/providers.go`
+  `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — free string, charset `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`, max 128
   chars (`configIdentRE`, `configMaxIdent`). Default when unset:
   `claude-sonnet-5` under claudesdk, `kimi-k2.5` under venice

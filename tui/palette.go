@@ -91,14 +91,16 @@ func (m Model) paletteItems() []paletteItem {
 		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
 		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
 		{title: topTitle, hint: "ctrl+k", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
-		{title: schedTitle, hint: "ctrl+e", act: func(m *Model) tea.Cmd { return m.toggleSchedView() }},
+		{title: schedTitle, hint: "ctrl+y", act: func(m *Model) tea.Cmd { return m.toggleSchedView() }},
 		{title: "cheatsheet (keys + commands)", hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleHelp(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
 		{title: "jump to group/session", hint: "ctrl+t", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},
 		{title: "switch group", hint: "/sw <group>", run: "/sw ", edit: true},
 		{title: "switch chat session", hint: "/session [name]", run: "/session ", edit: true},
-		{title: "new group", hint: "/new <group>", run: "/new ", edit: true},
+		{title: "new group (dialog)", hint: "ctrl+n", act: func(m *Model) tea.Cmd { return m.openNewGroup() }},
+		{title: "edit current group (dialog)", hint: "ctrl+e", act: func(m *Model) tea.Cmd { return m.openEditGroup() }},
+		{title: "new group (command)", hint: "/new <group>", run: "/new ", edit: true},
 		{title: "refresh group list", hint: "/ls", run: "/ls"},
 
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},

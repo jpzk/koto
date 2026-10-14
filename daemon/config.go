@@ -43,17 +43,15 @@ func applyConfig(cfg map[string]any, key string, raw json.RawMessage) {
 		return
 	}
 	if key == "provider" {
-		// Only "claudesdk" (default) and "venice" are supported. Anything else
-		// is silently rejected so a typo doesn't silently swap providers — the
-		// next /config call will still show the previous value.
+		// Only the providers in knownProviders (providers.go) are supported.
+		// Anything else is silently rejected so a typo doesn't silently swap
+		// providers — the next /config call will still show the previous value.
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return
 		}
-		s = strings.ToLower(strings.TrimSpace(s))
-		switch s {
-		case "claudesdk", "venice":
-			cfg[key] = s
+		if p, ok := normProvider(s); ok {
+			cfg[key] = p
 		}
 		return
 	}

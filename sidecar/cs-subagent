@@ -17,6 +17,8 @@
 #   venice    -> venice_stream.js in VENICE_ONESHOT mode: ephemeral in-memory
 #                history (skips /workspace/.cs/venice-history.json), final text
 #                to stdout, tool/progress framing to stderr.
+#   openai    -> `codex exec --ephemeral` (no thread history written), progress
+#                on stderr, final message via -o to stdout; host-proxied auth.
 #
 # Usage: cs-subagent [--system <text>] <prompt...>
 #        echo <prompt> | cs-subagent [--system <text>]
@@ -84,6 +86,34 @@ case "$PROVIDER" in
     [ -n "$SYS" ] && SP_B64=$(printf '%s' "$SYS" | base64 -w 0)
     MSG_B64="$MSG_B64" SP_B64="$SP_B64" VENICE_MODEL="$VM" VENICE_ONESHOT=1 \
       node /sidecar/venice_stream.js
+    ;;
+  openai)
+    # codex exec in its plain (non-JSON) mode: progress on stderr, the final
+    # message written to a file by -o and printed as our stdout. --ephemeral
+    # keeps the run out of the group's codex thread history. Provider
+    # settings mirror fcguest/codex.go: the host proxy holds the credential,
+    # KOTO_OPENAI_API_KEY is a placeholder.
+    [ -n "${KOTO_OPENAI_BASE_URL:-}" ] || { echo "cs-subagent: KOTO_OPENAI_BASE_URL unset" >&2; exit 2; }
+    OM="$MODEL"; [ -z "$OM" ] && OM="${KOTO_DEFAULT_OPENAI_MODEL:-}"
+    # TOML basic-string escape for a -c value (\\, ", tab, CR, newline).
+    tq() { printf '%s' "$1" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); gsub(/\r/,"\\r"); if (NR>1) print "\\n"; print}'; }
+    OUT=$(mktemp)
+    trap 'rm -f "$OUT"' EXIT
+    set -- codex exec --ephemeral --skip-git-repo-check \
+      --dangerously-bypass-approvals-and-sandbox --color never -o "$OUT" \
+      -c 'model_provider="koto"' \
+      -c 'model_providers.koto.name="koto host proxy"' \
+      -c "model_providers.koto.base_url=\"$(tq "$KOTO_OPENAI_BASE_URL")\"" \
+      -c 'model_providers.koto.env_key="KOTO_OPENAI_API_KEY"' \
+      -c 'model_providers.koto.wire_api="responses"' \
+      -c 'model_providers.koto.supports_websockets=false' \
+      -c 'model_providers.koto.requires_openai_auth=false' \
+      -c 'check_for_update_on_startup=false' \
+      -c 'analytics.enabled=false'
+    [ -n "$OM" ]  && set -- "$@" -c "model=\"$(tq "$OM")\""
+    [ -n "$SYS" ] && set -- "$@" -c "developer_instructions=\"$(tq "$SYS")\""
+    printf '%s' "$PROMPT" | CODEX_HOME=/workspace/.codex "$@" - >&2
+    cat "$OUT"
     ;;
   *)
     echo "cs-subagent: unknown provider '$PROVIDER'" >&2

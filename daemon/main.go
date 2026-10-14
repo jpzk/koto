@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|install|update|uninstall|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|budget|install|update|uninstall|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -38,6 +38,10 @@ func main() {
 		// out of the wizard because the answer to a mid-flight 401 should
 		// not be a step that restarts the daemon and stops every microVM.
 		claudeLoginMain(os.Args[2:])
+	case "openai-login":
+		// Same, for groups on provider "openai" (Codex): device-code
+		// ChatGPT login or an API key, held host-side.
+		openaiLoginMain(os.Args[2:])
 	case "uninstall":
 		// The inverse of install, and only of install: stops the service and
 		// removes the unit and binaries, keeping every byte of state unless
@@ -60,6 +64,10 @@ func main() {
 		// subuid range) without a container. Also the integration test's
 		// entry point.
 		usernsProbeMain()
+	case "budget":
+		// Operator budget: windows, spend, caps and prices per (provider,
+		// auth). A gRPC client like ctl; the verb is admin-only.
+		budgetCliMain(os.Args[2:])
 	case "pki":
 		// Private CA / server cert / client identities, in Go — the
 		// openssl-free counterpart of the Makefile's pki-* targets.
