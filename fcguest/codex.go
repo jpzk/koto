@@ -123,6 +123,15 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		// No update check (the guest has no egress, and the binary is pinned).
 		"-c", "check_for_update_on_startup=false",
 		"-c", "analytics.enabled=false",
+		// Code mode (gpt-5.6-* are code_mode_only) runs tool calls through the
+		// codex-code-mode-host process the rootfs ships next to codex. The
+		// feature is Stable and default-on in rust-v0.152.1
+		// (codex-rs/features/src/lib.rs:985-990, consumed at
+		// codex-rs/core/src/thread_manager.rs:477); set it explicitly so a
+		// default flip upstream can't silently fail code mode closed. The host
+		// path is not configurable: codex looks for it beside its own
+		// executable (codex-rs/install-context/src/lib.rs:172-202).
+		"-c", "features.code_mode_host=true",
 	)
 	if model != "" {
 		args = append(args, "-c", "model="+tomlString(model))

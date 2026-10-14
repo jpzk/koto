@@ -141,6 +141,8 @@ func TestCodexArgs(t *testing.T) {
 		`model_providers.koto.supports_websockets=false`,
 		`model_providers.koto.requires_openai_auth=false`,
 		`check_for_update_on_startup=false`,
+		`analytics.enabled=false`,
+		`features.code_mode_host=true`,
 		`model="gpt-5.5"`,
 		`model_reasoning_effort="high"`,
 		`developer_instructions="be \"terse\"\\\nok"`,
@@ -161,6 +163,11 @@ func TestCodexArgs(t *testing.T) {
 	r := codexArgs(base, "", "", "", "01a13a01-c772-7110-bbfc-0a05d2ac287a")
 	if r[0] != "exec" || r[1] != "resume" || r[len(r)-2] != "01a13a01-c772-7110-bbfc-0a05d2ac287a" || r[len(r)-1] != "-" {
 		t.Errorf("resume argv shape: %q", r)
+	}
+	// Resumed turns must keep code mode on too, or a gpt-5.6 thread fails
+	// closed on its second message.
+	if !strings.Contains("\x00"+strings.Join(r, "\x00")+"\x00", "\x00features.code_mode_host=true\x00") {
+		t.Errorf("resume argv lacks features.code_mode_host=true: %q", r)
 	}
 	for _, a := range r {
 		if strings.HasPrefix(a, "model=") || strings.HasPrefix(a, "developer_instructions=") || strings.HasPrefix(a, "model_reasoning_effort=") {
