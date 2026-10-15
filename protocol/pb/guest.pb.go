@@ -1264,7 +1264,10 @@ type MsgReq struct {
 	Slot         int32                  `protobuf:"varint,6,opt,name=slot,proto3" json:"slot,omitempty"`                              // which log.<n> stream this turn writes to
 	// W3C traceparent of the host turn span. "" = telemetry off: the guest
 	// emits no GuestSpan frames at all.
-	Traceparent   string `protobuf:"bytes,7,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	Traceparent string `protobuf:"bytes,7,opt,name=traceparent,proto3" json:"traceparent,omitempty"`
+	// Scrubbed provider-neutral history materialized before the turn at
+	// /workspace/.cs/handoff/<session>.md. Empty means leave it untouched.
+	Handoff       []byte `protobuf:"bytes,8,opt,name=handoff,proto3" json:"handoff,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1346,6 +1349,13 @@ func (x *MsgReq) GetTraceparent() string {
 		return x.Traceparent
 	}
 	return ""
+}
+
+func (x *MsgReq) GetHandoff() []byte {
+	if x != nil {
+		return x.Handoff
+	}
+	return nil
 }
 
 type ExecReq struct {
@@ -2456,7 +2466,7 @@ const file_guest_proto_rawDesc = "" +
 	"\x03kvm\x18\x06 \x01(\bR\x03kvm\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd1\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xeb\x01\n" +
 	"\x06MsgReq\x12\x10\n" +
 	"\x03msg\x18\x01 \x01(\fR\x03msg\x12#\n" +
 	"\rsystem_prompt\x18\x02 \x01(\fR\fsystemPrompt\x12\x1f\n" +
@@ -2466,7 +2476,8 @@ const file_guest_proto_rawDesc = "" +
 	"uploadsTar\x12\x18\n" +
 	"\asession\x18\x05 \x01(\tR\asession\x12\x12\n" +
 	"\x04slot\x18\x06 \x01(\x05R\x04slot\x12 \n" +
-	"\vtraceparent\x18\a \x01(\tR\vtraceparent\"!\n" +
+	"\vtraceparent\x18\a \x01(\tR\vtraceparent\x12\x18\n" +
+	"\ahandoff\x18\b \x01(\fR\ahandoff\"!\n" +
 	"\aExecReq\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\"'\n" +
 	"\rExecStreamReq\x12\x16\n" +

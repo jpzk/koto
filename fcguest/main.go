@@ -1033,6 +1033,11 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 	if len(req.ConfigJson) > 0 {
 		writeWorkerFile(filepath.Join(csDir, "config.json"), req.ConfigJson)
 	}
+	if len(req.Handoff) > 0 {
+		if err := writeHandoffFile(req.Session, req.Handoff); err != nil {
+			logf("handoff write: %v", err)
+		}
+	}
 	tr.timed("guest.config_write", cfgStart, map[string]string{
 		"system_prompt_bytes": strconv.Itoa(len(sp)), "config_bytes": strconv.Itoa(len(req.ConfigJson))}, nil)
 	// Attachments saved host-side by the daemon ride along per turn; the
@@ -1057,6 +1062,42 @@ func handleMsg(c *vconn, req *pb.MsgReq) {
 	}
 	go runTurn(req, tr)
 	replyOK(c)
+}
+
+func writeHandoffFile(session string, data []byte) error {
+	base, err := unix.Open(csDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(base)
+	if err := unix.Mkdirat(base, "handoff", 0o700); err != nil && err != unix.EEXIST {
+		return err
+	}
+	dir, err := unix.Openat(base, "handoff", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dir)
+	name := sessionFileName(session) + ".md"
+	tmp := fmt.Sprintf(".%s.tmp-%d", name, time.Now().UnixNano())
+	fd, err := unix.Openat(dir, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(fd), tmp)
+	if _, err = f.Write(data); err == nil {
+		err = f.Chown(workerUID, workerGID)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = unix.Renameat(dir, tmp, dir, name)
+	}
+	if err != nil {
+		_ = unix.Unlinkat(dir, tmp, 0)
+	}
+	return err
 }
 
 // writeWorkerFile writes atomically (tmp + rename) so a reader in the guest

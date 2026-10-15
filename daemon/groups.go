@@ -903,7 +903,7 @@ func clearCmd(req groupReq) baseResp {
 	// read-only guest filesystem, or anything else that makes `rm` fail, told
 	// the operator the conversation was forgotten while it was still there.
 	if out, rc, err := fcExec(req.Group,
-		"rm -rf /workspace/.claude /workspace/.cs/sessions /workspace/.cs/venice-history.json /workspace/.cs/venice-history-*.json", 15*time.Second); err != nil {
+		"rm -rf /workspace/.claude /workspace/.cs/sessions /workspace/.cs/venice-history.json /workspace/.cs/venice-history-*.json /workspace/.cs/handoff", 15*time.Second); err != nil {
 		return errResp("clear: " + err.Error())
 	} else if rc != 0 {
 		return errResp(fmt.Sprintf("clear: guest deletion failed (rc=%d): %s", rc, truncateBytes(strings.TrimSpace(out), 400)))
@@ -924,6 +924,9 @@ func clearCmd(req groupReq) baseResp {
 	// filterLogSession's error; this is the same promise on the wider verb.
 	if err := clearGroupLogs(req.Group); err != nil {
 		return errResp("clear: " + err.Error())
+	}
+	if err := clearAllHandoffCursors(req.Group); err != nil {
+		return errResp("clear: handoff state: " + err.Error())
 	}
 	// ...and the in-memory replay ring, which is the OTHER copy (events.go).
 	clearEventRing(req.Group)
@@ -973,7 +976,7 @@ func clearSessionContext(g, sess string) baseResp {
 ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
 case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
 if [ -n "$ID" ]; then rm -f /workspace/.claude/projects/*/"$ID".jsonl || exit 1; fi
-rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id ` + vh + `
+rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id ` + vh + ` /workspace/.cs/handoff/` + name + `.md
 
 exit $?`
 	if out, rc, err := fcExec(g, script, 15*time.Second); err != nil {
@@ -1024,6 +1027,9 @@ func clearSession(g, sess string) baseResp {
 		}
 	}
 	clearEventRing(g)
+	if err := clearHandoffSession(g, sess); err != nil {
+		return errResp("clear: handoff state: " + err.Error())
+	}
 	removeSession(g, sess)
 	return baseResp{OK: true}
 }

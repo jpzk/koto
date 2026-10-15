@@ -119,8 +119,9 @@ func streamLineAppend(p string, b []byte) error {
 // glued onto that partial line, the parser never saw the [[session]] marker,
 // and the whole new turn — its turn_end included — was attributed to the
 // previous session (fuzz 2026-10-09 F7).
-func writeTurnHeader(p, session, msg string) {
-	h := fmt.Sprintf("%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), time.Now().UnixMilli(), fencePromptEcho(msg))
+func writeTurnHeader(p, session, msg string) float64 {
+	ms := time.Now().UnixMilli()
+	h := fmt.Sprintf("%s\n[ts:%d]\n>>> %s\n", sessionMarker(session), ms, fencePromptEcho(msg))
 	mu := logWriteLock(p)
 	mu.Lock()
 	defer mu.Unlock()
@@ -131,6 +132,7 @@ func writeTurnHeader(p, session, msg string) {
 		f.WriteString(h)
 		f.Close()
 	}
+	return float64(ms) / 1000
 }
 
 func tailBackgroundTask(g, streamPath, session, id, path string) {
@@ -381,12 +383,17 @@ func sendNowTurn(ot *otelTurn, g, session, msg string) error {
 	// and in History replay. Written unconditionally (default = "-") so a
 	// default turn after a named one resets the attribution. The slot is what
 	// makes the sticky marker safe again: no other turn writes here.
-	writeTurnHeader(logPath, session, msg)
+	provider := groupProvider(g)
+	handoffBlock, handoffFull, handoffLatest := prepareHandoff(g, session, provider)
+	turnTS := writeTurnHeader(logPath, session, msg)
 
 	sp := composeSystemPrompt(g)
 	// Built from the account store for the group's (provider, auth) on every
 	// turn — even a group that never called yet sees its account's budget.
 	augmented := contextBlock(budgetKeyFor(groupProvider(g)), latestMetric(g)) + "\n\n" + msg
+	if handoffBlock != "" {
+		augmented = handoffBlock + "\n\n" + augmented
+	}
 
 	// microVM delivery: the guest agent materializes the per-session
 	// system-prompt + config.json in the guest workspace and writes the
@@ -415,7 +422,7 @@ drain:
 	if !isReservedSession(session) {
 		activityTurnDelivering(g, session)
 	}
-	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB, otelTraceparent(ot.Ctx())); err != nil {
+	if err := fcSendMsg(g, session, slot, augmented, sp, cfgB, handoffFull, otelTraceparent(ot.Ctx())); err != nil {
 		// An error here is an AMBIGUOUS delivery, not a proven non-delivery.
 		// fc-agent starts runTurn BEFORE it replies, so a transport failure,
 		// a lost response or a deadline all leave a turn possibly running in
@@ -428,6 +435,12 @@ drain:
 		quarantineSlot(hold)
 		emitLogfG("send", g, "warn", "[%s] delivery failed ambiguously (%v) — quarantining slot %d until the VM is known dead", g, err, slot)
 		return err
+	}
+	if handoffLatest > turnTS {
+		turnTS = handoffLatest
+	}
+	if err := advanceHandoffCursor(g, session, provider, turnTS); err != nil {
+		emitLogfG("send", g, "warn", "[%s] advance handoff cursor: %v", g, err)
 	}
 	stall := time.After(turnWaitTimeout)
 	var retry <-chan time.Time
