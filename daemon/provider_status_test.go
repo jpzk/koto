@@ -201,18 +201,20 @@ func TestProviderStatusOpenAIAgreesWithProxy(t *testing.T) {
 func TestProvidersRPCCarriesNoSecret(t *testing.T) {
 	dir := provEnv(t)
 	const (
-		claudeTok = "sk-ant-oat01-SECRETCLAUDETOKEN0001"
-		claudeKey = "sk-ant-api03-SECRETCLAUDEKEY0002"
-		veniceKey = "vk-SECRETVENICEKEY0003"
-		openaiTok = "eyJSECRETOPENAITOKEN0004"
-		openaiRT  = "rt-SECRETOPENAIREFRESH0005"
-		openaiKey = "sk-proj-SECRETOPENAIKEY0006"
+		claudeTok  = "sk-ant-oat01-SECRETCLAUDETOKEN0001"
+		claudeKey  = "sk-ant-api03-SECRETCLAUDEKEY0002"
+		veniceKey  = "vk-SECRETVENICEKEY0003"
+		openaiTok  = "eyJSECRETOPENAITOKEN0004"
+		openaiRT   = "rt-SECRETOPENAIREFRESH0005"
+		openaiKey  = "sk-proj-SECRETOPENAIKEY0006"
+		minimaxKey = "sk-cp-SECRETMINIMAXKEY0007"
 	)
 	provWrite(t, credPath, `{"claudeAiOauth":{"accessToken":"`+claudeTok+`","expiresAt":4102444800000}}`)
 	provWrite(t, apiKeyPath, claudeKey)
 	provWrite(t, veniceKeyPath(), veniceKey)
 	provWrite(t, openaiAuthPath(), `{"tokens":{"access_token":"`+openaiTok+`","refresh_token":"`+openaiRT+`"}}`)
 	provWrite(t, openaiAPIKeyPath(), openaiKey)
+	provWrite(t, minimaxKeyPath(), minimaxKey)
 
 	resp, err := (&kotoServer{}).Providers(context.Background(), &pb.ProvidersReq{})
 	if err != nil || !resp.Ok {
@@ -236,7 +238,7 @@ func TestProvidersRPCCarriesNoSecret(t *testing.T) {
 	}
 	for _, blob := range [][]byte{wire, js} {
 		s := string(blob)
-		for _, secret := range []string{claudeTok, claudeKey, veniceKey, openaiTok, openaiRT, openaiKey} {
+		for _, secret := range []string{claudeTok, claudeKey, veniceKey, openaiTok, openaiRT, openaiKey, minimaxKey} {
 			// The whole secret and its distinctive core (any 8-byte window
 			// would do; the SECRET… marker is unique to the seeds).
 			if strings.Contains(s, secret) || strings.Contains(s, secret[:8]) {

@@ -1,0 +1,8 @@
+{
+  "providers": {
+    "minimax": {
+      "baseUrl": "http://127.0.0.1:18888/anthropic",
+      "apiKey": "proxied"
+    }
+  }
+}

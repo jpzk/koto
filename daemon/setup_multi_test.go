@@ -83,7 +83,8 @@ func runSteps(t *testing.T, sc *setupCtx, steps ...setupStep) (string, error) {
 }
 
 func TestParseMultiChoice(t *testing.T) {
-	names := knownProviders
+	// A fixed three-entry menu: the cases below spell out its bounds (1-3).
+	names := []string{providerClaude, providerVenice, providerOpenAI}
 	for _, tc := range []struct {
 		in   string
 		want []int
