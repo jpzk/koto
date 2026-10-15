@@ -111,6 +111,8 @@ func budgetKeyFor(provider string) budgetKey {
 		return budgetKey{providerOpenAI, openaiKindAuth(openaiPeekKind())}
 	case providerVenice:
 		return budgetKey{providerVenice, budgetAuthAPIKey}
+	case providerMinimax:
+		return budgetKey{providerMinimax, minimaxBudgetAuth()}
 	default:
 		return budgetKey{providerClaude, claudeAuthKind()}
 	}
@@ -384,7 +386,14 @@ func budgetObserve(key budgetKey, h http.Header) {
 		emitLogf("llm", "debug", "budget %s: dropped unknown rate-limit window(s) %s (total dropped %d)",
 			key, strings.Join(o.dropped, ","), n)
 	}
-	if o.empty() {
+	budgetApply(key, o)
+}
+
+// budgetApply folds one observation into key's account state. Shared by the
+// header path (budgetObserve) and providers whose windows come from a
+// host-side poll instead (minimax token_plan/remains).
+func budgetApply(key budgetKey, o budgetObs) {
+	if !key.valid() || o.empty() {
 		return
 	}
 	budgetMu.Lock()
