@@ -133,9 +133,9 @@ func TestProviderStatusClaude(t *testing.T) {
 		provEnv(t)
 		t.Setenv("KOTO_UPSTREAM", "http://127.0.0.1:18888")
 		provWant(t, providerClaude, true, credKindUpstream)
-		// Upstream only fronts Anthropic: the others stay unconfigured.
+		// Upstream fronts Anthropic and OpenAI; venice stays unconfigured.
 		provWant(t, providerVenice, false, "")
-		provWant(t, providerOpenAI, false, "")
+		provWant(t, providerOpenAI, true, credKindUpstream)
 	})
 	t.Run("KOTO_UPSTREAM blank", func(t *testing.T) {
 		provEnv(t)

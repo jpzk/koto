@@ -60,6 +60,9 @@ func providerCredKind(p string) string {
 			return credKindAPIKey
 		}
 	case providerOpenAI:
+		if kotoUpstreamSet() {
+			return credKindUpstream
+		}
 		f, ferr := openaiReadAuthFile()
 		switch kind, _ := openaiStoredCred(f, ferr); kind {
 		case "chatgpt":
@@ -71,12 +74,20 @@ func providerCredKind(p string) string {
 	return ""
 }
 
+// kotoUpstreamSet reports whether this daemon is chained to an outer koto
+// (KOTO_UPSTREAM non-empty). The outer proxy then holds every provider's
+// credential: the Anthropic and OpenAI paths both send a placeholder and
+// never read or refresh a local credential. Shared so the two cannot drift.
+func kotoUpstreamSet() bool {
+	return strings.TrimSpace(os.Getenv("KOTO_UPSTREAM")) != ""
+}
+
 // anthropicCredKind mirrors authHeaders' precedence: KOTO_UPSTREAM (the
 // outer proxy fills the credential in), then the API key currentAPIKey
 // resolves (env first, then creds/anthropic-api-key), then the claude-login
 // OAuth token readCreds reads.
 func anthropicCredKind() string {
-	if strings.TrimSpace(os.Getenv("KOTO_UPSTREAM")) != "" {
+	if kotoUpstreamSet() {
 		return credKindUpstream
 	}
 	if k := currentAPIKey(); k != "" {
