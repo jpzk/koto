@@ -27,7 +27,7 @@ func sendTurnTraceparent(t *testing.T) (got string, ot *otelTurn) {
 	defer ln.Close()
 	ot = otelTurnBegin("tg", "")
 	ot.bindSlot(1)
-	if err := fcSendMsg("tg", "", 1, "hi", "sp", nil, otelTraceparent(ot.Ctx())); err != nil {
+	if err := fcSendMsg("tg", "", 1, "hi", "sp", nil, nil, otelTraceparent(ot.Ctx())); err != nil {
 		t.Fatalf("fcSendMsg: %v", err)
 	}
 	return <-gotC, ot

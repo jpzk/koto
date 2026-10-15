@@ -1800,7 +1800,7 @@ func fcConsumeExpectedTurn(g string, slot int) (string, bool) {
 	return sess, ok
 }
 
-func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte, traceparent string) error {
+func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON, handoff []byte, traceparent string) error {
 	fcExpectTurn(g, slot, session)
 	m := &pb.MsgReq{
 		// W3C traceparent of the host turn span; "" when OTel export is off,
@@ -1815,7 +1815,8 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// The slot tells the guest which log stream this turn writes to, and
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
-		Slot: int32(slot),
+		Slot:    int32(slot),
+		Handoff: handoff,
 	}
 	files := fcTurnUploads(g, msg)
 	if len(files) > 0 {

@@ -137,6 +137,9 @@ message MsgReq {
   // W3C traceparent of the host turn span. "" = telemetry off: the guest
   // emits no GuestSpan frames at all.
   string traceparent   = 7;
+  // Scrubbed provider-neutral history materialized before the turn at
+  // /workspace/.cs/handoff/<session>.md. Empty means leave it untouched.
+  bytes  handoff       = 8;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
