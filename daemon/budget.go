@@ -78,17 +78,23 @@ func claudeAuthKind() string {
 
 // openaiKindAuth maps openaiCred.Kind onto the budget auth vocabulary.
 func openaiKindAuth(kind string) string {
-	if kind == "chatgpt" {
+	switch kind {
+	case "chatgpt":
 		return budgetAuthSub
+	case openaiKindUpstream:
+		return budgetAuthUpstream
 	}
 	return budgetAuthAPIKey
 }
 
 // openaiPeekKind answers which credential openaiCredential would use, with
-// the same precedence (ChatGPT OAuth tokens, then the api key in the auth
-// file, then the plain key file) but WITHOUT refreshing anything. "" means
+// the same precedence (KOTO_UPSTREAM, then ChatGPT OAuth tokens, then the
+// api key in the auth file, then the plain key file) but WITHOUT refreshing anything. "" means
 // no credential. TestOpenAIPeekKindMatchesCredential pins the agreement.
 func openaiPeekKind() string {
+	if kotoUpstreamSet() {
+		return openaiKindUpstream
+	}
 	f, ferr := openaiReadAuthFile()
 	if ferr == nil && f.Tokens != nil && f.Tokens.AccessToken != "" {
 		return "chatgpt"

@@ -106,7 +106,16 @@ type openaiAuthFile struct {
 	LastRefresh *time.Time    `json:"last_refresh,omitempty"`
 }
 
-// openaiCred is what the proxy injects. Kind is "chatgpt" or "api-key".
+// openaiKindUpstream is the openaiCred kind under KOTO_UPSTREAM; its token
+// is the same "proxied" placeholder the Anthropic path sends.
+const (
+	openaiKindUpstream        = credKindUpstream
+	openaiUpstreamPlaceholder = anthropicPlaceholderKey
+)
+
+// openaiCred is what the proxy injects. Kind is "chatgpt", "api-key" or
+// "upstream" (KOTO_UPSTREAM: Token is the placeholder the outer koto swaps
+// for its own credential).
 type openaiCred struct {
 	Kind      string
 	Token     string
@@ -297,6 +306,11 @@ func openaiRefresh(ctx context.Context, f *openaiAuthFile) error {
 // with a still-valid access token degrades to that token (the next request
 // retries); an expired token or a rejected refresh token is an error.
 func openaiCredential(ctx context.Context) (openaiCred, error) {
+	if kotoUpstreamSet() {
+		// The outer koto swaps the placeholder for its own credential: no
+		// local file is read and nothing is refreshed.
+		return openaiCred{Kind: openaiKindUpstream, Token: openaiUpstreamPlaceholder}, nil
+	}
 	openaiAuthMu.Lock()
 	defer openaiAuthMu.Unlock()
 
