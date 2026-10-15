@@ -19,7 +19,7 @@ import (
 // anything was observed, so the line keeps its shape (claudesdk subscription
 // stays byte-compatible with the pre-budget block apart from the label).
 func budgetCtxDefaultLabels(key budgetKey) []string {
-	if key.Auth == budgetAuthSub && (key.Provider == providerClaude || key.Provider == providerOpenAI) {
+	if key.Auth == budgetAuthSub && (key.Provider == providerClaude || key.Provider == providerOpenAI || key.Provider == providerMinimax) {
 		return []string{"5h", "7d"}
 	}
 	return nil
