@@ -70,6 +70,9 @@ mkdir -p "$HERE/.gocache/mod"
 echo "==> building rootfs image"
 "$CONTAINER" build -t koto-fcrootfs -f "$HERE/fcguest/Dockerfile.rootfs" "$HERE"
 
+echo "==> verifying rootfs image"
+CONTAINER="$CONTAINER" "$HERE/fcguest/verify-rootfs.sh" koto-fcrootfs
+
 echo "==> exporting filesystem + mkfs.ext4"
 CID=$("$CONTAINER" create koto-fcrootfs)
 trap '"$CONTAINER" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
