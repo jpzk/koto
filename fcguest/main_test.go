@@ -10,6 +10,26 @@ import (
 	"testing"
 )
 
+func TestEntrypointEnvironEnforcesPiRuntimePolicy(t *testing.T) {
+	got := make(map[string]string)
+	for _, assignment := range entrypointEnviron(nil) {
+		key, value, ok := strings.Cut(assignment, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	want := map[string]string{
+		"PI_OFFLINE":            "1",
+		"PI_TELEMETRY":          "0",
+		"PI_SKIP_VERSION_CHECK": "1",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("%s = %q, want %q", key, got[key], value)
+		}
+	}
+}
+
 // 2026-09-11 L118: every concurrent turn materialises the same config.json, and
 // writeWorkerFile used ONE shared "<path>.tmp" — so the second writer's
 // os.Remove unlinked the first's inode mid-write, its O_EXCL open then
