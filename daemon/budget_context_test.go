@@ -121,7 +121,7 @@ func TestContextBlockVenice(t *testing.T) {
 	k := budgetKey{providerVenice, budgetAuthAPIKey}
 	budgetRecordSpend(k, "llama-3.3-70b", usageOf(340_000, 0, 0, 0), nil)
 	l := ctxLines(t, contextBlock(k, nil))
-	want := []string{"rate-limit (venice/apikey): ?", "budget: today 340k tok"}
+	want := []string{"credits (venice/apikey): usd=? | diem=? | req ?", "budget: today 340k tok"}
 	if strings.Join(l[1:], "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q", l[1:])
 	}
