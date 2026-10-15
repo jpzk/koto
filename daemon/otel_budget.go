@@ -5,7 +5,8 @@ package main
 //
 // Source: budgetObserve (budget.go), fed by logMetricKey with the raw
 // response headers of every retired request: anthropic-ratelimit-unified-*
-// for claudesdk, x-codex-* (incl. credits) for openai. Venice sends none.
+// for claudesdk, x-codex-* (incl. credits) for openai, x-venice-balance-*
+// and x-ratelimit-*-requests for venice (otel_budget_venice.go).
 // The gauge callback reads a copy of that store.
 //
 // Rules:
@@ -27,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -95,7 +97,11 @@ type otelBudgetPoint struct {
 // otelBudgetCopy flattens the store into window points and overage
 // statuses (keyed by budgetKey), in a stable order.
 func otelBudgetCopy() (pts []otelBudgetPoint, overage map[budgetKey]string) {
-	all := budgetSnapshotAll()
+	return otelBudgetCopyFrom(budgetSnapshotAll())
+}
+
+// otelBudgetCopyFrom is otelBudgetCopy over an existing store snapshot.
+func otelBudgetCopyFrom(all map[budgetKey]budgetAccount) (pts []otelBudgetPoint, overage map[budgetKey]string) {
 	keys := make([]budgetKey, 0, len(all))
 	for k := range all {
 		keys = append(keys, k)
@@ -139,11 +145,16 @@ func otelBudgetInstruments(m metric.Meter) (metric.Registration, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("koto.llm.ratelimit.overage: %w", err))
 	}
+	bal, err := otelBalanceNew(m)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
 	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		pts, overage := otelBudgetCopy()
+		all := budgetSnapshotAll()
+		pts, overage := otelBudgetCopyFrom(all)
 		for _, p := range pts {
 			attrs := metric.WithAttributes(attribute.String("provider", p.provider),
 				attribute.String("auth", p.auth), attribute.String("window", p.window))
@@ -158,8 +169,9 @@ func otelBudgetInstruments(m metric.Meter) (metric.Registration, error) {
 			o.ObserveInt64(over, 1, metric.WithAttributes(attribute.String("provider", k.Provider),
 				attribute.String("auth", k.Auth), attribute.String("status", st)))
 		}
+		bal.observe(o, all, time.Now())
 		return nil
-	}, util, reset, over)
+	}, append([]metric.Observable{util, reset, over}, bal.instruments()...)...)
 	if err != nil {
 		return nil, fmt.Errorf("budget callback: %w", err)
 	}
