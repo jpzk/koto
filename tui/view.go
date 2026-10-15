@@ -676,14 +676,21 @@ func (m Model) metricsChips(useBars bool) (left, right string) {
 	if hit := cacheHitRatio(groupMetric); hit >= 0 {
 		parts = append(parts, renderMetricColored("cache", hit, pctColor(1-hit)))
 	}
-	if u5h := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-utilization"); u5h >= 0 {
-		if reset := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-reset"); reset > 0 {
-			parts = append(parts, renderReset(int64(reset)))
+	if m.groups[m.cur].Provider == "venice" {
+		// Venice has no 5h/7d windows: its account limit is the credit
+		// balance the proxy relays from x-venice-balance-<cur> on the
+		// group's own responses. No balance seen yet -> no chip (never a fake $0).
+		parts = append(parts, veniceCreditChips(groupMetric)...)
+	} else {
+		if u5h := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-utilization"); u5h >= 0 {
+			if reset := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-5h-reset"); reset > 0 {
+				parts = append(parts, renderReset(int64(reset)))
+			}
+			parts = append(parts, renderMetric("5h", u5h))
 		}
-		parts = append(parts, renderMetric("5h", u5h))
-	}
-	if u7d := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-7d-utilization"); u7d >= 0 {
-		parts = append(parts, renderMetric("7d", u7d))
+		if u7d := readRLFloat(m.globalMetric, "anthropic-ratelimit-unified-7d-utilization"); u7d >= 0 {
+			parts = append(parts, renderMetric("7d", u7d))
+		}
 	}
 
 	// Bottom-left: the active group's cost (Resources RPC). CPU is
@@ -2079,4 +2086,33 @@ func truncRunes(s string, n int) string {
 		return "…"
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// veniceLowUSD is the balance below which the venice credit chip turns bad.
+const veniceLowUSD = 1.0
+
+// veniceCreditChips renders a venice group's credit balance from the
+// x-venice-balance-<cur> headers the daemon keeps in the group's metrics
+// "ratelimit" map: "$2.00" for usd (rose under veniceLowUSD), then
+// "diem 13.5" for diem when staked. A currency never seen gets no chip.
+func veniceCreditChips(groupMetric map[string]any) []string {
+	var out []string
+	if usd := readRLFloat(groupMetric, "x-venice-balance-usd"); usd >= 0 && usd < 1e12 {
+		fg := veniceUSDColor(usd)
+		out = append(out, alertify(lipgloss.NewStyle(), fg).Foreground(fg).Bold(true).
+			Render(fmt.Sprintf("  $%.2f ", usd)))
+	}
+	if diem := readRLFloat(groupMetric, "x-venice-balance-diem"); diem >= 0 && diem < 1e12 {
+		out = append(out, lipgloss.NewStyle().Foreground(cWhite).Bold(true).
+			Render("  diem "+strconv.FormatFloat(diem, 'f', 2, 64)+" "))
+	}
+	return out
+}
+
+// veniceUSDColor: rose (bad) under veniceLowUSD, neutral otherwise.
+func veniceUSDColor(usd float64) lipgloss.Color {
+	if usd < veniceLowUSD {
+		return cRose
+	}
+	return cWhite
 }

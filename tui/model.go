@@ -2018,11 +2018,13 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			// Group-scoped for `metric` (usage is per-group), unscoped for
 			// `global` (the rate-limit window is account-wide).
 			if msg.group == m.metricGroup {
-				m.metric = mergeMetric(m.metric, msg.metric, "usage")
+				// venice credit headers ride in "ratelimit" and are absent
+				// from non-inference calls: retain them like usage.
+				m.metric = mergeMetric(m.metric, mergeMetric(m.metric, msg.metric, "usage"), "ratelimit")
 			} else {
 				m.metric, m.metricGroup = msg.metric, msg.group
 			}
-			m.globalMetric = mergeMetric(m.globalMetric, msg.global, "ratelimit")
+			m.globalMetric = mergeGlobalMetric(m.globalMetric, msg.global)
 		}
 		return m, nil
 
@@ -5898,4 +5900,31 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// mergeGlobalMetric is mergeMetric for the account-wide 5h/7d chips: the
+// newest record from ANY group can be a venice one whose "ratelimit" map holds
+// only x-venice-balance-* / x-ratelimit-* headers. That map is not the
+// anthropic window, so it must not displace the held one.
+func mergeGlobalMetric(prev, next map[string]any) map[string]any {
+	if next == nil {
+		return prev
+	}
+	rl, _ := next["ratelimit"].(map[string]any)
+	anth := false
+	for k := range rl {
+		if strings.HasPrefix(k, "anthropic-ratelimit") {
+			anth = true
+			break
+		}
+	}
+	if !anth && len(rl) > 0 {
+		trimmed := make(map[string]any, len(next))
+		for k, v := range next {
+			trimmed[k] = v
+		}
+		trimmed["ratelimit"] = map[string]any{}
+		next = trimmed
+	}
+	return mergeMetric(prev, next, "ratelimit")
 }
