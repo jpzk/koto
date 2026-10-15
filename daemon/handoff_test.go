@@ -86,6 +86,31 @@ func TestHandoffRenderScrubsBoundsAndFramesInjection(t *testing.T) {
 	}
 }
 
+func TestHandoffPrepareFirstProviderHistoryThenSameProviderNoOp(t *testing.T) {
+	setupHandoffRoot(t)
+	g := "handoff-provider-switch"
+	writeHandoffLog(t, groupLogPath(g),
+		"[[session]] chat\n[ts:1000]\n>>> remember PLUM-42\nok\n[[turn_end]]\n")
+	if err := advanceHandoffCursor(g, "chat", providerClaude, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	inline, full, latest := prepareHandoff(g, "chat", providerVenice)
+	if latest != 1 || !strings.Contains(inline, "1 turns ran on claudesdk") {
+		t.Fatalf("first provider handoff latest=%v inline=%q", latest, inline)
+	}
+	if !strings.Contains(string(full), "remember PLUM-42") {
+		t.Fatalf("first provider did not receive full prior history: %q", full)
+	}
+	if err := advanceHandoffCursor(g, "chat", providerVenice, latest); err != nil {
+		t.Fatal(err)
+	}
+	inline, full, latest = prepareHandoff(g, "chat", providerVenice)
+	if inline != "" || full != nil || latest != 1 {
+		t.Fatalf("same provider replayed history: latest=%v inline=%q full=%q", latest, inline, full)
+	}
+}
+
 func TestHandoffClearIsolatesNamedAndDefaultSessions(t *testing.T) {
 	setupHandoffRoot(t)
 	g := "handoff-clear"
