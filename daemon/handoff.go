@@ -131,6 +131,55 @@ func advanceHandoffCursor(g, session, provider string, ts float64) error {
 	return os.Rename(name, p)
 }
 
+// clearHandoffSession forgets every provider cursor for one session. The
+// caller invokes this only after the transcript clear succeeds, so a failed
+// clear cannot leave history behind while making it look unseen.
+func clearHandoffSession(g, session string) error {
+	mu := handoffMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+
+	state := readHandoffCursors(g)
+	delete(state.Sessions, handoffSessionKey(session))
+	p := handoffCursorPath(g)
+	if len(state.Sessions) == 0 {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	b, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".handoff-cursors.json.*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.Write(b); err == nil {
+		err = tmp.Chmod(0o600)
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, p)
+}
+
+func clearAllHandoffCursors(g string) error {
+	mu := handoffMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := os.Remove(handoffCursorPath(g)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // collectHandoffTurns returns complete renderable turns for session newer
 // than after, plus the newest timestamp present in that session. Events from
 // all concurrency-slot streams are stably merged exactly as History does.

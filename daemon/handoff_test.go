@@ -86,6 +86,52 @@ func TestHandoffRenderScrubsBoundsAndFramesInjection(t *testing.T) {
 	}
 }
 
+func TestHandoffClearIsolatesNamedAndDefaultSessions(t *testing.T) {
+	setupHandoffRoot(t)
+	g := "handoff-clear"
+	for _, tc := range []struct {
+		session  string
+		provider string
+		ts       float64
+	}{
+		{"", providerClaude, 1},
+		{"chat", providerClaude, 2},
+		{"chat", providerVenice, 3},
+		{"other", providerOpenAI, 4},
+	} {
+		if err := advanceHandoffCursor(g, tc.session, tc.provider, tc.ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := clearHandoffSession(g, "chat"); err != nil {
+		t.Fatal(err)
+	}
+	if got := handoffCursor(g, "chat", providerClaude); got != 0 {
+		t.Fatalf("cleared named-session cursor = %v, want 0", got)
+	}
+	if got := handoffCursor(g, "", providerClaude); got != 1 {
+		t.Fatalf("named clear disturbed default cursor: %v", got)
+	}
+	if got := handoffCursor(g, "other", providerOpenAI); got != 4 {
+		t.Fatalf("named clear disturbed sibling cursor: %v", got)
+	}
+	if err := clearHandoffSession(g, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := handoffCursor(g, "", providerClaude); got != 0 {
+		t.Fatalf("cleared default cursor = %v, want 0", got)
+	}
+	if got := handoffCursor(g, "other", providerOpenAI); got != 4 {
+		t.Fatalf("default clear disturbed sibling cursor: %v", got)
+	}
+	if err := clearAllHandoffCursors(g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(handoffCursorPath(g)); !os.IsNotExist(err) {
+		t.Fatalf("group clear left cursor file: %v", err)
+	}
+}
+
 func setupHandoffRoot(t *testing.T) {
 	t.Helper()
 	oldRoot := ROOT
