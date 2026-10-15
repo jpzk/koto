@@ -1000,6 +1000,12 @@ func entrypointEnviron(env map[string]string) []string {
 		"HOME=" + wsDir,
 		"SHELL=/bin/bash",
 		"ANTHROPIC_API_KEY=proxied",
+		// Fixed rootfs policy, shared by every provider. workerCmd supplies an
+		// explicit environment rather than inheriting the image ENV, so keep
+		// these in sync with Dockerfile.rootfs.
+		"PI_OFFLINE=1",
+		"PI_TELEMETRY=0",
+		"PI_SKIP_VERSION_CHECK=1",
 		"TERM=xterm-256color",
 		// UTF-8 locale, or every tmux server spawned from this env (the agent
 		// touching the shared shell first) treats clients as ASCII-only and

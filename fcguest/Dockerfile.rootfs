@@ -182,6 +182,13 @@ RUN set -eu; cd /tmp; \
     test "$(pi --version)" = "$PI_VERSION"; \
     test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"
 
+# pi must stay local and quiet in every guest execution path. Keep these
+# provider-neutral: provider credentials and endpoints arrive separately at
+# runtime, and a later runPi implementation can reuse the same rootfs policy.
+ENV PI_OFFLINE=1 \
+    PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1
+
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
