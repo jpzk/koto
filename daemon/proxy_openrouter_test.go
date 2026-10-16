@@ -34,8 +34,11 @@ func (f *fakeOpenRouterUpstream) hits() int {
 func openrouterProxyEnv(t *testing.T, writeKey bool) *fakeOpenRouterUpstream {
 	t.Helper()
 	ph, pr, ps, pg, pm, pc, pu := HERE, ROOT, SOCK_DIR, GROUPS_FILE, METRICS, credPath, openrouterUpstream
+	pk := openrouterCreditsKick
+	openrouterCreditsKick = func() {} // hit counts below must not see the /key poll
 	t.Cleanup(func() {
 		HERE, ROOT, SOCK_DIR, GROUPS_FILE, METRICS, credPath, openrouterUpstream = ph, pr, ps, pg, pm, pc, pu
+		openrouterCreditsKick = pk
 	})
 	fcHarness(t)
 	METRICS = filepath.Join(HERE, "metrics.jsonl")

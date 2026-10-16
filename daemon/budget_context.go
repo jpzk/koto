@@ -101,7 +101,8 @@ func budgetCtxRateLine(key budgetKey, a budgetAccount, now time.Time) string {
 }
 
 // budgetCtxExtraLine is the provider's second line: anthropic overage, or
-// codex credits. "" = the provider has neither (api keys, venice).
+// codex credits, or OpenRouter key credits. "" = the provider has none
+// (api keys, venice).
 func budgetCtxExtraLine(key budgetKey, a budgetAccount) string {
 	switch {
 	case key.Provider == providerClaude:
@@ -122,6 +123,8 @@ func budgetCtxExtraLine(key budgetKey, a budgetAccount) string {
 			return "credits: " + c.Balance
 		}
 		return "credits: ?"
+	case key.Provider == providerOpenRouter:
+		return openrouterCreditsLine(a.ORKey)
 	}
 	return ""
 }

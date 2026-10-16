@@ -413,6 +413,19 @@ func budgetView(operator bool) map[string]any {
 				}
 				e["credits"] = cm
 			}
+			if k := a.ORKey; k != nil {
+				om := map[string]any{"usage_usd": k.Usage, "free_tier": k.FreeTier, "at": k.At.UTC().Format(time.RFC3339)}
+				if k.HasLimit {
+					om["limit_usd"] = k.Limit
+				}
+				if k.HasRemaining {
+					om["remaining_usd"] = k.Remaining
+				}
+				if k.Reset != "" {
+					om["limit_reset"] = k.Reset
+				}
+				e["openrouter_key"] = om
+			}
 			if !a.Updated.IsZero() {
 				e["updated"] = a.Updated.UTC().Format(time.RFC3339)
 			}

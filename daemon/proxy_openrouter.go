@@ -155,4 +155,7 @@ func (h *handler) serveOpenRouter(w http.ResponseWriter, r *http.Request) {
 		dropHeaders: openrouterDropHeaders,
 		body:        openrouterRewriteBody,
 	})
+	// refresh the credits snapshot in the background (never blocks; rate
+	// limited in budget_openrouter.go).
+	openrouterCreditsKick()
 }
