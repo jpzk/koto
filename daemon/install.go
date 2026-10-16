@@ -395,7 +395,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// answers, and every agent turn then fails on auth. Caught installing on
 	// a clean machine; keep this list and writeEnvFile's reader in step.
 	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
-		"acl.json", ".credentials.json", "venice.key", "anthropic-api-key"} {
+		"acl.json", ".credentials.json", "venice.key", "maple.key", "anthropic-api-key"} {
 		_ = copySecretIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
 	}
 	// clients.allow and tokens.json are cumulative REGISTRIES, not one-shot

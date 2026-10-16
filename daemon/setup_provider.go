@@ -396,6 +396,13 @@ var setupProviderAuth = map[string]providerAuth{
 		remedy: "koto setup --only auth   (or write the key to <state>/creds/venice.key, 0600)",
 		batch:  "install -m 0600 keyfile <state>/creds/venice.key",
 	},
+	providerMaple: {
+		label:  "Maple",
+		detect: mapleCredDetect,
+		login:  mapleCredLogin,
+		remedy: "koto setup --only auth   (or write the key to <state>/creds/maple.key, 0600)",
+		batch:  "install -m 0600 keyfile <state>/creds/maple.key",
+	},
 	providerOpenAI: {
 		label:  "OpenAI",
 		detect: openaiCredDetect,
@@ -530,6 +537,7 @@ This connects a credential for each provider selected above, one at a time
   claudesdk  a Claude subscription (browser OAuth) or an Anthropic API key
   venice     a Venice API key
   openai     a ChatGPT subscription (device code) or an OpenAI API key
+  maple      a Maple API key (Pro, Max or Team plan; needs your maple-proxy)
 Check each provider's terms for which fits your use — the README has the
 details. A provider already connected is not logged in again.
 
@@ -691,4 +699,39 @@ func smokeProviderCheck(sc *setupCtx) bool {
 	u.warn("default provider %s has no credential — its turns will fail", p)
 	u.hint("connect it with:\n  " + pa.remedy)
 	return false
+}
+
+func mapleCredDetect(sc *setupCtx) (bool, string) {
+	if nonEmptyFile(filepath.Join(sc.credsDir(), "maple.key")) {
+		return true, "Maple API key stored"
+	}
+	return false, "no Maple API key (creds/maple.key)"
+}
+
+// mapleCredLogin stores the Maple API key. It does not install or start
+// maple-proxy: the operator runs that (docs/configuration.md, Maple).
+func mapleCredLogin(sc *setupCtx) error {
+	ac := &authCtx{ui: sc.ui, state: sc.stateDir()}
+	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
+		return fmt.Errorf("creds dir: %w", err)
+	}
+	if err := authTrustedCredsDir(ac); err != nil {
+		return err
+	}
+	sc.ui.info("create a key in the Maple app: Settings -> API & credits (Pro, Max or Team plan)")
+	sc.ui.info("koto talks to Maple through a maple-proxy you run (default http://127.0.0.1:8080/v1, KOTO_MAPLE_UPSTREAM)")
+	s, err := sc.ui.secret("Maple API key")
+	if err != nil {
+		return err
+	}
+	key := strings.TrimSpace(s)
+	if key == "" {
+		return errors.New("no key given")
+	}
+	path := filepath.Join(ac.credsDir(), "maple.key")
+	if err := pkiWriteFile(path, []byte(key), 0o600); err != nil {
+		return err
+	}
+	sc.ui.ok("stored in %s (0600)", path)
+	return nil
 }

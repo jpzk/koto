@@ -85,6 +85,11 @@ var modelsFallback = map[string][]modelEntry{
 		{defaultVeniceModel, "Kimi K2.5"},
 		{"llama-3.3-70b", "Llama 3.3 70B"},
 	},
+	"maple": {
+		{defaultMapleModel, "Kimi K3"},
+		{"glm-5-3", "GLM 5.3"},
+		{"gpt-oss-120b", "gpt-oss 120B"},
+	},
 	"openai": {
 		{defaultOpenAIModel, "GPT-5.5"},
 	},
@@ -95,6 +100,7 @@ var modelsFallback = map[string][]modelEntry{
 var (
 	modelsAnthropicBase = func() string { return upstream }
 	modelsVeniceBase    = func() string { return veniceUpstream }
+	modelsMapleBase     = mapleUpstreamBase
 	modelsOpenAIBase    = func(kind string) string {
 		if kind == "chatgpt" {
 			return openaiChatGPTUpstream
@@ -108,6 +114,7 @@ var (
 var (
 	modelsAnthropicAuth = authHeaders
 	modelsVeniceAuth    = veniceAuth
+	modelsMapleAuth     = mapleAuth
 	modelsOpenAIAuth    = openaiCredential
 )
 
@@ -348,6 +355,7 @@ var modelsFetchers = map[string]func(context.Context) ([]modelEntry, error){
 	"claudesdk": fetchAnthropicModels,
 	"venice":    fetchVeniceModels,
 	"openai":    fetchOpenAIModels,
+	"maple":     fetchMapleModels,
 }
 
 // ---- cache + single-flight -------------------------------------------------
@@ -467,3 +475,33 @@ func modelsReset() {
 // over modelsTimeout so a fetch that finishes inside its own budget is
 // served live, but the dialog never hangs past it (var for tests).
 var modelsRPCWait = modelsTimeout + time.Second
+
+// fetchMapleModels: GET <maple-proxy base>/models (OpenAI list shape). Maple
+// lists chat and embedding models together; anything whose id names an
+// embedding model is dropped, the rest are chat models.
+func fetchMapleModels(ctx context.Context) ([]modelEntry, error) {
+	key, err := modelsMapleAuth()
+	if err != nil || key == "" {
+		return nil, errors.New("no maple credential on this host")
+	}
+	base, err := modelsMapleBase()
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := modelsGet(ctx, strings.TrimRight(base, "/")+"/models", map[string]string{"Authorization": "Bearer " + key}, &r); err != nil {
+		return nil, err
+	}
+	var out []modelEntry
+	for _, d := range r.Data {
+		if strings.Contains(d.ID, "embed") {
+			continue
+		}
+		out = append(out, modelEntry{d.ID, d.ID})
+	}
+	return out, nil
+}

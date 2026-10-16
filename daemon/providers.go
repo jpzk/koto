@@ -19,11 +19,12 @@ const (
 	providerClaude = "claudesdk"
 	providerVenice = "venice"
 	providerOpenAI = "openai"
+	providerMaple  = "maple"
 )
 
 // knownProviders is the allowlist, in display order. builtinDefaultProvider
 // must be a member.
-var knownProviders = []string{providerClaude, providerVenice, providerOpenAI}
+var knownProviders = []string{providerClaude, providerVenice, providerOpenAI, providerMaple}
 
 // validProvider reports whether s is exactly a known provider name. Callers
 // normalise case/whitespace themselves where they accept user input
@@ -49,7 +50,7 @@ func normProvider(s string) (string, bool) {
 }
 
 // providerListText renders the allowlist for error messages:
-// "claudesdk, venice or openai".
+// "claudesdk, venice, openai or maple".
 func providerListText() string {
 	n := len(knownProviders)
 	if n == 1 {
@@ -97,4 +98,5 @@ var providerBlurb = map[string]string{
 	providerClaude: "Anthropic Claude via the Claude Agent SDK (subscription or API key)",
 	providerVenice: "Venice.ai open models, billed to a Venice API key",
 	providerOpenAI: "OpenAI via Codex CLI (ChatGPT sign-in or API key)",
+	providerMaple:  "Maple AI private (TEE) models via your own maple-proxy, billed to a Maple API key",
 }

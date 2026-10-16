@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -858,6 +859,8 @@ func llmRoutesFor(provider string) []llmRoute {
 	switch provider {
 	case providerVenice:
 		return llmRoutesVenice
+	case providerMaple:
+		return llmRoutesMaple
 	case providerOpenAI:
 		return llmRoutesOpenAI
 	case providerClaude, "":
@@ -1217,6 +1220,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveVenice(w, r)
 		return
 	}
+	if provider == providerMaple {
+		h.serveMaple(w, r)
+		return
+	}
 	if provider == providerOpenAI {
 		h.serveOpenAI(w, r)
 		return
@@ -1428,7 +1435,34 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // doesn't expose rate-limit headers, so the rate-limit row of the context
 // block degrades to `?` for Venice groups, which is fine.
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
-	llmFlowLog(h.group, r.Method, veniceUpstream, r.URL.Path)
+	h.serveChatLeg(w, r, chatLeg{
+		name: providerVenice,
+		base: veniceUpstream,
+		url:  func(r *http.Request) string { return veniceUpstream + r.URL.RequestURI() },
+		auth: veniceAuth,
+	})
+}
+
+// chatLeg describes one OpenAI-Chat-Completions-shaped upstream that the
+// sidecar's venice_stream.js drives: Venice (api.venice.ai) and Maple (an
+// operator-run maple-proxy, proxy_maple.go). Everything else (body bounds,
+// budget caps, header strip, Bearer injection, retry, SSE relay, usage
+// normalization, metrics, otel) is shared, so the two legs cannot drift.
+type chatLeg struct {
+	name string                       // provider name, for logs and the 503
+	base string                       // upstream origin, for the flow log
+	url  func(r *http.Request) string // full upstream URL for this request
+	auth func() (string, error)       // host-side key; never reaches the guest
+}
+
+func (h *handler) serveChatLeg(w http.ResponseWriter, r *http.Request, leg chatLeg) {
+	// Log the MAPPED target (Maple rewrites /api/v1/X to <base>/X), so the
+	// flow line shows where the request really goes.
+	flowBase, flowPath := leg.base, r.URL.Path
+	if fu, err := url.Parse(leg.url(r)); err == nil && fu.Host != "" {
+		flowBase, flowPath = fu.Scheme+"://"+fu.Host, fu.Path
+	}
+	llmFlowLog(h.group, r.Method, flowBase, flowPath)
 	t0 := time.Now()
 	// Same two bounds as the Anthropic path — this one buffers and retries
 	// identically, so it needs the identical budget (audit M2, M15).
@@ -1442,7 +1476,7 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		writeBudgetRefusal(w, ref, true)
 		return
 	}
-	key, err := veniceAuth()
+	key, err := leg.auth()
 	if err != nil {
 		// The guest is told THAT there is no key, never where it should be
 		// (audit 2026-09-11 L83). veniceAuth's message names an absolute host
@@ -1451,12 +1485,12 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		// the guest→host proxy boundary gives a prompt-injected agent the
 		// daemon's username and state-directory layout for free. The operator
 		// needs the path; the operator reads the daemon log.
-		emitLogfG("llm", h.group, "error", "[%s] venice request refused: %v", h.group, err)
-		http.Error(w, "the venice credential is not available on this host; ask the operator", http.StatusServiceUnavailable)
+		emitLogfG("llm", h.group, "error", "[%s] %s request refused: %v", h.group, leg.name, err)
+		http.Error(w, "the "+leg.name+" credential is not available on this host; ask the operator", http.StatusServiceUnavailable)
 		return
 	}
 	mkReq := func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, leg.url(r), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}

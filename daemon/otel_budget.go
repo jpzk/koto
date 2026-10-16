@@ -51,7 +51,7 @@ var otelBudgetStatuses = map[string]bool{"allowed": true, "allowed_warning": tru
 
 // otelBudgetProviders bounds the `provider` attribute (groupProvider
 // already only answers these; this is the belt to that brace).
-var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true, providerOpenAI: true}
+var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true, providerOpenAI: true, providerMaple: true}
 
 // otelBudgetParseUtil validates a utilization value (a 0..1 fraction).
 func otelBudgetParseUtil(s string) (float64, bool) {

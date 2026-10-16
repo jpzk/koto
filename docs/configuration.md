@@ -85,7 +85,7 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `KOTO_DEFAULT_PROVIDER` — provider written into a group's `config.json` when
   it has none or an invalid one: every new group (main included) and
   pre-provider groups on their next ensure(). `claudesdk` | `venice` |
-  `openai` (case-insensitive); unset or unknown = `claudesdk` —
+  `openai` | `maple` (case-insensitive); unset or unknown = `claudesdk` —
   `daemon/providers.go` `defaultProvider()`. Groups that already name a valid
   provider are never rewritten. Host-only: it is not a `config.json` key, not
   a ctl field and not settable by a guest; set it with `koto setup --only
@@ -93,6 +93,13 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `ANTHROPIC_API_KEY` — if set, outranks the key file
   `<state>/creds/anthropic-api-key` — `daemon/proxy.go` `currentAPIKey`,
   `proxyInitPaths`. The file is re-read per request.
+- `KOTO_MAPLE_UPSTREAM` — base URL of the operator-run maple-proxy that
+  `maple` groups are relayed to. Default `http://127.0.0.1:8080/v1`
+  (maple-proxy's own default) — `daemon/proxy_maple.go`
+  `mapleUpstreamBase`. Plain `http://` is accepted only for a loopback host
+  (otherwise the key would cross the network in clear text); anything else
+  must be `https://`. A bad value fails closed: the guest gets a 503 and the
+  daemon log says why. Read per request. See section 2.7.
 - `CRED_PATH` (legacy name, no `KOTO_` prefix) — OAuth credentials file.
   Default `<state>/.claude/.credentials.json` if it exists, else
   `$HOME/.claude/.credentials.json` — `daemon/proxy.go` `proxyInitPaths`.
@@ -173,9 +180,9 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 - `KOTO_JAIL_MAX_UID` — clamped end of the per-VM uid band carried across
   the bootstrap re-execs; accepted only in `(30000, 60000]` —
   `daemon/fcjail.go` const `jailMaxEnv`, `fcJailBaseUID`, `fcJailMaxUID`.
-- `KOTO_DEFAULT_CLAUDE_MODEL`, `KOTO_DEFAULT_VENICE_MODEL` — injected into
-  the guest init env with the values of `defaultClaudeModel` /
-  `defaultVeniceModel` — `daemon/fc.go` (init `env` map),
+- `KOTO_DEFAULT_CLAUDE_MODEL`, `KOTO_DEFAULT_VENICE_MODEL`,
+  `KOTO_DEFAULT_MAPLE_MODEL` — injected into the guest init env with the
+  values of `defaultClaudeModel` / `defaultVeniceModel` / `defaultMapleModel` — `daemon/fc.go` (init `env` map),
   `daemon/groups.go`. Also injected: `ANTHROPIC_BASE_URL=http://127.0.0.1:18888`
   (`fcGuestProxyTCP`), and `NO_PROXY`/`no_proxy=127.0.0.1,localhost` when
   the group's network is not `none`.
@@ -187,6 +194,39 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 
 ---
 
+### 2.7 Maple (`provider: maple`)
+
+Maple AI (https://maple.ai) runs its models inside attested secure
+enclaves. It has no plain OpenAI-compatible HTTPS endpoint: a client must
+verify the enclave attestation and speak the OpenSecret encrypted session
+protocol. The OpenAI-compatible door is **maple-proxy**, which the operator
+runs next to the daemon (https://maple.ai/docs/proxy). koto never downloads, installs or launches it and
+does not implement attestation itself; it treats maple-proxy as the
+upstream, exactly like the Venice leg.
+
+- Key: the Maple API key goes in `<state>/creds/maple.key` (mode 0600; `koto
+  setup --only auth` writes it). The daemon reads it per request and
+  injects it as `Authorization: Bearer` to maple-proxy; the guest only ever
+  holds the placeholder `proxied` — `daemon/proxy_maple.go` `mapleAuth`.
+  Run maple-proxy **without** `MAPLE_API_KEY` so the key lives only in koto's
+  store.
+- Upstream: `KOTO_MAPLE_UPSTREAM` (section 2.1), default
+  `http://127.0.0.1:8080/v1`.
+- Guest routes: `POST /api/v1/chat/completions`, `GET /api/v1/models[/…]`,
+  mapped to `<upstream>/chat/completions` and `<upstream>/models`
+  (`llmRoutesMaple`). The agent loop is the Venice one (`venice_stream.js`).
+- Default model `kimi-k3` (tool calls); override per group with `model`.
+- Budget key `maple/apikey`: spend only. Maple exposes no balance endpoint
+  or credit headers, so koto shows no balance numbers.
+- Pinned maple-proxy (newest release at least 6 weeks old at time of
+  writing): Maple `v3.3.10` (2026-08-29, proxy crate 0.3.3, commit
+  `8ee7ccfbc6d3e2b417c7a5ca17366bf3ac48bfc0`) from
+  https://github.com/MaplePrivacyLabs/Maple/releases/tag/v3.3.10 , e.g.
+  `maple-proxy-linux-x86_64.tar.gz` sha256
+  `22eb7de0e18ea6f0918ac96589f6138edd14d8b399b8944f96619fb1db537ad6`
+  (linux-aarch64 `c2578bbcd008475d904b42eb069c9fe01c6a4ab395ccfac339117ba8390f91bf`).
+  Verify the checksum before running it. The old standalone repo
+  OpenSecretCloud/maple-proxy is archived.
 ## 3. Per-group configuration (`config.json`)
 
 - Location: `<state>/groups/<group>/.cs/config.json` —
@@ -203,13 +243,14 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 
 ### Keys
 
-- `provider` — `claudesdk` | `venice` | `openai`. Default: the host's
+- `provider` — `claudesdk` | `venice` | `openai` | `maple`. Default: the host's
   `KOTO_DEFAULT_PROVIDER`, else `claudesdk` (`daemon/providers.go`
   `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — free string, charset `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`, max 128
   chars (`configIdentRE`, `configMaxIdent`). Default when unset:
-  `claude-sonnet-5` under claudesdk, `kimi-k2.5` under venice
-  (`daemon/groups.go` `defaultClaudeModel`, `defaultVeniceModel`).
+  `claude-sonnet-5` under claudesdk, `kimi-k2.5` under venice, `kimi-k3`
+  under maple (`daemon/groups.go` `defaultClaudeModel`, `defaultVeniceModel`;
+  `daemon/proxy_maple.go` `defaultMapleModel`).
 - `effort` — same charset/length rule as `model`. Shown as `(default)`
   when unset (`effectiveConfig`).
 - `network` — `none` | `wan` | `lan` | `full` (`daemon/fcnet.go` consts
