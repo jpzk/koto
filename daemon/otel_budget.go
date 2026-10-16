@@ -5,7 +5,8 @@ package main
 //
 // Source: budgetObserve (budget.go), fed by logMetricKey with the raw
 // response headers of every retired request: anthropic-ratelimit-unified-*
-// for claudesdk, x-codex-* (incl. credits) for openai. Venice sends none.
+// for claudesdk, x-codex-* (incl. credits) for openai. Venice sends none;
+// openrouter is polled (budget_openrouter.go, otel_budget_openrouter.go).
 // The gauge callback reads a copy of that store.
 //
 // Rules:
@@ -27,6 +28,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -51,7 +53,7 @@ var otelBudgetStatuses = map[string]bool{"allowed": true, "allowed_warning": tru
 
 // otelBudgetProviders bounds the `provider` attribute (groupProvider
 // already only answers these; this is the belt to that brace).
-var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true, providerOpenAI: true}
+var otelBudgetProviders = map[string]bool{providerClaude: true, providerVenice: true, providerOpenAI: true, providerOpenRouter: true}
 
 // otelBudgetParseUtil validates a utilization value (a 0..1 fraction).
 func otelBudgetParseUtil(s string) (float64, bool) {
@@ -95,7 +97,11 @@ type otelBudgetPoint struct {
 // otelBudgetCopy flattens the store into window points and overage
 // statuses (keyed by budgetKey), in a stable order.
 func otelBudgetCopy() (pts []otelBudgetPoint, overage map[budgetKey]string) {
-	all := budgetSnapshotAll()
+	return otelBudgetCopyFrom(budgetSnapshotAll())
+}
+
+// otelBudgetCopyFrom is otelBudgetCopy over an existing store snapshot.
+func otelBudgetCopyFrom(all map[budgetKey]budgetAccount) (pts []otelBudgetPoint, overage map[budgetKey]string) {
 	keys := make([]budgetKey, 0, len(all))
 	for k := range all {
 		keys = append(keys, k)
@@ -139,11 +145,17 @@ func otelBudgetInstruments(m metric.Meter) (metric.Registration, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("koto.llm.ratelimit.overage: %w", err))
 	}
+	cred, err := otelCreditsNew(m)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
 	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		pts, overage := otelBudgetCopy()
+		all := budgetSnapshotAll()
+		pts, overage := otelBudgetCopyFrom(all)
+		cred.observe(o, all, time.Now())
 		for _, p := range pts {
 			attrs := metric.WithAttributes(attribute.String("provider", p.provider),
 				attribute.String("auth", p.auth), attribute.String("window", p.window))
@@ -159,7 +171,7 @@ func otelBudgetInstruments(m metric.Meter) (metric.Registration, error) {
 				attribute.String("auth", k.Auth), attribute.String("status", st)))
 		}
 		return nil
-	}, util, reset, over)
+	}, append([]metric.Observable{util, reset, over}, cred.instruments()...)...)
 	if err != nil {
 		return nil, fmt.Errorf("budget callback: %w", err)
 	}

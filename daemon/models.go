@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -85,6 +86,11 @@ var modelsFallback = map[string][]modelEntry{
 		{defaultVeniceModel, "Kimi K2.5"},
 		{"llama-3.3-70b", "Llama 3.3 70B"},
 	},
+	"openrouter": {
+		{defaultOpenRouterModel, "Kimi K3"},
+		{"z-ai/glm-5.3", "GLM 5.3"},
+		{"moonshotai/kimi-k2.5", "Kimi K2.5"},
+	},
 	"openai": {
 		{defaultOpenAIModel, "GPT-5.5"},
 	},
@@ -93,9 +99,10 @@ var modelsFallback = map[string][]modelEntry{
 // Upstream origins, read at call time so an override of the proxy's origin
 // (KOTO_UPSTREAM) applies here too. Tests replace these.
 var (
-	modelsAnthropicBase = func() string { return upstream }
-	modelsVeniceBase    = func() string { return veniceUpstream }
-	modelsOpenAIBase    = func(kind string) string {
+	modelsAnthropicBase  = func() string { return upstream }
+	modelsVeniceBase     = func() string { return veniceUpstream }
+	modelsOpenRouterBase = func() string { return openrouterUpstream }
+	modelsOpenAIBase     = func(kind string) string {
 		if kind == "chatgpt" {
 			return openaiChatGPTUpstream
 		}
@@ -106,9 +113,10 @@ var (
 
 // Credential lookups, indirected for tests.
 var (
-	modelsAnthropicAuth = authHeaders
-	modelsVeniceAuth    = veniceAuth
-	modelsOpenAIAuth    = openaiCredential
+	modelsAnthropicAuth  = authHeaders
+	modelsVeniceAuth     = veniceAuth
+	modelsOpenRouterAuth = openrouterAuth
+	modelsOpenAIAuth     = openaiCredential
 )
 
 // ---- sanitizer -------------------------------------------------------------
@@ -345,9 +353,10 @@ next:
 }
 
 var modelsFetchers = map[string]func(context.Context) ([]modelEntry, error){
-	"claudesdk": fetchAnthropicModels,
-	"venice":    fetchVeniceModels,
-	"openai":    fetchOpenAIModels,
+	"claudesdk":  fetchAnthropicModels,
+	"venice":     fetchVeniceModels,
+	"openai":     fetchOpenAIModels,
+	"openrouter": fetchOpenRouterModels,
 }
 
 // ---- cache + single-flight -------------------------------------------------
@@ -467,3 +476,39 @@ func modelsReset() {
 // over modelsTimeout so a fetch that finishes inside its own budget is
 // served live, but the dialog never hangs past it (var for tests).
 var modelsRPCWait = modelsTimeout + time.Second
+
+// fetchOpenRouterModels: GET https://openrouter.ai/api/v1/models (OpenAI list
+// shape plus supported_parameters and architecture). The catalog has hundreds
+// of models; only text-output models that accept "tools" can drive the
+// venice_stream.js agent loop, so the rest are dropped.
+func fetchOpenRouterModels(ctx context.Context) ([]modelEntry, error) {
+	key, err := modelsOpenRouterAuth()
+	if err != nil || key == "" {
+		return nil, errors.New("no openrouter credential on this host")
+	}
+	var r struct {
+		Data []struct {
+			ID                  string   `json:"id"`
+			Name                string   `json:"name"`
+			SupportedParameters []string `json:"supported_parameters"`
+			Architecture        struct {
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
+		} `json:"data"`
+	}
+	u := strings.TrimRight(modelsOpenRouterBase(), "/") + "/api/v1/models"
+	if err := modelsGet(ctx, u, map[string]string{"Authorization": "Bearer " + key}, &r); err != nil {
+		return nil, err
+	}
+	var out []modelEntry
+	for _, d := range r.Data {
+		if !slices.Contains(d.SupportedParameters, "tools") {
+			continue
+		}
+		if m := d.Architecture.OutputModalities; len(m) > 0 && !slices.Contains(m, "text") {
+			continue
+		}
+		out = append(out, modelEntry{d.ID, d.Name})
+	}
+	return out, nil
+}

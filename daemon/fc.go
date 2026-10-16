@@ -1970,10 +1970,11 @@ const openaiGuestPlaceholderKey = "koto-proxied"
 func fcGuestInitEnv() map[string]string {
 	base := fmt.Sprintf("http://127.0.0.1:%d", fcGuestProxyTCP)
 	return map[string]string{
-		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
-		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
-		"KOTO_DEFAULT_OPENAI_MODEL": defaultOpenAIModel,
-		"ANTHROPIC_BASE_URL":        base,
+		"KOTO_DEFAULT_CLAUDE_MODEL":     defaultClaudeModel,
+		"KOTO_DEFAULT_VENICE_MODEL":     defaultVeniceModel,
+		"KOTO_DEFAULT_OPENAI_MODEL":     defaultOpenAIModel,
+		"KOTO_DEFAULT_OPENROUTER_MODEL": defaultOpenRouterModel,
+		"ANTHROPIC_BASE_URL":            base,
 		// codex: custom model provider base_url and env_key value (item 6).
 		"KOTO_OPENAI_BASE_URL": base + "/v1",
 		"KOTO_OPENAI_API_KEY":  openaiGuestPlaceholderKey,

@@ -47,7 +47,7 @@ func budgetProviderAlias(p string) (string, bool) {
 func budgetResolveKey(provider, auth string) (budgetKey, error) {
 	p, ok := budgetProviderAlias(provider)
 	if !ok {
-		return budgetKey{}, fmt.Errorf("unknown provider %q (claudesdk|openai|venice)", budgetSafeToken(provider))
+		return budgetKey{}, fmt.Errorf("unknown provider %q (claudesdk|openai|venice|openrouter)", budgetSafeToken(provider))
 	}
 	auth = strings.ToLower(strings.TrimSpace(auth))
 	if auth == "" {
@@ -241,7 +241,7 @@ func budgetApplyUnset(cfg *budgetConfig, key budgetKey, field string) error {
 func budgetApplyPrice(cfg *budgetConfig, provider, model string, prices map[string]string) error {
 	p, ok := budgetProviderAlias(provider)
 	if !ok {
-		return fmt.Errorf("unknown provider %q (claudesdk|openai|venice)", budgetSafeToken(provider))
+		return fmt.Errorf("unknown provider %q (claudesdk|openai|venice|openrouter)", budgetSafeToken(provider))
 	}
 	model = strings.TrimSpace(model)
 	if model == "" || budgetSanitizeModel(model) != model || model == budgetModelOther || model == budgetModelUnknown {
@@ -412,6 +412,19 @@ func budgetView(operator bool) map[string]any {
 					cm["balance"] = a.Credits.Balance
 				}
 				e["credits"] = cm
+			}
+			if k := a.ORKey; k != nil {
+				om := map[string]any{"usage_usd": k.Usage, "free_tier": k.FreeTier, "at": k.At.UTC().Format(time.RFC3339)}
+				if k.HasLimit {
+					om["limit_usd"] = k.Limit
+				}
+				if k.HasRemaining {
+					om["remaining_usd"] = k.Remaining
+				}
+				if k.Reset != "" {
+					om["limit_reset"] = k.Reset
+				}
+				e["openrouter_key"] = om
 			}
 			if !a.Updated.IsZero() {
 				e["updated"] = a.Updated.UTC().Format(time.RFC3339)

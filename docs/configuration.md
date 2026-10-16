@@ -85,7 +85,7 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `KOTO_DEFAULT_PROVIDER` — provider written into a group's `config.json` when
   it has none or an invalid one: every new group (main included) and
   pre-provider groups on their next ensure(). `claudesdk` | `venice` |
-  `openai` (case-insensitive); unset or unknown = `claudesdk` —
+  `openai` | `openrouter` (case-insensitive); unset or unknown = `claudesdk` —
   `daemon/providers.go` `defaultProvider()`. Groups that already name a valid
   provider are never rewritten. Host-only: it is not a `config.json` key, not
   a ctl field and not settable by a guest; set it with `koto setup --only
@@ -93,6 +93,20 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `ANTHROPIC_API_KEY` — if set, outranks the key file
   `<state>/creds/anthropic-api-key` — `daemon/proxy.go` `currentAPIKey`,
   `proxyInitPaths`. The file is re-read per request.
+- `KOTO_OPENROUTER_DATA_COLLECTION` — `deny` (default when unset) or `allow`.
+  With `deny` the proxy forces `provider.data_collection: "deny"` into every
+  `openrouter` chat request, so OpenRouter only routes to vendors that do not
+  store or train on prompts, whatever the guest sent. `allow` turns the
+  rewrite off. Any other value fails closed (the request gets a 400 and is
+  never sent) — `daemon/proxy_openrouter.go` `openrouterPrivacy`. Read per
+  request. See section 2.7.
+- `KOTO_OPENROUTER_ZDR` — `1` additionally forces `provider.zdr: true` (Zero
+  Data Retention endpoints only); `0` or unset = off. Same fail-closed rule.
+- `KOTO_OPENROUTER_CREDITS` — `1` opts in to polling `GET /api/v1/key` for
+  the key's credits (koto-context line, `koto budget`, OTel credit gauges).
+  Unset or anything else = OFF (default): no extra request to openrouter.ai,
+  no credits line, no credit gauges — `daemon/budget_openrouter.go`
+  `openrouterCreditsEnabled`. See section 2.7.
 - `CRED_PATH` (legacy name, no `KOTO_` prefix) — OAuth credentials file.
   Default `<state>/.claude/.credentials.json` if it exists, else
   `$HOME/.claude/.credentials.json` — `daemon/proxy.go` `proxyInitPaths`.
@@ -173,9 +187,10 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 - `KOTO_JAIL_MAX_UID` — clamped end of the per-VM uid band carried across
   the bootstrap re-execs; accepted only in `(30000, 60000]` —
   `daemon/fcjail.go` const `jailMaxEnv`, `fcJailBaseUID`, `fcJailMaxUID`.
-- `KOTO_DEFAULT_CLAUDE_MODEL`, `KOTO_DEFAULT_VENICE_MODEL` — injected into
-  the guest init env with the values of `defaultClaudeModel` /
-  `defaultVeniceModel` — `daemon/fc.go` (init `env` map),
+- `KOTO_DEFAULT_CLAUDE_MODEL`, `KOTO_DEFAULT_VENICE_MODEL`,
+  `KOTO_DEFAULT_OPENROUTER_MODEL` — injected into the guest init env with the
+  values of `defaultClaudeModel` / `defaultVeniceModel` /
+  `defaultOpenRouterModel` — `daemon/fc.go` (init `env` map),
   `daemon/groups.go`. Also injected: `ANTHROPIC_BASE_URL=http://127.0.0.1:18888`
   (`fcGuestProxyTCP`), and `NO_PROXY`/`no_proxy=127.0.0.1,localhost` when
   the group's network is not `none`.
@@ -184,6 +199,50 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
   `daemon/jobs.go`, `daemon/send.go`.
 - `KOTO_ENDPOINT`, `KOTO_PROMPTS_DIR`, `KOTO_SCRIPTS_DIR`, `KOTO_TUI_TERM` —
   set by `koto tui` for the TUI child (section 2.4).
+
+### 2.7 OpenRouter (`provider: openrouter`)
+
+OpenRouter (https://openrouter.ai) is one OpenAI-compatible HTTPS API in
+front of many model vendors (https://openrouter.ai/docs/api_reference/overview).
+koto relays it exactly like Venice: direct HTTPS, host-side key.
+
+- Key: an OpenRouter API key goes in `<state>/creds/openrouter.key` (mode
+  0600; `koto setup --only auth` writes it). The daemon reads it per request
+  and injects it as `Authorization: Bearer`; the guest only ever holds the
+  placeholder `proxied` — `daemon/proxy_openrouter.go` `openrouterAuth`. No
+  key = the guest gets a 503 and nothing is sent.
+- Guest routes: `POST /api/v1/chat/completions`, `GET /api/v1/models[/…]`,
+  relayed unchanged to `https://openrouter.ai/api/v1/…`
+  (`llmRoutesOpenRouter`). Every other path is refused, including
+  `/api/v1/key` and `/api/v1/credits`. The attribution headers
+  `HTTP-Referer`, `Referer`, `X-Title` and `X-OpenRouter-Title` are dropped.
+  The agent loop is the Venice one (`venice_stream.js`).
+- Privacy: OpenRouter's default routing (`provider.data_collection:
+  "allow"`) includes vendors that keep prompts and may train on them
+  (https://openrouter.ai/docs/guides/routing/provider-selection). koto forces
+  `"deny"` host side by default; see `KOTO_OPENROUTER_DATA_COLLECTION` and
+  `KOTO_OPENROUTER_ZDR` (section 2.1). Account-level privacy settings on
+  openrouter.ai still apply on top and can only tighten this.
+- Default model `moonshotai/kimi-k3` (lists `tools` in OpenRouter's
+  `supported_parameters`; the agent loop needs tool calls); override per
+  group with `model`. The TUI model picker lists only models that support
+  tools and text output.
+- Budget key `openrouter/apikey`. OpenRouter sends no balance headers.
+  Credits are OFF by default (no extra egress); with
+  `KOTO_OPENROUTER_CREDITS=1` in koto.env
+  the daemon polls `GET /api/v1/key` with the host key after OpenRouter
+  requests (at most once a minute, backing off up to 15 minutes on errors,
+  never blocking a turn) — `daemon/budget_openrouter.go`. That endpoint
+  describes the KEY, not the account: koto-context shows
+  `credits: $X left of $Y key limit` when the key has a credit limit, and
+  `credits: $Z used, no key limit` otherwise. The account balance needs a
+  management key (`/api/v1/credits`) that koto never holds, so it is not
+  shown. OTel gauges: `koto.llm.credits.used`, `.limit`, `.remaining`
+  (only when the key has a limit) and `.age`.
+- Recommendation: give the key koto uses its own credit limit on
+  openrouter.ai (https://openrouter.ai/settings/keys). That caps what a
+  runaway agent can spend, and it is what makes the remaining balance
+  visible to koto. koto's own `koto budget` caps work on top.
 
 ---
 
@@ -203,13 +262,15 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
 
 ### Keys
 
-- `provider` — `claudesdk` | `venice` | `openai`. Default: the host's
+- `provider` — `claudesdk` | `venice` | `openai` | `openrouter`. Default: the host's
   `KOTO_DEFAULT_PROVIDER`, else `claudesdk` (`daemon/providers.go`
   `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — free string, charset `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`, max 128
   chars (`configIdentRE`, `configMaxIdent`). Default when unset:
-  `claude-sonnet-5` under claudesdk, `kimi-k2.5` under venice
-  (`daemon/groups.go` `defaultClaudeModel`, `defaultVeniceModel`).
+  `claude-sonnet-5` under claudesdk, `kimi-k2.5` under venice,
+  `moonshotai/kimi-k3` under openrouter (`daemon/groups.go`
+  `defaultClaudeModel`, `defaultVeniceModel`,
+  `daemon/proxy_openrouter.go` `defaultOpenRouterModel`).
 - `effort` — same charset/length rule as `model`. Shown as `(default)`
   when unset (`effectiveConfig`).
 - `network` — `none` | `wan` | `lan` | `full` (`daemon/fcnet.go` consts

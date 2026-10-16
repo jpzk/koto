@@ -111,6 +111,8 @@ func budgetKeyFor(provider string) budgetKey {
 		return budgetKey{providerOpenAI, openaiKindAuth(openaiPeekKind())}
 	case providerVenice:
 		return budgetKey{providerVenice, budgetAuthAPIKey}
+	case providerOpenRouter:
+		return budgetKey{providerOpenRouter, budgetAuthAPIKey}
 	default:
 		return budgetKey{providerClaude, claudeAuthKind()}
 	}
@@ -168,6 +170,7 @@ type budgetAccount struct {
 	Windows map[string]budgetWindow
 	Overage string
 	Credits *budgetCredits
+	ORKey   *budgetORKey // openrouter /api/v1/key snapshot (budget_openrouter.go)
 	Updated time.Time
 }
 
@@ -179,6 +182,10 @@ func (a *budgetAccount) clone() budgetAccount {
 	if a.Credits != nil {
 		cr := *a.Credits
 		c.Credits = &cr
+	}
+	if a.ORKey != nil {
+		k := *a.ORKey
+		c.ORKey = &k
 	}
 	return c
 }
