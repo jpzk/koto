@@ -79,8 +79,11 @@ case "$PROVIDER" in
     [ -n "$SYS" ]   && set -- "$@" --append-system-prompt "$SYS"
     env HOME="$H" "$@" | KOTO_SUBAGENT=1 node /sidecar/stream_filter.js
     ;;
-  venice)
+  venice|maple)
+    # maple reuses the Venice agent loop: same Chat Completions shape; the
+    # host proxy maps /api/v1/* onto the operator's maple-proxy.
     VM="$MODEL"; [ -z "$VM" ] && VM="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+    [ -z "$MODEL" ] && [ "$PROVIDER" = maple ] && VM="${KOTO_DEFAULT_MAPLE_MODEL:-kimi-k3}"
     MSG_B64=$(printf '%s' "$PROMPT" | base64 -w 0)
     SP_B64=""
     [ -n "$SYS" ] && SP_B64=$(printf '%s' "$SYS" | base64 -w 0)

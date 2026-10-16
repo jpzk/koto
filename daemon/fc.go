@@ -1973,6 +1973,7 @@ func fcGuestInitEnv() map[string]string {
 		"KOTO_DEFAULT_CLAUDE_MODEL": defaultClaudeModel,
 		"KOTO_DEFAULT_VENICE_MODEL": defaultVeniceModel,
 		"KOTO_DEFAULT_OPENAI_MODEL": defaultOpenAIModel,
+		"KOTO_DEFAULT_MAPLE_MODEL":  defaultMapleModel,
 		"ANTHROPIC_BASE_URL":        base,
 		// codex: custom model provider base_url and env_key value (item 6).
 		"KOTO_OPENAI_BASE_URL": base + "/v1",

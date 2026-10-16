@@ -93,24 +93,24 @@ func TestParseMultiChoice(t *testing.T) {
 		{"3, 1", []int{0, 2}, false},
 		{"3 1 3", []int{0, 2}, false},
 		{"2", []int{1}, false},
-		{"all", []int{0, 1, 2}, false},
-		{"ALL", []int{0, 1, 2}, false},
+		{"all", []int{0, 1, 2, 3}, false},
+		{"ALL", []int{0, 1, 2, 3}, false},
 		{"openai,claudesdk", []int{0, 2}, false},
 		{"1,,2", []int{0, 1}, false},
 		{"", nil, false},
 		{"   ", nil, false},
 		{"0", nil, true},
-		{"4", nil, true},
+		{"5", nil, true},
 		{"1,9", nil, true},
 		{"gemini", nil, true},
-		{"1-3", nil, true},
+		{"1-4", nil, true},
 		{",", nil, true},
 	} {
 		got, err := parseMultiChoice(tc.in, len(names), names)
 		if tc.bad {
 			if err == nil {
 				t.Errorf("%q: accepted as %v, want an error", tc.in, got)
-			} else if !strings.Contains(err.Error(), "1-3") {
+			} else if !strings.Contains(err.Error(), "1-4") {
 				t.Errorf("%q: error %q does not say what is valid", tc.in, err)
 			}
 			continue

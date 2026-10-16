@@ -11,7 +11,7 @@ import (
 // The single allowlist accepts exactly the three providers and nothing else,
 // and every admission point agrees with it.
 func TestProviderAllowlist(t *testing.T) {
-	for _, p := range []string{"claudesdk", "venice", "openai"} {
+	for _, p := range []string{"claudesdk", "venice", "openai", "maple"} {
 		if !validProvider(p) {
 			t.Errorf("validProvider(%q) = false, want true", p)
 		}
@@ -30,7 +30,7 @@ func TestProviderAllowlist(t *testing.T) {
 	if !validProvider(defaultProvider()) {
 		t.Fatal("defaultProvider() is not on the allowlist")
 	}
-	if got := providerListText(); got != "claudesdk, venice or openai" {
+	if got := providerListText(); got != "claudesdk, venice, openai or maple" {
 		t.Errorf("providerListText = %q", got)
 	}
 	// applyConfig: accepts openai, rejects unknown without clobbering.
@@ -85,7 +85,7 @@ func TestCtlConfigSetProviderOpenAI(t *testing.T) {
 func TestSpawnProviderAllowlist(t *testing.T) {
 	s := &kotoServer{}
 	r, err := s.Spawn(t.Context(), &pb.SpawnReq{Group: "okgroup", Provider: "gemini"})
-	if err != nil || !strings.Contains(r.Error, "provider must be claudesdk, venice or openai") {
+	if err != nil || !strings.Contains(r.Error, "provider must be claudesdk, venice, openai or maple") {
 		t.Fatalf("gemini must be refused: %+v %v", r, err)
 	}
 }

@@ -59,6 +59,10 @@ func providerCredKind(p string) string {
 		if k, err := veniceAuth(); err == nil && k != "" {
 			return credKindAPIKey
 		}
+	case providerMaple:
+		if k, err := mapleAuth(); err == nil && k != "" {
+			return credKindAPIKey
+		}
 	case providerOpenAI:
 		f, ferr := openaiReadAuthFile()
 		switch kind, _ := openaiStoredCred(f, ferr); kind {

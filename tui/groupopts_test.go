@@ -11,7 +11,7 @@ import (
 // allowlists are exactly what the daemon accepts today.
 func TestGroupOptTable(t *testing.T) {
 	want := map[string]string{
-		"provider":  "claudesdk|venice|openai",
+		"provider":  "claudesdk|venice|openai|maple",
 		"effort":    "default|low|medium|high|xhigh|max",
 		"network":   "none|wan|lan|full",
 		"size":      "small|medium|large|xlarge",
@@ -49,7 +49,7 @@ func TestGroupOptTable(t *testing.T) {
 	if groupOptValid("provider", "openai-typo") || !groupOptValid("size", "xlarge") {
 		t.Error("groupOptValid wrong")
 	}
-	if c := groupOptChoices("provider"); c != "claudesdk, venice, or openai" {
+	if c := groupOptChoices("provider"); c != "claudesdk, venice, openai, or maple" {
 		t.Errorf("choices = %q", c)
 	}
 }

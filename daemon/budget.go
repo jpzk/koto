@@ -111,6 +111,8 @@ func budgetKeyFor(provider string) budgetKey {
 		return budgetKey{providerOpenAI, openaiKindAuth(openaiPeekKind())}
 	case providerVenice:
 		return budgetKey{providerVenice, budgetAuthAPIKey}
+	case providerMaple:
+		return budgetKey{providerMaple, budgetAuthAPIKey}
 	default:
 		return budgetKey{providerClaude, claudeAuthKind()}
 	}

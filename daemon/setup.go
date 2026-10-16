@@ -85,7 +85,7 @@ func setupUsage() {
 	fmt.Fprintln(os.Stderr, `usage: koto setup [flags]
 
 Configures an installed koto: mints the TLS identities, picks the default
-LLM provider (claudesdk, venice or openai) and connects its credentials,
+LLM provider (claudesdk, venice, openai or maple) and connects its credentials,
 starts the daemon and smoke-tests it. It neither builds nor installs —
 run "make fetch" (or "make build") and then "make install" first. Safe
 to re-run: every step detects whether it is already done.
@@ -95,7 +95,7 @@ flags:
   -y             accept defaults; never prompt (steps needing real input fail)
   --only ID      run just one step (e.g. --only rootfs)
   --from ID      start at this step, skipping earlier ones
-  --provider P   default provider for new groups (claudesdk, venice, openai);
+  --provider P   default provider for new groups (claudesdk, venice, openai, maple);
                  stored as KOTO_DEFAULT_PROVIDER in /etc/koto/koto.env, no prompt
   --providers L  providers to set up, comma-separated (e.g. claudesdk,openai);
                  the auth step connects each. The default is --provider, which
