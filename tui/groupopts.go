@@ -72,7 +72,7 @@ const effortDefault = "default"
 // groupOptTable is the single source of truth. Order is the dialog's field
 // order (text rows included).
 var groupOptTable = []groupOpt{
-	{key: "provider", values: []string{"claudesdk", "venice", "openai"}, spawn: true},
+	{key: "provider", values: []string{"claudesdk", "venice", "openai", "openrouter"}, spawn: true},
 	{key: "model", text: true},
 	{key: "effort", values: []string{effortDefault, "low", "medium", "high", "xhigh", "max"}},
 	{key: "network", values: []string{"none", "wan", "lan", "full"}, restart: true, risky: map[string]string{

@@ -79,8 +79,11 @@ case "$PROVIDER" in
     [ -n "$SYS" ]   && set -- "$@" --append-system-prompt "$SYS"
     env HOME="$H" "$@" | KOTO_SUBAGENT=1 node /sidecar/stream_filter.js
     ;;
-  venice)
+  venice|openrouter)
+    # openrouter reuses the Venice agent loop: same Chat Completions shape,
+    # same /api/v1/* paths; the host proxy injects the key.
     VM="$MODEL"; [ -z "$VM" ] && VM="${KOTO_DEFAULT_VENICE_MODEL:-kimi-k2.5}"
+    [ -z "$MODEL" ] && [ "$PROVIDER" = openrouter ] && VM="${KOTO_DEFAULT_OPENROUTER_MODEL:-moonshotai/kimi-k3}"
     MSG_B64=$(printf '%s' "$PROMPT" | base64 -w 0)
     SP_B64=""
     [ -n "$SYS" ] && SP_B64=$(printf '%s' "$SYS" | base64 -w 0)

@@ -358,7 +358,7 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	env = withTraceHeaders(env, tr.workerTraceparent())
 	defer func() { tr.workerEnd(tw.stalled.Load(), "") }()
 	switch cfg.Provider {
-	case "venice":
+	case "venice", "openrouter":
 		runVenice(tw, req, cfg, sess, env)
 	case "openai":
 		runCodex(tw, req, cfg, sess, env)
@@ -794,9 +794,15 @@ func runVenice(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env [
 	model := cfg.Model
 	if model == "" {
 		model = envValue(env, "KOTO_DEFAULT_VENICE_MODEL")
+		if cfg.Provider == "openrouter" {
+			model = envValue(env, "KOTO_DEFAULT_OPENROUTER_MODEL")
+		}
 	}
 	if model == "" {
 		model = "kimi-k2.5"
+		if cfg.Provider == "openrouter" {
+			model = "moonshotai/kimi-k3"
+		}
 	}
 	vh := filepath.Join(csDir, "venice-history.json")
 	if sess != "default" {

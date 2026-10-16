@@ -29,7 +29,7 @@ const budgetUsage = `usage: koto budget [--json]
        koto budget price <provider> <model> in=<usd/Mtok> out=<usd/Mtok> [cache_read=..] [cache_write=..]
        koto budget price <provider> <model> --delete
 
-  provider: claudesdk (claude) | openai (codex) | venice
+  provider: claudesdk (claude) | openai (codex) | venice | openrouter
   auth:     subscription | apikey | upstream | env   (default: current)
   field:    usd_per_day | usd_per_month | tokens_per_day
             max_window_used.<5h|1d|7d|30d>   (0.9 or 90%)

@@ -631,6 +631,8 @@ func (c groupConfig) model() string {
 	switch c.provider() {
 	case providerVenice:
 		return defaultVeniceModel
+	case providerOpenRouter:
+		return defaultOpenRouterModel
 	case providerOpenAI:
 		return defaultOpenAIModel
 	}

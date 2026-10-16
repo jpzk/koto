@@ -396,6 +396,13 @@ var setupProviderAuth = map[string]providerAuth{
 		remedy: "koto setup --only auth   (or write the key to <state>/creds/venice.key, 0600)",
 		batch:  "install -m 0600 keyfile <state>/creds/venice.key",
 	},
+	providerOpenRouter: {
+		label:  "OpenRouter",
+		detect: openrouterCredDetect,
+		login:  openrouterCredLogin,
+		remedy: "koto setup --only auth   (or write the key to <state>/creds/openrouter.key, 0600)",
+		batch:  "install -m 0600 keyfile <state>/creds/openrouter.key",
+	},
 	providerOpenAI: {
 		label:  "OpenAI",
 		detect: openaiCredDetect,
@@ -530,6 +537,7 @@ This connects a credential for each provider selected above, one at a time
   claudesdk  a Claude subscription (browser OAuth) or an Anthropic API key
   venice     a Venice API key
   openai     a ChatGPT subscription (device code) or an OpenAI API key
+  openrouter an OpenRouter API key (set a credit limit on it)
 Check each provider's terms for which fits your use — the README has the
 details. A provider already connected is not logged in again.
 
@@ -691,4 +699,39 @@ func smokeProviderCheck(sc *setupCtx) bool {
 	u.warn("default provider %s has no credential — its turns will fail", p)
 	u.hint("connect it with:\n  " + pa.remedy)
 	return false
+}
+
+func openrouterCredDetect(sc *setupCtx) (bool, string) {
+	if nonEmptyFile(filepath.Join(sc.credsDir(), "openrouter.key")) {
+		return true, "OpenRouter API key stored"
+	}
+	return false, "no OpenRouter API key (creds/openrouter.key)"
+}
+
+// openrouterCredLogin stores the OpenRouter API key (docs/configuration.md,
+// OpenRouter).
+func openrouterCredLogin(sc *setupCtx) error {
+	ac := &authCtx{ui: sc.ui, state: sc.stateDir()}
+	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
+		return fmt.Errorf("creds dir: %w", err)
+	}
+	if err := authTrustedCredsDir(ac); err != nil {
+		return err
+	}
+	sc.ui.info("create a key at https://openrouter.ai/settings/keys and give it a credit limit")
+	sc.ui.info("koto forces provider.data_collection=deny on every request (KOTO_OPENROUTER_DATA_COLLECTION)")
+	s, err := sc.ui.secret("OpenRouter API key")
+	if err != nil {
+		return err
+	}
+	key := strings.TrimSpace(s)
+	if key == "" {
+		return errors.New("no key given")
+	}
+	path := filepath.Join(ac.credsDir(), "openrouter.key")
+	if err := pkiWriteFile(path, []byte(key), 0o600); err != nil {
+		return err
+	}
+	sc.ui.ok("stored in %s (0600)", path)
+	return nil
 }

@@ -47,7 +47,7 @@ func budgetProviderAlias(p string) (string, bool) {
 func budgetResolveKey(provider, auth string) (budgetKey, error) {
 	p, ok := budgetProviderAlias(provider)
 	if !ok {
-		return budgetKey{}, fmt.Errorf("unknown provider %q (claudesdk|openai|venice)", budgetSafeToken(provider))
+		return budgetKey{}, fmt.Errorf("unknown provider %q (claudesdk|openai|venice|openrouter)", budgetSafeToken(provider))
 	}
 	auth = strings.ToLower(strings.TrimSpace(auth))
 	if auth == "" {
@@ -241,7 +241,7 @@ func budgetApplyUnset(cfg *budgetConfig, key budgetKey, field string) error {
 func budgetApplyPrice(cfg *budgetConfig, provider, model string, prices map[string]string) error {
 	p, ok := budgetProviderAlias(provider)
 	if !ok {
-		return fmt.Errorf("unknown provider %q (claudesdk|openai|venice)", budgetSafeToken(provider))
+		return fmt.Errorf("unknown provider %q (claudesdk|openai|venice|openrouter)", budgetSafeToken(provider))
 	}
 	model = strings.TrimSpace(model)
 	if model == "" || budgetSanitizeModel(model) != model || model == budgetModelOther || model == budgetModelUnknown {
