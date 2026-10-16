@@ -233,6 +233,7 @@ func TestOpenRouterCreditsNoKeyNoRequest(t *testing.T) {
 // The async kick never blocks, fetches at most once per gap, and a failure
 // backs off instead of hammering the upstream.
 func TestOpenRouterCreditsKickRateLimited(t *testing.T) {
+	t.Setenv("KOTO_OPENROUTER_CREDITS", "1")
 	f := openrouterCreditsEnv(t, `{"data":{"usage":1}}`)
 	openrouterUpstream = f.srv.URL
 	wait := func() {
@@ -289,5 +290,26 @@ func TestOpenRouterCreditsKickRateLimited(t *testing.T) {
 	openrouterCreditsMu.Unlock()
 	if b2 != 2*openrouterCreditsMinGap {
 		t.Fatalf("backoff did not double: %s", b2)
+	}
+}
+
+// The credits poll is extra egress the operator did not ask for: without
+// KOTO_OPENROUTER_CREDITS=1 the kick sends nothing and stores nothing.
+func TestOpenRouterCreditsOffByDefault(t *testing.T) {
+	for _, v := range []string{"", "0", "yes", "true"} {
+		t.Setenv("KOTO_OPENROUTER_CREDITS", v)
+		f := openrouterCreditsEnv(t, `{"data":{"usage":1,"limit":10,"limit_remaining":9}}`)
+		openrouterUpstream = f.srv.URL
+		openrouterCreditsKickAsync()
+		time.Sleep(50 * time.Millisecond)
+		openrouterCreditsMu.Lock()
+		busy := openrouterCreditsBusy
+		openrouterCreditsMu.Unlock()
+		if busy || f.n() != 0 {
+			t.Fatalf("KOTO_OPENROUTER_CREDITS=%q: poll ran (busy=%v hits=%d)", v, busy, f.n())
+		}
+		if orAccount(t).ORKey != nil {
+			t.Fatalf("KOTO_OPENROUTER_CREDITS=%q: snapshot stored without opt-in", v)
+		}
 	}
 }

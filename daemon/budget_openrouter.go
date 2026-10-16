@@ -14,6 +14,10 @@ package main
 //     balance is not visible with an inference key, so none is shown, never
 //     a made-up number.
 //
+// OFF BY DEFAULT: the poll is extra egress to openrouter.ai that the operator
+// did not ask for, so it runs only with KOTO_OPENROUTER_CREDITS=1 in
+// koto.env. Off means no /key request, no credits line and no credits gauge.
+//
 // Polling never blocks a turn: serveOpenRouter kicks an async refresh after
 // each request, at most once per openrouterCreditsMinGap; a failure backs off
 // exponentially up to openrouterCreditsMaxBackoff. Every number is validated
@@ -27,6 +31,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -66,9 +71,19 @@ var (
 // var so proxy tests that count upstream hits can turn it off.
 var openrouterCreditsKick = openrouterCreditsKickAsync
 
+// openrouterCreditsEnabled reports the KOTO_OPENROUTER_CREDITS=1 opt-in (read
+// per call so a koto.env change applies on the next daemon start and tests
+// can t.Setenv it).
+func openrouterCreditsEnabled() bool {
+	return strings.TrimSpace(os.Getenv("KOTO_OPENROUTER_CREDITS")) == "1"
+}
+
 // openrouterCreditsKickAsync starts one background refresh unless one is
 // running or the gap / backoff has not elapsed. Returns at once.
 func openrouterCreditsKickAsync() {
+	if !openrouterCreditsEnabled() {
+		return
+	}
 	base := openrouterUpstream
 	now := time.Now()
 	openrouterCreditsMu.Lock()

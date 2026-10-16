@@ -102,6 +102,11 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
   request. See section 2.7.
 - `KOTO_OPENROUTER_ZDR` — `1` additionally forces `provider.zdr: true` (Zero
   Data Retention endpoints only); `0` or unset = off. Same fail-closed rule.
+- `KOTO_OPENROUTER_CREDITS` — `1` opts in to polling `GET /api/v1/key` for
+  the key's credits (koto-context line, `koto budget`, OTel credit gauges).
+  Unset or anything else = OFF (default): no extra request to openrouter.ai,
+  no credits line, no credit gauges — `daemon/budget_openrouter.go`
+  `openrouterCreditsEnabled`. See section 2.7.
 - `CRED_PATH` (legacy name, no `KOTO_` prefix) — OAuth credentials file.
   Default `<state>/.claude/.credentials.json` if it exists, else
   `$HOME/.claude/.credentials.json` — `daemon/proxy.go` `proxyInitPaths`.
@@ -222,7 +227,9 @@ koto relays it exactly like Venice: direct HTTPS, host-side key.
   `supported_parameters`; the agent loop needs tool calls); override per
   group with `model`. The TUI model picker lists only models that support
   tools and text output.
-- Budget key `openrouter/apikey`. OpenRouter sends no balance headers, so
+- Budget key `openrouter/apikey`. OpenRouter sends no balance headers.
+  Credits are OFF by default (no extra egress); with
+  `KOTO_OPENROUTER_CREDITS=1` in koto.env
   the daemon polls `GET /api/v1/key` with the host key after OpenRouter
   requests (at most once a minute, backing off up to 15 minutes on errors,
   never blocking a turn) — `daemon/budget_openrouter.go`. That endpoint
