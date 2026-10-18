@@ -5,6 +5,10 @@ the guest drives through pi. The guest's runPi (venice-pi train, G3) picks the
 file for the group's provider and copies it into place before the turn; the
 daemon only owns the proxy leg.
 
+The rootfs ships each template read-only under
+`/usr/local/share/koto/pi/` (Dockerfile.rootfs); `verify-rootfs.sh` checks
+the minimax one points at the proxy with the placeholder key.
+
 ## minimax — `models.minimax.json`
 
 pi v0.84.4 ships a built-in `minimax` provider (api `anthropic-messages`,

@@ -189,6 +189,13 @@ ENV PI_OFFLINE=1 \
     PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1
 
+# Guest-side pi provider templates (fcguest/pi/README.md). Read-only in the
+# image; a launcher copies the one for the group's provider into
+# $PI_CODING_AGENT_DIR/models.json. They hold only the in-guest proxy URL and
+# a placeholder key — the real provider key stays on the host.
+COPY fcguest/pi/models.minimax.json /usr/local/share/koto/pi/models.minimax.json
+RUN chmod 0644 /usr/local/share/koto/pi/models.minimax.json
+
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node

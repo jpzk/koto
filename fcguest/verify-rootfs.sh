@@ -23,6 +23,10 @@ PI_SHA256=c2f3c3e6a1850bd87654cc3ca8811013272397c3d042a4e2a64c43ee1b423972
     test "$PI_OFFLINE" = 1
     test "$PI_TELEMETRY" = 0
     test "$PI_SKIP_VERSION_CHECK" = 1
+    m=/usr/local/share/koto/pi/models.minimax.json
+    test "$(jq -r .providers.minimax.baseUrl "$m")" = http://127.0.0.1:18888/anthropic
+    test "$(jq -r .providers.minimax.apiKey "$m")" = proxied
+    test "$(jq -r ".providers|keys[]" "$m")" = minimax
   '
 
-echo "verified pi $PI_VERSION ($PI_SHA256) and offline runtime environment"
+echo "verified pi $PI_VERSION ($PI_SHA256), minimax pi template and offline runtime environment"
