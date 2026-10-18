@@ -155,20 +155,29 @@ type budgetCredits struct {
 
 // budgetObs is what one response's headers say.
 type budgetObs struct {
-	windows map[string]budgetWindow
-	overage string
-	credits *budgetCredits
-	dropped []string // unknown windows / families, for the debug log
+	windows  map[string]budgetWindow
+	overage  string
+	credits  *budgetCredits
+	balances map[string]float64 // venice: currency -> balance
+	req      *budgetReqLimit    // venice: request-count limit
+	dropped  []string           // unknown windows / families, for the debug log
 }
 
-func (o budgetObs) empty() bool { return len(o.windows) == 0 && o.overage == "" && o.credits == nil }
+func (o budgetObs) empty() bool {
+	return len(o.windows) == 0 && o.overage == "" && o.credits == nil && len(o.balances) == 0 && o.req == nil
+}
 
 // budgetAccount is the latest known state of one key.
 type budgetAccount struct {
 	Windows map[string]budgetWindow
 	Overage string
 	Credits *budgetCredits
-	Updated time.Time
+	// Venice (budget_venice.go): credit balance per currency, when it was
+	// last seen, and the request-count limit.
+	Balances  map[string]float64
+	BalanceAt time.Time
+	Req       *budgetReqLimit
+	Updated   time.Time
 }
 
 func (a *budgetAccount) clone() budgetAccount {
@@ -179,6 +188,17 @@ func (a *budgetAccount) clone() budgetAccount {
 	if a.Credits != nil {
 		cr := *a.Credits
 		c.Credits = &cr
+	}
+	if a.Balances != nil {
+		c.Balances = make(map[string]float64, len(a.Balances))
+		for k, v := range a.Balances {
+			c.Balances[k] = v
+		}
+	}
+	c.BalanceAt = a.BalanceAt
+	if a.Req != nil {
+		rq := *a.Req
+		c.Req = &rq
 	}
 	return c
 }
@@ -362,13 +382,15 @@ func budgetSafeToken(s string) string {
 }
 
 // budgetParse picks the header family for the key's provider. Venice sends
-// no budget headers, so its keys only ever get spend.
+// credit balances and a request limit (budget_venice.go).
 func budgetParse(key budgetKey, h http.Header) budgetObs {
 	switch key.Provider {
 	case providerClaude:
 		return budgetParseAnthropic(h)
 	case providerOpenAI:
 		return budgetParseCodex(h)
+	case providerVenice:
+		return budgetParseVenice(h)
 	}
 	return budgetObs{}
 }
@@ -410,6 +432,21 @@ func budgetObserve(key budgetKey, h http.Header) {
 	if o.credits != nil {
 		cr := *o.credits
 		a.Credits = &cr
+	}
+	if len(o.balances) > 0 {
+		if a.Balances == nil {
+			a.Balances = map[string]float64{}
+		}
+		for c, v := range o.balances {
+			if _, ok := a.Balances[c]; ok || len(a.Balances) < veniceMaxCurrencies {
+				a.Balances[c] = v
+			}
+		}
+		a.BalanceAt = time.Now()
+	}
+	if o.req != nil {
+		rq := *o.req
+		a.Req = &rq
 	}
 	a.Updated = time.Now()
 }

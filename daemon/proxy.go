@@ -515,6 +515,10 @@ func logMetricKey(group string, key budgetKey, model string, path string, status
 			if len(vs) > 0 {
 				rl[lk] = vs[0]
 			}
+		} else if key.Provider == providerVenice && veniceMetricHeader(lk) && len(vs) > 0 {
+			// venice credit balance + request limit (budget_venice.go), so
+			// the context block can fall back to it after a restart.
+			rl[lk] = vs[0]
 		}
 	}
 	reqID := hdrs.Get("request-id")
@@ -1443,8 +1447,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Usage is normalized to the Anthropic shape (input_tokens/output_tokens) so
 // the daemon's contextBlock — which assumes Anthropic field names — still
 // surfaces token counts in the next turn's <koto-context> header. Venice
-// doesn't expose rate-limit headers, so the rate-limit row of the context
-// block degrades to `?` for Venice groups, which is fine.
+// has no 5h/7d windows; its responses carry the credit balance
+// (x-venice-balance-<cur>) and a request limit instead, which logMetricKey
+// folds into the budget store and the context block shows as a credits line.
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	target := veniceUpstreamURL(r.URL.RequestURI())
 	llmFlowLog(h.group, r.Method, target, "")

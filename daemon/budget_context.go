@@ -54,6 +54,19 @@ func budgetCtxAccount(key budgetKey, m map[string]any) (budgetAccount, bool) {
 			h[k] = []string{s}
 		}
 	}
+	if key.Provider == providerVenice {
+		// venice records carry the raw x-venice-balance-* / x-ratelimit-*
+		// headers; the balance is as old as the record.
+		o := budgetParseVenice(h)
+		if o.empty() {
+			return budgetAccount{}, false
+		}
+		a := budgetAccount{Balances: o.balances, Req: o.req}
+		if ts, ok := anyAsFloat(m["ts"]); ok && len(o.balances) > 0 {
+			a.BalanceAt = time.Unix(0, int64(ts*1e9))
+		}
+		return a, true
+	}
 	// metrics.jsonl keeps the anthropic family for every provider (the
 	// openai leg translates x-codex-* into it for the TUI).
 	o := budgetParseAnthropic(h)
@@ -81,6 +94,9 @@ func budgetCtxLabels(key budgetKey, a budgetAccount) []string {
 }
 
 func budgetCtxRateLine(key budgetKey, a budgetAccount, now time.Time) string {
+	if key.Provider == providerVenice {
+		return budgetCtxVeniceLine(key, a, now)
+	}
 	labels := budgetCtxLabels(key, a)
 	if len(labels) == 0 {
 		return "rate-limit (" + key.String() + "): ?"
