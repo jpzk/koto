@@ -333,7 +333,20 @@ group 턴이 401로 실패하면 `koto claude-login`을 실행하세요. 플래�
 `--status`, `--method oauth|api-key`, `--api-key-stdin`, `--no-verify`
 입니다 (`claudeLoginUsage`, `daemon/claude_login.go`).
 
+키 기반 provider의 경우 `koto venice-login`은 `creds/venice.key`를,
+`koto minimax-login`은 `creds/minimax.key`를 씁니다 (둘 다 0600, state
+dir 안; 키는 guest에 들어가지 않습니다). 키는 `--key-file F`,
+`--api-key-stdin` 또는 숨김 터미널 프롬프트에서 받습니다. 쓰기 전에 인증이
+필요한 요청 하나로 확인합니다: Venice `GET /api/v1/api_keys/rate_limits`
+(Bearer), MiniMax `GET /anthropic/v1/models` (`x-api-key`). 2xx면 저장하고,
+401/403이면 거부하고 1로 종료하며 기존 키 파일은 그대로 둡니다. provider에
+연결할 수 없으면 (네트워크 오류, 15s 타임아웃, 5xx) 경고와 함께 저장합니다.
+`--no-verify`는 요청을 건너뛰고, `--status`는 키 저장 여부만 알려줍니다.
+오류 메시지에는 상태 코드나 전송 오류만 담기고 키는 절대 담기지 않습니다
+(`providerKeyCheck`, `daemon/provider_keycheck.go`). setup 마법사의 `auth`
+단계도 같은 확인을 사용합니다.
+
 `daemon/main.go`에서 디스패치되는 다른 최상위 하위 명령은 `daemon`,
-`fcjail`, `ctl`, `setup`, `claude-login`, `uninstall`, `update`,
+`fcjail`, `ctl`, `setup`, `claude-login`, `openai-login`, `venice-login`, `minimax-login`, `uninstall`, `update`,
 `install`, `tui`, `userns-check`, `pki`, `version`입니다. 알 수 없는 하위
 명령은 ``unknown subcommand: <name>``을 출력하고 2로 종료합니다.

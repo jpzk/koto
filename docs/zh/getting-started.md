@@ -318,7 +318,18 @@ koto setup --check  # health of the install, changes nothing
 `--status`、`--method oauth|api-key`、`--api-key-stdin` 和 `--no-verify`
 （`claudeLoginUsage`，`daemon/claude_login.go`）。
 
+对基于密钥的 provider，`koto venice-login` 写入 `creds/venice.key`，
+`koto minimax-login` 写入 `creds/minimax.key`（均为 0600，位于 state 目录；
+密钥从不进入 guest）。密钥来自 `--key-file F`、`--api-key-stdin` 或终端上的
+隐藏输入。写入前先用一个需要认证的请求检查：Venice
+`GET /api/v1/api_keys/rate_limits`（Bearer），MiniMax
+`GET /anthropic/v1/models`（`x-api-key`）。2xx 则保存；401/403 则拒绝、以 1
+退出，且现有密钥文件保持不变。provider 无法访问（网络错误、15s 超时、5xx）
+时会带警告保存。`--no-verify` 跳过检查；`--status` 只报告是否已有密钥。
+错误信息只含状态码或传输错误，从不含密钥（`providerKeyCheck`，
+`daemon/provider_keycheck.go`）。setup 向导的 `auth` 步骤使用同一检查。
+
 `daemon/main.go` 中分发的其他顶层子命令是 `daemon`、`fcjail`、`ctl`、
-`setup`、`claude-login`、`uninstall`、`update`、`install`、`tui`、
+`setup`、`claude-login`、`openai-login`、`venice-login`、`minimax-login`、`uninstall`、`update`、`install`、`tui`、
 `userns-check`、`pki` 和 `version`。未知子命令打印
 ``unknown subcommand: <name>`` 并以退出码 2 结束。

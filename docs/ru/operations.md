@@ -338,7 +338,7 @@ not root (sudo is used only for the system files)` (`runUninstall`).
   в `main`.
 - `the venice credential is not available on this host; ask the operator`
   (HTTP 503): группа с провайдером venice, но ключ не найден
-  (`no venice key: write to …`).
+  (`no venice key: write to …`). Исправление: `koto venice-login`.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)` (HTTP
   403, `llmRefuse`): гость вызвал API-путь, который прокси не ретранслирует.

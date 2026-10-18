@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|budget|install|update|uninstall|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|venice-login|minimax-login|budget|install|update|uninstall|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -42,6 +42,12 @@ func main() {
 		// Same, for groups on provider "openai" (Codex): device-code
 		// ChatGPT login or an API key, held host-side.
 		openaiLoginMain(os.Args[2:])
+	case "venice-login":
+		// Venice API key, checked with Venice before it is stored.
+		providerLoginMain(providerVenice, os.Args[2:])
+	case "minimax-login":
+		// MiniMax key (M Plan subscription key or API key), checked first.
+		providerLoginMain(providerMinimax, os.Args[2:])
 	case "uninstall":
 		// The inverse of install, and only of install: stops the service and
 		// removes the unit and binaries, keeping every byte of state unless

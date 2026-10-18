@@ -303,7 +303,7 @@ root (sudo is used only for the system files)`（`runUninstall`）。
   这些是 error 级日志，因此也会以横幅形式出现在 `main` 中。
 - `the venice credential is not available on this host; ask the operator`
   （HTTP 503）：某个 group 用 venice provider，但找不到密钥
-  （`no venice key: write to …`）。
+  （`no venice key: write to …`）。修复：`koto venice-login`。
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)`（HTTP
   403，`llmRefuse`）：guest 调用了代理不转发的 API 路径。

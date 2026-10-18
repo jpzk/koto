@@ -342,7 +342,7 @@ viene, y qué hacer.
   `main`.
 - `the venice credential is not available on this host; ask the operator`
   (HTTP 503): un grupo con el provider venice, pero no se encontró clave
-  (`no venice key: write to …`).
+  (`no venice key: write to …`). Solución: `koto venice-login`.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)` (HTTP
   403, `llmRefuse`): el invitado llamó a una ruta de API que el proxy no
