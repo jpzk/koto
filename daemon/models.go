@@ -88,6 +88,10 @@ var modelsFallback = map[string][]modelEntry{
 	"openai": {
 		{defaultOpenAIModel, "GPT-5.5"},
 	},
+	"minimax": {
+		{defaultMinimaxModel, "MiniMax-M3"},
+		{"MiniMax-M2.7", "MiniMax-M2.7"},
+	},
 }
 
 // Upstream origins, read at call time so an override of the proxy's origin
@@ -95,6 +99,7 @@ var modelsFallback = map[string][]modelEntry{
 var (
 	modelsAnthropicBase = func() string { return upstream }
 	modelsVeniceBase    = func() string { return veniceUpstream }
+	modelsMinimaxBase   = func() string { return minimaxUpstream }
 	modelsOpenAIBase    = func(kind string) string {
 		if kind == "chatgpt" {
 			return openaiChatGPTUpstream
@@ -108,6 +113,7 @@ var (
 var (
 	modelsAnthropicAuth = authHeaders
 	modelsVeniceAuth    = veniceAuth
+	modelsMinimaxAuth   = minimaxAuth
 	modelsOpenAIAuth    = openaiCredential
 )
 
@@ -348,6 +354,7 @@ var modelsFetchers = map[string]func(context.Context) ([]modelEntry, error){
 	"claudesdk": fetchAnthropicModels,
 	"venice":    fetchVeniceModels,
 	"openai":    fetchOpenAIModels,
+	"minimax":   fetchMinimaxModels,
 }
 
 // ---- cache + single-flight -------------------------------------------------
@@ -467,3 +474,27 @@ func modelsReset() {
 // over modelsTimeout so a fetch that finishes inside its own budget is
 // served live, but the dialog never hangs past it (var for tests).
 var modelsRPCWait = modelsTimeout + time.Second
+
+// fetchMinimaxModels: GET /anthropic/v1/models (Anthropic list shape, one
+// page; MiniMax lists a handful of models).
+func fetchMinimaxModels(ctx context.Context) ([]modelEntry, error) {
+	key, err := modelsMinimaxAuth()
+	if err != nil || key == "" {
+		return nil, errors.New("no minimax credential on this host")
+	}
+	var r struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+	}
+	u := strings.TrimRight(modelsMinimaxBase(), "/") + "/anthropic/v1/models"
+	if err := modelsGet(ctx, u, map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]modelEntry, 0, len(r.Data))
+	for _, d := range r.Data {
+		out = append(out, modelEntry{d.ID, d.DisplayName})
+	}
+	return out, nil
+}

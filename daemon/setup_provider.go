@@ -403,6 +403,13 @@ var setupProviderAuth = map[string]providerAuth{
 		remedy: "koto openai-login",
 		batch:  "koto openai-login --api-key-stdin < keyfile",
 	},
+	providerMinimax: {
+		label:  "MiniMax",
+		detect: minimaxCredDetect,
+		login:  minimaxCredLogin,
+		remedy: "koto setup --only auth   (or write the key to <state>/creds/minimax.key, 0600)",
+		batch:  "install -m 0600 keyfile <state>/creds/minimax.key",
+	},
 }
 
 func nonEmptyFile(path string) bool {
@@ -530,6 +537,7 @@ This connects a credential for each provider selected above, one at a time
   claudesdk  a Claude subscription (browser OAuth) or an Anthropic API key
   venice     a Venice API key
   openai     a ChatGPT subscription (device code) or an OpenAI API key
+  minimax    a MiniMax M Plan subscription key or API key
 Check each provider's terms for which fits your use — the README has the
 details. A provider already connected is not logged in again.
 
@@ -691,4 +699,36 @@ func smokeProviderCheck(sc *setupCtx) bool {
 	u.warn("default provider %s has no credential — its turns will fail", p)
 	u.hint("connect it with:\n  " + pa.remedy)
 	return false
+}
+
+func minimaxCredDetect(sc *setupCtx) (bool, string) {
+	if nonEmptyFile(filepath.Join(sc.credsDir(), "minimax.key")) {
+		return true, "MiniMax key stored"
+	}
+	return false, "no MiniMax key (creds/minimax.key)"
+}
+
+func minimaxCredLogin(sc *setupCtx) error {
+	ac := &authCtx{ui: sc.ui, state: sc.stateDir()}
+	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
+		return fmt.Errorf("creds dir: %w", err)
+	}
+	if err := authTrustedCredsDir(ac); err != nil {
+		return err
+	}
+	sc.ui.info("create a Subscription Key (M Plan) or API key at https://platform.minimax.io")
+	s, err := sc.ui.secret("MiniMax key")
+	if err != nil {
+		return err
+	}
+	key := strings.TrimSpace(s)
+	if key == "" {
+		return errors.New("no key given")
+	}
+	path := filepath.Join(ac.credsDir(), "minimax.key")
+	if err := pkiWriteFile(path, []byte(key), 0o600); err != nil {
+		return err
+	}
+	sc.ui.ok("stored in %s (0600)", path)
+	return nil
 }

@@ -315,6 +315,13 @@ comes from, and what to do.
 - `the venice credential is not available on this host; ask the operator`
   (HTTP 503): a group with the venice provider, but no key was found
   (`no venice key: write to …`).
+- `the minimax credential is not available on this host; ask the operator`
+  (HTTP 503, `daemon/proxy_minimax.go`): a minimax group, but
+  `creds/minimax.key` is missing or empty. A key starting `sk-api-` is billed
+  as `minimax/apikey`; any other key is an M Plan subscription
+  (`minimax/subscription`), whose 5h and weekly windows the daemon reads from
+  `token_plan/remains` at most once a minute after a minimax call.
+  `KOTO_MINIMAX_REGION=cn` in koto.env switches to the mainland endpoints.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)` (HTTP
   403, `llmRefuse`): the guest called an API path the proxy does not relay.

@@ -59,6 +59,13 @@ func providerCredKind(p string) string {
 		if k, err := veniceAuth(); err == nil && k != "" {
 			return credKindAPIKey
 		}
+	case providerMinimax:
+		if k, err := minimaxAuth(); err == nil {
+			if minimaxKeyAuth(k) == budgetAuthSub {
+				return credKindSubscription
+			}
+			return credKindAPIKey
+		}
 	case providerOpenAI:
 		f, ferr := openaiReadAuthFile()
 		switch kind, _ := openaiStoredCred(f, ferr); kind {
