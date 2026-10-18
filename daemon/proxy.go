@@ -48,7 +48,9 @@ func anthropicUpstreamURL(reqURI string) string {
 // the guest-facing route unchanged, exactly like the OpenAI leg.
 func veniceUpstreamURL(reqURI string) string {
 	base, overridden := configuredUpstream(veniceUpstream)
-	if overridden {
+	// The legacy sidecar route (venice_stream.js) is already in Venice's
+	// namespace; only pi's bare /v1 route needs the /api prefix.
+	if overridden || strings.HasPrefix(reqURI, "/api/") {
 		return base + reqURI
 	}
 	return base + "/api" + reqURI
@@ -858,6 +860,9 @@ var llmRoutesVenice = []llmRoute{
 	// Model discovery is static in that file, so exposing Venice's models or
 	// account APIs would add authority without enabling a turn.
 	{http.MethodPost, "/v1/chat/completions", false},
+	// venice_stream.js (the default venice runtime, fcguest runVenice) posts
+	// every turn here; dropping it would break every existing venice group.
+	{http.MethodPost, "/api/v1/chat/completions", false},
 }
 
 // llmRoutesOpenAI: see proxy_openai.go for the hosts/paths and why.

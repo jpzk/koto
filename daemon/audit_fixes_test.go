@@ -438,6 +438,7 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		{"claudesdk", "HEAD", "/api/hello"}, // ...which it actually sends as HEAD
 		{"claudesdk", "HEAD", "/v1/models"},
 		{"venice", "POST", "/v1/chat/completions"},
+		{"venice", "POST", "/api/v1/chat/completions"}, // venice_stream.js
 	}
 	for _, c := range allowed {
 		if !llmPathAllowed(c.provider, c.method, c.path) {
@@ -450,7 +451,6 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		{"claudesdk", "GET", "/v1/organizations/me"},
 		{"venice", "POST", "/api/v1/api_keys"}, // mint a key and read it back
 		{"venice", "GET", "/api/v1/api_keys"},
-		{"venice", "POST", "/api/v1/chat/completions"}, // legacy sidecar route is not pi's route
 		{"venice", "GET", "/api/v1/models"},            // models.json is static
 		{"claudesdk", "GET", "/media/../secret.txt"},   // seen in the wild
 		{"claudesdk", "GET", "/"},
