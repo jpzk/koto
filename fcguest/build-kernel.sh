@@ -53,6 +53,12 @@ mkdir -p "$OUT" "$CACHE"
 # version, but it was tagged 2026-05-20 and sits ~26 point releases behind its
 # own 6.18 longterm branch — newer number, older and staler code. 6.1 is also
 # the series docs/kernel-amzn-vs-vanilla.md reasons about.
+#
+# deps-2026-10 (CVE audit, 6-week age gate <= 2026-09-06): NOT bumped. The
+# audit wants >= 6.1.190 (kernel.org 2026-10-15). The newest amzn microvm tag
+# is 6.1.188-56.x (first tagged 2026-09-29, eligible 2026-11-10), and no amzn
+# 6.1.189/190 tag exists. Vanilla 6.1.187 is the only gated option, and it
+# brings back the ACPI/acpi=off busy-poll regression above. Hold 6.1.186.
 KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.186-50.374.amzn2023}"
 # The commit the annotated tag dereferences to (git checkout resolves HEAD to
 # this, not the f3ba04a… tag-object sha from `git ls-remote refs/tags/…`).
