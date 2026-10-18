@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,19 @@ func configuredUpstream(providerBase string) (string, bool) {
 func anthropicUpstreamURL(reqURI string) string {
 	base, _ := configuredUpstream(upstream)
 	return base + reqURI
+}
+
+// veniceUpstreamURL maps the guest-facing OpenAI-compatible route used by pi
+// onto Venice's public /api/v1 namespace. An outer Koto bridge instead wants
+// the guest-facing route unchanged, exactly like the OpenAI leg.
+func veniceUpstreamURL(reqURI string) string {
+	base, overridden := configuredUpstream(veniceUpstream)
+	// The legacy sidecar route (venice_stream.js) is already in Venice's
+	// namespace; only pi's bare /v1 route needs the /api prefix.
+	if overridden || strings.HasPrefix(reqURI, "/api/") {
+		return base + reqURI
+	}
+	return base + "/api" + reqURI
 }
 
 // proxyMaxBody bounds a buffered LLM-leg request body (audit M2).
@@ -842,9 +856,13 @@ var llmRoutesAnthropic = []llmRoute{
 }
 
 var llmRoutesVenice = []llmRoute{
+	// pi v0.84.4 with the generated models.json makes exactly this request.
+	// Model discovery is static in that file, so exposing Venice's models or
+	// account APIs would add authority without enabling a turn.
+	{http.MethodPost, "/v1/chat/completions", false},
+	// venice_stream.js (the default venice runtime, fcguest runVenice) posts
+	// every turn here; dropping it would break every existing venice group.
 	{http.MethodPost, "/api/v1/chat/completions", false},
-	{http.MethodGet, "/api/v1/models", false},
-	{http.MethodGet, "/api/v1/models/", true},
 }
 
 // llmRoutesOpenAI: see proxy_openai.go for the hosts/paths and why.
@@ -1428,7 +1446,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // doesn't expose rate-limit headers, so the rate-limit row of the context
 // block degrades to `?` for Venice groups, which is fine.
 func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
-	llmFlowLog(h.group, r.Method, veniceUpstream, r.URL.Path)
+	target := veniceUpstreamURL(r.URL.RequestURI())
+	llmFlowLog(h.group, r.Method, target, "")
 	t0 := time.Now()
 	// Same two bounds as the Anthropic path — this one buffers and retries
 	// identically, so it needs the identical budget (audit M2, M15).
@@ -1440,6 +1459,10 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 	model := budgetModelFromBody(body)
 	if ref := budgetCheckCaps(h.group, budgetKeyFor(groupProvider(h.group))); ref != nil {
 		writeBudgetRefusal(w, ref, true)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer proxied")) != 1 {
+		http.Error(w, "koto proxy: venice requests must use the proxy credential", http.StatusUnauthorized)
 		return
 	}
 	key, err := veniceAuth()
@@ -1456,19 +1479,20 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mkReq := func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, veniceUpstream+r.URL.RequestURI(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		for k, vs := range r.Header {
-			if hopByHop[strings.ToLower(k)] {
+			lk := strings.ToLower(k)
+			if hopByHop[lk] || lk == "authorization" || lk == "x-api-key" {
 				continue
 			}
 			// Anthropic-specific headers leak nothing useful upstream and Venice's
 			// validator may complain — strip the lot. The sidecar's venice script
 			// doesn't send these anyway; this only matters if someone curls the
 			// proxy directly.
-			if strings.HasPrefix(strings.ToLower(k), "anthropic-") {
+			if strings.HasPrefix(lk, "anthropic-") {
 				continue
 			}
 			for _, v := range vs {
@@ -1500,6 +1524,9 @@ func (h *handler) serveVenice(w http.ResponseWriter, r *http.Request) {
 		"transfer-encoding": true,
 		"content-length":    true,
 		"connection":        true,
+		// Never reflect credential-shaped upstream headers into the guest.
+		"authorization": true,
+		"x-api-key":     true,
 	}
 	for k, vs := range resp.Header {
 		if skip[strings.ToLower(k)] {

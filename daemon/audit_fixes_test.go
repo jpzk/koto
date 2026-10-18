@@ -437,8 +437,8 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		{"claudesdk", "GET", "/api/hello"},  // Claude Code's connectivity check
 		{"claudesdk", "HEAD", "/api/hello"}, // ...which it actually sends as HEAD
 		{"claudesdk", "HEAD", "/v1/models"},
-		{"venice", "POST", "/api/v1/chat/completions"},
-		{"venice", "GET", "/api/v1/models"},
+		{"venice", "POST", "/v1/chat/completions"},
+		{"venice", "POST", "/api/v1/chat/completions"}, // venice_stream.js
 	}
 	for _, c := range allowed {
 		if !llmPathAllowed(c.provider, c.method, c.path) {
@@ -451,7 +451,8 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		{"claudesdk", "GET", "/v1/organizations/me"},
 		{"venice", "POST", "/api/v1/api_keys"}, // mint a key and read it back
 		{"venice", "GET", "/api/v1/api_keys"},
-		{"claudesdk", "GET", "/media/../secret.txt"}, // seen in the wild
+		{"venice", "GET", "/api/v1/models"},            // models.json is static
+		{"claudesdk", "GET", "/media/../secret.txt"},   // seen in the wild
 		{"claudesdk", "GET", "/"},
 		{"claudesdk", "GET", "/api/tags"},
 		{"claudesdk", "DELETE", "/v1/messages"}, // right path, wrong method
@@ -7814,7 +7815,8 @@ func TestVeniceCredentialPathIsNotToldToTheGuest(t *testing.T) {
 	}
 	h := &handler{group: "g"}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/chat/completions", strings.NewReader("{}"))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer proxied")
 	h.serveVenice(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status %d, want 503", rec.Code)

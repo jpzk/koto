@@ -399,7 +399,7 @@ func TestBudgetCapProxyVeniceRefusesBeforeUpstream(t *testing.T) {
 	}
 	saveCaps(t, cfg)
 	budgetRecordSpend(kV, "llama-3.3-70b", usageOf(60_000, 0, 0, 0), cfg) // $0.60
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(`{"model":"llama-3.3-70b","messages":[]}`))
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama-3.3-70b","messages":[]}`))
 	r.Header.Set("Authorization", "Bearer proxied")
 	rec := httptest.NewRecorder()
 	(&handler{group: "tg"}).ServeHTTP(rec, r)
