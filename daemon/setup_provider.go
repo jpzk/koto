@@ -393,8 +393,8 @@ var setupProviderAuth = map[string]providerAuth{
 		label:  "Venice",
 		detect: veniceCredDetect,
 		login:  veniceCredLogin,
-		remedy: "koto setup --only auth   (or write the key to <state>/creds/venice.key, 0600)",
-		batch:  "install -m 0600 keyfile <state>/creds/venice.key",
+		remedy: "koto venice-login",
+		batch:  "koto venice-login --key-file keyfile",
 	},
 	providerOpenAI: {
 		label:  "OpenAI",
@@ -407,8 +407,8 @@ var setupProviderAuth = map[string]providerAuth{
 		label:  "MiniMax",
 		detect: minimaxCredDetect,
 		login:  minimaxCredLogin,
-		remedy: "koto setup --only auth   (or write the key to <state>/creds/minimax.key, 0600)",
-		batch:  "install -m 0600 keyfile <state>/creds/minimax.key",
+		remedy: "koto minimax-login",
+		batch:  "koto minimax-login --key-file keyfile",
 	},
 }
 
@@ -444,30 +444,7 @@ func veniceCredDetect(sc *setupCtx) (bool, string) {
 	return false, "no Venice API key (creds/venice.key)"
 }
 
-func veniceCredLogin(sc *setupCtx) error {
-	ac := &authCtx{ui: sc.ui, state: sc.stateDir()}
-	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
-		return fmt.Errorf("creds dir: %w", err)
-	}
-	if err := authTrustedCredsDir(ac); err != nil {
-		return err
-	}
-	sc.ui.info("create a key at https://venice.ai/settings/api")
-	s, err := sc.ui.secret("Venice API key")
-	if err != nil {
-		return err
-	}
-	key := strings.TrimSpace(s)
-	if key == "" {
-		return errors.New("no key given")
-	}
-	path := filepath.Join(ac.credsDir(), "venice.key")
-	if err := pkiWriteFile(path, []byte(key), 0o600); err != nil {
-		return err
-	}
-	sc.ui.ok("stored in %s (0600)", path)
-	return nil
-}
+func veniceCredLogin(sc *setupCtx) error { return keyCredLogin(sc, providerVenice) }
 
 func openaiCredDetect(sc *setupCtx) (bool, string) {
 	if exists(filepath.Join(sc.credsDir(), "openai-auth.json")) {
@@ -708,7 +685,11 @@ func minimaxCredDetect(sc *setupCtx) (bool, string) {
 	return false, "no MiniMax key (creds/minimax.key)"
 }
 
-func minimaxCredLogin(sc *setupCtx) error {
+func minimaxCredLogin(sc *setupCtx) error { return keyCredLogin(sc, providerMinimax) }
+
+// keyCredLogin is the wizard side of `koto venice-login` / `koto
+// minimax-login`: same prompt, same key check before anything is written.
+func keyCredLogin(sc *setupCtx, provider string) error {
 	ac := &authCtx{ui: sc.ui, state: sc.stateDir()}
 	if err := os.MkdirAll(ac.credsDir(), 0o700); err != nil {
 		return fmt.Errorf("creds dir: %w", err)
@@ -716,19 +697,9 @@ func minimaxCredLogin(sc *setupCtx) error {
 	if err := authTrustedCredsDir(ac); err != nil {
 		return err
 	}
-	sc.ui.info("create a Subscription Key (M Plan) or API key at https://platform.minimax.io")
-	s, err := sc.ui.secret("MiniMax key")
+	key, err := providerPromptKey(ac, provider)
 	if err != nil {
 		return err
 	}
-	key := strings.TrimSpace(s)
-	if key == "" {
-		return errors.New("no key given")
-	}
-	path := filepath.Join(ac.credsDir(), "minimax.key")
-	if err := pkiWriteFile(path, []byte(key), 0o600); err != nil {
-		return err
-	}
-	sc.ui.ok("stored in %s (0600)", path)
-	return nil
+	return providerStoreKey(sc.ctx, ac, provider, key, true)
 }

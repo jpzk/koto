@@ -331,7 +331,7 @@ func indexOf(p string) int {
 
 // Declining is allowed and loud; -y fails with the provider's own remedy.
 func TestAuthStepSkipAndBatch(t *testing.T) {
-	remedy := map[string]string{"claudesdk": "koto claude-login", "venice": "koto setup --only auth", "openai": "koto openai-login"}
+	remedy := map[string]string{"claudesdk": "koto claude-login", "venice": "koto venice-login", "minimax": "koto minimax-login", "openai": "koto openai-login"}
 	for _, p := range knownProviders {
 		setupEnvHarness(t, setEnvKey(installedEnv(), defaultProviderEnv, p))
 		f := &fakeLogins{}
