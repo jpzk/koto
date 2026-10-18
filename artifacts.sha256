@@ -24,8 +24,11 @@
 # Makefile reads "unreleased" and `make fetch` says so rather than 404ing.
 #
 # `make dist` regenerates the entries below from the build it packages.
-7884cdeb6b1b634dc593f5ec7171fd6a301800f7c3fb491e4fc70ad1e52fce65  koto
-a0a828e38f66c044a51eeee08e3adf7e5a8e26796366e3e07c73857e2e86a405  koto-tui
+ab6cd899c81a008866ee35b172c894cb5e03d24b6753ca822b8e6e3b47393c76  koto
+377e0e67b1ee357cfa47112da1e17194fb97894e826b29f4c315f673c39b179c  koto-tui
+#   <sha256>  fcassets/firecracker
+#   <sha256>  fcassets/vmlinux
+#   <sha256>  fcassets/rootfs.img
 98ad7b3a21255fb9227dfe564a8c3e170d9272a6b1ac726a0e2f10a2d050e678  fcassets/firecracker
-a5b340a31ee7528e66f5d75dfc41938704910ab1ee5ffcb97c733853b6c5f642  fcassets/vmlinux
-f021fe79a789927ba67e1e0ad3bde44bc8810cb2b2d2b9ac3d2c7fa94419949a  fcassets/rootfs.img
+7887148eee64376bd89fc59b2657797432c5322232d71cf2a1c50b9a98e00ec3  fcassets/vmlinux
+ba4baf7eca65aca2fb8bd3e7c4c22b72c0d5df065baf46235963d621cbd5642d  fcassets/rootfs.img
