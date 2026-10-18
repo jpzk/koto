@@ -123,6 +123,30 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 #   read by the CVE rescans (notes/cve/scripts/rpm-bodhi.sh input format plus
 #   BUILDTIME) without mounting the image.
 
+# npm CLI, replaced in place under the 6-week age gate. F44's nodejs22-npm
+# 10.9.8 bundles tar 7.5.11 (GHSA path-traversal/symlink fixes need >= 7.5.21)
+# and no gated nodejs22 build ships a newer npm (22.23.3 is still in testing),
+# so the npm 10.9.9 registry tarball (published 2026-07-29, same 10.x line,
+# bundles tar 7.5.22) is checked against its SHA-512 (= dist.integrity) and
+# laid over the RPM's npm directory, keeping Fedora's builtin npmrc
+# (prefix=/usr/local, update-notifier=false). npm is self-bundled: no resolution.
+# Bump: pick a version published >= 6 weeks ago, then
+#   curl -fsSL https://registry.npmjs.org/npm/-/npm-$V.tgz | sha512sum
+#   (cross-check `npm view npm@$V dist.integrity`)
+ARG NPM_VERSION=10.9.9
+ARG NPM_SHA512=d60fba8cb42f688b81e33c2f1cbef2ad7b977166700ec0ad057f1b6d60ea6ef2524abf673e20c35931cd8305d1dbb8887134d6eefdc0e7b8435bd458bf65b862
+RUN set -eu; cd /tmp; \
+    curl -fsSL -o npm.tgz "https://registry.npmjs.org/npm/-/npm-$NPM_VERSION.tgz"; \
+    printf '%s  npm.tgz\n' "$NPM_SHA512" | sha512sum -c -; \
+    d="$(dirname "$(dirname "$(readlink -f "$(command -v npm)")")")"; \
+    test "$(jq -r .name "$d/package.json")" = npm; \
+    cp "$d/npmrc" /tmp/npmrc.fedora; find "$d" -mindepth 1 -delete; \
+    tar -xzf npm.tgz -C "$d" --strip-components=1 --no-same-owner; \
+    mv /tmp/npmrc.fedora "$d/npmrc"; rm -f npm.tgz; \
+    test "$(npm --version)" = "$NPM_VERSION"; \
+    test "$(npm root -g)" = /usr/local/lib/node_modules; \
+    test "$(jq -r .version "$d/node_modules/tar/package.json")" = 7.5.22
+
 RUN set -eu; cd /tmp; \
     reg=https://registry.npmjs.org/@anthropic-ai; v="$CLAUDE_CODE_VERSION"; \
     curl -fsSL -o wrapper.tgz "$reg/claude-code/-/claude-code-$v.tgz"; \
@@ -199,30 +223,42 @@ RUN set -eu; cd /tmp; \
     test "$(codex --version)" = "codex-cli $CODEX_VERSION"; \
     codex-code-mode-host --help | grep -qF -- '--listen <URL>'
 
-# pi coding agent, shipped as earendil-works' self-contained Linux archive.
-# Keep the complete distribution under /opt: the executable resolves its
-# bundled node_modules, themes, WASM, and other runtime assets relative to
-# itself.  The archive is selected by an exact release tag and authenticated
-# before extraction; the receipt lets rootfs verification prove which bytes
-# were accepted without downloading the artifact again.
-#
-# Bump deliberately by checking the release asset, then updating all three:
-#   V=0.84.4; A=pi-linux-x64.tar.gz
-#   curl -fsSL "https://github.com/earendil-works/pi/releases/download/v$V/$A" | sha256sum
-ARG PI_VERSION=0.84.4
-ARG PI_SHA256=c2f3c3e6a1850bd87654cc3ca8811013272397c3d042a4e2a64c43ee1b423972
-RUN set -eu; cd /tmp; \
-    a=pi-linux-x64.tar.gz; \
-    curl -fsSL -o "$a" \
-      "https://github.com/earendil-works/pi/releases/download/v$PI_VERSION/$a"; \
-    printf '%s  %s\n' "$PI_SHA256" "$a" | sha256sum -c -; \
-    mkdir -p /opt; \
-    tar -xzf "$a" -C /opt; \
-    printf '%s  %s\n' "$PI_SHA256" "$a" > /opt/pi/.artifact.sha256; \
+# pi coding agent, installed from npm with a committed lockfile.
+# The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
+# compiles undici in, so its undici 8.9.0 cannot be patched; every pi release
+# inside the 6-week age gate (newest: 0.85.1, 2026-09-05) still locks 8.9.0.
+# fcguest/pi/install/ is that release's own installer root
+# (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
+# 9079bdf9…ead33 / 48d12884…11ea3) with exactly two edits:
+#   - overrides.undici = 8.10.2 (published 2026-09-04; fixes the 8.9.0 GHSAs),
+#     lock entry swapped to its tarball + integrity;
+#   - the six @earendil-works/* 0.85.1 entries upstream left without an
+#     integrity got their registry dist.integrity filled in.
+# Every one of the 165 locked versions was published on or before 2026-09-05
+# and every entry carries a SHA-512, so `npm ci` installs exactly these bytes.
+# Lifecycle scripts are skipped (esbuild/protobufjs/@google/genai do not need
+# them at runtime; platform binaries arrive as optionalDependencies).
+# The receipt records the lockfile digest for verify-rootfs.sh.
+# Bump: take the new release's two installer files, re-apply the edits above
+# (drop the override once the release locks undici >= 8.10.2), update PI_VERSION
+# and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json) here
+# and in verify-rootfs.sh.
+ARG PI_VERSION=0.85.1
+ARG PI_LOCK_SHA256=35638da0c680b3a106d1affa93ec82d5b02de285bdb5fd332035ea76ed56c621
+COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
+RUN set -eu; cd /opt/pi; \
+    printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
+    npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=warn; \
+    npm cache clean --force; \
+    printf '%s  %s\n' "$PI_LOCK_SHA256" package-lock.json > /opt/pi/.artifact.sha256; \
+    ln -s node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js /opt/pi/pi; \
     ln -s /opt/pi/pi /usr/local/bin/pi; \
-    rm -f "$a"; \
+    chmod -R a+rX /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
-    test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"
+    test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
+    test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.10.2; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.10.2") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
 # provider-neutral: provider credentials and endpoints arrive separately at
