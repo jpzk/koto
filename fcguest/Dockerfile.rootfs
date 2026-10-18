@@ -157,6 +157,38 @@ RUN set -eu; cd /tmp; \
     test "$(codex --version)" = "codex-cli $CODEX_VERSION"; \
     codex-code-mode-host --help | grep -qF -- '--listen <URL>'
 
+# pi coding agent, shipped as earendil-works' self-contained Linux archive.
+# Keep the complete distribution under /opt: the executable resolves its
+# bundled node_modules, themes, WASM, and other runtime assets relative to
+# itself.  The archive is selected by an exact release tag and authenticated
+# before extraction; the receipt lets rootfs verification prove which bytes
+# were accepted without downloading the artifact again.
+#
+# Bump deliberately by checking the release asset, then updating all three:
+#   V=0.84.4; A=pi-linux-x64.tar.gz
+#   curl -fsSL "https://github.com/earendil-works/pi/releases/download/v$V/$A" | sha256sum
+ARG PI_VERSION=0.84.4
+ARG PI_SHA256=c2f3c3e6a1850bd87654cc3ca8811013272397c3d042a4e2a64c43ee1b423972
+RUN set -eu; cd /tmp; \
+    a=pi-linux-x64.tar.gz; \
+    curl -fsSL -o "$a" \
+      "https://github.com/earendil-works/pi/releases/download/v$PI_VERSION/$a"; \
+    printf '%s  %s\n' "$PI_SHA256" "$a" | sha256sum -c -; \
+    mkdir -p /opt; \
+    tar -xzf "$a" -C /opt; \
+    printf '%s  %s\n' "$PI_SHA256" "$a" > /opt/pi/.artifact.sha256; \
+    ln -s /opt/pi/pi /usr/local/bin/pi; \
+    rm -f "$a"; \
+    test "$(pi --version)" = "$PI_VERSION"; \
+    test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"
+
+# pi must stay local and quiet in every guest execution path. Keep these
+# provider-neutral: provider credentials and endpoints arrive separately at
+# runtime, and a later runPi implementation can reuse the same rootfs policy.
+ENV PI_OFFLINE=1 \
+    PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1
+
 # Same uid/gid contract as the podman sidecar: every worker (claude, venice_stream.js, jobs) runs as node
 # (uid 1000) because `claude --dangerously-skip-permissions` refuses root.
 RUN useradd -u 1000 -m -s /bin/bash node
