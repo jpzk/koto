@@ -198,6 +198,14 @@ RUN set -eu; cd /tmp; \
 # the managed layer that outranks the agent-writable $CODEX_HOME/config.toml,
 # so an interactive `codex` in /shell never phones home for a newer release
 # either. Analytics off for the same reason. Turns also pass both as -c flags.
+#
+# Version held at 0.152.1 on purpose (2026-10 deps audit, 6-week age gate,
+# cutoff 2026-09-06). The newest eligible release, rust-v0.153.4 (09-04), has
+# the same gix 0.81.0 / openssl 0.10.75 (openssl-src 3.6.3) / rustls 0.23.36 /
+# hickory 0.25.2 / zip 2.4.2 as 0.152.1, so bumping closes no advisory.
+# rustls 0.23.45 first ships in 0.156.0 (09-22, eligible 2026-11-03). No
+# release up to 0.163.0 bumps gix or openssl yet. Re-check the Cargo.lock at
+# codex-rs/Cargo.lock for the tag before bumping.
 ARG CODEX_VERSION=0.152.1
 ARG CODEX_SHA256=a0ed1b40b1d597b340f09ae00ecebc46670b06cb52aac315b9dc84fed0289fd0
 ARG CODEX_CODE_MODE_HOST_SHA256=0f1a544d5c1e89aed769a91d8e63421eb8eef9db554e861ed90704126a4191ed
