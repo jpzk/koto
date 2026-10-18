@@ -1,9 +1,11 @@
 # pi provider configs (guest side)
 
 Templates for `$PI_CODING_AGENT_DIR/models.json`, one per koto provider that
-the guest drives through pi. The guest's runPi (venice-pi train, G3) picks the
-file for the group's provider and copies it into place before the turn; the
-daemon only owns the proxy leg.
+the guest drives through pi. fc-agent's runPi (fcguest/pi.go) copies the file
+for the group's provider into a fresh private PI_CODING_AGENT_DIR for every
+turn; the daemon only owns the proxy leg. Provider "minimax" runs on pi;
+before runPi existed it fell through to the claude harness, whose
+/v1/messages the minimax allowlist refuses (scripts/e2e-minimax-send.sh).
 
 The rootfs ships each template read-only under
 `/usr/local/share/koto/pi/` (Dockerfile.rootfs); `verify-rootfs.sh` checks
@@ -25,9 +27,10 @@ docs/models.md), so the bundled model list stays in effect:
   `x-api-key`; the proxy drops it and injects the host's
   `creds/minimax.key`. The real key never enters the guest.
 
-pi args for G3's provider table:
-
-    minimax: --provider minimax --model "${model:-$KOTO_DEFAULT_MINIMAX_MODEL}"
+pi args (piArgs): `--mode json -p --provider minimax --model
+"-e"`, plus `--session-id` from
+sessions/<name>.pi.id after the first turn, `--thinking` from the group
+effort, and the group prompt as an `--append-system-prompt` file.
 
 `KOTO_DEFAULT_MINIMAX_MODEL` is pushed by the daemon in the guest init env
 (fcGuestInitEnv). Region (international vs mainland China) is a HOST setting
