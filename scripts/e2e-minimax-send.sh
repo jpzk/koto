@@ -71,9 +71,6 @@ while [ "$(date +%s)" -lt "$end" ]; do
   [ -n "$reply" ] && break
   sleep 3
 done
-[ -n "$reply" ] || fail "no assistant reply within ${DEADLINE_S}s; last history: $(head -c 600 "$WORK/hist.json")"
-say "assistant: $(printf '%s' "$reply" | tr '\n' ' ' | head -c 300)"
-
 sleep 2   # let the log stream flush the turn's lines
 kill "$LOGPID" 2>/dev/null; wait "$LOGPID" 2>/dev/null; LOGPID=""
 refused=$(jq -r --arg g "$G" 'select(.event=="log") | .msg | select(test("\\[" + $g + "\\] refused"))' "$WORK/daemon.log" 2>/dev/null)
@@ -82,7 +79,12 @@ say "daemon log: $nref refused line(s) for $G"
 [ -n "$refused" ] && printf '%s\n' "$refused" | head -5 | sed 's/^/  /'
 
 rc=0
-printf '%s' "$reply" | grep -q PONG || { echo "[$(ts)] FAIL: reply lacks PONG" >&2; rc=1; }
+if [ -z "$reply" ]; then
+  echo "[$(ts)] FAIL: no assistant reply within ${DEADLINE_S}s; last history: $(head -c 600 "$WORK/hist.json")" >&2; rc=1
+else
+  say "assistant: $(printf '%s' "$reply" | tr '\n' ' ' | head -c 300)"
+  printf '%s' "$reply" | grep -q PONG || { echo "[$(ts)] FAIL: reply lacks PONG" >&2; rc=1; }
+fi
 [ "$nref" -eq 0 ] || { echo "[$(ts)] FAIL: proxy refused $nref request(s) for $G" >&2; rc=1; }
 [ "$rc" -eq 0 ] && say "PASS"
 exit $rc
