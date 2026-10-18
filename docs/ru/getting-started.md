@@ -338,7 +338,21 @@ koto setup --check  # health of the install, changes nothing
 `--status`, `--method oauth|api-key`, `--api-key-stdin` и `--no-verify`
 (`claudeLoginUsage`, `daemon/claude_login.go`).
 
+Для провайдеров с ключом `koto venice-login` пишет `creds/venice.key`,
+а `koto minimax-login` пишет `creds/minimax.key` (оба 0600, в state dir;
+ключ никогда не попадает в guest). Ключ берётся из `--key-file F`,
+`--api-key-stdin` или скрытого запроса в терминале. До записи он
+проверяется одним запросом, требующим auth: Venice
+`GET /api/v1/api_keys/rate_limits` (Bearer), MiniMax
+`GET /anthropic/v1/models` (`x-api-key`). 2xx — ключ сохраняется. 401/403 —
+ключ отклоняется, выход с кодом 1, существующий файл ключа не меняется.
+Если провайдер недоступен (сетевая ошибка, таймаут 15s, 5xx), ключ
+сохраняется с предупреждением. `--no-verify` пропускает запрос; `--status`
+лишь сообщает, сохранён ли ключ. Ошибки содержат код статуса или ошибку
+транспорта, но никогда не ключ (`providerKeyCheck`,
+`daemon/provider_keycheck.go`). Шаг `auth` мастера использует ту же проверку.
+
 Остальные подкоманды верхнего уровня, диспетчеризуемые в `daemon/main.go`, —
-`daemon`, `fcjail`, `ctl`, `setup`, `claude-login`, `uninstall`, `update`,
+`daemon`, `fcjail`, `ctl`, `setup`, `claude-login`, `openai-login`, `venice-login`, `minimax-login`, `uninstall`, `update`,
 `install`, `tui`, `userns-check`, `pki` и `version`. Неизвестная подкоманда
 печатает ``unknown subcommand: <name>`` и выходит с кодом 2.

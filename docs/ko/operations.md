@@ -328,7 +328,7 @@ root (sudo is used only for the system files)` (`runUninstall`).
   OAuth 갱신 문제. error 라인이므로 `main`에 배너로도 나타납니다.
 - `the venice credential is not available on this host; ask the
   operator` (HTTP 503): venice provider인 그룹인데 키를 찾지 못했습니다
-  (`no venice key: write to …`).
+  (`no venice key: write to …`). 해결: `koto venice-login`.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)`
   (HTTP 403, `llmRefuse`): 게스트가 프록시가 중계하지 않는 API 경로를

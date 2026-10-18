@@ -339,7 +339,21 @@ Cuando el turno de un grupo falla con 401, ejecuta `koto claude-login`. Sus
 flags son `--status`, `--method oauth|api-key`, `--api-key-stdin` y
 `--no-verify` (`claudeLoginUsage`, `daemon/claude_login.go`).
 
+Para los providers con clave, `koto venice-login` escribe `creds/venice.key`
+y `koto minimax-login` escribe `creds/minimax.key` (ambos 0600, en el state
+dir; la clave nunca entra en un guest). La clave viene de `--key-file F`,
+`--api-key-stdin` o de un prompt oculto en la terminal. Antes de escribir
+nada se comprueba con una petición que requiere auth: Venice
+`GET /api/v1/api_keys/rate_limits` (Bearer), MiniMax
+`GET /anthropic/v1/models` (`x-api-key`). Un 2xx la guarda. Un 401/403 la
+rechaza, sale con 1 y deja intacto el fichero de clave existente. Si el
+provider no responde (error de red, timeout de 15s, 5xx) se guarda con un
+aviso. `--no-verify` omite la petición; `--status` solo dice si hay clave.
+Los errores llevan el código de estado o el error de transporte, nunca la
+clave (`providerKeyCheck`, `daemon/provider_keycheck.go`). El paso `auth`
+del asistente usa la misma comprobación.
+
 Los demás subcomandos de nivel superior despachados en `daemon/main.go` son
-`daemon`, `fcjail`, `ctl`, `setup`, `claude-login`, `uninstall`, `update`,
+`daemon`, `fcjail`, `ctl`, `setup`, `claude-login`, `openai-login`, `venice-login`, `minimax-login`, `uninstall`, `update`,
 `install`, `tui`, `userns-check`, `pki` y `version`. Un subcomando
 desconocido imprime ``unknown subcommand: <name>`` y sale con 2.
