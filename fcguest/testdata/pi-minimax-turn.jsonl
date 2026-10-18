@@ -1,0 +1,37 @@
+{"type":"session","version":3,"id":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-18T15:56:02.000Z","cwd":"/workspace"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start"}
+{"type":"message_end","message":{"role":"user","stopReason":null,"errorMessage":null}}
+{"type":"message_start"}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"The"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":" user wants me to run `echo TOOLOK`"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":" and then reply with exactly \"PONG\". This seems"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":" like a test of instruction following. Let"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":" me run the command and then reply with exactly PONG"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"."}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"The user wants me to run `echo TOOLOK` and then reply with exactly \"PONG\". This seems like a test of instruction following. Let me run the command and then reply with exactly PONG."}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call_7rzetrnit0aCXVABuj3jl8Ft","toolName":"bash"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"\"command\": \"echo TOOLOK\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"}"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"call_7rzetrnit0aCXVABuj3jl8Ft","name":"bash","arguments":{"command":"echo TOOLOK"}}}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","errorMessage":null}}
+{"type":"tool_execution_start","toolCallId":"call_7rzetrnit0aCXVABuj3jl8Ft","toolName":"bash","args":{"command":"echo TOOLOK"}}
+{"type":"tool_execution_update","toolCallId":"call_7rzetrnit0aCXVABuj3jl8Ft","toolName":"bash","args":{"command":"echo TOOLOK"},"partialResult":{"content":[]}}
+{"type":"tool_execution_update","toolCallId":"call_7rzetrnit0aCXVABuj3jl8Ft","toolName":"bash","args":{"command":"echo TOOLOK"},"partialResult":{"content":[{"type":"text","text":"TOOLOK\n"}],"details":{}}}
+{"type":"tool_execution_end","toolCallId":"call_7rzetrnit0aCXVABuj3jl8Ft","toolName":"bash","result":{"content":[{"type":"text","text":"TOOLOK\n"}]},"isError":false}
+{"type":"message_start"}
+{"type":"message_end","message":{"role":"toolResult","stopReason":null,"errorMessage":null}}
+{"type":"turn_end"}
+{"type":"turn_start"}
+{"type":"message_start"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"P"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ONG"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"PONG"}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","errorMessage":null}}
+{"type":"turn_end"}
+{"type":"agent_end"}
+{"type":"agent_settled"}

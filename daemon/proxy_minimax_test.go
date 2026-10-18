@@ -7,8 +7,10 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -491,5 +493,53 @@ func TestMinimaxRemainsPollFeedsBudget(t *testing.T) {
 	send()
 	if u.count() != 3 {
 		t.Fatalf("hits %d, want 3 (rate-limited poll)", u.count())
+	}
+}
+
+// TestMinimaxGuestPathsAllowed pins the guest wiring for provider=minimax
+// end to end on the daemon side (mm-e2e): the guest init env carries the
+// minimax default model, and the pi template the rootfs ships
+// (fcguest/pi/models.minimax.json) resolves — baseUrl + the /v1/messages pi
+// appends — to a path the minimax allowlist relays, on the in-guest proxy
+// port. The claude harness's request (ANTHROPIC_BASE_URL + /v1/messages,
+// what 1.5.1 sent for every minimax turn) stays refused.
+func TestMinimaxGuestPathsAllowed(t *testing.T) {
+	env := fcGuestInitEnv()
+	if env["KOTO_DEFAULT_MINIMAX_MODEL"] != defaultMinimaxModel {
+		t.Fatalf("KOTO_DEFAULT_MINIMAX_MODEL = %q", env["KOTO_DEFAULT_MINIMAX_MODEL"])
+	}
+	b, err := os.ReadFile(filepath.Join("..", "fcguest", "pi", "models.minimax.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Providers map[string]struct {
+			BaseURL string `json:"baseUrl"`
+			APIKey  string `json:"apiKey"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	mm, ok := cfg.Providers["minimax"]
+	if !ok {
+		t.Fatal("template has no minimax provider")
+	}
+	u, err := url.Parse(mm.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "127.0.0.1:"+strconv.Itoa(fcGuestProxyTCP) {
+		t.Errorf("template host %q, want the in-guest proxy port %d", u.Host, fcGuestProxyTCP)
+	}
+	if mm.APIKey == "" || strings.ContainsAny(mm.APIKey[:1], "$!") || strings.HasPrefix(mm.APIKey, "sk-") {
+		t.Errorf("template apiKey %q is not a plain placeholder", mm.APIKey)
+	}
+	if p := u.Path + "/v1/messages"; !llmPathAllowed(providerMinimax, http.MethodPost, p) {
+		t.Errorf("pi's Messages path %s is refused by the minimax allowlist", p)
+	}
+	claude, _ := url.Parse(env["ANTHROPIC_BASE_URL"])
+	if llmPathAllowed(providerMinimax, http.MethodPost, claude.Path+"/v1/messages") {
+		t.Error("the claude harness path is allowed for minimax; the allowlist test above is stale")
 	}
 }

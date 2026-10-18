@@ -975,7 +975,7 @@ func clearSessionContext(g, sess string) baseResp {
 ID=$(cat "$I" 2>/dev/null | tr -d '\r\n')
 case "$ID" in ''|*[!A-Za-z0-9_-]*) ID='' ;; esac
 if [ -n "$ID" ]; then rm -f /workspace/.claude/projects/*/"$ID".jsonl || exit 1; fi
-rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id ` + vh + `
+rm -f "$I" /workspace/.cs/sessions/` + name + `.codex.id /workspace/.cs/sessions/` + name + `.pi.id ` + vh + `
 
 exit $?`
 	if out, rc, err := fcExec(g, script, 15*time.Second); err != nil {

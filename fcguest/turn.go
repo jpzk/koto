@@ -362,6 +362,8 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 		runVenice(tw, req, cfg, sess, env)
 	case "openai":
 		runCodex(tw, req, cfg, sess, env)
+	case "minimax":
+		runPi(tw, req, cfg, sess, env)
 	default:
 		runClaude(tw, req, cfg, idf, migrateContinue, env)
 	}
