@@ -14,7 +14,7 @@ package main
 // $CODEX_HOME/config.toml: that file lives in the worker-writable workspace,
 // so a turn must not depend on (or be redirectable by) what is in it.
 //
-// The JSONL stream (codex-rs/exec/src/exec_events.rs at rust-v0.152.1) maps
+// The JSONL stream (codex-rs/exec/src/exec_events.rs at rust-v0.163.0) maps
 // onto the same frames the claude path emits: agent_message -> text,
 // reasoning -> think block, command_execution / file_change / mcp_tool_call /
 // web_search -> tool + tool output, turn.failed -> [[err]]. Token usage is
@@ -125,12 +125,12 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		"-c", "analytics.enabled=false",
 		// Code mode (gpt-5.6-* are code_mode_only) runs tool calls through the
 		// codex-code-mode-host process the rootfs ships next to codex. The
-		// feature is Stable and default-on in rust-v0.152.1
-		// (codex-rs/features/src/lib.rs:985-990, consumed at
-		// codex-rs/core/src/thread_manager.rs:477); set it explicitly so a
+		// feature is Stable and default-on in rust-v0.163.0
+		// (codex-rs/features/src/lib.rs:1177-1182, consumed at
+		// codex-rs/core/src/thread_manager.rs:575); set it explicitly so a
 		// default flip upstream can't silently fail code mode closed. The host
 		// path is not configurable: codex looks for it beside its own
-		// executable (codex-rs/install-context/src/lib.rs:172-202).
+		// executable (codex-rs/install-context/src/lib.rs:175-204).
 		"-c", "features.code_mode_host=true",
 	)
 	if model != "" {

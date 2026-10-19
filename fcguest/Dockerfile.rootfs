@@ -175,10 +175,10 @@ RUN set -eu; cd /tmp; \
 # resolution. Pinned by version AND by the SHA-256 of the release tarball,
 # checked here before anything is unpacked.
 #
-# Pin policy: the newest non-prerelease published at least 6 weeks before the
-# build. rust-v0.152.1 was published 2026-09-01T22:33:02Z. The digest is the
+# Pin: rust-v0.163.0, the newest non-prerelease (published 2026-10-15T21:30:38Z)
+# -- NOT age-gated, operator override 2026-10-19 (notes/deps/brief-nogate.md). The digest is the
 # "digest" GitHub reports for the asset, cross-checked by downloading it:
-#   T=rust-v0.152.1; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.163.0; A=codex-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
@@ -189,15 +189,15 @@ RUN set -eu; cd /tmp; \
 # it each reply starts "Code Mode is unavailable ... host executable was not
 # found" and code mode fails closed. ~69 MB unpacked. codex looks for it
 # beside its own executable, not via config
-# (codex-rs/install-context/src/lib.rs:172-202), hence /usr/local/bin.
-# features.code_mode_host is Stable and default-on in rust-v0.152.1
-# (codex-rs/features/src/lib.rs:985-990); the managed config and the turn's
+# (codex-rs/install-context/src/lib.rs:175-204), hence /usr/local/bin.
+# features.code_mode_host is Stable and default-on in rust-v0.163.0
+# (codex-rs/features/src/lib.rs:1177-1182); the managed config and the turn's
 # -c flag (fcguest/codex.go) set it explicitly anyway. Verify:
-#   T=rust-v0.152.1; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.163.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest, .size)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
-#   -> 2026-09-01T22:33:02Z, sha256:0f1a544d...4191ed, 25676959 bytes; the
+#   -> 2026-10-15T21:30:38Z, sha256:31426312...703529, 27583103 bytes; the
 #      tarball holds one member, codex-code-mode-host-x86_64-unknown-linux-musl.
 #
 # No self-update: codex's startup update check (check_for_update_on_startup,
@@ -206,16 +206,15 @@ RUN set -eu; cd /tmp; \
 # so an interactive `codex` in /shell never phones home for a newer release
 # either. Analytics off for the same reason. Turns also pass both as -c flags.
 #
-# Version held at 0.152.1 on purpose (2026-10 deps audit, 6-week age gate,
-# cutoff 2026-09-06). The newest eligible release, rust-v0.153.4 (09-04), has
-# the same gix 0.81.0 / openssl 0.10.75 (openssl-src 3.6.3) / rustls 0.23.36 /
-# hickory 0.25.2 / zip 2.4.2 as 0.152.1, so bumping closes no advisory.
-# rustls 0.23.45 first ships in 0.156.0 (09-22, eligible 2026-11-03). No
-# release up to 0.163.0 bumps gix or openssl yet. Re-check the Cargo.lock at
-# codex-rs/Cargo.lock for the tag before bumping.
-ARG CODEX_VERSION=0.152.1
-ARG CODEX_SHA256=a0ed1b40b1d597b340f09ae00ecebc46670b06cb52aac315b9dc84fed0289fd0
-ARG CODEX_CODE_MODE_HOST_SHA256=0f1a544d5c1e89aed769a91d8e63421eb8eef9db554e861ed90704126a4191ed
+# Bumped 0.152.1 -> 0.163.0 (2026-10-19): rustls 0.23.36 -> 0.23.45 (first in
+# 0.156.0), rustls-webpki 0.103.13 -> 0.103.15. Still unfixed upstream in
+# 0.163.0: gix 0.81.0, openssl 0.10.75 / openssl-src 3.6.3, hickory 0.25.2,
+# zip 2.4.2. Cargo.lock sha256 17cdd862...2719d03. `codex exec --json` stream
+# (exec/src/exec_events.rs) changed additively only (WebSearchItem.results).
+# Re-check codex-rs/Cargo.lock for the tag before bumping.
+ARG CODEX_VERSION=0.163.0
+ARG CODEX_SHA256=beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
+ARG CODEX_CODE_MODE_HOST_SHA256=314263128ba6592e7e807c265deeaf928a692b72dcbfeb5e0b20c9423b703529
 
 RUN set -eu; cd /tmp; \
     a=codex-x86_64-unknown-linux-musl; \

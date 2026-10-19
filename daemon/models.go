@@ -42,7 +42,7 @@ const (
 	modelsPageLimit   = 100
 	// modelsClientVersion is the codex release koto pins (rootfs); the
 	// ChatGPT backend's catalog is keyed on it (codex-api endpoint/models.rs).
-	modelsClientVersion = "0.152.1"
+	modelsClientVersion = "0.163.0"
 )
 
 const (
@@ -296,7 +296,7 @@ var openaiNonChat = []string{"embedding", "tts", "whisper", "dall-e", "moderatio
 	"transcribe", "audio", "realtime", "image", "davinci", "babbage", "sora"}
 
 // fetchOpenAIModels: ChatGPT mode GET {codex base}/models?client_version=
-// (the endpoint codex 0.152.1 itself uses, already on the proxy allowlist);
+// (the endpoint codex 0.163.0 itself uses, already on the proxy allowlist);
 // API-key mode GET {api base}/models, minus non-chat models.
 func fetchOpenAIModels(ctx context.Context) ([]modelEntry, error) {
 	cred, err := modelsOpenAIAuth(ctx)
