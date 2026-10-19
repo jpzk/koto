@@ -517,13 +517,15 @@ const defaultVeniceModel = "kimi-k2.5"
 // defaultOpenAIModel is what an openai (Codex CLI) group runs when config.json
 // has no `model`; injected as KOTO_DEFAULT_OPENAI_MODEL like the others.
 //
-// gpt-5.5 is the newest model in codex 0.152.1's bundled catalog
-// (`codex debug models --bundled`) that drives the plain unified_exec shell
-// tool. The gpt-5.6-* entries rank higher but are tool_mode=code_mode_only:
-// every tool call runs through a separate V8 host binary
-// (codex-code-mode-host) that the plain codex release tarball does not ship,
-// and without it they fail closed. A group can still pick one explicitly.
-const defaultOpenAIModel = "gpt-5.5"
+// gpt-6.1-sol is priority 1 ("Latest workhorse model for coding") in the live
+// ChatGPT codex catalog for client_version 0.163.0 (GET
+// backend-api/codex/models, 2026-10-19; evidence in the PR). codex 0.163.0's
+// own built-in default, gpt-5.5, is no longer in that catalog and the
+// ChatGPT-account upstream refuses it with a 400. Every gpt-5.6+/gpt-6 entry is
+// tool_mode=code_mode_only; the rootfs ships codex-code-mode-host for that.
+// fcguest/codex.go codexDefaultModel carries the same value as the guest-side
+// fallback, so a turn never falls through to codex's built-in default.
+const defaultOpenAIModel = "gpt-6.1-sol"
 
 // ensureProviderConfig writes provider and runtime defaults into a group's
 // config.json when missing or invalid. Idempotent — when the field is already

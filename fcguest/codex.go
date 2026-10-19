@@ -36,6 +36,30 @@ import (
 // codexProviderID names the custom model provider the -c overrides define.
 const codexProviderID = "koto"
 
+// codexDefaultModel is the model a turn runs when neither the group config nor
+// the host (KOTO_DEFAULT_OPENAI_MODEL, set by the daemon from its own
+// defaultOpenAIModel) names one. koto ALWAYS passes a model: codex's built-in
+// default follows the codex release, not the account, and codex 0.163.0's
+// (gpt-5.5) is refused by the ChatGPT-account upstream ("model is not
+// supported when using Codex with a ChatGPT account"). gpt-6.1-sol is
+// priority 1 in the live ChatGPT codex catalog for client_version 0.163.0
+// (GET backend-api/codex/models, 2026-10-19; minimal_client_version 0.153.0,
+// tool_mode code_mode_only, which the rootfs ships codex-code-mode-host for).
+// Keep in sync with daemon/groups.go defaultOpenAIModel.
+const codexDefaultModel = "gpt-6.1-sol"
+
+// codexModel resolves the model for one turn: group config, then the host
+// default, then koto's own default. Never empty.
+func codexModel(cfg groupConfig, env []string) string {
+	if m := strings.TrimSpace(cfg.Model); m != "" {
+		return m
+	}
+	if m := strings.TrimSpace(envValue(env, "KOTO_DEFAULT_OPENAI_MODEL")); m != "" {
+		return m
+	}
+	return codexDefaultModel
+}
+
 // codexHome is where codex keeps its thread history; HOME is /workspace for
 // the worker, so this is also codex's default and survives restarts.
 var codexHome = filepath.Join(wsDir, ".codex")
@@ -154,10 +178,7 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 		tw.errf("codex: KOTO_OPENAI_BASE_URL / KOTO_OPENAI_API_KEY not set — host too old for provider openai?")
 		return
 	}
-	model := cfg.Model
-	if model == "" {
-		model = envValue(env, "KOTO_DEFAULT_OPENAI_MODEL")
-	}
+	model := codexModel(cfg, env)
 	idf := codexIDFile(sess)
 	resume := ""
 	if id, err := os.ReadFile(idf); err == nil {

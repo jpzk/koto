@@ -86,7 +86,9 @@ var modelsFallback = map[string][]modelEntry{
 		{"llama-3.3-70b", "Llama 3.3 70B"},
 	},
 	"openai": {
-		{defaultOpenAIModel, "GPT-5.5"},
+		{defaultOpenAIModel, "GPT-6.1-Sol"},
+		{"gpt-6-astra", "GPT-6-Astra"},
+		{"gpt-6-luna", "GPT-6-Luna"},
 	},
 	"minimax": {
 		{defaultMinimaxModel, "MiniMax-M3"},

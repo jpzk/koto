@@ -94,7 +94,9 @@ case "$PROVIDER" in
     # settings mirror fcguest/codex.go: the host proxy holds the credential,
     # KOTO_OPENAI_API_KEY is a placeholder.
     [ -n "${KOTO_OPENAI_BASE_URL:-}" ] || { echo "cs-subagent: KOTO_OPENAI_BASE_URL unset" >&2; exit 2; }
-    OM="$MODEL"; [ -z "$OM" ] && OM="${KOTO_DEFAULT_OPENAI_MODEL:-}"
+    # Always name a model (never codex's built-in default; see fcguest/codex.go
+    # codexDefaultModel, same value).
+    OM="$MODEL"; [ -z "$OM" ] && OM="${KOTO_DEFAULT_OPENAI_MODEL:-gpt-6.1-sol}"
     # TOML basic-string escape for a -c value (\\, ", tab, CR, newline).
     tq() { printf '%s' "$1" | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); gsub(/\r/,"\\r"); if (NR>1) print "\\n"; print}'; }
     OUT=$(mktemp)
