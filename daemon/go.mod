@@ -68,13 +68,19 @@ toolchain go1.26.9
 // the ordinary 6-week rule, cutoff 2026-09-06 (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info). The netstack parses every guest
 // frame inside the daemon, so these are the highest-exposure deps:
-//   github.com/containers/gvisor-tap-vsock v0.8.9-0.20260902153735-d3d4f055ddc5
-//     — main @ 2026-09-02 (last commit before the cutoff). v0.9.0 is
-//     2026-10-07: too new (eligible 2026-11-18). v0.8.9 (2026-05-11) still
-//     pinned gvisor 2024-09; main moved it to 2026-04 and adapted to the
-//     udp.ForwarderHandler -> bool API change. New since v0.8.9: an ICMP
-//     echo forwarder — covered by fcEgressConn, which filters by dst IP for
-//     every protocol.
+//   github.com/containers/gvisor-tap-vsock v0.9.0 — tag 2026-10-07
+//     (6dbb5d4fa003). NOT age-gated: operator one-time override 2026-10-19
+//     (chore/deps-nogate). Replaces the main@2026-09-02 d3d4f055 snapshot.
+//     d3d4f055..v0.9.0 (46 commits): DNS forwards SOA/PTR/AAAA and returns
+//     NOERROR/NODATA for zone-owned names (we set no zones -> forward path),
+//     unix-socket listener cleanup, gateway API bearer-token auth + audit log
+//     (gvproxy HTTP API — koto does not expose it), net.ErrClosed handling.
+//     No change to types.Configuration / virtualnetwork.New used by fcnet.go.
+//     Requires the same gvisor 20260413; MVS also lifts test-only deps
+//     ginkgo v2.33.0, gomega v1.44.0, go-mockdns v1.3.0 (go.sum only).
+//     v0.8.9 (2026-05-11) still pinned gvisor 2024-09; the udp
+//     ForwarderHandler -> bool API change and ICMP echo forwarder (covered by
+//     fcEgressConn's dst-IP filter for every protocol) came in after it.
 //   gvisor.dev/gvisor v0.0.0-20260413194555-9680d69bf798 — 2026-04-13
 //   github.com/insomniacslk/dhcp v0.0.0-20260719225207-c76316d4aa82 —
 //     2026-07-19: GO-2026-6237 (the @latest c6bb46ad is 2026-10-14: too new)
@@ -85,7 +91,7 @@ toolchain go1.26.9
 //   v0.9.1 — 2020-01-14, x/exp 20231110.
 
 require (
-	github.com/containers/gvisor-tap-vsock v0.8.9-0.20260902153735-d3d4f055ddc5
+	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/go-logr/logr v1.4.4
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.22.0

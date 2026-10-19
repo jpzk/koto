@@ -300,3 +300,17 @@ func TestFcFlowLoggerDedup(t *testing.T) {
 		t.Errorf("no warn egress line for the blocked flow in ring tail")
 	}
 }
+
+// TestFcNetGatewayBuilds: the real gvisor-tap-vsock stack must come up with
+// koto's configuration. Regression: DHCPStaticLeases was keyed MAC -> IP;
+// since the IPPool rewrite the key is parsed as an IP, so every network !=
+// none group failed to boot ("cannot reserve static lease IP 5a:94:...").
+func TestFcNetGatewayBuilds(t *testing.T) {
+	vn, err := fcNetGateway()
+	if err != nil {
+		t.Fatalf("fcNetGateway: %v", err)
+	}
+	if vn == nil {
+		t.Fatal("fcNetGateway returned nil network")
+	}
+}
