@@ -58,25 +58,31 @@ ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732
 # image), checked against the digests below AND `rpm -K`, and installed before
 # the package set; that install then excludes these names from the repos so
 # nothing upgrades them past the pin.
-#   curl, libcurl  8.18.0-9.fc44    FEDORA-2026-2f88b83676  built 2026-08-24, stable 2026-08-27
-#   openssl-libs   1:3.5.8-1.fc44   FEDORA-2026-51251b4657  built 2026-08-28, stable 2026-09-02
-# Held at the base image's build (newer fix is younger than the gate):
-#   sudo     1.9.17-8.p2.fc44  (1.9.17-10.p2 stable 2026-10-09, eligible 2026-11-20)
-#   tar      2:1.35-8.fc44     (1.35-9 stable 2026-09-09, eligible 2026-10-21)
-#   libevent 2.1.12-17.fc44    (2.1.13-1 stable 2026-09-09, eligible 2026-10-21)
+# NOT age-gated (operator one-time override 2026-10-19, see notes/deps/nogate):
+#   curl, libcurl  8.18.0-14.fc44     FEDORA-2026-a06b828d65  built 2026-10-12, stable 2026-10-14
+#   openssl-libs   1:3.5.9-1.fc44     FEDORA-2026-12f3f3d569  built 2026-09-30, stable 2026-10-03
+#   sudo           1.9.17-10.p2.fc44  FEDORA-2026-7d4732cbab  built 2026-10-07, stable 2026-10-09
+#   tar            2:1.35-9.fc44      FEDORA-2026-044e56d9ff  built 2026-09-07, stable 2026-09-09
+#   libevent       2.1.13-1.fc44      FEDORA-2026-72d10c874d  built 2026-09-07, stable 2026-09-09
 # Bump: pick the Bodhi update (bodhi.fedoraproject.org/updates/?packages=<src>
 # &releases=F44&status=stable), check date_stable against the gate, then
 #   K=https://kojipkgs.fedoraproject.org/packages
 #   curl -fsSL "$K/<src>/<ver>/<rel>/data/signed/6d9f90a6/x86_64/<sub>-<ver>-<rel>.x86_64.rpm" | sha256sum
 RUN set -eu; mkdir /tmp/rpmpins; cd /tmp/rpmpins; \
     K=https://kojipkgs.fedoraproject.org/packages; S=data/signed/6d9f90a6/x86_64; \
-    curl -fsSLO "$K/curl/8.18.0/9.fc44/$S/curl-8.18.0-9.fc44.x86_64.rpm"; \
-    curl -fsSLO "$K/curl/8.18.0/9.fc44/$S/libcurl-8.18.0-9.fc44.x86_64.rpm"; \
-    curl -fsSLO "$K/openssl/3.5.8/1.fc44/$S/openssl-libs-3.5.8-1.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/curl/8.18.0/14.fc44/$S/curl-8.18.0-14.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/curl/8.18.0/14.fc44/$S/libcurl-8.18.0-14.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/openssl/3.5.9/1.fc44/$S/openssl-libs-3.5.9-1.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/sudo/1.9.17/10.p2.fc44/$S/sudo-1.9.17-10.p2.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/tar/1.35/9.fc44/$S/tar-1.35-9.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/libevent/2.1.13/1.fc44/$S/libevent-2.1.13-1.fc44.x86_64.rpm"; \
     printf '%s  %s\n' \
-      3b16a4a3a503b994a3fd591c6ac9ad70e9fec9503ecea8b8e94477a44f7f690e curl-8.18.0-9.fc44.x86_64.rpm \
-      096eb78ca6ceab7af35752a7449a4b8396f9c1c4fa8042b241b3f23ecf11ee0f libcurl-8.18.0-9.fc44.x86_64.rpm \
-      b77403edb99b33c5e9cc5956b84323b6f3dcf26db5c7ca3a194b9c526108b408 openssl-libs-3.5.8-1.fc44.x86_64.rpm \
+      c8e19f7686e0de82296338cf86aaa4fd7e506b158f0c2954318d4bc8d9559cd5 curl-8.18.0-14.fc44.x86_64.rpm \
+      6ce8b5ddce7d9d481e56bb72a5384e577e20e6bb9429be8273a1c7b5b7fdb5d9 libcurl-8.18.0-14.fc44.x86_64.rpm \
+      9b0efe3cf1f2ebaa3dfa0367c0cff4790c6c5d1269f2bcad53d7ace2759e0ede openssl-libs-3.5.9-1.fc44.x86_64.rpm \
+      b2d42a10ec6caffa3afd3b02c04892779206e5707c451145143f84c8a7473dad sudo-1.9.17-10.p2.fc44.x86_64.rpm \
+      d1d18fd2dcac33b12bc6c02d9bdf4472cc8abb951a392c57507c53aee4da3d28 tar-1.35-9.fc44.x86_64.rpm \
+      5ed6be9fadb91187080d63a4036227b53fcce1db82983ab5ec24e0d6493e066f libevent-2.1.13-1.fc44.x86_64.rpm \
       | sha256sum -c -; \
     rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
     dnf install -y --setopt=install_weak_deps=False ./*.rpm; \
@@ -114,8 +120,8 @@ RUN dnf install -y --setopt=install_weak_deps=False \
  && dnf clean all \
  && rpm --setperms $(rpm -qa) >/dev/null \
  && test -u /usr/bin/sudo \
- && rpm -q curl-8.18.0-9.fc44 libcurl-8.18.0-9.fc44 openssl-libs-3.5.8-1.fc44 \
-      sudo-1.9.17-8.p2.fc44 tar-1.35-8.fc44 libevent-2.1.12-17.fc44 \
+ && rpm -q curl-8.18.0-14.fc44 libcurl-8.18.0-14.fc44 openssl-libs-3.5.9-1.fc44 \
+      sudo-1.9.17-10.p2.fc44 tar-1.35-9.fc44 libevent-2.1.13-1.fc44 \
  && mkdir -p /usr/share/koto \
  && rpm -qa --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t%{BUILDTIME}\n' \
       | sort > /usr/share/koto/rpm-manifest.tsv
