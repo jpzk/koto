@@ -8,16 +8,18 @@ CONTAINER=${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/d
 IMAGE=${1:-koto-fcrootfs}
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to verify the rootfs"; exit 1; }
 
-PI_VERSION=0.85.1
-PI_LOCK_SHA256=35638da0c680b3a106d1affa93ec82d5b02de285bdb5fd332035ea76ed56c621
+PI_VERSION=0.86.0
+PI_LOCK_SHA256=510555c39ab4734446f6984762c9de67fd1fcd3400d3165a6da04251bad85e6b
 PI_UNDICI=8.10.2
-NPM_VERSION=10.9.9
+PI_BRACE=5.0.12
+NPM_VERSION=11.21.1
 NPM_TAR=7.5.22
 
 "$CONTAINER" run --rm --entrypoint /bin/sh \
   -e EXPECTED_PI_VERSION="$PI_VERSION" \
   -e EXPECTED_PI_LOCK_SHA256="$PI_LOCK_SHA256" \
   -e EXPECTED_PI_UNDICI="$PI_UNDICI" \
+  -e EXPECTED_PI_BRACE="$PI_BRACE" \
   -e EXPECTED_NPM_VERSION="$NPM_VERSION" \
   -e EXPECTED_NPM_TAR="$NPM_TAR" \
   "$IMAGE" -eu -c '
@@ -32,6 +34,9 @@ NPM_TAR=7.5.22
     for f in $(find /opt/pi -path "*/node_modules/undici/package.json"); do
       test "$(jq -r .version "$f")" = "$EXPECTED_PI_UNDICI"
     done
+    for f in $(find /opt/pi -path "*/node_modules/brace-expansion/package.json"); do
+      test "$(jq -r .version "$f")" = "$EXPECTED_PI_BRACE"
+    done
     test "$(npm --version)" = "$EXPECTED_NPM_VERSION"
     test "$(npm root -g)" = /usr/local/lib/node_modules
     n="$(dirname "$(dirname "$(readlink -f "$(command -v npm)")")")"
@@ -45,4 +50,4 @@ NPM_TAR=7.5.22
     test "$(jq -r ".providers|keys[]" "$m")" = minimax
   '
 
-echo "verified pi $PI_VERSION (lock $PI_LOCK_SHA256, undici $PI_UNDICI), npm $NPM_VERSION (tar $NPM_TAR), minimax pi template and offline runtime environment"
+echo "verified pi $PI_VERSION (lock $PI_LOCK_SHA256, undici $PI_UNDICI, brace-expansion $PI_BRACE), npm $NPM_VERSION (tar $NPM_TAR), minimax pi template and offline runtime environment"
