@@ -289,6 +289,7 @@ func TestOpenAIUpstreamURL(t *testing.T) {
 
 func TestOpenAIUpstreamURLOverride(t *testing.T) {
 	t.Setenv("KOTO_UPSTREAM", "http://outer-koto:18888/")
+	t.Setenv("KOTO_UPSTREAM_PROVIDERS", "openai") // the outer bridge must serve this leg
 	for _, c := range []struct{ kind, p, q, want string }{
 		{"chatgpt", "/v1/responses", "", "http://outer-koto:18888/v1/responses"},
 		{"api-key", "/v1/responses/compact", "", "http://outer-koto:18888/v1/responses/compact"},

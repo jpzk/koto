@@ -275,6 +275,7 @@ func TestVeniceUpstreamURLDefaultAndOverride(t *testing.T) {
 		t.Errorf("legacy sidecar upstream = %q", got)
 	}
 	t.Setenv("KOTO_UPSTREAM", "http://outer-koto:18888/")
+	t.Setenv("KOTO_UPSTREAM_PROVIDERS", "venice") // the outer bridge must serve this leg
 	if got := veniceUpstreamURL("/v1/chat/completions?x=1"); got != "http://outer-koto:18888/v1/chat/completions?x=1" {
 		t.Errorf("override upstream = %q", got)
 	}
