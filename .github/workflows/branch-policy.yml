@@ -1,0 +1,27 @@
+# branch-policy: only release/* and hotfix/* branches may be merged into main.
+# Feature work goes to `develop`; main moves only via a release or hotfix PR.
+# Plain bash, no third-party actions, no checkout, no secrets.
+name: branch-policy
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  branch-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: head branch must be release/* or hotfix/*
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -eu
+          if [[ "$HEAD_REF" =~ ^(release|hotfix)/ ]]; then
+            echo "ok: '$HEAD_REF' may target main"
+          else
+            echo "::error::'$HEAD_REF' may not target main; open the PR against develop (only release/* or hotfix/* merge into main)"
+            exit 1
+          fi
