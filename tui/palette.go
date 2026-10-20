@@ -143,13 +143,8 @@ func (m Model) paletteItems() []paletteItem {
 			m.toggleFullscreen()
 			return nil
 		}},
-		{title: "toggle mouse select mode", hint: "ctrl+s", act: func(m *Model) tea.Cmd {
-			m.selectMode = !m.selectMode
-			if m.selectMode {
-				return tea.DisableMouse
-			}
-			return tea.EnableMouseCellMotion
-		}},
+		{title: "toggle mouse select mode", hint: "ctrl+x", act: func(m *Model) tea.Cmd { return m.toggleMouseMode() }},
+		{title: "new session in this group", hint: "ctrl+s", act: func(m *Model) tea.Cmd { m.openNewSession(); return nil }},
 
 		{title: "color theme (live preview)", hint: "/themes", act: func(m *Model) tea.Cmd { m.openThemePicker(); return nil }},
 		{title: "list color themes", hint: "/themes list", run: "/themes list"},
@@ -242,7 +237,7 @@ func (m Model) groupItems() (keys []string, items []paletteItem) {
 	}
 	for _, g := range m.treeOrder() {
 		add(g, "")
-		for _, s := range m.groups[g].Sessions {
+		for _, s := range m.sessionsOf(g) {
 			add(g, s)
 		}
 	}

@@ -260,6 +260,9 @@ func (m Model) view() string {
 	if m.newGroup.open {
 		return m.renderNewGroup()
 	}
+	if m.newSess.open {
+		return m.renderNewSession()
+	}
 	if m.helpOpen {
 		// Cheatsheet modal (ctrl+h): paints the whole frame, whatever view is
 		// underneath — its key block in handleKey owns input the same way, so
