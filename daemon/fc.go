@@ -1093,14 +1093,20 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		init.Net = "l3"
 	}
 	initReq := &pb.AgentRequest{Op: &pb.AgentRequest_Init{Init: init}}
-	deadline := time.Now().Add(30 * time.Second)
+	bootTimeout := fcGuestBootTimeout
+	bootStart := time.Now()
+	deadline := bootStart.Add(bootTimeout)
 	for {
 		_, err = fcAgentCall(g, initReq, 5*time.Second)
 		if err == nil {
+			if el := time.Since(bootStart); guestBootSlow(el, bootTimeout) {
+				emitLogfG("fc", g, "warn", "[%s] guest agent took %s to come up (>50%% of %s=%s; host load %s on %d CPUs)",
+					g, el.Round(100*time.Millisecond), guestBootTimeoutEnv, bootTimeout, hostLoadAvg(), hostNCPU())
+			}
 			break
 		}
 		if time.Now().After(deadline) {
-			return fail(fmt.Errorf("guest agent didn't come up within 30s: %w (see %s)", err, fcConsolePath(g)))
+			return fail(guestBootTimeoutError(time.Since(bootStart), bootTimeout, hostLoadAvg(), hostNCPU(), err, fcConsolePath(g)))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
