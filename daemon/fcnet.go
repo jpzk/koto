@@ -112,7 +112,12 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 		GatewayMacAddress: fcNetGatewayMAC,
 		// Static lease so the gateway's NAT/ARP knows the guest by MAC even
 		// though fc-agent self-assigns the address (no in-guest DHCP client).
-		DHCPStaticLeases: map[string]string{fcNetGuestMAC: fcNetGuestIP},
+		// Keyed IP -> MAC (virtualnetwork.New: `for ip, mac := range`). It
+		// used to be MAC -> IP: v0.8.9's Reserve(net.IP) silently stored the
+		// lease under "<nil>"; since the 2026-04 IPPool rewrite (d3d4f055,
+		// v0.9.0) Reserve parses the key, so the swapped map failed every
+		// network != none boot with "cannot reserve static lease IP <mac>".
+		DHCPStaticLeases: map[string]string{fcNetGuestIP: fcNetGuestMAC},
 		// No DNS zones → the gateway forwards queries to the host resolver, so
 		// the guest resolves public names via 192.168.127.1.
 		//

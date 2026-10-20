@@ -33,8 +33,8 @@ OUT="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
 CACHE="$HERE/.kernelcache"
 mkdir -p "$OUT" "$CACHE"
 
-# Pins. microvm-kernel tag from amazonlinux/linux (6.1.186 base, tagged
-# 2026-09-07).
+# Pins. microvm-kernel tag from amazonlinux/linux (6.1.188 base, tagged
+# 2026-09-29).
 #
 # This one is a DELIBERATE EXCEPTION to the six-week dependency lag, taken for
 # 1.0.0. The lag exists so a broken or compromised release is noticed before we
@@ -53,13 +53,21 @@ mkdir -p "$OUT" "$CACHE"
 # version, but it was tagged 2026-05-20 and sits ~26 point releases behind its
 # own 6.18 longterm branch — newer number, older and staler code. 6.1 is also
 # the series docs/kernel-amzn-vs-vanilla.md reasons about.
-KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.186-50.374.amzn2023}"
+#
+# deps-2026-10 (CVE audit, 6-week age gate <= 2026-09-06) held 6.1.186: the
+# audit wants >= 6.1.190 (kernel.org 2026-10-15) and no amzn 6.1.189/190 tag
+# exists. deps-nogate (age gate lifted, stacked on that PR): bump to the
+# first amzn 6.1.188 tag, 6.1.188-56.385 (tagged 2026-09-29), which fixes
+# 24 of the 51 audited kernel CVEs. NOT vanilla 6.1.189/190: the ACPI /
+# acpi=off busy-poll regression above. Same Firecracker guest config, same
+# builder digest. The remaining 6.1.189/190 fixes wait for an amzn tag.
+KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.188-56.385.amzn2023}"
 # The commit the annotated tag dereferences to (git checkout resolves HEAD to
-# this, not the f3ba04a… tag-object sha from `git ls-remote refs/tags/…`).
+# this, not the f3260b2… tag-object sha from `git ls-remote refs/tags/…`).
 # The tag resolves to this commit, verified independently against the GitHub API
 # rather than taken from the clone — a pin the clone supplies proves nothing.
-# annotated tag e4a14d4b1d1131d7952f1005eed2f82c4c6b060b -> commit below.
-KERNEL_COMMIT="${KERNEL_COMMIT:-8a40ca92bfa9b706b76287942c89b13884928cb0}"
+# annotated tag f3260b2f53bf4459c2433469c8d37d2982fc418c -> commit below.
+KERNEL_COMMIT="${KERNEL_COMMIT:-0dcff8409289f418b20cf8b695406cb38ba477e0}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
 # Pinned by DIGEST: the builder image decides the compiler that produces
 # vmlinux, so a moving tag means a moving kernel binary.

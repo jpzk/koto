@@ -14,7 +14,7 @@ package main
 // $CODEX_HOME/config.toml: that file lives in the worker-writable workspace,
 // so a turn must not depend on (or be redirectable by) what is in it.
 //
-// The JSONL stream (codex-rs/exec/src/exec_events.rs at rust-v0.152.1) maps
+// The JSONL stream (codex-rs/exec/src/exec_events.rs at rust-v0.163.0) maps
 // onto the same frames the claude path emits: agent_message -> text,
 // reasoning -> think block, command_execution / file_change / mcp_tool_call /
 // web_search -> tool + tool output, turn.failed -> [[err]]. Token usage is
@@ -35,6 +35,30 @@ import (
 
 // codexProviderID names the custom model provider the -c overrides define.
 const codexProviderID = "koto"
+
+// codexDefaultModel is the model a turn runs when neither the group config nor
+// the host (KOTO_DEFAULT_OPENAI_MODEL, set by the daemon from its own
+// defaultOpenAIModel) names one. koto ALWAYS passes a model: codex's built-in
+// default follows the codex release, not the account, and codex 0.163.0's
+// (gpt-5.5) is refused by the ChatGPT-account upstream ("model is not
+// supported when using Codex with a ChatGPT account"). gpt-6.1-sol is
+// priority 1 in the live ChatGPT codex catalog for client_version 0.163.0
+// (GET backend-api/codex/models, 2026-10-19; minimal_client_version 0.153.0,
+// tool_mode code_mode_only, which the rootfs ships codex-code-mode-host for).
+// Keep in sync with daemon/groups.go defaultOpenAIModel.
+const codexDefaultModel = "gpt-6.1-sol"
+
+// codexModel resolves the model for one turn: group config, then the host
+// default, then koto's own default. Never empty.
+func codexModel(cfg groupConfig, env []string) string {
+	if m := strings.TrimSpace(cfg.Model); m != "" {
+		return m
+	}
+	if m := strings.TrimSpace(envValue(env, "KOTO_DEFAULT_OPENAI_MODEL")); m != "" {
+		return m
+	}
+	return codexDefaultModel
+}
 
 // codexHome is where codex keeps its thread history; HOME is /workspace for
 // the worker, so this is also codex's default and survives restarts.
@@ -125,12 +149,12 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		"-c", "analytics.enabled=false",
 		// Code mode (gpt-5.6-* are code_mode_only) runs tool calls through the
 		// codex-code-mode-host process the rootfs ships next to codex. The
-		// feature is Stable and default-on in rust-v0.152.1
-		// (codex-rs/features/src/lib.rs:985-990, consumed at
-		// codex-rs/core/src/thread_manager.rs:477); set it explicitly so a
+		// feature is Stable and default-on in rust-v0.163.0
+		// (codex-rs/features/src/lib.rs:1177-1182, consumed at
+		// codex-rs/core/src/thread_manager.rs:575); set it explicitly so a
 		// default flip upstream can't silently fail code mode closed. The host
 		// path is not configurable: codex looks for it beside its own
-		// executable (codex-rs/install-context/src/lib.rs:172-202).
+		// executable (codex-rs/install-context/src/lib.rs:175-204).
 		"-c", "features.code_mode_host=true",
 	)
 	if model != "" {
@@ -154,10 +178,7 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 		tw.errf("codex: KOTO_OPENAI_BASE_URL / KOTO_OPENAI_API_KEY not set — host too old for provider openai?")
 		return
 	}
-	model := cfg.Model
-	if model == "" {
-		model = envValue(env, "KOTO_DEFAULT_OPENAI_MODEL")
-	}
+	model := codexModel(cfg, env)
 	idf := codexIDFile(sess)
 	resume := ""
 	if id, err := os.ReadFile(idf); err == nil {

@@ -49,11 +49,53 @@ ARG CLAUDE_CODE_VERSION=2.1.280
 ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
 ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
 
+# Security-front RPMs, PINNED by NEVRA + SHA-256 under the 6-week age gate
+# (a build is eligible once its Bodhi update went stable >= 6 weeks before the
+# rootfs build). Fedora's updates repo only carries the newest build of each
+# package, so `dnf install curl` would silently adopt whatever was pushed this
+# week. Instead the exact Fedora-signed builds are fetched from Koji's signed/
+# tree (key 6d9f90a6 = RPM-GPG-KEY-44-fedora, already imported in the base
+# image), checked against the digests below AND `rpm -K`, and installed before
+# the package set; that install then excludes these names from the repos so
+# nothing upgrades them past the pin.
+# NOT age-gated (operator one-time override 2026-10-19, see notes/deps/nogate):
+#   curl, libcurl  8.18.0-14.fc44     FEDORA-2026-a06b828d65  built 2026-10-12, stable 2026-10-14
+#   openssl-libs   1:3.5.9-1.fc44     FEDORA-2026-12f3f3d569  built 2026-09-30, stable 2026-10-03
+#   sudo           1.9.17-10.p2.fc44  FEDORA-2026-7d4732cbab  built 2026-10-07, stable 2026-10-09
+#   tar            2:1.35-9.fc44      FEDORA-2026-044e56d9ff  built 2026-09-07, stable 2026-09-09
+#   libevent       2.1.13-1.fc44      FEDORA-2026-72d10c874d  built 2026-09-07, stable 2026-09-09
+# Bump: pick the Bodhi update (bodhi.fedoraproject.org/updates/?packages=<src>
+# &releases=F44&status=stable), check date_stable against the gate, then
+#   K=https://kojipkgs.fedoraproject.org/packages
+#   curl -fsSL "$K/<src>/<ver>/<rel>/data/signed/6d9f90a6/x86_64/<sub>-<ver>-<rel>.x86_64.rpm" | sha256sum
+RUN set -eu; mkdir /tmp/rpmpins; cd /tmp/rpmpins; \
+    K=https://kojipkgs.fedoraproject.org/packages; S=data/signed/6d9f90a6/x86_64; \
+    curl -fsSLO "$K/curl/8.18.0/14.fc44/$S/curl-8.18.0-14.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/curl/8.18.0/14.fc44/$S/libcurl-8.18.0-14.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/openssl/3.5.9/1.fc44/$S/openssl-libs-3.5.9-1.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/sudo/1.9.17/10.p2.fc44/$S/sudo-1.9.17-10.p2.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/tar/1.35/9.fc44/$S/tar-1.35-9.fc44.x86_64.rpm"; \
+    curl -fsSLO "$K/libevent/2.1.13/1.fc44/$S/libevent-2.1.13-1.fc44.x86_64.rpm"; \
+    printf '%s  %s\n' \
+      c8e19f7686e0de82296338cf86aaa4fd7e506b158f0c2954318d4bc8d9559cd5 curl-8.18.0-14.fc44.x86_64.rpm \
+      6ce8b5ddce7d9d481e56bb72a5384e577e20e6bb9429be8273a1c7b5b7fdb5d9 libcurl-8.18.0-14.fc44.x86_64.rpm \
+      9b0efe3cf1f2ebaa3dfa0367c0cff4790c6c5d1269f2bcad53d7ace2759e0ede openssl-libs-3.5.9-1.fc44.x86_64.rpm \
+      b2d42a10ec6caffa3afd3b02c04892779206e5707c451145143f84c8a7473dad sudo-1.9.17-10.p2.fc44.x86_64.rpm \
+      d1d18fd2dcac33b12bc6c02d9bdf4472cc8abb951a392c57507c53aee4da3d28 tar-1.35-9.fc44.x86_64.rpm \
+      5ed6be9fadb91187080d63a4036227b53fcce1db82983ab5ec24e0d6493e066f libevent-2.1.13-1.fc44.x86_64.rpm \
+      | sha256sum -c -; \
+    rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
+    dnf install -y --setopt=install_weak_deps=False ./*.rpm; \
+    cd /; rm -rf /tmp/rpmpins
+
+# curl, tar and sudo are deliberately NOT named here: they come from the base
+# image / the pinned step above, and naming an excluded package is an error
+# ("matches only excluded packages"). The rpm -q below asserts all of them.
 RUN dnf install -y --setopt=install_weak_deps=False \
+      --setopt=excludepkgs=curl,libcurl,libcurl-minimal,openssl,openssl-libs,sudo,tar,libevent \
       bash \
       ca-certificates \
       coreutils \
-      curl \
       e2fsprogs \
       git \
       iproute \
@@ -64,7 +106,6 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       procps-ng \
       python3 \
       ripgrep \
-      tar \
       gzip \
       tmux \
       which \
@@ -76,10 +117,42 @@ RUN dnf install -y --setopt=install_weak_deps=False \
       passt \
       slirp4netns \
       shadow-utils \
-      sudo \
  && dnf clean all \
  && rpm --setperms $(rpm -qa) >/dev/null \
- && test -u /usr/bin/sudo
+ && test -u /usr/bin/sudo \
+ && rpm -q curl-8.18.0-14.fc44 libcurl-8.18.0-14.fc44 openssl-libs-3.5.9-1.fc44 \
+      sudo-1.9.17-10.p2.fc44 tar-1.35-9.fc44 libevent-2.1.13-1.fc44 \
+ && mkdir -p /usr/share/koto \
+ && rpm -qa --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t%{BUILDTIME}\n' \
+      | sort > /usr/share/koto/rpm-manifest.tsv
+# ^ rpm-manifest.tsv: the exact package set + build times this rootfs shipped,
+#   read by the CVE rescans (notes/cve/scripts/rpm-bodhi.sh input format plus
+#   BUILDTIME) without mounting the image.
+
+# npm CLI, replaced in place. F44's nodejs22-npm 10.9.8 bundles tar 7.5.11
+# (GHSA path-traversal/symlink fixes need >= 7.5.21) and the 10.x line also
+# carries brace-expansion/ip-address/sigstore/pacote advisories fixed only in
+# 11.x trees. npm 11.21.1 (newest 11.x, published 2026-10-15 -- NOT age-gated,
+# operator override 2026-10-19; engines node ^20.17 || >=22.9, guest has 22.23.1)
+# bundles tar 7.5.22, brace-expansion 5.0.12, undici 6.29.0. The registry
+# tarball is checked against its SHA-512 (= dist.integrity) and laid over the
+# RPM's npm directory, keeping Fedora's builtin npmrc (prefix=/usr/local,
+# update-notifier=false). npm is self-bundled: no resolution.
+# Bump: curl -fsSL https://registry.npmjs.org/npm/-/npm-$V.tgz | sha512sum
+#   (cross-check `npm view npm@$V dist.integrity`), update verify-rootfs.sh.
+ARG NPM_VERSION=11.21.1
+ARG NPM_SHA512=613ccbe90044257c87713bb426251ced128ca7e9b3949b65eeb18b98445a5d441e14720c73d6ad76be86f4cf42f2f0d66efe347a9a13400ccd2f6fcfb5954385
+RUN set -eu; cd /tmp; \
+    curl -fsSL -o npm.tgz "https://registry.npmjs.org/npm/-/npm-$NPM_VERSION.tgz"; \
+    printf '%s  npm.tgz\n' "$NPM_SHA512" | sha512sum -c -; \
+    d="$(dirname "$(dirname "$(readlink -f "$(command -v npm)")")")"; \
+    test "$(jq -r .name "$d/package.json")" = npm; \
+    cp "$d/npmrc" /tmp/npmrc.fedora; find "$d" -mindepth 1 -delete; \
+    tar -xzf npm.tgz -C "$d" --strip-components=1 --no-same-owner; \
+    mv /tmp/npmrc.fedora "$d/npmrc"; rm -f npm.tgz; \
+    test "$(npm --version)" = "$NPM_VERSION"; \
+    test "$(npm root -g)" = /usr/local/lib/node_modules; \
+    test "$(jq -r .version "$d/node_modules/tar/package.json")" = 7.5.22
 
 RUN set -eu; cd /tmp; \
     reg=https://registry.npmjs.org/@anthropic-ai; v="$CLAUDE_CODE_VERSION"; \
@@ -102,10 +175,10 @@ RUN set -eu; cd /tmp; \
 # resolution. Pinned by version AND by the SHA-256 of the release tarball,
 # checked here before anything is unpacked.
 #
-# Pin policy: the newest non-prerelease published at least 6 weeks before the
-# build. rust-v0.152.1 was published 2026-09-01T22:33:02Z. The digest is the
+# Pin: rust-v0.163.0, the newest non-prerelease (published 2026-10-15T21:30:38Z)
+# -- NOT age-gated, operator override 2026-10-19 (notes/deps/brief-nogate.md). The digest is the
 # "digest" GitHub reports for the asset, cross-checked by downloading it:
-#   T=rust-v0.152.1; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.163.0; A=codex-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
@@ -116,15 +189,15 @@ RUN set -eu; cd /tmp; \
 # it each reply starts "Code Mode is unavailable ... host executable was not
 # found" and code mode fails closed. ~69 MB unpacked. codex looks for it
 # beside its own executable, not via config
-# (codex-rs/install-context/src/lib.rs:172-202), hence /usr/local/bin.
-# features.code_mode_host is Stable and default-on in rust-v0.152.1
-# (codex-rs/features/src/lib.rs:985-990); the managed config and the turn's
+# (codex-rs/install-context/src/lib.rs:175-204), hence /usr/local/bin.
+# features.code_mode_host is Stable and default-on in rust-v0.163.0
+# (codex-rs/features/src/lib.rs:1177-1182); the managed config and the turn's
 # -c flag (fcguest/codex.go) set it explicitly anyway. Verify:
-#   T=rust-v0.152.1; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.163.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest, .size)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
-#   -> 2026-09-01T22:33:02Z, sha256:0f1a544d...4191ed, 25676959 bytes; the
+#   -> 2026-10-15T21:30:38Z, sha256:31426312...703529, 27583103 bytes; the
 #      tarball holds one member, codex-code-mode-host-x86_64-unknown-linux-musl.
 #
 # No self-update: codex's startup update check (check_for_update_on_startup,
@@ -132,9 +205,16 @@ RUN set -eu; cd /tmp; \
 # the managed layer that outranks the agent-writable $CODEX_HOME/config.toml,
 # so an interactive `codex` in /shell never phones home for a newer release
 # either. Analytics off for the same reason. Turns also pass both as -c flags.
-ARG CODEX_VERSION=0.152.1
-ARG CODEX_SHA256=a0ed1b40b1d597b340f09ae00ecebc46670b06cb52aac315b9dc84fed0289fd0
-ARG CODEX_CODE_MODE_HOST_SHA256=0f1a544d5c1e89aed769a91d8e63421eb8eef9db554e861ed90704126a4191ed
+#
+# Bumped 0.152.1 -> 0.163.0 (2026-10-19): rustls 0.23.36 -> 0.23.45 (first in
+# 0.156.0), rustls-webpki 0.103.13 -> 0.103.15. Still unfixed upstream in
+# 0.163.0: gix 0.81.0, openssl 0.10.75 / openssl-src 3.6.3, hickory 0.25.2,
+# zip 2.4.2. Cargo.lock sha256 17cdd862...2719d03. `codex exec --json` stream
+# (exec/src/exec_events.rs) changed additively only (WebSearchItem.results).
+# Re-check codex-rs/Cargo.lock for the tag before bumping.
+ARG CODEX_VERSION=0.163.0
+ARG CODEX_SHA256=beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
+ARG CODEX_CODE_MODE_HOST_SHA256=314263128ba6592e7e807c265deeaf928a692b72dcbfeb5e0b20c9423b703529
 
 RUN set -eu; cd /tmp; \
     a=codex-x86_64-unknown-linux-musl; \
@@ -157,30 +237,44 @@ RUN set -eu; cd /tmp; \
     test "$(codex --version)" = "codex-cli $CODEX_VERSION"; \
     codex-code-mode-host --help | grep -qF -- '--listen <URL>'
 
-# pi coding agent, shipped as earendil-works' self-contained Linux archive.
-# Keep the complete distribution under /opt: the executable resolves its
-# bundled node_modules, themes, WASM, and other runtime assets relative to
-# itself.  The archive is selected by an exact release tag and authenticated
-# before extraction; the receipt lets rootfs verification prove which bytes
-# were accepted without downloading the artifact again.
-#
-# Bump deliberately by checking the release asset, then updating all three:
-#   V=0.84.4; A=pi-linux-x64.tar.gz
-#   curl -fsSL "https://github.com/earendil-works/pi/releases/download/v$V/$A" | sha256sum
-ARG PI_VERSION=0.84.4
-ARG PI_SHA256=c2f3c3e6a1850bd87654cc3ca8811013272397c3d042a4e2a64c43ee1b423972
-RUN set -eu; cd /tmp; \
-    a=pi-linux-x64.tar.gz; \
-    curl -fsSL -o "$a" \
-      "https://github.com/earendil-works/pi/releases/download/v$PI_VERSION/$a"; \
-    printf '%s  %s\n' "$PI_SHA256" "$a" | sha256sum -c -; \
-    mkdir -p /opt; \
-    tar -xzf "$a" -C /opt; \
-    printf '%s  %s\n' "$PI_SHA256" "$a" > /opt/pi/.artifact.sha256; \
+# pi coding agent, installed from npm with a committed lockfile.
+# The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
+# compiles its deps in, so they cannot be patched or audited. pi 0.86.0
+# (published 2026-09-19 -- NOT age-gated, operator override 2026-10-19) locks
+# undici 8.10.2 itself, so the 0.85.1 undici override is gone.
+# fcguest/pi/install/ is that release's own installer root
+# (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
+# 0a5c4663…9d503 / b7a6f64d…df909) with exactly two edits:
+#   - overrides.brace-expansion = 5.0.12 (published 2026-09-14; upstream locks
+#     5.0.9 via minimatch ^5.0.8), lock entry swapped to its tarball + integrity;
+#   - the six @earendil-works/* 0.86.0 entries upstream left without an
+#     integrity got their registry dist.integrity filled in (each checked
+#     against the downloaded tarball's SHA-512).
+# Every entry carries a SHA-512, so `npm ci` installs exactly these bytes.
+# Lifecycle scripts are skipped (esbuild/protobufjs/@google/genai do not need
+# them at runtime; platform binaries arrive as optionalDependencies).
+# The receipt records the lockfile digest for verify-rootfs.sh.
+# Bump: take the new release's two installer files, re-apply the edits above
+# (drop the override once the release locks brace-expansion >= 5.0.12), update
+# PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
+# here and in verify-rootfs.sh.
+ARG PI_VERSION=0.86.0
+ARG PI_LOCK_SHA256=510555c39ab4734446f6984762c9de67fd1fcd3400d3165a6da04251bad85e6b
+COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
+RUN set -eu; cd /opt/pi; \
+    printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
+    npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=warn; \
+    npm cache clean --force; \
+    printf '%s  %s\n' "$PI_LOCK_SHA256" package-lock.json > /opt/pi/.artifact.sha256; \
+    ln -s node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js /opt/pi/pi; \
     ln -s /opt/pi/pi /usr/local/bin/pi; \
-    rm -f "$a"; \
+    chmod -R a+rX /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
-    test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"
+    test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
+    test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.10.2; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.10.2") | .version' {} +)"; \
+    test -z "$(find /opt/pi -path '*/node_modules/brace-expansion/package.json' -exec jq -r 'select(.version != "5.0.12") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
 # provider-neutral: provider credentials and endpoints arrive separately at

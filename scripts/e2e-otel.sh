@@ -212,6 +212,14 @@ sleep 1; grep -q "listening grpc= http=127.0.0.1:$HPORT," "$W/recv.log" \
   unset OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_TRACES_PROTOCOL \
         OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_LOGS_PROTOCOL \
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT OTEL_EXPORTER_OTLP_METRICS_ENDPOINT OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+  # TLS client config / headers meant for the host's real (https) collector
+  # must not leak in: the OTLP/HTTP exporter refuses a plain-http endpoint
+  # combined with a TLS client config (errInsecureEndpointWithTLS), which
+  # would silently turn telemetry off.
+  for s in "" TRACES_ METRICS_ LOGS_; do
+    unset "OTEL_EXPORTER_OTLP_${s}CERTIFICATE" "OTEL_EXPORTER_OTLP_${s}CLIENT_CERTIFICATE" \
+          "OTEL_EXPORTER_OTLP_${s}CLIENT_KEY" "OTEL_EXPORTER_OTLP_${s}HEADERS"
+  done
   export HOME=$KHOME OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$HPORT" \
          OTEL_METRIC_EXPORT_INTERVAL=2000 OTEL_BSP_SCHEDULE_DELAY=500 \
          KOTO_OTEL_CAPTURE_CONTENT=1

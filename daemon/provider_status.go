@@ -11,11 +11,6 @@ package main
 // veniceAuth, openaiStoredCred), so the dialog and the proxy cannot disagree
 // about whether a provider is usable.
 
-import (
-	"os"
-	"strings"
-)
-
 // Credential kinds reported per provider. Coarse on purpose: enough to say
 // where the credential comes from, never which one it is.
 const (
@@ -83,7 +78,7 @@ func providerCredKind(p string) string {
 // resolves (env first, then creds/anthropic-api-key), then the claude-login
 // OAuth token readCreds reads.
 func anthropicCredKind() string {
-	if strings.TrimSpace(os.Getenv("KOTO_UPSTREAM")) != "" {
+	if _, bridged := configuredUpstream(providerClaude, upstream); bridged {
 		return credKindUpstream
 	}
 	if k := currentAPIKey(); k != "" {

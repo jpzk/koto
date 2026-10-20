@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -99,5 +100,22 @@ func TestUnwiredProviderFailsClosed(t *testing.T) {
 	}
 	if llmPathAllowed("gemini", http.MethodPost, "/v1/messages") {
 		t.Fatal("unknown provider allowed onto /v1/messages")
+	}
+}
+
+// The guest's fallback (fcguest codexDefaultModel, used when the host sends no
+// KOTO_DEFAULT_OPENAI_MODEL) must be the same model the daemon defaults to and
+// shows in the picker, or an old/new host+rootfs pair would disagree.
+func TestOpenAIDefaultMatchesGuestFallback(t *testing.T) {
+	b, err := os.ReadFile("../fcguest/codex.go")
+	if err != nil {
+		t.Skipf("fcguest source not beside daemon: %v", err)
+	}
+	want := `const codexDefaultModel = "` + defaultOpenAIModel + `"`
+	if !strings.Contains(string(b), want) {
+		t.Errorf("fcguest/codex.go lacks %s", want)
+	}
+	if l := modelsFallback["openai"]; len(l) == 0 || l[0].ID != defaultOpenAIModel {
+		t.Errorf("openai fallback list must lead with %q: %+v", defaultOpenAIModel, l)
 	}
 }

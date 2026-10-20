@@ -28,18 +28,42 @@ var (
 	veniceUpstream = "https://api.venice.ai"
 )
 
-// configuredUpstream returns the outer Koto bridge when one is configured,
-// otherwise the provider's normal public base. Resolve it per request so tests
-// and a daemon launched with KOTO_UPSTREAM share exactly the same URL logic.
-func configuredUpstream(providerBase string) (string, bool) {
-	if u := strings.TrimRight(os.Getenv("KOTO_UPSTREAM"), "/"); u != "" {
+// configuredUpstream returns the outer Koto bridge when one is configured AND
+// that bridge serves this provider's leg, otherwise the provider's normal
+// public base. Resolve it per request so tests and a daemon launched with
+// KOTO_UPSTREAM share exactly the same URL logic.
+//
+// An outer koto relays on behalf of ITS group's provider: its allowlist and
+// credential are that provider's. A nested daemon inherits KOTO_UPSTREAM from
+// its (normally claudesdk) outer guest, so sending the venice or openai leg
+// there was refused by the OUTER proxy with "outside the endpoint allowlist
+// for provider claudesdk". KOTO_UPSTREAM_PROVIDERS names the providers the
+// outer bridge serves (comma-separated); unset means claudesdk, the provider
+// whose ANTHROPIC_BASE_URL every koto guest is handed. The minimax leg never
+// uses the bridge (proxy_minimax.go).
+func configuredUpstream(provider, providerBase string) (string, bool) {
+	if u := strings.TrimRight(strings.TrimSpace(os.Getenv("KOTO_UPSTREAM")), "/"); u != "" && upstreamServes(provider) {
 		return u, true
 	}
 	return strings.TrimRight(providerBase, "/"), false
 }
 
+// upstreamServes reports whether the outer bridge relays provider's leg.
+func upstreamServes(provider string) bool {
+	list := strings.TrimSpace(os.Getenv("KOTO_UPSTREAM_PROVIDERS"))
+	if list == "" {
+		return provider == providerClaude
+	}
+	for _, p := range strings.Split(list, ",") {
+		if strings.EqualFold(strings.TrimSpace(p), provider) {
+			return true
+		}
+	}
+	return false
+}
+
 func anthropicUpstreamURL(reqURI string) string {
-	base, _ := configuredUpstream(upstream)
+	base, _ := configuredUpstream(providerClaude, upstream)
 	return base + reqURI
 }
 
@@ -47,7 +71,7 @@ func anthropicUpstreamURL(reqURI string) string {
 // onto Venice's public /api/v1 namespace. An outer Koto bridge instead wants
 // the guest-facing route unchanged, exactly like the OpenAI leg.
 func veniceUpstreamURL(reqURI string) string {
-	base, overridden := configuredUpstream(veniceUpstream)
+	base, overridden := configuredUpstream(providerVenice, veniceUpstream)
 	// The legacy sidecar route (venice_stream.js) is already in Venice's
 	// namespace; only pi's bare /v1 route needs the /api prefix.
 	if overridden || strings.HasPrefix(reqURI, "/api/") {

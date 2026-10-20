@@ -64,9 +64,34 @@ toolchain go1.26.9
 //   github.com/cenkalti/backoff/v5 v5.0.3 — 2025-07-23
 //   github.com/cespare/xxhash/v2 v2.3.0 — 2024-04-04
 //   github.com/google/uuid v1.6.0 — 2024-01-23
+// Host-side packet parsers (fcnet.go), 2026-10-18, CVE-audit upgrade under
+// the ordinary 6-week rule, cutoff 2026-09-06 (verified via
+// proxy.golang.org/<mod>/@v/<ver>.info). The netstack parses every guest
+// frame inside the daemon, so these are the highest-exposure deps:
+//   github.com/containers/gvisor-tap-vsock v0.9.0 — tag 2026-10-07
+//     (6dbb5d4fa003). NOT age-gated: operator one-time override 2026-10-19
+//     (chore/deps-nogate). Replaces the main@2026-09-02 d3d4f055 snapshot.
+//     d3d4f055..v0.9.0 (46 commits): DNS forwards SOA/PTR/AAAA and returns
+//     NOERROR/NODATA for zone-owned names (we set no zones -> forward path),
+//     unix-socket listener cleanup, gateway API bearer-token auth + audit log
+//     (gvproxy HTTP API — koto does not expose it), net.ErrClosed handling.
+//     No change to types.Configuration / virtualnetwork.New used by fcnet.go.
+//     Requires the same gvisor 20260413; MVS also lifts test-only deps
+//     ginkgo v2.33.0, gomega v1.44.0, go-mockdns v1.3.0 (go.sum only).
+//     v0.8.9 (2026-05-11) still pinned gvisor 2024-09; the udp
+//     ForwarderHandler -> bool API change and ICMP echo forwarder (covered by
+//     fcEgressConn's dst-IP filter for every protocol) came in after it.
+//   gvisor.dev/gvisor v0.0.0-20260413194555-9680d69bf798 — 2026-04-13
+//   github.com/insomniacslk/dhcp v0.0.0-20260719225207-c76316d4aa82 —
+//     2026-07-19: GO-2026-6237 (the @latest c6bb46ad is 2026-10-14: too new)
+//   Taken with what they require (MVS): inetaf/tcpproxy 20260515 — 2026-05-15,
+//   miekg/dns v1.1.73 — 2026-08-19, sirupsen/logrus v1.10.2 — 2026-08-25,
+//   mdlayher/socket v0.6.0 — 2026-03-31, mdlayher/vsock v1.3.0 — 2026-05-26,
+//   x/time v0.12.0 — 2025-06-04, linuxkit/virtsock 20220523, pkg/errors
+//   v0.9.1 — 2020-01-14, x/exp 20231110.
 
 require (
-	github.com/containers/gvisor-tap-vsock v0.8.9
+	github.com/containers/gvisor-tap-vsock v0.9.0
 	github.com/go-logr/logr v1.4.4
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.22.0
@@ -90,7 +115,6 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -98,24 +122,27 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
-	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048 // indirect
-	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
+	github.com/inetaf/tcpproxy v0.0.0-20260515195445-c159a6051109 // indirect
+	github.com/insomniacslk/dhcp v0.0.0-20260719225207-c76316d4aa82 // indirect
+	github.com/linuxkit/virtsock v0.0.0-20220523201153-1a23e78aa7a2 // indirect
+	github.com/mdlayher/socket v0.6.0 // indirect
+	github.com/mdlayher/vsock v1.3.0 // indirect
+	github.com/miekg/dns v1.1.73 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/time v0.5.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
-	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
+	gvisor.dev/gvisor v0.0.0-20260413194555-9680d69bf798 // indirect
 )
 
 replace koto-protocol => ../protocol
