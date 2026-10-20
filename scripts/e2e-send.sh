@@ -7,7 +7,8 @@
 #             egress profile (config + restart) and, after the PONG turn, a
 #             second turn runs an in-guest `curl -fsS https://example.com` and
 #             a DNS lookup (result read back from a guest marker file via
-#             `koto ctl runscript`, not from the reply). wan/lan/full: both must succeed; none: curl must
+#             `koto ctl runscript`, never from the reply; unreadable = FAIL).
+#             wan/lan/full: both must succeed; none: curl must
 #             FAIL (egress isolation intact).
 #
 #   1. spawn a fresh group with -provider PROVIDER (+ -network, restart)
@@ -184,8 +185,8 @@ if [ -n "$NET" ] && [ "$rc" -eq 0 ]; then
   # body arrived — to a per-run marker file. The verdict is read back from that
   # file with `koto ctl runscript`, NOT parsed out of the model's reply: an LLM
   # paraphrasing, reformatting or dropping a line of tool output must not fail
-  # (or pass) an egress check. The reply is only a fallback when the file
-  # cannot be read, and is reported as such.
+  # (or pass) an egress check. The reply is logged only. If the file
+  # cannot be read: that is a FAIL.
   PF=/workspace/.e2e-netprobe-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
   probe='Run this exact shell command in your bash tool and reply with ONLY its raw stdout, nothing else: '
   probe+='sh -c '\''t=$(curl -fsS -m 20 https://example.com 2>/dev/null); c=$?; ti=$(printf "%s" "$t" | grep -o "<title>[^<]*</title>" | head -1); getent hosts example.com >/dev/null 2>&1; d=$?; echo "CURL_RC=$c DNS_RC=$d TITLE=$ti" | tee '"$PF"''\'''
@@ -199,12 +200,14 @@ if [ -n "$NET" ] && [ "$rc" -eq 0 ]; then
     if [ -n "$marks" ]; then
       say "probe file $PF: $(printf '%s' "$marks" | head -c 300)"
     else
-      say "warn: marker file $PF unreadable ($(head -c 200 "$WORK/rs.err")) — falling back to the reply text"
-      marks=$(printf '%s' "$reply" | tr '\n' ' ')
+      # No silent fallback to the reply: the verdict must come from the guest,
+      # never from what the model chose to echo back.
+      echo "[$(ts)] FAIL: probe marker file $PF unreadable via runscript ($(head -c 200 "$WORK/rs.err")); the probe command did not run or did not write it" >&2
+      rc=1
     fi
     crc=$(printf '%s' "$marks" | grep -o 'CURL_RC=[0-9]*' | head -1 | cut -d= -f2)
     drc=$(printf '%s' "$marks" | grep -o 'DNS_RC=[0-9]*' | head -1 | cut -d= -f2)
-    [ -n "$crc" ] && [ -n "$drc" ] || { echo "[$(ts)] FAIL: probe lacks CURL_RC/DNS_RC markers (file and reply)" >&2; rc=1; }
+    [ "$rc" -ne 0 ] || { [ -n "$crc" ] && [ -n "$drc" ]; } || { echo "[$(ts)] FAIL: probe marker file lacks CURL_RC/DNS_RC" >&2; rc=1; }
     if [ "$rc" -eq 0 ] && [ "$NET" = none ]; then
       [ "$crc" != 0 ] || { echo "[$(ts)] FAIL: network=none but curl succeeded (egress NOT isolated)" >&2; rc=1; }
       [ "$rc" -eq 0 ] && say "net none: curl failed rc=$crc (isolated), dns rc=$drc"
