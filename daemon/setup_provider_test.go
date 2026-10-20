@@ -71,7 +71,7 @@ func setupEnvHarness(t *testing.T, body string) string {
 // installedEnv is koto.env as a fresh `koto install` renders it.
 func installedEnv() string {
 	d, o := envFileKeys("/var/lib/koto", "/usr/local/bin/claude")
-	return renderEnvFile(nil, d, o)
+	return renderEnvFile("", d, o)
 }
 
 func newTestSC(in string) *setupCtx {
@@ -432,11 +432,11 @@ func TestSetEnvKey(t *testing.T) {
 // provider must be on it or a reinstall silently drops the operator's choice.
 func TestInstallPreservesDefaultProvider(t *testing.T) {
 	d, o := envFileKeys("/var/lib/koto", "")
-	body := renderEnvFile(map[string]string{defaultProviderEnv: "venice"}, d, o)
+	body := renderEnvFile(defaultProviderEnv+"=venice\n", d, o)
 	if parseEnvFile(body)[defaultProviderEnv] != "venice" {
 		t.Fatalf("reinstall dropped %s:\n%s", defaultProviderEnv, body)
 	}
-	if !strings.Contains(renderEnvFile(nil, d, o), "#"+defaultProviderEnv+"=\n") {
+	if !strings.Contains(renderEnvFile("", d, o), "#"+defaultProviderEnv+"=\n") {
 		t.Error("fresh koto.env does not carry the commented placeholder")
 	}
 }
