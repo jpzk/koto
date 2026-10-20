@@ -6,7 +6,8 @@
 #   NETWORK:  optional none|wan|lan|full. When given, the group is set to that
 #             egress profile (config + restart) and, after the PONG turn, a
 #             second turn runs an in-guest `curl -fsS https://example.com` and
-#             a DNS lookup. wan/lan/full: both must succeed; none: curl must
+#             a DNS lookup (result read back from a guest marker file via
+#             `koto ctl runscript`, not from the reply). wan/lan/full: both must succeed; none: curl must
 #             FAIL (egress isolation intact).
 #
 #   1. spawn a fresh group with -provider PROVIDER (+ -network, restart)
@@ -178,20 +179,37 @@ if turn 1 "reply with exactly PONG"; then
 else rc=1; fi
 
 if [ -n "$NET" ] && [ "$rc" -eq 0 ]; then
-  # The probe is run by the agent's shell tool inside the guest; the markers
-  # carry the real exit codes, and the page title proves the body arrived.
+  # The probe is run by the agent's shell tool inside the guest, and writes its
+  # result — ONE line, the real exit codes plus the page title that proves the
+  # body arrived — to a per-run marker file. The verdict is read back from that
+  # file with `koto ctl runscript`, NOT parsed out of the model's reply: an LLM
+  # paraphrasing, reformatting or dropping a line of tool output must not fail
+  # (or pass) an egress check. The reply is only a fallback when the file
+  # cannot be read, and is reported as such.
+  PF=/workspace/.e2e-netprobe-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
   probe='Run this exact shell command in your bash tool and reply with ONLY its raw stdout, nothing else: '
-  probe+='sh -c '\''t=$(curl -fsS -m 20 https://example.com 2>/dev/null); echo "CURL_RC=$?"; printf "%s" "$t" | grep -o "<title>[^<]*</title>" | head -1; getent hosts example.com >/dev/null 2>&1; echo "DNS_RC=$?"'\'''
+  probe+='sh -c '\''t=$(curl -fsS -m 20 https://example.com 2>/dev/null); c=$?; ti=$(printf "%s" "$t" | grep -o "<title>[^<]*</title>" | head -1); getent hosts example.com >/dev/null 2>&1; d=$?; echo "CURL_RC=$c DNS_RC=$d TITLE=$ti" | tee '"$PF"''\'''
   if turn 2 "$probe"; then
-    say "probe: $(printf '%s' "$reply" | tr '\n' ' ' | head -c 300)"
-    crc=$(printf '%s' "$reply" | grep -o 'CURL_RC=[0-9]*' | head -1 | cut -d= -f2)
-    drc=$(printf '%s' "$reply" | grep -o 'DNS_RC=[0-9]*' | head -1 | cut -d= -f2)
-    [ -n "$crc" ] && [ -n "$drc" ] || { echo "[$(ts)] FAIL: probe reply lacks CURL_RC/DNS_RC markers" >&2; rc=1; }
+    say "probe reply: $(printf '%s' "$reply" | tr '\n' ' ' | head -c 300)"
+    marks=""
+    for _ in 1 2 3; do
+      marks=$("$KOTO" ctl runscript "$G" "cat $PF 2>/dev/null; rm -f $PF" 2>"$WORK/rs.err" | grep -m1 'CURL_RC=[0-9]* DNS_RC=[0-9]*')
+      [ -n "$marks" ] && break; sleep 3
+    done
+    if [ -n "$marks" ]; then
+      say "probe file $PF: $(printf '%s' "$marks" | head -c 300)"
+    else
+      say "warn: marker file $PF unreadable ($(head -c 200 "$WORK/rs.err")) — falling back to the reply text"
+      marks=$(printf '%s' "$reply" | tr '\n' ' ')
+    fi
+    crc=$(printf '%s' "$marks" | grep -o 'CURL_RC=[0-9]*' | head -1 | cut -d= -f2)
+    drc=$(printf '%s' "$marks" | grep -o 'DNS_RC=[0-9]*' | head -1 | cut -d= -f2)
+    [ -n "$crc" ] && [ -n "$drc" ] || { echo "[$(ts)] FAIL: probe lacks CURL_RC/DNS_RC markers (file and reply)" >&2; rc=1; }
     if [ "$rc" -eq 0 ] && [ "$NET" = none ]; then
       [ "$crc" != 0 ] || { echo "[$(ts)] FAIL: network=none but curl succeeded (egress NOT isolated)" >&2; rc=1; }
       [ "$rc" -eq 0 ] && say "net none: curl failed rc=$crc (isolated), dns rc=$drc"
     elif [ "$rc" -eq 0 ]; then
-      [ "$crc" = 0 ] && printf '%s' "$reply" | grep -qi 'Example Domain' || { echo "[$(ts)] FAIL: network=$NET curl rc=$crc / no Example Domain title" >&2; rc=1; }
+      [ "$crc" = 0 ] && printf '%s' "$marks" | grep -qi 'Example Domain' || { echo "[$(ts)] FAIL: network=$NET curl rc=$crc / no Example Domain title" >&2; rc=1; }
       [ "$drc" = 0 ] || { echo "[$(ts)] FAIL: network=$NET DNS lookup rc=$drc" >&2; rc=1; }
       [ "$rc" -eq 0 ] && say "net $NET: curl ok (Example Domain), dns ok"
     fi
