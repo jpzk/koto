@@ -672,6 +672,9 @@ func envFileKeys(stateDir, claude string) (defaults, optional [][2]string) {
 	optional = [][2]string{
 		{"KOTO_HOST_CPUS", ""},
 		{"KOTO_HOST_MEM_MIB", ""},
+		// Guest agent boot deadline (fcboottimeout.go); placeholder only, so a
+		// fresh koto.env shows the knob. Unset = 90s.
+		{guestBootTimeoutEnv, ""},
 		{"ANTHROPIC_API_KEY", ""},
 		// The claude CLI the proxy execs to refresh an OAuth token. Resolved
 		// at install time in the operator's shell; the unit's PATH cannot

@@ -42,6 +42,7 @@ Optional (written commented-out as `#KEY=` when empty):
 
 - `KOTO_HOST_CPUS`
 - `KOTO_HOST_MEM_MIB`
+- `KOTO_GUEST_BOOT_TIMEOUT`
 - `ANTHROPIC_API_KEY` — deliberately **not** seeded from `<state>/creds`
   (comment in `writeEnvFile`).
 - `KOTO_CLAUDE_BIN` — set to the claude CLI path resolved at install time
@@ -79,6 +80,18 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
   `daemon/fchostmem.go` `fcHostMemInit`. If capacity cannot be discovered at
   all and the variable is unset, the daemon refuses VM spawns (`REFUSING VM
   spawns until KOTO_HOST_MEM_MIB is set (use 0 for explicitly unlimited)`).
+- `KOTO_GUEST_BOOT_TIMEOUT` — how long a VM spawn waits for the guest agent
+  to answer its first Init over vsock (`CONNECT 10000`). Go duration
+  (`90s`, `2m`); default `90s`. Parsed once at daemon start; empty uses the
+  default silently, an unparsable or `<= 0` value logs
+  `KOTO_GUEST_BOOT_TIMEOUT=%q invalid … using default 1m30s` and uses the
+  default — `daemon/fcboottimeout.go` `fcGuestBootTimeoutInit`. A fast boot
+  returns as soon as the agent answers, so a larger cap costs nothing. On
+  timeout the spawn error names elapsed time, the configured cap, host
+  `/proc/loadavg` + CPU count and the console log path; a successful boot
+  that used more than half the cap logs a `warn` (early sign the host is too
+  loaded). Raise it on loaded/nested hosts where guests reach vsock slowly.
+  Set in koto.env and restart the daemon.
 - `KOTO_CLAUDE_BIN` — claude CLI executed for OAuth token refresh. Default
   bare `claude` (PATH lookup) — `daemon/claudebin.go` `claudeBin`, const
   `claudeBinEnv`.
