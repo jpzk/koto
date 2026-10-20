@@ -579,14 +579,22 @@ func sudoReadFile(path string) (content string, ok bool, err error) {
 // could not read it", which the caller must not treat as "empty" — see
 // renderEnvFile.
 func readEnvFile() (map[string]string, error) {
-	raw, ok, err := sudoReadFile(envFilePath)
-	if err != nil {
+	raw, err := readEnvFileRaw()
+	if err != nil || raw == "" {
 		return nil, err
 	}
-	if !ok {
-		return nil, nil
-	}
 	return parseEnvFile(raw), nil
+}
+
+// readEnvFileRaw is readEnvFile's text: "" when the file does not exist. It
+// goes through the same koto.env seams as the setup wizard (setup_provider.go)
+// so the installer's rewrite is testable against a temp file.
+func readEnvFileRaw() (string, error) {
+	raw, ok, err := setupEnvRead(setupEnvPath)
+	if err != nil || !ok {
+		return "", err
+	}
+	return raw, nil
 }
 
 // parseEnvFile reads KEY=VALUE lines, ignoring blanks and comments.
@@ -640,12 +648,16 @@ func installClaudeBin(u *setupUI) string {
 	return p
 }
 
-// writeEnvFile creates /etc/koto/koto.env, or merges new keys into an
-// existing one without touching values the operator has edited. claude is the
-// resolved CLI path (installClaudeBin), or "" for none.
-// envFileKeys is the set of keys koto.env carries: defaults always present,
-// optional ones commented out until set. Any key NOT listed here is dropped
-// by a reinstall, so every operator-facing knob the daemon reads belongs here.
+// writeEnvFile creates /etc/koto/koto.env, or rewrites an existing one
+// without losing anything the operator set there. claude is the resolved CLI
+// path (installClaudeBin), or "" for none.
+//
+// envFileKeys is the set of keys koto.env is SEEDED with: defaults always
+// present, optional ones commented out until set. It is not a whitelist —
+// every other KEY=VALUE already in the file (OTEL_EXPORTER_OTLP_*,
+// KOTO_OTEL_*, KOTO_UPSTREAM*, anything a future release or the operator
+// adds) is carried over verbatim by renderEnvFile. List a key here only to
+// give a fresh install its default or placeholder.
 func envFileKeys(stateDir, claude string) (defaults, optional [][2]string) {
 	defaults = [][2]string{
 		{"KOTO_HOME", stateDir},
@@ -666,8 +678,7 @@ func envFileKeys(stateDir, claude string) (defaults, optional [][2]string) {
 		// find it and ProtectHome may hide it (claudebin.go).
 		{claudeBinEnv, claude},
 		// The host default provider (providers.go). Written by `koto setup`'s
-		// provider step; listed here so a reinstall PRESERVES it like every
-		// other operator value instead of dropping a key it does not know.
+		// provider step; listed here so a fresh koto.env shows its placeholder.
 		{defaultProviderEnv, ""},
 	}
 	// ANTHROPIC_API_KEY is deliberately NOT seeded from <state>/creds: the
@@ -700,30 +711,49 @@ func writeEnvFile(o installOpts, claude string) error {
 	// commented-out blank and then written over by sudo, whose own
 	// unchanged-check was blind for exactly the same reason. Which contradicts
 	// the line this file prints about itself three lines below.
-	existing, err := readEnvFile()
+	existing, err := readEnvFileRaw()
 	if err != nil {
 		return fmt.Errorf("%w\n  refusing to rewrite it: re-running install must preserve the values set there", err)
 	}
 	body := renderEnvFile(existing, defaults, optional)
-	if err := sudoRun(o.ui, "install", "-d", "-m", "0755", "/etc/koto"); err != nil {
-		return err
-	}
-	// 0600: this file can hold an API key.
-	_, werr := sudoWriteIfChanged(o.ui, envFilePath, body, "0600")
+	// setupEnvWrite: `sudo install -d /etc/koto`, then the 0600 write (this
+	// file can hold an API key) — a seam, so tests write a temp file instead.
+	_, werr := setupEnvWrite(o.ui, setupEnvPath, body)
 	return werr
 }
 
+// envPreservedHeader opens the section of koto.env keys `koto install` does
+// not seed (envFileKeys) but carries over from the file it is rewriting.
+const envPreservedHeader = "# preserved — set here before this (re)install; koto install keeps every KEY=VALUE"
+
 // renderEnvFile is writeEnvFile's pure half: the koto.env text for the given
-// defaults and optional keys, every value already in existing preserved.
-func renderEnvFile(existing map[string]string, defaults, optional [][2]string) string {
+// defaults and optional keys, rendered over existing — the current file's
+// text, "" for a fresh install. NOTHING set in existing is lost:
+//   - a seeded key (defaults/optional) keeps its existing value in place;
+//   - every other KEY=VALUE (OTel exporter config, KOTO_UPSTREAM*, keys a
+//     later release adds, the operator's own) is appended after them under
+//     envPreservedHeader in the order it first appeared, with the value
+//     systemd would have used (the last assignment), byte for byte, and with
+//     the comment lines written directly above it.
+//
+// Rendering its own output again yields the same text (idempotent), so an
+// unchanged install leaves the file untouched.
+func renderEnvFile(existing string, defaults, optional [][2]string) string {
+	cur := parseEnvFile(existing)
+	seeded := map[string]bool{}
+	for _, kv := range defaults {
+		seeded[kv[0]] = true
+	}
+	for _, kv := range optional {
+		seeded[kv[0]] = true
+	}
+
 	var b strings.Builder
-	b.WriteString("# koto service configuration — read by the systemd unit.\n")
-	b.WriteString("# Edit and `sudo systemctl restart koto` to apply.\n")
-	b.WriteString("# Re-running `koto install` preserves the values set here.\n\n")
+	b.WriteString(envHeader)
 	for _, kv := range defaults {
 		v := kv[1]
-		if cur, ok := existing[kv[0]]; ok {
-			v = cur
+		if c, ok := cur[kv[0]]; ok {
+			v = c
 		}
 		fmt.Fprintf(&b, "%s=%s\n", kv[0], v)
 	}
@@ -732,15 +762,72 @@ func renderEnvFile(existing map[string]string, defaults, optional [][2]string) s
 		// KOTO_CLAUDE_BIN is the one key whose existing value has ALREADY been
 		// honored (or found stale and re-resolved) by installClaudeBin, so the
 		// resolved value is written as-is rather than re-preferring the file.
-		if cur, ok := existing[kv[0]]; ok && kv[0] != claudeBinEnv {
-			fmt.Fprintf(&b, "%s=%s\n", kv[0], cur)
+		if c, ok := cur[kv[0]]; ok && kv[0] != claudeBinEnv {
+			fmt.Fprintf(&b, "%s=%s\n", kv[0], c)
 		} else if kv[1] != "" {
 			fmt.Fprintf(&b, "%s=%s\n", kv[0], kv[1])
 		} else {
 			fmt.Fprintf(&b, "#%s=\n", kv[0])
 		}
 	}
+
+	keys, notes := envPreserved(existing, seeded)
+	if len(keys) > 0 {
+		b.WriteString("\n" + envPreservedHeader + "\n")
+		for _, k := range keys {
+			for _, c := range notes[k] {
+				b.WriteString(c + "\n")
+			}
+			fmt.Fprintf(&b, "%s=%s\n", k, cur[k])
+		}
+	}
 	return b.String()
+}
+
+// envHeader is the fixed preamble renderEnvFile writes; its lines are never
+// mistaken for an operator's comment when the file is rendered again.
+const envHeader = "# koto service configuration — read by the systemd unit.\n" +
+	"# Edit and `sudo systemctl restart koto` to apply.\n" +
+	"# Re-running `koto install` preserves the values set here.\n\n"
+
+// envPreserved lists, in first-appearance order, the keys assigned in raw
+// that are not seeded, each with the comment block directly above its first
+// assignment. Comments renderEnvFile generates itself (the header, the
+// preserved-section marker, "#KEY=" placeholders of seeded keys) are not the
+// operator's and are left out, so a re-render does not duplicate them.
+func envPreserved(raw string, seeded map[string]bool) (keys []string, notes map[string][]string) {
+	notes = map[string][]string{}
+	generated := map[string]bool{envPreservedHeader: true}
+	for _, l := range strings.Split(envHeader, "\n") {
+		generated[l] = true
+	}
+	var block []string
+	for _, line := range strings.Split(raw, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "":
+			block = nil
+		case strings.HasPrefix(t, "#"):
+			if k, _, ok := strings.Cut(strings.TrimPrefix(t, "#"), "="); ok && seeded[strings.TrimSpace(k)] {
+				block = nil // a seeded key's placeholder ends any comment above
+				continue
+			}
+			if !generated[t] {
+				block = append(block, t)
+			}
+		default:
+			k, _, ok := strings.Cut(t, "=")
+			k = strings.TrimSpace(k)
+			if ok && !seeded[k] {
+				if _, seen := notes[k]; !seen {
+					keys = append(keys, k)
+					notes[k] = block
+				}
+			}
+			block = nil
+		}
+	}
+	return keys, notes
 }
 
 // podmanPath resolves podman for the unit's ExecStartPre/ExecStop, which
