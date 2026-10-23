@@ -75,6 +75,7 @@ func helpSections() []helpSection {
 			{"pgup/pgdn", "page scroll (home/end: top/bottom)"},
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
 			{"ctrl+o", "fold/unfold jobs on the current row (works mid-draft)"},
+			{"ctrl+x", "tree: destroy hovered group (confirm modal, y = destroy)"},
 			{"", "hovering a job row shows a live tail of its output"},
 		}},
 		{"TERMINAL PANE (while focused)", []helpEntry{

@@ -628,6 +628,9 @@ type Model struct {
 	helpOpen    bool
 	helpVP      viewport.Model
 	helpVPReady bool
+	// destroyConfirm is the ctrl+x confirmation modal (destroy_confirm.go).
+	// Not a focus zone either: it owns key routing while open.
+	destroyConfirm destroyConfirmState
 
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
@@ -3111,6 +3114,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if m.newGroup.open {
 			return m, nil // modal form: the panes under the pointer are hidden
 		}
+		if m.destroyConfirm.open {
+			return m, nil // confirmation modal: swallow clicks + wheel
+		}
 		if m.helpOpen {
 			if m.helpVPReady {
 				var cmd tea.Cmd
@@ -4130,6 +4136,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// for the same reason: it covers the frame.
 		return m.handleNewGroupKey(msg)
 	}
+	if m.destroyConfirm.open {
+		// ctrl+x destroy confirmation (destroy_confirm.go): a modal over the
+		// whole frame, so it owns every key ahead of the shell block — y
+		// confirms, everything else cancels or is swallowed.
+		return m.handleDestroyConfirmKey(msg)
+	}
 	if m.helpOpen {
 		// The cheatsheet modal owns keys like the picker does — ahead of the
 		// shell block too, since the palette can open it from the terminal
@@ -4441,6 +4453,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if s == "ctrl+x" && m.focus == focusInput {
+		// Destroy-hovered is a tree binding (see destroy_confirm.go) — from
+		// the message bar, point at it rather than guess a target.
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group — tab into the tree first"})
+		return m, nil
+	}
 	if m.focus == focusTree {
 		rows := m.treeRows()
 		switch s {
@@ -4471,6 +4489,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.input.Value()) == "" && m.setJobFold(s == "right") {
 				return m, nil
 			}
+		case "ctrl+x":
+			// Destroy the hovered group, behind a confirmation modal
+			// (destroy_confirm.go). Session/job rows target their parent
+			// group; main and goal-* rows are refused inline.
+			m.openDestroyConfirm()
+			return m, nil
 		case "ctrl+o":
 			// One-key fold toggle ("open"). Unlike the arrows it never
 			// collides with draft editing, so it works draft or not.
@@ -5606,20 +5630,10 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.addLine(logLine{kind: "err", text: "usage: /destroy <group>"})
 			return nil
 		}
-		if target == "main" {
-			m.addLine(logLine{kind: "err", text: "cannot destroy main (orchestrator group)"})
-			return nil
-		}
-		// NOTHING local until the daemon has actually destroyed it (audit
-		// 2026-09-11 L42). The wipe used to run optimistically, and it cleared
-		// m.subscribed[target] — the guard that stops a second SubscribeGroup
-		// stream being opened for the same group. A DENIED destroy therefore
-		// left the group alive with its guard gone, and the unconditional
-		// listCmd on the response opened a replacement stream while the first
-		// stayed live with no cancellation handle. Each denied attempt leaked
-		// one more, and every event of that group was then delivered to all of
-		// them.
-		return daemonCmd(m.sock, "destroy", target, nil)
+		// main refusal + the audit L42 "nothing local until the daemon
+		// confirms" rule live in destroyGroup (destroy_confirm.go), shared
+		// with the ctrl+x confirmation modal.
+		return m.destroyGroup(target)
 	}
 	if v == "/restart" || strings.HasPrefix(v, "/restart ") {
 		target := strings.TrimSpace(strings.TrimPrefix(v, "/restart"))
