@@ -56,3 +56,19 @@ func TestCallRPCRefusesOutOfRangeInt32(t *testing.T) {
 		}
 	}
 }
+
+// /goal max=N is parsed at 32 bits, so a value past int32 is refused at the
+// prompt instead of travelling on to floatToInt32.
+func TestParseGoalSetMaxInt32(t *testing.T) {
+	m := newModel("", 200000)
+	m.groups = map[string]GroupInfo{"ALPHA": {Running: true}}
+	m.cur = "ALPHA"
+	if _, _, _, _, n, _, err := m.parseGoalSet("ALPHA max=2147483647 do it :: 1. ok"); err != nil || n != math.MaxInt32 {
+		t.Errorf("max=MaxInt32: n=%d err=%v", n, err)
+	}
+	for _, bad := range []string{"2147483648", "99999999999", "-1", "0", "x"} {
+		if _, _, _, _, n, _, err := m.parseGoalSet("ALPHA max=" + bad + " do it :: 1. ok"); err == nil {
+			t.Errorf("max=%s accepted as %d; want an error", bad, n)
+		}
+	}
+}

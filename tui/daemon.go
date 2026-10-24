@@ -353,7 +353,14 @@ func floatToInt32(field string, v float64) (int32, error) {
 	if math.IsNaN(v) || v < math.MinInt32 || v > math.MaxInt32 {
 		return 0, fmt.Errorf("%s %v out of int32 range", field, v)
 	}
-	return int32(v), nil
+	// Narrow through int64 with an integer bound check as well: the float
+	// guard above already excludes every out-of-range value, but this keeps
+	// the int32 conversion visibly bounded on the integer path too.
+	i := int64(v)
+	if i < math.MinInt32 || i > math.MaxInt32 {
+		return 0, fmt.Errorf("%s %v out of int32 range", field, v)
+	}
+	return int32(i), nil
 }
 
 // buildConfigReq encodes the absent/clear/set tri-state. Scalar config values
