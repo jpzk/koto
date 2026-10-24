@@ -2,7 +2,7 @@ module koto-protocol
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // This module is the entire cross-project contract: koto.proto plus its
 // committed generated code in ./pb — nothing hand-written. The daemon and

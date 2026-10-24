@@ -1,8 +1,8 @@
 package main
 
-// group_picker_test.go — the ctrl+t group/session jump: it lists every
+// group_picker_test.go — the ctrl+o group/session jump (was ctrl+t): it lists every
 // conversation, Enter switches to the picked one (group AND session), and its
-// filter scores names only. Plus the binding swap ctrl+t forced: thought
+// filter scores names only. Plus the older swap ctrl+t forced: thought
 // bodies moved to alt+t. See palette.go.
 
 import (
@@ -27,11 +27,11 @@ func fleetModel(t *testing.T) Model {
 	return m
 }
 
-func pressCtrlT(t *testing.T, m Model) Model {
+func pressCtrlO(t *testing.T, m Model) Model {
 	t.Helper()
-	m = press(t, m, tea.KeyCtrlT)
+	m = press(t, m, tea.KeyCtrlO)
 	if !m.picker.open || m.picker.mode != pickerGroups {
-		t.Fatal("ctrl+t did not open the group picker")
+		t.Fatal("ctrl+o did not open the group picker")
 	}
 	return m
 }
@@ -50,7 +50,7 @@ func typePicker(t *testing.T, m Model, s string) Model {
 // TestGroupPickerLists: every group plus each named session, in treeOrder —
 // main first, then running, then stopped. Sessions render as group:session.
 func TestGroupPickerLists(t *testing.T) {
-	m := pressCtrlT(t, fleetModel(t))
+	m := pressCtrlO(t, fleetModel(t))
 	want := []string{"main", "ghost", "ghost:docs", "ghost:build", "cold"}
 	if len(m.picker.matches) != len(want) {
 		t.Fatalf("picker has %d rows, want %d", len(m.picker.matches), len(want))
@@ -76,7 +76,7 @@ func TestGroupPickerLists(t *testing.T) {
 // TestGroupPickerSwitchesGroup: Enter on a group row is a /sw — the overlay
 // closes and m.cur follows.
 func TestGroupPickerSwitchesGroup(t *testing.T) {
-	m := pressCtrlT(t, fleetModel(t))
+	m := pressCtrlO(t, fleetModel(t))
 	m = typePicker(t, m, "cold")
 	m = press(t, m, tea.KeyEnter)
 	if m.picker.open {
@@ -91,7 +91,7 @@ func TestGroupPickerSwitchesGroup(t *testing.T) {
 // the active session. One jump instead of /sw then /session, which is the
 // whole reason session rows are in the list.
 func TestGroupPickerSwitchesSession(t *testing.T) {
-	m := pressCtrlT(t, fleetModel(t))
+	m := pressCtrlO(t, fleetModel(t))
 	m = typePicker(t, m, "ghost:docs")
 	m = press(t, m, tea.KeyEnter)
 	if m.cur != "ghost" {
@@ -101,7 +101,7 @@ func TestGroupPickerSwitchesSession(t *testing.T) {
 		t.Fatalf("active session = %q, want docs", got)
 	}
 	// And back to the group's default session via its bare row.
-	m = pressCtrlT(t, m)
+	m = pressCtrlO(t, m)
 	m = typePicker(t, m, "ghost")
 	m = press(t, m, tea.KeyEnter)
 	if got := m.activeSession("ghost"); got != "" {
@@ -114,7 +114,7 @@ func TestGroupPickerSwitchesSession(t *testing.T) {
 // the corpus — making a filter for a status match every group instead of the
 // one you named. Group mode scores the name alone.
 func TestGroupPickerFiltersNamesOnly(t *testing.T) {
-	m := pressCtrlT(t, fleetModel(t))
+	m := pressCtrlO(t, fleetModel(t))
 	m = typePicker(t, m, "running")
 	if len(m.picker.matches) != 0 {
 		t.Fatalf("%d matches for a status word, want 0 — hints leaked into the search corpus", len(m.picker.matches))
@@ -138,10 +138,32 @@ func TestAltTTogglesThoughts(t *testing.T) {
 	}
 }
 
-// TestCtrlTNoLongerTogglesThoughts: the old binding must not do both.
-func TestCtrlTNoLongerTogglesThoughts(t *testing.T) {
-	m := pressCtrlT(t, fleetModel(t))
+// TestCtrlTNoLongerOpensPicker: ctrl+t is the job-fold toggle now — it must
+// neither open the group picker (moved to ctrl+o) nor toggle thought bodies
+// (moved to alt+t), from the input box or from the tree.
+func TestCtrlTNoLongerOpensPicker(t *testing.T) {
+	m := press(t, fleetModel(t), tea.KeyCtrlT)
+	if m.picker.open {
+		t.Fatal("ctrl+t still opens the picker from the input box")
+	}
 	if m.expandedThoughts {
 		t.Fatal("ctrl+t still toggled thought bodies")
+	}
+	m = fleetModel(t)
+	m.focus = focusTree
+	m = press(t, m, tea.KeyCtrlT)
+	if m.picker.open {
+		t.Fatal("ctrl+t still opens the picker from the tree")
+	}
+}
+
+// TestCtrlOOpensPickerMidDraft: the switcher keeps working with a draft in
+// the message bar (it did on ctrl+t), and the draft survives.
+func TestCtrlOOpensPickerMidDraft(t *testing.T) {
+	m := fleetModel(t)
+	m.input.SetValue("half a thought")
+	m = pressCtrlO(t, m)
+	if m.input.Value() != "half a thought" {
+		t.Fatalf("draft mangled by ctrl+o: %q", m.input.Value())
 	}
 }

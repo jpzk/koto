@@ -260,7 +260,17 @@ func (m Model) view() string {
 	if m.newGroup.open {
 		return m.renderNewGroup()
 	}
+	if m.destroyConfirm.open {
+		// ctrl+x destroy confirmation: paints the whole frame like the
+		// cheatsheet; its key block in handleKey owns input.
+		return m.renderDestroyConfirm()
+	}
+	if m.stopConfirm.open {
+		// ctrl+s stop confirmation: same full-frame modal shape.
+		return m.renderStopConfirm()
+	}
 	if m.newSess.open {
+		// alt+n new-session dialog (newsession.go).
 		return m.renderNewSession()
 	}
 	if m.helpOpen {
@@ -1824,7 +1834,7 @@ func (m Model) renderHint() string {
 	if m.shellFocusable() {
 		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}
-	// alt+t, not ^t: ctrl+t is the group/session jump now.
+	// alt+t, not ^t: ctrl+t is the job-fold toggle now.
 	thoughtsHint := gl("⌥t thoughts", "alt-t thoughts")
 	if m.expandedThoughts {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render(gl("⌥t hide", "alt-t hide"))
@@ -1835,9 +1845,9 @@ func (m Model) renderHint() string {
 		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
 	}
 	parts = append(parts, toolOutsHint)
-	selectHint := "^s scroll"
+	selectHint := "^v scroll"
 	if m.selectMode {
-		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^s SELECT")
+		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^v SELECT")
 	}
 	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")

@@ -157,20 +157,20 @@ func TestNewSessionRowInTreeBeforeSend(t *testing.T) {
 	}
 }
 
-// ctrl+s opens the dialog; an invalid name shows an inline error and keeps
+// alt+n opens the dialog; an invalid name shows an inline error and keeps
 // the dialog open; a valid one creates (RPC), switches and closes.
-func TestCtrlSNewSessionDialog(t *testing.T) {
+func TestAltNNewSessionDialog(t *testing.T) {
 	m := sessModel(t)
-	// ctrl+s is 0x13 — in raw mode (IXON off) bubbletea delivers it as KeyCtrlS.
-	if (tea.KeyMsg{Type: tea.KeyCtrlS}).String() != "ctrl+s" {
-		t.Fatal("KeyCtrlS does not stringify as ctrl+s")
+	altN := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}, Alt: true}
+	if altN.String() != "alt+n" {
+		t.Fatalf("alt+n stringifies as %q", altN.String())
 	}
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = update(t, m, altN)
 	if !m.newSess.open || m.newSess.group != "alpha" {
-		t.Fatalf("ctrl+s did not open the dialog for alpha: %+v", m.newSess)
+		t.Fatalf("alt+n did not open the dialog for alpha: %+v", m.newSess)
 	}
 	if m.selectMode {
-		t.Fatal("ctrl+s still toggles mouse mode")
+		t.Fatal("alt+n toggled mouse mode")
 	}
 	if !strings.Contains(m.View(), "new session") {
 		t.Fatal("dialog not rendered")
@@ -215,7 +215,7 @@ func TestCtrlSNewSessionDialog(t *testing.T) {
 	}
 
 	// Esc cancels without creating anything.
-	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = update(t, m, altN)
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("other")})
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.newSess.open || slices.Contains(m.sessionsOf("alpha"), "other") || m.activeSession("alpha") != "review" {
@@ -223,24 +223,36 @@ func TestCtrlSNewSessionDialog(t *testing.T) {
 	}
 }
 
-// Mouse-mode toggle moved from ctrl+s to ctrl+x; help and palette agree.
-func TestMouseToggleOnCtrlX(t *testing.T) {
+// alt+n is the new-session key; ctrl+n stays the new-group dialog; the mouse
+// toggle is ctrl+v (from #51) and ctrl+x no longer toggles mouse mode.
+// Help and palette agree.
+func TestSessionKeymap(t *testing.T) {
 	m := sessModel(t)
-	ctrlX := tea.KeyMsg{Type: tea.KeyCtrlX}
-	if ctrlX.String() != "ctrl+x" {
-		t.Fatalf("ctrl+x stringifies as %q", ctrlX.String())
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlN})
+	if m.newSess.open {
+		t.Fatal("ctrl+n opened the new-session dialog")
 	}
-	m, cmd := update(t, m, ctrlX)
+	if !m.newGroup.open {
+		t.Fatal("ctrl+n no longer opens the new-group dialog")
+	}
+
+	m = sessModel(t)
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	if m.selectMode || m.newSess.open {
+		t.Fatalf("ctrl+x: selectMode=%v newSess=%v, want neither", m.selectMode, m.newSess.open)
+	}
+
+	m = sessModel(t)
+	ctrlV := tea.KeyMsg{Type: tea.KeyCtrlV}
+	m, cmd := update(t, m, ctrlV)
 	if !m.selectMode || cmd == nil {
-		t.Fatalf("ctrl+x: selectMode=%v cmd=%v, want select mode + DisableMouse", m.selectMode, cmd)
+		t.Fatalf("ctrl+v: selectMode=%v cmd=%v, want select mode + DisableMouse", m.selectMode, cmd)
 	}
-	if m.input.Value() != "" {
-		t.Fatalf("ctrl+x leaked into the input: %q", m.input.Value())
-	}
-	m, cmd = update(t, m, ctrlX)
+	m, cmd = update(t, m, ctrlV)
 	if m.selectMode || cmd == nil {
-		t.Fatalf("second ctrl+x: selectMode=%v", m.selectMode)
+		t.Fatalf("second ctrl+v: selectMode=%v", m.selectMode)
 	}
+
 	var paletteMouse, paletteSess string
 	for _, it := range m.paletteItems() {
 		switch it.title {
@@ -250,7 +262,7 @@ func TestMouseToggleOnCtrlX(t *testing.T) {
 			paletteSess = it.hint
 		}
 	}
-	if paletteMouse != "ctrl+x" || paletteSess != "ctrl+s" {
+	if paletteMouse != "ctrl+v" || paletteSess != "alt+n" {
 		t.Fatalf("palette hints: mouse=%q new-session=%q", paletteMouse, paletteSess)
 	}
 	help := map[string]string{}
@@ -259,7 +271,10 @@ func TestMouseToggleOnCtrlX(t *testing.T) {
 			help[e.key] = e.desc
 		}
 	}
-	if !strings.Contains(help["ctrl+x"], "mouse") || !strings.Contains(help["ctrl+s"], "new session") {
-		t.Fatalf("cheatsheet: ctrl+x=%q ctrl+s=%q", help["ctrl+x"], help["ctrl+s"])
+	if !strings.Contains(help["ctrl+v"], "mouse") || !strings.Contains(help["alt+n"], "new session") {
+		t.Fatalf("cheatsheet: ctrl+v=%q alt+n=%q", help["ctrl+v"], help["alt+n"])
+	}
+	if strings.Contains(help["ctrl+x"], "mouse") {
+		t.Fatalf("cheatsheet still maps ctrl+x to mouse: %q", help["ctrl+x"])
 	}
 }

@@ -2,7 +2,7 @@ module koto-fcagent
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // x/sys v0.48.0 (2026-08-31) is required by x/net v0.60.0, taken
 // 2026-10-09 under the security-fix exception (see daemon/go.mod); it was

@@ -1,6 +1,6 @@
 package main
 
-// newsession.go — the ctrl+s "new session" dialog.
+// newsession.go — the alt+n "new session" dialog.
 //
 // A small modal like the ctrl+n new-group dialog: while open it owns key
 // routing (the newSess block in handleKey) and paints the frame (View). One
@@ -10,9 +10,8 @@ package main
 // (switchSession: tree row immediately, SessionCreate RPC for persistence);
 // an already-known name just switches. Esc / ctrl+c cancel.
 //
-// ctrl+s used to toggle mouse capture; that moved to ctrl+x. In bubbletea's
-// raw mode IXON is off, so ctrl+s arrives as a key (0x13 → tea.KeyCtrlS)
-// instead of freezing the terminal as XOFF.
+// Key: alt+n (operator decision for 1.7.0). ctrl+n stays the new-group
+// dialog; the mouse toggle is ctrl+v; ctrl+s/ctrl+x are stop/destroy.
 
 import (
 	"strings"
@@ -119,7 +118,7 @@ func (m Model) renderNewSession() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-// toggleMouseMode flips mouse capture (ctrl+x, palette): scroll mode captures
+// toggleMouseMode flips mouse capture (ctrl+v, palette): scroll mode captures
 // the mouse for wheel-scroll, select mode releases it for native selection.
 func (m *Model) toggleMouseMode() tea.Cmd {
 	m.selectMode = !m.selectMode
