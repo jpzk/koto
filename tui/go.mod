@@ -2,7 +2,7 @@ module koto-tui
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // 6-week dependency lag rule (see /home/<user>/.claude/CLAUDE.md):
 // All five pins are stable releases at least 6 weeks old as of 2026-05-11.

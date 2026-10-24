@@ -2,7 +2,7 @@ module koto
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // Pins taken under the security-fix exception to the 6-week lag (CLAUDE.md,
 // Conventions), 2026-09-05 — each closes a REACHABLE govulncheck finding:
@@ -28,10 +28,16 @@ toolchain go1.26.9
 //     (HTTP/2 server memory exhaustion via trailers, window-update CPU burn,
 //     double flow-control refund, HPACK encoder race crash), reachable through
 //     grpc's http2 transport — the :8443 server here. The stdlib half of the
-//     same advisories is closed by toolchain go1.26.9. Taken with exactly
-//     what it requires: x/crypto v0.57.0, x/sys v0.48.0, x/term v0.46.0,
-//     x/text v0.42.0 (and x/text's x/mod v0.41.0, x/sync v0.23.0,
-//     x/tools v0.49.0). Moved in all four modules together.
+//     same advisories was closed by the go1.26.9 toolchain (since superseded,
+//     see 2026-10-24 below). Taken with exactly what it requires:
+//     x/crypto v0.57.0, x/sys v0.48.0, x/term v0.46.0, x/text v0.42.0
+//     (and x/text's x/mod v0.41.0, x/sync v0.23.0, x/tools v0.49.0).
+//     Moved in all four modules together.
+// And 2026-10-24, same exception, operator-approved: toolchain go1.26.10
+//   (released 2026-10-19, under the 6-week lag) fixes GO-2026-6809
+//   (crypto/x509), reported reachable by govulncheck in all four modules.
+//   Toolchain line only (with the Makefile GO_IMAGE digest); no module
+//   requirement changed, go.sum untouched.
 // Everything else follows the ordinary rule (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25; protobuf v1.36.12 —
 // 2026-08-10, re-checked 2026-10-09 against cutoff 2026-08-28).
