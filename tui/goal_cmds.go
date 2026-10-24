@@ -186,7 +186,8 @@ prefix:
 				return "", "", "", "", 0, false, fmt.Errorf("name= needs a value")
 			}
 		case strings.HasPrefix(t, "max="):
-			n, aerr := strconv.Atoi(strings.TrimPrefix(t, "max="))
+			n64, aerr := strconv.ParseInt(strings.TrimPrefix(t, "max="), 10, 32)
+			n := int(n64)
 			if aerr != nil || n <= 0 {
 				return "", "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
 			}
