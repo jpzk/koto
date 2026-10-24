@@ -265,6 +265,10 @@ func (m Model) view() string {
 		// cheatsheet; its key block in handleKey owns input.
 		return m.renderDestroyConfirm()
 	}
+	if m.stopConfirm.open {
+		// ctrl+s stop confirmation: same full-frame modal shape.
+		return m.renderStopConfirm()
+	}
 	if m.helpOpen {
 		// Cheatsheet modal (ctrl+h): paints the whole frame, whatever view is
 		// underneath — its key block in handleKey owns input the same way, so
@@ -1837,9 +1841,9 @@ func (m Model) renderHint() string {
 		toolOutsHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^d hide")
 	}
 	parts = append(parts, toolOutsHint)
-	selectHint := "^s scroll"
+	selectHint := "^v scroll"
 	if m.selectMode {
-		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^s SELECT")
+		selectHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^v SELECT")
 	}
 	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")

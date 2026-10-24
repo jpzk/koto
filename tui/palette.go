@@ -110,6 +110,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "clear whole group", hint: "/clear all", run: "/clear all"},
 		{title: "restart group VM", hint: "/restart", run: "/restart"},
 		{title: "stop group VM", hint: "/stop", run: "/stop"},
+		{title: "stop hovered group", hint: "ctrl+s", act: func(m *Model) tea.Cmd { m.openStopConfirm(); return nil }},
 		{title: "destroy hovered group", hint: "ctrl+x", act: func(m *Model) tea.Cmd { m.openDestroyConfirm(); return nil }},
 		{title: "destroy group", hint: "/destroy <group>", run: "/destroy ", edit: true},
 
@@ -144,7 +145,7 @@ func (m Model) paletteItems() []paletteItem {
 			m.toggleFullscreen()
 			return nil
 		}},
-		{title: "toggle mouse select mode", hint: "ctrl+s", act: func(m *Model) tea.Cmd {
+		{title: "toggle mouse select mode", hint: "ctrl+v", act: func(m *Model) tea.Cmd {
 			m.selectMode = !m.selectMode
 			if m.selectMode {
 				return tea.DisableMouse

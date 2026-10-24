@@ -500,7 +500,7 @@ type Model struct {
 	expandedToolOuts bool
 
 	// selectMode releases the mouse to the terminal so native click-drag text
-	// selection/copy works. Toggled with ctrl+s. When false (default) the mouse
+	// selection/copy works. Toggled with ctrl+v. When false (default) the mouse
 	// is captured for wheel-scroll. Keyboard scroll works in both modes.
 	selectMode bool
 
@@ -631,6 +631,8 @@ type Model struct {
 	// destroyConfirm is the ctrl+x confirmation modal (destroy_confirm.go).
 	// Not a focus zone either: it owns key routing while open.
 	destroyConfirm destroyConfirmState
+	// ctrl+s stop confirmation modal (stop_confirm.go).
+	stopConfirm stopConfirmState
 
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
@@ -3114,7 +3116,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if m.newGroup.open {
 			return m, nil // modal form: the panes under the pointer are hidden
 		}
-		if m.destroyConfirm.open {
+		if m.destroyConfirm.open || m.stopConfirm.open {
 			return m, nil // confirmation modal: swallow clicks + wheel
 		}
 		if m.helpOpen {
@@ -3132,7 +3134,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// below. While the pane is visible but UNFOCUSED only wheel events
 		// are forwarded — an in-grid left click is focus traffic
 		// (handleLeftClick focuses the pane), not input for the guest.
-		// ctrl+s select-mode releases the mouse entirely, so no MouseMsg
+		// ctrl+v select-mode releases the mouse entirely, so no MouseMsg
 		// arrives here at all in that mode.
 		if m.shell != nil && !m.shell.ended && !m.picker.open {
 			// !picker.open for the same reason the left-click branch below
@@ -4142,6 +4144,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// confirms, everything else cancels or is swallowed.
 		return m.handleDestroyConfirmKey(msg)
 	}
+	if m.stopConfirm.open {
+		// ctrl+s stop confirmation (stop_confirm.go): same modal shape and
+		// key ownership as the destroy one.
+		return m.handleStopConfirmKey(msg)
+	}
 	if m.helpOpen {
 		// The cheatsheet modal owns keys like the picker does — ahead of the
 		// shell block too, since the palette can open it from the terminal
@@ -4302,12 +4309,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refreshLog()
 		return m, nil
 	}
-	if s == "ctrl+s" {
+	if s == "ctrl+v" && (m.focus != focusInput || strings.TrimSpace(m.input.Value()) == "") {
 		// Toggle mouse capture. Scroll mode (default) captures the mouse for
 		// wheel-scroll; select mode releases it to the terminal so native
-		// click-drag selection/copy works. Keyboard scroll works in both. In
-		// raw mode IXON is off, so ctrl+s arrives as a keypress (no flow-control
-		// freeze).
+		// click-drag selection/copy works. Keyboard scroll works in both.
+		// The bubbles textinput keymap binds ctrl+v to clipboard Paste, so
+		// with a draft in the message bar ctrl+v stays paste (falls through
+		// to the input); with the tree (or any non-input pane) focused, or
+		// an empty draft, it is the mouse toggle. Terminal paste
+		// (ctrl+shift+v / bracketed paste) is a different key and unaffected.
 		m.selectMode = !m.selectMode
 		if m.selectMode {
 			return m, tea.DisableMouse
@@ -4459,6 +4469,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group — tab into the tree first"})
 		return m, nil
 	}
+	if s == "ctrl+s" && m.focus == focusInput {
+		// Stop-hovered is a tree binding too (stop_confirm.go): hint only.
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+s stops the hovered group — tab into the tree first"})
+		return m, nil
+	}
 	if m.focus == focusTree {
 		rows := m.treeRows()
 		switch s {
@@ -4494,6 +4509,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// (destroy_confirm.go). Session/job rows target their parent
 			// group; main and goal-* rows are refused inline.
 			m.openDestroyConfirm()
+			return m, nil
+		case "ctrl+s":
+			// Stop the hovered group, behind a confirmation modal
+			// (stop_confirm.go). Same targeting/refusals as ctrl+x, plus
+			// an inline "already stopped".
+			m.openStopConfirm()
 			return m, nil
 		case "ctrl+o":
 			// One-key fold toggle ("open"). Unlike the arrows it never
@@ -5660,8 +5681,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		if target == "" {
 			target = m.cur
 		}
-		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("stopping %s's VM… (boots again on next send; /restart %s to start it now)", target, target)})
-		return daemonCmd(m.sock, "stop", target, nil)
+		return m.stopGroup(target)
 	}
 	if v == "/repaint" {
 		// Force a full redraw: clear the alt-screen buffer, then re-run the
