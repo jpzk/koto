@@ -58,7 +58,7 @@ func toPBEvent(ev Event) *pb.Event {
 		Text:       ev.Text,
 		Name:       ev.Name,
 		Input:      ev.Input,
-		Words:      int32(ev.Words),
+		Words:      saturateInt32(ev.Words),
 		Body:       ev.Body,
 		Historical: ev.Historical,
 		Id:         ev.ID,
@@ -285,7 +285,7 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
 	}
-	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
+	return spawnRespPB(port), nil
 }
 
 func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error) {
@@ -467,7 +467,7 @@ func (s *kotoServer) Restart(ctx context.Context, r *pb.GroupReq) (*pb.SpawnResp
 	if err != nil {
 		return &pb.SpawnResp{Error: err.Error()}, nil
 	}
-	return &pb.SpawnResp{Ok: true, Port: int32(port)}, nil
+	return spawnRespPB(port), nil
 }
 
 func (s *kotoServer) History(ctx context.Context, r *pb.HistoryReq) (*pb.HistoryResp, error) {

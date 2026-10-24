@@ -241,10 +241,15 @@ RUN set -eu; cd /tmp; \
 # The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
 # compiles its deps in, so they cannot be patched or audited. pi 0.86.0
 # (published 2026-09-19 -- NOT age-gated, operator override 2026-10-19) locks
-# undici 8.10.2 itself, so the 0.85.1 undici override is gone.
+# undici 8.10.2 exactly; that is vulnerable (GHSA-xjj6-f33q-929c,
+# GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472), hence the undici override below.
 # fcguest/pi/install/ is that release's own installer root
 # (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
-# 0a5c4663…9d503 / b7a6f64d…df909) with exactly two edits:
+# 0a5c4663…9d503 / b7a6f64d…df909) with exactly three edits:
+#   - overrides.undici = 8.12.2 (published 2026-10-15 -- NOT age-gated,
+#     operator-approved security exception 2026-10-24; oldest patched release,
+#     no dependencies, no install scripts), lock entry swapped to its tarball +
+#     integrity (checked against the downloaded tarball's SHA-512);
 #   - overrides.brace-expansion = 5.0.12 (published 2026-09-14; upstream locks
 #     5.0.9 via minimatch ^5.0.8), lock entry swapped to its tarball + integrity;
 #   - the six @earendil-works/* 0.86.0 entries upstream left without an
@@ -255,11 +260,12 @@ RUN set -eu; cd /tmp; \
 # them at runtime; platform binaries arrive as optionalDependencies).
 # The receipt records the lockfile digest for verify-rootfs.sh.
 # Bump: take the new release's two installer files, re-apply the edits above
-# (drop the override once the release locks brace-expansion >= 5.0.12), update
+# (drop each override once the release locks brace-expansion >= 5.0.12 /
+# undici >= 8.12.2), update
 # PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
 # here and in verify-rootfs.sh.
 ARG PI_VERSION=0.86.0
-ARG PI_LOCK_SHA256=510555c39ab4734446f6984762c9de67fd1fcd3400d3165a6da04251bad85e6b
+ARG PI_LOCK_SHA256=a67466a870d729d04c1de1a71573c8aecdc3bad0ffbdc238d31c049e93a2612a
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
 RUN set -eu; cd /opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
@@ -272,8 +278,8 @@ RUN set -eu; cd /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
     test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
     test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
-    test "$(jq -r .version node_modules/undici/package.json)" = 8.10.2; \
-    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.10.2") | .version' {} +)"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.2; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.2") | .version' {} +)"; \
     test -z "$(find /opt/pi -path '*/node_modules/brace-expansion/package.json' -exec jq -r 'select(.version != "5.0.12") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
