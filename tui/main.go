@@ -31,6 +31,7 @@ func main() {
 	// see mono.go. It reads KOTO_TUI_MONO, else the terminal type (vt100 and
 	// friends), so a monochrome terminal needs no flag.
 	initMono(os.Getenv)
+	initNerdFont(os.Getenv)
 	initDebugLog(os.Getenv, sock)
 
 	// The theme is resolved after mono (which wins outright) and before the
