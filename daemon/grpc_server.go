@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -881,6 +882,42 @@ func (s *kotoServer) Clear(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, err
 	}
 	br := clearCmd(groupReq{Group: r.Group, Session: r.Session})
 	return &pb.BaseResp{Ok: br.OK, Error: br.Error}, nil
+}
+
+// SessionCreate registers a named session up-front, without a turn: the TUI's
+// ctrl+s dialog (and /session <new>) call it so the conversation is listed in
+// GroupInfo.sessions — and so in every client's tree, and across a TUI
+// restart — before its first prompt. Before this the registry only learned a
+// name from a successful Send, so a session that existed only in one TUI's
+// head vanished on the next state frame.
+//
+// Same refusals as the Send path's session handling: the default session is
+// implicit (never listed), goal-* is reserved for the driver, and the group
+// must be registered (no registry files for invented groups — audit M125).
+// Idempotent; does not boot the VM.
+func (s *kotoServer) SessionCreate(_ context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.BaseResp{Error: "invalid group name"}, nil
+	}
+	sess, err := normalizeSession(r.Session)
+	if err != nil {
+		return &pb.BaseResp{Error: err.Error()}, nil
+	}
+	if sess == "" {
+		return &pb.BaseResp{Error: "session name required (the default session always exists)"}, nil
+	}
+	if isReservedSession(sess) {
+		return &pb.BaseResp{Error: "session " + sess + " is reserved for the goal loop"}, nil
+	}
+	if !registeredGroup(r.Group) {
+		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
+	}
+	registerSession(r.Group, sess)
+	if !slices.Contains(listSessions(r.Group), sess) {
+		// registerSession degrades silently past sessionRegMax.
+		return &pb.BaseResp{Error: fmt.Sprintf("session registry for %s is full (%d)", r.Group, sessionRegMax)}, nil
+	}
+	return &pb.BaseResp{Ok: true}, nil
 }
 
 // Drain discards a group's waiting backlog and nothing else — the VM stays up,

@@ -269,6 +269,10 @@ func (m Model) view() string {
 		// ctrl+s stop confirmation: same full-frame modal shape.
 		return m.renderStopConfirm()
 	}
+	if m.newSess.open {
+		// alt+n new-session dialog (newsession.go).
+		return m.renderNewSession()
+	}
 	if m.helpOpen {
 		// Cheatsheet modal (ctrl+h): paints the whole frame, whatever view is
 		// underneath — its key block in handleKey owns input the same way, so

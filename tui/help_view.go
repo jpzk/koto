@@ -61,6 +61,7 @@ func helpSections() []helpSection {
 			{"ctrl+]", "shared terminal (tmux) for the active session"},
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
 			{"ctrl+@", "cycle to the next unread conversation"},
+			{"alt+n", "new session dialog - name it, enter creates + switches"},
 			{"ctrl+v", "toggle mouse mode: wheel-scroll vs native select/copy (draft in bar: paste)"},
 			{"ctrl+d", "expand/collapse tool output bodies"},
 			{"alt+t", "expand/collapse thought bodies"},
