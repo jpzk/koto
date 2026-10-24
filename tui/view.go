@@ -1830,7 +1830,7 @@ func (m Model) renderHint() string {
 	if m.shellFocusable() {
 		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}
-	// alt+t, not ^t: ctrl+t is the group/session jump now.
+	// alt+t, not ^t: ctrl+t is the job-fold toggle now.
 	thoughtsHint := gl("⌥t thoughts", "alt-t thoughts")
 	if m.expandedThoughts {
 		thoughtsHint = lipgloss.NewStyle().Foreground(cMagenta).Render(gl("⌥t hide", "alt-t hide"))

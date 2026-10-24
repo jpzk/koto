@@ -903,7 +903,7 @@ const (
 )
 
 // pickerState backs all three overlays: ctrl+r prompt-history recall, the
-// ctrl+p command palette, and the ctrl+t group/session jump (mode selects
+// ctrl+p command palette, and the ctrl+o group/session jump (mode selects
 // which). items is what fuzzyRank scores against in every mode; cmds is
 // populated in the two palette-shaped modes and is indexed by the same match
 // Idx, since their display column and their search corpus differ (see
@@ -4126,7 +4126,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// ahead of even the shell-focus block below, which otherwise hands
 		// every key to the guest pty and would swallow the filter text of a
 		// palette opened from the terminal. Ctrl+C dismisses (matches fzf);
-		// no harness binding (ctrl+t / ctrl+d / ctrl+l) fires while it's up.
+		// no harness binding (ctrl+o / ctrl+d / ctrl+l) fires while it's up.
 		if s == "ctrl+c" {
 			m.closePicker()
 			return m, nil
@@ -4278,13 +4278,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openPalette()
 		return m, nil
 	}
-	if s == "ctrl+t" {
+	if s == "ctrl+o" {
 		// Fuzzy jump to any conversation — every group plus its named
-		// sessions in one list, the fzf-for-tabs shape (ctrl+t is fzf's own
-		// "pick a thing" key). Third mode of the shared picker overlay; see
-		// palette.go. This key used to toggle thought bodies, which moved to
-		// alt+t: a switcher is reached far more often than a display toggle,
-		// so it gets the ctrl-tier binding.
+		// sessions in one list ("open"). Third mode of the shared picker
+		// overlay; see palette.go. Was ctrl+t until the operator moved it
+		// here; the job-fold toggle that used to own ctrl+o took ctrl+t.
 		m.openGroupPicker()
 		return m, nil
 	}
@@ -4516,8 +4514,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// an inline "already stopped".
 			m.openStopConfirm()
 			return m, nil
-		case "ctrl+o":
-			// One-key fold toggle ("open"). Unlike the arrows it never
+		case "ctrl+t":
+			// One-key fold toggle ("toggle"). Unlike the arrows it never
 			// collides with draft editing, so it works draft or not.
 			if !m.setJobFold(true) {
 				m.setJobFold(false)

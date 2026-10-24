@@ -37,7 +37,7 @@ type pickerMode int
 const (
 	pickerHistory pickerMode = iota // ctrl+r — this group's prompt history
 	pickerPalette                   // ctrl+p — the command palette
-	pickerGroups                    // ctrl+t — jump to a group/session
+	pickerGroups                    // ctrl+o — jump to a group/session
 	pickerThemes                    // /themes — pick a color palette, live-previewed
 )
 
@@ -95,7 +95,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "cheatsheet (keys + commands)", hint: "ctrl+h", act: func(m *Model) tea.Cmd { m.toggleHelp(); return nil }},
 
 		{title: "recall prompt history", hint: "ctrl+r", act: func(m *Model) tea.Cmd { m.openPicker(); return nil }},
-		{title: "jump to group/session", hint: "ctrl+t", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},
+		{title: "jump to group/session", hint: "ctrl+o", act: func(m *Model) tea.Cmd { m.openGroupPicker(); return nil }},
 		{title: "switch group", hint: "/sw <group>", run: "/sw ", edit: true},
 		{title: "switch chat session", hint: "/session [name]", run: "/session ", edit: true},
 		{title: "new group (dialog)", hint: "ctrl+n", act: func(m *Model) tea.Cmd { return m.openNewGroup() }},
@@ -212,7 +212,7 @@ func (m *Model) runPaletteItem(it paletteItem) tea.Cmd {
 	return nil
 }
 
-// --- group/session picker (ctrl+t) -------------------------------------------
+// --- group/session picker (ctrl+o) -------------------------------------------
 
 // groupItems builds one row per CONVERSATION — every group, plus each of its
 // named sessions — in treeOrder (main, then running, then stopped), so the

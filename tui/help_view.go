@@ -50,7 +50,7 @@ func helpSections() []helpSection {
 	return []helpSection{
 		{"GLOBAL KEYS", []helpEntry{
 			{"ctrl+p", "command palette - every action in one fuzzy list"},
-			{"ctrl+t", "jump to any group/session (fuzzy)"},
+			{"ctrl+o", "jump to any group/session (fuzzy)"},
 			{"ctrl+r", "recall prompt history for the current group"},
 			{"ctrl+h", "this cheatsheet"},
 			{"ctrl+n", "new group dialog - name, provider, network, size, ..."},
@@ -74,7 +74,7 @@ func helpSections() []helpSection {
 			{"up/down", "scroll chat; in the tree: move the cursor"},
 			{"pgup/pgdn", "page scroll (home/end: top/bottom)"},
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
-			{"ctrl+o", "fold/unfold jobs on the current row (works mid-draft)"},
+			{"ctrl+t", "fold/unfold jobs on the current row (works mid-draft)"},
 			{"ctrl+s", "tree: stop hovered group VM (confirm modal, y = stop)"},
 			{"ctrl+x", "tree: destroy hovered group (confirm modal, y = destroy)"},
 			{"", "hovering a job row shows a live tail of its output"},
