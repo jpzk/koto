@@ -37,18 +37,6 @@
 #   <sha256>  fcassets/firecracker
 9d740ef4f9485ff0eb5958378df48af38b5578b51d9d19884e75e780caf9cd69  koto
 c3e910bcbf11efc276f9bdb1be7d52478ef4ecef7957c31bf213764e6f48a5f2  koto-tui
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/firecracker
-#   <sha256>  fcassets/firecracker
 98ad7b3a21255fb9227dfe564a8c3e170d9272a6b1ac726a0e2f10a2d050e678  fcassets/firecracker
 0267ee4befc215885259433556633efc88836ec027643fe407376ed8dc540b3f  fcassets/vmlinux
 4ce1410452ab8e104361f278afa272a085e5357969b7a065effdb2cf7536cb03  fcassets/rootfs.img
