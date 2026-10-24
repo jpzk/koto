@@ -195,6 +195,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.Restart(ctx, &pb.GroupReq{Group: s("group")})
 	case "clear":
 		return cl.Clear(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
+	case "session_create":
+		return cl.SessionCreate(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "drain":
 		// Same session convention as clear ("" = the whole group), and the
 		// same reason for it: the operator is addressing one conversation or

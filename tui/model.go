@@ -500,7 +500,7 @@ type Model struct {
 	expandedToolOuts bool
 
 	// selectMode releases the mouse to the terminal so native click-drag text
-	// selection/copy works. Toggled with ctrl+s. When false (default) the mouse
+	// selection/copy works. Toggled with ctrl+x. When false (default) the mouse
 	// is captured for wheel-scroll. Keyboard scroll works in both modes.
 	selectMode bool
 
@@ -632,6 +632,8 @@ type Model struct {
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
 	newGroup newGroupForm
+	// New-session dialog (ctrl+s — see newsession.go), same modal contract.
+	newSess newSessForm
 	// modelsCache is the per-provider model list the new-group dialog has
 	// fetched this session (modelpick.go), shared across dialog opens.
 	modelsCache map[string]modelsLoadedMsg
@@ -855,6 +857,15 @@ type Model struct {
 	// the viewport (lineInSession) but stay in m.lines, so switching back
 	// is instant.
 	session map[string]string
+	// pendSess holds named sessions this TUI created (/session <new>, the ctrl+s
+	// dialog) that the daemon has not listed in GroupInfo.Sessions yet. treeRows
+	// merges them in (sessionsOf) so a just-created session is a real tree row
+	// from the first frame. Without it normalizeTreeCursor found no row for the
+	// new active session and fell back to the default one — which is exactly
+	// the "/session <name> does nothing" bug. An entry is dropped once the
+	// daemon lists the name (it then behaves like any other session, including
+	// the vanished-session fallback).
+	pendSess map[string][]string
 	// pending holds prompts the local TUI has sent that the daemon has not
 	// yet started (they're sitting in the group's send queue behind an
 	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
@@ -1068,6 +1079,7 @@ func newModel(sock string, ctxWindow int) Model {
 		jobDoneAt:      map[string]time.Time{},
 		jobsPrimed:     map[string]bool{},
 		jobsOpen:       map[string]bool{},
+		pendSess:       map[string][]string{},
 	}
 }
 
@@ -2098,11 +2110,12 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.unread, k)
 				continue
 			}
-			if s != "" && !slices.Contains(gi.Sessions, s) && !goalSession(s) {
+			if s != "" && !slices.Contains(gi.Sessions, s) && !slices.Contains(m.pendSess[g], s) && !goalSession(s) {
 				delete(m.unread, k)
 			}
 		}
 		m.groups = msg.groups
+		m.prunePendingSessions(msg.groups)
 		if msg.hasGlobalTok {
 			m.globalTokRate = msg.globalTok
 		}
@@ -3111,6 +3124,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if m.newGroup.open {
 			return m, nil // modal form: the panes under the pointer are hidden
 		}
+		if m.newSess.open {
+			return m, nil
+		}
 		if m.helpOpen {
 			if m.helpVPReady {
 				var cmd tea.Cmd
@@ -3126,7 +3142,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// below. While the pane is visible but UNFOCUSED only wheel events
 		// are forwarded — an in-grid left click is focus traffic
 		// (handleLeftClick focuses the pane), not input for the guest.
-		// ctrl+s select-mode releases the mouse entirely, so no MouseMsg
+		// ctrl+x select-mode releases the mouse entirely, so no MouseMsg
 		// arrives here at all in that mode.
 		if m.shell != nil && !m.shell.ended && !m.picker.open {
 			// !picker.open for the same reason the left-click branch below
@@ -4036,10 +4052,23 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		m.groupVer[msg.group]++
 		m.refreshLog()
 		return nil
+	case "session_create":
+		// The row already exists locally (pendSess); success needs no UI —
+		// the next state frame lists the name and prunes the pending entry.
+		// On failure the session still works in this TUI (the first send
+		// registers it daemon-side, as before SessionCreate existed); say so
+		// rather than drop the row the user is looking at.
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("create session %s: %v (kept locally; the first send registers it)", sessionDisplay(msg.session), msg.err)})
+		}
+		return nil
 	case "clear":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("clear: %v", msg.err)})
 			return nil
+		}
+		if t := msg.session; m.pendSess != nil && t != "" && t != "-" && t != "default" {
+			m.pendSess[msg.group] = slices.DeleteFunc(m.pendSess[msg.group], func(x string) bool { return x == t })
 		}
 		// Scope of the wipe follows the request: session "" = the whole
 		// group (legacy), "-" = the default session, name = that session.
@@ -4129,6 +4158,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// The new-group dialog (newgroup.go) owns keys like the cheatsheet,
 		// for the same reason: it covers the frame.
 		return m.handleNewGroupKey(msg)
+	}
+	if m.newSess.open {
+		return m.handleNewSessionKey(msg)
 	}
 	if m.helpOpen {
 		// The cheatsheet modal owns keys like the picker does — ahead of the
@@ -4291,16 +4323,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if s == "ctrl+s" {
-		// Toggle mouse capture. Scroll mode (default) captures the mouse for
-		// wheel-scroll; select mode releases it to the terminal so native
-		// click-drag selection/copy works. Keyboard scroll works in both. In
-		// raw mode IXON is off, so ctrl+s arrives as a keypress (no flow-control
-		// freeze).
-		m.selectMode = !m.selectMode
-		if m.selectMode {
-			return m, tea.DisableMouse
-		}
-		return m, tea.EnableMouseCellMotion
+		// New-session dialog (newsession.go). In raw mode IXON is off, so
+		// ctrl+s arrives as a keypress (no flow-control freeze).
+		m.openNewSession()
+		return m, nil
+	}
+	if s == "ctrl+x" {
+		// Toggle mouse capture (was ctrl+s). Scroll mode (default) captures
+		// the mouse for wheel-scroll; select mode releases it to the terminal
+		// so native click-drag selection/copy works. Keyboard scroll works in
+		// both. Operator-chosen key; ctrl+x was unbound in tui/.
+		return m, m.toggleMouseMode()
 	}
 	if s == "ctrl+l" {
 		m.toggleLogView()
@@ -5056,7 +5089,7 @@ func (m Model) treeRows() []treeRow {
 	var mainJobs []JobInfo
 	if len(order) > 0 && order[0] == "main" {
 		groups = order[1:]
-		mainSess = m.groups["main"].Sessions
+		mainSess = m.sessionsOf("main")
 		mainJobs = jobsOf("main", "")
 		rows = append(rows, treeRow{group: "main"})
 	}
@@ -5081,7 +5114,7 @@ func (m Model) treeRows() []treeRow {
 		gb, cont := branchFor()
 		rows = append(rows, treeRow{group: g, branch: gb})
 		defJobs := jobsOf(g, "")
-		sess := m.groups[g].Sessions
+		sess := m.sessionsOf(g)
 		nGC := len(defJobs) + len(sess)
 		gc := 0
 		gBranch := func() (string, string) {
@@ -5101,6 +5134,78 @@ func (m Model) treeRows() []treeRow {
 		}
 	}
 	return rows
+}
+
+// sessionsOf is g's named-session list as the tree shows it: the daemon's
+// GroupInfo.Sessions plus any this TUI created that the daemon has not
+// listed yet (pendSess), sorted like the daemon's registry.
+func (m Model) sessionsOf(g string) []string {
+	known := m.groups[g].Sessions
+	pend := m.pendSess[g]
+	if len(pend) == 0 {
+		return known
+	}
+	out := slices.Clone(known)
+	for _, s := range pend {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// addPendingSession records a locally created session so it is a tree row
+// before the daemon lists it. No-op for the default session or a name the
+// daemon already knows.
+func (m *Model) addPendingSession(g, s string) {
+	if s == "" || slices.Contains(m.sessionsOf(g), s) {
+		return
+	}
+	if m.pendSess == nil {
+		m.pendSess = map[string][]string{}
+	}
+	m.pendSess[g] = append(m.pendSess[g], s)
+}
+
+// prunePendingSessions drops pending entries the daemon now lists (or whose
+// group is gone): from then on the daemon's list is the source of truth.
+func (m *Model) prunePendingSessions(groups map[string]GroupInfo) {
+	for g, pend := range m.pendSess {
+		gi, ok := groups[g]
+		if !ok {
+			delete(m.pendSess, g)
+			continue
+		}
+		kept := pend[:0]
+		for _, s := range pend {
+			if !slices.Contains(gi.Sessions, s) {
+				kept = append(kept, s)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.pendSess, g)
+		} else {
+			m.pendSess[g] = kept
+		}
+	}
+}
+
+// switchSession makes s the active session of g AND moves the tree anchor
+// onto its row — the same end state as clicking that row (selectTreeRow), so
+// header, log filter, tree highlight and send target all agree. A named
+// session the tree doesn't know yet is created: recorded as pending (so its
+// row exists this frame) and registered daemon-side via SessionCreate (so it
+// survives a TUI restart and shows in other clients). The returned cmd is
+// that RPC, or nil.
+func (m *Model) switchSession(g, s string) tea.Cmd {
+	var cmd tea.Cmd
+	if s != "" && !slices.Contains(m.sessionsOf(g), s) && !goalSession(s) {
+		m.addPendingSession(g, s)
+		cmd = daemonCmd(m.sock, "session_create", g, map[string]any{"session": s})
+	}
+	m.selectTreeRow(treeRow{group: g, session: s})
+	return cmd
 }
 
 // setActiveSession switches which chat session of g is viewed/sent-to,
@@ -5574,7 +5679,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		arg := strings.TrimSpace(strings.TrimPrefix(v, "/session"))
 		if arg == "" {
 			cur := sessionDisplay(m.activeSession(m.cur))
-			known := append([]string{"default"}, m.groups[m.cur].Sessions...)
+			known := append([]string{"default"}, m.sessionsOf(m.cur)...)
 			m.addLine(logLine{kind: "sys", group: m.cur,
 				text: fmt.Sprintf("session: %s   (known: %s)   /session <name> switches, first send creates", cur, strings.Join(known, ", "))})
 			return nil
@@ -5591,14 +5696,14 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: m.cur, text: "already on session " + sessionDisplay(sess)})
 			return nil
 		}
-		m.setActiveSession(m.cur, sess)
-		m.clearUnread(m.cur, sess)
+		// switchSession, not a bare setActiveSession: a name the daemon has
+		// not listed yet had no tree row, so normalizeTreeCursor (run after
+		// every Update) fell back to the default session and silently undid
+		// the switch. switchSession creates the row and moves the anchor.
+		cmd := m.switchSession(m.cur, sess)
 		m.addLine(logLine{kind: "sys", group: m.cur, text: "session → " + sessionDisplay(sess)})
 		m.refreshLog()
-		m.vp.GotoBottom()
-		m.autoFollow = true
-		m.chaseShell()
-		return nil
+		return cmd
 	}
 	if strings.HasPrefix(v, "/destroy ") || v == "/destroy" {
 		target := strings.TrimSpace(strings.TrimPrefix(v, "/destroy"))

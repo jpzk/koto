@@ -45,6 +45,7 @@ const (
 	Koto_Metrics_FullMethodName        = "/koto.Koto/Metrics"
 	Koto_Clear_FullMethodName          = "/koto.Koto/Clear"
 	Koto_Drain_FullMethodName          = "/koto.Koto/Drain"
+	Koto_SessionCreate_FullMethodName  = "/koto.Koto/SessionCreate"
 	Koto_Jobs_FullMethodName           = "/koto.Koto/Jobs"
 	Koto_JobLogs_FullMethodName        = "/koto.Koto/JobLogs"
 	Koto_JobTail_FullMethodName        = "/koto.Koto/JobTail"
@@ -108,6 +109,14 @@ type KotoClient interface {
 	// pauses the goal first) a drain has nothing to stop it re-enqueueing —
 	// /goals interrupt is the verb that addresses a goal.
 	Drain(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*DrainResp, error)
+	// SessionCreate registers a named chat session (GroupReq.session) in the
+	// group's session registry WITHOUT sending a turn, so a client can create
+	// a conversation up-front (TUI ctrl+s) and see it in GroupInfo.sessions —
+	// and in every client's tree — before its first prompt. Idempotent. The
+	// default session ("", "-", "default") is implicit and refused, as is the
+	// goal-reserved "goal-" namespace. No VM boot: the guest pins the
+	// conversation id on the first send, exactly as before.
+	SessionCreate(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -357,6 +366,16 @@ func (c *kotoClient) Drain(ctx context.Context, in *GroupReq, opts ...grpc.CallO
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DrainResp)
 	err := c.cc.Invoke(ctx, Koto_Drain_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) SessionCreate(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BaseResp)
+	err := c.cc.Invoke(ctx, Koto_SessionCreate_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -715,6 +734,14 @@ type KotoServer interface {
 	// pauses the goal first) a drain has nothing to stop it re-enqueueing —
 	// /goals interrupt is the verb that addresses a goal.
 	Drain(context.Context, *GroupReq) (*DrainResp, error)
+	// SessionCreate registers a named chat session (GroupReq.session) in the
+	// group's session registry WITHOUT sending a turn, so a client can create
+	// a conversation up-front (TUI ctrl+s) and see it in GroupInfo.sessions —
+	// and in every client's tree — before its first prompt. Idempotent. The
+	// default session ("", "-", "default") is implicit and refused, as is the
+	// goal-reserved "goal-" namespace. No VM boot: the guest pins the
+	// conversation id on the first send, exactly as before.
+	SessionCreate(context.Context, *GroupReq) (*BaseResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -885,6 +912,9 @@ func (UnimplementedKotoServer) Clear(context.Context, *GroupReq) (*BaseResp, err
 }
 func (UnimplementedKotoServer) Drain(context.Context, *GroupReq) (*DrainResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Drain not implemented")
+}
+func (UnimplementedKotoServer) SessionCreate(context.Context, *GroupReq) (*BaseResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method SessionCreate not implemented")
 }
 func (UnimplementedKotoServer) Jobs(context.Context, *JobsReq) (*JobsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Jobs not implemented")
@@ -1200,6 +1230,24 @@ func _Koto_Drain_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).Drain(ctx, req.(*GroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_SessionCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GroupReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).SessionCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_SessionCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).SessionCreate(ctx, req.(*GroupReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1698,6 +1746,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Drain",
 			Handler:    _Koto_Drain_Handler,
+		},
+		{
+			MethodName: "SessionCreate",
+			Handler:    _Koto_SessionCreate_Handler,
 		},
 		{
 			MethodName: "Jobs",
