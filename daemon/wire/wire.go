@@ -98,6 +98,10 @@ type GroupInfo struct {
 	// render a fleet overview without a per-group Config round-trip.
 	Network string `json:"network,omitempty"`
 	Root    bool   `json:"root,omitempty"`
+	// SessionOrigins maps each live goal session whose goal was set from a
+	// NAMED session to that origin session (goals.go goalSessionOrigins), so
+	// clients can nest the goal rows under it. See koto.proto.
+	SessionOrigins map[string]string `json:"session_origins,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors
@@ -392,10 +396,17 @@ type GoalItem struct {
 	// restores it: a goal paused out of its PLAN phase must resume back into
 	// planning (re-running the plan turn), because resuming to `running`
 	// unconditionally would skip both the plan and the human approval gate.
-	PausedFrom  string  `json:"paused_from,omitempty"`
-	CreatedAt   float64 `json:"created_at"`
-	UpdatedAt   float64 `json:"updated_at,omitempty"`
-	CompletedAt float64 `json:"completed_at,omitempty"`
+	PausedFrom string `json:"paused_from,omitempty"`
+	// OriginSession is the named chat session the goal was set from ("" =
+	// the default session). Normalized at goal_set (goals.go
+	// resolveGoalOrigin): reserved goal-* names and names that are not a
+	// registered session of the group fold to "". The goal-finished /
+	// terminated handoff turn is delivered there (default if it no longer
+	// exists), and the TUI nests the goal's rows under it.
+	OriginSession string  `json:"origin_session,omitempty"`
+	CreatedAt     float64 `json:"created_at"`
+	UpdatedAt     float64 `json:"updated_at,omitempty"`
+	CompletedAt   float64 `json:"completed_at,omitempty"`
 }
 
 type GoalSetReq struct {
@@ -408,6 +419,8 @@ type GoalSetReq struct {
 	Plan *bool `json:"plan,omitempty"`
 	// Name is the run's short handle; empty => slugged from Text.
 	Name string `json:"name,omitempty"`
+	// Session is the origin session (see GoalItem.OriginSession); optional.
+	Session string `json:"session,omitempty"`
 }
 
 // GoalGroupReq covers approve / pause / interrupt / resume / cancel. Name

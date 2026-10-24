@@ -920,6 +920,11 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 				break
 			}
 		}
+		// An orphan job (its session has no row, so the default conversation
+		// adopted it — model.go visibleJobs) names the session it came from.
+		if job != nil && job.Session != r.session {
+			name = r.job + " @" + job.Session
+		}
 	}
 	contentW := leftPaneWidth - 2 // account for paddingX
 	// Cell width, not len(): the branch glyphs ("├─ ") are 3 cells but 7

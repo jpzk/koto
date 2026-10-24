@@ -5059,12 +5059,7 @@ func (m Model) foldedJobs(g, sess string) (n int) {
 	if m.jobsOpen[sessKey(g, sess)] {
 		return 0
 	}
-	for _, j := range m.groups[g].Jobs {
-		if j.Session == sess && m.jobVisible(g, j) {
-			n++
-		}
-	}
-	return
+	return len(m.visibleJobs(g, sess))
 }
 
 // setJobFold handles →/← in the tree: unfold (open=true) or fold the
@@ -5104,6 +5099,12 @@ func (m *Model) setJobFold(open bool) bool {
 // come from GroupInfo.Sessions and job lists from GroupInfo.Jobs (both
 // daemon-pushed via WatchState/List), so sessions and jobs created by any
 // client appear here as the daemon's mirrors update.
+//
+// A live goal's rows (goal-<name>, its -judge leaf, and their jobs) nest
+// under the named session the goal was set from (GroupInfo.SessionOrigins,
+// see sessionLayout); default-origin goals hang off the group as before.
+// Jobs whose session has no row are adopted by the group's default
+// conversation (visibleJobs) so they never silently vanish.
 func (m Model) treeRows() []treeRow {
 	order := m.treeOrder()
 	rows := []treeRow{}
@@ -5113,34 +5114,43 @@ func (m Model) treeRows() []treeRow {
 		if !m.jobsOpen[sessKey(g, sess)] {
 			return nil
 		}
-		var out []JobInfo
-		for _, j := range m.groups[g].Jobs {
-			if j.Session == sess && m.jobVisible(g, j) {
-				out = append(out, j)
-			}
-		}
+		out := m.visibleJobs(g, sess)
 		// Newest on top (the daemon sends oldest-first).
 		sort.SliceStable(out, func(a, b int) bool { return out[a].Started > out[b].Started })
 		return out
 	}
-	// appendSession emits one named-session row plus its job children.
-	appendSession := func(g, sess, glyph, cont string) {
+	// appendSession emits one named-session row, its job children, then the
+	// goal sessions nested under it (kids[sess]) — each a full session row
+	// with its own jobs one level deeper.
+	var appendSession func(g, sess, glyph, cont string, kids map[string][]string)
+	appendSession = func(g, sess, glyph, cont string, kids map[string][]string) {
 		rows = append(rows, treeRow{group: g, session: sess, branch: glyph})
 		jl := jobsOf(g, sess)
-		for k, j := range jl {
-			jb := "├─ "
-			if k == len(jl)-1 {
-				jb = "└─ "
+		ch := kids[sess]
+		n, k := len(jl)+len(ch), 0
+		next := func() (string, string) {
+			k++
+			if k == n {
+				return cont + "└─ ", cont + "   "
 			}
-			rows = append(rows, treeRow{group: g, session: sess, job: j.ID, branch: cont + jb})
+			return cont + "├─ ", cont + "│  "
+		}
+		for _, j := range jl {
+			b, _ := next()
+			rows = append(rows, treeRow{group: g, session: sess, job: j.ID, branch: b})
+		}
+		for _, c := range ch {
+			b, c2 := next()
+			appendSession(g, c, b, c2, nil)
 		}
 	}
 	groups := order
 	var mainSess []string
+	var mainKids map[string][]string
 	var mainJobs []JobInfo
 	if len(order) > 0 && order[0] == "main" {
 		groups = order[1:]
-		mainSess = m.sessionsOf("main")
+		mainSess, mainKids = m.sessionLayout("main")
 		mainJobs = jobsOf("main", "")
 		rows = append(rows, treeRow{group: "main"})
 	}
@@ -5159,13 +5169,13 @@ func (m Model) treeRows() []treeRow {
 	}
 	for _, s := range mainSess {
 		b, cont := branchFor()
-		appendSession("main", s, b, cont)
+		appendSession("main", s, b, cont, mainKids)
 	}
 	for _, g := range groups {
 		gb, cont := branchFor()
 		rows = append(rows, treeRow{group: g, branch: gb})
 		defJobs := jobsOf(g, "")
-		sess := m.sessionsOf(g)
+		sess, kids := m.sessionLayout(g)
 		nGC := len(defJobs) + len(sess)
 		gc := 0
 		gBranch := func() (string, string) {
@@ -5181,10 +5191,67 @@ func (m Model) treeRows() []treeRow {
 		}
 		for _, s2 := range sess {
 			b, c2 := gBranch()
-			appendSession(g, s2, b, c2)
+			appendSession(g, s2, b, c2, kids)
 		}
 	}
 	return rows
+}
+
+// sessionLayout splits g's named sessions (sessionsOf order) into the rows
+// that hang directly off the group (top) and the goal sessions nested under
+// the named session their goal was set from (kids[origin]). A goal session
+// nests only when GroupInfo.SessionOrigins names an origin that is itself a
+// non-goal session row of the group; otherwise — default-origin goal, origin
+// cleared or destroyed since, or an older daemon that sends no origins — it
+// stays at the group level, exactly as before origins existed.
+func (m Model) sessionLayout(g string) (top []string, kids map[string][]string) {
+	sess := m.sessionsOf(g)
+	origins := m.groups[g].SessionOrigins
+	if len(origins) == 0 {
+		return sess, nil
+	}
+	present := make(map[string]bool, len(sess))
+	for _, s := range sess {
+		present[s] = true
+	}
+	for _, s := range sess {
+		if o := origins[s]; goalSession(s) && o != "" && !goalSession(o) && present[o] {
+			if kids == nil {
+				kids = map[string][]string{}
+			}
+			kids[o] = append(kids[o], s)
+			continue
+		}
+		top = append(top, s)
+	}
+	return top, kids
+}
+
+// visibleJobs is conversation (g, sess)'s visible jobs (running, or inside
+// their linger window), regardless of fold state, in the daemon's order. The
+// DEFAULT conversation also adopts the group's orphan jobs — jobs whose
+// session has no row in the tree (a finished goal's worker, a cleared or
+// destroyed session). Filtering strictly by session made those rows vanish
+// with their session while the job was still running; under the group row
+// they stay visible, and the renderer tags them with their own session name.
+func (m Model) visibleJobs(g, sess string) []JobInfo {
+	var known map[string]bool
+	if sess == "" {
+		known = map[string]bool{}
+		for _, s := range m.sessionsOf(g) {
+			known[s] = true
+		}
+	}
+	var out []JobInfo
+	for _, j := range m.groups[g].Jobs {
+		if !m.jobVisible(g, j) {
+			continue
+		}
+		if j.Session == sess || (sess == "" && j.Session != "" && !known[j.Session]) {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // sessionsOf is g's named-session list as the tree shows it: the daemon's

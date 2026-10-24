@@ -1069,8 +1069,9 @@ func ctlGoal(args []string) {
 		max := fs.Int("max", 0, "max iterations (0 = default)")
 		plan := fs.String("plan", "yes", "plan-first (yes|no)")
 		name := fs.String("name", "", "short run name (also its session name); default: slugged from the goal")
+		session := fs.String("session", "", "origin session the goal is set from (handoff + tree nesting); default: the group's default session")
 		fs.Parse(rest)
-		const usage = "usage: koto ctl goal set [-max N] [-plan=no] [-name x] <group> <goal> :: <criteria>"
+		const usage = "usage: koto ctl goal set [-max N] [-plan=no] [-name x] [-session s] <group> <goal> :: <criteria>"
 		words := fs.Args()
 		if len(words) < 2 {
 			ctlFatal(2, usage)
@@ -1089,6 +1090,7 @@ func ctlGoal(args []string) {
 		req := &pb.GoalSetReq{
 			Group:         group,
 			Name:          *name,
+			Session:       *session,
 			Text:          strings.Join(words[:sep], " "),
 			Criteria:      strings.Join(words[sep+1:], " "),
 			MaxIterations: int32(*max),
