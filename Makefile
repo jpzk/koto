@@ -96,18 +96,21 @@ endif
 # give identical binaries, except for the version string stamped below.
 # Update deliberately: podman/docker pull golang:1.26-alpine, then
 #   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
-# golang:1.26.9-alpine (2026-10-08; 1.26.9 is the stdlib fix for the HTTP/2
-# advisories GO-2026-6603/6611/6612/6617, whose x/net half is pinned in the
-# go.mod files). Go 1.24 fell out of support when 1.26
-# shipped, so its stdlib no longer receives security fixes: govulncheck on the
-# then-shipped toolchain (2026-09-05) reported 13 reachable stdlib
-# vulnerabilities. 1.26 rather than 1.25 because x/crypto v0.56.0 — the fix for
+# golang:1.26.10-alpine (index digest, linux/amd64 child d1f3216e…; bumped
+# 2026-10-24 from the go1.26.9 image, operator-approved security exception:
+# go1.26.10 — released 2026-10-19 — fixes GO-2026-6809 (crypto/x509), which
+# govulncheck reported reachable in all four modules. The earlier 1.26.9 pin,
+# 2026-10-08, was the stdlib fix for the HTTP/2 advisories
+# GO-2026-6603/6611/6612/6617, whose x/net half is pinned in the go.mod files).
+# Go 1.24 fell out of support when 1.26 shipped, so its stdlib no longer
+# receives security fixes: govulncheck on the then-shipped toolchain
+# (2026-09-05) reported 13 reachable stdlib vulnerabilities. 1.26 rather than 1.25 because x/crypto v0.56.0 — the fix for
 # two reachable ssh DoS findings — requires go >= 1.26. Per the security-fix
 # exception to the 6-week lag (CLAUDE.md, Conventions): a pin that closes a
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/govulncheck.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0
+GO_IMAGE ?= docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
@@ -256,7 +259,7 @@ DIST_DIR       = dist/$(DIST_VERSION)
 # The release this checkout points at. Was dist/VERSION; it lives here now
 # because nothing under dist/ is checked in — dist/ is build output.
 # "unreleased" makes `make fetch` say so plainly instead of 404ing.
-DIST_VERSION  ?= 1.6.0
+DIST_VERSION  ?= 1.7.0
 
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.

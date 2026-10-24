@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -195,6 +196,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.Restart(ctx, &pb.GroupReq{Group: s("group")})
 	case "clear":
 		return cl.Clear(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
+	case "session_create":
+		return cl.SessionCreate(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "drain":
 		// Same session convention as clear ("" = the whole group), and the
 		// same reason for it: the operator is addressing one conversation or
@@ -206,7 +209,11 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 			r.Before = v
 		}
 		if v, ok := asFloat(extra["limit"]); ok {
-			r.Limit = int32(v)
+			n, err := floatToInt32("limit", v)
+			if err != nil {
+				return nil, err
+			}
+			r.Limit = n
 		}
 		return cl.History(ctx, r)
 	case "models":
@@ -240,7 +247,11 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "goal_set":
 		r := &pb.GoalSetReq{Group: s("group"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
-			r.MaxIterations = int32(v)
+			n, err := floatToInt32("max_iterations", v)
+			if err != nil {
+				return nil, err
+			}
+			r.MaxIterations = n
 		}
 		if b, ok := extra["plan"].(bool); ok {
 			r.Plan = &b
@@ -331,6 +342,18 @@ func asFloat(v any) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+// floatToInt32 narrows a JSON number for an int32 proto field. Go leaves an
+// out-of-range float->int32 conversion implementation-defined (it wraps on
+// amd64), so NaN, ±Inf and anything outside the int32 range is refused
+// with an error instead of reaching the daemon as a different number. The
+// fractional part is truncated, as the plain conversion always did.
+func floatToInt32(field string, v float64) (int32, error) {
+	if math.IsNaN(v) || v < math.MinInt32 || v > math.MaxInt32 {
+		return 0, fmt.Errorf("%s %v out of int32 range", field, v)
+	}
+	return int32(v), nil
 }
 
 // buildConfigReq encodes the absent/clear/set tri-state. Scalar config values

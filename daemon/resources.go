@@ -1182,7 +1182,7 @@ func resourcesSnapshotLocked() ([]groupResources, hostResources) {
 	var host hostResources
 	host.FSTotalBytes, host.FSFreeBytes = hostFSStats()
 	host.Groups = int32(len(names))
-	host.MemCapMiB = int32(fcHostMemCapMiB)
+	host.MemCapMiB = hostMemCapMiBPB()
 	host.MemHostTotalMiB = int32(fcHostMemTotalMiB())
 
 	for _, g := range names {

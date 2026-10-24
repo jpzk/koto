@@ -342,7 +342,7 @@ func TestPickerOverlayInputRowIsStable(t *testing.T) {
 // full-frame views — the log stays visible above the box.
 func TestPickerOverlayOverLogViewKeepsContent(t *testing.T) {
 	m := logModel(t, "main")
-	m = press(t, m, tea.KeyCtrlT)
+	m = press(t, m, tea.KeyCtrlO)
 	_, top, bottom := pickerBand(t, m)
 	if got, want := bottom-top+1, m.pickerRows(m.height); got != want {
 		t.Errorf("picker box is %d rows of a %d-row frame, want %d", got, m.height, want)

@@ -350,7 +350,7 @@ func goalStatusLine(it goalItemT) string {
 		extra = fmt.Sprintf(" (cap %d/%d)", it.Iteration, it.MaxIterations)
 	}
 	// The NAME leads, not the id: it is the run's session (goal-<name>), so
-	// it is what /session and the ctrl+t jump take, and what the tree shows.
+	// it is what /session and the ctrl+o jump take, and what the tree shows.
 	// Records from before names existed fall back to the id, which is what
 	// their session is called too.
 	handle := it.Name

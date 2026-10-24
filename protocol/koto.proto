@@ -50,6 +50,14 @@ service Koto {
   // pauses the goal first) a drain has nothing to stop it re-enqueueing —
   // /goals interrupt is the verb that addresses a goal.
   rpc Drain       (GroupReq)       returns (DrainResp);
+  // SessionCreate registers a named chat session (GroupReq.session) in the
+  // group's session registry WITHOUT sending a turn, so a client can create
+  // a conversation up-front (TUI ctrl+s) and see it in GroupInfo.sessions —
+  // and in every client's tree — before its first prompt. Idempotent. The
+  // default session ("", "-", "default") is implicit and refused, as is the
+  // goal-reserved "goal-" namespace. No VM boot: the guest pins the
+  // conversation id on the first send, exactly as before.
+  rpc SessionCreate (GroupReq)     returns (BaseResp);
   // Jobs lists a group's background jobs (cs-job) fresh from the guest —
   // group "" reads across all running groups (needs the "*" target, like
   // global metrics). JobLogs returns one job's metadata + an output tail.

@@ -50,7 +50,7 @@ func helpSections() []helpSection {
 	return []helpSection{
 		{"GLOBAL KEYS", []helpEntry{
 			{"ctrl+p", "command palette - every action in one fuzzy list"},
-			{"ctrl+t", "jump to any group/session (fuzzy)"},
+			{"ctrl+o", "jump to any group/session (fuzzy)"},
 			{"ctrl+r", "recall prompt history for the current group"},
 			{"ctrl+h", "this cheatsheet"},
 			{"ctrl+n", "new group dialog - name, provider, network, size, ..."},
@@ -61,7 +61,8 @@ func helpSections() []helpSection {
 			{"ctrl+]", "shared terminal (tmux) for the active session"},
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
 			{"ctrl+@", "cycle to the next unread conversation"},
-			{"ctrl+s", "toggle mouse mode: wheel-scroll vs native select/copy"},
+			{"alt+n", "new session dialog - name it, enter creates + switches"},
+			{"ctrl+v", "toggle mouse mode: wheel-scroll vs native select/copy (draft in bar: paste)"},
 			{"ctrl+d", "expand/collapse tool output bodies"},
 			{"alt+t", "expand/collapse thought bodies"},
 			{"esc", "interrupt the in-flight turn / close view / close tree"},
@@ -74,7 +75,9 @@ func helpSections() []helpSection {
 			{"up/down", "scroll chat; in the tree: move the cursor"},
 			{"pgup/pgdn", "page scroll (home/end: top/bottom)"},
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
-			{"ctrl+o", "fold/unfold jobs on the current row (works mid-draft)"},
+			{"ctrl+t", "fold/unfold jobs on the current row (works mid-draft)"},
+			{"ctrl+s", "tree: stop hovered group VM (confirm modal, y = stop)"},
+			{"ctrl+x", "tree: destroy hovered group (confirm modal, y = destroy)"},
 			{"", "hovering a job row shows a live tail of its output"},
 		}},
 		{"TERMINAL PANE (while focused)", []helpEntry{
