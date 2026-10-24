@@ -104,7 +104,11 @@ func ctlRespToPB(v any) (*pb.CtlResponse, error) {
 	case baseResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error}, nil
 	case spawnResp:
-		return &pb.CtlResponse{Ok: r.OK, Error: r.Error, Result: &pb.CtlResponse_Port{Port: int32(r.Port)}}, nil
+		port, err := portToPB(r.Port)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.CtlResponse{Ok: r.OK, Error: r.Error, Result: &pb.CtlResponse_Port{Port: port}}, nil
 	case listResp:
 		groups := map[string]*pb.GroupInfo{}
 		for g, gi := range r.Groups {
