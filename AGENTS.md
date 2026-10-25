@@ -73,7 +73,9 @@ plane (H1) and, on gRPC, re-labelled `config_posture` (admin-only,
 commit.
 
 - **`network`** = `none` (default) | `wan` | `lan` | `full`. `none`: no NIC,
-  only egress is the LLM proxy. Others attach a userspace gVisor L3 gateway
+  only egress is the LLM proxy, which refuses server-side tools (`tools[].type`
+  other than `custom`, `mcp_servers`) and non-allowlisted betas for `none`
+  (proxy_servertools.go). Others attach a userspace gVisor L3 gateway
   over vsock 9003 (`eth0` 192.168.127.2, NAT, DNS via gateway) filtered at the
   frame layer (`fcClassifyDst`/`fcDstAllowed`, fcnet.go): control plane always
   dropped, gateway subnet always allowed, `wan` = public only, `lan` = host LAN

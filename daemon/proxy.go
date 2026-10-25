@@ -1357,6 +1357,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	// network=none: no server-executed tools (they reach third-party hosts
+	// from Anthropic's side) and only allowlisted betas. Checked on the
+	// guest's bytes, before any rewrite, credential or upstream contact
+	// (proxy_servertools.go).
+	netNone := proxyNetworkNone(h.group)
+	if netNone {
+		if why := proxyServerToolReason(body); why != "" {
+			proxyRefuseServerTool(w, h.group, why)
+			return
+		}
+	}
 	model := budgetModelFromBody(body)
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
@@ -1384,7 +1395,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Merge the client's anthropic-beta list with ours once, outside the
 	// request builder, so the builder is a pure idempotent function of
 	// (body, headers, ah) safe to call once per retry attempt.
-	clientBeta := r.Header.Get("anthropic-beta")
+	clientBeta := strings.Join(r.Header.Values("anthropic-beta"), ",")
+	if netNone {
+		kept, dropped := proxyFilterBeta(clientBeta)
+		if len(dropped) > 0 && llmFlowSeen.allow("betadrop|"+h.group+"|"+strings.Join(dropped, ",")) {
+			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none allowlist)",
+				h.group, flattenInline(strings.Join(dropped, ",")))
+		}
+		clientBeta = strings.Join(kept, ",")
+	}
 	mergedBeta := strings.Trim(strings.Trim(strings.Join([]string{clientBeta, ah["anthropic-beta"]}, ","), ","), ",")
 
 	mkReq := func() (*http.Request, error) {
@@ -1395,8 +1414,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
+		// Allowlist, not denylist: arbitrary guest headers are not relayed
+		// (proxyFwdHeaders). anthropic-beta goes as the merged value below.
 		for k, vs := range r.Header {
-			if hopByHop[strings.ToLower(k)] || strings.ToLower(k) == "anthropic-beta" {
+			if !proxyForwardHeader(k) {
 				continue
 			}
 			for _, v := range vs {

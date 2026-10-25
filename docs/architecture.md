@@ -202,7 +202,13 @@ From `daemon/fc.go`:
 ## 5. Networking
 
 - **`network=none`, the default.** The VM has no NIC. Its only egress is the
-  L7 proxy over vsock 9000 (`fc.go` header, `fcnet.go` header).
+  L7 proxy over vsock 9000 (`fc.go` header, `fcnet.go` header). On the
+  Anthropic leg the proxy refuses (403) request bodies that declare
+  server-executed tools (any `tools[]` entry whose `type` is not `custom`) or
+  `mcp_servers`, since those reach third-party hosts from the provider's side,
+  and it forwards only allowlisted `anthropic-beta` values
+  (`daemon/proxy_servertools.go`). Every profile relays only allowlisted
+  guest request headers.
 - **`network=wan|lan|full`.** `fcSpawn` attaches a userspace gVisor gateway
   (`containers/gvisor-tap-vsock`, `fcNetGateway` in `daemon/fcnet.go`) and
   opens the 9003 listener only when `groupNetwork(g) != fcNetNone`. The
