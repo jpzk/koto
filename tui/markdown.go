@@ -132,10 +132,22 @@ func invalidateMarkdownCache() {
 }
 
 // renderMarkdown renders src to ANSI for a given column width.
-// ```ansi``` fenced blocks pass through verbatim — claude emits them when
+// ```ansi``` fenced blocks pass through (SGR survives) — claude emits them when
 // it wants raw escape codes (colored diff output etc.) that glamour/chroma
 // would otherwise scrub.
+//
+// The result is always passed through scrubVT (SGR-only): glamour decodes
+// HTML numeric character references (&#27; &#x1b; &#7;) into raw C0 bytes,
+// and ```ansi``` fences are model-authored, so without the scrub model output
+// could smuggle OSC 52 clipboard writes, title sets or other non-SGR escapes
+// into the operator's terminal (audit 1.7.1 tui/glamour-charref-terminal-escape).
 func renderMarkdown(src string, width int) string {
+	return scrubVT(renderMarkdownRaw(src, width))
+}
+
+// renderMarkdownRaw is renderMarkdown without the final scrub. Never write its
+// output to the terminal directly.
+func renderMarkdownRaw(src string, width int) string {
 	src = expandTabs(src)
 	r := getRenderer(width)
 	if r == nil {
