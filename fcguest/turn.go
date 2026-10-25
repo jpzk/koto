@@ -340,8 +340,12 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	sessDir := filepath.Join(csDir, "sessions")
 	_, derr := os.Stat(sessDir)
 	migrateContinue := os.IsNotExist(derr) && sess == "default"
-	_ = os.MkdirAll(sessDir, 0o755)
-	_ = os.Chown(sessDir, workerUID, workerGID)
+	if err := prepareSessDir(sessDir); err != nil {
+		// Never read or write id files through a path we could not pin
+		// down as a real directory: every id-file helper runs as root.
+		tw.errf("sessions dir: %v", err)
+		return
+	}
 	idf := filepath.Join(sessDir, sess+".id")
 
 	shellSess := "koto-shell"
@@ -493,6 +497,32 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 }
 
 // ---- claude -----------------------------------------------------------------
+
+// prepareSessDir establishes /workspace/.cs/sessions as a real,
+// worker-owned directory without ever following a link planted there.
+//
+// .cs is worker-owned, so uid 1000 can replace sessions/ with a symlink
+// between turns. The old MkdirAll+Chown pair resolved that link as PID 1 and
+// handed its target (/run, say) to the worker — audit 1.7.1
+// guest/sessdir-chown-follows-symlink. ensureWorkerDir is Mkdir + Lstat +
+// Lchown: nothing here dereferences the final component. A non-directory in
+// the way is removed (the link itself, never its target) and the dir made
+// once more, the same repair setupCS applies to .cs.
+func prepareSessDir(dir string) error {
+	err := ensureWorkerDir(dir)
+	if err == nil {
+		return nil
+	}
+	fi, lerr := os.Lstat(dir)
+	if lerr != nil || fi.IsDir() {
+		return err
+	}
+	logf("%s is not a directory (mode %s) — replacing it", dir, fi.Mode().Type())
+	if rerr := os.Remove(dir); rerr != nil {
+		return fmt.Errorf("%s: %w (remove: %v)", dir, err, rerr)
+	}
+	return ensureWorkerDir(dir)
+}
 
 func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrateContinue bool, env []string) {
 	args := []string{"-p", "--bare", "--dangerously-skip-permissions",
