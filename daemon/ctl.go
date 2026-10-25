@@ -435,11 +435,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if err != nil {
 			return errResp("ctl: " + err.Error())
 		}
-		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-		if len(lines) > req.N {
-			lines = lines[len(lines)-req.N:]
-		}
-		return ctlTailResp{baseResp{OK: true}, strings.Join(lines, "\n")}
+		return ctlTailResp{baseResp{OK: true}, ctlTailFence(req.Group, string(b), req.N)}
 
 	case "job_done":
 		// Self-targeted (like sched_*): any group may signal completion of its
