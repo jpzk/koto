@@ -407,7 +407,7 @@ func flattenBannerText(s string) string {
 
 // formatNotifyLine is the transcript (chat log) rendering of a notification.
 func formatNotifyLine(sev, title, msg string) string {
-	s := "🔔 [" + sev + "] " + title
+	s := ic(icBell) + " [" + sev + "] " + title
 	if msg != "" {
 		if title != "" {
 			s += " — "
@@ -460,7 +460,7 @@ func (m Model) renderNotifyInline(leftW, maxEnd int) string {
 	}
 	on := (m.tick/notifyBlinkTicks)%2 == 0
 	base := inv(fgOn(accent, cBlack), accent)
-	icon := " 🔔 "
+	icon := " " + ic(icBell) + " "
 	if !on {
 		base = lipgloss.NewStyle().Foreground(accent)
 		icon = "    "
@@ -811,7 +811,13 @@ func (m Model) renderTree(rows int) string {
 		}
 		active := m.activeSession(m.cur)
 		treeLive := m.treeCursorLive()
-		for i, r := range trows {
+		// Scroll window (tree_scroll.go): only rows [top, top+win) are drawn.
+		top, win := treeWindow(m.treeTop, m.treeIdx, len(trows), treeRowSlots(rows))
+		if top > 0 && len(lines) > 1 {
+			lines[1] = treeMoreMarker("↑", top)
+		}
+		for i := top; i < top+win; i++ {
+			r := trows[i]
 			// isCur marks the exact conversation being viewed: the group row
 			// is current only when its DEFAULT session is active; a named
 			// session row only when that session is. Job rows are peeked,
@@ -825,6 +831,9 @@ func (m Model) renderTree(rows int) string {
 			// compare by index, never index past the slice.
 			hov := treeLive && m.treeIdx == i
 			lines = append(lines, m.renderTreeRow(r, isCur, hov, unread, pad))
+		}
+		if below := len(trows) - (top + win); below > 0 && win > 0 {
+			lines = append(lines, treeMoreMarker("↓", below))
 		}
 	}
 
@@ -868,26 +877,14 @@ func (m Model) treeCursorLive() bool {
 		(m.focus == focusShell && m.preShellFocus == focusTree)
 }
 
-// Tree markers for session rows (see nerdfont.go for the opt-out). Nerd Font
-// glyphs live in the Private Use Area: keep them as \u escapes, literal PUA
-// bytes get stripped in transit.
-const (
-	nfSessionIcon = "\uf418 " // nf-oct-git_branch
-	nfGoalIcon    = "\uf140 " // nf-fa-bullseye
-	plainSession  = "◦ "
-)
-
 // sessionMarker is the tree marker (glyph + trailing space) for a session
 // row named s: bullseye for goal-run leaves (goal-<name>, incl. -judge),
 // branch for every other chat, the plain hollow dot when icons are off.
 func sessionMarker(s string) string {
-	if !nerdFont {
-		return plainSession
-	}
 	if goalSession(s) {
-		return nfGoalIcon
+		return ic(icGoalSession)
 	}
-	return nfSessionIcon
+	return ic(icSession)
 }
 
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
@@ -944,7 +941,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	act, working := m.activityFor(r.group)
 	working = working && !isSession && !isJob
 	if queued > 0 && !isSession && !isJob {
-		badge = fmt.Sprintf(" ⏳%d", queued)
+		badge = fmt.Sprintf(" %s%d", ic(icHourglass), queued)
 	} else if working {
 		// How long the whole turn has been going — the name gives up the width
 		// instead of the row growing. The point of the tree is to answer "is
@@ -988,7 +985,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// wedged (daemon saw no turn_end within turnWaitTimeout). Yellow ⚠ so it
 	// reads as "alive but stuck", distinct from orange-healthy / gray-stopped.
 	if stalled {
-		dot = "⚠ "
+		dot = ic(icWarn) + " "
 		dotColor = cYellow
 	}
 	if isSession {
@@ -1005,15 +1002,15 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		if job != nil {
 			switch job.Status {
 			case "running":
-				dot, dotColor = "⚙ ", cYellow
+				dot, dotColor = ic(icCog)+" ", cYellow
 			case "done":
 				if job.RC == "0" {
-					dot, dotColor = "✓ ", cAmber
+					dot, dotColor = ic(icCheck)+" ", cAmber
 				} else {
-					dot, dotColor = "✗ ", cRed
+					dot, dotColor = ic(icCross)+" ", cRed
 				}
 			case "orphaned":
-				dot, dotColor = "⚠ ", cYellow
+				dot, dotColor = ic(icWarn)+" ", cYellow
 			}
 			// Finished rows only exist inside their linger window (see
 			// jobVisible) — blink the icon there so the completion is
@@ -1273,7 +1270,7 @@ func renderLiveLines(liveText, liveKind string, tick, contentCols int) []string 
 	var head string
 	var bodyStyle lipgloss.Style
 	if liveKind == "thinking" {
-		head = lipgloss.NewStyle().Foreground(cMagenta).Render("🧠  ")
+		head = lipgloss.NewStyle().Foreground(cMagenta).Render(ic(icThought) + "  ")
 		bodyStyle = lipgloss.NewStyle().Foreground(cGray).Italic(true)
 	} else {
 		spin := string(spinnerFrames[tick%len(spinnerFrames)])
@@ -1311,7 +1308,7 @@ func renderLiveLines(liveText, liveKind string, tick, contentCols int) []string 
 // the amber › of a prompt the daemon has already begun. Multi-line prompts keep
 // their shape with indented continuation rows.
 func renderPendingLines(pending []string, contentCols int) []string {
-	glyph := lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render("⏳ ")
+	glyph := lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(ic(icHourglass) + " ")
 	body := lipgloss.NewStyle().Foreground(cYellow).Faint(true)
 	indent := "   "
 	out := make([]string, 0, len(pending))
@@ -1400,7 +1397,7 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 			}
 		}
 	case "tool":
-		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("⚙  ")
+		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render(ic(icCog) + "  ")
 		body := lipgloss.NewStyle().Foreground(cGray)
 		first := true
 		for _, ln := range srcLines {
@@ -1447,7 +1444,7 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		// First line is the "thought N words" summary, remaining lines are
 		// the full thinking body. Body is only rendered when expandedThoughts
 		// is on (set on the Model and threaded into rendered via allBlocks).
-		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("🧠  ")
+		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render(ic(icThought) + "  ")
 		summaryStyle := lipgloss.NewStyle().Foreground(cGray).Italic(true)
 		bodyStyle := lipgloss.NewStyle().Foreground(cGray).Italic(true)
 		// srcLines[0] is the summary; the rest is body (already collapsed
@@ -1465,7 +1462,7 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 		// raw stdout/stderr that claude saw. Rendered with a separate glyph
 		// and a slightly tighter body style — tool output is typically
 		// shell-formatted and benefits from a fixed-width feel.
-		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render("📤  ")
+		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render(ic(icToolOut) + "  ")
 		summaryStyle := lipgloss.NewStyle().Foreground(cGray)
 		bodyStyle := lipgloss.NewStyle().Foreground(cGray)
 		out = append(out, stampStr+glyph+summaryStyle.Render(srcLines[0]))

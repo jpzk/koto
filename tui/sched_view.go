@@ -150,7 +150,7 @@ func renderSchedRow(it schedItem, set []schedCol, msgW int, sel bool) string {
 		switch c {
 		case schedColOn:
 			if it.Enabled {
-				cells = append(cells, lipgloss.NewStyle().Foreground(cEmerald).Render(padCells(gl("✓", "+"), schedColW(c))))
+				cells = append(cells, lipgloss.NewStyle().Foreground(cEmerald).Render(padCells(gl(ic(icCheck), "+"), schedColW(c))))
 			} else {
 				cells = append(cells, gray.Render(padCells(gl("·", "-"), schedColW(c))))
 			}

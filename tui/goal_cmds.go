@@ -313,33 +313,33 @@ func formatGoalEvent(ev Event) string {
 func formatGoalEventRaw(ev Event) string {
 	switch ev.Event {
 	case "goal_set":
-		return fmt.Sprintf("◎ goal %s set", ev.ID)
+		return fmt.Sprintf("%s goal %s set", ic(icGoal), ev.ID)
 	case "goal_plan":
-		return fmt.Sprintf("◎ goal %s: planning", ev.ID)
+		return fmt.Sprintf("%s goal %s: planning", ic(icGoal), ev.ID)
 	case "goal_awaiting":
-		return fmt.Sprintf("◎ goal %s: plan ready — /goals approve to start", ev.ID)
+		return fmt.Sprintf("%s goal %s: plan ready — /goals approve to start", ic(icGoal), ev.ID)
 	case "goal_iter":
-		return fmt.Sprintf("◎ goal %s: iteration %s", ev.ID, ev.Text)
+		return fmt.Sprintf("%s goal %s: iteration %s", ic(icGoal), ev.ID, ev.Text)
 	case "goal_judge":
-		return fmt.Sprintf("⚖ goal %s: completion claimed — reviewing", ev.ID)
+		return fmt.Sprintf("%s goal %s: completion claimed — reviewing", ic(icScale), ev.ID)
 	case "goal_verdict":
 		if ev.Name == "met" {
-			return fmt.Sprintf("⚖ goal %s: verdict MET", ev.ID)
+			return fmt.Sprintf("%s goal %s: verdict MET", ic(icScale), ev.ID)
 		}
-		return fmt.Sprintf("⚖ goal %s: verdict unmet — %s", ev.ID, truncRunes(ev.Text, 120))
+		return fmt.Sprintf("%s goal %s: verdict unmet — %s", ic(icScale), ev.ID, truncRunes(ev.Text, 120))
 	case "goal_met":
-		return fmt.Sprintf("✅ goal %s MET", ev.ID)
+		return fmt.Sprintf("%s goal %s MET", ic(icMet), ev.ID)
 	case "goal_paused":
-		return fmt.Sprintf("⏸ goal %s paused (%s)", ev.ID, ev.Text)
+		return fmt.Sprintf("%s goal %s paused (%s)", ic(icPause), ev.ID, ev.Text)
 	case "goal_resumed":
 		if ev.Text != "" {
-			return fmt.Sprintf("▶ goal %s %s", ev.ID, ev.Text)
+			return fmt.Sprintf("%s goal %s %s", ic(icPlay), ev.ID, ev.Text)
 		}
-		return fmt.Sprintf("▶ goal %s resumed", ev.ID)
+		return fmt.Sprintf("%s goal %s resumed", ic(icPlay), ev.ID)
 	case "goal_cancelled":
-		return fmt.Sprintf("✗ goal %s cancelled", ev.ID)
+		return fmt.Sprintf("%s goal %s cancelled", ic(icCross), ev.ID)
 	case "goal_exhausted":
-		return fmt.Sprintf("✗ goal %s exhausted — hit its iteration cap without completing, handed to the coordinator", ev.ID)
+		return fmt.Sprintf("%s goal %s exhausted — hit its iteration cap without completing, handed to the coordinator", ic(icCross), ev.ID)
 	}
 	return "goal event: " + ev.Event
 }

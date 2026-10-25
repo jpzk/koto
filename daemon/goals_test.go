@@ -890,6 +890,7 @@ func TestCtlGoalVerbAuthorization(t *testing.T) {
 func TestCtlGoalSetAndStatusFromMain(t *testing.T) {
 	goalTestSetup(t)
 	const g = "goal-ctlset1"
+	sec172RegisterGroups(t, g)
 	withTurnFn(func(_, _, _ string) error { return nil }, func() {
 		// goal_set + goal_status via ctl from main. Plan-first so the goal
 		// parks at awaiting_approval deterministically instead of racing to
@@ -1002,6 +1003,7 @@ func TestCtlGoalDoneAndVerdictWindowGated(t *testing.T) {
 
 func TestCtlSendReservedSessionRejected(t *testing.T) {
 	goalTestSetup(t)
+	sec172RegisterGroups(t, "peer")
 	// Both the per-goal names and the pre-per-id ones left behind by older
 	// runs: reservation is by prefix, so every "goal-" session is refused.
 	for _, sess := range []string{

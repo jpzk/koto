@@ -359,11 +359,13 @@ disk together, as one named preset (defined in `fcSizePresets`, `fc.go`):
   is read by `fcMachineCfg` (machine-config) and `fcWorkspaceDiskBytes` (disk)
   at the next `fcSpawn`.
 - **Disk grows, never shrinks.** `fcEnsureWorkspaceImg` grows an existing
-  `workspace.img` offline on the host (the VM is stopped during `ensure()`):
-  `truncate` the sparse backing file → `e2fsck -fy` → `resize2fs`. Shrinking is
-  never attempted (protects workspace data), so `large`→`small` drops RAM/vCPU
-  on the next boot but leaves the disk at its grown size. `resize2fs` comes from
-  Alpine's `e2fsprogs-extra` (`host/Dockerfile`).
+  `workspace.img` by `truncate`-ing the sparse backing file on the host (the VM is
+  stopped during `ensure()`). The host runs no filesystem tool on the
+  guest-authored image; on the next boot the guest agent sees the device is
+  larger than the filesystem and runs `resize2fs /dev/vdb` online (best effort,
+  logged, never blocks boot). Shrinking is never attempted (protects workspace
+  data), so `large`→`small` drops RAM/vCPU on the next boot but leaves the disk
+  at its grown size.
 - **Legacy override.** Raw `vcpus` / `mem_mib` config keys still layer on top of
   the resolved preset (clamped 1–32 and 128–65536 MiB), so any hand-tuned group
   keeps working. There is no raw disk-size override — disk follows the preset.
@@ -685,9 +687,9 @@ doesn't (see "Host resource limits" above). The jail contributes
 `CLONE_NEWCGROUP` (the VMM can't see the host hierarchy) and the shim's
 `nice=10`.
 
-**Not (yet) covered.** The e2fsck/resize2fs host-side parse of the
-guest-writable `workspace.img` (trust-model gap #2) still runs unjailed;
-that's a separate follow-up.
+**Workspace image.** The host no longer parses the guest-writable
+`workspace.img`: a grow is `truncate` only and the guest runs `resize2fs`
+online (trust-model gap #2 closed for the grow path).
 
 ## Containers (rootless podman in the guest)
 

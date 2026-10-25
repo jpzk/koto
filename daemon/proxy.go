@@ -877,7 +877,14 @@ type llmRoute struct {
 var llmRoutesAnthropic = []llmRoute{
 	{http.MethodPost, "/v1/messages", false},
 	{http.MethodPost, "/v1/messages/count_tokens", false},
-	{http.MethodPost, "/v1/chat/completions", false},
+	// POST /v1/chat/completions (Anthropic's OpenAI-compatible endpoint) was
+	// here until 1.7.2 (audit proxy/chat-completions-budget-bypass). Its
+	// responses carry OpenAI-shaped usage (prompt_tokens/completion_tokens)
+	// that budgetRecordSpend does not count, so every call through it spent
+	// outside tokens_per_day / usd_per_day / usd_per_month. No koto client
+	// calls it (1 request in 138,494), so the route is removed rather than
+	// metered: a second usage dialect would need its own streaming-chunk
+	// parsing, and any gap there would reopen the same unmetered path.
 	{http.MethodGet, "/v1/models", false},
 	{http.MethodGet, "/v1/models/", true},
 	{http.MethodGet, "/api/hello", false},
@@ -1023,6 +1030,9 @@ func proxyForgetGroup(group string) {
 	proxyInflightMu.Lock()
 	delete(proxyInflightGroup, group)
 	proxyInflightMu.Unlock()
+	proxyBodyGroupMu.Lock()
+	delete(proxyBodyGroup, group)
+	proxyBodyGroupMu.Unlock()
 }
 
 // --- 2026-09-11 M15: an aggregate byte budget, not just a request count ------
@@ -1043,27 +1053,74 @@ func proxyForgetGroup(group string) {
 // answers 503, the same "come back" the slot wait already answers with.
 const proxyBodyBudget = 512 << 20
 
-var proxyBodyCharged atomic.Int64
+// proxyBodyBudgetPerGroup is one group's share of proxyBodyBudget (koto
+// 1.7.1 audit proxy/global-body-budget-starvation). With only the global
+// counter, one guest holding 32 in-flight bodies of up to 64 MiB could spend
+// the whole 512 MiB on its own and every OTHER group's next body read
+// answered 503 — a fleet-wide LLM-egress outage from a single peer. Capping a
+// group at a quarter of the pool keeps that peer's damage inside its own
+// share: the rest of the fleet always has at least 384 MiB, and the global
+// ceiling still bounds the heap whatever the number of groups. Two
+// maximum-size (proxyMaxBody) bodies still fit, so no legitimate single
+// request is refused by the share alone.
+const proxyBodyBudgetPerGroup = proxyBodyBudget / 4
 
-// budgetReader charges every byte it yields against the global budget and
-// fails the read once the budget is gone.
+var (
+	proxyBodyCharged atomic.Int64
+
+	proxyBodyGroupMu sync.Mutex
+	proxyBodyGroup   = map[string]*atomic.Int64{}
+)
+
+// proxyGroupBodyCounter returns the group's byte counter, creating it on
+// first use. proxyForgetGroup drops it; a refund closure that still holds the
+// old pointer keeps working against that (now unreachable) counter.
+func proxyGroupBodyCounter(group string) *atomic.Int64 {
+	proxyBodyGroupMu.Lock()
+	defer proxyBodyGroupMu.Unlock()
+	c, ok := proxyBodyGroup[group]
+	if !ok {
+		c = new(atomic.Int64)
+		proxyBodyGroup[group] = c
+	}
+	return c
+}
+
+// budgetReader charges every byte it yields against the group's share and the
+// global budget, and fails the read once either is gone. The group share is
+// charged first, so a group already at its share never touches (or briefly
+// inflates) the global counter other groups are reading.
 type budgetReader struct {
-	r      io.Reader
-	n      int64 // charged so far by THIS reader
-	failed bool
+	r        io.Reader
+	group    *atomic.Int64
+	n        int64 // charged so far by THIS reader (to both counters)
+	failed   bool
+	perGroup bool // the refusal was the group's share, not the fleet ceiling
 }
 
 func (b *budgetReader) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	if n > 0 {
+		if b.group.Add(int64(n)) > proxyBodyBudgetPerGroup {
+			b.group.Add(-int64(n))
+			b.failed, b.perGroup = true, true
+			return 0, errProxyBodyBudget
+		}
 		if proxyBodyCharged.Add(int64(n)) > proxyBodyBudget {
 			proxyBodyCharged.Add(-int64(n))
+			b.group.Add(-int64(n))
 			b.failed = true
 			return 0, errProxyBodyBudget
 		}
 		b.n += int64(n)
 	}
 	return n, err
+}
+
+// release refunds everything this reader charged, to both counters.
+func (b *budgetReader) release() {
+	proxyBodyCharged.Add(-b.n)
+	b.group.Add(-b.n)
 }
 
 var errProxyBodyBudget = errors.New("proxy body budget exhausted")
@@ -1107,7 +1164,8 @@ func (s *proxyStallReader) Read(p []byte) (int, error) {
 func (s *proxyStallReader) clear() { _ = s.rc.SetReadDeadline(time.Time{}) }
 
 // readRequestBody buffers a request body under both bounds — per request
-// (proxyMaxBody) and fleet-wide (proxyBodyBudget) — and returns the release
+// (proxyMaxBody), per group (proxyBodyBudgetPerGroup) and fleet-wide
+// (proxyBodyBudget) — and returns the release
 // that gives the bytes back. The release must run when the body stops being
 // referenced, i.e. after the last retry attempt, not after the first.
 func readRequestBody(w http.ResponseWriter, r *http.Request, group string) (body []byte, release func(), ok bool) {
@@ -1116,9 +1174,9 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, group string) (body
 	}
 	sr := newProxyStallReader(w, http.MaxBytesReader(w, r.Body, proxyMaxBody))
 	defer sr.clear()
-	br := &budgetReader{r: sr}
+	br := &budgetReader{r: sr, group: proxyGroupBodyCounter(group)}
 	b, err := io.ReadAll(br)
-	rel := func() { proxyBodyCharged.Add(-br.n) }
+	rel := br.release
 	if err != nil {
 		rel()
 		if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -1128,6 +1186,15 @@ func readRequestBody(w http.ResponseWriter, r *http.Request, group string) (body
 					group, proxyReadStall)
 			}
 			http.Error(w, "koto proxy: request body stalled", http.StatusRequestTimeout)
+			return nil, nil, false
+		}
+		if br.failed && br.perGroup {
+			if llmFlowSeen.allow("bodybudgetgroup|" + group) {
+				emitLogfG("llm", group, "warn",
+					"[%s] refusing request: group request-body share (%d MiB) exhausted",
+					group, proxyBodyBudgetPerGroup>>20)
+			}
+			http.Error(w, "koto proxy: request-body memory budget exhausted; retry shortly", http.StatusServiceUnavailable)
 			return nil, nil, false
 		}
 		if br.failed {
@@ -1290,6 +1357,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseBody()
+	// network=none: no server-executed tools (they reach third-party hosts
+	// from Anthropic's side) and only allowlisted betas. Checked on the
+	// guest's bytes, before any rewrite, credential or upstream contact
+	// (proxy_servertools.go).
+	netNone := proxyNetworkNone(h.group)
+	if netNone {
+		if why := proxyServerToolReason(body); why != "" {
+			proxyRefuseServerTool(w, h.group, why)
+			return
+		}
+	}
 	model := budgetModelFromBody(body)
 	// Ask the API to surface a readable SUMMARY of the model's reasoning.
 	// Newer models (claude-sonnet-5, opus-4.7/4.8, fable-5) default
@@ -1317,7 +1395,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Merge the client's anthropic-beta list with ours once, outside the
 	// request builder, so the builder is a pure idempotent function of
 	// (body, headers, ah) safe to call once per retry attempt.
-	clientBeta := r.Header.Get("anthropic-beta")
+	clientBeta := strings.Join(r.Header.Values("anthropic-beta"), ",")
+	if netNone {
+		kept, dropped := proxyFilterBeta(clientBeta)
+		if len(dropped) > 0 && llmFlowSeen.allow("betadrop|"+h.group+"|"+strings.Join(dropped, ",")) {
+			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none allowlist)",
+				h.group, flattenInline(strings.Join(dropped, ",")))
+		}
+		clientBeta = strings.Join(kept, ",")
+	}
 	mergedBeta := strings.Trim(strings.Trim(strings.Join([]string{clientBeta, ah["anthropic-beta"]}, ","), ","), ",")
 
 	mkReq := func() (*http.Request, error) {
@@ -1328,8 +1414,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
+		// Allowlist, not denylist: arbitrary guest headers are not relayed
+		// (proxyFwdHeaders). anthropic-beta goes as the merged value below.
 		for k, vs := range r.Header {
-			if hopByHop[strings.ToLower(k)] || strings.ToLower(k) == "anthropic-beta" {
+			if !proxyForwardHeader(k) {
 				continue
 			}
 			for _, v := range vs {

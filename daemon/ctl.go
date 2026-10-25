@@ -277,6 +277,9 @@ func ctlDispatch(owner string, line []byte) any {
 		if !groupNameRE.MatchString(req.Group) { // see goal_set: existing-group reference
 			return errResp("ctl: invalid group name")
 		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
 		// Enqueue onto the target's send queue and ack immediately. The queue
 		// worker runs the turn; the ctl connection handling the command never
 		// blocks behind a peer's turn (up to turnWaitTimeout, 25m), so it stays
@@ -435,11 +438,7 @@ func ctlDispatch(owner string, line []byte) any {
 		if err != nil {
 			return errResp("ctl: " + err.Error())
 		}
-		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-		if len(lines) > req.N {
-			lines = lines[len(lines)-req.N:]
-		}
-		return ctlTailResp{baseResp{OK: true}, strings.Join(lines, "\n")}
+		return ctlTailResp{baseResp{OK: true}, ctlTailFence(req.Group, string(b), req.N)}
 
 	case "job_done":
 		// Self-targeted (like sched_*): any group may signal completion of its
@@ -674,6 +673,9 @@ func ctlDispatch(owner string, line []byte) any {
 		if !groupNameRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")
 		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
 		plan := req.Plan == nil || *req.Plan
 		// A main caller always targets a PEER here (its own group is refused
 		// above), and the whole point of plan-first on that path is the human
@@ -799,6 +801,9 @@ func ctlDispatch(owner string, line []byte) any {
 		if !groupNameRE.MatchString(req.Group) {
 			return errResp("ctl: invalid group name")
 		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
 		it, err := addSched(req.Group, req.Cron, req.Msg)
 		if err != nil {
 			return errResp(err.Error())
@@ -859,4 +864,18 @@ func ctlDispatch(owner string, line []byte) any {
 	default:
 		return errResp("ctl: verb not allowed: " + env.Cmd)
 	}
+}
+
+// ctlRequireRegistered refuses a ctl verb that targets a group which does not
+// exist (sec-172). send, sched_add and goal_set used to accept any name that
+// matched groupNameRE, so main could make the daemon create host-side
+// directories, queues, schedules and goal records for invented groups — the
+// gRPC verbs already refuse that (registeredGroup, audit M29); the ctl plane
+// now does too. The caller's own group is socket-derived and always real, and
+// main is not a peer entry, so both pass.
+func ctlRequireRegistered(owner, g string) error {
+	if g == owner || g == ctlMainGroup || registeredGroup(g) {
+		return nil
+	}
+	return fmt.Errorf("ctl: no such group %s — spawn it first", g)
 }

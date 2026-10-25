@@ -69,7 +69,7 @@ func TestInstallHintNamesTheRightPackageManager(t *testing.T) {
 // unrefreshed token rather than as a setup error. If you add an exec.Command
 // to the daemon's runtime path, add it here too.
 func TestRuntimeToolsCoverEveryShellOut(t *testing.T) {
-	want := []string{"mkfs.ext4", "e2fsck", "resize2fs", "tar", "newuidmap", "newgidmap", "claude"}
+	want := []string{"mkfs.ext4", "tar", "newuidmap", "newgidmap", "claude"}
 	got := map[string]bool{}
 	for _, c := range checkRuntimeTools() {
 		got[c.name] = true

@@ -435,6 +435,12 @@ type Model struct {
 	focus focusZone
 
 	treeIdx int
+	// treeTop is the first treeRows index drawn in the tree pane — its
+	// scroll offset when the fleet has more rows than the pane is tall.
+	// Clamped after every Update (clampTreeTop) so the cursor stays inside
+	// the window; renderTree and treeRowAt re-derive it through the same
+	// pure treeWindow so a stale value can never hide the cursor.
+	treeTop int
 	// treeSel is the identity (group, session, job; branch always "") of the
 	// row treeIdx points at — the selection anchor. treeRows() changes shape
 	// out from under the flat index without any keypress: jobs insert
@@ -1916,6 +1922,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	nm.normalizeTreeCursor()
+	nm.clampTreeTop()
 	return nm, cmd
 }
 
@@ -2782,9 +2789,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyActivity(ev)
 			}
 		case "sched_fired", "sched_run":
-			tag := "⏰"
+			tag := ic(icAlarm)
 			if ev.Event == "sched_run" {
-				tag = "▶"
+				tag = ic(icPlay)
 			}
 			m.addLine(logLine{kind: "sys", group: ev.Group,
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
@@ -2963,7 +2970,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		for _, s := range msg.items {
 			mark := "·"
 			if s.Enabled {
-				mark = "✓"
+				mark = ic(icCheck)
 			}
 			next := formatRelative(s.NextDueAt)
 			if !s.Enabled {
