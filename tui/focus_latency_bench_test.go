@@ -64,7 +64,7 @@ func (discardShellStream) Send(*pb.ShellInput) error { return nil }
 // goal sessions and jobs each), resource metrics for the top/status bars, a
 // populated markdown transcript for the focused group, and several groups
 // mid-turn so the 80ms spinner chain is running.
-func focusFleet(b *testing.B) Model {
+func focusFleet(b testing.TB) Model {
 	b.Helper()
 	const nGroups = 32
 	m := newModel("", 200000)
@@ -147,7 +147,7 @@ func shellScreen(rows int) []byte {
 
 // openShell attaches a stub shared terminal sized like the real pane, paints
 // a full screen into it and moves focus there.
-func openShell(b *testing.B, m Model) Model {
+func openShell(b testing.TB, m Model) Model {
 	b.Helper()
 	m.shellOpen = true
 	w, h := m.shellPaneSize()

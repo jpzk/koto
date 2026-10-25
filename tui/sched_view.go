@@ -205,6 +205,7 @@ func (m *Model) resizeSchedViewport() {
 	w, h := m.schedPaneSize()
 	m.schedVP.Width = w
 	m.schedVP.Height = h
+	m.cloneSchedInputs()
 	m.schedInput.Width = max(10, w-4)
 	m.schedSearch.Width = max(10, min(40, w-4))
 }
@@ -474,10 +475,10 @@ func (m *Model) enterSched() tea.Cmd {
 		m.schedVP = vp
 		ti := textinput.New()
 		ti.Prompt = ""
-		m.schedInput = ti
+		m.schedInput = &ti
 		si := textinput.New()
 		si.Prompt = "/" // the vim/less idiom: the keypress IS the prompt
-		m.schedSearch = si
+		m.schedSearch = &si
 		m.schedVPReady = true
 	}
 	if m.focus != focusSched {
@@ -584,7 +585,7 @@ func (m *Model) submitSchedEdit() tea.Cmd {
 // except enter/esc — t/r/d/e while typing are query characters, never ops),
 // the edit box (same ownership), the armed delete confirm (y/d confirm,
 // anything else disarms), then the normal bindings.
-func (m Model) handleSchedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleSchedKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	s := msg.String()
 	if m.schedSearching {
 		switch s {
@@ -604,7 +605,7 @@ func (m Model) handleSchedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var cmd tea.Cmd
-		m.schedSearch, cmd = m.schedSearch.Update(msg)
+		*m.schedSearch, cmd = m.schedSearch.Update(msg)
 		if v := m.schedSearch.Value(); v != m.schedFilter {
 			m.schedFilter = v
 			m.schedIdx = 0 // rank order: best match on top after every edit
@@ -627,7 +628,7 @@ func (m Model) handleSchedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.submitSchedEdit()
 		}
 		var cmd tea.Cmd
-		m.schedInput, cmd = m.schedInput.Update(msg)
+		*m.schedInput, cmd = m.schedInput.Update(msg)
 		return m, cmd
 	}
 	if m.schedConfirm != "" {

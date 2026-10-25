@@ -125,7 +125,7 @@ func (f *newGroupForm) noProviderLogin() bool {
 // current provider when still offered, and reloads the model list when the
 // provider changed under it.
 func (m *Model) handleProvidersLoaded(msg providersLoadedMsg) tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	if !f.open || f.prov.state != provLoading {
 		return nil
 	}

@@ -173,7 +173,7 @@ func (m *Model) openPalette() {
 	ti.CharLimit = 0
 	ti.Width = 60
 	ti.Focus()
-	m.picker = pickerState{
+	m.picker = &pickerState{
 		open:    true,
 		mode:    pickerPalette,
 		input:   ti,
@@ -256,7 +256,7 @@ func (m *Model) openGroupPicker() {
 	ti.CharLimit = 0
 	ti.Width = 60
 	ti.Focus()
-	m.picker = pickerState{
+	m.picker = &pickerState{
 		open:    true,
 		mode:    pickerGroups,
 		input:   ti,

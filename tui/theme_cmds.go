@@ -95,7 +95,7 @@ func (m *Model) openThemePicker() {
 	ti.CharLimit = 0
 	ti.Width = 60
 	ti.Focus()
-	m.picker = pickerState{
+	m.picker = &pickerState{
 		open:        true,
 		mode:        pickerThemes,
 		input:       ti,

@@ -481,7 +481,7 @@ func (m Model) portrait() bool { return m.width < m.height*2 }
 // It's also the only layout that survives the shape at all — under 101 cols
 // (125 with the tree showing) the side-by-side split drops the chat column
 // entirely, and a portrait terminal is usually under that.
-func (m Model) shellSplitMode() shellSplit {
+func (m *Model) shellSplitMode() shellSplit {
 	if m.fullscreen {
 		// Fullscreen collapses the split: the focused pane owns the frame —
 		// the pty when focus is on it (renderShellView falls into its
@@ -535,7 +535,7 @@ func (m Model) shellChatW() int {
 // the pty below would be resized — a guest-side reflow per keystroke. Instead
 // the box grows into the transcript above it, exactly as it does in the normal
 // chat view, and maxInputRows caps it so the half can always hold both.
-func (m Model) shellChatBlockH() int {
+func (m *Model) shellChatBlockH() int {
 	if m.shellSplitMode() != shellSplitRows {
 		return 0
 	}
@@ -546,7 +546,7 @@ func (m Model) shellChatBlockH() int {
 // shellChatBlockW is the chat half's total width in whichever split is on
 // screen: the full frame (less the tree) when stacked, the left column when
 // side by side, 0 when there is no split.
-func (m Model) shellChatBlockW() int {
+func (m *Model) shellChatBlockW() int {
 	if m.shellSplitMode() == shellSplitRows {
 		return m.shellAvailW()
 	}
@@ -799,7 +799,7 @@ func (m *Model) closeShell() {
 // False when the pane is closed, when the log view covers everything, and when
 // the terminal is too small to split at all (there the pane only shows
 // fullscreen, while focused).
-func (m Model) shellSplitVisible() bool {
+func (m *Model) shellSplitVisible() bool {
 	// focusLog AND focusTop: view() dispatches on both BEFORE the shell and
 	// returns a whole frame, so the pane is not on screen under either — and
 	// this predicate is what the mouse router hit-tests against (audit
@@ -825,7 +825,7 @@ func (m Model) shellSplitVisible() bool {
 // "no shared shell attached" pane (m.shell == nil) renders through
 // renderShellView while shellSplitVisible says false — budgeting that frame
 // against the plain chat view's rows would over-run the terminal height.
-func (m Model) shellViewActive() bool {
+func (m *Model) shellViewActive() bool {
 	return m.focus == focusShell || m.shellSplitVisible()
 }
 
@@ -839,7 +839,7 @@ func (m Model) shellViewActive() bool {
 // chat view reserved the bottom half of the frame for a terminal nobody had
 // opened — 70x60 gave the transcript 25 rows instead of 54 and left the rest
 // blank.
-func (m Model) shellStackChatH() int {
+func (m *Model) shellStackChatH() int {
 	if !m.shellViewActive() {
 		return 0
 	}
@@ -884,7 +884,7 @@ func (m *Model) syncShellSize() {
 //
 // Mouse events are forwarded too — see forwardShellMouse below — and so is
 // bracketed paste, via the emulator (the Paste case below).
-func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleShellKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.shell == nil {
 		return m, nil
 	}
