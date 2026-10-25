@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/vt"
 	"github.com/muesli/termenv"
 )
 
@@ -52,6 +53,16 @@ type frameCache struct {
 	ir inputRowsMemo
 
 	hits int // fast-path frames served (tests)
+
+	// Shell layout (shellframe.go): the chrome around the pty, keyed on
+	// viewGen like the regions above, and the pty body, keyed on the
+	// emulator's write generation.
+	shell     shellChrome
+	body      shellBody
+	shellHits int // chrome cache hits (tests)
+	// The emulator rows last rendered (screenRows).
+	rowTerm  *vt.Emulator
+	rowCache []screenRow
 }
 
 // frameGuard is the cheap part of the cache key; gen is the authoritative

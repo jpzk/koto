@@ -718,6 +718,10 @@ type Model struct {
 	frame       *frameCache
 	viewGen     uint64
 	keyEditOnly bool
+	// shellOnly is keyEditOnly's twin for the shared terminal: set by a
+	// handler whose only effect was on the pty (a key forwarded to the guest,
+	// guest output fed to the emulator) — see shellframe.go.
+	shellOnly bool
 
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see
@@ -1932,13 +1936,14 @@ func startWatchState() {
 // the two.
 func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	m.cloneOpenModals()
-	m.keyEditOnly = false
+	m.keyEditOnly, m.shellOnly = false, false
 	nm, cmd := m.update(raw)
-	if nm.keyEditOnly {
-		// A pure prompt edit (framecache.go): nothing treeRows reads changed,
+	if nm.keyEditOnly || nm.shellOnly {
+		// A pure prompt edit (framecache.go) or a pty-only message
+		// (shellframe.go): nothing treeRows reads changed,
 		// so the cursor is still where the last message left it, and the
 		// off-prompt regions of the last frame are still this frame's.
-		nm.keyEditOnly = false
+		nm.keyEditOnly, nm.shellOnly = false, false
 		return nm, cmd
 	}
 	nm.viewGen = nextViewGen()
@@ -3111,6 +3116,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		// Stale frame from a superseded session (detach+reattach in quick
 		// succession, or a group switch that started a new one) — drop it.
 		if m.shell == nil || msg.id != m.shell.id {
+			m.shellOnly = true // dropped: nothing changed
 			return m, nil
 		}
 		if len(msg.data) > 0 {
@@ -3121,7 +3127,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		if msg.end || msg.errText != "" {
 			m.shell.ended = true
 			m.shell.errText = msg.errText
+			return m, nil
 		}
+		// Guest output and nothing else: only the pty body changes (shellframe.go).
+		m.shellOnly = true
 		return m, nil
 
 	case shellChaseMsg:
