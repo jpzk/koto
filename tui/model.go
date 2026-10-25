@@ -631,6 +631,10 @@ type Model struct {
 	// destroyConfirm is the ctrl+x confirmation modal (destroy_confirm.go).
 	// Not a focus zone either: it owns key routing while open.
 	destroyConfirm destroyConfirmState
+	// sessDestroying marks sessKey(g, s) of session destroys sent from the
+	// ctrl+x modal and not yet answered; the "clear" response finishes them
+	// (finishSessionDestroy) — a plain /clear leaves the session selected.
+	sessDestroying map[string]bool
 	// ctrl+s stop confirmation modal (stop_confirm.go).
 	stopConfirm stopConfirmState
 
@@ -4069,6 +4073,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 		return nil
 	case "clear":
 		if msg.err != nil {
+			delete(m.sessDestroying, sessKey(msg.group, msg.session))
 			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("clear: %v", msg.err)})
 			return nil
 		}
@@ -4108,6 +4113,9 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			delete(m.streamBuf, turnKey(msg.group, target))
 		}
 		m.groupVer[msg.group]++
+		if m.sessDestroying[sessKey(msg.group, msg.session)] {
+			m.finishSessionDestroy(msg.group, msg.session)
+		}
 		// A history page already in flight describes the transcript that was
 		// just wiped; without this it would be appended back into the view.
 		m.invalidateHistory(msg.group)
@@ -4496,7 +4504,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s == "ctrl+x" && m.focus == focusInput {
 		// Destroy-hovered is a tree binding (see destroy_confirm.go) — from
 		// the message bar, point at it rather than guess a target.
-		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group — tab into the tree first"})
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group / session — tab into the tree first"})
 		return m, nil
 	}
 	if s == "ctrl+s" && m.focus == focusInput {
@@ -4535,9 +4543,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "ctrl+x":
-			// Destroy the hovered group, behind a confirmation modal
-			// (destroy_confirm.go). Session/job rows target their parent
-			// group; main and goal-* rows are refused inline.
+			// Destroy the hovered group or session, behind a confirmation
+			// modal (destroy_confirm.go). Session rows target that session
+			// (daemon Clear), job rows their parent group; main and goal-*
+			// rows are refused inline.
 			m.openDestroyConfirm()
 			return m, nil
 		case "ctrl+s":
