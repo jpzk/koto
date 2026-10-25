@@ -302,6 +302,10 @@ dist: $(ARTIFACTS)
 	  exit 1; \
 	fi
 	@mkdir -p $(DIST_DIR)
+	@# Clear THIS arch's assets from earlier runs first: SHA256SUMS hashes every
+	@# *_<arch>.zst in the directory, so a leftover would be listed and signed.
+	@# Assets are <name>_<version>_<arch>.zst — the separator is '_', not '-'.
+	@rm -f $(DIST_DIR)/*_$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 	@echo "==> packaging koto $(DIST_VERSION) for $(DIST_ARCH)"
 	@for a in $(ARTIFACTS); do \
 	  v=$(call assetver,$$a); \
@@ -325,8 +329,12 @@ dist: $(ARTIFACTS)
 	@# release. The security anchor is dist/artifacts.sha256, which is
 	@# COMMITTED and therefore arrives over git rather than over the same
 	@# connection as the bytes it vouches for.
-	@rm -f $(DIST_DIR)/*-$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS.asc
-	@( cd $(DIST_DIR) && sha256sum *_$(DIST_ARCH).zst > SHA256SUMS )
+	@# The first line binds the signature to THIS release: install.sh and
+	@# koto update refuse a SHA256SUMS whose koto-version is not the version
+	@# they were asked for, so an older signed set cannot be replayed under a
+	@# newer tag (or by a mirror).
+	@( cd $(DIST_DIR) && { echo "# koto-version: $$(echo '$(DIST_VERSION)' | sed 's/^v//')"; \
+	    sha256sum *_$(DIST_ARCH).zst; } > SHA256SUMS )
 	@echo "    SHA256SUMS over the uploaded assets"
 	@# Signing is SEPARATE and may happen elsewhere. The release key should not
 	@# have to live on a build host, so dist signs only if the secret key
@@ -430,6 +438,9 @@ release:
 	  echo "!! $(DIST_DIR)/SHA256SUMS.asc is not a good signature from $(RELEASE_KEY_FPR)"; \
 	  echo "   Nothing was uploaded."; exit 1; }
 	@echo "==> signature verified: $(RELEASE_KEY_FPR)"
+	@test "$$(sed -n 's/^# koto-version: //p' $(DIST_DIR)/SHA256SUMS)" = "$$(echo '$(DIST_VERSION)' | sed 's/^v//')" || { \
+	  echo "!! $(DIST_DIR)/SHA256SUMS does not say '# koto-version: $(DIST_VERSION)' - install.sh would refuse it."; \
+	  echo "   Re-run 'make dist' and sign the new file. Nothing was uploaded."; exit 1; }
 	@test "$$($(GH_RELEASE) view $(DIST_VERSION) --json isDraft --jq .isDraft 2>/dev/null)" = true || { \
 	  echo "!! no draft release $(DIST_VERSION) on $(GH_REPO) - run 'make release-draft' first"; exit 1; }
 	@# The uploaded SHA256SUMS must be the file that was signed.
