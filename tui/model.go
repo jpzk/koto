@@ -722,6 +722,9 @@ type Model struct {
 	// handler whose only effect was on the pty (a key forwarded to the guest,
 	// guest output fed to the emulator) — see shellframe.go.
 	shellOnly bool
+	// bgQuiet: a background stream frame that changed only state no View
+	// region reads until the next spin tick (streamQuiet, framecache.go).
+	bgQuiet bool
 
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see
@@ -1936,14 +1939,14 @@ func startWatchState() {
 // the two.
 func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	m.cloneOpenModals()
-	m.keyEditOnly, m.shellOnly = false, false
+	m.keyEditOnly, m.shellOnly, m.bgQuiet = false, false, false
 	nm, cmd := m.update(raw)
-	if nm.keyEditOnly || nm.shellOnly {
+	if nm.keyEditOnly || nm.shellOnly || nm.bgQuiet {
 		// A pure prompt edit (framecache.go) or a pty-only message
 		// (shellframe.go): nothing treeRows reads changed,
 		// so the cursor is still where the last message left it, and the
 		// off-prompt regions of the last frame are still this frame's.
-		nm.keyEditOnly, nm.shellOnly = false, false
+		nm.keyEditOnly, nm.shellOnly, nm.bgQuiet = false, false, false
 		return nm, cmd
 	}
 	nm.viewGen = nextViewGen()
@@ -2001,6 +2004,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.flushPending = false
 		if m.liveDirty {
 			m.refreshLog()
+		} else {
+			// Nothing was left to paint (the tick already flushed it):
+			// flushPending is not read by View, so the last frame stands.
+			m.bgQuiet = true
 		}
 		return m, nil
 
@@ -2660,6 +2667,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			}
 			m.lastSeq[ev.Group] = ev.Seq
 		}
+		quiet := m.streamQuiet(ev)
 		switch ev.Event {
 		case "gap":
 			// The daemon couldn't cover our resume window (frames aged out of
@@ -2891,6 +2899,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 				flushCmd = m.markContentDirty()
 			}
 		}
+		m.bgQuiet = quiet
 		return m, tea.Batch(m.ensureTicking(), flushCmd)
 
 	case streamClosedMsg:

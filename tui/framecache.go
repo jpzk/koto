@@ -220,3 +220,36 @@ func boxEdgesFor(b lipgloss.Border, fg lipgloss.Color, w int) boxEdges {
 	boxEdgeMemo.Store(k, e)
 	return e
 }
+
+// streamQuiet reports whether a stream frame, about to be applied, changes
+// nothing any View region reads until the next spin tick. Under a busy fleet
+// these are most of the traffic (the daemon re-emits the whole in-flight text
+// per chunk), and each one would otherwise bump viewGen and pay a full frame
+// rebuild on the same loop the keystrokes wait on.
+//
+// The live-overlay buffers' CONTENTS are read only by liveOverlay, i.e. by
+// refreshLog, which the stream handler defers to the tick (liveDirty); View
+// reads only their PRESENCE (status/hint "streaming", isAnimating). So:
+//   - stream / thinking / thinking_stream are quiet when the buffer they
+//     write already exists (a delta, not the first frame of the overlay);
+//   - tool_result / tool_result_stream / tool_result_begin are always
+//     quiet: toolOut* and toolBeginTs are read only when tool_result_done
+//     turns them into a transcript line.
+//
+// It must be called BEFORE the frame is applied. Must stay in sync with the
+// stream handler in model.go; framecache_test.go pins it against a full
+// render.
+func (m *Model) streamQuiet(ev Event) bool {
+	k := turnKey(ev.Group, ev.Session)
+	switch ev.Event {
+	case "stream":
+		_, ok := m.streamBuf[k]
+		return ok
+	case "thinking", "thinking_stream":
+		_, ok := m.thinkingBuf[k]
+		return ok
+	case "tool_result", "tool_result_stream", "tool_result_begin":
+		return true
+	}
+	return false
+}
