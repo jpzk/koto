@@ -5363,7 +5363,7 @@ func TestCtlNotifyCannotClaimAReservedSession(t *testing.T) {
 // fcHostMemCommittedMiB sums fcVMs, so deleting first made a still-running VMM
 // invisible to fleet admission for the whole shutdown window; and the pidfile is
 // what fcRunning falls back to, which is the only thing standing between a live
-// VMM and fcGrowWorkspaceImg running truncate + e2fsck + resize2fs on the ext4
+// VMM and fcGrowWorkspaceImg truncating the ext4
 // image that process still has open.
 func TestFcStopKeepsTheEvidenceWhenTheKillDoesNotTake(t *testing.T) {
 	fcHarness(t)
