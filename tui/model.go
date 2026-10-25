@@ -435,6 +435,12 @@ type Model struct {
 	focus focusZone
 
 	treeIdx int
+	// treeTop is the first treeRows index drawn in the tree pane — its
+	// scroll offset when the fleet has more rows than the pane is tall.
+	// Clamped after every Update (clampTreeTop) so the cursor stays inside
+	// the window; renderTree and treeRowAt re-derive it through the same
+	// pure treeWindow so a stale value can never hide the cursor.
+	treeTop int
 	// treeSel is the identity (group, session, job; branch always "") of the
 	// row treeIdx points at — the selection anchor. treeRows() changes shape
 	// out from under the flat index without any keypress: jobs insert
@@ -1916,6 +1922,7 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	nm.normalizeTreeCursor()
+	nm.clampTreeTop()
 	return nm, cmd
 }
 

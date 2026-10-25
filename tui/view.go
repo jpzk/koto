@@ -811,7 +811,13 @@ func (m Model) renderTree(rows int) string {
 		}
 		active := m.activeSession(m.cur)
 		treeLive := m.treeCursorLive()
-		for i, r := range trows {
+		// Scroll window (tree_scroll.go): only rows [top, top+win) are drawn.
+		top, win := treeWindow(m.treeTop, m.treeIdx, len(trows), treeRowSlots(rows))
+		if top > 0 && len(lines) > 1 {
+			lines[1] = treeMoreMarker("↑", top)
+		}
+		for i := top; i < top+win; i++ {
+			r := trows[i]
 			// isCur marks the exact conversation being viewed: the group row
 			// is current only when its DEFAULT session is active; a named
 			// session row only when that session is. Job rows are peeked,
@@ -825,6 +831,9 @@ func (m Model) renderTree(rows int) string {
 			// compare by index, never index past the slice.
 			hov := treeLive && m.treeIdx == i
 			lines = append(lines, m.renderTreeRow(r, isCur, hov, unread, pad))
+		}
+		if below := len(trows) - (top + win); below > 0 && win > 0 {
+			lines = append(lines, treeMoreMarker("↓", below))
 		}
 	}
 
