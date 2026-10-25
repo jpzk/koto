@@ -26,12 +26,16 @@ func (m Model) treeRowAt(x, y int) int {
 		return -1
 	}
 	i := y - treeRowYOffset
-	// -2: renderTree's lines slice spends its first two rows on the header
-	// and spacer before the first navigable row.
-	if i < 0 || i >= len(m.treeRows()) || i >= m.treeBodyRows()-2 {
+	// renderTree spends its first two lines on the header and spacer; the
+	// pane then shows rows [top, top+win) of the scrolled window
+	// (tree_scroll.go). A click on a "more" marker or past the window maps
+	// to nothing.
+	n := len(m.treeRows())
+	top, win := treeWindow(m.treeTop, m.treeIdx, n, treeRowSlots(m.treeBodyRows()))
+	if i < 0 || i >= win || top+i >= n {
 		return -1
 	}
-	return i
+	return top + i
 }
 
 // treeBodyRows mirrors the height each View() composition hands renderTree.
@@ -42,7 +46,7 @@ func (m Model) treeBodyRows() int {
 		return h
 	case m.focus == focusTop:
 		_, h := m.topPaneSize()
-		return h + 2
+		return h + 2 + m.topMemRows() // matches top_view.go's renderTree call
 	case m.shellViewActive():
 		// Every shell layout — either split axis AND fullscreen-with-tree
 		// (small terminal, preShellFocus == focusTree) — hands renderTree the
