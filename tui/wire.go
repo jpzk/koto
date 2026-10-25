@@ -59,6 +59,10 @@ type GroupInfo struct {
 	// by the fleet (top) view; empty Network means an older daemon.
 	Network string
 	Root    bool
+	// SessionOrigins maps a live goal session to the named chat session its
+	// goal was set from (koto.proto GroupInfo.session_origins). treeRows
+	// nests those goal rows under the origin session's row.
+	SessionOrigins map[string]string
 }
 
 // JobInfo is one background job in a group's guest (koto.proto JobInfo).

@@ -477,18 +477,19 @@ func listGroups() map[string]GroupInfo {
 	for g, p := range readGroups() {
 		cfg := loadGroupConfig(g) // ONE read+parse for all five config knobs
 		out[g] = GroupInfo{
-			Port:      p,
-			Running:   fcRunning(g),
-			Provider:  cfg.provider(),
-			Model:     cfg.model(),
-			Effort:    cfg.effort(),
-			Stalled:   groupStalled(g),
-			Queued:    queueDepth(g),
-			Sessions:  append(listSessions(g), goalLiveSessions(g)...),
-			Jobs:      jobsSnapshot(g),
-			TokPerSec: rates[g],
-			Network:   cfg.network(),
-			Root:      cfg.root(),
+			Port:           p,
+			Running:        fcRunning(g),
+			Provider:       cfg.provider(),
+			Model:          cfg.model(),
+			Effort:         cfg.effort(),
+			Stalled:        groupStalled(g),
+			Queued:         queueDepth(g),
+			Sessions:       append(listSessions(g), goalLiveSessions(g)...),
+			SessionOrigins: goalSessionOrigins(g),
+			Jobs:           jobsSnapshot(g),
+			TokPerSec:      rates[g],
+			Network:        cfg.network(),
+			Root:           cfg.root(),
 		}
 	}
 	return out

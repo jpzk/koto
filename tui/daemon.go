@@ -245,7 +245,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			n, err := floatToInt32("max_iterations", v)
 			if err != nil {
@@ -433,17 +433,18 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 	out := map[string]GroupInfo{}
 	for g, gi := range f.GetGroups() {
 		out[g] = GroupInfo{
-			Running:   gi.GetRunning(),
-			Provider:  gi.GetProvider(),
-			Model:     gi.GetModel(),
-			Effort:    gi.GetEffort(),
-			Stalled:   gi.GetStalled(),
-			Queued:    int(gi.GetQueued()),
-			Sessions:  gi.GetSessions(),
-			Jobs:      pbToJobs(gi.GetJobs()),
-			TokPerSec: gi.GetTokPerSec(),
-			Network:   gi.GetNetwork(),
-			Root:      gi.GetRoot(),
+			Running:        gi.GetRunning(),
+			Provider:       gi.GetProvider(),
+			Model:          gi.GetModel(),
+			Effort:         gi.GetEffort(),
+			Stalled:        gi.GetStalled(),
+			Queued:         int(gi.GetQueued()),
+			Sessions:       gi.GetSessions(),
+			Jobs:           pbToJobs(gi.GetJobs()),
+			TokPerSec:      gi.GetTokPerSec(),
+			Network:        gi.GetNetwork(),
+			Root:           gi.GetRoot(),
+			SessionOrigins: gi.GetSessionOrigins(),
 		}
 	}
 	return out

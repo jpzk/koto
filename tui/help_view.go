@@ -77,7 +77,7 @@ func helpSections() []helpSection {
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
 			{"ctrl+t", "fold/unfold jobs on the current row (works mid-draft)"},
 			{"ctrl+s", "tree: stop hovered group VM (confirm modal, y = stop)"},
-			{"ctrl+x", "tree: destroy hovered group (confirm modal, y = destroy)"},
+			{"ctrl+x", "tree: destroy group / session (hovered row; confirm modal, y = destroy)"},
 			{"", "hovering a job row shows a live tail of its output"},
 		}},
 		{"TERMINAL PANE (while focused)", []helpEntry{
