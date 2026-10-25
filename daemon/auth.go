@@ -55,6 +55,10 @@ func serverTLSConfig() (*tls.Config, error) {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    pool,
 		MinVersion:   tls.VersionTLS13,
+		// No session resumption: a resumed TLS 1.3 session skips
+		// VerifyPeerCertificate, so a revoked device could reconnect on a
+		// ticket without the allowlist being consulted (sec-172).
+		SessionTicketsDisabled: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return errors.New("no client certificate")
@@ -159,7 +163,38 @@ func authFromCtx(ctx context.Context) (clientIdentity, error) {
 		emitLogf("auth", "warn", "rejected call from %s: client cert %q presented %q's token", peerAddr(ctx), cn, id.Name)
 		return clientIdentity{}, status.Error(codes.Unauthenticated, "client certificate and token name different identities")
 	}
+	// clients.allow is enforced per RPC, not only at the handshake (sec-172):
+	// gRPC multiplexes every call over one long-lived TLS connection, and a
+	// resumed session skips VerifyPeerCertificate, so a device whose line was
+	// deleted kept working until it reconnected from scratch.
+	if err := certStillAllowed(ctx); err != nil {
+		emitLogf("auth", "warn", "rejected call from %s (%s): %v", peerAddr(ctx), cn, err)
+		return clientIdentity{}, status.Error(codes.Unauthenticated, "client certificate revoked")
+	}
 	return id, nil
+}
+
+// certStillAllowed re-reads clients.allow and requires the peer leaf
+// certificate's SHA-256 fingerprint to still be listed. Fails closed: no
+// peer certificate or an unreadable allowlist is a refusal.
+func certStillAllowed(ctx context.Context) error {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.AuthInfo == nil {
+		return errors.New("no client certificate")
+	}
+	ti, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(ti.State.PeerCertificates) == 0 {
+		return errors.New("no client certificate")
+	}
+	fp := sha256.Sum256(ti.State.PeerCertificates[0].Raw)
+	allow, err := loadClientAllow()
+	if err != nil {
+		return fmt.Errorf("clients.allow: %w", err)
+	}
+	if !allow[hex.EncodeToString(fp[:])] {
+		return errors.New("client cert no longer in clients.allow")
+	}
+	return nil
 }
 
 // authBindingPreflight names every identity whose two credentials cannot
@@ -365,6 +400,10 @@ func (s *aclStream) revalidate() error {
 	if !ok {
 		emitLogf("acl", "warn", "%s: identity no longer in tokens.json — closing %s stream", s.id.Name, s.verb)
 		return status.Errorf(codes.Unauthenticated, "identity %s has been revoked", s.id.Name)
+	}
+	if err := certStillAllowed(s.ServerStream.Context()); err != nil {
+		emitLogf("acl", "warn", "%s: %v — closing %s stream", s.id.Name, err, s.verb)
+		return status.Errorf(codes.Unauthenticated, "client certificate of %s has been revoked", s.id.Name)
 	}
 	if !rolesAllowed(loadACL(), id.Roles, s.verb, target, targeted) {
 		emitLogfG("acl", aclLogGroup(target), "warn", "%s (roles %s) lost %s on %q — closing the stream",

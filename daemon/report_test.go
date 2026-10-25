@@ -118,6 +118,7 @@ func TestReportEmptyRefused(t *testing.T) {
 func TestReportSolicitedRoundTrip(t *testing.T) {
 	reportRoot(t)
 	const g = "rep-round"
+	sec172RegisterGroups(t, g)
 	rec := newTurnRecorder()
 	withTurnFn(rec.fn, func() {
 		br, ok := ctlDispatch(ctlMainGroup, ctlLine(t, map[string]any{
@@ -278,6 +279,7 @@ func TestReportRearmLatestWins(t *testing.T) {
 // turn into a goal loop.
 func TestReportFromSessionDegrades(t *testing.T) {
 	reportRoot(t)
+	sec172RegisterGroups(t, "rep-deg-bad", "rep-deg-goal")
 	for _, from := range []string{"../evil", "goal-x"} {
 		g := "rep-deg-" + map[string]string{"../evil": "bad", "goal-x": "goal"}[from]
 		rec := newTurnRecorder()

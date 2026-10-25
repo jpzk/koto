@@ -1403,6 +1403,8 @@ func TestStreamAuthzRevalidates(t *testing.T) {
 		target:   "main",
 		targeted: true,
 	}
+	var revokeCert func()
+	s.ServerStream, revokeCert = sec172AllowedPeerStream(t)
 	stale := func() { s.mu.Lock(); s.lastCheck = time.Now().Add(-time.Hour); s.mu.Unlock() }
 
 	stale()
@@ -1437,6 +1439,12 @@ func TestStreamAuthzRevalidates(t *testing.T) {
 	stale()
 	if err := s.revalidate(); err != nil {
 		t.Fatalf("widened grant still refused: %v", err)
+	}
+	// Deleting the device's clients.allow line closes the stream too (sec-172).
+	revokeCert()
+	stale()
+	if err := s.revalidate(); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("revoked client cert kept its stream: %v", err)
 	}
 }
 
