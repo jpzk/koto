@@ -14,7 +14,10 @@ package main
 import (
 	"flag"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +142,119 @@ func TestNerdSitesOffGolden(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("nerdFont=false output drifted from develop golden\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}
+
+// pictograph reports the emoji / dingbat blocks the Nerd Font swap must
+// clear: Misc Symbols + Dingbats (U+2600-27BF), the emoji planes
+// (U+1F300-1FAFF), and the media/hourglass run of Misc Technical (⏩-⏺).
+func pictograph(r rune) bool {
+	return (r >= 0x1f300 && r <= 0x1faff) || (r >= 0x2600 && r <= 0x27bf) ||
+		(r >= 0x23e9 && r <= 0x23fa)
+}
+
+func TestNerdSitesNoEmoji(t *testing.T) {
+	withNerdFont(t, true)
+	sites := nerdSites(t)
+	if len(sites) < 30 {
+		t.Fatalf("only %d sites rendered — harness lost coverage", len(sites))
+	}
+	for k, v := range sites {
+		for _, r := range v {
+			if pictograph(r) {
+				t.Errorf("%s: pictograph U+%04X left with nerdFont=true: %q", k, r, v)
+			}
+		}
+	}
+}
+
+// TestNerdSitesWidthParity: flipping the font never moves a column — every
+// rendered line is the same cell width in both modes.
+func TestNerdSitesWidthParity(t *testing.T) {
+	withNerdFont(t, false)
+	off := nerdSites(t)
+	nerdFont = true
+	on := nerdSites(t)
+	for k, v := range off {
+		ol, nl := strings.Split(v, "\n"), strings.Split(on[k], "\n")
+		if len(ol) != len(nl) {
+			t.Errorf("%s: %d lines off vs %d on", k, len(ol), len(nl))
+			continue
+		}
+		for i := range ol {
+			if cellWidth(ol[i]) != cellWidth(nl[i]) {
+				t.Errorf("%s line %d: width %d off vs %d on\noff %q\non  %q",
+					k, i, cellWidth(ol[i]), cellWidth(nl[i]), ol[i], nl[i])
+			}
+		}
+	}
+}
+
+func TestNerdIconWidths(t *testing.T) {
+	for _, i := range allIcons {
+		if cellWidth(i.nf) != cellWidth(i.plain) {
+			t.Errorf("icon %q/%q: nf %d cells, plain %d", i.nf, i.plain, cellWidth(i.nf), cellWidth(i.plain))
+		}
+		if !strings.ContainsFunc(i.nf, func(r rune) bool { return r >= 0xe000 && r <= 0xf8ff || r >= 0xf0000 }) {
+			t.Errorf("icon %q: nf form has no Private Use glyph", i.nf)
+		}
+	}
+}
+
+// TestNerdIconsMonoFallback: every Nerd Font codepoint — in the icon table
+// and anywhere written as an escape in nerdfont.go — folds to a same-width
+// ASCII stand-in under mono.
+func TestNerdIconsMonoFallback(t *testing.T) {
+	src, err := os.ReadFile("nerdfont.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[rune]bool{}
+	for _, m := range regexp.MustCompile(`\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})`).FindAllStringSubmatch(string(src), -1) {
+		h := m[1] + m[2]
+		v, _ := strconv.ParseUint(h, 16, 32)
+		seen[rune(v)] = true
+	}
+	for _, i := range allIcons {
+		for _, r := range i.nf {
+			if r != ' ' {
+				seen[r] = true
+			}
+		}
+	}
+	if len(seen) < 14 {
+		t.Fatalf("found only %d NF codepoints — scan broken?", len(seen))
+	}
+	for r := range seen {
+		rep, ok := monoGlyphs[r]
+		if !ok {
+			t.Errorf("U+%04X has no monoGlyphs fallback", r)
+			continue
+		}
+		if cellWidth(rep) != cellWidth(string(r)) {
+			t.Errorf("U+%04X: mono %q is %d cells, glyph %d", r, rep, cellWidth(rep), cellWidth(string(r)))
+		}
+		if got := foldASCII(string(r)); got != rep {
+			t.Errorf("foldASCII(U+%04X) = %q, want %q", r, got, rep)
+		}
+	}
+}
+
+// TestNerdGlyphsCentralized: Nerd Font codepoints are written only in
+// nerdfont.go (and mono.go's fallback map) — no scattered literals.
+func TestNerdGlyphsCentralized(t *testing.T) {
+	files, _ := filepath.Glob("*.go")
+	pua := regexp.MustCompile(`\\u[eE][0-9a-fA-F]{3}|\\u[fF][0-8][0-9a-fA-F]{2}|\\U000[fF][0-9a-fA-F]{4}|[\x{e000}-\x{f8ff}\x{f0000}-\x{10ffff}]`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "nerdfont.go" || f == "mono.go" {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc := pua.FindIndex(b); loc != nil {
+			t.Errorf("%s: Nerd Font codepoint %q outside nerdfont.go", f, b[loc[0]:loc[1]])
+		}
 	}
 }

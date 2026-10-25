@@ -303,7 +303,7 @@ func TestActivityQueueBadgeWins(t *testing.T) {
 		return s + strings.Repeat(" ", w-len(s))
 	}
 	got := m.renderTreeRow(treeRow{group: "main"}, false, false, false, pad)
-	if !strings.Contains(got, "⏳3") {
+	if !strings.Contains(got, ic(icHourglass)+"3") {
 		t.Fatalf("queue badge should survive: %q", got)
 	}
 	if strings.Contains(got, "1m30s") {

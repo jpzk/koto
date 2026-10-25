@@ -537,7 +537,7 @@ func (m Model) renderNewGroup() string {
 	curLine := 0
 	errLine := func(key string) {
 		if f.err != "" && f.errAt == key {
-			lines = append(lines, red.Width(inner).Render(gl("✗ ", "x ")+f.err))
+			lines = append(lines, red.Width(inner).Render(gl(ic(icCross)+" ", "x ")+f.err))
 		}
 	}
 	var ep editPlan
@@ -672,7 +672,7 @@ func (m Model) renderNewGroup() string {
 		if key == ngCustom && f.errAt != ngCustom && f.custom.Value() != "" {
 			// Live check while typing; the submit-time error replaces it.
 			if e := validateModelID(strings.TrimSpace(f.custom.Value())); e != "" {
-				lines = append(lines, red.Width(inner).Render(gl("✗ ", "x ")+e))
+				lines = append(lines, red.Width(inner).Render(gl(ic(icCross)+" ", "x ")+e))
 			}
 		}
 	}

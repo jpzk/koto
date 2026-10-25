@@ -104,7 +104,7 @@ func (m Model) renderNewSession() string {
 		amber.Render("name    ") + "  " + in.View(),
 	}
 	if f.err != "" {
-		lines = append(lines, red.Width(inner).Render(gl("✗ ", "x ")+f.err))
+		lines = append(lines, red.Width(inner).Render(gl(ic(icCross)+" ", "x ")+f.err))
 	}
 	lines = append(lines, "",
 		gray.Width(inner).Render(gl("enter create + switch · esc cancel", "enter create + switch . esc cancel")))

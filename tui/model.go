@@ -2782,9 +2782,9 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyActivity(ev)
 			}
 		case "sched_fired", "sched_run":
-			tag := "⏰"
+			tag := ic(icAlarm)
 			if ev.Event == "sched_run" {
-				tag = "▶"
+				tag = ic(icPlay)
 			}
 			m.addLine(logLine{kind: "sys", group: ev.Group,
 				text: fmt.Sprintf("%s sched %s fired", tag, ev.ID), ts: int64(ev.Ts)})
@@ -2963,7 +2963,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		for _, s := range msg.items {
 			mark := "·"
 			if s.Enabled {
-				mark = "✓"
+				mark = ic(icCheck)
 			}
 			next := formatRelative(s.NextDueAt)
 			if !s.Enabled {

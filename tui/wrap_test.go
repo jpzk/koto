@@ -59,7 +59,7 @@ func TestPendingPromptWraps(t *testing.T) {
 			t.Errorf("row %d is %d cells wide, budget is %d", i, w, cols+promptPrefixW)
 		}
 	}
-	if !strings.Contains(lines[0], "⏳") {
+	if !strings.Contains(lines[0], ic(icHourglass)) {
 		t.Error("first row lost the queued glyph")
 	}
 }

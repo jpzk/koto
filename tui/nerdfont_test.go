@@ -123,9 +123,9 @@ func TestNerdFontRowWidthUnchanged(t *testing.T) {
 				t.Errorf("%s hov=%v: width %d with icon, %d with ◦ (%q vs %q)",
 					s, hov, cellWidth(cur), cellWidth(old), cur, old)
 			}
-			if cellWidth(sessionMarker(s)) != cellWidth(plainSession) {
+			if cellWidth(sessionMarker(s)) != cellWidth(icSession.plain) {
 				t.Errorf("%s: marker width %d, want %d", s,
-					cellWidth(sessionMarker(s)), cellWidth(plainSession))
+					cellWidth(sessionMarker(s)), cellWidth(icSession.plain))
 			}
 		}
 	}
@@ -144,7 +144,7 @@ func TestNerdFontUnreadStillPink(t *testing.T) {
 
 // TestNerdFontMonoFold: B/W mode folds the icons to one ASCII cell each.
 func TestNerdFontMonoFold(t *testing.T) {
-	if got := foldASCII(nfSessionIcon + nfGoalIcon); got != "- O " {
+	if got := foldASCII(icSession.nf + icGoalSession.nf); got != "- O " {
 		t.Errorf("foldASCII(icons) = %q, want %q", got, "- O ")
 	}
 }

@@ -328,6 +328,7 @@ func TestSchedMutationRefreshes(t *testing.T) {
 // whole — the header is exactly ON CRON NEXT MSG and no rendered line
 // exceeds the terminal width (no mid-cell clipping, no wrap).
 func TestSchedView40ColGolden(t *testing.T) {
+	withNerdFont(t, false) // golden rows below are the plain glyphs
 	m := schedModel(t)
 	m.width, m.height = 40, 30
 	m.resizeSchedViewport()

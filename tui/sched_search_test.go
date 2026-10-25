@@ -84,6 +84,7 @@ func schedDataRows(out string) []string {
 // the 3 fuzzy matches — exact golden rows in rank order, so reverting the
 // filtering (or the rank) fails this test.
 func TestSchedSearchFiltersRows(t *testing.T) {
+	withNerdFont(t, false) // golden rows below are the plain glyphs
 	m := schedModel100(t)
 	if out := stripANSI(m.View()); !strings.Contains(out, "100 schedules · 99 enabled") {
 		t.Fatalf("pre-filter summary missing:\n%s", out)
