@@ -307,10 +307,15 @@ func (m Model) view() string {
 		// the user types to the agent.
 		return m.withPicker(m.renderShellView())
 	}
+	logRows := m.chatRows()
+	if fc, ok := m.cachedChatFrame(logRows); ok {
+		// Pure prompt edit since the last full frame (framecache.go).
+		fc.hits++
+		return fc.status + "\n" + fc.middle + "\n" + m.renderInput() + "\n" + fc.hint + "\n" + fc.metrics
+	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
 	status := m.renderStatusBar(spin)
-	logRows := m.chatRows()
 	treeW := m.treePaneW()
 
 	// The chat column is assembled by hand rather than through lipgloss:
@@ -342,6 +347,7 @@ func (m Model) view() string {
 	input := m.renderInput()
 	hint := m.renderHint()
 	metricsBar := m.renderMetricsBar()
+	m.storeChatFrame(logRows, status, middle, hint, metricsBar)
 
 	// A plain join, not lipgloss.JoinVertical: that pads every line to the
 	// widest, which means measuring every line, and the padding buys
@@ -1232,7 +1238,7 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 // preShellFocus. With the pane open but unfocused (shellOpen split mode) the
 // normal rule applies: tab toggles the tree in and out beside the split, and
 // tree navigation works as usual.
-func (m Model) treePaneW() int {
+func (m *Model) treePaneW() int {
 	if m.fullscreen {
 		return 0 // fullscreen hides the tree no matter which pane owns it
 	}
@@ -1518,7 +1524,7 @@ func (m Model) renderScrollbar(rows int) string {
 // The -1 is the separator column, which only the side-by-side split pays for.
 // Stacked the box keeps the full width it has in the plain chat view, so
 // opening the terminal pane doesn't narrow the bar the operator is typing in.
-func (m Model) inputBoxW() int {
+func (m *Model) inputBoxW() int {
 	if m.shellSplitVisible() {
 		if m.shellSplitMode() == shellSplitRows {
 			return m.shellChatBlockW()
@@ -1531,12 +1537,19 @@ func (m Model) inputBoxW() int {
 // inputTextCols is the column budget for the prompt input's text: the
 // bordered box's interior minus the 2-cell prefix and the textinput's own
 // prompt. Matches the MaxWidth clip renderInput applies to each body row.
-func (m Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputPromptW()) }
+func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputPromptW()) }
 
 // inputPromptW is the rendered width of the textinput's prompt ("> "), which
 // we now draw ourselves — bubbles' View() only handles the placeholder path.
-func (m Model) inputPromptW() int {
-	return lipgloss.Width(m.input.PromptStyle.Render(m.input.Prompt))
+func (m *Model) inputPromptW() int {
+	p, st := m.input.Prompt, m.input.PromptStyle
+	// An unframed style on one tab-free line renders to the same cells it
+	// was given; skip the Render (this runs several times per keystroke).
+	if st.GetHorizontalFrameSize() == 0 && st.GetWidth() == 0 && st.GetMaxWidth() == 0 && st.GetTransform() == nil &&
+		!strings.ContainsAny(p, "\t\n") {
+		return ansi.StringWidth(p)
+	}
+	return lipgloss.Width(st.Render(p))
 }
 
 // maxInputRows caps how tall the prompt box may grow. Past the cap the value
@@ -1548,7 +1561,7 @@ func (m Model) inputPromptW() int {
 // box's two borders and one surviving row of transcript), because there the
 // rest of the frame belongs to the terminal pane: an uncapped box would eat
 // past its own half and push the frame taller than the terminal.
-func (m Model) maxInputRows() int {
+func (m *Model) maxInputRows() int {
 	if ch := m.shellStackChatH(); ch > 0 {
 		return max(1, min(10, ch-3))
 	}
@@ -1558,13 +1571,23 @@ func (m Model) maxInputRows() int {
 // inputRows reports how many text rows the prompt box occupies right now.
 // View() and logViewportSize() budget the chat pane around it, so this must
 // agree with what renderInput actually draws.
-func (m Model) inputRows() int {
-	if m.input.Value() == "" {
+func (m *Model) inputRows() int {
+	v := m.input.Value()
+	if v == "" {
 		return 1 // placeholder is clipped, never wrapped — see renderInput
 	}
-	rs, pos := inputWindow([]rune(m.input.Value()), m.input.Position())
-	rows, _, _ := wrapInput(rs, pos, m.inputTextCols())
-	return min(len(rows), m.maxInputRows())
+	// Layout asks this several times per message (chatRows, the KeyMsg
+	// row-change check, renderInput, the frame cache guard); the wrap is
+	// memoized on everything it reads.
+	pos, cols, mx := m.input.Position(), m.inputTextCols(), m.maxInputRows()
+	if n, ok := m.frame.inputRows(v, pos, cols, mx); ok {
+		return n
+	}
+	rs, p := inputWindow([]rune(v), pos)
+	rows, _, _ := wrapInput(rs, p, cols)
+	n := min(len(rows), mx)
+	m.frame.storeInputRows(v, pos, cols, mx, n)
+	return n
 }
 
 // inputRenderMax bounds how much of the prompt value is laid out (audit
@@ -1661,6 +1684,9 @@ func wrapInput(rs []rune, pos, cols int) (rows [][]rune, curRow, curCol int) {
 }
 
 func runeCells(r rune) int {
+	if r < 0x80 {
+		return 1 // ASCII: width 0 or 1, and the floor below is 1 either way
+	}
 	if w := ansi.StringWidth(string(r)); w > 1 {
 		return w
 	}
@@ -1803,11 +1829,11 @@ func (m Model) renderInput() string {
 // drawBox frames rows in border b, each row padded (or cut) to w cells, the
 // border glyphs in color fg. The box's outer width is w+2.
 func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string {
-	edge := lipgloss.NewStyle().Foreground(fg)
-	left, right := edge.Render(b.Left), edge.Render(b.Right)
+	e := boxEdgesFor(b, fg, w)
+	left, right := e.left, e.right
 	var sb strings.Builder
 	sb.Grow((w + 24) * (len(rows) + 2))
-	sb.WriteString(edge.Render(b.TopLeft + strings.Repeat(b.Top, w) + b.TopRight))
+	sb.WriteString(e.top)
 	for _, r := range rows {
 		sb.WriteByte('\n')
 		sb.WriteString(left)
@@ -1815,7 +1841,7 @@ func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string 
 		sb.WriteString(right)
 	}
 	sb.WriteByte('\n')
-	sb.WriteString(edge.Render(b.BottomLeft + strings.Repeat(b.Bottom, w) + b.BottomRight))
+	sb.WriteString(e.bottom)
 	return sb.String()
 }
 

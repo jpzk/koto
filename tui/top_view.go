@@ -675,7 +675,7 @@ func (m *Model) exitTop() {
 // close, arrows move the selection (pgup/pgdn scroll), s/c/m/t re-sort,
 // everything else is dropped (read-only view — bare letters are free here
 // precisely because nothing types).
-func (m Model) handleTopKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleTopKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch s := msg.String(); s {
 	case "esc", "ctrl+k":
 		m.exitTop()

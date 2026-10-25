@@ -96,7 +96,7 @@ func TestNewGroupOffersOnlyConfiguredProviders(t *testing.T) {
 	fk := startFakeKoto(t)
 	fk.providers = provResp("venice", "openai")
 	m := openNew(t, focusModel(t))
-	f := &m.newGroup
+	f := m.newGroup
 	if f.prov.state != provLoaded {
 		t.Fatalf("prov state = %d, want loaded", f.prov.state)
 	}
@@ -139,7 +139,7 @@ func TestNewGroupOffersOnlyConfiguredProviders(t *testing.T) {
 func TestEditGroupKeepsUnconfiguredCurrentProvider(t *testing.T) {
 	check := func(t *testing.T, m Model, fk *fakeKoto) {
 		t.Helper()
-		f := &m.newGroup
+		f := m.newGroup
 		if got, want := f.values("provider"), []string{"claudesdk", "venice"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("provider options = %v, want %v", got, want)
 		}
@@ -210,7 +210,7 @@ func TestNewGroupNoProviderLogin(t *testing.T) {
 	fk := startFakeKoto(t)
 	fk.providers = provResp()
 	m := openNew(t, focusModel(t))
-	f := &m.newGroup
+	f := m.newGroup
 	if len(f.values("provider")) != 0 || f.value("provider") != "" {
 		t.Fatalf("offered %v / %q with no login", f.values("provider"), f.value("provider"))
 	}
@@ -253,7 +253,7 @@ func TestProvidersRPCErrorFallsBackToFullList(t *testing.T) {
 			fk := startFakeKoto(t)
 			fk.providers = resp
 			m := openNew(t, focusModel(t))
-			f := &m.newGroup
+			f := m.newGroup
 			if f.prov.state != provFallback {
 				t.Fatalf("prov state = %d, want fallback", f.prov.state)
 			}

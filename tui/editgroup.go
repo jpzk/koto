@@ -91,7 +91,7 @@ func (m *Model) openEditGroup() tea.Cmd {
 		}
 	}
 	f.mp.cache = m.modelsCache
-	m.newGroup = f
+	m.newGroup = &f
 	return tea.Batch(editReadCmd(m.sock, g), providersCmd(m.sock))
 }
 
@@ -200,7 +200,7 @@ func origFromGroup(gi GroupInfo, ok bool) map[string]string {
 // handleEditRead prefills the open edit dialog from the read and loads the
 // model list for the group's provider.
 func (m *Model) handleEditRead(msg editReadMsg) tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	if !f.open || !f.edit.on || f.edit.group != msg.group || !f.edit.loading {
 		return nil
 	}
@@ -371,7 +371,7 @@ func editSubmitCmd(sock, g string, p editPlan) tea.Cmd {
 }
 
 func (m *Model) submitEditGroup() tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	if f.busy || f.edit.loading {
 		return nil
 	}
@@ -400,7 +400,7 @@ func (m *Model) submitEditGroup() tea.Cmd {
 // before a failed restart becomes the new baseline, and the button keeps
 // offering the restart.
 func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	open := f.open && f.edit.on && f.edit.group == msg.group
 	if open {
 		f.busy = false
@@ -432,7 +432,7 @@ func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
 		return nil
 	}
 	if open {
-		m.newGroup = newGroupForm{}
+		m.newGroup = &newGroupForm{}
 	}
 	text := "saved " + msg.group
 	if kv != "" {

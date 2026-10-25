@@ -200,7 +200,7 @@ func (d destroyConfirmState) label() string {
 }
 
 // handleDestroyConfirmKey routes keys while the modal is open.
-func (m Model) handleDestroyConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleDestroyConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		d := m.destroyConfirm
