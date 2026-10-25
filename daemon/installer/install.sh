@@ -58,8 +58,11 @@
 #
 # WHAT IT DOES NOT PROVE. That the release is what the koto authors intended —
 # only that it was signed by the key this script names. The source clone is
-# fetched over HTTPS from the repository and is not signature-checked; it
-# supplies the prompts and the manifest, not anything that runs as root. If
+# fetched over HTTPS from the repository and is not signature-checked, so it
+# is trusted for the prompts and the manifest only: before `koto install` runs
+# this script deletes any creds/ and daemon state (groups, groups*.json,
+# schedules.json, goals.json, metrics.jsonl) a tag may have committed, and
+# `koto install` itself never imports them without -migrate-clone. If
 # this script itself was served to you modified, the fingerprint in it could
 # be modified too. Read it before piping it to a shell; that advice is not a
 # formality here.
@@ -187,22 +190,26 @@ getp() { # with a progress bar on a terminal: the assets
 	fi
 }
 
-# The source clone needs a TAG, so "latest" is resolved to one up front: GitHub
-# answers /releases/latest with a redirect to /releases/tag/<tag>.
-if [ "$DO_INSTALL" -eq 1 ] && [ "$VERSION" = latest ]; then
+# The source clone needs a TAG, and the signed SHA256SUMS is checked against
+# the version asked for, so "latest" is resolved to one up front: GitHub
+# answers /releases/latest with a redirect to /releases/tag/<tag>. A mirror
+# (KOTO_BASE_URL) has no such redirect — name the version you want from it.
+if [ "$VERSION" = latest ]; then
+	[ -z "${KOTO_BASE_URL:-}" ] ||
+		die "KOTO_BASE_URL needs --version: the signed SHA256SUMS must name the release you asked for"
 	VERSION="$(curl -fsSI --proto '=https' --connect-timeout 20 "https://github.com/$REPO/releases/latest" |
 		tr -d '\r' | awk 'tolower($1) == "location:" { n = split($2, p, "/"); print p[n] }' | tail -1)"
 	[ -n "$VERSION" ] && [ "$VERSION" != latest ] ||
 		die "could not resolve the latest koto release — pass --version"
 fi
+# The version as release tooling writes it into SHA256SUMS and asset names.
+VER="${VERSION#v}"
 
 # KOTO_BASE_URL overrides where assets come from — a mirror, or a test origin.
 # It changes only DELIVERY: the signature check below is unconditional, so a
 # mirror cannot serve anything this script will accept without the release key.
 if [ -n "${KOTO_BASE_URL:-}" ]; then
 	BASE="$KOTO_BASE_URL"
-elif [ "$VERSION" = latest ]; then
-	BASE="https://github.com/$REPO/releases/latest/download"
 else
 	BASE="https://github.com/$REPO/releases/download/$VERSION"
 fi
@@ -225,6 +232,12 @@ if [ "$DO_INSTALL" -eq 1 ]; then
 		die "could not clone $REPO_URL at $VERSION"
 	DEST="$SRC/koto"
 	MANIFEST="$DEST/artifacts.sha256"
+	# The tag is not signed. A tag author without the release key could commit
+	# trust anchors (creds/ca.key, server.key, clients.allow, tokens.json,
+	# acl.json) or standing orders (schedules.json, goals.json) for a fresh
+	# install to adopt. Nothing legitimate ships them, so remove them outright.
+	( cd "$DEST" && rm -rf -- creds groups groups*.json schedules.json goals.json metrics.jsonl ) ||
+		die "could not scrub daemon state from the clone"
 fi
 [ -n "$DEST" ] || DEST="$PWD"
 
@@ -255,25 +268,69 @@ got_fpr="$(gpg --batch --with-colons --list-keys | awk -F: '/^fpr:/ {print $10; 
 step "signature on SHA256SUMS"
 get "$BASE/SHA256SUMS" "$STAGE/SHA256SUMS"
 get "$BASE/SHA256SUMS.asc" "$STAGE/SHA256SUMS.asc"
-gpg --batch --status-fd=1 --verify "$STAGE/SHA256SUMS.asc" "$STAGE/SHA256SUMS" 2>/dev/null |
-	grep -q "^\[GNUPG:\] VALIDSIG $KEY_FPR" ||
+# Judge gpg by its exit status AND its status lines. VALIDSIG alone is not
+# enough: gpg prints it for a signature from an expired or revoked key too
+# (alongside EXPKEYSIG / REVKEYSIG), and a pipe into grep would hide the exit.
+grc=0
+gpg --batch --status-fd=1 --verify "$STAGE/SHA256SUMS.asc" "$STAGE/SHA256SUMS" \
+	>"$STAGE/gpg.status" 2>/dev/null || grc=$?
+[ "$grc" -eq 0 ] ||
+	die "gpg rejected the signature on SHA256SUMS (exit $grc) — nothing was installed"
+if grep -Eq '^\[GNUPG:\] (EXPKEYSIG|REVKEYSIG|EXPSIG|BADSIG|ERRSIG|NO_PUBKEY)( |$)' "$STAGE/gpg.status"; then
+	die "SHA256SUMS is signed by an expired or revoked key, or the signature is bad: $(grep -Eo '(EXPKEYSIG|REVKEYSIG|EXPSIG|BADSIG|ERRSIG|NO_PUBKEY)' "$STAGE/gpg.status" | head -1) — nothing was installed"
+fi
+grep -q '^\[GNUPG:\] GOODSIG ' "$STAGE/gpg.status" &&
+	grep -q "^\[GNUPG:\] VALIDSIG $KEY_FPR " "$STAGE/gpg.status" ||
 	die "SHA256SUMS is not signed by $KEY_FPR — nothing was installed"
 echo "    good signature from $KEY_FPR"
+
+# The signature covers WHICH release this is, not just "some release by this
+# key": release tooling writes exactly one '# koto-version: X.Y.Z' line into
+# the signed file. Anything else is an older (or other) signed set served
+# under this tag or by a mirror — a rollback — and is refused.
+signed_ver="$(awk '/^# koto-version: / { v = $3; n++ } END { if (n != 1) exit 1; print v }' "$STAGE/SHA256SUMS")" ||
+	die "SHA256SUMS does not name exactly one koto-version — it is not a $VER release, nothing was installed"
+[ "$signed_ver" = "$VER" ] ||
+	die "SHA256SUMS is signed for koto $signed_ver, not the $VER you asked for — refusing a rollback, nothing was installed"
+echo "    signed for koto $signed_ver"
+grep -v '^#' "$STAGE/SHA256SUMS" >"$STAGE/SHA256SUMS.body"
 
 # Asset names come out of the signed file: <name>_<version>_<arch>.zst, where
 # the version is the component's own (firecracker_1.17.0, vmlinux_6.1.186,
 # rootfs.img_fedora44). Map each back to the path koto expects by stripping
-# the _<version>_<arch>.zst tail.
-assets="$(awk '{print $2}' "$STAGE/SHA256SUMS")"
+# the _<version>_<arch>.zst tail. A release is all five, each once, and koto
+# and koto-tui carry the release's own version: a set missing one would fall
+# back to whatever the clone has, so it is refused before anything downloads.
+assets="$(awk '{print $2}' "$STAGE/SHA256SUMS.body")"
 [ -n "$assets" ] || die "SHA256SUMS lists no assets"
-n=$(echo "$assets" | wc -w)
-step "downloading $n assets"
-i=0
+have=" "
 for a in $assets; do
 	case "$a" in
 	*_"$ARCH".zst) ;;
 	*) die "SHA256SUMS names $a, which is not a $ARCH asset" ;;
 	esac
+	base="${a%_"$ARCH".zst}"
+	name="${base%_*}"
+	case "$name" in
+	koto | koto-tui)
+		[ "${base##*_}" = "$VER" ] ||
+			die "SHA256SUMS lists $a, which is not koto $VER — nothing was installed" ;;
+	firecracker | vmlinux | rootfs.img) ;;
+	*) die "unexpected asset $a" ;;
+	esac
+	case "$have" in *" $name "*) die "SHA256SUMS lists $name twice" ;; esac
+	have="$have$name "
+done
+for want in koto koto-tui firecracker vmlinux rootfs.img; do
+	case "$have" in
+	*" $want "*) ;;
+	*) die "SHA256SUMS has no $want asset — a release is all five, nothing was installed" ;;
+	esac
+done
+n=$(echo "$assets" | wc -w)
+step "downloading $n assets"
+i=0
+for a in $assets; do
 	i=$((i + 1))
 	echo "    ($i/$n) $a"
 	getp "$BASE/$a" "$STAGE/$a"
@@ -281,7 +338,7 @@ for a in $assets; do
 done
 
 step "checking the assets against the signed SHA256SUMS"
-(cd "$STAGE" && sha256sum -c SHA256SUMS >/dev/null) ||
+(cd "$STAGE" && sha256sum -c SHA256SUMS.body >/dev/null) ||
 	die "an asset does not match the signed SHA256SUMS — nothing was installed"
 echo "    all $n match"
 

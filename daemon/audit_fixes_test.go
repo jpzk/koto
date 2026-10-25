@@ -431,7 +431,6 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 	allowed := []struct{ provider, method, path string }{
 		{"claudesdk", "POST", "/v1/messages"},
 		{"claudesdk", "POST", "/v1/messages/count_tokens"},
-		{"claudesdk", "POST", "/v1/chat/completions"},
 		{"claudesdk", "GET", "/v1/models"},
 		{"claudesdk", "GET", "/v1/models/claude-sonnet-5"},
 		{"claudesdk", "GET", "/api/hello"},  // Claude Code's connectivity check
@@ -451,16 +450,17 @@ func TestLLMEndpointAllowlist(t *testing.T) {
 		{"claudesdk", "GET", "/v1/organizations/me"},
 		{"venice", "POST", "/api/v1/api_keys"}, // mint a key and read it back
 		{"venice", "GET", "/api/v1/api_keys"},
-		{"venice", "GET", "/api/v1/models"},            // models.json is static
-		{"claudesdk", "GET", "/media/../secret.txt"},   // seen in the wild
+		{"venice", "GET", "/api/v1/models"},          // models.json is static
+		{"claudesdk", "GET", "/media/../secret.txt"}, // seen in the wild
 		{"claudesdk", "GET", "/"},
 		{"claudesdk", "GET", "/api/tags"},
 		{"claudesdk", "DELETE", "/v1/messages"}, // right path, wrong method
 		{"claudesdk", "GET", "/v1/messages"},
-		{"venice", "POST", "/v1/messages"},    // the other provider's route
-		{"claudesdk", "POST", "/api/hello"},   // right path, wrong method
-		{"claudesdk", "HEAD", "/v1/messages"}, // HEAD is GET, and GET is not allowed here
-		{"claudesdk", "GET", "/v1/models/"},   // the prefix rule needs an id
+		{"venice", "POST", "/v1/messages"},            // the other provider's route
+		{"claudesdk", "POST", "/api/hello"},           // right path, wrong method
+		{"claudesdk", "HEAD", "/v1/messages"},         // HEAD is GET, and GET is not allowed here
+		{"claudesdk", "GET", "/v1/models/"},           // the prefix rule needs an id
+		{"claudesdk", "POST", "/v1/chat/completions"}, // unmetered usage dialect (1.7.2)
 	}
 	for _, c := range refused {
 		if llmPathAllowed(c.provider, c.method, c.path) {
@@ -1403,6 +1403,8 @@ func TestStreamAuthzRevalidates(t *testing.T) {
 		target:   "main",
 		targeted: true,
 	}
+	var revokeCert func()
+	s.ServerStream, revokeCert = sec172AllowedPeerStream(t)
 	stale := func() { s.mu.Lock(); s.lastCheck = time.Now().Add(-time.Hour); s.mu.Unlock() }
 
 	stale()
@@ -1437,6 +1439,12 @@ func TestStreamAuthzRevalidates(t *testing.T) {
 	stale()
 	if err := s.revalidate(); err != nil {
 		t.Fatalf("widened grant still refused: %v", err)
+	}
+	// Deleting the device's clients.allow line closes the stream too (sec-172).
+	revokeCert()
+	stale()
+	if err := s.revalidate(); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("revoked client cert kept its stream: %v", err)
 	}
 }
 
