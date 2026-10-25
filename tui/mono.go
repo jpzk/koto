@@ -300,6 +300,7 @@ var monoGlyphs = map[rune]string{
 	'│': "|", '─': "-", '├': "+", '└': "+", '┌': "+", '┐': "+", '┘': "+",
 	// state markers
 	'●': "*", '○': "o", '◦': "-", '◆': "*", '◎': "O", '•': "*",
+	'\uf418': "-", '\uf140': "O", // Nerd Font session / goal icons
 	'⚠': "!", '⚙': "%", '✓': "+", '✗': "x", '⚖': "=",
 	'▲': "^", '▼': "v", '▶': ">", '◀': "<",
 	// wide (two-cell) markers — replacements are two ASCII cells

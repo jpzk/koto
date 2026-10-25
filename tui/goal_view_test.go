@@ -126,7 +126,7 @@ func TestGoalJudgeRowKeepsSuffix(t *testing.T) {
 }
 
 // TestGoalRowShowsRunID: the tree row shows the bare run name — no role
-// glyph (the session marker ◦ is the only prefix), no shared "goal-" prefix.
+// glyph (the session marker is the only prefix), no shared "goal-" prefix.
 func TestGoalRowShowsRunID(t *testing.T) {
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
