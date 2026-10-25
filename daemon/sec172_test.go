@@ -4,6 +4,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,5 +133,78 @@ func TestSec172BodyBudgetPerGroup(t *testing.T) {
 		t.Errorf("hog refused (%d) after releasing everything — its share leaked", code)
 	} else {
 		rel()
+	}
+}
+
+// sec172FakeClone builds a release-shaped clone that ALSO carries attacker-
+// committed creds and daemon state (audit supply/release-clone-seeds-creds-
+// state), plus the prompts/fcassets a real install needs so seedStateDir can
+// run end to end.
+func sec172FakeClone(t *testing.T) (root, state string, planted []string) {
+	t.Helper()
+	root, state = t.TempDir(), t.TempDir()
+	if err := os.Chmod(state, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	w := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w("prompts/global.md", "policy\n")
+	for _, a := range []string{"firecracker", "vmlinux", "rootfs.img"} {
+		w("fcassets/"+a, a)
+	}
+	planted = []string{
+		"creds/ca.crt", "creds/ca.key", "creds/server.crt", "creds/server.key",
+		"creds/acl.json", "creds/.credentials.json", "creds/anthropic-api-key",
+		"creds/venice.key", "creds/minimax.key",
+		"creds/client-evil.crt", "creds/client-evil.key", "creds/token-evil",
+		"groups/main/prompt.md", "groups.json", "schedules.json", "goals.json", "metrics.jsonl",
+	}
+	for _, p := range planted {
+		w(p, "attacker\n")
+	}
+	w("creds/clients.allow", "SHA256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff evil\n")
+	w("creds/tokens.json", `{"evil":{"hash":"x","roles":["admin"]}}`)
+	planted = append(planted, "creds/clients.allow", "creds/tokens.json")
+	return root, state, planted
+}
+
+// 1.7.2 fix(5): a default install (what install.sh runs from the unsigned
+// tag clone) must not carry ANY clone creds or daemon state into the state
+// dir, and must leave the clone's files where they are.
+func TestSec172InstallIgnoresCloneState(t *testing.T) {
+	root, state, planted := sec172FakeClone(t)
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := installOpts{root: root, stateDir: state, ui: newSetupUI(true, true)}
+	if err := seedStateDir(o, me); err != nil {
+		t.Fatalf("seedStateDir: %v", err)
+	}
+	for _, p := range planted {
+		if _, err := os.Lstat(filepath.Join(state, p)); err == nil {
+			t.Errorf("clone %s was imported into the state dir", p)
+		}
+	}
+	// Top-level registries must not exist at all; groups/ and creds/ may
+	// exist (seedStateDir creates them) but must be empty.
+	for _, d := range []string{"groups", "creds"} {
+		ents, _ := os.ReadDir(filepath.Join(state, d))
+		for _, e := range ents {
+			t.Errorf("state %s/ contains %s after a default install", d, e.Name())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(state, "prompts", "global.md")); err != nil {
+		t.Errorf("prompts must still be installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "schedules.json")); err != nil {
+		t.Errorf("clone schedules.json moved away (should be left alone): %v", err)
 	}
 }

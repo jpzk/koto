@@ -58,8 +58,11 @@
 #
 # WHAT IT DOES NOT PROVE. That the release is what the koto authors intended —
 # only that it was signed by the key this script names. The source clone is
-# fetched over HTTPS from the repository and is not signature-checked; it
-# supplies the prompts and the manifest, not anything that runs as root. If
+# fetched over HTTPS from the repository and is not signature-checked, so it
+# is trusted for the prompts and the manifest only: before `koto install` runs
+# this script deletes any creds/ and daemon state (groups, groups*.json,
+# schedules.json, goals.json, metrics.jsonl) a tag may have committed, and
+# `koto install` itself never imports them without -migrate-clone. If
 # this script itself was served to you modified, the fingerprint in it could
 # be modified too. Read it before piping it to a shell; that advice is not a
 # formality here.
@@ -225,6 +228,12 @@ if [ "$DO_INSTALL" -eq 1 ]; then
 		die "could not clone $REPO_URL at $VERSION"
 	DEST="$SRC/koto"
 	MANIFEST="$DEST/artifacts.sha256"
+	# The tag is not signed. A tag author without the release key could commit
+	# trust anchors (creds/ca.key, server.key, clients.allow, tokens.json,
+	# acl.json) or standing orders (schedules.json, goals.json) for a fresh
+	# install to adopt. Nothing legitimate ships them, so remove them outright.
+	( cd "$DEST" && rm -rf -- creds groups groups*.json schedules.json goals.json metrics.jsonl ) ||
+		die "could not scrub daemon state from the clone"
 fi
 [ -n "$DEST" ] || DEST="$PWD"
 

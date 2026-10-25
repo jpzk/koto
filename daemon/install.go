@@ -79,8 +79,11 @@ func hostCPUs() string {
 type installOpts struct {
 	stateDir string
 	root     string // the clone
-	ui       *setupUI
-	ctx      *setupCtx
+	// migrateClone opts in to moving the clone's creds/ and daemon state
+	// into the state dir. Off by default: the clone is not trusted input.
+	migrateClone bool
+	ui           *setupUI
+	ctx          *setupCtx
 }
 
 func installUsage() {
@@ -94,7 +97,13 @@ preserved).
 
 flags:
   -state DIR   state directory (default /var/lib/koto)
-  -y           accept defaults, never prompt`)
+  -y           accept defaults, never prompt
+  -migrate-clone
+               move creds/ and daemon state (groups, groups.json,
+               schedules.json, goals.json, metrics.jsonl) from THIS checkout
+               into the state dir. Only for your own dev checkout: a
+               release clone is not signature-checked, so it is never
+               trusted for creds or state by default.`)
 }
 
 func installMain(args []string) {
@@ -103,6 +112,7 @@ func installMain(args []string) {
 	state := fs.String("state", defaultStateDir, "state directory")
 	assumeYes := fs.Bool("y", false, "accept defaults")
 	noColor := fs.Bool("no-color", false, "disable color")
+	migrateClone := fs.Bool("migrate-clone", false, "move creds/ and daemon state from this checkout into the state dir (your own dev checkout only)")
 	_ = fs.Parse(args)
 
 	// The state path is interpolated into the systemd unit (WorkingDirectory,
@@ -126,7 +136,7 @@ func installMain(args []string) {
 	defer stop()
 	sc := &setupCtx{ui: ui, root: root, ctx: ctx}
 	if err := runInstall(installOpts{
-		stateDir: *state, root: root, ui: ui, ctx: sc,
+		stateDir: *state, root: root, ui: ui, ctx: sc, migrateClone: *migrateClone,
 	}); err != nil {
 		ctlFatal(1, "install: %v", err)
 	}
@@ -367,64 +377,21 @@ func seedStateDir(o installOpts, me *user.User) error {
 		}
 	}
 
-	// Migrate live state from a dev clone on first install. Without this an
-	// install of an in-use clone silently starts empty and strands every
-	// group workspace where it lay — the single most destructive-feeling
-	// outcome of "upgrading", even though nothing is deleted.
-	//
-	// Never overwrites: each item moves only when the state dir has none.
-	if err := migrateState(o, "groups"); err != nil {
+	// Clone state is NOT trusted input (audit supply/release-clone-seeds-creds-
+	// state). install.sh runs this from a fresh `git clone --branch <tag>` of
+	// an UNSIGNED tree: anyone who can push a tag — without the release key —
+	// could commit creds/{ca.key,server.key,clients.allow,tokens.json,acl.json}
+	// and schedules.json and have them seeded as the new daemon's trust
+	// anchors, admin identity and standing orders for main. So nothing under
+	// creds/ and no daemon state (groups, groups.json, schedules.json,
+	// goals.json, metrics.jsonl) moves from the clone unless the operator asks
+	// for it with -migrate-clone, which only makes sense for their OWN dev
+	// checkout. Without the flag we name what was left behind and stop there.
+	tightenSecretDir(filepath.Join(o.stateDir, "creds"))
+	if !o.migrateClone {
+		warnUnmigratedCloneState(o)
+	} else if err := migrateCloneState(o); err != nil {
 		return err
-	}
-	for _, f := range []string{"groups.json", "schedules.json", "goals.json", "metrics.jsonl"} {
-		if err := migrateState(o, f); err != nil {
-			return err
-		}
-	}
-
-	// creds: MIGRATION ONLY. The wizard now runs after install and mints
-	// straight into the state dir, so nothing here is the normal path — this
-	// exists to carry an older install's clone-side creds across, and to pick
-	// up a dev clone's identities on first install. Never overwrites.
-	srcCreds := filepath.Join(o.root, "creds")
-	dstCreds := filepath.Join(o.stateDir, "creds")
-	tightenSecretDir(dstCreds)
-	// anthropic-api-key belongs in this list: writeEnvFile reads it from the
-	// STATE dir to fold into koto.env, so omitting it silently produced an
-	// install with no credentials at all — the daemon starts and the API
-	// answers, and every agent turn then fails on auth. Caught installing on
-	// a clean machine; keep this list and writeEnvFile's reader in step.
-	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
-		"acl.json", ".credentials.json", "venice.key", "minimax.key", "anthropic-api-key"} {
-		_ = copySecretIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
-	}
-	// clients.allow and tokens.json are cumulative REGISTRIES, not one-shot
-	// files: copy-if-absent left an upgrade's newly minted identities with a
-	// cert in the state dir but no allowlist entry, so the client failed the
-	// handshake with a bare "tls: bad certificate". Merge instead — additive
-	// only, so an identity minted directly against the state dir is never
-	// clobbered by a stale one in the clone.
-	//
-	// But ONLY on a first install (audit M32). Revoking a device is deleting
-	// its line from clients.allow and its entry from tokens.json; an additive
-	// merge on every upgrade put both back from a clone that predates the
-	// revocation, and the `client-*`/`token-*` files are copied too, so
-	// possession of the old certificate and token was enough to authenticate
-	// again with the old roles. An install must not undo a security action.
-	// Once the installed registries exist they are AUTHORITATIVE: the wizard
-	// mints into the state dir (`koto pki client -creds <state>/creds`), so a
-	// clone-side identity is legacy by construction. Skipped names are printed
-	// with the command that would add them back deliberately.
-	if err := seedIdentityRegistries(srcCreds, dstCreds); err != nil {
-		return err
-	}
-	if entries, err := os.ReadDir(srcCreds); err == nil {
-		for _, e := range entries {
-			n := e.Name()
-			if strings.HasPrefix(n, "client-") || strings.HasPrefix(n, "token-") {
-				_ = copySecretIfAbsent(filepath.Join(srcCreds, n), filepath.Join(dstCreds, n))
-			}
-		}
 	}
 	// NO PKI MINTING HERE. It used to mint a CA when the clone had none,
 	// which was right when the wizard ran BEFORE install and had already
@@ -1576,4 +1543,89 @@ func openRegular(path string) (*os.File, error) {
 		return nil, fmt.Errorf("%s: not a regular file (%s)", path, fi.Mode().Type())
 	}
 	return f, nil
+}
+
+// cloneStateItems are the clone paths that carry daemon state. creds/ is
+// handled separately because it is a directory of individually named secrets.
+var cloneStateItems = []string{"groups", "groups.json", "schedules.json", "goals.json", "metrics.jsonl"}
+
+// warnUnmigratedCloneState names clone-side state and creds that a default
+// install deliberately did not carry over, with the flag that would. Silence
+// would strand a dev operator's groups without explanation.
+func warnUnmigratedCloneState(o installOpts) {
+	var left []string
+	for _, n := range cloneStateItems {
+		if exists(filepath.Join(o.root, n)) {
+			left = append(left, n)
+		}
+	}
+	if ents, err := os.ReadDir(filepath.Join(o.root, "creds")); err == nil && len(ents) > 0 {
+		left = append(left, "creds/")
+	}
+	if len(left) == 0 {
+		return
+	}
+	o.ui.warn("not importing %s from %s: clone state is not trusted. If this is your own dev checkout, re-run `koto install -migrate-clone` to move it into %s",
+		strings.Join(left, ", "), o.root, o.stateDir)
+}
+
+// migrateCloneState is the opt-in (-migrate-clone) dev-checkout migration.
+func migrateCloneState(o installOpts) error {
+	// Migrate live state from a dev clone on first install. Without this an
+	// install of an in-use clone silently starts empty and strands every
+	// group workspace where it lay — the single most destructive-feeling
+	// outcome of "upgrading", even though nothing is deleted.
+	//
+	// Never overwrites: each item moves only when the state dir has none.
+	for _, f := range cloneStateItems {
+		if err := migrateState(o, f); err != nil {
+			return err
+		}
+	}
+
+	// creds: MIGRATION ONLY. The wizard now runs after install and mints
+	// straight into the state dir, so nothing here is the normal path — this
+	// exists to carry an older install's clone-side creds across, and to pick
+	// up a dev clone's identities on first install. Never overwrites.
+	srcCreds := filepath.Join(o.root, "creds")
+	dstCreds := filepath.Join(o.stateDir, "creds")
+	tightenSecretDir(dstCreds)
+	// anthropic-api-key belongs in this list: writeEnvFile reads it from the
+	// STATE dir to fold into koto.env, so omitting it silently produced an
+	// install with no credentials at all — the daemon starts and the API
+	// answers, and every agent turn then fails on auth. Caught installing on
+	// a clean machine; keep this list and writeEnvFile's reader in step.
+	for _, f := range []string{"ca.crt", "ca.key", "server.crt", "server.key",
+		"acl.json", ".credentials.json", "venice.key", "minimax.key", "anthropic-api-key"} {
+		_ = copySecretIfAbsent(filepath.Join(srcCreds, f), filepath.Join(dstCreds, f))
+	}
+	// clients.allow and tokens.json are cumulative REGISTRIES, not one-shot
+	// files: copy-if-absent left an upgrade's newly minted identities with a
+	// cert in the state dir but no allowlist entry, so the client failed the
+	// handshake with a bare "tls: bad certificate". Merge instead — additive
+	// only, so an identity minted directly against the state dir is never
+	// clobbered by a stale one in the clone.
+	//
+	// But ONLY on a first install (audit M32). Revoking a device is deleting
+	// its line from clients.allow and its entry from tokens.json; an additive
+	// merge on every upgrade put both back from a clone that predates the
+	// revocation, and the `client-*`/`token-*` files are copied too, so
+	// possession of the old certificate and token was enough to authenticate
+	// again with the old roles. An install must not undo a security action.
+	// Once the installed registries exist they are AUTHORITATIVE: the wizard
+	// mints into the state dir (`koto pki client -creds <state>/creds`), so a
+	// clone-side identity is legacy by construction. Skipped names are printed
+	// with the command that would add them back deliberately.
+	if err := seedIdentityRegistries(srcCreds, dstCreds); err != nil {
+		return err
+	}
+	if entries, err := os.ReadDir(srcCreds); err == nil {
+		for _, e := range entries {
+			n := e.Name()
+			if strings.HasPrefix(n, "client-") || strings.HasPrefix(n, "token-") {
+				_ = copySecretIfAbsent(filepath.Join(srcCreds, n), filepath.Join(dstCreds, n))
+			}
+		}
+	}
+	return nil
 }
