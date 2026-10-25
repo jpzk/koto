@@ -207,7 +207,7 @@ func workspaceIsBlank(dev string) (bool, error) {
 //
 // Everything else gets e2fsck and a second attempt. If that does not produce a
 // mountable filesystem the boot FAILS, loudly: an unbootable group whose data is
-// intact is recoverable by the operator (backup superblocks, a host-side fsck,
+// intact is recoverable by the operator (backup superblocks, a sandboxed fsck,
 // a copy of the image), and a booted group whose data was just erased is not.
 func mountWorkspace() error {
 	_ = os.MkdirAll(wsDir, 0o755)
@@ -233,8 +233,9 @@ func mountWorkspace() error {
 			logf("e2fsck %s: %v: %s", wsDev, ferr, bytes.TrimSpace(out))
 			if err = unix.Mount(wsDev, wsDir, "ext4", wsMountFlags, ""); err != nil {
 				return fmt.Errorf("mount %s failed and e2fsck did not repair it: %w — "+
-					"the workspace has NOT been reformatted; recover it host-side "+
-					"(e2fsck on groups/<g>/workspace.img) or move it aside to start fresh", wsDev, err)
+					"the workspace has NOT been reformatted; recover a COPY of "+
+					"groups/<g>/workspace.img in a sandbox (unprivileged container, no "+
+					"credentials mounted) or move it aside to start fresh", wsDev, err)
 			}
 			logf("mount %s: recovered by e2fsck", wsDev)
 		} else {
@@ -247,6 +248,9 @@ func mountWorkspace() error {
 			}
 		}
 	}
+	// The host grows a disk by extending the backing file only; grow the
+	// filesystem into it here, online. Best effort: never blocks boot.
+	growWorkspace(wsDev)
 	// entrypoint.sh runs as uid 1000 with HOME=/workspace; a root-owned
 	// mount root would break every write.
 	var st unix.Stat_t

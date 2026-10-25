@@ -418,12 +418,12 @@ func checkBuildTools() []checkResult {
 // host requirements even for a binary release that never builds anything —
 // podman is not among them, which is the point of keeping it build-only.
 // (Verified against the call sites: proxy.go refresh(), fc.go workspace image
-// creation/growth and skills delivery, plus the jailer's id mapping.)
+// creation and skills delivery, plus the jailer's id mapping. Growing an
+// image is truncate-only on the host — the guest runs resize2fs — so e2fsck
+// and resize2fs are not host requirements.)
 func checkRuntimeTools() []checkResult {
 	out := lookupAll([]toolReq{
 		{bin: "mkfs.ext4", why: "creates each group's workspace image", fedora: "e2fsprogs", debian: "e2fsprogs"},
-		{bin: "e2fsck", why: "checks a workspace image before growing it", fedora: "e2fsprogs", debian: "e2fsprogs"},
-		{bin: "resize2fs", why: "grows a workspace image when the size preset increases", fedora: "e2fsprogs", debian: "e2fsprogs"},
 		{bin: "tar", why: "delivers skills into a guest", fedora: "tar", debian: "tar"},
 		// The jailer maps a distinct uid per VM out of the host's subuid
 		// range, which needs these setuid-capability helpers — they carry

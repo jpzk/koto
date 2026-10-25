@@ -117,7 +117,7 @@ sudo pacman -S --needed git make podman passt        # Arch
 
 These come from `checkRuntimeTools` in `daemon/setup_checks.go`, with Fedora and Debian package names:
 
-- `mkfs.ext4`, `e2fsck`, `resize2fs`: `e2fsprogs`. They create, check and grow each group's workspace image.
+- `mkfs.ext4`: `e2fsprogs`. It creates each group's workspace image. Growing an image needs no host tool: the host extends the file and the guest resizes the filesystem online.
 - `tar`: `tar`. It delivers skills into a guest.
 - `newuidmap`, `newgidmap`: `shadow-utils` on Fedora, `uidmap` on Debian/Ubuntu. They map the per-VM uid/gid that the jailed microVM monitor runs as.
 - `claude`: warn-only. It is needed only for OAuth (subscription) auth, where the proxy shells out to refresh the token. Its hint asks for `node >= 22` and `npm i -g @anthropic-ai/claude-code`. On Debian-family hosts it also notes that Ubuntu's `nodejs` package is v18, and suggests `sudo snap install node --classic --channel=22` or nvm.

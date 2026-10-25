@@ -86,7 +86,7 @@ commit.
   Legacy `internet=full` → `wan`. Needs a `CONFIG_TUN` kernel.
 - **`size`** = `small` (default, 2 vCPU/1 GiB/8 GiB) | `medium` (2/2G/12G) |
   `large` (4/4G/16G) | `xlarge` (8/8G/24G); `fcResolveSize`. Disk grows,
-  never shrinks (offline `truncate`→`e2fsck`→`resize2fs`). Raw
+  never shrinks (host `truncate` only; guest grows the fs online). Raw
   `vcpus`/`mem_mib`/`io_mbps`/`io_ops` layer on top. The preset also sets the
   **host resource-limit stack**: virtio-blk token buckets, VMM `nice=10`,
   per-VM cgroups (`cpu.weight=50×vcpus`, `memory.high=mem+512MiB`;

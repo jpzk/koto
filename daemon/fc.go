@@ -457,7 +457,7 @@ func fcEnsureWorkspaceImg(g string) error {
 	img := fcWorkspaceImg(g)
 	target := fcWorkspaceDiskBytes(g)
 	// Lstat, not Stat: everything downstream of this check operates on the
-	// PATH — truncate/e2fsck/resize2fs in the grow path, os.Chown in
+	// PATH — truncate in the grow path, os.Chown in
 	// fcJailFixupPerms, and the jail shim's bind mount, which hands the
 	// resolved inode to the VM as a read-write block device. A symlink here
 	// would redirect all of that at whatever the daemon can reach, and the
@@ -470,9 +470,10 @@ func fcEnsureWorkspaceImg(g string) error {
 		if !fi.Mode().IsRegular() {
 			return fmt.Errorf("workspace.img for %s is not a regular file (%s) — refusing to use it as a VM disk", g, fi.Mode().Type())
 		}
-		// Image exists: grow it offline if the resolved size is larger (the
-		// VM is stopped during ensure(), so an offline resize is safe). Never
-		// shrink — that would risk workspace data.
+		// Image exists: extend the backing file if the resolved size is
+		// larger (the VM is stopped during ensure()); the guest grows the
+		// filesystem online on its next boot. Never shrink — that would risk
+		// workspace data.
 		return fcGrowWorkspaceImg(g, img, fi.Size(), target)
 	}
 	// Nothing has been created yet, so this is the cheapest possible refusal
@@ -541,33 +542,26 @@ func fcEnsureWorkspaceImg(g string) error {
 }
 
 // fcGrowWorkspaceImg grows an existing workspace.img to target bytes when the
-// resolved size increased. It runs offline on the host (the VM is stopped):
-// grow the sparse backing file, force an fsck, then resize2fs. Shrinking is
-// never attempted (target <= current is a no-op) to protect workspace data.
-// resize2fs lives in Alpine's e2fsprogs-extra (see host/Dockerfile).
+// resolved size increased. The host only extends the sparse backing file; the
+// filesystem inside is grown by the guest agent, online, after it mounts the
+// disk (fcguest growWorkspace runs resize2fs on /dev/vdb). The image is
+// guest-authored, so the host deliberately runs no filesystem tool on it —
+// e2fsck/resize2fs here would mean parsing attacker-controlled ext4 metadata
+// with the daemon's full authority. Shrinking is never attempted (target <=
+// current is a no-op) to protect workspace data.
 func fcGrowWorkspaceImg(g, img string, current, target int64) error {
 	if target <= current {
 		return nil
 	}
-	// A grow is an e2fsck plus a resize2fs writing new metadata, on a
-	// filesystem that may have no room for it — and it is the operation most
-	// likely to be attempted when the disk is already in trouble (audit M163).
+	// A grow reserves new blocks for the guest to fill, and it is the
+	// operation most likely to be attempted when the disk is already in
+	// trouble (audit M163).
 	if err := fcHostDiskAdmit(g, "growing the workspace image"); err != nil {
 		return err
 	}
-	emitLogfG("fc", g, "info", "[%s] growing workspace.img → %d GiB", g, target>>30)
+	emitLogfG("fc", g, "info", "[%s] growing workspace.img → %d GiB (filesystem is resized by the guest on boot)", g, target>>30)
 	if err := os.Truncate(img, target); err != nil {
 		return fmt.Errorf("workspace grow truncate: %w", err)
-	}
-	// e2fsck -f returns 1 when it fixed something (not fatal); resize2fs still
-	// needs a clean fs, so we run it and let resize2fs surface any real fault.
-	if out, err := exec.Command("e2fsck", "-fy", img).CombinedOutput(); err != nil {
-		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() > 1 {
-			return fmt.Errorf("workspace grow e2fsck: %v: %s", err, strings.TrimSpace(string(out)))
-		}
-	}
-	if out, err := exec.Command("resize2fs", img).CombinedOutput(); err != nil {
-		return fmt.Errorf("workspace grow resize2fs: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -1197,8 +1191,8 @@ func fcAwaitExitImpl(vm *fcVM, pid int) bool {
 //     which VM to OOM-kill;
 //   - the PIDFILE stays too, when the kill did not take. That file is what
 //     fcRunning falls back to, and fcRunning is what stands between a live VMM
-//     and fcGrowWorkspaceImg running truncate + e2fsck + resize2fs on the ext4
-//     image that process still has open. Removing it after an unconfirmed kill
+//     and fcGrowWorkspaceImg truncating the image that process still has
+//     open. Removing it after an unconfirmed kill
 //     turned a wedged VMM into silent workspace corruption. Left in place, the
 //     group reads as running: no resize, and no second VM booted onto the same
 //     image — which is exactly the rule the operator already follows by hand
