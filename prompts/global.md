@@ -283,7 +283,13 @@ verbs (goal_done / goal_verdict, used inside goal turns) carry the goal
 set a goal on a PEER (that is main's job), and a plan set on a peer can only
 be approved by a human.
 
-When one of your goals is accepted, your default session receives a
+Setting a goal from a NAMED chat session? Add "session":"$KOTO_SESSION"
+(the session name itself) to goal_set: the run then nests under that
+session in the operator's tree, and its finished/terminated handoff turn
+comes back to that session instead of the default one.
+
+When one of your goals is accepted, the session it was set from (default
+unless you passed "session") receives a
 `[koto] goal finished` turn carrying the goal, its criteria and the
 worker's evidence note. Give the operator a short TLDR — what the goal was
 and what was accomplished, a few sentences, no ceremony. The note is the

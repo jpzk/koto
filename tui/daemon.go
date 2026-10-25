@@ -245,7 +245,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			n, err := floatToInt32("max_iterations", v)
 			if err != nil {
@@ -353,7 +353,14 @@ func floatToInt32(field string, v float64) (int32, error) {
 	if math.IsNaN(v) || v < math.MinInt32 || v > math.MaxInt32 {
 		return 0, fmt.Errorf("%s %v out of int32 range", field, v)
 	}
-	return int32(v), nil
+	// Narrow through int64 with an integer bound check as well: the float
+	// guard above already excludes every out-of-range value, but this keeps
+	// the int32 conversion visibly bounded on the integer path too.
+	i := int64(v)
+	if i < math.MinInt32 || i > math.MaxInt32 {
+		return 0, fmt.Errorf("%s %v out of int32 range", field, v)
+	}
+	return int32(i), nil
 }
 
 // buildConfigReq encodes the absent/clear/set tri-state. Scalar config values
@@ -426,17 +433,18 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 	out := map[string]GroupInfo{}
 	for g, gi := range f.GetGroups() {
 		out[g] = GroupInfo{
-			Running:   gi.GetRunning(),
-			Provider:  gi.GetProvider(),
-			Model:     gi.GetModel(),
-			Effort:    gi.GetEffort(),
-			Stalled:   gi.GetStalled(),
-			Queued:    int(gi.GetQueued()),
-			Sessions:  gi.GetSessions(),
-			Jobs:      pbToJobs(gi.GetJobs()),
-			TokPerSec: gi.GetTokPerSec(),
-			Network:   gi.GetNetwork(),
-			Root:      gi.GetRoot(),
+			Running:        gi.GetRunning(),
+			Provider:       gi.GetProvider(),
+			Model:          gi.GetModel(),
+			Effort:         gi.GetEffort(),
+			Stalled:        gi.GetStalled(),
+			Queued:         int(gi.GetQueued()),
+			Sessions:       gi.GetSessions(),
+			Jobs:           pbToJobs(gi.GetJobs()),
+			TokPerSec:      gi.GetTokPerSec(),
+			Network:        gi.GetNetwork(),
+			Root:           gi.GetRoot(),
+			SessionOrigins: gi.GetSessionOrigins(),
 		}
 	}
 	return out

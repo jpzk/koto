@@ -868,6 +868,28 @@ func (m Model) treeCursorLive() bool {
 		(m.focus == focusShell && m.preShellFocus == focusTree)
 }
 
+// Tree markers for session rows (see nerdfont.go for the opt-out). Nerd Font
+// glyphs live in the Private Use Area: keep them as \u escapes, literal PUA
+// bytes get stripped in transit.
+const (
+	nfSessionIcon = "\uf418 " // nf-oct-git_branch
+	nfGoalIcon    = "\uf140 " // nf-fa-bullseye
+	plainSession  = "◦ "
+)
+
+// sessionMarker is the tree marker (glyph + trailing space) for a session
+// row named s: bullseye for goal-run leaves (goal-<name>, incl. -judge),
+// branch for every other chat, the plain hollow dot when icons are off.
+func sessionMarker(s string) string {
+	if !nerdFont {
+		return plainSession
+	}
+	if goalSession(s) {
+		return nfGoalIcon
+	}
+	return nfSessionIcon
+}
+
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
 	info := m.groups[r.group]
 	running, stalled, queued := info.Running, info.Stalled, info.Queued
@@ -897,6 +919,11 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 				job = &info.Jobs[i]
 				break
 			}
+		}
+		// An orphan job (its session has no row, so the default conversation
+		// adopted it — model.go visibleJobs) names the session it came from.
+		if job != nil && job.Session != r.session {
+			name = r.job + " @" + job.Session
 		}
 	}
 	contentW := leftPaneWidth - 2 // account for paddingX
@@ -967,7 +994,9 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	if isSession {
 		// Session rows carry the conversation, not the VM: run/stall state
 		// stays on the group row; a hollow marker keeps the hierarchy legible.
-		dot = "◦ "
+		// Nerd Font icon (see nerdfont.go): branch for chats, bullseye for
+		// goal-run leaves; "◦ " under KOTO_TUI_NERDFONT=0.
+		dot = sessionMarker(r.session)
 		dotColor = cGray
 	}
 	if isJob {

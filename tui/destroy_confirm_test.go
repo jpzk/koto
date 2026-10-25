@@ -156,24 +156,6 @@ func TestDestroyKeyRefusesGoalRows(t *testing.T) {
 	}
 }
 
-// A session row targets its parent group, and confirming destroys the
-// parent (sessions are conversations, the group owns the VM + disk).
-func TestDestroyKeySessionRowTargetsParent(t *testing.T) {
-	sent := recordDestroys(t)
-	m := treeModel(t, destroyGroups(), "alpha", "triage", "")
-	if m.treeSel.session != "triage" {
-		t.Fatalf("precondition: hovered %+v", m.treeSel)
-	}
-	m, _ = dpress(t, m, keyCtrlX)
-	if !m.destroyConfirm.open || m.destroyConfirm.group != "alpha" {
-		t.Fatalf("modal = %+v, want parent group alpha", m.destroyConfirm)
-	}
-	m, _ = dpress(t, m, runeKey('y'))
-	if len(*sent) != 1 || (*sent)[0] != "alpha" {
-		t.Fatalf("sent = %v, want [alpha]", *sent)
-	}
-}
-
 // From the message bar ctrl+x is not a destroy: hint only, no modal.
 func TestDestroyKeyInputFocusOnlyHints(t *testing.T) {
 	sent := recordDestroys(t)

@@ -80,6 +80,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -652,6 +653,81 @@ func goalSessionSlug(it goalItem) string {
 	return it.ID
 }
 
+// resolveGoalOrigin normalizes a goal_set's origin session. The result is
+// either "" (the default session) or a registered, non-reserved named session
+// of the group. Everything else folds to "":
+//   - malformed names and the default aliases ("-", "default")
+//     (normalizeSession);
+//   - reserved goal-* names: a goal session is follow-only, so neither the
+//     handoff turn (it would land in another run's worker or judge context,
+//     the M42 rule) nor a tree nesting may target it;
+//   - names that are not in the group's session registry: the origin is
+//     where a human or a coordinator is already talking, and an unknown name
+//     would otherwise mint a brand-new session the moment the handoff lands.
+//
+// Never an error: the origin is routing, so a stale or forged value costs the
+// caller nothing but the nesting. `known` is the group's registry (callers
+// that already read it pass it in; nil reads it).
+func resolveGoalOrigin(group, origin string, known map[string]bool) string {
+	s, err := normalizeSession(strings.TrimSpace(origin))
+	if err != nil || s == "" {
+		return ""
+	}
+	if isReservedSession(s) {
+		emitLogfG("goal", group, "warn", "[%s] goal_set origin %q is a reserved goal session — using the default session", group, s)
+		return ""
+	}
+	if known == nil {
+		known = groupSessionSet(group)
+	}
+	if !known[s] {
+		emitLogfG("goal", group, "info", "[%s] goal_set origin %q is not a session of the group — using the default session", group, s)
+		return ""
+	}
+	return s
+}
+
+// goalHandoffSession is where a finished goal's handoff turn goes: its origin
+// session while that is still a registered session of the group, else the
+// default session (the origin was cleared or destroyed since — re-creating it
+// just to deliver one turn would resurrect a conversation the operator
+// removed). Re-checks reservation too, for hand-edited goals.json records.
+func goalHandoffSession(g string, it goalItem) string {
+	o := it.OriginSession
+	if o == "" || isReservedSession(o) {
+		return ""
+	}
+	if !slices.Contains(listSessions(g), o) {
+		emitLogfG("goal", g, "info", "[%s] goal %s origin session %q is gone — handing off to the default session", g, it.ID, o)
+		return ""
+	}
+	return o
+}
+
+// goalSessionOrigins maps each live goal session of g (worker, and judge once
+// listed — the same set goalLiveSessions returns) to its goal's origin
+// session, for goals set from a NAMED session. Default-origin goals are
+// absent: their rows hang off the group as before.
+func goalSessionOrigins(g string) map[string]string {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	var out map[string]string
+	for _, it := range activeGoalsLocked(g) {
+		if it.OriginSession == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		slug := goalSessionSlug(*it)
+		out[goalWorkSessionFor(slug)] = it.OriginSession
+		if it.Judged {
+			out[goalJudgeSessionFor(slug)] = it.OriginSession
+		}
+	}
+	return out
+}
+
 // goalSet creates a SELF-set goal — the group is its own creator, so its own
 // agent may approve the plan. Kept as the plain form because that is what a
 // group setting a goal on itself means, and what the tests exercise.
@@ -664,6 +740,15 @@ func goalSet(group, text, criteria, name string, maxIter int, plan bool) (goalIt
 // plan-first on a delegated goal IS the human gate and the delegate must not
 // be able to close it (audit M49).
 func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bool) (goalItem, error) {
+	return goalSetFrom(creator, group, "", text, criteria, name, maxIter, plan)
+}
+
+// goalSetFrom is goalSetBy plus the ORIGIN session: the named chat session of
+// `group` the goal was set from. It is advisory routing, not authority — it
+// decides where the goal-finished handoff turn lands and where the TUI nests
+// the run's rows — so a bad value degrades to the default session rather than
+// failing the goal (resolveGoalOrigin).
+func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter int, plan bool) (goalItem, error) {
 	if group == "" {
 		return goalItem{}, fmt.Errorf("group is required")
 	}
@@ -715,6 +800,7 @@ func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bo
 	// collision M44 describes, arriving by a race instead of by a gap in the
 	// occupied set. listSessions reads a file, so it is gathered outside.
 	taken := groupSessionSet(group)
+	origin = resolveGoalOrigin(group, origin, taken)
 	goalLock.Lock()
 	name, err := resolveGoalNameLocked(group, strings.TrimSpace(name), text, taken)
 	if err != nil {
@@ -729,6 +815,7 @@ func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bo
 		Criteria:      criteria,
 		Plan:          plan,
 		CreatedBy:     creator,
+		OriginSession: origin,
 		Status:        status,
 		MaxIterations: maxIter,
 		CreatedAt:     goalNow(),
@@ -752,7 +839,7 @@ func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bo
 	snap := snapshotGoalsLocked()
 	goalLock.Unlock()
 	snap.write()
-	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s plan=%t max=%d", it.ID, it.Name, group, plan, maxIter)
+	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s origin=%s plan=%t max=%d", it.ID, it.Name, group, sessionMarkerName(origin), plan, maxIter)
 	emit(group, Event{Event: "goal_set", ID: it.ID, Text: text, Session: goalWorkSessionFor(it.Name)})
 	startGoalDriver(group, it.ID)
 	return it, nil
@@ -1453,7 +1540,7 @@ func goalMarkMet(g string, snap goalItem, note string) {
 // the goal is already terminal, so a failure here costs the summary
 // (warn-logged), never the verdict.
 func goalInformCoordinator(g string, it goalItem) {
-	if _, err := enqueueSend(g, "", goalInformCoordinatorMsg(it)); err != nil {
+	if _, err := enqueueSend(g, goalHandoffSession(g, it), goalInformCoordinatorMsg(it)); err != nil {
 		emitLogfG("goal", g, "warn", "coordinator notice for goal %s dropped: %v", it.ID, err)
 	}
 }
@@ -1520,7 +1607,7 @@ func goalMarkExhausted(g, id, detail string) {
 // terminal, so a dropped enqueue costs the summary (warn-logged), never the
 // termination.
 func goalInformCoordinatorExhausted(g string, it goalItem, detail string) {
-	if _, err := enqueueSend(g, "", goalCoordinatorExhaustedMsg(it, detail)); err != nil {
+	if _, err := enqueueSend(g, goalHandoffSession(g, it), goalCoordinatorExhaustedMsg(it, detail)); err != nil {
 		emitLogfG("goal", g, "warn", "coordinator notice for exhausted goal %s dropped: %v", it.ID, err)
 	}
 }

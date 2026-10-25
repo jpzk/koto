@@ -55,6 +55,7 @@ type goalItemT struct {
 	LastFeedback  string
 	DoneNote      string
 	PausedReason  string
+	OriginSession string
 }
 
 type goalListMsg struct {
@@ -89,6 +90,7 @@ func goalFromMap(v any) goalItemT {
 	it.LastFeedback, _ = mp["last_feedback"].(string)
 	it.DoneNote, _ = mp["done_note"].(string)
 	it.PausedReason, _ = mp["paused_reason"].(string)
+	it.OriginSession, _ = mp["origin_session"].(string)
 	return it
 }
 
@@ -111,10 +113,13 @@ func goalListCmd(sock, filter string) tea.Cmd {
 	}
 }
 
-func goalSetCmd(sock, group, name, text, criteria string, maxIter int, plan bool) tea.Cmd {
+// goalSetCmd sets a goal. origin is the chat session it is set from ("" =
+// default): the daemon records it so the run nests under that session in the
+// tree and its finished/terminated handoff turn lands back there.
+func goalSetCmd(sock, group, origin, name, text, criteria string, maxIter int, plan bool) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := daemonCall(sock, "goal_set", map[string]any{
-			"group": group, "name": name, "text": text, "criteria": criteria,
+			"group": group, "session": origin, "name": name, "text": text, "criteria": criteria,
 			"max_iterations": maxIter, "plan": plan,
 		})
 		if err != nil {
@@ -186,7 +191,8 @@ prefix:
 				return "", "", "", "", 0, false, fmt.Errorf("name= needs a value")
 			}
 		case strings.HasPrefix(t, "max="):
-			n, aerr := strconv.Atoi(strings.TrimPrefix(t, "max="))
+			n64, aerr := strconv.ParseInt(strings.TrimPrefix(t, "max="), 10, 32)
+			n := int(n64)
 			if aerr != nil || n <= 0 {
 				return "", "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
 			}
@@ -248,7 +254,7 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals set: " + err.Error()})
 			return nil
 		}
-		return goalSetCmd(m.sock, group, name, text, criteria, maxIter, plan)
+		return goalSetCmd(m.sock, group, m.goalOrigin(group), name, text, criteria, maxIter, plan)
 	case "approve", "pause", "interrupt", "resume", "cancel":
 		// Args: [<group>] [<name>] — goals run concurrently, so a name picks
 		// one of the group's runs. A single token is a group only when it
@@ -359,4 +365,21 @@ func goalStatusLine(it goalItemT) string {
 	}
 	return oneLine(fmt.Sprintf("  %-16s %-12s %-18s %s",
 		handle, it.Group, it.Status+extra, truncRunes(oneLine(it.Text), 44)))
+}
+
+// goalOrigin is the origin session a /goals set records: the session the
+// operator is typing in, when the goal targets the group being viewed. A goal
+// aimed at ANOTHER group has no origin there (the active session belongs to
+// m.cur), so it hangs off that group's default session as before. Goal
+// sessions are follow-only and never an origin; the daemon folds them (and
+// unregistered names) to default anyway, this just avoids sending them.
+func (m Model) goalOrigin(group string) string {
+	if group != m.cur {
+		return ""
+	}
+	s := m.activeSession(group)
+	if goalSession(s) {
+		return ""
+	}
+	return s
 }

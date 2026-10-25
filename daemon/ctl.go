@@ -689,7 +689,16 @@ func ctlDispatch(owner string, line []byte) any {
 			plan = true
 			emitLogfG("goal", req.Group, "info", "[%s] main set a peer goal with plan=false; forcing plan-first (approval is a human's)", req.Group)
 		}
-		it, err := goalSetBy(owner, req.Group, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		// The origin session is the caller's OWN session ($KOTO_SESSION), so it
+		// only means something when the goal is set on the caller's own group:
+		// main naming one of ITS sessions on a peer goal would point the
+		// handoff at an unrelated (or same-named) session of the peer. Peer
+		// goals therefore hand off to the peer's default session, as before.
+		origin := req.Session
+		if req.Group != owner {
+			origin = ""
+		}
+		it, err := goalSetFrom(owner, req.Group, origin, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
 		if err != nil {
 			return errResp(err.Error())
 		}
