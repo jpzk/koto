@@ -300,7 +300,11 @@ var monoGlyphs = map[rune]string{
 	'│': "|", '─': "-", '├': "+", '└': "+", '┌': "+", '┐': "+", '┘': "+",
 	// state markers
 	'●': "*", '○': "o", '◦': "-", '◆': "*", '◎': "O", '•': "*",
-	'\uf418': "-", '\uf140': "O", // Nerd Font session / goal icons
+	// Nerd Font icons (nerdfont.go) — all one cell, same stand-ins as the
+	// plain glyphs they replace (TestNerdIconsMonoFallback pins coverage)
+	'\uf418': "-", '\uf140': "O", '\uf071': "!", '\uf013': "%", '\uf00c': "+",
+	'\uf00d': "x", '\uf04b': ">", '\uf04c': "=", '\uf24e': "=", '\uf0f3': "!",
+	'\uf0eb': "~", '\uf093': ">", '\uf252': ".", '\uf017': "!", '\uf058': "k",
 	'⚠': "!", '⚙': "%", '✓': "+", '✗': "x", '⚖': "=",
 	'▲': "^", '▼': "v", '▶': ">", '◀': "<",
 	// wide (two-cell) markers — replacements are two ASCII cells

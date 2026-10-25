@@ -1,0 +1,71 @@
+== goal/goal_awaiting/
+◎ goal g: plan ready — /goals approve to start
+== goal/goal_cancelled/
+✗ goal g cancelled
+== goal/goal_exhausted/
+✗ goal g exhausted — hit its iteration cap without completing, handed to the coordinator
+== goal/goal_iter/2
+◎ goal g: iteration 2
+== goal/goal_judge/
+⚖ goal g: completion claimed — reviewing
+== goal/goal_met/
+✅ goal g MET
+== goal/goal_paused/operator
+⏸ goal g paused (operator)
+== goal/goal_plan/
+◎ goal g: planning
+== goal/goal_resumed/
+▶ goal g resumed
+== goal/goal_set/
+◎ goal g set
+== goal/goal_verdict/met
+⚖ goal g: verdict MET
+== goal/goal_verdict/nope
+⚖ goal g: verdict unmet — nope
+== notify/inline-off
+                           g1 · done — finished 
+== notify/inline-on
+                        🔔 g1 · done — finished 
+== notify/line
+🔔 [high] deploy — v1.4 live
+== sched/list-enabled
+  ✓
+== sched/sched_fired
+⏰ sched s1 fired
+== sched/sched_run
+▶ sched s1 fired
+== transcript/live-thinking
+🧠  pondering
+== transcript/pending
+⏳ queued prompt
+== transcript/prompt
+HH:MM ›  summary line
+         body one
+== transcript/sys
+HH:MM ·  summary line
+         body one
+== transcript/thought
+HH:MM 🧠  summary line
+         body one
+== transcript/tool
+HH:MM ⚙  summary line
+      ⚙  body one
+== transcript/tool_out
+HH:MM 📤  summary line
+         body one
+== tree/stuck
+ ├─ ⚠ stuck          
+== tree/work
+ └─ ● work        ⏳2
+== tree/work/j:jbad
+    ├─ ✗ jbad        
+== tree/work/j:jok
+    ├─ ✓ jok         
+== tree/work/j:jorph
+    ├─ ⚠ jorph       
+== tree/work/j:jrun
+    ├─ ⚙ jrun        
+== tree/work/s:goal-x
+    └─ ◦ x           
+== tree/work/s:side
+    ├─ ◦ side        

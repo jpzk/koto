@@ -547,7 +547,7 @@ func startRunScript(group, name, script string) {
 			case "end":
 				flush(true)
 				logInfo("script", "runscript %s on %s: done", name, group)
-				prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript ✓ " + name})
+				prog.Send(scriptLogMsg{group: group, kind: "sys", text: "runscript " + ic(icCheck) + " " + name})
 				return
 			}
 		}
