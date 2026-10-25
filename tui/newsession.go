@@ -37,7 +37,7 @@ func (m *Model) openNewSession() {
 	}
 	ti := newGroupInput(32, "e.g. review")
 	ti.Focus()
-	m.newSess = newSessForm{open: true, group: m.cur, name: ti}
+	m.newSess = &newSessForm{open: true, group: m.cur, name: ti}
 }
 
 // validateSessionName returns "" for a creatable name, else the inline
@@ -59,11 +59,11 @@ func validateSessionName(name string) string {
 
 // handleNewSessionKey routes keys while the dialog is open; nothing reaches
 // the chat input or the tree behind it.
-func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	f := &m.newSess
+func (m Model) handleNewSessionKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	f := m.newSess
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.newSess = newSessForm{}
+		m.newSess = &newSessForm{}
 		return m, nil
 	case "enter":
 		name := strings.TrimSpace(f.name.Value())
@@ -72,7 +72,7 @@ func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		g := f.group
-		m.newSess = newSessForm{}
+		m.newSess = &newSessForm{}
 		if _, ok := m.groups[g]; !ok {
 			m.addLine(logLine{kind: "err", text: "new session: group " + g + " is gone"})
 			return m, nil
@@ -90,7 +90,7 @@ func (m Model) handleNewSessionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // renderNewSession paints the dialog as the whole frame, centered.
 func (m Model) renderNewSession() string {
-	f := m.newSess
+	f := *m.newSess
 	bw := max(24, min(m.width-2, 56))
 	inner := bw - 4
 	amber := lipgloss.NewStyle().Foreground(cAmber)

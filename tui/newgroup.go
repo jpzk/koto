@@ -104,14 +104,14 @@ func (m *Model) openNewGroup() tea.Cmd {
 	// The per-provider list cache outlives one dialog: reopening it does not
 	// refetch what this TUI already has (the daemon caches too).
 	f.mp.cache = m.modelsCache
-	m.newGroup = f
+	m.newGroup = &f
 	return tea.Batch(m.reloadModels(), providersCmd(m.sock))
 }
 
 // reloadModels points the model select at the dialog's current provider and
 // returns the fetch, or nil when the list came from the cache.
 func (m *Model) reloadModels() tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	prov := f.value("provider")
 	if prov == "" {
 		// No provider to list models for (none has a login): an empty,
@@ -334,7 +334,7 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 }
 
 func (m *Model) submitNewGroup() tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	if f.busy {
 		return nil
 	}
@@ -359,7 +359,7 @@ func (m *Model) submitNewGroup() tea.Cmd {
 // spawn-success path (switch to the group, refresh the list); failure keeps
 // the dialog up with the daemon's error inline.
 func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
-	f := &m.newGroup
+	f := m.newGroup
 	f.busy = false
 	if msg.spawned {
 		f.spawned = msg.group
@@ -378,14 +378,14 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 		}
 		return nil
 	}
-	m.newGroup = newGroupForm{}
+	m.newGroup = &newGroupForm{}
 	return m.handleDaemonResp(daemonRespMsg{op: "spawn", group: msg.group})
 }
 
 // handleNewGroupKey routes keys while the dialog is open. Nothing reaches the
 // panes underneath.
-func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	f := &m.newGroup
+func (m Model) handleNewGroupKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	f := m.newGroup
 	key := f.field()
 	// Edit mode: a field whose current value could not be read is shown as
 	// "unknown" and only navigable — never changed, so never sent.
@@ -397,7 +397,7 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch s := msg.String(); s {
 	case "esc", "ctrl+c":
-		m.newGroup = newGroupForm{}
+		m.newGroup = &newGroupForm{}
 		return m, nil
 	case "tab", "down", "ctrl+n":
 		f.move(1)
@@ -454,7 +454,7 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Picking "custom…" moves focus to the id input. done=false hands the key to
 // the dialog's generic routing (tab, esc on a closed list, …).
 func (m *Model) handleModelKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	f := &m.newGroup
+	f := m.newGroup
 	p := &f.mp
 	s := msg.String()
 	if !p.open {
@@ -522,7 +522,7 @@ func (m Model) newGroupBoxWidth() int {
 
 // renderNewGroup paints the dialog as the whole frame, centered.
 func (m Model) renderNewGroup() string {
-	f := m.newGroup
+	f := *m.newGroup
 	bw := m.newGroupBoxWidth()
 	inner := bw - 4 // border 2 + padding 2
 	const labelW = 10

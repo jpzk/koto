@@ -85,7 +85,7 @@ func (m *Model) openStopConfirm() {
 }
 
 // handleStopConfirmKey routes keys while the modal is open.
-func (m Model) handleStopConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleStopConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		g := m.stopConfirm.group

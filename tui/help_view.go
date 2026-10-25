@@ -218,7 +218,7 @@ func (m *Model) resizeHelpViewport() {
 // handleHelpKey routes keys while the modal is open: close keys and scroll
 // keys, everything else swallowed (it's a modal — a stray keystroke must not
 // land in the message bar or the tree underneath).
-func (m Model) handleHelpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleHelpKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+h", "q", "enter", "ctrl+c":
 		// ctrl+c dismisses like the picker overlay does (it's the interrupt

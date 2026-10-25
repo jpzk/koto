@@ -646,9 +646,9 @@ type Model struct {
 
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
-	newGroup newGroupForm
+	newGroup *newGroupForm // pointer: Model size — see framecache.go cloneOpenModals
 	// New-session dialog (ctrl+s — see newsession.go), same modal contract.
-	newSess newSessForm
+	newSess *newSessForm
 	// modelsCache is the per-provider model list the new-group dialog has
 	// fetched this session (modelpick.go), shared across dialog opens.
 	modelsCache map[string]modelsLoadedMsg
@@ -688,7 +688,7 @@ type Model struct {
 	schedLoading     bool
 	schedConfirm     string
 	schedEditing     bool
-	schedInput       textinput.Model
+	schedInput       *textinput.Model
 	schedEditPending *schedItem
 	// / search (sched_view.go): schedSearching means the prompt owns every
 	// key; schedFilter is the live fuzzy query (persists after enter);
@@ -696,7 +696,7 @@ type Model struct {
 	// (a non-nil empty slice is a filter that matched nothing).
 	schedSearching bool
 	schedFilter    string
-	schedSearch    textinput.Model
+	schedSearch    *textinput.Model
 	schedMatches   []int
 
 	// vpLines is the chat viewport's content as the slice it was built from
@@ -709,6 +709,22 @@ type Model struct {
 	// building them is dominated by Unicode width measurement inside
 	// lipgloss. Keyed on every value that determines a row's output.
 	treeRowCache map[string]string
+
+	// frame is the keystroke fast path (framecache.go): the off-focus regions
+	// of the last full frame, reused while the only thing that changed since
+	// is the prompt text. viewGen names the non-input state that frame was
+	// built from; keyEditOnly is set by handleKey for a pure prompt edit and
+	// read once by the Update wrapper.
+	frame       *frameCache
+	viewGen     uint64
+	keyEditOnly bool
+	// shellOnly is keyEditOnly's twin for the shared terminal: set by a
+	// handler whose only effect was on the pty (a key forwarded to the guest,
+	// guest output fed to the emulator) — see shellframe.go.
+	shellOnly bool
+	// bgQuiet: a background stream frame that changed only state no View
+	// region reads until the next spin tick (streamQuiet, framecache.go).
+	bgQuiet bool
 
 	// Shared shell (focusShell / "/shell"). shell is nil until the first
 	// /shell attach; it survives a focus switch away from focusShell (see
@@ -749,7 +765,7 @@ type Model struct {
 	// /reload, but the historyMsg path re-seeds from the daemon's log on
 	// the next attach.
 	promptHistory  map[string][]string
-	picker         pickerState
+	picker         *pickerState
 	prePickerFocus focusZone
 
 	// histNav: per-group shell-history navigation cursor for ↑/↓ recall in
@@ -1078,6 +1094,12 @@ func newModel(sock string, ctxWindow int) Model {
 		height:         24,
 		mdCache:        map[string]string{},
 		treeRowCache:   map[string]string{},
+		frame:          &frameCache{},
+		newGroup:       &newGroupForm{},
+		newSess:        &newSessForm{},
+		picker:         &pickerState{},
+		schedInput:     &textinput.Model{},
+		schedSearch:    &textinput.Model{},
 		vpCache:        map[string]vpCacheEntry{},
 		groupVer:       map[string]int{},
 		promptHistory:  map[string][]string{},
@@ -1916,17 +1938,24 @@ func startWatchState() {
 // expiry), and View runs right after; this is the one choke point between
 // the two.
 func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
-	next, cmd := m.update(raw)
-	nm, ok := next.(Model)
-	if !ok {
-		return next, cmd
+	m.cloneOpenModals()
+	m.keyEditOnly, m.shellOnly, m.bgQuiet = false, false, false
+	nm, cmd := m.update(raw)
+	if nm.keyEditOnly || nm.shellOnly || nm.bgQuiet {
+		// A pure prompt edit (framecache.go) or a pty-only message
+		// (shellframe.go): nothing treeRows reads changed,
+		// so the cursor is still where the last message left it, and the
+		// off-prompt regions of the last frame are still this frame's.
+		nm.keyEditOnly, nm.shellOnly, nm.bgQuiet = false, false, false
+		return nm, cmd
 	}
+	nm.viewGen = nextViewGen()
 	nm.normalizeTreeCursor()
 	nm.clampTreeTop()
 	return nm, cmd
 }
 
-func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 	switch msg := raw.(type) {
 
 	case tea.WindowSizeMsg:
@@ -1975,6 +2004,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushPending = false
 		if m.liveDirty {
 			m.refreshLog()
+		} else {
+			// Nothing was left to paint (the tick already flushed it):
+			// flushPending is not read by View, so the last frame stands.
+			m.bgQuiet = true
 		}
 		return m, nil
 
@@ -2634,6 +2667,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.lastSeq[ev.Group] = ev.Seq
 		}
+		quiet := m.streamQuiet(ev)
 		switch ev.Event {
 		case "gap":
 			// The daemon couldn't cover our resume window (frames aged out of
@@ -2865,6 +2899,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 				flushCmd = m.markContentDirty()
 			}
 		}
+		m.bgQuiet = quiet
 		return m, tea.Batch(m.ensureTicking(), flushCmd)
 
 	case streamClosedMsg:
@@ -3090,6 +3125,7 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// Stale frame from a superseded session (detach+reattach in quick
 		// succession, or a group switch that started a new one) — drop it.
 		if m.shell == nil || msg.id != m.shell.id {
+			m.shellOnly = true // dropped: nothing changed
 			return m, nil
 		}
 		if len(msg.data) > 0 {
@@ -3100,7 +3136,10 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.end || msg.errText != "" {
 			m.shell.ended = true
 			m.shell.errText = msg.errText
+			return m, nil
 		}
+		// Guest output and nothing else: only the pty body changes (shellframe.go).
+		m.shellOnly = true
 		return m, nil
 
 	case shellChaseMsg:
@@ -3125,11 +3164,11 @@ func (m Model) update(raw tea.Msg) (tea.Model, tea.Cmd) {
 		// The prompt box grows and shrinks as the value wraps; the chat
 		// viewport owns the slack, so re-size it whenever the row count moves
 		// (typing past the right edge, clearing on enter, history recall).
-		if mm, ok := nm.(Model); ok && mm.inputRows() != rows {
-			mm.resizeViewport()
-			mm.refreshPeekVP() // hovering a job row while typing in tree focus
-			mm.refreshLog()
-			return mm, cmd
+		if nm.inputRows() != rows {
+			nm.keyEditOnly = false // the chat viewport moved
+			nm.resizeViewport()
+			nm.refreshPeekVP() // hovering a job row while typing in tree focus
+			nm.refreshLog()
 		}
 		return nm, cmd
 
@@ -3297,7 +3336,7 @@ func (m Model) logViewportSize() (int, int) {
 // prompt box, the hint row and the metrics row leave over. The prompt box
 // grows as the value wraps (inputRows), so this shrinks with it — View() and
 // the viewport must agree on the number or the frame overflows the terminal.
-func (m Model) chatRows() int {
+func (m *Model) chatRows() int {
 	if ch := m.shellStackChatH(); ch > 0 {
 		// Stacked shell split: the transcript is budgeted against the chat
 		// half's own height, not the frame's — the terminal pane below owns
@@ -4160,7 +4199,7 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 
 // --- Key handling ------------------------------------------------------------
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	s := msg.String()
 	if m.picker.open {
 		// The picker/palette overlay owns key input entirely until closed —
@@ -4744,6 +4783,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.refreshSuggestions()
+	// The one exit that touches nothing but the prompt — framecache.go.
+	m.keyEditOnly = isPromptEditKey(msg)
 	return m, cmd
 }
 
@@ -4763,7 +4804,7 @@ func (m *Model) openPicker() {
 	ti.Width = 60
 	ti.Focus()
 	matches := fuzzyRank("", items, 0)
-	m.picker = pickerState{
+	m.picker = &pickerState{
 		open:    true,
 		mode:    pickerHistory,
 		input:   ti,
@@ -4775,7 +4816,7 @@ func (m *Model) openPicker() {
 }
 
 func (m *Model) closePicker() {
-	m.picker = pickerState{}
+	m.picker = &pickerState{}
 	m.focus = m.prePickerFocus
 	if m.focus == focusInput {
 		m.input.Focus()
@@ -4784,7 +4825,7 @@ func (m *Model) closePicker() {
 
 // handlePickerKey routes all key input while the picker overlay is open.
 // Returns nil cmd for state-only changes; never quits the program.
-func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handlePickerKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	s := msg.String()
 	switch s {
 	case "esc", "ctrl+g":

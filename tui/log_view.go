@@ -525,7 +525,7 @@ func (m *Model) exitLog() {
 // handleLogKey routes keys when focus == focusLog. Esc / ctrl+L close,
 // arrow keys scroll, everything else is ignored (no typing in the log
 // view; it's read-only).
-func (m Model) handleLogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleLogKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	s := msg.String()
 	switch s {
 	case "esc", "ctrl+l":
