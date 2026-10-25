@@ -72,7 +72,7 @@ type frameGuard struct {
 	width, height               int
 	focus                       focusZone
 	cur                         string
-	treeIdx, tick               int
+	treeIdx, treeTop, tick      int
 	yOff, vpLines, logRows      int
 	inputRows                   int
 	pickerOpen, shellOpen, full bool
@@ -87,6 +87,7 @@ func (m *Model) frameGuard(logRows int) frameGuard {
 		focus:      m.focus,
 		cur:        m.cur,
 		treeIdx:    m.treeIdx,
+		treeTop:    m.treeTop,
 		tick:       m.tick,
 		yOff:       m.vp.YOffset,
 		vpLines:    len(m.vpLines),
