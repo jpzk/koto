@@ -877,7 +877,14 @@ type llmRoute struct {
 var llmRoutesAnthropic = []llmRoute{
 	{http.MethodPost, "/v1/messages", false},
 	{http.MethodPost, "/v1/messages/count_tokens", false},
-	{http.MethodPost, "/v1/chat/completions", false},
+	// POST /v1/chat/completions (Anthropic's OpenAI-compatible endpoint) was
+	// here until 1.7.2 (audit proxy/chat-completions-budget-bypass). Its
+	// responses carry OpenAI-shaped usage (prompt_tokens/completion_tokens)
+	// that budgetRecordSpend does not count, so every call through it spent
+	// outside tokens_per_day / usd_per_day / usd_per_month. No koto client
+	// calls it (1 request in 138,494), so the route is removed rather than
+	// metered: a second usage dialect would need its own streaming-chunk
+	// parsing, and any gap there would reopen the same unmetered path.
 	{http.MethodGet, "/v1/models", false},
 	{http.MethodGet, "/v1/models/", true},
 	{http.MethodGet, "/api/hello", false},
