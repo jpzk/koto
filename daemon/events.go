@@ -416,6 +416,15 @@ func stateHash(gs map[string]GroupInfo) string {
 		fld(gi.Effort)
 		fld(gi.Network)
 		fld(strings.Join(gi.Sessions, "\x00"))
+		origKeys := make([]string, 0, len(gi.SessionOrigins))
+		for k := range gi.SessionOrigins {
+			origKeys = append(origKeys, k)
+		}
+		sort.Strings(origKeys)
+		for _, k := range origKeys {
+			fld(k)
+			fld(gi.SessionOrigins[k])
+		}
 		for _, j := range gi.Jobs {
 			fld(j.ID)
 			fld(j.Session)

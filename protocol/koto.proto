@@ -348,6 +348,12 @@ message GroupInfo {
   // a per-group Config round-trip.
   string network = 11;
   bool   root    = 12;
+  // Goal session -> the named chat session its goal was set from
+  // (GoalItem.origin_session), for every live goal session of this group
+  // whose origin is NOT the default session. Clients nest those goal rows
+  // under the origin session's row; an absent key means "hang off the
+  // group", which is also the fallback when the origin row is gone.
+  map<string, string> session_origins = 13;
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -520,6 +526,11 @@ message GoalItem {
   // ("goal-<name>"), so it is what the tree row, /session and the ctl plane
   // all show. Defaults to a slug of `text` when the caller supplies none.
   string name           = 15;
+  // Named chat session the goal was set from ("" = the group's default
+  // session). The goal-finished / terminated handoff turn is delivered
+  // there (default when it no longer exists), and the TUI nests the goal's
+  // rows under it.
+  string origin_session = 16;
 }
 
 message GoalSetReq {
@@ -533,6 +544,11 @@ message GoalSetReq {
   // Run name (see GoalItem.name). Empty => slugged from `text`. Must be free
   // as a session name in the group.
   string name           = 6;
+  // Origin session: the named chat session (in `group`) the goal is set
+  // from. "" / "-" / "default" = the default session. Reserved goal-*
+  // names and names that are not a registered session fall back to the
+  // default session (never an error).
+  string session        = 7;
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
 message GoalGroupReq {                     // approve / pause / interrupt / resume / cancel

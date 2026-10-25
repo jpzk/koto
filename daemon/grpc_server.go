@@ -86,6 +86,12 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		Network:   sanitize(gi.Network),
 		Root:      gi.Root,
 	}
+	if len(gi.SessionOrigins) > 0 {
+		out.SessionOrigins = make(map[string]string, len(gi.SessionOrigins))
+		for k, v := range gi.SessionOrigins {
+			out.SessionOrigins[sanitize(k)] = sanitize(v)
+		}
+	}
 	for _, j := range gi.Jobs {
 		out.Jobs = append(out.Jobs, toPBJobInfo(j))
 	}
@@ -157,6 +163,7 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		LastFeedback:  sanitize(it.LastFeedback), // guest-written (goal_verdict)
 		DoneNote:      sanitize(it.DoneNote),     // guest-written (goal_done)
 		PausedReason:  sanitize(it.PausedReason),
+		OriginSession: sanitize(it.OriginSession),
 		CreatedAt:     it.CreatedAt,
 		UpdatedAt:     it.UpdatedAt,
 		CompletedAt:   it.CompletedAt,
@@ -1072,7 +1079,9 @@ func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp,
 	// "" creator: the operator set this one. It is the human the plan gate
 	// defers to, and it approves over GoalApprove — the guest ctl plane must
 	// not be able to (audit M49).
-	it, err := goalSetBy("", r.Group, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
+	// r.Session is the origin session the client set this from (the TUI's
+	// active session); resolveGoalOrigin folds reserved/unknown to default.
+	it, err := goalSetFrom("", r.Group, r.Session, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}
