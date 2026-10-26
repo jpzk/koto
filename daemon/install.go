@@ -797,16 +797,6 @@ func envPreserved(raw string, seeded map[string]bool) (keys []string, notes map[
 	return keys, notes
 }
 
-// podmanPath resolves podman for the unit's ExecStartPre/ExecStop, which
-// systemd requires to be absolute. /usr/bin/podman on both Fedora and Ubuntu,
-// but resolving means a podman installed anywhere else still works.
-func podmanPath() string {
-	if p, err := exec.LookPath("podman"); err == nil {
-		return p
-	}
-	return "/usr/bin/podman"
-}
-
 // renderUnit builds the service unit. Values are baked in literally rather
 // than using systemd specifiers, so `systemctl cat koto` shows the operator
 // exactly what will run. claude is the CLI path recorded in koto.env ("" for
@@ -1353,13 +1343,6 @@ func copySparse(dst, src *os.File, size int64) error {
 		at = size
 	}
 	return dst.Truncate(at)
-}
-
-func copyIfAbsent(src, dst string) error {
-	if exists(dst) || !exists(src) {
-		return nil
-	}
-	return copyFile(src, dst)
 }
 
 // copySecretIfAbsent migrates a credential with a FIXED owner-only mode.

@@ -1140,15 +1140,6 @@ func (m Model) isUnread(g, s string) bool { return m.unread[unreadKey(g, s)] }
 func (m *Model) clearUnread(g, s string)  { delete(m.unread, unreadKey(g, s)) }
 func (m *Model) markUnread(g, s string)   { m.unread[unreadKey(g, s)] = true }
 
-// clearGroupUnread drops every session's unread mark for g (group destroy).
-func (m *Model) clearGroupUnread(g string) {
-	for k := range m.unread {
-		if strings.HasPrefix(k, g+"\x00") {
-			delete(m.unread, k)
-		}
-	}
-}
-
 // chatKind reports whether a line kind carries conversation content (and is
 // therefore session-scoped); sys feedback, errors, and script output are
 // group-wide.

@@ -316,22 +316,6 @@ asking.`)
 
 // ---- subprocess helpers ----------------------------------------------------
 
-// interactive hands the real terminal to a child process (the OAuth login).
-// The wizard ignores SIGINT for the duration: the child is in the same
-// foreground process group and owns ^C while it runs.
-func (sc *setupCtx) interactive(name string, args ...string) error {
-	sc.ui.info("%s", sc.ui.dim("$ "+name+" "+strings.Join(args, " ")))
-	defer withChildInterrupt()()
-	// Bound to the setup context: a cancel now actually reaches the child
-	// (audit 2026-09-11 L170). exec.Command ignored it, so a wizard cancelled
-	// by any route left its interactive child running and attached to the
-	// operator's terminal.
-	cmd := exec.CommandContext(sc.ctx, name, args...)
-	cmd.Dir = sc.root
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
-}
-
 // setupArmInterrupt/setupDisarmInterrupt manage the wizard's own SIGINT
 // registration so an interactive child can suspend it and give it back. They
 // are package-level because the child handoffs are in claude_login.go too,
