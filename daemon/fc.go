@@ -596,12 +596,6 @@ func fcResolveSize(g string) (vcpus, memMiB int, diskBytes int64) {
 	return
 }
 
-// fcMachineCfg returns the resolved vCPU count and RAM for group g.
-func fcMachineCfg(g string) (vcpus, memMiB int) {
-	vcpus, memMiB, _ = fcResolveSize(g)
-	return
-}
-
 // fcResolveIO resolves a group's virtio-blk rate limit: the size preset's
 // bandwidth/ops columns, then optional raw "io_mbps"/"io_ops" config.json
 // overrides layered on top (same escape-hatch pattern as vcpus/mem_mib —
