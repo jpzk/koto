@@ -215,6 +215,15 @@ third-party module. go.mod diff expected empty (verified in criterion 4). If
 any helper is ever needed it must be pinned and ≥6 weeks old with justification
 here — none is anticipated.
 
+Verified (iter 4, criterion 4):
+- `git diff origin/develop...feat/cred-proxy -- '*.mod' '*.sum' go.work` → empty
+  (0 lines): no go.mod / go.sum / go.work change.
+- `go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./credproxy/`
+  (in daemon/) → only `koto/credproxy` itself; every transitive import is stdlib.
+- Justification: TLS MITM, leaf minting, and redaction need nothing beyond
+  crypto/* + net/http; a third-party dep in the secret-handling path would add
+  supply-chain risk for zero capability gain.
+
 ## 13. STRIDE summary
 
 - Spoofing: SNI==CONNECT==Host enforced (§7); upstream verified vs system roots.
