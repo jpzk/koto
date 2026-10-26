@@ -12,7 +12,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -350,43 +349,6 @@ func (u *setupUI) secret(q string) (string, error) {
 	s, err := u.readLine()
 	u.blank() // the user's Enter was swallowed with the echo
 	return s, err
-}
-
-// prefixWriter indents streamed subprocess output so it reads as a quoted
-// block rather than as the wizard's own voice. Buffers partial lines; Flush
-// emits a trailing fragment (progress bars, prompts without a newline).
-type prefixWriter struct {
-	ui  *setupUI
-	buf []byte
-}
-
-func (w *prefixWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	for {
-		i := bytes.IndexByte(w.buf, '\n')
-		if i < 0 {
-			break
-		}
-		w.emit(string(w.buf[:i]))
-		w.buf = w.buf[i+1:]
-	}
-	return len(p), nil
-}
-
-func (w *prefixWriter) Flush() {
-	if len(w.buf) > 0 {
-		w.emit(string(w.buf))
-		w.buf = nil
-	}
-}
-
-func (w *prefixWriter) emit(line string) {
-	// This is the most directly attacker-facing sink in the wizard: it is a
-	// SUBPROCESS's stdout and stderr, verbatim, on the operator's terminal
-	// (audit 2026-09-11 L103). The prefix is what makes a line legible as the
-	// child's; a bare \r or a cursor-up would let the child erase that frame
-	// and write where koto's own lines go.
-	fmt.Println(w.ui.dim("  │ ") + uiText(strings.TrimRight(line, "\r")))
 }
 
 // parseMultiChoice reads a multi-select answer over n options: numbers (or
