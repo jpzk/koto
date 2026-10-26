@@ -33,7 +33,7 @@
 - 파싱: 한 행에 `KEY=VALUE`, 빈 행과 `#` 주석은 무시, 키와 값의 공백은
   트리밍 — `daemon/install.go` `parseEnvFile`.
 
-`writeEnvFile`이 쓰는 키 (`defaults`와 `optional` 슬라이스):
+`writeEnvFile`이 쓰는 키 (`envFileKeys`의 `defaults`와 `optional` 슬라이스):
 
 항상 쓰이는 키 (이미 설정된 값은 보존):
 
@@ -52,6 +52,8 @@
 - `KOTO_CLAUDE_BIN` — 설치 시점에 해석된 claude CLI 경로로 설정됩니다
   (`installClaudeBin`); 다른 키와 달리 파일의 옛 값이 아니라 새로 해석된
   값이 쓰입니다 (`kv[0] != claudeBinEnv` 분기).
+- `KOTO_DEFAULT_PROVIDER` — 호스트 기본 provider (2.1 참조). `koto setup`의
+  `provider` 단계가 씁니다. `envFileKeys`에 있으므로 재설치해도 보존됩니다.
 
 유닛은 또한 `Environment=HOME=<state dir>`, `WorkingDirectory=<state
 dir>`, `ExecStart=/usr/local/bin/koto daemon`을 설정합니다 (`renderUnit`).
@@ -86,6 +88,14 @@ dir>`, `ExecStart=/usr/local/bin/koto daemon`을 설정합니다 (`renderUnit`).
 - `KOTO_CLAUDE_BIN` — OAuth 토큰 갱신을 위해 실행되는 claude CLI. 기본값은
   꾸밈없는 `claude` (PATH 조회) — `daemon/claudebin.go` `claudeBin`, 상수
   `claudeBinEnv`.
+- `KOTO_DEFAULT_PROVIDER` — group의 `config.json`에 provider가 없거나
+  유효하지 않을 때 그곳에 기록되는 provider: 모든 새 group (main 포함)과,
+  provider가 생기기 전에 만들어진 group은 다음 ensure() 때. `claudesdk` |
+  `venice` | `openai` (대소문자 무시). 미설정 또는 알 수 없는 값 =
+  `claudesdk` — `daemon/providers.go` `defaultProvider()`. 이미 유효한
+  provider가 지정된 group은 절대 다시 쓰지 않습니다. 호스트 전용: `config.json`
+  키도, ctl 필드도 아니며 guest가 설정할 수 없습니다. `koto setup --only provider`로
+  설정하거나 (또는 koto.env를 편집하고) daemon을 재시작하세요.
 - `ANTHROPIC_API_KEY` — 설정되어 있으면 키 파일
   `<state>/creds/anthropic-api-key`보다 우선합니다 — `daemon/proxy.go`
   `currentAPIKey`, `proxyInitPaths`. 파일은 요청마다 다시 읽힙니다.
@@ -204,8 +214,9 @@ dir>`, `ExecStart=/usr/local/bin/koto daemon`을 설정합니다 (`renderUnit`).
 
 ### 키
 
-- `provider` — `claudesdk` | `venice`. 기본값 `claudesdk`
-  (`daemon/groups.go` 상수 `defaultProvider`, `ensureProviderConfig`).
+- `provider` — `claudesdk` | `venice` | `openai`. 기본값: 호스트의
+  `KOTO_DEFAULT_PROVIDER`, 없으면 `claudesdk` (`daemon/providers.go`
+  `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — 자유 문자열, 문자 집합 `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`,
   최대 128자 (`configIdentRE`, `configMaxIdent`). 미설정 시 기본값:
   claudesdk에서는 `claude-sonnet-5`, venice에서는 `kimi-k2.5`

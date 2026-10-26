@@ -53,7 +53,7 @@ curl -fsSL https://kotovm.com/install.sh | sh -s -- --version 1.0.0
 검증 순서 (`install.sh` 머리말 주석, "WHAT THIS VERIFIES" 절):
 
 1. 지문으로 서명 키를 가져옵니다.
-2. `SHA256SUMS`의 분리 서명(detached signature)을 검증하고, `VALIDSIG` 행이 그 지문을 지목하는지 요구합니다.
+2. `SHA256SUMS`의 분리 서명(detached signature)을 검증하고, `VALIDSIG` 행이 그 지문을 지목하는지 요구합니다. 서명된 파일은 또한 요청한 버전과 같은 `# koto-version: X.Y.Z` 행을 정확히 하나 담고 있어야 합니다. 그 외의 값은 롤백으로 간주되어 거부됩니다 (`install.sh`, `signed_ver`).
 3. 서명된 `SHA256SUMS`에서 에셋 이름을 가져옵니다.
 4. 압축 해제 전에 모든 에셋을 검사하고, 전체 세트가 통과할 때까지 모든 것을 목적지 옆에 스테이징합니다.
 
@@ -123,7 +123,7 @@ sudo pacman -S --needed git make podman passt        # Arch
 `daemon/setup_checks.go`의 `checkRuntimeTools`에서 가져왔으며, Fedora와
 Debian 패키지 이름을 함께 적습니다:
 
-- `mkfs.ext4`, `e2fsck`, `resize2fs`: `e2fsprogs`. 각 group의 workspace 이미지를 생성, 검사, 확장합니다.
+- `mkfs.ext4`: `e2fsprogs`. 각 group의 workspace 이미지를 생성합니다. 이미지 확장에는 호스트 도구가 필요 없습니다: 호스트가 파일을 늘리고 guest가 파일시스템 크기를 온라인으로 조정합니다.
 - `tar`: `tar`. skill을 guest에 전달합니다.
 - `newuidmap`, `newgidmap`: Fedora에서는 `shadow-utils`, Debian/Ubuntu에서는 `uidmap`. jail에 갇힌 microVM 모니터가 실행되는 VM별 uid/gid를 매핑합니다.
 - `claude`: 경고만 합니다(warn-only). 프록시가 토큰 갱신을 위해 셸로 호출하는 OAuth(구독) 인증에만 필요합니다. 힌트는 `node >= 22`와 `npm i -g @anthropic-ai/claude-code`를 요구합니다. Debian 계열 호스트에서는 Ubuntu의 `nodejs` 패키지가 v18이라는 점도 언급하며 `sudo snap install node --classic --channel=22` 또는 nvm을 제안합니다.
@@ -154,7 +154,7 @@ Makefile `ARTIFACTS`와 `daemon/install.go`의 `artifacts`가 둘 다
 `fetch`). 기본값:
 
 - `KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download`
-- `DIST_VERSION ?= 1.0.5`
+- `DIST_VERSION ?= 1.7.4`
 - `DIST_ARCH ?= x86_64`
 
 릴리스 에셋은 zstd로 압축되고 `<basename>_<version>_<arch>.zst` 형식으로
@@ -296,10 +296,12 @@ missing — acquire the artifacts first:``를 출력하고 1로 종료합니다.
 - `-y`: 기본값을 수락하고 절대 묻지 않습니다. 실제 입력이 필요한 단계는 실패합니다.
 - `--only ID`: 한 단계만 실행합니다. 그 단계의 `detect`는 건너뛰므로 항상 실행됩니다. 알 수 없는 ID는 ``no such step "<id>" (see `koto setup --list`)``, 종료 코드 2. usage 텍스트의 예시 `--only rootfs`는 더 이상 존재하지 않는 단계를 가리킵니다.
 - `--from ID`: 이 단계부터 시작합니다.
+- `--provider P`: 새 group의 기본 provider (`claudesdk`, `venice` 또는 `openai`, 대소문자 무시). 그러면 `provider` 단계는 묻지 않고 그것을 저장합니다. 알 수 없는 값은 종료 코드 2로 끝납니다: ``unknown --provider "<p>" (want claudesdk, venice or openai)``. `koto setup --only provider --provider P`는 아무것도 묻지 않으므로 TTY 없이도 실행됩니다.
+- `--providers L`: 설정할 provider들, 쉼표로 구분 (예: `claudesdk,openai`, 대소문자 무시, 중복 제거). 그러면 `provider` 단계는 아무것도 묻지 않고, `auth` 단계가 각각을 연결합니다. 기본값은 `--provider`가 주어지면 그것, 아니면 목록의 첫 번째입니다. 목록에 없는 `--provider`는 종료 코드 2로 끝납니다: ``--provider <p> is not in --providers <list>: the default must be one of the providers being set up``. 알 수 없는 이름은 종료 코드 2로 끝납니다: ``unknown provider "<p>" in --providers (want claudesdk, venice or openai)``.
 - `--no-color`: 일반 출력. `NO_COLOR`가 설정되어 있거나 `TERM`이 `dumb` 또는 비어 있어도 스타일링이 꺼집니다 (`colorOK`, `daemon/setup_ui.go`).
 - `--list`: 단계 id를 순서대로 출력합니다.
 
-TTY가 없고 `-y`나 `--check`도 없으면 setup은 ``setup needs a terminal (or
+TTY가 없고, `-y`나 `--check`도 없으며, `--provider P` 또는 `--providers L`을 붙인 `--only provider`도 아니면 setup은 ``setup needs a terminal (or
 pass -y / --check)``와 함께 2로 종료합니다.
 
 상태 디렉터리는 `KOTO_HOME`, 설정되지 않았으면 `/var/lib/koto`입니다
@@ -311,10 +313,11 @@ pass -y / --check)``와 함께 2로 종료합니다.
 
 1. `installed` (Installed system). `installed()`를 감지합니다. 아무것도 설치하지 않습니다. koto가 설치되어 있지 않으면 "획득 후 `make install`" 힌트와 함께 실패합니다.
 2. `pki` (TLS identities). 감지는 `creds/` 아래의 이것들을 모두 요구합니다: `ca.crt`, `ca.key`, `server.crt`, `client-tui.crt`, `token-tui`, `client-agent.crt`, `token-agent`. 다른 머신에서 daemon에 접근할지 묻고, 그렇다면 `IP:192.168.1.20,DNS:koto.lan` 같은 추가 SAN을 받습니다. 기본 SAN은 `DNS:koto-daemon`, `DNS:localhost`, `IP:127.0.0.1` (`defaultServerSANs`, `daemon/pki.go`). `pkiInit`를 실행한 뒤 `tui`와 `agent` 클라이언트를 둘 다 role `admin`으로 발급합니다. 기존 CA는 절대 재생성되지 않습니다. [acl-and-auth.md](acl-and-auth.md) 참조.
-3. `auth` (Anthropic credentials). `creds/.credentials.json` (OAuth)이나 `creds/anthropic-api-key`가 존재하거나 `ANTHROPIC_API_KEY`가 설정되어 있으면 완료. `authConnect`를 실행하며, `koto claude-login`과 같은 흐름입니다. `-y`에서는 실패합니다. 두 방법 모두 사람이 필요하기 때문입니다. 오류는 ``koto claude-login --api-key-stdin < keyfile``을 가리킵니다.
-4. `service` (Start the daemon). `sudo systemctl restart koto`를 실행합니다. 이번 실행에서 자격 증명이 바뀌었다면 (`credsChanged`) 항상 미완료로 보고합니다. 마법사 주석은 그 이유를 프록시가 기동 시 한 번 자격 증명을 해석하기 때문이라고 설명합니다. 그 주석은 낡았습니다(stale): 프록시는 이제 요청마다 자격 증명을 읽습니다 (`daemon/proxy.go`의 `currentAPIKey`와 `readCreds`; `claudeLoginUsage`도 같은 말을 합니다). 따라서 파일 기반 자격 증명에서 재시작은 무해하지만 엄밀히 필수는 아닙니다. 환경 변수의 `ANTHROPIC_API_KEY`는 여전히 프로세스 수명 동안 고정됩니다 (`envAPIKey`).
-5. `smoke` (Smoke test). `tui` 신원으로 `127.0.0.1:8443`에 대한 클라이언트를 만들어 `List` RPC를 호출합니다. 2초마다, 최대 45초까지 재시도한 뒤 ``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``로 실패합니다. `/dev/kvm`이 사용 불가능하면 ``no usable /dev/kvm on this host — groups will not boot until that is fixed``를 경고합니다.
-6. `done` (Ready). ``koto is installed and running.``과 다음 명령들을 출력합니다: `koto tui`, `koto ctl list`, `systemctl status koto`, `journalctl -u koto -f`. 상태 디렉터리와 `/etc/koto/koto.env`, 그리고 `koto pki client -creds <state>/creds <name>`으로 클라이언트를 추가하는 방법도 출력합니다.
+3. `provider` (Providers). 두 가지 질문입니다. 먼저 `knownProviders`에 대한 다중 선택입니다 (`claudesdk`, `venice`, `openai`, 각각 한 줄 설명이 붙고, 이미 자격 증명이 있는 provider는 `✓ connected`로 표시됩니다): 쉼표나 공백으로 구분한 번호 (`1,3`), provider 이름, 또는 `all`로 답합니다. Enter는 미리 선택된 집합을 유지합니다: 현재 기본값과 이미 연결된 모든 provider. 그 밖의 입력은 설명과 함께 다시 묻습니다 (`parseMultiChoice`, `daemon/setup_ui.go`). 그다음, 둘 이상이 선택된 경우에만, 새 group이 그중 어느 것을 기본으로 쓸지 묻습니다. 현재 기본값이 그 안에 있으면 미리 선택됩니다. 정확히 하나만 선택되면 그것이 기본값이 되고 두 번째 질문은 하지 않습니다. 기본값만 저장되며, `/etc/koto/koto.env`의 `KOTO_DEFAULT_PROVIDER=<p>`로 기록됩니다 (`setupPersistProvider`, `daemon/setup_provider.go`). 파일의 다른 모든 행은 유지되고, 선택 자체를 기록하는 다른 설정은 없습니다 (어떤 자격 증명이 존재하는지로 도출할 수 있습니다). koto.env가 유효한 provider를 지정하고 있으면 (그리고 `--provider` 또는 `--providers`의 첫 번째가 주어졌다면 그것과 일치하면) 완료입니다. `--provider`나 `--providers`가 있으면 묻지 않습니다. `-y`에서는 현재 집합과 기본값을 유지합니다 (없으면 `claudesdk`). 권고 단계: `--check`는 이 단계의 미완료를 실패가 아닌 경고로 보고합니다. 선택한 적 없는 설치는 이전과 똑같이 `claudesdk`로 동작하기 때문입니다.
+4. `auth` (Provider credentials). 위에서 선택된 모든 provider에 대해 표시 순서대로 동작합니다 (provider 단계가 실행되지 않았다면: `--providers`, 없으면 `--provider` 하나, 없으면 기본값과 이미 연결된 모든 provider). 이미 로컬 자격 증명이 있는 provider는 `already connected, login skipped`로 보고됩니다. 나머지 각각은 자신의 "Connect … now?" 질문을 받고 `connected`, `skipped` (나중에 연결할 명령과 함께) 또는 `failed` (오류와 함께, 다음 provider는 여전히 제시됩니다)로 끝납니다. 이어서 요약이 선택된 각 provider와 그 상태를 나열하고 기본값을 표시합니다. 기본 provider가 자격 증명 없이 끝나면, 고칠 때까지 새 group의 모든 turn이 실패한다고 크게 알립니다. 기본이 아닌 provider는 더 부드러운 경고를 받습니다. 단계 통과 여부는 기본 provider만이 결정합니다: 기본 provider에 자격 증명이 있거나 그 로그인이 명시적으로 건너뛰어졌으면 통과하고, 기본 provider의 로그인이 실패하면 실패합니다. 선택된 모든 provider에 자격 증명이 있으면 이 단계는 완료이며 (재실행 시 건너뜀), 감지는 로컬에서 이루어집니다: claudesdk는 `creds/.credentials.json`, `creds/anthropic-api-key` 또는 `ANTHROPIC_API_KEY`, venice는 비어 있지 않은 `creds/venice.key`, openai는 `creds/openai-auth.json` 또는 비어 있지 않은 `creds/openai-api-key`. 로그인은 프로세스 안에서 실행됩니다: claudesdk는 `authConnect` (`koto claude-login`과 동일), venice와 minimax는 숨김 키 입력으로 `koto venice-login` / `koto minimax-login`처럼 provider에 확인하고 (거부된 키는 받지 않으며 아무것도 기록하지 않음) `creds/venice.key` 또는 `creds/minimax.key` (0600)에 저장합니다. openai는 `koto openai-login`의 device-code 또는 API 키 흐름입니다. `-y`에서는 아무것도 로그인하지 않습니다: 이미 연결된 provider는 통과하고, 빠진 각 provider는 비대화형 대안 (예: ``koto openai-login --api-key-stdin < keyfile``)과 함께 보고되며, 빠진 것이 기본 provider일 때만 단계가 실패합니다.
+5. `service` (Start the daemon). `sudo systemctl restart koto`를 실행합니다. 이번 실행에서 자격 증명이나 기본 provider가 바뀌었다면 (`restartOwed`) 항상 미완료로 보고합니다. daemon은 `KOTO_DEFAULT_PROVIDER`를 시작할 때만 읽습니다. 마법사 주석은 그 이유를 프록시가 기동 시 한 번 자격 증명을 해석하기 때문이라고 설명합니다. 그 주석은 낡았습니다(stale): 프록시는 이제 요청마다 자격 증명을 읽습니다 (`daemon/proxy.go`의 `currentAPIKey`와 `readCreds`; `claudeLoginUsage`도 같은 말을 합니다). 따라서 파일 기반 자격 증명에서 재시작은 무해하지만 엄밀히 필수는 아닙니다. 환경 변수의 `ANTHROPIC_API_KEY`는 여전히 프로세스 수명 동안 고정됩니다 (`envAPIKey`).
+6. `smoke` (Smoke test). `tui` 신원으로 `127.0.0.1:8443`에 대한 클라이언트를 만들어 `List` RPC를 호출합니다. 2초마다, 최대 45초까지 재시도한 뒤 ``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``로 실패합니다. `/dev/kvm`이 사용 불가능하면 ``no usable /dev/kvm on this host — groups will not boot until that is fixed``를 경고합니다. 그다음 기본 provider의 자격 증명을 로컬에서 확인하고 (LLM 요청 없음), 없으면 고치는 명령과 함께 경고합니다.
+7. `done` (Ready). ``koto is installed and running.``과 다음 명령들을 출력합니다: `koto tui`, `koto ctl list`, `systemctl status koto`, `journalctl -u koto -f`. 상태 디렉터리와 `/etc/koto/koto.env`, 그리고 `koto pki client -creds <state>/creds <name>`으로 클라이언트를 추가하는 방법도 출력합니다.
 
 재개는 상태 파일이 아니라 감지(detection)로 동작합니다. `koto setup`을
 다시 실행하면 `detect`가 충족된 모든 단계를 건너뜁니다 (`daemon/setup.go`
@@ -344,7 +347,8 @@ dir 안; 키는 guest에 들어가지 않습니다). 키는 `--key-file F`,
 `--no-verify`는 요청을 건너뛰고, `--status`는 키 저장 여부만 알려줍니다.
 오류 메시지에는 상태 코드나 전송 오류만 담기고 키는 절대 담기지 않습니다
 (`providerKeyCheck`, `daemon/provider_keycheck.go`). setup 마법사의 `auth`
-단계도 같은 확인을 사용합니다.
+단계도 같은 확인을 사용합니다. daemon은 요청마다 키를 다시 읽으므로 재시작이
+필요 없습니다.
 
 `daemon/main.go`에서 디스패치되는 다른 최상위 하위 명령은 `daemon`,
 `fcjail`, `ctl`, `setup`, `claude-login`, `openai-login`, `venice-login`, `minimax-login`, `uninstall`, `update`,

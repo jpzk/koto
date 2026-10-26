@@ -86,7 +86,7 @@ accepts for one message` 오류와 함께 종료 코드 2로 실패합니다 (`c
 
 - **`list`**: 모든 그룹과 상태. RPC `List`.
 - **`spawn [-provider P] [-model M] <group>`**: 그룹을 만들거나 시작합니다.
-  `-provider`(도움말 텍스트 `claudesdk|venice`), `-model`(모델 재정의).
+  `-provider`(도움말 텍스트 `claudesdk|venice|openai`), `-model`(모델 재정의).
   RPC `Spawn`.
 - **`stop <group>`**: RPC `Stop`.
 - **`interrupt <group>`**: RPC `Interrupt`. `drain`의 주석에 따르면, 실행 중인
@@ -138,7 +138,7 @@ accepts for one message` 오류와 함께 종료 코드 2로 실패합니다 (`c
   *지우는* 반면 플래그를 생략하면 그대로 둡니다 (`ctlConfig`의 `fs.Visit`).
   RPC `Config`. 플래그는:
   - `-model M` (`""`은 지움)
-  - `-provider claudesdk|venice`
+  - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
   - `-size small|medium|large|xlarge`
   - `-root yes|no`
@@ -331,6 +331,12 @@ not allowed for non-main groups: <verb>`를 받습니다.
   - 속도 제한: 버스트 `ctlPollBurst = 30`, `ctlPollRefill = 500ms`마다 토큰
     하나가 채워지는 그룹별 토큰 버킷. 한도를 넘으면:
     `ctl: tail is being polled too fast — slow down (this is rate limited per group)`.
+  - 로그는 상대 그룹(peer)이 작성한 것이므로 그대로 반환되지 않습니다
+    (`ctlTailFence`, `daemon/report.go`). 먼저 정리되고(제어 문자와 bidi
+    재정의 문자 제거), 그다음 모든 행에 report 본문처럼 `> ` 인용 접두사가
+    붙습니다. 맨 앞에는 `[tail of <group>]` 헤더가, 맨 끝에는 report turn이
+    쓰는 것과 같은 peer 콘텐츠 꼬리말(`peerTrailer`)이 붙습니다. `> ` 인용
+    접두사가 붙은 행만 peer의 텍스트입니다.
 
 **모든 그룹, 자기 대상**
 

@@ -8,6 +8,13 @@ koto 사용자(group과 대화하는 사람)와 운영자(daemon을 설치하고
 있습니다. 코드가 모호한 경우에는 추측하는 대신 "unverified(미검증)"라고
 명시했습니다. 문서와 코드가 다르면 코드가 우선합니다 — 문서를 고쳐 주세요.
 
+## 언어
+
+- [English](../README.md)
+- [中文](../zh/README.md)
+- [Русский](../ru/README.md)
+- [Español](../es/README.md)
+
 ## 시작하기
 
 - [getting-started.md](getting-started.md) — 빌드 및 런타임 요구 사항,

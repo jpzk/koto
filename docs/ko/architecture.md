@@ -214,6 +214,12 @@ README의 "defense in depth"(심층 방어) 서술입니다. 아래 절들은 �
 
 - **기본값 `network=none`.** VM에는 NIC이 없습니다. 유일한 이그레스는
   vsock 9000 위의 L7 프록시입니다(`fc.go` 머리말, `fcnet.go` 머리말).
+  Anthropic 구간에서 프록시는 서버 측 실행 도구(`tools[]`에서 `type`이
+  `custom`이 아닌 모든 항목)나 `mcp_servers`를 선언한 요청 본문을
+  거부(403)합니다. 이들은 provider 쪽에서 제3자 호스트에 접근하기
+  때문입니다. `anthropic-beta` 값은 허용 목록에 있는 것만 전달합니다
+  (`daemon/proxy_servertools.go`). 모든 프로필에서 guest 요청 헤더는 허용
+  목록에 있는 것만 전달됩니다.
 - **`network=wan|lan|full`.** `fcSpawn`이 사용자 공간 gVisor
   게이트웨이(`containers/gvisor-tap-vsock`, `daemon/fcnet.go`의
   `fcNetGateway`)를 붙이고, `groupNetwork(g) != fcNetNone`일 때만 9003

@@ -233,6 +233,12 @@ usage: koto update [--check] [--version X] [-y]
 자체는 `install.sh`에 있으며
 [getting-started.md](getting-started.md)에 설명되어 있습니다.
 
+1.7.1 이하에서 업그레이드하기: 설치 프로그램을 한 번 실행하세요,
+`curl -fsSL https://kotovm.com/install.sh | sh`. 1.7.2 이전의 설치 프로그램은
+`SHA256SUMS`의 서명된 `# koto-version:` 행을 읽지 못하므로, 그 버전들에서
+`koto update`를 실행하면 실패합니다. 1.7.2부터는 `koto update`가 정상
+동작합니다.
+
 ## 4. koto 제거: `koto uninstall`
 
 (`daemon/uninstall.go`)
@@ -329,6 +335,13 @@ root (sudo is used only for the system files)` (`runUninstall`).
 - `the venice credential is not available on this host; ask the
   operator` (HTTP 503): venice provider인 그룹인데 키를 찾지 못했습니다
   (`no venice key: write to …`). 해결: `koto venice-login`.
+- `the minimax credential is not available on this host; ask the
+  operator` (HTTP 503, `daemon/proxy_minimax.go`): minimax 그룹인데
+  `creds/minimax.key`가 없거나 비어 있습니다. 해결: `koto minimax-login`.
+  `sk-api-`로 시작하는 키는 `minimax/apikey`로 과금되고, 그 밖의 키는 모두
+  M Plan 구독(`minimax/subscription`)이며, daemon은 minimax 호출 후 최대
+  분당 한 번 `token_plan/remains`에서 5시간 및 주간 창을 읽습니다.
+  koto.env의 `KOTO_MINIMAX_REGION=cn`은 중국 본토 엔드포인트로 전환합니다.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)`
   (HTTP 403, `llmRefuse`): 게스트가 프록시가 중계하지 않는 API 경로를
