@@ -172,8 +172,8 @@ Day-2 참조 문서: 로그가 어디로 가는지, 자원 모니터링과 알�
     `Group <g> CPU N% sustained`.
 - 배달: `resources` 서브시스템의 로그 라인(수준 1은 `warn`, 수준 2는
   `error`, `emitLogfQuiet`로 전송)과 `main`으로의 알림. main의 알림
-  큐가 가득 차면 데몬은 `notification backlog full, alert dropped:
-  <title>`을 로그합니다.
+  큐가 가득 차면 데몬은
+  `notification backlog full, alert dropped: <title>`을 로그합니다.
 
 ## 3. 업그레이드: `koto update`
 
