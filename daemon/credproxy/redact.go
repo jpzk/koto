@@ -65,13 +65,38 @@ func (r *Redactor) Header(h http.Header) {
 	}
 }
 
+// partialSuffixLen returns the length of the longest suffix of chunk that is a
+// strict prefix of some secret value (i.e. a possible match still in progress
+// at the end of chunk). It is 0 when no secret could straddle the boundary.
+// Only this exact suffix must be held back as carry; everything before it is
+// safe to redact and emit, because any COMPLETE occurrence ending inside the
+// emitted region is fully contained and caught by Bytes (design §5).
+func (r *Redactor) partialSuffixLen(chunk []byte) int {
+	best := 0
+	for _, v := range r.values {
+		maxK := len(v) - 1 // strict prefix only; a full match is handled by Bytes
+		if maxK > len(chunk) {
+			maxK = len(chunk)
+		}
+		for k := maxK; k > best; k-- {
+			if bytes.Equal(chunk[len(chunk)-k:], v[:k]) {
+				if k > best {
+					best = k
+				}
+				break
+			}
+		}
+	}
+	return best
+}
+
 // streamReader wraps an upstream body and redacts secret bytes as it is read,
-// keeping an overlap carry of maxLen-1 bytes so a secret split across read
-// boundaries is still caught (design §5).
+// holding back only the genuine partial-match suffix (see partialSuffixLen) so
+// a secret split across read boundaries is still caught (design §5).
 type streamReader struct {
 	src   io.Reader
 	r     *Redactor
-	carry []byte
+	carry []byte // raw, un-emitted bytes that may begin a match
 	buf   []byte // already-redacted bytes ready to hand out
 	eof   bool
 }
@@ -99,29 +124,24 @@ func (s *streamReader) Read(p []byte) (int, error) {
 	tmp := make([]byte, 32*1024)
 	n, err := s.src.Read(tmp)
 	chunk := append(s.carry, tmp[:n]...)
-	overlap := s.r.maxLen - 1
-	if overlap < 0 {
-		overlap = 0
-	}
 	var emit []byte
 	if err == io.EOF {
 		s.eof = true
 		emit = s.r.Bytes(chunk)
 		s.carry = nil
-	} else if len(chunk) > overlap {
-		// Redact the safe prefix; keep the last `overlap` bytes as carry so a
-		// secret straddling the boundary is caught next round.
-		safe := chunk[:len(chunk)-overlap]
-		emit = s.r.Bytes(safe)
-		s.carry = append([]byte(nil), chunk[len(chunk)-overlap:]...)
 	} else {
-		s.carry = chunk
-		emit = nil
-		if err != nil {
-			return 0, err
+		// Hold back only the suffix that could still complete into a secret.
+		hold := s.r.partialSuffixLen(chunk)
+		safe := chunk[:len(chunk)-hold]
+		emit = s.r.Bytes(safe)
+		s.carry = append([]byte(nil), chunk[len(chunk)-hold:]...)
+		if len(emit) == 0 {
+			if err != nil {
+				return 0, err
+			}
+			// nothing safe to emit yet; read more.
+			return s.Read(p)
 		}
-		// nothing to emit yet; recurse-read more unless upstream blocked
-		return s.Read(p)
 	}
 	s.buf = emit
 	m := copy(p, s.buf)
