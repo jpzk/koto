@@ -51,7 +51,7 @@ What `install.sh` refuses (each is a `die` in `install.sh`):
 The verification order (header comment of `install.sh`, section "WHAT THIS VERIFIES"):
 
 1. Fetch the signing key by fingerprint.
-2. Verify the detached signature on `SHA256SUMS` and require the `VALIDSIG` line to name that fingerprint.
+2. Verify the detached signature on `SHA256SUMS` and require the `VALIDSIG` line to name that fingerprint. The signed file must also hold exactly one `# koto-version: X.Y.Z` line, equal to the release you asked for; any other value is refused as a rollback (`install.sh`, `signed_ver`).
 3. Take the asset names from the signed `SHA256SUMS`.
 4. Check every asset before decompressing it, and stage everything beside the destination until the whole set has passed.
 
@@ -144,7 +144,7 @@ Both routes produce exactly these.
 `make fetch` runs `install.sh --version $(DIST_VERSION) --dest . --manifest artifacts.sha256 --download-only --next "make install"` with `KOTO_BASE_URL="$(KOTO_DIST_URL)/$(DIST_VERSION)"` (Makefile target `fetch`). The defaults are:
 
 - `KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download`
-- `DIST_VERSION ?= 1.0.5`
+- `DIST_VERSION ?= 1.7.4`
 - `DIST_ARCH ?= x86_64`
 
 Release assets are zstd-compressed and named `<basename>_<version>_<arch>.zst`, for example `rootfs.img_fedora44_x86_64.zst` (Makefile comment above `DIST_ARCH`). The committed `artifacts.sha256` checksums the artifacts as they are installed, after decompression (Makefile comment above `MANIFEST`).

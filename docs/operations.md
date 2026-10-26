@@ -221,6 +221,11 @@ release it checks (header comment of `update.go`). The signature checks
 themselves live in `install.sh` and are described in
 [getting-started.md](getting-started.md).
 
+Upgrading from 1.7.1 or earlier: run the installer once,
+`curl -fsSL https://kotovm.com/install.sh | sh`. Installers before 1.7.2
+cannot read the signed `# koto-version:` line in `SHA256SUMS`, so
+`koto update` from those versions fails. From 1.7.2 on, `koto update` works.
+
 ## 4. Removing koto: `koto uninstall`
 
 (`daemon/uninstall.go`)
