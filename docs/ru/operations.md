@@ -241,6 +241,12 @@ usage: koto update [--check] [--version X] [-y]
 релиз (комментарий в заголовке `update.go`). Сами проверки подписи живут в
 `install.sh` и описаны в [getting-started.md](getting-started.md).
 
+Обновление с 1.7.1 или более ранней версии: один раз запустите установщик,
+`curl -fsSL https://kotovm.com/install.sh | sh`. Установщики до 1.7.2 не
+умеют читать подписанную строку `# koto-version:` в `SHA256SUMS`, поэтому
+`koto update` в этих версиях завершается ошибкой. Начиная с 1.7.2,
+`koto update` работает штатно.
+
 ## 4. Удаление koto: `koto uninstall`
 
 (`daemon/uninstall.go`)
@@ -339,6 +345,14 @@ not root (sudo is used only for the system files)` (`runUninstall`).
 - `the venice credential is not available on this host; ask the operator`
   (HTTP 503): группа с провайдером venice, но ключ не найден
   (`no venice key: write to …`). Исправление: `koto venice-login`.
+- `the minimax credential is not available on this host; ask the
+  operator` (HTTP 503, `daemon/proxy_minimax.go`): группа minimax, но
+  `creds/minimax.key` отсутствует или пуст. Исправление: `koto minimax-login`.
+  Ключ, начинающийся с `sk-api-`, тарифицируется как `minimax/apikey`,
+  любой другой ключ означает подписку M Plan (`minimax/subscription`), и
+  демон считывает 5-часовое и недельное окна из `token_plan/remains` не
+  чаще раза в минуту после вызовов minimax. `KOTO_MINIMAX_REGION=cn` в
+  koto.env переключает на эндпоинты материкового Китая.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)` (HTTP
   403, `llmRefuse`): гость вызвал API-путь, который прокси не ретранслирует.

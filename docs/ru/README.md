@@ -10,6 +10,13 @@
 "unverified" вместо догадок. Если документ и код расходятся, прав код —
 пожалуйста, исправьте документ.
 
+## Языки
+
+- [English](../README.md)
+- [中文](../zh/README.md)
+- [한국어](../ko/README.md)
+- [Español](../es/README.md)
+
 ## С чего начать
 
 - [getting-started.md](getting-started.md) — требования к сборке и среде

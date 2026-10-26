@@ -217,6 +217,12 @@ gRPC-слушателем в `daemon/daemon.go`.
 - **`network=none`, значение по умолчанию.** У VM нет NIC. Её единственный
   исходящий канал — L7-прокси через vsock 9000 (заголовок `fc.go`, заголовок
   `fcnet.go`).
+  На участке Anthropic прокси отклоняет (403) тела запросов, которые
+  объявляют серверные инструменты (любой элемент `tools[]`, чей `type` не
+  `custom`) или `mcp_servers`, потому что они обращаются к сторонним хостам
+  со стороны провайдера; значения `anthropic-beta` пересылаются только из
+  списка разрешённых (`daemon/proxy_servertools.go`). Во всех профилях
+  заголовки запросов гостя пересылаются только из списка разрешённых.
 - **`network=wan|lan|full`.** `fcSpawn` подключает userspace-шлюз gVisor
   (`containers/gvisor-tap-vsock`, `fcNetGateway` в `daemon/fcnet.go`) и
   открывает слушатель 9003 только когда `groupNetwork(g) != fcNetNone`.

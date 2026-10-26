@@ -34,7 +34,7 @@ grep-ом. Там, где код не делает поведение одноз
   игнорируются, пробелы вокруг ключа и значения обрезаются —
   `daemon/install.go` `parseEnvFile`.
 
-Ключи, записываемые `writeEnvFile` (срезы `defaults` и `optional`):
+Ключи, записываемые `writeEnvFile` (срезы `defaults` и `optional` в `envFileKeys`):
 
 Записываются всегда (значение сохраняется, если уже задано):
 
@@ -54,6 +54,9 @@ grep-ом. Там, где код не делает поведение одноз
   время установки (`installClaudeBin`); в отличие от остальных ключей,
   записывается свежеопределённое значение, а не старое значение из файла
   (ветка `kv[0] != claudeBinEnv`).
+- `KOTO_DEFAULT_PROVIDER` — провайдер по умолчанию для хоста (см. 2.1).
+  Записывается шагом `provider` в `koto setup`; входит в `envFileKeys`,
+  поэтому сохраняется при переустановке.
 
 Юнит также задаёт `Environment=HOME=<state dir>`, `WorkingDirectory=<state
 dir>` и `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
@@ -89,6 +92,15 @@ dir>` и `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 - `KOTO_CLAUDE_BIN` — CLI claude, исполняемый для обновления OAuth-токена.
   По умолчанию голое `claude` (поиск по PATH) — `daemon/claudebin.go`
   `claudeBin`, константа `claudeBinEnv`.
+- `KOTO_DEFAULT_PROVIDER` — провайдер, записываемый в `config.json` группы,
+  когда провайдер там отсутствует или недействителен: каждая новая группа
+  (включая main), а также группы, созданные до появления провайдеров, при
+  следующем ensure(). `claudesdk` | `venice` | `openai` (без учёта
+  регистра). Не задан или неизвестное значение = `claudesdk` —
+  `daemon/providers.go` `defaultProvider()`. Группа с уже действительным
+  провайдером никогда не перезаписывается. Только для хоста: это не ключ
+  `config.json` и не поле ctl, гость не может его задать. Задаётся через
+  `koto setup --only provider` (или правкой koto.env) и перезапуском демона.
 - `ANTHROPIC_API_KEY` — если задан, имеет приоритет над файлом ключа
   `<state>/creds/anthropic-api-key` — `daemon/proxy.go` `currentAPIKey`,
   `proxyInitPaths`. Файл перечитывается на каждый запрос.
@@ -210,9 +222,9 @@ dir>` и `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
 
 ### Ключи
 
-- `provider` — `claudesdk` | `venice`. По умолчанию `claudesdk`
-  (`daemon/groups.go`, константа `defaultProvider`,
-  `ensureProviderConfig`).
+- `provider` — `claudesdk` | `venice` | `openai`. По умолчанию:
+  `KOTO_DEFAULT_PROVIDER` хоста, иначе `claudesdk` (`daemon/providers.go`
+  `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — свободная строка, набор символов
   `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`, максимум 128 символов
   (`configIdentRE`, `configMaxIdent`). По умолчанию, когда не задан:

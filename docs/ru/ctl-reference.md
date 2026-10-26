@@ -87,7 +87,7 @@ than 1048576 bytes, which is more than the daemon accepts for one message`,
 
 - **`list`**: все группы и их состояние. RPC `List`.
 - **`spawn [-provider P] [-model M] <group>`**: создать или запустить группу.
-  `-provider` (текст справки `claudesdk|venice`), `-model` (переопределение
+  `-provider` (текст справки `claudesdk|venice|openai`), `-model` (переопределение
   модели). RPC `Spawn`.
 - **`stop <group>`**: RPC `Stop`.
 - **`interrupt <group>`**: RPC `Interrupt`. Согласно комментарию к `drain`,
@@ -140,7 +140,7 @@ than 1048576 bytes, which is more than the daemon accepts for one message`,
   `-model ""` *очищает* модель, а отсутствующий флаг оставляет её без
   изменений (`fs.Visit` в `ctlConfig`). RPC `Config`. Флаги:
   - `-model M` (`""` очищает)
-  - `-provider claudesdk|venice`
+  - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
   - `-size small|medium|large|xlarge`
   - `-root yes|no`
@@ -336,6 +336,13 @@ than 1048576 bytes, which is more than the daemon accepts for one message`,
     `ctlPollBurst = 30` и пополнением одного токена каждые
     `ctlPollRefill = 500ms`. Сверх лимита:
     `ctl: tail is being polled too fast — slow down (this is rate limited per group)`.
+  - Лог написан другой группой (peer), поэтому он не возвращается как есть
+    (`ctlTailFence`, `daemon/report.go`): сначала он очищается (удаляются
+    управляющие символы и символы переопределения bidi), затем каждая строка
+    получает префикс цитаты `> `, как тело report. В начале добавляется
+    заголовок `[tail of <group>]`, в конце тот же завершающий блок о
+    peer-контенте (`peerTrailer`), что и у report turn. Текстом peer являются
+    только строки с префиксом цитаты `> `.
 
 **Любая группа, только на себя**
 
