@@ -266,18 +266,6 @@ func parseTSLine(line string) (float64, bool) {
 	return float64(n) / 1000.0, true
 }
 
-func inode(path string) uint64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0
-	}
-	return sys.Ino
-}
-
 // A group's frames live in several files host-side:
 //
 //	.cs/log      the GROUP stream: everything the host writes about the group
