@@ -50,7 +50,7 @@ curl -fsSL https://kotovm.com/install.sh | sh -s -- --version 1.0.0
 验证顺序（`install.sh` 头部注释，"WHAT THIS VERIFIES" 一节）：
 
 1. 按指纹获取签名密钥。
-2. 验证 `SHA256SUMS` 上的分离签名，并要求 `VALIDSIG` 行指向该指纹。
+2. 验证 `SHA256SUMS` 上的分离签名，并要求 `VALIDSIG` 行指向该指纹。签名文件还必须恰好包含一行 `# koto-version: X.Y.Z`，且等于你请求的版本；任何其他值都会被当作回滚而拒绝（`install.sh`，`signed_ver`）。
 3. 从已签名的 `SHA256SUMS` 中取得资产文件名。
 4. 解压前校验每个资产，并把所有文件暂存在目标位置旁边，直到整套文件全部通过。
 
@@ -116,7 +116,7 @@ sudo pacman -S --needed git make podman passt        # Arch
 以下来自 `daemon/setup_checks.go` 的 `checkRuntimeTools`，附 Fedora 和
 Debian 的包名：
 
-- `mkfs.ext4`、`e2fsck`、`resize2fs`：`e2fsprogs`。用于创建、检查和扩容每个 group 的 workspace 镜像。
+- `mkfs.ext4`：`e2fsprogs`。用于创建每个 group 的 workspace 镜像。扩容镜像不需要主机工具：主机扩展文件，guest 在线调整文件系统大小。
 - `tar`：`tar`。用于向 guest 投递 skills。
 - `newuidmap`、`newgidmap`：Fedora 上是 `shadow-utils`，Debian/Ubuntu 上是 `uidmap`。用于映射被 jail 的 microVM 监控进程所使用的每 VM uid/gid。
 - `claude`：仅警告。只有 OAuth（订阅）认证需要它，此时 proxy 会调用它刷新 token。其提示要求 `node >= 22` 和 `npm i -g @anthropic-ai/claude-code`。在 Debian 系主机上还会说明 Ubuntu 的 `nodejs` 包是 v18，并建议 `sudo snap install node --classic --channel=22` 或 nvm。
@@ -145,7 +145,7 @@ Makefile `ARTIFACTS` 和 `daemon/install.go` 的 `artifacts` 都列出了它们�
 （Makefile target `fetch`）。默认值为：
 
 - `KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download`
-- `DIST_VERSION ?= 1.0.5`
+- `DIST_VERSION ?= 1.7.4`
 - `DIST_ARCH ?= x86_64`
 
 发布资产以 zstd 压缩，命名为 `<basename>_<version>_<arch>.zst`，例如
@@ -281,10 +281,12 @@ podman system migrate
 - `-y`：接受默认值，从不提示。需要真实输入的步骤会失败。
 - `--only ID`：只运行一个步骤。该步骤的 `detect` 被跳过，所以步骤一定会执行。未知 ID 给出 ``no such step "<id>" (see `koto setup --list`)``，退出码 2。usage 文本中的示例 `--only rootfs` 指向一个已不存在的步骤。
 - `--from ID`：从该步骤开始。
+- `--provider P`：新 group 的默认 provider（`claudesdk`、`venice` 或 `openai`，不区分大小写）。随后 `provider` 步骤不经提示直接持久化它。未知值以退出码 2 结束：``unknown --provider "<p>" (want claudesdk, venice or openai)``。`koto setup --only provider --provider P` 不提任何问题，因此没有 TTY 也能运行。
+- `--providers L`：要设置的 provider，逗号分隔（例如 `claudesdk,openai`，不区分大小写，重复项会被去掉）。随后 `provider` 步骤不提任何问题；`auth` 步骤逐个连接它们。给出 `--provider` 时默认值就是它，否则为列表中的第一个。不在列表中的 `--provider` 以退出码 2 结束：``--provider <p> is not in --providers <list>: the default must be one of the providers being set up``；未知名称以退出码 2 结束：``unknown provider "<p>" in --providers (want claudesdk, venice or openai)``。
 - `--no-color`：纯文本输出。设置了 `NO_COLOR`、或 `TERM` 为 `dumb` 或为空时同样关闭样式（`colorOK`，`daemon/setup_ui.go`）。
 - `--list`：按顺序打印步骤 id。
 
-没有 TTY 且未传 `-y` 或 `--check` 时，setup 以退出码 2 结束：``setup needs
+没有 TTY，且既未传 `-y`、`--check`，也不是带 `--provider P` 或 `--providers L` 的 `--only provider` 时，setup 以退出码 2 结束：``setup needs
 a terminal (or pass -y / --check)``。
 
 状态目录是 `KOTO_HOME`，未设置时为 `/var/lib/koto`（`setupCtx.stateDir`）。
@@ -296,10 +298,11 @@ a terminal (or pass -y / --check)``。
 
 1. `installed`（已安装的系统）。检测 `installed()`。它从不安装任何东西。koto 未安装时以"先获取、再 `make install`"的提示失败。
 2. `pki`（TLS 身份）。检测需要 `creds/` 下的所有这些文件：`ca.crt`、`ca.key`、`server.crt`、`client-tui.crt`、`token-tui`、`client-agent.crt`、`token-agent`。它会询问你是否会从另一台机器访问 daemon，若是，则接收额外的 SAN，例如 `IP:192.168.1.20,DNS:koto.lan`。默认 SAN 为 `DNS:koto-daemon`、`DNS:localhost` 和 `IP:127.0.0.1`（`defaultServerSANs`，`daemon/pki.go`）。它运行 `pkiInit`，然后签发 `tui` 和 `agent` 两个客户端，角色均为 `admin`。已存在的 CA 从不重新生成。见 [acl-and-auth.md](acl-and-auth.md)。
-3. `auth`（Anthropic 凭据）。当 `creds/.credentials.json`（OAuth）或 `creds/anthropic-api-key` 存在、或设置了 `ANTHROPIC_API_KEY` 时即视为完成。它运行 `authConnect`，与 `koto claude-login` 相同的流程。在 `-y` 下会失败，因为两种方法都需要人参与。错误指向 ``koto claude-login --api-key-stdin < keyfile``。
-4. `service`（启动 daemon）。运行 `sudo systemctl restart koto`。只要本次运行更改过凭据（`credsChanged`），它就报告未完成。向导注释给出的原因是 proxy 在启动时一次性解析凭据。该注释已过时：proxy 现在按请求读取凭据（`daemon/proxy.go` 的 `currentAPIKey` 和 `readCreds`），`claudeLoginUsage` 也是这么说的。因此对基于文件的凭据，重启无害但并非严格必要。来自环境变量的 `ANTHROPIC_API_KEY` 仍在进程生命周期内固定（`envAPIKey`）。
-5. `smoke`（冒烟测试）。为身份 `tui` 构建一个指向 `127.0.0.1:8443` 的客户端并调用 `List` RPC。每 2 秒重试，最长 45 秒，然后失败：``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``。如果 `/dev/kvm` 不可用则警告 ``no usable /dev/kvm on this host — groups will not boot until that is fixed``。
-6. `done`（就绪）。打印 ``koto is installed and running.`` 和后续命令：`koto tui`、`koto ctl list`、`systemctl status koto`、`journalctl -u koto -f`。它还打印状态目录和 `/etc/koto/koto.env`，以及如何用 `koto pki client -creds <state>/creds <name>` 添加客户端。
+3. `provider`（Provider）。两个问题。第一个是对 `knownProviders` 的多选（`claudesdk`、`venice`、`openai`，各附一行说明；已有凭据的 provider 标记为 `✓ connected`）：用逗号或空格分隔的编号（`1,3`）、provider 名称或 `all` 作答。回车保留预选集合：当前默认值加上所有已连接的 provider。其他输入会得到解释并重新提问（`parseMultiChoice`，`daemon/setup_ui.go`）。然后，仅当选中多于一个时，询问新 group 默认使用其中哪一个；当前默认值在其中时被预选。只选中一个时它就是默认值，不再问第二个问题。只有默认值会被持久化，即 `/etc/koto/koto.env` 中的 `KOTO_DEFAULT_PROVIDER=<p>`（`setupPersistProvider`，`daemon/setup_provider.go`）；文件的其他各行保持不变，也没有其他设置记录这次选择（它可以从现有哪些凭据推导出来）。当 koto.env 指定了一个有效 provider（且若给出了 `--provider` 或 `--providers`，它与 `--provider` 或 `--providers` 的第一个一致）时即视为完成。带 `--provider` 或 `--providers` 时不提示；在 `-y` 下保留当前集合和默认值（没有时为 `claudesdk`）。建议性步骤：`--check` 把它的待办状态报告为警告而不是失败，因为从未做过选择的安装会像以前一样在 `claudesdk` 上运行。
+4. `auth`（Provider 凭据）。按显示顺序作用于上面选中的每个 provider（provider 步骤没有运行时：用 `--providers`，否则单独的 `--provider`，否则默认值加上所有已连接的 provider）。已有本地凭据的 provider 报告为 `already connected, login skipped`；其余每个都有自己的"Connect … now?"提问，结果为 `connected`、`skipped`（附带之后连接它的命令）或 `failed`（附带错误；仍会继续提供下一个 provider）。随后一份汇总列出每个选中的 provider 及其状态，并标出默认值。默认 provider 最终没有凭据时，它会醒目地提示：在修复之前，新 group 的每个 turn 都会失败；非默认 provider 只得到较温和的警告。只有默认 provider 决定该步骤是否通过：默认 provider 有凭据或其登录被明确跳过时通过，默认 provider 登录失败时失败。当每个选中的 provider 都有凭据时该步骤视为完成（重新运行时跳过），检测在本地进行：claudesdk 为 `creds/.credentials.json`、`creds/anthropic-api-key` 或 `ANTHROPIC_API_KEY`；venice 为非空的 `creds/venice.key`；openai 为 `creds/openai-auth.json` 或非空的 `creds/openai-api-key`。登录在进程内运行：claudesdk 为 `authConnect`（与 `koto claude-login` 相同），venice 和 minimax 为隐藏的密钥输入，像 `koto venice-login` / `koto minimax-login` 一样向 provider 检查（被拒绝的密钥会被拒收，不写入任何内容），并存入 `creds/venice.key` 或 `creds/minimax.key`（0600），openai 为 `koto openai-login` 的设备码或 API 密钥流程。在 `-y` 下不登录任何 provider：已连接的通过，每个缺失的都附上其非交互式替代方式（例如 ``koto openai-login --api-key-stdin < keyfile``）报告出来，只有缺失的是默认 provider 时该步骤才失败。
+5. `service`（启动 daemon）。运行 `sudo systemctl restart koto`。只要本次运行更改过凭据或默认 provider（`restartOwed`），它就报告未完成；daemon 只在启动时读取 `KOTO_DEFAULT_PROVIDER`。向导注释给出的原因是 proxy 在启动时一次性解析凭据。该注释已过时：proxy 现在按请求读取凭据（`daemon/proxy.go` 的 `currentAPIKey` 和 `readCreds`），`claudeLoginUsage` 也是这么说的。因此对基于文件的凭据，重启无害但并非严格必要。来自环境变量的 `ANTHROPIC_API_KEY` 仍在进程生命周期内固定（`envAPIKey`）。
+6. `smoke`（冒烟测试）。为身份 `tui` 构建一个指向 `127.0.0.1:8443` 的客户端并调用 `List` RPC。每 2 秒重试，最长 45 秒，然后失败：``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``。如果 `/dev/kvm` 不可用则警告 ``no usable /dev/kvm on this host — groups will not boot until that is fixed``。随后它在本地检查默认 provider 的凭据（不发 LLM 请求），没有凭据时发出警告并附上修复命令。
+7. `done`（就绪）。打印 ``koto is installed and running.`` 和后续命令：`koto tui`、`koto ctl list`、`systemctl status koto`、`journalctl -u koto -f`。它还打印状态目录和 `/etc/koto/koto.env`，以及如何用 `koto pki client -creds <state>/creds <name>` 添加客户端。
 
 续跑靠检测，而不是状态文件。重新运行 `koto setup` 会跳过每个 `detect`
 已满足的步骤（`daemon/setup.go` 头部）。被中断的运行打印
@@ -327,7 +330,7 @@ koto setup --check  # health of the install, changes nothing
 退出，且现有密钥文件保持不变。provider 无法访问（网络错误、15s 超时、5xx）
 时会带警告保存。`--no-verify` 跳过检查；`--status` 只报告是否已有密钥。
 错误信息只含状态码或传输错误，从不含密钥（`providerKeyCheck`，
-`daemon/provider_keycheck.go`）。setup 向导的 `auth` 步骤使用同一检查。
+`daemon/provider_keycheck.go`）。setup 向导的 `auth` 步骤使用同一检查。daemon 按请求重新读取密钥，因此无需重启。
 
 `daemon/main.go` 中分发的其他顶层子命令是 `daemon`、`fcjail`、`ctl`、
 `setup`、`claude-login`、`openai-login`、`venice-login`、`minimax-login`、`uninstall`、`update`、`install`、`tui`、

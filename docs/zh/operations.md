@@ -216,6 +216,11 @@ usage: koto update [--check] [--version X] [-y]
 签名校验本身位于 `install.sh` 中，描述见
 [getting-started.md](getting-started.md)。
 
+从 1.7.1 或更早版本升级：运行一次安装器，
+`curl -fsSL https://kotovm.com/install.sh | sh`。1.7.2 之前的安装器无法读取
+`SHA256SUMS` 中已签名的 `# koto-version:` 行，因此从这些版本执行
+`koto update` 会失败。从 1.7.2 起，`koto update` 可以正常工作。
+
 ## 4. 移除 koto：`koto uninstall`
 
 （`daemon/uninstall.go`）
@@ -304,6 +309,13 @@ root (sudo is used only for the system files)`（`runUninstall`）。
 - `the venice credential is not available on this host; ask the operator`
   （HTTP 503）：某个 group 用 venice provider，但找不到密钥
   （`no venice key: write to …`）。修复：`koto venice-login`。
+- `the minimax credential is not available on this host; ask the operator`
+  （HTTP 503，`daemon/proxy_minimax.go`）：某个 minimax group，但
+  `creds/minimax.key` 缺失或为空。修复：`koto minimax-login`。以 `sk-api-` 开头的密钥按
+  `minimax/apikey` 计费；其他任何密钥都是 M Plan 订阅
+  （`minimax/subscription`），daemon 在 minimax 调用之后最多每分钟一次从
+  `token_plan/remains` 读取其 5 小时和每周窗口。
+  koto.env 中的 `KOTO_MINIMAX_REGION=cn` 会切换到中国大陆端点。
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)`（HTTP
   403，`llmRefuse`）：guest 调用了代理不转发的 API 路径。

@@ -31,7 +31,7 @@
 - 解析：每行 `KEY=VALUE`，空行和 `#` 注释忽略，键和值去除首尾空白 —
   `daemon/install.go` `parseEnvFile`。
 
-`writeEnvFile` 写入的键（`defaults` 与 `optional` 两个切片）：
+`writeEnvFile` 写入的键（`envFileKeys` 的 `defaults` 与 `optional` 两个切片）：
 
 总是写入（已设置的值被保留）：
 
@@ -50,6 +50,8 @@
 - `KOTO_CLAUDE_BIN` — 设为安装时解析出的 claude CLI 路径
   （`installClaudeBin`）；与其他键不同，这里写入的是新解析的值而不是
   文件里的旧值（`kv[0] != claudeBinEnv` 分支）。
+- `KOTO_DEFAULT_PROVIDER` — 主机默认 provider（见 2.1）。由 `koto setup` 的
+  `provider` 步骤写入；列在 `envFileKeys` 中，因此重新安装会保留它。
 
 该 unit 还设置 `Environment=HOME=<state dir>`、`WorkingDirectory=<state
 dir>` 和 `ExecStart=/usr/local/bin/koto daemon`（`renderUnit`）。
@@ -82,6 +84,14 @@ dir>` 和 `ExecStart=/usr/local/bin/koto daemon`（`renderUnit`）。
 - `KOTO_CLAUDE_BIN` — 执行 OAuth 令牌刷新的 claude CLI。默认裸名
   `claude`（PATH 查找） — `daemon/claudebin.go` `claudeBin`、常量
   `claudeBinEnv`。
+- `KOTO_DEFAULT_PROVIDER` — 当 group 的 `config.json` 没有 provider 或
+  provider 无效时写入其中的 provider：每个新 group（包括 main）以及
+  provider 出现之前创建的 group 在下次 ensure() 时。`claudesdk` | `venice` |
+  `openai`（不区分大小写）；未设置或未知 = `claudesdk` —
+  `daemon/providers.go` `defaultProvider()`。已指定有效 provider 的 group
+  从不被改写。仅限主机：它不是 `config.json` 键，不是 ctl 字段，guest 也
+  无法设置；用 `koto setup --only provider` 设置（或编辑 koto.env）并
+  重启 daemon。
 - `ANTHROPIC_API_KEY` — 设置时优先于密钥文件
   `<state>/creds/anthropic-api-key` — `daemon/proxy.go` `currentAPIKey`、
   `proxyInitPaths`。文件每个请求都会重读。
@@ -193,8 +203,9 @@ dir>` 和 `ExecStart=/usr/local/bin/koto daemon`（`renderUnit`）。
 
 ### 键
 
-- `provider` — `claudesdk` | `venice`。默认 `claudesdk`
-  （`daemon/groups.go` 常量 `defaultProvider`、`ensureProviderConfig`）。
+- `provider` — `claudesdk` | `venice` | `openai`。默认：主机的
+  `KOTO_DEFAULT_PROVIDER`，否则 `claudesdk`（`daemon/providers.go`
+  `defaultProvider()`、`daemon/groups.go` `ensureProviderConfig`）。
 - `model` — 自由字符串，字符集 `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`，最长
   128 字符（`configIdentRE`、`configMaxIdent`）。未设置时的默认值：
   claudesdk 下 `claude-sonnet-5`，venice 下 `kimi-k2.5`

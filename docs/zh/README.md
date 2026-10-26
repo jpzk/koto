@@ -7,6 +7,13 @@
 在本仓库中直接 grep 验证；在代码含义不明确的地方，文档会直接标注
 "unverified" 而不是臆测。若文档与代码不一致，以代码为准——请修正文档。
 
+## 语言
+
+- [English](../README.md)
+- [한국어](../ko/README.md)
+- [Русский](../ru/README.md)
+- [Español](../es/README.md)
+
 ## 从这里开始
 
 - [getting-started.md](getting-started.md) — 构建与运行时要求、`make` 各阶段

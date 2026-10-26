@@ -83,7 +83,7 @@ HOME=/var/lib/koto KOTO_CLIENT=tui KOTO_TOKEN=$(cat /var/lib/koto/creds/token-tu
 
 - **`list`**：所有组及其状态。RPC `List`。
 - **`spawn [-provider P] [-model M] <group>`**：创建或启动一个组。
-  `-provider`（帮助文本 `claudesdk|venice`），`-model`（模型覆盖）。
+  `-provider`（帮助文本 `claudesdk|venice|openai`），`-model`（模型覆盖）。
   RPC `Spawn`。
 - **`stop <group>`**：RPC `Stop`。
 - **`interrupt <group>`**：RPC `Interrupt`。按 `drain` 上的注释，中止
@@ -130,7 +130,7 @@ HOME=/var/lib/koto KOTO_CLIENT=tui KOTO_TOKEN=$(cat /var/lib/koto/creds/token-tu
   的 flag 保持不变（`ctlConfig` 中的 `fs.Visit`）。RPC `Config`。flag
   如下：
   - `-model M`（`""` 清除）
-  - `-provider claudesdk|venice`
+  - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
   - `-size small|medium|large|xlarge`
   - `-root yes|no`
@@ -305,6 +305,11 @@ non-main groups: <verb>`。
   - 速率限制：每组一个令牌桶，突发量 `ctlPollBurst = 30`，每
     `ctlPollRefill = 500ms` 补充一个令牌。超限时：
     `ctl: tail is being polled too fast — slow down (this is rate limited per group)`。
+  - 日志由对端撰写，因此不会原样返回（`ctlTailFence`，
+    `daemon/report.go`）。它先被清理（去除控制字符和 bidi 覆盖字符），然后
+    每一行都像 report 正文一样加上 `> ` 引用前缀。最前面是
+    `[tail of <group>]` 头部，最后是 report turn 所用的同一段对端内容尾注
+    （`peerTrailer`）。只有带 `> ` 引用前缀的行才是对端的文本。
 
 **任何组，仅限自身**
 

@@ -196,7 +196,12 @@ vsock 提供。`daemon/daemon.go` 中 gRPC 监听器上方的注释正是这样�
 ## 5. 网络
 
 - **`network=none`，默认值。** VM 没有网卡（NIC）。它唯一的出口是经
-  vsock 9000 的 L7 代理（`fc.go` 头部、`fcnet.go` 头部）。
+  vsock 9000 的 L7 代理（`fc.go` 头部、`fcnet.go` 头部）。在
+  Anthropic 这一段，代理会拒绝（403）声明了服务器端执行工具（`tools[]` 中任何
+  `type` 不是 `custom` 的条目）或 `mcp_servers` 的请求体，因为这些会从
+  provider 一侧访问第三方主机；它只转发白名单内的 `anthropic-beta` 值
+  （`daemon/proxy_servertools.go`）。每种配置都只转发白名单内的 guest
+  请求头。
 - **`network=wan|lan|full`。** `fcSpawn` 挂接一个用户态 gVisor 网关
   （`containers/gvisor-tap-vsock`，`daemon/fcnet.go` 的
   `fcNetGateway`），且仅当 `groupNetwork(g) != fcNetNone` 时才打开 9003
