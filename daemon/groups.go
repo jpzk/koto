@@ -681,10 +681,6 @@ func groupProviderName(g string) string { return loadGroupConfig(g).provider() }
 // the TUI renders "(default)" there).
 func groupModelName(g string) string { return loadGroupConfig(g).model() }
 
-// groupEffortName reads the reasoning-effort knob from config.json. Empty
-// when unset. Only meaningful for claudesdk; the venice path ignores it.
-func groupEffortName(g string) string { return loadGroupConfig(g).effort() }
-
 // groupAutostart reads config.json's "autostart" profile: "yes" boots the
 // group's microVM as soon as the daemon starts, anything else (including
 // missing) means "no" — the default, where a group's VM only comes up lazily,
@@ -697,8 +693,6 @@ func groupAutostart(g string) bool { return groupConfigBool(g, "autostart") }
 // unparseable, or any other value is false — these knobs grant capability, so
 // they fail closed. A real JSON bool is accepted too, for a hand-edited config.
 func groupConfigBool(g, key string) bool { return loadGroupConfig(g).boolYes(key) }
-
-func groupConfigString(g, key string) string { return loadGroupConfig(g).str(key) }
 
 func destroy(g string) baseResp { return destroyCtx(context.Background(), g) }
 
