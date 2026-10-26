@@ -35,7 +35,7 @@ Hay tres superficies de configuración:
   ignorados, espacios de clave y valor recortados — `daemon/install.go`
   `parseEnvFile`.
 
-Claves que escribe `writeEnvFile` (los slices `defaults` y `optional`):
+Claves que escribe `writeEnvFile` (los slices `defaults` y `optional` en `envFileKeys`):
 
 Siempre escritas (el valor se preserva si ya estaba definido):
 
@@ -55,6 +55,9 @@ Opcionales (escritas comentadas como `#KEY=` cuando están vacías):
   momento de la instalación (`installClaudeBin`); a diferencia de las otras
   claves, se escribe el valor recién resuelto en lugar del valor antiguo
   del archivo (rama `kv[0] != claudeBinEnv`).
+- `KOTO_DEFAULT_PROVIDER` — el provider por defecto del host (ver 2.1).
+  Lo escribe el paso `provider` de `koto setup`; forma parte de
+  `envFileKeys`, así que se preserva al reinstalar.
 
 La unidad también define `Environment=HOME=<state dir>`,
 `WorkingDirectory=<state dir>` y `ExecStart=/usr/local/bin/koto daemon`
@@ -93,6 +96,16 @@ La unidad también define `Environment=HOME=<state dir>`,
 - `KOTO_CLAUDE_BIN` — CLI de claude ejecutado para el refresco del token
   OAuth. Por defecto `claude` a secas (búsqueda en PATH) —
   `daemon/claudebin.go` `claudeBin`, const `claudeBinEnv`.
+- `KOTO_DEFAULT_PROVIDER` — el provider que se escribe en el `config.json`
+  de un grupo cuando falta o no es válido: cada grupo nuevo (incluido
+  main), y los grupos creados antes de que existieran los providers, en su
+  siguiente ensure(). `claudesdk` | `venice` | `openai` (sin distinguir
+  mayúsculas). Sin definir o desconocido = `claudesdk` —
+  `daemon/providers.go` `defaultProvider()`. Un grupo que ya tiene un
+  provider válido nunca se sobrescribe. Solo del host: no es una clave de
+  `config.json` ni un campo de ctl, así que un invitado no puede fijarlo.
+  Se fija con `koto setup --only provider` (o editando koto.env) y
+  reiniciando el daemon.
 - `ANTHROPIC_API_KEY` — si está definida, prevalece sobre el archivo de
   clave `<state>/creds/anthropic-api-key` — `daemon/proxy.go`
   `currentAPIKey`, `proxyInitPaths`. El archivo se relee por petición.
@@ -216,8 +229,9 @@ las definas tú.
 
 ### Claves
 
-- `provider` — `claudesdk` | `venice`. Por defecto `claudesdk`
-  (`daemon/groups.go` const `defaultProvider`, `ensureProviderConfig`).
+- `provider` — `claudesdk` | `venice` | `openai`. Por defecto: el
+  `KOTO_DEFAULT_PROVIDER` del host, si no `claudesdk` (`daemon/providers.go`
+  `defaultProvider()`, `daemon/groups.go` `ensureProviderConfig`).
 - `model` — cadena libre, juego de caracteres
   `^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$`, máximo 128 caracteres
   (`configIdentRE`, `configMaxIdent`). Por defecto cuando no está definida:

@@ -245,6 +245,12 @@ que comprueba (comentario de cabecera de `update.go`). Las comprobaciones de
 firma en sí viven en `install.sh` y se describen en
 [getting-started.md](getting-started.md).
 
+Actualizar desde 1.7.1 o anterior: ejecuta el instalador una vez,
+`curl -fsSL https://kotovm.com/install.sh | sh`. Los instaladores anteriores
+a 1.7.2 no saben leer la línea firmada `# koto-version:` de `SHA256SUMS`,
+así que `koto update` falla en esas versiones. A partir de 1.7.2,
+`koto update` funciona con normalidad.
+
 ## 4. Eliminar koto: `koto uninstall`
 
 (`daemon/uninstall.go`)
@@ -343,6 +349,14 @@ viene, y qué hacer.
 - `the venice credential is not available on this host; ask the operator`
   (HTTP 503): un grupo con el provider venice, pero no se encontró clave
   (`no venice key: write to …`). Solución: `koto venice-login`.
+- `the minimax credential is not available on this host; ask the
+  operator` (HTTP 503, `daemon/proxy_minimax.go`): un grupo minimax, pero
+  `creds/minimax.key` falta o está vacío. Solución: `koto minimax-login`.
+  Una clave que empieza por `sk-api-` se factura como `minimax/apikey`;
+  cualquier otra clave es una suscripción M Plan (`minimax/subscription`), y
+  el daemon lee las ventanas de 5 horas y semanal de `token_plan/remains` como
+  mucho una vez por minuto tras las llamadas a minimax. `KOTO_MINIMAX_REGION=cn`
+  en koto.env cambia a los endpoints de China continental.
 - `koto proxy: <METHOD> <path> is outside the endpoint allowlist for
   provider <p> (the proxy relays inference and model metadata only)` (HTTP
   403, `llmRefuse`): el invitado llamó a una ruta de API que el proxy no

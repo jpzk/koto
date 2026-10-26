@@ -57,7 +57,7 @@ El orden de verificación (comentario de cabecera de `install.sh`, sección
 "WHAT THIS VERIFIES"):
 
 1. Obtener la clave de firma por su huella.
-2. Verificar la firma separada de `SHA256SUMS` y exigir que la línea `VALIDSIG` nombre esa huella.
+2. Verificar la firma separada de `SHA256SUMS` y exigir que la línea `VALIDSIG` nombre esa huella. El archivo firmado también debe contener exactamente una línea `# koto-version: X.Y.Z`, igual a la versión pedida; cualquier otro valor se rechaza como rollback (`install.sh`, `signed_ver`).
 3. Tomar los nombres de los assets del `SHA256SUMS` firmado.
 4. Comprobar cada asset antes de descomprimirlo, y preparar todo junto al destino hasta que el conjunto completo haya pasado.
 
@@ -129,7 +129,7 @@ sudo pacman -S --needed git make podman passt        # Arch
 Estos vienen de `checkRuntimeTools` en `daemon/setup_checks.go`, con los
 nombres de paquete de Fedora y Debian:
 
-- `mkfs.ext4`, `e2fsck`, `resize2fs`: `e2fsprogs`. Crean, comprueban y hacen crecer la imagen del workspace de cada grupo.
+- `mkfs.ext4`: `e2fsprogs`. Crea la imagen del workspace de cada grupo. Hacer crecer una imagen no necesita ninguna herramienta del host: el host extiende el archivo y el invitado redimensiona el sistema de archivos en caliente.
 - `tar`: `tar`. Entrega skills dentro de un invitado.
 - `newuidmap`, `newgidmap`: `shadow-utils` en Fedora, `uidmap` en Debian/Ubuntu. Mapean el uid/gid por VM con el que corre el monitor de la microVM enjaulada.
 - `claude`: solo advertencia. Solo se necesita para la autenticación OAuth (suscripción), donde el proxy lo invoca para refrescar el token. Su sugerencia pide `node >= 22` y `npm i -g @anthropic-ai/claude-code`. En hosts de la familia Debian también señala que el paquete `nodejs` de Ubuntu es v18, y sugiere `sudo snap install node --classic --channel=22` o nvm.
@@ -157,7 +157,7 @@ Ambas rutas producen exactamente estos.
 `make fetch` ejecuta `install.sh --version $(DIST_VERSION) --dest . --manifest artifacts.sha256 --download-only --next "make install"` con `KOTO_BASE_URL="$(KOTO_DIST_URL)/$(DIST_VERSION)"` (objetivo `fetch` del Makefile). Los valores por defecto son:
 
 - `KOTO_DIST_URL ?= https://github.com/jpzk/koto/releases/download`
-- `DIST_VERSION ?= 1.0.5`
+- `DIST_VERSION ?= 1.7.4`
 - `DIST_ARCH ?= x86_64`
 
 Los assets de la release están comprimidos con zstd y se llaman
@@ -301,10 +301,12 @@ De `setupMain` y `setupUsage` en `daemon/setup.go`:
 - `-y`: aceptar los valores por defecto y no preguntar nunca. Los pasos que necesitan entrada real fallan.
 - `--only ID`: ejecutar un solo paso. Se omite su `detect`, así que el paso siempre se ejecuta. Un ID desconocido da ``no such step "<id>" (see `koto setup --list`)``, salida 2. El ejemplo del texto de uso `--only rootfs` nombra un paso que ya no existe.
 - `--from ID`: empezar en este paso.
+- `--provider P`: el provider por defecto para los grupos nuevos (`claudesdk`, `venice` u `openai`, sin distinguir mayúsculas); el paso `provider` lo persiste entonces sin preguntar. Un valor desconocido sale con 2 y ``unknown --provider "<p>" (want claudesdk, venice or openai)``. `koto setup --only provider --provider P` no pregunta nada y por eso también funciona sin TTY.
+- `--providers L`: los providers que configurar, separados por comas (p. ej. `claudesdk,openai`, sin distinguir mayúsculas, sin duplicados). El paso `provider` entonces no pregunta nada; el paso `auth` conecta cada uno. El provider por defecto es `--provider` si se da, si no el primero de la lista. Un `--provider` que no está en la lista sale con 2 y ``--provider <p> is not in --providers <list>: the default must be one of the providers being set up``; un nombre desconocido sale con 2 y ``unknown provider "<p>" in --providers (want claudesdk, venice or openai)``.
 - `--no-color`: salida plana. El estilado también se desactiva cuando `NO_COLOR` está definido o `TERM` es `dumb` o está vacío (`colorOK`, `daemon/setup_ui.go`).
 - `--list`: imprimir los ids de los pasos en orden.
 
-Sin TTY y sin `-y` ni `--check`, setup sale con 2 y ``setup needs a terminal
+Sin TTY, sin `-y` ni `--check` y si no es `--only provider` con `--provider P` o `--providers L`, setup sale con 2 y ``setup needs a terminal
 (or pass -y / --check)``.
 
 El directorio de estado es `KOTO_HOME`, o `/var/lib/koto` cuando no está
@@ -316,10 +318,11 @@ Los pasos, en orden (`setupSteps` en `daemon/setup_steps.go`):
 
 1. `installed` (Sistema instalado). Detecta `installed()`. Nunca instala nada. Cuando koto no está instalado falla con la sugerencia "adquirir, luego `make install`".
 2. `pki` (Identidades TLS). La detección necesita todo esto bajo `creds/`: `ca.crt`, `ca.key`, `server.crt`, `client-tui.crt`, `token-tui`, `client-agent.crt`, `token-agent`. Pregunta si alcanzarás el daemon desde otra máquina y, en tal caso, toma SANs extra como `IP:192.168.1.20,DNS:koto.lan`. Los SANs por defecto son `DNS:koto-daemon`, `DNS:localhost` e `IP:127.0.0.1` (`defaultServerSANs`, `daemon/pki.go`). Ejecuta `pkiInit`, luego genera los clientes `tui` y `agent`, ambos con rol `admin`. Una CA existente nunca se regenera. Véase [acl-and-auth.md](acl-and-auth.md).
-3. `auth` (Credenciales de Anthropic). Hecho cuando existe `creds/.credentials.json` (OAuth) o `creds/anthropic-api-key`, o cuando `ANTHROPIC_API_KEY` está definido. Ejecuta `authConnect`, el mismo flujo que `koto claude-login`. Bajo `-y` falla, porque ambos métodos necesitan una persona. El error apunta a ``koto claude-login --api-key-stdin < keyfile``.
-4. `service` (Arrancar el daemon). Ejecuta `sudo systemctl restart koto`. Informa not-done siempre que esta ejecución haya cambiado credenciales (`credsChanged`). El comentario del asistente da como razón que el proxy resuelve las credenciales una vez, al arrancar. Ese comentario está obsoleto: el proxy ahora lee las credenciales por petición (`currentAPIKey` y `readCreds` en `daemon/proxy.go`), y `claudeLoginUsage` dice lo mismo. Para credenciales basadas en archivo el reinicio es por tanto inocuo pero no estrictamente necesario. `ANTHROPIC_API_KEY` del entorno sigue fijo durante la vida del proceso (`envAPIKey`).
-5. `smoke` (Prueba de humo). Construye un cliente para la identidad `tui` contra `127.0.0.1:8443` y llama al RPC `List`. Reintenta cada 2 s durante hasta 45 s, y luego falla con ``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``. Si `/dev/kvm` no es usable advierte ``no usable /dev/kvm on this host — groups will not boot until that is fixed``.
-6. `done` (Listo). Imprime ``koto is installed and running.`` y los siguientes comandos: `koto tui`, `koto ctl list`, `systemctl status koto`, `journalctl -u koto -f`. También imprime el directorio de estado y `/etc/koto/koto.env`, y cómo añadir un cliente con `koto pki client -creds <state>/creds <name>`.
+3. `provider` (Providers). Dos preguntas. Primero una selección múltiple sobre `knownProviders` (`claudesdk`, `venice`, `openai`, cada uno con una descripción de una línea; un provider que ya tiene credencial aparece marcado `✓ connected`): responde con números separados por comas o espacios (`1,3`), nombres de provider o `all`. Enter conserva el conjunto preseleccionado: el provider por defecto actual más todos los ya conectados. Cualquier otra cosa se explica y se vuelve a preguntar (`parseMultiChoice`, `daemon/setup_ui.go`). Después, solo cuando se seleccionó más de uno, cuál de ESOS usan por defecto los grupos nuevos, con el provider por defecto actual preseleccionado si está entre ellos. Con exactamente uno seleccionado, ese es el provider por defecto y la segunda pregunta no se hace. Solo se persiste el provider por defecto, como `KOTO_DEFAULT_PROVIDER=<p>` en `/etc/koto/koto.env` (`setupPersistProvider`, `daemon/setup_provider.go`); todas las demás líneas del archivo se conservan, y ningún otro ajuste registra la selección (se deduce de qué credenciales existen). Hecho cuando koto.env nombra un provider válido (y coincide con `--provider`, o con el primero de `--providers`, si se dieron). Con `--provider` o `--providers` no pregunta; bajo `-y` conserva el conjunto y el provider por defecto actuales (`claudesdk` si no hay ninguno). Consultivo: `--check` lo informa como pendiente con un aviso, no como fallo, porque una instalación que nunca eligió funciona con `claudesdk` exactamente igual que antes.
+4. `auth` (Credenciales de providers). Actúa sobre cada provider seleccionado arriba, en orden de visualización (cuando el paso provider no se ejecutó: `--providers`, si no `--provider` solo, si no el provider por defecto más todos los ya conectados). Un provider que ya tiene credencial local se informa como `already connected, login skipped`; cada uno de los demás recibe su propio "Connect … now?" y termina `connected`, `skipped` (con el comando para conectarlo después) o `failed` (con el error; el siguiente provider se ofrece igualmente). Luego un resumen lista cada provider seleccionado con su estado y marca el provider por defecto. Cuando el provider por defecto termina sin credencial, avisa en voz alta de que cada turn de los grupos nuevos fallará hasta que se arregle; uno que no es el provider por defecto recibe un aviso más suave. Solo el provider por defecto decide si el paso pasa: pasa cuando tiene credencial o su login se omitió explícitamente, y falla cuando su login falló. El paso está hecho (una nueva ejecución lo omite) cuando cada provider seleccionado tiene credencial, detectada localmente: claudesdk `creds/.credentials.json`, `creds/anthropic-api-key` o `ANTHROPIC_API_KEY`; venice un `creds/venice.key` no vacío; openai `creds/openai-auth.json` o un `creds/openai-api-key` no vacío. Los logins se ejecutan dentro del proceso: claudesdk con `authConnect` (igual que `koto claude-login`), venice y minimax con una petición de clave oculta, comprobada con el provider como en `koto venice-login` / `koto minimax-login` (una clave rechazada no se acepta y no se escribe nada) y guardada en `creds/venice.key` o `creds/minimax.key` (0600), openai con el flujo device-code o de clave API de `koto openai-login`. Bajo `-y` no se hace ningún login: los providers ya conectados pasan, cada uno que falta se informa con su alternativa no interactiva (p. ej. ``koto openai-login --api-key-stdin < keyfile``), y el paso solo falla cuando el que falta es el provider por defecto.
+5. `service` (Arrancar el daemon). Ejecuta `sudo systemctl restart koto`. Informa not-done siempre que esta ejecución haya cambiado credenciales o el provider por defecto (`restartOwed`); el daemon lee `KOTO_DEFAULT_PROVIDER` solo al arrancar. El comentario del asistente da como razón que el proxy resuelve las credenciales una vez, al arrancar. Ese comentario está obsoleto: el proxy ahora lee las credenciales por petición (`currentAPIKey` y `readCreds` en `daemon/proxy.go`), y `claudeLoginUsage` dice lo mismo. Para credenciales basadas en archivo el reinicio es por tanto inocuo pero no estrictamente necesario. `ANTHROPIC_API_KEY` del entorno sigue fijo durante la vida del proceso (`envAPIKey`).
+6. `smoke` (Prueba de humo). Construye un cliente para la identidad `tui` contra `127.0.0.1:8443` y llama al RPC `List`. Reintenta cada 2 s durante hasta 45 s, y luego falla con ``daemon did not answer within 45s: … check `systemctl status koto` and `journalctl -u koto -n 50` ``. Si `/dev/kvm` no es usable advierte ``no usable /dev/kvm on this host — groups will not boot until that is fixed``. Después comprueba localmente la credencial del provider por defecto (sin petición al LLM) y, si no hay, avisa con el comando para arreglarlo.
+7. `done` (Listo). Imprime ``koto is installed and running.`` y los siguientes comandos: `koto tui`, `koto ctl list`, `systemctl status koto`, `journalctl -u koto -f`. También imprime el directorio de estado y `/etc/koto/koto.env`, y cómo añadir un cliente con `koto pki client -creds <state>/creds <name>`.
 
 La reanudación funciona por detección, no por un archivo de estado.
 Re-ejecutar `koto setup` omite cada paso cuyo `detect` esté satisfecho
@@ -351,7 +354,8 @@ provider no responde (error de red, timeout de 15s, 5xx) se guarda con un
 aviso. `--no-verify` omite la petición; `--status` solo dice si hay clave.
 Los errores llevan el código de estado o el error de transporte, nunca la
 clave (`providerKeyCheck`, `daemon/provider_keycheck.go`). El paso `auth`
-del asistente usa la misma comprobación.
+del asistente usa la misma comprobación. El daemon relee la clave en cada
+petición, así que no hace falta reiniciar.
 
 Los demás subcomandos de nivel superior despachados en `daemon/main.go` son
 `daemon`, `fcjail`, `ctl`, `setup`, `claude-login`, `openai-login`, `venice-login`, `minimax-login`, `uninstall`, `update`,

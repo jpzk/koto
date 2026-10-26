@@ -90,7 +90,7 @@ un helper aparte.
 
 - **`list`**: todos los grupos y su estado. RPC `List`.
 - **`spawn [-provider P] [-model M] <group>`**: crea o arranca un grupo.
-  `-provider` (texto de ayuda `claudesdk|venice`), `-model` (override del
+  `-provider` (texto de ayuda `claudesdk|venice|openai`), `-model` (override del
   modelo). RPC `Spawn`.
 - **`stop <group>`**: RPC `Stop`.
 - **`interrupt <group>`**: RPC `Interrupt`. Según el comentario de `drain`,
@@ -144,7 +144,7 @@ un helper aparte.
   `-model ""` *borra* el modelo mientras que un flag ausente lo deja igual
   (`fs.Visit` en `ctlConfig`). RPC `Config`. Los flags son:
   - `-model M` (`""` borra)
-  - `-provider claudesdk|venice`
+  - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
   - `-size small|medium|large|xlarge`
   - `-root yes|no`
@@ -343,6 +343,13 @@ recibe `ctl: verb not allowed for non-main groups: <verb>`.
     `ctlPollBurst = 30`, rellenando un token cada `ctlPollRefill = 500ms`.
     Por encima del límite:
     `ctl: tail is being polled too fast — slow down (this is rate limited per group)`.
+  - El log lo ha escrito otro grupo (un par), así que no se devuelve tal cual
+    (`ctlTailFence`, `daemon/report.go`): primero se sanea (se eliminan los
+    caracteres de control y de anulación bidi), y luego cada línea recibe el
+    prefijo de cita `> `, igual que el cuerpo de un report. Se antepone una
+    cabecera `[tail of <group>]` y se añade al final el mismo bloque de cierre
+    sobre contenido de pares (`peerTrailer`) que lleva un report turn. Solo
+    las líneas con el prefijo de cita `> ` son texto del par.
 
 **Cualquier grupo, hacia sí mismo**
 

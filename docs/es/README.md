@@ -10,6 +10,13 @@ en este repositorio; donde el código era ambiguo, los documentos dicen
 "unverified" (no verificado) en lugar de adivinar. Si un documento y el
 código discrepan, gana el código — por favor corrige el documento.
 
+## Idiomas
+
+- [English](../README.md)
+- [中文](../zh/README.md)
+- [한국어](../ko/README.md)
+- [Русский](../ru/README.md)
+
 ## Empieza aquí
 
 - [getting-started.md](getting-started.md) — requisitos de compilación y de
