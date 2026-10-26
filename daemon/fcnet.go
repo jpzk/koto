@@ -82,16 +82,6 @@ const (
 	fcNetFull = "full"
 )
 
-// fcNetSubnetNet is fcNetSubnet parsed once for the classifier's gateway-
-// subnet carve-out.
-var fcNetSubnetNet = func() *net.IPNet {
-	_, n, err := net.ParseCIDR(fcNetSubnet)
-	if err != nil {
-		panic(err) // literal const; cannot fail
-	}
-	return n
-}()
-
 // fcNetGatewayIPParsed is the one gateway-subnet address that is a carve-out
 // (fcClassifyDst); the rest of the /24 is LAN.
 var fcNetGatewayIPParsed = net.ParseIP(fcNetGatewayIP)

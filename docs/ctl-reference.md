@@ -325,6 +325,12 @@ allowed for non-main groups: <verb>`.
   - Rate limit: a per-group token bucket with burst `ctlPollBurst = 30`,
     refilling one token every `ctlPollRefill = 500ms`. Over the limit:
     `ctl: tail is being polled too fast — slow down (this is rate limited per group)`.
+  - The log is peer-authored, so it is not returned raw (`ctlTailFence`,
+    `daemon/report.go`). It is sanitized first (control characters and bidi
+    overrides removed), then every line is `> `-quoted like a report body. A
+    `[tail of <group>]` header comes first and the same peer-content trailer
+    that report turns use (`peerTrailer`) comes last. Only the `> `-quoted
+    lines are the peer's text.
 
 **Any group, self-targeted**
 
