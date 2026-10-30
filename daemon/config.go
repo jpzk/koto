@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"koto/ociimage"
 )
 
 // ---- config --------------------------------------------------------------
@@ -335,6 +337,13 @@ func configCmd(req configReq) configResp {
 	if _, known := readGroups()[req.Group]; !known {
 		return configResp{BaseResp: errResp("no such group: " + req.Group + " (spawn it first)")}
 	}
+	// image= is validated against the catalog BEFORE the write, so a raw ref
+	// or unknown name is refused with a readable error instead of being
+	// silently dropped like the other keys' bad values.
+	pin, setImage, err := imagePinFromRaw(req.Image)
+	if err != nil {
+		return configResp{BaseResp: errResp(err.Error())}
+	}
 	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
 		applyConfig(cfg, "model", req.Model)
 		applyConfig(cfg, "effort", req.Effort)
@@ -348,6 +357,9 @@ func configCmd(req configReq) configResp {
 		applyConfig(cfg, "root", req.Root)
 		applyConfig(cfg, "autostart", req.Autostart)
 		applyConfig(cfg, "kvm", req.KVM)
+		if setImage {
+			setImageConfig(cfg, pin)
+		}
 	})
 	if err != nil {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
@@ -396,6 +408,9 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 	eff["io"] = fmt.Sprintf("%dMiB/s / %dops", bwBytes>>20, ioOps)
 	if _, ok := eff["effort"]; !ok {
 		eff["effort"] = "(default)"
+	}
+	if _, ok := eff["image"]; !ok {
+		eff["image"] = ociimage.DefaultName
 	}
 	return eff
 }
