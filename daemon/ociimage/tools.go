@@ -175,7 +175,11 @@ func (t RootfsTools) Ensure(cache string, logf func(string, ...any)) (string, er
 	}
 	// /sidecar: whole directory (scripts + helper js), modes preserved.
 	sc := filepath.Join(stage, "sidecar")
-	if b, err := exec.Command("debugfs", "-R", "rdump "+ToolsSidecarDir+" "+stage, t.Rootfs).CombinedOutput(); err != nil {
+	req, err := debugfsReq("rdump", ToolsSidecarDir, stage)
+	if err != nil {
+		return "", fmt.Errorf("tools.img: rdump: %w", err)
+	}
+	if b, err := exec.Command("debugfs", "-R", req, t.Rootfs).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("tools.img: rdump %s: %v: %s", ToolsSidecarDir, err, b)
 	}
 	ents, err := os.ReadDir(sc)
@@ -255,8 +259,27 @@ func (t RootfsTools) Ensure(cache string, logf func(string, ...any)) (string, er
 	return out, nil
 }
 
+// debugfsReq builds one debugfs -R request: cmd followed by every argument
+// through q. A path that cannot be quoted is an error, never a silently
+// split or truncated request.
+func debugfsReq(cmd string, args ...string) (string, error) {
+	parts := []string{cmd}
+	for _, a := range args {
+		qa, err := q(a)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, qa)
+	}
+	return strings.Join(parts, " "), nil
+}
+
 func debugfsDump(img, src, dst string) error {
-	b, err := exec.Command("debugfs", "-R", "dump "+src+" "+dst, img).CombinedOutput()
+	req, err := debugfsReq("dump", src, dst)
+	if err != nil {
+		return err
+	}
+	b, err := exec.Command("debugfs", "-R", req, img).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, b)
 	}

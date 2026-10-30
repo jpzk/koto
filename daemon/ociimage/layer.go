@@ -50,8 +50,13 @@ func LayerFile(cache, diffID string) string {
 	return filepath.Join(cache, "layers", strings.TrimPrefix(diffID, "sha256:")+".ext4")
 }
 
-// q quotes one debugfs argument. debugfs' ss parser has no escape for '"'
-// or newlines, so such names are rejected (bounded, fail closed).
+// q quotes one debugfs argument (script line or -R request). debugfs' ss
+// parser splits on unquoted whitespace; inside "..." the only escape is a
+// doubled quote, and a newline always ends the request. We do not rely on
+// that: control characters (incl. NUL/newline), DEL, '"' and '\' are refused
+// (fail closed); everything else, spaces and single quotes included, is
+// passed through verbatim inside double quotes. Every path that reaches a
+// debugfs command line MUST go through q.
 func q(s string) (string, error) {
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
@@ -251,7 +256,10 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 			// later entry wins (tar semantics); dirs merge
 			if !(old.typ == 'd' && h.Typeflag == tar.TypeDir) {
 				s.cd(dir)
-				qb, _ := q(base)
+				qb, err := q(base)
+				if err != nil {
+					return st, err
+				}
 				if old.typ == 'd' {
 					s.emit("rmdir %s", qb)
 				} else {
@@ -376,7 +384,11 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 			if err != nil {
 				return st, err
 			}
-			s.emit("ea_set -f %s %s %s", xf, qp, qn)
+			qx, err := q(xf)
+			if err != nil {
+				return st, err
+			}
+			s.emit("ea_set -f %s %s %s", qx, qp, qn)
 			st.Xattrs++
 		}
 		if s.err != nil {
@@ -392,7 +404,10 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		return st, fmt.Errorf("diff_id mismatch: config says %s, layer is %s", l.DiffID, got)
 	}
 	for p, n := range s.links {
-		qp, _ := q(p)
+		qp, err := q(p)
+		if err != nil {
+			return st, err
+		}
 		s.emit("sif %s links_count %d", qp, n)
 	}
 	for i := len(dirMeta) - 1; i >= 0; i-- {
