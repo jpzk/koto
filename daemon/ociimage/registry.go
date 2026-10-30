@@ -128,6 +128,7 @@ type Client struct {
 	rootCAs   *x509.CertPool            // tests only
 	allowAddr func(netip.AddrPort) bool // tests only
 	stall     time.Duration             // tests only; default bodyStall
+	tempOpen  func()                    // tests only; runs after a blob temp file is created
 }
 
 func (c *Client) logf(f string, a ...any) {
@@ -373,8 +374,8 @@ func (c *Client) fetchDoc(cache string, r Ref, path, accept, dg string, max int6
 	}
 	if cache != "" {
 		p := BlobPath(cache, dg)
-		if os.MkdirAll(filepath.Dir(p), 0o755) == nil && os.WriteFile(p+".part", b, 0o444) == nil {
-			_ = os.Rename(p+".part", p)
+		if os.MkdirAll(filepath.Dir(p), 0o755) == nil {
+			_ = writeBlobAtomic(p, b)
 		}
 	}
 	return b, ct, nil
@@ -399,10 +400,17 @@ func (c *Client) blob(cache string, r Ref, dg string, size int64) (string, bool,
 			return err
 		}
 		defer resp.Body.Close()
-		tmp := p + ".part"
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		// unique temp per attempt: concurrent pulls of the same blob (two
+		// groups, image add + update) must not truncate or rename each
+		// other's partial file. The final rename is atomic and every writer
+		// publishes identical verified bytes, so the last rename wins harmlessly.
+		f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".part-*")
 		if err != nil {
 			return err
+		}
+		tmp := f.Name()
+		if c.tempOpen != nil {
+			c.tempOpen()
 		}
 		h := sha256.New()
 		n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, size+1))
@@ -615,4 +623,29 @@ func Age(created, now time.Time) string {
 		return fmt.Sprintf("%.1fh", d.Hours())
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// writeBlobAtomic publishes verified bytes b at p (0444) through a unique
+// temp file in the same directory and an atomic rename, so concurrent
+// writers of the same digest never see or clobber each other's partial file.
+func writeBlobAtomic(p string, b []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".part-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o444)
+	}
+	if err == nil {
+		err = os.Rename(tmp, p)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }

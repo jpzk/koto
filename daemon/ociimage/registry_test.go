@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -319,10 +320,9 @@ func TestBlobShaMismatchRejected(t *testing.T) {
 	if f.hits["/v2/test/img/blobs/"+ls[0]] != 1 {
 		t.Fatalf("digest mismatch was retried (%d GETs)", f.hits["/v2/test/img/blobs/"+ls[0]])
 	}
-	for _, p := range []string{BlobPath(cache, ls[0]), BlobPath(cache, ls[0]) + ".part"} {
-		if _, err := os.Stat(p); err == nil {
-			t.Fatalf("rejected blob left on disk: %s", p)
-		}
+	left, _ := filepath.Glob(BlobPath(cache, ls[0]) + "*")
+	if len(left) > 0 {
+		t.Fatalf("rejected blob left on disk: %v", left)
 	}
 	// a corrupted manifest document is rejected too
 	f2 := newFakeRegistry(t)
@@ -386,5 +386,53 @@ func TestAge(t *testing.T) {
 	}
 	if s := Age(time.Time{}, now); s != "unknown age" {
 		t.Fatal(s)
+	}
+}
+
+// TestConcurrentSameBlobPull: several pulls of the same image into one cache
+// (two groups, image add racing image update) all hold their blob temp file
+// open at the same moment; none may truncate, rename or delete another's
+// partial file, all must succeed, and the cache ends with one verified blob
+// per digest and no temp leftovers.
+func TestConcurrentSameBlobPull(t *testing.T) {
+	f := newFakeRegistry(t)
+	_, ls := f.addImage("a", time.Now().Add(-60*24*time.Hour),
+		mkTar(t, []tfile{{name: "f", body: strings.Repeat("q", 64<<10)}}))
+	cache := t.TempDir()
+	r, _ := ParseRef(f.host() + "/test/img:a")
+	const n = 4
+	var opened sync.WaitGroup
+	opened.Add(n)
+	all := make(chan struct{})
+	go func() { opened.Wait(); close(all) }()
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		c := f.client(nil)
+		var once sync.Once
+		c.tempOpen = func() {
+			once.Do(opened.Done)
+			select { // every puller has its temp open before any writes
+			case <-all:
+			case <-time.After(10 * time.Second):
+			}
+		}
+		go func() { _, err := c.Pull(r, cache); errs <- err }()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent pull %d: %v", i, err)
+		}
+	}
+	select {
+	case <-all:
+	default:
+		t.Fatal("pulls did not overlap; test proves nothing")
+	}
+	if !VerifyFile(BlobPath(cache, ls[0]), ls[0]) {
+		t.Fatal("cached blob does not verify")
+	}
+	left, _ := filepath.Glob(filepath.Join(cache, "blobs", "sha256", "*.part*"))
+	if len(left) > 0 {
+		t.Fatalf("temp files left: %v", left)
 	}
 }
