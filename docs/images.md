@@ -108,6 +108,32 @@ device 0/0) and opaque markers (`.wh..wh..opq`) become
 `trusted.overlay.opaque=y`. Bounds: 200 000 entries, 1024-byte paths,
 4 GiB decompressed per layer, 2 GiB per compressed blob, 64 manifest layers.
 
+### Registry outbound policy
+
+The registry picks the next places the daemon connects to: the token realm
+in `Www-Authenticate` and 30x redirects to blob CDNs. Every connection the
+daemon makes during a pull goes through the same policy
+(`daemon/ociimage/netpolicy.go`):
+
+- https only, for the registry, the token realm and every redirect hop.
+  A realm that carries userinfo is refused.
+- Addresses are checked after DNS resolution, on the address actually
+  dialled. The policy refuses loopback, RFC 1918 / ULA private,
+  link-local (this covers the 169.254.169.254 metadata service), CGNAT,
+  multicast, unspecified, reserved and documentation ranges, and NAT64
+  addresses that embed any of them. So **registries on localhost or a
+  private LAN are not supported**. Mirror the image to a public registry,
+  or pin it by digest from one.
+- Environment proxies (`HTTPS_PROXY`) are ignored, because a proxy would
+  move the dial away from the address that was checked.
+- At most 5 redirects. The registry's bearer token is dropped on any hop
+  that leaves the registry's host:port.
+- There is no whole-request deadline, so a large layer on a slow link
+  finishes. Dial and TLS handshakes are bounded at 30 s and response
+  headers at 60 s. A body that sends no byte for 2 minutes is aborted and
+  retried, up to 3 attempts. Cancelling the `koto image` call (Ctrl-C, or
+  the client disconnecting) cancels the requests in flight.
+
 ## tools.img
 
 `tools.img` is derived on the host from the shipped, already-verified

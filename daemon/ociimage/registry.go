@@ -10,18 +10,22 @@
 package ociimage
 
 import (
+	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -109,27 +113,27 @@ func ParseRef(s string) (Ref, error) {
 	return Ref{Host: host, Repo: repo, Tag: tag, Digest: dg}, nil
 }
 
-// Client talks to registries over HTTPS. Zero value is usable.
+// Client talks to registries over HTTPS through the outbound policy in
+// netpolicy.go. Zero value is usable.
 type Client struct {
-	HTTP  *http.Client         // default: 10 min timeout
+	Ctx   context.Context      // cancels in-flight requests; default Background
 	Logf  func(string, ...any) // progress log; default: discard
 	Sleep func(time.Duration)  // retry backoff; default time.Sleep
 	Now   func() time.Time     // age logging; default time.Now
 	Tries int                  // attempts for transient errors; default 3
 	tok   map[string]string    // host/repo -> bearer token
+
+	hcOnce    sync.Once
+	http      *http.Client
+	rootCAs   *x509.CertPool            // tests only
+	allowAddr func(netip.AddrPort) bool // tests only
+	stall     time.Duration             // tests only; default bodyStall
 }
 
 func (c *Client) logf(f string, a ...any) {
 	if c.Logf != nil {
 		c.Logf(f, a...)
 	}
-}
-
-func (c *Client) hc() *http.Client {
-	if c.HTTP == nil {
-		c.HTTP = &http.Client{Timeout: 10 * time.Minute}
-	}
-	return c.HTTP
 }
 
 func (c *Client) tries() int {
@@ -164,7 +168,7 @@ func (c *Client) auth(r Ref, resp *http.Response) error {
 		p[m[1]] = m[2]
 	}
 	u, err := url.Parse(p["realm"])
-	if err != nil || u.Scheme != "https" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Host == "" {
 		return fmt.Errorf("registry %s: bad token realm %q", r.Host, p["realm"])
 	}
 	q := u.Query()
@@ -173,7 +177,11 @@ func (c *Client) auth(r Ref, resp *http.Response) error {
 	}
 	q.Set("scope", "repository:"+r.Repo+":pull")
 	u.RawQuery = q.Encode()
-	tr, err := c.hc().Get(u.String())
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	tr, err := c.do(req)
 	if err != nil {
 		return err
 	}
@@ -219,7 +227,7 @@ func (c *Client) get(r Ref, path, accept string) (*http.Response, error) {
 		if t := c.tok[r.Host+"/"+r.Repo]; t != "" {
 			req.Header.Set("Authorization", "Bearer "+t)
 		}
-		resp, err := c.hc().Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			return nil, err
 		}

@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -28,11 +30,13 @@ type fakeRegistry struct {
 	lieHeader bool              // wrong Docker-Content-Digest on tag fetch
 	token     string            // non-empty: require Bearer auth
 	hits      map[string]int    // path -> GET count
+	realm     string            // non-empty: Www-Authenticate realm override
+	redirect  map[string]string // path -> 302 Location (after auth)
 }
 
 func newFakeRegistry(t *testing.T) *fakeRegistry {
 	f := &fakeRegistry{t: t, docs: map[string][]byte{}, types: map[string]string{}, tags: map[string]string{},
-		corrupt: map[string]bool{}, fail5xx: map[string]int{}, hits: map[string]int{}}
+		corrupt: map[string]bool{}, fail5xx: map[string]int{}, hits: map[string]int{}, redirect: map[string]string{}}
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -41,12 +45,27 @@ func newFakeRegistry(t *testing.T) *fakeRegistry {
 func (f *fakeRegistry) host() string { return strings.TrimPrefix(f.srv.URL, "https://") }
 
 func (f *fakeRegistry) client(logs *[]string) *Client {
-	return &Client{HTTP: f.srv.Client(), Sleep: func(time.Duration) {},
+	c := &Client{Sleep: func(time.Duration) {},
 		Logf: func(s string, a ...any) {
 			if logs != nil {
 				*logs = append(*logs, fmt.Sprintf(s, a...))
 			}
 		}}
+	c.testTrust(f.pool(), f.allow)
+	return c
+}
+
+// pool trusts the fake registry's certificate (httptest certs are shared,
+// so it also covers sibling httptest TLS servers).
+func (f *fakeRegistry) pool() *x509.CertPool {
+	p := x509.NewCertPool()
+	p.AddCert(f.srv.Certificate())
+	return p
+}
+
+// allow lets exactly the fake registry's loopback listener past the policy.
+func (f *fakeRegistry) allow(ap netip.AddrPort) bool {
+	return ap.String() == f.host()
 }
 
 func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
@@ -62,8 +81,16 @@ func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.hits[r.URL.Path]++
 	if f.token != "" && r.Header.Get("Authorization") != "Bearer "+f.token {
-		w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="fake"`, f.srv.URL))
+		realm := f.srv.URL + "/token"
+		if f.realm != "" {
+			realm = f.realm
+		}
+		w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s",service="fake"`, realm))
 		http.Error(w, "auth", 401)
+		return
+	}
+	if loc, ok := f.redirect[r.URL.Path]; ok {
+		http.Redirect(w, r, loc, http.StatusFound)
 		return
 	}
 	if n := f.fail5xx[r.URL.Path]; n > 0 {

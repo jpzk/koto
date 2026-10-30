@@ -33,7 +33,7 @@ type imageEnv struct {
 func defaultImageEnv(ctx context.Context) imageEnv {
 	return imageEnv{
 		store:  fcImageStore(),
-		client: &ociimage.Client{},
+		client: &ociimage.Client{Ctx: ctx},
 		groups: func() []string {
 			var out []string
 			for g := range readGroups() {
