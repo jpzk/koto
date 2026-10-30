@@ -56,6 +56,9 @@ type Catalog struct {
 	Default string            `json:"default,omitempty"` // "" == DefaultName
 	Names   map[string]string `json:"names"`             // name -> digest
 	Images  map[string]*Entry `json:"images"`            // digest -> entry
+	// Sources is the reference each name was added/updated from (a tag or a
+	// pinned ref), so `koto image update <name>` can re-resolve it.
+	Sources map[string]string `json:"sources,omitempty"`
 }
 
 // GroupRef is what one group pins: its current digest, its rollback
@@ -175,6 +178,7 @@ func (c *Catalog) Remove(name string, refs []GroupRef) error {
 			ErrInUse, name, Short(dg), strings.Join(u, ", "))
 	}
 	delete(c.Names, name)
+	delete(c.Sources, name)
 	if c.Default == name {
 		c.Default = ""
 	}
