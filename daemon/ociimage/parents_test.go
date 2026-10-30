@@ -3,8 +3,10 @@ package ociimage
 import (
 	"archive/tar"
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func hdrTar(t *testing.T, hs ...*tar.Header) []byte {
@@ -63,5 +65,48 @@ func TestCheckImpliedParents(t *testing.T) {
 	top := cacheLayer(t, cache, hdrTar(t, reg("bin/tool2")))
 	if err := CheckImpliedParents(cache, []Layer{base, mid, top}); err != nil {
 		t.Errorf("dir from middle layer: %v", err)
+	}
+}
+
+// Round-2 review: the subtree drop must still happen when a non-dir or a
+// whiteout replaces a lower dir, but must not scan lower once per entry.
+func TestCheckImpliedParentsReplaceAndScale(t *testing.T) {
+	cache := t.TempDir()
+	reg := func(n string) *tar.Header { return &tar.Header{Name: n, Typeflag: tar.TypeReg} }
+	dir := func(n string) *tar.Header { return &tar.Header{Name: n, Typeflag: tar.TypeDir} }
+	base := cacheLayer(t, cache, hdrTar(t, dir("srv/"), dir("srv/a/"), reg("srv/a/f")))
+	// srv replaced by a file: a later implied srv/x must be refused
+	mid := cacheLayer(t, cache, hdrTar(t, reg("srv")))
+	top := cacheLayer(t, cache, hdrTar(t, reg("srv/x")))
+	if err := CheckImpliedParents(cache, []Layer{base, mid, top}); err == nil || !strings.Contains(err.Error(), "/srv is only implied") {
+		t.Fatalf("file over dir then implied: %v", err)
+	}
+	// srv whited out, then recreated by an explicit dir: srv/a is gone, so
+	// an implied srv/a/y is a new dir, accepted
+	mid = cacheLayer(t, cache, hdrTar(t, reg(".wh.srv"), dir("srv/")))
+	top = cacheLayer(t, cache, hdrTar(t, reg("srv/a/y")))
+	if err := CheckImpliedParents(cache, []Layer{base, mid, top}); err != nil {
+		t.Fatalf("whiteout dir then recreate: %v", err)
+	}
+
+	// scale: n files over n lower files was n*n prefix checks (~10^9 at
+	// n=32k, tens of seconds); now linear.
+	const n = 32000
+	hs := []*tar.Header{dir("d/")}
+	for i := 0; i < n; i++ {
+		hs = append(hs, reg("d/f"+strconv.Itoa(i)))
+	}
+	lo := cacheLayer(t, cache, hdrTar(t, hs...))
+	hs = hs[:1]
+	for i := 0; i < n; i++ {
+		hs = append(hs, reg("d/f"+strconv.Itoa(i)), reg("d/.wh.g"+strconv.Itoa(i)))
+	}
+	hi := cacheLayer(t, cache, hdrTar(t, hs...))
+	start := time.Now()
+	if err := CheckImpliedParents(cache, []Layer{lo, hi}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("CheckImpliedParents %d over %d took %v (quadratic?)", n, n, d)
 	}
 }

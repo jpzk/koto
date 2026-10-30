@@ -179,6 +179,13 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("group %s: tools.img: %w", g, err)
 	}
+	// The sys overlay persists and is root-writable when root=yes; a later
+	// root=no boot must not inherit what that root worker left behind, so
+	// the downgrade discards every system disk of the root era (before
+	// PrepareSys, which then makes a fresh one).
+	if err := fcImageSysPosture(g, logf); err != nil {
+		return nil, err
+	}
 	mode := ociimage.SysFresh
 	if cfg.str("image_sys") == "restore" {
 		mode = ociimage.SysRestore
@@ -201,4 +208,25 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	}
 	logf("booting %s@%s (%d layers)", name, ociimage.Short(dg), len(layers))
 	return p, nil
+}
+
+// fcImageSysPosture ties the persistent sys overlay to the root posture:
+// a root=yes boot marks the group's system disks as root-written, and the
+// first root=no boot after that discards all of them (sys.img and every
+// parked archive), so nothing a root worker planted survives a downgrade.
+func fcImageSysPosture(g string, logf func(string, ...any)) error {
+	if groupRoot(g) {
+		if err := ociimage.MarkSysRoot(vol(g)); err != nil {
+			return fmt.Errorf("group %s: sys.root: %w", g, err)
+		}
+		return nil
+	}
+	n, err := ociimage.DropRootSys(vol(g))
+	if err != nil {
+		return fmt.Errorf("group %s: root=no after root=yes, discarding sys disks: %w", g, err)
+	}
+	if n > 0 {
+		logf("root=no after a root=yes boot: discarded %d system disk(s) written with guest root; sys.img starts fresh", n)
+	}
+	return nil
 }

@@ -30,11 +30,20 @@ func CheckImpliedParents(cache string, layers []Layer) error {
 			return fmt.Errorf("layer %d %s: %w", i+1, Short(l.DiffID), err)
 		}
 		// this layer's whiteouts / opaque dirs apply to the lower state first
+		// Every recorded path has all its ancestors recorded too, so only a
+		// path present in lower as a directory can have a subtree: skip the
+		// O(len(lower)) scan otherwise (it ran once per entry before).
 		for _, d := range opq {
-			dropUnder(lower, d, false)
+			if lower[d] {
+				dropUnder(lower, d, false)
+			}
 		}
 		for _, w := range wh {
-			dropUnder(lower, w, true)
+			if isDir, ok := lower[w]; ok && isDir {
+				dropUnder(lower, w, true)
+			} else {
+				delete(lower, w)
+			}
 		}
 		// whiteout markers live in their parent dir too (BuildLayer creates it)
 		check := make([]string, 0, len(ents)+len(wh)+len(opq))
@@ -59,7 +68,7 @@ func CheckImpliedParents(cache string, layers []Layer) error {
 			}
 		}
 		for p, isDir := range ents {
-			if !isDir {
+			if wasDir := lower[p]; !isDir && wasDir {
 				dropUnder(lower, p, false) // a non-dir replaces a lower dir subtree
 			}
 			lower[p] = isDir
@@ -78,8 +87,9 @@ func dropUnder(m map[string]bool, p string, self bool) {
 	if self {
 		delete(m, p)
 	}
+	pre := p + "/"
 	for k := range m {
-		if strings.HasPrefix(k, p+"/") {
+		if strings.HasPrefix(k, pre) {
 			delete(m, k)
 		}
 	}

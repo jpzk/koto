@@ -269,7 +269,8 @@ Only `admin` passes:
 - A `Config` request that sets any **posture** key is re-labelled
   `config_posture`, which is admin-only. The posture keys are `network`,
   `internet`, `root`, `ports`, `size`, `autostart`, `kvm` and `image` (it picks
-  the rootfs the group boots and whose `provision.sh` runs on every boot).
+  the rootfs the group boots; changing it gives the group a fresh `sys.img` (or, on rollback, the archived one), so the
+  workspace's `/workspace/.koto/provision.sh` runs again on the next boot).
 - A `config` grant therefore covers only the remaining settings: `model`,
   `effort` and `provider`.
 - The target check still applies. The in-guest ctl plane refuses posture keys

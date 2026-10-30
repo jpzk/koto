@@ -187,6 +187,10 @@ func TestCatalogCorruptRejected(t *testing.T) {
 	if _, err := NewStore(root).Load(); err == nil {
 		t.Fatal("future version accepted")
 	}
+	os.WriteFile(filepath.Join(root, "catalog.json"), []byte(`{"version":1,"names":{"x":"sha256:00"},"images":{"sha256:00":null}}`), 0o644)
+	if _, err := NewStore(root).Load(); err == nil || !strings.Contains(err.Error(), "null entry") {
+		t.Fatalf("null entry accepted: %v", err)
+	}
 }
 
 func TestPrepareSysApplyRollback(t *testing.T) {

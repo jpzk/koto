@@ -180,8 +180,11 @@ marker; a failing or killed run (30 min cap) runs again on the next boot.
 It runs in the background: the agent is reachable while it runs, and
 `/run/koto-provisioning` exists until it finishes
 (`while [ -e /run/koto-provisioning ]; do sleep 2; done`). Switching a group
-from `root=yes` to `root=no` removes koto's sudo grant from `sys.img` on the
-next boot.
+from `root=yes` to `root=no` discards, on the next image boot, every system
+disk written while it had root: `sys.img` and all archived `sys-*.img`. The
+group gets a fresh `sys.img` (provision.sh runs again, as uid 1000), and
+`rollback` then has no archived disk to restore. Whatever a root worker
+changed under `/` (sudoers, setuid files, units) does not carry over.
 
 `rollback` restores the previous digest together with its archived
 `sys.img`.

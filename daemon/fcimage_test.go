@@ -261,3 +261,71 @@ func TestFcImagePlanForDefaultArchivesSys(t *testing.T) {
 		t.Fatalf("archive: %q %v", b, err)
 	}
 }
+
+// qodo round 2: root=yes -> root=no must not keep a sys overlay (or a
+// parked archive a rollback could restore) that a root worker wrote.
+func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
+	fcHarness(t)
+	v := vol("tg")
+	cs := filepath.Join(v, ".cs")
+	_ = os.MkdirAll(cs, 0o755)
+	setRoot := func(r string) {
+		if err := os.WriteFile(filepath.Join(cs, "config.json"), []byte(`{"root":"`+r+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dgA := "sha256:" + strings.Repeat("a", 64)
+	dgB := "sha256:" + strings.Repeat("b", 64)
+	write := func(name, s string) {
+		if err := os.WriteFile(filepath.Join(v, name), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+
+	// root=no with no history: nothing touched
+	setRoot("no")
+	write("sys.img", "clean")
+	write("sys.digest", dgA+"\n")
+	if err := fcImageSysPosture("tg", logf); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "clean" {
+		t.Fatal("clean root=no sys.img touched")
+	}
+	// root=yes era: marked, disks kept while root=yes
+	setRoot("yes")
+	if err := fcImageSysPosture("tg", logf); err != nil {
+		t.Fatal(err)
+	}
+	write("sys.img", "root-written")
+	write(filepath.Base(ociimage.SysArchive(v, dgB)), "root-archive")
+	if err := fcImageSysPosture("tg", logf); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "root-written" {
+		t.Fatal("root=yes boot dropped its own sys.img")
+	}
+	// downgrade: every root-era disk goes, and only once
+	setRoot("no")
+	if err := fcImageSysPosture("tg", logf); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"sys.img", "sys.digest", filepath.Base(ociimage.SysArchive(v, dgB)), "sys.root"} {
+		if _, err := os.Stat(filepath.Join(v, p)); err == nil {
+			t.Errorf("%s kept after root=yes -> root=no", p)
+		}
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "discarded 2 system disk") {
+		t.Fatalf("logs: %q", logs)
+	}
+	write("sys.img", "fresh")
+	write("sys.digest", dgA+"\n")
+	if err := fcImageSysPosture("tg", logf); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "fresh" {
+		t.Fatal("second root=no boot discarded again")
+	}
+}

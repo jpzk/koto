@@ -235,3 +235,54 @@ func GroupDigests(c *Catalog, dir string, current, prev string) []string {
 	}
 	return out
 }
+
+func sysRootPath(dir string) string { return filepath.Join(dir, "sys.root") }
+
+// MarkSysRoot records that the group's image-mode system disks are written
+// by a guest that has root (root=yes). The sys overlay persists across
+// boots and is parked/restored across image changes, so anything a root
+// worker planted there (sudoers rules, setuid binaries, edited units) would
+// survive a later downgrade to root=no. The marker lets DropRootSys catch
+// that downgrade. Idempotent.
+func MarkSysRoot(dir string) error {
+	if _, err := os.Stat(sysRootPath(dir)); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return writeAtomic(sysRootPath(dir), "yes\n")
+}
+
+// DropRootSys is called on an image-mode boot with root=no. If MarkSysRoot
+// recorded a root=yes era, every system disk of that era is discarded:
+// sys.img, sys.digest and all parked sys-*.img archives (a rollback must
+// not bring a root-written overlay back either). The marker goes last, so
+// a crash midway repeats the purge. Returns how many disks were removed;
+// 0 with no marker. Fail closed: any removal error is returned and the
+// caller refuses the boot.
+func DropRootSys(dir string) (int, error) {
+	if _, err := os.Stat(sysRootPath(dir)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	n := 0
+	paths := []string{sysPath(dir)}
+	for _, h := range SysArchives(dir) {
+		paths = append(paths, filepath.Join(dir, "sys-"+h+".img"))
+	}
+	for _, p := range paths {
+		err := os.Remove(p)
+		if err == nil {
+			n++
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return n, err
+		}
+	}
+	if err := os.Remove(sysDigestPath(dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return n, err
+	}
+	return n, os.Remove(sysRootPath(dir))
+}

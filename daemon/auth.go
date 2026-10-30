@@ -248,7 +248,8 @@ func aclLogGroup(target string) string {
 // carrying both the delegable settings (model, effort, provider) and the ones
 // that decide what the group's VM may reach and hold, so a single `config`
 // grant authorized both. image= is posture too: it picks the rootfs the
-// group boots, and that image's provision.sh runs on every boot. The target
+// group boots, and changing it gives a fresh sys.img (rollback: the archived one), so the workspace's
+// /workspace/.koto/provision.sh runs again on the next boot. The target
 // check is unaffected — the request is still group-scoped, and admin passes
 // everything.
 func postureVerb(verb string, req any) string {

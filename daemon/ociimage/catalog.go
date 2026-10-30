@@ -235,6 +235,13 @@ func (s *Store) Load() (*Catalog, error) {
 	if c.Images == nil {
 		c.Images = map[string]*Entry{}
 	}
+	// json accepts "<digest>": null; every caller dereferences entries, so a
+	// nil one is corruption, refused here rather than a nil deref at spawn.
+	for d, e := range c.Images {
+		if e == nil {
+			return nil, fmt.Errorf("%s: image %s has a null entry", s.catalogPath(), d)
+		}
+	}
 	for n, d := range c.Names {
 		if _, ok := c.Images[d]; !ok {
 			return nil, fmt.Errorf("%s: name %q points at unknown digest %s", s.catalogPath(), n, d)
