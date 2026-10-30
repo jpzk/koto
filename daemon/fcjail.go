@@ -347,7 +347,15 @@ func fcjailMain() {
 		}
 		if b.RO {
 			// A read-only flag is only honored by a second, remount call.
-			if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
+			// Inside our user namespace the source mount's nosuid/nodev/
+			// noexec/atime flags are LOCKED: a remount that drops them is
+			// EPERM. A state dir on a nosuid,nodev mount (the image cache
+			// under it) hit exactly that, so keep whatever the bind inherited.
+			var st syscall.Statfs_t
+			if err := syscall.Statfs(dst, &st); err != nil {
+				die(fmt.Errorf("statfs %s: %w", dst, err))
+			}
+			if err := syscall.Mount("", dst, "", fcRemountROFlags(int64(st.Flags)), ""); err != nil {
 				die(fmt.Errorf("remount-ro %s: %w", dst, err))
 			}
 		}
@@ -388,4 +396,34 @@ func fcjailMain() {
 	if err := syscall.Exec(spec.Argv[0], spec.Argv, os.Environ()); err != nil {
 		die(fmt.Errorf("exec %v: %w", spec.Argv, err))
 	}
+}
+
+// statfs(2) f_flags bits (ST_*); syscall exports the MS_* side only.
+const (
+	stNoSuid     = 0x2
+	stNoDev      = 0x4
+	stNoExec     = 0x8
+	stNoAtime    = 0x400
+	stNoDirAtime = 0x800
+	stRelAtime   = 0x1000
+)
+
+// fcRemountROFlags is the read-only bind remount that keeps the mount flags
+// the bind inherited (statfs f_flags), which the kernel requires inside a
+// user namespace for the locked ones (MNT_LOCK_NOSUID/NODEV/NOEXEC/ATIME).
+// ST_RELATIME and MS_RELATIME differ in value, hence the explicit mapping.
+func fcRemountROFlags(stFlags int64) uintptr {
+	f := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY)
+	for _, m := range []struct {
+		st int64
+		ms uintptr
+	}{
+		{stNoSuid, syscall.MS_NOSUID}, {stNoDev, syscall.MS_NODEV}, {stNoExec, syscall.MS_NOEXEC},
+		{stNoAtime, syscall.MS_NOATIME}, {stNoDirAtime, syscall.MS_NODIRATIME}, {stRelAtime, syscall.MS_RELATIME},
+	} {
+		if stFlags&m.st != 0 {
+			f |= m.ms
+		}
+	}
+	return f
 }
