@@ -237,9 +237,17 @@ func (s *Store) Load() (*Catalog, error) {
 	}
 	// json accepts "<digest>": null; every caller dereferences entries, so a
 	// nil one is corruption, refused here rather than a nil deref at spawn.
+	// Layer digests/diff_ids are sliced (LayerLabel, LayerUUID, the boot
+	// args) and joined into cache paths, so a malformed one is refused here
+	// too: a corrupt catalog fails the load instead of panicking the daemon.
 	for d, e := range c.Images {
 		if e == nil {
 			return nil, fmt.Errorf("%s: image %s has a null entry", s.catalogPath(), d)
+		}
+		for i, l := range e.Layers {
+			if !ValidDigest(l.DiffID) || !ValidDigest(l.Digest) {
+				return nil, fmt.Errorf("%s: image %s layer %d has a malformed digest or diff_id", s.catalogPath(), d, i)
+			}
 		}
 	}
 	for n, d := range c.Names {

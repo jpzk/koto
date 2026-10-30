@@ -191,6 +191,23 @@ func TestCatalogCorruptRejected(t *testing.T) {
 	if _, err := NewStore(root).Load(); err == nil || !strings.Contains(err.Error(), "null entry") {
 		t.Fatalf("null entry accepted: %v", err)
 	}
+	// strix: malformed layer digests must fail Load, not panic LayerLabel/
+	// LayerUUID/fcImageBootArgs at spawn.
+	good := `"` + dgOf("ok") + `"`
+	for _, bad := range []string{`""`, `"sha256:"`, `"sha256:abc"`, `"sha256:` + strings.Repeat("G", 64) + `"`} {
+		for _, l := range []string{`{"digest":` + good + `,"diff_id":` + bad + `}`, `{"digest":` + bad + `,"diff_id":` + good + `}`} {
+			doc := `{"version":1,"names":{"x":"sha256:00"},"images":{"sha256:00":{"layers":[` + l + `]}}}`
+			os.WriteFile(filepath.Join(root, "catalog.json"), []byte(doc), 0o644)
+			if _, err := NewStore(root).Load(); err == nil || !strings.Contains(err.Error(), "malformed") {
+				t.Fatalf("layer %s accepted: %v", l, err)
+			}
+		}
+	}
+	doc := `{"version":1,"names":{"x":"sha256:00"},"images":{"sha256:00":{"layers":[{"digest":` + good + `,"diff_id":` + good + `}]}}}`
+	os.WriteFile(filepath.Join(root, "catalog.json"), []byte(doc), 0o644)
+	if _, err := NewStore(root).Load(); err != nil {
+		t.Fatalf("valid layer refused: %v", err)
+	}
 }
 
 func TestPrepareSysApplyRollback(t *testing.T) {
