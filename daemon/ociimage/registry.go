@@ -574,6 +574,16 @@ func (c *Client) Pull(r Ref, cache string) (*Image, error) {
 	if len(cfg.RootFS.DiffIDs) != len(m.Layers) {
 		return nil, fmt.Errorf("image config: %d diff_ids vs %d layers", len(cfg.RootFS.DiffIDs), len(m.Layers))
 	}
+	// Slot guard BEFORE any layer blob is fetched: an image the VM cannot
+	// attach must not cost a multi-GB download first. Repeated diff_ids
+	// collapse to one drive (daemon fcImageDedup), so count distinct ones.
+	distinct := map[string]bool{}
+	for _, d := range cfg.RootFS.DiffIDs {
+		distinct[d] = true
+	}
+	if err := CheckLayerSlots(len(distinct)); err != nil {
+		return nil, err
+	}
 	img := &Image{Ref: r.Pinned(dg), Digest: dg, ManifestDigest: mdg, ConfigDigest: m.Config.Digest, Created: cfg.Created,
 		Arch: cfg.Architecture, Env: cfg.Config.Env}
 	c.logf("image %s created %s (%s old, logged only), %d layers", Short(dg), fmtCreated(cfg.Created),

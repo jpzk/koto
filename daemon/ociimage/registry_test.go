@@ -436,3 +436,36 @@ func TestConcurrentSameBlobPull(t *testing.T) {
 		t.Fatalf("temp files left: %v", left)
 	}
 }
+
+// F14: the slot guard runs after manifest+config and BEFORE any layer blob
+// is requested; repeated diff_ids count once (they collapse to one drive).
+func TestPullRefusesTooManyLayersBeforeBlobs(t *testing.T) {
+	f := newFakeRegistry(t)
+	n := LayerSlots() + 1
+	var layers [][]byte
+	for i := 0; i < n; i++ {
+		layers = append(layers, mkTar(t, []tfile{{name: fmt.Sprintf("f%d", i), body: fmt.Sprint(i)}}))
+	}
+	_, ls := f.addImage("big", time.Now(), layers...)
+	r, _ := ParseRef(f.host() + "/test/img:big")
+	_, err := f.client(nil).Pull(r, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("want slot refusal, got %v", err)
+	}
+	for _, dg := range ls {
+		if h := f.hits["/v2/test/img/blobs/"+dg]; h != 0 {
+			t.Fatalf("layer blob %s fetched %d times before slot refusal", Short(dg), h)
+		}
+	}
+	// LayerSlots() distinct layers + one repeat: fits after dedup.
+	dup := append(append([][]byte(nil), layers[:n-1]...), layers[0])
+	f.addImage("dup", time.Now(), dup...)
+	r2, _ := ParseRef(f.host() + "/test/img:dup")
+	img, err := f.client(nil).Pull(r2, t.TempDir())
+	if err != nil {
+		t.Fatalf("dedup-fitting image refused: %v", err)
+	}
+	if len(img.Layers) != n {
+		t.Fatalf("layers = %d, want %d (dedup is the daemon's job)", len(img.Layers), n)
+	}
+}
