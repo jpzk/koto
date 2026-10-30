@@ -138,6 +138,15 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	cfg := loadGroupConfig(g)
 	name := cfg.str("image")
 	if name == "" || name == ociimage.DefaultName {
+		// Park a previous image's sys.img so that coming back to it later is a
+		// real transition (fresh apply = new sys.img; rollback = restore).
+		act, err := ociimage.ArchiveSys(vol(g))
+		if err != nil {
+			return nil, fmt.Errorf("group %s: archive sys.img: %w", g, err)
+		}
+		if act.Archived {
+			emitLogfG("fc", g, "info", "[%s] image: default rootfs; sys.img %s", g, act)
+		}
 		return nil, nil
 	}
 	dg := cfg.str("image_digest")

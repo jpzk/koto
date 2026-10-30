@@ -135,3 +135,29 @@ func TestCtlGroupAndFlags(t *testing.T) {
 }
 
 func newSpawnFlagsForTest() *flag.FlagSet { return flag.NewFlagSet("t", flag.ContinueOnError) }
+
+// image is a string key: only null and "" clear it. The generic list-key
+// clear ([]) is a type error here, not a silent reset to koto-default that
+// would drop the pin and schedule a sys.img reset.
+func TestConfigSetImageEmptyListRefused(t *testing.T) {
+	fcHarness(t)
+	dg := testCatalogImage(t, "debian", "a")
+	if r := ctlConfigSet(t, `{"cmd":"config_set","group":"tg","image":"debian"}`); r["ok"] != true {
+		t.Fatalf("catalog name refused: %v", r)
+	}
+	for _, val := range []string{`[]`, ` [ ] `, `{}`, `["debian"]`} {
+		r := ctlConfigSet(t, `{"cmd":"config_set","group":"tg","image":`+val+`}`)
+		if r["ok"] == true || !strings.Contains(fmt.Sprint(r["error"]), "must be a string") {
+			t.Fatalf("image=%s: want type refusal, got %v", val, r)
+		}
+		if c := loadGroupConfig("tg"); c.str("image") != "debian" || c.str("image_digest") != dg {
+			t.Fatalf("image=%s: pin changed despite refusal: %v", val, c)
+		}
+	}
+	if r := ctlConfigSet(t, `{"cmd":"config_set","group":"tg","image":null}`); r["ok"] != true {
+		t.Fatalf("null must clear: %v", r)
+	}
+	if c := loadGroupConfig("tg"); c.str("image") != "" || c.str("image_digest") != "" || c.str("image_prev") != dg {
+		t.Fatalf("null clear: %v", c)
+	}
+}

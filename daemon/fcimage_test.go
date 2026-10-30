@@ -234,3 +234,30 @@ func TestFcImagePlanForRefusals(t *testing.T) {
 		}
 	}
 }
+
+// The default-rootfs boot parks an image group's sys.img under its digest, so
+// returning to the same image later is a real transition (greptile: A ->
+// koto-default -> A kept the old sys.img despite image_sys=fresh).
+func TestFcImagePlanForDefaultArchivesSys(t *testing.T) {
+	fcHarness(t)
+	dg := "sha256:" + strings.Repeat("a", 64)
+	_ = os.MkdirAll(vol("tg"), 0o755)
+	if err := os.WriteFile(filepath.Join(vol("tg"), "sys.img"), []byte("A-state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vol("tg"), "sys.digest"), []byte(dg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := fcImagePlanFor("tg"); p != nil || err != nil {
+		t.Fatalf("default boot: %v %v", p, err)
+	}
+	if _, err := os.Stat(filepath.Join(vol("tg"), "sys.img")); err == nil {
+		t.Fatal("sys.img still in place after a default boot")
+	}
+	if ociimage.SysDigest(vol("tg")) != "" {
+		t.Fatal("sys.digest kept")
+	}
+	if b, err := os.ReadFile(ociimage.SysArchive(vol("tg"), dg)); err != nil || string(b) != "A-state" {
+		t.Fatalf("archive: %q %v", b, err)
+	}
+}

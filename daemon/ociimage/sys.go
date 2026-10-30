@@ -124,18 +124,57 @@ func PrepareSys(dir, dg string, mode SysMode, size int64) (SysAction, error) {
 	}
 	_ = os.Remove(sysDigestPath(dir))
 	arch := SysArchive(dir, dg)
-	if _, err := os.Stat(arch); err == nil && mode == SysRestore {
+	_, aerr := os.Stat(arch)
+	restore := aerr == nil && mode == SysRestore
+	// Commit the digest BEFORE sys.img appears. sys.img is absent here, so a
+	// failed digest write leaves the archive where it was, and a crash after
+	// the write but before the rename/mkfs just repeats this path next boot.
+	// The reverse order could leave a sys.img with no digest, which the next
+	// call treats as an unowned leftover and deletes — losing the rollback.
+	if err := writeAtomic(sysDigestPath(dir), dg+"\n"); err != nil {
+		return a, err
+	}
+	if restore {
 		if err := os.Rename(arch, sysPath(dir)); err != nil {
+			_ = os.Remove(sysDigestPath(dir))
 			return a, err
 		}
 		a.Restored = true
-	} else {
-		if err := MakeSys(sysPath(dir), size); err != nil {
-			return a, err
-		}
-		a.Created = true
+		return a, nil
 	}
-	return a, writeAtomic(sysDigestPath(dir), dg+"\n")
+	if err := MakeSys(sysPath(dir), size); err != nil {
+		_ = os.Remove(sysDigestPath(dir))
+		return a, err
+	}
+	a.Created = true
+	return a, nil
+}
+
+// ArchiveSys parks the group's current sys.img under its digest (the same
+// archive PrepareSys would make) and forgets the digest. The default-rootfs
+// boot calls it, so a later return to the same image is a real transition:
+// image_sys=fresh then gets a new sys.img instead of the same-digest keep,
+// and a rollback (image_sys=restore) finds the archive. No sys.img, or one
+// without a valid digest, is left alone. dir missing is not an error.
+func ArchiveSys(dir string) (SysAction, error) {
+	var a SysAction
+	cur := SysDigest(dir)
+	if !ValidDigest(cur) {
+		return a, nil
+	}
+	if _, err := os.Stat(sysPath(dir)); err != nil {
+		_ = os.Remove(sysDigestPath(dir)) // digest without a disk: stale record
+		return a, nil
+	}
+	a.ArchivePath = SysArchive(dir, cur)
+	// sys.img goes first: a crash between the two leaves a stale digest with
+	// no disk, which PrepareSys ignores (it only trusts the digest when
+	// sys.img exists).
+	if err := os.Rename(sysPath(dir), a.ArchivePath); err != nil {
+		return a, err
+	}
+	a.Archived = true
+	return a, os.Remove(sysDigestPath(dir))
 }
 
 // MakeSys creates an empty ext4 sys.img (sparse) owned by root inside.

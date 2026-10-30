@@ -68,7 +68,10 @@ func imagePinFromRaw(raw json.RawMessage) (p imagePin, ok bool, err error) {
 	if len(raw) == 0 {
 		return imagePin{}, false, nil
 	}
-	if isClear(raw) {
+	// Only null and "" clear image=. isClear also accepts [] (the generic
+	// list-key clear), but image is a string: [] is a type error, not a reset
+	// to koto-default.
+	if s := strings.TrimSpace(string(raw)); s == "null" || s == `""` {
 		return imagePin{Name: ociimage.DefaultName}, true, nil
 	}
 	var s string

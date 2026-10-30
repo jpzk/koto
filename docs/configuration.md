@@ -250,6 +250,9 @@ The yes/no keys fail closed: absent, unparsable or any other value is
   `autostart`, `kvm`. On gRPC, a Config request carrying any of them is
   authorized as the synthetic admin-only verb `config_posture` —
   `daemon/auth.go` `postureVerb`, `daemon/acl.go` `adminOnlyVerbs`.
+- `image` is admin-only on gRPC too (same `config_posture` relabel); on the
+  in-guest ctl plane main may still set it, but only to an operator-curated
+  catalog name (see [images.md](images.md)).
 - On the in-guest ctl plane, `config_set` is main-only (`ctl: verb not
   allowed for non-main groups: config_set`) and refuses every posture key
   with `ctl: <key> is an operator-only setting — ask the operator (TUI

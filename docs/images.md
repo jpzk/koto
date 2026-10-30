@@ -54,7 +54,8 @@ Per-group key `image=<catalog name>` (`daemon/config_image.go`):
 - accepted: a catalog name or `koto-default` (empty clears it). Raw
   references (anything with `/`, `:` or `@`) are rejected with a readable
   error; only operator-curated catalog names are accepted, also via
-  in-guest `config_set` from main.
+  in-guest `config_set` from main. On gRPC, setting or clearing `image` is the
+  admin-only `config_posture` verb (`daemon/auth.go` `postureVerb`).
 - at set time the group config records `image_digest` (the pin),
   `image_prev` (for rollback) and whether `sys.img` must be fresh or
   restored.
