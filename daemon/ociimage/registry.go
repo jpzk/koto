@@ -471,6 +471,7 @@ type Image struct {
 	Ref            string    `json:"ref"`             // name@digest (pinned)
 	Digest         string    `json:"digest"`          // what the user pinned (index or manifest)
 	ManifestDigest string    `json:"manifest_digest"` // linux/amd64 manifest
+	ConfigDigest   string    `json:"config_digest"`
 	Created        time.Time `json:"created"`
 	Arch           string    `json:"arch"`
 	Env            []string  `json:"env,omitempty"`
@@ -557,7 +558,7 @@ func (c *Client) Pull(r Ref, cache string) (*Image, error) {
 	if len(cfg.RootFS.DiffIDs) != len(m.Layers) {
 		return nil, fmt.Errorf("image config: %d diff_ids vs %d layers", len(cfg.RootFS.DiffIDs), len(m.Layers))
 	}
-	img := &Image{Ref: r.Pinned(dg), Digest: dg, ManifestDigest: mdg, Created: cfg.Created,
+	img := &Image{Ref: r.Pinned(dg), Digest: dg, ManifestDigest: mdg, ConfigDigest: m.Config.Digest, Created: cfg.Created,
 		Arch: cfg.Architecture, Env: cfg.Config.Env}
 	c.logf("image %s created %s (%s old, logged only), %d layers", Short(dg), fmtCreated(cfg.Created),
 		Age(cfg.Created, c.now()), len(m.Layers))
