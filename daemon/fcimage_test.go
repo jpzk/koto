@@ -269,10 +269,24 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 	v := vol("tg")
 	cs := filepath.Join(v, ".cs")
 	_ = os.MkdirAll(cs, 0o755)
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	root := false
 	setRoot := func(r string) {
 		if err := os.WriteFile(filepath.Join(cs, "config.json"), []byte(`{"root":"`+r+`"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		root = groupRoot("tg")
+	}
+	// boot = what fcImagePlanFor does: posture step, (PrepareSys,) mark
+	boot := func() error {
+		if err := fcImageSysPosture("tg", root, logf); err != nil {
+			return err
+		}
+		if root {
+			return ociimage.MarkSysRoot(v)
+		}
+		return nil
 	}
 	dgA := "sha256:" + strings.Repeat("a", 64)
 	dgB := "sha256:" + strings.Repeat("b", 64)
@@ -281,14 +295,31 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var logs []string
-	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+
+	// qodo r3: a root=yes boot that fails before sys.img is ready (only the
+	// posture step ran, PrepareSys failed) must not mark, so a later root=no
+	// boot keeps the clean archives
+	write(filepath.Base(ociimage.SysArchive(v, dgB)), "clean-archive")
+	setRoot("yes")
+	if err := fcImageSysPosture("tg", root, logf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(v, "sys.root")); err == nil {
+		t.Fatal("posture step marked root before sys.img was ready")
+	}
+	setRoot("no")
+	if err := boot(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(ociimage.SysArchive(v, dgB)); string(b) != "clean-archive" {
+		t.Fatal("failed root=yes boot doomed a clean archive")
+	}
 
 	// root=no with no history: nothing touched
 	setRoot("no")
 	write("sys.img", "clean")
 	write("sys.digest", dgA+"\n")
-	if err := fcImageSysPosture("tg", logf); err != nil {
+	if err := boot(); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "clean" {
@@ -296,12 +327,12 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 	}
 	// root=yes era: marked, disks kept while root=yes
 	setRoot("yes")
-	if err := fcImageSysPosture("tg", logf); err != nil {
+	if err := boot(); err != nil {
 		t.Fatal(err)
 	}
 	write("sys.img", "root-written")
 	write(filepath.Base(ociimage.SysArchive(v, dgB)), "root-archive")
-	if err := fcImageSysPosture("tg", logf); err != nil {
+	if err := boot(); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "root-written" {
@@ -309,7 +340,7 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 	}
 	// downgrade: every root-era disk goes, and only once
 	setRoot("no")
-	if err := fcImageSysPosture("tg", logf); err != nil {
+	if err := boot(); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"sys.img", "sys.digest", filepath.Base(ociimage.SysArchive(v, dgB)), "sys.root"} {
@@ -322,7 +353,7 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 	}
 	write("sys.img", "fresh")
 	write("sys.digest", dgA+"\n")
-	if err := fcImageSysPosture("tg", logf); err != nil {
+	if err := boot(); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "fresh" {

@@ -182,8 +182,11 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	// The sys overlay persists and is root-writable when root=yes; a later
 	// root=no boot must not inherit what that root worker left behind, so
 	// the downgrade discards every system disk of the root era (before
-	// PrepareSys, which then makes a fresh one).
-	if err := fcImageSysPosture(g, logf); err != nil {
+	// PrepareSys, which then makes a fresh one). The root=yes mark is set
+	// only once sys.img is ready (below), so a boot that fails earlier does
+	// not doom older, clean archives to a later purge.
+	root := groupRoot(g)
+	if err := fcImageSysPosture(g, root, logf); err != nil {
 		return nil, err
 	}
 	mode := ociimage.SysFresh
@@ -202,6 +205,11 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	if fi, err := os.Lstat(p.Sys); err != nil || !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("group %s: sys.img is not a regular file — refusing to use it as a VM disk", g)
 	}
+	if root {
+		if err := ociimage.MarkSysRoot(vol(g)); err != nil {
+			return nil, fmt.Errorf("group %s: sys.root: %w", g, err)
+		}
+	}
 	for _, l := range layers {
 		p.Layers = append(p.Layers, ociimage.LayerFile(st.Root, l.DiffID))
 		p.DiffIDs = append(p.DiffIDs, l.DiffID)
@@ -211,14 +219,13 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 }
 
 // fcImageSysPosture ties the persistent sys overlay to the root posture:
-// a root=yes boot marks the group's system disks as root-written, and the
-// first root=no boot after that discards all of them (sys.img and every
-// parked archive), so nothing a root worker planted survives a downgrade.
-func fcImageSysPosture(g string, logf func(string, ...any)) error {
-	if groupRoot(g) {
-		if err := ociimage.MarkSysRoot(vol(g)); err != nil {
-			return fmt.Errorf("group %s: sys.root: %w", g, err)
-		}
+// once a root=yes boot has its sys.img ready, fcImagePlanFor marks the
+// group's system disks as root-written (ociimage.MarkSysRoot); the first
+// root=no boot after that discards all of them (sys.img and every parked
+// archive), so nothing a root worker planted survives a downgrade. With
+// root=yes this step does nothing (in particular, it does not mark).
+func fcImageSysPosture(g string, root bool, logf func(string, ...any)) error {
+	if root {
 		return nil
 	}
 	n, err := ociimage.DropRootSys(vol(g))
