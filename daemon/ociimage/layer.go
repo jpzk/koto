@@ -35,8 +35,8 @@ const (
 )
 
 type node struct {
-	typ  byte // 'd' 'f' 'l' 'c' 'b' 'p' 'h' 'w'
-	hard string
+	typ  byte   // 'd' 'f' 'l' 'c' 'b' 'p' 'h' 'w'
+	hard string // for typ h: the regular file this links to
 }
 
 // LayerLabel / LayerUUID derive the ext4 identity from the diff_id, so the
@@ -204,7 +204,10 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		mtime    time.Time
 	}
 	s.emit("rmdir /lost+found") // a layer must not inject lost+found into the merged root
-	var dirMeta []metaRec       // applied at the end so later children don't matter
+	// dirMeta: last header per directory wins (tar semantics), applied after
+	// every child exists, deepest path first, so nothing created later in
+	// the script touches a directory whose metadata is already final.
+	dirMeta := map[string]metaRec{}
 	xn := 0
 	for {
 		h, err := tr.Next()
@@ -255,6 +258,23 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		if old, ok := s.nodes[p]; ok && p != "/" {
 			// later entry wins (tar semantics); dirs merge
 			if !(old.typ == 'd' && h.Typeflag == tar.TypeDir) {
+				// links_count is fixed up at the end per origin path; replacing
+				// either side of a hardlink pair would leave it wrong. Refuse.
+				if old.typ == 'h' || s.links[p] > 0 {
+					return st, fmt.Errorf("%s: replacing a hardlinked entry in the same layer is unsupported", p)
+				}
+				if old.typ == 'd' {
+					for np := range s.nodes {
+						if strings.HasPrefix(np, p+"/") {
+							return st, fmt.Errorf("%s: replacing a non-empty directory in the same layer is unsupported", p)
+						}
+					}
+					for dp := range dirMeta {
+						if dp == p || strings.HasPrefix(dp, p+"/") {
+							delete(dirMeta, dp)
+						}
+					}
+				}
 				s.cd(dir)
 				qb, err := q(base)
 				if err != nil {
@@ -275,7 +295,7 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 					s.mk(p, 'd', "mkdir %s")
 				}
 			}
-			dirMeta = append(dirMeta, metaRec{p, h.Uid, h.Gid, 0o40000 | mode, h.ModTime})
+			dirMeta[p] = metaRec{p, h.Uid, h.Gid, 0o40000 | mode, h.ModTime}
 			st.Dirs++
 		case tar.TypeReg, tar.TypeRegA:
 			if h.Size < 0 || h.Size > maxLayerBytes {
@@ -329,6 +349,11 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 				return st, err
 			}
 			tn, ok := s.nodes[tgt]
+			if ok && tn.typ == 'h' {
+				// link to a link: point at the original regular file
+				tgt = tn.hard
+				tn, ok = s.nodes[tgt]
+			}
 			if !ok || tn.typ != 'f' {
 				return st, fmt.Errorf("%s: hardlink target %s not a regular file in this layer", p, tgt)
 			}
@@ -337,6 +362,9 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 				return st, err
 			}
 			s.mk(p, 'h', "ln "+strings.ReplaceAll(qt, "%", "%%")+" %s")
+			if n := s.nodes[p]; n != nil {
+				n.hard = tgt
+			}
 			if s.links[tgt] == 0 {
 				s.links[tgt] = 1
 			}
@@ -410,8 +438,25 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		}
 		s.emit("sif %s links_count %d", qp, n)
 	}
-	for i := len(dirMeta) - 1; i >= 0; i-- {
-		m := dirMeta[i]
+	dirs := make([]string, 0, len(dirMeta))
+	for p := range dirMeta {
+		dirs = append(dirs, p)
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		di, dj := strings.Count(dirs[i], "/"), strings.Count(dirs[j], "/")
+		if dirs[i] == "/" {
+			di = 0
+		}
+		if dirs[j] == "/" {
+			dj = 0
+		}
+		if di != dj {
+			return di > dj
+		}
+		return dirs[i] < dirs[j]
+	})
+	for _, dp := range dirs {
+		m := dirMeta[dp]
 		s.meta(m.p, m.uid, m.gid, m.mode, m.mtime)
 	}
 	if s.err == nil {
