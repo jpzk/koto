@@ -85,6 +85,7 @@ func main() {
 	// the reaper's children) needs a sane PATH.
 	_ = os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	if os.Getpid() == 1 {
+		bootImage()
 		earlyInit()
 	}
 	go reaper()
@@ -95,6 +96,7 @@ func main() {
 		select {}
 	}
 	setupCS()
+	provisionOnce()
 	loopbackUp()
 	go proxyBridge()
 	go ctlForward()
@@ -830,6 +832,12 @@ func handleInit(c *vconn, req *pb.InitReq) {
 // shadow the golden rootfs — after a `make rootfs` a previously-upgraded
 // file keeps its old upper copy until the .rootovl tree is reset.
 func enableRoot() error {
+	if imageMode != nil {
+		// The image root is already a writable overlay (sys upper); a second
+		// overlay on the workspace would move installs off the base.
+		_ = os.MkdirAll("/etc/sudoers.d", 0o750)
+		return os.WriteFile("/etc/sudoers.d/node", []byte("#1000 ALL=(ALL) NOPASSWD: ALL\n"), 0o440)
+	}
 	if err := overlayRootDirs(); err != nil {
 		logf("root overlay: %v — sudo grant falls back to tmpfs", err)
 		if merr := unix.Mount("tmpfs", "/etc/sudoers.d", "tmpfs", 0, "mode=755"); merr != nil {
@@ -1000,7 +1008,7 @@ func portBridge(port uint32) {
 
 func entrypointEnviron(env map[string]string) []string {
 	out := []string{
-		"PATH=/sidecar:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"PATH=" + workerPATH,
 		"HOME=" + wsDir,
 		"SHELL=/bin/bash",
 		"ANTHROPIC_API_KEY=proxied",
