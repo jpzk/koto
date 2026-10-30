@@ -26,7 +26,8 @@ type imageEnv struct {
 	groups  func() []string
 	running func(g string) bool
 	restart func(g string) error
-	tools   func() string // basename of the tools image in use ("" = unknown)
+	lock    func(g string) func() // group op lock (groupOpLock); nil = none
+	tools   func() string         // basename of the tools image in use ("" = unknown)
 	now     func() time.Time
 }
 
@@ -44,6 +45,7 @@ func defaultImageEnv(ctx context.Context) imageEnv {
 		},
 		running: fcRunning,
 		restart: func(g string) error { _, err := restartCtx(ctx, g); return err },
+		lock:    groupOpLock,
 		tools: func() string {
 			k, err := ociimage.RootfsTools{Rootfs: fcRootfsPath(), Agent: os.Getenv(fcImageAgentEnv)}.Key(fcImagesDir())
 			if err != nil {
@@ -220,6 +222,9 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	if err := ociimage.CheckLayerSlots(len(fcImageDedup(img.Layers))); err != nil {
 		return fmt.Errorf("image %s: %w", name, err)
 	}
+	if err := ociimage.CheckImpliedParents(env.store.Root, img.Layers); err != nil {
+		return fmt.Errorf("image %s: %w", name, err)
+	}
 	built, reused, err := ociimage.EnsureLayers(env.store.Root, img, cl.Logf)
 	if err != nil {
 		return err
@@ -351,8 +356,16 @@ func imageInspect(env imageEnv, name string, out func(string, ...any)) error {
 
 // imageApplyOne pins g to pin and restarts it if it is running.
 func imageApplyOne(env imageEnv, g string, pin imagePin, out func(string, ...any)) error {
+	// Under the group op lock: fcSpawn holds it from its running check through
+	// fcImagePlanFor, so either the boot already read the new pin, or it
+	// registered its PID before we sample running and gets restarted. Without
+	// it a write landing mid-boot saw running=false and left the old image up.
+	unlock := env.lockGroup(g)
 	before := loadGroupConfig(g).str(cfgImageDigest)
-	if _, err := updateGroupConfig(g, func(cfg map[string]any) { setImageConfig(cfg, pin) }); err != nil {
+	_, err := updateGroupConfig(g, func(cfg map[string]any) { setImageConfig(cfg, pin) })
+	up := env.running(g)
+	unlock()
+	if err != nil {
 		return fmt.Errorf("%s: %w", g, err)
 	}
 	if before == pin.Digest {
@@ -360,7 +373,7 @@ func imageApplyOne(env imageEnv, g string, pin imagePin, out func(string, ...any
 		return nil
 	}
 	out("%s: %s -> %s@%s (fresh sys.img, provision.sh runs once)", g, shortOrDefault(before), pin.Name, ociimage.Short(pin.Digest))
-	return imageRestart(env, g, out)
+	return imageRestart(env, g, up, out)
 }
 
 func shortOrDefault(dg string) string {
@@ -370,8 +383,9 @@ func shortOrDefault(dg string) string {
 	return ociimage.Short(dg)
 }
 
-func imageRestart(env imageEnv, g string, out func(string, ...any)) error {
-	if !env.running(g) {
+// imageRestart restarts g when it was running at the (locked) config write.
+func imageRestart(env imageEnv, g string, up bool, out func(string, ...any)) error {
+	if !up {
 		out("%s: not running; applies at its next start", g)
 		return nil
 	}
@@ -447,6 +461,7 @@ func imageRollback(env imageEnv, g string, out func(string, ...any)) error {
 	}
 	var from, to string
 	var verr error
+	unlock := env.lockGroup(g)
 	_, err = updateGroupConfig(g, func(cfg map[string]any) {
 		cur, _ := cfg[cfgImageDigest].(string)
 		curName, _ := cfg[cfgImage].(string)
@@ -487,6 +502,8 @@ func imageRollback(env imageEnv, g string, out func(string, ...any)) error {
 		cfg[cfgImagePrev] = cur
 		cfg[cfgImagePrevName] = curName
 	})
+	up := env.running(g)
+	unlock()
 	if verr != nil {
 		return verr
 	}
@@ -494,5 +511,12 @@ func imageRollback(env imageEnv, g string, out func(string, ...any)) error {
 		return err
 	}
 	out("%s: rollback %s -> %s (previous sys.img restored if archived)", g, from, to)
-	return imageRestart(env, g, out)
+	return imageRestart(env, g, up, out)
+}
+
+func (env imageEnv) lockGroup(g string) func() {
+	if env.lock == nil {
+		return func() {}
+	}
+	return env.lock(g)
 }

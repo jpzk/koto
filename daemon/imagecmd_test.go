@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,5 +169,35 @@ func TestImageCliParse(t *testing.T) {
 	}
 	if _, err := imageCliParse(nil); err == nil {
 		t.Fatal("empty accepted")
+	}
+}
+
+// F18: apply landing while a boot is between its running check and PID
+// registration (fcSpawn holds groupOpMu across fcImagePlanFor) must not
+// conclude "not running" and leave the VM on the old image. apply takes the
+// group op lock, so it waits for the boot and then sees it up -> restart.
+func TestImageApplyWaitsForInFlightSpawn(t *testing.T) {
+	fcHarness(t)
+	e := newImageTestEnv(t)
+	testCatalogImage(t, "debian", "a")
+	var mu sync.Mutex
+	e.lock = func(string) func() { mu.Lock(); return mu.Unlock }
+
+	mu.Lock() // a spawn of tg is in flight: lock held, PID not yet registered
+	done := make(chan error, 1)
+	go func() { done <- e.run("apply", false, "debian", "tg") }()
+	select {
+	case err := <-done:
+		mu.Unlock()
+		t.Fatalf("apply finished during an in-flight spawn (err=%v, restarts=%v)", err, e.restarted)
+	case <-time.After(100 * time.Millisecond):
+	}
+	e.up["tg"] = true // spawn registers its PID, then releases the lock
+	mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(e.restarted, ",") != "tg" {
+		t.Fatalf("booted-mid-apply group not restarted: %v", e.restarted)
 	}
 }

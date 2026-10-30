@@ -47,22 +47,28 @@ func LayerOK(cache string, l Layer) bool {
 	return err == nil && lbl == LayerLabel(l.DiffID) && uuid == LayerUUID(l.DiffID)
 }
 
-// EnsureLayers converts every layer of img that is not already cached.
-// It refuses images over the slot budget before doing any work. Returns the
-// number of layers built vs reused (shared with other images).
+// EnsureLayers converts every distinct layer of img that is not already
+// cached. A repeated diff_id is one ext4 (the daemon's fcImageDedup attaches
+// it once), so the slot budget and the work both count unique diff_ids. It
+// refuses images over the slot budget before doing any work. Returns the
+// number of distinct layers built vs reused (shared with other images). A
+// reused layer's mtime is refreshed so a concurrent GC's grace period covers
+// it until the catalog entry that keeps it is written.
 func EnsureLayers(cache string, img *Image, logf func(string, ...any)) (built, reused int, err error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	if err := CheckLayerSlots(len(img.Layers)); err != nil {
+	ls := UniqueLayers(img.Layers)
+	if err := CheckLayerSlots(len(ls)); err != nil {
 		return 0, 0, err
 	}
 	convertMu.Lock()
 	defer convertMu.Unlock()
-	for i, l := range img.Layers {
+	for i, l := range ls {
 		if LayerOK(cache, l) {
+			TouchCached(LayerFile(cache, l.DiffID))
 			reused++
-			logf("layer %d/%d %s cached (%s)", i+1, len(img.Layers), Short(l.DiffID), LayerLabel(l.DiffID))
+			logf("layer %d/%d %s cached (%s)", i+1, len(ls), Short(l.DiffID), LayerLabel(l.DiffID))
 			continue
 		}
 		t := time.Now()
@@ -72,7 +78,7 @@ func EnsureLayers(cache string, img *Image, logf func(string, ...any)) (built, r
 		}
 		built++
 		logf("layer %d/%d %s converted in %s: %d entries (%d files, %d dirs, %d symlinks, %d whiteouts, %d opaque)",
-			i+1, len(img.Layers), Short(l.DiffID), time.Since(t).Round(time.Millisecond),
+			i+1, len(ls), Short(l.DiffID), time.Since(t).Round(time.Millisecond),
 			st.Entries, st.Files, st.Dirs, st.Symlinks, st.Whiteouts, st.Opaque)
 	}
 	return built, reused, nil
@@ -183,4 +189,28 @@ func LibcWarning(libc string) string {
 		return "WARNING: no dynamic loader found in the image (static or distroless?): claude will not run"
 	}
 	return ""
+}
+
+// UniqueLayers keeps the first occurrence of every diff_id, in order. Only
+// the set matters here (conversion is per diff_id); the boot order of
+// repeated layers is the daemon's fcImageDedup.
+func UniqueLayers(layers []Layer) []Layer {
+	seen := map[string]bool{}
+	var out []Layer
+	for _, l := range layers {
+		if !seen[l.DiffID] {
+			seen[l.DiffID] = true
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// TouchCached refreshes the mtime of a reused cache file so Store.GC's grace
+// period protects it while an `image add` that reuses it is in flight (the
+// catalog entry that keeps it is written last). Best effort: a failed touch
+// only shrinks the protection back to the file's real age.
+func TouchCached(p string) {
+	now := time.Now()
+	_ = os.Chtimes(p, now, now)
 }

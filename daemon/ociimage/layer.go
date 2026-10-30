@@ -31,7 +31,11 @@ const (
 	maxNameLen    = 255
 	maxLayerBytes = 4 << 30 // decompressed tar stream
 	maxXattrBytes = 64 << 10
-	fakeTime      = "1700000000" // E2FSPROGS_FAKE_TIME: deterministic fs timestamps
+	// maxLayerXattrBytes caps the sum of xattr values in one layer: each value is
+	// staged as a host file during conversion and lands in ext4 blocks, so the
+	// per-value cap alone let a layer stage unbounded data (qodo #5).
+	maxLayerXattrBytes = 16 << 20
+	fakeTime           = "1700000000" // E2FSPROGS_FAKE_TIME: deterministic fs timestamps
 )
 
 type node struct {
@@ -155,7 +159,7 @@ func (s *script) meta(p string, uid, gid int, mode int64, mtime time.Time) {
 
 type LayerStats struct {
 	Entries, Files, Dirs, Symlinks, Hardlinks, Whiteouts, Opaque, Devices, Xattrs int
-	TarBytes, ContentBytes                                                        int64
+	TarBytes, ContentBytes, XattrBytes                                            int64
 }
 
 // BuildLayer converts one cached blob into cache/layers/<diff_id>.ext4.
@@ -398,6 +402,12 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 			if len(v) > maxXattrBytes {
 				return st, fmt.Errorf("%s: xattr too large", p)
 			}
+			if st.XattrBytes+int64(len(v)) > maxLayerXattrBytes {
+				return st, fmt.Errorf("%s: layer xattrs exceed %d bytes in total", p, maxLayerXattrBytes)
+			}
+			// sizing: a value that does not fit in the inode takes its own
+			// block(s); count every one as such (round up to 4K).
+			st.XattrBytes += (int64(len(v)) + 4095) / 4096 * 4096
 			xn++
 			xf := filepath.Join(work, fmt.Sprintf("x%d", xn))
 			if err := os.WriteFile(xf, []byte(v), 0o600); err != nil {
@@ -467,9 +477,9 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		return st, s.err
 	}
 
-	// size: content rounded to 4K + per-inode overhead, +25% + 8M slack
+	// size: content rounded to 4K + xattr blocks + per-inode overhead, +25% + 8M slack
 	ents := int64(len(s.nodes)) + 16
-	blocks := (st.ContentBytes+int64(st.Files)*4096)/4096 + ents/8 + 64
+	blocks := (st.ContentBytes+st.XattrBytes+int64(st.Files)*4096)/4096 + ents/8 + 64
 	sizeMB := (blocks*4096*5/4)>>20 + 8
 	inodes := ents + ents/4 + 64
 	img := out + ".part"

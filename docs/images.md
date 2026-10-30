@@ -107,7 +107,17 @@ Layer conversion (`ociimage.BuildLayer`) runs `mke2fs` plus a generated
 on the host. OCI whiteouts (`.wh.<name>`) become overlayfs whiteouts (char
 device 0/0) and opaque markers (`.wh..wh..opq`) become
 `trusted.overlay.opaque=y`. Bounds: 200 000 entries, 1024-byte paths,
-4 GiB decompressed per layer, 2 GiB per compressed blob, 64 manifest layers.
+4 GiB decompressed per layer, 2 GiB per compressed blob, 64 manifest layers,
+64 KiB per xattr value and 16 MiB of xattr values per layer. A diff_id
+repeated in the layer list is converted and attached once.
+
+A layer that writes `a/b` without a header for `a` gets `a` as a
+root:root 0755 directory (what moby's overlay2 unpack does too). Layers are
+converted once per diff_id and shared, so the lower stack is not known at
+that point. `image add` therefore refuses an image where such an implied
+parent sits on a lower-layer symlink or file (e.g. `bin/tool` over
+`/bin -> usr/bin`), because it would hide the lower entry. Rebuild the image
+so the layer writes through the real path.
 
 ### Registry outbound policy
 

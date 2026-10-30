@@ -238,8 +238,12 @@ func TestBuildLayerWhiteoutsOpaque(t *testing.T) {
 	}
 	after, _ := os.ReadFile(p)
 	fi2, _ := os.Stat(p)
-	if !bytes.Equal(before, after) || !fi2.ModTime().Equal(mt) {
+	if !bytes.Equal(before, after) {
 		t.Fatal("cached layer changed on reuse")
+	}
+	// reuse refreshes the mtime (GC grace covers an in-flight add, F20)
+	if fi2.ModTime().Before(mt) {
+		t.Fatalf("reuse did not refresh mtime: %v -> %v", mt, fi2.ModTime())
 	}
 	// determinism: rebuilding from scratch yields the same image bytes
 	os.Chmod(p, 0o644)

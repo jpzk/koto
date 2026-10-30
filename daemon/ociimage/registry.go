@@ -344,6 +344,7 @@ func (c *Client) fetchDoc(cache string, r Ref, path, accept, dg string, max int6
 		p := BlobPath(cache, dg)
 		if st, err := os.Stat(p); err == nil && st.Size() <= max {
 			if b, err := os.ReadFile(p); err == nil && Sha(b) == dg {
+				TouchCached(p)
 				return b, "", nil
 			}
 		}
@@ -386,6 +387,7 @@ func (c *Client) fetchDoc(cache string, r Ref, path, accept, dg string, max int6
 func (c *Client) blob(cache string, r Ref, dg string, size int64) (string, bool, error) {
 	p := BlobPath(cache, dg)
 	if VerifyFile(p, dg) {
+		TouchCached(p)
 		return p, true, nil
 	}
 	if size <= 0 || size > MaxBlob {
