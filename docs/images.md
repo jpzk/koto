@@ -130,9 +130,22 @@ koto image rollback mygroup
 `apply` archives the group's `sys.img` as `sys-<olddigest12>.img` and boots
 the new base with a fresh `sys.img`, so system changes made on the old base
 are gone while `/workspace` is untouched. If `/workspace/.koto/provision.sh`
-exists it runs once as root on the first boot of each new base (marker
-`/var/lib/koto/provisioned` inside `sys.img`, log
+exists it runs on the first boot of each new base, after the network is up
+(marker `/var/lib/koto/provisioned` inside `sys.img`, log
 `/var/log/koto-provision.log`); put your `apt install` lines there.
+
+The script lives in the worker-writable workspace, so it runs with the
+group's root posture: as root only when the group has `root=yes`, otherwise
+as the worker (uid/gid 1000, `HOME=/workspace`). The log's first line and the
+agent console say which. With `root=no` a script cannot install system
+packages; set `root=yes` for that. Only a run that exits 0 writes the
+marker; a failing or killed run (30 min cap) runs again on the next boot.
+It runs in the background: the agent is reachable while it runs, and
+`/run/koto-provisioning` exists until it finishes
+(`while [ -e /run/koto-provisioning ]; do sleep 2; done`). Switching a group
+from `root=yes` to `root=no` removes koto's sudo grant from `sys.img` on the
+next boot.
+
 `rollback` restores the previous digest together with its archived
 `sys.img`.
 

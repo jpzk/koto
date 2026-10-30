@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -52,6 +53,8 @@ const (
 	provisionScript = "/workspace/.koto/provision.sh"
 	provisionLog    = "/var/log/koto-provision.log"
 	provisionMax    = 30 * time.Minute
+	// provisionRunning exists (tmpfs /run) while provision.sh runs.
+	provisionRunning = "/run/koto-provisioning"
 )
 
 // imageMode is set once imageRoot has pivoted; read-only afterwards.
@@ -449,11 +452,19 @@ func appendLine(path, line string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
-// provisionOnce runs /workspace/.koto/provision.sh as root the first time a
-// base boots (marker absent in the sys upper). Runs in the background so a
-// slow script never holds the agent's RPC listener back; output goes to the
-// sys upper (root-owned), not to the worker-writable workspace.
-func provisionOnce() {
+// provisionOnce runs /workspace/.koto/provision.sh the first time a base
+// boots (marker absent in the sys upper). It is started from handleInit, after
+// the network is up and the root posture is applied, so a script that needs
+// apt/dnf has a route. The script is worker-writable, so it runs with the
+// group's posture: as root only when the group has root=yes, as the worker
+// (uid/gid 1000) otherwise — root=no must not be bypassable by planting a
+// script. Runs in the background so a slow script never holds the agent's RPC
+// listener back; /run/koto-provisioning exists while it runs so work that
+// depends on it can wait. Output goes to the sys upper (root-owned), not to
+// the worker-writable workspace. Only a run that exits 0 (or a base without a
+// script) writes the marker; a failed, refused or killed run retries on the
+// next boot.
+func provisionOnce(root bool) {
 	if imageMode == nil {
 		return
 	}
@@ -467,44 +478,82 @@ func provisionOnce() {
 	}
 	if err != nil || !fi.Mode().IsRegular() {
 		logf("provision: %s is not a regular file (%v), not running it", provisionScript, err)
-		writeMarker("refused")
 		return
 	}
+	_ = os.WriteFile(provisionRunning, nil, 0o644)
 	go func() {
+		defer os.Remove(provisionRunning)
 		t0 := time.Now()
 		_ = os.MkdirAll(filepath.Dir(provisionLog), 0o755)
-		lf, err := os.OpenFile(provisionLog, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|unix.O_NOFOLLOW, 0o600)
+		lf, err := os.OpenFile(provisionLog, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|unix.O_NOFOLLOW, 0o644)
 		if err != nil {
 			logf("provision: log: %v", err)
 			return
 		}
 		defer lf.Close()
-		cmd := exec.Command("/bin/sh", provisionScript)
-		cmd.Dir = "/root"
-		_ = os.MkdirAll("/root", 0o700)
-		cmd.Env = []string{"PATH=" + toolsDir + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-			"HOME=/root", "USER=root", "LANG=C.UTF-8", "KOTO_IMAGE=" + imageMode.Name, "KOTO_IMAGE_DIGEST=" + imageMode.Digest}
+		_ = lf.Chmod(0o644) // root-owned; readable so a root=no worker sees its output
+		cmd := provisionCmd(root)
+		if cmd.Dir == "/root" {
+			_ = os.MkdirAll("/root", 0o700)
+		}
 		cmd.Stdout, cmd.Stderr = lf, lf
+		who := provisionWho(cmd)
+		fmt.Fprintf(lf, "# koto: running %s as %s\n", provisionScript, who)
 		pid, ch, err := startTracked(cmd)
 		if err != nil {
-			logf("provision: start: %v", err)
-			writeMarker("start-failed")
+			logf("provision: start as %s: %v", who, err)
 			return
 		}
-		logf("provision: running %s (pid %d)", provisionScript, pid)
+		logf("provision: running %s as %s (pid %d)", provisionScript, who, pid)
 		var rc int
 		select {
 		case ws := <-ch:
 			rc = ws.ExitStatus()
 		case <-time.After(provisionMax):
+			_ = unix.Kill(-pid, unix.SIGKILL)
 			_ = unix.Kill(pid, unix.SIGKILL)
-			ws := <-ch
-			rc = ws.ExitStatus()
+			<-ch
+			rc = -1
 			logf("provision: killed after %s", provisionMax)
 		}
-		logf("provision: rc=%d in %s", rc, time.Since(t0).Round(time.Millisecond))
-		writeMarker("rc=" + strconv.Itoa(rc))
+		logf("provision: rc=%d as %s in %s", rc, who, time.Since(t0).Round(time.Millisecond))
+		if rc != 0 {
+			logf("provision: not marking %s done; it runs again on the next boot", imageMode.Digest)
+			return
+		}
+		writeMarker("rc=0 user=" + who)
 	}()
+}
+
+// provisionCmd builds the provision.sh command for the group's root posture:
+// root=yes → root (HOME=/root), otherwise the worker uid/gid 1000 with
+// supplementary groups dropped (HOME=/workspace).
+func provisionCmd(root bool) *exec.Cmd {
+	cmd := exec.Command("/bin/sh", provisionScript)
+	path := "PATH=" + toolsDir + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	var name, digest string
+	if imageMode != nil {
+		name, digest = imageMode.Name, imageMode.Digest
+	}
+	img := []string{"LANG=C.UTF-8", "KOTO_IMAGE=" + name, "KOTO_IMAGE_DIGEST=" + digest}
+	if root {
+		cmd.Dir = "/root"
+		cmd.Env = append([]string{path, "HOME=/root", "USER=root", "LOGNAME=root"}, img...)
+		return cmd
+	}
+	cmd.Dir = wsDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID, Groups: []uint32{}},
+	}
+	cmd.Env = append([]string{path, "HOME=" + wsDir, "USER=node", "LOGNAME=node"}, img...)
+	return cmd
+}
+
+func provisionWho(cmd *exec.Cmd) string {
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
+		return fmt.Sprintf("uid %d", cmd.SysProcAttr.Credential.Uid)
+	}
+	return "root"
 }
 
 func writeMarker(state string) {
@@ -547,4 +596,24 @@ func bootImage() {
 		_ = unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
 		select {}
 	}
+}
+
+const (
+	imageSudoers   = "/etc/sudoers.d/node"
+	imageSudoGrant = "#1000 ALL=(ALL) NOPASSWD: ALL\n"
+)
+
+// revokeImageSudo removes koto's root=yes grant from an image root. The sys
+// upper persists, so without this a group moved from root=yes to root=no kept
+// passwordless sudo. Only a file that is exactly koto's grant is removed.
+func revokeImageSudo(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != imageSudoGrant {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		logf("root=no: remove %s: %v", path, err)
+		return
+	}
+	logf("root=no: removed koto sudo grant %s", path)
 }

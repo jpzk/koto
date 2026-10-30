@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,4 +193,65 @@ func TestWorkerPATHDefaultUnchanged(t *testing.T) {
 	if imageMode == nil && workerPATH != "/sidecar:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
 		t.Fatalf("default worker PATH changed: %s", workerPATH)
 	}
+}
+
+// provision.sh is worker-writable, so it must run with the group's posture:
+// root only for root=yes, uid/gid 1000 with no supplementary groups otherwise.
+func TestProvisionCmdHonoursRootPosture(t *testing.T) {
+	w := provisionCmd(false)
+	c := w.SysProcAttr
+	if c == nil || c.Credential == nil {
+		t.Fatal("root=no: provision.sh would run as root")
+	}
+	if c.Credential.Uid != workerUID || c.Credential.Gid != workerGID || len(c.Credential.Groups) != 0 || c.Credential.NoSetGroups {
+		t.Fatalf("root=no credential = %+v, want uid/gid 1000, no groups", c.Credential)
+	}
+	if w.Dir != wsDir || !hasEnv(w.Env, "HOME="+wsDir) || !hasEnv(w.Env, "USER=node") {
+		t.Fatalf("root=no dir/env = %q %q", w.Dir, w.Env)
+	}
+	if got := provisionWho(w); got != "uid 1000" {
+		t.Fatalf("who = %q", got)
+	}
+	r := provisionCmd(true)
+	if r.SysProcAttr != nil && r.SysProcAttr.Credential != nil {
+		t.Fatalf("root=yes: unexpected credential %+v", r.SysProcAttr.Credential)
+	}
+	if r.Dir != "/root" || !hasEnv(r.Env, "HOME=/root") || provisionWho(r) != "root" {
+		t.Fatalf("root=yes dir/env = %q %q", r.Dir, r.Env)
+	}
+	for _, cmd := range []*exec.Cmd{w, r} {
+		if len(cmd.Args) != 2 || cmd.Args[1] != provisionScript {
+			t.Fatalf("args = %q", cmd.Args)
+		}
+	}
+}
+
+func hasEnv(env []string, kv string) bool {
+	for _, e := range env {
+		if e == kv {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRevokeImageSudoOnlyKotoGrant(t *testing.T) {
+	d := t.TempDir()
+	ours := filepath.Join(d, "node")
+	if err := os.WriteFile(ours, []byte(imageSudoGrant), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	revokeImageSudo(ours)
+	if _, err := os.Stat(ours); !os.IsNotExist(err) {
+		t.Fatalf("koto grant not removed: %v", err)
+	}
+	theirs := filepath.Join(d, "other")
+	if err := os.WriteFile(theirs, []byte("node ALL=(ALL) ALL\n"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	revokeImageSudo(theirs)
+	if _, err := os.Stat(theirs); err != nil {
+		t.Fatalf("foreign sudoers file removed: %v", err)
+	}
+	revokeImageSudo(filepath.Join(d, "missing")) // no panic, no error
 }

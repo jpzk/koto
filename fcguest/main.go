@@ -96,7 +96,6 @@ func main() {
 		select {}
 	}
 	setupCS()
-	provisionOnce()
 	loopbackUp()
 	go proxyBridge()
 	go ctlForward()
@@ -739,11 +738,12 @@ func agentServer() {
 // ---- init: ports + entrypoint -----------------------------------------------
 
 var (
-	initMu       sync.Mutex
-	entrypointUp bool
-	netStarted   bool
-	rootEnabled  bool
-	portsUp      = map[int]bool{}
+	initMu           sync.Mutex
+	entrypointUp     bool
+	netStarted       bool
+	rootEnabled      bool
+	provisionStarted bool
+	portsUp          = map[int]bool{}
 )
 
 func handleInit(c *vconn, req *pb.InitReq) {
@@ -776,6 +776,18 @@ func handleInit(c *vconn, req *pb.InitReq) {
 		} else {
 			rootEnabled = true
 		}
+	}
+	// image mode, root=no: the sys upper persists across boots, so a sudo
+	// grant written while the group had root=yes would survive the downgrade.
+	// Remove koto's own grant (exact content only; anything else is the
+	// image's or the operator's).
+	if !req.Root && imageMode != nil {
+		revokeImageSudo(imageSudoers)
+	}
+	// First boot of a base: provision.sh, after net + posture are settled.
+	if !provisionStarted {
+		provisionStarted = true
+		provisionOnce(req.Root)
 	}
 	// config kvm=yes: the host left VMX/SVM in this vCPU's CPUID, so the
 	// built-in KVM registered /dev/kvm — but devtmpfs creates it root-only and
@@ -835,8 +847,8 @@ func enableRoot() error {
 	if imageMode != nil {
 		// The image root is already a writable overlay (sys upper); a second
 		// overlay on the workspace would move installs off the base.
-		_ = os.MkdirAll("/etc/sudoers.d", 0o750)
-		return os.WriteFile("/etc/sudoers.d/node", []byte("#1000 ALL=(ALL) NOPASSWD: ALL\n"), 0o440)
+		_ = os.MkdirAll(filepath.Dir(imageSudoers), 0o750)
+		return os.WriteFile(imageSudoers, []byte(imageSudoGrant), 0o440)
 	}
 	if err := overlayRootDirs(); err != nil {
 		logf("root overlay: %v — sudo grant falls back to tmpfs", err)
