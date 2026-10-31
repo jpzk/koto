@@ -1,0 +1,29 @@
+name: Semgrep
+on:
+  workflow_dispatch: {}
+  pull_request: {}
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - .github/workflows/semgrep.yml
+  schedule:
+    - cron: '12 15 * * *'
+jobs:
+  semgrep:
+    name: semgrep/ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    if: (github.actor != 'dependabot[bot]')
+    container:
+      # 1.177.0, pushed 2026-09-10 (multi-arch OCI index digest)
+      image: docker.io/semgrep/semgrep@sha256:acaac22ffc7b7cc5926de0751b223bce0b2491c33d18422fa72f632c78d81198
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: semgrep ci
