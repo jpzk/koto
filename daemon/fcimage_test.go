@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -214,7 +215,7 @@ func TestFcImagePlanForRefusals(t *testing.T) {
 	}
 	for _, cfg := range []map[string]any{{}, {"image": ""}, {"image": ociimage.DefaultName}} {
 		set(cfg)
-		if p, err := fcImagePlanFor("tg"); p != nil || err != nil {
+		if p, err := fcImagePlanFor("tg", false); p != nil || err != nil {
 			t.Fatalf("%v: want default boot, got %v %v", cfg, p, err)
 		}
 	}
@@ -228,7 +229,7 @@ func TestFcImagePlanForRefusals(t *testing.T) {
 		var m map[string]any
 		_ = json.Unmarshal([]byte(cfg), &m)
 		set(m)
-		p, err := fcImagePlanFor("tg")
+		p, err := fcImagePlanFor("tg", false)
 		if p != nil || err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("%s: want error %q, got %v %v", cfg, want, p, err)
 		}
@@ -248,7 +249,7 @@ func TestFcImagePlanForDefaultArchivesSys(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(vol("tg"), "sys.digest"), []byte(dg+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := fcImagePlanFor("tg"); p != nil || err != nil {
+	if p, err := fcImagePlanFor("tg", false); p != nil || err != nil {
 		t.Fatalf("default boot: %v %v", p, err)
 	}
 	if _, err := os.Stat(filepath.Join(vol("tg"), "sys.img")); err == nil {
@@ -358,5 +359,82 @@ func TestFcImageSysPostureDowngradeDiscards(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(v, "sys.img")); string(b) != "fresh" {
 		t.Fatal("second root=no boot discarded again")
+	}
+}
+
+// fakeExt4 writes a file whose superblock carries label/uuid (all ReadSuper
+// looks at), read-only like the real cached layer and tools images.
+func fakeExt4(t *testing.T, p, label, uuid string) {
+	t.Helper()
+	b := make([]byte, 2048)
+	b[1024+0x38], b[1024+0x39] = 0x53, 0xEF
+	if uuid != "" {
+		u, err := hex.DecodeString(strings.ReplaceAll(uuid, "-", ""))
+		if err != nil || len(u) != 16 {
+			t.Fatalf("uuid %q", uuid)
+		}
+		copy(b[1024+0x68:], u)
+	}
+	copy(b[1024+0x78:1024+0x88], label)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	_ = os.Remove(p)
+	if err := os.WriteFile(p, b, 0o444); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// F31 (greptile r5): the sys.root mark follows the root posture fcSpawn
+// snapshotted for this boot (the value the guest's InitReq.Root gets), not a
+// second config read that a concurrent `config root=` could have changed.
+func TestFcImagePlanForUsesBootRoot(t *testing.T) {
+	fcHarness(t)
+	t.Setenv(fcImageAgentEnv, "")
+	dg := testCatalogImage(t, "tools", "r5root")
+	st := fcImageStore()
+	diff := ociimage.Sha([]byte("diff-r5root"))
+	fakeExt4(t, ociimage.LayerFile(st.Root, diff), ociimage.LayerLabel(diff), ociimage.LayerUUID(diff))
+	_ = os.MkdirAll(fcAssetsDir(), 0o755)
+	if err := os.WriteFile(fcRootfsPath(), []byte("rootfs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key, err := ociimage.RootfsTools{Rootfs: fcRootfsPath()}.Key(st.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeExt4(t, ociimage.ToolsPath(st.Root, key), ociimage.ToolsLabel, "")
+	v := vol("tg")
+	_ = os.MkdirAll(filepath.Join(v, ".cs"), 0o755)
+	write := func(name, s string) {
+		if err := os.WriteFile(filepath.Join(v, name), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marked := func() bool { _, err := os.Stat(filepath.Join(v, "sys.root")); return err == nil }
+	setCfg := func(root string) {
+		b, _ := json.Marshal(map[string]any{"image": "tools", "image_digest": dg, "root": root})
+		if err := os.WriteFile(groupConfigPath("tg"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("sys.img", "sys")
+	write("sys.digest", dg+"\n")
+
+	// config flipped to root=no after fcSpawn read root=yes: still marked
+	setCfg("no")
+	p, err := fcImagePlanFor("tg", true)
+	if err != nil || p == nil {
+		t.Fatalf("plan: %v %v", p, err)
+	}
+	if !marked() {
+		t.Fatal("root=yes boot (config since flipped to no) left sys disks unmarked")
+	}
+	// config flipped to root=yes after fcSpawn read root=no: not marked
+	_ = os.Remove(filepath.Join(v, "sys.root"))
+	setCfg("yes")
+	if p, err := fcImagePlanFor("tg", false); err != nil || p == nil {
+		t.Fatalf("plan: %v %v", p, err)
+	}
+	if marked() {
+		t.Fatal("root=no boot marked from a later config read")
 	}
 }

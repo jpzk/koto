@@ -133,8 +133,9 @@ func fcImageJailBinds(p *fcImagePlan) []fcBind {
 // fcImagePlanFor resolves group g's image boot. nil, nil = default rootfs
 // (no image= or the built-in koto-default). Errors are readable and refuse
 // the boot: a group pinned to an image the host cannot produce must not
-// silently fall back to a different root.
-func fcImagePlanFor(g string) (*fcImagePlan, error) {
+// silently fall back to a different root. root is the boot's root posture,
+// snapshotted by fcSpawn (see the sys.root marking below).
+func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 	cfg := loadGroupConfig(g)
 	name := cfg.str("image")
 	if name == "" || name == ociimage.DefaultName {
@@ -184,8 +185,10 @@ func fcImagePlanFor(g string) (*fcImagePlan, error) {
 	// the downgrade discards every system disk of the root era (before
 	// PrepareSys, which then makes a fresh one). The root=yes mark is set
 	// only once sys.img is ready (below), so a boot that fails earlier does
-	// not doom older, clean archives to a later purge.
-	root := groupRoot(g)
+	// not doom older, clean archives to a later purge. root is the value
+	// fcSpawn read ONCE for this boot and also hands the guest (InitReq.Root):
+	// a second read could see a concurrent config change, booting a root guest
+	// on a disk that was never marked (greptile r5).
 	if err := fcImageSysPosture(g, root, logf); err != nil {
 		return nil, err
 	}

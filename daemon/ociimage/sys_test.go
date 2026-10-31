@@ -1,8 +1,10 @@
 package ociimage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +86,39 @@ func TestArchiveSysOnDefaultBoot(t *testing.T) {
 	}
 	if lbl, _, _ := ReadSuper(sysPath(dir)); lbl != SysLabel {
 		t.Fatalf("label %q", lbl)
+	}
+}
+
+// F33 (codeant r5): a listing failure must not read as "no archives" — that
+// would clear sys.root while root-written archives stay for a rollback.
+func TestDropRootSysListErrorKeepsMarker(t *testing.T) {
+	dir := t.TempDir()
+	dg := "sha256:" + strings.Repeat("c", 64)
+	for _, f := range []string{"sys.img", filepath.Base(SysArchive(dir, dg))} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("root-written"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := MarkSysRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("EIO") }
+	_, err := DropRootSys(dir)
+	readDir = os.ReadDir
+	if err == nil {
+		t.Fatal("listing error ignored")
+	}
+	if _, err := os.Stat(sysRootPath(dir)); err != nil {
+		t.Fatal("marker cleared despite the listing error")
+	}
+	if _, err := os.Stat(SysArchive(dir, dg)); err != nil {
+		t.Fatal("archive gone")
+	}
+	// listing works again: the purge completes
+	if n, err := DropRootSys(dir); err != nil || n != 2 {
+		t.Fatalf("retry: n=%d err=%v", n, err)
+	}
+	if _, err := os.Stat(sysRootPath(dir)); err == nil {
+		t.Fatal("marker kept after a full purge")
 	}
 }

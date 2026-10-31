@@ -95,7 +95,7 @@ func TestConfigSetImageRejectsNonCatalog(t *testing.T) {
 	if c.str("image") != "" || c.str("image_digest") != "" || c.str("image_prev") != cur {
 		t.Fatalf("clear: %v", c)
 	}
-	if p, err := fcImagePlanFor("tg"); p != nil || err != nil {
+	if p, err := fcImagePlanFor("tg", false); p != nil || err != nil {
 		t.Fatalf("cleared group must boot the default rootfs: %v %v", p, err)
 	}
 	// The effective config always names the image.

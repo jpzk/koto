@@ -220,13 +220,18 @@ func TestParseRef(t *testing.T) {
 		{"ghcr.io/o/r:v1.2", "ghcr.io", "o/r", "v1.2", ""},
 		{"127.0.0.1:5000/test/img:x", "127.0.0.1:5000", "test/img", "x", ""},
 		{"localhost/a@" + dg, "localhost", "a", "", dg},
+		// F34 (codeant r5): "__" and "-+" are legal OCI component separators
+		{"ghcr.io/o/foo__bar:v1", "ghcr.io", "o/foo__bar", "v1", ""},
+		{"ghcr.io/o/foo--bar", "ghcr.io", "o/foo--bar", "latest", ""},
+		{"ghcr.io/a-b_c.d/e---f", "ghcr.io", "a-b_c.d/e---f", "latest", ""},
 	} {
 		r, err := ParseRef(c.in)
 		if err != nil || r.Host != c.host || r.Repo != c.repo || r.Tag != c.tag || r.Digest != c.dg {
 			t.Errorf("ParseRef(%q) = %+v, %v", c.in, r, err)
 		}
 	}
-	for _, bad := range []string{"", "debian:trixie@" + dg, "debian@sha256:abc", "Debian", "a b", "x/../y", "debian:-bad"} {
+	for _, bad := range []string{"", "debian:trixie@" + dg, "debian@sha256:abc", "Debian", "a b", "x/../y", "debian:-bad",
+		"ghcr.io/o/a___b", "ghcr.io/o/a.._b", "ghcr.io/o/_a", "ghcr.io/o/a_", "ghcr.io/o//a", "ghcr.io/o/a-", "ghcr.io/o/a._b"} {
 		if _, err := ParseRef(bad); err == nil {
 			t.Errorf("ParseRef(%q) accepted", bad)
 		}

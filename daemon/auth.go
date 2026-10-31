@@ -251,8 +251,14 @@ func aclLogGroup(target string) string {
 // group boots, and changing it gives a fresh sys.img (rollback: the archived one), so the workspace's
 // /workspace/.koto/provision.sh runs again on the next boot. The target
 // check is unaffected — the request is still group-scoped, and admin passes
-// everything.
+// everything. A Spawn that carries --image writes the same image= pin
+// (grpc_server.go Spawn -> setImageConfig), so it takes the same label:
+// otherwise a role holding only `spawn` on a group could re-spawn it with a
+// different image and reset its sys.img.
 func postureVerb(verb string, req any) string {
+	if sr, ok := req.(*pb.SpawnReq); ok && verb == "spawn" && sr.Image != "" {
+		return "config_posture"
+	}
 	cr, ok := req.(*pb.ConfigReq)
 	if verb != "config" || !ok {
 		return verb

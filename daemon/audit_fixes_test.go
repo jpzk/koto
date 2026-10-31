@@ -808,6 +808,32 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 	}
 }
 
+// F30 (coderabbit r5): Spawn{image} writes the same image= pin as Config, so
+// a role holding only `spawn` must not get it; a plain spawn stays `spawn`.
+func TestSpawnImageIsPosture(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		req  *pb.SpawnReq
+		want string
+	}{
+		{"plain", &pb.SpawnReq{Group: "g"}, "spawn"},
+		{"model", &pb.SpawnReq{Group: "g", Model: "claude-sonnet-5"}, "spawn"},
+		{"image", &pb.SpawnReq{Group: "g", Image: "tools"}, "config_posture"},
+	} {
+		if got := postureVerb("spawn", c.req); got != c.want {
+			t.Errorf("%s: verb %q, want %q", c.name, got, c.want)
+		}
+	}
+	acl := aclTable{"spawner": {"spawn": targetSet{any: true}}}
+	v := postureVerb("spawn", &pb.SpawnReq{Group: "g", Image: "tools"})
+	if rolesAllowed(acl, []string{"spawner"}, v, "g", true) {
+		t.Fatal("spawn grant set image=")
+	}
+	if !rolesAllowed(acl, []string{defaultRole}, v, "g", true) {
+		t.Fatal("admin denied spawn --image")
+	}
+}
+
 // 2026-09-11 M4: AttachShell's session is a raw tmux selector. Pin it to the
 // namespace the daemon mints, so it can't create unmanaged sessions or forge
 // a daemon log record with a newline.

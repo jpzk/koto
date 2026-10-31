@@ -785,7 +785,10 @@ func handleInit(c *vconn, req *pb.InitReq) {
 		revokeImageSudo(imageSudoers)
 	}
 	// First boot of a base: provision.sh, after net + posture are settled.
-	if !provisionStarted {
+	// An l3 request whose netUp failed waits for a later InitReq that brings
+	// the route up (coderabbit r5): a route-less run would fail its installs
+	// and, with provisionStarted already set, never be retried this boot.
+	if shouldProvision(req.Net, netStarted, provisionStarted) {
 		provisionStarted = true
 		provisionOnce(req.Root)
 	}
@@ -1614,4 +1617,10 @@ func shutdown() {
 	// fcStop's graceful window work instead of always hitting the SIGKILL
 	// fallback, which would risk a dirty workspace ext4).
 	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
+}
+
+// shouldProvision: provision.sh starts once per boot, and for an l3 group
+// only once the network is actually up.
+func shouldProvision(net string, netUp, started bool) bool {
+	return !started && (net != "l3" || netUp)
 }

@@ -257,5 +257,6 @@ The yes/no keys fail closed: absent, unparsable or any other value is
   allowed for non-main groups: config_set`) and refuses every posture key
   with `ctl: <key> is an operator-only setting — ask the operator (TUI
   /config, or koto ctl config)` — `daemon/ctl.go` `configPostureKey`.
-  Main can therefore only set `model`, `effort`, `provider` there.
+  Main can therefore only set `model`, `effort`, `provider` and `image`
+  (catalog names only) there.
 - See [acl-and-auth.md](acl-and-auth.md) for roles.

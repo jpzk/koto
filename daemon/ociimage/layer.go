@@ -38,6 +38,11 @@ const (
 	fakeTime           = "1700000000" // E2FSPROGS_FAKE_TIME: deterministic fs timestamps
 )
 
+// maxLayerXattrs caps xattr ENTRIES per layer: each one, empty or not, is a
+// staged host file plus a debugfs command (codeant r5). One per tar entry on
+// average (a label on every file) still fits. A var so tests can lower it.
+var maxLayerXattrs = maxEntries
+
 type node struct {
 	typ  byte   // 'd' 'f' 'l' 'c' 'b' 'p' 'h' 'w'
 	hard string // for typ h: the regular file this links to
@@ -160,6 +165,7 @@ func (s *script) meta(p string, uid, gid int, mode int64, mtime time.Time) {
 type LayerStats struct {
 	Entries, Files, Dirs, Symlinks, Hardlinks, Whiteouts, Opaque, Devices, Xattrs int
 	TarBytes, ContentBytes, XattrBytes                                            int64
+	XattrValueBytes                                                               int64 // actual xattr value bytes (XattrBytes is the 4K-rounded disk estimate)
 }
 
 // BuildLayer converts one cached blob into cache/layers/<diff_id>.ext4.
@@ -402,9 +408,17 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 			if len(v) > maxXattrBytes {
 				return st, fmt.Errorf("%s: xattr too large", p)
 			}
-			if st.XattrBytes+int64(len(v)) > maxLayerXattrBytes {
+			// The caps count what is staged: actual value bytes (greptile r5:
+			// the 4K disk estimate made 4097 tiny labels hit a 16 MiB cap) and
+			// entries, since an empty value still stages a host file and a
+			// debugfs command (codeant r5).
+			if st.XattrValueBytes+int64(len(v)) > maxLayerXattrBytes {
 				return st, fmt.Errorf("%s: layer xattrs exceed %d bytes in total", p, maxLayerXattrBytes)
 			}
+			if st.Xattrs >= maxLayerXattrs {
+				return st, fmt.Errorf("%s: layer has more than %d xattrs", p, maxLayerXattrs)
+			}
+			st.XattrValueBytes += int64(len(v))
 			// sizing: a value that does not fit in the inode takes its own
 			// block(s); count every one as such (round up to 4K).
 			st.XattrBytes += (int64(len(v)) + 4095) / 4096 * 4096
@@ -485,6 +499,15 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 	img := out + ".part"
 	_ = os.MkdirAll(filepath.Dir(out), 0o755)
 	_ = os.Remove(img)
+	// Every failure below removes the (up to GiB-sized, sparse) .part; only
+	// the final rename keeps it (codeant r5: mke2fs/debugfs/truncate errors
+	// left it in the cache).
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(img)
+		}
+	}()
 	if err := os.WriteFile(img, nil, 0o644); err != nil {
 		return st, err
 	}
@@ -529,7 +552,11 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 	if err := os.Chmod(img, 0o444); err != nil {
 		return st, err
 	}
-	return st, os.Rename(img, out)
+	if err := os.Rename(img, out); err != nil {
+		return st, err
+	}
+	renamed = true
+	return st, nil
 }
 
 type countReader struct {

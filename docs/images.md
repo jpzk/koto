@@ -73,6 +73,11 @@ Drives (`daemon/fcimage.go`, `ociimage.FixedDevices`):
   `apt install`s and `/etc` edits live here).
 - `vdd..` one read-only ext4 drive per OCI layer, bottom to top.
 
+Every drive carries the group's disk rate limiter, as the default boot's
+rootfs and workspace drives do: Firecracker buckets are per drive (there is
+no shared bucket), so the aggregate bound is the per-drive limit times the
+number of drives (3 + layers, at most the layer-slot cap).
+
 The guest init (`fcguest/image.go`) stacks
 `overlay lowerdir=Ln:..:L1,upperdir=sys`, verifies every layer drive's
 ext4 label and UUID against the `koto.layers=` kernel command line (boot
@@ -108,7 +113,8 @@ on the host. OCI whiteouts (`.wh.<name>`) become overlayfs whiteouts (char
 device 0/0) and opaque markers (`.wh..wh..opq`) become
 `trusted.overlay.opaque=y`. Bounds: 200 000 entries, 1024-byte paths,
 4 GiB decompressed per layer, 2 GiB per compressed blob, 64 manifest layers,
-64 KiB per xattr value and 16 MiB of xattr values per layer. A diff_id
+64 KiB per xattr value, 16 MiB of xattr values (actual value bytes) and
+200 000 xattrs per layer. A diff_id
 repeated in the layer list is converted and attached once.
 
 A layer that writes `a/b` without a header for `a` gets `a` as a

@@ -106,7 +106,7 @@ func TestImageApplyRollbackRm(t *testing.T) {
 	if c.str(cfgImage) != "" || c.str(cfgImageDigest) != "" || c.str(cfgImagePrev) != dg2 {
 		t.Fatalf("rollback to default: %v", c)
 	}
-	if p, err := fcImagePlanFor("peer"); p != nil || err != nil {
+	if p, err := fcImagePlanFor("peer", false); p != nil || err != nil {
 		t.Fatalf("default plan: %v %v", p, err)
 	}
 

@@ -249,7 +249,9 @@ The full verb set, derived mechanically from the RPCs (so names like `goal_list`
   `sched_run`
 - **Goals:** `goal_set`, `goal_list`, `goal_approve`, `goal_pause`,
   `goal_interrupt`, `goal_resume`, `goal_cancel`
-- **Inspection:** `resources`
+- **Sessions:** `session_create`
+- **Inspection:** `resources`, `models`, `providers`
+- **Budgets and images:** `budget`, `image`
 - **ACL management:** `acl_get`, `acl_set_role`, `acl_del_role`
 - **Execution and streams:** `run_script`, `attach_shell`, `subscribe_group`,
   `subscribe_logs`, `watch_state`
@@ -262,6 +264,10 @@ Only `admin` passes:
 - `acl_get`, `acl_set_role`, `acl_del_role`. ACL management must not be
   delegatable through the ACL itself.
 - `run_script`: direct code execution in a guest VM.
+- `budget`: spend caps bound what agents may spend; whoever could lift them
+  could void the bound.
+- `image`: pulls into host-wide caches, rewrites every pinned group's base
+  and resets their system disks.
 - `config_posture`: a synthetic verb, covered in the next section.
 
 ### 3.6 `config` vs `config_posture` (`postureVerb`, `daemon/auth.go`)
@@ -273,6 +279,8 @@ Only `admin` passes:
   workspace's `/workspace/.koto/provision.sh` runs again on the next boot).
 - A `config` grant therefore covers only the remaining settings: `model`,
   `effort` and `provider`.
+- A `Spawn` request that carries `image` writes the same `image=` pin, so it is
+  re-labelled `config_posture` too; a `spawn` grant covers spawns without it.
 - The target check still applies. The in-guest ctl plane refuses posture keys
   on its own (`configPostureKey` in `daemon/ctl.go`; see
   [configuration.md](configuration.md)).

@@ -807,7 +807,12 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	// OCI image groups (image=, fcimage.go): resolve layers, tools.img and
 	// sys.img before anything is staged. nil = the default rootfs boot.
-	imgPlan, err := fcImagePlanFor(g)
+	// Root posture: read ONCE per boot. The image plan marks the sys disks
+	// from it and the guest gets the same value (InitReq.Root below);
+	// configCmd does not take the group op lock, so a second read could
+	// disagree with the first (greptile r5).
+	root := groupRoot(g)
+	imgPlan, err := fcImagePlanFor(g, root)
 	if err != nil {
 		return err
 	}
@@ -1103,7 +1108,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		// Guest hostname becomes koto-vm-<group> (handleInit) so shell
 		// prompts identify which group's VM they're in.
 		Group: g,
-		Root:  groupRoot(g),
+		Root:  root,
 		Kvm:   kvm,
 	}
 	for _, p := range pubPorts {

@@ -60,8 +60,18 @@ func SysDigest(dir string) string {
 }
 
 // SysArchives lists the 12-hex digest prefixes of archived sys images.
+// Unreadable dir = none (listing only); DropRootSys uses sysArchives and
+// fails on the error instead.
 func SysArchives(dir string) []string {
-	ents, _ := os.ReadDir(dir)
+	out, _ := sysArchives(dir)
+	return out
+}
+
+// readDir is os.ReadDir; a test seam for listing failures.
+var readDir = os.ReadDir
+
+func sysArchives(dir string) ([]string, error) {
+	ents, err := readDir(dir)
 	var out []string
 	for _, e := range ents {
 		if m := sysArchRe.FindStringSubmatch(e.Name()); m != nil {
@@ -69,7 +79,7 @@ func SysArchives(dir string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, err
 }
 
 // SysAction describes what PrepareSys did, for logs and the CLI.
@@ -270,7 +280,13 @@ func DropRootSys(dir string) (int, error) {
 	}
 	n := 0
 	paths := []string{sysPath(dir)}
-	for _, h := range SysArchives(dir) {
+	// An unreadable dir must not look like "no archives": the marker would
+	// then be cleared with root-written archives still on disk (codeant r5).
+	hs, err := sysArchives(dir)
+	if err != nil {
+		return 0, fmt.Errorf("list sys archives: %w", err)
+	}
+	for _, h := range hs {
 		paths = append(paths, filepath.Join(dir, "sys-"+h+".img"))
 	}
 	for _, p := range paths {

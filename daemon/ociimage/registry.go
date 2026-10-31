@@ -47,9 +47,11 @@ const (
 
 var (
 	digestRe = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	repoRe   = regexp.MustCompile(`^[a-z0-9]+([._/-][a-z0-9]+)*$`)
-	tagRe    = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
-	authKV   = regexp.MustCompile(`(\w+)="([^"]*)"`)
+	// OCI distribution spec: path components [a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*
+	// joined by "/" (foo__bar and foo--bar are legal; ".." and "//" are not).
+	repoRe = regexp.MustCompile(`^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*$`)
+	tagRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	authKV = regexp.MustCompile(`(\w+)="([^"]*)"`)
 )
 
 // ValidDigest reports whether s is a well-formed sha256 digest.
