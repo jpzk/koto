@@ -255,3 +255,39 @@ func TestRevokeImageSudoOnlyKotoGrant(t *testing.T) {
 	}
 	revokeImageSudo(filepath.Join(d, "missing")) // no panic, no error
 }
+
+// An image whose /workspace is a symlink (or a file) refuses to boot:
+// MkdirAll would follow the link and mountWorkspace would mount ws.img over
+// its target (codeant r6). Nothing is created through the link.
+func TestInjectImageRefusesWorkspaceSymlink(t *testing.T) {
+	a := &imageArgs{Layers: []string{hA}, Name: "debian", Digest: dg}
+	for _, kind := range []string{"symlink", "file"} {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if kind == "symlink" {
+			err = os.Symlink("data", filepath.Join(root, "workspace")) // resolves (to root/data) like /data in the guest
+		} else {
+			err = os.WriteFile(filepath.Join(root, "workspace"), nil, 0o644)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := injectImage(root, a); err == nil || !strings.Contains(err.Error(), "koto mounts the group workspace there") {
+			t.Fatalf("%s /workspace: injectImage err=%v, want refusal", kind, err)
+		}
+		if fi, err := os.Lstat(filepath.Join(root, "workspace")); err != nil || fi.IsDir() {
+			t.Fatalf("%s /workspace replaced: %v %v", kind, fi, err)
+		}
+	}
+	// a real directory is fine
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "workspace"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := injectImage(root, a); err != nil {
+		t.Fatalf("directory /workspace: %v", err)
+	}
+}

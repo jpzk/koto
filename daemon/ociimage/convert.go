@@ -140,12 +140,22 @@ func scanLayer(blob, mediaType string, present map[string]string) error {
 		r = gz
 	}
 	tr := tar.NewReader(&countReader{r: r, max: maxLayerBytes})
+	added := map[string]string{} // this layer's loaders
+	wh, opq := map[string]bool{}, map[string]bool{}
 	for n := 0; ; n++ {
 		if n > maxEntries {
 			return fmt.Errorf("more than %d entries", maxEntries)
 		}
 		h, err := tr.Next()
 		if err == io.EOF {
+			for k := range present {
+				if hiddenBy(k, wh, opq) {
+					delete(present, k)
+				}
+			}
+			for k, v := range added {
+				present[k] = v
+			}
 			return nil
 		}
 		if err != nil {
@@ -156,25 +166,36 @@ func scanLayer(blob, mediaType string, present map[string]string) error {
 			return err
 		}
 		dir, base := path.Dir(p), path.Base(p)
+		// Whiteouts hide LOWER layers only (OCI layer spec), so they are
+		// collected here and applied once per layer: one ancestor walk per
+		// loader path instead of a scan of every loader per whiteout, which
+		// was quadratic on a layer of many loaders and whiteouts (codeant r6).
 		if base == ".wh..wh..opq" {
-			for k := range present {
-				if strings.HasPrefix(k, dir+"/") {
-					delete(present, k)
-				}
-			}
+			opq[dir] = true
 			continue
 		}
 		if strings.HasPrefix(base, ".wh.") {
-			tgt := path.Join(dir, strings.TrimPrefix(base, ".wh."))
-			for k := range present {
-				if k == tgt || strings.HasPrefix(k, tgt+"/") {
-					delete(present, k)
-				}
-			}
+			wh[path.Join(dir, strings.TrimPrefix(base, ".wh."))] = true
 			continue
 		}
 		if lc := loaderLibc(base); lc != "" && h.Typeflag != tar.TypeDir {
-			present[p] = lc
+			added[p] = lc
+		}
+	}
+}
+
+// hiddenBy reports whether p (or an ancestor) is whited out by wh, or sits
+// below an opaque directory in opq.
+func hiddenBy(p string, wh, opq map[string]bool) bool {
+	if wh[p] {
+		return true
+	}
+	for d := path.Dir(p); ; d = path.Dir(d) {
+		if wh[d] || opq[d] {
+			return true
+		}
+		if d == "/" || d == "." {
+			return false
 		}
 	}
 }

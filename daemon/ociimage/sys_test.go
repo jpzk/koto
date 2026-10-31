@@ -122,3 +122,78 @@ func TestDropRootSysListErrorKeepsMarker(t *testing.T) {
 		t.Fatal("marker kept after a full purge")
 	}
 }
+
+// An unreadable sys.digest or an un-stat-able sys.img/archive is not "absent"
+// (codeant r6): PrepareSys and ArchiveSys must fail and leave sys.img, its
+// digest and the archives exactly as they were.
+func TestSysIOErrorsFailClosed(t *testing.T) {
+	a, b := dgOf("A"), dgOf("B")
+	eio := errors.New("EIO")
+	setup := func(t *testing.T) string {
+		dir := t.TempDir()
+		if err := os.WriteFile(sysPath(dir), []byte("A-state"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sysDigestPath(dir), []byte(a+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	intact := func(t *testing.T, dir string) {
+		t.Helper()
+		if s, err := os.ReadFile(sysPath(dir)); err != nil || string(s) != "A-state" {
+			t.Fatalf("sys.img changed: %q %v", s, err)
+		}
+		if d, err := os.ReadFile(sysDigestPath(dir)); err != nil || strings.TrimSpace(string(d)) != a {
+			t.Fatalf("sys.digest changed: %q %v", d, err)
+		}
+		if exists(SysArchive(dir, a)) {
+			t.Fatal("archived despite the error")
+		}
+	}
+	failOn := func(name string) func(string) (os.FileInfo, error) {
+		return func(p string) (os.FileInfo, error) {
+			if filepath.Base(p) == name {
+				return nil, eio
+			}
+			return os.Stat(p)
+		}
+	}
+	t.Run("digest read error", func(t *testing.T) {
+		dir := setup(t)
+		readFile = func(string) ([]byte, error) { return nil, eio }
+		defer func() { readFile = os.ReadFile }()
+		if _, err := PrepareSys(dir, b, SysFresh, 0); !errors.Is(err, eio) {
+			t.Fatalf("PrepareSys err=%v", err)
+		}
+		if _, err := ArchiveSys(dir); !errors.Is(err, eio) {
+			t.Fatalf("ArchiveSys err=%v", err)
+		}
+		readFile = os.ReadFile
+		intact(t, dir)
+	})
+	t.Run("sys.img stat error", func(t *testing.T) {
+		dir := setup(t)
+		statFile = failOn("sys.img")
+		defer func() { statFile = os.Stat }()
+		if _, err := PrepareSys(dir, b, SysFresh, 0); !errors.Is(err, eio) {
+			t.Fatalf("PrepareSys err=%v", err)
+		}
+		if _, err := ArchiveSys(dir); !errors.Is(err, eio) {
+			t.Fatalf("ArchiveSys err=%v", err)
+		}
+		statFile = os.Stat
+		intact(t, dir)
+	})
+	t.Run("archive stat error on restore", func(t *testing.T) {
+		dir := t.TempDir()
+		statFile = failOn(filepath.Base(SysArchive(dir, b)))
+		defer func() { statFile = os.Stat }()
+		if _, err := PrepareSys(dir, b, SysRestore, 0); !errors.Is(err, eio) {
+			t.Fatalf("PrepareSys(restore) err=%v", err)
+		}
+		if exists(sysPath(dir)) {
+			t.Fatal("fresh sys.img made over an unreadable rollback archive")
+		}
+	})
+}

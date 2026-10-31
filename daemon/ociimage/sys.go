@@ -10,6 +10,7 @@ package ociimage
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,13 +51,45 @@ func short12(dg string) string {
 	return h
 }
 
-// SysDigest returns the digest the current sys.img belongs to ("" if none).
+// SysDigest returns the digest the current sys.img belongs to ("" if none,
+// or if it cannot be read: listing only). PrepareSys and ArchiveSys use
+// sysDigest and fail on a read error instead.
 func SysDigest(dir string) string {
-	b, err := os.ReadFile(sysDigestPath(dir))
-	if err != nil {
-		return ""
+	d, _ := sysDigest(dir)
+	return d
+}
+
+// readFile and statFile are os.ReadFile / os.Stat; test seams for I/O errors.
+var (
+	readFile = os.ReadFile
+	statFile = os.Stat
+)
+
+// sysDigest is SysDigest that tells "no digest" (absent: "", nil) from an
+// unreadable one (EIO, EACCES, EISDIR: error). Treating the latter as absent
+// made PrepareSys delete the group's sys.img as unowned (codeant r6).
+func sysDigest(dir string) (string, error) {
+	b, err := readFile(sysDigestPath(dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
 	}
-	return strings.TrimSpace(string(b))
+	if err != nil {
+		return "", fmt.Errorf("sys.digest: %w", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// sysExists stats p: (true, nil) present, (false, nil) absent, error for
+// anything else, so a permission or I/O error never reads as "no disk".
+func sysExists(p string) (bool, error) {
+	_, err := statFile(p)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat %s: %w", filepath.Base(p), err)
 }
 
 // SysArchives lists the 12-hex digest prefixes of archived sys images.
@@ -114,9 +147,14 @@ func PrepareSys(dir, dg string, mode SysMode, size int64) (SysAction, error) {
 	if !ValidDigest(dg) {
 		return a, fmt.Errorf("sys.img: invalid digest %q", dg)
 	}
-	cur := SysDigest(dir)
-	_, err := os.Stat(sysPath(dir))
-	exists := err == nil
+	cur, err := sysDigest(dir)
+	if err != nil {
+		return a, err
+	}
+	exists, err := sysExists(sysPath(dir))
+	if err != nil {
+		return a, err
+	}
 	if exists && cur == dg {
 		a.Kept = true
 		return a, nil
@@ -134,8 +172,11 @@ func PrepareSys(dir, dg string, mode SysMode, size int64) (SysAction, error) {
 	}
 	_ = os.Remove(sysDigestPath(dir))
 	arch := SysArchive(dir, dg)
-	_, aerr := os.Stat(arch)
-	restore := aerr == nil && mode == SysRestore
+	haveArch, err := sysExists(arch)
+	if err != nil && mode == SysRestore {
+		return a, err // unreadable archive: do not silently replace the rollback with a fresh disk
+	}
+	restore := haveArch && mode == SysRestore
 	// Commit the digest BEFORE sys.img appears. sys.img is absent here, so a
 	// failed digest write leaves the archive where it was, and a crash after
 	// the write but before the rename/mkfs just repeats this path next boot.
@@ -168,11 +209,18 @@ func PrepareSys(dir, dg string, mode SysMode, size int64) (SysAction, error) {
 // without a valid digest, is left alone. dir missing is not an error.
 func ArchiveSys(dir string) (SysAction, error) {
 	var a SysAction
-	cur := SysDigest(dir)
+	cur, err := sysDigest(dir)
+	if err != nil {
+		return a, err
+	}
 	if !ValidDigest(cur) {
 		return a, nil
 	}
-	if _, err := os.Stat(sysPath(dir)); err != nil {
+	ok, err := sysExists(sysPath(dir))
+	if err != nil {
+		return a, err // EIO/EACCES is not "no disk": keep the digest
+	}
+	if !ok {
 		_ = os.Remove(sysDigestPath(dir)) // digest without a disk: stale record
 		return a, nil
 	}

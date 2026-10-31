@@ -361,6 +361,14 @@ func imageApplyOne(env imageEnv, g string, pin imagePin, out func(string, ...any
 	// registered its PID before we sample running and gets restarted. Without
 	// it a write landing mid-boot saw running=false and left the old image up.
 	unlock := env.lockGroup(g)
+	// Re-check under the lock: destroy holds it while it removes the group, so
+	// a destroy that won the race between imageApply's check and here is seen
+	// now instead of updateGroupConfig recreating a deleted group's config
+	// (codeant r6).
+	if err := imageGroupKnown(env, g); err != nil {
+		unlock()
+		return fmt.Errorf("%s: %w", g, err)
+	}
 	before := loadGroupConfig(g).str(cfgImageDigest)
 	_, err := updateGroupConfig(g, func(cfg map[string]any) { setImageConfig(cfg, pin) })
 	up := env.running(g)
@@ -462,6 +470,14 @@ func imageRollback(env imageEnv, g string, out func(string, ...any)) error {
 	var from, to string
 	var verr error
 	unlock := env.lockGroup(g)
+	// Re-check under the lock: destroy holds it while it removes the group, so
+	// a destroy that won the race between imageApply's check and here is seen
+	// now instead of updateGroupConfig recreating a deleted group's config
+	// (codeant r6).
+	if err := imageGroupKnown(env, g); err != nil {
+		unlock()
+		return fmt.Errorf("%s: %w", g, err)
+	}
 	_, err = updateGroupConfig(g, func(cfg map[string]any) {
 		cur, _ := cfg[cfgImageDigest].(string)
 		curName, _ := cfg[cfgImage].(string)

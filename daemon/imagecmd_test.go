@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -199,5 +201,45 @@ func TestImageApplyWaitsForInFlightSpawn(t *testing.T) {
 	}
 	if strings.Join(e.restarted, ",") != "tg" {
 		t.Fatalf("booted-mid-apply group not restarted: %v", e.restarted)
+	}
+}
+
+// A destroy that wins the race between imageApply's existence check and the
+// group op lock must make apply/rollback fail, not recreate the deleted
+// group's config and report success (codeant r6). destroy removes the group
+// from groups.json while holding the same lock.
+func TestImageApplyRechecksGroupUnderLock(t *testing.T) {
+	fcHarness(t)
+	testCatalogImage(t, "debian", "a")
+	for _, op := range []string{"apply", "rollback"} {
+		e := newImageTestEnv(t)
+		var gmu sync.Mutex
+		groups := []string{"main", "peer", "tg"}
+		e.groups = func() []string { gmu.Lock(); defer gmu.Unlock(); return append([]string(nil), groups...) }
+		var mu sync.Mutex
+		e.lock = func(string) func() { mu.Lock(); return mu.Unlock }
+		args := []string{"debian", "tg"}
+		if op == "rollback" {
+			args = []string{"tg"}
+		}
+		mu.Lock() // destroy of tg holds the lock
+		done := make(chan error, 1)
+		go func() { done <- e.run(op, false, args...) }()
+		time.Sleep(100 * time.Millisecond) // op passed its unlocked check, waits on the lock
+		gmu.Lock()
+		groups = []string{"main", "peer"} // destroy removes tg, then releases the lock
+		gmu.Unlock()
+		_ = os.RemoveAll(filepath.Dir(groupConfigPath("tg")))
+		mu.Unlock()
+		err := <-done
+		if err == nil || !strings.Contains(err.Error(), `no group "tg"`) {
+			t.Fatalf("%s on a group destroyed mid-op: err=%v", op, err)
+		}
+		if _, serr := os.Stat(groupConfigPath("tg")); serr == nil {
+			t.Fatalf("%s recreated the destroyed group's config", op)
+		}
+		if len(e.restarted) != 0 {
+			t.Fatalf("%s restarted a destroyed group: %v", op, e.restarted)
+		}
 	}
 }

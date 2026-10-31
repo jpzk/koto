@@ -330,6 +330,15 @@ var caBundles = []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/cer
 // temp dir in tests.
 func injectImage(root string, a *imageArgs) error {
 	p := func(s string) string { return filepath.Join(root, s) }
+	// /workspace must be a real directory of the image: MkdirAll follows a
+	// symlink, and mountWorkspace would then mount ws.img over the link's
+	// target (hiding that base directory) instead of at /workspace. Refuse
+	// the boot rather than guess (codeant r6).
+	if fi, err := os.Lstat(p("/workspace")); err == nil && !fi.IsDir() {
+		return fmt.Errorf("image /workspace is a %s, not a directory; koto mounts the group workspace there (rebuild the image without it)", fi.Mode().Type())
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("image /workspace: %w", err)
+	}
 	for _, d := range []string{"/etc", "/etc/koto", "/var/lib/koto", "/var/log", "/workspace"} {
 		if err := os.MkdirAll(p(d), 0o755); err != nil {
 			return err

@@ -491,9 +491,19 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		return st, s.err
 	}
 
-	// size: content rounded to 4K + xattr blocks + per-inode overhead, +25% + 8M slack
+	// size: content rounded to 4K + xattr blocks + per-inode overhead + one
+	// data block per directory (implied parents included) + dirent bytes,
+	// +25% + 8M slack. Without the per-directory block a dir-heavy layer ran
+	// out of blocks inside debugfs (codeant r6).
 	ents := int64(len(s.nodes)) + 16
-	blocks := (st.ContentBytes+st.XattrBytes+int64(st.Files)*4096)/4096 + ents/8 + 64
+	var ndirs, dirent int64
+	for np, n := range s.nodes {
+		if n.typ == 'd' {
+			ndirs++
+		}
+		dirent += (8 + int64(len(path.Base(np))) + 3) &^ 3
+	}
+	blocks := (st.ContentBytes+st.XattrBytes+int64(st.Files)*4096)/4096 + ents/8 + ndirs + dirent/4096 + 64
 	sizeMB := (blocks*4096*5/4)>>20 + 8
 	inodes := ents + ents/4 + 64
 	img := out + ".part"

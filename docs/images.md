@@ -202,3 +202,9 @@ changed under `/` (sudoers, setuid files, units) does not carry over.
 - shell attach (`/shell`, `koto ctl shell`) needs `tmux` in the image.
 - `root=yes` needs `sudo` in the image (the root filesystem is writable via
   the sys overlay anyway).
+- the image config's `Env` (e.g. `LD_LIBRARY_PATH`, a custom `PATH`) is not
+  applied: workers get koto's own environment. Make the image work without
+  it (library paths via `/etc/ld.so.conf.d` + `ldconfig` in `provision.sh`)
+  until an image ENV policy lands.
+- `/workspace` must be a directory (or absent) in the image; an image that
+  ships it as a symlink or file refuses to boot.

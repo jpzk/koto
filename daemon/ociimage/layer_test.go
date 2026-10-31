@@ -3,11 +3,13 @@ package ociimage
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type tent struct {
@@ -289,5 +291,67 @@ func TestBuildLayerRejects(t *testing.T) {
 	}
 	if _, serr := os.Stat(LayerFile(cache, l.DiffID)); serr == nil {
 		t.Error("diff_id-mismatched layer left a file")
+	}
+}
+
+// TestBuildLayerDirHeavy: every ext4 directory needs its own data block, so a
+// valid layer of 20000 empty directories must fit the computed image size
+// (codeant r6: the old ents/8 budget ran out of blocks inside debugfs).
+func TestBuildLayerDirHeavy(t *testing.T) {
+	needE2fs(t)
+	cache := t.TempDir()
+	var ents []tent
+	for i := 0; i < 200; i++ {
+		ents = append(ents, tent{name: fmt.Sprintf("p%03d/", i), typ: tar.TypeDir})
+		for j := 0; j < 100; j++ {
+			ents = append(ents, tent{name: fmt.Sprintf("p%03d/d%03d/", i, j), typ: tar.TypeDir})
+		}
+	}
+	l := cacheLayer(t, cache, tarOf(t, ents...))
+	if _, _, err := EnsureLayers(cache, &Image{Layers: []Layer{l}}, nil); err != nil {
+		t.Fatalf("EnsureLayers(20200 dirs): %v", err)
+	}
+	p := LayerFile(cache, l.DiffID)
+	if out, err := exec.Command("e2fsck", "-fn", p).CombinedOutput(); err != nil {
+		t.Fatalf("e2fsck: %v\n%s", err, out)
+	}
+	if st := dbg(t, p, "stat /p199/d099"); !strings.Contains(st, "Type: directory") {
+		t.Fatalf("/p199/d099 missing:\n%s", st)
+	}
+}
+
+// TestDetectLibcWhiteoutsScale: whiteouts are applied once per layer to the
+// LOWER layers' loaders (OCI: a whiteout never hides an entry of its own
+// layer), so 30000 loaders whited out by 30000 whiteouts is linear, not the
+// old per-whiteout scan of every loader (codeant r6).
+func TestDetectLibcWhiteoutsScale(t *testing.T) {
+	cache := t.TempDir()
+	const n = 30000
+	var lower, upper []tent
+	for i := 0; i < n; i++ {
+		lower = append(lower, tent{name: fmt.Sprintf("x%05d/ld-musl-x86_64.so.1", i), body: "E"})
+		upper = append(upper, tent{name: fmt.Sprintf("x%05d/.wh.ld-musl-x86_64.so.1", i)})
+	}
+	lo, up := cacheLayer(t, cache, tarOf(t, lower...)), cacheLayer(t, cache, tarOf(t, upper...))
+	t0 := time.Now()
+	got, err := DetectLibc(cache, []Layer{lo, up})
+	if el := time.Since(t0); el > 3*time.Second {
+		t.Errorf("DetectLibc on %d loaders + %d whiteouts took %s", n, n, el)
+	}
+	if err != nil || got != LibcUnknown {
+		t.Fatalf("all loaders whited out: DetectLibc=%q,%v want unknown", got, err)
+	}
+	// Same-layer: the whiteout (and opaque marker) hide lower layers only.
+	same := cacheLayer(t, cache, tarOf(t,
+		tent{name: "lib/ld-musl-x86_64.so.1", body: "E"}, tent{name: "lib/.wh.ld-musl-x86_64.so.1"},
+		tent{name: "lib/.wh..wh..opq"}))
+	if got, err := DetectLibc(cache, []Layer{same}); err != nil || got != LibcMusl {
+		t.Fatalf("same-layer whiteout hid its own layer's loader: %q,%v", got, err)
+	}
+	// ...while an opaque dir above still hides the lower loader.
+	opq := cacheLayer(t, cache, tarOf(t, tent{name: "x00007/.wh..wh..opq"}))
+	one := cacheLayer(t, cache, tarOf(t, tent{name: "x00007/ld-musl-x86_64.so.1", body: "E"}))
+	if got, _ := DetectLibc(cache, []Layer{one, opq}); got != LibcUnknown {
+		t.Fatalf("opaque dir above did not hide lower loader: %q", got)
 	}
 }
