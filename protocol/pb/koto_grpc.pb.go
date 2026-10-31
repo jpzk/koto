@@ -68,6 +68,7 @@ const (
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
 	Koto_Budget_FullMethodName         = "/koto.Koto/Budget"
+	Koto_Image_FullMethodName          = "/koto.Koto/Image"
 	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
 	Koto_AttachShell_FullMethodName    = "/koto.Koto/AttachShell"
 	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
@@ -202,6 +203,13 @@ type KotoClient interface {
 	// could lift them would void the bound (same class as config_posture).
 	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
 	Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error)
+	// Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
+	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
+	// apply to every group pinned to the name. Streams human-readable lines
+	// (event "data") then "end"; failures are one in-band "error" event.
+	// HARDCODED admin-only: pulls from registries, writes host-wide caches
+	// and resets groups' system disks.
+	Image(ctx context.Context, in *ImageReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageEvent], error)
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -611,9 +619,28 @@ func (c *kotoClient) Budget(ctx context.Context, in *BudgetReq, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *kotoClient) Image(ctx context.Context, in *ImageReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_Image_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ImageReq, ImageEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_ImageClient = grpc.ServerStreamingClient[ImageEvent]
+
 func (c *kotoClient) RunScript(ctx context.Context, in *RunScriptReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ScriptEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_RunScript_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_RunScript_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +659,7 @@ type Koto_RunScriptClient = grpc.ServerStreamingClient[ScriptEvent]
 
 func (c *kotoClient) AttachShell(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ShellInput, ShellFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[2], Koto_AttachShell_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_AttachShell_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +672,7 @@ type Koto_AttachShellClient = grpc.BidiStreamingClient[ShellInput, ShellFrame]
 
 func (c *kotoClient) SubscribeGroup(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[3], Koto_SubscribeGroup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[4], Koto_SubscribeGroup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +691,7 @@ type Koto_SubscribeGroupClient = grpc.ServerStreamingClient[Event]
 
 func (c *kotoClient) SubscribeLogs(ctx context.Context, in *LogsReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[4], Koto_SubscribeLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[5], Koto_SubscribeLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -683,7 +710,7 @@ type Koto_SubscribeLogsClient = grpc.ServerStreamingClient[LogEvent]
 
 func (c *kotoClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[5], Koto_WatchState_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[6], Koto_WatchState_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -827,6 +854,13 @@ type KotoServer interface {
 	// could lift them would void the bound (same class as config_posture).
 	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
 	Budget(context.Context, *BudgetReq) (*BudgetResp, error)
+	// Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
+	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
+	// apply to every group pinned to the name. Streams human-readable lines
+	// (event "data") then "end"; failures are one in-band "error" event.
+	// HARDCODED admin-only: pulls from registries, writes host-wide caches
+	// and resets groups' system disks.
+	Image(*ImageReq, grpc.ServerStreamingServer[ImageEvent]) error
 	// RunScript executes a POSIX sh script inside a group's microVM as the
 	// guest worker user (node, uid 1000, cwd /workspace) and streams its
 	// combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -981,6 +1015,9 @@ func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*Acl
 }
 func (UnimplementedKotoServer) Budget(context.Context, *BudgetReq) (*BudgetResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Budget not implemented")
+}
+func (UnimplementedKotoServer) Image(*ImageReq, grpc.ServerStreamingServer[ImageEvent]) error {
+	return status.Error(codes.Unimplemented, "method Image not implemented")
 }
 func (UnimplementedKotoServer) RunScript(*RunScriptReq, grpc.ServerStreamingServer[ScriptEvent]) error {
 	return status.Error(codes.Unimplemented, "method RunScript not implemented")
@@ -1641,6 +1678,17 @@ func _Koto_Budget_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Image_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ImageReq)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(KotoServer).Image(m, &grpc.GenericServerStream[ImageReq, ImageEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_ImageServer = grpc.ServerStreamingServer[ImageEvent]
+
 func _Koto_RunScript_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RunScriptReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1840,6 +1888,11 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "JobTail",
 			Handler:       _Koto_JobTail_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Image",
+			Handler:       _Koto_Image_Handler,
 			ServerStreams: true,
 		},
 		{

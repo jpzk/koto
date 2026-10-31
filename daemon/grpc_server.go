@@ -206,6 +206,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Root = optRaw(r.Root)
 	out.Autostart = optRaw(r.Autostart)
 	out.KVM = optRaw(r.Kvm)
+	out.Image = optRaw(r.Image)
 	return out
 }
 
@@ -274,9 +275,23 @@ func (s *kotoServer) Spawn(ctx context.Context, r *pb.SpawnReq) (*pb.SpawnResp, 
 			return &pb.SpawnResp{Error: fmt.Sprintf("spawn cap reached (%d groups)", ctlMaxSpawn)}, nil
 		}
 	}
+	// --image: catalog names only, resolved to the digest now (config_image.go).
+	var pin imagePin
+	if r.Image != "" {
+		p, err := resolveImageName(r.Image)
+		if err != nil {
+			return &pb.SpawnResp{Error: err.Error()}, nil
+		}
+		pin = p
+	}
 	if r.Provider != "" || r.Model != "" || r.Size != "" {
 		if err := seedSpawnConfig(r.Group, r.Provider, r.Model, r.Size); err != nil {
 			return &pb.SpawnResp{Error: err.Error()}, nil
+		}
+	}
+	if pin.Name != "" {
+		if _, err := updateGroupConfig(r.Group, func(cfg map[string]any) { setImageConfig(cfg, pin) }); err != nil {
+			return &pb.SpawnResp{Error: "write config: " + err.Error()}, nil
 		}
 	}
 	// Re-checked immediately before the boot: the validation, the cap read and

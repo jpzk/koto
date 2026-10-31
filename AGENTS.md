@@ -68,7 +68,8 @@ referenced below point there.
 All apply on `/restart` unless noted. **Posture keys** (`network`, `root`,
 `ports`, `size`, `autostart`, `kvm`) are operator-only: refused on the in-guest ctl
 plane (H1) and, on gRPC, re-labelled `config_posture` (admin-only,
-`postureVerb` in auth.go). Delegable keys: `model`, `effort`, `provider`.
+`postureVerb` in auth.go). `image` is also `config_posture` on gRPC (main may set
+a catalog name via ctl). Delegable keys: `model`, `effort`, `provider`.
 `updateGroupConfig` (config.go) is the ONE writer — per-group lock, rename
 commit.
 

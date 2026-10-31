@@ -319,14 +319,15 @@ func ctlCliMain(args []string) {
 		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
 		provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
 		model := fs.String("model", "", "model override")
-		fs.Parse(rest)
-		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] <group>")
+		image := fs.String("image", "", "catalog image name (koto image ls); pinned by digest")
+		group, err := ctlGroupAndFlags(fs, rest)
+		if err != nil {
+			ctlFatal(2, "usage: koto ctl spawn <group> [-provider P] [-model M] [-image NAME]")
 		}
 		cl := ctlClient()
 		ctx, cancel := ctlCtx()
 		defer cancel()
-		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: fs.Arg(0), Provider: *provider, Model: *model})
+		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: group, Provider: *provider, Model: *model, Image: *image})
 		ctlPrint(resp, err)
 
 	case "send":
@@ -851,6 +852,7 @@ func ctlConfig(args []string) {
 	root := fs.String("root", "", "yes|no")
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
 	kvm := fs.String("kvm", "", "yes|no — nested virtualization (/dev/kvm in the guest)")
+	image := fs.String("image", "", "catalog image name (koto image ls) or koto-default; applies on /restart")
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -885,6 +887,9 @@ func ctlConfig(args []string) {
 	}
 	if seen["kvm"] {
 		req.Kvm = kvm
+	}
+	if seen["image"] {
+		req.Image = image
 	}
 
 	cl := ctlClient()
@@ -1151,4 +1156,26 @@ func ctlGoal(args []string) {
 func stdoutIsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// ctlGroupAndFlags parses `<group> [-flags]` or `[-flags] <group>`: Go's flag
+// package stops at the first positional, so a leading group is split off
+// before parsing (koto spawn <g> --image <name>).
+func ctlGroupAndFlags(fs *flag.FlagSet, args []string) (string, error) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		if err := fs.Parse(args[1:]); err != nil {
+			return "", err
+		}
+		if fs.NArg() != 0 {
+			return "", fmt.Errorf("unexpected args: %v", fs.Args())
+		}
+		return args[0], nil
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() != 1 {
+		return "", fmt.Errorf("want exactly one group, got %v", fs.Args())
+	}
+	return fs.Arg(0), nil
 }

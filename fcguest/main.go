@@ -85,6 +85,7 @@ func main() {
 	// the reaper's children) needs a sane PATH.
 	_ = os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	if os.Getpid() == 1 {
+		bootImage()
 		earlyInit()
 	}
 	go reaper()
@@ -737,11 +738,12 @@ func agentServer() {
 // ---- init: ports + entrypoint -----------------------------------------------
 
 var (
-	initMu       sync.Mutex
-	entrypointUp bool
-	netStarted   bool
-	rootEnabled  bool
-	portsUp      = map[int]bool{}
+	initMu           sync.Mutex
+	entrypointUp     bool
+	netStarted       bool
+	rootEnabled      bool
+	provisionStarted bool
+	portsUp          = map[int]bool{}
 )
 
 func handleInit(c *vconn, req *pb.InitReq) {
@@ -774,6 +776,21 @@ func handleInit(c *vconn, req *pb.InitReq) {
 		} else {
 			rootEnabled = true
 		}
+	}
+	// image mode, root=no: the sys upper persists across boots, so a sudo
+	// grant written while the group had root=yes would survive the downgrade.
+	// Remove koto's own grant (exact content only; anything else is the
+	// image's or the operator's).
+	if !req.Root && imageMode != nil {
+		revokeImageSudo(imageSudoers)
+	}
+	// First boot of a base: provision.sh, after net + posture are settled.
+	// An l3 request whose netUp failed waits for a later InitReq that brings
+	// the route up (coderabbit r5): a route-less run would fail its installs
+	// and, with provisionStarted already set, never be retried this boot.
+	if shouldProvision(req.Net, netStarted, provisionStarted) {
+		provisionStarted = true
+		provisionOnce(req.Root)
 	}
 	// config kvm=yes: the host left VMX/SVM in this vCPU's CPUID, so the
 	// built-in KVM registered /dev/kvm — but devtmpfs creates it root-only and
@@ -830,6 +847,12 @@ func handleInit(c *vconn, req *pb.InitReq) {
 // shadow the golden rootfs — after a `make rootfs` a previously-upgraded
 // file keeps its old upper copy until the .rootovl tree is reset.
 func enableRoot() error {
+	if imageMode != nil {
+		// The image root is already a writable overlay (sys upper); a second
+		// overlay on the workspace would move installs off the base.
+		_ = os.MkdirAll(filepath.Dir(imageSudoers), 0o750)
+		return os.WriteFile(imageSudoers, []byte(imageSudoGrant), 0o440)
+	}
 	if err := overlayRootDirs(); err != nil {
 		logf("root overlay: %v — sudo grant falls back to tmpfs", err)
 		if merr := unix.Mount("tmpfs", "/etc/sudoers.d", "tmpfs", 0, "mode=755"); merr != nil {
@@ -1000,7 +1023,7 @@ func portBridge(port uint32) {
 
 func entrypointEnviron(env map[string]string) []string {
 	out := []string{
-		"PATH=/sidecar:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		"PATH=" + workerPATH,
 		"HOME=" + wsDir,
 		"SHELL=/bin/bash",
 		"ANTHROPIC_API_KEY=proxied",
@@ -1594,4 +1617,10 @@ func shutdown() {
 	// fcStop's graceful window work instead of always hitting the SIGKILL
 	// fallback, which would risk a dirty workspace ext4).
 	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
+}
+
+// shouldProvision: provision.sh starts once per boot, and for an l3 group
+// only once the network is actually up.
+func shouldProvision(net string, netUp, started bool) bool {
+	return !started && (net != "l3" || netUp)
 }

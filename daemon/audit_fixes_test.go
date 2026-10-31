@@ -784,6 +784,9 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 		{"size", &pb.ConfigReq{Group: "g", Size: s("xlarge")}, "config_posture"},
 		{"autostart", &pb.ConfigReq{Group: "g", Autostart: s("yes")}, "config_posture"},
 		{"kvm", &pb.ConfigReq{Group: "g", Kvm: s("yes")}, "config_posture"},
+		// image= picks the rootfs (and its provision.sh) the group boots.
+		{"image", &pb.ConfigReq{Group: "g", Image: s("tools")}, "config_posture"},
+		{"clear image", &pb.ConfigReq{Group: "g", Image: s("")}, "config_posture"},
 		{"mixed", &pb.ConfigReq{Group: "g", Model: s("x"), Root: s("yes")}, "config_posture"},
 		// Clearing a posture key is setting it.
 		{"clear network", &pb.ConfigReq{Group: "g", Network: s("")}, "config_posture"},
@@ -802,6 +805,32 @@ func TestConfigPostureIsAdminOnly(t *testing.T) {
 	}
 	if !rolesAllowed(acl, []string{defaultRole}, "config_posture", "g", true) {
 		t.Fatal("admin denied posture config")
+	}
+}
+
+// F30 (coderabbit r5): Spawn{image} writes the same image= pin as Config, so
+// a role holding only `spawn` must not get it; a plain spawn stays `spawn`.
+func TestSpawnImageIsPosture(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		req  *pb.SpawnReq
+		want string
+	}{
+		{"plain", &pb.SpawnReq{Group: "g"}, "spawn"},
+		{"model", &pb.SpawnReq{Group: "g", Model: "claude-sonnet-5"}, "spawn"},
+		{"image", &pb.SpawnReq{Group: "g", Image: "tools"}, "config_posture"},
+	} {
+		if got := postureVerb("spawn", c.req); got != c.want {
+			t.Errorf("%s: verb %q, want %q", c.name, got, c.want)
+		}
+	}
+	acl := aclTable{"spawner": {"spawn": targetSet{any: true}}}
+	v := postureVerb("spawn", &pb.SpawnReq{Group: "g", Image: "tools"})
+	if rolesAllowed(acl, []string{"spawner"}, v, "g", true) {
+		t.Fatal("spawn grant set image=")
+	}
+	if !rolesAllowed(acl, []string{defaultRole}, v, "g", true) {
+		t.Fatal("admin denied spawn --image")
 	}
 }
 
