@@ -20,7 +20,8 @@ package main
 //
 //   KOTO_ADDR        dial target            (default 127.0.0.1:8443)
 //   KOTO_CREDS_DIR   PKI directory          (default ./creds)
-//   KOTO_CLIENT      identity name          (default agent) — resolves
+//   KOTO_CLIENT      identity name          (default agent; `koto image` and
+//                       `koto spawn --image` default to the admin `tui`) — resolves
 //                       client-<name>.{crt,key} + token-<name> in CREDS_DIR
 //   KOTO_CERT/KEY/CA/TOKEN  individual overrides (TOKEN is the value)
 //   KOTO_SERVER_NAME TLS server-name override for off-SAN dial targets
@@ -124,7 +125,8 @@ admin role only
 
 env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds, else
      $KOTO_HOME/creds, else /var/lib/koto/creds — the installed default),
-     KOTO_CLIENT (agent), KOTO_CERT/KEY/CA/TOKEN, KOTO_SERVER_NAME
+     KOTO_CLIENT (agent; koto image / koto spawn --image: tui),
+     KOTO_CERT/KEY/CA/TOKEN, KOTO_SERVER_NAME
 `
 
 func ctlEnvOr(k, def string) string {
@@ -159,20 +161,59 @@ func ctlCredsDir() string {
 	return "creds"
 }
 
+// Client identity defaults. `koto ctl` is the agent-facing surface and keeps
+// the least-privilege `agent` identity. The operator-facing admin subcommands
+// (`koto image`, `koto spawn --image`) call admin-only rpcs, so they default
+// to the admin identity `tui` that `koto tui` uses; access stays gated by the
+// file permissions on creds/token-tui + client-tui.key, exactly like the TUI.
+// An explicit KOTO_CLIENT always wins.
+const (
+	ctlDefaultIdentity      = "agent"
+	ctlAdminIdentity        = "tui"
+	imageCliDefaultIdentity = ctlAdminIdentity
+)
+
+// ctlClientName resolves the identity: explicit KOTO_CLIENT, else def.
+func ctlClientName(def string) string { return ctlEnvOr("KOTO_CLIENT", def) }
+
+// spawnCliIdentity is the default identity for a spawn: top-level
+// `koto spawn --image` is an operator command (image= is config_posture,
+// admin-only); `koto ctl spawn` and an image-less spawn stay on agent.
+func spawnCliIdentity(topLevel bool, image string) string {
+	if topLevel && image != "" {
+		return ctlAdminIdentity
+	}
+	return ctlDefaultIdentity
+}
+
 // ctlClient dials the daemon with the same mTLS+token scheme as the TUI
 // (tui/daemon.go); kept separate because the TUI is its own module.
-func ctlClient() pb.KotoClient {
+func ctlClient() pb.KotoClient { return ctlClientAs(ctlDefaultIdentity) }
+
+// ctlClientAs dials as KOTO_CLIENT, else def. With the admin default a
+// missing/unreadable token or key says so and names KOTO_CLIENT instead of
+// surfacing later as a PermissionDenied for another identity.
+func ctlClientAs(def string) pb.KotoClient {
 	credsDir := ctlCredsDir()
-	name := ctlEnvOr("KOTO_CLIENT", "agent")
+	name := ctlClientName(def)
+	hint := ""
+	if def == ctlAdminIdentity {
+		hint = fmt.Sprintf(" (this command runs as the admin client %q by default, like koto tui, and needs read access to %s; KOTO_CLIENT=<name> overrides)", ctlAdminIdentity, credsDir)
+	}
 	if os.Getenv("KOTO_TOKEN") == "" {
-		if _, err := os.Stat(filepath.Join(credsDir, "token-"+name)); err != nil {
-			ctlFatal(1, "no token: set KOTO_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)",
-				filepath.Join(credsDir, "token-"+name), name)
+		tok := filepath.Join(credsDir, "token-"+name)
+		f, err := os.Open(tok)
+		if err != nil {
+			if hint != "" {
+				ctlFatal(1, "no token for client %q: %s missing or unreadable: %v%s", name, tok, err, hint)
+			}
+			ctlFatal(1, "no token: set KOTO_TOKEN or provide %s (mint with `make pki-client NAME=%s ROLE=agent`)", tok, name)
 		}
+		f.Close()
 	}
 	c, err := newKotoClient(credsDir, name, ctlEnvOr("KOTO_ADDR", "127.0.0.1:8443"))
 	if err != nil {
-		ctlFatal(1, "%v", err)
+		ctlFatal(1, "%v%s", err, hint)
 	}
 	return c
 }
@@ -316,18 +357,7 @@ func ctlCliMain(args []string) {
 		ctlPrint(resp, err)
 
 	case "spawn":
-		fs := flag.NewFlagSet("spawn", flag.ExitOnError)
-		provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
-		model := fs.String("model", "", "model override")
-		fs.Parse(rest)
-		if fs.NArg() != 1 {
-			ctlFatal(2, "usage: koto ctl spawn [-provider P] [-model M] <group>")
-		}
-		cl := ctlClient()
-		ctx, cancel := ctlCtx()
-		defer cancel()
-		resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: fs.Arg(0), Provider: *provider, Model: *model})
-		ctlPrint(resp, err)
+		ctlSpawn(rest, false)
 
 	case "send":
 		fs := flag.NewFlagSet("send", flag.ExitOnError)
@@ -851,6 +881,7 @@ func ctlConfig(args []string) {
 	root := fs.String("root", "", "yes|no")
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
 	kvm := fs.String("kvm", "", "yes|no — nested virtualization (/dev/kvm in the guest)")
+	image := fs.String("image", "", "catalog image name (koto image ls) or koto-default; applies on /restart")
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -885,6 +916,9 @@ func ctlConfig(args []string) {
 	}
 	if seen["kvm"] {
 		req.Kvm = kvm
+	}
+	if seen["image"] {
+		req.Image = image
 	}
 
 	cl := ctlClient()
@@ -1151,4 +1185,48 @@ func ctlGoal(args []string) {
 func stdoutIsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// ctlGroupAndFlags parses `<group> [-flags]` or `[-flags] <group>`: Go's flag
+// package stops at the first positional, so a leading group is split off
+// before parsing (koto spawn <g> --image <name>).
+func ctlGroupAndFlags(fs *flag.FlagSet, args []string) (string, error) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		if err := fs.Parse(args[1:]); err != nil {
+			return "", err
+		}
+		if fs.NArg() != 0 {
+			return "", fmt.Errorf("unexpected args: %v", fs.Args())
+		}
+		return args[0], nil
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() != 1 {
+		return "", fmt.Errorf("want exactly one group, got %v", fs.Args())
+	}
+	return fs.Arg(0), nil
+}
+
+// ctlSpawn is `koto ctl spawn` (topLevel=false) and its `koto spawn`
+// shorthand (topLevel=true); see spawnCliIdentity for the identity default.
+func ctlSpawn(rest []string, topLevel bool) {
+	cmd := "koto ctl spawn"
+	if topLevel {
+		cmd = "koto spawn"
+	}
+	fs := flag.NewFlagSet("spawn", flag.ExitOnError)
+	provider := fs.String("provider", "", strings.Join(knownProviders, "|"))
+	model := fs.String("model", "", "model override")
+	image := fs.String("image", "", "catalog image name (koto image ls); pinned by digest")
+	group, err := ctlGroupAndFlags(fs, rest)
+	if err != nil {
+		ctlFatal(2, "usage: %s <group> [-provider P] [-model M] [-image NAME]", cmd)
+	}
+	cl := ctlClientAs(spawnCliIdentity(topLevel, *image))
+	ctx, cancel := ctlCtx()
+	defer cancel()
+	resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: group, Provider: *provider, Model: *model, Image: *image})
+	ctlPrint(resp, err)
 }

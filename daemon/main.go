@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|setup|claude-login|openai-login|venice-login|minimax-login|budget|install|update|uninstall|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|spawn|setup|claude-login|openai-login|venice-login|minimax-login|image|budget|install|update|uninstall|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -70,6 +70,14 @@ func main() {
 		// subuid range) without a container. Also the integration test's
 		// entry point.
 		usernsProbeMain()
+	case "spawn":
+		// Shorthand for `koto ctl spawn` (koto spawn <group> --image <name>);
+		// with --image it defaults to the admin client tui (spawnCliIdentity).
+		ctlSpawn(os.Args[2:], true)
+	case "image":
+		// OCI image catalog (docs/images.md): add/ls/inspect/rm/gc/update/
+		// apply/rollback over the admin-only Image rpc.
+		imageCliMain(os.Args[2:])
 	case "budget":
 		// Operator budget: windows, spend, caps and prices per (provider,
 		// auth). A gRPC client like ctl; the verb is admin-only.

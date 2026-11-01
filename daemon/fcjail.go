@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -199,6 +200,13 @@ func fcJailFixupPerms(g string, uid int) error {
 // (read-write), and the two device nodes Firecracker needs. Nothing else from
 // the host is visible after the chroot.
 func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
+	return fcStageJailFor(g, cfgJSON, uid, nil)
+}
+
+// fcStageJailFor is fcStageJail with an optional OCI image plan: the rootfs
+// bind is replaced by tools.img (ro), sys.img (rw) and one ro bind per layer
+// (fcimage.go). img == nil stages exactly the default jail.
+func fcStageJailFor(g string, cfgJSON []byte, uid int, img *fcImagePlan) (fcJailSpec, error) {
 	root := fcJailDir(g)
 	for _, d := range []string{root, filepath.Join(root, "a"), filepath.Join(root, "dev"), filepath.Join(root, "vsock")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -208,7 +216,16 @@ func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
 	// Empty bind targets. The shim overmounts each with the real inode, so
 	// their own mode is irrelevant — but the config file is a real file the
 	// dropped uid reads, so it is world-readable (0644).
-	for _, f := range []string{"firecracker", "a/vmlinux", "a/rootfs.img", "a/workspace.img", "dev/kvm", "dev/urandom"} {
+	touch := []string{"firecracker", "a/vmlinux", "a/rootfs.img", "a/workspace.img", "dev/kvm", "dev/urandom"}
+	var imgBinds []fcBind
+	if img != nil {
+		imgBinds = fcImageJailBinds(img)
+		touch = []string{"firecracker", "a/vmlinux", "a/workspace.img", "dev/kvm", "dev/urandom"}
+		for _, b := range imgBinds {
+			touch = append(touch, strings.TrimPrefix(b.Dst, "/"))
+		}
+	}
+	for _, f := range touch {
 		p := filepath.Join(root, f)
 		fh, err := os.OpenFile(p, os.O_CREATE, 0o644)
 		if err != nil {
@@ -238,6 +255,13 @@ func fcStageJail(g string, cfgJSON []byte, uid int) (fcJailSpec, error) {
 			{Src: "/dev/urandom", Dst: "/dev/urandom"},
 		},
 		Argv: []string{"/firecracker", "--no-api", "--config-file", "/fc.json"},
+	}
+	if img != nil {
+		// Swap the rootfs bind (index 2) for the image drives; order and
+		// everything else stay as in the default jail.
+		b := append([]fcBind{}, spec.Binds[:2]...)
+		b = append(b, imgBinds...)
+		spec.Binds = append(b, spec.Binds[3:]...)
 	}
 	return spec, nil
 }
@@ -323,7 +347,15 @@ func fcjailMain() {
 		}
 		if b.RO {
 			// A read-only flag is only honored by a second, remount call.
-			if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
+			// Inside our user namespace the source mount's nosuid/nodev/
+			// noexec/atime flags are LOCKED: a remount that drops them is
+			// EPERM. A state dir on a nosuid,nodev mount (the image cache
+			// under it) hit exactly that, so keep whatever the bind inherited.
+			var st syscall.Statfs_t
+			if err := syscall.Statfs(dst, &st); err != nil {
+				die(fmt.Errorf("statfs %s: %w", dst, err))
+			}
+			if err := syscall.Mount("", dst, "", fcRemountROFlags(int64(st.Flags)), ""); err != nil {
 				die(fmt.Errorf("remount-ro %s: %w", dst, err))
 			}
 		}
@@ -364,4 +396,34 @@ func fcjailMain() {
 	if err := syscall.Exec(spec.Argv[0], spec.Argv, os.Environ()); err != nil {
 		die(fmt.Errorf("exec %v: %w", spec.Argv, err))
 	}
+}
+
+// statfs(2) f_flags bits (ST_*); syscall exports the MS_* side only.
+const (
+	stNoSuid     = 0x2
+	stNoDev      = 0x4
+	stNoExec     = 0x8
+	stNoAtime    = 0x400
+	stNoDirAtime = 0x800
+	stRelAtime   = 0x1000
+)
+
+// fcRemountROFlags is the read-only bind remount that keeps the mount flags
+// the bind inherited (statfs f_flags), which the kernel requires inside a
+// user namespace for the locked ones (MNT_LOCK_NOSUID/NODEV/NOEXEC/ATIME).
+// ST_RELATIME and MS_RELATIME differ in value, hence the explicit mapping.
+func fcRemountROFlags(stFlags int64) uintptr {
+	f := uintptr(syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY)
+	for _, m := range []struct {
+		st int64
+		ms uintptr
+	}{
+		{stNoSuid, syscall.MS_NOSUID}, {stNoDev, syscall.MS_NODEV}, {stNoExec, syscall.MS_NOEXEC},
+		{stNoAtime, syscall.MS_NOATIME}, {stNoDirAtime, syscall.MS_NODIRATIME}, {stRelAtime, syscall.MS_RELATIME},
+	} {
+		if stFlags&m.st != 0 {
+			f |= m.ms
+		}
+	}
+	return f
 }

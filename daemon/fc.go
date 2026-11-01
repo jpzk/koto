@@ -640,6 +640,17 @@ func fcWorkspaceDiskBytes(g string) int64 {
 // larger value while the fleet accounting still held the smaller (audit M110).
 // kvm is the group's kvm profile (groupKVM), snapshotted by fcSpawn the same way.
 func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB int, bwBytes, ops int64, kvm bool) []byte {
+	cb, _ := fcVMConfigFor(g, kernelPath, rootfsPath, wsPath, udsPath, vcpus, memMiB, bwBytes, ops, kvm, nil)
+	return cb
+}
+
+// fcVMConfigFor is fcVMConfig with an optional OCI image plan. img == nil is
+// the default rootfs boot, byte-identical to what develop built before image
+// support (pinned by TestFcVMConfigDefaultUnchanged). With a plan the drive
+// list is built from ociimage.FixedDevices plus one read-only drive per
+// layer (fcImageDrives) and the cmdline carries the koto.* image keys;
+// rootfsPath is then unused.
+func fcVMConfigFor(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB int, bwBytes, ops int64, kvm bool, img *fcImagePlan) ([]byte, error) {
 	rateLimiter := func() map[string]any {
 		return map[string]any{
 			"bandwidth": map[string]any{"size": bwBytes, "one_time_burst": fcIOBurstBytes, "refill_time": 1000},
@@ -664,11 +675,18 @@ func fcVMConfig(g, kernelPath, rootfsPath, wsPath, udsPath string, vcpus, memMiB
 		"machine-config": map[string]any{"vcpu_count": vcpus, "smt": false, "mem_size_mib": memMiB},
 		"vsock":          map[string]any{"guest_cid": 3, "uds_path": udsPath},
 	}
+	if img != nil {
+		drives, err := fcImageDrives(img, wsPath, rateLimiter)
+		if err != nil {
+			return nil, err
+		}
+		cfg["drives"] = drives
+		cfg["boot-source"] = map[string]any{"kernel_image_path": kernelPath, "boot_args": fcImageBootArgs(img)}
+	}
 	if !kvm {
 		cfg["cpu-config"] = fcNoNestedCPUTemplate
 	}
-	cb, _ := json.Marshal(cfg)
-	return cb
+	return json.Marshal(cfg)
 }
 
 // fcNoNestedCPUTemplate is the inline Firecracker custom CPU template every
@@ -785,6 +803,17 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		return err
 	}
 	if err := fcEnsureWorkspaceImg(g); err != nil {
+		return err
+	}
+	// OCI image groups (image=, fcimage.go): resolve layers, tools.img and
+	// sys.img before anything is staged. nil = the default rootfs boot.
+	// Root posture: read ONCE per boot. The image plan marks the sys disks
+	// from it and the guest gets the same value (InitReq.Root below);
+	// configCmd does not take the group op lock, so a second read could
+	// disagree with the first (greptile r5).
+	root := groupRoot(g)
+	imgPlan, err := fcImagePlanFor(g, root)
+	if err != nil {
 		return err
 	}
 	// Stale socket files from a previous run make both FC's bind (uds) and
@@ -909,6 +938,11 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if err := fcJailFixupPerms(g, jailUID); err != nil {
 		return fail(err)
 	}
+	if imgPlan != nil {
+		if err := os.Chown(imgPlan.Sys, jailUID, jailUID); err != nil {
+			return fail(fmt.Errorf("jail: chown sys.img: %w", err))
+		}
+	}
 
 	// VM config. Root drive is the shared golden rootfs, read-only, so one
 	// image safely backs every group. console → per-group log file for boot
@@ -921,7 +955,10 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if kvm && !fcHostNested() {
 		emitLogfG("fc", g, "error", "[%s] kvm=yes but host nested virtualization is off (kvm_intel/kvm_amd nested=N): the guest gets no /dev/kvm", g)
 	}
-	cb := fcVMConfig(g, "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v", vcpus, memMiB, bwBytes, ioOps, kvm)
+	cb, err := fcVMConfigFor(g, "/a/vmlinux", "/a/rootfs.img", "/a/workspace.img", "/vsock/v", vcpus, memMiB, bwBytes, ioOps, kvm, imgPlan)
+	if err != nil {
+		return fail(err)
+	}
 
 	console, err := fcConsoleSink(g)
 	if err != nil {
@@ -929,7 +966,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	// --no-api: fully static config; lifecycle is process-level (the agent's
 	// shutdown op powers the guest off, which exits the FC process).
-	spec, err := fcStageJail(g, cb, jailUID)
+	spec, err := fcStageJailFor(g, cb, jailUID, imgPlan)
 	if err != nil {
 		console.Close()
 		return fail(err)
@@ -1071,7 +1108,7 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		// Guest hostname becomes koto-vm-<group> (handleInit) so shell
 		// prompts identify which group's VM they're in.
 		Group: g,
-		Root:  groupRoot(g),
+		Root:  root,
 		Kvm:   kvm,
 	}
 	for _, p := range pubPorts {

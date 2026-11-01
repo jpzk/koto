@@ -247,14 +247,23 @@ func aclLogGroup(target string) string {
 // synthetic admin-only verb config_posture (acl.go). ConfigReq is one message
 // carrying both the delegable settings (model, effort, provider) and the ones
 // that decide what the group's VM may reach and hold, so a single `config`
-// grant authorized both. The target check is unaffected — the request is still
-// group-scoped, and admin passes everything.
+// grant authorized both. image= is posture too: it picks the rootfs the
+// group boots, and changing it gives a fresh sys.img (rollback: the archived one), so the workspace's
+// /workspace/.koto/provision.sh runs again on the next boot. The target
+// check is unaffected — the request is still group-scoped, and admin passes
+// everything. A Spawn that carries --image writes the same image= pin
+// (grpc_server.go Spawn -> setImageConfig), so it takes the same label:
+// otherwise a role holding only `spawn` on a group could re-spawn it with a
+// different image and reset its sys.img.
 func postureVerb(verb string, req any) string {
+	if sr, ok := req.(*pb.SpawnReq); ok && verb == "spawn" && sr.Image != "" {
+		return "config_posture"
+	}
 	cr, ok := req.(*pb.ConfigReq)
 	if verb != "config" || !ok {
 		return verb
 	}
-	for _, p := range []*string{cr.Network, cr.Internet, cr.Root, cr.Ports, cr.Size, cr.Autostart, cr.Kvm} {
+	for _, p := range []*string{cr.Network, cr.Internet, cr.Root, cr.Ports, cr.Size, cr.Autostart, cr.Kvm, cr.Image} {
 		if p != nil {
 			return "config_posture"
 		}
