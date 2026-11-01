@@ -99,7 +99,7 @@ func (p *imagePick) cycle(d int) {
 		p.sel = ((p.sel+d)%n + n) % n
 	}
 	p.refresh = false // a refresh is armed for one image, not "the field"
-	p.lost = ""        // the operator picked again
+	p.lost = ""       // the operator picked again
 }
 
 // parseImageKnown parses the op "known" TSV. Malformed rows are skipped; a

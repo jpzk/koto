@@ -277,7 +277,6 @@ func TestNewGroupNoSourceNoRefresh(t *testing.T) {
 	}
 }
 
-
 // TestNewGroupSubmitCancelledGateNoSpawn (T01/T03): an Esc that lands
 // after the image step (or with no image step) but before the Spawn rpc
 // means the spawn is never sent and the result reports cancelled.
