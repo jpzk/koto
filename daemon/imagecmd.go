@@ -29,6 +29,17 @@ type imageEnv struct {
 	lock    func(g string) func() // group op lock (groupOpLock); nil = none
 	tools   func() string         // basename of the tools image in use ("" = unknown)
 	now     func() time.Time
+	// pull fetches an image into the store (nil = client.Pull); tests swap it.
+	pull func(ociimage.Ref, string) (*ociimage.Image, error)
+}
+
+// cancelled is the Image rpc's context error (client went away or pressed
+// Esc), nil while it is live or when no context is attached.
+func (env imageEnv) cancelled() error {
+	if env.client == nil || env.client.Ctx == nil {
+		return nil
+	}
+	return env.client.Ctx.Err()
 }
 
 func defaultImageEnv(ctx context.Context) imageEnv {
@@ -227,8 +238,19 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	cl := env.client
 	cl.Logf = func(f string, a ...any) { out("  "+f, a...) }
 	out("pulling %s", refStr)
-	img, err := cl.Pull(ref, env.store.Root)
+	pull := cl.Pull
+	if env.pull != nil {
+		pull = env.pull
+	}
+	img, err := pull(ref, env.store.Root)
 	if err != nil {
+		return err
+	}
+	// A cancelled rpc (the TUI's Esc mid-pull) stops before any layer is
+	// built and, below, before the catalog is touched: blob .part files are
+	// removed by the client; completed, verified blobs stay as cache for
+	// `koto image gc`.
+	if err := env.cancelled(); err != nil {
 		return err
 	}
 	if err := ociimage.CheckLayerSlots(len(fcImageDedup(img.Layers))); err != nil {
@@ -247,6 +269,12 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	}
 	var prev string
 	if err := env.store.Update(func(c *ociimage.Catalog) error {
+		// Re-checked under the catalog lock: a cancel that landed while
+		// the layers were converting (or the lock was contended) writes
+		// nothing.
+		if err := env.cancelled(); err != nil {
+			return err
+		}
 		if cur, ok := c.Names[name]; ok != update {
 			if ok {
 				return fmt.Errorf("image %q was added concurrently (%s)", name, ociimage.Short(cur))
@@ -591,6 +619,11 @@ func imageKnown(env imageEnv, out func(string, ...any)) error {
 			src = "builtin"
 		case c.Sources[k.Name] != "":
 			src = c.Sources[k.Name] // what update re-resolves
+		case c.Names[k.Name] != "":
+			// In the catalog without a recorded source (a v1 catalog):
+			// update has nothing to re-resolve, so report none rather than
+			// the well-known ref it would not use.
+			src = ""
 		}
 		row(k.Name, k.Label, src)
 	}
