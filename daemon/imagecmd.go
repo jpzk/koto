@@ -114,10 +114,22 @@ func fmtTime(t time.Time) string {
 func imageRun(env imageEnv, op string, args []string, all bool, out func(string, ...any)) error {
 	switch op {
 	case "add":
+		// The ref is optional for a well-known name (ociimage.Known): the
+		// daemon's list supplies it, so clients never carry a ref of their own.
+		if len(args) == 1 {
+			if ref, ok := ociimage.KnownRef(args[0]); ok {
+				args = append(args, ref)
+			}
+		}
 		if err := imageArgs(op, args, 2, "<name> <ref>"); err != nil {
 			return err
 		}
 		return imageFetch(env, args[0], args[1], false, out)
+	case "known":
+		if err := imageArgs(op, args, 0, ""); err != nil {
+			return err
+		}
+		return imageKnown(env, out)
 	case "update":
 		if len(args) < 1 || len(args) > 2 {
 			return fmt.Errorf("usage: koto image update <name> [<ref>]")
@@ -175,9 +187,9 @@ func imageRun(env imageEnv, op string, args []string, all bool, out func(string,
 		}
 		return imageRollback(env, args[0], out)
 	case "":
-		return errors.New("usage: koto image add|ls|inspect|rm|gc|update|apply|rollback")
+		return errors.New("usage: koto image add|ls|known|inspect|rm|gc|update|apply|rollback")
 	}
-	return fmt.Errorf("unknown image op %q (add|ls|inspect|rm|gc|update|apply|rollback)", op)
+	return fmt.Errorf("unknown image op %q (add|ls|known|inspect|rm|gc|update|apply|rollback)", op)
 }
 
 // imageFetch is add (new name) and update (existing name, moves it). The
@@ -535,4 +547,57 @@ func (env imageEnv) lockGroup(g string) func() {
 		return func() {}
 	}
 	return env.lock(g)
+}
+
+// imageKnown is the picker view (op "known"): the well-known images
+// (ociimage.Known) in their order, then every other catalog name, one
+// tab-separated row each after a "#" header:
+//
+//	name  label  source  digest  created
+//
+// source is the registry ref (well-known) or the recorded add/update source
+// ("builtin" for koto-default, "-" when none); digest is the pinned digest,
+// "-" when the name is not in the catalog yet (a picker shows "will pull
+// latest" and adds it with `image add <name>`); created is RFC 3339 or "-".
+// Fields never contain a tab: names are [a-z0-9._-], refs have no spaces.
+func imageKnown(env imageEnv, out func(string, ...any)) error {
+	c, err := env.store.Load()
+	if err != nil {
+		return err
+	}
+	dash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	row := func(name, label, src string) {
+		dg, created := "-", "-"
+		if e, ok := c.Lookup(name); ok && !e.Builtin {
+			dg = e.Digest
+			if !e.Created.IsZero() {
+				created = e.Created.UTC().Format(time.RFC3339)
+			}
+		}
+		out("%s\t%s\t%s\t%s\t%s", name, label, dash(src), dg, created)
+	}
+	out("# name\tlabel\tsource\tdigest\tcreated")
+	seen := map[string]bool{}
+	for _, k := range ociimage.Known() {
+		seen[k.Name] = true
+		src := k.Ref
+		switch {
+		case k.Name == ociimage.DefaultName:
+			src = "builtin"
+		case c.Sources[k.Name] != "":
+			src = c.Sources[k.Name] // what update re-resolves
+		}
+		row(k.Name, k.Label, src)
+	}
+	for _, n := range c.SortedNames() {
+		if !seen[n] {
+			row(n, n, c.Sources[n])
+		}
+	}
+	return nil
 }
