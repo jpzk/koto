@@ -42,6 +42,14 @@ func (env imageEnv) cancelled() error {
 	return env.client.Ctx.Err()
 }
 
+// ctx is the Image rpc's context (Background when none is attached).
+func (env imageEnv) ctx() context.Context {
+	if env.client == nil || env.client.Ctx == nil {
+		return context.Background()
+	}
+	return env.client.Ctx
+}
+
 func defaultImageEnv(ctx context.Context) imageEnv {
 	return imageEnv{
 		store:  fcImageStore(),
@@ -259,7 +267,10 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	if err := ociimage.CheckImpliedParents(env.store.Root, img.Layers); err != nil {
 		return fmt.Errorf("image %s: %w", name, err)
 	}
-	built, reused, err := ociimage.EnsureLayers(env.store.Root, img, cl.Logf)
+	// The layer build honours the cancel too (PR 94 live check: an Esc
+	// that landed just after the last blob let a 170 MB layer convert and
+	// stay on disk): it stops between layers and removes what it built.
+	built, reused, fresh, err := ociimage.EnsureLayersCtx(env.ctx(), env.store.Root, img, cl.Logf)
 	if err != nil {
 		return err
 	}
@@ -292,6 +303,12 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 		c.Sources[name] = refStr
 		return nil
 	}); err != nil {
+		// Cancelled before the catalog entry was written: nothing names
+		// the layers this add built, so they go (blobs stay as verified
+		// cache for `koto image gc`).
+		if env.cancelled() != nil {
+			ociimage.RemoveFresh(fresh, cl.Logf)
+		}
 		return err
 	}
 	out("%s: %s", name, img.Ref)
