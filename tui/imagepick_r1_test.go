@@ -277,3 +277,40 @@ func TestNewGroupNoSourceNoRefresh(t *testing.T) {
 	}
 }
 
+
+// TestNewGroupSubmitCancelledGateNoSpawn (T01/T03): an Esc that lands
+// after the image step (or with no image step) but before the Spawn rpc
+// means the spawn is never sent and the result reports cancelled.
+func TestNewGroupSubmitCancelledGateNoSpawn(t *testing.T) {
+	fk := startFakeKoto(t)
+	g := newSubmitGate()
+	if !g.cancel() {
+		t.Fatal("cancel on a fresh gate refused")
+	}
+	p := newGroupPlan{group: "gx", spawn: map[string]any{"provider": "claudesdk"}, seq: 42, gate: g}
+	msg := newGroupSubmitCmd("", p)()
+	r, ok := msg.(newGroupResultMsg)
+	if !ok || !r.cancelled || r.spawned || r.seq != 42 {
+		t.Fatalf("result = %#v, want cancelled, not spawned, seq 42", msg)
+	}
+	if got := fk.got(); len(got) != 0 {
+		t.Fatalf("calls %v, want none after Esc", got)
+	}
+}
+
+// TestImageKnownParseScrubs (strix CWE-150, T05): op "known" fields are
+// daemon (and, for sources, registry-ref) text: control bytes never reach
+// the select.
+func TestImageKnownParseScrubs(t *testing.T) {
+	opts, err := parseImageKnown("evil\tev\x1b]52;c;eA==\x07il\treg.test/x\x1b[2J:1\t-\t-\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range opts {
+		for _, s := range []string{o.name, o.label, o.source, o.digest, o.created} {
+			if strings.ContainsAny(s, "\x1b\x07") {
+				t.Fatalf("unscrubbed field %q", s)
+			}
+		}
+	}
+}
