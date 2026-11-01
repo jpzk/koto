@@ -77,7 +77,9 @@ preselected and spawns exactly as before (no `image=` key).
   is spawned, and the catalog is re-read so a retry shows the real state.
 - `Esc` while the add/update runs cancels it: the `Image` rpc is cancelled,
   the daemon writes no catalog entry (a blob's `.part` file is removed;
-  blobs already fetched and verified stay as cache for `koto image gc`),
+  layers already converted for this add are removed, and the build stops
+  before the next layer; blobs already fetched and verified stay as cache
+  for `koto image gc`),
   no group is spawned and the log says `cancelled`. Once the spawn itself
   has started, `Esc` closes the dialog but the spawn finishes (the daemon
   may already have created the group); its result is logged.
