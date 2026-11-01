@@ -3,6 +3,7 @@ package ociimage
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -55,16 +56,50 @@ func LayerOK(cache string, l Layer) bool {
 // reused layer's mtime is refreshed so a concurrent GC's grace period covers
 // it until the catalog entry that keeps it is written.
 func EnsureLayers(cache string, img *Image, logf func(string, ...any)) (built, reused int, err error) {
+	built, reused, _, err = EnsureLayersCtx(context.Background(), cache, img, logf)
+	return built, reused, err
+}
+
+// FreshLayer is a layer file one EnsureLayersCtx call converted, with the
+// mtime it had when the build finished: a later TouchCached (another add
+// reusing it) moves the mtime, which is how RemoveFresh tells a layer only
+// the cancelled add knows about from one somebody else now relies on.
+type FreshLayer struct {
+	Path  string
+	Mtime time.Time
+}
+
+// EnsureLayersCtx is EnsureLayers that honours ctx (nil = never cancelled):
+// it checks ctx before each layer, and when ctx is cancelled it stops,
+// removes the layers this call built (RemoveFresh) and returns ctx.Err().
+// A conversion already running finishes first (it is one mke2fs/debugfs
+// pass, not interruptible) and is then removed. The returned fresh list
+// lets the caller undo the build if it is cancelled later, before the
+// catalog entry that would keep the layers is written.
+func EnsureLayersCtx(ctx context.Context, cache string, img *Image, logf func(string, ...any)) (built, reused int, fresh []FreshLayer, err error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	ls := UniqueLayers(img.Layers)
 	if err := CheckLayerSlots(len(ls)); err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	convertMu.Lock()
 	defer convertMu.Unlock()
+	cancelled := func() error {
+		if ctx == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			removeFreshLocked(fresh, logf)
+			return err
+		}
+		return nil
+	}
 	for i, l := range ls {
+		if err := cancelled(); err != nil {
+			return built, reused, nil, err
+		}
 		if LayerOK(cache, l) {
 			TouchCached(LayerFile(cache, l.DiffID))
 			reused++
@@ -74,14 +109,49 @@ func EnsureLayers(cache string, img *Image, logf func(string, ...any)) (built, r
 		t := time.Now()
 		st, err := BuildLayer(cache, l)
 		if err != nil {
-			return built, reused, fmt.Errorf("layer %d %s: %w", i+1, Short(l.DiffID), err)
+			return built, reused, fresh, fmt.Errorf("layer %d %s: %w", i+1, Short(l.DiffID), err)
+		}
+		p := LayerFile(cache, l.DiffID)
+		if fi, serr := os.Stat(p); serr == nil {
+			fresh = append(fresh, FreshLayer{Path: p, Mtime: fi.ModTime()})
 		}
 		built++
 		logf("layer %d/%d %s converted in %s: %d entries (%d files, %d dirs, %d symlinks, %d whiteouts, %d opaque)",
 			i+1, len(ls), Short(l.DiffID), time.Since(t).Round(time.Millisecond),
 			st.Entries, st.Files, st.Dirs, st.Symlinks, st.Whiteouts, st.Opaque)
 	}
-	return built, reused, nil
+	if err := cancelled(); err != nil {
+		return built, reused, nil, err
+	}
+	return built, reused, fresh, nil
+}
+
+// RemoveFresh deletes the layers a cancelled add built, except any whose
+// mtime moved since (another add reused it via TouchCached and may be about
+// to write a catalog entry naming it). Taken under convertMu, so it cannot
+// interleave with another EnsureLayers checking or touching the same file.
+func RemoveFresh(fresh []FreshLayer, logf func(string, ...any)) {
+	if len(fresh) == 0 {
+		return
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	convertMu.Lock()
+	defer convertMu.Unlock()
+	removeFreshLocked(fresh, logf)
+}
+
+func removeFreshLocked(fresh []FreshLayer, logf func(string, ...any)) {
+	for _, f := range fresh {
+		fi, err := os.Stat(f.Path)
+		if err != nil || !fi.ModTime().Equal(f.Mtime) {
+			continue
+		}
+		if err := os.Remove(f.Path); err == nil {
+			logf("cancelled: removed layer %s", path.Base(f.Path))
+		}
+	}
 }
 
 // Libc values reported by DetectLibc.
