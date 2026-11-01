@@ -326,3 +326,19 @@ func TestEditGroupImageReadOnly(t *testing.T) {
 		t.Errorf("edit view lacks image/apply hint:\n%s", s)
 	}
 }
+
+// TestRPCTimeoutSpawnOutlivesImageBoot: Spawn blocks until the microVM is up,
+// and the first group on an image also builds tools.img + sys.img first. The
+// live check measured that past the 30s unary default (DeadlineExceeded for a
+// group the daemon then created), so spawn gets its own, longer deadline;
+// every other unary rpc keeps 30s.
+func TestRPCTimeoutSpawnOutlivesImageBoot(t *testing.T) {
+	if got := rpcTimeout("spawn"); got < 2*time.Minute {
+		t.Fatalf("rpcTimeout(spawn) = %s, want >= 2m (image spawn builds tools.img + boots)", got)
+	}
+	for _, c := range []string{"list", "send", "stop", "destroy", "config"} {
+		if got := rpcTimeout(c); got != 30*time.Second {
+			t.Fatalf("rpcTimeout(%s) = %s, want 30s", c, got)
+		}
+	}
+}
