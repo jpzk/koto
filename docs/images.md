@@ -48,7 +48,7 @@ Source: `daemon/image_cli.go` (CLI), `daemon/imagecmd.go` (daemon side).
   `sys.img` (or back to `koto-default` if that was the previous image).
 - `known`: the well-known base images, then every other catalog name, one
   TSV row each: `name label source digest created` (`-` = empty; source is
-  `builtin`, the ref recorded at add/update, else the well-known ref). The list is
+  `builtin`, the ref recorded at add/update, `-` for a catalog entry with none, else the well-known ref). The list is
   defined once in `daemon/ociimage/known.go`:
   - `default` -> `koto-default` (built-in Fedora rootfs, nothing to pull)
   - `debian` -> `docker.io/library/debian:latest`
@@ -75,10 +75,23 @@ preselected and spawns exactly as before (no `image=` key).
   under the Create button), then spawns with `image=<name>`. If the pull
   fails, the error is shown inline with `(group X not created)`: no group
   is spawned, and the catalog is re-read so a retry shows the real state.
+- `Esc` while the add/update runs cancels it: the `Image` rpc is cancelled,
+  the daemon writes no catalog entry (a blob's `.part` file is removed;
+  blobs already fetched and verified stay as cache for `koto image gc`),
+  no group is spawned and the log says `cancelled`. Once the spawn itself
+  has started, `Esc` closes the dialog but the spawn finishes (the daemon
+  may already have created the group); its result is logged.
 - Already in the catalog: the group boots the pinned digest. Press `r` on
   that entry to update it to the latest first (`image update <name>`);
   changing the selection turns that off. A failed update also means no
-  group. Other groups on the old digest are not moved.
+  group. Other groups on the old digest are not moved. An entry with no
+  recorded source (`known` reports source `-`, e.g. added before sources
+  were recorded) has nothing to re-resolve and is not offered `r`; use
+  `koto image update <name> <ref>`.
+- After a failed step, a retry does not repeat an add/update that already
+  succeeded. If the catalog re-read fails, the choices shown stay as they
+  were; if it no longer lists the chosen image, Create asks for a new pick
+  instead of falling back to `default`.
 - If the daemon cannot answer `known` (older daemon), the hint reads
   `image list unavailable: default only` and only `default` is
   offered.
