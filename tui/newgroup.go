@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -76,6 +77,54 @@ type newGroupForm struct {
 	// image add/update printed while the submit runs.
 	img      imagePick
 	progress string
+	// submit is the running submit's sequence id (nextNgGen): its progress
+	// and result messages carry it, anything else is stale and dropped.
+	// gate lets Esc cancel it (submitGate).
+	submit uint64
+	gate   *submitGate
+}
+
+// submitGate is shared by a running submit and the dialog. Esc cancels
+// the image add/update (its rpc context) and, if the spawn has not been
+// started yet, guarantees it never starts. Once the spawn is in flight it is
+// left to finish: the daemon may already have written the group, so a
+// client-side cancel would only lose the answer (findings T03).
+type submitGate struct {
+	mu        sync.Mutex
+	ctx       context.Context
+	cancelFn  context.CancelFunc
+	cancelled bool
+	spawning  bool
+}
+
+func newSubmitGate() *submitGate {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &submitGate{ctx: ctx, cancelFn: cancel}
+}
+
+// cancel is Esc: it reports whether the submit was stopped before its
+// spawn (true) or the spawn is already running (false).
+func (g *submitGate) cancel() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.spawning {
+		return false
+	}
+	g.cancelled = true
+	g.cancelFn()
+	return true
+}
+
+// beginSpawn is the submit's last check before the Spawn rpc: false when
+// Esc got there first.
+func (g *submitGate) beginSpawn() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cancelled || g.ctx.Err() != nil {
+		return false
+	}
+	g.spawning = true
+	return true
 }
 
 func newGroupInput(limit int, placeholder string) textinput.Model {
@@ -111,13 +160,16 @@ func (m *Model) openNewGroup() tea.Cmd {
 	// refetch what this TUI already has (the daemon caches too).
 	f.mp.cache = m.modelsCache
 	m.newGroup = &f
-	return tea.Batch(m.reloadModels(), providersCmd(m.sock), imageKnownCmd())
+	f.img.gen = nextNgGen()
+	return tea.Batch(m.reloadModels(), providersCmd(m.sock), imageKnownCmd(f.img.gen))
 }
 
 // handleImageLoaded feeds an op "known" answer to the open new-group
-// dialog (edit mode shows the image read-only and never asks).
+// dialog (edit mode shows the image read-only and never asks). An answer
+// to an older request (a dialog since closed and reopened, or a reload that
+// was superseded) is dropped.
 func (m *Model) handleImageLoaded(msg imageLoadedMsg) {
-	if f := m.newGroup; f.open && !f.edit.on {
+	if f := m.newGroup; f.open && !f.edit.on && msg.gen == f.img.gen {
 		f.img.loaded(msg)
 	}
 }
@@ -252,6 +304,9 @@ type newGroupPlan struct {
 	// image, "" = none); spawn["image"] carries the name.
 	imageOp string
 	image   string
+	// seq and gate tie the submit to its dialog (newGroupForm.submit/gate).
+	seq  uint64
+	gate *submitGate
 }
 
 // plan validates the form against the known groups and builds the requests.
@@ -263,6 +318,11 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	}
 	if _, exists := groups[g]; exists && g != f.spawned {
 		return newGroupPlan{}, ngName, "group " + g + " already exists"
+	}
+	if f.img.lost != "" && g != f.spawned {
+		// The image chosen before a reload is gone: never fall back to
+		// another image behind the operator's back.
+		return newGroupPlan{}, ngImage, "image " + f.img.lost + " is no longer listed; pick an image"
 	}
 	if f.value("provider") == "" {
 		return newGroupPlan{}, "provider", "no provider has a login on this host"
@@ -316,19 +376,29 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 
 // newGroupResultMsg ends a submit. stage is the step that failed ("" on
 // success); spawned reports whether the spawn step succeeded (or was skipped
-// because it already had).
+// because it already had); imageDone that the image add/update succeeded;
+// cancelled that Esc stopped the submit before its spawn. seq is the
+// submit's id (newGroupForm.submit).
 type newGroupResultMsg struct {
-	group   string
-	stage   string
-	err     error
-	spawned bool
+	seq       uint64
+	group     string
+	stage     string
+	err       error
+	spawned   bool
+	image     string
+	imageDone bool
+	cancelled bool
 }
 
 // newGroupSubmitCmd runs the plan's steps in order, stopping at the first
 // failure. An image add/update comes first and a failure there ends the
 // submit before the spawn: no group on an image that is not in the catalog.
+// The add/update runs under the gate's context, so Esc cancels the rpc (the
+// daemon then writes nothing); the gate is checked again right before the
+// spawn.
 func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 	return func() tea.Msg {
+		res := newGroupResultMsg{seq: p.seq, group: p.group, image: p.image}
 		call := func(op string, extra map[string]any) error {
 			x := map[string]any{"group": p.group}
 			for k, v := range extra {
@@ -338,29 +408,40 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 			return err
 		}
 		if p.imageOp != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
-			err := imageStream(ctx, p.imageOp, []string{p.image}, sendProgress)
+			ctx, cancel := context.WithTimeout(p.gate.ctx, imagePullTimeout)
+			err := imageStream(ctx, p.imageOp, []string{p.image}, sendProgress(p.seq))
 			cancel()
 			if err != nil {
-				return newGroupResultMsg{group: p.group, stage: "image " + p.imageOp + " " + p.image, err: err}
+				res.stage, res.err = "image "+p.imageOp+" "+p.image, err
+				res.cancelled = p.gate.ctx.Err() != nil
+				return res
 			}
+			res.imageDone = true
 		}
 		if p.spawn != nil {
+			if !p.gate.beginSpawn() {
+				res.stage, res.err, res.cancelled = "spawn", context.Canceled, true
+				return res
+			}
 			if err := call("spawn", p.spawn); err != nil {
-				return newGroupResultMsg{group: p.group, stage: "spawn", err: err}
+				res.stage, res.err = "spawn", err
+				return res
 			}
 		}
+		res.spawned = true
 		if p.config != nil {
 			if err := call("config", p.config); err != nil {
-				return newGroupResultMsg{group: p.group, stage: "config", err: err, spawned: true}
+				res.stage, res.err = "config", err
+				return res
 			}
 		}
 		if p.restart {
 			if err := call("restart", nil); err != nil {
-				return newGroupResultMsg{group: p.group, stage: "restart", err: err, spawned: true}
+				res.stage, res.err = "restart", err
+				return res
 			}
 		}
-		return newGroupResultMsg{group: p.group, spawned: true}
+		return res
 	}
 }
 
@@ -384,7 +465,49 @@ func (m *Model) submitNewGroup() tea.Cmd {
 	f.err, f.errAt = "", ""
 	f.busy = true
 	f.progress = ""
+	f.submit, f.gate = nextNgGen(), newSubmitGate()
+	p.seq, p.gate = f.submit, f.gate
 	return newGroupSubmitCmd(m.sock, p)
+}
+
+// cancelNewGroup is Esc on the dialog. A running submit is cancelled first:
+// before its spawn that means no group (the image rpc is cancelled, the
+// daemon writes nothing) and "cancelled" in the log; once the spawn is in
+// flight it finishes and its outcome is logged (handleStaleNewGroupResult).
+func (m *Model) cancelNewGroup() {
+	f := m.newGroup
+	if f.open && f.busy && f.gate != nil {
+		g := strings.TrimSpace(f.name.Value())
+		if f.gate.cancel() {
+			what := "new group " + g + ": cancelled"
+			if io := f.img.cur(); !io.builtin() && f.img.step() != "" {
+				what += " (image " + f.img.step() + " " + io.name + " stopped)"
+			}
+			m.addLine(logLine{kind: "sys", text: what + ", no group created"})
+		} else {
+			m.addLine(logLine{kind: "sys", text: "new group " + g + ": dialog closed, spawn already running; its result follows"})
+		}
+	}
+	m.newGroup = &newGroupForm{}
+}
+
+// handleStaleNewGroupResult: the result of a submit whose dialog is gone
+// (Esc, or reopened). A cancelled one was already logged; a group spawned
+// after the dialog closed is logged and the list refreshed, without moving
+// focus to it; any other failure is logged.
+func (m *Model) handleStaleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
+	switch {
+	case msg.cancelled:
+		return nil
+	case msg.err != nil && msg.spawned:
+		m.addLine(logLine{kind: "err", text: fmt.Sprintf("new group %s: spawned after the dialog closed, but %s: %v", msg.group, msg.stage, msg.err)})
+	case msg.err != nil:
+		m.addLine(logLine{kind: "err", text: fmt.Sprintf("new group %s: %s: %v", msg.group, msg.stage, msg.err)})
+		return nil
+	default:
+		m.addLine(logLine{kind: "sys", text: "spawned " + msg.group + " (dialog was closed)"})
+	}
+	return listCmd(m.sock)
 }
 
 // handleNewGroupResult: success closes the dialog and runs the ordinary
@@ -392,9 +515,18 @@ func (m *Model) submitNewGroup() tea.Cmd {
 // the dialog up with the daemon's error inline.
 func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 	f := m.newGroup
+	if f == nil || !f.open || !f.busy || msg.seq != f.submit {
+		return m.handleStaleNewGroupResult(msg)
+	}
 	f.busy = false
+	f.gate = nil
 	if msg.spawned {
 		f.spawned = msg.group
+	}
+	if msg.imageDone {
+		// The add/update landed: a retry must not repeat it, even before
+		// the catalog reload below answers.
+		f.img.done, f.img.refresh = msg.image, false
 	}
 	if msg.err != nil {
 		text := fmt.Sprintf("%s %s: %v", msg.stage, msg.group, msg.err)
@@ -406,15 +538,15 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 			text = "spawned, but " + text
 		}
 		m.addLine(logLine{kind: "err", text: "new group: " + text})
-		var reload tea.Cmd
-		if f.open {
-			f.err, f.errAt = text, ngCreate
-			// An add may have landed before a later step failed (or the
-			// catalog moved): re-read it so a retry neither re-adds nor
-			// shows a stale "will pull latest".
-			f.img.want = f.img.cur().name
-			reload = imageKnownCmd()
-		}
+		// Image rpc text (a registry's status line) is untrusted: scrub
+		// it like the log line above before it is painted in the dialog.
+		f.err, f.errAt = scrubVTStrict(text), ngCreate
+		// An add may have landed before a later step failed (or the
+		// catalog moved): re-read it so the hints are current. A failed
+		// re-read keeps the options shown (imagePick.loaded).
+		f.img.want = f.img.cur().name
+		f.img.gen = nextNgGen()
+		reload := imageKnownCmd(f.img.gen)
 		if msg.spawned {
 			return tea.Batch(listCmd(m.sock), reload)
 		}
@@ -450,7 +582,7 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case "r":
 			// Arm/disarm "update to latest" — only a pinned image has a
 			// newer tag to resolve; an unpinned one is pulled at latest.
-			if f.img.cur().pinned() {
+			if f.img.cur().updatable() {
 				f.img.refresh = !f.img.refresh
 			}
 			return m, nil
@@ -458,7 +590,7 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	switch s := msg.String(); s {
 	case "esc", "ctrl+c":
-		m.newGroup = &newGroupForm{}
+		m.cancelNewGroup()
 		return m, nil
 	case "tab", "down", "ctrl+n":
 		f.move(1)
@@ -828,7 +960,7 @@ func (m Model) renderNewGroup() string {
 	}
 	if f.field() == ngImage && !f.edit.on {
 		keys = gl("←→ change · tab next · esc cancel", "lt/rt change . tab next . esc cancel")
-		if f.img.cur().pinned() {
+		if f.img.cur().updatable() {
 			keys = gl("←→ change · r update to latest · tab next · esc cancel",
 				"lt/rt change . r update to latest . tab next . esc cancel")
 		}

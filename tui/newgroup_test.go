@@ -48,6 +48,13 @@ type fakeKoto struct {
 	// fails that Image op (imagepick_test.go).
 	known     string
 	failImage string
+	// holdImage makes add/update block until the client cancels; begun is
+	// closed when it starts, cancelled when its rpc context is done.
+	// imageErr overrides the failImage error text.
+	holdImage bool
+	begun     chan struct{}
+	cancelled chan struct{}
+	imageErr  string
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {

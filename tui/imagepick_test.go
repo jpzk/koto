@@ -36,18 +36,30 @@ func knownTSV(created string) string {
 // when empty, like an older daemon); add/update are recorded as
 // "image <op> <args>" and fail when fk.failImage names the op.
 func (f *fakeKoto) Image(r *pb.ImageReq, s grpc.ServerStreamingServer[pb.ImageEvent]) error {
+	f.mu.Lock()
+	known, fail, errText, hold := f.known, f.failImage, f.imageErr, f.holdImage
+	f.mu.Unlock()
 	if r.Op == "known" {
-		if f.known == "" {
+		if known == "" {
 			return status.Error(codes.Unimplemented, "unknown method Image")
 		}
-		return s.Send(&pb.ImageEvent{Event: "data", Data: f.known})
+		return s.Send(&pb.ImageEvent{Event: "data", Data: known})
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, strings.TrimSpace("image "+r.Op+" "+strings.Join(r.Args, " ")))
 	f.mu.Unlock()
 	_ = s.Send(&pb.ImageEvent{Event: "data", Data: "resolving " + strings.Join(r.Args, " ") + "\n"})
-	if f.failImage == r.Op {
-		return s.Send(&pb.ImageEvent{Event: "error", Error: "pull: registry unreachable"})
+	if hold {
+		close(f.begun)
+		<-s.Context().Done()
+		close(f.cancelled)
+		return s.Context().Err()
+	}
+	if fail == r.Op {
+		if errText == "" {
+			errText = "pull: registry unreachable"
+		}
+		return s.Send(&pb.ImageEvent{Event: "error", Error: errText})
 	}
 	return s.Send(&pb.ImageEvent{Event: "end"})
 }
@@ -297,7 +309,8 @@ func TestNewGroupImageProgressShown(t *testing.T) {
 	startFakeKoto(t).known = knownTSV("-")
 	m := openNewGroupLoaded(t)
 	m.newGroup.busy = true
-	nm, _ := m.Update(newGroupProgressMsg{line: "pulling layer 2/3"})
+	m.newGroup.submit = 7
+	nm, _ := m.Update(newGroupProgressMsg{seq: 7, line: "pulling layer 2/3"})
 	m = nm.(Model)
 	if !strings.Contains(stripANSI(m.View()), "pulling layer 2/3") {
 		t.Error("progress line not rendered")

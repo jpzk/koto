@@ -2967,8 +2967,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case newGroupProgressMsg:
-		if f := m.newGroup; f.open && f.busy {
-			f.progress = msg.line
+		// Only the running submit's lines; registry text is untrusted.
+		if f := m.newGroup; f.open && f.busy && msg.seq == f.submit {
+			f.progress = scrubVTStrict(msg.line)
 		}
 		return m, nil
 
