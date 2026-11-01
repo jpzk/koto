@@ -15,8 +15,10 @@ package main
 // on success the dialog closes and the TUI switches to the new group.
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,7 +41,7 @@ const (
 // ports is the last row), then the Create button. Derived from groupOptTable
 // so a new knob there shows up here without a second list.
 func newGroupFields() []string {
-	f := []string{ngName}
+	f := []string{ngName, ngImage}
 	for _, o := range groupOptTable {
 		f = append(f, o.key)
 		if o.key == ngModel {
@@ -70,6 +72,10 @@ type newGroupForm struct {
 	// prov is the Providers answer the provider select filters by
 	// (providers.go).
 	prov provChoice
+	// img is the image select (imagepick.go); progress is the last line an
+	// image add/update printed while the submit runs.
+	img      imagePick
+	progress string
 }
 
 func newGroupInput(limit int, placeholder string) textinput.Model {
@@ -105,7 +111,15 @@ func (m *Model) openNewGroup() tea.Cmd {
 	// refetch what this TUI already has (the daemon caches too).
 	f.mp.cache = m.modelsCache
 	m.newGroup = &f
-	return tea.Batch(m.reloadModels(), providersCmd(m.sock))
+	return tea.Batch(m.reloadModels(), providersCmd(m.sock), imageKnownCmd())
+}
+
+// handleImageLoaded feeds an op "known" answer to the open new-group
+// dialog (edit mode shows the image read-only and never asks).
+func (m *Model) handleImageLoaded(msg imageLoadedMsg) {
+	if f := m.newGroup; f.open && !f.edit.on {
+		f.img.loaded(msg)
+	}
 }
 
 // reloadModels points the model select at the dialog's current provider and
@@ -152,7 +166,7 @@ func (f *newGroupForm) field() string { return f.fields[f.cur] }
 // hidden reports whether field key is currently skipped: the custom-id input
 // only exists while the model select is on "custom…".
 func (f *newGroupForm) hidden(key string) bool {
-	if key == ngName && f.edit.on {
+	if (key == ngName || key == ngImage) && f.edit.on {
 		return true // read-only in edit mode: shown, never focused
 	}
 	return key == ngCustom && !f.mp.isCustom()
@@ -234,6 +248,10 @@ type newGroupPlan struct {
 	spawn   map[string]any
 	config  map[string]any
 	restart bool
+	// imageOp is the catalog step before the spawn ("add" / "update" of
+	// image, "" = none); spawn["image"] carries the name.
+	imageOp string
+	image   string
 }
 
 // plan validates the form against the known groups and builds the requests.
@@ -267,6 +285,10 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 		}
 		if model != "" {
 			p.spawn["model"] = model
+		}
+		if io := f.img.cur(); !io.builtin() {
+			p.spawn["image"] = io.name
+			p.image, p.imageOp = io.name, f.img.step()
 		}
 	}
 	cfg := map[string]any{}
@@ -303,7 +325,8 @@ type newGroupResultMsg struct {
 }
 
 // newGroupSubmitCmd runs the plan's steps in order, stopping at the first
-// failure.
+// failure. An image add/update comes first and a failure there ends the
+// submit before the spawn: no group on an image that is not in the catalog.
 func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 	return func() tea.Msg {
 		call := func(op string, extra map[string]any) error {
@@ -313,6 +336,14 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 			}
 			_, err := daemonCall(sock, op, x)
 			return err
+		}
+		if p.imageOp != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
+			err := imageStream(ctx, p.imageOp, []string{p.image}, sendProgress)
+			cancel()
+			if err != nil {
+				return newGroupResultMsg{group: p.group, stage: "image " + p.imageOp + " " + p.image, err: err}
+			}
 		}
 		if p.spawn != nil {
 			if err := call("spawn", p.spawn); err != nil {
@@ -352,6 +383,7 @@ func (m *Model) submitNewGroup() tea.Cmd {
 	}
 	f.err, f.errAt = "", ""
 	f.busy = true
+	f.progress = ""
 	return newGroupSubmitCmd(m.sock, p)
 }
 
@@ -366,17 +398,27 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 	}
 	if msg.err != nil {
 		text := fmt.Sprintf("%s %s: %v", msg.stage, msg.group, msg.err)
+		if strings.HasPrefix(msg.stage, "image ") {
+			// The catalog step failed: nothing was spawned.
+			text = fmt.Sprintf("%s: %v (group %s not created)", msg.stage, msg.err, msg.group)
+		}
 		if msg.spawned {
 			text = "spawned, but " + text
 		}
 		m.addLine(logLine{kind: "err", text: "new group: " + text})
+		var reload tea.Cmd
 		if f.open {
 			f.err, f.errAt = text, ngCreate
+			// An add may have landed before a later step failed (or the
+			// catalog moved): re-read it so a retry neither re-adds nor
+			// shows a stale "will pull latest".
+			f.img.want = f.img.cur().name
+			reload = imageKnownCmd()
 		}
 		if msg.spawned {
-			return listCmd(m.sock)
+			return tea.Batch(listCmd(m.sock), reload)
 		}
-		return nil
+		return reload
 	}
 	m.newGroup = &newGroupForm{}
 	return m.handleDaemonResp(daemonRespMsg{op: "spawn", group: msg.group})
@@ -393,6 +435,25 @@ func (m Model) handleNewGroupKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if key == ngModel && !locked {
 		if done, cmd := m.handleModelKey(msg); done {
 			return m, cmd
+		}
+	}
+	if key == ngImage && !f.busy {
+		switch msg.String() {
+		case "left", "right", " ":
+			d := 1
+			if msg.String() == "left" {
+				d = -1
+			}
+			f.img.cycle(d)
+			f.clearErr(ngCreate)
+			return m, nil
+		case "r":
+			// Arm/disarm "update to latest" — only a pinned image has a
+			// newer tag to resolve; an unpinned one is pulled at latest.
+			if f.img.cur().pinned() {
+				f.img.refresh = !f.img.refresh
+			}
+			return m, nil
 		}
 	}
 	switch s := msg.String(); s {
@@ -554,6 +615,36 @@ func (m Model) renderNewGroup() string {
 			lines = append(lines, "  "+gray.Render(fmt.Sprintf("%-*s", labelW, key))+"  "+truncCells(f.edit.group, valW-2))
 			continue
 		}
+		if key == ngImage && f.edit.on {
+			// Read-only: changing a group's image is `koto image apply`.
+			v := f.edit.image
+			if v == "" {
+				v = "unknown"
+			}
+			lines = append(lines, "  "+gray.Render(fmt.Sprintf("%-*s", labelW, key))+"  "+truncCells(v, valW-2))
+			continue
+		}
+		if key == ngImage {
+			focused := i == f.cur
+			if focused {
+				curLine = len(lines)
+			}
+			mark, label := "  ", gray.Render(fmt.Sprintf("%-*s", labelW, key))
+			v := f.img.cur().label
+			val := "  " + truncCells(v, valW-2)
+			if focused {
+				mark, label = amber.Render(gl("› ", "> ")), amber.Render(fmt.Sprintf("%-*s", labelW, key))
+				val = amber.Render(gl("‹ ", "< ")) + truncCells(v, valW-4) + amber.Render(gl(" ›", " >"))
+			}
+			lines = append(lines, mark+label+val)
+			pad := strings.Repeat(" ", 2+labelW+2)
+			hs := gray
+			if f.img.state == imagesFailed || f.img.step() != "" {
+				hs = amber // a pull is coming, or the list is degraded
+			}
+			lines = append(lines, pad+hs.Render(truncCells(f.img.hint(focused, time.Now()), inner-len(pad))))
+			continue
+		}
 		if f.hidden(key) {
 			continue
 		}
@@ -586,6 +677,9 @@ func (m Model) renderNewGroup() string {
 			lines = append(lines, "", mark+st.Render(btn))
 			if focused {
 				curLine = len(lines) - 1
+			}
+			if f.busy && f.progress != "" {
+				lines = append(lines, "  "+gray.Render(truncCells(f.progress, inner-2)))
 			}
 			errLine(key)
 			continue
@@ -683,11 +777,18 @@ func (m Model) renderNewGroup() string {
 		lines = append(lines, f.editSummary(inner)...)
 	} else if p, badKey, e := f.plan(m.groups); e == "" {
 		var parts []string
+		if p.imageOp != "" {
+			parts = append(parts, "image "+p.imageOp+" "+p.image)
+		}
 		if p.spawn != nil {
+			img := ""
+			if p.image != "" {
+				img = ", " + p.image
+			}
 			if mv, ok := p.spawn["model"]; ok {
-				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s, %s)", p.group, p.spawn["provider"], mv, p.spawn["size"]))
+				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s, %s%s)", p.group, p.spawn["provider"], mv, p.spawn["size"], img))
 			} else {
-				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s)", p.group, p.spawn["provider"], p.spawn["size"]))
+				parts = append(parts, fmt.Sprintf("spawn %s (%s, %s%s)", p.group, p.spawn["provider"], p.spawn["size"], img))
 			}
 		}
 		if p.config != nil {
@@ -723,6 +824,14 @@ func (m Model) renderNewGroup() string {
 	if f.edit.on {
 		keys = gl("tab/↑↓ move · ←→ change · enter save · esc cancel",
 			"tab/up/dn move . lt/rt change . enter save . esc cancel")
+		keys += gl(" · image: koto image apply <name> ", " . image: koto image apply <name> ") + f.edit.group
+	}
+	if f.field() == ngImage && !f.edit.on {
+		keys = gl("←→ change · tab next · esc cancel", "lt/rt change . tab next . esc cancel")
+		if f.img.cur().pinned() {
+			keys = gl("←→ change · r update to latest · tab next · esc cancel",
+				"lt/rt change . r update to latest . tab next . esc cancel")
+		}
 	}
 	if f.field() == ngModel {
 		keys = gl("←→ change · enter list · tab next · esc cancel",

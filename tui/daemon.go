@@ -176,7 +176,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "list":
 		return cl.List(ctx, &pb.ListReq{})
 	case "spawn":
-		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size")}
+		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size"), Image: s("image")}
 		if b, ok := extra["main"].(bool); ok {
 			r.Main = b
 		}

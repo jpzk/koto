@@ -2962,6 +2962,16 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.handleModelsLoaded(msg)
 		return m, nil
 
+	case imageLoadedMsg:
+		m.handleImageLoaded(msg)
+		return m, nil
+
+	case newGroupProgressMsg:
+		if f := m.newGroup; f.open && f.busy {
+			f.progress = msg.line
+		}
+		return m, nil
+
 	case providersLoadedMsg:
 		return m, m.handleProvidersLoaded(msg)
 

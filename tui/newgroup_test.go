@@ -44,6 +44,10 @@ type fakeKoto struct {
 	// providers is the Providers RPC answer; nil = Unimplemented (an older
 	// daemon), which the dialog treats as "check unavailable".
 	providers *pb.ProvidersResp
+	// known is the Image op "known" answer ("" = Unimplemented); failImage
+	// fails that Image op (imagepick_test.go).
+	known     string
+	failImage string
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {
@@ -69,7 +73,7 @@ func (f *fakeKoto) got() []string {
 
 func (f *fakeKoto) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, error) {
 	kv := map[string]string{"group": r.Group}
-	for k, v := range map[string]string{"provider": r.Provider, "model": r.Model, "size": r.Size} {
+	for k, v := range map[string]string{"provider": r.Provider, "model": r.Model, "size": r.Size, "image": r.Image} {
 		if v != "" {
 			kv[k] = v
 		}
@@ -340,7 +344,7 @@ func TestNewGroupCyclesAllowlist(t *testing.T) {
 	// Navigation: shift+tab and up go back; ctrl+n / ctrl+p move too.
 	m = gotoField(t, m, "provider")
 	m = press(t, m, tea.KeyShiftTab)
-	if m.newGroup.field() != ngName {
+	if m.newGroup.field() != ngImage { // name, image, provider, ...
 		t.Fatalf("shift+tab from provider landed on %q", m.newGroup.field())
 	}
 	m = press(t, m, tea.KeyCtrlN)
@@ -348,7 +352,7 @@ func TestNewGroupCyclesAllowlist(t *testing.T) {
 		t.Fatalf("ctrl+n in dialog landed on %q", m.newGroup.field())
 	}
 	m = press(t, m, tea.KeyUp)
-	if m.newGroup.field() != ngName {
+	if m.newGroup.field() != ngImage {
 		t.Fatalf("up landed on %q", m.newGroup.field())
 	}
 }
