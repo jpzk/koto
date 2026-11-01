@@ -41,6 +41,9 @@ type editState struct {
 	// restartPending: an earlier save landed but its restart failed, so the
 	// button still offers the restart with nothing left to send.
 	restartPending bool
+	// image is the group's catalog image from the config read (read-only
+	// in the dialog; "" = unknown).
+	image string
 }
 
 // locked reports whether key can't be edited: in edit mode while the read
@@ -211,6 +214,7 @@ func (m *Model) handleEditRead(msg editReadMsg) tea.Cmd {
 		f.edit.orig = origFromGroup(gi, ok)
 	} else {
 		f.edit.orig = origFromConfig(msg.cfg)
+		f.edit.image, _ = msg.cfg["image"].(string)
 	}
 	for _, o := range groupOptTable {
 		if v, ok := f.edit.orig[o.key]; ok && !o.text {

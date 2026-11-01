@@ -14,7 +14,9 @@ import (
 )
 
 const imageUsage = `usage: koto image <op> [args]
-  add <name> <ref>            pull <ref> (tag or @digest), pin its digest under <name>
+  add <name> [<ref>]          pull <ref> (tag or @digest), pin its digest under <name>;
+                              <ref> may be omitted for debian, ubuntu, kali (latest)
+  known                       the well-known images + catalog names (TSV, for pickers)
   ls                          list catalog names, digests, users
   inspect <name>              show one image (layers, created, libc, groups)
   rm <name>                   remove a name (refused while a group uses it)

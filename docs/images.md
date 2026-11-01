@@ -46,8 +46,61 @@ Source: `daemon/image_cli.go` (CLI), `daemon/imagecmd.go` (daemon side).
   start.
 - `rollback <group>`: back to the previous digest and its archived
   `sys.img` (or back to `koto-default` if that was the previous image).
+- `known`: the well-known base images, then every other catalog name, one
+  TSV row each: `name label source digest created` (`-` = empty; source is
+  `builtin`, the ref recorded at add/update, `-` for a catalog entry with none, else the well-known ref). The list is
+  defined once in `daemon/ociimage/known.go`:
+  - `default` -> `koto-default` (built-in Fedora rootfs, nothing to pull)
+  - `debian` -> `docker.io/library/debian:latest`
+  - `ubuntu` -> `docker.io/library/ubuntu:latest`
+  - `kali` -> `docker.io/kalilinux/kali-rolling:latest`
+
+  `add <name>` without a ref works for these names: the daemon fills in the
+  ref from that list. "latest" is resolved to a digest at add time and
+  pinned like any other entry.
 
 Image age is logged, never enforced: koto has no age gate (`ociimage.Pull`).
+
+## TUI: picking the image for a new group
+
+The new-group dialog (`ctrl+n`) has an **image** field right after the
+name. Its choices come from the daemon (`Image` op `known`): `default`,
+`debian`, `ubuntu`, `kali`, then every other catalog name. `default` is
+preselected and spawns exactly as before (no `image=` key).
+
+- `←` / `→` cycle the choices. Each one shows a hint: `built-in rootfs`,
+  `pinned sha256:<12> · <age>` when already in the catalog, or
+  `will pull latest (<ref>)` when not.
+- Not yet in the catalog: Create runs `image add <name>` first (progress
+  under the Create button), then spawns with `image=<name>`. If the pull
+  fails, the error is shown inline with `(group X not created)`: no group
+  is spawned, and the catalog is re-read so a retry shows the real state.
+- `Esc` while the add/update runs cancels it: the `Image` rpc is cancelled,
+  the daemon writes no catalog entry (a blob's `.part` file is removed;
+  layers already converted for this add are removed, and the build stops
+  before the next layer; blobs already fetched and verified stay as cache
+  for `koto image gc`),
+  no group is spawned and the log says `cancelled`. Once the spawn itself
+  has started, `Esc` closes the dialog but the spawn finishes (the daemon
+  may already have created the group); its result is logged.
+- Already in the catalog: the group boots the pinned digest. Press `r` on
+  that entry to update it to the latest first (`image update <name>`);
+  changing the selection turns that off. A failed update also means no
+  group. Other groups on the old digest are not moved. An entry with no
+  recorded source (`known` reports source `-`, e.g. added before sources
+  were recorded) has nothing to re-resolve and is not offered `r`; use
+  `koto image update <name> <ref>`.
+- After a failed step, a retry does not repeat an add/update that already
+  succeeded. If the catalog re-read fails, the choices shown stay as they
+  were; if it no longer lists the chosen image, Create asks for a new pick
+  instead of falling back to `default`.
+- If the daemon cannot answer `known` (older daemon), the hint reads
+  `image list unavailable: default only` and only `default` is
+  offered.
+
+The edit dialog (`ctrl+e`) shows the group's image read-only. Changing the
+image of an existing group is `koto image apply <name> <group>` (see
+above).
 
 ## Group config
 

@@ -29,6 +29,25 @@ type imageEnv struct {
 	lock    func(g string) func() // group op lock (groupOpLock); nil = none
 	tools   func() string         // basename of the tools image in use ("" = unknown)
 	now     func() time.Time
+	// pull fetches an image into the store (nil = client.Pull); tests swap it.
+	pull func(ociimage.Ref, string) (*ociimage.Image, error)
+}
+
+// cancelled is the Image rpc's context error (client went away or pressed
+// Esc), nil while it is live or when no context is attached.
+func (env imageEnv) cancelled() error {
+	if env.client == nil || env.client.Ctx == nil {
+		return nil
+	}
+	return env.client.Ctx.Err()
+}
+
+// ctx is the Image rpc's context (Background when none is attached).
+func (env imageEnv) ctx() context.Context {
+	if env.client == nil || env.client.Ctx == nil {
+		return context.Background()
+	}
+	return env.client.Ctx
 }
 
 func defaultImageEnv(ctx context.Context) imageEnv {
@@ -114,10 +133,22 @@ func fmtTime(t time.Time) string {
 func imageRun(env imageEnv, op string, args []string, all bool, out func(string, ...any)) error {
 	switch op {
 	case "add":
+		// The ref is optional for a well-known name (ociimage.Known): the
+		// daemon's list supplies it, so clients never carry a ref of their own.
+		if len(args) == 1 {
+			if ref, ok := ociimage.KnownRef(args[0]); ok {
+				args = append(args, ref)
+			}
+		}
 		if err := imageArgs(op, args, 2, "<name> <ref>"); err != nil {
 			return err
 		}
 		return imageFetch(env, args[0], args[1], false, out)
+	case "known":
+		if err := imageArgs(op, args, 0, ""); err != nil {
+			return err
+		}
+		return imageKnown(env, out)
 	case "update":
 		if len(args) < 1 || len(args) > 2 {
 			return fmt.Errorf("usage: koto image update <name> [<ref>]")
@@ -175,9 +206,9 @@ func imageRun(env imageEnv, op string, args []string, all bool, out func(string,
 		}
 		return imageRollback(env, args[0], out)
 	case "":
-		return errors.New("usage: koto image add|ls|inspect|rm|gc|update|apply|rollback")
+		return errors.New("usage: koto image add|ls|known|inspect|rm|gc|update|apply|rollback")
 	}
-	return fmt.Errorf("unknown image op %q (add|ls|inspect|rm|gc|update|apply|rollback)", op)
+	return fmt.Errorf("unknown image op %q (add|ls|known|inspect|rm|gc|update|apply|rollback)", op)
 }
 
 // imageFetch is add (new name) and update (existing name, moves it). The
@@ -215,8 +246,19 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	cl := env.client
 	cl.Logf = func(f string, a ...any) { out("  "+f, a...) }
 	out("pulling %s", refStr)
-	img, err := cl.Pull(ref, env.store.Root)
+	pull := cl.Pull
+	if env.pull != nil {
+		pull = env.pull
+	}
+	img, err := pull(ref, env.store.Root)
 	if err != nil {
+		return err
+	}
+	// A cancelled rpc (the TUI's Esc mid-pull) stops before any layer is
+	// built and, below, before the catalog is touched: blob .part files are
+	// removed by the client; completed, verified blobs stay as cache for
+	// `koto image gc`.
+	if err := env.cancelled(); err != nil {
 		return err
 	}
 	if err := ociimage.CheckLayerSlots(len(fcImageDedup(img.Layers))); err != nil {
@@ -225,7 +267,10 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	if err := ociimage.CheckImpliedParents(env.store.Root, img.Layers); err != nil {
 		return fmt.Errorf("image %s: %w", name, err)
 	}
-	built, reused, err := ociimage.EnsureLayers(env.store.Root, img, cl.Logf)
+	// The layer build honours the cancel too (PR 94 live check: an Esc
+	// that landed just after the last blob let a 170 MB layer convert and
+	// stay on disk): it stops between layers and removes what it built.
+	built, reused, fresh, err := ociimage.EnsureLayersCtx(env.ctx(), env.store.Root, img, cl.Logf)
 	if err != nil {
 		return err
 	}
@@ -235,6 +280,12 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	}
 	var prev string
 	if err := env.store.Update(func(c *ociimage.Catalog) error {
+		// Re-checked under the catalog lock: a cancel that landed while
+		// the layers were converting (or the lock was contended) writes
+		// nothing.
+		if err := env.cancelled(); err != nil {
+			return err
+		}
 		if cur, ok := c.Names[name]; ok != update {
 			if ok {
 				return fmt.Errorf("image %q was added concurrently (%s)", name, ociimage.Short(cur))
@@ -252,6 +303,12 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 		c.Sources[name] = refStr
 		return nil
 	}); err != nil {
+		// Cancelled before the catalog entry was written: nothing names
+		// the layers this add built, so they go (blobs stay as verified
+		// cache for `koto image gc`).
+		if env.cancelled() != nil {
+			ociimage.RemoveFresh(fresh, cl.Logf)
+		}
 		return err
 	}
 	out("%s: %s", name, img.Ref)
@@ -535,4 +592,62 @@ func (env imageEnv) lockGroup(g string) func() {
 		return func() {}
 	}
 	return env.lock(g)
+}
+
+// imageKnown is the picker view (op "known"): the well-known images
+// (ociimage.Known) in their order, then every other catalog name, one
+// tab-separated row each after a "#" header:
+//
+//	name  label  source  digest  created
+//
+// source is the registry ref (well-known) or the recorded add/update source
+// ("builtin" for koto-default, "-" when none); digest is the pinned digest,
+// "-" when the name is not in the catalog yet (a picker shows "will pull
+// latest" and adds it with `image add <name>`); created is RFC 3339 or "-".
+// Fields never contain a tab: names are [a-z0-9._-], refs have no spaces.
+func imageKnown(env imageEnv, out func(string, ...any)) error {
+	c, err := env.store.Load()
+	if err != nil {
+		return err
+	}
+	dash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	row := func(name, label, src string) {
+		dg, created := "-", "-"
+		if e, ok := c.Lookup(name); ok && !e.Builtin {
+			dg = e.Digest
+			if !e.Created.IsZero() {
+				created = e.Created.UTC().Format(time.RFC3339)
+			}
+		}
+		out("%s\t%s\t%s\t%s\t%s", name, label, dash(src), dg, created)
+	}
+	out("# name\tlabel\tsource\tdigest\tcreated")
+	seen := map[string]bool{}
+	for _, k := range ociimage.Known() {
+		seen[k.Name] = true
+		src := k.Ref
+		switch {
+		case k.Name == ociimage.DefaultName:
+			src = "builtin"
+		case c.Sources[k.Name] != "":
+			src = c.Sources[k.Name] // what update re-resolves
+		case c.Names[k.Name] != "":
+			// In the catalog without a recorded source (a v1 catalog):
+			// update has nothing to re-resolve, so report none rather than
+			// the well-known ref it would not use.
+			src = ""
+		}
+		row(k.Name, k.Label, src)
+	}
+	for _, n := range c.SortedNames() {
+		if !seen[n] {
+			row(n, n, c.Sources[n])
+		}
+	}
+	return nil
 }

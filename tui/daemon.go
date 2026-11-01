@@ -133,7 +133,7 @@ func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout(cmd))
 	defer cancel()
 
 	// One log line per unary RPC — the single choke point every command,
@@ -166,6 +166,22 @@ func daemonCall(_ string, cmd string, extra map[string]any) (map[string]any, err
 	return out, nil
 }
 
+// spawnTimeout bounds a Spawn rpc. Spawn returns only once the microVM is up,
+// and the first group on an image also builds tools.img and a fresh sys.img
+// before booting: measured 23s for tools.img alone plus the boot on a nested
+// KVM host, so the 30s unary default reported DeadlineExceeded for a group
+// the daemon went on to create. Generous rather than tight: the daemon has
+// its own boot deadline, this only stops a hung connection pinning the dialog.
+const spawnTimeout = 5 * time.Minute
+
+// rpcTimeout is the deadline daemonCall gives one unary rpc.
+func rpcTimeout(cmd string) time.Duration {
+	if cmd == "spawn" {
+		return spawnTimeout
+	}
+	return 30 * time.Second
+}
+
 func s2(v any) string { s, _ := v.(string); return s }
 
 func sinceMs(t0 time.Time) time.Duration { return time.Since(t0).Round(time.Millisecond) }
@@ -176,7 +192,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "list":
 		return cl.List(ctx, &pb.ListReq{})
 	case "spawn":
-		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size")}
+		r := &pb.SpawnReq{Group: s("group"), Provider: s("provider"), Model: s("model"), Size: s("size"), Image: s("image")}
 		if b, ok := extra["main"].(bool); ok {
 			r.Main = b
 		}
