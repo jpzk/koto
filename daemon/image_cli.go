@@ -1,7 +1,8 @@
 package main
 
 // `koto image <op> ...` client: a thin streaming wrapper over the admin-only
-// Image rpc (imagecmd.go does the work in the daemon).
+// Image rpc (imagecmd.go does the work in the daemon). Connects as the admin
+// client `tui` unless KOTO_CLIENT is set (imageCliDefaultIdentity, ctl_cli.go).
 
 import (
 	"context"
@@ -53,7 +54,7 @@ func imageCliMain(args []string) {
 		}
 		ctlFatal(2, "%v", err)
 	}
-	stream, err := ctlClient().Image(context.Background(), req)
+	stream, err := ctlClientAs(imageCliDefaultIdentity).Image(context.Background(), req)
 	if err != nil {
 		ctlFatal(1, "image: %v", err)
 	}

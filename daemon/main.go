@@ -71,8 +71,9 @@ func main() {
 		// entry point.
 		usernsProbeMain()
 	case "spawn":
-		// Shorthand for `koto ctl spawn` (koto spawn <group> --image <name>).
-		ctlCliMain(append([]string{"spawn"}, os.Args[2:]...))
+		// Shorthand for `koto ctl spawn` (koto spawn <group> --image <name>);
+		// with --image it defaults to the admin client tui (spawnCliIdentity).
+		ctlSpawn(os.Args[2:], true)
 	case "image":
 		// OCI image catalog (docs/images.md): add/ls/inspect/rm/gc/update/
 		// apply/rollback over the admin-only Image rpc.

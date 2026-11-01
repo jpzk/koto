@@ -22,6 +22,8 @@ digest; groups are pinned to that digest, never to a moving tag.
 
 ## Commands (`koto image`, admin-only rpc `Image`)
 
+`koto image` and `koto spawn --image` run as the admin client `tui` by default (KOTO_CLIENT overrides); they need read access to the daemon creds dir. `koto ctl` keeps the `agent` default, so `koto ctl spawn -image` / `koto ctl config -image` need `KOTO_CLIENT=tui`.
+
 Source: `daemon/image_cli.go` (CLI), `daemon/imagecmd.go` (daemon side).
 
 - `add <name> <ref>`: pull `<ref>` (tag or `@sha256:` digest), verify every
