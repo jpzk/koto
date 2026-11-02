@@ -57,15 +57,22 @@ for st in tmux tree; do
 done
 
 echo "[$(ts)] 3/4 normalise + mke2fs"
+# Disk budget: keep at most one copy of the ~1G payload on disk. The tree
+# is unpacked into a tmpfs inside a long-lived helper container, the tree
+# image is dropped, and only then does mke2fs write guest.img.
 CID=$("$CONTAINER" create koto-guest-tree)
-trap '"$CONTAINER" rm -f "$CID" >/dev/null 2>&1 || true' EXIT
-rm -f "$OUT"
-"$CONTAINER" cp "$CID:/g" - | "$CONTAINER" run --rm -i --cpus="$CPUS" \
-  --security-opt label=disable --network=none \
+MK=$("$CONTAINER" run -d --cpus="$CPUS" --security-opt label=disable --network=none \
+  --tmpfs "/s:rw,size=${GUEST_TMPFS:-1800m},mode=0755" \
   -v "$OUTDIR:/out" \
   -e CHOWN_TO="$CHOWN_TO" -e SDE="$SOURCE_DATE_EPOCH" -e GUEST_UUID="$GUEST_UUID" \
-  koto-guest-tmux sh -eu -c '
-    mkdir /s; tar -C /s -xf - --no-same-owner; T=/s/g
+  koto-guest-tmux sleep 86400)
+trap '"$CONTAINER" rm -f -t 0 "$CID" "$MK" >/dev/null 2>&1 || true' EXIT
+rm -f "$OUT"
+"$CONTAINER" cp "$CID:/g" - | "$CONTAINER" exec -i "$MK" tar -C /s -xf - --no-same-owner
+"$CONTAINER" rm -f "$CID" >/dev/null
+"$CONTAINER" rmi -f koto-guest-tree >/dev/null
+"$CONTAINER" exec "$MK" sh -eu -c '
+    T=/s/g
     chown -R 0:0 "$T"
     find "$T" -type d -exec chmod 0755 {} +
     find "$T" -type f -perm /111 -exec chmod 0755 {} +
@@ -89,6 +96,7 @@ rm -f "$OUT"
     chown "$CHOWN_TO" /out/guest.img
     echo "files=$N data=$DATA size=${MB}M"
   '
+"$CONTAINER" rm -f -t 0 "$MK" >/dev/null
 chmod 0444 "$OUT"
 echo "[$(ts)] 4/4 done"
 ls -l "$OUT"
