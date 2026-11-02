@@ -1,5 +1,5 @@
 # Every build target is keyed on the REAL FILE it produces — the koto and
-# koto-tui binaries, fcassets/{firecracker,vmlinux,rootfs.img} — compared
+# koto-tui binaries, fcassets/{firecracker,vmlinux,guest.img} — compared
 # against its actual source inputs, so a target is a no-op once its output is
 # current and rebuilds the moment the output is deleted or its inputs change.
 # (The .build/ marker files this used to use are gone; `clean` still removes
@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs assets dist release
+.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-10-09 via proxy.golang.org:
@@ -31,7 +31,7 @@ PROTOC_GEN_GO_GRPC_VER := v1.6.2
 #   make build && make install && make wizard      build it yourself — ~40 min
 #
 # The two acquire routes produce the SAME five files: ./koto, ./koto-tui, and
-# fcassets/{firecracker,vmlinux,rootfs.img}. Nothing downstream can tell which
+# fcassets/{firecracker,vmlinux,guest.img}. Nothing downstream can tell which
 # route produced them.
 #
 # WHY BOTH ROUTES. `make fetch` is for people who want to run koto. `make
@@ -131,7 +131,7 @@ KOTO_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || date
 # The five files that ARE koto at runtime. Both acquisition routes produce
 # exactly these, and nothing downstream can tell which route did it.
 FCASSETS  := fcassets
-ARTIFACTS := koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux $(FCASSETS)/rootfs.img
+ARTIFACTS := koto koto-tui $(FCASSETS)/firecracker $(FCASSETS)/vmlinux $(FCASSETS)/guest.img
 # go.mod/go.sum, go.work and this Makefile are prerequisites too: a dependency
 # bump or a GO_IMAGE change produces different bytes with not one *.go touched,
 # and until 2026-09-05 `make koto` silently kept the stale binary after exactly
@@ -156,7 +156,7 @@ build:
 	$(MAKE) koto-tui
 	$(MAKE) firecracker
 	$(MAKE) kernel
-	$(MAKE) rootfs
+	$(MAKE) guest
 	@echo
 	@echo "built: $(ARTIFACTS)"
 	@echo "next:  make install"
@@ -188,7 +188,7 @@ setup:
 # file:// path included; the check does not change. The work itself is
 # install.sh's — `make fetch` is that script run against the clone.
 #
-# The manifest lists the artifacts as INSTALLED, not as transferred: rootfs.img
+# The manifest lists the artifacts as INSTALLED, not as transferred: guest.img
 # ships compressed and is checked after decompression. It vouches for the
 # download route only — a local `make build` does not reproduce these bytes
 # and is not held to them.
@@ -202,7 +202,8 @@ MANIFEST      := artifacts.sha256
 #   koto-tui_1.0.0_x86_64.zst        ditto
 #   firecracker_1.17.0_x86_64.zst    from `firecracker --version`
 #   vmlinux_6.1.186_x86_64.zst       from the "Linux version" string in the image
-#   rootfs.img_fedora44_x86_64.zst   from /usr/lib/os-release inside the image
+#   guest.img_1.9.0_x86_64.zst       koto's version, from share/koto/MANIFEST
+#                                    inside the image (stamped by build-guest.sh)
 #
 # Underscores separate the fields because names (koto-tui) and versions never
 # contain one, so install.sh can split a name without knowing the version.
@@ -226,6 +227,8 @@ $$(case "$(1)" in \
   koto)          ./koto version 2>/dev/null ;; \
   */firecracker) ./$(1) --version 2>/dev/null | head -1 | sed 's/^Firecracker v//' ;; \
   */vmlinux)     grep -a -m1 -oE 'Linux version [0-9][^ ]*' $(1) | cut -d' ' -f3 ;; \
+  */guest.img)   debugfs -R "cat /share/koto/MANIFEST" $(1) 2>/dev/null | \
+                   sed -n 's/^version=//p' | head -1 ;; \
   */rootfs.img)  debugfs -R "cat /usr/lib/os-release" $(1) 2>/dev/null | \
                    awk -F= '/^ID=/{gsub(/"/,"",$$2);i=$$2} /^VERSION_ID=/{gsub(/"/,"",$$2);v=$$2} END{print i v}' ;; \
   *)             echo "$(DIST_VERSION)" | sed 's/^v//' ;; \
@@ -289,8 +292,8 @@ fetch:
 # to move into the tree.
 #
 # Run this on the machine whose build you are publishing. The builds do not
-# reproduce bit-for-bit (koto stamps `git describe`, vmlinux and rootfs.img
-# embed build timestamps and resolved package versions), so the published
+# reproduce bit-for-bit (koto stamps `git describe`, vmlinux
+# embeds a build timestamp; guest.img alone is reproducible, see build-repro), so the published
 # checksums have to come from THIS build, not from a later rebuild of the same
 # commit — and a from-source build is never held to them.
 dist: $(ARTIFACTS)
@@ -314,6 +317,11 @@ dist: $(ARTIFACTS)
 	  if [ "$$a" = koto ] && [ "$$v" != "$(DIST_VERSION)" ]; then \
 	    echo "koto reports version '$$v', but this is release $(DIST_VERSION)."; \
 	    echo "build it from a clean checkout of tag $(DIST_VERSION), so git describe stamps exactly that."; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$a" = $(FCASSETS)/guest.img ] && [ "$$v" != "$(DIST_VERSION)" ]; then \
+	    echo "guest.img is stamped '$$v', but this is release $(DIST_VERSION)."; \
+	    echo "rebuild it from the tag (make guest), so build-guest.sh stamps exactly that."; \
 	    exit 1; \
 	  fi; \
 	  out="$(DIST_DIR)/$$(basename $$a)_$${v}_$(DIST_ARCH).zst"; \
@@ -739,7 +747,7 @@ dev-tui: koto koto-tui
 
 # One-time bootstrap. Identities are COPIED from the clone's creds/ so the
 # `koto ctl` identities you already have keep working (same CA); the guest
-# assets are HARDLINKED, because rootfs.img is 2GB and a dev instance has no
+# assets are HARDLINKED, because guest.img (and a legacy rootfs.img) are ~1-2GB and a dev instance has no
 # reason to own a second copy of it. Delete .dev/ to start over.
 $(DEV)/.stamp:
 	@mkdir -p $(DEV)/groups $(DEV)/creds $(DEV)/fcassets $(DEV)/prompts $(DEV)/run
@@ -752,7 +760,7 @@ $(DEV)/.stamp:
 	  [ -e creds/$$f ] && cp -a creds/$$f $(DEV)/creds/ || true; done
 	@cp -a creds/client-*.crt creds/client-*.key creds/token-* $(DEV)/creds/ 2>/dev/null || true
 	@cp -a prompts/*.md $(DEV)/prompts/ 2>/dev/null || true
-	@for a in firecracker vmlinux rootfs.img; do \
+	@for a in firecracker vmlinux guest.img rootfs.img; do [ -e fcassets/$$a ] || continue; \
 	  ln -f fcassets/$$a $(DEV)/fcassets/$$a 2>/dev/null || cp fcassets/$$a $(DEV)/fcassets/$$a; done
 	@touch $@
 	@echo "created $(DEV) (state dir for the dev daemon)"
@@ -967,7 +975,22 @@ $(FCASSETS)/rootfs.img: $(FCGUEST_SRC)
 
 rootfs: $(FCASSETS)/rootfs.img
 
-assets: firecracker kernel rootfs
+# guest.img: what koto needs INSIDE a group VM and nothing else (fc-agent,
+# node + npm, the agent CLIs, static tmux, the sidecar scripts), mounted
+# read-only at /opt/koto over the group's OCI image. Built only from pinned
+# inputs and reproducible: same commit, same bytes. This is the released
+# guest asset from 1.9.0; the monolithic rootfs above is kept buildable for
+# one release as the image=koto-default / offline fallback (design.md).
+GUEST_SRC := $(filter-out %_test.go,$(wildcard fcguest/*.go)) fcguest/go.mod fcguest/go.sum \
+  fcguest/Dockerfile.guest fcguest/build-guest.sh $(wildcard fcguest/guest/*) \
+  $(wildcard fcguest/pi/install/*) fcguest/pi/models.minimax.json $(SIDECAR_SRC) $(PROTOCOL_SRC)
+$(FCASSETS)/guest.img: $(GUEST_SRC)
+	./fcguest/build-guest.sh
+	$(prune-dangling)
+
+guest: $(FCASSETS)/guest.img
+
+assets: firecracker kernel guest
 
 # clean is SAFE: stops the daemon and removes runtime droppings (logs,
 # metrics, run/, build sentinels). Group workspaces — every agent's session

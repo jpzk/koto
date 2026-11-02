@@ -433,10 +433,16 @@ func fcPreflight() error {
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		return fmt.Errorf("firecracker runtime: /dev/kvm not available in cs_host (re-run `make host-run` on a KVM-capable host; run-host.sh passes --device /dev/kvm when present)")
 	}
-	for _, p := range []string{fcBinPath(), fcKernelPath(), fcRootfsPath()} {
+	for _, p := range []string{fcBinPath(), fcKernelPath()} {
 		if _, err := os.Stat(p); err != nil {
 			return fmt.Errorf("firecracker runtime: missing asset %s (run `make assets`)", p)
 		}
+	}
+	// The guest image: guest.img from 1.9.0; a host that only has the 1.8.0
+	// rootfs.img still boots (legacy fallback, one release). Which one a
+	// given group uses is fcImagePlanFor's call, with its own errors.
+	if !fileExists(fcGuestPath()) && !fileExists(fcRootfsPath()) {
+		return fmt.Errorf("firecracker runtime: missing asset %s (run `make assets`)", fcGuestPath())
 	}
 	return nil
 }

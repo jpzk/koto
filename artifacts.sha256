@@ -9,7 +9,7 @@
 # they vouch for, so a compromised mirror cannot vouch for itself.
 #
 # It vouches for the DOWNLOAD route only. The builds are not reproducible (koto
-# stamps `git describe`; vmlinux and rootfs.img embed build timestamps and
+# stamps `git describe`; vmlinux and the pre-1.9 rootfs.img embed build timestamps and
 # resolved package versions), so `make build` output will not match these
 # lines, and nothing holds it to them — `make install` checks presence only.
 #
@@ -18,7 +18,7 @@
 #   <sha256>  koto-tui
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/rootfs.img
+#   <sha256>  fcassets/guest.img     (fcassets/rootfs.img up to 1.8.x)
 #
 # Empty until the first release is published. Until then DIST_VERSION in the
 # Makefile reads "unreleased" and `make fetch` says so rather than 404ing.

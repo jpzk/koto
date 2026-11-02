@@ -78,7 +78,7 @@ func sec172Good() string {
 }
 
 func sec172AllAssets(ver string) []string {
-	return []string{"koto_" + ver, "koto-tui_" + ver, "firecracker_1.17.0", "vmlinux_6.1.186", "rootfs.img_fedora44"}
+	return []string{"koto_" + ver, "koto-tui_" + ver, "firecracker_1.17.0", "vmlinux_6.1.186", "guest.img_" + ver}
 }
 
 // runInstallFetch serves rel from a file:// mirror and runs
@@ -162,7 +162,7 @@ func TestSec172ReleaseAcceptsBoundSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a correctly bound, complete, well-signed 1.7.2 set was refused: %v\n%s", err, out)
 	}
-	for _, rel := range []string{"koto", "koto-tui", "fcassets/firecracker", "fcassets/vmlinux", "fcassets/rootfs.img"} {
+	for _, rel := range []string{"koto", "koto-tui", "fcassets/firecracker", "fcassets/vmlinux", "fcassets/guest.img"} {
 		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
 			t.Errorf("%s not unpacked: %v\n%s", rel, err, out)
 		}
@@ -174,6 +174,23 @@ func TestSec172ReleaseAcceptsBoundSet(t *testing.T) {
 		gpgStatus:   sec172Good(),
 	}, "v1.7.2"); err != nil {
 		t.Fatalf("--version v1.7.2 refused a 1.7.2 set: %v\n%s", err, out)
+	}
+}
+
+// Rollback: this installer must still install a pre-guest.img release
+// (1.8.x shipped the monolithic rootfs.img_fedora44), so
+// `install.sh --version 1.8.0` works from a 1.9 host.
+func TestReleaseAcceptsLegacyRootfsSet(t *testing.T) {
+	err, out, dest := runInstallFetch(t, sec172Release{
+		versionLine: "# koto-version: 1.8.0",
+		assets:      []string{"koto_1.8.0", "koto-tui_1.8.0", "firecracker_1.17.0", "vmlinux_6.1.186", "rootfs.img_fedora44"},
+		gpgStatus:   sec172Good(),
+	}, "1.8.0")
+	if err != nil {
+		t.Fatalf("a well-signed 1.8.0 (rootfs.img) set was refused: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "fcassets/rootfs.img")); err != nil {
+		t.Errorf("fcassets/rootfs.img not unpacked: %v\n%s", err, out)
 	}
 }
 
@@ -191,13 +208,19 @@ func TestSec172ReleaseRefusesUnboundOrIncompleteSet(t *testing.T) {
 		{"two version lines",
 			sec172Release{"# koto-version: 1.7.2\n# koto-version: 1.7.1", sec172AllAssets("1.7.2"), sec172Good(), 0}, "1.7.2", "exactly one koto-version"},
 		{"koto asset from another release",
-			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.1", "koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "rootfs.img_fedora44"}, sec172Good(), 0}, "1.7.2", "not koto 1.7.2"},
+			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.1", "koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "guest.img_1.7.2"}, sec172Good(), 0}, "1.7.2", "not koto 1.7.2"},
 		{"koto-tui missing (clone binary fallback)",
-			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "rootfs.img_fedora44"}, sec172Good(), 0}, "1.7.2", "has no koto-tui asset"},
+			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "guest.img_1.7.2"}, sec172Good(), 0}, "1.7.2", "has no koto-tui asset"},
 		{"koto missing",
-			sec172Release{"# koto-version: 1.7.2", []string{"koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "rootfs.img_fedora44"}, sec172Good(), 0}, "1.7.2", "has no koto asset"},
-		{"rootfs listed twice",
-			sec172Release{"# koto-version: 1.7.2", append(sec172AllAssets("1.7.2"), "rootfs.img_fedora43"), sec172Good(), 0}, "1.7.2", "twice"},
+			sec172Release{"# koto-version: 1.7.2", []string{"koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "guest.img_1.7.2"}, sec172Good(), 0}, "1.7.2", "has no koto asset"},
+		{"guest.img listed twice",
+			sec172Release{"# koto-version: 1.7.2", append(sec172AllAssets("1.7.2"), "guest.img_1.7.2"), sec172Good(), 0}, "1.7.2", "twice"},
+		{"guest.img from another release",
+			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.2", "koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186", "guest.img_1.7.1"}, sec172Good(), 0}, "1.7.2", "not koto 1.7.2"},
+		{"both guest.img and the legacy rootfs.img",
+			sec172Release{"# koto-version: 1.7.2", append(sec172AllAssets("1.7.2"), "rootfs.img_fedora44"), sec172Good(), 0}, "1.7.2", "both guest.img and rootfs.img"},
+		{"no guest image at all",
+			sec172Release{"# koto-version: 1.7.2", []string{"koto_1.7.2", "koto-tui_1.7.2", "firecracker_1.17.0", "vmlinux_6.1.186"}, sec172Good(), 0}, "1.7.2", "has no guest.img asset"},
 		{"expired key (gpg exit 0, VALIDSIG present)",
 			sec172Release{"# koto-version: 1.7.2", sec172AllAssets("1.7.2"),
 				"[GNUPG:] NEWSIG\n[GNUPG:] KEYEXPIRED 1780000000\n[GNUPG:] EXPKEYSIG 89ABCDEF01234567 koto release\n[GNUPG:] VALIDSIG " + sec172FPR + " 2026-10-01 1790000000 0 4 0 22 10 00 " + sec172FPR + "\n", 0},
