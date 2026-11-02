@@ -302,7 +302,7 @@ func TestRootfsTools(t *testing.T) {
 	if fi.Mode().Perm() != 0o444 {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if lbl, _, _ := ReadSuper(p); lbl != ToolsLabel {
+	if lbl, _, _ := ReadSuper(p); lbl != GuestLabel {
 		t.Fatalf("label %q", lbl)
 	}
 	for dst, want := range map[string]string{"/bin/fc-agent": "AGENT", "/bin/claude": "CLAUDE", "/bin/codex": "CODEX",

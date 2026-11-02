@@ -9,7 +9,7 @@ package main
 //	koto.image=<catalog name>  koto.digest=sha256:<hex64>  koto.created=<RFC3339>
 //
 // Drives, in the order the daemon builds them from ociimage.FixedDevices:
-// vda tools (label kototools, this root), vdb workspace (unchanged: mounted
+// vda guest.img (label kotoguest, 1.8.0: kototools; this root), vdb workspace (unchanged: mounted
 // by mountWorkspace as on every other group), vdc sys (label kotosys, the
 // overlay upper) and vdd.. one read-only ext4 per layer. Layers are matched
 // to the cmdline BY SUPERBLOCK (label "L"+hex[:15] AND uuid = hex[:32]),
@@ -38,10 +38,13 @@ import (
 )
 
 const (
-	toolsLabel = "kototools" // ociimage.ToolsLabel
-	sysLabel   = "kotosys"   // ociimage.SysLabel
-	toolsDev   = "/dev/vda"
-	toolsDir   = "/opt/koto"
+	guestLabel = "kotoguest" // ociimage.GuestLabel
+	// legacyGuestLabel is the 1.8.0 label (tools.img derived from rootfs.img);
+	// still accepted so a host-derived image keeps booting.
+	legacyGuestLabel = "kototools" // ociimage.LegacyGuestLabel
+	sysLabel         = "kotosys"   // ociimage.SysLabel
+	toolsDev         = "/dev/vda"
+	toolsDir         = "/opt/koto"
 	// maxImageLayers bounds what the guest accepts from the cmdline. The
 	// host's slot guard (ociimage.CheckLayerSlots) is the real limit; this
 	// only keeps a malformed cmdline from driving unbounded work here.
@@ -250,8 +253,8 @@ func imageRoot(a *imageArgs) error {
 			tools = &drives[i]
 		}
 	}
-	if tools == nil || tools.label != toolsLabel {
-		return fmt.Errorf("root drive %s is not tools.img (label %v, want %s)", toolsDev, tools, toolsLabel)
+	if tools == nil || !isGuestLabel(tools.label) {
+		return fmt.Errorf("root drive %s is not guest.img (label %v, want %s)", toolsDev, tools, guestLabel)
 	}
 	sys := byLabel(drives, sysLabel)
 	if len(sys) != 1 {
@@ -626,3 +629,7 @@ func revokeImageSudo(path string) {
 	}
 	logf("root=no: removed koto sudo grant %s", path)
 }
+
+// isGuestLabel reports whether l labels a guest.img: the current label or
+// the 1.8.0 one.
+func isGuestLabel(l string) bool { return l == guestLabel || l == legacyGuestLabel }

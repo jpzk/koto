@@ -67,7 +67,7 @@ func sb(dev, h string) superblock { return superblock{dev, layerLabel(h), layerU
 func TestMatchLayersBySuperblockNotOrder(t *testing.T) {
 	// drives deliberately in a different order than the cmdline
 	drives := []superblock{
-		{"/dev/vda", "kototools", "x"}, {"/dev/vdc", "kotosys", "y"},
+		{"/dev/vda", "kotoguest", "x"}, {"/dev/vdc", "kotosys", "y"},
 		sb("/dev/vdd", hC), sb("/dev/vde", hA), sb("/dev/vdf", hB),
 	}
 	got, err := matchLayers([]string{hA, hB, hC}, drives)
@@ -289,5 +289,19 @@ func TestInjectImageRefusesWorkspaceSymlink(t *testing.T) {
 	}
 	if err := injectImage(root, a); err != nil {
 		t.Fatalf("directory /workspace: %v", err)
+	}
+}
+
+func TestIsGuestLabel(t *testing.T) {
+	for l, want := range map[string]bool{
+		"kotoguest":  true, // guest.img
+		"kototools":  true, // 1.8.0 host-derived tools.img
+		"kotosys":    false,
+		"":           false,
+		"kotoguest ": false,
+	} {
+		if got := isGuestLabel(l); got != want {
+			t.Errorf("isGuestLabel(%q) = %v, want %v", l, got, want)
+		}
 	}
 }

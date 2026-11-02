@@ -401,7 +401,7 @@ func TestFcImagePlanForUsesBootRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fakeExt4(t, ociimage.ToolsPath(st.Root, key), ociimage.ToolsLabel, "")
+	fakeExt4(t, ociimage.ToolsPath(st.Root, key), ociimage.GuestLabel, "")
 	v := vol("tg")
 	_ = os.MkdirAll(filepath.Join(v, ".cs"), 0o755)
 	write := func(name, s string) {

@@ -26,8 +26,11 @@ import (
 	"time"
 )
 
-// ToolsLabel is the ext4 label of tools.img; guest init checks it.
-const ToolsLabel = "kototools"
+// GuestLabel is the ext4 label of guest.img; guest init checks it.
+const GuestLabel = "kotoguest"
+
+// LegacyGuestLabel is the 1.8.0 label (tools.img). fc-agent still accepts it.
+const LegacyGuestLabel = "kototools"
 
 // toolsLayout versions the file layout below; bump it when it changes so
 // every host rebuilds.
@@ -131,7 +134,7 @@ func (t RootfsTools) Ensure(cache string, logf func(string, ...any)) (string, er
 	}
 	out := ToolsPath(cache, key)
 	if fi, err := os.Stat(out); err == nil && fi.Mode().Perm()&0o222 == 0 {
-		if lbl, _, err := ReadSuper(out); err == nil && lbl == ToolsLabel {
+		if lbl, _, err := ReadSuper(out); err == nil && lbl == GuestLabel {
 			return out, nil
 		}
 	}
@@ -234,7 +237,7 @@ func (t RootfsTools) Ensure(cache string, logf func(string, ...any)) (string, er
 		return "", err
 	}
 	env := append(os.Environ(), "E2FSPROGS_FAKE_TIME="+fakeTime)
-	mk := exec.Command("mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0", "-L", ToolsLabel,
+	mk := exec.Command("mke2fs", "-q", "-F", "-t", "ext4", "-b", "4096", "-m", "0", "-L", GuestLabel,
 		"-O", "^has_journal", "-E", "root_owner=0:0", img)
 	mk.Env = env
 	if b, err := mk.CombinedOutput(); err != nil {
