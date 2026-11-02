@@ -41,6 +41,7 @@ func ctlConfigSet(t *testing.T, line string) map[string]any {
 // pinned to its digest at set time.
 func TestConfigSetImageRejectsNonCatalog(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t) // cleared group + offline stub = legacy boot (nil plan)
 	dg := testCatalogImage(t, "debian", "a")
 	for val, want := range map[string]string{
 		`"debian:trixie"`:                   "registry reference",

@@ -65,14 +65,8 @@ func defaultImageEnv(ctx context.Context) imageEnv {
 		running: fcRunning,
 		restart: func(g string) error { _, err := restartCtx(ctx, g); return err },
 		lock:    groupOpLock,
-		tools: func() string {
-			k, err := ociimage.RootfsTools{Rootfs: fcRootfsPath(), Agent: os.Getenv(fcImageAgentEnv)}.Key(fcImagesDir())
-			if err != nil {
-				return ""
-			}
-			return k + ".img"
-		},
-		now: time.Now,
+		tools:   fcLegacyToolsKey,
+		now:     time.Now,
 	}
 }
 

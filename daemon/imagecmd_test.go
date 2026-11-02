@@ -45,6 +45,7 @@ func (e *imageTestEnv) run(op string, all bool, args ...string) error {
 // for the archived sys.img (restore), including back to koto-default.
 func TestImageApplyRollbackRm(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t) // cleared group + offline stub = legacy boot (nil plan)
 	e := newImageTestEnv(t)
 	dg1 := testCatalogImage(t, "debian", "a")
 

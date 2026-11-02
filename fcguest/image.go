@@ -312,6 +312,7 @@ func imageRoot(a *imageArgs) error {
 	imageMode = a
 	workerPATH = "/sidecar:" + toolsDir + "/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	_ = os.Setenv("PATH", toolsDir+"/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	piTemplateDir = toolsDir + "/share/koto/pi"
 	logf("image %s@%s: %d layers + sys %s, root ready in %s", a.Name, shortDigest(a.Digest),
 		len(lowers), sys[0].dev, time.Since(t0).Round(time.Millisecond))
 	return nil
@@ -387,6 +388,10 @@ func injectImage(root string, a *imageArgs) error {
 	if _, err := os.Lstat(p("/etc/codex/managed_config.toml")); errors.Is(err, os.ErrNotExist) {
 		_ = os.MkdirAll(p("/etc/codex"), 0o755)
 		_ = os.Symlink(toolsDir+"/etc/codex/managed_config.toml", p("/etc/codex/managed_config.toml"))
+	}
+	// guest.img's tmux defaults (status off), unless the base brought its own.
+	if _, err := os.Lstat(p("/etc/tmux.conf")); errors.Is(err, os.ErrNotExist) {
+		_ = os.Symlink(toolsDir+"/share/koto/tmux.conf", p("/etc/tmux.conf"))
 	}
 	// /sidecar is on every worker PATH and referenced by absolute path.
 	_ = os.RemoveAll(p("/sidecar"))

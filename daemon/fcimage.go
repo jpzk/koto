@@ -130,15 +130,35 @@ func fcImageJailBinds(p *fcImagePlan) []fcBind {
 	return b
 }
 
-// fcImagePlanFor resolves group g's image boot. nil, nil = default rootfs
-// (no image= or the built-in koto-default). Errors are readable and refuse
-// the boot: a group pinned to an image the host cannot produce must not
-// silently fall back to a different root. root is the boot's root posture,
-// snapshotted by fcSpawn (see the sys.root marking below).
+// fcImagePlanFor resolves group g's image boot. nil, nil = legacy rootfs
+// (image=koto-default opt-out, or a no-image group whose default image
+// cannot be produced on an offline host that still has rootfs.img). A group
+// with no image= boots the catalog default (fedora) through this path,
+// without config.json being rewritten (fcDefaultImageFor). Errors are
+// readable and refuse the boot: a group pinned to an image the host cannot
+// produce must not silently fall back to a different root. root is the
+// boot's root posture, snapshotted by fcSpawn (see the sys.root marking
+// below).
 func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 	cfg := loadGroupConfig(g)
 	name := cfg.str("image")
-	if name == "" || name == ociimage.DefaultName {
+	dg := cfg.str("image_digest")
+	legacy := name == ociimage.DefaultName
+	if legacy && !fileExists(fcRootfsPath()) {
+		return nil, fmt.Errorf("group %s: image=%s needs %s, which this install does not have; set image= to %s (koto image apply)", g, name, fcRootfsPath(), ociimage.FedoraName)
+	}
+	if name == "" {
+		n, d, ok, err := fcDefaultImageFor(g)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			name, dg = n, d
+		} else {
+			legacy = true
+		}
+	}
+	if legacy {
 		// Park a previous image's sys.img so that coming back to it later is a
 		// real transition (fresh apply = new sys.img; rollback = restore).
 		act, err := ociimage.ArchiveSys(vol(g))
@@ -150,7 +170,6 @@ func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 		}
 		return nil, nil
 	}
-	dg := cfg.str("image_digest")
 	if !ociimage.ValidName(name) {
 		return nil, fmt.Errorf("group %s: image=%q is not a catalog name", g, name)
 	}
@@ -176,9 +195,13 @@ func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 	if _, _, err := ociimage.EnsureLayers(st.Root, &ociimage.Image{Layers: layers}, logf); err != nil {
 		return nil, fmt.Errorf("group %s: image %s layers: %w (re-run koto image add)", g, name, err)
 	}
-	tools, err := ociimage.RootfsTools{Rootfs: fcRootfsPath(), Agent: os.Getenv(fcImageAgentEnv)}.Ensure(st.Root, logf)
+	src, kind, err := fcGuestSource()
 	if err != nil {
-		return nil, fmt.Errorf("group %s: tools.img: %w", g, err)
+		return nil, fmt.Errorf("group %s: %w", g, err)
+	}
+	tools, err := src.Ensure(st.Root, logf)
+	if err != nil {
+		return nil, fmt.Errorf("group %s: guest.img (%s): %w", g, kind, err)
 	}
 	// The sys overlay persists and is root-writable when root=yes; a later
 	// root=no boot must not inherit what that root worker left behind, so

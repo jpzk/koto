@@ -206,6 +206,7 @@ func TestFcStageJailForImage(t *testing.T) {
 // be resolved from the catalog refuses the boot instead of falling back.
 func TestFcImagePlanForRefusals(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t)
 	set := func(cfg map[string]any) {
 		_ = os.MkdirAll(filepath.Dir(groupConfigPath("tg")), 0o755)
 		b, _ := json.Marshal(cfg)
@@ -241,6 +242,7 @@ func TestFcImagePlanForRefusals(t *testing.T) {
 // koto-default -> A kept the old sys.img despite image_sys=fresh).
 func TestFcImagePlanForDefaultArchivesSys(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t)
 	dg := "sha256:" + strings.Repeat("a", 64)
 	_ = os.MkdirAll(vol("tg"), 0o755)
 	if err := os.WriteFile(filepath.Join(vol("tg"), "sys.img"), []byte("A-state"), 0o644); err != nil {
