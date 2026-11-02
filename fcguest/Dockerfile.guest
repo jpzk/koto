@@ -33,7 +33,7 @@ RUN set -eu; mkdir /tmp/rpms; cd /tmp/rpms; \
     rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
     dnf install -y -q --disablerepo='*' --setopt=install_weak_deps=False ./*.rpm; \
     cd /; rm -rf /tmp/rpms /var/cache/dnf; \
-    musl-gcc --version >/dev/null; mke2fs -V
+    musl-gcc --version >/dev/null; mke2fs -V; yacc -V; cmp --version >/dev/null
 
 # Static tmux for /shell on any glibc base (the fedora base has none).
 # musl + static libevent/ncurses: no NSS, no shared libs, no glibc version

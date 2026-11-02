@@ -3,6 +3,7 @@
 # Fedora-signed builds (key 6d9f90a6) from Koji's permanent signed/ tree, so
 # the set never moves under a rebuild. All built >= 6 weeks before 2026-11-02.
 # Versions match the pinned fedora base (glibc 2.43-8, libgcc 16.2.1-2).
+# byacc + diffutils: tmux/ncurses configure need yacc, cmp and diff.
 # Format: sha256 srcname version release name arch
 77a82e328053f73d3881e633ffefb4dd49ebe0ac5b18a996de9b615de4eb9569 gcc 16.2.1 2.fc44 gcc x86_64
 a3ca10854d95dc2aefc76e36d116c0a33a305d53b2ba06d92e43aeedb179668b gcc 16.2.1 2.fc44 cpp x86_64
@@ -30,3 +31,5 @@ ee3f9558c65ca0a92de766ce54e218be780e703f8d2b1353ebbbff762f067d6e pkgconf 2.5.1 1
 da2ce9b6c5e9fac1da7e418be923ff2bbd202180e4812d7b91f118fcd549ede5 pkgconf 2.5.1 1.fc44 pkgconf-pkg-config x86_64
 5b45fb58dec26385b34f937b2917608abd66d531eb7d78a878e8ed426c65eff5 pkgconf 2.5.1 1.fc44 pkgconf-m4 noarch
 b59040138169f46c60b79230941ffc0dbce15b9e897bd46d1e83361a393400b8 pkgconf 2.5.1 1.fc44 libpkgconf x86_64
+c8ce533522bb321b2d3837e4f8803e146f206f6efdcdef126d5dc57f17468e0d byacc 2.0.20241231 3.fc44 byacc x86_64
+45001ec4ea4d2c56a879ad55dc94c426525100bfa421f2ed41224ed08adb9cc3 diffutils 3.12 5.fc44 diffutils x86_64
