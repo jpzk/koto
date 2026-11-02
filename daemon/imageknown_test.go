@@ -10,7 +10,7 @@ import (
 	"koto/ociimage"
 )
 
-// op known: the well-known list in order (built-in first), then the other
+// op known: the well-known list in order (fedora, the default, first), then the other
 // catalog names; a well-known name not in the catalog yet has digest "-",
 // one that is has its pinned digest and created date.
 func TestImageKnown(t *testing.T) {
@@ -24,7 +24,7 @@ func TestImageKnown(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(e.log.String(), "\n"), "\n")
 	want := []string{
 		"# name\tlabel\tsource\tdigest\tcreated",
-		ociimage.DefaultName + "\tdefault\tbuiltin\t-\t-",
+		ociimage.FedoraName + "\tfedora (default)\t" + ociimage.FedoraRef + "\t-\t-",
 		"debian\tdebian\tdocker.io/library/debian:latest\t-\t-",
 		"ubuntu\tubuntu\t-\t" + dg + "\t2025-01-02T03:04:05Z",
 		"kali\tkali\tdocker.io/kalilinux/kali-rolling:latest\t-\t-",

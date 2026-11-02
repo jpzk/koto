@@ -26,8 +26,10 @@ import (
 	"time"
 )
 
-// DefaultName is the built-in image: today's shipped rootfs, booted through
-// the unchanged default path. It is never stored, pulled or removed.
+// DefaultName is the built-in legacy image: the 1.8.0 shipped rootfs, booted through
+// the old rootfs path. It is never stored, pulled or removed. Since guest.img
+// it is only an explicit opt-out (image=koto-default) and the offline
+// fallback while fcassets/rootfs.img is on disk, for one release.
 const DefaultName = "koto-default"
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -53,7 +55,7 @@ type Entry struct {
 // Catalog is the on-disk document. Names may share a digest.
 type Catalog struct {
 	Version int               `json:"version"`
-	Default string            `json:"default,omitempty"` // "" == DefaultName
+	Default string            `json:"default,omitempty"` // "" == FedoraName
 	Names   map[string]string `json:"names"`             // name -> digest
 	Images  map[string]*Entry `json:"images"`            // digest -> entry
 	// Sources is the reference each name was added/updated from (a tag or a
@@ -74,7 +76,7 @@ var builtin = &Entry{Builtin: true, Arch: "amd64", Libc: LibcGlibc}
 // DefaultImage returns the name new groups get when they ask for "the default".
 func (c *Catalog) DefaultImage() string {
 	if c.Default == "" {
-		return DefaultName
+		return FedoraName
 	}
 	return c.Default
 }
