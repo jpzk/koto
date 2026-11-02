@@ -111,3 +111,61 @@ func TestFcGuestSource(t *testing.T) {
 		t.Fatalf("shipped guest.img: no tools key to keep, got %q", k)
 	}
 }
+
+// Upgrade then rollback of a 1.8.0 no-image group: the first boot after the
+// upgrade puts it on fedora (config.json and workspace.img untouched), and a
+// rollback (1.8.0 boots it on the default rootfs, whose path calls
+// ArchiveSys) parks the fedora sys.img under its digest. Nothing the 1.8.0
+// path reads is changed, and nothing is deleted.
+func TestNoImageGroupUpgradeRollbackRoundTrip(t *testing.T) {
+	fcHarness(t)
+	t.Setenv(fcImageAgentEnv, "")
+	fcLegacyRootfs(t) // an upgraded 1.8.0 host keeps rootfs.img
+	dg := testCatalogImage(t, ociimage.FedoraName, "fed")
+	st := fcImageStore()
+	diff := ociimage.Sha([]byte("diff-fed"))
+	fakeExt4(t, ociimage.LayerFile(st.Root, diff), ociimage.LayerLabel(diff), ociimage.LayerUUID(diff))
+	fakeExt4(t, fcGuestPath(), ociimage.GuestLabel, "")
+	fcEnsureDefault = func(func(string, ...any)) (string, string, error) {
+		return ociimage.FedoraName, dg, nil
+	}
+	// 1.8.0 state: config without image, a workspace, no sys.img yet.
+	cfg := `{"model":"x"}`
+	_ = os.MkdirAll(filepath.Dir(groupConfigPath("old")), 0o755)
+	if err := os.WriteFile(groupConfigPath("old"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(vol("old"), 0o755)
+	ws := filepath.Join(vol("old"), "workspace.img")
+	if err := os.WriteFile(ws, []byte("user data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The fedora sys.img for dg (pre-made: no mke2fs in the test image).
+	if err := os.WriteFile(filepath.Join(vol("old"), "sys.img"), []byte("fedora sys"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vol("old"), "sys.digest"), []byte(dg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := fcImagePlanFor("old", false)
+	if err != nil || p == nil || p.Name != ociimage.FedoraName || p.Tools != fcGuestPath() {
+		t.Fatalf("upgrade boot: %+v %v", p, err)
+	}
+	if b, _ := os.ReadFile(groupConfigPath("old")); string(b) != cfg {
+		t.Fatalf("config.json rewritten: %s", b)
+	}
+	// Rollback: what 1.8.0's default-rootfs boot does with the same files.
+	act, err := ociimage.ArchiveSys(vol("old"))
+	if err != nil || !act.Archived {
+		t.Fatalf("1.8.0 archive: %+v %v", act, err)
+	}
+	if b, err := os.ReadFile(ociimage.SysArchive(vol("old"), dg)); err != nil || string(b) != "fedora sys" {
+		t.Fatalf("fedora sys.img not parked: %q %v", b, err)
+	}
+	if b, _ := os.ReadFile(ws); string(b) != "user data" {
+		t.Fatalf("workspace changed: %q", b)
+	}
+	if !fileExists(fcRootfsPath()) {
+		t.Fatal("rootfs.img gone: rollback cannot boot")
+	}
+}
