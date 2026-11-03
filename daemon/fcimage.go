@@ -15,6 +15,7 @@ package main
 // byte-identical develop config.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,7 +193,11 @@ func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 	logf := func(f string, a ...any) { emitLogfG("fc", g, "info", "[%s] image: "+f, append([]any{g}, a...)...) }
 	// Layer files are shared and 0444; a missing one (gc'd, disk loss) is
 	// rebuilt from its cached blob, or the boot is refused.
-	if _, _, err := ociimage.EnsureLayers(st.Root, &ociimage.Image{Layers: layers}, logf); err != nil {
+	// Both steps report as the group's activity (convert / sysimg), which
+	// the TUI renders for the group being created, plus a progress line in
+	// the daemon log at each step's start and end.
+	defer activityPrep(g, "", "")
+	if _, _, _, err := ociimage.EnsureLayersProgress(context.Background(), st.Root, &ociimage.Image{Layers: layers}, logf, fcPrepProgress(g, logf, time.Now)); err != nil {
 		return nil, fmt.Errorf("group %s: image %s layers: %w (re-run koto image add)", g, name, err)
 	}
 	src, kind, err := fcGuestSource()
@@ -219,7 +224,20 @@ func fcImagePlanFor(g string, root bool) (*fcImagePlan, error) {
 	if cfg.str("image_sys") == "restore" {
 		mode = ociimage.SysRestore
 	}
+	sysBuild := !ociimage.SysReady(vol(g), dg)
+	if sysBuild {
+		detail := "building sys.img"
+		if mode == ociimage.SysRestore {
+			detail = "restoring sys.img"
+		}
+		activityPrep(g, actSysImg, detail)
+		logf("progress phase=%s done=0 total=1", ociimage.PhaseSys)
+	}
 	act, err := ociimage.PrepareSys(vol(g), dg, mode, 0)
+	if sysBuild && err == nil {
+		logf("progress phase=%s done=1 total=1", ociimage.PhaseSys)
+	}
+	activityPrep(g, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("group %s: sys.img: %w", g, err)
 	}
@@ -262,4 +280,44 @@ func fcImageSysPosture(g string, root bool, logf func(string, ...any)) error {
 		logf("root=no after a root=yes boot: discarded %d system disk(s) written with guest root; sys.img starts fresh", n)
 	}
 	return nil
+}
+
+// fcPrepEvery is the gap between two activity frames of one converting
+// layer: the frames land in the group's replay ring, so a minute-long
+// conversion must not crowd the turn's real events out of it.
+const fcPrepEvery = time.Second
+
+// fcPrepProgress turns the boot's layer conversion progress into group
+// activity (throttled to fcPrepEvery, a new layer and its last byte always
+// pass) and a daemon log line at each layer's start, end or cache hit.
+func fcPrepProgress(g string, logf func(string, ...any), now func() time.Time) func(ociimage.Progress) {
+	var last time.Time
+	lastLayer := 0
+	return func(p ociimage.Progress) {
+		switch p.Phase {
+		case ociimage.PhaseLayerOK:
+			logf("progress phase=%s layer=%d/%d done=%d total=%d", p.Phase, p.Layer, p.Layers, p.Done, p.Total)
+		case ociimage.PhaseConvert:
+			newLayer := p.Layer != lastLayer
+			final := p.Total > 0 && p.Done >= p.Total
+			if newLayer || final {
+				logf("progress phase=%s layer=%d/%d done=%d total=%d", p.Phase, p.Layer, p.Layers, p.Done, p.Total)
+			}
+			t := now()
+			if !newLayer && !final && t.Sub(last) < fcPrepEvery {
+				return
+			}
+			last, lastLayer = t, p.Layer
+			activityPrep(g, actConvert, fcPrepDetail(p))
+		}
+	}
+}
+
+// fcPrepDetail is the activity detail of one conversion update.
+func fcPrepDetail(p ociimage.Progress) string {
+	s := fmt.Sprintf("layer %d/%d", p.Layer, p.Layers)
+	if p.Total > 0 {
+		s += fmt.Sprintf("  %.1f/%.1f MB", float64(p.Done)/1e6, float64(p.Total)/1e6)
+	}
+	return s
 }

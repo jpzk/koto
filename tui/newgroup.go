@@ -80,6 +80,10 @@ type newGroupForm struct {
 	// pull is the structured progress of the same add/update (a daemon
 	// newer than 1.9.0); when set it is drawn as a bar instead of progress.
 	pull pullView
+	// spawnGroup is the group the running submit spawns ("" = none): while
+	// its boot prepares the image (activity convert / sysimg) the dialog
+	// shows that step instead of the finished pull.
+	spawnGroup string
 	// submit is the running submit's sequence id (nextNgGen): its progress
 	// and result messages carry it, anything else is stale and dropped.
 	// gate lets Esc cancel it (submitGate).
@@ -468,6 +472,10 @@ func (m *Model) submitNewGroup() tea.Cmd {
 	f.err, f.errAt = "", ""
 	f.busy = true
 	f.progress, f.pull = "", pullView{}
+	f.spawnGroup = ""
+	if p.spawn != nil {
+		f.spawnGroup = p.group
+	}
 	f.submit, f.gate = nextNgGen(), newSubmitGate()
 	p.seq, p.gate = f.submit, f.gate
 	return newGroupSubmitCmd(m.sock, p)
@@ -813,7 +821,10 @@ func (m Model) renderNewGroup() string {
 			if focused {
 				curLine = len(lines) - 1
 			}
+			prep, prepOK := m.bootPrep(&f)
 			switch {
+			case prepOK:
+				lines = append(lines, "  "+prep.render(inner-2))
 			case f.busy && f.pull.ok:
 				lines = append(lines, "  "+f.pull.render(inner-2))
 			case f.busy && f.progress != "":

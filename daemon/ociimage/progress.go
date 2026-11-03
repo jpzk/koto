@@ -11,16 +11,19 @@ import (
 
 // Progress phases, in the order an add goes through them.
 const (
-	PhaseResolve  = "resolve"  // tag -> digest, manifests, config
-	PhaseDownload = "download" // a layer blob is streaming (Done/Total bytes)
-	PhaseVerify   = "verify"   // re-hashing an already cached blob
-	PhaseCached   = "cached"   // blob was in the cache, verified
-	PhaseConvert  = "convert"  // building the layer's ext4 image
-	PhaseDone     = "done"     // every layer is ready
+	PhaseResolve  = "resolve"      // tag -> digest, manifests, config
+	PhaseDownload = "download"     // a layer blob is streaming (Done/Total bytes)
+	PhaseVerify   = "verify"       // re-hashing an already cached blob
+	PhaseCached   = "cached"       // blob was in the cache, verified
+	PhaseConvert  = "convert"      // building the layer's ext4 image (Done/Total = blob bytes consumed)
+	PhaseLayerOK  = "layer_cached" // the layer's ext4 image already exists (Done = Total = blob size)
+	PhaseSys      = "sysimg"       // first boot: building the group's sys.img (Done/Total = 0/1, 1/1)
+	PhaseDone     = "done"         // every layer is ready
 )
 
 // Progress is one structured update. Layer is 1-based (0 = not layer
-// specific); Done/Total are bytes for download/verify/cached, 0 otherwise.
+// specific); Done/Total are bytes for download/verify/cached/convert/layer_cached
+// (blob bytes), steps for sysimg, 0 otherwise.
 type Progress struct {
 	Phase  string
 	Layer  int
@@ -76,3 +79,7 @@ func (c *Client) progress(p Progress) {
 		c.Progress(p)
 	}
 }
+
+// convertClock is the clock BuildLayerProgress throttles on (nil =
+// time.Now); tests set a fake one so a small layer yields many updates.
+var convertClock func() time.Time

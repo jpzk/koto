@@ -80,8 +80,12 @@ preselected and spawns exactly as before (no `image=` key).
   done/total; byte updates throttled to about 4 per second per blob) next
   to the unchanged text lines, and the dialog draws a bar:
   `pulling fedora  layer 1/1  [#######-----] 42.1/66.2 MB  12 MB/s`,
-  then names the later steps (`verifying` a cached blob, `converting`
-  layer i/n, `pulled`). Against an older daemon, which sends text only,
+  then the conversion the same way (`converting fedora  layer 1/1
+  [###---] 20.0/66.2 MB`: compressed blob bytes the tar walk has
+  consumed, throttled the same way, ending at done == total before the
+  mke2fs/debugfs pass), a layer whose ext4 is already on disk as one short
+  `cached fedora  layer 1/1  ext4 ready` line, `verifying` a cached blob,
+  and `pulled`. Against an older daemon, which sends text only,
   the dialog shows the last text line as before; an older TUI or CLI
   ignores the new event and reads the same lines as before.
 - The first-boot default pull (a group with no `image=` booting the
@@ -93,6 +97,14 @@ preselected and spawns exactly as before (no `image=` key).
   to the dialog, and the client may not call `Image` at all. Its progress
   lines go to the daemon log. The per-group `sys.img` is made at boot the
   same way, so it is not an `image add` phase either.
+- Boot preparation: the boot itself (inside `Spawn`) converts any layer
+  whose ext4 is missing and builds the group's `sys.img`. Both are
+  reported as the group's activity (`convert` with `layer i/n  a/b MB`,
+  throttled to one frame a second; `sysimg`), which the TUI renders in the
+  status bar and, while the dialog's spawn runs, under Create as
+  `building sys.img  <group>` / `converting image  <group>  layer 1/2 ...`.
+  The daemon log gets `[<group>] image: progress phase=convert`,
+  `layer_cached` and `sysimg` lines at each step's start and end.
 - `Esc` while the add/update runs cancels it: the `Image` rpc is cancelled,
   the daemon writes no catalog entry (a blob's `.part` file is removed;
   layers already converted for this add are removed, and the build stops

@@ -7,7 +7,9 @@ package main
 //
 //	pulling fedora  layer 1/1  [#######-----] 42.1/66.2 MB  12 MB/s
 //
-// and names the later phases (verify, convert). An older daemon sends text
+// and the conversion the same way (converting fedora  layer 1/1  [###--]
+// 20.0/66.2 MB: blob bytes the tar walk consumed), a cached layer as one
+// short line, and the later phases by name. An older daemon sends text
 // only, and the dialog keeps showing its last line (newGroupProgressMsg).
 
 import (
@@ -89,6 +91,10 @@ func pullVerb(phase string) string {
 		return "cached"
 	case "convert":
 		return "converting"
+	case "layer_cached":
+		return "cached"
+	case "sysimg":
+		return "building sys.img"
 	case "done":
 		return "pulled"
 	}
@@ -118,6 +124,14 @@ func (v pullView) render(width int) string {
 	}
 	if v.layers > 0 && v.layer > 0 {
 		head += fmt.Sprintf("  layer %d/%d", v.layer, v.layers)
+	}
+	if v.phase == "layer_cached" {
+		// the layer's ext4 is already on disk: one short line, no bar
+		s := head + "  ext4 ready"
+		if v.total > 0 {
+			s += "  " + fmtMB(v.total) + " MB"
+		}
+		return truncCells(s, width)
 	}
 	if v.total <= 0 {
 		return truncCells(head, width)
@@ -164,4 +178,34 @@ func sendPull(seq uint64) func(*pb.ImageProgress) {
 	return func(p *pb.ImageProgress) {
 		progressSink(newGroupProgressMsg{seq: seq, pull: p, at: time.Now()})
 	}
+}
+
+// bootPrep is the image-preparation step of the group a running submit
+// spawns, from its activity frames: the daemon converts any layer whose
+// ext4 is missing and builds the group's sys.img inside the (unary) Spawn,
+// and reports both as the group's activity (convert / sysimg), which this
+// TUI receives once the group shows up in the state stream.
+func (m Model) bootPrep(f *newGroupForm) (bootPrepView, bool) {
+	if f == nil || !f.busy || f.spawnGroup == "" {
+		return bootPrepView{}, false
+	}
+	a, ok := m.activityFor(f.spawnGroup)
+	if !ok || (a.phase != "convert" && a.phase != "sysimg") {
+		return bootPrepView{}, false
+	}
+	return bootPrepView{phase: a.phase, detail: scrubVTStrict(a.detail), group: f.spawnGroup}, true
+}
+
+// bootPrepView renders one boot preparation step:
+//
+//	building sys.img  mygroup
+//	converting image  mygroup  layer 1/2  12.3/48.1 MB
+type bootPrepView struct{ phase, detail, group string }
+
+func (v bootPrepView) render(width int) string {
+	s := activityLabel(v.phase) + "  " + v.group
+	if v.detail != "" && v.phase == "convert" {
+		s += "  " + v.detail
+	}
+	return truncCells(s, width)
 }

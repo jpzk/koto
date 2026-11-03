@@ -28,7 +28,10 @@ const imageUsage = `usage: koto image <op> [args]
   rollback <group>            back to the previous image and its sys.img
 
 KOTO_IMAGE_PROGRESS=1 also prints the structured add/update progress events
-(phase, layer i/n, bytes done/total) on stderr, one line each.
+(phase, layer i/n, bytes done/total) on stderr, one line each: resolve,
+download, verify/cached (blob), convert (tar bytes consumed building the
+layer ext4), layer_cached (ext4 already on disk), done. The first boot of a
+group logs its own progress phase=convert/sysimg lines in the daemon log.
 `
 
 // imageCliParse turns argv into an ImageReq. --all/-all is only for apply.
