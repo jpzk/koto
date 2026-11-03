@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -186,5 +187,80 @@ func TestProxyAllowAbsoluteForm(t *testing.T) {
 	h.serveEgress(rec, req)
 	if len(dialed) != 1 || dialed[0] != "93.184.216.34:80" {
 		t.Fatalf("absolute-form listed: dialed %v (code %d)", dialed, rec.Code)
+	}
+}
+
+// Audit (d): the gate authorizes the host that is DIALED (r.URL.Host), and a
+// Host header naming a different authority is refused — a listed name must
+// not front an unlisted vhost, nor the reverse.
+func TestProxyAllowHostURLMismatch(t *testing.T) {
+	allowProxyEnv(t, fcNetWAN, `["api.example.com"]`, allowDNS)
+	var dialed []string
+	egressDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return nil, fmt.Errorf("no network in test")
+	}
+	h := &handler{group: "tg"}
+	send := func(method, rawURL, host string) int {
+		dialed = nil
+		var req *http.Request
+		if method == http.MethodConnect {
+			req = &http.Request{Method: method, Host: host, URL: &url.URL{Host: rawURL}, Header: http.Header{}}
+		} else {
+			req = httptest.NewRequest(method, rawURL, nil)
+			req.Host = host
+		}
+		rec := httptest.NewRecorder()
+		h.serveEgress(rec, req)
+		return rec.Code
+	}
+	for _, c := range []struct {
+		method, url, host string
+		want              int
+		dial              bool
+	}{
+		{"GET", "http://evil.test/x", "api.example.com", http.StatusForbidden, false},
+		{"GET", "http://api.example.com/x", "evil.test", http.StatusForbidden, false},
+		{"GET", "http://evil.test/x", "api.example.com:80", http.StatusForbidden, false},
+		{http.MethodConnect, "evil.test:443", "api.example.com:443", http.StatusForbidden, false},
+		{http.MethodConnect, "api.example.com:443", "evil.test:443", http.StatusForbidden, false},
+		{http.MethodConnect, "", "api.example.com:443", http.StatusBadRequest, false},
+		// same authority spelled differently is not a mismatch
+		{"GET", "http://api.example.com/x", "API.example.com.:80", http.StatusBadGateway, true},
+		{"GET", "http://api.example.com:80/x", "api.example.com", http.StatusBadGateway, true},
+		{http.MethodConnect, "api.example.com:443", "api.example.com:443", http.StatusBadGateway, true},
+	} {
+		code := send(c.method, c.url, c.host)
+		if code != c.want || (len(dialed) > 0) != c.dial {
+			t.Errorf("%s url=%q host=%q: got %d dialed=%v; want %d dial=%v", c.method, c.url, c.host, code, dialed, c.want, c.dial)
+		}
+	}
+}
+
+// Same attack over the wire, through a real http.Server: Go's parser takes
+// the authority from an absolute-form target, so the forged Host line can
+// never become the gated name.
+func TestProxyAllowHostMismatchOnWire(t *testing.T) {
+	allowProxyEnv(t, fcNetWAN, `["api.example.com"]`, allowDNS)
+	var dialed []string
+	egressDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return nil, fmt.Errorf("no network in test")
+	}
+	srv := httptest.NewServer(&handler{group: "tg"})
+	defer srv.Close()
+	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET http://evil.test/x HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(dialed) != 0 {
+		t.Fatalf("forged Host on wire: got %d dialed=%v; want 403, no dial", resp.StatusCode, dialed)
 	}
 }
