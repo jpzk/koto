@@ -151,20 +151,32 @@ func currentAllow(g string) *allowPolicy {
 	return seedAllow(g)
 }
 
-// seedAllow (re)loads the policy from config.json — called at spawn.
+// seedAllow (re)loads the policy from config.json — called at spawn. It takes
+// the group's config lock so a seed racing a config_set cannot store a
+// snapshot read before that commit after the commit's own publish.
 func seedAllow(g string) *allowPolicy {
+	mu := cfgMu(g)
+	mu.Lock()
+	defer mu.Unlock()
+	return publishAllowLocked(g)
+}
+
+// publishAllowLocked stores the policy config.json holds right now. Callers
+// hold cfgMu(g); it is the ONLY production writer of the live slot, so the
+// enforced policy is always the last committed file.
+func publishAllowLocked(g string) *allowPolicy {
 	l, err := groupAllow(g)
 	p := &allowPolicy{list: l, denyAll: err != nil}
 	allowSlot(g).Store(p)
 	return p
 }
 
-// allowApplyLive publishes a freshly committed list. The return value is
-// shown to the operator: the swap is always immediate for new flows; flows
-// already open to a now-disallowed destination are dropped on their next
-// packet (the gateway reads the policy per frame; the L7 proxy per request).
-func allowApplyLive(g string, l *netallow.List) string {
-	allowSlot(g).Store(&allowPolicy{list: l})
+// allowApplyStatus tells the operator how a committed list took effect
+// (updateGroupConfig already published it): the swap is always immediate for
+// new flows; flows already open to a now-disallowed destination are dropped
+// on their next packet (the gateway reads the policy per frame; the L7 proxy
+// per request).
+func allowApplyStatus(g string) string {
 	if fcRunning(g) {
 		return "live (applied to the running VM, no restart needed)"
 	}

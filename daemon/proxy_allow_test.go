@@ -137,7 +137,7 @@ func TestProxyAllowLiveChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowApplyLive("tg", l)
+	publishAllowForTest("tg", l)
 	if c, d := send("evil.test:443"); !dialedOK(c, d) {
 		t.Errorf("after live add: want dial, got %d %v", c, d)
 	}
@@ -146,7 +146,7 @@ func TestProxyAllowLiveChange(t *testing.T) {
 	}
 	// clearing the list restores the profile-only behaviour, live
 	empty, _ := netallow.Parse("")
-	allowApplyLive("tg", empty)
+	publishAllowForTest("tg", empty)
 	if c, d := send("api.example.com:443"); !dialedOK(c, d) {
 		t.Errorf("after live clear: want dial, got %d %v", c, d)
 	}

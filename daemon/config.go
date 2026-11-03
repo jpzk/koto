@@ -280,7 +280,15 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 	mu := cfgMu(g)
 	mu.Lock()
 	defer mu.Unlock()
+	// Republish the live egress policy from the file we just committed (or
+	// failed to touch), still under the lock: two concurrent writers can then
+	// never leave the enforced policy different from config.json, which a
+	// publish after Unlock allowed (the later commit could publish first).
+	defer publishAllowLocked(g)
+	return updateGroupConfigLocked(g, mutate)
+}
 
+func updateGroupConfigLocked(g string, mutate func(map[string]any)) (map[string]any, error) {
 	p := groupConfigPath(g)
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, err
@@ -388,7 +396,7 @@ func configCmd(req configReq) configResp {
 	if setAllow {
 		// The gateway filter is host-side: swap the running VM's allow set
 		// in place (no restart). Tell the caller which happened.
-		eff["allow_apply"] = allowApplyLive(req.Group, allowList)
+		eff["allow_apply"] = allowApplyStatus(req.Group)
 	}
 	return configResp{BaseResp: baseResp{OK: true}, Config: eff}
 }
@@ -473,6 +481,9 @@ func readGroupConfigFile(p string) ([]byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(b, &obj); err != nil {
 		return nil, fmt.Errorf("%w: %v", errConfigCorrupt, err)
+	}
+	if obj == nil { // "null" parses into a nil map without error
+		return nil, fmt.Errorf("%w: not a JSON object", errConfigCorrupt)
 	}
 	return b, nil
 }

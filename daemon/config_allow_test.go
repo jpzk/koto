@@ -7,9 +7,11 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	pb "koto-protocol/pb"
+	"koto/netallow"
 )
 
 func allowReq(g, v string) configReq {
@@ -187,7 +189,7 @@ func TestAllowCorruptConfigFailsClosed(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	p := groupConfigPath("tg")
-	for _, body := range []string{`{"allow":["10.0.0.1"`, ``, `[1,2]`, "\x00garbage"} {
+	for _, body := range []string{`{"allow":["10.0.0.1"`, ``, `null`, `[1,2]`, "\x00garbage"} {
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -226,5 +228,56 @@ func TestAllowCorruptConfigFailsClosed(t *testing.T) {
 	}
 	if err := ensureProviderConfig("tg"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// publishAllowForTest stores a policy directly (tests that exercise the gates
+// without a config.json round trip) and returns the operator status string.
+func publishAllowForTest(g string, l *netallow.List) string {
+	allowSlot(g).Store(&allowPolicy{list: l})
+	return allowApplyStatus(g)
+}
+
+// Concurrent config_sets, unrelated config writers and spawn-time seeds must
+// never leave the enforced policy different from the committed file. Before
+// the publish moved under cfgMu, writer A could commit L1, writer B commit
+// and publish L2, then A publish L1 — live L1, file L2.
+func TestAllowConcurrentCommitEqualsFile(t *testing.T) {
+	fcHarness(t)
+	entries := func(p *allowPolicy) string {
+		if p.denyAll {
+			return "!deny"
+		}
+		return strings.Join(p.list.Entries(), ",")
+	}
+	for round := 0; round < 40; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(3)
+			go func(i int) {
+				defer wg.Done()
+				v := fmt.Sprintf("10.%d.%d.1", round, i)
+				if i%4 == 0 {
+					v = "" // clear
+				}
+				if r := configCmd(allowReq("tg", v)); !r.OK {
+					t.Error(r.Error)
+				}
+			}(i)
+			go func() { defer wg.Done(); seedAllow("tg") }()
+			go func(i int) {
+				defer wg.Done()
+				m := "m" + fmt.Sprint(i)
+				if r := configCmd(fromPBConfigReq(&pb.ConfigReq{Group: "tg", Model: &m})); !r.OK {
+					t.Error(r.Error)
+				}
+			}(i)
+		}
+		wg.Wait()
+		l, err := groupAllow("tg")
+		file := &allowPolicy{list: l, denyAll: err != nil}
+		if got, want := entries(allowSlot("tg").Load()), entries(file); got != want {
+			t.Fatalf("round %d: enforced %q != file %q", round, got, want)
+		}
 	}
 }

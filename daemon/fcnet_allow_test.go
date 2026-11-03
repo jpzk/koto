@@ -122,7 +122,7 @@ func clientHello(t *testing.T, serverName string) []byte {
 }
 
 // allowGroup publishes list for a fresh test group through the real live
-// slot (allowApplyLive) and returns the group name.
+// slot (publishAllowForTest) and returns the group name.
 func allowGroup(t *testing.T, list string) string {
 	t.Helper()
 	g := "allowtest-" + t.Name()
@@ -302,15 +302,15 @@ func TestAllowlistLiveChangeNoRestart(t *testing.T) {
 
 	// Operator changes the list on the SAME running link (no new conn).
 	l, _ := netallow.Parse("8.8.8.8,a.example.com")
-	if got := allowApplyLive(g, l); got == "" {
-		t.Fatal("allowApplyLive returned no status")
+	if got := publishAllowForTest(g, l); got == "" {
+		t.Fatal("publishAllowForTest returned no status")
 	}
 	// established 1.1.1.1 flow loses its next packet; 8.8.8.8 opens;
 	// a.example.com's pin survives, b.example.com's is dropped.
 	wantPass(t, pump(t, e, est...), false, true, true, false)
 
 	// Clearing the list restores the plain profile on the live link.
-	allowApplyLive(g, nil)
+	publishAllowForTest(g, nil)
 	wantPass(t, pump(t, e, est...), true, true, true, true)
 }
 
