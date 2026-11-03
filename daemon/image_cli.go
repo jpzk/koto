@@ -26,6 +26,9 @@ const imageUsage = `usage: koto image <op> [args]
                               move groups to <name>'s digest (fresh sys.img,
                               /workspace untouched, provision.sh once)
   rollback <group>            back to the previous image and its sys.img
+
+KOTO_IMAGE_PROGRESS=1 also prints the structured add/update progress events
+(phase, layer i/n, bytes done/total) on stderr, one line each.
 `
 
 // imageCliParse turns argv into an ImageReq. --all/-all is only for apply.
@@ -56,6 +59,7 @@ func imageCliMain(args []string) {
 		}
 		ctlFatal(2, "%v", err)
 	}
+	showProgress := os.Getenv("KOTO_IMAGE_PROGRESS") == "1"
 	stream, err := ctlClientAs(imageCliDefaultIdentity).Image(context.Background(), req)
 	if err != nil {
 		ctlFatal(1, "image: %v", err)
@@ -71,6 +75,11 @@ func imageCliMain(args []string) {
 		switch ev.Event {
 		case "data":
 			fmt.Print(ev.Data)
+		case "progress":
+			if p := ev.GetProgress(); p != nil && showProgress {
+				fmt.Fprintf(os.Stderr, "progress phase=%s image=%s layer=%d/%d done=%d total=%d\n",
+					p.GetPhase(), p.GetImage(), p.GetLayer(), p.GetLayers(), p.GetDone(), p.GetTotal())
+			}
 		case "end":
 			return
 		case "error":

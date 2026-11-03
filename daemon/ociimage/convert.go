@@ -77,6 +77,16 @@ type FreshLayer struct {
 // lets the caller undo the build if it is cancelled later, before the
 // catalog entry that would keep the layers is written.
 func EnsureLayersCtx(ctx context.Context, cache string, img *Image, logf func(string, ...any)) (built, reused int, fresh []FreshLayer, err error) {
+	return EnsureLayersProgress(ctx, cache, img, logf, nil)
+}
+
+// EnsureLayersProgress is EnsureLayersCtx that also reports a PhaseConvert
+// update (layer i/n of the distinct layers) before each layer it checks or
+// builds; prog may be nil.
+func EnsureLayersProgress(ctx context.Context, cache string, img *Image, logf func(string, ...any), prog func(Progress)) (built, reused int, fresh []FreshLayer, err error) {
+	if prog == nil {
+		prog = func(Progress) {}
+	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -100,6 +110,7 @@ func EnsureLayersCtx(ctx context.Context, cache string, img *Image, logf func(st
 		if err := cancelled(); err != nil {
 			return built, reused, nil, err
 		}
+		prog(Progress{Phase: PhaseConvert, Layer: i + 1, Layers: len(ls)})
 		if LayerOK(cache, l) {
 			TouchCached(LayerFile(cache, l.DiffID))
 			reused++
