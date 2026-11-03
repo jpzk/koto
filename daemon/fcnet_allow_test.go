@@ -323,3 +323,53 @@ func TestAllowlistCorruptDeniesAll(t *testing.T) {
 	dns := ipv4Frame(fcNetGuestIP, fcNetGatewayIP, 17, 33333, 53, []byte("q"))
 	wantPass(t, pump(t, e, guestTCP("1.1.1.1", 443, nil), dns), false, false) // dns: consumed by koto's resolver
 }
+
+// rawHello builds a TLS ClientHello record by hand: exts == nil omits the
+// extensions block entirely (legal in TLS 1.2), otherwise it is written
+// verbatim with its 2-byte length.
+func rawHello(exts []byte) []byte {
+	body := []byte{0x03, 0x03}
+	body = append(body, make([]byte, 32)...) // random
+	body = append(body, 0)                   // session_id
+	body = append(body, 0, 2, 0xc0, 0x2f)    // one cipher suite
+	body = append(body, 1, 0)                // null compression
+	if exts != nil {
+		body = binary.BigEndian.AppendUint16(body, uint16(len(exts)))
+		body = append(body, exts...)
+	}
+	hs := append([]byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
+	return append([]byte{0x16, 0x03, 0x01, byte(len(hs) >> 8), byte(len(hs))}, hs...)
+}
+
+// TestAllowlistSNILessHelloDenied (audit f): a ClientHello with no SNI — no
+// extensions block at all, or extensions without server_name — must not
+// reach an IP that is allowed only through a hostname pin. A statically
+// listed IP still takes it (no SNI gate there).
+func TestAllowlistSNILessHelloDenied(t *testing.T) {
+	pinSelf(t)
+	noExt := rawHello(nil)
+	noSNI := rawHello([]byte{0x00, 0x0b, 0x00, 0x02, 0x01, 0x00}) // ec_point_formats only
+	malformed := rawHello([]byte{0x00, 0x0b, 0x00, 0x09, 0x01})   // ext body overruns
+	for name, h := range map[string][]byte{"no-extensions": noExt, "no-sni": noSNI, "malformed": malformed} {
+		if sni, isHello, complete := fcTLSSNI(h); sni != "" || !isHello || !complete {
+			t.Errorf("%s: fcTLSSNI = %q isHello=%v complete=%v, want \"\" true true", name, sni, isHello, complete)
+		}
+	}
+	g := allowGroup(t, "example.com,1.1.1.1")
+	e := newConn(g, fcNetWAN)
+	resolve(t, e, "example.com.", rrA("example.com.", "93.184.216.34", 300))
+	frames := [][]byte{
+		guestTCP("93.184.216.34", 443, noExt),     // pin-only IP, no extensions
+		guestTCP("93.184.216.34", 443, noSNI),     // pin-only IP, extensions w/o SNI
+		guestTCP("93.184.216.34", 443, malformed), // pin-only IP, malformed whole hello
+		guestTCP("1.1.1.1", 443, noExt),           // IP-listed: passes without SNI
+		guestTCP("1.1.1.1", 443, noSNI),
+		guestTCP("93.184.216.34", 443, clientHello(t, "example.com")), // control
+	}
+	wantPass(t, pump(t, e, frames...), false, false, false, true, true, true)
+	// Still best effort for a hello split across segments: a prefix that does
+	// not hold the whole handshake message is not judged.
+	if _, isHello, complete := fcTLSSNI(noSNI[:30]); !isHello || complete {
+		t.Errorf("split hello prefix: isHello=%v complete=%v", isHello, complete)
+	}
+}

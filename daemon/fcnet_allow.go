@@ -21,8 +21,10 @@ package main
 // On a pin-only destination:
 //   - TCP :443 — a TLS ClientHello whose SNI is not an allowed name is
 //     dropped (shared CDN IPs: pinning a.example.com's IP must not open
-//     every other site on that edge). A ClientHello with no SNI is dropped.
-//     A ClientHello whose SNI is not in the first segment is let through
+//     every other site on that edge). A ClientHello with no SNI is dropped,
+//     including one with no extensions block at all or a malformed one,
+//     whenever the whole handshake message is in the segment. A ClientHello
+//     split so that neither it nor its SNI fits the first segment is let through
 //     (best effort — see docs/firecracker-vsock.md "Egress allowlist").
 //   - UDP :443 (QUIC) is dropped: the SNI is not checkable without
 //     decrypting the Initial; clients fall back to TCP.
@@ -184,17 +186,28 @@ func (a *fcAllow) allowFrame(frame []byte) bool {
 
 // fcTLSSNI extracts the server_name from a TLS ClientHello at the start of a
 // TCP payload. isHello reports the payload starts a handshake record carrying
-// a ClientHello; complete reports the extensions block was fully present (so
-// an empty sni means "no SNI sent", not "cut off by the segment boundary").
+// a ClientHello; complete reports the hello was judged in full (so an empty
+// sni means "no SNI sent", not "cut off by the segment boundary"): either the
+// extensions block was fully present, or the whole handshake message is in p
+// (then a missing extensions block or a malformed hello also means no SNI).
 func fcTLSSNI(p []byte) (sni string, isHello, complete bool) {
 	// record: type(1)=22 version(2) len(2); handshake: type(1)=1 len(3)
 	if len(p) < 9 || p[0] != 0x16 || p[1] != 0x03 || p[5] != 0x01 {
 		return "", false, false
 	}
 	b := p[9:]
+	// whole: the entire ClientHello body (handshake length) is in this
+	// segment. Then nothing is "cut off" any more: a hello that ends before
+	// an extensions block, or that does not parse, carries no SNI and is
+	// judged complete (= no allowed name), not waved through as truncated.
+	bad := func() (string, bool, bool) { return "", true, false }
+	if hl := int(p[6])<<16 | int(p[7])<<8 | int(p[8]); 9+hl <= len(p) {
+		b = p[9 : 9+hl]
+		bad = func() (string, bool, bool) { return "", true, true }
+	}
 	// legacy_version(2) random(32)
 	if len(b) < 34 {
-		return "", true, false
+		return bad()
 	}
 	b = b[34:]
 	skip := func(lenBytes int) bool { // skip a length-prefixed vector
@@ -212,16 +225,17 @@ func fcTLSSNI(p []byte) (sni string, isHello, complete bool) {
 		return true
 	}
 	if !skip(1) || !skip(2) || !skip(1) { // session_id, cipher_suites, compression
-		return "", true, false
+		return bad()
 	}
 	if len(b) < 2 {
-		return "", true, false
+		return bad() // a whole hello without extensions: no SNI
 	}
 	extLen := int(binary.BigEndian.Uint16(b))
 	b = b[2:]
 	if len(b) < extLen {
-		// Truncated: scan what is present for the SNI anyway.
-		complete = false
+		// Truncated (or, for a whole hello, malformed): scan what is
+		// present for the SNI anyway.
+		_, _, complete = bad()
 	} else {
 		b, complete = b[:extLen], true
 	}
@@ -229,7 +243,7 @@ func fcTLSSNI(p []byte) (sni string, isHello, complete bool) {
 		typ := binary.BigEndian.Uint16(b)
 		n := int(binary.BigEndian.Uint16(b[2:]))
 		if len(b) < 4+n {
-			return "", true, false
+			return bad()
 		}
 		body := b[4 : 4+n]
 		b = b[4+n:]
