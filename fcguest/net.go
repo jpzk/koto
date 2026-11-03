@@ -18,7 +18,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -46,19 +45,11 @@ func netUp() error {
 		return err
 	}
 	tapFile = f
-	// Configure via iproute2 (in the rootfs) — clearer and less brittle than
-	// hand-rolled netlink, and the agent is PID 1 (root). Order matters: set
-	// MAC/MTU, bring up, then address + default route.
-	for _, a := range [][]string{
-		{"link", "set", netTAPName, "address", netGuestMAC},
-		{"link", "set", netTAPName, "mtu", strconv.Itoa(netMTU)},
-		{"link", "set", netTAPName, "up"},
-		{"addr", "add", netGuestCIDR, "dev", netTAPName},
-		{"route", "add", "default", "via", netGatewayIP},
-	} {
-		if err := runReaped("ip", a...); err != nil {
-			return err
-		}
+	// Configure over rtnetlink (netlink.go). This used to shell out to `ip`,
+	// which the fedora OCI base and guest.img do not ship (1.9.0 regression:
+	// wan/full image groups got a TAP with no address or route).
+	if err := netConfigure(netTAPName, netGuestMAC, netMTU, netGuestCIDR, netGatewayIP); err != nil {
+		return err
 	}
 	// Point DNS at the gateway. The rootfs is read-only, so /etc/resolv.conf is
 	// a symlink to /run/resolv.conf (a writable tmpfs); we just write the
