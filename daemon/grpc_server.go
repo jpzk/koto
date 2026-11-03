@@ -85,6 +85,7 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		TokPerSec: gi.TokPerSec,
 		Network:   sanitize(gi.Network),
 		Root:      gi.Root,
+		Allow:     sanitizeAll(gi.Allow),
 	}
 	if len(gi.SessionOrigins) > 0 {
 		out.SessionOrigins = make(map[string]string, len(gi.SessionOrigins))
@@ -207,6 +208,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Autostart = optRaw(r.Autostart)
 	out.KVM = optRaw(r.Kvm)
 	out.Image = optRaw(r.Image)
+	out.Allow = optRaw(r.Allow)
 	return out
 }
 

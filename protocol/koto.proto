@@ -362,6 +362,10 @@ message GroupInfo {
   // under the origin session's row; an absent key means "hang off the
   // group", which is also the fallback when the origin row is gone.
   map<string, string> session_origins = 13;
+  // Effective egress allowlist (canonical entries; empty = none, the network
+  // profile alone decides). A corrupt stored list renders as a single
+  // "!invalid (deny-all)" entry and is enforced as deny-all.
+  repeated string allow = 14;
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -483,6 +487,10 @@ message ConfigReq {
   // set time (image_digest), keeps the previous one (image_prev) for
   // rollback, and the guest boots it on the next /restart with a fresh sys.img.
   optional string image    = 15;
+  // allow: egress allowlist narrowing network (effective = profile ∩ allow),
+  // comma-separated; "" clears. Invalid entries are refused with an error.
+  // Applies LIVE — the gateway filter is host-side, no /restart needed.
+  optional string allow    = 16;
 }
 
 message JobsReq { string group = 1; } // "" = all running groups

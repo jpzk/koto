@@ -79,7 +79,7 @@ config
   config <group>                           print effective config (no flags = read)
   config <group> [-model M] [-provider P] [-network none|wan|lan|full]
          [-size small|medium|large|xlarge] [-root yes|no] [-effort E] [-ports P]
-         [-autostart yes|no]
+         [-autostart yes|no] [-allow "a,b,c"]
                                            set keys ("" clears a key)
 
 streams
@@ -882,6 +882,7 @@ func ctlConfig(args []string) {
 	autostart := fs.String("autostart", "", "yes|no — boot this group with the daemon")
 	kvm := fs.String("kvm", "", "yes|no — nested virtualization (/dev/kvm in the guest)")
 	image := fs.String("image", "", "catalog image name (koto image ls) or koto-default; applies on /restart")
+	allow := fs.String("allow", "", `egress allowlist, comma list (IPs, CIDR, 10.0.0.*, a-b, host, *.host); ""=clear; applies live`)
 	fs.Parse(rest)
 	if fs.NArg() != 0 {
 		ctlFatal(2, "config: unexpected args after group: %v (flags follow the group)", fs.Args())
@@ -919,6 +920,9 @@ func ctlConfig(args []string) {
 	}
 	if seen["image"] {
 		req.Image = image
+	}
+	if seen["allow"] {
+		req.Allow = allow
 	}
 
 	cl := ctlClient()

@@ -98,6 +98,10 @@ type GroupInfo struct {
 	// render a fleet overview without a per-group Config round-trip.
 	Network string `json:"network,omitempty"`
 	Root    bool   `json:"root,omitempty"`
+	// Allow is the effective egress allowlist (canonical entries; empty = no
+	// narrowing). A corrupt stored list shows as one "!invalid" marker and
+	// is enforced as deny-all.
+	Allow []string `json:"allow,omitempty"`
 	// SessionOrigins maps each live goal session whose goal was set from a
 	// NAMED session to that origin session (goals.go goalSessionOrigins), so
 	// clients can nest the goal rows under it. See koto.proto.
@@ -196,6 +200,12 @@ type ConfigReq struct {
 	// host CPU's VMX/SVM to the guest so it can run its own KVM guests; "no"
 	// masks it in the guest's CPUID. Applies on /restart.
 	KVM json.RawMessage `json:"kvm,omitempty"`
+	// Allow is the egress allowlist that narrows Network: effective = profile
+	// ∩ allow; empty = no narrowing. A comma-separated string or a list of
+	// strings (see daemon/netallow for the v1 forms); "" / null / [] clear.
+	// Invalid entries are refused with an error. Applies live (the gateway
+	// filter is host-side).
+	Allow json.RawMessage `json:"allow,omitempty"`
 	// Image is a catalog name (koto image ls) or koto-default; "" clears to
 	// koto-default. Raw registry refs are refused; the daemon pins the
 	// name's digest at set time. Applies on /restart (see config_image.go).

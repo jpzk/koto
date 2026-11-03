@@ -344,6 +344,12 @@ func configCmd(req configReq) configResp {
 	if err != nil {
 		return configResp{BaseResp: errResp(err.Error())}
 	}
+	// allow= gets the same treatment: an egress allowlist with a typo must be
+	// refused loudly, never dropped while the previous list stays in force.
+	allowList, setAllow, err := allowFromRaw(req.Allow)
+	if err != nil {
+		return configResp{BaseResp: errResp(err.Error())}
+	}
 	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
 		applyConfig(cfg, "model", req.Model)
 		applyConfig(cfg, "effort", req.Effort)
@@ -360,11 +366,20 @@ func configCmd(req configReq) configResp {
 		if setImage {
 			setImageConfig(cfg, pin)
 		}
+		if setAllow {
+			setAllowConfig(cfg, allowList)
+		}
 	})
 	if err != nil {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
 	}
-	return configResp{BaseResp: baseResp{OK: true}, Config: effectiveConfig(req.Group, cfg)}
+	eff := effectiveConfig(req.Group, cfg)
+	if setAllow {
+		// The gateway filter is host-side: swap the running VM's allow set
+		// in place (no restart). Tell the caller which happened.
+		eff["allow_apply"] = allowApplyLive(req.Group, allowList)
+	}
+	return configResp{BaseResp: baseResp{OK: true}, Config: eff}
 }
 
 // imageDefaultDisplay is what koto config shows for a group with no image=:
@@ -415,6 +430,13 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 	}
 	// No image= boots the catalog default (fedora); say so rather than naming
 	// koto-default, which is now only the explicit legacy opt-out.
+	// allow: canonical comma form of what the gateway enforces; "(none)" =
+	// no narrowing, the profile alone decides.
+	if a := groupConfig(cfg).allowDisplay(); len(a) > 0 {
+		eff[cfgAllow] = strings.Join(a, ",")
+	} else {
+		eff[cfgAllow] = "(none)"
+	}
 	if v, _ := eff["image"].(string); v == "" {
 		eff["image"] = imageDefaultDisplay
 	}
