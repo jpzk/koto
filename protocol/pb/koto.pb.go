@@ -781,8 +781,12 @@ type GroupInfo struct {
 	// under the origin session's row; an absent key means "hang off the
 	// group", which is also the fallback when the origin row is gone.
 	SessionOrigins map[string]string `protobuf:"bytes,13,rep,name=session_origins,json=sessionOrigins,proto3" json:"session_origins,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Effective egress allowlist (canonical entries; empty = none, the network
+	// profile alone decides). A corrupt stored list renders as a single
+	// "!invalid (deny-all)" entry and is enforced as deny-all.
+	Allow         []string `protobuf:"bytes,14,rep,name=allow,proto3" json:"allow,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GroupInfo) Reset() {
@@ -902,6 +906,13 @@ func (x *GroupInfo) GetRoot() bool {
 func (x *GroupInfo) GetSessionOrigins() map[string]string {
 	if x != nil {
 		return x.SessionOrigins
+	}
+	return nil
+}
+
+func (x *GroupInfo) GetAllow() []string {
+	if x != nil {
+		return x.Allow
 	}
 	return nil
 }
@@ -1673,7 +1684,11 @@ type ConfigReq struct {
 	// Raw registry refs are refused. The daemon records the name's digest at
 	// set time (image_digest), keeps the previous one (image_prev) for
 	// rollback, and the guest boots it on the next /restart with a fresh sys.img.
-	Image         *string `protobuf:"bytes,15,opt,name=image,proto3,oneof" json:"image,omitempty"`
+	Image *string `protobuf:"bytes,15,opt,name=image,proto3,oneof" json:"image,omitempty"`
+	// allow: egress allowlist narrowing network (effective = profile ∩ allow),
+	// comma-separated; "" clears. Invalid entries are refused with an error.
+	// Applies LIVE — the gateway filter is host-side, no /restart needed.
+	Allow         *string `protobuf:"bytes,16,opt,name=allow,proto3,oneof" json:"allow,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1788,6 +1803,13 @@ func (x *ConfigReq) GetKvm() string {
 func (x *ConfigReq) GetImage() string {
 	if x != nil && x.Image != nil {
 		return *x.Image
+	}
+	return ""
+}
+
+func (x *ConfigReq) GetAllow() string {
+	if x != nil && x.Allow != nil {
+		return *x.Allow
 	}
 	return ""
 }
@@ -4849,7 +4871,7 @@ const file_koto_proto_rawDesc = "" +
 	"\x03msg\x18\x03 \x01(\tR\x03msg\x12\x0e\n" +
 	"\x02ts\x18\x04 \x01(\x01R\x02ts\x12\x1c\n" +
 	"\tsubsystem\x18\x05 \x01(\tR\tsubsystem\x12\x14\n" +
-	"\x05group\x18\x06 \x01(\tR\x05group\"\xd3\x03\n" +
+	"\x05group\x18\x06 \x01(\tR\x05group\"\xe9\x03\n" +
 	"\tGroupInfo\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\x1a\n" +
@@ -4864,7 +4886,8 @@ const file_koto_proto_rawDesc = "" +
 	" \x01(\x01R\ttokPerSec\x12\x18\n" +
 	"\anetwork\x18\v \x01(\tR\anetwork\x12\x12\n" +
 	"\x04root\x18\f \x01(\bR\x04root\x12L\n" +
-	"\x0fsession_origins\x18\r \x03(\v2#.koto.GroupInfo.SessionOriginsEntryR\x0esessionOrigins\x1aA\n" +
+	"\x0fsession_origins\x18\r \x03(\v2#.koto.GroupInfo.SessionOriginsEntryR\x0esessionOrigins\x12\x14\n" +
+	"\x05allow\x18\x0e \x03(\tR\x05allow\x1aA\n" +
 	"\x13SessionOriginsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb8\x01\n" +
@@ -4926,7 +4949,7 @@ const file_koto_proto_rawDesc = "" +
 	"HistoryReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06before\x18\x03 \x01(\x01R\x06before\"\xdf\x03\n" +
+	"\x06before\x18\x03 \x01(\x01R\x06before\"\x84\x04\n" +
 	"\tConfigReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05model\x18\x02 \x01(\tH\x00R\x05model\x88\x01\x01\x12\x1b\n" +
@@ -4941,7 +4964,8 @@ const file_koto_proto_rawDesc = "" +
 	"\tautostart\x18\r \x01(\tH\bR\tautostart\x88\x01\x01\x12\x15\n" +
 	"\x03kvm\x18\x0e \x01(\tH\tR\x03kvm\x88\x01\x01\x12\x19\n" +
 	"\x05image\x18\x0f \x01(\tH\n" +
-	"R\x05image\x88\x01\x01B\b\n" +
+	"R\x05image\x88\x01\x01\x12\x19\n" +
+	"\x05allow\x18\x10 \x01(\tH\vR\x05allow\x88\x01\x01B\b\n" +
 	"\x06_modelB\t\n" +
 	"\a_effortB\b\n" +
 	"\x06_portsB\v\n" +
@@ -4954,7 +4978,8 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"_autostartB\x06\n" +
 	"\x04_kvmB\b\n" +
-	"\x06_imageJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
+	"\x06_imageB\b\n" +
+	"\x06_allowJ\x04\b\x04\x10\x05J\x04\b\b\x10\t\"\x1f\n" +
 	"\aJobsReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"S\n" +
 	"\bJobsResp\x12\x0e\n" +

@@ -56,6 +56,10 @@ func netShapeEnv(t *testing.T, network string) *captureUpstream {
 	if err := os.WriteFile(filepath.Join(vol("tg"), ".cs", "config.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A live allow slot left by another test would change the profile's
+	// server-tool behaviour; start from the file.
+	liveAllow.Delete("tg")
+	t.Cleanup(func() { liveAllow.Delete("tg") })
 	proxySetBootNetwork("tg", network)
 	t.Cleanup(func() { proxySetBootNetwork("tg", fcNetNone) })
 	c := &captureUpstream{}
@@ -188,5 +192,80 @@ func assertHeaderAllowlist(t *testing.T, h http.Header) {
 		if got := h.Get(k); got != want {
 			t.Fatalf("allowlisted header %s = %q, want %q", k, got, want)
 		}
+	}
+}
+
+// netShapeAllowEnv: like netShapeEnv(wan) but config.json also carries an
+// egress allowlist, published the way spawn does (seedAllow).
+func netShapeAllowEnv(t *testing.T, allow string) *captureUpstream {
+	t.Helper()
+	up := netShapeEnv(t, fcNetWAN)
+	cfg := `{"provider":"` + providerClaude + `","network":"` + fcNetWAN + `","allow":` + allow + `}`
+	if err := os.WriteFile(filepath.Join(vol("tg"), ".cs", "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedAllow("tg")
+	t.Cleanup(func() { liveAllow.Delete("tg") })
+	return up
+}
+
+// PR #104 review: with network=wan and allow=api.example.com, a server tool
+// would have Anthropic contact unlisted hosts for the guest; neither gate can
+// see those destinations, so an active allowlist refuses them like none does.
+func TestProxyAllowlistRefusesServerTools(t *testing.T) {
+	up := netShapeAllowEnv(t, `["api.example.com"]`)
+	if !currentAllow("tg").active() {
+		t.Fatal("allowlist not active after seed")
+	}
+	cases := map[string]string{
+		"web_fetch":   valWebFetchBody,
+		"web_search":  `{"model":"m","max_tokens":1,"messages":[],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
+		"mcp_servers": `{"model":"m","max_tokens":1,"messages":[],"mcp_servers":[{"type":"url","url":"https://attacker.example/mcp","name":"x"}]}`,
+		"mcp toolset": `{"model":"m","max_tokens":1,"messages":[],"tools":[{"type":"mcp_toolset","mcp_server_name":"x"}]}`,
+		"code_exec":   `{"model":"m","max_tokens":1,"messages":[],"tools":[{"type":"code_execution_20250825","name":"code_execution"}]}`,
+	}
+	for name, body := range cases {
+		rec := httptest.NewRecorder()
+		(&handler{group: "tg"}).ServeHTTP(rec, valCaptureReq(body))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403 (body %s)", name, rec.Code, rec.Body.String())
+			continue
+		}
+		if !strings.Contains(rec.Body.String(), "egress allowlist") {
+			t.Errorf("%s: refusal does not name the allowlist: %s", name, rec.Body.String())
+		}
+	}
+	if n := up.n(); n != 0 {
+		t.Fatalf("upstream got %d requests for refused bodies", n)
+	}
+	// Client tools still relay; the web-fetch beta is dropped like for none.
+	body := `{"model":"m","max_tokens":1,"messages":[],"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`
+	rec := httptest.NewRecorder()
+	(&handler{group: "tg"}).ServeHTTP(rec, valCaptureReq(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("client tool: status %d body %s", rec.Code, rec.Body.String())
+	}
+	if beta := strings.Join(up.last(t).hdr.Values("Anthropic-Beta"), ","); strings.Contains(beta, "web-fetch") {
+		t.Fatalf("web-fetch beta relayed with allowlist active: %q", beta)
+	}
+}
+
+// A corrupt stored list fails closed to deny-all, which is also "active".
+func TestProxyAllowlistDenyAllRefusesServerTools(t *testing.T) {
+	up := netShapeAllowEnv(t, `"not-a-list"`)
+	rec := httptest.NewRecorder()
+	(&handler{group: "tg"}).ServeHTTP(rec, valCaptureReq(valWebFetchBody))
+	if rec.Code != http.StatusForbidden || up.n() != 0 {
+		t.Fatalf("deny-all: status %d, upstream %d (body %s)", rec.Code, up.n(), rec.Body.String())
+	}
+}
+
+// Clearing the list restores wan behaviour (server tools relayed).
+func TestProxyAllowlistClearedKeepsServerTools(t *testing.T) {
+	up := netShapeAllowEnv(t, `[]`)
+	rec := httptest.NewRecorder()
+	(&handler{group: "tg"}).ServeHTTP(rec, valCaptureReq(valWebFetchBody))
+	if rec.Code != http.StatusOK || up.n() != 1 {
+		t.Fatalf("empty allow: status %d, upstream %d (body %s)", rec.Code, up.n(), rec.Body.String())
 	}
 }

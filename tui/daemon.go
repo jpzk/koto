@@ -397,6 +397,7 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("model", &r.Model)
 	setOpt("effort", &r.Effort)
 	setOpt("ports", &r.Ports)
+	setOpt("allow", &r.Allow)
 	setOpt("provider", &r.Provider)
 	setOpt("internet", &r.Internet)
 	setOpt("network", &r.Network)

@@ -34,6 +34,7 @@ const (
 	ngModel  = "model"
 	ngCustom = "model-id"
 	ngPorts  = "ports"
+	ngAllow  = "allow"
 	ngCreate = "create"
 )
 
@@ -60,10 +61,12 @@ type newGroupForm struct {
 	mp     modelPick       // the model select
 	custom textinput.Model // the custom model id (mp on "custom…")
 	ports  textinput.Model
-	sel    map[string]int // select key → index into f.values(key)
-	err    string         // inline error, shown under errAt
-	errAt  string         // field key the error belongs to
-	busy   bool           // a submit is in flight
+	// allow is the egress allowlist input, comma-separated.
+	allow textinput.Model
+	sel   map[string]int // select key → index into f.values(key)
+	err   string         // inline error, shown under errAt
+	errAt string         // field key the error belongs to
+	busy  bool           // a submit is in flight
 	// spawned is the group a previous submit already spawned before a later
 	// step failed: a retry with the same name skips spawn (it would now fail
 	// "exists") and redoes only config/restart.
@@ -157,6 +160,7 @@ func (m *Model) openNewGroup() tea.Cmd {
 		name:   newGroupInput(32, "lowercase, e.g. research"),
 		custom: newGroupInput(64, "model id"),
 		ports:  newGroupInput(200, "e.g. 8080,3000"),
+		allow:  newGroupInput(allowInputLimit, allowPlaceholder),
 		sel:    map[string]int{},
 	}
 	for _, o := range groupOptTable {
@@ -258,6 +262,8 @@ func (f *newGroupForm) input(key string) *textinput.Model {
 		return &f.custom
 	case ngPorts:
 		return &f.ports
+	case ngAllow:
+		return &f.allow
 	}
 	return nil
 }
@@ -338,6 +344,10 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	if err != nil {
 		return newGroupPlan{}, ngPorts, err.Error()
 	}
+	allow, err := parseAllowList(f.allow.Value())
+	if err != nil {
+		return newGroupPlan{}, ngAllow, err.Error()
+	}
 	model, merr := f.modelValue()
 	if merr != "" {
 		return newGroupPlan{}, ngCustom, merr
@@ -369,6 +379,9 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	}
 	if ports != "" {
 		cfg["ports"] = ports
+	}
+	if allow != "" {
+		cfg[ngAllow] = allow
 	}
 	for k := range cfg {
 		if groupOptNeedsRestart(k) {
@@ -1059,3 +1072,13 @@ func (m Model) renderModelList(lines *[]string, inner int) int {
 	}
 	return cur
 }
+
+// The allow input: no byte cap. The daemon caps entries (MaxEntries), not
+// bytes, and a textinput CharLimit silently truncates SetValue — a stored
+// list longer than the cap would be cut on prefill and the cut list re-sent
+// when the operator only edited another field. 0 = unlimited; the entry
+// count is checked by parseAllowList.
+const (
+	allowInputLimit  = 0
+	allowPlaceholder = "empty = whole profile; e.g. 1.2.3.4,github.com"
+)

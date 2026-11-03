@@ -66,6 +66,9 @@ const effortDefault = "default"
 //	          autostartGroups); a /restart of the group does nothing for it.
 //	ports     restart. fc.go pushes the published-port list in the init
 //	          request after boot and opens one host listener per port then.
+//	allow     NO restart. config_allow.go allowApplyLive swaps the running
+//	          VM's allow set; the gateway filter and the L7 proxy read it per
+//	          frame / per request (config reply: allow_apply).
 //
 // TestGroupOptRestartFlags pins this table.
 //
@@ -85,6 +88,10 @@ var groupOptTable = []groupOpt{
 	{key: "autostart", values: []string{"no", "yes"}, note: "applies at next daemon start"},
 	{key: "kvm", values: []string{"no", "yes"}, restart: true, risky: map[string]string{"yes": "nested virtualization exposed"}},
 	{key: "ports", text: true, restart: true},
+	// allow is the egress allowlist on top of network (daemon/config_allow.go):
+	// the daemon swaps it into a running VM's gateway filter at once
+	// (allowApplyLive), so no restart. Operator-only on every plane.
+	{key: "allow", text: true, note: "applies live; egress = network ∩ allow, empty = whole profile"},
 }
 
 // groupOptNeedsRestart reports whether changing key needs a VM restart to
@@ -201,6 +208,55 @@ func parsePortList(s string) (string, error) {
 func truncPort(t string) string {
 	if len(t) > 8 {
 		return t[:8] + "…"
+	}
+	return t
+}
+
+// allowMaxEntries mirrors daemon/netallow.MaxEntries.
+const allowMaxEntries = 256
+
+// allowLastOctetRE is the one IPv4 wildcard form v1 accepts (192.168.1.*).
+var allowLastOctetRE = regexp.MustCompile(`^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.\*$`)
+
+// parseAllowList trims a comma-separated egress allowlist into the
+// comma-joined form the daemon parses (daemon/netallow.Parse splits on
+// commas only, so a range "a - b" keeps its spaces). It refuses up front
+// what v1 never accepts — regex (~...), any glob other than a leading "*."
+// or an IPv4 last-octet "*", repeats and over-long lists — so the operator
+// sees the reason inline. Everything else (CIDR, ranges, hostnames) is the
+// daemon's call: it re-validates the whole list and refuses it on any bad
+// entry, and that error lands inline too.
+func parseAllowList(s string) (string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.Split(s, ",") {
+		e := strings.TrimSpace(p)
+		if e == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(e, "~"):
+			return "", fmt.Errorf("allow %q: regex not supported", truncAllow(e))
+		case strings.Contains(e, "*") && !allowLastOctetRE.MatchString(e) &&
+			!(strings.HasPrefix(e, "*.") && !strings.Contains(e[2:], "*")):
+			return "", fmt.Errorf("allow %q: only *.host or a.b.c.* wildcards", truncAllow(e))
+		}
+		k := strings.ToLower(e)
+		if seen[k] {
+			return "", fmt.Errorf("allow %q repeated", truncAllow(e))
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	if len(out) > allowMaxEntries {
+		return "", fmt.Errorf("max %d allow entries", allowMaxEntries)
+	}
+	return strings.Join(out, ","), nil
+}
+
+func truncAllow(t string) string {
+	if len([]rune(t)) > 24 {
+		return string([]rune(t)[:24]) + "…"
 	}
 	return t
 }

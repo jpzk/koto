@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -278,14 +280,31 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 	mu := cfgMu(g)
 	mu.Lock()
 	defer mu.Unlock()
+	// Republish the live egress policy from the file we just committed (or
+	// failed to touch), still under the lock: two concurrent writers can then
+	// never leave the enforced policy different from config.json, which a
+	// publish after Unlock allowed (the later commit could publish first).
+	defer publishAllowLocked(g)
+	return updateGroupConfigLocked(g, mutate)
+}
 
+func updateGroupConfigLocked(g string, mutate func(map[string]any)) (map[string]any, error) {
 	p := groupConfigPath(g)
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, err
 	}
 	cfg := map[string]any{}
-	oldB, _ := os.ReadFile(p)
-	_ = json.Unmarshal(oldB, &cfg)
+	oldB, err := readGroupConfigFile(p)
+	if err != nil {
+		// Never rewrite a file we could not read or parse: the rewrite would
+		// start from {} and silently drop every key in it — including an
+		// egress allowlist, which would turn a corrupt (deny-all) list into
+		// no list at all. Fail closed; the operator fixes the file by hand.
+		return nil, err
+	}
+	if len(oldB) > 0 {
+		_ = json.Unmarshal(oldB, &cfg) // validated by readGroupConfigFile
+	}
 	mutate(cfg)
 	newB, err := json.Marshal(cfg)
 	if err != nil {
@@ -344,6 +363,12 @@ func configCmd(req configReq) configResp {
 	if err != nil {
 		return configResp{BaseResp: errResp(err.Error())}
 	}
+	// allow= gets the same treatment: an egress allowlist with a typo must be
+	// refused loudly, never dropped while the previous list stays in force.
+	allowList, setAllow, err := allowFromRaw(req.Allow)
+	if err != nil {
+		return configResp{BaseResp: errResp(err.Error())}
+	}
 	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
 		applyConfig(cfg, "model", req.Model)
 		applyConfig(cfg, "effort", req.Effort)
@@ -360,11 +385,20 @@ func configCmd(req configReq) configResp {
 		if setImage {
 			setImageConfig(cfg, pin)
 		}
+		if setAllow {
+			setAllowConfig(cfg, allowList)
+		}
 	})
 	if err != nil {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
 	}
-	return configResp{BaseResp: baseResp{OK: true}, Config: effectiveConfig(req.Group, cfg)}
+	eff := effectiveConfig(req.Group, cfg)
+	if setAllow {
+		// The gateway filter is host-side: swap the running VM's allow set
+		// in place (no restart). Tell the caller which happened.
+		eff["allow_apply"] = allowApplyStatus(req.Group)
+	}
+	return configResp{BaseResp: baseResp{OK: true}, Config: eff}
 }
 
 // imageDefaultDisplay is what koto config shows for a group with no image=:
@@ -415,8 +449,54 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 	}
 	// No image= boots the catalog default (fedora); say so rather than naming
 	// koto-default, which is now only the explicit legacy opt-out.
+	// allow: canonical comma form of what the gateway enforces; "(none)" =
+	// no narrowing, the profile alone decides.
+	if a := groupConfig(cfg).allowDisplay(); len(a) > 0 {
+		eff[cfgAllow] = strings.Join(a, ",")
+	} else {
+		eff[cfgAllow] = "(none)"
+	}
 	if v, _ := eff["image"].(string); v == "" {
 		eff["image"] = imageDefaultDisplay
 	}
 	return eff
+}
+
+// errConfigCorrupt marks a config.json that exists but cannot be read or does
+// not parse as a JSON object. Writers refuse to clobber it and the egress
+// allowlist reader enforces it as deny-all (fail closed).
+var errConfigCorrupt = errors.New("config.json is unreadable or malformed; fix or remove it by hand")
+
+// readGroupConfigFile returns the raw config.json. A missing file is (nil,
+// nil) — a fresh group. Any other read error, or content that is not a JSON
+// object, is errConfigCorrupt.
+func readGroupConfigFile(p string) ([]byte, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %v", errConfigCorrupt, err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return nil, fmt.Errorf("%w: %v", errConfigCorrupt, err)
+	}
+	if obj == nil { // "null" parses into a nil map without error
+		return nil, fmt.Errorf("%w: not a JSON object", errConfigCorrupt)
+	}
+	return b, nil
+}
+
+// loadGroupConfigStrict is loadGroupConfig that reports a corrupt file
+// instead of answering "empty config". Use it wherever "empty" would widen
+// a policy.
+func loadGroupConfigStrict(g string) (groupConfig, error) {
+	b, err := readGroupConfigFile(groupConfigPath(g))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	var cfg map[string]any
+	_ = json.Unmarshal(b, &cfg)
+	return cfg, nil
 }

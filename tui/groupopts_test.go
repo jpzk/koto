@@ -20,9 +20,10 @@ func TestGroupOptTable(t *testing.T) {
 		"kvm":       "no|yes",
 		"model":     "",
 		"ports":     "",
+		"allow":     "",
 	}
 	defaults := map[string]string{"provider": "claudesdk", "effort": "default", "network": "none",
-		"size": "small", "root": "no", "autostart": "no", "kvm": "no", "model": "", "ports": ""}
+		"size": "small", "root": "no", "autostart": "no", "kvm": "no", "model": "", "ports": "", "allow": ""}
 	if len(groupOptTable) != len(want) {
 		t.Fatalf("table has %d rows, want %d", len(groupOptTable), len(want))
 	}
@@ -96,6 +97,7 @@ func TestGroupOptRestartFlags(t *testing.T) {
 	want := map[string]bool{
 		"provider": false, "model": false, "effort": false, "autostart": false,
 		"network": true, "size": true, "root": true, "kvm": true, "ports": true,
+		"allow": false,
 	}
 	got := map[string]bool{}
 	for _, o := range groupOptTable {
@@ -103,7 +105,7 @@ func TestGroupOptRestartFlags(t *testing.T) {
 		if o.restart != groupOptNeedsRestart(o.key) {
 			t.Errorf("%s: groupOptNeedsRestart disagrees with the row", o.key)
 		}
-		if o.text != (o.key == "model" || o.key == "ports") {
+		if o.text != (o.key == "model" || o.key == "ports" || o.key == "allow") {
 			t.Errorf("%s: text = %v", o.key, o.text)
 		}
 		if o.text && isSelectField(o.key) {

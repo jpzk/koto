@@ -914,6 +914,10 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	// this listener. The policy is captured at spawn — changes apply on /restart.
 	netPol := groupNetwork(g)
 	proxySetBootNetwork(g, netPol) // the L7 gate's snapshot (audit H1)
+	// The allowlist is NOT a boot snapshot: both gates read currentAllow(g)
+	// per flow, and configCmd swaps it live. Re-seed from config.json here so
+	// a hand edit made while the VM was down is what this boot enforces.
+	seedAllow(g)
 	if netPol != fcNetNone {
 		vn, err := fcNetGateway()
 		if err != nil {

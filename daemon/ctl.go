@@ -199,7 +199,7 @@ func configPostureKey(req configReq) string {
 	}{
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
-		{"kvm", req.KVM},
+		{"kvm", req.KVM}, {"allow", req.Allow},
 	} {
 		if len(k.raw) > 0 {
 			return k.name

@@ -24,7 +24,7 @@ func editCfg() map[string]any {
 	return map[string]any{
 		"provider": "venice", "model": "qwen3-235b", "effort": "high",
 		"network": "wan", "size": "medium", "root": "no", "kvm": "no",
-		"autostart": "yes", "ports": []any{8080.0, 3000.0},
+		"autostart": "yes", "ports": []any{8080.0, 3000.0}, "allow": "(none)",
 		"io": "100MiB/s / 1000ops",
 	}
 }

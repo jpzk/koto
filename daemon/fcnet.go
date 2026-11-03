@@ -122,7 +122,9 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 // egress at the frame layer under the group's network profile. Blocks until
 // the connection ends. The policy is captured per link conn — i.e. fixed for
 // the VM's lifetime; a profile change applies on /restart, same as the
-// gateway attach itself. group is only for the flow log lines.
+// gateway attach itself. The egress ALLOWLIST is not captured: it is read
+// live per frame from currentAllow(group) (fcnet_allow.go), so -allow changes
+// apply to the running VM.
 func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, group, policy string) (err error) {
 	// The netstack parses every frame a guest emits, inside the daemon
 	// process (audit M14). A panic on THIS goroutine — the accept/reframe
@@ -284,7 +286,10 @@ var fcSelfIPs = func() func() []net.IP {
 
 // fcEgressConn wraps the guest link conn. Reads (guest→host) are reframed so
 // that only allowed Qemu frames pass through to the netstack; writes
-// (host→guest) pass straight through. Because both ends use identical framing
+// (host→guest) pass through unchanged and are never parsed. While an
+// allowlist is active, guest UDP DNS to the gateway is consumed here and
+// answered by koto's own resolver (fcnet_dns.go), which writes its reply
+// frames to the guest under the same lock as the netstack's writes. Because both ends use identical framing
 // (4-byte big-endian length + ethernet frame), dropping a frame is invisible
 // to the netstack — a blocked SYN simply never arrives, so the guest's connect
 // times out, same as a firewall DROP.
@@ -295,16 +300,22 @@ type fcEgressConn struct {
 	flows  *fcFlowLogger // summarized per-flow egress log
 	bytes  *fcTokenBucket
 	frames *fcTokenBucket
+	allow  *fcAllow // per-group allowlist (fcnet_allow.go), read live per frame
+	dns    *fcDNS   // koto's gateway resolver (fcnet_dns.go): the only pin source
+	wmu    sync.Mutex
 }
 
 func fcNewEgressConn(c net.Conn, group, policy string) *fcEgressConn {
-	return &fcEgressConn{
+	e := &fcEgressConn{
 		Conn:   c,
 		policy: policy,
 		flows:  newFcFlowLogger(group),
 		bytes:  newFcTokenBucket(fcNetBytesPerSec, fcNetBytesBurst),
 		frames: newFcTokenBucket(fcNetFramesPerSec, fcNetFramesBurst),
+		allow:  newFcAllow(group),
 	}
+	e.dns = newFcDNS(e.allow, e.writeGuest)
+	return e
 }
 
 func (e *fcEgressConn) Read(p []byte) (int, error) {
@@ -321,8 +332,23 @@ func (e *fcEgressConn) Read(p []byte) (int, error) {
 		// one. See fcTokenBucket for why this throttles rather than drops.
 		e.frames.take(1)
 		e.bytes.take(len(frame) + 4)
+		if !fcGuestMACOK(frame) {
+			// Multicast (IPv6 ND/MLD) never reached the gateway anyway —
+			// drop quietly; a unicast miss is the reflection attempt, log it.
+			if len(frame) >= 14 && frame[0]&1 == 0 {
+				e.flows.record(frame, e.policy+" (bad ethernet address)", false)
+			}
+			continue
+		}
+		if e.dns.intercept(frame) {
+			continue // answered host-side by koto's resolver
+		}
 		allowed := fcFrameAllowed(frame, e.policy)
-		e.flows.record(frame, e.policy, allowed)
+		why := e.policy
+		if allowed && e.allow != nil && !e.allow.allowFrame(frame) {
+			allowed, why = false, e.policy+" ∩ allowlist"
+		}
+		e.flows.record(frame, why, allowed)
 		if allowed {
 			hdr := make([]byte, 4)
 			binary.BigEndian.PutUint32(hdr, uint32(len(frame)))
@@ -784,4 +810,60 @@ func fcFrameAllowed(frame []byte, policy string) bool {
 	default:
 		return true
 	}
+}
+
+// Write carries gateway → guest frames unchanged and uninspected. This
+// direction is NOT evidence of anything the gateway said — the gvisor switch
+// reflects guest frames down it (see fcGuestMACOK) — so no policy state, DNS
+// pins in particular, may ever be derived from it.
+func (e *fcEgressConn) Write(b []byte) (int, error) {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	return e.Conn.Write(b)
+}
+
+// writeGuest sends one frame from koto itself (a resolver reply) to the
+// guest, framed like the netstack's own writes and serialised with them.
+func (e *fcEgressConn) writeGuest(frame []byte) error {
+	e.wmu.Lock()
+	defer e.wmu.Unlock()
+	if e.Conn == nil {
+		return net.ErrClosed
+	}
+	_, err := e.Conn.Write(append(binary.BigEndian.AppendUint32(nil, uint32(len(frame))), frame...))
+	return err
+}
+
+var (
+	fcGatewayMACBytes = func() [6]byte {
+		m, err := net.ParseMAC(fcNetGatewayMAC)
+		if err != nil {
+			panic(err) // literal const; cannot fail
+		}
+		return [6]byte(m)
+	}()
+	fcBroadcastMAC = [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+)
+
+// fcGuestMACOK is the link-layer half of the guest → gateway filter. The
+// gvisor switch (v0.9.0 Switch.rxBuf) learns cam[src MAC] = this link and
+// transmits every frame whose destination is not the gateway's MAC back out
+// by CAM lookup — so a guest frame addressed to the guest's OWN MAC comes
+// straight back down its link, indistinguishable from a gateway → guest
+// frame (Strix, PR #104: how a forged "DNS answer from 192.168.127.1"
+// reached the old wire-sniffing pinner). The guest's only peer on this
+// one-guest switch is the gateway, so the destination must be the gateway's
+// MAC or broadcast (ARP); anything else has no legitimate receiver. The
+// source must be unicast and not the gateway's own MAC — that would poison
+// the CAM entry the netstack's replies are delivered by. Runts carry no
+// ethernet header and are dropped.
+func fcGuestMACOK(frame []byte) bool {
+	if len(frame) < 14 {
+		return false
+	}
+	dst, src := [6]byte(frame[0:6]), [6]byte(frame[6:12])
+	if dst != fcGatewayMACBytes && dst != fcBroadcastMAC {
+		return false
+	}
+	return src != fcGatewayMACBytes && src[0]&1 == 0
 }

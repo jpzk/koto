@@ -17,8 +17,15 @@ package main
 // For every group, whatever the profile, only the request headers on
 // proxyFwdHeaders are relayed; arbitrary guest headers are not.
 //
-// Groups with wan/lan/full keep server tools and the full beta list: they
-// already have direct egress, so the gate would add nothing.
+// A group with an active egress allowlist (allow, or the deny-all a corrupt
+// config.json fails closed to) gets the same two restrictions whatever its
+// profile: the L3 gate and L7 proxy see only the guest's own flows, never
+// the hosts Anthropic contacts for a server tool, so relaying one would
+// bypass the list (proxyServerToolsRestricted).
+//
+// Groups with wan/lan/full and no allowlist keep server tools and the full
+// beta list: they already have unrestricted direct egress, so the gate would
+// add nothing.
 
 import (
 	"bytes"
@@ -91,6 +98,23 @@ func proxyForwardHeader(k string) bool {
 // (the same two-profile rule serveEgress applies).
 func proxyNetworkNone(group string) bool {
 	return groupNetwork(group) == fcNetNone || proxyBootNetwork(group) == fcNetNone
+}
+
+// proxyServerToolsRestricted reports why server-executed tools and the wider
+// beta list are withheld for group: "none" for a network=none group,
+// "allowlist" when an egress allowlist (or its fail-closed deny-all) is
+// active, "" when neither applies. With an allowlist the guest has egress, but
+// only to listed hosts — and the gates cannot see the third-party hosts
+// Anthropic would contact on the guest's behalf, so a server tool would
+// bypass the list.
+func proxyServerToolsRestricted(group string) string {
+	if proxyNetworkNone(group) {
+		return "none"
+	}
+	if currentAllow(group).active() {
+		return "allowlist"
+	}
+	return ""
 }
 
 // proxyFilterBeta keeps the allowlisted values of a comma-separated
@@ -214,12 +238,16 @@ func proxyServerToolReason(body []byte) string {
 // proxyRefuseServerTool answers a refused request in the Anthropic error
 // shape, so the guest's client shows the reason instead of a parse failure.
 func proxyRefuseServerTool(w http.ResponseWriter, group, reason string) {
-	if llmFlowSeen.allow("servertool|" + group + "|" + reason) {
-		emitLogfG("llm", group, "warn", "[%s] refused /v1/messages: %s (network profile is 'none'; server-side tools reach the internet)", group, reason)
+	why, fix := "network profile is 'none'", "raise the group's network profile (applies on /restart)"
+	if proxyServerToolsRestricted(group) == "allowlist" {
+		why, fix = "egress allowlist (allow) is active", "clear the group's allow list"
 	}
-	msg := "koto proxy: this group's network profile is 'none', so requests that use server-side tools " +
+	if llmFlowSeen.allow("servertool|" + group + "|" + reason) {
+		emitLogfG("llm", group, "warn", "[%s] refused /v1/messages: %s (%s; server-side tools reach hosts the gates cannot check)", group, reason, why)
+	}
+	msg := "koto proxy: this group's " + why + ", so requests that use server-side tools " +
 		"(web fetch/search, code execution, MCP servers) are refused (" + reason + "). " +
-		"Use a client-side tool, or raise the group's network profile (applies on /restart)."
+		"Use a client-side tool, or " + fix + "."
 	b, _ := json.Marshal(map[string]any{
 		"type":  "error",
 		"error": map[string]any{"type": "permission_error", "message": msg},
