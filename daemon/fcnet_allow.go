@@ -19,7 +19,7 @@ package main
 //     dropped (shared CDN IPs: pinning a.example.com's IP must not open
 //     every other site on that edge). A ClientHello with no SNI is dropped.
 //     A ClientHello whose SNI is not in the first segment is let through
-//     (best effort — see docs/network.md).
+//     (best effort — see docs/firecracker-vsock.md "Egress allowlist").
 //   - UDP :443 (QUIC) is dropped: the SNI is not checkable without
 //     decrypting the Initial; clients fall back to TCP.
 //   - anything else is allowed by IP.

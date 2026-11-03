@@ -218,6 +218,15 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
   on next spawn (`/restart`); lowering to `none` also takes effect on the
   proxy's very next request (comment in `applyConfig`). Legacy key
   `internet`: `full` → `wan`, `none` → `none`, migrated to `network`.
+- `allow` — egress allowlist narrowing `network` (effective = profile ∩
+  allowlist). Comma string or JSON string array; `""`/`null`/`[]` clears. Forms:
+  IPv4/IPv6 address, CIDR, `192.168.1.*`, range `a-b`, `example.com`,
+  `*.example.com` (one label). Globs and `~regex` are rejected with an error
+  and the old list is kept (`daemon/config_allow.go`, `daemon/netallow`). Max
+  256 entries. Stored canonical under `"allow"`; a stored list that fails to
+  parse denies all egress. Applies **live** to a running VM (response key
+  `allow_apply`). Details and caveats:
+  [firecracker-vsock.md](firecracker-vsock.md#egress-allowlist-allow).
 - `size` — `small` | `medium` | `large` | `xlarge`. Default `small`.
   Applies on next spawn. Disk grows but never shrinks. Presets
   (`daemon/fc.go` `fcSizePresets`; vCPU, RAM MiB, workspace disk, IO MiB/s,
@@ -246,7 +255,7 @@ The yes/no keys fail closed: absent, unparsable or any other value is
 
 ### Who may set what
 
-- **Posture keys** = `network`, `internet`, `root`, `ports`, `size`,
+- **Posture keys** = `network`, `internet`, `allow`, `root`, `ports`, `size`,
   `autostart`, `kvm`. On gRPC, a Config request carrying any of them is
   authorized as the synthetic admin-only verb `config_posture` —
   `daemon/auth.go` `postureVerb`, `daemon/acl.go` `adminOnlyVerbs`.

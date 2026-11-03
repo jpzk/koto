@@ -23,8 +23,8 @@
 //
 // Hostnames cannot be enforced at L3 directly (frames carry IPs). The
 // gateway pins the IPs its own resolver returned for an allowed name (see
-// Pins) and, on :443, checks the TLS SNI; see docs/network.md for the CDN
-// shared-IP and DoH caveats.
+// Pins) and, on :443, checks the TLS SNI; see docs/firecracker-vsock.md
+// "Egress allowlist" for the CDN shared-IP and DoH caveats.
 package netallow
 
 import (

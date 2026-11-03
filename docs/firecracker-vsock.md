@@ -342,6 +342,148 @@ always wins over a legacy `internet` key.
     every networked profile (`wan`/`lan`/`full`); `none` never calls `netUp`,
     so it is left dangling — no DNS, as intended.
 
+## Egress allowlist (`allow`)
+
+Optional per-group narrowing on top of a networked profile. Semantics:
+
+    effective = profile ∩ allowlist
+
+An **empty list** (the default) is no narrowing — the profile alone decides,
+exactly the pre-allowlist behaviour. A non-empty list admits a destination
+only when the profile admits it **and** some entry matches it. The allowlist
+never widens a profile: `192.168.1.*` on a `wan` group stays blocked (LAN is
+not in `wan`), and `ctl` destinations (loopback, link-local, the host's own
+IPs) stay dropped under every list. The gateway itself (`192.168.127.1`,
+DNS) is always reachable so hostname entries can resolve. On `network=none`
+the list is stored but has nothing to narrow (no NIC).
+
+**Setting it** (operator-only posture key, like `network`):
+
+```sh
+koto ctl config mygroup -network wan -allow "github.com,*.githubusercontent.com,140.82.112.0/20"
+koto ctl config mygroup -allow ""      # clear → back to the plain profile
+koto ctl config mygroup                # effective config shows allow=…
+koto ctl list                          # each group's list is shown too
+```
+
+`-allow` takes a comma list (whitespace tolerated). The hand-edited JSON
+form may also be a string array. In-guest `config_set` refuses it
+(`configPostureKey`), and on gRPC a Config carrying `allow` is relabelled
+`config_posture` (admin-only), same as `network`.
+
+**v1 entry forms** (`daemon/netallow`, max 256 entries, de-duplicated):
+
+- `203.0.113.7`, `2001:db8::1` — single address
+- `10.0.0.0/8`, `2001:db8::/32` — CIDR, IPv4 or IPv6; host bits must be
+  zero (`10.0.0.1/8` is rejected with a "did you mean 10.0.0.0/8?" hint)
+- `192.168.1.*` — last-octet wildcard (= `/24`; kept in this form)
+- `10.0.0.5-10.0.0.20` — inclusive range, same family, low ≤ high
+- `example.com` — exact hostname (case-insensitive, trailing dot ignored)
+- `*.example.com` — exactly **one** label under `example.com`:
+  matches `api.example.com`, not `example.com` itself and not
+  `a.b.example.com` (list those separately)
+
+**Rejected at parse time** — the whole update fails with an error naming
+the entry, and the previously stored list is kept unchanged:
+
+- globs anywhere else: `*.example.*`, `ex*mple.com`, `*` (would match
+  `example.evil.com`)
+- regex: `~^api\..*` (not in v1)
+- bad CIDR (`10.0.0.0/33`, zones), host bits set
+- reversed range (`10.0.0.9-10.0.0.1`), mixed-family range
+- wildcard in a non-last octet (`10.*.0.1`)
+- malformed hostnames: single label, bad characters (use punycode for IDNs),
+  labels starting/ending with `-`, > 253 bytes
+
+**Storage.** Canonical `[]string` under `"allow"` in
+`groups/<g>/config.json`, next to `"network"` — `groups.json` is only the
+name → port registry. A stored list that no longer parses (hand-edited
+garbage) **fails closed**: the group is denied everything but the gateway,
+and the effective config shows `!invalid (deny-all)`.
+
+**Applies live.** Both enforcement points read the current policy
+(`currentAllow(g)`, one atomic load) on every guest frame and every proxy
+request, so no restart is needed. The config response carries
+`allow_apply`: `live (applied to the running VM, no restart needed)` or
+`stored (applies when the VM next starts)` when the group is not running.
+A flow to a destination that is no longer allowed loses its next packet.
+(Changing the `network` profile itself still needs `/restart`.)
+
+### How it is enforced
+
+- **IP entries — L3 frame filter** (`daemon/fcnet_allow.go`). After the
+  profile check, each guest frame's destination must match an entry.
+- **Hostname entries — DNS pinning.** Frames carry IPs, not names. The
+  gateway watches the A/AAAA answers **its own resolver**
+  (`192.168.127.1:53`, UDP) sends back to the guest — the gateway→guest
+  path, which the guest cannot forge. If the question name (or a CNAME in
+  the chain) matches an entry, the answer IPs are pinned for the record TTL,
+  clamped to 30 s … 1 h (`netallow.PinMinTTL`/`PinMaxTTL`), at most 4096
+  pins per group (full → new pins refused, fail closed). Before the guest
+  has resolved the name, its IPs are not allowed: a hostname is reachable
+  **only after a pin**. When the list changes, pins whose names are no longer
+  allowed are discarded.
+- **SNI check on pin-only IPs, TCP :443.** An IP that is allowed *only*
+  because of a pin must present a TLS ClientHello whose SNI is an allowed
+  name; a complete ClientHello without SNI is dropped. IPs matched by a static IP/CIDR
+  entry are not SNI-gated.
+- **QUIC (UDP :443) to pin-only IPs is dropped** — the SNI sits inside the
+  encrypted Initial. Clients fall back to TCP/TLS.
+- **Other ports on a pin-only IP** (e.g. `:22` to `github.com`) are allowed
+  by IP.
+- **L7 forward proxy** (`daemon/proxy_allow.go`, the `HTTP_PROXY` path in
+  `serveEgress`). Applied right after the profile check, so a guest cannot
+  route around the gateway filter through the proxy. A **name** target passes
+  if the name matches an entry, or if the IP the proxy actually dials (the
+  vetted one — no re-resolve) matches an IP entry. An **IP-literal** target
+  passes only static IP entries — L3 resolver pins are not consulted at L7.
+
+### Caveats — read before relying on it
+
+The allowlist is a strong guard for IP entries and a **best-effort** guard
+for hostnames. It narrows what a cooperative or lightly-compromised agent
+can reach; it is not a DLP boundary against a determined one.
+
+- **CDN shared IPs.** `a.example.com` often resolves to an edge IP that
+  serves thousands of unrelated sites. Pinning it opens that IP. The :443
+  SNI check narrows TLS to allowed names, but plain HTTP (:80) or any other
+  port on the same IP reaches every vhost there by `Host:` header.
+- **Domain fronting / SNI ≠ Host.** The SNI check sees only the ClientHello.
+  Inside the encrypted tunnel the guest can send a different `Host:` to the
+  same CDN (the same applies to a CONNECT tunnel through the L7 proxy to an
+  allowed name). Many CDNs block fronting; not all.
+- **ECH (Encrypted Client Hello).** With ECH the outer SNI is the
+  provider's public name, not the real one. If that public name isn't
+  allowed the connection is dropped (fail closed); if it is, the inner name
+  is not checked.
+- **The SNI check is stateless, per segment.** A :443 segment that starts
+  with a *complete* ClientHello is checked; every other segment passes. So a
+  ClientHello whose extensions spill into the next segment (large
+  post-quantum hellos), or a non-TLS protocol spoken on :443, is let
+  through — best effort, no TCP reassembly at the frame layer.
+- **DoH / other resolvers are not pinned.** DNS-over-HTTPS, DoT, or a
+  public resolver the profile/list lets the guest reach is invisible to the
+  gateway. Answers from them pin nothing, so hostname entries only work
+  through the gateway resolver (`/etc/resolv.conf` points there). This fails
+  closed for hostnames, but an allowed DoH endpoint is a DNS-tunnel
+  exfiltration channel — don't list one.
+- **DNS over TCP to the gateway is not parsed.** Truncated UDP answers that
+  the client retries over TCP pin nothing; names with huge record sets may
+  be partially unreachable.
+- **DNS itself is not filtered.** The gateway resolves any name on the host
+  (see the DNS caveat above), so query names remain an exfiltration side
+  channel regardless of the list.
+- **Pins live per VM link.** They are in memory and are lost on VM restart;
+  the guest re-resolves and re-pins. A guest-side DNS cache that outlives
+  the pin TTL (rare — the clamp floor is 30 s) gets dropped connections
+  until it re-resolves.
+- **Open proxy tunnels survive a change.** A CONNECT tunnel already open
+  through the L7 proxy is not torn down when the list changes; only new
+  requests see the new list. (L3 flows are re-checked per frame.)
+- **IPv6.** Entries are accepted, but the guest link is configured
+  IPv4-only (`192.168.127.2/24`); IPv6 entries matter mostly for proxy
+  targets.
+
 ## VM size profile (`size`: `small` | `medium` | `large` | `xlarge`)
 
 Per-group config key selecting the machine shape — vCPU, RAM, and workspace
