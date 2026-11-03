@@ -28,10 +28,13 @@ package main
 // locally pending pendSess entry), and if it was the active session the
 // view falls back to the group's default session.
 //
-// Confirmation is a single explicit key: y. Focus starts (and stays) on
-// Cancel, so enter cancels, as do esc / n / q / ctrl+c. Every other key is
-// swallowed — it's a modal, a stray keystroke must not reach the message
-// bar or the tree underneath. Like the cheatsheet it is not a focus zone:
+// Confirmation is a two-button dialog, [ No ] [ Yes ], shared with the stop
+// modal (confirm_buttons.go). Focus starts on No, so enter cancels unless
+// the operator moved focus to Yes first (left/right, h/l, tab/shift+tab);
+// esc / n / q / ctrl+c (and ctrl+x again) cancel whatever is focused, y is a
+// shortcut for Yes, and a left click on a button activates it. Every other
+// key is swallowed — it's a modal, a stray keystroke must not reach the
+// message bar or the tree underneath. Like the cheatsheet it is not a focus zone:
 // m.focus is untouched and the modal only owns key routing while open. Both
 // variants share one state (destroyConfirm) so the modal priority order
 // against the stop / new-session dialogs is unchanged.
@@ -51,11 +54,12 @@ import (
 )
 
 // destroyConfirmState is the open modal: which group (session "") or which
-// session of a group a y would destroy.
+// session of a group Yes would destroy, plus the button focus (zero = No).
 type destroyConfirmState struct {
 	open    bool
 	group   string
 	session string
+	buttons confirmButtons
 }
 
 // destroyCmdFn issues the daemon destroy for one group. A seam so tests can
@@ -199,10 +203,20 @@ func (d destroyConfirmState) label() string {
 	return d.group
 }
 
-// handleDestroyConfirmKey routes keys while the modal is open.
+// handleDestroyConfirmKey routes keys while the modal is open: the shared
+// button row (confirm_buttons.go) decides; ctrl+x toggles the modal closed.
 func (m Model) handleDestroyConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
+	var act confirmAction
+	m.destroyConfirm.buttons, act = m.destroyConfirm.buttons.key(msg.String(), "ctrl+x")
+	return m.resolveDestroyConfirm(act)
+}
+
+// resolveDestroyConfirm applies a resolved key/click: Yes sends the destroy
+// through the existing daemon path (nothing local until it confirms), No
+// closes and sends nothing, confirmNone keeps the modal open.
+func (m Model) resolveDestroyConfirm(act confirmAction) (Model, tea.Cmd) {
+	switch act {
+	case confirmAccept:
 		d := m.destroyConfirm
 		m.destroyConfirm = destroyConfirmState{}
 		m.addLine(logLine{kind: "sys", text: fmt.Sprintf("destroying %s…", d.label())})
@@ -210,12 +224,10 @@ func (m Model) handleDestroyConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, m.destroySession(d.group, d.session)
 		}
 		return m, m.destroyGroup(d.group)
-	case "esc", "n", "N", "q", "enter", "ctrl+c", "ctrl+x":
-		// enter = the focused (default) button, which is Cancel.
+	case confirmCancel:
 		d := m.destroyConfirm
 		m.destroyConfirm = destroyConfirmState{}
 		m.addLine(logLine{kind: "sys", text: fmt.Sprintf("destroy %s cancelled", d.label())})
-		return m, nil
 	}
 	return m, nil
 }
@@ -237,13 +249,11 @@ func (m Model) renderDestroyConfirm() string {
 		body = lipgloss.JoinVertical(lipgloss.Left,
 			"Its conversation and transcript are deleted.",
 			"The group, its VM and workspace stay.",
-			red.Render("Irreversible - y/n."),
+			red.Render("Irreversible."),
 		)
 	}
-	cancel := lipgloss.NewStyle().Foreground(cFgInv).Background(cAmber).Bold(true).Render("[ Cancel ]")
-	destroy := gray.Render("  y = destroy")
-	hint := gray.Render("enter/esc/n cancel · press y to destroy")
-	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", cancel+destroy, "", hint)
+	hint := gray.Render("←/→ tab move · enter select · esc cancel · y = destroy")
+	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", m.destroyConfirm.buttons.render(), "", hint)
 	w := min(max(lipgloss.Width(inner)+4, 30), max(20, m.width-2))
 	box := lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).

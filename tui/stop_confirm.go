@@ -7,8 +7,12 @@ package main
 // pending work: every queued prompt and the turn it is running are dropped,
 // not paused. That is recoverable (the workspace disk and chat history stay,
 // the VM boots again on the next send) but it throws away work, so it gets
-// the same guard as ctrl+x destroy (destroy_confirm.go): a modal, focus on
-// Cancel, a single explicit y to confirm.
+// the same guard as ctrl+x destroy (destroy_confirm.go): a modal with the
+// shared [ No ] [ Yes ] button row (confirm_buttons.go). Focus starts on No,
+// so enter cancels unless focus was moved to Yes (left/right, h/l,
+// tab/shift+tab); esc / n / q / ctrl+c (and ctrl+s again) cancel, y is a
+// shortcut for Yes, a left click on a button activates it, and every other
+// key is swallowed.
 //
 // Target resolution is the destroy one: the tree cursor (m.treeSel), with a
 // session or job row targeting its parent group. Refused inline with no
@@ -33,10 +37,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// stopConfirmState is the open modal: which group a y would stop.
+// stopConfirmState is the open modal: which group Yes would stop, plus the
+// button focus (zero = No).
 type stopConfirmState struct {
-	open  bool
-	group string
+	open    bool
+	group   string
+	buttons confirmButtons
 }
 
 // stopCmdFn issues the daemon stop for one group. A seam so tests can record
@@ -84,19 +90,27 @@ func (m *Model) openStopConfirm() {
 	m.stopConfirm = stopConfirmState{open: true, group: g}
 }
 
-// handleStopConfirmKey routes keys while the modal is open.
+// handleStopConfirmKey routes keys while the modal is open: the shared
+// button row (confirm_buttons.go) decides; ctrl+s toggles the modal closed.
 func (m Model) handleStopConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
+	var act confirmAction
+	m.stopConfirm.buttons, act = m.stopConfirm.buttons.key(msg.String(), "ctrl+s")
+	return m.resolveStopConfirm(act)
+}
+
+// resolveStopConfirm applies a resolved key/click: Yes stops through the
+// existing /stop path, No closes and sends nothing, confirmNone keeps the
+// modal open.
+func (m Model) resolveStopConfirm(act confirmAction) (Model, tea.Cmd) {
+	switch act {
+	case confirmAccept:
 		g := m.stopConfirm.group
 		m.stopConfirm = stopConfirmState{}
 		return m, m.stopGroup(g)
-	case "esc", "n", "N", "q", "enter", "ctrl+c", "ctrl+s":
-		// enter = the focused (default) button, which is Cancel.
+	case confirmCancel:
 		g := m.stopConfirm.group
 		m.stopConfirm = stopConfirmState{}
 		m.addLine(logLine{kind: "sys", text: fmt.Sprintf("stop %s cancelled", g)})
-		return m, nil
 	}
 	return m, nil
 }
@@ -113,10 +127,8 @@ func (m Model) renderStopConfirm() string {
 		"drops queued work and the running turn;",
 		"boots again on next send.",
 	)
-	cancel := lipgloss.NewStyle().Foreground(cFgInv).Background(cAmber).Bold(true).Render("[ Cancel ]")
-	stop := gray.Render("  y = stop")
-	hint := gray.Render("enter/esc/n cancel · press y to stop")
-	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", cancel+stop, "", hint)
+	hint := gray.Render("←/→ tab move · enter select · esc cancel · y = stop")
+	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", m.stopConfirm.buttons.render(), "", hint)
 	w := min(max(lipgloss.Width(inner)+4, 30), max(20, m.width-2))
 	box := lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).
