@@ -1056,8 +1056,12 @@ func (m Model) renderModelList(lines *[]string, inner int) int {
 	return cur
 }
 
-// The allow input: room for a long list (the daemon caps entries, not bytes).
+// The allow input: no byte cap. The daemon caps entries (MaxEntries), not
+// bytes, and a textinput CharLimit silently truncates SetValue — a stored
+// list longer than the cap would be cut on prefill and the cut list re-sent
+// when the operator only edited another field. 0 = unlimited; the entry
+// count is checked by parseAllowList.
 const (
-	allowInputLimit  = 4096
+	allowInputLimit  = 0
 	allowPlaceholder = "empty = whole profile; e.g. 1.2.3.4,github.com"
 )

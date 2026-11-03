@@ -6,6 +6,7 @@ package main
 // line, a daemon refusal inline under the field, and the new-group path.
 
 import (
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -222,5 +223,96 @@ func TestBuildConfigReqAllow(t *testing.T) {
 	}
 	if r := buildConfigReq(map[string]any{"group": "g", "allow": "a.com"}); r.GetAllow() != "a.com" {
 		t.Errorf("allow = %q", r.GetAllow())
+	}
+}
+
+// longAllowList: allowMaxEntries distinct 253-byte hostnames (the daemon's
+// longest legal entry), ~65 KiB — far past the old 4096-byte input cap.
+func longAllowList() string {
+	l63 := strings.Repeat("x", 63)
+	out := make([]string, allowMaxEntries)
+	for i := range out {
+		first := "h" + strconv.Itoa(1000+i) + strings.Repeat("x", 58)
+		out[i] = first + "." + l63 + "." + l63 + "." + strings.Repeat("y", 61)
+		if len(out[i]) != 253 {
+			panic(len(out[i]))
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// TestEditGroupAllowLongListRoundTrip: a stored list at the daemon's maximum
+// (256 entries × 253 bytes) is prefilled byte-for-byte, is NOT sent when the
+// operator edits another field, survives typing into the field, and is
+// re-sent whole when it does change. Before: CharLimit 4096 cut the prefill
+// and an unrelated edit re-sent the cut list (silently dropping entries).
+func TestEditGroupAllowLongListRoundTrip(t *testing.T) {
+	long := longAllowList()
+	if c, err := parseAllowList(long); err != nil || c != long {
+		t.Fatalf("long list rejected client-side: %v", err)
+	}
+	fk := startFakeKoto(t)
+	cfg := editCfg()
+	cfg["allow"] = long
+	m := openEdit(t, fk, cfg)
+	if got := m.newGroup.allow.Value(); got != long {
+		t.Fatalf("prefill truncated: %d bytes, want %d", len(got), len(long))
+	}
+	if m.newGroup.edit.orig[ngAllow] != long {
+		t.Fatal("long list not the baseline")
+	}
+
+	// Edit another field only: allow must not be in the plan.
+	m.newGroup.ports.SetValue("9000")
+	p, at, e := m.newGroup.editPlan()
+	if e != "" {
+		t.Fatalf("plan err %s at %s", e, at)
+	}
+	if _, sent := p.config[ngAllow]; sent {
+		t.Fatalf("unrelated edit re-sent allow (%d bytes)", len(p.config[ngAllow].(string)))
+	}
+	if !reflect.DeepEqual(p.changed, []string{ngPorts}) {
+		t.Fatalf("changed = %v, want [ports]", p.changed)
+	}
+	if got := m.newGroup.allow.Value(); got != long {
+		t.Fatalf("allow changed by editing ports: %d bytes", len(got))
+	}
+
+	// Typing into the field keeps every byte; an over-count list is refused
+	// by count, never cut.
+	m.newGroup.ports.SetValue("8080,3000")
+	m = gotoField(t, m, ngAllow)
+	m = typeText(t, m, ",z.com")
+	if got := m.newGroup.allow.Value(); got != long+",z.com" {
+		t.Fatalf("typed value truncated: %d bytes, want %d", len(got), len(long)+6)
+	}
+	if _, at, e = m.newGroup.editPlan(); at != ngAllow || !strings.Contains(e, "max 256") {
+		t.Fatalf("257 entries: at=%s e=%q, want max-entries refusal", at, e)
+	}
+
+	// Replace one entry (still 256): sent whole.
+	repl := "z.com" + long[strings.Index(long, ","):]
+	m.newGroup.allow.SetValue(repl)
+	p, _, e = m.newGroup.editPlan()
+	if e != "" || p.config[ngAllow] != repl {
+		t.Fatalf("changed long list not sent whole: e=%q len=%d want %d", e, len(fmt.Sprint(p.config[ngAllow])), len(repl))
+	}
+}
+
+// TestNewGroupAllowLongList: the new-group dialog takes a max-size list
+// without truncation and sends it whole.
+func TestNewGroupAllowLongList(t *testing.T) {
+	long := longAllowList()
+	m := focusModel(t)
+	m = press(t, m, tea.KeyCtrlN)
+	f := m.newGroup
+	f.name.SetValue("res")
+	f.allow.SetValue(long)
+	if f.allow.Value() != long {
+		t.Fatalf("new-group allow truncated to %d bytes", len(f.allow.Value()))
+	}
+	p, at, e := f.plan(map[string]GroupInfo{})
+	if e != "" || p.config["allow"] != long {
+		t.Fatalf("plan at=%s e=%s allow len=%d", at, e, len(fmt.Sprint(p.config["allow"])))
 	}
 }
