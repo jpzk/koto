@@ -45,6 +45,7 @@ func (e *imageTestEnv) run(op string, all bool, args ...string) error {
 // for the archived sys.img (restore), including back to koto-default.
 func TestImageApplyRollbackRm(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t) // cleared group + offline stub = legacy boot (nil plan)
 	e := newImageTestEnv(t)
 	dg1 := testCatalogImage(t, "debian", "a")
 
@@ -241,5 +242,28 @@ func TestImageApplyRechecksGroupUnderLock(t *testing.T) {
 		if len(e.restarted) != 0 {
 			t.Fatalf("%s restarted a destroyed group: %v", op, e.restarted)
 		}
+	}
+}
+
+// image ls lists koto-default as the shipped rootfs only when rootfs.img is
+// on the host; without it the entry is marked unavailable.
+func TestImageLsDefaultAvailability(t *testing.T) {
+	fcHarness(t)
+	e := newImageTestEnv(t)
+	if err := e.run("ls", false); err != nil {
+		t.Fatal(err)
+	}
+	first := strings.SplitN(e.log.String(), "\n", 2)[0]
+	if !strings.HasPrefix(first, ociimage.DefaultName) || !strings.Contains(first, "unavailable") || strings.Contains(first, "shipped rootfs") {
+		t.Fatalf("no rootfs.img: %q", first)
+	}
+	fcLegacyRootfs(t)
+	e.log.Reset()
+	if err := e.run("ls", false); err != nil {
+		t.Fatal(err)
+	}
+	first = strings.SplitN(e.log.String(), "\n", 2)[0]
+	if !strings.Contains(first, "built-in, shipped rootfs") || strings.Contains(first, "unavailable") {
+		t.Fatalf("with rootfs.img: %q", first)
 	}
 }

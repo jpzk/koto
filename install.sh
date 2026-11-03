@@ -45,7 +45,7 @@
 #
 #   3. Take the asset NAMES from the now-trusted SHA256SUMS. Release assets
 #      carry the version of the thing inside them (firecracker_1.17.0_…,
-#      vmlinux_6.1.186_…, rootfs.img_fedora44_…), so the names cannot be
+#      vmlinux_6.1.186_…, guest.img_1.9.0_…), so the names cannot be
 #      guessed ahead of time — and taking them from a signed file means a
 #      tampered index cannot point us at something else.
 #
@@ -222,7 +222,7 @@ echo "koto release $VERSION ($ARCH) from $BASE"
 SRC=""
 if [ "$DO_INSTALL" -eq 1 ]; then
 	# /var/tmp, not /tmp: /tmp is tmpfs on Fedora, and the clone holds the
-	# unpacked 2 GiB rootfs until `koto install` has copied it into place.
+	# unpacked ~1 GiB guest image until `koto install` has copied it into place.
 	SRC="$(mktemp -d "${TMPDIR:-/var/tmp}/koto-install.XXXXXX")"
 	trap 'rm -rf "$SRC"' EXIT INT TERM
 	step "source: $REPO_URL @ $VERSION"
@@ -243,7 +243,7 @@ fi
 
 # --- fetch and verify ------------------------------------------------------
 # Stage BESIDE the destination: the same filesystem makes the final move a
-# rename rather than a second copy of a 2 GiB rootfs.
+# rename rather than a second copy of a ~1 GiB guest image.
 mkdir -p "$DEST"
 DEST="$(cd "$DEST" && pwd)"
 STAGE="$(mktemp -d "$DEST/.koto-fetch.XXXXXX")"
@@ -297,10 +297,17 @@ grep -v '^#' "$STAGE/SHA256SUMS" >"$STAGE/SHA256SUMS.body"
 
 # Asset names come out of the signed file: <name>_<version>_<arch>.zst, where
 # the version is the component's own (firecracker_1.17.0, vmlinux_6.1.186,
-# rootfs.img_fedora44). Map each back to the path koto expects by stripping
-# the _<version>_<arch>.zst tail. A release is all five, each once, and koto
-# and koto-tui carry the release's own version: a set missing one would fall
-# back to whatever the clone has, so it is refused before anything downloads.
+# guest.img_1.9.0). Map each back to the path koto expects by stripping
+# the _<version>_<arch>.zst tail. A release is all five, each once, and koto,
+# koto-tui and guest.img carry the release's own version: a set missing one
+# would fall back to whatever the clone has, so it is refused before anything
+# downloads.
+#
+# The fifth asset is the guest image. From 1.9.0 that is guest.img (fc-agent,
+# node, the agent CLIs; the OS comes from the OCI image catalog). Releases up
+# to 1.8.x shipped the monolithic rootfs.img_fedora44 instead, and this
+# script still installs those, so rolling back with `--version 1.8.0` works.
+# Exactly one of the two; a set with both or neither is refused.
 assets="$(awk '{print $2}' "$STAGE/SHA256SUMS.body")"
 [ -n "$assets" ] || die "SHA256SUMS lists no assets"
 have=" "
@@ -312,7 +319,7 @@ for a in $assets; do
 	base="${a%_"$ARCH".zst}"
 	name="${base%_*}"
 	case "$name" in
-	koto | koto-tui)
+	koto | koto-tui | guest.img)
 		[ "${base##*_}" = "$VER" ] ||
 			die "SHA256SUMS lists $a, which is not koto $VER — nothing was installed" ;;
 	firecracker | vmlinux | rootfs.img) ;;
@@ -321,12 +328,20 @@ for a in $assets; do
 	case "$have" in *" $name "*) die "SHA256SUMS lists $name twice" ;; esac
 	have="$have$name "
 done
-for want in koto koto-tui firecracker vmlinux rootfs.img; do
+for want in koto koto-tui firecracker vmlinux; do
 	case "$have" in
 	*" $want "*) ;;
 	*) die "SHA256SUMS has no $want asset — a release is all five, nothing was installed" ;;
 	esac
 done
+case "$have" in
+*" guest.img "*)
+	case "$have" in *" rootfs.img "*)
+		die "SHA256SUMS lists both guest.img and rootfs.img — a release ships one guest image, nothing was installed" ;;
+	esac ;;
+*" rootfs.img "*) ;;
+*) die "SHA256SUMS has no guest.img asset — a release is all five, nothing was installed" ;;
+esac
 n=$(echo "$assets" | wc -w)
 step "downloading $n assets"
 i=0
@@ -346,11 +361,11 @@ step "unpacking into $DEST"
 mkdir -p "$STAGE/out/fcassets"
 outs=""
 for a in $assets; do
-	base="${a%_"$ARCH".zst}"    # koto-tui_1.0.0    / rootfs.img_fedora44
-	name="${base%_*}"           # koto-tui          / rootfs.img
+	base="${a%_"$ARCH".zst}"    # koto-tui_1.0.0    / guest.img_1.9.0
+	name="${base%_*}"           # koto-tui          / guest.img
 	case "$name" in
 	koto | koto-tui) rel="$name" ;;
-	firecracker | vmlinux | rootfs.img) rel="fcassets/$name" ;;
+	firecracker | vmlinux | guest.img | rootfs.img) rel="fcassets/$name" ;;
 	*) die "unexpected asset $a" ;;
 	esac
 	echo "    $rel"

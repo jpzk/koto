@@ -149,8 +149,19 @@ func installed() bool { return exists(unitPath) && exists(envFilePath) }
 // they are the contract between the acquire stage and this one.
 var artifacts = []string{
 	"koto", "koto-tui",
-	"fcassets/firecracker", "fcassets/vmlinux", "fcassets/rootfs.img",
+	"fcassets/firecracker", "fcassets/vmlinux", "fcassets/guest.img",
 }
+
+// installAssetNames are the fcassets install copies from the clone into the
+// state dir when the clone has them. rootfs.img is optional from 1.9.0: a
+// clone that still builds it (`make rootfs`) refreshes the legacy fallback,
+// and one that does not leaves the state dir's copy alone. Install NEVER
+// deletes rootfs.img: it is what image=koto-default and the offline fallback
+// boot, and what a rollback to 1.8.x boots (design.md, migration).
+var installAssetNames = []string{"firecracker", "vmlinux", "guest.img", "rootfs.img"}
+
+// requiredAssetNames must be in the state dir after install.
+var requiredAssetNames = []string{"firecracker", "vmlinux", "guest.img"}
 
 func requireArtifacts(root string) error {
 	var missing []string
@@ -484,7 +495,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 	// because installStopDaemon has already stopped the service, so no VM is
 	// booting from these files.
 	dstAssets := filepath.Join(o.stateDir, "fcassets")
-	for _, a := range []string{"firecracker", "vmlinux", "rootfs.img"} {
+	for _, a := range installAssetNames {
 		src := filepath.Join(o.root, "fcassets", a)
 		dst := filepath.Join(dstAssets, a)
 		if !exists(src) {
@@ -499,7 +510,7 @@ func seedStateDir(o installOpts, me *user.User) error {
 		}
 	}
 	var missing []string
-	for _, a := range []string{"firecracker", "vmlinux", "rootfs.img"} {
+	for _, a := range requiredAssetNames {
 		if !exists(filepath.Join(dstAssets, a)) {
 			missing = append(missing, a)
 		}

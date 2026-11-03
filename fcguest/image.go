@@ -9,7 +9,7 @@ package main
 //	koto.image=<catalog name>  koto.digest=sha256:<hex64>  koto.created=<RFC3339>
 //
 // Drives, in the order the daemon builds them from ociimage.FixedDevices:
-// vda tools (label kototools, this root), vdb workspace (unchanged: mounted
+// vda guest.img (label kotoguest, 1.8.0: kototools; this root), vdb workspace (unchanged: mounted
 // by mountWorkspace as on every other group), vdc sys (label kotosys, the
 // overlay upper) and vdd.. one read-only ext4 per layer. Layers are matched
 // to the cmdline BY SUPERBLOCK (label "L"+hex[:15] AND uuid = hex[:32]),
@@ -38,10 +38,13 @@ import (
 )
 
 const (
-	toolsLabel = "kototools" // ociimage.ToolsLabel
-	sysLabel   = "kotosys"   // ociimage.SysLabel
-	toolsDev   = "/dev/vda"
-	toolsDir   = "/opt/koto"
+	guestLabel = "kotoguest" // ociimage.GuestLabel
+	// legacyGuestLabel is the 1.8.0 label (tools.img derived from rootfs.img);
+	// still accepted so a host-derived image keeps booting.
+	legacyGuestLabel = "kototools" // ociimage.LegacyGuestLabel
+	sysLabel         = "kotosys"   // ociimage.SysLabel
+	toolsDev         = "/dev/vda"
+	toolsDir         = "/opt/koto"
 	// maxImageLayers bounds what the guest accepts from the cmdline. The
 	// host's slot guard (ociimage.CheckLayerSlots) is the real limit; this
 	// only keeps a malformed cmdline from driving unbounded work here.
@@ -250,8 +253,8 @@ func imageRoot(a *imageArgs) error {
 			tools = &drives[i]
 		}
 	}
-	if tools == nil || tools.label != toolsLabel {
-		return fmt.Errorf("root drive %s is not tools.img (label %v, want %s)", toolsDev, tools, toolsLabel)
+	if tools == nil || !isGuestLabel(tools.label) {
+		return fmt.Errorf("root drive %s is not guest.img (label %v, want %s)", toolsDev, tools, guestLabel)
 	}
 	sys := byLabel(drives, sysLabel)
 	if len(sys) != 1 {
@@ -309,6 +312,7 @@ func imageRoot(a *imageArgs) error {
 	imageMode = a
 	workerPATH = "/sidecar:" + toolsDir + "/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	_ = os.Setenv("PATH", toolsDir+"/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	piTemplateDir = toolsDir + "/share/koto/pi"
 	logf("image %s@%s: %d layers + sys %s, root ready in %s", a.Name, shortDigest(a.Digest),
 		len(lowers), sys[0].dev, time.Since(t0).Round(time.Millisecond))
 	return nil
@@ -384,6 +388,10 @@ func injectImage(root string, a *imageArgs) error {
 	if _, err := os.Lstat(p("/etc/codex/managed_config.toml")); errors.Is(err, os.ErrNotExist) {
 		_ = os.MkdirAll(p("/etc/codex"), 0o755)
 		_ = os.Symlink(toolsDir+"/etc/codex/managed_config.toml", p("/etc/codex/managed_config.toml"))
+	}
+	// guest.img's tmux defaults (status off), unless the base brought its own.
+	if _, err := os.Lstat(p("/etc/tmux.conf")); errors.Is(err, os.ErrNotExist) {
+		_ = os.Symlink(toolsDir+"/share/koto/tmux.conf", p("/etc/tmux.conf"))
 	}
 	// /sidecar is on every worker PATH and referenced by absolute path.
 	_ = os.RemoveAll(p("/sidecar"))
@@ -626,3 +634,7 @@ func revokeImageSudo(path string) {
 	}
 	logf("root=no: removed koto sudo grant %s", path)
 }
+
+// isGuestLabel reports whether l labels a guest.img: the current label or
+// the 1.8.0 one.
+func isGuestLabel(l string) bool { return l == guestLabel || l == legacyGuestLabel }

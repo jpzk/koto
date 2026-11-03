@@ -41,6 +41,7 @@ func ctlConfigSet(t *testing.T, line string) map[string]any {
 // pinned to its digest at set time.
 func TestConfigSetImageRejectsNonCatalog(t *testing.T) {
 	fcHarness(t)
+	fcLegacyRootfs(t) // cleared group + offline stub = legacy boot (nil plan)
 	dg := testCatalogImage(t, "debian", "a")
 	for val, want := range map[string]string{
 		`"debian:trixie"`:                   "registry reference",
@@ -98,8 +99,8 @@ func TestConfigSetImageRejectsNonCatalog(t *testing.T) {
 	if p, err := fcImagePlanFor("tg", false); p != nil || err != nil {
 		t.Fatalf("cleared group must boot the default rootfs: %v %v", p, err)
 	}
-	// The effective config always names the image.
-	if eff := configCmd(configReq{Group: "tg"}).Config; eff["image"] != ociimage.DefaultName {
+	// The effective config names the default image, never koto-default.
+	if eff := configCmd(configReq{Group: "tg"}).Config; eff["image"] != imageDefaultDisplay {
 		t.Fatalf("effective image = %v", eff["image"])
 	}
 }
@@ -159,5 +160,24 @@ func TestConfigSetImageEmptyListRefused(t *testing.T) {
 	}
 	if c := loadGroupConfig("tg"); c.str("image") != "" || c.str("image_digest") != "" || c.str("image_prev") != dg {
 		t.Fatalf("null clear: %v", c)
+	}
+}
+
+// A group with no image= boots the default image (fedora): koto config must
+// say so and never show koto-default; an explicit pin is shown as set.
+func TestEffectiveConfigNoImageShowsDefault(t *testing.T) {
+	for _, cfg := range []map[string]any{{}, {"image": ""}} {
+		eff := effectiveConfig("plain", cfg)
+		if eff["image"] != imageDefaultDisplay || eff["image"] == ociimage.DefaultName {
+			t.Fatalf("cfg %v: image = %v, want %q", cfg, eff["image"], imageDefaultDisplay)
+		}
+		if !strings.Contains(imageDefaultDisplay, ociimage.FedoraName) {
+			t.Fatalf("display %q does not name %s", imageDefaultDisplay, ociimage.FedoraName)
+		}
+	}
+	for _, v := range []string{"debian", ociimage.DefaultName} {
+		if eff := effectiveConfig("pinned", map[string]any{"image": v}); eff["image"] != v {
+			t.Fatalf("image=%s shown as %v", v, eff["image"])
+		}
 	}
 }

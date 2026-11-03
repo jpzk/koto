@@ -73,11 +73,11 @@ func TestCatalogPutLookupUpdate(t *testing.T) {
 	if _, ok := c.ByDigest(a.Digest); !ok {
 		t.Fatal("old digest dropped on update (rollback needs it)")
 	}
-	// built-in default and the default pointer
+	// legacy built-in and the default pointer
 	if e, ok := c.Lookup(DefaultName); !ok || !e.Builtin {
 		t.Fatal("koto-default not built in")
 	}
-	if c.DefaultImage() != DefaultName {
+	if c.DefaultImage() != FedoraName { // unset default == fedora since guest.img
 		t.Fatal("default pointer")
 	}
 	for _, bad := range []string{DefaultName, "Debian", "-x", "a/b", "docker.io/library/debian:trixie", strings.Repeat("a", 65)} {
@@ -302,7 +302,7 @@ func TestRootfsTools(t *testing.T) {
 	if fi.Mode().Perm() != 0o444 {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if lbl, _, _ := ReadSuper(p); lbl != ToolsLabel {
+	if lbl, _, _ := ReadSuper(p); lbl != GuestLabel {
 		t.Fatalf("label %q", lbl)
 	}
 	for dst, want := range map[string]string{"/bin/fc-agent": "AGENT", "/bin/claude": "CLAUDE", "/bin/codex": "CODEX",

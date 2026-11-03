@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,6 +39,13 @@ func fcHarness(t *testing.T) {
 	groupsLock.Lock()
 	writeGroups(map[string]int{"main": 8787, "tg": 8788, "peer": 8789})
 	groupsLock.Unlock()
+	// No network in unit tests: the default image cannot be added, as on an
+	// offline host. Tests that want it resolved stub fcEnsureDefault again.
+	prevDefault := fcEnsureDefault
+	fcEnsureDefault = func(func(string, ...any)) (string, string, error) {
+		return "", "", errors.New("offline (unit test)")
+	}
+	t.Cleanup(func() { fcEnsureDefault = prevDefault })
 }
 
 // TestFcTurnSink: frames render into the slot's host log in the marker
@@ -552,5 +560,16 @@ func TestFcResolveIO(t *testing.T) {
 	write(`{"io_mbps":9999,"io_ops":999999}`)
 	if bw, ops := fcResolveIO("tg"); bw != int64(small.ioBwMiBps)<<20 || ops != int64(small.ioOps) {
 		t.Fatalf("over-clamp: got %d/%d, want small preset", bw, ops)
+	}
+}
+
+// fcLegacyRootfs puts a stand-in fcassets/rootfs.img on disk: a host
+// upgraded from 1.8.0, where a no-image group that cannot get the default
+// image (offline) and image=koto-default boot the legacy rootfs.
+func fcLegacyRootfs(t *testing.T) {
+	t.Helper()
+	_ = os.MkdirAll(fcAssetsDir(), 0o755)
+	if err := os.WriteFile(fcRootfsPath(), []byte("rootfs"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

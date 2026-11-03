@@ -65,14 +65,8 @@ func defaultImageEnv(ctx context.Context) imageEnv {
 		running: fcRunning,
 		restart: func(g string) error { _, err := restartCtx(ctx, g); return err },
 		lock:    groupOpLock,
-		tools: func() string {
-			k, err := ociimage.RootfsTools{Rootfs: fcRootfsPath(), Agent: os.Getenv(fcImageAgentEnv)}.Key(fcImagesDir())
-			if err != nil {
-				return ""
-			}
-			return k + ".img"
-		},
-		now: time.Now,
+		tools:   fcLegacyToolsKey,
+		now:     time.Now,
 	}
 }
 
@@ -349,7 +343,11 @@ func imageLs(env imageEnv, out func(string, ...any)) error {
 		return err
 	}
 	refs := imageRefs(env, c)
-	out("%s  (built-in, shipped rootfs)", ociimage.DefaultName)
+	if fileExists(fcRootfsPath()) {
+		out("%s  (built-in, shipped rootfs)", ociimage.DefaultName)
+	} else {
+		out("%s  (unavailable: no %s on this host)", ociimage.DefaultName, fcRootfsPath())
+	}
 	for _, n := range c.SortedNames() {
 		e, _ := c.Lookup(n)
 		line := fmt.Sprintf("%s  %s  %s  %d layers  %s  %s", n, ociimage.Short(e.Digest),
