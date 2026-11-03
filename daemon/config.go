@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -284,8 +286,17 @@ func updateGroupConfig(g string, mutate func(map[string]any)) (map[string]any, e
 		return nil, err
 	}
 	cfg := map[string]any{}
-	oldB, _ := os.ReadFile(p)
-	_ = json.Unmarshal(oldB, &cfg)
+	oldB, err := readGroupConfigFile(p)
+	if err != nil {
+		// Never rewrite a file we could not read or parse: the rewrite would
+		// start from {} and silently drop every key in it — including an
+		// egress allowlist, which would turn a corrupt (deny-all) list into
+		// no list at all. Fail closed; the operator fixes the file by hand.
+		return nil, err
+	}
+	if len(oldB) > 0 {
+		_ = json.Unmarshal(oldB, &cfg) // validated by readGroupConfigFile
+	}
 	mutate(cfg)
 	newB, err := json.Marshal(cfg)
 	if err != nil {
@@ -441,4 +452,40 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 		eff["image"] = imageDefaultDisplay
 	}
 	return eff
+}
+
+// errConfigCorrupt marks a config.json that exists but cannot be read or does
+// not parse as a JSON object. Writers refuse to clobber it and the egress
+// allowlist reader enforces it as deny-all (fail closed).
+var errConfigCorrupt = errors.New("config.json is unreadable or malformed; fix or remove it by hand")
+
+// readGroupConfigFile returns the raw config.json. A missing file is (nil,
+// nil) — a fresh group. Any other read error, or content that is not a JSON
+// object, is errConfigCorrupt.
+func readGroupConfigFile(p string) ([]byte, error) {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %v", errConfigCorrupt, err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return nil, fmt.Errorf("%w: %v", errConfigCorrupt, err)
+	}
+	return b, nil
+}
+
+// loadGroupConfigStrict is loadGroupConfig that reports a corrupt file
+// instead of answering "empty config". Use it wherever "empty" would widen
+// a policy.
+func loadGroupConfigStrict(g string) (groupConfig, error) {
+	b, err := readGroupConfigFile(groupConfigPath(g))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	var cfg map[string]any
+	_ = json.Unmarshal(b, &cfg)
+	return cfg, nil
 }

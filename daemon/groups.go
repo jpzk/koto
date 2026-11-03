@@ -490,7 +490,7 @@ func listGroups() map[string]GroupInfo {
 			TokPerSec:      rates[g],
 			Network:        cfg.network(),
 			Root:           cfg.root(),
-			Allow:          cfg.allowDisplay(),
+			Allow:          groupAllowDisplay(g, cfg),
 		}
 	}
 	return out

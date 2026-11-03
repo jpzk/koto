@@ -106,8 +106,16 @@ func (c groupConfig) allowDisplay() []string {
 
 const allowCorruptMarker = "!invalid (deny-all)"
 
-// groupAllow is the per-group accessor for runtime callers.
-func groupAllow(g string) (*netallow.List, error) { return loadGroupConfig(g).allow() }
+// groupAllow is the per-group accessor for runtime callers. An unreadable or
+// malformed config.json is errAllowCorrupt (deny-all), never "no list":
+// the file may well have held one.
+func groupAllow(g string) (*netallow.List, error) {
+	cfg, err := loadGroupConfigStrict(g)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errAllowCorrupt, err)
+	}
+	return cfg.allow()
+}
 
 // ---- live allow state --------------------------------------------------------
 //
@@ -161,4 +169,14 @@ func allowApplyLive(g string, l *netallow.List) string {
 		return "live (applied to the running VM, no restart needed)"
 	}
 	return "stored (applies when the VM next starts)"
+}
+
+// groupAllowDisplay is allowDisplay for a group whose file may be corrupt:
+// loadGroupConfig answers {} for a malformed file, which would display as
+// "no allowlist" while enforcement is deny-all.
+func groupAllowDisplay(g string, cfg groupConfig) []string {
+	if _, err := loadGroupConfigStrict(g); err != nil {
+		return []string{allowCorruptMarker}
+	}
+	return cfg.allowDisplay()
 }

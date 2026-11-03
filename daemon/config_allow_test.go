@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -174,5 +175,56 @@ func TestAllowLivePolicy(t *testing.T) {
 	}
 	if a := listGroups()["tg"].Allow; len(a) != 1 || a[0] != allowCorruptMarker {
 		t.Fatalf("corrupt list display = %v", a)
+	}
+}
+
+// A config.json that is malformed or unreadable must enforce deny-all — the
+// file may have held an allowlist — and no writer (spawn's provider seeding,
+// config_set of an unrelated key) may clobber it into "no allowlist".
+func TestAllowCorruptConfigFailsClosed(t *testing.T) {
+	fcHarness(t)
+	if r := configCmd(allowReq("tg", "10.0.0.1")); !r.OK {
+		t.Fatal(r.Error)
+	}
+	p := groupConfigPath("tg")
+	for _, body := range []string{`{"allow":["10.0.0.1"`, ``, `[1,2]`, "\x00garbage"} {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if pol := seedAllow("tg"); !pol.denyAll || !pol.active() || pol.list.AllowIP(netip.MustParseAddr("10.0.0.1")) {
+			t.Fatalf("malformed %q not deny-all: %+v", body, pol)
+		}
+		if _, err := groupAllow("tg"); !errors.Is(err, errAllowCorrupt) {
+			t.Fatalf("groupAllow(%q) err = %v", body, err)
+		}
+		if a := listGroups()["tg"].Allow; len(a) != 1 || a[0] != allowCorruptMarker {
+			t.Fatalf("malformed %q display = %v", body, a)
+		}
+		if err := ensureProviderConfig("tg"); !errors.Is(err, errConfigCorrupt) {
+			t.Fatalf("ensureProviderConfig clobbered %q: err=%v", body, err)
+		}
+		s := "small"
+		if r := configCmd(fromPBConfigReq(&pb.ConfigReq{Group: "tg", Size: &s})); r.OK {
+			t.Fatalf("config_set rewrote malformed %q", body)
+		}
+		if b, _ := os.ReadFile(p); string(b) != body {
+			t.Fatalf("file rewritten: %q -> %q", body, b)
+		}
+	}
+	// unreadable (a directory where the file should be) -> deny-all too
+	os.Remove(p)
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if pol := seedAllow("tg"); !pol.denyAll {
+		t.Fatalf("unreadable config not deny-all: %+v", pol)
+	}
+	// missing file is a fresh group: no allowlist, writers proceed
+	os.Remove(p)
+	if pol := seedAllow("tg"); pol.active() {
+		t.Fatalf("missing config narrowed: %+v", pol)
+	}
+	if err := ensureProviderConfig("tg"); err != nil {
+		t.Fatal(err)
 	}
 }
