@@ -399,7 +399,13 @@ the entry, and the previously stored list is kept unchanged:
 `groups/<g>/config.json`, next to `"network"` — `groups.json` is only the
 name → port registry. A stored list that no longer parses (hand-edited
 garbage) **fails closed**: the group is denied everything but the gateway,
-and the effective config shows `!invalid (deny-all)`.
+and the effective config shows `!invalid (deny-all)`. The same holds for a
+`config.json` that is itself malformed, `null`, or unreadable: the
+allowlist reader enforces **deny-all** (never "no list"), and every config
+writer refuses to rewrite the file (it would start from `{}` and silently
+drop the list) — fix or remove it by hand. Commit + live publish are
+serialised under one lock (incl. the startup seed), so the enforced policy
+always equals the committed file.
 
 **Applies live.** Both enforcement points read the current policy
 (`currentAllow(g)`, one atomic load) on every guest frame and every proxy
@@ -413,16 +419,32 @@ A flow to a destination that is no longer allowed loses its next packet.
 
 - **IP entries — L3 frame filter** (`daemon/fcnet_allow.go`). After the
   profile check, each guest frame's destination must match an entry.
-- **Hostname entries — DNS pinning.** Frames carry IPs, not names. The
-  gateway watches the A/AAAA answers **its own resolver**
-  (`192.168.127.1:53`, UDP) sends back to the guest — the gateway→guest
-  path, which the guest cannot forge. If the question name (or a CNAME in
-  the chain) matches an entry, the answer IPs are pinned for the record TTL,
-  clamped to 30 s … 1 h (`netallow.PinMinTTL`/`PinMaxTTL`), at most 4096
-  pins per group (full → new pins refused, fail closed). Before the guest
+- **Hostname entries — DNS pinning, from koto's own resolver only**
+  (`daemon/fcnet_dns.go`). Frames carry IPs, not names. While an allowlist
+  is active, every UDP query the guest sends to the gateway resolver
+  (`192.168.127.1:53`) is taken off the link in `fcEgressConn.Read`
+  (guest → host) *before* gvisor's netstack sees it. koto builds a **fresh**
+  query (random id, the one question, EDNS0), sends it to the host's
+  resolvers, accepts only an answer matching that id + question (else
+  SERVFAIL), and synthesises the reply to the guest. A/AAAA records
+  reachable from the question through the CNAME chain are pinned when the
+  question name or a CNAME on the path matches an entry, for the
+  **minimum TTL along that path** (a short CNAME can't keep the old target
+  open for the A record's longer TTL), clamped to 30 s … 1 h
+  (`netallow.PinMinTTL`/`PinMaxTTL`), at most 4096 pins per group (full →
+  new pins refused, fail closed). **Nothing on the gateway → guest path
+  (`fcEgressConn.Write`) is parsed** — an earlier version sniffed DNS
+  answers there, but the gvisor switch reflects a guest frame whose dst
+  MAC isn't the gateway's back down the guest's own link, so a guest could
+  forge an "answer" and mint a pin for any IP (Strix finding, PR #104;
+  regression test `TestStrixForgedDNSPinViaReflection`). Before the guest
   has resolved the name, its IPs are not allowed: a hostname is reachable
   **only after a pin**. When the list changes, pins whose names are no longer
   allowed are discarded.
+- **Link-layer hygiene** (`fcGuestMACOK`, every network profile). Guest
+  frames whose destination MAC is neither the gateway's nor broadcast, or
+  whose source MAC is the gateway's, are dropped at ingress — no
+  guest-to-guest path and no reflection back to the sender.
 - **SNI check on pin-only IPs, TCP :443.** An IP that is allowed *only*
   because of a pin must present a TLS ClientHello whose SNI is an allowed
   name; a complete ClientHello without SNI is dropped. IPs matched by a static IP/CIDR
@@ -437,6 +459,16 @@ A flow to a destination that is no longer allowed loses its next packet.
   if the name matches an entry, or if the IP the proxy actually dials (the
   vetted one — no re-resolve) matches an IP entry. An **IP-literal** target
   passes only static IP entries — L3 resolver pins are not consulted at L7.
+  The authority checked is the one dialled (`r.URL.Host` / CONNECT target,
+  default port filled in); a request whose `Host` header names a different
+  authority is refused (403), and the `Host` header is not forwarded
+  separately.
+- **Server-side tools on the LLM proxy.** The gates can't see where a
+  provider-hosted tool connects, so while an allowlist is active (incl.
+  deny-all) `/v1/messages` gets the same restrictions as `network=none`:
+  `web_fetch`, `web_search`, `mcp_servers`, MCP toolsets and code execution
+  are refused (403, never forwarded) and the matching beta headers are
+  stripped. Clear the list to use them.
 
 ### Caveats — read before relying on it
 
@@ -467,9 +499,19 @@ can reach; it is not a DLP boundary against a determined one.
   through the gateway resolver (`/etc/resolv.conf` points there). This fails
   closed for hostnames, but an allowed DoH endpoint is a DNS-tunnel
   exfiltration channel — don't list one.
-- **DNS over TCP to the gateway is not parsed.** Truncated UDP answers that
-  the client retries over TCP pin nothing; names with huge record sets may
-  be partially unreachable.
+- **DNS over TCP to the gateway is not intercepted.** It is still answered
+  by gvisor's resolver and pins nothing, so a truncated (TC=1) UDP answer
+  retried over TCP can only reach IPs already pinned; names with huge record
+  sets may be partially unreachable. Fails closed.
+- **OpenAI `/v1/responses` server tools are not gated.** The server-tool
+  refusal above covers the Anthropic `/v1/messages` leg. The OpenAI
+  Responses leg (codex) can declare hosted `web_search`/MCP tools and is
+  not restricted — neither for `network=none` (pre-existing) nor for an
+  allowlist. Follow-up.
+- **Split ClientHello.** A ClientHello that arrives *whole* in one segment
+  without SNI (no extensions, extensions without SNI, or malformed) is
+  denied on a pin-only IP. A hello whose first segment is only a prefix is
+  not judged (see "stateless" above) — best effort.
 - **DNS itself is not filtered.** The gateway resolves any name on the host
   (see the DNS caveat above), so query names remain an exfiltration side
   channel regardless of the list.
