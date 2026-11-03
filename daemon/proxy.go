@@ -1361,8 +1361,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// from Anthropic's side) and only allowlisted betas. Checked on the
 	// guest's bytes, before any rewrite, credential or upstream contact
 	// (proxy_servertools.go).
-	netNone := proxyNetworkNone(h.group)
-	if netNone {
+	// An active egress allowlist gets the same treatment: neither the L3 gate
+	// nor the L7 proxy can see the hosts Anthropic would contact for a server
+	// tool, so relaying one would bypass the list.
+	restrictTools := proxyServerToolsRestricted(h.group) != ""
+	if restrictTools {
 		if why := proxyServerToolReason(body); why != "" {
 			proxyRefuseServerTool(w, h.group, why)
 			return
@@ -1396,10 +1399,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request builder, so the builder is a pure idempotent function of
 	// (body, headers, ah) safe to call once per retry attempt.
 	clientBeta := strings.Join(r.Header.Values("anthropic-beta"), ",")
-	if netNone {
+	if restrictTools {
 		kept, dropped := proxyFilterBeta(clientBeta)
 		if len(dropped) > 0 && llmFlowSeen.allow("betadrop|"+h.group+"|"+strings.Join(dropped, ",")) {
-			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none allowlist)",
+			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none / egress-allowlist beta list)",
 				h.group, flattenInline(strings.Join(dropped, ",")))
 		}
 		clientBeta = strings.Join(kept, ",")
