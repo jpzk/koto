@@ -122,7 +122,9 @@ func fcNetGateway() (*virtualnetwork.VirtualNetwork, error) {
 // egress at the frame layer under the group's network profile. Blocks until
 // the connection ends. The policy is captured per link conn — i.e. fixed for
 // the VM's lifetime; a profile change applies on /restart, same as the
-// gateway attach itself. group is only for the flow log lines.
+// gateway attach itself. The egress ALLOWLIST is not captured: it is read
+// live per frame from currentAllow(group) (fcnet_allow.go), so -allow changes
+// apply to the running VM.
 func fcNetServe(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn net.Conn, group, policy string) (err error) {
 	// The netstack parses every frame a guest emits, inside the daemon
 	// process (audit M14). A panic on THIS goroutine — the accept/reframe
@@ -284,7 +286,8 @@ var fcSelfIPs = func() func() []net.IP {
 
 // fcEgressConn wraps the guest link conn. Reads (guest→host) are reframed so
 // that only allowed Qemu frames pass through to the netstack; writes
-// (host→guest) pass straight through. Because both ends use identical framing
+// (host→guest) pass through unchanged, after the allowlist has looked at them
+// for DNS answers to pin. Because both ends use identical framing
 // (4-byte big-endian length + ethernet frame), dropping a frame is invisible
 // to the netstack — a blocked SYN simply never arrives, so the guest's connect
 // times out, same as a firewall DROP.
@@ -295,6 +298,7 @@ type fcEgressConn struct {
 	flows  *fcFlowLogger // summarized per-flow egress log
 	bytes  *fcTokenBucket
 	frames *fcTokenBucket
+	allow  *fcAllow // per-group allowlist (fcnet_allow.go), read live per frame
 }
 
 func fcNewEgressConn(c net.Conn, group, policy string) *fcEgressConn {
@@ -304,6 +308,7 @@ func fcNewEgressConn(c net.Conn, group, policy string) *fcEgressConn {
 		flows:  newFcFlowLogger(group),
 		bytes:  newFcTokenBucket(fcNetBytesPerSec, fcNetBytesBurst),
 		frames: newFcTokenBucket(fcNetFramesPerSec, fcNetFramesBurst),
+		allow:  newFcAllow(group),
 	}
 }
 
@@ -322,7 +327,11 @@ func (e *fcEgressConn) Read(p []byte) (int, error) {
 		e.frames.take(1)
 		e.bytes.take(len(frame) + 4)
 		allowed := fcFrameAllowed(frame, e.policy)
-		e.flows.record(frame, e.policy, allowed)
+		why := e.policy
+		if allowed && e.allow != nil && !e.allow.allowFrame(frame) {
+			allowed, why = false, e.policy+" ∩ allowlist"
+		}
+		e.flows.record(frame, why, allowed)
 		if allowed {
 			hdr := make([]byte, 4)
 			binary.BigEndian.PutUint32(hdr, uint32(len(frame)))
@@ -784,4 +793,14 @@ func fcFrameAllowed(frame []byte, policy string) bool {
 	default:
 		return true
 	}
+}
+
+// Write carries gateway → guest frames unchanged. The allowlist observes them
+// first so a DNS answer for an allowed hostname is pinned BEFORE the guest
+// can act on it (fcnet_allow.go).
+func (e *fcEgressConn) Write(b []byte) (int, error) {
+	if e.allow != nil {
+		e.allow.observe(b)
+	}
+	return e.Conn.Write(b)
 }

@@ -353,10 +353,19 @@ func (l *List) MatchHost(name string) bool {
 // TTL-0 answer is still usable for the connect that follows it and a
 // day-long TTL does not keep a stale IP open for a day.
 const (
-	PinMinTTL = 30 * time.Second
-	PinMaxTTL = time.Hour
-	MaxPins   = 4096
+	PinMinTTL   = 30 * time.Second
+	PinMaxTTL   = time.Hour
+	MaxPins     = 4096
+	maxPinHosts = 8 // hostnames remembered per pinned IP (shared CDN IPs)
 )
+
+// pin is one pinned address: its expiry and the allowed hostname(s) whose
+// answers produced it, so a live list change can drop exactly the pins whose
+// name is no longer allowed (Retain).
+type pin struct {
+	exp   time.Time
+	hosts []string
+}
 
 // Pins is the set of IPs the gateway's OWN resolver returned for allowed
 // hostnames, each with an expiry. Only answers observed on the gateway →
@@ -364,7 +373,7 @@ const (
 // use.
 type Pins struct {
 	mu  sync.Mutex
-	m   map[netip.Addr]time.Time
+	m   map[netip.Addr]*pin
 	now func() time.Time
 }
 
@@ -373,12 +382,16 @@ func NewPins(now func() time.Time) *Pins {
 	if now == nil {
 		now = time.Now
 	}
-	return &Pins{m: map[netip.Addr]time.Time{}, now: now}
+	return &Pins{m: map[netip.Addr]*pin{}, now: now}
 }
 
-// Add pins a for ttl (clamped). Returns false when the table is full of live
-// pins — fail closed: the IP stays unreachable.
-func (p *Pins) Add(a netip.Addr, ttl time.Duration) bool {
+// Add pins a for ttl (clamped) with no hostname tag. See AddHost.
+func (p *Pins) Add(a netip.Addr, ttl time.Duration) bool { return p.AddHost(a, "", ttl) }
+
+// AddHost pins a for ttl (clamped), tagged with the allowed hostname that
+// resolved to it. Returns false when the table is full of live pins — fail
+// closed: the IP stays unreachable.
+func (p *Pins) AddHost(a netip.Addr, host string, ttl time.Duration) bool {
 	if ttl < PinMinTTL {
 		ttl = PinMinTTL
 	}
@@ -386,19 +399,24 @@ func (p *Pins) Add(a netip.Addr, ttl time.Duration) bool {
 		ttl = PinMaxTTL
 	}
 	a = a.Unmap()
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	exp := now.Add(ttl)
-	if old, ok := p.m[a]; ok {
-		if exp.After(old) {
-			p.m[a] = exp
+	if old, ok := p.m[a]; ok && old.exp.After(now) {
+		if exp.After(old.exp) {
+			old.exp = exp
+		}
+		if !containsStr(old.hosts, host) && len(old.hosts) < maxPinHosts {
+			old.hosts = append(old.hosts, host)
 		}
 		return true
 	}
+	delete(p.m, a) // expired entry, if any: start fresh (drop its old tags)
 	if len(p.m) >= MaxPins {
 		for k, e := range p.m {
-			if !e.After(now) {
+			if !e.exp.After(now) {
 				delete(p.m, k)
 			}
 		}
@@ -406,8 +424,17 @@ func (p *Pins) Add(a netip.Addr, ttl time.Duration) bool {
 			return false
 		}
 	}
-	p.m[a] = exp
+	p.m[a] = &pin{exp: exp, hosts: []string{host}}
 	return true
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Has reports whether a is pinned and unexpired.
@@ -422,11 +449,35 @@ func (p *Pins) Has(a netip.Addr) bool {
 	if !ok {
 		return false
 	}
-	if !e.After(p.now()) {
+	if !e.exp.After(p.now()) {
 		delete(p.m, a)
 		return false
 	}
 	return true
+}
+
+// Retain drops every pin none of whose hostnames still satisfies keep — used
+// when the allowlist changes live, so a removed hostname stops reaching its
+// IPs immediately while still-allowed names keep theirs.
+func (p *Pins) Retain(keep func(host string) bool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for a, e := range p.m {
+		var hs []string
+		for _, h := range e.hosts {
+			if keep(h) {
+				hs = append(hs, h)
+			}
+		}
+		if len(hs) == 0 {
+			delete(p.m, a)
+		} else {
+			e.hosts = hs
+		}
+	}
 }
 
 // Snapshot returns the live pins, sorted (diagnostics/tests).
@@ -436,7 +487,7 @@ func (p *Pins) Snapshot() []netip.Addr {
 	now := p.now()
 	var out []netip.Addr
 	for a, e := range p.m {
-		if e.After(now) {
+		if e.exp.After(now) {
 			out = append(out, a)
 		}
 	}

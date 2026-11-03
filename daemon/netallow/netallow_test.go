@@ -204,3 +204,23 @@ func TestPinsFullFailsClosed(t *testing.T) {
 		t.Fatal("expired pins should be reclaimed")
 	}
 }
+
+func TestPinsRetainByHost(t *testing.T) {
+	p := NewPins(nil)
+	a := netip.MustParseAddr("203.0.113.1") // shared by two names
+	b := netip.MustParseAddr("203.0.113.2")
+	p.AddHost(a, "a.example.com", time.Minute)
+	p.AddHost(a, "B.example.com.", time.Minute)
+	p.AddHost(b, "b.example.com", time.Minute)
+	p.Retain(func(h string) bool { return h == "a.example.com" })
+	if !p.Has(a) {
+		t.Error("a still has an allowed name; must survive Retain")
+	}
+	if p.Has(b) {
+		t.Error("b's only name was removed; must be dropped")
+	}
+	p.Retain(func(string) bool { return false })
+	if p.Has(a) {
+		t.Error("Retain(none) must empty the set")
+	}
+}
