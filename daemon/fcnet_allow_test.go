@@ -41,7 +41,7 @@ func ipv4Frame(src, dst string, proto byte, sport, dport uint16, payload []byte)
 		binary.BigEndian.PutUint16(l4[4:6], uint16(8+len(payload)))
 	}
 	copy(l4[l4len:], payload)
-	return f
+	return guestMACs(f)
 }
 
 func guestTCP(dst string, port uint16, payload []byte) []byte {
@@ -221,13 +221,13 @@ func TestAllowlistStaticEntries(t *testing.T) {
 		guestTCP("192.168.1.77", 80, nil),                                   // wildcard (LAN)
 		guestTCP("9.9.9.5", 53, nil),                                        // range
 		guestTCP("9.9.9.10", 53, nil),                                       // past range
-		ipv4Frame(fcNetGuestIP, fcNetGatewayIP, 17, 33333, 53, []byte("q")), // gateway DNS
+		ipv4Frame(fcNetGuestIP, fcNetGatewayIP, 17, 33333, 53, []byte("q")), // gateway DNS: koto resolver
 	}
 	e := newConn(g, fcNetFull)
-	wantPass(t, pump(t, e, frames...), true, false, true, true, true, false, true)
+	wantPass(t, pump(t, e, frames...), true, false, true, true, true, false, false)
 	// profile ∩ allowlist: under wan the listed LAN ranges stay blocked.
 	e = newConn(g, fcNetWAN)
-	wantPass(t, pump(t, e, frames...), true, false, false, false, true, false, true)
+	wantPass(t, pump(t, e, frames...), true, false, false, false, true, false, false)
 }
 
 func TestAllowlistHostnameOnlyAfterPin(t *testing.T) {
@@ -238,20 +238,19 @@ func TestAllowlistHostnameOnlyAfterPin(t *testing.T) {
 	wantPass(t, pump(t, e, syn), false) // before any resolution: dropped
 
 	// An answer for a NON-allowed name pins nothing.
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "evil.test.", rrA("evil.test.", "93.184.216.34", 300)))
+	resolve(t, e, "evil.test.", rrA("evil.test.", "93.184.216.34", 300))
 	wantPass(t, pump(t, e, syn), false)
-	// A forged "answer" not sourced from the gateway resolver pins nothing.
-	e.allow.observe(dnsAnswer(t, "1.1.1.1", "example.com.", rrA("example.com.", "93.184.216.34", 300)))
-	wantPass(t, pump(t, e, syn), false)
-	// The gateway resolver's answer for the allowed name — via the real
-	// Write path, as the gateway would emit it.
+	// A gateway → guest "answer" on the Write path is never trusted.
 	deliver(t, e, dnsAnswer(t, fcNetGatewayIP, "example.com.", rrA("example.com.", "93.184.216.34", 300)))
+	wantPass(t, pump(t, e, syn), false)
+	// koto's resolver answering the guest's query for the allowed name pins.
+	resolve(t, e, "example.com.", rrA("example.com.", "93.184.216.34", 300))
 	wantPass(t, pump(t, e, syn, guestTCP("93.184.216.35", 80, nil)), true, false)
 
 	// CNAME chain from an allowed wildcard name pins the final A only.
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "img.cdn.test.",
+	resolve(t, e, "img.cdn.test.",
 		rrCNAME("img.cdn.test.", "edge.provider.net."), rrA("edge.provider.net.", "203.0.113.9", 60),
-		rrA("unrelated.net.", "203.0.113.66", 60)))
+		rrA("unrelated.net.", "203.0.113.66", 60))
 	if !e.allow.pinSet(currentAllow(g)).Has(netip.MustParseAddr("203.0.113.9")) {
 		t.Error("CNAME target address of an allowed name was not pinned")
 	}
@@ -259,7 +258,7 @@ func TestAllowlistHostnameOnlyAfterPin(t *testing.T) {
 		t.Error("an answer record not on the question's CNAME chain was pinned")
 	}
 	// one-level wildcard only: a.b.cdn.test is not allowed.
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "a.b.cdn.test.", rrA("a.b.cdn.test.", "203.0.113.77", 60)))
+	resolve(t, e, "a.b.cdn.test.", rrA("a.b.cdn.test.", "203.0.113.77", 60))
 	if e.allow.pinSet(currentAllow(g)).Has(netip.MustParseAddr("203.0.113.77")) {
 		t.Error("two-level name pinned under *.cdn.test")
 	}
@@ -269,7 +268,7 @@ func TestAllowlistSNIOnPinnedIP(t *testing.T) {
 	pinSelf(t)
 	g := allowGroup(t, "example.com,1.1.1.1")
 	e := newConn(g, fcNetWAN)
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "example.com.", rrA("example.com.", "93.184.216.34", 300)))
+	resolve(t, e, "example.com.", rrA("example.com.", "93.184.216.34", 300))
 	good := clientHello(t, "example.com")
 	bad := clientHello(t, "other-site-on-same-cdn.test")
 	if sni, isHello, complete := fcTLSSNI(good); sni != "example.com" || !isHello || !complete {
@@ -295,8 +294,8 @@ func TestAllowlistLiveChangeNoRestart(t *testing.T) {
 	pinSelf(t)
 	g := allowGroup(t, "1.1.1.1,a.example.com,b.example.com")
 	e := newConn(g, fcNetWAN)
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "a.example.com.", rrA("a.example.com.", "203.0.113.1", 300)))
-	e.allow.observe(dnsAnswer(t, fcNetGatewayIP, "b.example.com.", rrA("b.example.com.", "203.0.113.2", 300)))
+	resolve(t, e, "a.example.com.", rrA("a.example.com.", "203.0.113.1", 300))
+	resolve(t, e, "b.example.com.", rrA("b.example.com.", "203.0.113.2", 300))
 	est := []([]byte){guestTCP("1.1.1.1", 443, []byte("x")), guestTCP("8.8.8.8", 443, nil),
 		guestTCP("203.0.113.1", 80, nil), guestTCP("203.0.113.2", 80, nil)}
 	wantPass(t, pump(t, e, est...), true, false, true, true)
@@ -322,5 +321,5 @@ func TestAllowlistCorruptDeniesAll(t *testing.T) {
 	t.Cleanup(func() { liveAllow.Delete(g) })
 	e := newConn(g, fcNetFull)
 	dns := ipv4Frame(fcNetGuestIP, fcNetGatewayIP, 17, 33333, 53, []byte("q"))
-	wantPass(t, pump(t, e, guestTCP("1.1.1.1", 443, nil), dns), false, true)
+	wantPass(t, pump(t, e, guestTCP("1.1.1.1", 443, nil), dns), false, false) // dns: consumed by koto's resolver
 }

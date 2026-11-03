@@ -11,10 +11,14 @@ package main
 // decides, exactly the pre-allowlist behaviour.
 //
 // Hostname entries cannot match a frame directly (frames carry IPs). Instead
-// the gateway pins the A/AAAA answers its OWN resolver (192.168.127.1:53)
-// sends back for an allowed name — observed on the gateway → guest path,
-// which the guest cannot forge — for the record TTL (clamped, see
-// netallow.Pins). On a pin-only destination:
+// koto's OWN host-side resolver (fcnet_dns.go), which answers the guest at
+// 192.168.127.1:53 while an allowlist is active, pins the A/AAAA answers it
+// got for an allowed name, for the minimum TTL along the CNAME chain
+// (clamped, see netallow.Pins). Guest-path traffic is never parsed for DNS
+// answers: the gateway → guest direction is reachable by the guest itself
+// (gvisor switch reflection), so a pin sniffed there would be forgeable.
+//
+// On a pin-only destination:
 //   - TCP :443 — a TLS ClientHello whose SNI is not an allowed name is
 //     dropped (shared CDN IPs: pinning a.example.com's IP must not open
 //     every other site on that edge). A ClientHello with no SNI is dropped.
@@ -24,25 +28,22 @@ package main
 //     decrypting the Initial; clients fall back to TCP.
 //   - anything else is allowed by IP.
 // DNS the guest sends ELSEWHERE (DoH, a public resolver it is allowed to
-// reach) is not observed and pins nothing, so a hostname entry only works
-// through the gateway resolver. DNS over TCP to the gateway is not parsed
-// either (truncated answers): documented caveats.
+// reach) pins nothing, so a hostname entry only works through the gateway
+// resolver. DNS over TCP to the gateway is answered by gvisor and pins
+// nothing either: documented caveats.
 
 import (
 	"encoding/binary"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/dns/dnsmessage"
 
 	"koto/netallow"
 )
 
 // fcAllow is one guest link's allowlist state: the policy source and the
-// resolver pins observed on this link.
+// pins koto's resolver recorded for this link.
 type fcAllow struct {
 	policy func() *allowPolicy
 	now    func() time.Time
@@ -179,107 +180,6 @@ func (a *fcAllow) allowFrame(frame []byte) bool {
 		}
 	}
 	return true
-}
-
-// observe inspects one gateway → guest write ([len][frame], as the gvisor
-// switch emits exactly one per Write) and pins the A/AAAA answers of DNS
-// responses from the gateway resolver for allowed names. Never blocks the
-// write; anything unparseable simply pins nothing (fail closed).
-func (a *fcAllow) observe(b []byte) {
-	p := a.policy()
-	if !p.active() || p.denyAll || !p.list.HasHosts() || len(b) < 4 {
-		return
-	}
-	if int(binary.BigEndian.Uint32(b[:4])) != len(b)-4 {
-		return
-	}
-	pk, ok := fcParsePkt(b[4:])
-	if !ok || pk.proto != 17 || pk.srcPort != 53 || pk.payload == nil ||
-		!pk.src.IsValid() || !fcNetGatewayIPParsed.Equal(net.IP(pk.src.AsSlice())) {
-		return
-	}
-	fcPinDNS(p.list, a.pinSet(p), pk.payload)
-}
-
-// fcPinDNS pins the addresses a DNS response gives for its question name,
-// following CNAME chains from that name, when the name is allowed. The pin
-// is tagged with the QUESTION name — the one the operator allowed — so a
-// later list change drops it if that name goes away.
-func fcPinDNS(l *netallow.List, pins *netallow.Pins, msg []byte) {
-	var pr dnsmessage.Parser
-	h, err := pr.Start(msg)
-	if err != nil || !h.Response || h.RCode != dnsmessage.RCodeSuccess {
-		return
-	}
-	qs, err := pr.AllQuestions()
-	if err != nil || len(qs) != 1 {
-		return
-	}
-	qname := strings.TrimSuffix(strings.ToLower(qs[0].Name.String()), ".")
-	if !l.MatchHost(qname) {
-		return
-	}
-	type rec struct {
-		owner, cname string
-		addr         netip.Addr
-		ttl          uint32
-	}
-	var recs []rec
-	for {
-		ah, err := pr.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
-			break
-		}
-		if err != nil {
-			return
-		}
-		r := rec{owner: strings.TrimSuffix(strings.ToLower(ah.Name.String()), "."), ttl: ah.TTL}
-		switch ah.Type {
-		case dnsmessage.TypeA:
-			v, err := pr.AResource()
-			if err != nil {
-				return
-			}
-			r.addr = netip.AddrFrom4(v.A)
-		case dnsmessage.TypeAAAA:
-			v, err := pr.AAAAResource()
-			if err != nil {
-				return
-			}
-			r.addr = netip.AddrFrom16(v.AAAA).Unmap()
-		case dnsmessage.TypeCNAME:
-			v, err := pr.CNAMEResource()
-			if err != nil {
-				return
-			}
-			r.cname = strings.TrimSuffix(strings.ToLower(v.CNAME.String()), ".")
-		default:
-			if err := pr.SkipAnswer(); err != nil {
-				return
-			}
-			continue
-		}
-		recs = append(recs, r)
-	}
-	// Names reachable from the question via CNAME (order-independent,
-	// bounded: a chain longer than 8 is not followed further).
-	names := map[string]bool{qname: true}
-	for i := 0; i < 8; i++ {
-		grew := false
-		for _, r := range recs {
-			if r.cname != "" && names[r.owner] && !names[r.cname] {
-				names[r.cname], grew = true, true
-			}
-		}
-		if !grew {
-			break
-		}
-	}
-	for _, r := range recs {
-		if r.addr.IsValid() && names[r.owner] {
-			pins.AddHost(r.addr, qname, time.Duration(r.ttl)*time.Second)
-		}
-	}
 }
 
 // fcTLSSNI extracts the server_name from a TLS ClientHello at the start of a
