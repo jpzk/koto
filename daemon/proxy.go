@@ -1863,6 +1863,11 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)
 		return
 	}
+	if ok, why := egressAllowlistOK(h.group, target, vetted); !ok {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (%s)", h.group, r.Method, target, why)
+		http.Error(w, "egress blocked: target not in this group's allowlist", http.StatusForbidden)
+		return
+	}
 	if !egressAcquire(h.group) {
 		if llmFlowSeen.allow("egressconns|" + h.group) {
 			emitLogfG("egress", h.group, "warn",

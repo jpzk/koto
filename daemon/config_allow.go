@@ -154,7 +154,7 @@ func seedAllow(g string) *allowPolicy {
 // allowApplyLive publishes a freshly committed list. The return value is
 // shown to the operator: the swap is always immediate for new flows; flows
 // already open to a now-disallowed destination are dropped on their next
-// packet (the gateway re-checks established flows against the generation).
+// packet (the gateway reads the policy per frame; the L7 proxy per request).
 func allowApplyLive(g string, l *netallow.List) string {
 	allowSlot(g).Store(&allowPolicy{list: l})
 	if fcRunning(g) {
