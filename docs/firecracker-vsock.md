@@ -526,6 +526,30 @@ can reach; it is not a DLP boundary against a determined one.
   IPv4-only (`192.168.127.2/24`); IPv6 entries matter mostly for proxy
   targets.
 
+### Trust boundary: provider-side fetches
+
+The allowlist and `network=none` govern connections **the guest itself
+makes** — the L3 gate on the VM link and the L7 forward proxy. They do not
+govern requests the **LLM provider** makes on the guest's behalf.
+
+- **In scope:** every TCP/UDP flow and every proxied HTTP(S) request that
+  originates in the guest.
+- **Out of scope:** provider-side web search, scraping, page fetching or
+  URL inputs — anything the provider's servers retrieve after receiving a
+  model request. Examples: Venice `venice_parameters` web features, and
+  request options on the OpenAI / Venice / MiniMax legs that ask the
+  provider to search or fetch.
+- **Non-Anthropic legs are not inspected** for such options; the request
+  body is forwarded as sent.
+- **The Anthropic `/v1/messages` leg** refuses declared server tools and
+  `mcp_servers` only (see "Server-side tools on the LLM proxy" above). It
+  is a narrow filter on known declarations, not a guarantee that the
+  provider fetches nothing.
+
+If a group must not reach unlisted hosts **by any path**, do not give it a
+provider that can fetch. The allowlist alone does not make that guarantee.
+This is a deliberate boundary, not a pending fix.
+
 ## VM size profile (`size`: `small` | `medium` | `large` | `xlarge`)
 
 Per-group config key selecting the machine shape — vCPU, RAM, and workspace
