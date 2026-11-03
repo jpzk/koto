@@ -343,7 +343,11 @@ func imageLs(env imageEnv, out func(string, ...any)) error {
 		return err
 	}
 	refs := imageRefs(env, c)
-	out("%s  (built-in, shipped rootfs)", ociimage.DefaultName)
+	if fileExists(fcRootfsPath()) {
+		out("%s  (built-in, shipped rootfs)", ociimage.DefaultName)
+	} else {
+		out("%s  (unavailable: no %s on this host)", ociimage.DefaultName, fcRootfsPath())
+	}
 	for _, n := range c.SortedNames() {
 		e, _ := c.Lookup(n)
 		line := fmt.Sprintf("%s  %s  %s  %d layers  %s  %s", n, ociimage.Short(e.Digest),

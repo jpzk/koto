@@ -367,6 +367,10 @@ func configCmd(req configReq) configResp {
 	return configResp{BaseResp: baseResp{OK: true}, Config: effectiveConfig(req.Group, cfg)}
 }
 
+// imageDefaultDisplay is what koto config shows for a group with no image=:
+// it boots the catalog default, so name that, never koto-default.
+const imageDefaultDisplay = "(default: " + ociimage.FedoraName + ")"
+
 // effectiveConfig resolves every knob to the value the group actually runs
 // with — defaults filled in — so clients can show the full configuration, not
 // only the keys a user happened to set. Disk still holds only explicit keys
@@ -409,8 +413,10 @@ func effectiveConfig(g string, cfg map[string]any) map[string]any {
 	if _, ok := eff["effort"]; !ok {
 		eff["effort"] = "(default)"
 	}
-	if _, ok := eff["image"]; !ok {
-		eff["image"] = ociimage.DefaultName
+	// No image= boots the catalog default (fedora); say so rather than naming
+	// koto-default, which is now only the explicit legacy opt-out.
+	if v, _ := eff["image"].(string); v == "" {
+		eff["image"] = imageDefaultDisplay
 	}
 	return eff
 }

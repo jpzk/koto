@@ -244,3 +244,26 @@ func TestImageApplyRechecksGroupUnderLock(t *testing.T) {
 		}
 	}
 }
+
+// image ls lists koto-default as the shipped rootfs only when rootfs.img is
+// on the host; without it the entry is marked unavailable.
+func TestImageLsDefaultAvailability(t *testing.T) {
+	fcHarness(t)
+	e := newImageTestEnv(t)
+	if err := e.run("ls", false); err != nil {
+		t.Fatal(err)
+	}
+	first := strings.SplitN(e.log.String(), "\n", 2)[0]
+	if !strings.HasPrefix(first, ociimage.DefaultName) || !strings.Contains(first, "unavailable") || strings.Contains(first, "shipped rootfs") {
+		t.Fatalf("no rootfs.img: %q", first)
+	}
+	fcLegacyRootfs(t)
+	e.log.Reset()
+	if err := e.run("ls", false); err != nil {
+		t.Fatal(err)
+	}
+	first = strings.SplitN(e.log.String(), "\n", 2)[0]
+	if !strings.Contains(first, "built-in, shipped rootfs") || strings.Contains(first, "unavailable") {
+		t.Fatalf("with rootfs.img: %q", first)
+	}
+}
