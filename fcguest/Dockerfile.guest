@@ -55,7 +55,7 @@ ENV CC=musl-gcc \
 RUN set -eu; mkdir -p /b /out; cd /b; \
     curl -fsSL -o tmux.tgz "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"; \
     curl -fsSL -o libevent.tgz "https://github.com/libevent/libevent/releases/download/release-$LIBEVENT_VERSION/libevent-$LIBEVENT_VERSION.tar.gz"; \
-    curl -fsSL -o ncurses.tgz "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VERSION.tar.gz"; \
+    curl -fsSL --retry 3 -o ncurses.tgz "https://mirrors.kernel.org/gnu/ncurses/ncurses-$NCURSES_VERSION.tar.gz" || curl -fsSL --retry 3 -o ncurses.tgz "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VERSION.tar.gz"; \
     printf '%s  %s\n' "$TMUX_SHA256" tmux.tgz "$LIBEVENT_SHA256" libevent.tgz \
       "$NCURSES_SHA256" ncurses.tgz | sha256sum -c -; \
     for t in ncurses libevent tmux; do mkdir $t; tar -xzf $t.tgz -C $t --strip-components=1 --no-same-owner; done; \
