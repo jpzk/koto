@@ -31,6 +31,10 @@ type imageEnv struct {
 	now     func() time.Time
 	// pull fetches an image into the store (nil = client.Pull); tests swap it.
 	pull func(ociimage.Ref, string) (*ociimage.Image, error)
+	// progress receives structured add/update progress for image name (nil =
+	// none: the CLI-less boot path, tests). The Image rpc sends each one as
+	// a "progress" event next to the unchanged text lines.
+	progress func(name string, p ociimage.Progress)
 }
 
 // cancelled is the Image rpc's context error (client went away or pressed
@@ -75,7 +79,11 @@ func (s *kotoServer) Image(r *pb.ImageReq, stream pb.Koto_ImageServer) error {
 		_ = stream.Send(&pb.ImageEvent{Event: "data", Data: fmt.Sprintf(f, a...) + "\n"})
 	}
 	emitLogf("image", "info", "image %s %s", r.Op, strings.Join(r.Args, " "))
-	if err := imageRun(defaultImageEnv(stream.Context()), r.Op, r.Args, r.All, out); err != nil {
+	env := defaultImageEnv(stream.Context())
+	env.progress = func(name string, p ociimage.Progress) {
+		_ = stream.Send(&pb.ImageEvent{Event: "progress", Progress: imageProgressPB(name, p)})
+	}
+	if err := imageRun(env, r.Op, r.Args, r.All, out); err != nil {
 		emitLogf("image", "warn", "image %s: %v", r.Op, err)
 		return stream.Send(&pb.ImageEvent{Event: "error", Error: err.Error()})
 	}
@@ -239,6 +247,10 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	}
 	cl := env.client
 	cl.Logf = func(f string, a ...any) { out("  "+f, a...) }
+	cl.Progress = nil
+	if env.progress != nil {
+		cl.Progress = func(p ociimage.Progress) { env.progress(name, p) }
+	}
 	out("pulling %s", refStr)
 	pull := cl.Pull
 	if env.pull != nil {
@@ -264,7 +276,7 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 	// The layer build honours the cancel too (PR 94 live check: an Esc
 	// that landed just after the last blob let a 170 MB layer convert and
 	// stay on disk): it stops between layers and removes what it built.
-	built, reused, fresh, err := ociimage.EnsureLayersCtx(env.ctx(), env.store.Root, img, cl.Logf)
+	built, reused, fresh, err := ociimage.EnsureLayersProgress(env.ctx(), env.store.Root, img, cl.Logf, cl.Progress)
 	if err != nil {
 		return err
 	}
@@ -304,6 +316,10 @@ func imageFetch(env imageEnv, name, refStr string, update bool, out func(string,
 			ociimage.RemoveFresh(fresh, cl.Logf)
 		}
 		return err
+	}
+	if cl.Progress != nil {
+		cl.Progress(ociimage.Progress{Phase: ociimage.PhaseDone, Layers: len(img.Layers),
+			Done: img.CompressedSize(), Total: img.CompressedSize()})
 	}
 	out("%s: %s", name, img.Ref)
 	out("  digest   %s", img.Digest)
@@ -648,4 +664,10 @@ func imageKnown(env imageEnv, out func(string, ...any)) error {
 		}
 	}
 	return nil
+}
+
+// imageProgressPB is the wire form of one structured add/update update.
+func imageProgressPB(name string, p ociimage.Progress) *pb.ImageProgress {
+	return &pb.ImageProgress{Phase: p.Phase, Layer: int32(p.Layer), Layers: int32(p.Layers),
+		Done: p.Done, Total: p.Total, Image: name}
 }

@@ -38,6 +38,11 @@ const (
 	actRetry  = "retry"  // upstream returned 429/503/529; sleeping before retry
 	actStream = "stream" // upstream response bytes flowing
 	actWork   = "work"   // between upstream calls — the guest is running a tool
+	// Image preparation inside a boot (fcImagePlanFor), before the VM exists:
+	// a missing layer being converted, the group's sys.img being built. The
+	// detail carries layer i/n and the bytes done.
+	actConvert = "convert"
+	actSysImg  = "sysimg"
 )
 
 // activityState is one group's live phase inputs plus the last phase emitted.
@@ -59,6 +64,10 @@ type activityState struct {
 	llmWait   int               // upstream calls with no response byte yet
 	llmRecv   int               // upstream calls whose body is streaming
 	retryText string            // non-empty while doWithRetry is backing off
+	// prep/prepDetail: the image-preparation step of a boot (actConvert,
+	// actSysImg), "" otherwise. It outranks everything: no turn can be
+	// further along than its VM, which does not exist yet.
+	prep, prepDetail string
 
 	phase  string // last emitted
 	detail string
@@ -86,6 +95,8 @@ func activityForget(g string) {
 // a concurrent subagent's stream would hide exactly the case this exists for.
 func (s *activityState) resolve() (string, string) {
 	switch {
+	case s.prep != "":
+		return s.prep, s.prepDetail
 	case s.retryText != "":
 		return actRetry, s.retryText
 	case s.llmRecv > 0:
@@ -291,4 +302,14 @@ func activityRetry(g, detail string) {
 
 func activityRetryDone(g string) {
 	withActivity(g, func(s *activityState) { s.retryText = "" })
+}
+
+// ---- boot-time image preparation (fcimage.go) -------------------------------
+
+// activityPrep reports the image-preparation step of g's boot (actConvert or
+// actSysImg with a detail such as "layer 1/2  12.3/48.1 MB"); phase ""
+// ends it. A first boot can spend a minute converting a layer whose ext4
+// was gc'd or never built, inside a unary Spawn with no other outward sign.
+func activityPrep(g, phase, detail string) {
+	withActivity(g, func(s *activityState) { s.prep, s.prepDetail = phase, detail })
 }

@@ -47,6 +47,10 @@ func activityLabel(phase string) string {
 		return "receiving"
 	case "work":
 		return "running tools"
+	case "convert":
+		return "converting image"
+	case "sysimg":
+		return "building sys.img"
 	}
 	return phase
 }

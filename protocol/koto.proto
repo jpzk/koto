@@ -154,6 +154,7 @@ service Koto {
   // op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
   // apply to every group pinned to the name. Streams human-readable lines
   // (event "data") then "end"; failures are one in-band "error" event.
+  // add/update also interleave structured "progress" events (ImageProgress).
   // HARDCODED admin-only: pulls from registries, writes host-wide caches
   // and resets groups' system disks.
   rpc Image (ImageReq) returns (stream ImageEvent);
@@ -812,7 +813,24 @@ message ImageReq {
   bool   all           = 3; // apply: every group pinned to the name
 }
 message ImageEvent {
-  string event = 1; // data | end | error
+  // data | progress | end | error. "progress" is additive (koto > 1.9.0):
+  // clients that predate it ignore an unknown event, and every "data"
+  // line they relied on is still sent unchanged.
+  string event = 1;
   string data  = 2; // one or more complete lines
   string error = 3;
+  ImageProgress progress = 4; // event == "progress" only
+}
+// ImageProgress is one structured add/update progress update (throttled
+// daemon-side to about 4 per second per blob): a client draws a bar from
+// it instead of parsing the text lines.
+message ImageProgress {
+  // resolve | download | verify | cached | convert | done; unknown values
+  // (a newer daemon) should be shown by name.
+  string phase  = 1;
+  int32  layer  = 2; // 1-based; 0 = not layer specific
+  int32  layers = 3;
+  int64  done   = 4; // bytes (download/verify/cached), else 0
+  int64  total  = 5; // the manifest's layer size, else 0
+  string image  = 6; // catalog name being added/updated
 }
