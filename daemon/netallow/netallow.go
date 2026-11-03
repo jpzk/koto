@@ -71,24 +71,41 @@ func Parse(s string) (*List, error) {
 
 // ParseEntries parses individual entries. Any invalid entry fails the whole
 // list — a typo must never silently widen or narrow egress.
+//
+// Every non-empty input entry counts against MaxEntries, duplicates
+// included, so a pasted blob of a million copies of one address is refused
+// rather than silently collapsed. Each entry is parsed into a scratch list
+// first and only merged into the index when its canonical form is new:
+// duplicates never grow prefixes/ranges (the per-flow linear scan).
 func ParseEntries(in []string) (*List, error) {
 	l := &List{hosts: map[string]bool{}, wild: map[string]bool{}}
 	seen := map[string]bool{}
+	n := 0
 	for _, raw := range in {
 		e := strings.TrimSpace(raw)
 		if e == "" {
 			continue
 		}
-		canon, err := l.add(e)
+		if n++; n > MaxEntries {
+			return nil, fmt.Errorf("allowlist too long (max %d entries, duplicates included)", MaxEntries)
+		}
+		tmp := &List{hosts: map[string]bool{}, wild: map[string]bool{}}
+		canon, err := tmp.add(e)
 		if err != nil {
 			return nil, fmt.Errorf("allow entry %q: %w", e, err)
 		}
-		if !seen[canon] {
-			seen[canon] = true
-			l.entries = append(l.entries, canon)
+		if seen[canon] {
+			continue
 		}
-		if len(l.entries) > MaxEntries {
-			return nil, fmt.Errorf("allowlist too long (max %d entries)", MaxEntries)
+		seen[canon] = true
+		l.entries = append(l.entries, canon)
+		l.prefixes = append(l.prefixes, tmp.prefixes...)
+		l.ranges = append(l.ranges, tmp.ranges...)
+		for h := range tmp.hosts {
+			l.hosts[h] = true
+		}
+		for h := range tmp.wild {
+			l.wild[h] = true
 		}
 	}
 	return l, nil

@@ -224,3 +224,45 @@ func TestPinsRetainByHost(t *testing.T) {
 		t.Error("Retain(none) must empty the set")
 	}
 }
+
+// TestDuplicatesCountedAndNotIndexed: duplicates (literal or spelled
+// differently but canonically equal) count against MaxEntries and are
+// merged into the index only once.
+func TestDuplicatesCountedAndNotIndexed(t *testing.T) {
+	dup := make([]string, MaxEntries+1)
+	for i := range dup {
+		dup[i] = "1.1.1.1"
+	}
+	if _, err := ParseEntries(dup); err == nil {
+		t.Fatal("MaxEntries+1 copies of one entry must be refused")
+	}
+	if _, err := Parse(strings.Repeat("example.com,", MaxEntries+1)); err == nil {
+		t.Fatal("MaxEntries+1 copies via Parse must be refused")
+	}
+	in := []string{"1.1.1.1", "1.1.1.1", "::ffff:1.1.1.1", "10.0.0.0/8", "10.0.0.0/8",
+		"10.0.0.5-10.0.0.20", "10.0.0.5 - 10.0.0.20", "192.168.1.*", "192.168.1.*",
+		"Example.COM", "example.com.", "*.Foo.com", "*.foo.com"}
+	l, err := ParseEntries(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1.1.1.1", "10.0.0.0/8", "10.0.0.5-10.0.0.20", "192.168.1.*", "example.com", "*.foo.com"}
+	if got := l.Entries(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+	if len(l.prefixes) != 3 || len(l.ranges) != 1 || len(l.hosts) != 1 || len(l.wild) != 1 {
+		t.Fatalf("index not deduped: %d prefixes, %d ranges, %d hosts, %d wild",
+			len(l.prefixes), len(l.ranges), len(l.hosts), len(l.wild))
+	}
+	if !l.AllowIP(netip.MustParseAddr("1.1.1.1")) || !l.AllowIP(netip.MustParseAddr("10.0.0.7")) ||
+		!l.MatchHost("example.com") || !l.MatchHost("a.foo.com") || l.MatchHost("evil.com") {
+		t.Fatal("deduped list lost semantics")
+	}
+	exact := make([]string, MaxEntries)
+	for i := range exact {
+		exact[i] = "1.1.1.1"
+	}
+	if _, err := ParseEntries(exact); err != nil {
+		t.Fatalf("exactly MaxEntries entries must parse: %v", err)
+	}
+}

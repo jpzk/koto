@@ -371,7 +371,7 @@ form may also be a string array. In-guest `config_set` refuses it
 (`configPostureKey`), and on gRPC a Config carrying `allow` is relabelled
 `config_posture` (admin-only), same as `network`.
 
-**v1 entry forms** (`daemon/netallow`, max 256 entries, de-duplicated):
+**v1 entry forms** (`daemon/netallow`, max 256 entries — duplicates count toward the cap — de-duplicated):
 
 - `203.0.113.7`, `2001:db8::1` — single address
 - `10.0.0.0/8`, `2001:db8::/32` — CIDR, IPv4 or IPv6; host bits must be
