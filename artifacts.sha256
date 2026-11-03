@@ -9,7 +9,7 @@
 # they vouch for, so a compromised mirror cannot vouch for itself.
 #
 # It vouches for the DOWNLOAD route only. The builds are not reproducible (koto
-# stamps `git describe`; vmlinux and rootfs.img embed build timestamps and
+# stamps `git describe`; vmlinux and the pre-1.9 rootfs.img embed build timestamps and
 # resolved package versions), so `make build` output will not match these
 # lines, and nothing holds it to them — `make install` checks presence only.
 #
@@ -18,7 +18,7 @@
 #   <sha256>  koto-tui
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/vmlinux
-#   <sha256>  fcassets/rootfs.img
+#   <sha256>  fcassets/guest.img     (fcassets/rootfs.img up to 1.8.x)
 #
 # Empty until the first release is published. Until then DIST_VERSION in the
 # Makefile reads "unreleased" and `make fetch` says so rather than 404ing.
@@ -35,8 +35,8 @@
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/firecracker
-54ecd808803110354ff1f98d65e81572a2bc8ad6c2ce7eac4559f6e02709c478  koto
-c7b5b3b38fd2c42d526c870565e264c64223983bf5907f953cc5b48e5b54fd4f  koto-tui
+f8c735a070b7b170610c3ab47784f1e414c6c4a28e7a4187c6babcb0f2fa28a7  koto
+72ca25b3f6f42a609141d060ea4b1e11d3805578b54c3236922c6d15116a18f6  koto-tui
 98ad7b3a21255fb9227dfe564a8c3e170d9272a6b1ac726a0e2f10a2d050e678  fcassets/firecracker
 0267ee4befc215885259433556633efc88836ec027643fe407376ed8dc540b3f  fcassets/vmlinux
-021be7fa5fd86f6374732b48199ec5f3ffa537050cc275af8f1d113657ead03a  fcassets/rootfs.img
+89feac8b5689ea5b91b51c95e1c5e29f4d852731e48161bfd39abe7c8a500365  fcassets/guest.img

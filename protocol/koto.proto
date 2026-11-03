@@ -150,6 +150,14 @@ service Koto {
   // op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
   rpc Budget (BudgetReq) returns (BudgetResp);
 
+  // Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
+  // op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
+  // apply to every group pinned to the name. Streams human-readable lines
+  // (event "data") then "end"; failures are one in-band "error" event.
+  // HARDCODED admin-only: pulls from registries, writes host-wide caches
+  // and resets groups' system disks.
+  rpc Image (ImageReq) returns (stream ImageEvent);
+
   // RunScript executes a POSIX sh script inside a group's microVM as the
   // guest worker user (node, uid 1000, cwd /workspace) and streams its
   // combined stdout+stderr live. Also HARDCODED admin-only (daemon/acl.go):
@@ -382,7 +390,12 @@ message ScheduleItem {
 
 // ---- requests ----
 
-message SpawnReq  { string group = 1; bool main = 2; string provider = 3; string model = 4; string size = 5; }
+message SpawnReq  {
+  string group = 1; bool main = 2; string provider = 3; string model = 4; string size = 5;
+  // image: a catalog name from `koto image ls` (never a raw registry ref).
+  // The daemon pins the name's current digest into the group config.
+  string image = 6;
+}
 message SendReq   {
   string group      = 1;
   string msg        = 2;
@@ -465,6 +478,11 @@ message ConfigReq {
   optional string network  = 12;  // none|wan|lan|full — egress profile; applies on /restart
   optional string autostart = 13; // yes|no — boot this group's VM when the daemon starts
   optional string kvm      = 14;  // yes|no — expose VMX/SVM (nested virtualization); applies on /restart
+  // image: catalog name (koto image ls) or koto-default; "" clears = koto-default.
+  // Raw registry refs are refused. The daemon records the name's digest at
+  // set time (image_digest), keeps the previous one (image_prev) for
+  // rollback, and the guest boots it on the next /restart with a fresh sys.img.
+  optional string image    = 15;
 }
 
 message JobsReq { string group = 1; } // "" = all running groups
@@ -785,4 +803,16 @@ message BudgetReq {
 message BudgetResp {
   bool ok = 1; string error = 2;
   google.protobuf.Struct budget = 3;  // full view after the operation
+}
+
+// Image (see the Image rpc comment and daemon/imagecmd.go).
+message ImageReq {
+  string op            = 1; // add|ls|inspect|rm|gc|update|apply|rollback
+  repeated string args = 2;
+  bool   all           = 3; // apply: every group pinned to the name
+}
+message ImageEvent {
+  string event = 1; // data | end | error
+  string data  = 2; // one or more complete lines
+  string error = 3;
 }

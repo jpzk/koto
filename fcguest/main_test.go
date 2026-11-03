@@ -118,3 +118,23 @@ func TestWriteWorkerFileIsConcurrencySafe(t *testing.T) {
 		}
 	}
 }
+
+// F38 (coderabbit r5): provision.sh waits for the L3 route; a failed netUp
+// must not consume the once-per-boot start.
+func TestShouldProvisionWaitsForL3(t *testing.T) {
+	for _, c := range []struct {
+		net            string
+		netUp, started bool
+		want           bool
+	}{
+		{"", false, false, true},
+		{"l3", true, false, true},
+		{"l3", false, false, false},
+		{"", false, true, false},
+		{"l3", true, true, false},
+	} {
+		if got := shouldProvision(c.net, c.netUp, c.started); got != c.want {
+			t.Errorf("shouldProvision(%q, netUp=%v, started=%v) = %v, want %v", c.net, c.netUp, c.started, got, c.want)
+		}
+	}
+}

@@ -156,7 +156,7 @@ func sec172FakeClone(t *testing.T) (root, state string, planted []string) {
 		}
 	}
 	w("prompts/global.md", "policy\n")
-	for _, a := range []string{"firecracker", "vmlinux", "rootfs.img"} {
+	for _, a := range []string{"firecracker", "vmlinux", "guest.img"} {
 		w("fcassets/"+a, a)
 	}
 	planted = []string{

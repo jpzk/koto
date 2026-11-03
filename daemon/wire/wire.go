@@ -196,6 +196,10 @@ type ConfigReq struct {
 	// host CPU's VMX/SVM to the guest so it can run its own KVM guests; "no"
 	// masks it in the guest's CPUID. Applies on /restart.
 	KVM json.RawMessage `json:"kvm,omitempty"`
+	// Image is a catalog name (koto image ls) or koto-default; "" clears to
+	// koto-default. Raw registry refs are refused; the daemon pins the
+	// name's digest at set time. Applies on /restart (see config_image.go).
+	Image json.RawMessage `json:"image,omitempty"`
 }
 
 // ---- Response envelopes ---------------------------------------------------

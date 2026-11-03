@@ -1,0 +1,191 @@
+# guest.img: koto's in-guest runtime (fc-agent, node + npm, claude, codex,
+# pi, static tmux, /sidecar) and nothing else. Every group VM attaches it
+# read-only as vda (ext4 label kotoguest) and fc-agent bind-mounts it at
+# /opt/koto inside the group's OCI image root. See
+# /workspace/goal/rootfs-split/design.md section 3 for the layout.
+#
+# Built by fcguest/build-guest.sh, never run as a container. Every input is
+# pinned: images by digest, downloads by sha256/sha512 checked BEFORE use,
+# the build toolchain by NEVRA + sha256 from Koji's permanent signed tree
+# (fcguest/guest/rpms.lock). Nothing resolves against a moving index: there
+# is no `dnf install <name>`, no `apk add`, and npm runs only as `npm ci`
+# against a lockfile whose every entry carries an integrity.
+#
+# Stages:
+#   tc    pinned fedora + build toolchain (gcc, musl-gcc, make, e2fsprogs)
+#   tmux  static musl tmux + its terminfo, built from pinned source
+#   tree  the guest.img file tree under /g (no toolchain in it)
+# build-guest.sh streams /g of `tree` into a `tmux` container that
+# normalises it and writes guest.img with mke2fs (byte-reproducible).
+
+# Same digest Dockerfile.rootfs builds FROM (and the catalog's "fedora").
+ARG FEDORA=docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
+
+FROM ${FEDORA} AS tc
+COPY fcguest/guest/rpms.lock /tmp/rpms.lock
+RUN set -eu; mkdir /tmp/rpms; cd /tmp/rpms; \
+    K=https://kojipkgs.fedoraproject.org/packages; \
+    grep -v '^#' /tmp/rpms.lock | while read -r sum src v r n a; do \
+      f="$n-$v-$r.$a.rpm"; \
+      curl -fsSL -o "$f" "$K/$src/$v/$r/data/signed/6d9f90a6/$a/$f"; \
+      printf '%s  %s\n' "$sum" "$f" | sha256sum -c - >/dev/null; \
+    done; \
+    rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
+    dnf install -y -q --disablerepo='*' --setopt=install_weak_deps=False ./*.rpm; \
+    cd /; rm -rf /tmp/rpms /var/cache/dnf; \
+    musl-gcc --version >/dev/null; mke2fs -V; yacc -V; cmp --version >/dev/null
+
+# Static tmux for /shell on any glibc base (the fedora base has none).
+# musl + static libevent/ncurses: no NSS, no shared libs, no glibc version
+# floor. ncurses' compiled-in terminfo search path starts at
+# /opt/koto/share/terminfo, so no TERMINFO_DIRS is needed.
+#   tmux     3.5a           2024-10-04  github.com/tmux/tmux releases
+#   libevent 2.1.13-stable  2026-07-01  github.com/libevent/libevent releases
+#   ncurses  6.5            2024-04-27  invisible-island.net/archives/ncurses
+FROM tc AS tmux
+ARG TMUX_VERSION=3.5a
+ARG TMUX_SHA256=16216bd0877170dfcc64157085ba9013610b12b082548c7c9542cc0103198951
+ARG LIBEVENT_VERSION=2.1.13-stable
+ARG LIBEVENT_SHA256=f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c
+ARG NCURSES_VERSION=6.5
+ARG NCURSES_SHA256=136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
+ENV CC=musl-gcc \
+    CFLAGS="-O2 -ffile-prefix-map=/b=. -fno-ident" \
+    PFX=/b/pfx
+RUN set -eu; mkdir -p /b /out; cd /b; \
+    curl -fsSL -o tmux.tgz "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"; \
+    curl -fsSL -o libevent.tgz "https://github.com/libevent/libevent/releases/download/release-$LIBEVENT_VERSION/libevent-$LIBEVENT_VERSION.tar.gz"; \
+    curl -fsSL --retry 3 -o ncurses.tgz "https://mirrors.kernel.org/gnu/ncurses/ncurses-$NCURSES_VERSION.tar.gz" || curl -fsSL --retry 3 -o ncurses.tgz "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VERSION.tar.gz"; \
+    printf '%s  %s\n' "$TMUX_SHA256" tmux.tgz "$LIBEVENT_SHA256" libevent.tgz \
+      "$NCURSES_SHA256" ncurses.tgz | sha256sum -c -; \
+    for t in ncurses libevent tmux; do mkdir $t; tar -xzf $t.tgz -C $t --strip-components=1 --no-same-owner; done; \
+    cd /b/ncurses; \
+    ./configure --prefix="$PFX" --without-shared --with-normal --without-debug \
+      --without-cxx --without-cxx-binding --without-ada --without-manpages \
+      --without-tests --enable-widec --disable-db-install --enable-pc-files \
+      --with-pkg-config-libdir="$PFX/lib/pkgconfig" \
+      --with-default-terminfo-dir=/opt/koto/share/terminfo \
+      --with-terminfo-dirs=/opt/koto/share/terminfo:/etc/terminfo:/usr/share/terminfo:/lib/terminfo \
+      >/dev/null; \
+    make -j2 >/dev/null; make install >/dev/null; \
+    mkdir -p /out/terminfo; \
+    "$PFX/bin/tic" -x -o /out/terminfo \
+      -e dumb,linux,vt100,vt220,xterm,xterm-color,xterm-256color,screen,screen-256color,tmux,tmux-256color \
+      misc/terminfo.src; \
+    cd /b/libevent; \
+    ./configure --prefix="$PFX" --disable-shared --enable-static --disable-openssl \
+      --disable-samples --disable-libevent-regress --disable-debug-mode >/dev/null; \
+    make -j2 >/dev/null; make install >/dev/null; \
+    cd /b/tmux; \
+    PKG_CONFIG_LIBDIR="$PFX/lib/pkgconfig" ./configure --enable-static \
+      CPPFLAGS="-I$PFX/include -I$PFX/include/ncursesw" LDFLAGS="-L$PFX/lib" >/dev/null; \
+    make -j2 >/dev/null; \
+    strip -o /out/tmux tmux; \
+    if readelf -l /out/tmux | grep -q INTERP; then echo "tmux is not static"; exit 1; fi; \
+    test "$(/out/tmux -V)" = "tmux $TMUX_VERSION"; \
+    test -f /out/terminfo/x/xterm-256color; test -f /out/terminfo/t/tmux-256color; \
+    cd /; rm -rf /b
+
+FROM ${FEDORA} AS tree
+
+# node: the official nodejs.org linux-x64 build (glibc >= 2.28, libstdc++
+# linked statically), only bin/node is taken. v22.23.2 (2026-07-28, security
+# release) is the newest 22.x outside the 6-week gate on 2026-11-02 (22.23.3
+# 2026-09-23 and 22.23.4 2026-10-20 are not). Bump:
+#   curl -fsSL https://nodejs.org/dist/v$V/SHASUMS256.txt | grep linux-x64.tar.xz
+ARG NODE_VERSION=22.23.2
+ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+# npm CLI: same pin and reasoning as Dockerfile.rootfs (tar >= 7.5.21 etc.).
+ARG NPM_VERSION=11.21.1
+ARG NPM_SHA512=613ccbe90044257c87713bb426251ced128ca7e9b3949b65eeb18b98445a5d441e14720c73d6ad76be86f4cf42f2f0d66efe347a9a13400ccd2f6fcfb5954385
+# claude, codex, pi: same pins as Dockerfile.rootfs; bump both together.
+ARG CLAUDE_CODE_VERSION=2.1.280
+ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
+ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
+ARG CODEX_VERSION=0.163.0
+ARG CODEX_SHA256=beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
+ARG CODEX_CODE_MODE_HOST_SHA256=314263128ba6592e7e807c265deeaf928a692b72dcbfeb5e0b20c9423b703529
+ARG PI_VERSION=0.86.0
+ARG PI_LOCK_SHA256=a67466a870d729d04c1de1a71573c8aecdc3bad0ffbdc238d31c049e93a2612a
+
+ENV PATH=/g/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+RUN set -eu; mkdir -p /g/bin /g/lib/node_modules /g/etc/ssl /g/etc/codex /g/share/koto/pi; \
+    for d in proc dev sys run tmp mnt newroot; do mkdir -p /g/$d; done; \
+    cd /tmp; \
+    curl -fsSL -o node.txz "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz"; \
+    printf '%s  node.txz\n' "$NODE_SHA256" | sha256sum -c -; \
+    tar -xJOf node.txz "node-v$NODE_VERSION-linux-x64/bin/node" > /g/bin/node; \
+    chmod 0755 /g/bin/node; rm -f node.txz; \
+    test "$(node --version)" = "v$NODE_VERSION"; \
+    curl -fsSL -o npm.tgz "https://registry.npmjs.org/npm/-/npm-$NPM_VERSION.tgz"; \
+    printf '%s  npm.tgz\n' "$NPM_SHA512" | sha512sum -c -; \
+    mkdir /g/lib/node_modules/npm; \
+    tar -xzf npm.tgz -C /g/lib/node_modules/npm --strip-components=1 --no-same-owner; \
+    rm -f npm.tgz; \
+    printf 'prefix=/usr/local\nupdate-notifier=false\n' > /g/lib/node_modules/npm/npmrc; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /g/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /g/bin/npx; \
+    test "$(npm --version)" = "$NPM_VERSION"; \
+    test "$(node -p 'require("/g/lib/node_modules/npm/node_modules/tar/package.json").version')" = 7.5.22
+
+# claude: wrapper unpacked where `npm i -g` would put it, native binary over
+# its stub. The path keeps the "claude-code" marker that interruptAgent
+# matches in /proc/PID/exe (agentWorkerPattern, daemon/send.go).
+RUN set -eu; cd /tmp; \
+    reg=https://registry.npmjs.org/@anthropic-ai; v="$CLAUDE_CODE_VERSION"; \
+    curl -fsSL -o wrapper.tgz "$reg/claude-code/-/claude-code-$v.tgz"; \
+    curl -fsSL -o native.tgz "$reg/claude-code-linux-x64/-/claude-code-linux-x64-$v.tgz"; \
+    printf '%s  wrapper.tgz\n%s  native.tgz\n' \
+      "$CLAUDE_CODE_SHA512" "$CLAUDE_CODE_LINUX_X64_SHA512" | sha512sum -c -; \
+    dir=/g/lib/node_modules/@anthropic-ai/claude-code; mkdir -p "$dir"; \
+    tar -xzf wrapper.tgz -C "$dir" --strip-components=1 --no-same-owner; \
+    tar -xzOf native.tgz package/claude > "$dir/bin/claude.exe"; \
+    chmod 0755 "$dir/bin/claude.exe"; rm -f wrapper.tgz native.tgz; \
+    ln -sf ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /g/bin/claude; \
+    claude --version | grep -qF "$v"
+
+RUN set -eu; cd /tmp; \
+    u="https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION"; \
+    a=codex-x86_64-unknown-linux-musl; h=codex-code-mode-host-x86_64-unknown-linux-musl; \
+    curl -fsSL -o codex.tgz "$u/$a.tar.gz"; curl -fsSL -o cmhost.tgz "$u/$h.tar.gz"; \
+    printf '%s  codex.tgz\n%s  cmhost.tgz\n' "$CODEX_SHA256" "$CODEX_CODE_MODE_HOST_SHA256" | sha256sum -c -; \
+    tar -xzOf codex.tgz "$a" > /g/bin/codex; tar -xzOf cmhost.tgz "$h" > /g/bin/codex-code-mode-host; \
+    chmod 0755 /g/bin/codex /g/bin/codex-code-mode-host; rm -f codex.tgz cmhost.tgz; \
+    printf 'check_for_update_on_startup = false\n\n[analytics]\nenabled = false\n\n[features]\ncode_mode_host = true\n' \
+      > /g/etc/codex/managed_config.toml; \
+    test "$(codex --version)" = "codex-cli $CODEX_VERSION"; \
+    codex-code-mode-host --help | grep -qF -- '--listen <URL>'
+
+# pi: npm ci against the committed lockfile (every entry has an integrity),
+# lifecycle scripts skipped; see Dockerfile.rootfs for the override story.
+COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /g/opt/pi/
+RUN set -eu; cd /g/opt/pi; \
+    printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
+    HOME=/tmp/pihome npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=warn; \
+    rm -rf /tmp/pihome; \
+    printf '%s  %s\n' "$PI_LOCK_SHA256" package-lock.json > .artifact.sha256; \
+    ln -s node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js pi; \
+    ln -s ../opt/pi/pi /g/bin/pi; \
+    test "$(PI_OFFLINE=1 PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 pi --version)" = "$PI_VERSION"; \
+    v() { node -p "require('$1').version"; }; \
+    test "$(v ./node_modules/undici/package.json)" = 8.12.2; \
+    test -z "$(find . -path '*/node_modules/undici/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="8.12.2"?"":v' {} \; | tr -d '\n')"; \
+    test -z "$(find . -path '*/node_modules/brace-expansion/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="5.0.12"?"":v' {} \; | tr -d '\n')"
+
+RUN cp /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /g/etc/ssl/ca-bundle.crt
+COPY fcguest/pi/models.minimax.json /g/share/koto/pi/models.minimax.json
+COPY fcguest/guest/tmux.conf /g/share/koto/tmux.conf
+COPY --from=tmux /out/tmux /g/bin/tmux
+COPY --from=tmux /out/terminfo /g/share/terminfo
+COPY sidecar/ /g/sidecar/
+COPY fcguest/fc-agent /g/bin/fc-agent
+ARG GUEST_VERSION=dev
+RUN set -eu; { \
+      echo "version=$GUEST_VERSION"; echo "layout=v2"; \
+      echo "fedora_base=be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19"; \
+      echo "node=$NODE_VERSION sha256:$NODE_SHA256"; echo "npm=$NPM_VERSION sha512:$NPM_SHA512"; \
+      echo "claude-code=$CLAUDE_CODE_VERSION sha512:$CLAUDE_CODE_SHA512 linux-x64 sha512:$CLAUDE_CODE_LINUX_X64_SHA512"; \
+      echo "codex=$CODEX_VERSION sha256:$CODEX_SHA256 code-mode-host sha256:$CODEX_CODE_MODE_HOST_SHA256"; \
+      echo "pi=$PI_VERSION lock-sha256:$PI_LOCK_SHA256"; \
+    } > /g/share/koto/PINS

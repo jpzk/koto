@@ -319,6 +319,9 @@ var adminOnlyVerbs = map[string]bool{
 	// "show" rides the same verb (one RPC); the ctl plane gives main a
 	// read-only view instead (ctl.go).
 	"budget": true,
+	// image: pulls from registries into host-wide caches, rewrites every
+	// pinned group's base and resets their system disks (Image rpc).
+	"image": true,
 	// Not an RPC: the synthetic verb aclCheck substitutes for `config` when
 	// the request carries a POSTURE setter. ConfigReq mixes model/effort/
 	// provider with network, root, ports, size and autostart, and one coarse

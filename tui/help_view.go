@@ -53,7 +53,7 @@ func helpSections() []helpSection {
 			{"ctrl+o", "jump to any group/session (fuzzy)"},
 			{"ctrl+r", "recall prompt history for the current group"},
 			{"ctrl+h", "this cheatsheet"},
-			{"ctrl+n", "new group dialog - name, provider, network, size, ..."},
+			{"ctrl+n", "new group dialog - name, image, provider, network, ..."},
 			{"ctrl+k", "fleet view - space/cpu/mem/tok-s per group"},
 			{"ctrl+e", "edit the current group (provider, model, network, ...)"},
 			{"ctrl+y", "schedules view - manage daemon cron schedules"},
