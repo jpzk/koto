@@ -264,8 +264,8 @@ RUN set -eu; cd /tmp; \
 # undici >= 8.12.2), update
 # PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
 # here and in verify-rootfs.sh.
-ARG PI_VERSION=0.86.0
-ARG PI_LOCK_SHA256=a67466a870d729d04c1de1a71573c8aecdc3bad0ffbdc238d31c049e93a2612a
+ARG PI_VERSION=1.5.0
+ARG PI_LOCK_SHA256=039086b635ea7cb2c9c36ba8351cc2b0363f8444ce8227d3e0f189ecc7187205
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
 RUN set -eu; cd /opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \

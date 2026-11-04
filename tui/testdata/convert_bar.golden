@@ -1,0 +1,11 @@
+resolving debian
+pulling debian  layer 1/2  [-----------------------] 0.0/48.1 MB
+pulling debian  layer 1/2  [#######------] 24.1/48.1 MB  12 MB/s
+cached debian  layer 2/2  [########################] 1.0 MB
+converting debian  layer 1/2  [--------------------] 0.0/48.1 MB
+converting debian  layer 1/2  [##############-----] 36.1/48.1 MB
+converting debian  layer 1/2  [###################] 48.1/48.1 MB
+cached debian  layer 2/2  ext4 ready  1.0 MB
+pulled debian  2 layers  49.1 MB
+converting image  dev  layer 1/2  12.3/48.1 MB
+building sys.img  dev

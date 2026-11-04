@@ -55,6 +55,9 @@ type fakeKoto struct {
 	begun     chan struct{}
 	cancelled chan struct{}
 	imageErr  string
+	// failAllow, when set, is the error a config_set carrying allow gets
+	// (the daemon refusing the list); a good one answers allow_apply.
+	failAllow string
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {
@@ -112,6 +115,7 @@ func (f *fakeKoto) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, e
 	opt("root", r.Root)
 	opt("autostart", r.Autostart)
 	opt("kvm", r.Kvm)
+	opt("allow", r.Allow)
 	if len(kv) == 1 {
 		f.rec("read", kv)
 		if f.failRead {
@@ -126,6 +130,13 @@ func (f *fakeKoto) Config(_ context.Context, r *pb.ConfigReq) (*pb.ConfigResp, e
 	f.rec("config", kv)
 	if f.failOp == "config" {
 		return &pb.ConfigResp{Ok: false, Error: "network: admin only"}, nil
+	}
+	if r.Allow != nil {
+		if f.failAllow != "" {
+			return &pb.ConfigResp{Ok: false, Error: f.failAllow}, nil
+		}
+		s, _ := structpb.NewStruct(map[string]any{"allow_apply": "live (applied to the running VM, no restart needed)"})
+		return &pb.ConfigResp{Ok: true, Config: s}, nil
 	}
 	return &pb.ConfigResp{Ok: true}, nil
 }

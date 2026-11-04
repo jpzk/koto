@@ -77,6 +77,24 @@ type FreshLayer struct {
 // lets the caller undo the build if it is cancelled later, before the
 // catalog entry that would keep the layers is written.
 func EnsureLayersCtx(ctx context.Context, cache string, img *Image, logf func(string, ...any)) (built, reused int, fresh []FreshLayer, err error) {
+	return EnsureLayersProgress(ctx, cache, img, logf, nil)
+}
+
+// layerCached and layerBuilder are LayerOK and BuildLayerProgress; tests
+// swap them to drive the convert loop without e2fsprogs on the PATH.
+var (
+	layerCached  = LayerOK
+	layerBuilder = BuildLayerProgress
+)
+
+// EnsureLayersProgress is EnsureLayersCtx that also reports progress per
+// distinct layer i/n: PhaseLayerOK for a layer whose ext4 image is already
+// cached, else PhaseConvert from 0 to the blob size as the tar is consumed
+// (BuildLayerProgress; throttled, final done == total). prog may be nil.
+func EnsureLayersProgress(ctx context.Context, cache string, img *Image, logf func(string, ...any), prog func(Progress)) (built, reused int, fresh []FreshLayer, err error) {
+	if prog == nil {
+		prog = func(Progress) {}
+	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -100,14 +118,18 @@ func EnsureLayersCtx(ctx context.Context, cache string, img *Image, logf func(st
 		if err := cancelled(); err != nil {
 			return built, reused, nil, err
 		}
-		if LayerOK(cache, l) {
+		if layerCached(cache, l) {
+			prog(Progress{Phase: PhaseLayerOK, Layer: i + 1, Layers: len(ls), Done: l.Size, Total: l.Size})
 			TouchCached(LayerFile(cache, l.DiffID))
 			reused++
 			logf("layer %d/%d %s cached (%s)", i+1, len(ls), Short(l.DiffID), LayerLabel(l.DiffID))
 			continue
 		}
 		t := time.Now()
-		st, err := BuildLayer(cache, l)
+		prog(Progress{Phase: PhaseConvert, Layer: i + 1, Layers: len(ls), Total: l.Size})
+		st, err := layerBuilder(cache, l, func(done, total int64) {
+			prog(Progress{Phase: PhaseConvert, Layer: i + 1, Layers: len(ls), Done: done, Total: total})
+		})
 		if err != nil {
 			return built, reused, fresh, fmt.Errorf("layer %d %s: %w", i+1, Short(l.DiffID), err)
 		}

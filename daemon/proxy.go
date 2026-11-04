@@ -1361,8 +1361,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// from Anthropic's side) and only allowlisted betas. Checked on the
 	// guest's bytes, before any rewrite, credential or upstream contact
 	// (proxy_servertools.go).
-	netNone := proxyNetworkNone(h.group)
-	if netNone {
+	// An active egress allowlist gets the same treatment: neither the L3 gate
+	// nor the L7 proxy can see the hosts Anthropic would contact for a server
+	// tool, so relaying one would bypass the list.
+	restrictTools := proxyServerToolsRestricted(h.group) != ""
+	if restrictTools {
 		if why := proxyServerToolReason(body); why != "" {
 			proxyRefuseServerTool(w, h.group, why)
 			return
@@ -1396,10 +1399,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request builder, so the builder is a pure idempotent function of
 	// (body, headers, ah) safe to call once per retry attempt.
 	clientBeta := strings.Join(r.Header.Values("anthropic-beta"), ",")
-	if netNone {
+	if restrictTools {
 		kept, dropped := proxyFilterBeta(clientBeta)
 		if len(dropped) > 0 && llmFlowSeen.allow("betadrop|"+h.group+"|"+strings.Join(dropped, ",")) {
-			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none allowlist)",
+			emitLogfG("llm", h.group, "info", "[%s] dropped anthropic-beta %s (not on the network=none / egress-allowlist beta list)",
 				h.group, flattenInline(strings.Join(dropped, ",")))
 		}
 		clientBeta = strings.Join(kept, ",")
@@ -1821,19 +1824,26 @@ func egressRelease(g string) {
 // unless the operator granted a networked profile, and even then only the
 // destination classes that profile allows.
 func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
-	target := r.Host // authority form for CONNECT; URL host for absolute-form
-	if target == "" {
-		target = r.URL.Host
+	// Authorize the host that will actually be DIALED: r.URL.Host, which is
+	// the authority for CONNECT and the URL's host for absolute-form — the
+	// same value egressHTTP builds the outbound request from. r.Host is only
+	// a cross-check: a request whose Host names a different authority than
+	// the one being dialed (a listed name fronting an unlisted vhost, or the
+	// reverse) is refused rather than resolved in either direction.
+	if r.URL == nil || r.URL.Host == "" {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s (no request-target authority)", h.group, r.Method)
+		http.Error(w, "egress blocked: forward-proxy request without a target host", http.StatusBadRequest)
+		return
 	}
-	// Absolute-form may omit the port ("http://host/x"); CONNECT never does.
-	// Default it from the scheme so the vetted address the dial is pinned to
-	// is a complete ip:port rather than a bare "ip:".
-	if _, _, err := net.SplitHostPort(target); err != nil {
-		port := "80"
-		if r.URL != nil && r.URL.Scheme == "https" {
-			port = "443"
-		}
-		target = net.JoinHostPort(strings.Trim(target, "[]"), port)
+	scheme := r.URL.Scheme
+	if r.Method == http.MethodConnect {
+		scheme = "https"
+	}
+	target := egressAuthority(r.URL.Host, scheme)
+	if r.Host != "" && egressAuthority(r.Host, scheme) != target {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (Host header %q does not match the request target)", h.group, r.Method, target, r.Host)
+		http.Error(w, "egress blocked: Host header does not match the request target", http.StatusForbidden)
+		return
 	}
 	// Two profiles, both must allow: the one the VM BOOTED with (snapshot,
 	// see proxySetBootNetwork) and the one in config.json now. Raising the
@@ -1863,6 +1873,11 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress blocked: target not permitted under this group's network profile", http.StatusForbidden)
 		return
 	}
+	if ok, why := egressAllowlistOK(h.group, target, vetted); !ok {
+		emitLogfG("egress", h.group, "warn", "[%s] BLOCKED %s %s (%s)", h.group, r.Method, target, why)
+		http.Error(w, "egress blocked: target not in this group's allowlist", http.StatusForbidden)
+		return
+	}
 	if !egressAcquire(h.group) {
 		if llmFlowSeen.allow("egressconns|" + h.group) {
 			emitLogfG("egress", h.group, "warn",
@@ -1878,6 +1893,25 @@ func (h *handler) serveEgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.egressHTTP(w, r, target, vetted)
+}
+
+// egressAuthority normalises a request authority to host:port for both the
+// gate and the Host cross-check: lower-case, trailing root dot dropped, IPv6
+// brackets canonical, and the port defaulted from the scheme when absent
+// (absolute-form may omit it; CONNECT never does).
+func egressAuthority(hostport, scheme string) string {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = hostport, ""
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if port == "" {
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // egressIntersect returns the profile allowing exactly the destination classes
@@ -2043,7 +2077,7 @@ func (h *handler) egressHTTP(w http.ResponseWriter, r *http.Request, target, vet
 		return
 	}
 	for k, vs := range r.Header {
-		if hopByHop[strings.ToLower(k)] {
+		if hopByHop[strings.ToLower(k)] || strings.EqualFold(k, "Host") {
 			continue
 		}
 		for _, v := range vs {

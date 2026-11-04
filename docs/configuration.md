@@ -218,6 +218,16 @@ These appear in `daemon/` code but are set by koto itself; do not set them.
   on next spawn (`/restart`); lowering to `none` also takes effect on the
   proxy's very next request (comment in `applyConfig`). Legacy key
   `internet`: `full` → `wan`, `none` → `none`, migrated to `network`.
+- `allow` — egress allowlist narrowing `network` (effective = profile ∩
+  allowlist). Comma string or JSON string array; `""`/`null`/`[]` clears. Forms:
+  IPv4/IPv6 address, CIDR, `192.168.1.*`, range `a-b`, `example.com`,
+  `*.example.com` (one label). Globs and `~regex` are rejected with an error
+  and the old list is kept (`daemon/config_allow.go`, `daemon/netallow`). Max
+  256 entries. Stored canonical under `"allow"`; a stored list that fails to
+  parse denies all egress. Applies **live** to a running VM (response key
+  `allow_apply`). Details and caveats:
+  [firecracker-vsock.md](firecracker-vsock.md#egress-allowlist-allow); provider
+  fetches are out of scope — see "Trust boundary: provider-side fetches" below.
 - `size` — `small` | `medium` | `large` | `xlarge`. Default `small`.
   Applies on next spawn. Disk grows but never shrinks. Presets
   (`daemon/fc.go` `fcSizePresets`; vCPU, RAM MiB, workspace disk, IO MiB/s,
@@ -244,9 +254,21 @@ The yes/no keys fail closed: absent, unparsable or any other value is
 `no`; a JSON boolean is accepted for hand-edited files —
 `daemon/groups.go` `groupConfigBool`.
 
+#### Trust boundary: provider-side fetches
+
+`allow` and `network=none` govern connections the guest itself makes (L3
+gate + L7 proxy). Requests the LLM provider makes on the guest's behalf —
+provider web search, scraping, URL inputs (e.g. Venice
+`venice_parameters` web features, OpenAI / Venice / MiniMax request
+options) — are outside that boundary and are not inspected on
+non-Anthropic legs; the Anthropic leg refuses declared server tools and
+`mcp_servers` only. If a group must not reach unlisted hosts by any path,
+do not give it a provider that can fetch. Details:
+[firecracker-vsock.md](firecracker-vsock.md#trust-boundary-provider-side-fetches).
+
 ### Who may set what
 
-- **Posture keys** = `network`, `internet`, `root`, `ports`, `size`,
+- **Posture keys** = `network`, `internet`, `allow`, `root`, `ports`, `size`,
   `autostart`, `kvm`. On gRPC, a Config request carrying any of them is
   authorized as the synthetic admin-only verb `config_posture` —
   `daemon/auth.go` `postureVerb`, `daemon/acl.go` `adminOnlyVerbs`.

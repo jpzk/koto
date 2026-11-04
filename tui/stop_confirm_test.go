@@ -88,7 +88,7 @@ func TestStopKeyOpensModal(t *testing.T) {
 		t.Fatalf("opening the modal must send nothing (cmd=%v sent=%v)", cmd != nil, *sent)
 	}
 	v := m.View()
-	for _, want := range []string{"alpha", "drops queued work and the running turn", "boots again on next send", "Cancel", "y = stop"} {
+	for _, want := range []string{"alpha", "drops queued work and the running turn", "boots again on next send", "[ No ]", "[ Yes ]"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("modal view missing %q:\n%s", want, v)
 		}
@@ -96,7 +96,7 @@ func TestStopKeyOpensModal(t *testing.T) {
 }
 
 // Every cancel path closes the modal and sends nothing — esc, n, enter
-// (default focus is Cancel), ctrl+c. Unrelated keys are swallowed.
+// (default focus is No), ctrl+c. Unrelated keys are swallowed.
 func TestStopModalCancelPaths(t *testing.T) {
 	for name, k := range map[string]tea.KeyMsg{
 		"esc": keyEsc, "n": runeKey('n'), "enter-default": keyEnter, "ctrl+c": keyCtrlC,

@@ -118,12 +118,15 @@ func ParseRef(s string) (Ref, error) {
 // Client talks to registries over HTTPS through the outbound policy in
 // netpolicy.go. Zero value is usable.
 type Client struct {
-	Ctx   context.Context      // cancels in-flight requests; default Background
-	Logf  func(string, ...any) // progress log; default: discard
-	Sleep func(time.Duration)  // retry backoff; default time.Sleep
-	Now   func() time.Time     // age logging; default time.Now
-	Tries int                  // attempts for transient errors; default 3
-	tok   map[string]string    // host/repo -> bearer token
+	Ctx  context.Context      // cancels in-flight requests; default Background
+	Logf func(string, ...any) // progress log; default: discard
+	// Progress receives structured updates (phase, layer i/n, bytes);
+	// nil = none. Called on the pulling goroutine; keep it cheap.
+	Progress func(Progress)
+	Sleep    func(time.Duration) // retry backoff; default time.Sleep
+	Now      func() time.Time    // age logging; default time.Now
+	Tries    int                 // attempts for transient errors; default 3
+	tok      map[string]string   // host/repo -> bearer token
 
 	hcOnce    sync.Once
 	http      *http.Client
@@ -386,9 +389,15 @@ func (c *Client) fetchDoc(cache string, r Ref, path, accept, dg string, max int6
 
 // blob ensures layer blob dg is in the cache (fetching only if missing or
 // corrupt) and returns its path and whether it was already cached.
-func (c *Client) blob(cache string, r Ref, dg string, size int64) (string, bool, error) {
+func (c *Client) blob(cache string, r Ref, dg string, size int64, layer, layers int) (string, bool, error) {
 	p := BlobPath(cache, dg)
+	if _, err := os.Stat(p); err == nil {
+		// a cached blob is re-hashed in full: on a multi-GB layer that
+		// takes long enough to be worth naming
+		c.progress(Progress{Phase: PhaseVerify, Layer: layer, Layers: layers, Total: size})
+	}
 	if VerifyFile(p, dg) {
+		c.progress(Progress{Phase: PhaseCached, Layer: layer, Layers: layers, Done: size, Total: size})
 		TouchCached(p)
 		return p, true, nil
 	}
@@ -417,7 +426,13 @@ func (c *Client) blob(cache string, r Ref, dg string, size int64) (string, bool,
 			c.tempOpen()
 		}
 		h := sha256.New()
-		n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, size+1))
+		// byte progress: starts at 0 on every attempt, so a retry shows
+		// the bar going back rather than a stale count
+		c.progress(Progress{Phase: PhaseDownload, Layer: layer, Layers: layers, Total: size})
+		body := newCountingReader(io.LimitReader(resp.Body, size+1), size, ProgressEvery, c.now, func(done int64) {
+			c.progress(Progress{Phase: PhaseDownload, Layer: layer, Layers: layers, Done: done, Total: size})
+		})
+		n, err := io.Copy(io.MultiWriter(f, h), body)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
@@ -521,6 +536,7 @@ var layerTypes = map[string]bool{
 // manifests + config + every layer blob, digest-verified, only what is
 // missing. The image's age is logged, never enforced.
 func (c *Client) Pull(r Ref, cache string) (*Image, error) {
+	c.progress(Progress{Phase: PhaseResolve})
 	dg, err := c.Resolve(r)
 	if err != nil {
 		return nil, err
@@ -600,7 +616,7 @@ func (c *Client) Pull(r Ref, cache string) (*Image, error) {
 			return nil, fmt.Errorf("layer %d: unsupported media type %q (gzip or plain tar only)", i, l.MediaType)
 		}
 		t := time.Now()
-		_, hit, err := c.blob(cache, r, l.Digest, l.Size)
+		_, hit, err := c.blob(cache, r, l.Digest, l.Size, i+1, len(m.Layers))
 		if err != nil {
 			return nil, err
 		}

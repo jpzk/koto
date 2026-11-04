@@ -170,6 +170,15 @@ type LayerStats struct {
 
 // BuildLayer converts one cached blob into cache/layers/<diff_id>.ext4.
 func BuildLayer(cache string, l Layer) (LayerStats, error) {
+	return BuildLayerProgress(cache, l, nil)
+}
+
+// BuildLayerProgress is BuildLayer that reports how much of the cached blob
+// (compressed bytes, the size the manifest and the download bar use) the
+// tar walk has consumed: throttled to one call per ProgressEvery, monotonic,
+// and always a final call with done == total once the stream is drained
+// (before the mke2fs/debugfs pass). prog may be nil.
+func BuildLayerProgress(cache string, l Layer, prog func(done, total int64)) (LayerStats, error) {
 	var st LayerStats
 	for _, tool := range []string{"mke2fs", "debugfs", "e2fsck"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -190,9 +199,20 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 		return st, err
 	}
 	defer f.Close()
-	var r io.Reader = f
+	var total int64 = l.Size
+	if fi, err := f.Stat(); err == nil {
+		total = fi.Size() // the verified blob; l.Size is the same number
+	}
+	var sent int64 = -1
+	report := func(done int64) {
+		if prog != nil && done > sent {
+			sent = done
+			prog(done, total)
+		}
+	}
+	var r io.Reader = newCountingReader(f, total, ProgressEvery, convertClock, report)
 	if strings.HasSuffix(l.MediaType, "gzip") {
-		gz, err := gzip.NewReader(f)
+		gz, err := gzip.NewReader(r)
 		if err != nil {
 			return st, err
 		}
@@ -451,6 +471,7 @@ func BuildLayer(cache string, l Layer) (LayerStats, error) {
 	if _, err := io.Copy(io.Discard, cr); err != nil {
 		return st, err
 	}
+	report(total)
 	st.TarBytes = cr.n
 	if got := "sha256:" + hex.EncodeToString(dh.Sum(nil)); got != l.DiffID {
 		return st, fmt.Errorf("diff_id mismatch: config says %s, layer is %s", l.DiffID, got)

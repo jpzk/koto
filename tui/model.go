@@ -2969,7 +2969,11 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 	case newGroupProgressMsg:
 		// Only the running submit's lines; registry text is untrusted.
 		if f := m.newGroup; f.open && f.busy && msg.seq == f.submit {
-			f.progress = scrubVTStrict(msg.line)
+			if msg.pull != nil {
+				f.pull.update(msg.pull, msg.at)
+			} else {
+				f.progress = scrubVTStrict(msg.line)
+			}
 		}
 		return m, nil
 
@@ -3181,8 +3185,14 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		if m.newGroup.open {
 			return m, nil // modal form: the panes under the pointer are hidden
 		}
-		if m.destroyConfirm.open || m.stopConfirm.open || m.newSess.open {
-			return m, nil // confirmation modal / new-session dialog: swallow clicks + wheel
+		if m.destroyConfirm.open || m.stopConfirm.open {
+			// Confirmation modal: a left click on [ No ] / [ Yes ] activates
+			// it; every other click and the wheel are swallowed
+			// (confirm_buttons.go).
+			return m.handleConfirmMouse(msg)
+		}
+		if m.newSess.open {
+			return m, nil // new-session dialog: swallow clicks + wheel
 		}
 		if m.helpOpen {
 			if m.helpVPReady {
@@ -4222,8 +4232,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	if m.destroyConfirm.open {
 		// ctrl+x destroy confirmation (destroy_confirm.go): a modal over the
-		// whole frame, so it owns every key ahead of the shell block — y
-		// confirms, everything else cancels or is swallowed.
+		// whole frame, so it owns every key ahead of the shell block — the
+		// shared [ No ] [ Yes ] row decides; other keys are swallowed.
 		return m.handleDestroyConfirmKey(msg)
 	}
 	if m.stopConfirm.open {

@@ -212,7 +212,14 @@ From `daemon/fc.go`:
 - **`network=wan|lan|full`.** `fcSpawn` attaches a userspace gVisor gateway
   (`containers/gvisor-tap-vsock`, `fcNetGateway` in `daemon/fcnet.go`) and
   opens the 9003 listener only when `groupNetwork(g) != fcNetNone`. The
-  policy is captured at spawn, so changing it needs a restart of the group.
+  profile is captured at spawn, so changing it needs a restart of the group.
+- **Egress allowlist (`allow`).** Optional per-group narrowing:
+  effective = profile ∩ allowlist, empty = profile alone. IP entries are
+  matched per frame (`daemon/fcnet_allow.go`); hostname entries via DNS
+  pinning of the gateway resolver's answers plus an SNI check on :443; the
+  L7 proxy applies the same list (`daemon/proxy_allow.go`). Read per frame
+  and per request, so changes apply live. Syntax and caveats:
+  [firecracker-vsock.md](firecracker-vsock.md#egress-allowlist-allow).
 - **Topology** (constants in `daemon/fcnet.go`):
   - guest `192.168.127.2` (`fcNetGuestIP`)
   - gateway `192.168.127.1` (`fcNetGatewayIP`), which also serves DNS

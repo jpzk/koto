@@ -207,6 +207,7 @@ type KotoClient interface {
 	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
 	// apply to every group pinned to the name. Streams human-readable lines
 	// (event "data") then "end"; failures are one in-band "error" event.
+	// add/update also interleave structured "progress" events (ImageProgress).
 	// HARDCODED admin-only: pulls from registries, writes host-wide caches
 	// and resets groups' system disks.
 	Image(ctx context.Context, in *ImageReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageEvent], error)
@@ -858,6 +859,7 @@ type KotoServer interface {
 	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
 	// apply to every group pinned to the name. Streams human-readable lines
 	// (event "data") then "end"; failures are one in-band "error" event.
+	// add/update also interleave structured "progress" events (ImageProgress).
 	// HARDCODED admin-only: pulls from registries, writes host-wide caches
 	// and resets groups' system disks.
 	Image(*ImageReq, grpc.ServerStreamingServer[ImageEvent]) error

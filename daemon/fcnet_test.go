@@ -71,13 +71,14 @@ func TestFcDstAllowed(t *testing.T) {
 	}
 }
 
-// ethFrame builds a minimal ethernet+IPv4 frame with the given destination.
+// ethFrame builds a minimal ethernet+IPv4 frame with the given destination
+// (guest → gateway MACs).
 func ethFrame(dstIP string) []byte {
 	f := make([]byte, 34)
-	// 0..5 dst MAC, 6..11 src MAC (left zero)
+	// 0..5 dst MAC, 6..11 src MAC: set by guestMACs
 	binary.BigEndian.PutUint16(f[12:14], 0x0800) // IPv4
 	copy(f[30:34], net.ParseIP(dstIP).To4())     // IP header dst @ eth+16
-	return f
+	return guestMACs(f)
 }
 
 // ethFrame6 builds a minimal ethernet+IPv6 frame with the given destination.
@@ -85,7 +86,7 @@ func ethFrame6(dstIP string) []byte {
 	f := make([]byte, 54)
 	binary.BigEndian.PutUint16(f[12:14], 0x86DD) // IPv6
 	copy(f[38:54], net.ParseIP(dstIP).To16())    // IPv6 dst @ eth+24
-	return f
+	return guestMACs(f)
 }
 
 func TestFcFrameAllowed(t *testing.T) {
@@ -205,7 +206,7 @@ func tcpFrame(dst string, port uint16, flags byte) []byte {
 	binary.BigEndian.PutUint16(f[36:38], port) // TCP dst port
 	f[46] = 0x50                               // data offset: 5 words
 	f[47] = flags                              // TCP flags
-	return f
+	return guestMACs(f)
 }
 
 // udpFrame builds an ethernet+IPv4+UDP frame.
@@ -219,7 +220,7 @@ func udpFrame(dst string, port uint16) []byte {
 	copy(f[30:34], net.ParseIP(dst).To4())
 	binary.BigEndian.PutUint16(f[36:38], port) // UDP dst port
 	binary.BigEndian.PutUint16(f[38:40], 8)    // UDP length: header only
-	return f
+	return guestMACs(f)
 }
 
 func TestFcParseFlow(t *testing.T) {
@@ -313,4 +314,14 @@ func TestFcNetGatewayBuilds(t *testing.T) {
 	if vn == nil {
 		t.Fatal("fcNetGateway returned nil network")
 	}
+}
+
+// guestMACs stamps the ethernet addresses a well-behaved guest uses — dst the
+// gateway, src its own NIC — so a frame passes fcGuestMACOK.
+func guestMACs(f []byte) []byte {
+	gw, _ := net.ParseMAC(fcNetGatewayMAC)
+	me, _ := net.ParseMAC(fcNetGuestMAC)
+	copy(f[0:6], gw)
+	copy(f[6:12], me)
+	return f
 }

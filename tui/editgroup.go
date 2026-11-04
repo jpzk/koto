@@ -78,6 +78,7 @@ func (m *Model) openEditGroup() tea.Cmd {
 		name:   newGroupInput(32, ""),
 		custom: newGroupInput(64, "model id"),
 		ports:  newGroupInput(200, "e.g. 8080,3000"),
+		allow:  newGroupInput(allowInputLimit, allowPlaceholder),
 		sel:    map[string]int{},
 		edit:   editState{on: true, group: g, loading: true, orig: map[string]string{}},
 	}
@@ -153,6 +154,20 @@ func origFromConfig(cfg map[string]any) map[string]string {
 			if s, ok := v.(string); ok && (s == "" || validateModelID(s) == "") {
 				orig[o.key] = s
 			}
+		case ngAllow:
+			// effectiveConfig: comma list, "(none)" for no list. Absent (an
+			// older daemon) or "!invalid (deny-all)" (a stored list that no
+			// longer parses) stays unknown: fix that one with koto config.
+			s, ok := v.(string)
+			if !ok || strings.HasPrefix(s, "!") {
+				continue
+			}
+			if s == "(none)" {
+				s = ""
+			}
+			if c, err := parseAllowList(s); err == nil && c == s {
+				orig[o.key] = s
+			}
 		case "effort":
 			s, _ := v.(string)
 			if !present || s == "" || s == "(default)" {
@@ -224,6 +239,7 @@ func (m *Model) handleEditRead(msg editReadMsg) tea.Cmd {
 		}
 	}
 	f.ports.SetValue(f.edit.orig[ngPorts])
+	f.allow.SetValue(f.edit.orig[ngAllow])
 	f.mp.want = f.edit.orig[ngModel]
 	cmd := m.reloadModels()
 	f.syncEditModel()
@@ -294,6 +310,12 @@ func (f *newGroupForm) editPlan() (editPlan, string, string) {
 				return p, ngPorts, err.Error()
 			}
 			cur = c
+		case ngAllow:
+			c, err := parseAllowList(f.allow.Value())
+			if err != nil {
+				return p, ngAllow, err.Error()
+			}
+			cur = c
 		default:
 			cur = f.value(o.key)
 		}
@@ -344,6 +366,9 @@ type editResultMsg struct {
 	err       error
 	saved     bool
 	restarted bool
+	// allowApply is the daemon's allow_apply note when the save set allow
+	// ("live (...)" or "stored (...)"), shown in the saved line.
+	allowApply string
 }
 
 // editSubmitCmd sends config_set with exactly the changed keys, then the
@@ -357,9 +382,13 @@ func editSubmitCmd(sock, g string, p editPlan) tea.Cmd {
 			for k, v := range p.config {
 				x[k] = v
 			}
-			if _, err := daemonCall(sock, "config", x); err != nil {
+			out, err := daemonCall(sock, "config", x)
+			if err != nil {
 				res.stage, res.err = "config", err
 				return res
+			}
+			if cfg, ok := out["config"].(map[string]any); ok {
+				res.allowApply, _ = cfg["allow_apply"].(string)
 			}
 			res.saved = true
 		}
@@ -429,6 +458,10 @@ func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
 				f.edit.restartPending = true
 			}
 			f.err, f.errAt = text, ngCreate
+			if _, sent := msg.plan.config[ngAllow]; sent && !msg.saved && strings.Contains(msg.err.Error(), "allow") {
+				// The daemon refused the list: show it under the field.
+				f.errAt = ngAllow
+			}
 		}
 		if msg.saved {
 			return listCmd(m.sock)
@@ -445,6 +478,9 @@ func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
 	if msg.restarted {
 		text += " (restarted)"
 	}
+	if msg.allowApply != "" {
+		text += "; allow " + msg.allowApply
+	}
 	m.addLine(logLine{kind: "sys", group: msg.group, text: text})
 	return listCmd(m.sock)
 }
@@ -457,6 +493,9 @@ func editChangeText(p editPlan, mark bool) string {
 		v := fmt.Sprint(p.config[k])
 		if v == "" {
 			v = "(default)"
+			if k == ngAllow {
+				v = "(none)"
+			}
 		}
 		s := k + "=" + v
 		if mark && groupOptNeedsRestart(k) {

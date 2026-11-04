@@ -350,3 +350,15 @@ func DropRootSys(dir string) (int, error) {
 	}
 	return n, os.Remove(sysRootPath(dir))
 }
+
+// SysReady reports whether dir already has a sys.img for digest dg, i.e.
+// PrepareSys(dir, dg, …) would keep it rather than build or restore one.
+// Errors read as not ready (PrepareSys then reports them).
+func SysReady(dir, dg string) bool {
+	cur, err := sysDigest(dir)
+	if err != nil || cur != dg {
+		return false
+	}
+	ok, err := sysExists(sysPath(dir))
+	return err == nil && ok
+}

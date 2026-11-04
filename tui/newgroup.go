@@ -34,6 +34,7 @@ const (
 	ngModel  = "model"
 	ngCustom = "model-id"
 	ngPorts  = "ports"
+	ngAllow  = "allow"
 	ngCreate = "create"
 )
 
@@ -60,10 +61,12 @@ type newGroupForm struct {
 	mp     modelPick       // the model select
 	custom textinput.Model // the custom model id (mp on "custom…")
 	ports  textinput.Model
-	sel    map[string]int // select key → index into f.values(key)
-	err    string         // inline error, shown under errAt
-	errAt  string         // field key the error belongs to
-	busy   bool           // a submit is in flight
+	// allow is the egress allowlist input, comma-separated.
+	allow textinput.Model
+	sel   map[string]int // select key → index into f.values(key)
+	err   string         // inline error, shown under errAt
+	errAt string         // field key the error belongs to
+	busy  bool           // a submit is in flight
 	// spawned is the group a previous submit already spawned before a later
 	// step failed: a retry with the same name skips spawn (it would now fail
 	// "exists") and redoes only config/restart.
@@ -77,6 +80,13 @@ type newGroupForm struct {
 	// image add/update printed while the submit runs.
 	img      imagePick
 	progress string
+	// pull is the structured progress of the same add/update (a daemon
+	// newer than 1.9.0); when set it is drawn as a bar instead of progress.
+	pull pullView
+	// spawnGroup is the group the running submit spawns ("" = none): while
+	// its boot prepares the image (activity convert / sysimg) the dialog
+	// shows that step instead of the finished pull.
+	spawnGroup string
 	// submit is the running submit's sequence id (nextNgGen): its progress
 	// and result messages carry it, anything else is stale and dropped.
 	// gate lets Esc cancel it (submitGate).
@@ -150,6 +160,7 @@ func (m *Model) openNewGroup() tea.Cmd {
 		name:   newGroupInput(32, "lowercase, e.g. research"),
 		custom: newGroupInput(64, "model id"),
 		ports:  newGroupInput(200, "e.g. 8080,3000"),
+		allow:  newGroupInput(allowInputLimit, allowPlaceholder),
 		sel:    map[string]int{},
 	}
 	for _, o := range groupOptTable {
@@ -251,6 +262,8 @@ func (f *newGroupForm) input(key string) *textinput.Model {
 		return &f.custom
 	case ngPorts:
 		return &f.ports
+	case ngAllow:
+		return &f.allow
 	}
 	return nil
 }
@@ -331,6 +344,10 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	if err != nil {
 		return newGroupPlan{}, ngPorts, err.Error()
 	}
+	allow, err := parseAllowList(f.allow.Value())
+	if err != nil {
+		return newGroupPlan{}, ngAllow, err.Error()
+	}
 	model, merr := f.modelValue()
 	if merr != "" {
 		return newGroupPlan{}, ngCustom, merr
@@ -362,6 +379,9 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	}
 	if ports != "" {
 		cfg["ports"] = ports
+	}
+	if allow != "" {
+		cfg[ngAllow] = allow
 	}
 	for k := range cfg {
 		if groupOptNeedsRestart(k) {
@@ -409,7 +429,7 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 		}
 		if p.imageOp != "" {
 			ctx, cancel := context.WithTimeout(p.gate.ctx, imagePullTimeout)
-			err := imageStream(ctx, p.imageOp, []string{p.image}, sendProgress(p.seq))
+			err := imageStream(ctx, p.imageOp, []string{p.image}, sendProgress(p.seq), sendPull(p.seq))
 			cancel()
 			if err != nil {
 				res.stage, res.err = "image "+p.imageOp+" "+p.image, err
@@ -464,7 +484,11 @@ func (m *Model) submitNewGroup() tea.Cmd {
 	}
 	f.err, f.errAt = "", ""
 	f.busy = true
-	f.progress = ""
+	f.progress, f.pull = "", pullView{}
+	f.spawnGroup = ""
+	if p.spawn != nil {
+		f.spawnGroup = p.group
+	}
 	f.submit, f.gate = nextNgGen(), newSubmitGate()
 	p.seq, p.gate = f.submit, f.gate
 	return newGroupSubmitCmd(m.sock, p)
@@ -810,7 +834,13 @@ func (m Model) renderNewGroup() string {
 			if focused {
 				curLine = len(lines) - 1
 			}
-			if f.busy && f.progress != "" {
+			prep, prepOK := m.bootPrep(&f)
+			switch {
+			case prepOK:
+				lines = append(lines, "  "+prep.render(inner-2))
+			case f.busy && f.pull.ok:
+				lines = append(lines, "  "+f.pull.render(inner-2))
+			case f.busy && f.progress != "":
 				lines = append(lines, "  "+gray.Render(truncCells(f.progress, inner-2)))
 			}
 			errLine(key)
@@ -1042,3 +1072,13 @@ func (m Model) renderModelList(lines *[]string, inner int) int {
 	}
 	return cur
 }
+
+// The allow input: no byte cap. The daemon caps entries (MaxEntries), not
+// bytes, and a textinput CharLimit silently truncates SetValue — a stored
+// list longer than the cap would be cut on prefill and the cut list re-sent
+// when the operator only edited another field. 0 = unlimited; the entry
+// count is checked by parseAllowList.
+const (
+	allowInputLimit  = 0
+	allowPlaceholder = "empty = whole profile; e.g. 1.2.3.4,github.com"
+)

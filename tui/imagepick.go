@@ -250,9 +250,9 @@ func (p *imagePick) step() string {
 }
 
 // imageStream runs one Image rpc, handing every complete output line to
-// line (nil = discard). An "error" event or a transport error is the
-// returned error.
-func imageStream(ctx context.Context, op string, args []string, line func(string)) error {
+// line and every structured "progress" event to prog (either nil =
+// discard). An "error" event or a transport error is the returned error.
+func imageStream(ctx context.Context, op string, args []string, line func(string), prog func(*pb.ImageProgress)) error {
 	cl, err := getClient()
 	if err != nil {
 		return err
@@ -276,6 +276,10 @@ func imageStream(ctx context.Context, op string, args []string, line func(string
 					line(l)
 				}
 			}
+		case "progress":
+			if prog != nil && ev.GetProgress() != nil {
+				prog(ev.GetProgress())
+			}
 		case "end":
 			return nil
 		case "error":
@@ -290,7 +294,7 @@ func imageKnownCmd(gen uint64) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		var b strings.Builder
-		err := imageStream(ctx, "known", nil, func(l string) { b.WriteString(l + "\n") })
+		err := imageStream(ctx, "known", nil, func(l string) { b.WriteString(l + "\n") }, nil)
 		if err != nil {
 			logWarn("rpc", "image known: %v", err)
 			return imageLoadedMsg{gen: gen, err: err}
@@ -304,11 +308,14 @@ func imageKnownCmd(gen uint64) tea.Cmd {
 // image, unpacked and converted on the host.
 const imagePullTimeout = 20 * time.Minute
 
-// newGroupProgressMsg is one line of add/update output, shown in the
-// dialog while submit seq runs (a line from another submit is dropped).
+// newGroupProgressMsg is one line of add/update output, or (pull != nil)
+// one structured progress update received at at, shown in the dialog while
+// submit seq runs (a message from another submit is dropped).
 type newGroupProgressMsg struct {
 	seq  uint64
 	line string
+	pull *pb.ImageProgress
+	at   time.Time
 }
 
 // progressSink delivers a progress message to the running program (nil

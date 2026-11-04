@@ -137,6 +137,9 @@ helper is given.
   - `-model M` (`""` clears)
   - `-provider claudesdk|venice|openai`
   - `-network none|wan|lan|full`
+  - `-allow "a,b,c"`: egress allowlist (profile ∩ list; `""` clears;
+    applies live). Forms and caveats:
+    [firecracker-vsock.md](firecracker-vsock.md#egress-allowlist-allow)
   - `-size small|medium|large|xlarge`
   - `-root yes|no`
   - `-effort E`
@@ -314,7 +317,7 @@ allowed for non-main groups: <verb>`.
 - **`resources`**: cached host-side samples, read-only (`resourcesCtlResp`).
 - **`config_set`** `{"group"?, model/effort/provider}`.
   - Defaults to the caller's own group.
-  - **Posture keys are refused**. These are `network`, `internet`, `root`,
+  - **Posture keys are refused**. These are `network`, `internet`, `allow`, `root`,
     `ports`, `size`, `autostart` and `kvm` (`configPostureKey`). The error is
     ``ctl: <key> is an operator-only setting — ask the operator (TUI /config, or koto ctl config)``.
   - Only `model`, `effort` and `provider` are settable here (`configCmd`).
