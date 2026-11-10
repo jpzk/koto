@@ -17,6 +17,7 @@ import (
 	"koto-protocol/pb"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -1461,6 +1462,25 @@ func (s *kotoServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Koto_Subscribe
 	}
 	subscribers[g] = append(subscribers[g], sub)
 	subsLock.Unlock()
+	// Tell the client the subscription is LIVE. A server-streaming call
+	// returns to the client as soon as the request is written, before this
+	// handler has run, so `koto ctl ask` (subscribe, then Send) raced: the
+	// Send's `prompt` frame could be emitted before the registration above and
+	// the ask then waited forever for a prompt it had already missed. Headers
+	// sent here, after registration, are what the client blocks on
+	// (stream.Header()) before it sends.
+	if err := stream.SendHeader(metadata.MD{}); err != nil {
+		subsLock.Lock()
+		kept := subscribers[g][:0]
+		for _, x := range subscribers[g] {
+			if x != sub {
+				kept = append(kept, x)
+			}
+		}
+		subscribers[g] = kept
+		subsLock.Unlock()
+		return err
+	}
 	defer func() {
 		subsLock.Lock()
 		kept := subscribers[g][:0]
