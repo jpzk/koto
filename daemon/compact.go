@@ -212,6 +212,74 @@ func emitCompactNote(g, session, text string) {
 
 // ---- execution (on the session worker) --------------------------------------
 
+// compactStatusFn, when non-nil, replaces the guest status-file round trip
+// (reset=true: delete it before the turn; reset=false: read it). Test seam.
+var compactStatusFn func(g, session string, reset bool) (string, error)
+
+// compactStatusPath is fc-agent's per-session outcome file
+// (fcguest/compact.go compactStatusFile; claude's is written by the parser on
+// compact_boundary). A guest [[err]] frame does not fail runTurn, so this file
+// is how the daemon tells "compacted" from "failed" or, for claude, from
+// "/compact was read as an ordinary prompt".
+func compactStatusPath(session string) string {
+	return "/workspace/.cs/sessions/" + sessionMarkerName(session) + ".compact"
+}
+
+func compactStatus(g, session string, reset bool) (string, error) {
+	if compactStatusFn != nil {
+		return compactStatusFn(g, session, reset)
+	}
+	p := compactShellQuote(compactStatusPath(session))
+	if reset {
+		_, _, err := fcExec(g, "rm -f "+p, 15*time.Second)
+		return "", err
+	}
+	out, rc, err := fcExec(g, "head -c 1024 "+p+" 2>/dev/null", 15*time.Second)
+	if err != nil || rc != 0 {
+		return "", err
+	}
+	return out, nil
+}
+
+// runCompactNative runs one native compaction turn and interprets the guest's
+// status line. Returns the harness's own detail on success.
+func runCompactNative(g, session string, req *compactReq) (string, error) {
+	// A stale "ok" from an earlier run must not vouch for this one.
+	if _, err := compactStatus(g, session, true); err != nil {
+		return "", fmt.Errorf("reset status: %w", err)
+	}
+	if err := runTurn(g, session, buildCompactMsg(req.mech, req.instr)); err != nil {
+		return "", err
+	}
+	st, err := compactStatus(g, session, false)
+	if err != nil {
+		return "", fmt.Errorf("read status: %w", err)
+	}
+	return parseCompactStatus(req.mech, st)
+}
+
+// parseCompactStatus maps the guest's "ok …" / "err …" line to a result.
+func parseCompactStatus(mech compactMech, st string) (string, error) {
+	st = strings.TrimSpace(st)
+	if i := strings.IndexByte(st, '\n'); i >= 0 {
+		st = st[:i]
+	}
+	word, detail, _ := strings.Cut(st, " ")
+	switch word {
+	case "ok":
+		return detail, nil
+	case "err":
+		if detail == "" {
+			detail = "the harness reported a failure"
+		}
+		return "", fmt.Errorf("%s", detail)
+	}
+	if mech == mechClaudeSlash {
+		return "", fmt.Errorf("claude emitted no compact_boundary — /compact was likely answered as a prompt (nothing to compact yet?)")
+	}
+	return "", fmt.Errorf("the guest reported no outcome (fc-agent older than this host?)")
+}
+
 // compactClearFn / compactSummaryFn, when non-nil, replace the VM-touching
 // steps of the fallback. Test seams only.
 var (
@@ -269,10 +337,11 @@ func compactClear(g, session string) error {
 func runCompactJob(g, session string, req *compactReq) error {
 	start := time.Now()
 	var err error
+	detail := ""
 	if req.mech == mechFallback {
 		err = runCompactFallback(g, session, req.instr)
 	} else {
-		err = runTurn(g, session, buildCompactMsg(req.mech, req.instr))
+		detail, err = runCompactNative(g, session, req)
 	}
 	if err != nil {
 		hint := ""
@@ -283,6 +352,9 @@ func runCompactJob(g, session string, req *compactReq) error {
 		return err
 	}
 	note := fmt.Sprintf("compacted via %s in %s", req.mech, time.Since(start).Round(time.Second))
+	if detail != "" {
+		note += ": " + detail
+	}
 	if req.mech == mechCodexAppServer && req.instr != "" {
 		note += " (codex ignores focus instructions)"
 	}

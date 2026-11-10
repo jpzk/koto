@@ -38,13 +38,19 @@ func newCompactTestEnv(t *testing.T, g, provider string, turn func(msg string) e
 		}
 		return nil
 	})
-	prevClear, prevSum := compactClearFn, compactSummaryFn
+	prevClear, prevSum, prevStatus := compactClearFn, compactSummaryFn, compactStatusFn
+	compactStatusFn = func(_, _ string, reset bool) (string, error) {
+		if reset {
+			return "", nil
+		}
+		return "ok test harness compacted\n", nil
+	}
 	compactClearFn = func(string, string) error { e.add("clear"); return nil }
 	compactSummaryFn = func(string, string) (string, error) { return "goal: x; next: y", nil }
 	t.Cleanup(func() {
 		compactProviderFn = prevProv
 		setTurnFn(prevTurn)
-		compactClearFn, compactSummaryFn = prevClear, prevSum
+		compactClearFn, compactSummaryFn, compactStatusFn = prevClear, prevSum, prevStatus
 		queuesMu.Lock()
 		delete(queues, sessKey(g, ""))
 		delete(compactPending, sessKey(g, ""))
@@ -349,5 +355,67 @@ func TestCompactRefusesGoalSessions(t *testing.T) {
 	}
 	if _, _, err := requestCompact("bad name!", "", "", false); err == nil {
 		t.Fatal("bad group name accepted")
+	}
+}
+
+// The guest's status line decides the note: a native turn that "succeeded"
+// host-side may still have failed in the harness, and claude may have answered
+// /compact as a prompt.
+func TestParseCompactStatus(t *testing.T) {
+	for _, tc := range []struct {
+		mech        compactMech
+		st, detail  string
+		errContains string
+	}{
+		{mechPiRPC, "ok pi compacted the session (150.0k → ~32.0k tokens)\n", "pi compacted the session (150.0k → ~32.0k tokens)", ""},
+		{mechCodexAppServer, "err codex: thread/resume: thread not found\n", "", "thread not found"},
+		{mechCodexAppServer, "err", "", "reported a failure"},
+		{mechClaudeSlash, "", "", "no compact_boundary"},
+		{mechPiRPC, "", "", "no outcome"},
+		{mechPiRPC, "garbage", "", "no outcome"},
+	} {
+		d, err := parseCompactStatus(tc.mech, tc.st)
+		if tc.errContains == "" {
+			if err != nil || d != tc.detail {
+				t.Errorf("%s %q: got %q, %v", tc.mech, tc.st, d, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.errContains) {
+			t.Errorf("%s %q: err = %v, want %q", tc.mech, tc.st, err, tc.errContains)
+		}
+	}
+}
+
+// Native compaction resets the status BEFORE the turn (a stale ok must not
+// vouch for this run) and reads it after; a guest-reported failure fails the job.
+func TestRunCompactNativeUsesGuestStatus(t *testing.T) {
+	for _, prov := range []string{providerClaude, providerOpenAI, providerMinimax} {
+		var order []string
+		newCompactTestEnv(t, "cstat", prov, func(string) error { order = append(order, "turn"); return nil })
+		compactStatusFn = func(_, _ string, reset bool) (string, error) {
+			if reset {
+				order = append(order, "reset")
+				return "", nil
+			}
+			order = append(order, "read")
+			return "err harness said no\n", nil
+		}
+		err := runCompactJob("cstat", "", &compactReq{mech: compactStrategy(prov, false)})
+		if err == nil || !strings.Contains(err.Error(), "harness said no") {
+			t.Errorf("%s: err = %v", prov, err)
+		}
+		if strings.Join(order, ",") != "reset,turn,read" {
+			t.Errorf("%s: order = %v", prov, order)
+		}
+	}
+	// The fallback never consults the native status file.
+	newCompactTestEnv(t, "cstat", "venice", nil)
+	compactStatusFn = func(string, string, bool) (string, error) {
+		t.Error("fallback read the native status file")
+		return "", nil
+	}
+	if err := runCompactJob("cstat", "", &compactReq{mech: mechFallback}); err != nil {
+		t.Fatalf("fallback: %v", err)
 	}
 }

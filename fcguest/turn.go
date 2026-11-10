@@ -361,6 +361,10 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	tr.workerStart(cfg.Provider, cfg.Model)
 	env = withTraceHeaders(env, tr.workerTraceparent())
 	defer func() { tr.workerEnd(tw.stalled.Load(), "") }()
+	if cw, ok := parseCompactMsg(req.Msg); ok {
+		runCompact(tw, req, cfg, sess, cw, env)
+		return
+	}
 	switch cfg.Provider {
 	case "venice":
 		runVenice(tw, req, cfg, sess, env)
@@ -377,13 +381,36 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 // turn env, stdout and stderr on pipes we own (never cmd.StdoutPipe — the
 // reaper waits the child, so nothing would close the parent's write ends).
 func workerCmd(name string, args []string, env []string, stdin []byte) (*worker, error) {
+	return startWorker(name, args, env, bytes.NewReader(stdin))
+}
+
+// workerCmdPipe is workerCmd with a LIVE stdin: the caller writes requests as
+// the worker's replies arrive (the JSON-RPC compaction drivers, compact.go)
+// and closes it to let the worker exit. Both pi --mode rpc and codex
+// app-server shut down on stdin EOF, so a fixed buffer would end them before
+// the compaction they were asked for completes.
+func workerCmdPipe(name string, args []string, env []string) (*worker, *os.File, error) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	w, err := startWorker(name, args, env, inR)
+	inR.Close() // the child holds its own copy
+	if err != nil {
+		inW.Close()
+		return nil, nil, err
+	}
+	return w, inW, nil
+}
+
+func startWorker(name string, args []string, env []string, stdin io.Reader) (*worker, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = wsDir
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
 	}
-	cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stdin = stdin
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -676,8 +703,15 @@ func (p *claudeParser) charge(t *toolState, s string) {
 func (p *claudeParser) line(b []byte) {
 	var ev struct {
 		Type      string `json:"type"`
+		Subtype   string `json:"subtype"`
 		SessionID string `json:"session_id"`
-		Message   *struct {
+		// compact_boundary (system/compact_boundary): claude's own
+		// compaction finished — /compact or auto-compact.
+		CompactMetadata *struct {
+			Trigger   string `json:"trigger"`
+			PreTokens int64  `json:"pre_tokens"`
+		} `json:"compact_metadata"`
+		Message *struct {
 			Content []struct {
 				Type    string          `json:"type"`
 				Content json.RawMessage `json:"content"`
@@ -713,6 +747,26 @@ func (p *claudeParser) line(b []byte) {
 	if p.idf != "" && !p.wroteID && validSessionID(ev.SessionID) {
 		writeWorkerFile(p.idf, []byte(ev.SessionID))
 		p.wroteID = true
+	}
+	// Claude Code's headless /compact (and auto-compact) answer with a
+	// system/compact_boundary record and no assistant text
+	// (agent-sdk_slash-commands.md:174-208). Without this the turn rendered
+	// empty; it also writes the per-session compact status the daemon reads
+	// to tell "compacted" from "/compact was taken as a prompt".
+	if ev.Type == "system" && ev.Subtype == "compact_boundary" {
+		trig, pre := "manual", int64(0)
+		if m := ev.CompactMetadata; m != nil {
+			if m.Trigger != "" {
+				trig = m.Trigger
+			}
+			pre = m.PreTokens
+		}
+		detail := fmt.Sprintf("claude compacted the conversation (%s, %s tokens before)", compactSafe(trig), compactTokens(pre))
+		p.tw.text([]byte("[koto] " + detail + "\n"))
+		if p.idf != "" {
+			writeCompactStatus(strings.TrimSuffix(p.idf, ".id")+compactStatusExt, true, detail)
+		}
+		return
 	}
 	// Tool results are injected by the harness as a top-level `user` record
 	// of tool_result blocks — not inside the assistant's stream_event
