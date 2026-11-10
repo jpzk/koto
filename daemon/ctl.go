@@ -318,6 +318,11 @@ func ctlDispatch(owner string, line []byte) any {
 		registerSession(req.Group, sess)
 		return baseResp{OK: true}
 
+	case "compact":
+		// Every group may compact ITSELF (self-targeting, like sched_*);
+		// main may also name a peer. compact.go.
+		return ctlCompact(owner, line)
+
 	case "stop":
 		if !isMain {
 			return errResp("ctl: verb not allowed for non-main groups: stop")

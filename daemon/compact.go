@@ -320,3 +320,47 @@ func runCompactFallback(g, session, instr string) error {
 func compactShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// ---- ctl verb ------------------------------------------------------------------
+
+// ctlCompactReq is {"cmd":"compact"} on the in-guest control plane
+// (protocol/guest.proto CompactReq). group is honoured for main only; every
+// other group compacts itself.
+type ctlCompactReq struct {
+	Group        string `json:"group,omitempty"`
+	Session      string `json:"session,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+	Fresh        bool   `json:"fresh,omitempty"`
+}
+
+// ctlCompact serves the compact verb for owner. A compaction a group asks for
+// mid-turn queues behind that very turn — the turn finishes, then the session
+// compacts; nothing is ever cancelled.
+func ctlCompact(owner string, line []byte) any {
+	var req ctlCompactReq
+	if err := json.Unmarshal(line, &req); err != nil {
+		return errResp(err.Error())
+	}
+	g := owner
+	if req.Group != "" && !strings.EqualFold(req.Group, owner) {
+		if owner != ctlMainGroup {
+			return errResp("ctl: compact targets your own group only")
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		g = req.Group
+	}
+	sess, err := normalizeSession(req.Session)
+	if err != nil {
+		return errResp("ctl: " + err.Error())
+	}
+	if _, _, err := requestCompact(g, sess, req.Instructions, req.Fresh); err != nil {
+		return errResp("ctl: compact: " + err.Error())
+	}
+	registerSession(g, sess)
+	return baseResp{OK: true}
+}

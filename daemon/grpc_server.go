@@ -350,6 +350,20 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	if !registeredGroup(r.Group) {
 		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
 	}
+	// "/compact [--fresh] [instructions]" is the koto-level compaction verb,
+	// not a turn (compact.go). Intercepted here so the TUI needs no proto
+	// change; attachments make no sense on it and are refused rather than
+	// silently dropped.
+	if instr, fresh, ok := parseCompactCommand(r.Msg); ok {
+		if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
+			return &pb.BaseResp{Error: "/compact takes no attachments"}, nil
+		}
+		if _, _, err := requestCompact(r.Group, session, instr, fresh); err != nil {
+			return &pb.BaseResp{Error: err.Error()}, nil
+		}
+		registerSession(r.Group, session)
+		return &pb.BaseResp{Ok: true}, nil
+	}
 	msg := r.Msg
 	staged := false
 	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
