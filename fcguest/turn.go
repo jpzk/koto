@@ -551,6 +551,9 @@ func prepareSessDir(dir string) error {
 	return ensureWorkerDir(dir)
 }
 
+// startClaudeWorker starts the claude worker: startWorker (a test seam).
+var startClaudeWorker = startWorker
+
 func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrateContinue bool, env []string) {
 	args := []string{"-p", "--bare", "--dangerously-skip-permissions",
 		"--output-format", "stream-json", "--include-partial-messages", "--verbose"}
@@ -576,7 +579,7 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	if cfg.Effort != "" {
 		args = append(args, "--effort", cfg.Effort)
 	}
-	w, err := workerCmd("claude", args, env, req.Msg)
+	w, err := startClaudeWorker("claude", args, env, bytes.NewReader(req.Msg))
 	if err != nil {
 		tw.errf("claude: start: %v", err)
 		return
@@ -673,7 +676,10 @@ type claudeParser struct {
 	// held is the total tool-input bytes currently retained across open
 	// blocks, and warnedBlocks keeps the open-block notice to one per turn
 	// (audit M150).
-	held         int
+	held int
+	// compact, when set, owns the compaction verdict: a stdout boundary is
+	// only reported once it is verified in the transcript (claude_compact.go).
+	compact      *claudeCompactor
 	warnedBlocks bool
 }
 
@@ -762,6 +768,10 @@ func (p *claudeParser) line(b []byte) {
 			pre = m.PreTokens
 		}
 		detail := fmt.Sprintf("claude compacted the conversation (%s, %s tokens before)", compactSafe(trig), compactTokens(pre))
+		if p.compact != nil {
+			p.compact.sawBoundary(detail)
+			return
+		}
 		p.tw.text([]byte("[koto] " + detail + "\n"))
 		if p.idf != "" {
 			writeCompactStatus(strings.TrimSuffix(p.idf, ".id")+compactStatusExt, true, detail)
