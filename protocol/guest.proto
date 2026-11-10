@@ -91,6 +91,7 @@ message CtlRequest {
     SchedIDReq     sched_del      = 22;
     SchedToggleReq sched_toggle   = 23;
     SchedIDReq     sched_run      = 24;
+    CompactReq     compact        = 25; // daemon/compact.go
   }
 }
 
@@ -215,4 +216,14 @@ message TurnFrame {
     bool     turn_end       = 9;
     GuestSpan span          = 10; // only when MsgReq.traceparent != ""; droppable
   }
+}
+
+// ctl `compact` (daemon/compact.go ctlCompact): compact a chat session via
+// its harness's native mechanism, or summarize-and-restart. Queued behind any
+// running turn, never cancels it. group is honoured for main only.
+message CompactReq {
+  string group        = 1;
+  string session      = 2;
+  string instructions = 3;
+  bool   fresh        = 4; // force summarize-and-restart
 }

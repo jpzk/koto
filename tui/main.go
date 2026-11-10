@@ -20,7 +20,7 @@ func main() {
 	if sock == "" {
 		sock = "/koto-run/koto.sock"
 	}
-	ctxWindow := 200_000
+	ctxWindow := 0 // 0 = per-model window (ctxWindowFor); CTX_WINDOW overrides
 	if v := os.Getenv("CTX_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			ctxWindow = n

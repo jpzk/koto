@@ -42,6 +42,7 @@ func TestCtlPBEveryVerbMaps(t *testing.T) {
 		`{"cmd":"sched_del","id":"nope"}`,
 		`{"cmd":"sched_toggle","id":"nope","enabled":true}`,
 		`{"cmd":"sched_run","id":"nope"}`,
+		`{"cmd":"compact","group":"peer","session":"s1","instructions":"x","fresh":true}`, // refused for non-main → peer
 	}
 	for _, l := range lines {
 		req, err := ctlRequestFromJSON([]byte(l))

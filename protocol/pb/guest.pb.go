@@ -507,6 +507,7 @@ type CtlRequest struct {
 	//	*CtlRequest_SchedDel
 	//	*CtlRequest_SchedToggle
 	//	*CtlRequest_SchedRun
+	//	*CtlRequest_Compact
 	Cmd           isCtlRequest_Cmd `protobuf_oneof:"cmd"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -765,6 +766,15 @@ func (x *CtlRequest) GetSchedRun() *SchedIDReq {
 	return nil
 }
 
+func (x *CtlRequest) GetCompact() *CompactReq {
+	if x != nil {
+		if x, ok := x.Cmd.(*CtlRequest_Compact); ok {
+			return x.Compact
+		}
+	}
+	return nil
+}
+
 type isCtlRequest_Cmd interface {
 	isCtlRequest_Cmd()
 }
@@ -865,6 +875,10 @@ type CtlRequest_SchedRun struct {
 	SchedRun *SchedIDReq `protobuf:"bytes,24,opt,name=sched_run,json=schedRun,proto3,oneof"`
 }
 
+type CtlRequest_Compact struct {
+	Compact *CompactReq `protobuf:"bytes,25,opt,name=compact,proto3,oneof"` // daemon/compact.go
+}
+
 func (*CtlRequest_Spawn) isCtlRequest_Cmd() {}
 
 func (*CtlRequest_Send) isCtlRequest_Cmd() {}
@@ -912,6 +926,8 @@ func (*CtlRequest_SchedDel) isCtlRequest_Cmd() {}
 func (*CtlRequest_SchedToggle) isCtlRequest_Cmd() {}
 
 func (*CtlRequest_SchedRun) isCtlRequest_Cmd() {}
+
+func (*CtlRequest_Compact) isCtlRequest_Cmd() {}
 
 type CtlTailResp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2359,6 +2375,77 @@ func (*TurnFrame_TurnEnd) isTurnFrame_Kind() {}
 
 func (*TurnFrame_Span) isTurnFrame_Kind() {}
 
+// ctl `compact` (daemon/compact.go ctlCompact): compact a chat session via
+// its harness's native mechanism, or summarize-and-restart. Queued behind any
+// running turn, never cancels it. group is honoured for main only.
+type CompactReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Session       string                 `protobuf:"bytes,2,opt,name=session,proto3" json:"session,omitempty"`
+	Instructions  string                 `protobuf:"bytes,3,opt,name=instructions,proto3" json:"instructions,omitempty"`
+	Fresh         bool                   `protobuf:"varint,4,opt,name=fresh,proto3" json:"fresh,omitempty"` // force summarize-and-restart
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompactReq) Reset() {
+	*x = CompactReq{}
+	mi := &file_guest_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompactReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompactReq) ProtoMessage() {}
+
+func (x *CompactReq) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompactReq.ProtoReflect.Descriptor instead.
+func (*CompactReq) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *CompactReq) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *CompactReq) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *CompactReq) GetInstructions() string {
+	if x != nil {
+		return x.Instructions
+	}
+	return ""
+}
+
+func (x *CompactReq) GetFresh() bool {
+	if x != nil {
+		return x.Fresh
+	}
+	return false
+}
+
 var File_guest_proto protoreflect.FileDescriptor
 
 const file_guest_proto_rawDesc = "" +
@@ -2396,7 +2483,7 @@ const file_guest_proto_rawDesc = "" +
 	"\x0eGoalVerdictReq\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
 	"\x03met\x18\x02 \x01(\bR\x03met\x12\x18\n" +
-	"\areasons\x18\x03 \x01(\fR\areasons\"\xb0\t\n" +
+	"\areasons\x18\x03 \x01(\fR\areasons\"\xde\t\n" +
 	"\n" +
 	"CtlRequest\x12&\n" +
 	"\x05spawn\x18\x01 \x01(\v2\x0e.koto.SpawnReqH\x00R\x05spawn\x12&\n" +
@@ -2429,7 +2516,8 @@ const file_guest_proto_rawDesc = "" +
 	"sched_list\x18\x15 \x01(\v2\x12.koto.SchedListReqH\x00R\tschedList\x12/\n" +
 	"\tsched_del\x18\x16 \x01(\v2\x10.koto.SchedIDReqH\x00R\bschedDel\x129\n" +
 	"\fsched_toggle\x18\x17 \x01(\v2\x14.koto.SchedToggleReqH\x00R\vschedToggle\x12/\n" +
-	"\tsched_run\x18\x18 \x01(\v2\x10.koto.SchedIDReqH\x00R\bschedRunB\x05\n" +
+	"\tsched_run\x18\x18 \x01(\v2\x10.koto.SchedIDReqH\x00R\bschedRun\x12,\n" +
+	"\acompact\x18\x19 \x01(\v2\x10.koto.CompactReqH\x00R\acompactB\x05\n" +
 	"\x03cmd\"!\n" +
 	"\vCtlTailResp\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\"\xb0\x03\n" +
@@ -2535,7 +2623,13 @@ const file_guest_proto_rawDesc = "" +
 	"\bturn_end\x18\t \x01(\bH\x00R\aturnEnd\x12%\n" +
 	"\x04span\x18\n" +
 	" \x01(\v2\x0f.koto.GuestSpanH\x00R\x04spanB\x06\n" +
-	"\x04kindB\x15Z\x13koto-protocol/pb;pbb\x06proto3"
+	"\x04kind\"v\n" +
+	"\n" +
+	"CompactReq\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
+	"\asession\x18\x02 \x01(\tR\asession\x12\"\n" +
+	"\finstructions\x18\x03 \x01(\tR\finstructions\x12\x14\n" +
+	"\x05fresh\x18\x04 \x01(\bR\x05freshB\x15Z\x13koto-protocol/pb;pbb\x06proto3"
 
 var (
 	file_guest_proto_rawDescOnce sync.Once
@@ -2549,7 +2643,7 @@ func file_guest_proto_rawDescGZIP() []byte {
 	return file_guest_proto_rawDescData
 }
 
-var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_guest_proto_goTypes = []any{
 	(*CtlSendReq)(nil),     // 0: koto.CtlSendReq
 	(*CtlTailReq)(nil),     // 1: koto.CtlTailReq
@@ -2575,80 +2669,82 @@ var file_guest_proto_goTypes = []any{
 	(*ToolUse)(nil),        // 21: koto.ToolUse
 	(*GuestSpan)(nil),      // 22: koto.GuestSpan
 	(*TurnFrame)(nil),      // 23: koto.TurnFrame
-	nil,                    // 24: koto.InitReq.EnvEntry
-	nil,                    // 25: koto.GuestSpan.AttrsEntry
-	(*SpawnReq)(nil),       // 26: koto.SpawnReq
-	(*GroupReq)(nil),       // 27: koto.GroupReq
-	(*ListReq)(nil),        // 28: koto.ListReq
-	(*ResourcesReq)(nil),   // 29: koto.ResourcesReq
-	(*ConfigReq)(nil),      // 30: koto.ConfigReq
-	(*GoalSetReq)(nil),     // 31: koto.GoalSetReq
-	(*GoalGroupReq)(nil),   // 32: koto.GoalGroupReq
-	(*GoalListReq)(nil),    // 33: koto.GoalListReq
-	(*SchedAddReq)(nil),    // 34: koto.SchedAddReq
-	(*SchedListReq)(nil),   // 35: koto.SchedListReq
-	(*SchedIDReq)(nil),     // 36: koto.SchedIDReq
-	(*SchedToggleReq)(nil), // 37: koto.SchedToggleReq
-	(*ListResp)(nil),       // 38: koto.ListResp
-	(*ResourcesResp)(nil),  // 39: koto.ResourcesResp
-	(*ConfigResp)(nil),     // 40: koto.ConfigResp
-	(*GoalResp)(nil),       // 41: koto.GoalResp
-	(*GoalListResp)(nil),   // 42: koto.GoalListResp
-	(*SchedAddResp)(nil),   // 43: koto.SchedAddResp
-	(*SchedListResp)(nil),  // 44: koto.SchedListResp
-	(*ShellResize)(nil),    // 45: koto.ShellResize
+	(*CompactReq)(nil),     // 24: koto.CompactReq
+	nil,                    // 25: koto.InitReq.EnvEntry
+	nil,                    // 26: koto.GuestSpan.AttrsEntry
+	(*SpawnReq)(nil),       // 27: koto.SpawnReq
+	(*GroupReq)(nil),       // 28: koto.GroupReq
+	(*ListReq)(nil),        // 29: koto.ListReq
+	(*ResourcesReq)(nil),   // 30: koto.ResourcesReq
+	(*ConfigReq)(nil),      // 31: koto.ConfigReq
+	(*GoalSetReq)(nil),     // 32: koto.GoalSetReq
+	(*GoalGroupReq)(nil),   // 33: koto.GoalGroupReq
+	(*GoalListReq)(nil),    // 34: koto.GoalListReq
+	(*SchedAddReq)(nil),    // 35: koto.SchedAddReq
+	(*SchedListReq)(nil),   // 36: koto.SchedListReq
+	(*SchedIDReq)(nil),     // 37: koto.SchedIDReq
+	(*SchedToggleReq)(nil), // 38: koto.SchedToggleReq
+	(*ListResp)(nil),       // 39: koto.ListResp
+	(*ResourcesResp)(nil),  // 40: koto.ResourcesResp
+	(*ConfigResp)(nil),     // 41: koto.ConfigResp
+	(*GoalResp)(nil),       // 42: koto.GoalResp
+	(*GoalListResp)(nil),   // 43: koto.GoalListResp
+	(*SchedAddResp)(nil),   // 44: koto.SchedAddResp
+	(*SchedListResp)(nil),  // 45: koto.SchedListResp
+	(*ShellResize)(nil),    // 46: koto.ShellResize
 }
 var file_guest_proto_depIdxs = []int32{
-	26, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
+	27, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
 	0,  // 1: koto.CtlRequest.send:type_name -> koto.CtlSendReq
-	27, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
-	28, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
-	29, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
-	30, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
+	28, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
+	29, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
+	30, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
+	31, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
 	1,  // 6: koto.CtlRequest.tail:type_name -> koto.CtlTailReq
 	2,  // 7: koto.CtlRequest.job_done:type_name -> koto.JobDoneReq
 	3,  // 8: koto.CtlRequest.notify:type_name -> koto.NotifyReq
 	4,  // 9: koto.CtlRequest.report:type_name -> koto.ReportReq
 	5,  // 10: koto.CtlRequest.goal_done:type_name -> koto.GoalDoneReq
 	6,  // 11: koto.CtlRequest.goal_verdict:type_name -> koto.GoalVerdictReq
-	31, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
-	32, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
-	33, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
-	32, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
-	32, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
-	32, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
-	32, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
-	34, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
-	35, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
-	36, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
-	37, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
-	36, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
-	38, // 24: koto.CtlResponse.list:type_name -> koto.ListResp
-	39, // 25: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
-	40, // 26: koto.CtlResponse.config:type_name -> koto.ConfigResp
-	8,  // 27: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
-	41, // 28: koto.CtlResponse.goal:type_name -> koto.GoalResp
-	42, // 29: koto.CtlResponse.goals:type_name -> koto.GoalListResp
-	43, // 30: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
-	44, // 31: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
-	24, // 32: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
-	10, // 33: koto.AgentRequest.init:type_name -> koto.InitReq
-	11, // 34: koto.AgentRequest.msg:type_name -> koto.MsgReq
-	12, // 35: koto.AgentRequest.exec:type_name -> koto.ExecReq
-	13, // 36: koto.AgentRequest.exec_stream:type_name -> koto.ExecStreamReq
-	14, // 37: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
-	15, // 38: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
-	16, // 39: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
-	45, // 40: koto.AgentFrame.resize:type_name -> koto.ShellResize
-	25, // 41: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
-	20, // 42: koto.TurnFrame.open:type_name -> koto.TurnOpen
-	21, // 43: koto.TurnFrame.tool:type_name -> koto.ToolUse
-	22, // 44: koto.TurnFrame.span:type_name -> koto.GuestSpan
-	45, // [45:45] is the sub-list for method output_type
-	45, // [45:45] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	32, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
+	33, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
+	34, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
+	33, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
+	33, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
+	33, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
+	33, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
+	35, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
+	36, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
+	37, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
+	38, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
+	37, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
+	24, // 24: koto.CtlRequest.compact:type_name -> koto.CompactReq
+	39, // 25: koto.CtlResponse.list:type_name -> koto.ListResp
+	40, // 26: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
+	41, // 27: koto.CtlResponse.config:type_name -> koto.ConfigResp
+	8,  // 28: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
+	42, // 29: koto.CtlResponse.goal:type_name -> koto.GoalResp
+	43, // 30: koto.CtlResponse.goals:type_name -> koto.GoalListResp
+	44, // 31: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
+	45, // 32: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
+	25, // 33: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
+	10, // 34: koto.AgentRequest.init:type_name -> koto.InitReq
+	11, // 35: koto.AgentRequest.msg:type_name -> koto.MsgReq
+	12, // 36: koto.AgentRequest.exec:type_name -> koto.ExecReq
+	13, // 37: koto.AgentRequest.exec_stream:type_name -> koto.ExecStreamReq
+	14, // 38: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
+	15, // 39: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
+	16, // 40: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
+	46, // 41: koto.AgentFrame.resize:type_name -> koto.ShellResize
+	26, // 42: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
+	20, // 43: koto.TurnFrame.open:type_name -> koto.TurnOpen
+	21, // 44: koto.TurnFrame.tool:type_name -> koto.ToolUse
+	22, // 45: koto.TurnFrame.span:type_name -> koto.GuestSpan
+	46, // [46:46] is the sub-list for method output_type
+	46, // [46:46] is the sub-list for method input_type
+	46, // [46:46] is the sub-list for extension type_name
+	46, // [46:46] is the sub-list for extension extendee
+	0,  // [0:46] is the sub-list for field type_name
 }
 
 func init() { file_guest_proto_init() }
@@ -2682,6 +2778,7 @@ func file_guest_proto_init() {
 		(*CtlRequest_SchedDel)(nil),
 		(*CtlRequest_SchedToggle)(nil),
 		(*CtlRequest_SchedRun)(nil),
+		(*CtlRequest_Compact)(nil),
 	}
 	file_guest_proto_msgTypes[9].OneofWrappers = []any{
 		(*CtlResponse_Port)(nil),
@@ -2728,7 +2825,7 @@ func file_guest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_guest_proto_rawDesc), len(file_guest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   26,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

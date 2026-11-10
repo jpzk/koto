@@ -72,6 +72,9 @@ func sessKey(g, session string) string { return g + "\x00" + session }
 type sendJob struct {
 	session string // "" = the group's default session
 	msg     string
+	// compact, when non-nil, makes this job a compaction (compact.go): the
+	// worker runs runCompactJob instead of a prompt turn. msg is then empty.
+	compact *compactReq
 	done    chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
@@ -409,6 +412,11 @@ func splitSessKey(k string) (g, session string, ok bool) {
 // future teardown; it never blocks because the channel is buffered and we fall
 // through to the overflow error when full.
 func enqueueSend(g, session, msg string) (<-chan error, error) {
+	// Every user-facing producer (Send, ctl send, scheduler) lands here; only
+	// requestCompact may author a compaction message (compact.go).
+	if isReservedCompactMsg(msg) {
+		return nil, fmt.Errorf("message uses the reserved koto-compact prefix")
+	}
 	return enqueue(g, sendJob{session: session, msg: msg})
 }
 
@@ -685,6 +693,9 @@ func dropQueuedWhere(g, verb string, match func(session string) bool) int {
 			select {
 			case job := <-q:
 				releaseQueuedBytesLocked(g, len(job.msg))
+				if job.compact != nil {
+					delete(compactPending, k)
+				}
 				job.done <- fmt.Errorf("group %q %s; queued message discarded", g, verb)
 				n++
 			default:
@@ -737,6 +748,11 @@ func sendWorker(g, session string, q chan sendJob) {
 		select {
 		case job = <-q:
 			releaseQueuedBytes(g, len(job.msg))
+			if job.compact != nil {
+				queuesMu.Lock()
+				delete(compactPending, sessKey(g, session))
+				queuesMu.Unlock()
+			}
 			if !idle.Stop() {
 				select {
 				case <-idle.C:
@@ -788,7 +804,11 @@ func sendWorkerTurn(g string, job sendJob) {
 	inFlightSess[k] = true
 	turnCancels[k] = make(chan struct{})
 	queuesMu.Unlock()
-	job.done <- runTurn(g, job.session, job.msg)
+	if job.compact != nil {
+		job.done <- runCompactJob(g, job.session, job.compact)
+	} else {
+		job.done <- runTurn(g, job.session, job.msg)
+	}
 	queuesMu.Lock()
 	delete(inFlightSess, k)
 	delete(turnCancels, k)

@@ -17,6 +17,7 @@ import (
 	"koto-protocol/pb"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -349,6 +350,20 @@ func (s *kotoServer) Send(_ context.Context, r *pb.SendReq) (*pb.BaseResp, error
 	// unregistered group (M17); this refuses to spend disk on one.
 	if !registeredGroup(r.Group) {
 		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
+	}
+	// "/compact [--fresh] [instructions]" is the koto-level compaction verb,
+	// not a turn (compact.go). Intercepted here so the TUI needs no proto
+	// change; attachments make no sense on it and are refused rather than
+	// silently dropped.
+	if instr, fresh, ok := parseCompactCommand(r.Msg); ok {
+		if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
+			return &pb.BaseResp{Error: "/compact takes no attachments"}, nil
+		}
+		if _, _, err := requestCompact(r.Group, session, instr, fresh); err != nil {
+			return &pb.BaseResp{Error: err.Error()}, nil
+		}
+		registerSession(r.Group, session)
+		return &pb.BaseResp{Ok: true}, nil
 	}
 	msg := r.Msg
 	staged := false
@@ -1447,6 +1462,25 @@ func (s *kotoServer) SubscribeGroup(r *pb.SubscribeReq, stream pb.Koto_Subscribe
 	}
 	subscribers[g] = append(subscribers[g], sub)
 	subsLock.Unlock()
+	// Tell the client the subscription is LIVE. A server-streaming call
+	// returns to the client as soon as the request is written, before this
+	// handler has run, so `koto ctl ask` (subscribe, then Send) raced: the
+	// Send's `prompt` frame could be emitted before the registration above and
+	// the ask then waited forever for a prompt it had already missed. Headers
+	// sent here, after registration, are what the client blocks on
+	// (stream.Header()) before it sends.
+	if err := stream.SendHeader(metadata.MD{}); err != nil {
+		subsLock.Lock()
+		kept := subscribers[g][:0]
+		for _, x := range subscribers[g] {
+			if x != sub {
+				kept = append(kept, x)
+			}
+		}
+		subscribers[g] = kept
+		subsLock.Unlock()
+		return err
+	}
 	defer func() {
 		subsLock.Lock()
 		kept := subscribers[g][:0]

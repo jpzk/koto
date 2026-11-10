@@ -386,7 +386,9 @@ func sendNowTurn(ot *otelTurn, g, session, msg string) error {
 	sp := composeSystemPrompt(g)
 	// Built from the account store for the group's (provider, auth) on every
 	// turn — even a group that never called yet sees its account's budget.
-	augmented := contextBlock(budgetKeyFor(groupProvider(g)), latestMetric(g)) + "\n\n" + msg
+	// Compaction turns are delivered verbatim (turnMessage): the guest keys
+	// off their first bytes.
+	augmented := turnMessage(msg, func() string { return contextBlock(budgetKeyFor(groupProvider(g)), latestMetric(g)) })
 
 	// microVM delivery: the guest agent materializes the per-session
 	// system-prompt + config.json in the guest workspace and writes the
