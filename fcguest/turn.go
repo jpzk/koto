@@ -560,8 +560,10 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	// Session selection: a captured id resumes that exact conversation; no
 	// id + migration shim continues the pre-sessions thread once; otherwise
 	// this is the session's first turn and starts fresh.
+	resumeID := ""
 	if id, err := os.ReadFile(idf); err == nil && len(bytes.TrimSpace(id)) > 0 {
-		args = append(args, "--resume", string(bytes.TrimSpace(id)))
+		resumeID = string(bytes.TrimSpace(id))
+		args = append(args, "--resume", resumeID)
 		tw.tr.workerAttr("session.resumed", "true")
 	} else if migrateContinue {
 		args = append(args, "--continue")
@@ -578,6 +580,12 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	}
 	if cfg.Effort != "" {
 		args = append(args, "--effort", cfg.Effort)
+	}
+	// A resumed /compact must outlive claude's async transcript write
+	// (claude_compact.go); everything else is the one-shot prompt path.
+	if resumeID != "" && validSessionID(resumeID) && isClaudeCompactPrompt(req.Msg) {
+		runClaudeCompact(tw, req, args, env, idf, resumeID)
+		return
 	}
 	w, err := startClaudeWorker("claude", args, env, bytes.NewReader(req.Msg))
 	if err != nil {
