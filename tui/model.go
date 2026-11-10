@@ -363,6 +363,9 @@ type contentFlushMsg struct{}
 type Model struct {
 	sock      string
 	ctxWindow int
+	// ctxWarned: groups whose one-time pre-compaction warning already
+	// fired; re-armed below ctxRearmFrac (ctxfill.go).
+	ctxWarned map[string]bool
 
 	width, height int
 
@@ -2077,6 +2080,11 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 				m.metric, m.metricGroup = msg.metric, msg.group
 			}
 			m.globalMetric = mergeGlobalMetric(m.globalMetric, msg.global)
+			if frac, ok := m.ctxFill(m.metricGroup, m.metric); ok {
+				if w := m.ctxWarnCheck(m.metricGroup, frac); w != "" {
+					m.addLine(logLine{kind: "sys", group: m.metricGroup, text: w})
+				}
+			}
 		}
 		return m, nil
 
@@ -2307,6 +2315,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 				batch = append(batch, logLine{kind: "thought", group: msg.group, session: ev.Session, text: formatThoughtFull(ev.Words, ev.Body), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "tool_result_done":
 				batch = append(batch, logLine{kind: "tool_out", group: msg.group, session: ev.Session, text: formatToolOutFull(ev.Body), ts: int64(ev.Ts), tsF: ev.Ts})
+			case "compact":
+				batch = append(batch, logLine{kind: "sys", group: msg.group, session: ev.Session,
+					text: formatCompactNote(ev.Text), ts: int64(ev.Ts), tsF: ev.Ts})
 			case "notification":
 				sev := ev.Severity
 				if sev != "high" {
@@ -2812,6 +2823,15 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			// frames are skipped — a phase from a past turn is not the live one.
 			if !ev.Historical {
 				m.applyActivity(ev)
+			}
+		case "compact":
+			// Compaction lifecycle notes from daemon/compact.go (queued,
+			// started, done + summary, failed). A compact empties the
+			// context, so the pre-compaction warning re-arms.
+			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
+				text: formatCompactNote(ev.Text), ts: int64(ev.Ts)})
+			if !ev.Historical {
+				delete(m.ctxWarned, ev.Group)
 			}
 		case "sched_fired", "sched_run":
 			tag := ic(icAlarm)
@@ -4000,6 +4020,15 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			return nil
 		}
 		return listCmd(m.sock) // pick up auto-spawned sidecar
+	case "compact":
+		// /compact rides the Send RPC but has its own op so a refusal never
+		// pops someone else's optimistic ⏳ row (it never added one). Success
+		// renders through the daemon's "compact" event notes.
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group,
+				text: fmt.Sprintf("compact: %v", msg.err)})
+		}
+		return nil
 	case "destroy":
 		if msg.err != nil {
 			// Denied or failed: the group still exists, so nothing local
@@ -5830,6 +5859,14 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			sess = "-"
 		}
 		return daemonCmd(m.sock, "clear", m.cur, map[string]any{"session": sess})
+	}
+	if op, extra, ok := m.compactCommand(v); ok {
+		if goalSession(m.activeSession(m.cur)) {
+			m.addLine(logLine{kind: "err", group: m.cur,
+				text: "goal sessions are follow-only — /compact the default session, or /goals interrupt to take over"})
+			return nil
+		}
+		return daemonCmd(m.sock, op, m.cur, extra)
 	}
 	if v == "/drain" || v == "/drain all" {
 		// Discard the QUEUED prompts — the tree's ⏳N badge — and nothing

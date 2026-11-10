@@ -106,6 +106,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},
 		{title: "discard queued prompts", hint: "/drain", run: "/drain"},
 		{title: "discard queued prompts (whole group)", hint: "/drain all", run: "/drain all"},
+		{title: "compact this session (summarize context)", hint: "/compact [focus]", run: "/compact ", edit: true},
 		{title: "clear this session", hint: "/clear", run: "/clear"},
 		{title: "clear whole group", hint: "/clear all", run: "/clear all"},
 		{title: "restart group VM", hint: "/restart", run: "/restart"},

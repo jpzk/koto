@@ -685,12 +685,12 @@ func (m Model) metricsChips(useBars bool) (left, right string) {
 	if m.metricGroup != m.cur {
 		groupMetric = nil
 	}
-	if ctx := sumCtxTokens(groupMetric); ctx > 0 {
-		frac := 0.0
-		if m.ctxWindow > 0 {
-			frac = float64(ctx) / float64(m.ctxWindow)
+	if frac, ok := m.ctxFill(m.cur, groupMetric); ok {
+		parts = append(parts, renderMetricColored("ctx", frac, ctxColor(frac)))
+		if hint := ctxHint(frac); hint != "" {
+			parts = append(parts, alertify(lipgloss.NewStyle(), ctxColor(frac)).
+				Foreground(ctxColor(frac)).Render(hint+" "))
 		}
-		parts = append(parts, renderMetric("ctx", frac))
 	}
 	if hit := cacheHitRatio(groupMetric); hit >= 0 {
 		parts = append(parts, renderMetricColored("cache", hit, pctColor(1-hit)))

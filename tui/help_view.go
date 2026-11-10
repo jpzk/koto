@@ -111,6 +111,7 @@ func helpSections() []helpSection {
 			{"/sw <group>", "switch active group"},
 			{"/session [name]", "switch chat session (default or - returns)"},
 			{"/ls", "refresh the group list"},
+			{"/compact [--fresh] [focus]", "summarize the session to free context (waits for a running turn)"},
 			{"/clear [all]", "clear the session (all = the whole group)"},
 			{"/stop [g]", "power off the group's VM (boots again on next send)"},
 			{"/restart [g]", "restart the VM (applies network/size/root config)"},

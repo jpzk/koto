@@ -197,7 +197,9 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 			r.Main = b
 		}
 		return cl.Spawn(ctx, r)
-	case "send":
+	case "send", "compact":
+		// compact is a Send the daemon intercepts ("/compact [--fresh] [focus]",
+		// daemon/grpc_server.go); a separate op only for the response path.
 		return cl.Send(ctx, &pb.SendReq{Group: s("group"), Msg: s("msg"), Session: s("session")})
 	case "stop":
 		return cl.Stop(ctx, &pb.GroupReq{Group: s("group")})
