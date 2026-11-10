@@ -38,7 +38,18 @@ func newCompactTestEnv(t *testing.T, g, provider string, turn func(msg string) e
 		}
 		return nil
 	})
-	prevClear, prevSum, prevStatus := compactClearFn, compactSummaryFn, compactStatusFn
+	prevClear, prevSum, prevStatus, prevBound := compactClearFn, compactSummaryFn, compactStatusFn, compactBoundariesFn
+	// claude's transcript gains one boundary per /compact turn the guest ran,
+	// as a real persisted compaction does.
+	compactBoundariesFn = func(string, string) (int, error) {
+		n := 0
+		for _, c := range e.snapshot() {
+			if c == "turn:/compact" || strings.HasPrefix(c, "turn:/compact ") {
+				n++
+			}
+		}
+		return n, nil
+	}
 	compactStatusFn = func(_, _ string, reset bool) (string, error) {
 		if reset {
 			return "", nil
@@ -50,7 +61,7 @@ func newCompactTestEnv(t *testing.T, g, provider string, turn func(msg string) e
 	t.Cleanup(func() {
 		compactProviderFn = prevProv
 		setTurnFn(prevTurn)
-		compactClearFn, compactSummaryFn, compactStatusFn = prevClear, prevSum, prevStatus
+		compactClearFn, compactSummaryFn, compactStatusFn, compactBoundariesFn = prevClear, prevSum, prevStatus, prevBound
 		queuesMu.Lock()
 		delete(queues, sessKey(g, ""))
 		delete(compactPending, sessKey(g, ""))
@@ -417,5 +428,114 @@ func TestRunCompactNativeUsesGuestStatus(t *testing.T) {
 	}
 	if err := runCompactJob("cstat", "", &compactReq{mech: mechFallback}); err != nil {
 		t.Fatalf("fallback: %v", err)
+	}
+}
+
+// collectCompactNotes records every compact note for the test's duration.
+func collectCompactNotes(t *testing.T) func() []string {
+	var mu sync.Mutex
+	var notes []string
+	prev := compactNoteHook
+	compactNoteHook = func(_, _ string, text string) {
+		mu.Lock()
+		notes = append(notes, text)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { compactNoteHook = prev })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), notes...)
+	}
+}
+
+// The forced no-op (the bug as seen live on claude-sonnet-5: guest said "ok",
+// transcript gained no boundary, ctx 45.9k→46.1k): koto must NOT say
+// "compacted via claude-slash"; it says the native run did not take, falls
+// back to summarize-and-restart, and reports that honestly.
+func TestCompactClaudeNoOpFallsBackWithHonestNote(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status string
+		bounds int
+	}{
+		{"guest-ok-but-no-new-boundary", "ok claude compacted the conversation (manual, 45.9k tokens before)\n", 1},
+		{"guest-says-not-persisted", "err claude reported compact_boundary but it was not persisted to the transcript koto resumes next (x.jsonl: 1 boundaries before, 1 after) — the session is NOT compacted\n", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const g = "cmpnoop"
+			e := newCompactTestEnv(t, g, providerClaude, nil)
+			compactStatusFn = func(_, _ string, reset bool) (string, error) {
+				if reset {
+					return "", nil
+				}
+				return c.status, nil
+			}
+			compactBoundariesFn = func(string, string) (int, error) { return c.bounds, nil } // never grows
+			notes := collectCompactNotes(t)
+			_, _, done, err := enqueueCompact(g, "", "", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := waitDone(t, done); err != nil {
+				t.Fatalf("fallback after a no-op should succeed: %v", err)
+			}
+			got := e.snapshot()
+			if len(got) != 4 || got[0] != "turn:/compact" ||
+				!strings.HasPrefix(got[1], "turn:[koto] This session is about to be compacted") ||
+				got[2] != "clear" || !strings.HasPrefix(got[3], "turn:[koto] Session compacted") {
+				t.Fatalf("no-op did not fall back to summarize-and-restart: %q", got)
+			}
+			ns := notes()
+			all := strings.Join(ns, "\n")
+			for _, n := range ns {
+				if strings.HasPrefix(n, "compacted via claude-slash") {
+					t.Fatalf("a no-op compaction was reported as a success: %q", ns)
+				}
+			}
+			if !strings.Contains(all, "compact via claude-slash did not take effect") ||
+				!strings.Contains(all, "compacted via fallback (after claude-slash did not take effect)") {
+				t.Fatalf("notes are not honest about the no-op: %q", ns)
+			}
+		})
+	}
+}
+
+// A verified compaction is a plain success: no fallback, success note.
+func TestCompactClaudeVerifiedNoFallback(t *testing.T) {
+	const g = "cmpverified"
+	e := newCompactTestEnv(t, g, providerClaude, nil)
+	notes := collectCompactNotes(t)
+	_, _, done, err := enqueueCompact(g, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.snapshot(); len(got) != 1 {
+		t.Fatalf("verified compaction did extra work: %q", got)
+	}
+	ns := notes()
+	if len(ns) == 0 || !strings.HasPrefix(ns[len(ns)-1], "compacted via claude-slash") {
+		t.Fatalf("notes = %q", ns)
+	}
+}
+
+// A claude turn that never compacted ("answered as a prompt") or a failed
+// turn is reported, not turned into a destructive restart.
+func TestCompactClaudeHardFailureDoesNotFallBack(t *testing.T) {
+	const g = "cmpclhard"
+	e := newCompactTestEnv(t, g, providerClaude, nil)
+	compactStatusFn = func(_, _ string, reset bool) (string, error) { return "", nil }
+	_, _, done, err := enqueueCompact(g, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err == nil || !strings.Contains(err.Error(), "no compact_boundary") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := e.snapshot(); len(got) != 1 {
+		t.Fatalf("hard failure fell through to more work: %q", got)
 	}
 }

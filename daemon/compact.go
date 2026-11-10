@@ -14,7 +14,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -227,7 +229,13 @@ func enqueueCompact(g, session, instr string, fresh bool) (compactMech, bool, <-
 	return mech, busy, done, nil
 }
 
+// compactNoteHook, when non-nil, observes every compact note. Test seam only.
+var compactNoteHook func(g, session, text string)
+
 func emitCompactNote(g, session, text string) {
+	if compactNoteHook != nil {
+		compactNoteHook(g, session, text)
+	}
 	emit(g, Event{Event: "compact", Session: session, Text: text})
 	emitLogfG("group", g, "info", "compact group=%s session=%q: %s", g, session, text)
 }
@@ -263,12 +271,67 @@ func compactStatus(g, session string, reset bool) (string, error) {
 	return out, nil
 }
 
+// compactNoopError: the harness ran its compaction but it did not take — the
+// transcript koto resumes next gained no compact_boundary. Distinct from a
+// failed turn or "nothing to compact": the summary call was paid for and the
+// context is still full, so the job falls back to summarize-and-restart.
+type compactNoopError struct{ why string }
+
+func (e *compactNoopError) Error() string { return e.why }
+
+// compactBoundariesFn, when non-nil, replaces the guest transcript count.
+// Test seam only.
+var compactBoundariesFn func(g, session string) (int, error)
+
+// compactBoundaries counts compact_boundary records in the claude transcript
+// the session resumes next (sessions/<marker>.id → projects/*/<id>.jsonl).
+// -1 when there is no id or transcript yet. The pattern is the record's own
+// unescaped "type"+"subtype" pair, which message text cannot produce (it is
+// JSON-escaped inside the transcript).
+func compactBoundaries(g, session string) (int, error) {
+	if compactBoundariesFn != nil {
+		return compactBoundariesFn(g, session)
+	}
+	idp := compactShellQuote("/workspace/.cs/sessions/" + sessionMarkerName(session) + ".id")
+	script := `id=$(head -c 200 ` + idp + ` 2>/dev/null | tr -d '[:space:]')
+case "$id" in ""|*[!A-Za-z0-9_-]*) echo -1; exit 0;; esac
+n=-1
+for f in /workspace/.claude/projects/*/"$id".jsonl; do
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
+  [ $n -lt 0 ] && n=0
+  c=$(grep -c '"type":"system","subtype":"compact_boundary"' "$f"); n=$((n + ${c:-0}))
+done
+echo $n`
+	out, rc, err := fcExec(g, script, 30*time.Second)
+	if err != nil {
+		return -1, err
+	}
+	if rc != 0 {
+		return -1, fmt.Errorf("boundary count exited %d", rc)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return -1, fmt.Errorf("boundary count: %q", strings.TrimSpace(out))
+	}
+	return n, nil
+}
+
 // runCompactNative runs one native compaction turn and interprets the guest's
-// status line. Returns the harness's own detail on success.
+// status line. Returns the harness's own detail on success. For claude the
+// daemon also VERIFIES: a new compact_boundary must be in the transcript the
+// next turn resumes, whatever the guest said.
 func runCompactNative(g, session string, req *compactReq) (string, error) {
 	// A stale "ok" from an earlier run must not vouch for this one.
 	if _, err := compactStatus(g, session, true); err != nil {
 		return "", fmt.Errorf("reset status: %w", err)
+	}
+	before := -1
+	if req.mech == mechClaudeSlash {
+		n, err := compactBoundaries(g, session)
+		if err != nil {
+			emitLogfG("group", g, "warn", "compact group=%s session=%q: boundary count before: %v", g, session, err)
+		}
+		before = n
 	}
 	if err := runTurn(g, session, buildCompactMsg(req.mech, req.instr)); err != nil {
 		return "", err
@@ -277,7 +340,26 @@ func runCompactNative(g, session string, req *compactReq) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read status: %w", err)
 	}
-	return parseCompactStatus(req.mech, st)
+	detail, err := parseCompactStatus(req.mech, st)
+	if req.mech != mechClaudeSlash {
+		return detail, err
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "not persisted") {
+			return "", &compactNoopError{err.Error()}
+		}
+		return "", err
+	}
+	after, aerr := compactBoundaries(g, session)
+	switch {
+	case aerr != nil:
+		return "", &compactNoopError{fmt.Sprintf("claude reported compacting but the transcript could not be checked (%v)", aerr)}
+	case after < 0:
+		return "", &compactNoopError{"claude reported compacting but the session has no transcript to resume"}
+	case before >= 0 && after <= before:
+		return "", &compactNoopError{fmt.Sprintf("claude reported compacting but no new compact_boundary landed in the transcript the next turn resumes (%d before, %d after)", before, after)}
+	}
+	return detail, nil
 }
 
 // parseCompactStatus maps the guest's "ok …" / "err …" line to a result.
@@ -364,6 +446,21 @@ func runCompactJob(g, session string, req *compactReq) error {
 		err = runCompactFallback(g, session, req.instr)
 	} else {
 		detail, err = runCompactNative(g, session, req)
+	}
+	// A native compaction that ran but did not take is never reported as a
+	// success: say so, then summarize-and-restart so the context really
+	// shrinks.
+	var noop *compactNoopError
+	if errors.As(err, &noop) {
+		emitCompactNote(g, session, fmt.Sprintf("compact via %s did not take effect: %v — falling back to summarize-and-restart", req.mech, noop))
+		if ferr := runCompactFallback(g, session, req.instr); ferr != nil {
+			err = fmt.Errorf("%v; the summarize-and-restart fallback also failed: %w", noop, ferr)
+			emitCompactNote(g, session, fmt.Sprintf("compact failed (%s): %v", req.mech, err))
+			return err
+		}
+		emitCompactNote(g, session, fmt.Sprintf("compacted via %s (after %s did not take effect) in %s; summary kept at %s",
+			mechFallback, req.mech, time.Since(start).Round(time.Second), compactSummaryPath(session)))
+		return nil
 	}
 	if err != nil {
 		hint := ""
