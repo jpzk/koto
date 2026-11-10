@@ -955,6 +955,12 @@ func ctlAsk(args []string) {
 	if err != nil {
 		ctlFatal(1, "subscribe: %v", err)
 	}
+	// SubscribeGroup returns once the request is WRITTEN, not once the daemon
+	// has registered the subscriber. Wait for the headers the handler sends
+	// after registering, or the prompt frame of our own Send can slip past.
+	if _, err := stream.Header(); err != nil {
+		ctlFatal(1, "subscribe: %v", err)
+	}
 	sendCtx, sendCancel := ctlCtx()
 	resp, err := cl.Send(sendCtx, &pb.SendReq{Group: group, Msg: msg, Session: *session})
 	sendCancel()

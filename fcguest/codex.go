@@ -136,14 +136,27 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		// The VM is the sandbox (as with claude's --dangerously-skip-permissions):
 		// no interactive approver exists, and bwrap is not in the rootfs.
 		"--dangerously-bypass-approvals-and-sandbox",
-		"-c", "model_provider="+tomlString(codexProviderID),
-		"-c", "model_providers."+codexProviderID+".name="+tomlString("koto host proxy"),
-		"-c", "model_providers."+codexProviderID+".base_url="+tomlString(baseURL),
-		"-c", "model_providers."+codexProviderID+".env_key="+tomlString("KOTO_OPENAI_API_KEY"),
-		"-c", "model_providers."+codexProviderID+".wire_api="+tomlString("responses"),
+	)
+	args = append(args, codexConfigArgs(baseURL, model, effort, systemPrompt)...)
+	if resumeID != "" {
+		args = append(args, resumeID)
+	}
+	return append(args, "-")
+}
+
+// codexConfigArgs is the -c override set every codex process gets — exec turns
+// and the app-server compaction (compact.go) alike: provider = the host proxy,
+// no update check, no analytics, code mode, then model / effort / koto prompt.
+func codexConfigArgs(baseURL, model, effort, systemPrompt string) []string {
+	args := []string{
+		"-c", "model_provider=" + tomlString(codexProviderID),
+		"-c", "model_providers." + codexProviderID + ".name=" + tomlString("koto host proxy"),
+		"-c", "model_providers." + codexProviderID + ".base_url=" + tomlString(baseURL),
+		"-c", "model_providers." + codexProviderID + ".env_key=" + tomlString("KOTO_OPENAI_API_KEY"),
+		"-c", "model_providers." + codexProviderID + ".wire_api=" + tomlString("responses"),
 		// The proxy relays HTTP request/response only (no websocket upgrade).
-		"-c", "model_providers."+codexProviderID+".supports_websockets=false",
-		"-c", "model_providers."+codexProviderID+".requires_openai_auth=false",
+		"-c", "model_providers." + codexProviderID + ".supports_websockets=false",
+		"-c", "model_providers." + codexProviderID + ".requires_openai_auth=false",
 		// No update check (the guest has no egress, and the binary is pinned).
 		"-c", "check_for_update_on_startup=false",
 		"-c", "analytics.enabled=false",
@@ -156,7 +169,7 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		// path is not configurable: codex looks for it beside its own
 		// executable (codex-rs/install-context/src/lib.rs:175-204).
 		"-c", "features.code_mode_host=true",
-	)
+	}
 	if model != "" {
 		args = append(args, "-c", "model="+tomlString(model))
 	}
@@ -166,10 +179,7 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 	if systemPrompt != "" {
 		args = append(args, "-c", "developer_instructions="+tomlString(systemPrompt))
 	}
-	if resumeID != "" {
-		args = append(args, resumeID)
-	}
-	return append(args, "-")
+	return args
 }
 
 func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []string) {

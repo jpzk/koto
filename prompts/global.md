@@ -101,6 +101,12 @@ Non-main groups are restricted to self-targeting: the `group` field on
 always filters to yourself. A fired schedule arrives identically to a
 manual send — your normal message loop handles it.
 
+Compacting your context: `{"cmd":"compact","session":"<name>","instructions":"<focus>"}`
+compresses a chat session through your harness's native compaction
+(`"fresh":true` = write a summary and restart instead). It queues behind
+the running turn — so it takes effect after you finish this one — and never
+cancels it. Non-main groups compact themselves only; main may add `group`.
+
 Reporting back to main: when `main` delegates a task to you and asks for a
 reply, the task ends with a `[koto] main requested a reply` note. When the
 task is COMPLETE — in that same turn, or several turns and background jobs
