@@ -140,6 +140,28 @@ func isReservedCompactMsg(msg string) bool {
 	return strings.HasPrefix(msg, "\x00koto-compact")
 }
 
+// isCompactTurnMsg reports whether msg is a native compaction turn as built by
+// buildCompactMsg: the NUL-prefixed codex/pi request, or claude's literal
+// "/compact [focus]".
+func isCompactTurnMsg(msg string) bool {
+	return isReservedCompactMsg(msg) || msg == "/compact" || strings.HasPrefix(msg, "/compact ")
+}
+
+// turnMessage is what sendNowTurn delivers to the guest: the <koto-context>
+// header + msg for an ordinary turn, msg VERBATIM for a compaction turn. Both
+// recognisers are prefix matches — fc-agent's parseCompactMsg needs
+// compactPrefix at byte 0, and Claude Code only runs /compact as a built-in
+// when it is the first token — so a header in front turned every native
+// compaction into a no-op (pi/codex: the NUL-carrying message fell through to
+// the harness's argv; claude: /compact answered as a prompt). ctxBlock is lazy
+// so a compaction turn does not touch the account store.
+func turnMessage(msg string, ctxBlock func() string) string {
+	if isCompactTurnMsg(msg) {
+		return msg
+	}
+	return ctxBlock() + "\n\n" + msg
+}
+
 // compactPending marks sessions with a compaction queued but not yet started,
 // so a second request does not stack a redundant one. Guarded by queuesMu.
 var compactPending = map[string]bool{}
