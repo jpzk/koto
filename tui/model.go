@@ -5926,10 +5926,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			m.addLine(logLine{kind: "err", text: "usage: /destroy <group>"})
 			return nil
 		}
-		// main refusal + the audit L42 "nothing local until the daemon
-		// confirms" rule live in destroyGroup (destroy_confirm.go), shared
-		// with the ctrl+x confirmation modal.
-		return m.destroyGroup(target)
+		// Same typed-name modal as ctrl+x on a group row: nothing is sent
+		// until the operator types the exact name + enter. The main
+		// refusal and the audit L42 "nothing local until the daemon
+		// confirms" rule stay in openGroupDestroyConfirm and the shared
+		// confirm path (destroy_confirm.go).
+		m.openGroupDestroyConfirm(target)
+		return nil
 	}
 	if v == "/restart" || strings.HasPrefix(v, "/restart ") {
 		target := strings.TrimSpace(strings.TrimPrefix(v, "/restart"))

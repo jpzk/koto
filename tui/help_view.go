@@ -77,7 +77,7 @@ func helpSections() []helpSection {
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
 			{"ctrl+t", "fold/unfold jobs on the current row (works mid-draft)"},
 			{"ctrl+s", "tree: stop hovered group VM (confirm modal: No / Yes)"},
-			{"ctrl+x", "tree: destroy group / session (hovered row; confirm modal: No / Yes)"},
+			{"ctrl+x", "tree: destroy hovered group (type its name + enter) / session (No / Yes)"},
 			{"", "hovering a job row shows a live tail of its output"},
 		}},
 		{"TERMINAL PANE (while focused)", []helpEntry{
@@ -115,7 +115,7 @@ func helpSections() []helpSection {
 			{"/clear [all]", "clear the session (all = the whole group)"},
 			{"/stop [g]", "power off the group's VM (boots again on next send)"},
 			{"/restart [g]", "restart the VM (applies network/size/root config)"},
-			{"/destroy <g>", "destroy the group and its workspace"},
+			{"/destroy <g>", "destroy group + workspace (type its name to confirm)"},
 			{"/interrupt", "interrupt the in-flight turn (same as ctrl+c / esc)"},
 			{"/drain [all]", "discard the session's queued prompts (all = the whole group)"},
 			{"/config [k=v ..]", "show or set group config (network, size, root, ports, ..)"},
