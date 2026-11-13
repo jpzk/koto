@@ -486,6 +486,7 @@ func listGroups() map[string]GroupInfo {
 			Queued:         queueDepth(g),
 			Sessions:       append(listSessions(g), goalLiveSessions(g)...),
 			SessionOrigins: goalSessionOrigins(g),
+			SessionModes:   listSessionModes(g),
 			Jobs:           jobsSnapshot(g),
 			TokPerSec:      rates[g],
 			Network:        cfg.network(),

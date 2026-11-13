@@ -1356,8 +1356,9 @@ func (x *SendReq) GetSession() string {
 // `mode` is read by SessionCreate only: the new session's permission mode
 // ("" = yolo), stored in the same registry write that creates the session,
 // so its first turn can never run in another mode (the TUI passes "plan").
-// A harness that does not support the mode yet (codex, pi) gets yolo — the
-// create still succeeds; GroupInfo.session_modes shows the effective mode.
+// Only a NEW session still at yolo takes it (session_create is not a posture
+// verb). A harness that does not support the mode yet (codex, pi, venice)
+// refuses it with an error — never a silent yolo.
 type GroupReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`

@@ -1852,6 +1852,15 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
 	}
+	// Permission mode from the HOST registry (session_modes.go) — the only
+	// source the guest obeys; config.json above carries none.
+	if mode := sessionMode(g, session); mode != modeYolo {
+		m.Mode = mode
+		if mode == modeConfirm {
+			m.ApprovalTimeoutMs = approvalTimeout.Milliseconds()
+			m.ApprovalHardCapMs = approvalHardCap.Milliseconds()
+		}
+	}
 	files := fcTurnUploads(g, msg)
 	if len(files) > 0 {
 		args := append([]string{"-C", filepath.Join(vol(g), ".cs", "uploads"), "-cf", "-"}, files...)

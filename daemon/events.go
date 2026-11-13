@@ -425,6 +425,16 @@ func stateHash(gs map[string]GroupInfo) string {
 			fld(k)
 			fld(gi.SessionOrigins[k])
 		}
+		fld("modes")
+		modeKeys := make([]string, 0, len(gi.SessionModes))
+		for k := range gi.SessionModes {
+			modeKeys = append(modeKeys, k)
+		}
+		sort.Strings(modeKeys)
+		for _, k := range modeKeys {
+			fld(k)
+			fld(gi.SessionModes[k])
+		}
 		for _, j := range gi.Jobs {
 			fld(j.ID)
 			fld(j.Session)
