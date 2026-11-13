@@ -975,9 +975,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// is right-aligned, the count travels with the name.
 	cnt := ""
 	if !isJob {
-		if n := m.foldedJobs(r.group, r.session); n > 0 {
-			cnt = fmt.Sprintf(" (%d)", n)
-		}
+		cnt = m.foldLabel(r.group, r.session)
 	}
 	if badge != "" {
 		badgeW = cellWidth(badge)

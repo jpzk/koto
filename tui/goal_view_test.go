@@ -50,6 +50,7 @@ func TestGoalSessionLeafInTree(t *testing.T) {
 		"main": {Running: true},
 		"work": {Running: true, Sessions: []string{goalSess}},
 	}
+	m.jobsOpen[sessKey("work", "")] = true // goal rows fold under the group row
 	found := false
 	for _, r := range m.treeRows() {
 		if r.group == "work" && r.session == goalSess && r.job == "" {
@@ -108,6 +109,7 @@ func TestGoalJudgeRowKeepsSuffix(t *testing.T) {
 	judge := goalSess + "-judge"
 	m.groups = map[string]GroupInfo{"work": {Running: true, Sessions: []string{goalSess, judge}}}
 	m.cur = "work"
+	unfoldGoals(&m)
 	var row string
 	for _, r := range m.treeRows() {
 		if r.session == judge && r.job == "" {
@@ -132,6 +134,7 @@ func TestGoalRowShowsRunID(t *testing.T) {
 	m.width, m.height = 200, 30
 	m.groups = map[string]GroupInfo{"work": {Running: true, Sessions: []string{goalSess}}}
 	m.cur = "work"
+	unfoldGoals(&m)
 	var row string
 	for _, r := range m.treeRows() {
 		if r.session == goalSess && r.job == "" {

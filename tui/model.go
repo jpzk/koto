@@ -5269,21 +5269,102 @@ func (m Model) jobBlinking(g, id string) bool {
 	return ok && time.Since(t) < jobLingerMs*time.Millisecond
 }
 
-// foldedJobs reports how many job rows a folded conversation is hiding.
-// Zero for unfolded conversations — the rows themselves are visible then,
-// so there is nothing to badge.
-func (m Model) foldedJobs(g, sess string) (n int) {
-	if m.jobsOpen[sessKey(g, sess)] {
-		return 0
+// foldGoals is the goal-session children of conversation (g, sess) — the
+// session rows that fold with sess's job list (jobsOpen), regardless of fold
+// state. A named session owns the goals set from it (sessionLayout kids); the
+// DEFAULT conversation (the group row, main included) owns the goal sessions
+// left at the group level — default-origin goals, plus any whose origin
+// session is gone, the same adoption visibleJobs applies to orphan jobs. A
+// goal session owns no goals: its kids are only its own jobs.
+func (m Model) foldGoals(g, sess string) []string {
+	if goalSession(sess) {
+		return nil
 	}
-	return len(m.visibleJobs(g, sess))
+	top, kids := m.sessionLayout(g)
+	if sess != "" {
+		return kids[sess]
+	}
+	var out []string
+	for _, s := range top {
+		if goalSession(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// foldParent is the conversation whose child list goal session s folds
+// with: its origin session when it nests there, else the group default ("").
+// ok=false for non-goal sessions and the default itself — those rows are
+// never hidden by a fold.
+func (m Model) foldParent(g, s string) (parent string, ok bool) {
+	if !goalSession(s) {
+		return "", false
+	}
+	_, kids := m.sessionLayout(g)
+	for o, ch := range kids {
+		if slices.Contains(ch, s) {
+			return o, true
+		}
+	}
+	return "", true
+}
+
+// foldedCount is what a folded conversation hides: its visible jobs and its
+// goal-session children (foldGoals), plus whether any of it is live — a
+// running job, or a goal session at all (goal sessions are only listed while
+// the goal runs). All zero for unfolded conversations: the rows themselves
+// are visible then, so there is nothing to badge.
+func (m Model) foldedCount(g, sess string) (jobs, goals int, live bool) {
+	if m.jobsOpen[sessKey(g, sess)] {
+		return 0, 0, false
+	}
+	for _, j := range m.visibleJobs(g, sess) {
+		jobs++
+		live = live || j.Status == "running"
+	}
+	goals = len(m.foldGoals(g, sess))
+	return jobs, goals, live || goals > 0
+}
+
+// foldedJobs reports how many child rows (jobs + goal sessions) a folded
+// conversation is hiding. Zero for unfolded conversations.
+func (m Model) foldedJobs(g, sess string) (n int) {
+	j, gl, _ := m.foldedCount(g, sess)
+	return j + gl
+}
+
+// foldLabel is the gray count a folded row carries after its name: "(2j)",
+// "(1g)", "(2j 1g)" — j counts job rows, g goal sessions — with a leading
+// "*" while anything inside runs ("(*2j 1g)"). ASCII on purpose: the tree
+// pane is 22 cells and an ambiguous-width glyph would shove the row. Empty
+// when nothing is folded.
+func (m Model) foldLabel(g, sess string) string {
+	j, gl, live := m.foldedCount(g, sess)
+	if j+gl == 0 {
+		return ""
+	}
+	var parts []string
+	if j > 0 {
+		parts = append(parts, fmt.Sprintf("%dj", j))
+	}
+	if gl > 0 {
+		parts = append(parts, fmt.Sprintf("%dg", gl))
+	}
+	mark := ""
+	if live {
+		mark = "*"
+	}
+	return " (" + mark + strings.Join(parts, " ") + ")"
 }
 
 // setJobFold handles →/← in the tree: unfold (open=true) or fold the
-// hovered conversation's job rows. Folding from a job row folds the list it
-// belongs to and re-anchors the cursor on the conversation row. Returns
-// false when there is nothing to do — the caller lets the arrow fall
-// through to the input's cursor movement.
+// hovered conversation's child list — its job rows AND its goal sessions
+// (foldGoals), one shared state. ← on a child row (a job, or a goal session
+// whose own list is already folded) folds the list it belongs to and
+// re-anchors the cursor on the parent conversation row. Returns false when
+// there is nothing to do — the caller lets the arrow fall through to the
+// input's cursor movement.
 func (m *Model) setJobFold(open bool) bool {
 	rows := m.treeRows()
 	if m.treeIdx >= len(rows) {
@@ -5303,11 +5384,21 @@ func (m *Model) setJobFold(open bool) bool {
 		m.selectTreeRow(treeRow{group: r.group, session: r.session})
 		return true
 	}
-	if !m.jobsOpen[key] {
-		return false
+	if m.jobsOpen[key] {
+		delete(m.jobsOpen, key)
+		return true
 	}
-	delete(m.jobsOpen, key)
-	return true
+	if p, ok := m.foldParent(r.group, r.session); ok {
+		delete(m.jobsOpen, sessKey(r.group, p))
+		for i, pr := range m.treeRows() {
+			if pr.group == r.group && pr.session == p && pr.job == "" {
+				m.treeIdx = i
+				m.selectTreeRow(pr)
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // treeRows flattens the tree: main, then main's default-session jobs, named
@@ -5343,7 +5434,10 @@ func (m Model) treeRows() []treeRow {
 	appendSession = func(g, sess, glyph, cont string, kids map[string][]string) {
 		rows = append(rows, treeRow{group: g, session: sess, branch: glyph})
 		jl := jobsOf(g, sess)
-		ch := kids[sess]
+		var ch []string
+		if m.jobsOpen[sessKey(g, sess)] {
+			ch = kids[sess] // goal kids fold with the job rows
+		}
 		n, k := len(jl)+len(ch), 0
 		next := func() (string, string) {
 			k++
@@ -5361,6 +5455,21 @@ func (m Model) treeRows() []treeRow {
 			appendSession(g, c, b, c2, nil)
 		}
 	}
+	// topShown drops the group-level goal sessions while the group's default
+	// conversation is folded: they are its children (foldGoals), so they
+	// fold with its job rows under the group row.
+	topShown := func(g string, top []string) []string {
+		if m.jobsOpen[sessKey(g, "")] {
+			return top
+		}
+		out := top[:0:0]
+		for _, s := range top {
+			if !goalSession(s) {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
 	groups := order
 	var mainSess []string
 	var mainKids map[string][]string
@@ -5368,6 +5477,7 @@ func (m Model) treeRows() []treeRow {
 	if len(order) > 0 && order[0] == "main" {
 		groups = order[1:]
 		mainSess, mainKids = m.sessionLayout("main")
+		mainSess = topShown("main", mainSess)
 		mainJobs = jobsOf("main", "")
 		rows = append(rows, treeRow{group: "main"})
 	}
@@ -5393,6 +5503,7 @@ func (m Model) treeRows() []treeRow {
 		rows = append(rows, treeRow{group: g, branch: gb})
 		defJobs := jobsOf(g, "")
 		sess, kids := m.sessionLayout(g)
+		sess = topShown(g, sess)
 		nGC := len(defJobs) + len(sess)
 		gc := 0
 		gBranch := func() (string, string) {
@@ -5725,6 +5836,15 @@ func (m *Model) clearPeek() {
 // even that is gone (group destroyed while hovered) just clamp — the next
 // out-of-band m.cur change re-anchors properly.
 func (m *Model) normalizeTreeCursor() {
+	// The active conversation is a goal session hidden inside a folded
+	// parent (/sw goal-x, a goal-start auto-switch, or the parent folded by
+	// another path): reveal it by unfolding the parent rather than letting
+	// the vanished-row fallback below kick the user to the default session.
+	if as := m.activeSession(m.cur); as != "" {
+		if p, ok := m.foldParent(m.cur, as); ok && slices.Contains(m.sessionsOf(m.cur), as) {
+			m.jobsOpen[sessKey(m.cur, p)] = true
+		}
+	}
 	rows := m.treeRows()
 	if len(rows) == 0 {
 		m.treeIdx = 0
