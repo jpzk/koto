@@ -58,6 +58,20 @@ service Koto {
   // goal-reserved "goal-" namespace. No VM boot: the guest pins the
   // conversation id on the first send, exactly as before.
   rpc SessionCreate (GroupReq)     returns (BaseResp);
+  // Approve answers one pending tool-approval request of a session in
+  // mode=confirm (daemon/approvals.go). The pending table is keyed
+  // (group, session, slot, id); the FIRST answer wins and is written down
+  // the turn connection as an ApprovalReply, every later answer (and any
+  // replay) gets already_answered=true and changes nothing. Operator-only:
+  // NOT on the in-guest ctl plane, so no agent (main included) can approve
+  // its own tool calls. Unanswered requests fail closed: host deadline
+  // (default 10m), interrupt, daemon restart and VM stop all deny.
+  rpc Approve     (ApproveReq)     returns (ApproveResp);
+  // ListPending lists the open approval requests (group "" = every group the
+  // caller may target; needs the "*" target like JobsReq). Operator-only, not
+  // on the ctl plane. Live updates ride SubscribeGroup as Event
+  // approval_request / approval_resolved.
+  rpc ListPending (ListPendingReq) returns (ListPendingResp);
   // Jobs lists a group's background jobs (cs-job) fresh from the guest —
   // group "" reads across all running groups (needs the "*" target, like
   // global metrics). JobLogs returns one job's metadata + an output tail.
@@ -236,6 +250,11 @@ message Event {
   // `text` field.
   string severity   = 14;
   string title      = 15;
+  // Approval payload (event == "approval_request"): id = request id, name =
+  // tool, input = tool input JSON, text = one-line summary, deadline = unix
+  // seconds at which the host denies it. event == "approval_resolved": id,
+  // msg = allow|deny|timeout, name = who decided.
+  double deadline    = 16;
 }
 
 message RunScriptReq {
@@ -367,6 +386,13 @@ message GroupInfo {
   // profile alone decides). A corrupt stored list renders as a single
   // "!invalid (deny-all)" entry and is enforced as deny-all.
   repeated string allow = 14;
+  // Permission mode per session (yolo | plan | confirm), host-side registry
+  // only (never config.json). Only non-yolo sessions are listed; key "" is
+  // the default session. Absent = yolo.
+  map<string, string> session_modes = 15;
+  // Open approval requests per session (key "" = default session); drives
+  // the TUI inbox counter and the tree badge. Absent = 0.
+  map<string, int32> pending_approvals = 16;
 }
 
 // One background job (sidecar/cs-job) in a group's guest, attributed to the
@@ -432,7 +458,13 @@ message SendReq   {
 // the legacy behavior); "-"/"default" = only the default session; a name =
 // only that session. Per-session clear resets the conversation and removes
 // the session's lines from the transcript, leaving other sessions intact.
-message GroupReq  { string group = 1; string session = 2; }
+//
+// `mode` is read by SessionCreate only: the new session's permission mode
+// ("" = yolo), stored in the same registry write that creates the session,
+// so its first turn can never run in another mode (the TUI passes "plan").
+// A harness that does not support the mode yet (codex, pi) gets yolo — the
+// create still succeeds; GroupInfo.session_modes shows the effective mode.
+message GroupReq  { string group = 1; string session = 2; string mode = 3; }
 message ListReq   {}
 message LogsReq   {}
 message WatchReq  {}
@@ -492,6 +524,13 @@ message ConfigReq {
   // comma-separated; "" clears. Invalid entries are refused with an error.
   // Applies LIVE — the gateway filter is host-side, no /restart needed.
   optional string allow    = 16;
+  // mode: per-SESSION permission mode yolo|plan|confirm for `session`
+  // (""/"-"/"default" = default session). Stored in the daemon's host
+  // session registry, never in config.json; a posture key, so the ctl
+  // plane's config_set refuses it — operator gRPC/TUI only. Applies from the
+  // next turn. confirm is refused for goal sessions.
+  optional string mode     = 17;
+  string session           = 18; // read only together with mode
 }
 
 message JobsReq { string group = 1; } // "" = all running groups
@@ -841,4 +880,36 @@ message ImageProgress {
   int64  done   = 4; // bytes (download/verify/cached), else 0
   int64  total  = 5; // the manifest's layer size, else 0
   string image  = 6; // catalog name being added/updated
+}
+
+// ---- tool approvals (mode=confirm; daemon/approvals.go) ----
+
+message ApproveReq {
+  string group   = 1;
+  string session = 2; // "" / "-" / "default" = default session
+  string id      = 3; // PendingApproval.id
+  bool   allow   = 4;
+  string msg     = 5; // deny-with-message: reaches the model as the deny reason
+}
+message ApproveResp {
+  bool   ok               = 1;
+  string error            = 2;
+  bool   already_answered = 3; // a previous answer (or the deadline) won
+  string decision         = 4; // allow | deny | timeout — the winning decision
+}
+message ListPendingReq { string group = 1; } // "" = all groups ("*" target)
+message PendingApproval {
+  string group      = 1;
+  string session    = 2;
+  int32  slot       = 3;
+  string id         = 4;
+  string tool       = 5;
+  string input_json = 6;
+  string summary    = 7;
+  double deadline   = 8; // unix seconds; host denies at this time
+  double created    = 9;
+}
+message ListPendingResp {
+  bool ok = 1; string error = 2;
+  repeated PendingApproval pending = 3;
 }

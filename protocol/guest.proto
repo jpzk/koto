@@ -138,6 +138,18 @@ message MsgReq {
   // W3C traceparent of the host turn span. "" = telemetry off: the guest
   // emits no GuestSpan frames at all.
   string traceparent   = 7;
+  // Permission mode of this turn's session, from the daemon's HOST registry
+  // (never config.json): ""/yolo = today's behaviour, plan, confirm. A
+  // harness that does not support the mode refuses the turn with a clear
+  // error instead of running it as yolo.
+  string mode          = 8;
+  // confirm only: how long the guest waits for an ApprovalReply before it
+  // denies on its own (fail closed). Set a little past the host deadline so
+  // the host's timeout normally wins. 0 = guest default.
+  int64  approval_timeout_ms = 9;
+  // confirm only: worker hard cap in ms (the worker clock pauses while an
+  // approval is pending, but never past this). 0 = guest default.
+  int64  approval_hard_cap_ms = 10;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
@@ -215,6 +227,10 @@ message TurnFrame {
     string   err            = 8;  // [[err]] line
     bool     turn_end       = 9;
     GuestSpan span          = 10; // only when MsgReq.traceparent != ""; droppable
+    ApprovalRequest approval_request = 11; // confirm: a tool call awaits the operator
+    // confirm: the guest denied request <id> on its own deadline (or because
+    // the turn connection dropped) — the daemon logs it as a timeout.
+    string   approval_expired = 12;
   }
 }
 
@@ -226,4 +242,29 @@ message CompactReq {
   string session      = 2;
   string instructions = 3;
   bool   fresh        = 4; // force summarize-and-restart
+}
+
+// ---- 9004 reverse direction (host → guest) ---------------------------------
+// mode=confirm turns use the turn connection in both directions: the guest
+// sends TurnFrame.approval_request, the daemon answers with one TurnReply per
+// request on the same connection (the writer half, daemon/approvals.go). The
+// guest translates it into claude's control_response. Anything the guest
+// cannot match to an open request is ignored; a dropped connection denies
+// every open request (fail closed).
+message ApprovalRequest {
+  string id               = 1; // claude's control request_id
+  string tool             = 2;
+  string input_json       = 3; // the tool input, JSON (bounded by the guest)
+  string summary          = 4; // one line for the card / transcript
+  int64  deadline_unix_ms = 5; // guest-side deadline (informational)
+}
+message ApprovalReply {
+  string id    = 1;
+  bool   allow = 2;
+  string msg   = 3; // deny reason shown to the model ("" = default text)
+}
+message TurnReply {
+  oneof kind {
+    ApprovalReply approval = 1;
+  }
 }
