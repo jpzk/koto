@@ -64,3 +64,15 @@ func TestListResponseKeepsSessionModes(t *testing.T) {
 		t.Fatalf("empty group should carry nil maps: %+v", gs2["g"])
 	}
 }
+
+// Pending counts are narrowed to int32 with a clamp: an out-of-range or
+// negative value in a List frame must not wrap.
+func TestListPendingApprovalsClamped(t *testing.T) {
+	gs := parseListGroups(map[string]any{"g": map[string]any{
+		"pending_approvals": map[string]any{"a": "9999999999", "b": "-5", "c": "3"},
+	}})
+	p := gs["g"].PendingApprovals
+	if p["a"] != 2147483647 || p["b"] != 0 || p["c"] != 3 {
+		t.Fatalf("pending approvals not clamped: %v", p)
+	}
+}

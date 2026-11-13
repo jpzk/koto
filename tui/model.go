@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -1633,7 +1634,15 @@ func parseListGroups(raw map[string]any) map[string]GroupInfo {
 		if pm, ok := mp["pending_approvals"].(map[string]any); ok && len(pm) > 0 {
 			pend = make(map[string]int32, len(pm))
 			for s, n := range pm {
-				pend[s] = int32(asInt64(n))
+				// clamp before narrowing: a count is never negative and a
+				// garbled frame must not wrap int32 (CodeQL incorrect-integer-conversion)
+				v := asInt64(n)
+				if v < 0 {
+					v = 0
+				} else if v > math.MaxInt32 {
+					v = math.MaxInt32
+				}
+				pend[s] = int32(v)
 			}
 		}
 		out[k] = GroupInfo{Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root,
