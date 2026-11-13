@@ -43,7 +43,7 @@ func TestJobRowsFoldedByDefault(t *testing.T) {
 	}
 }
 
-// The folded count renders right after the name — "ghost (1)" — not in the
+// The folded count renders right after the name — "ghost (*1j)" — not in the
 // right-aligned badge slot. Checked on the hover row, whose single style
 // keeps the text contiguous.
 func TestFoldedCountRendersNextToName(t *testing.T) {
@@ -58,12 +58,12 @@ func TestFoldedCountRendersNextToName(t *testing.T) {
 		return s + strings.Repeat(" ", w-len(s))
 	}
 	row := m.renderTreeRow(treeRow{group: "ghost"}, false, true, false, pad)
-	if !strings.Contains(row, "ghost (1)") {
-		t.Errorf("hover row missing \"ghost (1)\":\n%q", row)
+	if !strings.Contains(row, "ghost (*1j)") {
+		t.Errorf("hover row missing \"ghost (*1j)\":\n%q", row)
 	}
 	m.jobsOpen[sessKey("ghost", "")] = true
 	row = m.renderTreeRow(treeRow{group: "ghost"}, false, true, false, pad)
-	if strings.Contains(row, "(1)") {
+	if strings.Contains(row, "(*1j)") {
 		t.Errorf("unfolded row still shows the count:\n%q", row)
 	}
 }

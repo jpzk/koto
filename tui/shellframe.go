@@ -253,7 +253,7 @@ func (m Model) shellChromeGuard(stacked bool, bodyH, rows, chatW, treeW int) she
 // (shellSplitMode: to its right on a landscape terminal, below it on a
 // portrait one) — and the chat half keeps its message bar, so the operator
 // can toggle focus between typing to the agent and driving the shared shell
-// (ctrl+]) with both panes staying on screen; terminals too small for
+// (alt+] / ctrl+]) with both panes staying on screen; terminals too small for
 // either axis fall back to the prior fullscreen behavior, mirroring
 // renderLogView.
 func (m Model) renderShellView() string {

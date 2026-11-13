@@ -26,7 +26,7 @@ package main
 // theme lookup. applyTheme runs once at startup (and again on /themes), before
 // or between frames; the render path only ever reads the vars.
 //
-// THE SIX STATUS HUES ARE NOT THEMED. cRed/cYellow/cMagenta/cPink/cEmerald/
+// THE SIX STATUS HUES ARE NOT THEMED (seven, with the yolo chip's cBrick). cRed/cYellow/cMagenta/cPink/cEmerald/
 // cRose carry MEANING — error, working, thinking, alert — and the nine roles
 // have no counterpart for them: they are three tiers of gray-vs-ground plus one
 // accent, deliberately hue-agnostic. Mapping red onto a role would make "error"
@@ -114,11 +114,12 @@ var builtinPalette = struct {
 	black, red, yellow, magenta, amber, dkAmber lipgloss.Color
 	white, gray, brWhite, pink, emerald, rose   lipgloss.Color
 	fgInv                                       lipgloss.Color
+	brick                                       lipgloss.Color
 }{
 	black: cBlack, red: cRed, yellow: cYellow, magenta: cMagenta,
 	amber: cAmber, dkAmber: cDkAmber, white: cWhite, gray: cGray,
 	brWhite: cBrWhite, pink: cPink, emerald: cEmerald, rose: cRose,
-	fgInv: cFgInv,
+	fgInv: cFgInv, brick: cBrick,
 }
 
 // --- the native palettes -----------------------------------------------------
@@ -145,6 +146,7 @@ type nativePalette struct {
 	black, red, yellow, magenta, amber, dkAmber lipgloss.Color
 	white, gray, brWhite, pink, emerald, rose   lipgloss.Color
 	fgInv                                       lipgloss.Color
+	brick                                       lipgloss.Color
 }
 
 // nativePalettes are the ones a name can select, in the order the picker
@@ -161,6 +163,7 @@ var nativePalettes = []nativePalette{{
 	emerald: lipgloss.Color("42"),  // #00d787
 	rose:    lipgloss.Color("212"), // #ff87d7
 	fgInv:   lipgloss.Color("0"),
+	brick:   lipgloss.Color("124"), // #af0000
 }}
 
 // findNative looks a native palette up by name, case-insensitively.
@@ -192,6 +195,7 @@ func applyNative(p *nativePalette) {
 	cAmber, cDkAmber, cWhite, cGray = p.amber, p.dkAmber, p.white, p.gray
 	cBrWhite, cPink, cEmerald, cRose = p.brWhite, p.pink, p.emerald, p.rose
 	cFgInv = p.fgInv
+	cBrick = p.brick
 	themePageBg = ""
 	themeLight = false
 	activeTheme = p.name
@@ -200,7 +204,7 @@ func applyNative(p *nativePalette) {
 // statusHues is the six meaning-carrying colors in one shade tier. See the
 // file comment: the palette format has no role for them, so a theme selects
 // between two hand-picked sets instead of deriving them.
-type statusHues struct{ red, yellow, magenta, pink, emerald, rose string }
+type statusHues struct{ red, yellow, magenta, pink, emerald, rose, brick string }
 
 // statusOnDark keeps the built-in look — these are the hex values of the
 // 256-color codes the untuned TUI uses (or the bright form of the ANSI index,
@@ -213,6 +217,7 @@ var statusOnDark = statusHues{
 	pink:    "#ff5faf",
 	emerald: "#00d787",
 	rose:    "#ff87d7",
+	brick:   "#b5403a", // yolo chip: brick, not cRed's error red
 }
 
 // statusOnLight is the same six hues at a luminance that reads on a light
@@ -225,6 +230,7 @@ var statusOnLight = statusHues{
 	pink:    "#af005f",
 	emerald: "#00875f",
 	rose:    "#d70087",
+	brick:   "#8a2a22",
 }
 
 // --- applying ----------------------------------------------------------------
@@ -322,6 +328,7 @@ func applyTheme(p *themePalette) {
 	cPink = lipgloss.Color(h.pink)
 	cEmerald = lipgloss.Color(h.emerald)
 	cRose = lipgloss.Color(h.rose)
+	cBrick = lipgloss.Color(h.brick)
 
 	activeTheme = p.Name
 }
@@ -456,6 +463,7 @@ func resetTheme() {
 	cAmber, cDkAmber, cWhite, cGray = b.amber, b.dkAmber, b.white, b.gray
 	cBrWhite, cPink, cEmerald, cRose = b.brWhite, b.pink, b.emerald, b.rose
 	cFgInv = b.fgInv
+	cBrick = b.brick
 	activeTheme = ""
 	themeLight = false
 	themePageBg = ""

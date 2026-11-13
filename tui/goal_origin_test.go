@@ -107,6 +107,7 @@ func TestTreeNestsGoalUnderOriginSession(t *testing.T) {
 			SessionOrigins: map[string]string{goalSess: "lab", judge: "lab"}},
 	}
 	m.processJobTransitions(m.groups)
+	m.jobsOpen[sessKey("work", "")] = true // goal-other folds under the group row
 	for _, s := range []string{"lab", goalSess, judge} {
 		m.jobsOpen[sessKey("work", s)] = true
 	}
@@ -157,6 +158,7 @@ func TestTreeGoalFallsBackWhenOriginMissing(t *testing.T) {
 		"main": {Running: true},
 		"work": {Running: true, Sessions: []string{"alpha", goalSess}, SessionOrigins: map[string]string{goalSess: "gone"}},
 	}
+	m.jobsOpen[sessKey("work", "")] = true
 	rows := m.treeRows()
 	a := rowIndex(rows, "work", "alpha", "")
 	g := rowIndex(rows, "work", goalSess, "")

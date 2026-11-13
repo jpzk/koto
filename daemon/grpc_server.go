@@ -67,6 +67,7 @@ func toPBEvent(ev Event) *pb.Event {
 		Session:    ev.Session,
 		Severity:   ev.Severity,
 		Title:      ev.Title,
+		Deadline:   ev.Deadline,
 	}
 }
 
@@ -92,6 +93,18 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		out.SessionOrigins = make(map[string]string, len(gi.SessionOrigins))
 		for k, v := range gi.SessionOrigins {
 			out.SessionOrigins[sanitize(k)] = sanitize(v)
+		}
+	}
+	if len(gi.SessionModes) > 0 {
+		out.SessionModes = make(map[string]string, len(gi.SessionModes))
+		for k, v := range gi.SessionModes {
+			out.SessionModes[sanitize(k)] = sanitize(v)
+		}
+	}
+	if len(gi.PendingApprovals) > 0 {
+		out.PendingApprovals = make(map[string]int32, len(gi.PendingApprovals))
+		for k, v := range gi.PendingApprovals {
+			out.PendingApprovals[sanitize(k)] = v
 		}
 	}
 	for _, j := range gi.Jobs {
@@ -210,6 +223,8 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.KVM = optRaw(r.Kvm)
 	out.Image = optRaw(r.Image)
 	out.Allow = optRaw(r.Allow)
+	out.Mode = optRaw(r.Mode)
+	out.Session = r.GetSession()
 	return out
 }
 
@@ -950,6 +965,16 @@ func (s *kotoServer) SessionCreate(_ context.Context, r *pb.GroupReq) (*pb.BaseR
 	}
 	if !registeredGroup(r.Group) {
 		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
+	}
+	// Initial mode, set BEFORE the session is listed so its first turn can
+	// never run in another mode. Unsupported harness -> refused loudly, no
+	// silent yolo (the TUI only asks for plan on claude groups). Only a NEW
+	// session still at yolo takes it: session_create is not a posture verb,
+	// so it must never be a way to change (relax) an existing session's mode.
+	if r.Mode != "" && !slices.Contains(listSessions(r.Group), sess) && sessionMode(r.Group, sess) == modeYolo {
+		if _, err := setSessionMode(r.Group, sess, r.Mode, groupProviderName(r.Group)); err != nil {
+			return &pb.BaseResp{Error: err.Error()}, nil
+		}
 	}
 	registerSession(r.Group, sess)
 	if !slices.Contains(listSessions(r.Group), sess) {

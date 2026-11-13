@@ -27,7 +27,7 @@ func TestCtrlHTogglesHelp(t *testing.T) {
 		t.Fatal("helpOpen = true after second ctrl+h")
 	}
 	// esc closes too, from tree focus, leaving the tree focused.
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	m = press(t, m, tea.KeyCtrlH)
 	if !m.helpOpen {
 		t.Fatal("helpOpen = false after ctrl+h from tree focus")
@@ -45,7 +45,7 @@ func TestCtrlHTogglesHelp(t *testing.T) {
 // and a sampling of keys/commands, and replaces the chat frame entirely.
 func TestHelpViewRendersSections(t *testing.T) {
 	m := focusModel(t)
-	m.height = 80 // tall enough that nothing needs scrolling
+	m.height = 90 // tall enough that nothing needs scrolling
 	m = press(t, m, tea.KeyCtrlH)
 	out := stripANSI(m.View())
 	for _, want := range []string{

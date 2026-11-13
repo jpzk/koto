@@ -56,9 +56,13 @@ func opOf(t *testing.T, cmd tea.Cmd) daemonRespMsg {
 	if cmd == nil {
 		t.Fatal("no daemon command returned")
 	}
-	msg, ok := cmd().(daemonRespMsg)
+	out := cmd()
+	if sc, ok := out.(sessionCreatedMsg); ok { // session_create.go's own msg
+		return daemonRespMsg{op: "session_create", group: sc.group, session: sc.session, err: sc.err}
+	}
+	msg, ok := out.(daemonRespMsg)
 	if !ok {
-		t.Fatalf("cmd produced %T, want daemonRespMsg", cmd())
+		t.Fatalf("cmd produced %T, want daemonRespMsg", out)
 	}
 	return msg
 }

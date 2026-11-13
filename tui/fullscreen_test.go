@@ -50,7 +50,7 @@ func TestCtrlFFullscreenChatHidesSplit(t *testing.T) {
 // restores tree mode, so the round-trip ends where it started.
 func TestCtrlFFromTreeRoundTrips(t *testing.T) {
 	m := focusModel(t)
-	m = press(t, m, tea.KeyTab) // open the tree
+	m = pressTree(t, m) // open the tree
 	if m.focus != focusTree {
 		t.Fatalf("focus = %v after tab, want focusTree", m.focus)
 	}
@@ -120,7 +120,7 @@ func TestFocusChangeExitsFullscreen(t *testing.T) {
 	// Chat fullscreen + tab → tree opens, fullscreen off.
 	m := splitShellModel(t)
 	m = pressCtrlF(t, m)
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.fullscreen || m.focus != focusTree {
 		t.Fatalf("fullscreen=%v focus=%v after tab, want false/focusTree", m.fullscreen, m.focus)
 	}

@@ -54,6 +54,7 @@ import (
 //
 //	cRed error · cYellow working · cMagenta thinking/keys
 //	cPink high-severity · cEmerald normal-severity · cRose over-threshold
+//	cBrick yolo mode chip
 var (
 	cBlack   = lipgloss.Color("0")
 	cRed     = lipgloss.Color("1") // error
@@ -67,6 +68,11 @@ var (
 	cPink    = lipgloss.Color("13") // high severity — bright, to part it from cMagenta
 	cEmerald = lipgloss.Color("2")  // notification banner, normal severity
 	cRose    = lipgloss.Color("9")  // over-threshold alert — bright, to part it from cRed
+	// cBrick is the yolo mode chip in the prompt box (approvals.go
+	// modeChipColor): brick red, a status hue of its own so "tools run
+	// unasked" never reads as cRed's "error". 124 (#af0000) is the 256-cube
+	// fallback; a theme picks its shade by ground luminance like cRed.
+	cBrick = lipgloss.Color("124")
 	// cFgInv is the text drawn on top of cAmber. It is black in the built-in
 	// palette — same value cBlack has — but the two roles come apart under a
 	// theme: cBlack becomes b_low (a panel tier nothing paints any more, kept
@@ -259,6 +265,12 @@ func (m Model) view() string {
 	}
 	if m.newGroup.open {
 		return m.renderNewGroup()
+	}
+	if m.approvalCard.open {
+		return m.renderApprovalCard()
+	}
+	if m.modeSel.open {
+		return m.renderModeSel()
 	}
 	if m.destroyConfirm.open {
 		// ctrl+x destroy confirmation: paints the whole frame like the
@@ -529,7 +541,7 @@ func (m Model) renderStatusLeft() string {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
 	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
-	return app + grp + m.renderLoadingSegment()
+	return app + grp + m.renderModeSegment() + m.renderLoadingSegment()
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
@@ -794,7 +806,7 @@ func (m Model) renderTree(rows int) string {
 	header := ""
 	if m.focus == focusTree {
 		header = inv(cFgInv, cAmber).Bold(true).
-			Render(" agents (tab back) ")
+			Render(" agents (esc back) ")
 	} else {
 		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
 			Render(" agents ")
@@ -963,15 +975,34 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// is right-aligned, the count travels with the name.
 	cnt := ""
 	if !isJob {
-		if n := m.foldedJobs(r.group, r.session); n > 0 {
-			cnt = fmt.Sprintf(" (%d)", n)
-		}
+		cnt = m.foldLabel(r.group, r.session)
 	}
 	if badge != "" {
 		badgeW = cellWidth(badge)
 		w -= badgeW
 		if w < 1 {
 			w = 1
+		}
+	}
+	// Permission-mode badge on every conversation row (the group row is the
+	// default session) and, when tool calls wait for the operator, a yellow
+	// "!N" inbox badge (approvals.go). Reserved out of the name field like
+	// the badge so the row never overflows.
+	markPend, markMode := "", ""
+	if !isJob {
+		sk := ""
+		if isSession {
+			sk = r.session
+		}
+		md := m.sessionMode(r.group, sk)
+		markMode = " " + modeLetter(md)
+		if n := m.pendingFor(r.group, sk); n > 0 {
+			markPend = fmt.Sprintf(" !%d", n)
+		}
+		if mw := cellWidth(markPend + markMode); w-mw >= 1 {
+			w -= mw
+		} else {
+			markPend, markMode = "", ""
 		}
 	}
 	dot := "○ "
@@ -1056,8 +1087,23 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// spinner and no blink is stable across ticks and hits the cache; an
 	// animating row misses once per spinner frame, which is the work actually
 	// worth doing.
+	// The folded count is a fold's only trace, so it never gets cut: when
+	// name+count overflow the field, the count first tightens ("(*1j 1g)" ->
+	// "*1j1g"), then falls back to the bare total ("(*2)"); the NAME gives up
+	// the remaining cells (keeping at least 3).
+	if cnt != "" && cellWidth(name+cnt) > w {
+		j, gl, live := m.foldedCount(r.group, r.session)
+		nw := min(cellWidth(name), 3)
+		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live)} {
+			if cellWidth(cnt) <= w-nw {
+				break
+			}
+			cnt = c
+		}
+		name = truncWidth(name, max(w-cellWidth(cnt), 1))
+	}
 	rowKey := strings.Join([]string{
-		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge,
+		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge, markPend, markMode,
 		strconv.Itoa(w), strconv.FormatBool(isCur), strconv.FormatBool(hov),
 		strconv.FormatBool(unread),
 	}, "\x00")
@@ -1075,7 +1121,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		// same fixed width on every row — the background is the selection
 		// marker, and a width that varied with branch depth or badge glyphs
 		// read as a rendering glitch.
-		txt := " " + r.branch + dot + field + badge
+		txt := " " + r.branch + dot + field + badge + markPend + markMode
 		if pw := cellWidth(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
@@ -1096,6 +1142,12 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	}
 	if badge != "" {
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(badge)
+	}
+	if markPend != "" {
+		parts += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(markPend)
+	}
+	if markMode != "" {
+		parts += modeStyle(strings.TrimSpace(modeOfLetter(markMode))).Render(markMode)
 	}
 	return m.cacheTreeRow(rowKey, parts)
 }
@@ -1231,12 +1283,12 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 // --- log area ----------------------------------------------------------------
 
 // treePaneW is leftPaneWidth when the tree is visible and 0 otherwise. In the
-// normal chat view that's exactly when the tree is focused (tab toggles both
+// normal chat view that's exactly when the tree is focused (alt+[ toggles both
 // together). While the shell pane itself is FOCUSED, keystrokes go to the
 // guest pty rather than tree navigation — the tree stays visible if it was
 // open (focused) at the moment the shell took focus, tracked via
 // preShellFocus. With the pane open but unfocused (shellOpen split mode) the
-// normal rule applies: tab toggles the tree in and out beside the split, and
+// normal rule applies: alt+[ toggles the tree in and out beside the split, and
 // tree navigation works as usual.
 func (m *Model) treePaneW() int {
 	if m.fullscreen {
@@ -1537,7 +1589,7 @@ func (m *Model) inputBoxW() int {
 // inputTextCols is the column budget for the prompt input's text: the
 // bordered box's interior minus the 2-cell prefix and the textinput's own
 // prompt. Matches the MaxWidth clip renderInput applies to each body row.
-func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputPromptW()) }
+func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.modeChipW()-m.inputPromptW()) }
 
 // inputPromptW is the rendered width of the textinput's prompt ("> "), which
 // we now draw ourselves — bubbles' View() only handles the placeholder path.
@@ -1794,22 +1846,26 @@ func (m Model) renderInput() string {
 		return s
 	}
 
+	// The session's permission mode rides inside the box, ahead of the text:
+	// always visible, so what a prompt is about to be allowed to do is never
+	// a tree glance away.
+	chip := m.renderModeChip()
 	var rows []string
 	if m.input.Value() == "" {
 		// Placeholder path: one line, never wrapped. It used to carry the
 		// whole slash-command list, which bubbles truncated to input.Width —
 		// so what an empty box actually showed was an arbitrary prefix of it.
 		// It now points at ctrl+h instead (see newModel).
-		rows = []string{clip(prefix + " " + m.input.View())}
+		rows = []string{clip(prefix + " " + chip + m.input.View())}
 	} else {
 		rows = m.renderInputLines(m.inputTextCols())
 		// Continuations align under the first row's text — the glyph, the
 		// space and the textinput prompt are all first-row-only.
-		cont := strings.Repeat(" ", 2+m.inputPromptW())
+		cont := strings.Repeat(" ", 2+m.modeChipW()+m.inputPromptW())
 		for i, row := range rows {
 			pfx := cont
 			if i == 0 {
-				pfx = prefix + " " + m.input.PromptStyle.Render(m.input.Prompt)
+				pfx = prefix + " " + chip + m.input.PromptStyle.Render(m.input.Prompt)
 			}
 			rows[i] = clip(pfx + row)
 		}
@@ -1850,13 +1906,13 @@ func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string 
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
 	if m.focus == focusTree {
-		// ⇥ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
+		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
 		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
 		// Key names are spelled out in mono rather than left to the ASCII
 		// fold: a width-preserving stand-in for ⇥/⎋/⌥ is a single cryptic
 		// letter, and this row is flow text that can afford the extra columns
 		// (it's chosen before layout, so the widths still add up).
-		left := gl(" ↑↓ switch · ^r prompts · ⇥/⎋ close", " up/dn switch . ^r prompts . tab/esc close")
+		left := gl(" ↑↓ switch · ^r prompts · ⌥[/⎋ close", " up/dn switch . ^r prompts . alt-[/esc close")
 		if m.shellFocusable() {
 			left += gl(" · ⌥→ term", " . alt-right term")
 		}
@@ -1882,7 +1938,7 @@ func (m Model) renderHint() string {
 	} else {
 		parts = append(parts, gl(" ↩ send", " enter send"))
 	}
-	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⇥/⎋ tree", "tab/esc tree"))
+	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⌥[/⎋ tree", "alt-[/esc tree"), gl("⇥ mode", "tab mode"))
 	if m.shellFocusable() {
 		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}
@@ -1903,9 +1959,9 @@ func (m Model) renderHint() string {
 	}
 	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")
-	shellHint := "^] shell"
+	shellHint := gl("⌥] shell", "alt-] shell")
 	if m.shellSplitVisible() {
-		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
+		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render(shellHint)
 	}
 	parts = append(parts, shellHint)
 	fullHint := "^f full"

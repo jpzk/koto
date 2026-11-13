@@ -43,6 +43,7 @@ func iconPad(s string, w int) string {
 // unless asked) with ANSI stripped.
 func sessionRow(t *testing.T, m Model, s string, hov, unread bool) string {
 	t.Helper()
+	unfoldGoals(&m)
 	for _, r := range m.treeRows() {
 		if r.session == s && r.job == "" {
 			return stripANSI(m.renderTreeRow(r, false, hov, unread, iconPad))

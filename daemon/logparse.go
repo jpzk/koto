@@ -316,6 +316,20 @@ func (p *logParser) feedLine(line string) []Event {
 		e.Ts = float64(ms) / 1000.0
 		e.Session = sess
 		return []Event{e}
+	case strings.HasPrefix(line, "[[approval ") && strings.HasSuffix(line, "]]"):
+		// Host-written by approvals.go: "[[approval <id> <decision> by <who>]]".
+		// Guest text can never produce it (turnWriter escapes "[["), so a
+		// well-formed line is the daemon's record of a decision.
+		f := strings.Fields(strings.TrimSuffix(line[len("[[approval "):], "]]"))
+		if len(f) != 4 || f[2] != "by" {
+			return nil
+		}
+		switch f[1] {
+		case decAllow, decDeny, decTimeout:
+		default:
+			return nil
+		}
+		return []Event{ev(Event{Event: "approval", ID: f[0], Msg: f[1], Name: f[3]})}
 	case strings.HasPrefix(line, "[[think_end]] ") || strings.HasPrefix(line, "[[tool_out_end]] "):
 		// Stray close marker outside a block (e.g. an empty thinking block
 		// that emitted begin+end while state was still settling). Swallow it

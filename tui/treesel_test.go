@@ -19,6 +19,10 @@ func treeModel(t *testing.T, groups map[string]GroupInfo, g, sess, job string) M
 		// Job rows are folded by default; unfold the target conversation.
 		m.jobsOpen[sessKey(g, sess)] = true
 	}
+	if p, ok := m.foldParent(g, sess); ok {
+		// Goal rows fold with their parent's child list (folded by default).
+		m.jobsOpen[sessKey(g, p)] = true
+	}
 	rows := m.treeRows()
 	idx := -1
 	for i, r := range rows {

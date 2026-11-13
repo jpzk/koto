@@ -630,7 +630,7 @@ func (m Model) renderTopScrollbar() string {
 // renderTopHint mirrors renderLogHint with fleet-view bindings.
 func (m Model) renderTopHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
-	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ select", "up/dn select"), gl("⇧↑↓ tree", "shift-up/dn tree"), "pgup/dn scroll", "tab tree", "^k close", "^c exit"}
+	parts := []string{" fleet · by " + m.topSort.String(), "s/c/m/t sort", gl("↑↓ select", "up/dn select"), gl("⇧↑↓ tree", "shift-up/dn tree"), "pgup/dn scroll", gl("⌥[ tree", "alt-[ tree"), "^k close", "^c exit"}
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
@@ -696,7 +696,7 @@ func (m Model) handleTopKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.refreshTopViewport()
 		m.topVP.GotoTop()
 		return m, nil
-	case "tab":
+	case keyTreeToggle:
 		// Show/hide the tree beside the table without leaving the view.
 		// Tree visibility here is preTopFocus (the log view's convention),
 		// so this doubles as where esc lands you — which is the honest
