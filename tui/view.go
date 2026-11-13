@@ -266,7 +266,7 @@ func (m Model) view() string {
 	if m.newGroup.open {
 		return m.renderNewGroup()
 	}
-	if m.approvalCard.open {
+	if m.approvalCard.open && !m.approvalCard.inline {
 		return m.renderApprovalCard()
 	}
 	if m.modeSel.open {
@@ -1624,6 +1624,12 @@ func (m *Model) maxInputRows() int {
 // View() and logViewportSize() budget the chat pane around it, so this must
 // agree with what renderInput actually draws.
 func (m *Model) inputRows() int {
+	if m.approvalCard.open && m.approvalCard.inline {
+		return len(m.inlineApprovalRows())
+	}
+	if m.approvalInputLocked() {
+		return 1 // renderInputLocked
+	}
 	v := m.input.Value()
 	if v == "" {
 		return 1 // placeholder is clipped, never wrapped — see renderInput
@@ -1826,6 +1832,14 @@ func (m Model) renderInputLines(cols int) []string {
 }
 
 func (m Model) renderInput() string {
+	if m.approvalCard.open && m.approvalCard.inline {
+		// A tool approval of the viewed session takes the prompt's place
+		// (approvals.go); the draft sits untouched in m.input meanwhile.
+		return m.renderInlineApproval()
+	}
+	if m.approvalInputLocked() {
+		return m.renderInputLocked()
+	}
 	borderColor := cGray
 	prefixColor := cGray
 	if m.focus == focusInput {
@@ -1905,6 +1919,10 @@ func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string 
 
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
+	if m.approvalCard.open && m.approvalCard.inline {
+		// The card carries its own key hint; "↩ send" would be a lie here.
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(dim.Render(" tool approval pending"))
+	}
 	if m.focus == focusTree {
 		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
 		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
