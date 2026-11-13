@@ -20,11 +20,26 @@ func noQueue(t *testing.T, g, session string) {
 	}
 }
 
+// detachQueues forgets g's session queues left by EARLIER tests: queues are
+// package globals and an idle send worker keeps its entry until it retires,
+// so under load a previous test's tg/default worker could still be listed and
+// read as "the refused send was queued". The stale worker keeps its own
+// channel and retires on its own (same pattern as queue_test.go).
+func detachQueues(g string, sessions ...string) {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	for _, s := range sessions {
+		delete(queues, sessKey(g, s))
+	}
+	delete(groupQueuedBytes, g)
+}
+
 // Unattended producers (ctl send, cron, goal driver) are refused up front
 // when the target session is in confirm mode; yolo and plan pass.
 func TestUnattendedSendIntoConfirmRejected(t *testing.T) {
 	fcHarness(t)
 	quietLogAlerts(t)
+	detachQueues("tg", "", "rev", "other")
 	if _, err := setSessionMode("tg", "", modeConfirm, providerClaude); err != nil {
 		t.Fatal(err)
 	}
