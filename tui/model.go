@@ -651,9 +651,12 @@ type Model struct {
 	// Permission modes + tool-approval inbox (approvals.go): open requests
 	// keyed approvalKey, the alt+a card, the /mode picker, and the last
 	// ListPending fetch (rate limit).
-	approvals      map[string]approvalItem
-	approvalCard   approvalCardState
-	modeSel        modeSelState
+	approvals    map[string]approvalItem
+	approvalCard approvalCardState
+	modeSel      modeSelState
+	// modeWant: the mode tab / shift+tab asked for, per sessKey, while the
+	// config RPC is in flight (mode_keys.go) — the chip shows it at once.
+	modeWant       map[string]string
 	pendingFetchAt time.Time
 
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
@@ -3046,6 +3049,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.handleSessionCreated(msg)
 		return m, nil
 
+	case modeCycledMsg:
+		return m, m.handleModeCycled(msg)
+
 	case daemonRespMsg:
 		return m, m.handleDaemonResp(msg)
 
@@ -4648,8 +4654,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, daemonCmd(m.sock, "interrupt", m.cur, map[string]any{"session": m.activeSession(m.cur)})
 		}
 		// Second meaning, with no turn to stop: the message-bar ↔ tree
-		// toggle. Tab is the same toggle and keeps working mid-turn (while
-		// a turn runs esc means interrupt, so reach the tree with tab).
+		// toggle. alt+[ is the same toggle and keeps working mid-turn (while
+		// a turn runs esc means interrupt, so reach the tree with alt+[).
 		if m.focus == focusTree {
 			m.exitTree()
 		} else {
@@ -4682,11 +4688,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if s == "tab" {
-		// Tab mirrors esc/ctrl+[ — the tree open/close toggle — but keeps
-		// working mid-turn (esc doubles as the interrupt then). It never
-		// reaches here with the pty focused: the shell-focus block forwards
-		// tab to the guest as a completion key; alt+←/→ move focus instead.
+	if s == "tab" || s == "shift+tab" {
+		// Tab / shift+tab cycle the current session's permission mode
+		// (mode_keys.go). Every modal, card and dialog routed its keys
+		// above, and the shell-focus block forwards tab to the guest, so
+		// tab only means "mode" on the plain chat + tree surface.
+		dir := 1
+		if s == "shift+tab" {
+			dir = -1
+		}
+		return m, m.cycleMode(dir)
+	}
+	if s == keyTreeToggle {
+		// alt+[ mirrors esc/ctrl+[ — the tree open/close toggle — but keeps
+		// working mid-turn (esc doubles as the interrupt then). Took over
+		// from tab, which now cycles the session mode. See mode_keys.go for
+		// why ESC '[' (the CSI introducer) still parses as alt+[.
 		if m.focus == focusTree {
 			m.exitTree()
 		} else {
@@ -4700,12 +4717,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if s == "ctrl+x" && m.focus == focusInput {
 		// Destroy-hovered is a tree binding (see destroy_confirm.go) — from
 		// the message bar, point at it rather than guess a target.
-		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group / session — tab into the tree first"})
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+x destroys the hovered group / session — alt+[ (or esc) into the tree first"})
 		return m, nil
 	}
 	if s == "ctrl+s" && m.focus == focusInput {
 		// Stop-hovered is a tree binding too (stop_confirm.go): hint only.
-		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+s stops the hovered group — tab into the tree first"})
+		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+s stops the hovered group — alt+[ (or esc) into the tree first"})
 		return m, nil
 	}
 	if m.focus == focusTree {

@@ -129,12 +129,12 @@ func (m *Model) handleLeftClick(x, y int) bool {
 		// focus), so the chat column would widen and reflow under the cursor
 		// mid-read — and a click on a message reads as "look at this", not
 		// "close the tree". The prompt box below is where a click means
-		// "give me the input"; tab still toggles as before.
+		// "give me the input"; alt+[ / esc still toggle as before.
 		if y <= m.chatRows() {
 			return true
 		}
 		// Prompt box / hint / metrics rows → focus the input, mirroring the
-		// "tab" branch (keeps any draft; drops the job peek with the tree).
+		// alt+[ branch (keeps any draft; drops the job peek with the tree).
 		m.clearPeek()
 		m.focus = focusInput
 		m.input.Focus()

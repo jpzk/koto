@@ -72,7 +72,8 @@ func helpSections() []helpSection {
 		}},
 		{"CHAT + TREE", []helpEntry{
 			{"enter", "send message; in the tree: back to the message bar"},
-			{"tab", "toggle tree focus"},
+			{"alt+[", "toggle tree focus (fallback: esc / ctrl+[ when no turn runs)"},
+			{"tab / shift+tab", "cycle this session's mode yolo > plan > confirm (backwards)"},
 			{"up/down", "scroll chat; in the tree: move the cursor"},
 			{"pgup/pgdn", "page scroll (home/end: top/bottom)"},
 			{"right/left", "tree row, empty message bar: unfold/fold job rows"},
@@ -92,7 +93,7 @@ func helpSections() []helpSection {
 		{"FLEET VIEW (ctrl+k)", []helpEntry{
 			{"up/down", "move the selection (tree cursor follows)"},
 			{"s / c / m / t", "sort by space / cpu / mem / tok-s"},
-			{"tab", "toggle the tree pane alongside"},
+			{"alt+[", "toggle the tree pane alongside"},
 			{"shift+up/down", "move the tree cursor row-by-row (also in the log view)"},
 			{"pgup/pgdn", "scroll the table"},
 			{"esc / ctrl+k", "close"},

@@ -806,7 +806,7 @@ func (m Model) renderTree(rows int) string {
 	header := ""
 	if m.focus == focusTree {
 		header = inv(cFgInv, cAmber).Bold(true).
-			Render(" agents (tab back) ")
+			Render(" agents (esc back) ")
 	} else {
 		header = lipgloss.NewStyle().Foreground(cAmber).Bold(true).
 			Render(" agents ")
@@ -1270,12 +1270,12 @@ func (m Model) renderJobPeek(rows int) (string, bool) {
 // --- log area ----------------------------------------------------------------
 
 // treePaneW is leftPaneWidth when the tree is visible and 0 otherwise. In the
-// normal chat view that's exactly when the tree is focused (tab toggles both
+// normal chat view that's exactly when the tree is focused (alt+[ toggles both
 // together). While the shell pane itself is FOCUSED, keystrokes go to the
 // guest pty rather than tree navigation — the tree stays visible if it was
 // open (focused) at the moment the shell took focus, tracked via
 // preShellFocus. With the pane open but unfocused (shellOpen split mode) the
-// normal rule applies: tab toggles the tree in and out beside the split, and
+// normal rule applies: alt+[ toggles the tree in and out beside the split, and
 // tree navigation works as usual.
 func (m *Model) treePaneW() int {
 	if m.fullscreen {
@@ -1893,13 +1893,13 @@ func drawBox(b lipgloss.Border, fg lipgloss.Color, w int, rows []string) string 
 func (m Model) renderHint() string {
 	dim := lipgloss.NewStyle().Foreground(cGray)
 	if m.focus == focusTree {
-		// ⇥ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
+		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
 		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
 		// Key names are spelled out in mono rather than left to the ASCII
 		// fold: a width-preserving stand-in for ⇥/⎋/⌥ is a single cryptic
 		// letter, and this row is flow text that can afford the extra columns
 		// (it's chosen before layout, so the widths still add up).
-		left := gl(" ↑↓ switch · ^r prompts · ⇥/⎋ close", " up/dn switch . ^r prompts . tab/esc close")
+		left := gl(" ↑↓ switch · ^r prompts · ⌥[/⎋ close", " up/dn switch . ^r prompts . alt-[/esc close")
 		if m.shellFocusable() {
 			left += gl(" · ⌥→ term", " . alt-right term")
 		}
@@ -1925,7 +1925,7 @@ func (m Model) renderHint() string {
 	} else {
 		parts = append(parts, gl(" ↩ send", " enter send"))
 	}
-	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⇥/⎋ tree", "tab/esc tree"))
+	parts = append(parts, gl("↑↓ scroll", "up/dn scroll"), gl("⌥[/⎋ tree", "alt-[/esc tree"), gl("⇥ mode", "tab mode"))
 	if m.shellFocusable() {
 		parts = append(parts, gl("⌥→ term", "alt-right term"))
 	}

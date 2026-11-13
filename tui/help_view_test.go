@@ -27,7 +27,7 @@ func TestCtrlHTogglesHelp(t *testing.T) {
 		t.Fatal("helpOpen = true after second ctrl+h")
 	}
 	// esc closes too, from tree focus, leaving the tree focused.
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	m = press(t, m, tea.KeyCtrlH)
 	if !m.helpOpen {
 		t.Fatal("helpOpen = false after ctrl+h from tree focus")

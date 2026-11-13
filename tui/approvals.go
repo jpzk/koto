@@ -83,6 +83,9 @@ type modeSelState struct {
 
 // sessionMode is the effective mode of (g, s); "" s = default session.
 func (m Model) sessionMode(g, s string) string {
+	if w, ok := m.modeWant[sessKey(g, s)]; ok {
+		return w // a tab switch in flight (mode_keys.go)
+	}
 	if md := m.groups[g].SessionModes[s]; md != "" {
 		return md
 	}
