@@ -361,6 +361,17 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	tr.workerStart(cfg.Provider, cfg.Model)
 	env = withTraceHeaders(env, tr.workerTraceparent())
 	defer func() { tr.workerEnd(tw.stalled.Load(), "") }()
+	// The permission mode gates every worker launch, compaction included: a
+	// harness that cannot honour it refuses the turn (never a silent yolo).
+	mode, merr := normTurnMode(req.GetMode())
+	if merr == nil {
+		merr = harnessModeErr(cfg.Provider, mode)
+	}
+	if merr != nil {
+		tw.errf("%v", merr)
+		return
+	}
+	tr.workerAttr("permission.mode", mode)
 	if cw, ok := parseCompactMsg(req.Msg); ok {
 		runCompact(tw, req, cfg, sess, cw, env)
 		return
@@ -555,8 +566,16 @@ func prepareSessDir(dir string) error {
 var startClaudeWorker = startWorker
 
 func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrateContinue bool, env []string) {
-	args := []string{"-p", "--bare", "--dangerously-skip-permissions",
-		"--output-format", "stream-json", "--include-partial-messages", "--verbose"}
+	mode, err := normTurnMode(req.GetMode())
+	if err != nil {
+		tw.errf("%v", err)
+		return
+	}
+	args, err := claudeBaseArgs(mode)
+	if err != nil {
+		tw.errf("%v", err)
+		return
+	}
 	// Session selection: a captured id resumes that exact conversation; no
 	// id + migration shim continues the pre-sessions thread once; otherwise
 	// this is the session's first turn and starts fresh.
