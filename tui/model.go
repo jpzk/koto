@@ -653,7 +653,13 @@ type Model struct {
 	// ListPending fetch (rate limit).
 	approvals    map[string]approvalItem
 	approvalCard approvalCardState
-	modeSel      modeSelState
+	// approvalShown: requests whose inline card already popped up once (after
+	// esc it comes back only when focus returns to the prompt).
+	// approvalAnswered: decided here, waiting for the daemon's
+	// approval_resolved — never offered again.
+	approvalShown    map[string]bool
+	approvalAnswered map[string]bool
+	modeSel          modeSelState
 	// modeWant: the mode tab / shift+tab asked for, per sessKey, while the
 	// config RPC is in flight (mode_keys.go) — the chip shows it at once.
 	modeWant       map[string]string
@@ -2009,6 +2015,13 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 	m.cloneOpenModals()
 	m.keyEditOnly, m.shellOnly, m.bgQuiet = false, false, false
 	nm, cmd := m.update(raw)
+	if nm.syncInlineApproval() {
+		// The inline approval card came or went (approvals.go): the prompt
+		// box changed height, so the chat viewport is re-sized.
+		nm.keyEditOnly, nm.shellOnly, nm.bgQuiet = false, false, false
+		nm.resizeViewport()
+		nm.refreshLog()
+	}
 	if nm.keyEditOnly || nm.shellOnly || nm.bgQuiet {
 		// A pure prompt edit (framecache.go) or a pty-only message
 		// (shellframe.go): nothing treeRows reads changed,
@@ -4361,8 +4374,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.handleNewGroupKey(msg)
 	}
 	if m.approvalCard.open {
-		// Tool-approval card (approvals.go): opened only by the operator
-		// (alt+a / /approve), owns every key; bare enter = deny.
+		// Tool-approval card (approvals.go): the alt+a modal, or the inline
+		// card a request of the viewed session opens in the prompt's place.
+		// Owns every key; bare enter = deny, allow = → then enter.
 		return m.handleApprovalCardKey(msg)
 	}
 	if m.modeSel.open {
@@ -4726,6 +4740,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// Stop-hovered is a tree binding too (stop_confirm.go): hint only.
 		m.addLine(logLine{kind: "sys", group: m.cur, text: "ctrl+s stops the hovered group — alt+[ (or esc) into the tree first"})
 		return m, nil
+	}
+	if m.approvalInputLocked() && (m.focus == focusTree || m.focus == focusInput) {
+		// The viewed session waits on a tool approval: the prompt is
+		// disabled (draft kept). Tree navigation still works; anything that
+		// would type into, submit or recall the prompt is swallowed. Focus
+		// on the prompt itself re-opens the card (syncInlineApproval).
+		if m.focus == focusInput {
+			return m, nil
+		}
+		switch s {
+		case "up", "down", "pgup", "pgdown", "shift+up", "shift+down", "home", "end",
+			"ctrl+t", "ctrl+x", "ctrl+s":
+		case "left", "right":
+			if strings.TrimSpace(m.input.Value()) != "" {
+				return m, nil // would move the draft's cursor
+			}
+		case "enter":
+			// Never submits the draft: back to the prompt, where the card
+			// re-opens (its enter guard eats this very keystroke's echo).
+			m.exitTree()
+			return m, nil
+		default:
+			return m, nil
+		}
 	}
 	if m.focus == focusTree {
 		rows := m.treeRows()
