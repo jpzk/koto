@@ -137,9 +137,14 @@ func TestApprovalCardRender40Cols(t *testing.T) {
 	assertFits(t, view, 40)
 	v := ansi.Strip(view)
 	for _, want := range []string{"approve Edit?", "file: /workspace/a.go", "- old line", "+ new line",
-		"auto-deny at 12:30:45", "[ Deny ]", "[ Allow ]", "alpha:default"} {
+		"auto-deny at 12:30:45", "‹ Deny ›", "Allow", "alpha:default", "select", "confirm"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("card lacks %q:\n%s", want, v)
+		}
+	}
+	for _, gone := range []string{"[ Deny ]", "[ Allow ]", "y allow"} {
+		if strings.Contains(v, gone) {
+			t.Errorf("card still shows %q:\n%s", gone, v)
 		}
 	}
 }
@@ -171,12 +176,22 @@ func TestApprovalCardEnterDenies(t *testing.T) {
 	}
 }
 
-func TestApprovalCardYAllows(t *testing.T) {
+// There is no one-key allow: y / Y (and vi l) are swallowed, the card stays
+// open on Deny and nothing is sent.
+func TestApprovalCardYDoesNothing(t *testing.T) {
 	sent := recordApprovals(t)
 	m := openCard(t)
-	dpress(t, m, runeKey('y'))
-	if len(*sent) != 1 || !(*sent)[0].allow {
-		t.Fatalf("sent = %+v, want one allow", *sent)
+	for _, r := range "yYlh" {
+		m, _ = dpress(t, m, runeKey(r))
+	}
+	if len(*sent) != 0 || !m.approvalCard.open || m.approvalCard.allow {
+		t.Fatalf("y/Y/l/h: sent=%+v open=%v allow=%v, want nothing sent, card open on Deny",
+			*sent, m.approvalCard.open, m.approvalCard.allow)
+	}
+	// ...and an enter after them still denies.
+	dpress(t, m, keyEnter)
+	if len(*sent) != 1 || (*sent)[0].allow {
+		t.Fatalf("enter after y: sent=%+v, want one deny", *sent)
 	}
 }
 

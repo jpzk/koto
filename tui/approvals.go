@@ -21,11 +21,14 @@ package main
 //   - Card: tool, summary, the input (a -/+ diff for Edit/MultiEdit/Write,
 //     "$ cmd" for Bash, key: value otherwise), and the host deadline as a
 //     FIXED wall-clock time ("auto-deny at 15:04:05", not a countdown).
-//     Focus starts on [ Deny ]: a bare enter denies. y allows, n denies,
-//     m opens a message box (enter = deny with that message as the reason
-//     the model sees), tab/←/→ move focus, esc closes the card and leaves
-//     the request pending. Every line fits a 36-40 column phone viewport.
-//     There is deliberately no "always allow".
+//     The decision is a horizontal selection "‹ Deny ›   Allow": Deny is
+//     preselected, → (or tab) moves to Allow, ← (or shift+tab) back, enter
+//     confirms the selection. Allowing therefore always takes two keys,
+//     → then enter — there is no one-key allow (y/Y/l do nothing), so a
+//     stray keystroke can deny at worst. n denies, m opens a message box
+//     (enter = deny with that message as the reason the model sees), esc
+//     closes the card and leaves the request pending. Every line fits a
+//     36-40 column phone viewport. There is deliberately no "always allow".
 
 import (
 	"encoding/json"
@@ -69,7 +72,7 @@ func (a approvalItem) key() string { return approvalKey(a.group, a.session, a.id
 type approvalCardState struct {
 	open    bool
 	key     string
-	allow   bool // focus on [ Allow ]; zero value = [ Deny ] focused
+	allow   bool // Allow selected; zero value = Deny (the preselection)
 	msgMode bool // deny-with-message box open
 	msg     textinput.Model
 }
@@ -261,11 +264,11 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.msg, cmd = m.approvalCard.msg.Update(msg)
 		return m, cmd
 	}
+	// No one-key allow: y/Y (and the vi l/h) are deliberately unbound and
+	// swallowed with every other stray key. Allow = → (or tab) then enter.
 	switch msg.String() {
 	case "enter":
 		return m.answerApproval(a, m.approvalCard.allow, "")
-	case "y", "Y":
-		return m.answerApproval(a, true, "")
 	case "n", "N", "d":
 		return m.answerApproval(a, false, "")
 	case "m", "M":
@@ -273,10 +276,11 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.allow = false
 		m.approvalCard.msg = newDenyMsgInput()
 	case "tab", "shift+tab":
+		// Two items, so next/previous with wrap are both a toggle.
 		m.approvalCard.allow = !m.approvalCard.allow
-	case "left", "h":
+	case "left":
 		m.approvalCard.allow = false
-	case "right", "l":
+	case "right":
 		m.approvalCard.allow = true
 	case "esc", "q", "ctrl+c", "alt+a":
 		m.approvalCard = approvalCardState{}
@@ -406,18 +410,79 @@ func approvalInputLines(tool, input string, w int) []string {
 	return out
 }
 
-// renderApprovalCard paints the card centered over a blank ground.
-func (m Model) renderApprovalCard() string {
-	a := m.approvals[m.approvalCard.key]
-	boxW := min(approvalCardMaxW, max(20, m.width))
-	w := boxW - 4 // border + padding
+// approvalQueuePos is a's 1-based place among the open requests of its own
+// session (oldest deadline first) and how many that session has.
+func (m Model) approvalQueuePos(a approvalItem) (int, int) {
+	pos, n := 0, 0
+	for _, b := range m.sortedApprovals() {
+		if b.group != a.group || b.session != a.session {
+			continue
+		}
+		n++
+		if b.key() == a.key() {
+			pos = n
+		}
+	}
+	return pos, n
+}
+
+// approvalPills is the decision row: the selected item is a filled pill
+// with chevrons (Deny amber, Allow red), the other plain gray text of the
+// same width, so the row never shifts and mono still shows the selection.
+func approvalPills(allow bool) string {
+	sel := lipgloss.NewStyle().Foreground(cFgInv).Bold(true)
+	idle := lipgloss.NewStyle().Foreground(cGray)
+	l, r := gl("‹", "<"), gl("›", ">")
+	deny, al := idle.Render("  Deny  "), idle.Render("  Allow  ")
+	if allow {
+		al = sel.Background(cRed).Render(l + " Allow " + r)
+	} else {
+		deny = sel.Background(cAmber).Render(l + " Deny " + r)
+	}
+	return deny + "  " + al
+}
+
+// approvalHintParts is the key hint; joined on one line when it fits,
+// otherwise broken at a " · " so no part is ever split.
+func approvalHint(w int) []string {
+	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg", "esc later"}
+	var out []string
+	cur := ""
+	for _, p := range parts {
+		switch {
+		case cur == "":
+			cur = p
+		case ansi.StringWidth(cur+" · "+p) <= w:
+			cur += " · " + p
+		default:
+			out = append(out, cur)
+			cur = p
+		}
+	}
+	return append(out, cur)
+}
+
+// approvalCardRows is the card content at inner width w: title (+ "i/N"
+// when the session has several requests), group:session, summary, the
+// input body (capped at bodyMax lines), the deadline, the pills and the
+// hint. Shared by the centered modal and the inline card (item 3).
+func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	yel := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	gray := lipgloss.NewStyle().Foreground(cGray)
+	title := "approve " + a.tool + "?"
+	if pos, n := m.approvalQueuePos(a); n > 1 {
+		q := fmt.Sprintf("%d/%d", pos, n)
+		if pad := w - ansi.StringWidth(title) - ansi.StringWidth(q); pad >= 1 {
+			title += strings.Repeat(" ", pad) + q
+		} else {
+			title += " " + q
+		}
+	}
 	var rows []string
-	for _, l := range wrapCells("approve "+a.tool+"?", w) {
+	for _, l := range wrapCells(title, w) {
 		rows = append(rows, yel.Render(l))
 	}
-	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session)+" · "+a.id, w) {
+	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session), w) {
 		rows = append(rows, gray.Render(l))
 	}
 	if a.summary != "" {
@@ -425,38 +490,42 @@ func (m Model) renderApprovalCard() string {
 	}
 	rows = append(rows, "")
 	body := approvalInputLines(a.tool, a.input, w)
-	// Leave room for the fixed rows: header 2-3, blank, deadline, blank,
-	// buttons, blank, hint, border.
-	budget := max(3, m.height-len(rows)-10)
-	if len(body) > budget {
+	if budget := max(3, bodyMax); len(body) > budget {
 		more := len(body) - budget + 1
 		body = append(body[:budget-1], gray.Render(fmt.Sprintf("… %d more lines", more)))
 	}
 	rows = append(rows, body...)
-	rows = append(rows, "", yel.Render(approvalDeadline(a.deadline)), "")
+	rows = append(rows, "", yel.Render(gl("⏱ ", "")+approvalDeadline(a.deadline)), "")
 	if m.approvalCard.msgMode {
 		rows = append(rows, "deny with message:", m.approvalCard.msg.View(), "",
 			gray.Render("enter deny · esc back"))
-	} else {
-		focused := lipgloss.NewStyle().Foreground(cFgInv).Bold(true)
-		idle := lipgloss.NewStyle().Foreground(cGray)
-		deny, allow := idle.Render("[ Deny ]"), idle.Render("[ Allow ]")
-		if m.approvalCard.allow {
-			allow = focused.Background(cRed).Render("[ Allow ]")
-		} else {
-			deny = focused.Background(cAmber).Render("[ Deny ]")
-		}
-		rows = append(rows, deny+"  "+allow, "",
-			gray.Render("enter=focused y allow n deny"),
-			gray.Render("m deny+message · esc later"))
+		return rows
 	}
-	box := lipgloss.NewStyle().
+	rows = append(rows, approvalPills(m.approvalCard.allow), "")
+	for _, h := range approvalHint(w) {
+		rows = append(rows, gray.Render(h))
+	}
+	return rows
+}
+
+// approvalBox frames rows in the card's yellow border at outer width boxW.
+func approvalBox(rows []string, boxW int) string {
+	return lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).
 		BorderForeground(cYellow).
 		Padding(0, 1).
 		Width(boxW - 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderApprovalCard paints the card centered over a blank ground.
+func (m Model) renderApprovalCard() string {
+	a := m.approvals[m.approvalCard.key]
+	boxW := min(approvalCardMaxW, max(20, m.width))
+	// Fixed rows around the body: title/origin/summary ~4, blank, deadline,
+	// blank, pills, blank, hint 2, border 2.
+	rows := m.approvalCardRows(a, boxW-4, m.height-14)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, approvalBox(rows, boxW))
 }
 
 // ---- mode selector ---------------------------------------------------------

@@ -62,7 +62,7 @@ func helpSections() []helpSection {
 			{"ctrl+f", "fullscreen chat (hide the tree column)"},
 			{"ctrl+@", "cycle to the next unread conversation"},
 			{"alt+n", "new session dialog - name it, enter creates + switches"},
-			{"alt+a", "tool-approval card: enter=deny, y allow, n deny, m deny+msg, esc later"},
+			{"alt+a", "tool-approval card: ←→ select (Deny first), enter confirms, n deny, m deny+msg, esc later"},
 			{"ctrl+v", "toggle mouse mode: wheel-scroll vs native select/copy (draft in bar: paste)"},
 			{"ctrl+d", "expand/collapse tool output bodies"},
 			{"alt+t", "expand/collapse thought bodies"},
