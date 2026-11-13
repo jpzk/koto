@@ -34,6 +34,9 @@ type Event struct {
 	// rides Text.
 	Severity string
 	Title    string
+	// Deadline (unix seconds) is the host auto-deny time of an
+	// approval_request event.
+	Deadline float64
 }
 
 // GroupInfo is one group's row in the WatchState / List snapshot.
@@ -63,6 +66,12 @@ type GroupInfo struct {
 	// goal was set from (koto.proto GroupInfo.session_origins). treeRows
 	// nests those goal rows under the origin session's row.
 	SessionOrigins map[string]string
+	// SessionModes is the permission mode per session (koto.proto
+	// GroupInfo.session_modes; key "" = default session, absent = yolo)
+	// and PendingApprovals the open approval requests per session —
+	// approvals.go renders both.
+	SessionModes     map[string]string
+	PendingApprovals map[string]int32
 }
 
 // JobInfo is one background job in a group's guest (koto.proto JobInfo).

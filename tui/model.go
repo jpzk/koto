@@ -647,6 +647,14 @@ type Model struct {
 	// ctrl+s stop confirmation modal (stop_confirm.go).
 	stopConfirm stopConfirmState
 
+	// Permission modes + tool-approval inbox (approvals.go): open requests
+	// keyed approvalKey, the alt+a card, the /mode picker, and the last
+	// ListPending fetch (rate limit).
+	approvals      map[string]approvalItem
+	approvalCard   approvalCardState
+	modeSel        modeSelState
+	pendingFetchAt time.Time
+
 	// New-group dialog (ctrl+n — see newgroup.go). A modal like the
 	// cheatsheet: owns keys and the frame while newGroup.open.
 	newGroup *newGroupForm // pointer: Model size — see framecache.go cloneOpenModals
@@ -2236,6 +2244,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		// A job finishing in this frame opened a blink-linger window;
 		// the tick chain must run for it (no-op when nothing animates).
 		cmds = append(cmds, m.ensureTicking())
+		cmds = append(cmds, m.reconcileApprovals())
 		return m, tea.Batch(cmds...)
 
 	case historyRetryMsg:
@@ -2850,6 +2859,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			// session-blind.
 			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
 				text: formatGoalEvent(ev), ts: int64(ev.Ts)})
+		case "approval_request", "approval_resolved":
+			// Tool-approval inbox (approvals.go): counter + tree badge only,
+			// never a modal of its own.
+			m.onApprovalEvent(ev)
 		case "notification":
 			sev := ev.Severity
 			if sev != "high" {
@@ -3204,6 +3217,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		// picker gates below (the panes under the pointer aren't visible).
 		if m.newGroup.open {
 			return m, nil // modal form: the panes under the pointer are hidden
+		}
+		if m.approvalCard.open || m.modeSel.open {
+			return m, nil // approval card / mode picker: keyboard only
 		}
 		if m.destroyConfirm.open || m.stopConfirm.open {
 			// Confirmation modal: a left click on [ No ] / [ Yes ] activates
@@ -3961,6 +3977,9 @@ func (m *Model) scheduleProbe() tea.Cmd {
 
 func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 	switch msg.op {
+	case "approve", "list_pending":
+		m.handleApprovalResp(msg)
+		return nil
 	case "spawn":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", text: fmt.Sprintf("spawn %s: %v", msg.group, msg.err)})
@@ -4259,6 +4278,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// for the same reason: it covers the frame.
 		return m.handleNewGroupKey(msg)
 	}
+	if m.approvalCard.open {
+		// Tool-approval card (approvals.go): opened only by the operator
+		// (alt+a / /approve), owns every key; bare enter = deny.
+		return m.handleApprovalCardKey(msg)
+	}
+	if m.modeSel.open {
+		return m.handleModeSelKey(msg)
+	}
 	if m.destroyConfirm.open {
 		// ctrl+x destroy confirmation (destroy_confirm.go): a modal over the
 		// whole frame, so it owns every key ahead of the shell block — the
@@ -4430,6 +4457,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// `📤 tool output N lines`, expanded shows the full body indented.
 		m.expandedToolOuts = !m.expandedToolOuts
 		m.refreshLog()
+		return m, nil
+	}
+	if s == "alt+a" {
+		// Tool-approval inbox (approvals.go): open the card on the most
+		// relevant pending request. Never opens by itself.
+		m.openApprovalCard()
 		return m, nil
 	}
 	if s == "alt+n" {
@@ -5867,6 +5900,17 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			return nil
 		}
 		return daemonCmd(m.sock, op, m.cur, extra)
+	}
+	if v == "/mode" || strings.HasPrefix(v, "/mode ") {
+		if arg := strings.TrimSpace(strings.TrimPrefix(v, "/mode")); arg != "" {
+			return m.setMode(m.cur, m.activeSession(m.cur), arg)
+		}
+		m.openModeSel()
+		return nil
+	}
+	if v == "/approve" || v == "/inbox" {
+		m.openApprovalCard()
+		return nil
 	}
 	if v == "/drain" || v == "/drain all" {
 		// Discard the QUEUED prompts — the tree's ⏳N badge — and nothing

@@ -45,7 +45,7 @@ func TestCtrlHTogglesHelp(t *testing.T) {
 // and a sampling of keys/commands, and replaces the chat frame entirely.
 func TestHelpViewRendersSections(t *testing.T) {
 	m := focusModel(t)
-	m.height = 80 // tall enough that nothing needs scrolling
+	m.height = 90 // tall enough that nothing needs scrolling
 	m = press(t, m, tea.KeyCtrlH)
 	out := stripANSI(m.View())
 	for _, want := range []string{

@@ -105,6 +105,8 @@ func (m Model) paletteItems() []paletteItem {
 
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},
 		{title: "discard queued prompts", hint: "/drain", run: "/drain"},
+		{title: "permission mode of this session", hint: "/mode", run: "/mode"},
+		{title: "tool approvals inbox", hint: "alt+a", act: func(m *Model) tea.Cmd { m.openApprovalCard(); return nil }},
 		{title: "discard queued prompts (whole group)", hint: "/drain all", run: "/drain all"},
 		{title: "compact this session (summarize context)", hint: "/compact [focus]", run: "/compact ", edit: true},
 		{title: "clear this session", hint: "/clear", run: "/clear"},

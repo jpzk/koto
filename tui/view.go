@@ -260,6 +260,12 @@ func (m Model) view() string {
 	if m.newGroup.open {
 		return m.renderNewGroup()
 	}
+	if m.approvalCard.open {
+		return m.renderApprovalCard()
+	}
+	if m.modeSel.open {
+		return m.renderModeSel()
+	}
 	if m.destroyConfirm.open {
 		// ctrl+x destroy confirmation: paints the whole frame like the
 		// cheatsheet; its key block in handleKey owns input.
@@ -529,7 +535,7 @@ func (m Model) renderStatusLeft() string {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
 	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
-	return app + grp + m.renderLoadingSegment()
+	return app + grp + m.renderModeSegment() + m.renderLoadingSegment()
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
@@ -974,6 +980,27 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 			w = 1
 		}
 	}
+	// Permission-mode badge on every conversation row (the group row is the
+	// default session) and, when tool calls wait for the operator, a yellow
+	// "!N" inbox badge (approvals.go). Reserved out of the name field like
+	// the badge so the row never overflows.
+	markPend, markMode := "", ""
+	if !isJob {
+		sk := ""
+		if isSession {
+			sk = r.session
+		}
+		md := m.sessionMode(r.group, sk)
+		markMode = " " + modeLetter(md)
+		if n := m.pendingFor(r.group, sk); n > 0 {
+			markPend = fmt.Sprintf(" !%d", n)
+		}
+		if mw := cellWidth(markPend + markMode); w-mw >= 1 {
+			w -= mw
+		} else {
+			markPend, markMode = "", ""
+		}
+	}
 	dot := "○ "
 	dotColor := cGray
 	if running {
@@ -1057,7 +1084,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// animating row misses once per spinner frame, which is the work actually
 	// worth doing.
 	rowKey := strings.Join([]string{
-		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge,
+		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge, markPend, markMode,
 		strconv.Itoa(w), strconv.FormatBool(isCur), strconv.FormatBool(hov),
 		strconv.FormatBool(unread),
 	}, "\x00")
@@ -1075,7 +1102,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		// same fixed width on every row — the background is the selection
 		// marker, and a width that varied with branch depth or badge glyphs
 		// read as a rendering glitch.
-		txt := " " + r.branch + dot + field + badge
+		txt := " " + r.branch + dot + field + badge + markPend + markMode
 		if pw := cellWidth(txt); pw < contentW+1 {
 			txt += strings.Repeat(" ", contentW+1-pw)
 		}
@@ -1096,6 +1123,12 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	}
 	if badge != "" {
 		parts += lipgloss.NewStyle().Foreground(cGray).Render(badge)
+	}
+	if markPend != "" {
+		parts += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(markPend)
+	}
+	if markMode != "" {
+		parts += modeStyle(strings.TrimSpace(modeOfLetter(markMode))).Render(markMode)
 	}
 	return m.cacheTreeRow(rowKey, parts)
 }
