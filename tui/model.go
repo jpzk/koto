@@ -1568,58 +1568,93 @@ func listCmd(sock string) tea.Cmd {
 			return listMsg{err: err}
 		}
 		raw, _ := resp["groups"].(map[string]any)
-		out := map[string]GroupInfo{}
-		for k, v := range raw {
-			mp, _ := v.(map[string]any)
-			running, _ := mp["running"].(bool)
-			provider, _ := mp["provider"].(string)
-			model, _ := mp["model"].(string)
-			effort, _ := mp["effort"].(string)
-			stalled, _ := mp["stalled"].(bool)
-			queued, _ := mp["queued"].(float64)
-			// sessions must be parsed here too, not just in stateGroups: a
-			// List lands after every send (and on /ls and every reconnect
-			// probe) and wholesale-replaces m.groups — dropping the field
-			// here would wipe the tree's session rows on each of those.
-			var sessions []string
-			if raw, ok := mp["sessions"].([]any); ok {
-				for _, sv := range raw {
-					if str, ok := sv.(string); ok {
-						sessions = append(sessions, str)
-					}
-				}
-			}
-			// jobs likewise — same wholesale-replace hazard as sessions.
-			var jobs []JobInfo
-			if raw, ok := mp["jobs"].([]any); ok {
-				for _, jv := range raw {
-					jm, ok := jv.(map[string]any)
-					if !ok {
-						continue
-					}
-					id, _ := jm["id"].(string)
-					if id == "" {
-						continue
-					}
-					sess, _ := jm["session"].(string)
-					st, _ := jm["status"].(string)
-					rc, _ := jm["rc"].(string)
-					cmd, _ := jm["cmd"].(string)
-					jobs = append(jobs, JobInfo{
-						ID: id, Session: sess, Status: st, RC: rc, Cmd: cmd,
-						Started: asInt64(jm["started"]), OutSize: asInt64(jm["out_size"]),
-					})
-				}
-			}
-			tokPS, _ := mp["tok_per_sec"].(float64)
-			// network/root likewise ride every List frame — parsed here too so
-			// the top view survives the same wholesale replace.
-			network, _ := mp["network"].(string)
-			root, _ := mp["root"].(bool)
-			out[k] = GroupInfo{Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root}
-		}
-		return listMsg{groups: out}
+		return listMsg{groups: parseListGroups(raw)}
 	}
+}
+
+// parseListGroups converts a List response (protojson, proto field names)
+// into the map the listMsg handler wholesale-installs as m.groups. Every
+// field the state frame carries (stateGroups) must be parsed here too, or a
+// List landing after a send wipes it until the next state change.
+func parseListGroups(raw map[string]any) map[string]GroupInfo {
+	out := map[string]GroupInfo{}
+	for k, v := range raw {
+		mp, _ := v.(map[string]any)
+		running, _ := mp["running"].(bool)
+		provider, _ := mp["provider"].(string)
+		model, _ := mp["model"].(string)
+		effort, _ := mp["effort"].(string)
+		stalled, _ := mp["stalled"].(bool)
+		queued, _ := mp["queued"].(float64)
+		// sessions must be parsed here too, not just in stateGroups: a
+		// List lands after every send (and on /ls and every reconnect
+		// probe) and wholesale-replaces m.groups — dropping the field
+		// here would wipe the tree's session rows on each of those.
+		var sessions []string
+		if raw, ok := mp["sessions"].([]any); ok {
+			for _, sv := range raw {
+				if str, ok := sv.(string); ok {
+					sessions = append(sessions, str)
+				}
+			}
+		}
+		// jobs likewise — same wholesale-replace hazard as sessions.
+		var jobs []JobInfo
+		if raw, ok := mp["jobs"].([]any); ok {
+			for _, jv := range raw {
+				jm, ok := jv.(map[string]any)
+				if !ok {
+					continue
+				}
+				id, _ := jm["id"].(string)
+				if id == "" {
+					continue
+				}
+				sess, _ := jm["session"].(string)
+				st, _ := jm["status"].(string)
+				rc, _ := jm["rc"].(string)
+				cmd, _ := jm["cmd"].(string)
+				jobs = append(jobs, JobInfo{
+					ID: id, Session: sess, Status: st, RC: rc, Cmd: cmd,
+					Started: asInt64(jm["started"]), OutSize: asInt64(jm["out_size"]),
+				})
+			}
+		}
+		tokPS, _ := mp["tok_per_sec"].(float64)
+		// network/root likewise ride every List frame — parsed here too so
+		// the top view survives the same wholesale replace.
+		network, _ := mp["network"].(string)
+		root, _ := mp["root"].(bool)
+		// session modes, pending approvals and goal origins likewise:
+		// without them every List (one lands after each send) reset the
+		// mode chip and the tree badges to yolo, and the state stream —
+		// whose hash had not changed — never pushed the truth back.
+		var pend map[string]int32
+		if pm, ok := mp["pending_approvals"].(map[string]any); ok && len(pm) > 0 {
+			pend = make(map[string]int32, len(pm))
+			for s, n := range pm {
+				pend[s] = int32(asInt64(n))
+			}
+		}
+		out[k] = GroupInfo{Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root,
+			SessionOrigins: strMap(mp["session_origins"]), SessionModes: strMap(mp["session_modes"]), PendingApprovals: pend}
+	}
+	return out
+}
+
+// strMap reads a protojson map<string,string>; nil when absent or empty.
+func strMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, x := range m {
+		if s, ok := x.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }
 
 // asInt64 parses protojson's int64 encoding, which is a JSON *string* (and
