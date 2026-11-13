@@ -33,6 +33,7 @@ func setModeCfg(g, sess, mode string) configResp {
 // config.json (which the guest sees and main can partly write) is read.
 func TestSessionModeRegistryHostOnly(t *testing.T) {
 	fcHarness(t)
+	quietLogAlerts(t)
 	if m := sessionMode("tg", ""); m != modeYolo {
 		t.Fatalf("default = %q", m)
 	}

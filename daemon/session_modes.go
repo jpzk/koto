@@ -32,6 +32,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -205,4 +206,34 @@ func setSessionMode(g, session, mode, provider string) (string, error) {
 	}
 	emitLogfG("session", g, "info", "[%s] session=%s mode=%s", g, sessionMarkerName(session), mv)
 	return mv, nil
+}
+
+// errUnattendedConfirm marks a send refused because its target session is in
+// confirm mode and nobody is guaranteed to be at the TUI to answer the tool
+// approvals it would raise. Callers that retry (schedules, goal enqueue) test
+// for it with errors.Is and give up instead of looping.
+var errUnattendedConfirm = errors.New("session is in confirm mode")
+
+// enqueueUnattended is enqueueSend for producers with no operator behind the
+// turn — cron schedules, the goal driver, ctl send. A confirm session would
+// park each tool call on an approval nobody is watching (and then deny it at
+// the deadline), so the send is refused up front, before anything is queued.
+// The mode is read from the host registry, never from the guest.
+func enqueueUnattended(g, session, msg, who string) (<-chan error, error) {
+	if err := checkUnattended(g, session, who); err != nil {
+		return nil, err
+	}
+	return enqueueSend(g, session, msg)
+}
+
+func checkUnattended(g, session, who string) error {
+	if sessionMode(g, session) != modeConfirm {
+		return nil
+	}
+	name := session
+	if name == "" {
+		name = "default"
+	}
+	return fmt.Errorf("%w: %s send into %s/%s rejected (confirm needs an operator to approve each tool call; switch the session to yolo or plan, or send it yourself)",
+		errUnattendedConfirm, who, g, name)
 }
