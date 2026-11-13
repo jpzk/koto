@@ -1634,15 +1634,7 @@ func parseListGroups(raw map[string]any) map[string]GroupInfo {
 		if pm, ok := mp["pending_approvals"].(map[string]any); ok && len(pm) > 0 {
 			pend = make(map[string]int32, len(pm))
 			for s, n := range pm {
-				// clamp before narrowing: a count is never negative and a
-				// garbled frame must not wrap int32 (CodeQL incorrect-integer-conversion)
-				v := asInt64(n)
-				if v < 0 {
-					v = 0
-				} else if v > math.MaxInt32 {
-					v = math.MaxInt32
-				}
-				pend[s] = int32(v)
+				pend[s] = asCount32(n)
 			}
 		}
 		out[k] = GroupInfo{Running: running, Provider: provider, Model: model, Effort: effort, Stalled: stalled, Queued: int(queued), Sessions: sessions, Jobs: jobs, TokPerSec: tokPS, Network: network, Root: root,
@@ -1664,6 +1656,30 @@ func strMap(v any) map[string]string {
 		}
 	}
 	return out
+}
+
+// asCount32 reads a non-negative int32 count (protojson int32 may arrive as
+// a string or a number). Strings parse at bitSize 32 so an oversized value
+// saturates instead of wrapping (CodeQL go/incorrect-integer-conversion);
+// negatives and NaN read as 0.
+func asCount32(v any) int32 {
+	switch n := v.(type) {
+	case string:
+		x, _ := strconv.ParseInt(n, 10, 32)
+		if x < 0 {
+			return 0
+		}
+		return int32(x)
+	case float64:
+		if !(n > 0) {
+			return 0
+		}
+		if n >= math.MaxInt32 {
+			return math.MaxInt32
+		}
+		return int32(n)
+	}
+	return 0
 }
 
 // asInt64 parses protojson's int64 encoding, which is a JSON *string* (and
