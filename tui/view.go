@@ -1087,6 +1087,21 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// spinner and no blink is stable across ticks and hits the cache; an
 	// animating row misses once per spinner frame, which is the work actually
 	// worth doing.
+	// The folded count is a fold's only trace, so it never gets cut: when
+	// name+count overflow the field, the count first tightens ("(*1j 1g)" ->
+	// "*1j1g"), then falls back to the bare total ("(*2)"); the NAME gives up
+	// the remaining cells (keeping at least 3).
+	if cnt != "" && cellWidth(name+cnt) > w {
+		j, gl, live := m.foldedCount(r.group, r.session)
+		nw := min(cellWidth(name), 3)
+		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live)} {
+			if cellWidth(cnt) <= w-nw {
+				break
+			}
+			cnt = c
+		}
+		name = truncWidth(name, max(w-cellWidth(cnt), 1))
+	}
 	rowKey := strings.Join([]string{
 		r.branch, dot, string(dotColor), string(nameColor), name, cnt, badge, markPend, markMode,
 		strconv.Itoa(w), strconv.FormatBool(isCur), strconv.FormatBool(hov),

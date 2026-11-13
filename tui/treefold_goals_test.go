@@ -248,3 +248,32 @@ func TestCursorNeverOnHiddenRow(t *testing.T) {
 		}
 	}
 }
+
+// On deep rows (the pane is 22 cells) the count tightens instead of being
+// cut, and the name gives up cells first.
+func TestFoldedCountSurvivesDeepRows(t *testing.T) {
+	m := newModel("", 200000)
+	m.groups = foldFixture()
+	w := m.groups["work"]
+	w.Sessions = append(w.Sessions, "averyveryverylongname")
+	w.Jobs = append(w.Jobs, JobInfo{ID: "longjob", Session: "averyveryverylongname", Status: "running", Started: 4})
+	m.groups["work"] = w
+	m.processJobTransitions(m.groups)
+	for _, c := range []struct{ s, want string }{{"lab", "lab *1j1g"}, {"averyveryverylongname", "aver (*1j)"}} {
+		var row string
+		for _, r := range m.treeRows() {
+			if r.group == "work" && r.session == c.s && r.job == "" {
+				row = stripANSI(m.renderTreeRow(r, false, false, false, iconPad))
+			}
+		}
+		if !strings.Contains(row, c.want) {
+			t.Errorf("%s row %q lacks %q", c.s, row, c.want)
+		}
+		if cellWidth(row) > leftPaneWidth {
+			t.Errorf("%s row %q wider than the pane (%d)", c.s, row, cellWidth(row))
+		}
+	}
+	if got := foldLabelTotal(3, true); got != " (*3)" {
+		t.Errorf("total label %q", got)
+	}
+}

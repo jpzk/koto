@@ -5358,6 +5358,31 @@ func (m Model) foldLabel(g, sess string) string {
 	return " (" + mark + strings.Join(parts, " ") + ")"
 }
 
+// foldLabelTight is foldLabel's narrow form for deep rows: " *1j1g" — no
+// parens or inner space, same j/g/* meaning.
+func (m Model) foldLabelTight(j, gl int, live bool) string {
+	s := " "
+	if live {
+		s += "*"
+	}
+	if j > 0 {
+		s += fmt.Sprintf("%dj", j)
+	}
+	if gl > 0 {
+		s += fmt.Sprintf("%dg", gl)
+	}
+	return s
+}
+
+// foldLabelTotal is the last-resort count, " (*3)": jobs + goals together.
+func foldLabelTotal(n int, live bool) string {
+	mark := ""
+	if live {
+		mark = "*"
+	}
+	return fmt.Sprintf(" (%s%d)", mark, n)
+}
+
 // setJobFold handles →/← in the tree: unfold (open=true) or fold the
 // hovered conversation's child list — its job rows AND its goal sessions
 // (foldGoals), one shared state. ← on a child row (a job, or a goal session
