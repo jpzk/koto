@@ -88,11 +88,14 @@ func TestApprovalInlineDraftPreservedAndRestored(t *testing.T) {
 	m := typing(t, "half typed")
 	m = apFeed(t, m, approvalReq("ap1"))
 	adv(time.Second)
-	for _, k := range []tea.KeyMsg{runes("y"), runes("Y"), runes("x"), {Type: tea.KeyBackspace}} {
+	for _, k := range []tea.KeyMsg{runes("y"), runes("Y"), runes("x"), runes("q"), {Type: tea.KeyBackspace}} {
 		m, _ = dpress(t, m, k)
 	}
 	if len(*sent) != 0 || m.input.Value() != "half typed" {
 		t.Fatalf("stray keys: sent=%+v draft=%q", *sent, m.input.Value())
+	}
+	if !m.approvalCard.inline {
+		t.Fatalf("a stray q hid the inline card")
 	}
 	m, _ = dpress(t, m, keyEnter) // enter = deny
 	if len(*sent) != 1 || (*sent)[0].allow {

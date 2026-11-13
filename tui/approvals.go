@@ -406,7 +406,14 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.approvalCard = approvalCardState{}
-	case "esc", "q", "ctrl+c":
+	case "q":
+		// A stray q while typing must not hide the inline card (the next
+		// esc would then land in the tree and interrupt the turn); only
+		// esc hides it. The modal keeps q = close.
+		if !m.approvalCard.inline {
+			m.approvalCard = approvalCardState{}
+		}
+	case "esc", "ctrl+c":
 		if m.approvalCard.inline {
 			// Later: the request stays pending and the prompt stays
 			// disabled; focus goes to the tree (scroll / switch sessions).
