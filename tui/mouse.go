@@ -148,7 +148,7 @@ func (m *Model) handleLeftClick(x, y int) bool {
 		// Off the pty grid but inside the split is the read-only chat half —
 		// left of the grid side by side, above it when stacked: clicking it
 		// detaches back to chat focus with the pane still open (the mouse is
-		// the only way to move focus off the pty — ctrl+] closes the terminal
+		// the only way to move focus off the pty — alt+] (ctrl+]) closes the terminal
 		// outright). Grid clicks were already offered to the guest;
 		// status/hint/metrics rows stay inert.
 		ox, oy := m.shellMouseOrigin()

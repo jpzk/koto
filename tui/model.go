@@ -84,10 +84,10 @@ const (
 	// config profiles (network/root/model) — linux-top for the fleet.
 	// Read-only like focusLog; handled by handleTopKey (top_view.go).
 	focusTop
-	// focusShell is the shared-shell pane, opened with /shell or ctrl+]
+	// focusShell is the shared-shell pane, opened with /shell or alt+] (ctrl+])
 	// (see shell_view.go). Unlike focusLog it is NOT read-only: while
 	// focused, almost every keystroke round-trips as raw bytes to the
-	// group's guest pty via handleShellKey; ctrl+] is the one reserved
+	// group's guest pty via handleShellKey; alt+] (ctrl+]) is the one reserved
 	// local escape, and it CLOSES the pane (same as /shell off) rather than
 	// merely handing focus back. The pane can also sit open but unfocused
 	// (shellOpen, split mode) — a click on the chat column detaches focus
@@ -762,7 +762,7 @@ type Model struct {
 	// the chat side focused the tree and the shell split are hidden; with
 	// the pty focused the tree and the chat column are (shellChatW/treePaneW
 	// both key off this). Transient by design — any focus change (tab, esc,
-	// alt+←/→, ctrl+], ctrl+l, or a click that moves focus) drops back to
+	// alt+←/→, alt+] (ctrl+]), ctrl+l, or a click that moves focus) drops back to
 	// the normal layout, so it is never persisted. preFullFocus mirrors
 	// preLogFocus/preShellFocus: entering from tree mode parks focus on the
 	// input (the tree is hidden, arrows must not drive an invisible cursor),
@@ -4396,7 +4396,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// must reach bash history search, ctrl+d must be EOF, ctrl+l a
 		// redraw. Found the hard way: with this dispatch below the chrome
 		// bindings, ctrl+c in the shell hit the quit branch and killed the
-		// whole TUI. The reserved local keys: ctrl+] CLOSES the pane
+		// whole TUI. The reserved local keys: alt+] (ctrl+]) CLOSES the pane
 		// (closeShell, which hands focus back on the way out — an
 		// open/close toggle, never a focus toggle), ctrl+f zooms the pane
 		// to the whole frame (fullscreen toggle), ctrl+p opens the command
@@ -4409,22 +4409,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// handleShellKey as a literal 0x1b, because vim/less inside the
 		// pane are unusable without the escape key (esc == ctrl+[, so both
 		// spellings reach the guest).
-		// Exiting the TUI from the shell is alt+← (or ctrl+]) then /exit.
+		// Exiting the TUI from the shell is alt+← (or alt+] / ctrl+]) then /exit.
 		switch s {
-		case "ctrl+]":
+		case keyShellToggle, keyShellToggleFallback:
+			// alt+] (ctrl+] fallback) CLOSES the pane and never reaches the
+			// guest — the pty sees neither ESC ] nor 0x1d.
 			m.closeShell()
 			return m, nil
 		case "ctrl+f":
 			// Zoom the pty to the whole frame (tree + chat column hidden);
 			// the same toggle the chat side has. Reserved locally like
-			// ctrl+] — the guest never sees ctrl+f (readline forward-char;
+			// alt+] (ctrl+]) — the guest never sees ctrl+f (readline forward-char;
 			// the right-arrow key covers that use inside).
 			m.fullscreen = !m.fullscreen
 			m.resizeViewport()
 			m.refreshLog()
 			return m, nil
 		case "ctrl+p":
-			// Command palette, reserved here like ctrl+] and ctrl+f so the
+			// Command palette, reserved here like alt+] (ctrl+]) and ctrl+f so the
 			// chrome stays reachable without first leaving the pane — it is
 			// the one door to every binding, and being stranded in the
 			// terminal is exactly when you want it. The guest loses ctrl+p
@@ -4605,7 +4607,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// not flow control). Pinned by TestSchedKeyIsFree.
 		return m, m.toggleSchedView()
 	}
-	if s == "ctrl+]" {
+	if s == keyShellToggle || s == keyShellToggleFallback {
 		return m, m.toggleShellPane()
 	}
 	if m.focus == focusLog {
@@ -4630,7 +4632,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	if s == "alt+right" {
 		// Focus the terminal pane. A pure focus move — nothing opens or
-		// closes (ctrl+] is the open/close toggle) — so it's a no-op when
+		// closes (alt+] (ctrl+]) is the open/close toggle) — so it's a no-op when
 		// no live pane is on screen. alt+← is the way back (handled in the
 		// shell-focus block above). Costs the textinput its alt+arrow
 		// word-jump; ctrl+←/→ still does that.
@@ -5061,7 +5063,7 @@ func (m *Model) toggleLogView() {
 	}
 }
 
-// toggleShellPane opens/closes the shared-shell pane (ctrl+], and the
+// toggleShellPane opens/closes the shared-shell pane (alt+] (ctrl+]), and the
 // palette's entry), mirroring toggleLogView's shape. It toggles the PANE, not
 // focus: an open-but-unfocused pane (split mode, typing in the message bar)
 // closes here rather than stealing focus — use a click on the grid for that.
@@ -6169,7 +6171,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 			return nil
 		}
 		m.enterShell(arg) // arg == "" -> the active chat session's shell (shellSessionName)
-		// Same as the ctrl+] path: start the tick chain for the cursor blink.
+		// Same as the alt+] (ctrl+]) path: start the tick chain for the cursor blink.
 		return m.ensureTicking()
 	}
 	if v == "/prompt" || strings.HasPrefix(v, "/prompt ") {

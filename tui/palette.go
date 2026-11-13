@@ -11,7 +11,7 @@ package main
 //
 // Three kinds of entry, because "run it" is wrong for a third of them:
 //   - act:  direct model mutation (the pane/view toggles, which have no
-//           slash form at all — ctrl+] and ctrl+l are their only other door)
+//           slash form at all — alt+] (ctrl+]) and ctrl+l are their only other door)
 //   - run:  a slash command dispatched verbatim, for the no-argument verbs
 //   - edit: the slash command is PREFILLED into the message bar instead of
 //           run. Two reasons: the verb needs an argument the palette can't
@@ -52,7 +52,7 @@ type paletteItem struct {
 }
 
 // searchKey is what the fuzzy matcher scores against — the title plus the
-// slash form and the keybinding, so "/clear" and "ctrl+]" both find their row
+// slash form and the keybinding, so "/clear" and "alt+]" / "ctrl+]" find their row
 // even though the display column shows the prose title.
 func (p paletteItem) searchKey() string {
 	key := p.title
@@ -88,7 +88,7 @@ func (m Model) paletteItems() []paletteItem {
 	}
 
 	items := []paletteItem{
-		{title: shellTitle, hint: "ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
+		{title: shellTitle, hint: "alt+] / ctrl+]", act: func(m *Model) tea.Cmd { return m.toggleShellPane() }},
 		{title: logTitle, hint: "ctrl+l", act: func(m *Model) tea.Cmd { m.toggleLogView(); return nil }},
 		{title: topTitle, hint: "ctrl+k", act: func(m *Model) tea.Cmd { m.toggleTopView(); return nil }},
 		{title: schedTitle, hint: "ctrl+y", act: func(m *Model) tea.Cmd { return m.toggleSchedView() }},

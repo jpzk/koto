@@ -1946,9 +1946,9 @@ func (m Model) renderHint() string {
 	}
 	parts = append(parts, selectHint)
 	parts = append(parts, "^l log")
-	shellHint := "^] shell"
+	shellHint := gl("⌥] shell", "alt-] shell")
 	if m.shellSplitVisible() {
-		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render("^] shell")
+		shellHint = lipgloss.NewStyle().Foreground(cMagenta).Render(shellHint)
 	}
 	parts = append(parts, shellHint)
 	fullHint := "^f full"

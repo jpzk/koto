@@ -35,9 +35,9 @@ func bannerLines(group string, contentCols int) []string {
 	}
 	width := len(rows[0]) // 23
 	shear := []int{4, 3, 2, 1, 0}
-	// Widest line is the hint at 42 cells; the art needs 30 (shear 4 + "/ " +
+	// Widest line is the hint at 41 cells; the art needs 30 (shear 4 + "/ " +
 	// width + " /").
-	if contentCols < len("ctrl+] opens a shared terminal in this group") {
+	if contentCols < len("alt+] opens a shared terminal (or ctrl+])") {
 		return nil
 	}
 	// One color for the whole banner — the sys-line gray, so it sits
@@ -65,7 +65,7 @@ func bannerLines(group string, contentCols int) []string {
 	hint := lipgloss.NewStyle().Foreground(cGray)
 	key := lipgloss.NewStyle().Foreground(cGray).Bold(true)
 	out = append(out, "",
-		key.Render("ctrl+]")+hint.Render(" opens a shared terminal in this group"),
+		key.Render("alt+]")+hint.Render(" opens a shared terminal (or ctrl+])"),
 		key.Render("ctrl+h")+hint.Render(" opens the cheatsheet"))
 	return out
 }

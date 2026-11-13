@@ -30,6 +30,24 @@ import (
 // keyTreeToggle is the tree open/close toggle (was tab).
 const keyTreeToggle = "alt+["
 
+// keyShellToggle opens/closes the shared terminal pane (operator request
+// 2026-11-13; was ctrl+]). From input/tree focus it is toggleShellPane (the
+// same as /shell); with the pane FOCUSED it is a reserved local key that
+// closes the pane and is never forwarded to the guest pty.
+// keyShellToggleFallback (ctrl+], 0x1d) keeps working everywhere alt+] does.
+//
+// alt+] on the wire is ESC ']' — also the OSC introducer. Bubble Tea v1.3.10
+// has no OSC parser on its input side: ESC ']' matches no entry in its
+// sequence table and no CSI pattern, so detectOneMsg falls back to alt+rune
+// and consumes exactly those two bytes ("alt+]"); whatever follows in the
+// same read is parsed as its own keys, so nothing is swallowed. Pinned by
+// TestAltCloseBracketRawBytes in shell_key_test.go. Terminals that turn
+// alt into a meta bit or drop it can still use ctrl+].
+const (
+	keyShellToggle         = "alt+]"
+	keyShellToggleFallback = "ctrl+]"
+)
+
 // modeCycledMsg is the outcome of one tab-driven mode switch.
 type modeCycledMsg struct {
 	group, session string
