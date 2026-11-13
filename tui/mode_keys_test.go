@@ -426,3 +426,35 @@ func TestTabInShellPaneGoesToGuest(t *testing.T) {
 	}
 	assertNoModeChange(t, m, sent, "shell pane")
 }
+
+// Repeated mid-turn switches coalesce into ONE sys line, updated to the
+// newest wish — even with turn output in between; a new prompt starts a
+// fresh line.
+func TestTabMidTurnNoteCoalesces(t *testing.T) {
+	m := treeModel(t, modeGroups(""), "alpha", "", "")
+	m.focus = focusInput
+	m.busy[m.curKey()] = true
+	recordCycles(t)
+	n := len(m.lines)
+	m = press(t, m, tea.KeyTab)
+	m.addLine(logLine{kind: "assistant", group: "alpha", text: "working…"})
+	m = press(t, m, tea.KeyTab)
+	m = press(t, m, tea.KeyTab)
+	var notes []string
+	for _, l := range m.lines[n:] {
+		if l.kind == "sys" {
+			notes = append(notes, l.text)
+		}
+	}
+	want := m.modeWant[sessKey("alpha", m.activeSession("alpha"))]
+	if len(notes) != 1 || !strings.Contains(notes[0], "→ "+want+" ·") || !strings.HasSuffix(notes[0], modeNextTurnNote) {
+		t.Fatalf("want one note → %s, got %q", want, notes)
+	}
+	// next turn: a fresh note, the old one is left alone
+	m.addLine(logLine{kind: "prompt", group: "alpha", text: "go"})
+	n = len(m.lines)
+	m = press(t, m, tea.KeyTab)
+	if got := m.lines[n:]; len(got) != 1 || got[0].kind != "sys" {
+		t.Fatalf("after a new prompt want a new note, got %+v", got)
+	}
+}
