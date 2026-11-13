@@ -431,7 +431,14 @@ drain:
 		emitLogfG("send", g, "warn", "[%s] delivery failed ambiguously (%v) — quarantining slot %d until the VM is known dead", g, err, slot)
 		return err
 	}
-	stall := time.After(turnWaitTimeout)
+	// The stall clock pauses while this session has a tool approval pending
+	// (approvals.go stallClock): an operator deciding is not a wedged guest.
+	// Hard-capped in wall time. With nothing pending it is exactly the old
+	// turnWaitTimeout timer, sampled once a second.
+	sc := newStallClock(g, session, time.Now())
+	stallTick := time.NewTicker(time.Second)
+	defer stallTick.Stop()
+	stall := make(chan struct{})
 	var retry <-chan time.Time
 	sigAttempts := 0
 	for {
@@ -453,6 +460,9 @@ drain:
 			// arrives through the normal path (run_turn writes it when the
 			// worker dies), so the queue advances to the next prompt exactly
 			// as after a completed turn.
+			// An interrupt (or stop) settles every approval this turn still
+			// has open as a deny, written down the turn connection.
+			denyApprovals(g, session, nil, decDeny, "interrupt", true)
 			cancelC = nil // closed channel is always ready; don't spin
 			retry = time.After(interruptRetryDelay)
 		case <-retry:
@@ -477,6 +487,11 @@ drain:
 				emitLogfG("send", g, "info", "group=%s session=%s: interrupt SIG%s: %v", g, sessionMarkerName(session), sig, err)
 			}
 			retry = time.After(interruptRetryDelay)
+		case now := <-stallTick.C:
+			if sc.due(now) {
+				close(stall)
+				stallTick.Stop()
+			}
 		case <-stall:
 			setStalled(g, session, true)
 			// The guest side of this turn may still be alive and writing into
@@ -725,6 +740,9 @@ func notifyTurnDone(g, sess string) {
 // queue advances onto the freshly (re)started VM. A spurious token pushed when
 // no turn is in flight is drained by the next sendNow's pre-wait drain loop.
 func abortInflightTurn(g string) {
+	// The VM is gone, and so are the turn connections: every open approval
+	// is denied (logged); nothing can be written back.
+	denyApprovals(g, "*", nil, decDeny, "vm-exit", false)
 	// Every running conversation: the VM took all of them down with it.
 	for _, sess := range inFlightSessions(g) {
 		c := turnDoneCh(g, sess)

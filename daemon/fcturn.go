@@ -77,6 +77,15 @@ func fcTurnSink(g string, c net.Conn) {
 	defer gi.finish()
 	ensureSlotTail(g, slot)
 	w := newTurnWriter(g, slotLogPath(g, slot))
+	// Writer half (approvals.go): a confirm turn's approval answers go back
+	// down this connection. Everything still open when the stream ends —
+	// TurnEnd, a guest crash, a read error — is denied (the guest cannot be
+	// told any more: write=false), and the writer dies before c.Close().
+	rw := newTurnReplyWriter(c)
+	defer func() {
+		rw.close()
+		denyApprovals(g, sess, rw, decDeny, "stream-end", false)
+	}()
 	// Runs after flushHold (defers are LIFO), so held bytes reach OTel too.
 	defer w.otelFlush()
 	// A stream that dies mid-line may leave a byte or two withheld by text()'s
@@ -95,9 +104,24 @@ func fcTurnSink(g string, c net.Conn) {
 			gi.add(sp.Span)
 			continue
 		}
+		if ar, ok := f.Kind.(*pb.TurnFrame_ApprovalRequest); ok {
+			openApproval(g, sess, slot, ar.ApprovalRequest, rw, w.p)
+			continue
+		}
+		if ae, ok := f.Kind.(*pb.TurnFrame_ApprovalExpired); ok {
+			// The guest denied on its own deadline (or claude cancelled):
+			// settle the host's entry as a timeout, nothing to write back.
+			if approvalTokenOK(ae.ApprovalExpired) {
+				resolveApproval(approvalKey{g, sess, slot, ae.ApprovalExpired}, false, decTimeout, "", "guest-deadline", false)
+			}
+			continue
+		}
 		if f.GetTurnEnd() {
 			// Export before [[turn_end]] lets sendNow close the host turn span.
 			gi.finish()
+			// Nothing may stay pending past the turn: deny (and log) before
+			// [[turn_end]] so the decision lands inside the turn's block.
+			denyApprovals(g, sess, rw, decDeny, "turn-end", false)
 		}
 		if !w.frame(f) {
 			if w.failed {

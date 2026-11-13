@@ -48,6 +48,9 @@ type Event struct {
 	// The message body rides Text.
 	Severity string `json:"severity,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Deadline (event == "approval_request"): unix seconds at which the host
+	// denies the request (daemon/approvals.go).
+	Deadline float64 `json:"deadline,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
@@ -109,6 +112,9 @@ type GroupInfo struct {
 	// SessionModes: per-session permission mode, non-yolo sessions only (key
 	// "" = default session). Host registry (session_modes.go).
 	SessionModes map[string]string `json:"session_modes,omitempty"`
+	// PendingApprovals: open tool-approval requests per session (key "" =
+	// default session); absent = none (daemon/approvals.go).
+	PendingApprovals map[string]int32 `json:"pending_approvals,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors

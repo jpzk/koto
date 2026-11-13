@@ -1857,7 +1857,9 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	if mode := sessionMode(g, session); mode != modeYolo {
 		m.Mode = mode
 		if mode == modeConfirm {
-			m.ApprovalTimeoutMs = approvalTimeout.Milliseconds()
+			// A little past the host deadline: the host normally decides
+			// (and logs the timeout); the guest is the backstop.
+			m.ApprovalTimeoutMs = (approvalTimeout + 30*time.Second).Milliseconds()
 			m.ApprovalHardCapMs = approvalHardCap.Milliseconds()
 		}
 	}

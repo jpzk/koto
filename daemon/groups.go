@@ -454,6 +454,9 @@ func stopGroupPrepare(g string) {
 	// disarmed for the same reason; stop is the other lifecycle edge that
 	// discards the traffic.
 	disarmReport(g)
+	// Pending tool approvals die with the stop: denied (fail closed) while
+	// the guest can still be told, before the cancel and the power-off.
+	denyApprovals(g, "*", nil, decDeny, "vm-stop", true)
 	for _, sess := range inFlightSessions(g) {
 		if requestTurnCancel(g, sess) {
 			emitLogfG("group", g, "info", "stop group=%s session=%s: canceling in-flight turn",
@@ -477,21 +480,22 @@ func listGroups() map[string]GroupInfo {
 	for g, p := range readGroups() {
 		cfg := loadGroupConfig(g) // ONE read+parse for all five config knobs
 		out[g] = GroupInfo{
-			Port:           p,
-			Running:        fcRunning(g),
-			Provider:       cfg.provider(),
-			Model:          cfg.model(),
-			Effort:         cfg.effort(),
-			Stalled:        groupStalled(g),
-			Queued:         queueDepth(g),
-			Sessions:       append(listSessions(g), goalLiveSessions(g)...),
-			SessionOrigins: goalSessionOrigins(g),
-			SessionModes:   listSessionModes(g),
-			Jobs:           jobsSnapshot(g),
-			TokPerSec:      rates[g],
-			Network:        cfg.network(),
-			Root:           cfg.root(),
-			Allow:          groupAllowDisplay(g, cfg),
+			Port:             p,
+			Running:          fcRunning(g),
+			Provider:         cfg.provider(),
+			Model:            cfg.model(),
+			Effort:           cfg.effort(),
+			Stalled:          groupStalled(g),
+			Queued:           queueDepth(g),
+			Sessions:         append(listSessions(g), goalLiveSessions(g)...),
+			SessionOrigins:   goalSessionOrigins(g),
+			SessionModes:     listSessionModes(g),
+			PendingApprovals: pendingApprovalCounts(g),
+			Jobs:             jobsSnapshot(g),
+			TokPerSec:        rates[g],
+			Network:          cfg.network(),
+			Root:             cfg.root(),
+			Allow:            groupAllowDisplay(g, cfg),
 		}
 	}
 	return out

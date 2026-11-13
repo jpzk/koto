@@ -435,6 +435,16 @@ func stateHash(gs map[string]GroupInfo) string {
 			fld(k)
 			fld(gi.SessionModes[k])
 		}
+		fld("pending")
+		pendKeys := make([]string, 0, len(gi.PendingApprovals))
+		for k := range gi.PendingApprovals {
+			pendKeys = append(pendKeys, k)
+		}
+		sort.Strings(pendKeys)
+		for _, k := range pendKeys {
+			fld(k)
+			fmt.Fprintf(&b, "%d|", gi.PendingApprovals[k])
+		}
 		for _, j := range gi.Jobs {
 			fld(j.ID)
 			fld(j.Session)

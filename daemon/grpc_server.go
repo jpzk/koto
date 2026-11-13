@@ -67,6 +67,7 @@ func toPBEvent(ev Event) *pb.Event {
 		Session:    ev.Session,
 		Severity:   ev.Severity,
 		Title:      ev.Title,
+		Deadline:   ev.Deadline,
 	}
 }
 
@@ -98,6 +99,12 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		out.SessionModes = make(map[string]string, len(gi.SessionModes))
 		for k, v := range gi.SessionModes {
 			out.SessionModes[sanitize(k)] = sanitize(v)
+		}
+	}
+	if len(gi.PendingApprovals) > 0 {
+		out.PendingApprovals = make(map[string]int32, len(gi.PendingApprovals))
+		for k, v := range gi.PendingApprovals {
+			out.PendingApprovals[sanitize(k)] = v
 		}
 	}
 	for _, j := range gi.Jobs {
