@@ -74,8 +74,8 @@ var claudeIsolation = []string{"--setting-sources=", "--strict-mcp-config"}
 const claudePlanTools = "Read"
 
 // claudeBaseArgs is the launch prefix for a mode. yolo is byte-identical to
-// the pre-modes launch. confirm is wired in by the approval round trip; until
-// a guest implements it the turn is refused (fail closed).
+// the pre-modes launch. confirm launches with a live stream-json stdin and
+// the approval round trip (approval.go) answers every tool call.
 func claudeBaseArgs(mode string) ([]string, error) {
 	out := []string{"--output-format", "stream-json", "--include-partial-messages", "--verbose"}
 	switch mode {
@@ -87,6 +87,15 @@ func claudeBaseArgs(mode string) ([]string, error) {
 		a = append(a, "--permission-mode", "plan", "--permission-prompts", "none",
 			"--tools", claudePlanTools, "--disallowedTools", "ExitPlanMode")
 		return append(a, out...), nil
+	case modeConfirm:
+		// Every tool call becomes a control_request on stdout answered on the
+		// live stream-json stdin (approval.go). Same settings isolation as
+		// plan: an agent-written allow rule must not pre-approve anything.
+		a := []string{"-p", "--bare"}
+		a = append(a, claudeIsolation...)
+		a = append(a, "--permission-mode", "default", "--permission-prompt-tool", "stdio",
+			"--input-format", "stream-json")
+		return append(a, out...), nil
 	}
-	return nil, fmt.Errorf("permission mode %s is not implemented by this guest — refusing the turn", mode)
+	return nil, fmt.Errorf("permission mode %q is not implemented by this guest — refusing the turn", mode)
 }

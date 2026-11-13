@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -86,6 +87,11 @@ type turnConn struct {
 	qmu    sync.Mutex
 	queued int
 	room   chan struct{}
+
+	// rd is the reverse direction of the turn connection (host -> guest
+	// TurnReply frames, mode=confirm only); nil = no reader, which a confirm
+	// turn treats as a dropped connection (every approval denied).
+	rd io.Reader
 
 	// tr is the turn's span recorder (span.go); nil when tracing is off.
 	tr *guestTracer
@@ -320,6 +326,7 @@ func runTurn(req *pb.MsgReq, tr *guestTracer) {
 	}
 	conn := dialRetry(portLogSlot)
 	tw := newTurnConn(conn)
+	tw.rd = conn
 	defer conn.Close()
 	defer tw.close()
 	tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_Open{Open: &pb.TurnOpen{Slot: int32(slot)}}})
@@ -460,6 +467,12 @@ type worker struct {
 var workerDrainGrace = 2 * time.Second
 
 func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
+	runWorkerClock(tw, w, parse, newWorkerClock(turnTimeout, 0))
+}
+
+// runWorkerClock is runWorker with a caller-owned turn clock (confirm turns
+// pause it while an approval is pending; approval.go).
+func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *workerClock) {
 	pid, ch, outR, errR := w.pid, w.done, w.out, w.err
 	timedOut := false
 	var tmu sync.Mutex
@@ -469,7 +482,7 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	kill := func() { killGroup(pid, syscall.SIGKILL) }
 	tw.onStall.Store(&kill)
 	defer tw.onStall.Store(nil)
-	timer := time.AfterFunc(turnTimeout, func() {
+	clk.start(func() {
 		tmu.Lock()
 		timedOut = true
 		tmu.Unlock()
@@ -506,7 +519,7 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 
 	ws := <-ch // the worker itself has exited; whatever still holds the pipes is not it
 	tw.tr.workerAttr("exit_code", strconv.Itoa(ws.ExitStatus()))
-	timer.Stop()
+	clk.stop()
 
 	// Drain what is already in flight, then take the pipes away. Closing the
 	// READ end is what unblocks a scanner parked on a descendant that will
@@ -530,7 +543,11 @@ func runWorker(tw *turnConn, w *worker, parse func(line []byte)) {
 	defer tmu.Unlock()
 	if timedOut {
 		tw.tr.workerAttr("timed_out", "true")
-		tw.errf("turn exceeded %ds budget — killed", int(turnTimeout/time.Second))
+		if clk.firedBy() == "hard cap" {
+			tw.errf("turn exceeded its %ds hard cap (approval waits included) — killed", int(clk.hardCap/time.Second))
+		} else {
+			tw.errf("turn exceeded %ds budget — killed", int(turnTimeout/time.Second))
+		}
 	}
 }
 
@@ -571,7 +588,13 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 		tw.errf("%v", err)
 		return
 	}
-	args, err := claudeBaseArgs(mode)
+	// A compaction runs no tools; under confirm it launches read-only (plan)
+	// rather than with an approval channel nobody would be asked on.
+	launch := mode
+	if mode == modeConfirm && isClaudeCompactPrompt(req.Msg) {
+		launch = modePlan
+	}
+	args, err := claudeBaseArgs(launch)
 	if err != nil {
 		tw.errf("%v", err)
 		return
@@ -604,6 +627,10 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	// (claude_compact.go); everything else is the one-shot prompt path.
 	if resumeID != "" && validSessionID(resumeID) && isClaudeCompactPrompt(req.Msg) {
 		runClaudeCompact(tw, req, args, env, idf, resumeID)
+		return
+	}
+	if launch == modeConfirm {
+		runClaudeConfirm(tw, req, args, env, idf)
 		return
 	}
 	w, err := startClaudeWorker("claude", args, env, bytes.NewReader(req.Msg))
@@ -1020,4 +1047,45 @@ func jobStatusIsRunning(path string) bool {
 	var buf [64]byte
 	n, _ := io.ReadFull(io.LimitReader(f, int64(len(buf))), buf[:])
 	return strings.TrimSpace(string(buf[:n])) == "running"
+}
+
+// runClaudeConfirm drives a mode=confirm turn: the message goes in as one
+// stream-json user record on a live stdin, every can_use_tool control request
+// is put to the host (approval.go), and stdin closes once the result is out.
+func runClaudeConfirm(tw *turnConn, req *pb.MsgReq, args []string, env []string, idf string) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		tw.errf("claude: stdin pipe: %v", err)
+		return
+	}
+	w, err := startClaudeWorker("claude", args, env, inR)
+	inR.Close()
+	if err != nil {
+		inW.Close()
+		tw.errf("claude: start: %v", err)
+		return
+	}
+	timeout, hardCap := approvalTimeouts(req)
+	clk := newWorkerClock(turnTimeout, hardCap)
+	g := newApprovalGate(tw, inW, clk, timeout)
+	defer g.close()
+	if err := g.sendUser(req.Msg); err != nil {
+		logf("confirm: write the message to claude: %v", err)
+	}
+	if tw.rd != nil {
+		go g.readReplies(tw.rd)
+	} else {
+		g.drop(errors.New("no reply channel"))
+	}
+	tw.tr.workerAttr("approval.timeout_ms", strconv.FormatInt(timeout.Milliseconds(), 10))
+	p := newClaudeParser(tw, idf)
+	runWorkerClock(tw, w, func(b []byte) {
+		if g.line(b) {
+			return
+		}
+		p.line(b)
+		if isResultLine(b) {
+			g.endInput()
+		}
+	}, clk)
 }
