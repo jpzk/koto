@@ -1856,6 +1856,8 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	// source the guest obeys; config.json above carries none.
 	if mode := sessionMode(g, session); mode != modeYolo {
 		m.Mode = mode
+		// Audit trail for restricted turns only (yolo stays silent, as before).
+		emitLogfG("session", g, "info", "[%s] turn session=%s mode=%s", g, sessionMarkerName(session), mode)
 		if mode == modeConfirm {
 			// A little past the host deadline: the host normally decides
 			// (and logs the timeout); the guest is the backstop.

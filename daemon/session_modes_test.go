@@ -270,3 +270,35 @@ func TestFcSendMsgStampsMode(t *testing.T) {
 		}
 	}
 }
+
+// The plan default is the TUI's choice, passed in SessionCreate.mode; the
+// daemon's own default stays yolo for everything else: a fresh group's
+// default session, goal-<name> sessions, and sessions created without a mode
+// (ctl / send / schedules / main).
+func TestDaemonDefaultsStayYolo(t *testing.T) {
+	fcHarness(t)
+	groupsLock.Lock()
+	writeGroups(map[string]int{"main": 8787, "tg": 8788, "peer": 8789, "newg": 8790})
+	groupsLock.Unlock()
+	if md := sessionMode("newg", ""); md != modeYolo {
+		t.Fatalf("new group default session = %s, want yolo", md)
+	}
+	s := &kotoServer{}
+	if r, _ := s.SessionCreate(context.Background(), &pb.GroupReq{Group: "newg", Session: "viactl"}); !r.Ok {
+		t.Fatalf("modeless create: %q", r.Error)
+	}
+	registerSession("newg", "goal-x")
+	registerSession("newg", "goal-x-judge")
+	for _, sess := range []string{"", "viactl", "goal-x", "goal-x-judge"} {
+		if md := sessionMode("newg", sess); md != modeYolo {
+			t.Errorf("newg/%q = %s, want yolo", sess, md)
+		}
+	}
+	if len(listSessionModes("newg")) != 0 {
+		t.Fatalf("daemon wrote modes on its own: %v", listSessionModes("newg"))
+	}
+	// Only an explicit mode (the TUI's) makes a plan session.
+	if r, _ := s.SessionCreate(context.Background(), &pb.GroupReq{Group: "newg", Session: "fromtui", Mode: modePlan}); !r.Ok || sessionMode("newg", "fromtui") != modePlan {
+		t.Fatalf("TUI create with plan: %v %q", r.Ok, r.Error)
+	}
+}

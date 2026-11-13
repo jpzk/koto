@@ -614,3 +614,77 @@ func modeOfLetter(b string) string {
 	}
 	return modeYolo
 }
+
+// ---- mode chip (prompt input box) ------------------------------------------
+
+// modeChipColor is the chip hue of a mode. Each is a palette VAR, read at
+// render time, so the chip tracks every theme (swatch themes included):
+//   - yolo    -> cBrick, its own fixed status hue (view.go), never cRed;
+//   - plan    -> cMagenta, the var the transcript's tool glyph uses
+//     (view.go renderBlock case "tool": Foreground(cMagenta) on icCog);
+//   - confirm -> cAmber, the var the tree cursor row is painted with
+//     (view.go treeRow hover branch: inv(cFgInv, cAmber)).
+func modeChipColor(md string) lipgloss.Color {
+	switch md {
+	case modePlan:
+		return cMagenta
+	case modeConfirm:
+		return cAmber
+	}
+	return cBrick
+}
+
+// modeChipLabel is the chip text. Four cells for every mode, so the input
+// column never shifts on a switch, and distinct in mono where color is gone.
+func modeChipLabel(md string) string {
+	switch md {
+	case modePlan:
+		return "plan"
+	case modeConfirm:
+		return "conf"
+	}
+	return "yolo"
+}
+
+// modeChipW is the chip's cell width inside the input box ("yolo› "), 0 when
+// there is no group to show a mode for.
+func (m Model) modeChipW() int {
+	if m.cur == "" {
+		return 0
+	}
+	return 6
+}
+
+// renderModeChip is the active session's mode, prepended to the input line.
+// Read from the session mode registry on every frame, so a switch shows on
+// the next frame.
+func (m Model) renderModeChip() string {
+	if m.cur == "" {
+		return ""
+	}
+	md := m.sessionMode(m.cur, m.activeSession(m.cur))
+	return lipgloss.NewStyle().Foreground(modeChipColor(md)).Bold(true).
+		Render(modeChipLabel(md)+gl("›", ">")) + " "
+}
+
+// setLocalMode records a mode the daemon accepted (or the TUI just asked a
+// new session to start in) in the local snapshot, so the chip and the tree
+// badge update now; the next state frame replaces it with the daemon's own
+// registry. Copy-on-write: the map may be shared with an older snapshot.
+func (m *Model) setLocalMode(g, s, md string) {
+	gi, ok := m.groups[g]
+	if !ok {
+		return
+	}
+	nm := make(map[string]string, len(gi.SessionModes)+1)
+	for k, v := range gi.SessionModes {
+		nm[k] = v
+	}
+	if md == "" || md == modeYolo {
+		delete(nm, s)
+	} else {
+		nm[s] = md
+	}
+	gi.SessionModes = nm
+	m.groups[g] = gi
+}

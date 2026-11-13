@@ -908,6 +908,9 @@ type Model struct {
 	// daemon lists the name (it then behaves like any other session, including
 	// the vanished-session fallback).
 	pendSess map[string][]string
+	// creating holds the sessions this TUI is creating (session_create.go):
+	// sends into them wait for the create, so it lands first, mode and all.
+	creating map[string]*sessCreate
 	// pending holds prompts the local TUI has sent that the daemon has not
 	// yet started (they're sitting in the group's send queue behind an
 	// in-flight turn). Rendered at the bottom of the chat view as amber ⏳
@@ -2979,6 +2982,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.reconnecting = false
 		return m, listCmd(m.sock)
 
+	case sessionCreatedMsg:
+		m.handleSessionCreated(msg)
+		return m, nil
+
 	case daemonRespMsg:
 		return m, m.handleDaemonResp(msg)
 
@@ -4238,6 +4245,15 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			return nil
 		}
 		cfg, _ := msg.resp["config"].(map[string]any)
+		// A mode switch the daemon accepted shows on the next frame (the
+		// prompt-box chip, the tree badge), not a state frame later.
+		if md, ok := cfg["mode"].(string); ok {
+			ms, _ := cfg["mode_session"].(string)
+			if ms == "default" || ms == "-" {
+				ms = ""
+			}
+			m.setLocalMode(msg.group, ms, md)
+		}
 		summary := "(default)"
 		if len(cfg) > 0 {
 			keys := make([]string, 0, len(cfg))
@@ -5442,7 +5458,7 @@ func (m *Model) switchSession(g, s string) tea.Cmd {
 	var cmd tea.Cmd
 	if s != "" && !slices.Contains(m.sessionsOf(g), s) && !goalSession(s) {
 		m.addPendingSession(g, s)
-		cmd = daemonCmd(m.sock, "session_create", g, map[string]any{"session": s})
+		cmd = m.beginSessionCreate(g, s)
 	}
 	m.selectTreeRow(treeRow{group: g, session: s})
 	return cmd
@@ -6140,7 +6156,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	m.pending[m.cur] = append(m.pending[m.cur], pendingPrompt{session: m.activeSession(m.cur), text: scrubVTStrict(v)})
 	m.sendInFlight[m.cur]++
 	m.refreshLog()
-	return daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": m.activeSession(m.cur)})
+	sess := m.activeSession(m.cur)
+	return m.gateSend(m.cur, sess, v, daemonCmd(m.sock, "send", m.cur, map[string]any{"msg": v, "session": sess}))
 }
 
 func (m Model) allBlocks(contentCols int, plain bool) []renderedBlock {

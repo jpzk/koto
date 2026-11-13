@@ -54,6 +54,7 @@ import (
 //
 //	cRed error · cYellow working · cMagenta thinking/keys
 //	cPink high-severity · cEmerald normal-severity · cRose over-threshold
+//	cBrick yolo mode chip
 var (
 	cBlack   = lipgloss.Color("0")
 	cRed     = lipgloss.Color("1") // error
@@ -67,6 +68,11 @@ var (
 	cPink    = lipgloss.Color("13") // high severity — bright, to part it from cMagenta
 	cEmerald = lipgloss.Color("2")  // notification banner, normal severity
 	cRose    = lipgloss.Color("9")  // over-threshold alert — bright, to part it from cRed
+	// cBrick is the yolo mode chip in the prompt box (approvals.go
+	// modeChipColor): brick red, a status hue of its own so "tools run
+	// unasked" never reads as cRed's "error". 124 (#af0000) is the 256-cube
+	// fallback; a theme picks its shade by ground luminance like cRed.
+	cBrick = lipgloss.Color("124")
 	// cFgInv is the text drawn on top of cAmber. It is black in the built-in
 	// palette — same value cBlack has — but the two roles come apart under a
 	// theme: cBlack becomes b_low (a panel tier nothing paints any more, kept
@@ -1570,7 +1576,7 @@ func (m *Model) inputBoxW() int {
 // inputTextCols is the column budget for the prompt input's text: the
 // bordered box's interior minus the 2-cell prefix and the textinput's own
 // prompt. Matches the MaxWidth clip renderInput applies to each body row.
-func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputPromptW()) }
+func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.modeChipW()-m.inputPromptW()) }
 
 // inputPromptW is the rendered width of the textinput's prompt ("> "), which
 // we now draw ourselves — bubbles' View() only handles the placeholder path.
@@ -1827,22 +1833,26 @@ func (m Model) renderInput() string {
 		return s
 	}
 
+	// The session's permission mode rides inside the box, ahead of the text:
+	// always visible, so what a prompt is about to be allowed to do is never
+	// a tree glance away.
+	chip := m.renderModeChip()
 	var rows []string
 	if m.input.Value() == "" {
 		// Placeholder path: one line, never wrapped. It used to carry the
 		// whole slash-command list, which bubbles truncated to input.Width —
 		// so what an empty box actually showed was an arbitrary prefix of it.
 		// It now points at ctrl+h instead (see newModel).
-		rows = []string{clip(prefix + " " + m.input.View())}
+		rows = []string{clip(prefix + " " + chip + m.input.View())}
 	} else {
 		rows = m.renderInputLines(m.inputTextCols())
 		// Continuations align under the first row's text — the glyph, the
 		// space and the textinput prompt are all first-row-only.
-		cont := strings.Repeat(" ", 2+m.inputPromptW())
+		cont := strings.Repeat(" ", 2+m.modeChipW()+m.inputPromptW())
 		for i, row := range rows {
 			pfx := cont
 			if i == 0 {
-				pfx = prefix + " " + m.input.PromptStyle.Render(m.input.Prompt)
+				pfx = prefix + " " + chip + m.input.PromptStyle.Render(m.input.Prompt)
 			}
 			rows[i] = clip(pfx + row)
 		}
