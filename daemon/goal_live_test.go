@@ -15,6 +15,7 @@ type liveRig struct {
 	t     *testing.T
 	a     net.Conn
 	notes chan *pb.SteerNote
+	appr  chan *pb.ApprovalReply
 	done  chan struct{}
 }
 
@@ -22,7 +23,7 @@ func newLiveRig(t *testing.T, slot int, session string) *liveRig {
 	t.Helper()
 	fcExpectTurn("tg", slot, session)
 	a, b := net.Pipe()
-	r := &liveRig{t: t, a: a, notes: make(chan *pb.SteerNote, 8), done: make(chan struct{})}
+	r := &liveRig{t: t, a: a, notes: make(chan *pb.SteerNote, 8), appr: make(chan *pb.ApprovalReply, 8), done: make(chan struct{})}
 	go func() { fcTurnSink("tg", b); close(r.done) }()
 	go func() {
 		for {
@@ -32,6 +33,9 @@ func newLiveRig(t *testing.T, slot int, session string) *liveRig {
 			}
 			if n := tr.GetNote(); n != nil {
 				r.notes <- n
+			}
+			if ap := tr.GetApproval(); ap != nil {
+				r.appr <- ap
 			}
 		}
 	}()

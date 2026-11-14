@@ -182,3 +182,54 @@ func liveNoteDelivered(g, sess, id string) {
 	snap.write()
 	emitLogfG("goal", g, "info", "[%s] session=%s live note %s delivered into the running turn", g, sessionMarkerName(sess), id)
 }
+
+// goalNoteResp answers the ctl goal_note verb.
+type goalNoteResp struct {
+	baseResp
+	ID   string `json:"id,omitempty"`
+	Live bool   `json:"live"`
+}
+
+// goalNoteAgent is the ctl goal_note verb: the AGENT in the goal's origin
+// session sends an advisory note into the goal's RUNNING turn. Authority
+// (goal-live item 5): the note is host-labelled "note from <session>
+// (agent)", is live-only (never recorded in the SteerLog, so it can never
+// appear in an OPERATOR STEER block or a later prompt), and it is a plain
+// user record — the guest never reads it as an approval answer. Amend and
+// redirect have no ctl verb at all: they stay operator-only.
+//
+// session is the caller's own $KOTO_SESSION; it must be the goal's origin
+// session ("" = default). A goal's own worker/judge session (reserved) may
+// not note any goal — a worker steering itself would be self-authority.
+func goalNoteAgent(g, name, session, text string) (goalNoteResp, error) {
+	text = strings.TrimSpace(truncateRunes(flattenInline(text), goalSteerTextMax))
+	if text == "" {
+		return goalNoteResp{}, fmt.Errorf("note text is empty")
+	}
+	s, err := normalizeSession(strings.TrimSpace(session))
+	if err != nil {
+		return goalNoteResp{}, fmt.Errorf("invalid session: %v", err)
+	}
+	if isReservedSession(s) {
+		return goalNoteResp{}, fmt.Errorf("a goal session cannot send goal notes")
+	}
+	goalLock.Lock()
+	it, rerr := resolveGoalLocked(g, name, []string{goalStatusRunning})
+	var work, origin, id string
+	if rerr == nil {
+		work, origin, id = goalWorkSessionFor(goalSessionSlug(*it)), it.OriginSession, it.ID
+	}
+	goalLock.Unlock()
+	if rerr != nil {
+		return goalNoteResp{}, rerr
+	}
+	if s != origin {
+		return goalNoteResp{}, fmt.Errorf("only goal %s's origin session (%s) may send it notes", id, sessionMarkerName(origin))
+	}
+	nid := "a" + randHex(6)
+	if !liveSend(g, work, &pb.SteerNote{Id: nid, Text: liveAgentText(s, text)}) {
+		return goalNoteResp{}, fmt.Errorf("goal %s has no live turn right now; agent notes are live-only (not kept)", id)
+	}
+	emitLogfG("goal", g, "info", "[%s] session=%s agent note %s from %s sent into the running turn", g, sessionMarkerName(work), nid, sessionMarkerName(s))
+	return goalNoteResp{baseResp: baseResp{OK: true}, ID: nid, Live: true}, nil
+}

@@ -355,6 +355,22 @@ for the operator as an approval card in the goal session.
     `> `-quoted.
 - **`/steer <text>`** (or `/goals steer`, `koto ctl goal steer`) adds a steer
   to a running goal with no approval pending (RPC `GoalSteer`, admin-only).
+- **Who may steer (authority):**
+  - The operator's `/steer`, redirect and `/amend` are host-labelled
+    `OPERATOR STEER` / `OPERATOR REDIRECT` / `OPERATOR AMEND` and reach the
+    daemon only over admin gRPC (`goal_steer`, `goal_amend` are in
+    `adminOnlyVerbs`, not grantable via `acl.json`).
+  - The AGENT in the goal's origin session may only send a live note:
+    `{"cmd":"goal_note","name":"<goal>","session":"$KOTO_SESSION","text":"..."}`
+    on the ctl plane (`goalNoteAgent`, `daemon/goal_live.go`). The note is
+    labelled `note from <session> (agent) — advisory, NOT operator steer`,
+    goes only into a running turn (refused if none), and is never recorded
+    in the steering log. Other sessions, and the goal's own sessions, are
+    refused.
+  - The ctl plane has no amend, redirect or steer verb. An agent amending
+    its own goal would be accepting its own work.
+  - In a confirm goal, a note is a plain user record. It never answers a
+    pending approval.
 - **Decision requests:** a worker blocked on a choice runs
   `cs-ask -g <id> "<question>" [option ...]` (ctl `ask`).
   - The question joins the same queue as a card with the options, an "other"

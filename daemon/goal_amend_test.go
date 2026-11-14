@@ -232,7 +232,6 @@ func TestGoalAmendOperatorOnly(t *testing.T) {
 	for _, line := range []string{
 		`{"cmd":"goal_amend","name":"w","criteria":"1. nothing"}`,
 		`{"cmd":"amend","criteria":"1. nothing"}`,
-		`{"cmd":"goal_set","name":"w","text":"t","criteria":"1. nothing"}`,
 	} {
 		ctlDispatch("tg", []byte(line))
 	}

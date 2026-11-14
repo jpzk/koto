@@ -768,6 +768,27 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
+	// goal_note: the origin-session AGENT's only live steering verb — an
+	// advisory note into its own goal's running turn, host-labelled
+	// "(agent)" and never recorded as an OPERATOR STEER. Self-targeted for
+	// every caller (main included). There is deliberately NO goal_steer,
+	// goal_redirect or goal_amend on this plane: those carry operator
+	// authority and reach the daemon only over the admin gRPC surface.
+	case "goal_note":
+		var req struct {
+			Name    string `json:"name"`
+			Session string `json:"session"`
+			Text    string `json:"text"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		r, err := goalNoteAgent(owner, req.Name, req.Session, req.Text)
+		if err != nil {
+			return errResp("ctl: goal_note: " + err.Error())
+		}
+		return r
+
 	case "goal_status":
 		var req goalListReq
 		if err := json.Unmarshal(line, &req); err != nil {
