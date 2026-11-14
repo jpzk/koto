@@ -1117,8 +1117,9 @@ func ctlGoal(args []string) {
 		plan := fs.String("plan", "yes", "plan-first (yes|no)")
 		name := fs.String("name", "", "short run name (also its session name); default: slugged from the goal")
 		session := fs.String("session", "", "origin session the goal is set from (handoff + tree nesting); default: the group's default session")
+		mode := fs.String("mode", "", "goal session mode: yolo (default) | confirm — every tool call waits for the operator; a confirm/plan origin session forces confirm")
 		fs.Parse(rest)
-		const usage = "usage: koto ctl goal set [-max N] [-plan=no] [-name x] [-session s] <group> <goal> :: <criteria>"
+		const usage = "usage: koto ctl goal set [-max N] [-plan=no] [-mode yolo|confirm] [-name x] [-session s] <group> <goal> :: <criteria>"
 		words := fs.Args()
 		if len(words) < 2 {
 			ctlFatal(2, usage)
@@ -1141,6 +1142,7 @@ func ctlGoal(args []string) {
 			Text:          strings.Join(words[:sep], " "),
 			Criteria:      strings.Join(words[sep+1:], " "),
 			MaxIterations: int32(*max),
+			Mode:          *mode,
 		}
 		switch *plan {
 		case "yes":

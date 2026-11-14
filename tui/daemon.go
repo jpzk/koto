@@ -268,7 +268,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria"), Mode: s("mode")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			n, err := floatToInt32("max_iterations", v)
 			if err != nil {

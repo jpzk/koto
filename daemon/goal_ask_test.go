@@ -12,7 +12,7 @@ func askRig(t *testing.T, mode string) {
 	fcHarness(t)
 	quietLogAlerts(t)
 	resetApprovals(t)
-	goalTestSetup(t)
+	goalOriginSetup(t)
 	steerMirrorRec(t)
 	goalLock.Lock()
 	goals = append(goals, goalItem{ID: "ga1", Group: "tg", Name: "w", Text: "t", Criteria: "c",

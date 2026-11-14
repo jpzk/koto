@@ -13,7 +13,7 @@ import (
 // — no approval pending — reaches iteration k+1's prompt inside the
 // harness's own OPERATOR STEER block, attributed to the RPC caller.
 func TestGoalSteerOperatorReachesNextIteration(t *testing.T) {
-	goalTestSetup(t)
+	goalOriginSetup(t)
 	mirrors := steerMirrorRec(t)
 	const g = "goal-steerop"
 	rec := &turnRec{}
@@ -94,7 +94,7 @@ func TestGoalSteerOperatorOnly(t *testing.T) {
 			t.Fatalf("ctl plane carries %s", n)
 		}
 	}
-	goalTestSetup(t)
+	goalOriginSetup(t)
 	steerMirrorRec(t)
 	goalLock.Lock()
 	goals = append(goals, goalItem{ID: "gso1", Group: "tg", Name: "w", Text: "t", Criteria: "c",

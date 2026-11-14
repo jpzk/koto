@@ -136,11 +136,11 @@ func goalListCmd(sock, filter string) tea.Cmd {
 // goalSetCmd sets a goal. origin is the chat session it is set from ("" =
 // default): the daemon records it so the run nests under that session in the
 // tree and its finished/terminated handoff turn lands back there.
-func goalSetCmd(sock, group, origin, name, text, criteria string, maxIter int, plan bool) tea.Cmd {
+func goalSetCmd(sock, group, origin, name, mode, text, criteria string, maxIter int, plan bool) tea.Cmd {
 	return func() tea.Msg {
 		resp, err := daemonCall(sock, "goal_set", map[string]any{
 			"group": group, "session": origin, "name": name, "text": text, "criteria": criteria,
-			"max_iterations": maxIter, "plan": plan,
+			"max_iterations": maxIter, "plan": plan, "mode": mode,
 		})
 		if err != nil {
 			return goalOpMsg{op: "set", group: group, err: err}
@@ -170,7 +170,9 @@ var goalHelpLines = []string{
 	"an independent in-VM judge accepts the acceptance criteria. Plan-first goals",
 	"run one planning turn, then wait for YOUR /goals approve before executing.",
 	"",
-	"  /goals set [<group>] [max=N] [plan=no] <goal> :: <criteria>   set a goal",
+	"  /goals set [<group>] [max=N] [plan=no] [mode=confirm] <goal> :: <criteria>",
+	"                                     set a goal (mode=confirm: you approve",
+	"                                     each tool call, one by one, in its session)",
 	"  /goals list [<group>]              goals and their status",
 	"  /goals approve [<group>] [<name>]  approve a plan (awaiting_approval → running)",
 	"  /goals pause   [<group>] [<name>]  pause at the next iteration boundary",
@@ -190,6 +192,14 @@ var goalHelpLines = []string{
 	"execution iterations (default 20); plan=no skips the plan/approval phase",
 	"and starts iterating immediately.",
 	"",
+	"mode=confirm: every tool call of the run becomes an approval card in its",
+	"goal session, answered oldest first (i/N); while one waits the goal shows",
+	"\"waiting for confirmation (N)\" and its clocks are paused (no auto-deny).",
+	"A goal set from a confirm/plan session is always confirm. On a card,",
+	"a = allow+message, m = deny+message: the text reaches the model now AND",
+	"the next iteration as OPERATOR STEER. A worker blocked on a choice asks",
+	"with cs-ask (\"waiting for decision\"); answer it on the card.",
+	"",
 	"example:",
 	"  /goals set name=weather max=10 build a CLI weather tool :: 1. `weather berlin` prints a forecast  2. README documents usage",
 }
@@ -199,6 +209,13 @@ var goalHelpLines = []string{
 // The first token is a group only when it names a group known to the TUI —
 // goal text is free text, so there is no syntactic marker like cron's.
 func (m *Model) parseGoalSet(rest string) (group, name, text, criteria string, maxIter int, plan bool, err error) {
+	group, name, _, text, criteria, maxIter, plan, err = m.parseGoalSetMode(rest)
+	return
+}
+
+// parseGoalSetMode is parseGoalSet plus mode=yolo|confirm (goal session mode;
+// "" = daemon default, which a confirm/plan origin raises to confirm).
+func (m *Model) parseGoalSetMode(rest string) (group, name, mode, text, criteria string, maxIter int, plan bool, err error) {
 	plan = true
 	toks := strings.Fields(rest)
 	group = m.cur
@@ -211,19 +228,24 @@ prefix:
 		case strings.HasPrefix(t, "name="):
 			name = strings.TrimPrefix(t, "name=")
 			if name == "" {
-				return "", "", "", "", 0, false, fmt.Errorf("name= needs a value")
+				return "", "", "", "", "", 0, false, fmt.Errorf("name= needs a value")
 			}
 		case strings.HasPrefix(t, "max="):
 			n64, aerr := strconv.ParseInt(strings.TrimPrefix(t, "max="), 10, 32)
 			n := int(n64)
 			if aerr != nil || n <= 0 {
-				return "", "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
+				return "", "", "", "", "", 0, false, fmt.Errorf("bad max=%q", strings.TrimPrefix(t, "max="))
 			}
 			maxIter = n
 		case t == "plan=no" || t == "plan=false":
 			plan = false
 		case t == "plan=yes" || t == "plan=true":
 			plan = true
+		case strings.HasPrefix(t, "mode="):
+			mode = strings.ToLower(strings.TrimPrefix(t, "mode="))
+			if mode != "yolo" && mode != "confirm" {
+				return "", "", "", "", "", 0, false, fmt.Errorf("mode= takes yolo or confirm")
+			}
 		default:
 			_, known := m.groups[t]
 			if !known || explicitGroup {
@@ -241,13 +263,13 @@ prefix:
 	body := cutFields(rest, i)
 	goalText, crit, found := strings.Cut(body, " :: ")
 	if !found {
-		return "", "", "", "", 0, false, fmt.Errorf("missing ` :: ` between goal text and acceptance criteria")
+		return "", "", "", "", "", 0, false, fmt.Errorf("missing ` :: ` between goal text and acceptance criteria")
 	}
 	goalText, crit = strings.TrimSpace(goalText), strings.TrimSpace(crit)
 	if goalText == "" || crit == "" {
-		return "", "", "", "", 0, false, fmt.Errorf("goal text and criteria must both be non-empty")
+		return "", "", "", "", "", 0, false, fmt.Errorf("goal text and criteria must both be non-empty")
 	}
-	return group, name, goalText, crit, maxIter, plan, nil
+	return group, name, mode, goalText, crit, maxIter, plan, nil
 }
 
 // handleGoalCmd routes `/goals ...` (and its `/goal` alias). Returns the
@@ -272,12 +294,12 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 	case "list":
 		return goalListCmd(m.sock, arg)
 	case "set":
-		group, name, text, criteria, maxIter, plan, err := m.parseGoalSet(arg)
+		group, name, mode, text, criteria, maxIter, plan, err := m.parseGoalSetMode(arg)
 		if err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals set: " + err.Error()})
 			return nil
 		}
-		return goalSetCmd(m.sock, group, m.goalOrigin(group), name, text, criteria, maxIter, plan)
+		return goalSetCmd(m.sock, group, m.goalOrigin(group), name, mode, text, criteria, maxIter, plan)
 	case "steer":
 		group, name, text, err := m.parseSteer(arg)
 		if err != nil {
