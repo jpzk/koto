@@ -1454,6 +1454,24 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 				out = append(out, prefix+body.Render(seg))
 			}
 		}
+	case "goalwait":
+		// /goals list wait rows (goalWaitLines): a run blocked on the
+		// operator. No timestamp gutter — the "waiting for confirmation (N)"
+		// phrase must stay whole on a 36-col phone, and the 9-col stamp
+		// gutter leaves it only 24 there. The row keeps the same total width
+		// budget as every other kind (gutter + contentCols).
+		glyph := lipgloss.NewStyle().Foreground(cAmber).Render(ic(icPause) + " ")
+		body := lipgloss.NewStyle().Foreground(cAmber)
+		cols := contentCols + len(indent) + 3 - 3 // glyph+space, 1 spare for a wide glyph
+		for _, ln := range srcLines {
+			for i, seg := range wrapLine(ln, cols) {
+				if i == 0 {
+					out = append(out, glyph+body.Render(seg))
+				} else {
+					out = append(out, "  "+body.Render(seg))
+				}
+			}
+		}
 	case "tool":
 		glyph := lipgloss.NewStyle().Foreground(cMagenta).Render(ic(icCog) + "  ")
 		body := lipgloss.NewStyle().Foreground(cGray)

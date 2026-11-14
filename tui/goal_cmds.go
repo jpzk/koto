@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -56,6 +57,15 @@ type goalItemT struct {
 	DoneNote      string
 	PausedReason  string
 	OriginSession string
+	// Live, read-time (daemon goalWithPending): the work session has tool
+	// approvals open (WaitingConfirm, Pending of them, the oldest is
+	// PendingTool since PendingSince unix seconds) or a decision request.
+	Mode            string
+	WaitingConfirm  bool
+	Pending         int
+	PendingTool     string
+	PendingSince    float64
+	WaitingDecision bool
 }
 
 type goalListMsg struct {
@@ -91,6 +101,16 @@ func goalFromMap(v any) goalItemT {
 	it.DoneNote, _ = mp["done_note"].(string)
 	it.PausedReason, _ = mp["paused_reason"].(string)
 	it.OriginSession, _ = mp["origin_session"].(string)
+	it.Mode, _ = mp["mode"].(string)
+	it.WaitingConfirm, _ = mp["waiting_confirm"].(bool)
+	if f, ok := mp["pending"].(float64); ok {
+		it.Pending = int(f)
+	}
+	it.PendingTool, _ = mp["pending_tool"].(string)
+	if f, ok := mp["pending_since"].(float64); ok {
+		it.PendingSince = f
+	}
+	it.WaitingDecision, _ = mp["waiting_decision"].(bool)
 	return it
 }
 
@@ -350,7 +370,7 @@ func goalStatusLine(it goalItemT) string {
 	switch it.Status {
 	case "paused":
 		extra = " (" + it.PausedReason + ")"
-	case "running":
+	case "running", "waiting_confirm", "waiting_decision":
 		extra = fmt.Sprintf(" %d/%d", it.Iteration, it.MaxIterations)
 	case "exhausted":
 		extra = fmt.Sprintf(" (cap %d/%d)", it.Iteration, it.MaxIterations)
@@ -365,6 +385,40 @@ func goalStatusLine(it goalItemT) string {
 	}
 	return oneLine(fmt.Sprintf("  %-16s %-12s %-18s %s",
 		handle, it.Group, it.Status+extra, truncRunes(oneLine(it.Text), 44)))
+}
+
+// goalWaitWidth bounds every goal-wait row. They render as kind "goalwait"
+// (view.go: no timestamp gutter), which a 36-col phone gives 30 columns, so
+// "waiting for confirmation (N)" never wraps mid-phrase.
+const goalWaitWidth = 30
+
+// goalWaitLines renders the rows a /goals list entry gets while its run is
+// blocked on the operator: "waiting for confirmation (N)" plus the oldest
+// pending tool and how long it has waited, or "waiting for decision". Empty
+// when the run waits on nobody. now is the age reference (time.Now in the
+// TUI, fixed in tests). Each row fits goalWaitWidth.
+func goalWaitLines(it goalItemT, now time.Time) []string {
+	var out []string
+	if it.WaitingDecision {
+		out = append(out, "waiting for decision")
+	}
+	if it.WaitingConfirm || it.Pending > 0 {
+		n := max(it.Pending, 1)
+		out = append(out, fmt.Sprintf("waiting for confirmation (%d)", n))
+		age := ""
+		if it.PendingSince > 0 {
+			since := time.UnixMilli(int64(it.PendingSince * 1000))
+			age = " · " + fmtElapsed(now.Sub(since))
+		}
+		tool := oneLine(it.PendingTool)
+		if tool == "" {
+			tool = "tool"
+		}
+		head := "oldest: "
+		room := goalWaitWidth - len([]rune(head)) - len([]rune(age))
+		out = append(out, head+truncRunes(tool, max(4, room))+age)
+	}
+	return out
 }
 
 // goalOrigin is the origin session a /goals set records: the session the

@@ -3210,6 +3210,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: "goals:"})
 		for _, it := range msg.items {
 			m.addLine(logLine{kind: "sys", group: m.cur, text: goalStatusLine(it)})
+			for _, w := range goalWaitLines(it, time.Now()) {
+				m.addLine(logLine{kind: "goalwait", group: m.cur, text: w})
+			}
 			if it.Status == "paused" && it.LastFeedback != "" {
 				fb := it.LastFeedback
 				if len(fb) > 100 {

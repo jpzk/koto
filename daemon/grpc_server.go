@@ -187,9 +187,9 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		PendingSince:    it.PendingSince,
 		WaitingDecision: it.WaitingDecision,
 		Steers:          int32(it.Steers),
-		CreatedAt:     it.CreatedAt,
-		UpdatedAt:     it.UpdatedAt,
-		CompletedAt:   it.CompletedAt,
+		CreatedAt:       it.CreatedAt,
+		UpdatedAt:       it.UpdatedAt,
+		CompletedAt:     it.CompletedAt,
 	}
 }
 

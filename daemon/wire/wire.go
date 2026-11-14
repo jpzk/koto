@@ -449,10 +449,10 @@ type GoalItem struct {
 	// ask / AskUserQuestion) rather than a tool approval. Read-time too.
 	WaitingDecision bool `json:"waiting_decision,omitempty"`
 	// Steers counts the operator steers recorded for this goal (steer log).
-	Steers int `json:"steers,omitempty"`
-	CreatedAt     float64 `json:"created_at"`
-	UpdatedAt     float64 `json:"updated_at,omitempty"`
-	CompletedAt   float64 `json:"completed_at,omitempty"`
+	Steers      int     `json:"steers,omitempty"`
+	CreatedAt   float64 `json:"created_at"`
+	UpdatedAt   float64 `json:"updated_at,omitempty"`
+	CompletedAt float64 `json:"completed_at,omitempty"`
 }
 
 type GoalSetReq struct {
