@@ -1857,7 +1857,7 @@ LEDGER:
 <...every ledger item, in order, [x] done / [ ] open>
 
 NEXT: <the immediate next step>
-%s%s
+%s%s%s
 GOAL:
 %s
 
@@ -1872,7 +1872,7 @@ closes; put a short evidence summary in R):
   printf '{"cmd":"goal_done","id":"%s","note":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, handoff, it.Text, it.Criteria, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, handoff, goalSteerBlock(it), it.Text, it.Criteria, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {
@@ -1960,6 +1960,7 @@ func goalOwnsWorkSession(g, s string) bool {
 // GoalItem.WaitingConfirm) from the approval table and the live work-session
 // mode. Must be called WITHOUT goalLock (sessionMode and approvalsMu).
 func goalWithPending(it goalItem) goalItem {
+	it.Steers = len(it.SteerLog)
 	if goalTerminal(it.Status) {
 		return it
 	}

@@ -394,17 +394,26 @@ func approveOperator(g, session, id string, allow bool, msg, who string) *pb.App
 		approvalsMu.Unlock()
 		return &pb.ApproveResp{Error: "answer the oldest pending approval of " + g + "/" + sessionMarkerName(session) + " first: " + older}
 	}
+	tool := ""
+	if p := approvals[*key]; p != nil {
+		tool = sanitize(p.tool)
+	}
 	approvalsMu.Unlock()
 	dec := decDeny
 	if allow {
 		dec = decAllow
-		msg = ""
-	} else {
-		msg = truncateRunes(flattenInline(msg), 2000)
 	}
+	// Both answers may carry the operator's message (deny: the refusal reason;
+	// allow: a note the guest hands the model with the tool result).
+	msg = strings.TrimSpace(truncateRunes(flattenInline(msg), 2000))
 	got, already := resolveApproval(*key, allow, dec, msg, who, true)
 	if got == "" {
 		return &pb.ApproveResp{Error: "no pending approval " + id}
+	}
+	if !already && got == dec && msg != "" {
+		// Durable steer: a goal iteration's successor starts context-fresh,
+		// so the message is also recorded host-side for the next prompt.
+		goalAddSteer(g, session, dec+" "+tool, who, msg)
 	}
 	return &pb.ApproveResp{Ok: true, AlreadyAnswered: already, Decision: got}
 }

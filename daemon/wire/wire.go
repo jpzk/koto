@@ -449,10 +449,19 @@ type GoalItem struct {
 	// ask / AskUserQuestion) rather than a tool approval. Read-time too.
 	WaitingDecision bool `json:"waiting_decision,omitempty"`
 	// Steers counts the operator steers recorded for this goal (steer log).
-	Steers      int     `json:"steers,omitempty"`
-	CreatedAt   float64 `json:"created_at"`
-	UpdatedAt   float64 `json:"updated_at,omitempty"`
-	CompletedAt float64 `json:"completed_at,omitempty"`
+	// Read-time (goalWithPending), from SteerLog.
+	Steers int `json:"steers,omitempty"`
+	// SteerLog is the HOST record of operator steering for this run: messages
+	// given on its approvals, decision answers and /steer. Written by the
+	// daemon only, from operator-authenticated paths (gRPC Approve), never from
+	// the ctl plane or anything the guest wrote; goalWorkerMsg composes the
+	// "OPERATOR STEER (authoritative)" block from it alone. The guest copy
+	// (/workspace/goal/<name>/steer.md) is a mirror and is never read back.
+	// Loop-internal: not on pb.
+	SteerLog    []GoalSteer `json:"steer_log,omitempty"`
+	CreatedAt   float64     `json:"created_at"`
+	UpdatedAt   float64     `json:"updated_at,omitempty"`
+	CompletedAt float64     `json:"completed_at,omitempty"`
 }
 
 type GoalSetReq struct {
@@ -493,4 +502,14 @@ type GoalResp struct {
 type GoalListResp struct {
 	BaseResp
 	Goals []GoalItem `json:"goals"`
+}
+
+// GoalSteer is one entry of GoalItem.SteerLog.
+type GoalSteer struct {
+	Ts        float64 `json:"ts"`
+	Iteration int     `json:"iteration"`
+	// Source: "allow <tool>" | "deny <tool>" | "decision" | "steer".
+	Source string `json:"source"`
+	Who    string `json:"who,omitempty"`
+	Text   string `json:"text"`
 }
