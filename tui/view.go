@@ -996,7 +996,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		}
 		md := m.sessionMode(r.group, sk)
 		markMode = " " + modeLetter(md)
-		if n := m.pendingFor(r.group, sk); n > 0 {
+		if n := m.pendingShown(r.group, sk); n > 0 {
 			markPend = fmt.Sprintf(" !%d", n)
 		}
 		if mw := cellWidth(markPend + markMode); w-mw >= 1 {
@@ -1089,12 +1089,13 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// worth doing.
 	// The folded count is a fold's only trace, so it never gets cut: when
 	// name+count overflow the field, the count first tightens ("(*1j 1g)" ->
-	// "*1j1g"), then falls back to the bare total ("(*2)"); the NAME gives up
-	// the remaining cells (keeping at least 3).
+	// "*1j1g"), then falls back to the total ("(*2)") and finally the bare
+	// total ("*2") — the rolled-up "!N" pending mark can squeeze the field
+	// that far; the NAME gives up the remaining cells (keeping at least 3).
 	if cnt != "" && cellWidth(name+cnt) > w {
 		j, gl, live := m.foldedCount(r.group, r.session)
 		nw := min(cellWidth(name), 3)
-		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live)} {
+		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)} {
 			if cellWidth(cnt) <= w-nw {
 				break
 			}
@@ -1452,6 +1453,24 @@ func renderBlockLines(b renderedBlock, contentCols int) []string {
 					first = false
 				}
 				out = append(out, prefix+body.Render(seg))
+			}
+		}
+	case "goalwait":
+		// /goals list wait rows (goalWaitLines): a run blocked on the
+		// operator. No timestamp gutter — the "waiting for confirmation (N)"
+		// phrase must stay whole on a 36-col phone, and the 9-col stamp
+		// gutter leaves it only 24 there. The row keeps the same total width
+		// budget as every other kind (gutter + contentCols).
+		glyph := lipgloss.NewStyle().Foreground(cAmber).Render(ic(icPause) + " ")
+		body := lipgloss.NewStyle().Foreground(cAmber)
+		cols := contentCols + len(indent) + 3 - 3 // glyph+space, 1 spare for a wide glyph
+		for _, ln := range srcLines {
+			for i, seg := range wrapLine(ln, cols) {
+				if i == 0 {
+					out = append(out, glyph+body.Render(seg))
+				} else {
+					out = append(out, "  "+body.Render(seg))
+				}
 			}
 		}
 	case "tool":

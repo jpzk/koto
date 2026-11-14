@@ -111,6 +111,10 @@ service Koto {
   rpc GoalInterrupt (GoalGroupReq) returns (GoalResp);
   rpc GoalResume    (GoalGroupReq) returns (GoalResp);
   rpc GoalCancel    (GoalGroupReq) returns (GoalResp);
+  // GoalSteer appends an operator steer to a goal's steering log; the next
+  // iteration prompt carries it as OPERATOR STEER (authoritative). Operator
+  // plane only — the in-guest ctl plane has no steer verb.
+  rpc GoalSteer     (GoalSteerReq) returns (GoalResp);
 
   // Resources reports host-side resource consumption for the whole fleet:
   // per-group workspace.img allocation + growth rate + FC process CPU/RSS,
@@ -255,6 +259,9 @@ message Event {
   // seconds at which the host denies it. event == "approval_resolved": id,
   // msg = allow|deny|timeout, name = who decided.
   double deadline    = 16;
+  // approval_request: kind ("" / tool | ask) and, for ask, the options.
+  string kind        = 17;
+  repeated string options = 18;
 }
 
 message RunScriptReq {
@@ -598,6 +605,18 @@ message GoalItem {
   // there (default when it no longer exists), and the TUI nests the goal's
   // rows under it.
   string origin_session = 16;
+  // Permission mode of the goal's work session at creation: yolo | confirm.
+  string mode           = 17;
+  // Live (not persisted): open approvals / decision requests of the work
+  // session. waiting_confirm = a tool approval is pending, waiting_decision =
+  // an ask is pending; pending = how many; pending_tool + pending_since
+  // describe the OLDEST one (the one the operator answers next).
+  bool   waiting_confirm  = 18;
+  int32  pending          = 19;
+  string pending_tool     = 20;
+  double pending_since    = 21;
+  bool   waiting_decision = 22;
+  int32  steers           = 23; // operator steers recorded so far
 }
 
 message GoalSetReq {
@@ -616,6 +635,14 @@ message GoalSetReq {
   // names and names that are not a registered session fall back to the
   // default session (never an error).
   string session        = 7;
+  // Work-session permission mode: "" / yolo (default) | confirm. A goal set
+  // from a confirm or plan session is never yolo (it is raised to confirm).
+  string mode           = 8;
+}
+message GoalSteerReq {
+  string group = 1;
+  string name  = 2; // run name or id; "" = the sole active goal
+  string text  = 3;
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
 message GoalGroupReq {                     // approve / pause / interrupt / resume / cancel
@@ -890,7 +917,10 @@ message ApproveReq {
   string session = 2; // "" / "-" / "default" = default session
   string id      = 3; // PendingApproval.id
   bool   allow   = 4;
-  string msg     = 5; // deny-with-message: reaches the model as the deny reason
+  // Optional message on EITHER answer: deny reason, allow note, or the
+  // answer text of a decision request (kind=ask). Reaches the model in the
+  // current turn; on a goal session it is also recorded as an operator steer.
+  string msg     = 5;
 }
 message ApproveResp {
   bool   ok               = 1;
@@ -909,6 +939,8 @@ message PendingApproval {
   string summary    = 7;
   double deadline   = 8; // unix seconds; host denies at this time
   double created    = 9;
+  string kind       = 10; // "" / tool = tool approval, ask = decision request
+  repeated string options = 11; // kind=ask: the choices (summary = question)
 }
 message ListPendingResp {
   bool ok = 1; string error = 2;

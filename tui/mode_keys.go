@@ -75,10 +75,11 @@ var modeCycleCmdFn = func(sock, g, s, mode, prev string) tea.Cmd {
 	}
 }
 
-// modeSteps is the cycle a session can take: goal-* sessions skip confirm
-// (nobody is there to approve).
+// modeSteps is the cycle a session can take. A goal work session cycles
+// all three (a confirm goal queues its tool calls in that session); only
+// the judge skips confirm — it must run its checks unattended.
 func modeSteps(s string) []string {
-	if goalSession(s) {
+	if goalJudgeSession(s) {
 		return []string{modeYolo, modePlan}
 	}
 	return permModes

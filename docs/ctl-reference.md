@@ -194,7 +194,7 @@ helper is given.
 
 #### Goals (`ctlGoal`)
 
-- **`goal set [-max N] [-plan=no] [-name x] <group> <goal> :: <criteria>`**.
+- **`goal set [-max N] [-plan=no] [-mode yolo|confirm] [-name x] [-session s] <group> <goal> :: <criteria>`**.
   The goal text and the criteria are separated by a literal `::` argument, and
   both sides must be non-empty.
   - `-max`: max iterations. `0` means the default, which is
@@ -202,6 +202,10 @@ helper is given.
     `goalMaxIterCeil = 200` (`daemon/goals.go`, `goalSetBy`).
   - `-plan`: `yes` (default) or `no`. Anything else fails with
     `goal set: -plan takes yes or no`.
+  - `-mode`: `yolo` (default) or `confirm`. A confirm goal's tool calls wait
+    for the operator in its goal session. A goal set from a confirm or plan
+    `-session` is always confirm (see
+    [groups-goals-schedules.md](groups-goals-schedules.md)).
   - `-name`: short run name, also used as the session name. Defaults to a slug
     of the goal.
   - Sends RPC `GoalSet`. A goal on `main` is refused with `cannot set a goal
@@ -213,6 +217,10 @@ helper is given.
   there is only one candidate. `[name]` is not shown in `ctlUsage`, but is in
   the verb's usage error. `interrupt` means pause now and abort the in-flight
   goal turn (usage text).
+- **`goal steer <group> [name=<run>] <text...>`**: RPC `GoalSteer`
+  (admin-only). Adds a durable operator steer to a planning, awaiting,
+  running or paused goal. The next iteration reads it as OPERATOR STEER.
+  Empty text, a finished goal or a group without a goal is refused.
 
 #### Shared shell (`ctlShell`)
 
@@ -362,12 +370,25 @@ allowed for non-main groups: <verb>`.
 - **`goal_done`** `{"id","note"(b64)}` and **`goal_verdict`**
   `{"id","met","reasons"(b64)}`. The note and the reasons are truncated to
   `goalNoteMax = 4000` (`recordGoalDone`, `recordGoalVerdict`).
-- **`goal_set`** `{"group"?,"name"?,"text","criteria","plan"?,"max_iterations"?}`.
+- **`goal_set`** `{"group"?,"name"?,"text","criteria","plan"?,"max_iterations"?,"mode"?,"session"?}`.
   - A non-main caller is always forced to target itself. An empty group means
     the caller's own.
   - A goal on `main` is refused: `ctl: cannot set a goal on main`.
   - **When main sets a goal with `plan:false`, it is forced to plan-first**,
     because approving a plan is a human's call (log line in `ctlDispatch`).
+  - `mode` is `yolo` (default) or `confirm`; anything else is refused with
+    `invalid goal mode "<m>" (yolo or confirm)` (`resolveGoalMode`). An agent
+    may always ask for `confirm`. It can never get `yolo` out of a
+    restriction: when the session it claims to come from, or any of its
+    sessions with a turn in flight, is in confirm or plan, a yolo request is
+    raised to confirm (`callerSessionModes`).
+- **`ask`** `{"id","question","options"?}`. A goal worker's decision request
+  (wrapped by `cs-ask`). Accepted only while the goal's work turn is running,
+  one at a time per work session. It is queued in that session's approval
+  queue (kind `ask`, no deadline) and the call **blocks** until the operator
+  answers. A non-empty answer also goes to the goal's steering log
+  (`daemon/goal_ask.go`). There is **no** ctl verb for steers: an operator
+  steer comes only from the host (`GoalSteer` RPC, admin-only).
 - **`goal_approve`** `{"name"?}`. Self-only. Naming another group fails with
   ``ctl: goal_approve is self-only (a plan set on a peer needs a human)``.
   It also requires an awaiting-approval goal that the group set itself.

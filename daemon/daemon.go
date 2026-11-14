@@ -64,6 +64,7 @@ type (
 	schedIDReq     = wire.SchedIDReq
 	schedToggleReq = wire.SchedToggleReq
 	goalItem       = wire.GoalItem
+	goalSteer      = wire.GoalSteer
 	goalSetReq     = wire.GoalSetReq
 	goalGroupReq   = wire.GoalGroupReq
 	goalListReq    = wire.GoalListReq

@@ -3210,6 +3210,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: m.cur, text: "goals:"})
 		for _, it := range msg.items {
 			m.addLine(logLine{kind: "sys", group: m.cur, text: goalStatusLine(it)})
+			for _, w := range goalWaitLines(it, time.Now()) {
+				m.addLine(logLine{kind: "goalwait", group: m.cur, text: w})
+			}
 			if it.Status == "paused" && it.LastFeedback != "" {
 				fb := it.LastFeedback
 				if len(fb) > 100 {
@@ -3240,6 +3243,8 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			text = fmt.Sprintf("goal %s resumed with a fresh %d-iteration budget", it.ID, it.MaxIterations)
 		case "interrupt":
 			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goals resume to continue)", it.ID)
+		case "steer":
+			text = fmt.Sprintf("steer recorded on goal %s — its next iteration reads it as OPERATOR STEER", it.ID)
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -5412,7 +5417,17 @@ func (m Model) foldLabelTight(j, gl int, live bool) string {
 	return s
 }
 
-// foldLabelTotal is the last-resort count, " (*3)": jobs + goals together.
+// foldLabelBare is the narrowest count, " *3" (live) / " +3": the total
+// without parens, for a row whose field the rolled-up "!N" pending mark has
+// already squeezed so far that a 3-char name + " (*3)" no longer fits.
+func foldLabelBare(n int, live bool) string {
+	if live {
+		return fmt.Sprintf(" *%d", n)
+	}
+	return fmt.Sprintf(" +%d", n)
+}
+
+// foldLabelTotal is the parenthesised total, " (*3)": jobs + goals together.
 func foldLabelTotal(n int, live bool) string {
 	mark := ""
 	if live {
@@ -6158,6 +6173,11 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/goals"), "/goal"))
 		return m.handleGoalCmd(rest)
 	}
+	// /steer is /goals steer: a durable operator steer on a running goal,
+	// no approval pending needed. In a goal session it targets that run.
+	if v == "/steer" || strings.HasPrefix(v, "/steer ") {
+		return m.handleGoalCmd("steer " + strings.TrimSpace(strings.TrimPrefix(v, "/steer")))
+	}
 	if v == "/clear" || v == "/clear all" {
 		if v == "/clear all" {
 			// Whole group: every session + the full transcript.
@@ -6396,7 +6416,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// server's reserved-session error.
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
-			text: "goal sessions are follow-only — chat in the default session, or /goals interrupt to take over"})
+			text: "goal sessions are follow-only — /steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
 		return nil
 	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row

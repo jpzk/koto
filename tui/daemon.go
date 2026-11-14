@@ -268,7 +268,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria"), Mode: s("mode")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			n, err := floatToInt32("max_iterations", v)
 			if err != nil {
@@ -298,6 +298,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_cancel":
 		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
+	case "goal_steer":
+		return cl.GoalSteer(ctx, &pb.GoalSteerReq{Group: s("group"), Name: s("name"), Text: s("text")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }
@@ -697,6 +699,7 @@ func pbToEvent(p *pb.Event) Event {
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
 		Historical: p.Historical, ID: p.Id, Seq: p.Seq, Session: p.Session,
 		Severity: p.Severity, Title: p.Title, Deadline: p.Deadline,
+		Kind: p.GetKind(), Options: p.GetOptions(),
 	}
 }
 

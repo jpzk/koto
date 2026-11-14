@@ -330,13 +330,13 @@ func TestApprovalReconcileAndSeed(t *testing.T) {
 }
 
 // /mode <m> sends Config(mode, session) for the viewed session; bad modes
-// and confirm on a goal session are refused locally.
+// and confirm on a goal judge are refused locally.
 func TestModeCommand(t *testing.T) {
 	sent := recordModes(t)
 	m := treeModel(t, approvalGroups(), "alpha", "", "")
 	m.dispatchInput("/mode plan")
 	m.dispatchInput("/mode bogus")
-	m.setActiveSession("alpha", "goal-x")
+	m.setActiveSession("alpha", "goal-x-judge")
 	m.dispatchInput("/mode confirm")
 	if strings.Join(*sent, ",") != "alpha||plan" {
 		t.Fatalf("sent = %v, want only alpha||plan", *sent)

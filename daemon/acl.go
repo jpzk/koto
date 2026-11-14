@@ -292,6 +292,8 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalGroupReq: // GoalApprove, GoalPause, GoalInterrupt, GoalResume, GoalCancel
 		return r.Group, true
+	case *pb.GoalSteerReq:
+		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
@@ -343,6 +345,10 @@ var adminOnlyVerbs = map[string]bool{
 	// on the ctl plane either.
 	"approve":      true,
 	"list_pending": true,
+	// goal_steer: an operator steer is injected into every later iteration
+	// as "OPERATOR STEER (authoritative)"; a delegated role could otherwise
+	// author the very text that outranks the goal (goal_steer.go).
+	"goal_steer": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

@@ -288,7 +288,7 @@ func TestApprovalOutrightDenials(t *testing.T) {
 	f := newGateFix(t, time.Hour)
 	f.g.line(canUse("p", "ExitPlanMode", `{}`))
 	f.g.line(canUse("big", "Write", `{"content":"`+strings.Repeat("a", approvalInputMax)+`"}`))
-	f.g.line([]byte(`{"type":"control_request","request_id":"h","request":{"subtype":"hook_callback"}}`))
+	f.g.line([]byte(`{"type":"control_request","request_id":"h","request":{"subtype":"mcp_message"}}`))
 	rs := f.in.responses(t)
 	if len(rs) != 3 {
 		t.Fatalf("responses: %+v", rs)
@@ -410,15 +410,22 @@ func TestApprovalSummary(t *testing.T) {
 }
 
 // fakeClaudeConfirm plays claude's side of the stdio permission protocol:
-// read the user record, ask once, record the answer, emit the result, then
-// wait for stdin EOF (the guest must close it after the result).
+// read the user record, ask once (FAKE_TUID selects whether can_use_tool
+// carries a tool_use_id), record the answer, emit the result, then keep
+// everything else claude's stdin carries until EOF in $FAKE_DIR/rest (an
+// allow+message note is one more user record there; the guest must close
+// stdin after the result).
 const fakeClaudeConfirm = `
 read -r u; printf '%s\n' "$u" > "$FAKE_DIR/user"
 echo '{"type":"system","subtype":"init","session_id":"11111111-2222-3333-4444-555555555555"}'
+if [ -n "$FAKE_TUID" ]; then
+echo '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"touch /workspace/m"}}}'
+else
 echo '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch /workspace/m"}}}'
+fi
 read -r r; printf '%s\n' "$r" > "$FAKE_DIR/resp"
 echo '{"type":"result","subtype":"success","session_id":"11111111-2222-3333-4444-555555555555"}'
-cat >/dev/null
+cat > "$FAKE_DIR/rest"
 echo eof > "$FAKE_DIR/eof"
 `
 
@@ -542,3 +549,97 @@ func TestRunClaudeConfirmCompactIsPlan(t *testing.T) {
 		t.Fatalf("confirm compaction launch: %q", argv)
 	}
 }
+
+// A confirm GOAL turn: the host sends no deadline of its own (timeout ==
+// hard cap == 7d); the guest keeps both unclamped, so the only thing that
+// ends a turn waiting on the operator is that long backstop — never the
+// 1200s turnTimeout (the budget is paused while the approval is pending).
+func TestApprovalTimeoutsGoalTurnNoDeadline(t *testing.T) {
+	week := int64((7 * 24 * time.Hour) / time.Millisecond)
+	to, hc := approvalTimeouts(&pb.MsgReq{ApprovalTimeoutMs: week, ApprovalHardCapMs: week})
+	if to != 7*24*time.Hour || hc != 7*24*time.Hour {
+		t.Fatalf("goal turn limits clamped: %v %v", to, hc)
+	}
+	fired := make(chan struct{}, 1)
+	c := newWorkerClock(60*time.Millisecond, hc)
+	c.start(func() { fired <- struct{}{} })
+	defer c.stop()
+	c.pause() // the operator has not answered yet
+	select {
+	case <-fired:
+		t.Fatalf("turn killed while an approval was pending (%s)", c.firedBy())
+	case <-time.After(300 * time.Millisecond): // 5x the budget
+	}
+}
+
+// The confirm launch registers no SDK hooks (--bare drops them): the first
+// thing on claude's stdin is the user record.
+func TestRunClaudeConfirmNoInitialize(t *testing.T) {
+	dir, _ := runConfirmFake(t, hostAnswer(true, ""))
+	if u := readFake(t, dir, "user"); !strings.Contains(u, `"type":"user"`) || strings.Contains(u, "initialize") {
+		t.Fatalf("first stdin record = %s", u)
+	}
+	if rest := readFake(t, dir, "rest"); strings.Contains(rest, "initialize") || strings.Contains(rest, "OPERATOR NOTE") {
+		t.Fatalf("plain allow wrote more to claude: %s", rest)
+	}
+}
+
+// Allow + message: the tool runs (allow echoes the input) and the message
+// reaches the model as one more user record right after the allow, in the
+// same turn — with or without a tool_use_id on can_use_tool.
+func TestRunClaudeConfirmAllowMsgQueuedUserRecord(t *testing.T) {
+	for _, tuid := range []string{"1", ""} {
+		t.Setenv("FAKE_TUID", tuid)
+		dir, _ := runConfirmFake(t, hostAnswer(true, "use the staging bucket next"))
+		resp := readFake(t, dir, "resp")
+		if !strings.Contains(resp, `"behavior":"allow"`) || !strings.Contains(resp, "touch /workspace/m") {
+			t.Fatalf("allow lost: %s", resp)
+		}
+		rest := strings.TrimSpace(readFake(t, dir, "rest"))
+		var u struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		if strings.Count(rest, "\n") != 0 || json.Unmarshal([]byte(rest), &u) != nil || u.Type != "user" || u.Message.Role != "user" ||
+			u.Message.Content != allowNoteText("use the staging bucket next") {
+			t.Fatalf("tuid=%q allow message not delivered as one user record: %q", tuid, rest)
+		}
+	}
+}
+
+// Deny + message rides in the permission answer itself, never as a user
+// record; a whitespace-only allow message writes none.
+func TestApprovalGateAllowNoteOnlyWithText(t *testing.T) {
+	var buf bytes.Buffer
+	g := newApprovalGate(&turnConn{c: io.Discard}, nopWC{&buf}, nil, time.Minute)
+	g.pending["a"], g.reqTool["a"] = time.AfterFunc(time.Hour, func() {}), "Bash"
+	g.pending["b"], g.reqTool["b"] = time.AfterFunc(time.Hour, func() {}), "Bash"
+	g.pending["c"], g.reqTool["c"] = time.AfterFunc(time.Hour, func() {}), "Bash"
+	g.finish("a", true, "note A", "", false)
+	if s := buf.String(); strings.Count(s, "\n") != 2 || !strings.Contains(s, `"type":"user"`) || !strings.Contains(s, "note A") {
+		t.Fatalf("allow+message: %s", s)
+	}
+	buf.Reset()
+	g.finish("b", true, "   ", "", false)
+	if s := buf.String(); strings.Count(s, "\n") != 1 || strings.Contains(s, `"type":"user"`) {
+		t.Fatalf("blank message produced a note: %s", s)
+	}
+	buf.Reset()
+	g.finish("c", false, "no, use /tmp", "", false)
+	if s := buf.String(); strings.Count(s, "\n") != 1 || strings.Contains(s, `"type":"user"`) || !strings.Contains(s, "no, use /tmp") {
+		t.Fatalf("deny+message: %s", s)
+	}
+	// an unexpected hook_callback gets an empty continue answer
+	buf.Reset()
+	g.request("h", &controlRequest{Subtype: "hook_callback", CallbackID: "x"})
+	if s := buf.String(); !strings.Contains(s, `"request_id":"h"`) || strings.Contains(s, "additionalContext") || strings.Contains(s, `"error"`) {
+		t.Fatalf("hook answer: %s", s)
+	}
+}
+
+type nopWC struct{ io.Writer }
+
+func (nopWC) Close() error { return nil }
