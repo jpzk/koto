@@ -1426,6 +1426,10 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 	defer func() {
 		goalLock.Lock()
 		delete(goalDoneOpen, snap.ID)
+		goalLock.Unlock()
+		// A decision request belongs to this turn: it ends with it.
+		cancelGoalAsks(g, work)
+		goalLock.Lock()
 		if n, has := goalDoneMail[snap.ID]; has {
 			claimed, note = true, n
 		}
@@ -1871,8 +1875,14 @@ closes; put a short evidence summary in R):
   R="criterion 1: <command> passed; criterion 2: ..."
   printf '{"cmd":"goal_done","id":"%s","note":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl
+Blocked by a decision only the operator can make (not a question you can
+answer yourself)? Ask, and the answer comes back to this turn — it waits for
+the operator with no timeout and your turn budget paused:
+  cs-ask -g %s "<question>" "<option 1>" "<option 2>"
+  (prints the answer; exit 3 = declined, stop and wait; if the tool call
+  times out, run: cs-ask --wait)
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, handoff, goalSteerBlock(it), it.Text, it.Criteria, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, dir, dir, dir, feedback, handoff, goalSteerBlock(it), it.Text, it.Criteria, it.ID, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {
@@ -1970,12 +1980,20 @@ func goalWithPending(it goalItem) goalItem {
 	}
 	n, tool, since := oldestPendingApproval(it.Group, work)
 	if n > 0 {
-		it.WaitingConfirm = true
 		it.Pending = n
 		it.PendingTool = tool
 		it.PendingSince = float64(since.UnixMilli()) / 1000
-		if it.Status == goalStatusRunning {
-			it.Status = goalStatusWaitingConfirm
+		if tool == kindAsk {
+			// The oldest open item is a decision request (goal_ask.go).
+			it.WaitingDecision = true
+			if it.Status == goalStatusRunning {
+				it.Status = goalStatusWaitingDecision
+			}
+		} else {
+			it.WaitingConfirm = true
+			if it.Status == goalStatusRunning {
+				it.Status = goalStatusWaitingConfirm
+			}
 		}
 	}
 	return it
@@ -1986,3 +2004,7 @@ func goalWithPending(it goalItem) goalItem {
 // persisted: the stored status stays running, so pause/resume/cancel and the
 // driver's transitions are unchanged.
 const goalStatusWaitingConfirm = "waiting_confirm"
+
+// goalStatusWaitingDecision: same, when the oldest open item is a decision
+// request (ctl ask) — display-only, never persisted.
+const goalStatusWaitingDecision = "waiting_decision"

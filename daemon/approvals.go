@@ -106,6 +106,11 @@ type pendingApproval struct {
 	w        *turnReplyWriter
 	logPath  string
 	timer    *time.Timer
+	// kind=ask (goal_ask.go): a decision request. No turn connection (w nil);
+	// the answer goes to the blocked ctl ask through answer instead.
+	kind    string
+	options []string
+	answer  chan askAnswer
 }
 
 var (
@@ -247,6 +252,14 @@ func resolveApproval(k approvalKey, allow bool, dec, msg, who string, write bool
 	}
 	rememberAnsweredLocked(k, dec)
 	approvalsMu.Unlock()
+	if p.answer != nil {
+		// Decision request: the blocked ctl ask is the reply channel.
+		p.answer <- askAnswer{allow: allow, msg: msg, who: who}
+		emit(k.g, Event{Event: "approval_resolved", Session: k.s, ID: k.id, Msg: dec, Name: approvalWho(who)})
+		emitLogfG("approval", k.g, "info", "[%s] session=%s decision %s: %s by %s",
+			k.g, sessionMarkerName(k.s), k.id, dec, approvalWho(who))
+		return dec, false
+	}
 	// A deny is recorded BEFORE the guest hears it (it is final whatever the
 	// write does); an allow only after the guest has it, so the transcript
 	// never claims an allow that did not reach the guest.
@@ -356,6 +369,7 @@ func listPendingApprovals(g string) []*pb.PendingApproval {
 			Group: p.key.g, Session: p.key.s, Slot: int32(p.key.slot), Id: p.key.id,
 			Tool: sanitize(p.tool), InputJson: sanitize(p.input), Summary: sanitize(p.summary),
 			Deadline: unixOrZero(p.deadline), Created: float64(p.created.UnixMilli()) / 1000,
+			Kind: p.kind, Options: append([]string(nil), p.options...),
 		})
 	}
 	return out
@@ -394,9 +408,9 @@ func approveOperator(g, session, id string, allow bool, msg, who string) *pb.App
 		approvalsMu.Unlock()
 		return &pb.ApproveResp{Error: "answer the oldest pending approval of " + g + "/" + sessionMarkerName(session) + " first: " + older}
 	}
-	tool := ""
+	tool, kind, question := "", "", ""
 	if p := approvals[*key]; p != nil {
-		tool = sanitize(p.tool)
+		tool, kind, question = sanitize(p.tool), p.kind, p.summary
 	}
 	approvalsMu.Unlock()
 	dec := decDeny
@@ -406,6 +420,11 @@ func approveOperator(g, session, id string, allow bool, msg, who string) *pb.App
 	// Both answers may carry the operator's message (deny: the refusal reason;
 	// allow: a note the guest hands the model with the tool result).
 	msg = strings.TrimSpace(truncateRunes(flattenInline(msg), 2000))
+	if kind == kindAsk && allow && msg == "" {
+		// A decision is its text (the picked option or free text); the
+		// no-text answer is the card's "stop and wait" row = deny.
+		return &pb.ApproveResp{Error: "a decision needs an answer (pick an option or type one), or deny to stop and wait"}
+	}
 	got, already := resolveApproval(*key, allow, dec, msg, who, true)
 	if got == "" {
 		return &pb.ApproveResp{Error: "no pending approval " + id}
@@ -413,7 +432,15 @@ func approveOperator(g, session, id string, allow bool, msg, who string) *pb.App
 	if !already && got == dec && msg != "" {
 		// Durable steer: a goal iteration's successor starts context-fresh,
 		// so the message is also recorded host-side for the next prompt.
-		goalAddSteer(g, session, dec+" "+tool, who, msg)
+		if kind == kindAsk {
+			ans := msg
+			if !allow {
+				ans = "declined (stop and wait): " + msg
+			}
+			goalAddSteer(g, session, "decision", who, "Q: "+question+" → A: "+ans)
+		} else {
+			goalAddSteer(g, session, dec+" "+tool, who, msg)
+		}
 	}
 	return &pb.ApproveResp{Ok: true, AlreadyAnswered: already, Decision: got}
 }

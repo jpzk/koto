@@ -621,6 +621,21 @@ func ctlDispatch(owner string, line []byte) any {
 		emitLogfG("goal", owner, "info", "[%s] goal_done claim (%d-byte note)", owner, len(n))
 		return baseResp{OK: true}
 
+	case "ask":
+		// Self-targeted, open to ALL groups: a goal WORKER asks the operator a
+		// decision question (goal_ask.go). Window-gated like goal_done (only
+		// while that goal's work turn is in flight) and it BLOCKS until the
+		// operator answers — the guest sends it on its own connection.
+		var req struct {
+			ID       string   `json:"id"`
+			Question string   `json:"question"`
+			Options  []string `json:"options"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp("ctl: ask: " + err.Error())
+		}
+		return goalAsk(owner, req.ID, req.Question, req.Options)
+
 	case "goal_verdict":
 		// Self-targeted, open to ALL groups: the acceptance JUDGE reports its
 		// verdict. Window-gated to the goal-judge turn, same as goal_done

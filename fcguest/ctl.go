@@ -13,8 +13,10 @@ package main
 // expect ({"ok":true,"port":..} rather than {"ok":true,"result":{...}}).
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"koto-protocol/pb"
 
@@ -82,4 +84,99 @@ func ctlResponseJSON(resp *pb.CtlResponse) []byte {
 func ctlErrorJSON(err error) []byte {
 	b, _ := json.Marshal(map[string]any{"ok": false, "error": err.Error()})
 	return append(b, '\n')
+}
+
+// ---- ask: decision requests (daemon/goal_ask.go) ----------------------------
+//
+// The daemon answers an ask only once the operator has decided, which may be
+// hours. So the line never rides the shared ctl connection (it would hold
+// every later notify/job_done/goal_done behind it): startCtlAsk sends it on a
+// connection of its own and appends the answer to ctl.out when it arrives.
+// While it waits, every live turn clock is paused — an operator thinking is
+// not a turn running (the host's stall clock pauses on the same pending entry).
+
+// ctlAskMax bounds concurrent asks (the host allows one per goal session).
+const ctlAskMax = 4
+
+var (
+	ctlAskSem = make(chan struct{}, ctlAskMax)
+	// ctlAskRoundTrip performs the blocking exchange. Test seam.
+	ctlAskRoundTrip = func(req *pb.CtlRequest) (*pb.CtlResponse, error) {
+		c, err := vsockDial(portCtl)
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close()
+		if err := writeFrame(c, req); err != nil {
+			return nil, err
+		}
+		resp := &pb.CtlResponse{}
+		if err := readFrame(bufio.NewReader(c), frameMaxHost, resp); err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
+	// ctlAskOut receives the answer line. Test seam.
+	ctlAskOut = appendCtlOut
+)
+
+func startCtlAsk(req *pb.CtlRequest) {
+	select {
+	case ctlAskSem <- struct{}{}:
+	default:
+		ctlAskOut(ctlErrorJSON(fmt.Errorf("ctl: ask: %d decision requests already waiting", ctlAskMax)))
+		return
+	}
+	go func() {
+		defer func() { <-ctlAskSem }()
+		ctlAskOut(runCtlAsk(req))
+	}()
+}
+
+// runCtlAsk is one ask round trip with the live turn clocks paused.
+func runCtlAsk(req *pb.CtlRequest) []byte {
+	resume := pauseLiveClocks()
+	defer resume()
+	resp, err := ctlAskRoundTrip(req)
+	if err != nil {
+		return ctlErrorJSON(fmt.Errorf("ctl: ask: %v", err))
+	}
+	return ctlResponseJSON(resp)
+}
+
+// liveClocks are the worker clocks of the turns running right now
+// (runWorkerClock registers them).
+var (
+	liveClocksMu sync.Mutex
+	liveClocks   = map[*workerClock]struct{}{}
+)
+
+func registerLiveClock(c *workerClock) func() {
+	liveClocksMu.Lock()
+	liveClocks[c] = struct{}{}
+	liveClocksMu.Unlock()
+	return func() {
+		liveClocksMu.Lock()
+		delete(liveClocks, c)
+		liveClocksMu.Unlock()
+	}
+}
+
+// pauseLiveClocks pauses every live turn clock; the returned func resumes
+// exactly those (a clock that stopped meanwhile ignores the resume).
+func pauseLiveClocks() func() {
+	liveClocksMu.Lock()
+	cs := make([]*workerClock, 0, len(liveClocks))
+	for c := range liveClocks {
+		cs = append(cs, c)
+	}
+	liveClocksMu.Unlock()
+	for _, c := range cs {
+		c.pause()
+	}
+	return func() {
+		for _, c := range cs {
+			c.resume()
+		}
+	}
 }

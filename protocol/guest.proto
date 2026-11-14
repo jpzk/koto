@@ -64,6 +64,11 @@ message NotifyReq {
 message ReportReq      { bytes msg = 1; }
 message GoalDoneReq    { string id = 1; bytes note = 2; }
 message GoalVerdictReq { string id = 1; bool met = 2; bytes reasons = 3; }
+// ask: a goal worker blocked on a decision asks the operator (daemon/goal_ask.go).
+// Answered on the SAME connection once the operator decides — the guest sends
+// it on a connection of its own, so the rest of the ctl plane never waits.
+message AskReq         { string id = 1; string question = 2; repeated string options = 3; }
+message AskResp        { string ask_id = 1; bool answered = 2; string answer = 3; }
 
 message CtlRequest {
   oneof cmd {
@@ -92,6 +97,7 @@ message CtlRequest {
     SchedToggleReq sched_toggle   = 23;
     SchedIDReq     sched_run      = 24;
     CompactReq     compact        = 25; // daemon/compact.go
+    AskReq         ask            = 26; // daemon/goal_ask.go
   }
 }
 
@@ -113,6 +119,7 @@ message CtlResponse {
     GoalListResp  goals     = 9;  // goal_status
     SchedAddResp  sched     = 10; // sched_add
     SchedListResp scheds    = 11; // sched_list
+    AskResp       ask       = 12; // ask
   }
 }
 

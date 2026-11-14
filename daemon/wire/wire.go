@@ -51,6 +51,11 @@ type Event struct {
 	// Deadline (event == "approval_request"): unix seconds at which the host
 	// denies the request (daemon/approvals.go).
 	Deadline float64 `json:"deadline,omitempty"`
+	// Kind / Options (event == "approval_request"): kind "ask" is a goal's
+	// decision request (daemon/goal_ask.go) — Text is the question, Options
+	// the choices; "" is a tool approval.
+	Kind    string   `json:"kind,omitempty"`
+	Options []string `json:"options,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.

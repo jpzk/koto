@@ -68,6 +68,8 @@ func toPBEvent(ev Event) *pb.Event {
 		Severity:   ev.Severity,
 		Title:      ev.Title,
 		Deadline:   ev.Deadline,
+		Kind:       ev.Kind,
+		Options:    ev.Options,
 	}
 }
 
