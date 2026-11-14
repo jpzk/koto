@@ -196,47 +196,14 @@ type approvalGate struct {
 	inp      map[string]json.RawMessage // original input per open request (allow echoes it as updatedInput)
 	reqTool  map[string]string          // open request id -> tool name
 	reqTUID  map[string]string          // open request id -> tool_use_id (when claude sends one)
-	// Allow+message notes waiting for their tool's PostToolUse hook:
-	// keyed by tool_use_id, or (claude sent none) queued per tool name.
-	noteByTUID map[string]string
-	noteByTool map[string][]string
-	dropped    bool
-	closed     bool
+	dropped  bool
+	closed   bool
 }
 
 func newApprovalGate(tw *turnConn, in io.WriteCloser, clk *workerClock, timeout time.Duration) *approvalGate {
 	return &approvalGate{tw: tw, clk: clk, timeout: timeout, in: in,
 		pending: map[string]*time.Timer{}, inp: map[string]json.RawMessage{},
-		reqTool: map[string]string{}, reqTUID: map[string]string{},
-		noteByTUID: map[string]string{}, noteByTool: map[string][]string{}}
-}
-
-// hookCallbackID is the one SDK hook callback koto registers: PostToolUse
-// (and PostToolUseFailure) of every tool, so an operator message given with
-// an ALLOW reaches the model next to that tool's result.
-const hookCallbackID = "koto_allow_note"
-
-// initRequestID is the request_id of the guest's initialize control request.
-const initRequestID = "koto-init"
-
-// sendInit registers the PostToolUse hook (SDK control protocol
-// "initialize"). It is written before the user record; claude answers with
-// a control_response the gate ignores. A deny message needs none of this —
-// it rides in the permission answer itself.
-func (g *approvalGate) sendInit() error {
-	hook := []map[string]any{{"matcher": nil, "hookCallbackIds": []string{hookCallbackID}}}
-	b, err := json.Marshal(map[string]any{
-		"type":       "control_request",
-		"request_id": initRequestID,
-		"request": map[string]any{"subtype": "initialize",
-			"hooks": map[string]any{"PostToolUse": hook, "PostToolUseFailure": hook}},
-	})
-	if err != nil {
-		return err
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.writeLocked(b)
+		reqTool: map[string]string{}, reqTUID: map[string]string{}}
 }
 
 // allowNoteText frames an allow message for the model.
@@ -244,54 +211,42 @@ func allowNoteText(msg string) string {
 	return "OPERATOR NOTE (given with the approval of this tool call): " + msg
 }
 
-// hookLocked answers a hook_callback: the allow+message note queued for
-// that tool call as additionalContext, or an empty (continue) output.
-func (g *approvalGate) hookLocked(id string, r *controlRequest) {
-	var in struct {
-		Event     string `json:"hook_event_name"`
-		ToolName  string `json:"tool_name"`
-		ToolUseID string `json:"tool_use_id"`
-	}
-	_ = json.Unmarshal(r.Input, &in)
-	tuid := in.ToolUseID
-	if tuid == "" {
-		tuid = r.ToolUseID
-	}
-	note, ok := "", false
-	if r.CallbackID == hookCallbackID {
-		if note, ok = g.noteByTUID[tuid]; ok && tuid != "" {
-			delete(g.noteByTUID, tuid)
-		} else if q := g.noteByTool[in.ToolName]; len(q) > 0 {
-			note, ok = q[0], true
-			g.noteByTool[in.ToolName] = q[1:]
-		}
-	}
-	out := map[string]any{}
-	if ok {
-		ev := in.Event
-		if ev == "" {
-			ev = "PostToolUse"
-		}
-		out["hookSpecificOutput"] = map[string]any{"hookEventName": ev, "additionalContext": allowNoteText(note)}
-	}
+// Allow+message delivery. The note is written as one more stream-json user
+// record on claude's live stdin right after the allow: claude queues a user
+// record that arrives mid-turn and hands it to the model together with the
+// tool's result on the next API call — the same turn, one result. (An SDK
+// PostToolUse hook would be the obvious carrier, but the confirm launch runs
+// --bare, and --bare drops SDK-registered hooks: claude 2.1.280 never sends
+// the hook_callback. Probed in the e2e guest, see goal-confirm/hookprobe*.)
+// The tool cannot finish before the allow is written, so the note is always
+// queued before the model's next request.
+
+// userRecord is one stream-json user record.
+func userRecord(content string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"type":               "user",
+		"session_id":         "",
+		"parent_tool_use_id": nil,
+		"message":            map[string]any{"role": "user", "content": content},
+	})
+}
+
+// hookLocked answers a hook_callback with an empty (continue) output. koto
+// registers no hooks; this only keeps an unexpected callback from blocking
+// claude.
+func (g *approvalGate) hookLocked(id string, _ *controlRequest) {
 	b, _ := json.Marshal(map[string]any{
 		"type":     "control_response",
-		"response": map[string]any{"subtype": "success", "request_id": id, "response": out},
+		"response": map[string]any{"subtype": "success", "request_id": id, "response": map[string]any{}},
 	})
 	if err := g.writeLocked(b); err != nil {
 		logf("approval hook %s: answer claude: %v", id, err)
 	}
 }
 
-// sendUser writes the turn's message as the one stream-json user record.
+// sendUser writes the turn's message as the first stream-json user record.
 func (g *approvalGate) sendUser(msg []byte) error {
-	rec := map[string]any{
-		"type":               "user",
-		"session_id":         "",
-		"parent_tool_use_id": nil,
-		"message":            map[string]any{"role": "user", "content": string(msg)},
-	}
-	b, err := json.Marshal(rec)
+	b, err := userRecord(string(msg))
 	if err != nil {
 		return err
 	}
@@ -439,17 +394,16 @@ func (g *approvalGate) finishLocked(id string, allow bool, msg, expired string, 
 	delete(g.pending, id)
 	input := g.inp[id]
 	delete(g.inp, id)
-	tool, tuid := g.reqTool[id], g.reqTUID[id]
 	delete(g.reqTool, id)
 	delete(g.reqTUID, id)
 	if expired != "cancelled" {
 		g.respondLocked(id, allow, msg, input)
-		// Allow+message: the note waits for the tool's PostToolUse hook.
+		// Allow+message: the note follows the allow as a queued user record.
 		if note := strings.TrimSpace(msg); allow && note != "" {
-			if tuid != "" {
-				g.noteByTUID[tuid] = note
-			} else {
-				g.noteByTool[tool] = append(g.noteByTool[tool], note)
+			if b, err := userRecord(allowNoteText(note)); err == nil {
+				if werr := g.writeLocked(b); werr != nil {
+					logf("approval %s: allow note to claude: %v", id, werr)
+				}
 			}
 		}
 	}

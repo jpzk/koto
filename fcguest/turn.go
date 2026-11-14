@@ -1071,9 +1071,6 @@ func runClaudeConfirm(tw *turnConn, req *pb.MsgReq, args []string, env []string,
 	clk := newWorkerClock(turnTimeout, hardCap)
 	g := newApprovalGate(tw, inW, clk, timeout)
 	defer g.close()
-	if err := g.sendInit(); err != nil {
-		logf("confirm: register the allow-note hook: %v", err)
-	}
 	if err := g.sendUser(req.Msg); err != nil {
 		logf("confirm: write the message to claude: %v", err)
 	}
