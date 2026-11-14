@@ -643,6 +643,10 @@ message GoalSteerReq {
   string group = 1;
   string name  = 2; // run name or id; "" = the sole active goal
   string text  = 3;
+  // redirect: abort the running worker turn and start the next iteration
+  // now with this steer on top (iteration++; ledger/git kept). Running
+  // goals only.
+  bool   redirect = 4;
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
 message GoalGroupReq {                     // approve / pause / interrupt / resume / cancel

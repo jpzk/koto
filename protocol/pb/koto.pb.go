@@ -2801,10 +2801,14 @@ func (x *GoalSetReq) GetMode() string {
 }
 
 type GoalSteerReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"` // run name or id; "" = the sole active goal
-	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Group string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Name  string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"` // run name or id; "" = the sole active goal
+	Text  string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	// redirect: abort the running worker turn and start the next iteration
+	// now with this steer on top (iteration++; ledger/git kept). Running
+	// goals only.
+	Redirect      bool `protobuf:"varint,4,opt,name=redirect,proto3" json:"redirect,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2858,6 +2862,13 @@ func (x *GoalSteerReq) GetText() string {
 		return x.Text
 	}
 	return ""
+}
+
+func (x *GoalSteerReq) GetRedirect() bool {
+	if x != nil {
+		return x.Redirect
+	}
+	return false
 }
 
 type GoalListReq struct {
@@ -5662,11 +5673,12 @@ const file_koto_proto_rawDesc = "" +
 	"\x04name\x18\x06 \x01(\tR\x04name\x12\x18\n" +
 	"\asession\x18\a \x01(\tR\asession\x12\x12\n" +
 	"\x04mode\x18\b \x01(\tR\x04modeB\a\n" +
-	"\x05_plan\"L\n" +
+	"\x05_plan\"h\n" +
 	"\fGoalSteerReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
-	"\x04text\x18\x03 \x01(\tR\x04text\"#\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x12\x1a\n" +
+	"\bredirect\x18\x04 \x01(\bR\bredirect\"#\n" +
 	"\vGoalListReq\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"8\n" +
 	"\fGoalGroupReq\x12\x14\n" +

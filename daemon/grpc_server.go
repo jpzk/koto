@@ -1211,6 +1211,9 @@ func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.Goal
 func (s *kotoServer) GoalSteer(ctx context.Context, r *pb.GoalSteerReq) (*pb.GoalResp, error) {
 	who := identityOf(ctx).Name
 	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		if r.Redirect {
+			return goalRedirectOperator(g, name, r.Text, who)
+		}
 		return goalSteerOperator(g, name, r.Text, who)
 	})
 }

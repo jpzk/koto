@@ -104,6 +104,10 @@ streams
   goal steer <group> [name=<run>] <text>   durable operator steer: the run's
                                            next iteration reads it as
                                            OPERATOR STEER (operator-only)
+  goal redirect <group> [name=<run>] <text>
+                                           abort the running turn and start
+                                           the next iteration now, this
+                                           steer on top (operator-only)
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
@@ -1190,20 +1194,22 @@ func ctlGoal(args []string) {
 		}
 		ctlPrint(resp, err)
 
-	case "steer":
+	case "steer", "redirect":
 		// koto ctl goal steer <group> [name=<run>] <text...> — durable
-		// operator steer (GoalSteer, operator-only).
+		// operator steer (GoalSteer, operator-only). redirect: same record,
+		// and the running turn is aborted for a fresh iteration now.
+		usage := "usage: koto ctl goal " + sub + " <group> [name=<run>] <text...>"
 		if len(rest) < 2 {
-			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+			ctlFatal(2, "%s", usage)
 		}
-		req := &pb.GoalSteerReq{Group: rest[0]}
+		req := &pb.GoalSteerReq{Group: rest[0], Redirect: sub == "redirect"}
 		words := rest[1:]
 		if strings.HasPrefix(words[0], "name=") {
 			req.Name, words = strings.TrimPrefix(words[0], "name="), words[1:]
 		}
 		req.Text = strings.Join(words, " ")
 		if strings.TrimSpace(req.Text) == "" {
-			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+			ctlFatal(2, "%s", usage)
 		}
 		resp, err := cl.GoalSteer(ctx, req)
 		ctlPrint(resp, err)
