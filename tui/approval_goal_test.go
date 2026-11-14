@@ -172,3 +172,43 @@ func TestGoalPendingRolledIntoFoldedParent(t *testing.T) {
 }
 
 func itoa(i int) string { return string(rune('0' + i)) }
+
+// e2e E18 regression: a 3-char plan session folding a live job and a confirm
+// goal with an open approval. The rolled-up " !1" squeezes the name field so
+// far that " (*2)" would cut "e18" to "e1"; the count drops to the bare
+// " *2" and the name stays whole, row within the pane.
+func TestFoldedCountBareKeepsShortName(t *testing.T) {
+	groups := map[string]GroupInfo{
+		"main": {Running: true},
+		"smx": {Running: true, Sessions: []string{"e12", "e18", "goal-e18g"},
+			SessionOrigins: map[string]string{"goal-e18g": "e18"},
+			SessionModes:   map[string]string{"": "confirm", "e12": "plan", "e18": "plan", "goal-e18g": "confirm"},
+			Jobs:           []JobInfo{{ID: "BhiBF2Ix", Session: "e18", Status: "running", Started: 1}}},
+	}
+	m := treeModel(t, groups, "smx", "e18", "")
+	m.processJobTransitions(m.groups)
+	m = apFeed(t, m, Event{Event: "approval_request", Group: "smx", Session: "goal-e18g", ID: "q1",
+		Name: "Bash", Input: `{"command":"ls"}`, Text: "Bash ls", Ts: 1000})
+	m.jobsOpen[sessKey("smx", "e18")] = false
+	var row string
+	for _, r := range m.treeRows() {
+		if r.group == "smx" && r.session == "e18" && r.job == "" {
+			row = ansi.Strip(m.renderTreeRow(r, false, false, false, iconPad))
+		}
+	}
+	if !strings.Contains(row, "e18 ") || !strings.Contains(row, "!1") {
+		t.Fatalf("folded e18 row %q: want whole name + rolled-up !1", row)
+	}
+	if !strings.Contains(row, "*2") && !strings.Contains(row, "*1j1g") {
+		t.Fatalf("folded e18 row %q lost its count", row)
+	}
+	if cellWidth(row) > leftPaneWidth {
+		t.Fatalf("row %q wider than the pane (%d)", row, cellWidth(row))
+	}
+	if got := foldLabelBare(2, true); got != " *2" {
+		t.Errorf("bare label %q", got)
+	}
+	if got := foldLabelBare(2, false); got != " +2" {
+		t.Errorf("bare label %q", got)
+	}
+}

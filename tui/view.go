@@ -1089,12 +1089,13 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// worth doing.
 	// The folded count is a fold's only trace, so it never gets cut: when
 	// name+count overflow the field, the count first tightens ("(*1j 1g)" ->
-	// "*1j1g"), then falls back to the bare total ("(*2)"); the NAME gives up
-	// the remaining cells (keeping at least 3).
+	// "*1j1g"), then falls back to the total ("(*2)") and finally the bare
+	// total ("*2") — the rolled-up "!N" pending mark can squeeze the field
+	// that far; the NAME gives up the remaining cells (keeping at least 3).
 	if cnt != "" && cellWidth(name+cnt) > w {
 		j, gl, live := m.foldedCount(r.group, r.session)
 		nw := min(cellWidth(name), 3)
-		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live)} {
+		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)} {
 			if cellWidth(cnt) <= w-nw {
 				break
 			}

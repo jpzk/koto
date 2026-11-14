@@ -5417,7 +5417,17 @@ func (m Model) foldLabelTight(j, gl int, live bool) string {
 	return s
 }
 
-// foldLabelTotal is the last-resort count, " (*3)": jobs + goals together.
+// foldLabelBare is the narrowest count, " *3" (live) / " +3": the total
+// without parens, for a row whose field the rolled-up "!N" pending mark has
+// already squeezed so far that a 3-char name + " (*3)" no longer fits.
+func foldLabelBare(n int, live bool) string {
+	if live {
+		return fmt.Sprintf(" *%d", n)
+	}
+	return fmt.Sprintf(" +%d", n)
+}
+
+// foldLabelTotal is the parenthesised total, " (*3)": jobs + goals together.
 func foldLabelTotal(n int, live bool) string {
 	mark := ""
 	if live {
