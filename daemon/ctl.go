@@ -711,7 +711,11 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group != owner {
 			origin = ""
 		}
-		it, err := goalSetFrom(owner, req.Group, origin, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		// Mode: the caller may ask for confirm; it can never get yolo while
+		// it is itself confirm/plan (callerSessionModes, inherit-restrictive).
+		it, err := goalSetWith(goalSetOpts{creator: owner, group: req.Group, origin: origin,
+			text: req.Text, criteria: req.Criteria, name: req.Name, maxIter: req.MaxIterations, plan: plan,
+			mode: req.Mode, callerModes: callerSessionModes(owner, req.Session)})
 		if err != nil {
 			return errResp(err.Error())
 		}

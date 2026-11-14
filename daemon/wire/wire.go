@@ -431,7 +431,25 @@ type GoalItem struct {
 	// registered session of the group fold to "". The goal-finished /
 	// terminated handoff turn is delivered there (default if it no longer
 	// exists), and the TUI nests the goal's rows under it.
-	OriginSession string  `json:"origin_session,omitempty"`
+	OriginSession string `json:"origin_session,omitempty"`
+	// Mode is the run's permission mode as set at goal_set: "yolo" or
+	// "confirm" (goals.go goalSetWith; inherit-restrictive). The LIVE mode of
+	// the work session is the host registry's (the operator may switch it);
+	// goal_status reports that one.
+	Mode string `json:"mode,omitempty"`
+	// WaitingConfirm / Pending / PendingTool / PendingSince are computed at
+	// read time (goal_status, GoalList), never persisted: the work session has
+	// Pending tool approvals open, the oldest for PendingTool since
+	// PendingSince (unix seconds). The run's turn budget is paused meanwhile.
+	WaitingConfirm bool    `json:"waiting_confirm,omitempty"`
+	Pending        int     `json:"pending,omitempty"`
+	PendingTool    string  `json:"pending_tool,omitempty"`
+	PendingSince   float64 `json:"pending_since,omitempty"`
+	// WaitingDecision: the oldest pending item is a decision request (ctl
+	// ask / AskUserQuestion) rather than a tool approval. Read-time too.
+	WaitingDecision bool `json:"waiting_decision,omitempty"`
+	// Steers counts the operator steers recorded for this goal (steer log).
+	Steers int `json:"steers,omitempty"`
 	CreatedAt     float64 `json:"created_at"`
 	UpdatedAt     float64 `json:"updated_at,omitempty"`
 	CompletedAt   float64 `json:"completed_at,omitempty"`
@@ -449,6 +467,9 @@ type GoalSetReq struct {
 	Name string `json:"name,omitempty"`
 	// Session is the origin session (see GoalItem.OriginSession); optional.
 	Session string `json:"session,omitempty"`
+	// Mode is the run's permission mode: "" / "yolo" (default) or "confirm".
+	// A goal set from a confirm/plan session is confirm regardless.
+	Mode string `json:"mode,omitempty"`
 }
 
 // GoalGroupReq covers approve / pause / interrupt / resume / cancel. Name

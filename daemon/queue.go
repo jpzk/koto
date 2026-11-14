@@ -72,6 +72,10 @@ func sessKey(g, session string) string { return g + "\x00" + session }
 type sendJob struct {
 	session string // "" = the group's default session
 	msg     string
+	// mode, when set, overrides the session's registry mode for THIS turn
+	// only, and can only restrict it (effectiveTurnMode): the goal driver
+	// runs a confirm goal's plan turn read-only (plan) so it never asks.
+	mode string
 	// compact, when non-nil, makes this job a compaction (compact.go): the
 	// worker runs runCompactJob instead of a prompt turn. msg is then empty.
 	compact *compactReq
@@ -807,7 +811,10 @@ func sendWorkerTurn(g string, job sendJob) {
 	if job.compact != nil {
 		job.done <- runCompactJob(g, job.session, job.compact)
 	} else {
-		job.done <- runTurn(g, job.session, job.msg)
+		setTurnModeOverride(g, job.session, job.mode)
+		err := runTurn(g, job.session, job.msg)
+		setTurnModeOverride(g, job.session, "")
+		job.done <- err
 	}
 	queuesMu.Lock()
 	delete(inFlightSess, k)

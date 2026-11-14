@@ -750,6 +750,34 @@ func goalSetBy(creator, group, text, criteria, name string, maxIter int, plan bo
 // the run's rows — so a bad value degrades to the default session rather than
 // failing the goal (resolveGoalOrigin).
 func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter int, plan bool) (goalItem, error) {
+	return goalSetWith(goalSetOpts{creator: creator, group: group, origin: origin, text: text,
+		criteria: criteria, name: name, maxIter: maxIter, plan: plan})
+}
+
+// goalSetOpts is goal_set's full argument set. mode is the requested run mode
+// ("" / yolo, or confirm); callerModes are the modes of the sessions the
+// request came from that goalSetWith cannot see on its own (main's calling
+// session when it sets a goal on a peer).
+type goalSetOpts struct {
+	creator, group, origin, text, criteria, name string
+	mode                                         string
+	callerModes                                  []string
+	maxIter                                      int
+	plan                                         bool
+}
+
+// goalSetWith creates the goal. The run's MODE is fixed here, atomically with
+// the record: the work session's registry entry is written under goalLock
+// before the goal is listed or its driver starts, so not one turn of a
+// confirm goal can run yolo. Inherit-restrictive: a goal started from a
+// confirm or plan session (the raw origin, the resolved origin, or a caller
+// session) is never yolo — a yolo request is raised to confirm. Who CAN make
+// that request is bounded by the origin's own mode: an agent in a confirm
+// session needs the operator to approve the very tool call that writes its
+// goal_set. The operator may still switch a running goal session
+// yolo<->confirm afterwards (TUI tab / koto config mode=, host-authoritative).
+func goalSetWith(o goalSetOpts) (goalItem, error) {
+	creator, group, origin, text, criteria, name, maxIter, plan := o.creator, o.group, o.origin, o.text, o.criteria, o.name, o.maxIter, o.plan
 	if group == "" {
 		return goalItem{}, fmt.Errorf("group is required")
 	}
@@ -801,9 +829,27 @@ func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter in
 	// collision M44 describes, arriving by a race instead of by a gap in the
 	// occupied set. listSessions reads a file, so it is gathered outside.
 	taken := groupSessionSet(group)
+	restrictors := append([]string(nil), o.callerModes...)
+	if raw, err := normalizeSession(strings.TrimSpace(origin)); err == nil {
+		// The RAW origin counts too: a goal set from inside a confirm goal
+		// session is folded to the default origin below, but it was still
+		// started from a confirm session.
+		restrictors = append(restrictors, sessionMode(group, raw))
+	}
 	origin = resolveGoalOrigin(group, origin, taken)
+	restrictors = append(restrictors, sessionMode(group, origin))
+	mode, raised, err := resolveGoalMode(o.mode, restrictors...)
+	if err != nil {
+		return goalItem{}, err
+	}
+	if prov := groupProviderName(group); !harnessSupportsMode(prov, mode) {
+		return goalItem{}, fmt.Errorf("goal mode %s: %v", mode, modeUnsupportedErr(prov, mode))
+	}
+	if raised {
+		emitLogfG("goal", group, "info", "[%s] goal_set from a confirm/plan session: mode raised to confirm (a goal never runs less restricted than where it was started)", group)
+	}
 	goalLock.Lock()
-	name, err := resolveGoalNameLocked(group, strings.TrimSpace(name), text, taken)
+	name, err = resolveGoalNameLocked(group, strings.TrimSpace(name), text, taken)
 	if err != nil {
 		goalLock.Unlock()
 		return goalItem{}, err
@@ -817,6 +863,7 @@ func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter in
 		Plan:          plan,
 		CreatedBy:     creator,
 		OriginSession: origin,
+		Mode:          mode,
 		Status:        status,
 		MaxIterations: maxIter,
 		CreatedAt:     goalNow(),
@@ -824,6 +871,17 @@ func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter in
 	if n := len(activeGoalsLocked(group)); n >= goalMaxActive {
 		goalLock.Unlock()
 		return goalItem{}, fmt.Errorf("group %q already has %d active goals; finish or cancel one first", group, n)
+	}
+	// The mode is written for BOTH sessions every time, yolo included: a
+	// reused run name must not inherit a stale entry from an earlier run.
+	// The judge always runs yolo (it never asks — goalIsJudgeSession).
+	if _, err := storeSessionMode(group, goalWorkSessionFor(name), mode); err != nil {
+		goalLock.Unlock()
+		return goalItem{}, fmt.Errorf("goal session mode: %v", err)
+	}
+	if _, err := storeSessionMode(group, goalJudgeSessionFor(name), modeYolo); err != nil {
+		goalLock.Unlock()
+		return goalItem{}, fmt.Errorf("goal judge session mode: %v", err)
 	}
 	// Setting a new goal retires the group's terminal records (the
 	// generalization of the old replace-in-place): outcomes stay listed
@@ -840,21 +898,26 @@ func goalSetFrom(creator, group, origin, text, criteria, name string, maxIter in
 	snap := snapshotGoalsLocked()
 	goalLock.Unlock()
 	snap.write()
-	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s origin=%s plan=%t max=%d", it.ID, it.Name, group, sessionMarkerName(origin), plan, maxIter)
+	emitLogfG("goal", group, "info", "set id=%s name=%s group=%s origin=%s mode=%s plan=%t max=%d", it.ID, it.Name, group, sessionMarkerName(origin), mode, plan, maxIter)
 	emit(group, Event{Event: "goal_set", ID: it.ID, Text: text, Session: goalWorkSessionFor(it.Name)})
 	startGoalDriver(group, it.ID)
 	return it, nil
 }
 
+// goalList snapshots the goals (filter "" = all groups), each with its live
+// confirm/decision fields filled in (goalWithPending, outside goalLock).
 func goalList(filter string) []goalItem {
 	goalLock.Lock()
-	defer goalLock.Unlock()
 	out := make([]goalItem, 0, len(goals))
 	for _, it := range goals {
 		if filter != "" && it.Group != filter {
 			continue
 		}
 		out = append(out, it)
+	}
+	goalLock.Unlock()
+	for i := range out {
+		out[i] = goalWithPending(out[i])
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Group < out[j].Group })
 	return out
@@ -1319,7 +1382,7 @@ func goalPlanPhase(g, id string) bool {
 	}
 	emit(g, Event{Event: "goal_plan", ID: snap.ID, Session: work})
 	emitLogfG("goal", g, "info", "plan turn id=%s", snap.ID)
-	done, err := enqueueUnattended(g, work, goalPlanMsg(snap), "goal")
+	done, err := enqueueGoalTurn(g, work, goalPlanMsg(snap), true)
 	if err != nil {
 		goalPauseWith(g, id, "stalled", "plan turn could not be enqueued: "+err.Error())
 		return false
@@ -1479,7 +1542,7 @@ func goalEnqueue(g, id, session, msg string) (<-chan error, error) {
 		if i > 0 && !goalStillRunnable(id) {
 			return nil, fmt.Errorf("goal is no longer running")
 		}
-		done, err := enqueueUnattended(g, session, msg, "goal")
+		done, err := enqueueGoalTurn(g, session, msg, false)
 		if err == nil {
 			return done, nil
 		}
@@ -1719,7 +1782,17 @@ GOAL:
 
 ACCEPTANCE CRITERIA (an independent reviewer will verify these against
 artifacts before the goal can close):
-%s`, it.ID, dir, dir, dir, it.Text, it.Criteria)
+%s`, it.ID, dir, dir, dir, it.Text, it.Criteria) + goalPlanReadOnlyNote(it)
+}
+
+// goalPlanReadOnlyNote: a confirm goal's plan turn runs in PLAN mode (it
+// never asks — enqueueGoalTurn noAsk), so it cannot write the ledger; the
+// first iteration's ritual creates it from the plan in the handoff.
+func goalPlanReadOnlyNote(it goalItem) string {
+	if sessionMode(it.Group, goalWorkSessionFor(goalSessionSlug(it))) != modeConfirm {
+		return ""
+	}
+	return "\n\nNOTE: this goal runs in confirm mode, so this plan turn is READ-ONLY (no file writes,\nno commands that change anything). Skip steps 1-3; put the full ledger in the PLAN template —\niteration 1 creates ledger.json and progress.md from it."
 }
 
 func goalWorkerMsg(it goalItem) string {
@@ -1853,3 +1926,62 @@ func ctlGoalSelfSet(g, name string) error {
 	}
 	return nil
 }
+
+// goalIsJudgeSession reports whether s is the judge session of one of g's
+// goals (any status: a judge leaf outlives its run until the next goal_set).
+func goalIsJudgeSession(g, s string) bool {
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	for _, it := range goals {
+		if it.Group == g && goalJudgeSessionFor(goalSessionSlug(it)) == s {
+			return true
+		}
+	}
+	return false
+}
+
+// goalOwnsWorkSession reports whether s is the work session of one of g's
+// non-terminal goals — the one session the goal loop may drive in confirm.
+func goalOwnsWorkSession(g, s string) bool {
+	if !isReservedSession(s) {
+		return false
+	}
+	goalLock.Lock()
+	defer goalLock.Unlock()
+	for _, it := range goals {
+		if it.Group == g && !goalTerminal(it.Status) && goalWorkSessionFor(goalSessionSlug(it)) == s {
+			return true
+		}
+	}
+	return false
+}
+
+// goalWithPending fills the read-time confirm fields of it (see
+// GoalItem.WaitingConfirm) from the approval table and the live work-session
+// mode. Must be called WITHOUT goalLock (sessionMode and approvalsMu).
+func goalWithPending(it goalItem) goalItem {
+	if goalTerminal(it.Status) {
+		return it
+	}
+	work := goalWorkSessionFor(goalSessionSlug(it))
+	if m := sessionMode(it.Group, work); m != modeYolo || it.Mode != "" {
+		it.Mode = m
+	}
+	n, tool, since := oldestPendingApproval(it.Group, work)
+	if n > 0 {
+		it.WaitingConfirm = true
+		it.Pending = n
+		it.PendingTool = tool
+		it.PendingSince = float64(since.UnixMilli()) / 1000
+		if it.Status == goalStatusRunning {
+			it.Status = goalStatusWaitingConfirm
+		}
+	}
+	return it
+}
+
+// goalStatusWaitingConfirm is the DISPLAY status of a running goal whose work
+// session has a tool approval open (GoalList / goal_status). It is never
+// persisted: the stored status stays running, so pause/resume/cancel and the
+// driver's transitions are unchanged.
+const goalStatusWaitingConfirm = "waiting_confirm"

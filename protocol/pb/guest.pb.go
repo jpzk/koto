@@ -2527,6 +2527,8 @@ type ApprovalRequest struct {
 	InputJson      string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`                   // the tool input, JSON (bounded by the guest)
 	Summary        string                 `protobuf:"bytes,4,opt,name=summary,proto3" json:"summary,omitempty"`                                        // one line for the card / transcript
 	DeadlineUnixMs int64                  `protobuf:"varint,5,opt,name=deadline_unix_ms,json=deadlineUnixMs,proto3" json:"deadline_unix_ms,omitempty"` // guest-side deadline (informational)
+	Kind           string                 `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`                                              // "" / tool | ask (AskUserQuestion)
+	Options        []string               `protobuf:"bytes,7,rep,name=options,proto3" json:"options,omitempty"`                                        // kind=ask: choices; summary = question
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -2596,11 +2598,25 @@ func (x *ApprovalRequest) GetDeadlineUnixMs() int64 {
 	return 0
 }
 
+func (x *ApprovalRequest) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ApprovalRequest) GetOptions() []string {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
 type ApprovalReply struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Allow         bool                   `protobuf:"varint,2,opt,name=allow,proto3" json:"allow,omitempty"`
-	Msg           string                 `protobuf:"bytes,3,opt,name=msg,proto3" json:"msg,omitempty"` // deny reason shown to the model ("" = default text)
+	Msg           string                 `protobuf:"bytes,3,opt,name=msg,proto3" json:"msg,omitempty"` // deny reason / allow note / ask answer shown to the model
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2911,14 +2927,16 @@ const file_guest_proto_rawDesc = "" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
 	"\asession\x18\x02 \x01(\tR\asession\x12\"\n" +
 	"\finstructions\x18\x03 \x01(\tR\finstructions\x12\x14\n" +
-	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"\x98\x01\n" +
+	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"\xc6\x01\n" +
 	"\x0fApprovalRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12\x1d\n" +
 	"\n" +
 	"input_json\x18\x03 \x01(\tR\tinputJson\x12\x18\n" +
 	"\asummary\x18\x04 \x01(\tR\asummary\x12(\n" +
-	"\x10deadline_unix_ms\x18\x05 \x01(\x03R\x0edeadlineUnixMs\"G\n" +
+	"\x10deadline_unix_ms\x18\x05 \x01(\x03R\x0edeadlineUnixMs\x12\x12\n" +
+	"\x04kind\x18\x06 \x01(\tR\x04kind\x12\x18\n" +
+	"\aoptions\x18\a \x03(\tR\aoptions\"G\n" +
 	"\rApprovalReply\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05allow\x18\x02 \x01(\bR\x05allow\x12\x10\n" +

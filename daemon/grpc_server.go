@@ -179,6 +179,14 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		DoneNote:      sanitize(it.DoneNote),     // guest-written (goal_done)
 		PausedReason:  sanitize(it.PausedReason),
 		OriginSession: sanitize(it.OriginSession),
+		Mode:          sanitize(it.Mode),
+		// live, read-time (goalWithPending)
+		WaitingConfirm:  it.WaitingConfirm,
+		Pending:         int32(it.Pending),
+		PendingTool:     sanitize(it.PendingTool),
+		PendingSince:    it.PendingSince,
+		WaitingDecision: it.WaitingDecision,
+		Steers:          int32(it.Steers),
 		CreatedAt:     it.CreatedAt,
 		UpdatedAt:     it.UpdatedAt,
 		CompletedAt:   it.CompletedAt,
@@ -1138,7 +1146,10 @@ func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp,
 	// not be able to (audit M49).
 	// r.Session is the origin session the client set this from (the TUI's
 	// active session); resolveGoalOrigin folds reserved/unknown to default.
-	it, err := goalSetFrom("", r.Group, r.Session, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
+	// r.Mode: yolo (default) | confirm; a confirm/plan origin session raises
+	// it to confirm (goalSetWith).
+	it, err := goalSetWith(goalSetOpts{creator: "", group: r.Group, origin: r.Session, text: r.Text,
+		criteria: r.Criteria, name: r.Name, maxIter: int(r.MaxIterations), plan: plan, mode: r.GetMode()})
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}

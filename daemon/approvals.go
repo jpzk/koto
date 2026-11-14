@@ -164,13 +164,18 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 	}
 	k := approvalKey{g, session, slot, id}
 	now := time.Now()
+	tmo := approvalTimeoutFor(g, session) // before approvalsMu: takes goalLock
+	var deadline time.Time
+	if tmo > 0 {
+		deadline = now.Add(tmo)
+	}
 	p := &pendingApproval{
 		key:      k,
 		tool:     truncateBytes(flattenInline(req.GetTool()), fcMarkerMaxName),
 		input:    truncateBytes(req.GetInputJson(), approvalInputMax),
 		summary:  truncateBytes(flattenInline(req.GetSummary()), approvalSummaryMax),
 		created:  now,
-		deadline: now.Add(approvalTimeout),
+		deadline: deadline,
 		w:        w,
 		logPath:  logPath,
 	}
@@ -197,14 +202,28 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 		return
 	}
 	approvals[k] = p
-	p.timer = time.AfterFunc(approvalTimeout, func() {
-		resolveApproval(k, false, decTimeout, "denied: no operator answer before the deadline", "host-deadline", true)
-	})
+	if tmo > 0 {
+		p.timer = time.AfterFunc(tmo, func() {
+			resolveApproval(k, false, decTimeout, "denied: no operator answer before the deadline", "host-deadline", true)
+		})
+	}
 	approvalsMu.Unlock()
 	emit(g, Event{Event: "approval_request", Session: session, ID: id, Name: p.tool,
-		Input: p.input, Text: p.summary, Deadline: float64(p.deadline.UnixMilli()) / 1000})
+		Input: p.input, Text: p.summary, Deadline: unixOrZero(p.deadline)})
+	dl := "none — the goal waits"
+	if !p.deadline.IsZero() {
+		dl = p.deadline.Format(time.RFC3339)
+	}
 	emitLogfG("approval", g, "info", "[%s] session=%s approval %s requested: %s (deadline %s)",
-		g, sessionMarkerName(session), id, p.tool, p.deadline.Format(time.RFC3339))
+		g, sessionMarkerName(session), id, p.tool, dl)
+}
+
+// unixOrZero is t in unix seconds, 0 for the zero time (no deadline).
+func unixOrZero(t time.Time) float64 {
+	if t.IsZero() {
+		return 0
+	}
+	return float64(t.UnixMilli()) / 1000
 }
 
 // resolveApproval settles k. First answer wins: it returns (decision, false)
@@ -336,7 +355,7 @@ func listPendingApprovals(g string) []*pb.PendingApproval {
 		out = append(out, &pb.PendingApproval{
 			Group: p.key.g, Session: p.key.s, Slot: int32(p.key.slot), Id: p.key.id,
 			Tool: sanitize(p.tool), InputJson: sanitize(p.input), Summary: sanitize(p.summary),
-			Deadline: float64(p.deadline.UnixMilli()) / 1000, Created: float64(p.created.UnixMilli()) / 1000,
+			Deadline: unixOrZero(p.deadline), Created: float64(p.created.UnixMilli()) / 1000,
 		})
 	}
 	return out
@@ -366,6 +385,14 @@ func approveOperator(g, session, id string, allow bool, msg, who string) *pb.App
 		}
 		approvalsMu.Unlock()
 		return &pb.ApproveResp{Error: "no pending approval " + id + " in " + g + "/" + sessionMarkerName(session)}
+	}
+	if older := olderPendingLocked(*key); older != "" {
+		// Strictly oldest first (goal-confirm): the operator works through a
+		// session's approvals as a queue, and the agent's tool calls are
+		// settled in the order it made them. The TUI only ever shows the
+		// oldest; a client that answers another one is told which comes first.
+		approvalsMu.Unlock()
+		return &pb.ApproveResp{Error: "answer the oldest pending approval of " + g + "/" + sessionMarkerName(session) + " first: " + older}
 	}
 	approvalsMu.Unlock()
 	dec := decDeny
@@ -413,8 +440,9 @@ type stallClock struct {
 }
 
 func newStallClock(g, session string, now time.Time) *stallClock {
+	_, hc := turnApprovalLimits(g, session)
 	return &stallClock{
-		budget: turnWaitTimeout, hardCap: max(turnWaitTimeout, approvalHardCap+5*time.Minute),
+		budget: turnWaitTimeout, hardCap: max(turnWaitTimeout, hc+5*time.Minute),
 		start: now, last: now,
 		paused: func() bool { return approvalsPending(g, session) > 0 },
 	}
@@ -427,4 +455,68 @@ func (c *stallClock) due(now time.Time) bool {
 	}
 	c.last = now
 	return c.active >= c.budget || now.Sub(c.start) >= c.hardCap
+}
+
+// approvalBefore is the queue order of a session's approvals: creation time,
+// then id (the same order listPendingApprovals reports).
+func approvalBefore(a, b *pendingApproval) bool {
+	if !a.created.Equal(b.created) {
+		return a.created.Before(b.created)
+	}
+	return a.key.id < b.key.id
+}
+
+// olderPendingLocked returns the id of an approval of k's session that is
+// queued BEFORE k ("" when k is the oldest). Holds approvalsMu.
+func olderPendingLocked(k approvalKey) string {
+	p := approvals[k]
+	if p == nil {
+		return ""
+	}
+	var first *pendingApproval
+	for kk, q := range approvals {
+		if kk.g != k.g || kk.s != k.s || kk == k {
+			continue
+		}
+		if approvalBefore(q, p) && (first == nil || approvalBefore(q, first)) {
+			first = q
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	return first.key.id
+}
+
+// oldestPendingApproval reports how many approvals (g, session) has open and
+// the tool + creation time of the oldest — the goal view's "waiting for
+// confirmation (N)" line.
+func oldestPendingApproval(g, session string) (n int, tool string, since time.Time) {
+	approvalsMu.Lock()
+	defer approvalsMu.Unlock()
+	var first *pendingApproval
+	for k, p := range approvals {
+		if k.g != g || k.s != session {
+			continue
+		}
+		n++
+		if first == nil || approvalBefore(p, first) {
+			first = p
+		}
+	}
+	if first != nil {
+		tool, since = sanitize(first.tool), first.created
+	}
+	return
+}
+
+// approvalTimeoutFor is the host auto-deny deadline of a new request in
+// (g, session); 0 = none. A goal's work session uses goalApprovalTimeout
+// (default none: the run simply waits for the operator, its clocks paused),
+// every other confirm session the plain approvalTimeout.
+func approvalTimeoutFor(g, session string) time.Duration {
+	if goalOwnsWorkSession(g, session) {
+		return goalApprovalTimeout
+	}
+	return approvalTimeout
 }

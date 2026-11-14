@@ -257,11 +257,13 @@ message ApprovalRequest {
   string input_json       = 3; // the tool input, JSON (bounded by the guest)
   string summary          = 4; // one line for the card / transcript
   int64  deadline_unix_ms = 5; // guest-side deadline (informational)
+  string kind             = 6; // "" / tool | ask (AskUserQuestion)
+  repeated string options = 7; // kind=ask: choices; summary = question
 }
 message ApprovalReply {
   string id    = 1;
   bool   allow = 2;
-  string msg   = 3; // deny reason shown to the model ("" = default text)
+  string msg   = 3; // deny reason / allow note / ask answer shown to the model
 }
 message TurnReply {
   oneof kind {

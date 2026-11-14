@@ -1854,15 +1854,17 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	}
 	// Permission mode from the HOST registry (session_modes.go) — the only
 	// source the guest obeys; config.json above carries none.
-	if mode := sessionMode(g, session); mode != modeYolo {
+	if mode := effectiveTurnMode(g, session); mode != modeYolo {
 		m.Mode = mode
 		// Audit trail for restricted turns only (yolo stays silent, as before).
 		emitLogfG("session", g, "info", "[%s] turn session=%s mode=%s", g, sessionMarkerName(session), mode)
 		if mode == modeConfirm {
 			// A little past the host deadline: the host normally decides
-			// (and logs the timeout); the guest is the backstop.
-			m.ApprovalTimeoutMs = (approvalTimeout + 30*time.Second).Milliseconds()
-			m.ApprovalHardCapMs = approvalHardCap.Milliseconds()
+			// (and logs the timeout); the guest is the backstop. A goal
+			// session has no host deadline by default (turnApprovalLimits).
+			tmo, hc := turnApprovalLimits(g, session)
+			m.ApprovalTimeoutMs = tmo.Milliseconds()
+			m.ApprovalHardCapMs = hc.Milliseconds()
 		}
 	}
 	files := fcTurnUploads(g, msg)
