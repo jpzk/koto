@@ -697,6 +697,7 @@ func pbToEvent(p *pb.Event) Event {
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
 		Historical: p.Historical, ID: p.Id, Seq: p.Seq, Session: p.Session,
 		Severity: p.Severity, Title: p.Title, Deadline: p.Deadline,
+		Kind: p.GetKind(), Options: p.GetOptions(),
 	}
 }
 

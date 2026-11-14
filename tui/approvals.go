@@ -67,7 +67,18 @@ type approvalItem struct {
 	deadline           float64   // unix seconds; the host denies at this time (0 = never)
 	created            float64   // unix seconds the host opened it (queue order)
 	seen               time.Time // when this TUI learned of it (prune grace)
+	kind               string    // "ask" = goal decision request; "" = tool approval
+	options            []string  // ask: the answers the goal offered
 }
+
+// kindAsk marks a decision request (daemon goal_ask.go).
+const kindAsk = "ask"
+
+func (a approvalItem) isAsk() bool { return a.kind == kindAsk }
+
+// askRows is the ask card's selection: 0 = stop and wait (the default),
+// 1..len(options) = an option, len(options)+1 = other (type an answer).
+func (a approvalItem) askRows() int { return len(a.options) + 2 }
 
 func approvalKey(g, s, id string) string { return g + "\x00" + s + "\x00" + id }
 
@@ -86,6 +97,7 @@ type approvalCardState struct {
 	msgMode bool // message box open: deny+msg (allow false) or allow+msg (allow true)
 	msg     textinput.Model
 	shownAt time.Time
+	askIdx  int // ask cards: selected row (see askRows); 0 = stop and wait
 }
 
 // approvalEnterGuard: how long after an inline card pops up a bare enter is
@@ -156,9 +168,13 @@ func (m *Model) onApprovalEvent(ev Event) {
 	switch ev.Event {
 	case "approval_request":
 		m.approvals[k] = approvalItem{group: ev.Group, session: ev.Session, id: ev.ID,
-			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, created: ev.Ts, seen: time.Now()}
-		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts),
-			text: fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)})
+			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, created: ev.Ts, seen: time.Now(),
+			kind: ev.Kind, options: ev.Options}
+		what := fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)
+		if ev.Kind == kindAsk {
+			what = "decision needed (alt+a)"
+		}
+		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts), text: what})
 	case "approval_resolved":
 		delete(m.approvals, k)
 		delete(m.approvalShown, k)
@@ -184,7 +200,14 @@ func (m *Model) seedApprovals(resp map[string]any) {
 		cr, _ := p["created"].(float64)
 		a := approvalItem{group: s2(p["group"]), session: s2(p["session"]), id: s2(p["id"]),
 			tool: s2(p["tool"]), input: s2(p["input_json"]), summary: s2(p["summary"]), deadline: dl,
-			created: cr, seen: time.Now()}
+			created: cr, seen: time.Now(), kind: s2(p["kind"])}
+		if opts, _ := p["options"].([]any); len(opts) > 0 {
+			for _, o := range opts {
+				if s := s2(o); s != "" {
+					a.options = append(a.options, s)
+				}
+			}
+		}
 		if a.id != "" {
 			m.approvals[a.key()] = a
 		}
@@ -386,6 +409,9 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard = approvalCardState{}
 		return m, nil
 	}
+	if a.isAsk() {
+		return m.handleAskCardKey(a, msg)
+	}
 	if m.approvalCard.msgMode {
 		switch msg.String() {
 		case "esc":
@@ -469,7 +495,14 @@ func (m Model) answerApproval(a approvalItem, allow bool, msg string) (Model, te
 	if allow {
 		verb = "allow"
 	}
-	m.addLine(logLine{kind: "sys", group: a.group, session: a.session, text: fmt.Sprintf("%s %s %s…", verb, a.tool, a.id)})
+	what := fmt.Sprintf("%s %s %s…", verb, a.tool, a.id)
+	if a.isAsk() {
+		what = fmt.Sprintf("decision %s: stop and wait…", a.id)
+		if allow {
+			what = fmt.Sprintf("decision %s: %s…", a.id, ansi.Truncate(msg, 60, "…"))
+		}
+	}
+	m.addLine(logLine{kind: "sys", group: a.group, session: a.session, text: what})
 	return m, approveCmdFn(m.sock, a, allow, msg)
 }
 
@@ -648,6 +681,9 @@ func approvalHintFor(w int, allow bool) []string {
 // input body (capped at bodyMax lines), the deadline, the pills and the
 // hint. Shared by the centered modal and the inline card (item 3).
 func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
+	if a.isAsk() {
+		return m.askCardRows(a, w, bodyMax)
+	}
 	yel := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	gray := lipgloss.NewStyle().Foreground(cGray)
 	title := "approve " + a.tool + "?"
@@ -713,6 +749,9 @@ func (m *Model) inlineApprovalRows() []string {
 	// status + hint + metrics (3) + the box's 2 borders + 3 chat rows.
 	if over := len(rows) - max(1, m.height-8); over > 0 {
 		body := len(approvalInputLines(a.tool, a.input, w))
+		if a.isAsk() {
+			body = len(wrapCells(a.summary, w))
+		}
 		rows = m.approvalCardRows(a, w, body-over)
 	}
 	for i, r := range rows {
