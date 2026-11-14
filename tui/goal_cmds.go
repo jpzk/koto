@@ -66,6 +66,8 @@ type goalItemT struct {
 	PendingTool     string
 	PendingSince    float64
 	WaitingDecision bool
+	// Version of the spec: 1 at goal_set, +1 per /amend (0 = older daemon).
+	Version int
 }
 
 type goalListMsg struct {
@@ -111,6 +113,9 @@ func goalFromMap(v any) goalItemT {
 		it.PendingSince = f
 	}
 	it.WaitingDecision, _ = mp["waiting_decision"].(bool)
+	if f, ok := mp["version"].(float64); ok {
+		it.Version = int(f)
+	}
 	return it
 }
 
@@ -179,9 +184,16 @@ var goalHelpLines = []string{
 	"  /goals interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
 	"  /goals resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
 	"  /goals cancel  [<group>] [<name>]  cancel the goal",
-	"  /steer [<group>] [name=<run>] <text>  durable operator steer: the run's",
-	"                                     next iteration reads it as OPERATOR STEER",
-	"                                     (in a goal session: that run)",
+	"  /steer [<group>] [name=<run>] <text>  live operator steer: reaches the",
+	"                                     running turn now and the next iteration",
+	"                                     as OPERATOR STEER (in a goal session:",
+	"                                     that run; plain enter there = /steer)",
+	"  /steer … !<text>                   REDIRECT: abort the turn, start the next",
+	"                                     iteration now with the steer on top",
+	"  /amend [<group>] [name=<run>]      edit the run's spec: the input is",
+	"                                     prefilled with max=N <text> :: <criteria>;",
+	"                                     enter sends a versioned amend (the judge",
+	"                                     always reads the latest version)",
 	"  /goals help                        this help",
 	"",
 	"<group> defaults to the current group. A group can run SEVERAL goals at",
@@ -306,7 +318,14 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals steer: " + err.Error()})
 			return nil
 		}
-		return goalSteerCmd(m.sock, group, name, text)
+		text, redirect := splitRedirect(text)
+		if text == "" {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals steer: usage: /steer [<group>] [name=<run>] [!]<text>"})
+			return nil
+		}
+		return goalSteerCmd(m.sock, group, name, text, redirect)
+	case "amend":
+		return m.handleAmend(arg)
 	case "approve", "pause", "interrupt", "resume", "cancel":
 		// Args: [<group>] [<name>] — goals run concurrently, so a name picks
 		// one of the group's runs. A single token is a group only when it
@@ -473,18 +492,25 @@ func (m Model) goalOrigin(group string) string {
 // goalSteerCmd sends a durable operator steer (GoalSteer RPC, operator-only)
 // to a goal run; the daemon records it and the run's next iteration reads it
 // as OPERATOR STEER.
-func goalSteerCmd(sock, group, name, text string) tea.Cmd {
+func goalSteerCmd(sock, group, name, text string, redirect bool) tea.Cmd {
+	op := "steer"
+	if redirect {
+		op = "redirect"
+	}
 	return func() tea.Msg {
 		args := map[string]any{"group": group, "text": text}
 		if name != "" {
 			args["name"] = name
 		}
+		if redirect {
+			args["redirect"] = true
+		}
 		resp, err := daemonCall(sock, "goal_steer", args)
 		if err != nil {
-			return goalOpMsg{op: "steer", group: group, err: err}
+			return goalOpMsg{op: op, group: group, err: err}
 		}
 		raw, _ := resp["item"].(map[string]any)
-		return goalOpMsg{op: "steer", group: group, item: goalFromMap(raw)}
+		return goalOpMsg{op: op, group: group, item: goalFromMap(raw)}
 	}
 }
 

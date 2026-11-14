@@ -299,7 +299,24 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "goal_cancel":
 		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_steer":
-		return cl.GoalSteer(ctx, &pb.GoalSteerReq{Group: s("group"), Name: s("name"), Text: s("text")})
+		redirect, _ := extra["redirect"].(bool)
+		return cl.GoalSteer(ctx, &pb.GoalSteerReq{Group: s("group"), Name: s("name"), Text: s("text"), Redirect: redirect})
+	case "goal_amend":
+		r := &pb.GoalAmendReq{Group: s("group"), Name: s("name")}
+		if v, ok := extra["text"].(string); ok {
+			r.Text = &v
+		}
+		if v, ok := extra["criteria"].(string); ok {
+			r.Criteria = &v
+		}
+		if v, ok := asFloat(extra["max_iterations"]); ok {
+			n, err := floatToInt32("max_iterations", v)
+			if err != nil {
+				return nil, err
+			}
+			r.MaxIterations = &n
+		}
+		return cl.GoalAmend(ctx, r)
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }

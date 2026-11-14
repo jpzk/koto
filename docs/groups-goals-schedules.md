@@ -355,6 +355,18 @@ for the operator as an approval card in the goal session.
     `> `-quoted.
 - **`/steer <text>`** (or `/goals steer`, `koto ctl goal steer`) adds a steer
   to a running goal with no approval pending (RPC `GoalSteer`, admin-only).
+- **Live steering from the TUI:**
+  - `/steer [<group>] [name=<run>] <text>` reaches the running turn now and
+    the next iteration as `OPERATOR STEER`. A leading `!` (`/steer !<text>`)
+    is a REDIRECT: the turn is aborted and the next iteration starts at once
+    with the steer on top.
+  - Selecting a goal's work row in the tree puts a `steer›` chip on the
+    input, next to the mode chip. Plain enter there is `/steer` for that run
+    (`!` = redirect). The judge row stays follow-only.
+  - `/amend [<group>] [name=<run>]` opens the editor: the input is prefilled
+    with `/amend <g> name=<run> max=N <text> :: <criteria>`. Edit and press
+    enter; only changed fields are sent (`GoalAmend`, versioned). Fields can
+    also be given directly: `/amend name=x max=15`, `/amend :: <criteria>`.
 - **Who may steer (authority):**
   - The operator's `/steer`, redirect and `/amend` are host-labelled
     `OPERATOR STEER` / `OPERATOR REDIRECT` / `OPERATOR AMEND` and reach the
