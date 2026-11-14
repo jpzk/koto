@@ -294,6 +294,8 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalSteerReq:
 		return r.Group, true
+	case *pb.GoalAmendReq:
+		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
@@ -349,6 +351,10 @@ var adminOnlyVerbs = map[string]bool{
 	// as "OPERATOR STEER (authoritative)"; a delegated role could otherwise
 	// author the very text that outranks the goal (goal_steer.go).
 	"goal_steer": true,
+	// goal_amend: rewrites a goal's text / criteria / cap, i.e. the contract
+	// the judge accepts against. A delegated role amending its own group's
+	// goal would be self-acceptance (goal_amend.go).
+	"goal_amend": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

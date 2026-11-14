@@ -189,6 +189,7 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		PendingSince:    it.PendingSince,
 		WaitingDecision: it.WaitingDecision,
 		Steers:          int32(it.Steers),
+		Version:         int32(goalVersion(it)),
 		CreatedAt:       it.CreatedAt,
 		UpdatedAt:       it.UpdatedAt,
 		CompletedAt:     it.CompletedAt,
@@ -1215,6 +1216,20 @@ func (s *kotoServer) GoalSteer(ctx context.Context, r *pb.GoalSteerReq) (*pb.Goa
 			return goalRedirectOperator(g, name, r.Text, who)
 		}
 		return goalSteerOperator(g, name, r.Text, who)
+	})
+}
+
+// GoalAmend is /amend: a versioned edit of a goal's text / criteria / cap.
+// Operator-only (adminOnlyVerbs "goal_amend"), absent from the ctl plane.
+func (s *kotoServer) GoalAmend(ctx context.Context, r *pb.GoalAmendReq) (*pb.GoalResp, error) {
+	who := identityOf(ctx).Name
+	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		var maxIter *int
+		if r.MaxIterations != nil {
+			n := int(r.GetMaxIterations())
+			maxIter = &n
+		}
+		return goalAmendOperator(g, name, r.Text, r.Criteria, maxIter, who)
 	})
 }
 

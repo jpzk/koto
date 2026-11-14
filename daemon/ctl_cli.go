@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -105,6 +106,7 @@ streams
                                            next iteration reads it as
                                            OPERATOR STEER (operator-only)
   goal redirect <group> [name=<run>] <text>
+  goal amend <group> [name=<run>] [text=<goal>] [criteria=<c>] [max=<n>]
                                            abort the running turn and start
                                            the next iteration now, this
                                            steer on top (operator-only)
@@ -1212,6 +1214,44 @@ func ctlGoal(args []string) {
 			ctlFatal(2, "%s", usage)
 		}
 		resp, err := cl.GoalSteer(ctx, req)
+		ctlPrint(resp, err)
+
+	case "amend":
+		// koto ctl goal amend <group> [name=<run>] [text=<..>] [criteria=<..>] [max=<n>]
+		// — versioned spec edit (GoalAmend, operator-only). Each key=value
+		// takes the rest of its word; quote values with spaces.
+		usage := "usage: koto ctl goal amend <group> [name=<run>] [text=<goal>] [criteria=<criteria>] [max=<n>]"
+		if len(rest) < 2 {
+			ctlFatal(2, "%s", usage)
+		}
+		req := &pb.GoalAmendReq{Group: rest[0]}
+		for _, w := range rest[1:] {
+			k, v, ok := strings.Cut(w, "=")
+			if !ok {
+				ctlFatal(2, "%s", usage)
+			}
+			switch k {
+			case "name":
+				req.Name = v
+			case "text":
+				req.Text = &v
+			case "criteria":
+				req.Criteria = &v
+			case "max", "max_iterations":
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					ctlFatal(2, "max must be a number: %q", v)
+				}
+				n32 := int32(n)
+				req.MaxIterations = &n32
+			default:
+				ctlFatal(2, "%s", usage)
+			}
+		}
+		if req.Text == nil && req.Criteria == nil && req.MaxIterations == nil {
+			ctlFatal(2, "%s", usage)
+		}
+		resp, err := cl.GoalAmend(ctx, req)
 		ctlPrint(resp, err)
 
 	default:

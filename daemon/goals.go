@@ -1385,6 +1385,9 @@ func goalDriveOnce(g, id string) {
 			emitLogfG("goal", g, "info", "verdict id=%s unmet (iteration %d/%d)", snap.ID, snap.Iteration, snap.MaxIterations)
 			continue
 		}
+		goalLock.Lock()
+		goalRefreshSpecLocked(&snap)
+		goalLock.Unlock()
 		goalMarkMet(g, snap, note)
 		return
 	}
@@ -1488,6 +1491,8 @@ func goalWorkerTurn(g string, snap goalItem) (claimed bool, note string, ok bool
 	if cur := findGoalByIDLocked(snap.ID); cur != nil {
 		snap.SteerLog = append([]goalSteer(nil), cur.SteerLog...)
 	}
+	// An amend made since the loop-top snapshot is this turn's spec.
+	goalRefreshSpecLocked(&snap)
 	goalLock.Unlock()
 	emit(g, Event{Event: "goal_iter", ID: snap.ID, Text: fmt.Sprintf("%d/%d", snap.Iteration, snap.MaxIterations), Session: work})
 	emitLogfG("goal", g, "info", "iteration %d/%d id=%s", snap.Iteration, snap.MaxIterations, snap.ID)
@@ -1533,6 +1538,9 @@ func goalJudgeCheck(g string, snap goalItem) (v goalVerdict, got bool, ok bool) 
 			goalLock.Unlock()
 			return goalVerdict{}, false, false
 		}
+		// The judge reviews against the LATEST spec (an operator amend made
+		// during the worker turn, or between review attempts, applies).
+		goalRefreshSpecLocked(&snap)
 		// First review of this run: from here the judge session exists as a
 		// tree leaf (goalLiveSessions). Persisted so the leaf survives a
 		// daemon restart for as long as the run does.
@@ -1923,7 +1931,7 @@ LEDGER:
 
 NEXT: <the immediate next step>
 %s%s%s
-GOAL:
+GOAL%s:
 %s
 
 ACCEPTANCE CRITERIA:
@@ -1943,7 +1951,7 @@ the operator with no timeout and your turn budget paused:
   (prints the answer; exit 3 = declined, stop and wait; if the tool call
   times out, run: cs-ask --wait)
 Otherwise just end your turn; you will be re-invoked.`,
-		it.ID, it.Iteration, it.MaxIterations, goalRedirectBlock(it), dir, dir, dir, feedback, handoff, goalSteerBlock(it), it.Text, it.Criteria, it.ID, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, goalRedirectBlock(it), dir, dir, dir, feedback, handoff, goalSteerBlock(it), goalSpecLabel(it), it.Text, it.Criteria, it.ID, it.ID)
 }
 
 func goalJudgeMsg(it goalItem) string {
@@ -1962,7 +1970,7 @@ acceptance criterion is met:
   three parts: what failed, what you observed, and what would be acceptable.
 - Overall: met only if EVERY criterion passes.
 
-GOAL:
+GOAL%s:
 %s
 
 ACCEPTANCE CRITERIA:
@@ -1975,7 +1983,7 @@ without a verdict is discarded):
   R="criterion 2 FAIL: observed ...; acceptable would be ..."
   printf '{"cmd":"goal_verdict","id":"%s","met":false,"reasons":"%%s"}\n' \
     "$(printf '%%s' "$R" | base64 -w 0)" > /workspace/.cs/ctl`,
-		it.ID, it.Iteration, it.MaxIterations, goalDirFor(it), it.Text, it.Criteria, it.ID, it.ID)
+		it.ID, it.Iteration, it.MaxIterations, goalDirFor(it), goalSpecLabel(it), it.Text, it.Criteria, it.ID, it.ID)
 }
 
 // ctlGoalSelfSet reports whether the named goal of g was set BY g, i.e.
