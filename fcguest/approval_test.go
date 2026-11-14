@@ -288,7 +288,7 @@ func TestApprovalOutrightDenials(t *testing.T) {
 	f := newGateFix(t, time.Hour)
 	f.g.line(canUse("p", "ExitPlanMode", `{}`))
 	f.g.line(canUse("big", "Write", `{"content":"`+strings.Repeat("a", approvalInputMax)+`"}`))
-	f.g.line([]byte(`{"type":"control_request","request_id":"h","request":{"subtype":"hook_callback"}}`))
+	f.g.line([]byte(`{"type":"control_request","request_id":"h","request":{"subtype":"mcp_message"}}`))
 	rs := f.in.responses(t)
 	if len(rs) != 3 {
 		t.Fatalf("responses: %+v", rs)
@@ -410,13 +410,26 @@ func TestApprovalSummary(t *testing.T) {
 }
 
 // fakeClaudeConfirm plays claude's side of the stdio permission protocol:
-// read the user record, ask once, record the answer, emit the result, then
-// wait for stdin EOF (the guest must close it after the result).
+// read the initialize request (the allow-note hook), read the user record,
+// ask once, record the answer, run the PostToolUse hook callback when
+// allowed (FAKE_TUID selects whether can_use_tool carries a tool_use_id),
+// emit the result, then wait for stdin EOF (the guest must close it after
+// the result).
 const fakeClaudeConfirm = `
+read -r i; printf '%s\n' "$i" > "$FAKE_DIR/init"
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"koto-init","response":{}}}'
 read -r u; printf '%s\n' "$u" > "$FAKE_DIR/user"
 echo '{"type":"system","subtype":"init","session_id":"11111111-2222-3333-4444-555555555555"}'
+if [ -n "$FAKE_TUID" ]; then
+echo '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu_1","input":{"command":"touch /workspace/m"}}}'
+else
 echo '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch /workspace/m"}}}'
+fi
 read -r r; printf '%s\n' "$r" > "$FAKE_DIR/resp"
+case "$r" in *'"allow"'*)
+echo '{"type":"control_request","request_id":"hook-1","request":{"subtype":"hook_callback","callback_id":"koto_allow_note","tool_use_id":"toolu_1","input":{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"toolu_1"}}}'
+read -r h; printf '%s\n' "$h" > "$FAKE_DIR/hook";;
+esac
 echo '{"type":"result","subtype":"success","session_id":"11111111-2222-3333-4444-555555555555"}'
 cat >/dev/null
 echo eof > "$FAKE_DIR/eof"
@@ -564,3 +577,81 @@ func TestApprovalTimeoutsGoalTurnNoDeadline(t *testing.T) {
 	case <-time.After(300 * time.Millisecond): // 5x the budget
 	}
 }
+
+// The confirm launch registers koto's PostToolUse hook before the user
+// record (SDK initialize control request).
+func TestRunClaudeConfirmRegistersAllowNoteHook(t *testing.T) {
+	dir, _ := runConfirmFake(t, hostAnswer(true, ""))
+	init := readFake(t, dir, "init")
+	for _, w := range []string{`"subtype":"initialize"`, `"request_id":"koto-init"`, `"PostToolUse"`, `"PostToolUseFailure"`, `"koto_allow_note"`} {
+		if !strings.Contains(init, w) {
+			t.Fatalf("initialize lacks %s: %s", w, init)
+		}
+	}
+}
+
+// Allow + message: the tool runs (allow echoes the input) and the message
+// reaches the model as the tool's PostToolUse additionalContext — keyed by
+// the tool_use_id claude sent with can_use_tool.
+func TestRunClaudeConfirmAllowMsgByToolUseID(t *testing.T) {
+	t.Setenv("FAKE_TUID", "1")
+	dir, _ := runConfirmFake(t, hostAnswer(true, "use the staging bucket next"))
+	resp := readFake(t, dir, "resp")
+	if !strings.Contains(resp, `"behavior":"allow"`) || !strings.Contains(resp, "touch /workspace/m") {
+		t.Fatalf("allow lost: %s", resp)
+	}
+	h := readFake(t, dir, "hook")
+	if !strings.Contains(h, `"request_id":"hook-1"`) || !strings.Contains(h, `"additionalContext":"`+allowNoteText("use the staging bucket next")+`"`) ||
+		!strings.Contains(h, `"hookEventName":"PostToolUse"`) {
+		t.Fatalf("allow message not delivered: %s", h)
+	}
+}
+
+// Older claude sends no tool_use_id with can_use_tool: the note is matched
+// by tool name instead.
+func TestRunClaudeConfirmAllowMsgByToolName(t *testing.T) {
+	t.Setenv("FAKE_TUID", "")
+	dir, _ := runConfirmFake(t, hostAnswer(true, "ok but keep it small"))
+	if h := readFake(t, dir, "hook"); !strings.Contains(h, "OPERATOR NOTE (given with the approval of this tool call): ok but keep it small") {
+		t.Fatalf("allow message not delivered: %s", h)
+	}
+}
+
+// Plain allow (no message): the hook answers an empty output — no note.
+func TestRunClaudeConfirmPlainAllowNoNote(t *testing.T) {
+	t.Setenv("FAKE_TUID", "1")
+	dir, _ := runConfirmFake(t, hostAnswer(true, ""))
+	h := readFake(t, dir, "hook")
+	if !strings.Contains(h, `"request_id":"hook-1"`) || strings.Contains(h, "additionalContext") {
+		t.Fatalf("plain allow hook answer: %s", h)
+	}
+}
+
+// A note is delivered once; a whitespace-only message writes none.
+func TestApprovalGateAllowNoteOnce(t *testing.T) {
+	var buf bytes.Buffer
+	g := newApprovalGate(&turnConn{c: io.Discard}, nopWC{&buf}, nil, time.Minute)
+	g.pending["a"], g.reqTool["a"], g.reqTUID["a"] = time.AfterFunc(time.Hour, func() {}), "Bash", "tu-a"
+	g.pending["b"], g.reqTool["b"] = time.AfterFunc(time.Hour, func() {}), "Bash"
+	g.finish("a", true, "note A", "", false)
+	g.finish("b", true, "   ", "", false)
+	hook := func(tuid string) string {
+		buf.Reset()
+		g.request("h", &controlRequest{Subtype: "hook_callback", CallbackID: hookCallbackID,
+			Input: json.RawMessage(`{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"` + tuid + `"}`)})
+		return buf.String()
+	}
+	if s := hook("tu-a"); !strings.Contains(s, "note A") {
+		t.Fatalf("first hook: %s", s)
+	}
+	if s := hook("tu-a"); strings.Contains(s, "additionalContext") {
+		t.Fatalf("note delivered twice: %s", s)
+	}
+	if s := hook("tu-b"); strings.Contains(s, "additionalContext") {
+		t.Fatalf("blank message produced a note: %s", s)
+	}
+}
+
+type nopWC struct{ io.Writer }
+
+func (nopWC) Close() error { return nil }

@@ -26,7 +26,11 @@ package main
 //     confirms the selection. Allowing therefore always takes two keys,
 //     → then enter — there is no one-key allow (y/Y/l do nothing), so a
 //     stray keystroke can deny at worst. n denies, m opens a message box
-//     (enter = deny with that message as the reason the model sees), esc
+//     (enter = deny with that message as the reason the model sees); with
+//     Allow selected, a opens the allow+message box (enter = allow, the
+//     message reaches the model next to the tool's result). Both boxes are
+//     optional extras: plain enter answers without a message, an empty box
+//     sends none, and esc in a box goes back to the card on Deny. esc
 //     closes the card and leaves the request pending. Every line fits a
 //     36-40 column phone viewport. There is deliberately no "always allow".
 
@@ -79,7 +83,7 @@ type approvalCardState struct {
 	inline  bool
 	key     string
 	allow   bool // Allow selected; zero value = Deny (the preselection)
-	msgMode bool // deny-with-message box open
+	msgMode bool // message box open: deny+msg (allow false) or allow+msg (allow true)
 	msg     textinput.Model
 	shownAt time.Time
 }
@@ -368,6 +372,12 @@ func newDenyMsgInput() textinput.Model {
 	return ti
 }
 
+func newAllowMsgInput() textinput.Model {
+	ti := newDenyMsgInput()
+	ti.Placeholder = "note for the model"
+	return ti
+}
+
 // handleApprovalCardKey routes keys while the card is open; unhandled keys
 // are swallowed.
 func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -379,10 +389,12 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.approvalCard.msgMode {
 		switch msg.String() {
 		case "esc":
+			// Back to the card, and back to the safe preselection.
 			m.approvalCard.msgMode = false
+			m.approvalCard.allow = false
 			return m, nil
 		case "enter":
-			return m.answerApproval(a, false, strings.TrimSpace(m.approvalCard.msg.Value()))
+			return m.answerApproval(a, m.approvalCard.allow, strings.TrimSpace(m.approvalCard.msg.Value()))
 		}
 		var cmd tea.Cmd
 		m.approvalCard.msg, cmd = m.approvalCard.msg.Update(msg)
@@ -402,6 +414,14 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.msgMode = true
 		m.approvalCard.allow = false
 		m.approvalCard.msg = newDenyMsgInput()
+	case "a", "A":
+		// Allow+message still takes the selection first (→ then a): from
+		// the Deny preselection a stray a does nothing.
+		if !m.approvalCard.allow {
+			return m, nil
+		}
+		m.approvalCard.msgMode = true
+		m.approvalCard.msg = newAllowMsgInput()
 	case "tab", "shift+tab":
 		// Two items, so next/previous with wrap are both a toggle.
 		m.approvalCard.allow = !m.approvalCard.allow
@@ -597,8 +617,16 @@ func approvalPills(allow bool) string {
 
 // approvalHintParts is the key hint; joined on one line when it fits,
 // otherwise broken at a " · " so no part is ever split.
-func approvalHint(w int) []string {
-	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg", "esc later"}
+func approvalHint(w int) []string { return approvalHintFor(w, false) }
+
+// approvalHintFor: m (deny+msg) always works; a (allow+msg) is offered
+// once Allow is selected, the only time it does anything.
+func approvalHintFor(w int, allow bool) []string {
+	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg"}
+	if allow {
+		parts = append(parts, "a allow+msg")
+	}
+	parts = append(parts, "esc later")
 	var out []string
 	cur := ""
 	for _, p := range parts {
@@ -650,12 +678,17 @@ func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	rows = append(rows, body...)
 	rows = append(rows, "", yel.Render(gl("⏱ ", "")+approvalDeadline(a.deadline)), "")
 	if m.approvalCard.msgMode {
+		if m.approvalCard.allow {
+			rows = append(rows, "allow with message:", m.approvalCard.msg.View(), "",
+				gray.Render("enter allow · esc back"))
+			return rows
+		}
 		rows = append(rows, "deny with message:", m.approvalCard.msg.View(), "",
 			gray.Render("enter deny · esc back"))
 		return rows
 	}
 	rows = append(rows, approvalPills(m.approvalCard.allow), "")
-	for _, h := range approvalHint(w) {
+	for _, h := range approvalHintFor(w, m.approvalCard.allow) {
 		rows = append(rows, gray.Render(h))
 	}
 	return rows
