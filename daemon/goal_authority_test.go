@@ -181,3 +181,75 @@ func TestGoalConfirmNoteNeverAnswersApproval(t *testing.T) {
 	}
 	r.end()
 }
+
+// guestCtl sends one ctl JSON line the way the guest agent does: strict
+// protojson into a CtlRequest (fcguest/ctl.go, mirrored by
+// ctlRequestFromJSON), then the daemon's proto adapter. A conversion error
+// is returned as-is — that is where an unschema'd verb dies in production.
+func guestCtl(t *testing.T, g, line string) (*pb.CtlResponse, error) {
+	t.Helper()
+	req, err := ctlRequestFromJSON([]byte(line))
+	if err != nil {
+		return nil, err
+	}
+	return ctlDispatchPB(g, req), nil
+}
+
+// The guest path, end to end: goal_note is IN the CtlRequest schema (e2e
+// E31 found it refused as "unknown field goal_note" before the daemon was
+// reached) and is accepted for the origin session, returning its note id;
+// a non-origin session is refused by the daemon. goal_amend / goal_redirect
+// / goal_steer stay OUT of the schema, refused at conversion, goal untouched.
+func TestGoalNoteGuestPathAcceptedAmendRedirectRefused(t *testing.T) {
+	fcHarness(t)
+	quietLogAlerts(t)
+	resetApprovals(t)
+	goalOriginSetup(t)
+	steerMirrorRec(t)
+	amendMirrorRec(t)
+	authGoal(t, "ggp1", "gp", "work", "")
+	r := newLiveRig(t, 1, "goal-gp")
+	r.ready("tg", "goal-gp")
+
+	resp, err := guestCtl(t, "tg", `{"cmd":"goal_note","name":"gp","session":"work","text":"check the cache"}`)
+	if err != nil {
+		t.Fatalf("goal_note refused by the guest schema: %v", err)
+	}
+	gn := resp.GetGoalNote()
+	if !resp.Ok || gn == nil || !gn.GetLive() || gn.GetId() == "" {
+		t.Fatalf("origin goal_note via guest path = %v", resp)
+	}
+	n := r.note()
+	if n.GetId() != gn.GetId() || !strings.HasPrefix(n.GetText(), "note from work (agent)") {
+		t.Fatalf("delivered note = %+v", n)
+	}
+	r.send(&pb.TurnFrame{Kind: &pb.TurnFrame_NoteDelivered{NoteDelivered: n.GetId()}})
+	if resp, err := guestCtl(t, "tg", `{"cmd":"goal_note","name":"gp","session":"other","text":"x"}`); err != nil || resp.Ok {
+		t.Fatalf("non-origin goal_note via guest path = %v / %v", resp, err)
+	}
+	r.end()
+
+	for _, line := range []string{
+		`{"cmd":"goal_amend","name":"gp","session":"work","criteria":"1. nothing","max_iterations":9}`,
+		`{"cmd":"goal_redirect","name":"gp","session":"work","text":"stop and accept"}`,
+		`{"cmd":"goal_steer","name":"gp","session":"work","text":"x","redirect":true}`,
+	} {
+		for _, g := range []string{"tg", ctlMainGroup} {
+			resp, err := guestCtl(t, g, line)
+			if err == nil {
+				t.Fatalf("%s as %s passed the guest schema: %v", line, g, resp)
+			}
+			if !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("%s as %s: unexpected refusal %v", line, g, err)
+			}
+		}
+	}
+	cur := goalByIDT(t, "ggp1")
+	goalLock.Lock()
+	marked := goalRedirects["ggp1"]
+	goalLock.Unlock()
+	if cur.Criteria != "c" || cur.MaxIterations != 5 || cur.Iteration != 2 || cur.Version != 0 ||
+		len(cur.SteerLog) != 0 || len(cur.AmendLog) != 0 || marked || cur.Status != goalStatusRunning {
+		t.Fatalf("guest path changed the goal: %+v marked=%v", cur, marked)
+	}
+}

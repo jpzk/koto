@@ -95,3 +95,22 @@ func TestReadCtlLineResynchronisesAfterAnOversizedRecord(t *testing.T) {
 		t.Error("an unterminated final record was accepted as complete")
 	}
 }
+
+// goal_note is in the guest's ctl schema (it used to die here as "unknown
+// field goal_note" before reaching the daemon); its response flattens to
+// {"ok":true,"id":..,"live":true}. Operator-authority verbs stay out.
+func TestCtlGoalNoteInSchemaAmendRedirectOut(t *testing.T) {
+	req, err := ctlRequestFromJSON([]byte(`{"cmd":"goal_note","name":"g","session":"","text":"hi"}`))
+	if err != nil || req.GetGoalNote().GetText() != "hi" || req.GetGoalNote().GetName() != "g" {
+		t.Fatalf("goal_note = %v / %v", req, err)
+	}
+	out := string(ctlResponseJSON(&pb.CtlResponse{Ok: true, Result: &pb.CtlResponse_GoalNote{GoalNote: &pb.GoalNoteResp{Id: "a1", Live: true}}}))
+	if !strings.Contains(out, `"id":"a1"`) || !strings.Contains(out, `"live":true`) || !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("goal_note resp = %s", out)
+	}
+	for _, l := range []string{`{"cmd":"goal_amend","name":"g","criteria":"x"}`, `{"cmd":"goal_redirect","name":"g","text":"x"}`, `{"cmd":"goal_steer","name":"g","text":"x"}`} {
+		if _, err := ctlRequestFromJSON([]byte(l)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("%s: %v", l, err)
+		}
+	}
+}

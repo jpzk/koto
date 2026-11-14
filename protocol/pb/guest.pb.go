@@ -602,6 +602,121 @@ func (x *AskResp) GetAnswer() string {
 	return ""
 }
 
+// goal_note: the origin-session agent's advisory live note into its own
+// running goal (daemon/goal_live.go goalNoteAgent). goal_amend / goal_redirect
+// are deliberately absent: they carry operator authority (admin gRPC only).
+type GoalNoteReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Session       string                 `protobuf:"bytes,2,opt,name=session,proto3" json:"session,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GoalNoteReq) Reset() {
+	*x = GoalNoteReq{}
+	mi := &file_guest_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GoalNoteReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GoalNoteReq) ProtoMessage() {}
+
+func (x *GoalNoteReq) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GoalNoteReq.ProtoReflect.Descriptor instead.
+func (*GoalNoteReq) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GoalNoteReq) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GoalNoteReq) GetSession() string {
+	if x != nil {
+		return x.Session
+	}
+	return ""
+}
+
+func (x *GoalNoteReq) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type GoalNoteResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Live          bool                   `protobuf:"varint,2,opt,name=live,proto3" json:"live,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GoalNoteResp) Reset() {
+	*x = GoalNoteResp{}
+	mi := &file_guest_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GoalNoteResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GoalNoteResp) ProtoMessage() {}
+
+func (x *GoalNoteResp) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GoalNoteResp.ProtoReflect.Descriptor instead.
+func (*GoalNoteResp) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GoalNoteResp) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *GoalNoteResp) GetLive() bool {
+	if x != nil {
+		return x.Live
+	}
+	return false
+}
+
 type CtlRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Cmd:
@@ -632,6 +747,7 @@ type CtlRequest struct {
 	//	*CtlRequest_SchedRun
 	//	*CtlRequest_Compact
 	//	*CtlRequest_Ask
+	//	*CtlRequest_GoalNote
 	Cmd           isCtlRequest_Cmd `protobuf_oneof:"cmd"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -639,7 +755,7 @@ type CtlRequest struct {
 
 func (x *CtlRequest) Reset() {
 	*x = CtlRequest{}
-	mi := &file_guest_proto_msgTypes[9]
+	mi := &file_guest_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -651,7 +767,7 @@ func (x *CtlRequest) String() string {
 func (*CtlRequest) ProtoMessage() {}
 
 func (x *CtlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[9]
+	mi := &file_guest_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -664,7 +780,7 @@ func (x *CtlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CtlRequest.ProtoReflect.Descriptor instead.
 func (*CtlRequest) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{9}
+	return file_guest_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CtlRequest) GetCmd() isCtlRequest_Cmd {
@@ -908,6 +1024,15 @@ func (x *CtlRequest) GetAsk() *AskReq {
 	return nil
 }
 
+func (x *CtlRequest) GetGoalNote() *GoalNoteReq {
+	if x != nil {
+		if x, ok := x.Cmd.(*CtlRequest_GoalNote); ok {
+			return x.GoalNote
+		}
+	}
+	return nil
+}
+
 type isCtlRequest_Cmd interface {
 	isCtlRequest_Cmd()
 }
@@ -1016,6 +1141,10 @@ type CtlRequest_Ask struct {
 	Ask *AskReq `protobuf:"bytes,26,opt,name=ask,proto3,oneof"` // daemon/goal_ask.go
 }
 
+type CtlRequest_GoalNote struct {
+	GoalNote *GoalNoteReq `protobuf:"bytes,27,opt,name=goal_note,json=goalNote,proto3,oneof"` // daemon/goal_live.go (agent, labelled)
+}
+
 func (*CtlRequest_Spawn) isCtlRequest_Cmd() {}
 
 func (*CtlRequest_Send) isCtlRequest_Cmd() {}
@@ -1068,6 +1197,8 @@ func (*CtlRequest_Compact) isCtlRequest_Cmd() {}
 
 func (*CtlRequest_Ask) isCtlRequest_Cmd() {}
 
+func (*CtlRequest_GoalNote) isCtlRequest_Cmd() {}
+
 type CtlTailResp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
@@ -1077,7 +1208,7 @@ type CtlTailResp struct {
 
 func (x *CtlTailResp) Reset() {
 	*x = CtlTailResp{}
-	mi := &file_guest_proto_msgTypes[10]
+	mi := &file_guest_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1089,7 +1220,7 @@ func (x *CtlTailResp) String() string {
 func (*CtlTailResp) ProtoMessage() {}
 
 func (x *CtlTailResp) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[10]
+	mi := &file_guest_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1102,7 +1233,7 @@ func (x *CtlTailResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CtlTailResp.ProtoReflect.Descriptor instead.
 func (*CtlTailResp) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{10}
+	return file_guest_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CtlTailResp) GetText() string {
@@ -1131,6 +1262,7 @@ type CtlResponse struct {
 	//	*CtlResponse_Sched
 	//	*CtlResponse_Scheds
 	//	*CtlResponse_Ask
+	//	*CtlResponse_GoalNote
 	Result        isCtlResponse_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1138,7 +1270,7 @@ type CtlResponse struct {
 
 func (x *CtlResponse) Reset() {
 	*x = CtlResponse{}
-	mi := &file_guest_proto_msgTypes[11]
+	mi := &file_guest_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1150,7 +1282,7 @@ func (x *CtlResponse) String() string {
 func (*CtlResponse) ProtoMessage() {}
 
 func (x *CtlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[11]
+	mi := &file_guest_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1163,7 +1295,7 @@ func (x *CtlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CtlResponse.ProtoReflect.Descriptor instead.
 func (*CtlResponse) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{11}
+	return file_guest_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CtlResponse) GetOk() bool {
@@ -1277,6 +1409,15 @@ func (x *CtlResponse) GetAsk() *AskResp {
 	return nil
 }
 
+func (x *CtlResponse) GetGoalNote() *GoalNoteResp {
+	if x != nil {
+		if x, ok := x.Result.(*CtlResponse_GoalNote); ok {
+			return x.GoalNote
+		}
+	}
+	return nil
+}
+
 type isCtlResponse_Result interface {
 	isCtlResponse_Result()
 }
@@ -1321,6 +1462,10 @@ type CtlResponse_Ask struct {
 	Ask *AskResp `protobuf:"bytes,12,opt,name=ask,proto3,oneof"` // ask
 }
 
+type CtlResponse_GoalNote struct {
+	GoalNote *GoalNoteResp `protobuf:"bytes,13,opt,name=goal_note,json=goalNote,proto3,oneof"` // goal_note
+}
+
 func (*CtlResponse_Port) isCtlResponse_Result() {}
 
 func (*CtlResponse_List) isCtlResponse_Result() {}
@@ -1341,6 +1486,8 @@ func (*CtlResponse_Scheds) isCtlResponse_Result() {}
 
 func (*CtlResponse_Ask) isCtlResponse_Result() {}
 
+func (*CtlResponse_GoalNote) isCtlResponse_Result() {}
+
 type InitReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ports         []int32                `protobuf:"varint,1,rep,packed,name=ports,proto3" json:"ports,omitempty"`                                                               // published TCP ports to bridge
@@ -1355,7 +1502,7 @@ type InitReq struct {
 
 func (x *InitReq) Reset() {
 	*x = InitReq{}
-	mi := &file_guest_proto_msgTypes[12]
+	mi := &file_guest_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1514,7 @@ func (x *InitReq) String() string {
 func (*InitReq) ProtoMessage() {}
 
 func (x *InitReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[12]
+	mi := &file_guest_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1527,7 @@ func (x *InitReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InitReq.ProtoReflect.Descriptor instead.
 func (*InitReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{12}
+	return file_guest_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *InitReq) GetPorts() []int32 {
@@ -1459,7 +1606,7 @@ type MsgReq struct {
 
 func (x *MsgReq) Reset() {
 	*x = MsgReq{}
-	mi := &file_guest_proto_msgTypes[13]
+	mi := &file_guest_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1471,7 +1618,7 @@ func (x *MsgReq) String() string {
 func (*MsgReq) ProtoMessage() {}
 
 func (x *MsgReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[13]
+	mi := &file_guest_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1484,7 +1631,7 @@ func (x *MsgReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MsgReq.ProtoReflect.Descriptor instead.
 func (*MsgReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{13}
+	return file_guest_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *MsgReq) GetMsg() []byte {
@@ -1573,7 +1720,7 @@ type ExecReq struct {
 
 func (x *ExecReq) Reset() {
 	*x = ExecReq{}
-	mi := &file_guest_proto_msgTypes[14]
+	mi := &file_guest_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1585,7 +1732,7 @@ func (x *ExecReq) String() string {
 func (*ExecReq) ProtoMessage() {}
 
 func (x *ExecReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[14]
+	mi := &file_guest_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1598,7 +1745,7 @@ func (x *ExecReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecReq.ProtoReflect.Descriptor instead.
 func (*ExecReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{14}
+	return file_guest_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ExecReq) GetScript() string {
@@ -1617,7 +1764,7 @@ type ExecStreamReq struct {
 
 func (x *ExecStreamReq) Reset() {
 	*x = ExecStreamReq{}
-	mi := &file_guest_proto_msgTypes[15]
+	mi := &file_guest_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1629,7 +1776,7 @@ func (x *ExecStreamReq) String() string {
 func (*ExecStreamReq) ProtoMessage() {}
 
 func (x *ExecStreamReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[15]
+	mi := &file_guest_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1642,7 +1789,7 @@ func (x *ExecStreamReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecStreamReq.ProtoReflect.Descriptor instead.
 func (*ExecStreamReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{15}
+	return file_guest_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ExecStreamReq) GetScript() string {
@@ -1661,7 +1808,7 @@ type GuestScriptReq struct {
 
 func (x *GuestScriptReq) Reset() {
 	*x = GuestScriptReq{}
-	mi := &file_guest_proto_msgTypes[16]
+	mi := &file_guest_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1673,7 +1820,7 @@ func (x *GuestScriptReq) String() string {
 func (*GuestScriptReq) ProtoMessage() {}
 
 func (x *GuestScriptReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[16]
+	mi := &file_guest_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1686,7 +1833,7 @@ func (x *GuestScriptReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestScriptReq.ProtoReflect.Descriptor instead.
 func (*GuestScriptReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{16}
+	return file_guest_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GuestScriptReq) GetScript() string {
@@ -1707,7 +1854,7 @@ type ShellAttachReq struct {
 
 func (x *ShellAttachReq) Reset() {
 	*x = ShellAttachReq{}
-	mi := &file_guest_proto_msgTypes[17]
+	mi := &file_guest_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1719,7 +1866,7 @@ func (x *ShellAttachReq) String() string {
 func (*ShellAttachReq) ProtoMessage() {}
 
 func (x *ShellAttachReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[17]
+	mi := &file_guest_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1732,7 +1879,7 @@ func (x *ShellAttachReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShellAttachReq.ProtoReflect.Descriptor instead.
 func (*ShellAttachReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{17}
+	return file_guest_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ShellAttachReq) GetSession() string {
@@ -1764,7 +1911,7 @@ type ShutdownReq struct {
 
 func (x *ShutdownReq) Reset() {
 	*x = ShutdownReq{}
-	mi := &file_guest_proto_msgTypes[18]
+	mi := &file_guest_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1776,7 +1923,7 @@ func (x *ShutdownReq) String() string {
 func (*ShutdownReq) ProtoMessage() {}
 
 func (x *ShutdownReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[18]
+	mi := &file_guest_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1789,7 +1936,7 @@ func (x *ShutdownReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownReq.ProtoReflect.Descriptor instead.
 func (*ShutdownReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{18}
+	return file_guest_proto_rawDescGZIP(), []int{20}
 }
 
 type AgentRequest struct {
@@ -1810,7 +1957,7 @@ type AgentRequest struct {
 
 func (x *AgentRequest) Reset() {
 	*x = AgentRequest{}
-	mi := &file_guest_proto_msgTypes[19]
+	mi := &file_guest_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1822,7 +1969,7 @@ func (x *AgentRequest) String() string {
 func (*AgentRequest) ProtoMessage() {}
 
 func (x *AgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[19]
+	mi := &file_guest_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1835,7 +1982,7 @@ func (x *AgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentRequest.ProtoReflect.Descriptor instead.
 func (*AgentRequest) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{19}
+	return file_guest_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *AgentRequest) GetOp() isAgentRequest_Op {
@@ -1966,7 +2113,7 @@ type AgentResponse struct {
 
 func (x *AgentResponse) Reset() {
 	*x = AgentResponse{}
-	mi := &file_guest_proto_msgTypes[20]
+	mi := &file_guest_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1978,7 +2125,7 @@ func (x *AgentResponse) String() string {
 func (*AgentResponse) ProtoMessage() {}
 
 func (x *AgentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[20]
+	mi := &file_guest_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1991,7 +2138,7 @@ func (x *AgentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentResponse.ProtoReflect.Descriptor instead.
 func (*AgentResponse) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{20}
+	return file_guest_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *AgentResponse) GetOk() bool {
@@ -2041,7 +2188,7 @@ type AgentFrame struct {
 
 func (x *AgentFrame) Reset() {
 	*x = AgentFrame{}
-	mi := &file_guest_proto_msgTypes[21]
+	mi := &file_guest_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2053,7 +2200,7 @@ func (x *AgentFrame) String() string {
 func (*AgentFrame) ProtoMessage() {}
 
 func (x *AgentFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[21]
+	mi := &file_guest_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2066,7 +2213,7 @@ func (x *AgentFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentFrame.ProtoReflect.Descriptor instead.
 func (*AgentFrame) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{21}
+	return file_guest_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *AgentFrame) GetKind() isAgentFrame_Kind {
@@ -2175,7 +2322,7 @@ type TurnOpen struct {
 
 func (x *TurnOpen) Reset() {
 	*x = TurnOpen{}
-	mi := &file_guest_proto_msgTypes[22]
+	mi := &file_guest_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2187,7 +2334,7 @@ func (x *TurnOpen) String() string {
 func (*TurnOpen) ProtoMessage() {}
 
 func (x *TurnOpen) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[22]
+	mi := &file_guest_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2200,7 +2347,7 @@ func (x *TurnOpen) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnOpen.ProtoReflect.Descriptor instead.
 func (*TurnOpen) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{22}
+	return file_guest_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *TurnOpen) GetSlot() int32 {
@@ -2220,7 +2367,7 @@ type ToolUse struct {
 
 func (x *ToolUse) Reset() {
 	*x = ToolUse{}
-	mi := &file_guest_proto_msgTypes[23]
+	mi := &file_guest_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2232,7 +2379,7 @@ func (x *ToolUse) String() string {
 func (*ToolUse) ProtoMessage() {}
 
 func (x *ToolUse) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[23]
+	mi := &file_guest_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2245,7 +2392,7 @@ func (x *ToolUse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolUse.ProtoReflect.Descriptor instead.
 func (*ToolUse) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{23}
+	return file_guest_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ToolUse) GetName() string {
@@ -2281,7 +2428,7 @@ type GuestSpan struct {
 
 func (x *GuestSpan) Reset() {
 	*x = GuestSpan{}
-	mi := &file_guest_proto_msgTypes[24]
+	mi := &file_guest_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2293,7 +2440,7 @@ func (x *GuestSpan) String() string {
 func (*GuestSpan) ProtoMessage() {}
 
 func (x *GuestSpan) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[24]
+	mi := &file_guest_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2306,7 +2453,7 @@ func (x *GuestSpan) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestSpan.ProtoReflect.Descriptor instead.
 func (*GuestSpan) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{24}
+	return file_guest_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *GuestSpan) GetSpanId() []byte {
@@ -2390,7 +2537,7 @@ type TurnFrame struct {
 
 func (x *TurnFrame) Reset() {
 	*x = TurnFrame{}
-	mi := &file_guest_proto_msgTypes[25]
+	mi := &file_guest_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2402,7 +2549,7 @@ func (x *TurnFrame) String() string {
 func (*TurnFrame) ProtoMessage() {}
 
 func (x *TurnFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[25]
+	mi := &file_guest_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2415,7 +2562,7 @@ func (x *TurnFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnFrame.ProtoReflect.Descriptor instead.
 func (*TurnFrame) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{25}
+	return file_guest_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TurnFrame) GetKind() isTurnFrame_Kind {
@@ -2658,7 +2805,7 @@ type CompactReq struct {
 
 func (x *CompactReq) Reset() {
 	*x = CompactReq{}
-	mi := &file_guest_proto_msgTypes[26]
+	mi := &file_guest_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2670,7 +2817,7 @@ func (x *CompactReq) String() string {
 func (*CompactReq) ProtoMessage() {}
 
 func (x *CompactReq) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[26]
+	mi := &file_guest_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2683,7 +2830,7 @@ func (x *CompactReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactReq.ProtoReflect.Descriptor instead.
 func (*CompactReq) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{26}
+	return file_guest_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *CompactReq) GetGroup() string {
@@ -2736,7 +2883,7 @@ type ApprovalRequest struct {
 
 func (x *ApprovalRequest) Reset() {
 	*x = ApprovalRequest{}
-	mi := &file_guest_proto_msgTypes[27]
+	mi := &file_guest_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2748,7 +2895,7 @@ func (x *ApprovalRequest) String() string {
 func (*ApprovalRequest) ProtoMessage() {}
 
 func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[27]
+	mi := &file_guest_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2761,7 +2908,7 @@ func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalRequest.ProtoReflect.Descriptor instead.
 func (*ApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{27}
+	return file_guest_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ApprovalRequest) GetId() string {
@@ -2824,7 +2971,7 @@ type ApprovalReply struct {
 
 func (x *ApprovalReply) Reset() {
 	*x = ApprovalReply{}
-	mi := &file_guest_proto_msgTypes[28]
+	mi := &file_guest_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2836,7 +2983,7 @@ func (x *ApprovalReply) String() string {
 func (*ApprovalReply) ProtoMessage() {}
 
 func (x *ApprovalReply) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[28]
+	mi := &file_guest_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2849,7 +2996,7 @@ func (x *ApprovalReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalReply.ProtoReflect.Descriptor instead.
 func (*ApprovalReply) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{28}
+	return file_guest_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ApprovalReply) GetId() string {
@@ -2886,7 +3033,7 @@ type SteerNote struct {
 
 func (x *SteerNote) Reset() {
 	*x = SteerNote{}
-	mi := &file_guest_proto_msgTypes[29]
+	mi := &file_guest_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2898,7 +3045,7 @@ func (x *SteerNote) String() string {
 func (*SteerNote) ProtoMessage() {}
 
 func (x *SteerNote) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[29]
+	mi := &file_guest_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2911,7 +3058,7 @@ func (x *SteerNote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SteerNote.ProtoReflect.Descriptor instead.
 func (*SteerNote) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{29}
+	return file_guest_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SteerNote) GetId() string {
@@ -2941,7 +3088,7 @@ type TurnReply struct {
 
 func (x *TurnReply) Reset() {
 	*x = TurnReply{}
-	mi := &file_guest_proto_msgTypes[30]
+	mi := &file_guest_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2953,7 +3100,7 @@ func (x *TurnReply) String() string {
 func (*TurnReply) ProtoMessage() {}
 
 func (x *TurnReply) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[30]
+	mi := &file_guest_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2966,7 +3113,7 @@ func (x *TurnReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnReply.ProtoReflect.Descriptor instead.
 func (*TurnReply) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{30}
+	return file_guest_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *TurnReply) GetKind() isTurnReply_Kind {
@@ -3055,7 +3202,14 @@ const file_guest_proto_rawDesc = "" +
 	"\aAskResp\x12\x15\n" +
 	"\x06ask_id\x18\x01 \x01(\tR\x05askId\x12\x1a\n" +
 	"\banswered\x18\x02 \x01(\bR\banswered\x12\x16\n" +
-	"\x06answer\x18\x03 \x01(\tR\x06answer\"\x80\n" +
+	"\x06answer\x18\x03 \x01(\tR\x06answer\"O\n" +
+	"\vGoalNoteReq\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\asession\x18\x02 \x01(\tR\asession\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"2\n" +
+	"\fGoalNoteResp\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04live\x18\x02 \x01(\bR\x04live\"\xb2\n" +
 	"\n" +
 	"\n" +
 	"CtlRequest\x12&\n" +
@@ -3091,10 +3245,11 @@ const file_guest_proto_rawDesc = "" +
 	"\fsched_toggle\x18\x17 \x01(\v2\x14.koto.SchedToggleReqH\x00R\vschedToggle\x12/\n" +
 	"\tsched_run\x18\x18 \x01(\v2\x10.koto.SchedIDReqH\x00R\bschedRun\x12,\n" +
 	"\acompact\x18\x19 \x01(\v2\x10.koto.CompactReqH\x00R\acompact\x12 \n" +
-	"\x03ask\x18\x1a \x01(\v2\f.koto.AskReqH\x00R\x03askB\x05\n" +
+	"\x03ask\x18\x1a \x01(\v2\f.koto.AskReqH\x00R\x03ask\x120\n" +
+	"\tgoal_note\x18\x1b \x01(\v2\x11.koto.GoalNoteReqH\x00R\bgoalNoteB\x05\n" +
 	"\x03cmd\"!\n" +
 	"\vCtlTailResp\x12\x12\n" +
-	"\x04text\x18\x01 \x01(\tR\x04text\"\xd3\x03\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\x86\x04\n" +
 	"\vCtlResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x14\n" +
@@ -3108,7 +3263,8 @@ const file_guest_proto_rawDesc = "" +
 	"\x05sched\x18\n" +
 	" \x01(\v2\x12.koto.SchedAddRespH\x00R\x05sched\x12-\n" +
 	"\x06scheds\x18\v \x01(\v2\x13.koto.SchedListRespH\x00R\x06scheds\x12!\n" +
-	"\x03ask\x18\f \x01(\v2\r.koto.AskRespH\x00R\x03askB\b\n" +
+	"\x03ask\x18\f \x01(\v2\r.koto.AskRespH\x00R\x03ask\x121\n" +
+	"\tgoal_note\x18\r \x01(\v2\x12.koto.GoalNoteRespH\x00R\bgoalNoteB\b\n" +
 	"\x06result\"\xcf\x01\n" +
 	"\aInitReq\x12\x14\n" +
 	"\x05ports\x18\x01 \x03(\x05R\x05ports\x12(\n" +
@@ -3249,7 +3405,7 @@ func file_guest_proto_rawDescGZIP() []byte {
 	return file_guest_proto_rawDescData
 }
 
-var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_guest_proto_goTypes = []any{
 	(*CtlSendReq)(nil),      // 0: koto.CtlSendReq
 	(*CtlTailReq)(nil),      // 1: koto.CtlTailReq
@@ -3260,108 +3416,112 @@ var file_guest_proto_goTypes = []any{
 	(*GoalVerdictReq)(nil),  // 6: koto.GoalVerdictReq
 	(*AskReq)(nil),          // 7: koto.AskReq
 	(*AskResp)(nil),         // 8: koto.AskResp
-	(*CtlRequest)(nil),      // 9: koto.CtlRequest
-	(*CtlTailResp)(nil),     // 10: koto.CtlTailResp
-	(*CtlResponse)(nil),     // 11: koto.CtlResponse
-	(*InitReq)(nil),         // 12: koto.InitReq
-	(*MsgReq)(nil),          // 13: koto.MsgReq
-	(*ExecReq)(nil),         // 14: koto.ExecReq
-	(*ExecStreamReq)(nil),   // 15: koto.ExecStreamReq
-	(*GuestScriptReq)(nil),  // 16: koto.GuestScriptReq
-	(*ShellAttachReq)(nil),  // 17: koto.ShellAttachReq
-	(*ShutdownReq)(nil),     // 18: koto.ShutdownReq
-	(*AgentRequest)(nil),    // 19: koto.AgentRequest
-	(*AgentResponse)(nil),   // 20: koto.AgentResponse
-	(*AgentFrame)(nil),      // 21: koto.AgentFrame
-	(*TurnOpen)(nil),        // 22: koto.TurnOpen
-	(*ToolUse)(nil),         // 23: koto.ToolUse
-	(*GuestSpan)(nil),       // 24: koto.GuestSpan
-	(*TurnFrame)(nil),       // 25: koto.TurnFrame
-	(*CompactReq)(nil),      // 26: koto.CompactReq
-	(*ApprovalRequest)(nil), // 27: koto.ApprovalRequest
-	(*ApprovalReply)(nil),   // 28: koto.ApprovalReply
-	(*SteerNote)(nil),       // 29: koto.SteerNote
-	(*TurnReply)(nil),       // 30: koto.TurnReply
-	nil,                     // 31: koto.InitReq.EnvEntry
-	nil,                     // 32: koto.GuestSpan.AttrsEntry
-	(*SpawnReq)(nil),        // 33: koto.SpawnReq
-	(*GroupReq)(nil),        // 34: koto.GroupReq
-	(*ListReq)(nil),         // 35: koto.ListReq
-	(*ResourcesReq)(nil),    // 36: koto.ResourcesReq
-	(*ConfigReq)(nil),       // 37: koto.ConfigReq
-	(*GoalSetReq)(nil),      // 38: koto.GoalSetReq
-	(*GoalGroupReq)(nil),    // 39: koto.GoalGroupReq
-	(*GoalListReq)(nil),     // 40: koto.GoalListReq
-	(*SchedAddReq)(nil),     // 41: koto.SchedAddReq
-	(*SchedListReq)(nil),    // 42: koto.SchedListReq
-	(*SchedIDReq)(nil),      // 43: koto.SchedIDReq
-	(*SchedToggleReq)(nil),  // 44: koto.SchedToggleReq
-	(*ListResp)(nil),        // 45: koto.ListResp
-	(*ResourcesResp)(nil),   // 46: koto.ResourcesResp
-	(*ConfigResp)(nil),      // 47: koto.ConfigResp
-	(*GoalResp)(nil),        // 48: koto.GoalResp
-	(*GoalListResp)(nil),    // 49: koto.GoalListResp
-	(*SchedAddResp)(nil),    // 50: koto.SchedAddResp
-	(*SchedListResp)(nil),   // 51: koto.SchedListResp
-	(*ShellResize)(nil),     // 52: koto.ShellResize
+	(*GoalNoteReq)(nil),     // 9: koto.GoalNoteReq
+	(*GoalNoteResp)(nil),    // 10: koto.GoalNoteResp
+	(*CtlRequest)(nil),      // 11: koto.CtlRequest
+	(*CtlTailResp)(nil),     // 12: koto.CtlTailResp
+	(*CtlResponse)(nil),     // 13: koto.CtlResponse
+	(*InitReq)(nil),         // 14: koto.InitReq
+	(*MsgReq)(nil),          // 15: koto.MsgReq
+	(*ExecReq)(nil),         // 16: koto.ExecReq
+	(*ExecStreamReq)(nil),   // 17: koto.ExecStreamReq
+	(*GuestScriptReq)(nil),  // 18: koto.GuestScriptReq
+	(*ShellAttachReq)(nil),  // 19: koto.ShellAttachReq
+	(*ShutdownReq)(nil),     // 20: koto.ShutdownReq
+	(*AgentRequest)(nil),    // 21: koto.AgentRequest
+	(*AgentResponse)(nil),   // 22: koto.AgentResponse
+	(*AgentFrame)(nil),      // 23: koto.AgentFrame
+	(*TurnOpen)(nil),        // 24: koto.TurnOpen
+	(*ToolUse)(nil),         // 25: koto.ToolUse
+	(*GuestSpan)(nil),       // 26: koto.GuestSpan
+	(*TurnFrame)(nil),       // 27: koto.TurnFrame
+	(*CompactReq)(nil),      // 28: koto.CompactReq
+	(*ApprovalRequest)(nil), // 29: koto.ApprovalRequest
+	(*ApprovalReply)(nil),   // 30: koto.ApprovalReply
+	(*SteerNote)(nil),       // 31: koto.SteerNote
+	(*TurnReply)(nil),       // 32: koto.TurnReply
+	nil,                     // 33: koto.InitReq.EnvEntry
+	nil,                     // 34: koto.GuestSpan.AttrsEntry
+	(*SpawnReq)(nil),        // 35: koto.SpawnReq
+	(*GroupReq)(nil),        // 36: koto.GroupReq
+	(*ListReq)(nil),         // 37: koto.ListReq
+	(*ResourcesReq)(nil),    // 38: koto.ResourcesReq
+	(*ConfigReq)(nil),       // 39: koto.ConfigReq
+	(*GoalSetReq)(nil),      // 40: koto.GoalSetReq
+	(*GoalGroupReq)(nil),    // 41: koto.GoalGroupReq
+	(*GoalListReq)(nil),     // 42: koto.GoalListReq
+	(*SchedAddReq)(nil),     // 43: koto.SchedAddReq
+	(*SchedListReq)(nil),    // 44: koto.SchedListReq
+	(*SchedIDReq)(nil),      // 45: koto.SchedIDReq
+	(*SchedToggleReq)(nil),  // 46: koto.SchedToggleReq
+	(*ListResp)(nil),        // 47: koto.ListResp
+	(*ResourcesResp)(nil),   // 48: koto.ResourcesResp
+	(*ConfigResp)(nil),      // 49: koto.ConfigResp
+	(*GoalResp)(nil),        // 50: koto.GoalResp
+	(*GoalListResp)(nil),    // 51: koto.GoalListResp
+	(*SchedAddResp)(nil),    // 52: koto.SchedAddResp
+	(*SchedListResp)(nil),   // 53: koto.SchedListResp
+	(*ShellResize)(nil),     // 54: koto.ShellResize
 }
 var file_guest_proto_depIdxs = []int32{
-	33, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
+	35, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
 	0,  // 1: koto.CtlRequest.send:type_name -> koto.CtlSendReq
-	34, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
-	35, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
-	36, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
-	37, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
+	36, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
+	37, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
+	38, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
+	39, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
 	1,  // 6: koto.CtlRequest.tail:type_name -> koto.CtlTailReq
 	2,  // 7: koto.CtlRequest.job_done:type_name -> koto.JobDoneReq
 	3,  // 8: koto.CtlRequest.notify:type_name -> koto.NotifyReq
 	4,  // 9: koto.CtlRequest.report:type_name -> koto.ReportReq
 	5,  // 10: koto.CtlRequest.goal_done:type_name -> koto.GoalDoneReq
 	6,  // 11: koto.CtlRequest.goal_verdict:type_name -> koto.GoalVerdictReq
-	38, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
-	39, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
-	40, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
-	39, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
-	39, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
-	39, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
-	39, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
-	41, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
-	42, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
-	43, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
-	44, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
-	43, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
-	26, // 24: koto.CtlRequest.compact:type_name -> koto.CompactReq
+	40, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
+	41, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
+	42, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
+	41, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
+	41, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
+	41, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
+	41, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
+	43, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
+	44, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
+	45, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
+	46, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
+	45, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
+	28, // 24: koto.CtlRequest.compact:type_name -> koto.CompactReq
 	7,  // 25: koto.CtlRequest.ask:type_name -> koto.AskReq
-	45, // 26: koto.CtlResponse.list:type_name -> koto.ListResp
-	46, // 27: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
-	47, // 28: koto.CtlResponse.config:type_name -> koto.ConfigResp
-	10, // 29: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
-	48, // 30: koto.CtlResponse.goal:type_name -> koto.GoalResp
-	49, // 31: koto.CtlResponse.goals:type_name -> koto.GoalListResp
-	50, // 32: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
-	51, // 33: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
-	8,  // 34: koto.CtlResponse.ask:type_name -> koto.AskResp
-	31, // 35: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
-	12, // 36: koto.AgentRequest.init:type_name -> koto.InitReq
-	13, // 37: koto.AgentRequest.msg:type_name -> koto.MsgReq
-	14, // 38: koto.AgentRequest.exec:type_name -> koto.ExecReq
-	15, // 39: koto.AgentRequest.exec_stream:type_name -> koto.ExecStreamReq
-	16, // 40: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
-	17, // 41: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
-	18, // 42: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
-	52, // 43: koto.AgentFrame.resize:type_name -> koto.ShellResize
-	32, // 44: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
-	22, // 45: koto.TurnFrame.open:type_name -> koto.TurnOpen
-	23, // 46: koto.TurnFrame.tool:type_name -> koto.ToolUse
-	24, // 47: koto.TurnFrame.span:type_name -> koto.GuestSpan
-	27, // 48: koto.TurnFrame.approval_request:type_name -> koto.ApprovalRequest
-	28, // 49: koto.TurnReply.approval:type_name -> koto.ApprovalReply
-	29, // 50: koto.TurnReply.note:type_name -> koto.SteerNote
-	51, // [51:51] is the sub-list for method output_type
-	51, // [51:51] is the sub-list for method input_type
-	51, // [51:51] is the sub-list for extension type_name
-	51, // [51:51] is the sub-list for extension extendee
-	0,  // [0:51] is the sub-list for field type_name
+	9,  // 26: koto.CtlRequest.goal_note:type_name -> koto.GoalNoteReq
+	47, // 27: koto.CtlResponse.list:type_name -> koto.ListResp
+	48, // 28: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
+	49, // 29: koto.CtlResponse.config:type_name -> koto.ConfigResp
+	12, // 30: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
+	50, // 31: koto.CtlResponse.goal:type_name -> koto.GoalResp
+	51, // 32: koto.CtlResponse.goals:type_name -> koto.GoalListResp
+	52, // 33: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
+	53, // 34: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
+	8,  // 35: koto.CtlResponse.ask:type_name -> koto.AskResp
+	10, // 36: koto.CtlResponse.goal_note:type_name -> koto.GoalNoteResp
+	33, // 37: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
+	14, // 38: koto.AgentRequest.init:type_name -> koto.InitReq
+	15, // 39: koto.AgentRequest.msg:type_name -> koto.MsgReq
+	16, // 40: koto.AgentRequest.exec:type_name -> koto.ExecReq
+	17, // 41: koto.AgentRequest.exec_stream:type_name -> koto.ExecStreamReq
+	18, // 42: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
+	19, // 43: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
+	20, // 44: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
+	54, // 45: koto.AgentFrame.resize:type_name -> koto.ShellResize
+	34, // 46: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
+	24, // 47: koto.TurnFrame.open:type_name -> koto.TurnOpen
+	25, // 48: koto.TurnFrame.tool:type_name -> koto.ToolUse
+	26, // 49: koto.TurnFrame.span:type_name -> koto.GuestSpan
+	29, // 50: koto.TurnFrame.approval_request:type_name -> koto.ApprovalRequest
+	30, // 51: koto.TurnReply.approval:type_name -> koto.ApprovalReply
+	31, // 52: koto.TurnReply.note:type_name -> koto.SteerNote
+	53, // [53:53] is the sub-list for method output_type
+	53, // [53:53] is the sub-list for method input_type
+	53, // [53:53] is the sub-list for extension type_name
+	53, // [53:53] is the sub-list for extension extendee
+	0,  // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_guest_proto_init() }
@@ -3370,7 +3530,7 @@ func file_guest_proto_init() {
 		return
 	}
 	file_koto_proto_init()
-	file_guest_proto_msgTypes[9].OneofWrappers = []any{
+	file_guest_proto_msgTypes[11].OneofWrappers = []any{
 		(*CtlRequest_Spawn)(nil),
 		(*CtlRequest_Send)(nil),
 		(*CtlRequest_Stop)(nil),
@@ -3397,8 +3557,9 @@ func file_guest_proto_init() {
 		(*CtlRequest_SchedRun)(nil),
 		(*CtlRequest_Compact)(nil),
 		(*CtlRequest_Ask)(nil),
+		(*CtlRequest_GoalNote)(nil),
 	}
-	file_guest_proto_msgTypes[11].OneofWrappers = []any{
+	file_guest_proto_msgTypes[13].OneofWrappers = []any{
 		(*CtlResponse_Port)(nil),
 		(*CtlResponse_List)(nil),
 		(*CtlResponse_Resources)(nil),
@@ -3409,8 +3570,9 @@ func file_guest_proto_init() {
 		(*CtlResponse_Sched)(nil),
 		(*CtlResponse_Scheds)(nil),
 		(*CtlResponse_Ask)(nil),
+		(*CtlResponse_GoalNote)(nil),
 	}
-	file_guest_proto_msgTypes[19].OneofWrappers = []any{
+	file_guest_proto_msgTypes[21].OneofWrappers = []any{
 		(*AgentRequest_Init)(nil),
 		(*AgentRequest_Msg)(nil),
 		(*AgentRequest_Exec)(nil),
@@ -3419,14 +3581,14 @@ func file_guest_proto_init() {
 		(*AgentRequest_ShellAttach)(nil),
 		(*AgentRequest_Shutdown)(nil),
 	}
-	file_guest_proto_msgTypes[21].OneofWrappers = []any{
+	file_guest_proto_msgTypes[23].OneofWrappers = []any{
 		(*AgentFrame_Data)(nil),
 		(*AgentFrame_End)(nil),
 		(*AgentFrame_Error)(nil),
 		(*AgentFrame_Input)(nil),
 		(*AgentFrame_Resize)(nil),
 	}
-	file_guest_proto_msgTypes[25].OneofWrappers = []any{
+	file_guest_proto_msgTypes[27].OneofWrappers = []any{
 		(*TurnFrame_Open)(nil),
 		(*TurnFrame_Text)(nil),
 		(*TurnFrame_ThinkBegin)(nil),
@@ -3442,7 +3604,7 @@ func file_guest_proto_init() {
 		(*TurnFrame_LiveReady)(nil),
 		(*TurnFrame_NoteDelivered)(nil),
 	}
-	file_guest_proto_msgTypes[30].OneofWrappers = []any{
+	file_guest_proto_msgTypes[32].OneofWrappers = []any{
 		(*TurnReply_Approval)(nil),
 		(*TurnReply_Note)(nil),
 	}
@@ -3452,7 +3614,7 @@ func file_guest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_guest_proto_rawDesc), len(file_guest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
