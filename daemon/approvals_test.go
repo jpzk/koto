@@ -112,10 +112,18 @@ func TestApprovalFirstAnswerWinsReplayIgnored(t *testing.T) {
 	if c := pendingApprovalCounts("tg"); c["work"] != 1 {
 		t.Fatalf("pending counts = %v", c)
 	}
+	// registerApproval publishes the pending entry before it emits the event
+	// (emit runs after approvalsMu is released), so waitPending can return a
+	// moment before the event is in the ring: poll for it instead of racing.
 	sawReq := false
-	for _, ev := range replayFrom("tg", 0) {
-		if ev.Event == "approval_request" && ev.Id == "req-1" && ev.Session == "work" && ev.Deadline > 0 {
-			sawReq = true
+	for i := 0; i < 300 && !sawReq; i++ {
+		for _, ev := range replayFrom("tg", 0) {
+			if ev.Event == "approval_request" && ev.Id == "req-1" && ev.Session == "work" && ev.Deadline > 0 {
+				sawReq = true
+			}
+		}
+		if !sawReq {
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if !sawReq {
