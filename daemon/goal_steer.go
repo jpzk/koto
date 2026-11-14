@@ -43,6 +43,13 @@ var goalSteerMirrorFn func(g, dir, body string)
 // "allow <tool>" / "deny <tool>" / "decision" / "steer"; who is the operator
 // identity. Must be called WITHOUT goalLock.
 func goalAddSteer(g, sess, source, who, text string) bool {
+	return goalAddSteerID(g, sess, source, who, text, "")
+}
+
+// goalAddSteerID is goalAddSteer with an entry id ("" = none): a steer that
+// is also offered to the running turn live carries one, so the guest's
+// note_delivered can mark it (goal_live.go).
+func goalAddSteerID(g, sess, source, who, text, id string) bool {
 	text = strings.TrimSpace(truncateRunes(flattenInline(text), goalSteerTextMax))
 	if text == "" || !isReservedSession(sess) {
 		return false
@@ -61,7 +68,7 @@ func goalAddSteer(g, sess, source, who, text string) bool {
 		}
 		it.SteerLog = append(it.SteerLog, goalSteer{
 			Ts: goalNow(), Iteration: it.Iteration,
-			Source: truncateRunes(flattenInline(source), 80), Who: truncateRunes(flattenInline(who), 80), Text: text,
+			Source: truncateRunes(flattenInline(source), 80), Who: truncateRunes(flattenInline(who), 80), Text: text, ID: id,
 		})
 		if n := len(it.SteerLog); n > goalSteerMax {
 			it.SteerLog = append([]goalSteer(nil), it.SteerLog[n-goalSteerMax:]...)
@@ -157,9 +164,12 @@ func goalSteerOperator(g, name, text, who string) (goalItem, error) {
 	if err != nil {
 		return goalItem{}, err
 	}
-	if !goalAddSteer(g, sess, "steer", who, text) {
+	nid := "n" + randHex(6)
+	if !goalAddSteerID(g, sess, "steer", who, text, nid) {
 		return goalItem{}, fmt.Errorf("goal %s did not take the steer", id)
 	}
+	// Live too: the running turn reads it at its next tool boundary.
+	goalLiveNote(g, sess, nid, liveOperatorText(who, strings.TrimSpace(truncateRunes(flattenInline(text), goalSteerTextMax))))
 	goalLock.Lock()
 	var out goalItem
 	found := false

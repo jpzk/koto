@@ -517,4 +517,9 @@ type GoalSteer struct {
 	Source string `json:"source"`
 	Who    string `json:"who,omitempty"`
 	Text   string `json:"text"`
+	// ID names a steer that was also offered to the running turn live
+	// (goal_live.go); Live is set once the guest confirmed it wrote the
+	// note into the worker's stdin (TurnFrame.note_delivered).
+	ID   string `json:"id,omitempty"`
+	Live bool   `json:"live,omitempty"`
 }

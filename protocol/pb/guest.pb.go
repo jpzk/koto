@@ -1448,8 +1448,13 @@ type MsgReq struct {
 	// confirm only: worker hard cap in ms (the worker clock pauses while an
 	// approval is pending, but never past this). 0 = guest default.
 	ApprovalHardCapMs int64 `protobuf:"varint,10,opt,name=approval_hard_cap_ms,json=approvalHardCapMs,proto3" json:"approval_hard_cap_ms,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// goal work turns: keep claude's stream-json stdin open for the whole turn
+	// so the daemon can deliver live steer notes (TurnReply.note) into it. The
+	// guest announces it with TurnFrame.live_ready; a harness that cannot do it
+	// never sends that, and the note waits for the next iteration instead.
+	LiveInput     bool `protobuf:"varint,11,opt,name=live_input,json=liveInput,proto3" json:"live_input,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MsgReq) Reset() {
@@ -1550,6 +1555,13 @@ func (x *MsgReq) GetApprovalHardCapMs() int64 {
 		return x.ApprovalHardCapMs
 	}
 	return 0
+}
+
+func (x *MsgReq) GetLiveInput() bool {
+	if x != nil {
+		return x.LiveInput
+	}
+	return false
 }
 
 type ExecReq struct {
@@ -2369,6 +2381,8 @@ type TurnFrame struct {
 	//	*TurnFrame_Span
 	//	*TurnFrame_ApprovalRequest
 	//	*TurnFrame_ApprovalExpired
+	//	*TurnFrame_LiveReady
+	//	*TurnFrame_NoteDelivered
 	Kind          isTurnFrame_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2519,6 +2533,24 @@ func (x *TurnFrame) GetApprovalExpired() string {
 	return ""
 }
 
+func (x *TurnFrame) GetLiveReady() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_LiveReady); ok {
+			return x.LiveReady
+		}
+	}
+	return false
+}
+
+func (x *TurnFrame) GetNoteDelivered() string {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnFrame_NoteDelivered); ok {
+			return x.NoteDelivered
+		}
+	}
+	return ""
+}
+
 type isTurnFrame_Kind interface {
 	isTurnFrame_Kind()
 }
@@ -2573,6 +2605,16 @@ type TurnFrame_ApprovalExpired struct {
 	ApprovalExpired string `protobuf:"bytes,12,opt,name=approval_expired,json=approvalExpired,proto3,oneof"`
 }
 
+type TurnFrame_LiveReady struct {
+	// live_input: the guest is reading TurnReply.note for this turn now.
+	LiveReady bool `protobuf:"varint,13,opt,name=live_ready,json=liveReady,proto3,oneof"`
+}
+
+type TurnFrame_NoteDelivered struct {
+	// live_input: note <id> was written into the running worker's stdin.
+	NoteDelivered string `protobuf:"bytes,14,opt,name=note_delivered,json=noteDelivered,proto3,oneof"`
+}
+
 func (*TurnFrame_Open) isTurnFrame_Kind() {}
 
 func (*TurnFrame_Text) isTurnFrame_Kind() {}
@@ -2596,6 +2638,10 @@ func (*TurnFrame_Span) isTurnFrame_Kind() {}
 func (*TurnFrame_ApprovalRequest) isTurnFrame_Kind() {}
 
 func (*TurnFrame_ApprovalExpired) isTurnFrame_Kind() {}
+
+func (*TurnFrame_LiveReady) isTurnFrame_Kind() {}
+
+func (*TurnFrame_NoteDelivered) isTurnFrame_Kind() {}
 
 // ctl `compact` (daemon/compact.go ctlCompact): compact a chat session via
 // its harness's native mechanism, or summarize-and-restart. Queued behind any
@@ -2827,11 +2873,67 @@ func (x *ApprovalReply) GetMsg() string {
 	return ""
 }
 
+// A live steer note for the running turn (MsgReq.live_input). text is
+// composed and labelled by the HOST (OPERATOR STEER / note from <s> (agent));
+// the guest hands it to the model verbatim as one more stream-json user record.
+type SteerNote struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SteerNote) Reset() {
+	*x = SteerNote{}
+	mi := &file_guest_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SteerNote) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SteerNote) ProtoMessage() {}
+
+func (x *SteerNote) ProtoReflect() protoreflect.Message {
+	mi := &file_guest_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SteerNote.ProtoReflect.Descriptor instead.
+func (*SteerNote) Descriptor() ([]byte, []int) {
+	return file_guest_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *SteerNote) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SteerNote) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
 type TurnReply struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
 	//
 	//	*TurnReply_Approval
+	//	*TurnReply_Note
 	Kind          isTurnReply_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2839,7 +2941,7 @@ type TurnReply struct {
 
 func (x *TurnReply) Reset() {
 	*x = TurnReply{}
-	mi := &file_guest_proto_msgTypes[29]
+	mi := &file_guest_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2851,7 +2953,7 @@ func (x *TurnReply) String() string {
 func (*TurnReply) ProtoMessage() {}
 
 func (x *TurnReply) ProtoReflect() protoreflect.Message {
-	mi := &file_guest_proto_msgTypes[29]
+	mi := &file_guest_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2864,7 +2966,7 @@ func (x *TurnReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnReply.ProtoReflect.Descriptor instead.
 func (*TurnReply) Descriptor() ([]byte, []int) {
-	return file_guest_proto_rawDescGZIP(), []int{29}
+	return file_guest_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *TurnReply) GetKind() isTurnReply_Kind {
@@ -2883,6 +2985,15 @@ func (x *TurnReply) GetApproval() *ApprovalReply {
 	return nil
 }
 
+func (x *TurnReply) GetNote() *SteerNote {
+	if x != nil {
+		if x, ok := x.Kind.(*TurnReply_Note); ok {
+			return x.Note
+		}
+	}
+	return nil
+}
+
 type isTurnReply_Kind interface {
 	isTurnReply_Kind()
 }
@@ -2891,7 +3002,13 @@ type TurnReply_Approval struct {
 	Approval *ApprovalReply `protobuf:"bytes,1,opt,name=approval,proto3,oneof"`
 }
 
+type TurnReply_Note struct {
+	Note *SteerNote `protobuf:"bytes,2,opt,name=note,proto3,oneof"`
+}
+
 func (*TurnReply_Approval) isTurnReply_Kind() {}
+
+func (*TurnReply_Note) isTurnReply_Kind() {}
 
 var File_guest_proto protoreflect.FileDescriptor
 
@@ -3002,7 +3119,7 @@ const file_guest_proto_rawDesc = "" +
 	"\x03kvm\x18\x06 \x01(\bR\x03kvm\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc6\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe5\x02\n" +
 	"\x06MsgReq\x12\x10\n" +
 	"\x03msg\x18\x01 \x01(\fR\x03msg\x12#\n" +
 	"\rsystem_prompt\x18\x02 \x01(\fR\fsystemPrompt\x12\x1f\n" +
@@ -3016,7 +3133,9 @@ const file_guest_proto_rawDesc = "" +
 	"\x04mode\x18\b \x01(\tR\x04mode\x12.\n" +
 	"\x13approval_timeout_ms\x18\t \x01(\x03R\x11approvalTimeoutMs\x12/\n" +
 	"\x14approval_hard_cap_ms\x18\n" +
-	" \x01(\x03R\x11approvalHardCapMs\"!\n" +
+	" \x01(\x03R\x11approvalHardCapMs\x12\x1d\n" +
+	"\n" +
+	"live_input\x18\v \x01(\bR\tliveInput\"!\n" +
 	"\aExecReq\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\"'\n" +
 	"\rExecStreamReq\x12\x16\n" +
@@ -3070,7 +3189,7 @@ const file_guest_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcb\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x95\x04\n" +
 	"\tTurnFrame\x12$\n" +
 	"\x04open\x18\x01 \x01(\v2\x0e.koto.TurnOpenH\x00R\x04open\x12\x14\n" +
 	"\x04text\x18\x02 \x01(\fH\x00R\x04text\x12!\n" +
@@ -3086,7 +3205,10 @@ const file_guest_proto_rawDesc = "" +
 	"\x04span\x18\n" +
 	" \x01(\v2\x0f.koto.GuestSpanH\x00R\x04span\x12B\n" +
 	"\x10approval_request\x18\v \x01(\v2\x15.koto.ApprovalRequestH\x00R\x0fapprovalRequest\x12+\n" +
-	"\x10approval_expired\x18\f \x01(\tH\x00R\x0fapprovalExpiredB\x06\n" +
+	"\x10approval_expired\x18\f \x01(\tH\x00R\x0fapprovalExpired\x12\x1f\n" +
+	"\n" +
+	"live_ready\x18\r \x01(\bH\x00R\tliveReady\x12'\n" +
+	"\x0enote_delivered\x18\x0e \x01(\tH\x00R\rnoteDeliveredB\x06\n" +
 	"\x04kind\"v\n" +
 	"\n" +
 	"CompactReq\x12\x14\n" +
@@ -3106,9 +3228,13 @@ const file_guest_proto_rawDesc = "" +
 	"\rApprovalReply\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05allow\x18\x02 \x01(\bR\x05allow\x12\x10\n" +
-	"\x03msg\x18\x03 \x01(\tR\x03msg\"F\n" +
+	"\x03msg\x18\x03 \x01(\tR\x03msg\"/\n" +
+	"\tSteerNote\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\"m\n" +
 	"\tTurnReply\x121\n" +
-	"\bapproval\x18\x01 \x01(\v2\x13.koto.ApprovalReplyH\x00R\bapprovalB\x06\n" +
+	"\bapproval\x18\x01 \x01(\v2\x13.koto.ApprovalReplyH\x00R\bapproval\x12%\n" +
+	"\x04note\x18\x02 \x01(\v2\x0f.koto.SteerNoteH\x00R\x04noteB\x06\n" +
 	"\x04kindB\x15Z\x13koto-protocol/pb;pbb\x06proto3"
 
 var (
@@ -3123,7 +3249,7 @@ func file_guest_proto_rawDescGZIP() []byte {
 	return file_guest_proto_rawDescData
 }
 
-var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_guest_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_guest_proto_goTypes = []any{
 	(*CtlSendReq)(nil),      // 0: koto.CtlSendReq
 	(*CtlTailReq)(nil),      // 1: koto.CtlTailReq
@@ -3154,67 +3280,68 @@ var file_guest_proto_goTypes = []any{
 	(*CompactReq)(nil),      // 26: koto.CompactReq
 	(*ApprovalRequest)(nil), // 27: koto.ApprovalRequest
 	(*ApprovalReply)(nil),   // 28: koto.ApprovalReply
-	(*TurnReply)(nil),       // 29: koto.TurnReply
-	nil,                     // 30: koto.InitReq.EnvEntry
-	nil,                     // 31: koto.GuestSpan.AttrsEntry
-	(*SpawnReq)(nil),        // 32: koto.SpawnReq
-	(*GroupReq)(nil),        // 33: koto.GroupReq
-	(*ListReq)(nil),         // 34: koto.ListReq
-	(*ResourcesReq)(nil),    // 35: koto.ResourcesReq
-	(*ConfigReq)(nil),       // 36: koto.ConfigReq
-	(*GoalSetReq)(nil),      // 37: koto.GoalSetReq
-	(*GoalGroupReq)(nil),    // 38: koto.GoalGroupReq
-	(*GoalListReq)(nil),     // 39: koto.GoalListReq
-	(*SchedAddReq)(nil),     // 40: koto.SchedAddReq
-	(*SchedListReq)(nil),    // 41: koto.SchedListReq
-	(*SchedIDReq)(nil),      // 42: koto.SchedIDReq
-	(*SchedToggleReq)(nil),  // 43: koto.SchedToggleReq
-	(*ListResp)(nil),        // 44: koto.ListResp
-	(*ResourcesResp)(nil),   // 45: koto.ResourcesResp
-	(*ConfigResp)(nil),      // 46: koto.ConfigResp
-	(*GoalResp)(nil),        // 47: koto.GoalResp
-	(*GoalListResp)(nil),    // 48: koto.GoalListResp
-	(*SchedAddResp)(nil),    // 49: koto.SchedAddResp
-	(*SchedListResp)(nil),   // 50: koto.SchedListResp
-	(*ShellResize)(nil),     // 51: koto.ShellResize
+	(*SteerNote)(nil),       // 29: koto.SteerNote
+	(*TurnReply)(nil),       // 30: koto.TurnReply
+	nil,                     // 31: koto.InitReq.EnvEntry
+	nil,                     // 32: koto.GuestSpan.AttrsEntry
+	(*SpawnReq)(nil),        // 33: koto.SpawnReq
+	(*GroupReq)(nil),        // 34: koto.GroupReq
+	(*ListReq)(nil),         // 35: koto.ListReq
+	(*ResourcesReq)(nil),    // 36: koto.ResourcesReq
+	(*ConfigReq)(nil),       // 37: koto.ConfigReq
+	(*GoalSetReq)(nil),      // 38: koto.GoalSetReq
+	(*GoalGroupReq)(nil),    // 39: koto.GoalGroupReq
+	(*GoalListReq)(nil),     // 40: koto.GoalListReq
+	(*SchedAddReq)(nil),     // 41: koto.SchedAddReq
+	(*SchedListReq)(nil),    // 42: koto.SchedListReq
+	(*SchedIDReq)(nil),      // 43: koto.SchedIDReq
+	(*SchedToggleReq)(nil),  // 44: koto.SchedToggleReq
+	(*ListResp)(nil),        // 45: koto.ListResp
+	(*ResourcesResp)(nil),   // 46: koto.ResourcesResp
+	(*ConfigResp)(nil),      // 47: koto.ConfigResp
+	(*GoalResp)(nil),        // 48: koto.GoalResp
+	(*GoalListResp)(nil),    // 49: koto.GoalListResp
+	(*SchedAddResp)(nil),    // 50: koto.SchedAddResp
+	(*SchedListResp)(nil),   // 51: koto.SchedListResp
+	(*ShellResize)(nil),     // 52: koto.ShellResize
 }
 var file_guest_proto_depIdxs = []int32{
-	32, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
+	33, // 0: koto.CtlRequest.spawn:type_name -> koto.SpawnReq
 	0,  // 1: koto.CtlRequest.send:type_name -> koto.CtlSendReq
-	33, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
-	34, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
-	35, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
-	36, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
+	34, // 2: koto.CtlRequest.stop:type_name -> koto.GroupReq
+	35, // 3: koto.CtlRequest.list:type_name -> koto.ListReq
+	36, // 4: koto.CtlRequest.resources:type_name -> koto.ResourcesReq
+	37, // 5: koto.CtlRequest.config_set:type_name -> koto.ConfigReq
 	1,  // 6: koto.CtlRequest.tail:type_name -> koto.CtlTailReq
 	2,  // 7: koto.CtlRequest.job_done:type_name -> koto.JobDoneReq
 	3,  // 8: koto.CtlRequest.notify:type_name -> koto.NotifyReq
 	4,  // 9: koto.CtlRequest.report:type_name -> koto.ReportReq
 	5,  // 10: koto.CtlRequest.goal_done:type_name -> koto.GoalDoneReq
 	6,  // 11: koto.CtlRequest.goal_verdict:type_name -> koto.GoalVerdictReq
-	37, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
-	38, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
-	39, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
-	38, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
-	38, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
-	38, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
-	38, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
-	40, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
-	41, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
-	42, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
-	43, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
-	42, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
+	38, // 12: koto.CtlRequest.goal_set:type_name -> koto.GoalSetReq
+	39, // 13: koto.CtlRequest.goal_approve:type_name -> koto.GoalGroupReq
+	40, // 14: koto.CtlRequest.goal_status:type_name -> koto.GoalListReq
+	39, // 15: koto.CtlRequest.goal_pause:type_name -> koto.GoalGroupReq
+	39, // 16: koto.CtlRequest.goal_interrupt:type_name -> koto.GoalGroupReq
+	39, // 17: koto.CtlRequest.goal_resume:type_name -> koto.GoalGroupReq
+	39, // 18: koto.CtlRequest.goal_cancel:type_name -> koto.GoalGroupReq
+	41, // 19: koto.CtlRequest.sched_add:type_name -> koto.SchedAddReq
+	42, // 20: koto.CtlRequest.sched_list:type_name -> koto.SchedListReq
+	43, // 21: koto.CtlRequest.sched_del:type_name -> koto.SchedIDReq
+	44, // 22: koto.CtlRequest.sched_toggle:type_name -> koto.SchedToggleReq
+	43, // 23: koto.CtlRequest.sched_run:type_name -> koto.SchedIDReq
 	26, // 24: koto.CtlRequest.compact:type_name -> koto.CompactReq
 	7,  // 25: koto.CtlRequest.ask:type_name -> koto.AskReq
-	44, // 26: koto.CtlResponse.list:type_name -> koto.ListResp
-	45, // 27: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
-	46, // 28: koto.CtlResponse.config:type_name -> koto.ConfigResp
+	45, // 26: koto.CtlResponse.list:type_name -> koto.ListResp
+	46, // 27: koto.CtlResponse.resources:type_name -> koto.ResourcesResp
+	47, // 28: koto.CtlResponse.config:type_name -> koto.ConfigResp
 	10, // 29: koto.CtlResponse.tail:type_name -> koto.CtlTailResp
-	47, // 30: koto.CtlResponse.goal:type_name -> koto.GoalResp
-	48, // 31: koto.CtlResponse.goals:type_name -> koto.GoalListResp
-	49, // 32: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
-	50, // 33: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
+	48, // 30: koto.CtlResponse.goal:type_name -> koto.GoalResp
+	49, // 31: koto.CtlResponse.goals:type_name -> koto.GoalListResp
+	50, // 32: koto.CtlResponse.sched:type_name -> koto.SchedAddResp
+	51, // 33: koto.CtlResponse.scheds:type_name -> koto.SchedListResp
 	8,  // 34: koto.CtlResponse.ask:type_name -> koto.AskResp
-	30, // 35: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
+	31, // 35: koto.InitReq.env:type_name -> koto.InitReq.EnvEntry
 	12, // 36: koto.AgentRequest.init:type_name -> koto.InitReq
 	13, // 37: koto.AgentRequest.msg:type_name -> koto.MsgReq
 	14, // 38: koto.AgentRequest.exec:type_name -> koto.ExecReq
@@ -3222,18 +3349,19 @@ var file_guest_proto_depIdxs = []int32{
 	16, // 40: koto.AgentRequest.run_script:type_name -> koto.GuestScriptReq
 	17, // 41: koto.AgentRequest.shell_attach:type_name -> koto.ShellAttachReq
 	18, // 42: koto.AgentRequest.shutdown:type_name -> koto.ShutdownReq
-	51, // 43: koto.AgentFrame.resize:type_name -> koto.ShellResize
-	31, // 44: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
+	52, // 43: koto.AgentFrame.resize:type_name -> koto.ShellResize
+	32, // 44: koto.GuestSpan.attrs:type_name -> koto.GuestSpan.AttrsEntry
 	22, // 45: koto.TurnFrame.open:type_name -> koto.TurnOpen
 	23, // 46: koto.TurnFrame.tool:type_name -> koto.ToolUse
 	24, // 47: koto.TurnFrame.span:type_name -> koto.GuestSpan
 	27, // 48: koto.TurnFrame.approval_request:type_name -> koto.ApprovalRequest
 	28, // 49: koto.TurnReply.approval:type_name -> koto.ApprovalReply
-	50, // [50:50] is the sub-list for method output_type
-	50, // [50:50] is the sub-list for method input_type
-	50, // [50:50] is the sub-list for extension type_name
-	50, // [50:50] is the sub-list for extension extendee
-	0,  // [0:50] is the sub-list for field type_name
+	29, // 50: koto.TurnReply.note:type_name -> koto.SteerNote
+	51, // [51:51] is the sub-list for method output_type
+	51, // [51:51] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_guest_proto_init() }
@@ -3311,9 +3439,12 @@ func file_guest_proto_init() {
 		(*TurnFrame_Span)(nil),
 		(*TurnFrame_ApprovalRequest)(nil),
 		(*TurnFrame_ApprovalExpired)(nil),
+		(*TurnFrame_LiveReady)(nil),
+		(*TurnFrame_NoteDelivered)(nil),
 	}
-	file_guest_proto_msgTypes[29].OneofWrappers = []any{
+	file_guest_proto_msgTypes[30].OneofWrappers = []any{
 		(*TurnReply_Approval)(nil),
+		(*TurnReply_Note)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3321,7 +3452,7 @@ func file_guest_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_guest_proto_rawDesc), len(file_guest_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   32,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
