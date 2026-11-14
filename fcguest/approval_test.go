@@ -542,3 +542,25 @@ func TestRunClaudeConfirmCompactIsPlan(t *testing.T) {
 		t.Fatalf("confirm compaction launch: %q", argv)
 	}
 }
+
+// A confirm GOAL turn: the host sends no deadline of its own (timeout ==
+// hard cap == 7d); the guest keeps both unclamped, so the only thing that
+// ends a turn waiting on the operator is that long backstop — never the
+// 1200s turnTimeout (the budget is paused while the approval is pending).
+func TestApprovalTimeoutsGoalTurnNoDeadline(t *testing.T) {
+	week := int64((7 * 24 * time.Hour) / time.Millisecond)
+	to, hc := approvalTimeouts(&pb.MsgReq{ApprovalTimeoutMs: week, ApprovalHardCapMs: week})
+	if to != 7*24*time.Hour || hc != 7*24*time.Hour {
+		t.Fatalf("goal turn limits clamped: %v %v", to, hc)
+	}
+	fired := make(chan struct{}, 1)
+	c := newWorkerClock(60*time.Millisecond, hc)
+	c.start(func() { fired <- struct{}{} })
+	defer c.stop()
+	c.pause() // the operator has not answered yet
+	select {
+	case <-fired:
+		t.Fatalf("turn killed while an approval was pending (%s)", c.firedBy())
+	case <-time.After(300 * time.Millisecond): // 5x the budget
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"koto-protocol/pb"
 )
@@ -245,5 +246,94 @@ func TestGoalJudgeSessionNeverConfirm(t *testing.T) {
 	}
 	if _, err := setSessionMode(g, "goal-j", modeYolo, providerClaude); err != nil {
 		t.Fatalf("work session yolo: %v", err)
+	}
+}
+
+// Approvals in a confirm goal's work session wait for the operator: no host
+// deadline (Deadline 0, no timer), the stall clock is paused past the plain
+// 1200s budget, the guest is told the long hard cap, and the goal reads as
+// waiting_confirm with the pending count + oldest tool. They are answered
+// strictly oldest first. A plain confirm session keeps its deadline.
+func TestGoalApprovalWaitsPausedOldestFirst(t *testing.T) {
+	fcHarness(t)
+	quietLogAlerts(t)
+	resetApprovals(t)
+	goalTestSetup(t)
+	goalLock.Lock()
+	goals = append(goals, goalItem{ID: "gp1", Group: "tg", Name: "w", Text: "t", Criteria: "c",
+		Status: goalStatusRunning, MaxIterations: 1, Mode: modeConfirm, CreatedAt: goalNow()})
+	goalLock.Unlock()
+	if _, err := storeSessionMode("tg", "goal-w", modeConfirm); err != nil {
+		t.Fatal(err)
+	}
+	if d := approvalTimeoutFor("tg", "goal-w"); d != 0 {
+		t.Fatalf("goal approval auto-deny by default: %v", d)
+	}
+	if d := approvalTimeoutFor("tg", "work"); d != approvalTimeout {
+		t.Fatalf("plain session deadline changed: %v", d)
+	}
+	gt, hc := turnApprovalLimits("tg", "goal-w")
+	if gt != goalApprovalHardCap || hc != goalApprovalHardCap {
+		t.Fatalf("guest limits for a goal turn = %v/%v", gt, hc)
+	}
+
+	r := newApprovalRig(t, 1, "goal-w")
+	r.request("a-1", "Bash")
+	waitPending(t, "tg", "goal-w", 1)
+	time.Sleep(5 * time.Millisecond) // distinct created times
+	r.request("a-2", "Write")
+	waitPending(t, "tg", "goal-w", 2)
+
+	lp := listPendingApprovals("tg")
+	if len(lp) != 2 || lp[0].Deadline != 0 || lp[1].Deadline != 0 {
+		t.Fatalf("goal approvals carry a deadline: %v", lp)
+	}
+	approvalsMu.Lock()
+	for k, p := range approvals {
+		if p.timer != nil {
+			t.Errorf("auto-deny timer armed on %v", k)
+		}
+	}
+	approvalsMu.Unlock()
+
+	// Turn budget paused: far past turnWaitTimeout, still not due.
+	t0 := time.Now()
+	c := newStallClock("tg", "goal-w", t0)
+	if c.due(t0.Add(turnWaitTimeout + time.Hour)) {
+		t.Fatal("stall clock killed a goal turn waiting on an approval")
+	}
+
+	// goal_status: waiting_confirm + pending + oldest tool.
+	lst, ok := ctlDispatch("tg", ctlLine(t, map[string]any{"cmd": "goal_status"})).(goalListResp)
+	if !ok || len(lst.Goals) != 1 {
+		t.Fatalf("goal_status = %+v", lst)
+	}
+	it := lst.Goals[0]
+	if it.Status != goalStatusWaitingConfirm || !it.WaitingConfirm || it.Pending != 2 || it.PendingTool != "Bash" || it.PendingSince <= 0 {
+		t.Fatalf("goal_status item = %+v", it)
+	}
+	if st := goalByIDT(t, "gp1").Status; st != goalStatusRunning {
+		t.Fatalf("display status persisted: %s", st)
+	}
+
+	// Strictly oldest first.
+	if rp := approveOperator("tg", "goal-w", "a-2", true, "", "op"); rp.GetError() == "" || !strings.Contains(rp.GetError(), "a-1") {
+		t.Fatalf("answered the newer approval first: %+v", rp)
+	}
+	if rp := approveOperator("tg", "goal-w", "a-1", true, "", "op"); rp.GetError() != "" {
+		t.Fatalf("oldest: %s", rp.GetError())
+	}
+	if rp := r.reply(); rp.GetId() != "a-1" || !rp.GetAllow() {
+		t.Fatalf("reply = %v", rp)
+	}
+	if rp := approveOperator("tg", "goal-w", "a-2", false, "", "op"); rp.GetError() != "" {
+		t.Fatalf("next: %s", rp.GetError())
+	}
+	if rp := r.reply(); rp.GetId() != "a-2" || rp.GetAllow() {
+		t.Fatalf("reply = %v", rp)
+	}
+	r.end()
+	if lst2 := goalList("tg"); len(lst2) != 1 || lst2[0].WaitingConfirm || lst2[0].Status != goalStatusRunning {
+		t.Fatalf("after answers: %+v", lst2)
 	}
 }
