@@ -337,3 +337,49 @@ func TestGoalApprovalWaitsPausedOldestFirst(t *testing.T) {
 		t.Fatalf("after answers: %+v", lst2)
 	}
 }
+
+// Cancelling a confirm goal whose iteration waits on an approval settles the
+// open request (deny by goal-cancel) instead of leaving the deadline-less
+// card and the turn parked forever. A cancel with nothing pending is a plain
+// status change.
+func TestGoalCancelDeniesWaitingApprovals(t *testing.T) {
+	fcHarness(t)
+	quietLogAlerts(t)
+	resetApprovals(t)
+	goalTestSetup(t)
+	prevFn := goalInterruptTurnFn
+	t.Cleanup(func() { goalInterruptTurnFn = prevFn })
+	goalInterruptTurnFn = func(string, string) error { return nil }
+	goalLock.Lock()
+	goals = append(goals,
+		goalItem{ID: "gc1", Group: "tg", Name: "w", Text: "t", Criteria: "c",
+			Status: goalStatusRunning, MaxIterations: 1, Mode: modeConfirm, CreatedAt: goalNow()},
+		goalItem{ID: "gc2", Group: "tg", Name: "v", Text: "t", Criteria: "c",
+			Status: goalStatusRunning, MaxIterations: 1, Mode: modeConfirm, CreatedAt: goalNow()})
+	goalLock.Unlock()
+	if _, err := storeSessionMode("tg", "goal-w", modeConfirm); err != nil {
+		t.Fatal(err)
+	}
+	r := newApprovalRig(t, 1, "goal-w")
+	r.request("c-1", "Bash")
+	waitPending(t, "tg", "goal-w", 1)
+
+	if _, err := goalCancel("tg", "w"); err != nil {
+		t.Fatal(err)
+	}
+	if rp := r.reply(); rp.GetId() != "c-1" || rp.GetAllow() {
+		t.Fatalf("reply after cancel = %v", rp)
+	}
+	waitPending(t, "tg", "goal-w", 0)
+	r.end()
+	if !strings.Contains(r.transcript(), "[[approval c-1 deny by goal-cancel]]") {
+		t.Fatalf("transcript lacks the goal-cancel deny marker:\n%s", r.transcript())
+	}
+	if st := goalByIDT(t, "gc1").Status; st != goalStatusCancelled {
+		t.Fatalf("status = %s", st)
+	}
+	// nothing pending: plain cancel, no error.
+	if _, err := goalCancel("tg", "v"); err != nil {
+		t.Fatal(err)
+	}
+}

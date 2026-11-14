@@ -1076,8 +1076,39 @@ func goalCancel(g, name string) (goalItem, error) {
 		return it, err
 	}
 	emitLogfG("goal", g, "info", "cancel id=%s", it.ID)
-	emit(g, Event{Event: "goal_cancelled", ID: it.ID, Session: goalWorkSessionFor(goalSessionSlug(it))})
+	work := goalWorkSessionFor(goalSessionSlug(it))
+	emit(g, Event{Event: "goal_cancelled", ID: it.ID, Session: work})
+	goalCancelWaitingTurn(g, work, it.ID)
 	return it, nil
+}
+
+// goalCancelWaitingTurn: a cancelled goal never keeps waiting on the
+// operator. Goal approvals and decision requests have no deadline, so an
+// iteration parked on one would hold its session (and the card in the
+// operator's queue) forever. When the goal's worker session has any open,
+// the in-flight turn is cancelled (sendNow's abort loop then signals and
+// escalates) and the open requests are denied by "goal-cancel". A cancel
+// with nothing pending keeps the old behaviour: the iteration finishes and
+// its claim is discarded by the status check.
+func goalCancelWaitingTurn(g, work, id string) {
+	if approvalsPending(g, work) == 0 && !pendingAskIn(g, work) {
+		return
+	}
+	if requestTurnCancel(g, work) {
+		emitLogfG("goal", g, "info", "cancel id=%s: canceled the turn waiting on the operator", id)
+	}
+	n := denyApprovals(g, work, nil, decDeny, "goal-cancel", true)
+	cancelGoalAsks(g, work)
+	if sessionBusy(g, work) {
+		fn := goalInterruptTurnFn
+		if fn == nil {
+			fn = interruptAgent
+		}
+		if ierr := fn(g, work); ierr != nil {
+			emitLogfG("goal", g, "warn", "cancel turn: %v", ierr)
+		}
+	}
+	emitLogfG("goal", g, "info", "cancel id=%s: denied %d open approval(s)", id, n)
 }
 
 // goalCancelOnDestroy silently cancels every non-terminal goal when its
