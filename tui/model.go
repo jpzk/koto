@@ -3243,6 +3243,8 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			text = fmt.Sprintf("goal %s resumed with a fresh %d-iteration budget", it.ID, it.MaxIterations)
 		case "interrupt":
 			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goals resume to continue)", it.ID)
+		case "steer":
+			text = fmt.Sprintf("steer recorded on goal %s — its next iteration reads it as OPERATOR STEER", it.ID)
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -6161,6 +6163,11 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/goals"), "/goal"))
 		return m.handleGoalCmd(rest)
 	}
+	// /steer is /goals steer: a durable operator steer on a running goal,
+	// no approval pending needed. In a goal session it targets that run.
+	if v == "/steer" || strings.HasPrefix(v, "/steer ") {
+		return m.handleGoalCmd("steer " + strings.TrimSpace(strings.TrimPrefix(v, "/steer")))
+	}
 	if v == "/clear" || v == "/clear all" {
 		if v == "/clear all" {
 			// Whole group: every session + the full transcript.
@@ -6399,7 +6406,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// server's reserved-session error.
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
-			text: "goal sessions are follow-only — chat in the default session, or /goals interrupt to take over"})
+			text: "goal sessions are follow-only — /steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
 		return nil
 	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row

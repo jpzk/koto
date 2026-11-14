@@ -1204,6 +1204,17 @@ func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.Goal
 	return goalGroupRPC(r.Group, r.Name, goalCancel)
 }
 
+// GoalSteer is /steer: a durable operator steer on a non-terminal goal,
+// recorded host-side with the caller's identity. Operator-only
+// (adminOnlyVerbs "goal_steer") and absent from the ctl plane — the agent
+// must never be able to author operator steer.
+func (s *kotoServer) GoalSteer(ctx context.Context, r *pb.GoalSteerReq) (*pb.GoalResp, error) {
+	who := identityOf(ctx).Name
+	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		return goalSteerOperator(g, name, r.Text, who)
+	})
+}
+
 // ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------
 
 func (s *kotoServer) AclGet(_ context.Context, _ *pb.AclGetReq) (*pb.AclResp, error) {

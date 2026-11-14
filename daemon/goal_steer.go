@@ -135,3 +135,43 @@ func goalSteerMirror(g, dir, body string) {
 		}
 	}()
 }
+
+// goalSteerOperator is /steer: the operator adds a durable steer to a goal
+// WITHOUT an approval pending (goal-steer item 10). Reached only from the
+// GoalSteer gRPC RPC (adminOnlyVerbs "goal_steer") — never from the ctl
+// plane, so the agent cannot author one. name picks the run ("" = the sole
+// non-terminal goal of g); any non-terminal run takes a steer (a paused or
+// awaiting run reads it on its next iteration).
+func goalSteerOperator(g, name, text, who string) (goalItem, error) {
+	if strings.TrimSpace(flattenInline(text)) == "" {
+		return goalItem{}, fmt.Errorf("steer text is empty")
+	}
+	goalLock.Lock()
+	it, err := resolveGoalLocked(g, name,
+		[]string{goalStatusPlanning, goalStatusAwaiting, goalStatusRunning, goalStatusPaused})
+	var sess, id string
+	if err == nil {
+		sess, id = goalWorkSessionFor(goalSessionSlug(*it)), it.ID
+	}
+	goalLock.Unlock()
+	if err != nil {
+		return goalItem{}, err
+	}
+	if !goalAddSteer(g, sess, "steer", who, text) {
+		return goalItem{}, fmt.Errorf("goal %s did not take the steer", id)
+	}
+	goalLock.Lock()
+	var out goalItem
+	found := false
+	for i := range goals {
+		if goals[i].ID == id {
+			out, found = goals[i], true
+			break
+		}
+	}
+	goalLock.Unlock()
+	if !found {
+		return goalItem{}, fmt.Errorf("goal %s vanished", id)
+	}
+	return goalWithPending(out), nil
+}

@@ -298,6 +298,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_cancel":
 		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
+	case "goal_steer":
+		return cl.GoalSteer(ctx, &pb.GoalSteerReq{Group: s("group"), Name: s("name"), Text: s("text")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }

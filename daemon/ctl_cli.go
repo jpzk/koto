@@ -101,6 +101,9 @@ streams
   goal list [group] | approve|pause|interrupt|resume|cancel <group>
                                            (interrupt = pause now, aborting
                                            the in-flight goal turn)
+  goal steer <group> [name=<run>] <text>   durable operator steer: the run's
+                                           next iteration reads it as
+                                           OPERATOR STEER (operator-only)
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
@@ -1100,7 +1103,7 @@ func ctlSched(args []string) {
 
 func ctlGoal(args []string) {
 	if len(args) < 1 {
-		ctlFatal(2, "usage: koto ctl goal set|list|approve|pause|interrupt|resume|cancel ...")
+		ctlFatal(2, "usage: koto ctl goal set|list|approve|pause|interrupt|resume|cancel|steer ...")
 	}
 	sub, rest := args[0], args[1:]
 	cl := ctlClient()
@@ -1183,6 +1186,24 @@ func ctlGoal(args []string) {
 		case "cancel":
 			resp, err = cl.GoalCancel(ctx, req)
 		}
+		ctlPrint(resp, err)
+
+	case "steer":
+		// koto ctl goal steer <group> [name=<run>] <text...> — durable
+		// operator steer (GoalSteer, operator-only).
+		if len(rest) < 2 {
+			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+		}
+		req := &pb.GoalSteerReq{Group: rest[0]}
+		words := rest[1:]
+		if strings.HasPrefix(words[0], "name=") {
+			req.Name, words = strings.TrimPrefix(words[0], "name="), words[1:]
+		}
+		req.Text = strings.Join(words, " ")
+		if strings.TrimSpace(req.Text) == "" {
+			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+		}
+		resp, err := cl.GoalSteer(ctx, req)
 		ctlPrint(resp, err)
 
 	default:

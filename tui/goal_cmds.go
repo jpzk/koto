@@ -177,6 +177,9 @@ var goalHelpLines = []string{
 	"  /goals interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
 	"  /goals resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
 	"  /goals cancel  [<group>] [<name>]  cancel the goal",
+	"  /steer [<group>] [name=<run>] <text>  durable operator steer: the run's",
+	"                                     next iteration reads it as OPERATOR STEER",
+	"                                     (in a goal session: that run)",
 	"  /goals help                        this help",
 	"",
 	"<group> defaults to the current group. A group can run SEVERAL goals at",
@@ -275,6 +278,13 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 			return nil
 		}
 		return goalSetCmd(m.sock, group, m.goalOrigin(group), name, text, criteria, maxIter, plan)
+	case "steer":
+		group, name, text, err := m.parseSteer(arg)
+		if err != nil {
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals steer: " + err.Error()})
+			return nil
+		}
+		return goalSteerCmd(m.sock, group, name, text)
 	case "approve", "pause", "interrupt", "resume", "cancel":
 		// Args: [<group>] [<name>] — goals run concurrently, so a name picks
 		// one of the group's runs. A single token is a group only when it
@@ -436,4 +446,50 @@ func (m Model) goalOrigin(group string) string {
 		return ""
 	}
 	return s
+}
+
+// goalSteerCmd sends a durable operator steer (GoalSteer RPC, operator-only)
+// to a goal run; the daemon records it and the run's next iteration reads it
+// as OPERATOR STEER.
+func goalSteerCmd(sock, group, name, text string) tea.Cmd {
+	return func() tea.Msg {
+		args := map[string]any{"group": group, "text": text}
+		if name != "" {
+			args["name"] = name
+		}
+		resp, err := daemonCall(sock, "goal_steer", args)
+		if err != nil {
+			return goalOpMsg{op: "steer", group: group, err: err}
+		}
+		raw, _ := resp["item"].(map[string]any)
+		return goalOpMsg{op: "steer", group: group, item: goalFromMap(raw)}
+	}
+}
+
+// parseSteer resolves `/steer [<group>] [name=<run>] <text>` (and
+// `/goals steer …`). Viewing a goal session, the run defaults to THAT run;
+// elsewhere "" lets the daemon pick the group's sole active goal. The first
+// token is a group only when the TUI knows it, as for /goals set.
+func (m *Model) parseSteer(rest string) (group, name, text string, err error) {
+	group = m.cur
+	if s := m.activeSession(m.cur); goalSession(s) && !goalJudgeSession(s) {
+		name = goalRunID(s)
+	}
+	toks := strings.Fields(rest)
+	if len(toks) > 0 {
+		if _, known := m.groups[toks[0]]; known {
+			if toks[0] != m.cur {
+				name = ""
+			}
+			group, toks = toks[0], toks[1:]
+		}
+	}
+	if len(toks) > 0 && strings.HasPrefix(toks[0], "name=") {
+		name, toks = strings.TrimPrefix(toks[0], "name="), toks[1:]
+	}
+	text = strings.Join(toks, " ")
+	if text == "" {
+		return "", "", "", fmt.Errorf("usage: /steer [<group>] [name=<run>] <text>")
+	}
+	return group, name, text, nil
 }
