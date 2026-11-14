@@ -10,7 +10,7 @@ package main
 //   - Mode selector: /mode opens a three-row picker for the CURRENT session
 //     (/mode <yolo|plan|confirm> sets it directly). It calls the operator
 //     Config RPC with mode+session; nothing local changes until WatchState
-//     reports the new mode. The daemon refuses confirm for goal sessions.
+//     reports the new mode. The daemon refuses confirm only for a goal's judge.
 //   - Inbox: open approvals are counted in the status bar ("inbox N",
 //     yellow) and as a yellow "!N" on the session's tree row. NOTHING pops
 //     up on its own — the operator opens the card with alt+a or /approve.
@@ -60,7 +60,8 @@ type approvalItem struct {
 	group, session, id string
 	tool, input        string
 	summary            string
-	deadline           float64   // unix seconds; the host denies at this time
+	deadline           float64   // unix seconds; the host denies at this time (0 = never)
+	created            float64   // unix seconds the host opened it (queue order)
 	seen               time.Time // when this TUI learned of it (prune grace)
 }
 
@@ -151,7 +152,7 @@ func (m *Model) onApprovalEvent(ev Event) {
 	switch ev.Event {
 	case "approval_request":
 		m.approvals[k] = approvalItem{group: ev.Group, session: ev.Session, id: ev.ID,
-			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, seen: time.Now()}
+			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, created: ev.Ts, seen: time.Now()}
 		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts),
 			text: fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)})
 	case "approval_resolved":
@@ -176,8 +177,10 @@ func (m *Model) seedApprovals(resp map[string]any) {
 			continue
 		}
 		dl, _ := p["deadline"].(float64)
+		cr, _ := p["created"].(float64)
 		a := approvalItem{group: s2(p["group"]), session: s2(p["session"]), id: s2(p["id"]),
-			tool: s2(p["tool"]), input: s2(p["input_json"]), summary: s2(p["summary"]), deadline: dl, seen: time.Now()}
+			tool: s2(p["tool"]), input: s2(p["input_json"]), summary: s2(p["summary"]), deadline: dl,
+			created: cr, seen: time.Now()}
 		if a.id != "" {
 			m.approvals[a.key()] = a
 		}
@@ -285,13 +288,19 @@ var setModeCmdFn = func(sock, g, s, mode string) tea.Cmd {
 	return daemonCmd(sock, "config", g, map[string]any{"mode": mode, "session": s})
 }
 
-// sortedApprovals orders open requests oldest-deadline first.
+// sortedApprovals orders open requests oldest first: by when the host
+// opened them (the daemon answers a session's queue strictly in that
+// order — goal approvals have no deadline to sort by), then by deadline
+// for entries without a creation time.
 func (m Model) sortedApprovals() []approvalItem {
 	out := make([]approvalItem, 0, len(m.approvals))
 	for _, a := range m.approvals {
 		out = append(out, a)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if ci, cj := out[i].created, out[j].created; ci > 0 && cj > 0 && ci != cj {
+			return ci < cj
+		}
 		if out[i].deadline != out[j].deadline {
 			return out[i].deadline < out[j].deadline
 		}
@@ -468,7 +477,7 @@ func (m *Model) handleApprovalResp(msg daemonRespMsg) {
 // approvalDeadline renders the host deadline as a fixed local time.
 func approvalDeadline(dl float64) string {
 	if dl <= 0 {
-		return "auto-deny: host default"
+		return "no auto-deny · waits for you"
 	}
 	return "auto-deny at " + time.Unix(int64(dl), 0).Format("15:04:05")
 }
@@ -728,8 +737,8 @@ func (m *Model) setMode(g, s, mode string) tea.Cmd {
 		m.addLine(logLine{kind: "err", group: g, text: "usage: /mode [yolo|plan|confirm]"})
 		return nil
 	}
-	if mode == modeConfirm && goalSession(s) {
-		m.addLine(logLine{kind: "err", group: g, text: "goal sessions cannot be set to confirm"})
+	if mode == modeConfirm && goalJudgeSession(s) {
+		m.addLine(logLine{kind: "err", group: g, text: "the goal judge cannot be set to confirm"})
 		return nil
 	}
 	m.addLine(logLine{kind: "sys", group: g, session: s,
@@ -932,4 +941,19 @@ func (m *Model) setLocalMode(g, s, md string) {
 	}
 	gi.SessionModes = nm
 	m.groups[g] = gi
+}
+
+// pendingShown is the "!N" a tree row carries: its own session's open
+// approvals plus, while the row is folded, those of the goal sessions
+// folded under it — a confirm goal waiting on the operator must stay
+// visible when its parent conversation is collapsed.
+func (m Model) pendingShown(g, s string) int {
+	n := m.pendingFor(g, s)
+	if m.jobsOpen[sessKey(g, s)] {
+		return n
+	}
+	for _, gs := range m.foldGoals(g, s) {
+		n += m.pendingFor(g, gs)
+	}
+	return n
 }

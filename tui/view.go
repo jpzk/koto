@@ -996,7 +996,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 		}
 		md := m.sessionMode(r.group, sk)
 		markMode = " " + modeLetter(md)
-		if n := m.pendingFor(r.group, sk); n > 0 {
+		if n := m.pendingShown(r.group, sk); n > 0 {
 			markPend = fmt.Sprintf(" !%d", n)
 		}
 		if mw := cellWidth(markPend + markMode); w-mw >= 1 {
