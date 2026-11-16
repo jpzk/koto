@@ -725,21 +725,33 @@ func TestGoalConcurrentGoalsRunIndependently(t *testing.T) {
 	})
 }
 
-// TestGoalMaxActiveCap: the per-group concurrency cap bounds driver minting.
-func TestGoalMaxActiveCap(t *testing.T) {
+// TestGoalManyConcurrentAccepted: there is no per-group cap on active goals.
+// Twelve goals — more than the old cap of 8 and more than groupSlots — are
+// all accepted in one group, each gets its own run, and every driver joins
+// (plan turn → awaiting) through the shared slot pool.
+func TestGoalManyConcurrentAccepted(t *testing.T) {
 	goalTestSetup(t)
-	const g = "goal-conc-cap"
+	const g = "goal-conc-many"
+	const n = 12
 	withTurnFn(func(_, _, _ string) error { return nil }, func() {
+		seen := map[string]bool{}
 		var ids []string
-		for i := 0; i < goalMaxActive; i++ {
+		for i := 0; i < n; i++ {
 			it, err := goalSet(g, "plan a thing", "1. planned", fmt.Sprintf("g%d", i), 0, true)
 			if err != nil {
-				t.Fatalf("set #%d: %v", i, err)
+				t.Fatalf("set #%d refused: %v", i, err)
 			}
+			if seen[it.ID] {
+				t.Fatalf("set #%d reused id %s", i, it.ID)
+			}
+			seen[it.ID] = true
 			ids = append(ids, it.ID)
 		}
-		if _, err := goalSet(g, "one too many", "1. x", "over", 0, true); err == nil {
-			t.Fatal("active-goal cap not enforced")
+		goalLock.Lock()
+		active := len(activeGoalsLocked(g))
+		goalLock.Unlock()
+		if active != n {
+			t.Fatalf("active goals = %d, want %d", active, n)
 		}
 		// Join every driver (plan turn → awaiting) before the seam restores.
 		for _, id := range ids {

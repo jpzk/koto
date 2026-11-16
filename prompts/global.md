@@ -280,8 +280,8 @@ could check by RUNNING something, not by reading your claims.
   ```
 
 Goals run CONCURRENTLY: you can set several at once (each gets its own
-goal-<name> session pair and iterates independently, up to 8 active per
-group). When more than one is active, steer a specific one by adding
+goal-<name> session pair and iterates independently; there is no cap on
+how many a group may have). When more than one is active, steer a specific one by adding
 "name":"<name>" to goal_pause / goal_resume / goal_cancel / goal_approve —
 name-less calls work only while exactly one goal is a candidate. Reporting
 verbs (goal_done / goal_verdict, used inside goal turns) carry the goal
