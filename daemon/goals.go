@@ -51,6 +51,11 @@ package main
 //     goalDirFor directory, never a shared path). Verbs
 //     (approve/pause/interrupt/resume/cancel) take an optional NAME and
 //     resolve to the sole matching goal when it is omitted.
+//   - There is NO cap on how many goals a group may hold at once. What bounds
+//     concurrent goal TURNS is the slot pool (groupSlots, queue.go): goal,
+//     judge and chat turns combined never exceed it, and the rest wait in
+//     acquireSlot. Each turn is one claude process in the guest, so a small
+//     VM can run out of RAM before the pool binds — sizing is the operator's.
 //
 // One driver goroutine per active goal (keyed by goal ID) is the sole
 // producer of that goal's turns: it enqueues onto the group's ordinary send
@@ -99,12 +104,6 @@ const (
 
 	goalDefaultMaxIter = 20
 	goalMaxIterCeil    = 200
-
-	// goalMaxActive caps how many goals may run CONCURRENTLY in one group.
-	// Each active goal is one driver goroutine and at most one in-flight
-	// turn, so the real thrash limit is the group's turn slot pool; this cap
-	// just keeps a looping agent from minting drivers without bound.
-	goalMaxActive = 8
 
 	// goalNoteMax caps the decoded goal_done note / goal_verdict reasons —
 	// both agent-authored, both persisted into goals.json and (for reasons)
@@ -867,10 +866,6 @@ func goalSetWith(o goalSetOpts) (goalItem, error) {
 		Status:        status,
 		MaxIterations: maxIter,
 		CreatedAt:     goalNow(),
-	}
-	if n := len(activeGoalsLocked(group)); n >= goalMaxActive {
-		goalLock.Unlock()
-		return goalItem{}, fmt.Errorf("group %q already has %d active goals; finish or cancel one first", group, n)
 	}
 	// The mode is written for BOTH sessions every time, yolo included: a
 	// reused run name must not inherit a stale entry from an earlier run.

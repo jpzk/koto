@@ -180,9 +180,11 @@
 - **반복 상한:** `max_iterations`가 `<= 0`이면
   `goalDefaultMaxIter = 20`이 됩니다. `goalMaxIterCeil = 200`을 넘는 값은
   200으로 낮춰집니다.
-- **활성 목표 제한:** 그룹은 한 번에 최대 `goalMaxActive = 8`개 목표를
-  실행할 수 있습니다. 초과 시:
-  `group "<g>" already has <n> active goals; finish or cancel one first`.
+- **활성 목표 제한 없음:** 그룹은 목표를 개수 제한 없이 동시에 실행할 수
+  있습니다. 다만 턴은 그룹의 턴 슬롯 풀(`groupSlots = 10`)을 공유하므로
+  목표·심사·채팅을 합쳐 최대 10개 턴만 동시에 돌고 나머지는 슬롯을
+  기다립니다. 턴 하나는 게스트의 `claude` 프로세스 하나(~250 MiB)이므로
+  작은 VM에서 많은 목표를 동시에 돌리면 RAM이 부족할 수 있습니다.
 - **옛 레코드:** 새 목표를 설정하면 그룹의 끝난 목표 레코드(met,
   cancelled, exhausted)가 삭제됩니다.
 - **Id:** 목표 id는 16진수 12자입니다 (`newSchedID`, `goalIDLen`).

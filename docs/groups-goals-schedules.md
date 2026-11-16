@@ -177,9 +177,11 @@ All of this is in `daemon/goals.go`.
 - **Iteration cap:** `max_iterations` of `<= 0` becomes
   `goalDefaultMaxIter = 20`. Values above `goalMaxIterCeil = 200` are lowered
   to 200.
-- **Active-goal limit:** a group can run at most `goalMaxActive = 8` goals at
-  once. Over that:
-  `group "<g>" already has <n> active goals; finish or cancel one first`.
+- **No active-goal limit:** a group can run any number of goals at once.
+  Their turns still share the group's turn slot pool (`groupSlots = 10`):
+  at most 10 turns — goal, judge and chat combined — run at once and the
+  rest wait for a slot. Each turn is one `claude` process in the guest
+  (~250 MiB), so many concurrent goals on a small VM can exhaust its RAM.
 - **Old records:** setting a new goal deletes the group's finished goal
   records (met, cancelled, exhausted).
 - **Ids:** a goal id is 12 hex characters (`newSchedID`, `goalIDLen`).
