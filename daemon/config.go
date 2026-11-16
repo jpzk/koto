@@ -402,8 +402,8 @@ func configCmd(req configReq) configResp {
 		if !harnessSupportsMode(newProvider, mv) {
 			return configResp{BaseResp: errResp(modeUnsupportedErr(newProvider, mv).Error())}
 		}
-		if mv == modeConfirm && isReservedSession(s) {
-			return configResp{BaseResp: errResp("goal sessions cannot be set to confirm — the goal loop runs unattended")}
+		if mv != modeYolo && isReservedSession(s) && goalIsJudgeSession(req.Group, s) {
+			return configResp{BaseResp: errResp("goal judge sessions always run yolo — the judge never asks (set the mode on the goal's work session)")}
 		}
 		setMode, modeVal, modeSess = true, mv, s
 	}

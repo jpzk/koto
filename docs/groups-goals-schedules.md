@@ -296,6 +296,74 @@ dropped instead of run (`goalTurnShouldRun`). The error text is
 **Daemon restart:** goals in `running` or `planning` get their drivers back
 when the daemon starts (`resumeGoalDrivers`, called from `daemon/daemon.go`).
 
+### Confirm-mode goals
+
+A goal can run in **confirm** mode. Every tool call of its worker then waits
+for the operator as an approval card in the goal session.
+
+- **Choosing the mode:**
+  - Set it with `goal_set` `mode` (`yolo` default, or `confirm`), with
+    `koto ctl goal set -mode confirm`, or with `/goals set mode=confirm` in
+    the TUI.
+  - The work session is created with that mode atomically (`goalSetBy` →
+    `resolveGoalMode`).
+  - **Inherit-restrictive:** a goal set from a confirm or plan session never
+    runs yolo. A yolo request from there is raised to confirm and logged.
+  - The operator can still switch a running goal session between yolo and
+    confirm with tab or `/mode` (host-authoritative, like any session).
+- **Who may send into it:** only the goal driver (`enqueueGoalTurn`). Cron,
+  ctl `send`, job callbacks and reports into a confirm session are still
+  refused (`checkUnattended`).
+- **Plan and judge turns** never ask. A confirm goal's plan turn runs in plan
+  mode (read-only, `goalPlanReadOnlyNote`). The judge session always runs
+  yolo and its mode cannot be changed (`setSessionMode`), so it never asks.
+- **Waiting:**
+  - Goal approvals have **no auto-deny deadline** by default.
+    `KOTO_GOAL_APPROVAL_TIMEOUT` sets one.
+  - While an approval is open, the worker's turn budget and stall clocks are
+    paused, so the wait does not count. The backstop is
+    `goalApprovalHardCap = 7 days`.
+- **Queue:** the approvals of a session are answered strictly oldest first.
+  The inline card shows `i/N`, and answering one shows the next. The goal
+  session's tree row shows `!N`, the count rolls into the folded parent
+  session, and the inbox counts them.
+- **Status:**
+  - `goal_status` / `GoalList` report the display status `waiting_confirm`
+    (or `waiting_decision`, see below) with `waiting_confirm`, `pending`,
+    `pending_tool` and `pending_since`. The stored status stays `running`.
+  - The TUI goal view shows `waiting for confirmation (N)` with the oldest
+    tool and its age.
+
+#### Steering
+
+- **Allow+message and Deny+message:** on every card, `a` allows with a
+  message and `m` denies with one. Both need the card focused. The text
+  reaches the model in the current turn, next to the tool result or as the
+  denial reason.
+- **Durable steer:** iterations start with fresh context, so the daemon also
+  appends every message given on a goal approval to the goal's steering log
+  (`goalAddSteer`, `daemon/goal_steer.go`).
+  - The host record is the source. A mirror is written to
+    `/workspace/goal/<name>/steer.md` in the guest, and edits to the mirror
+    are ignored.
+  - Every later iteration prompt carries the log as
+    `OPERATOR STEER (authoritative)`. It is bounded to `goalSteerMax = 32`
+    entries of at most 1000 bytes each.
+  - The agent cannot forge one. Steers are appended only from operator
+    paths (approval answers, decision answers, `GoalSteer`). There is no ctl
+    verb for it, and agent-authored text such as the handoff stays
+    `> `-quoted.
+- **`/steer <text>`** (or `/goals steer`, `koto ctl goal steer`) adds a steer
+  to a running goal with no approval pending (RPC `GoalSteer`, admin-only).
+- **Decision requests:** a worker blocked on a choice runs
+  `cs-ask -g <id> "<question>" [option ...]` (ctl `ask`).
+  - The question joins the same queue as a card with the options, an "other"
+    free-text row and a default "stop and wait".
+  - The goal shows `waiting for decision`, and there is no timeout.
+  - The answer is printed to the worker and also recorded as a steer.
+  - Claude in `-p` mode does not expose `AskUserQuestion`, so `cs-ask` is the
+    only way to ask.
+
 ### Resolving which goal a verb means
 
 The approve, pause, interrupt, resume and cancel verbs take an optional name

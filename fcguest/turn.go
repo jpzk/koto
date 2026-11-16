@@ -482,6 +482,8 @@ func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *worke
 	kill := func() { killGroup(pid, syscall.SIGKILL) }
 	tw.onStall.Store(&kill)
 	defer tw.onStall.Store(nil)
+	// A pending ctl ask pauses this clock too (ctl.go pauseLiveClocks).
+	defer registerLiveClock(clk)()
 	clk.start(func() {
 		tmu.Lock()
 		timedOut = true

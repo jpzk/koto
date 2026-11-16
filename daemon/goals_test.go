@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -767,7 +768,7 @@ func TestGoalLoadSaveRoundtripAndResume(t *testing.T) {
 			got = *it
 		}
 		goalLock.Unlock()
-		if it == nil || got != want {
+		if it == nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("roundtrip mismatch:\n got %+v\nwant %+v", got, want)
 		}
 	})

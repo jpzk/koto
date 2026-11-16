@@ -580,6 +580,12 @@ func ctlForward() {
 			appendCtlOut(ctlErrorJSON(err))
 			continue
 		}
+		if req.GetAsk() != nil {
+			// A decision request blocks until the operator answers: its own
+			// connection, so every other ctl verb keeps flowing (ctl.go).
+			startCtlAsk(req)
+			continue
+		}
 		// One retry on a stale connection: redial and resend.
 		for attempt := 0; attempt < 2; attempt++ {
 			if conn == nil {

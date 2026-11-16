@@ -10,7 +10,7 @@ package main
 //   - Mode selector: /mode opens a three-row picker for the CURRENT session
 //     (/mode <yolo|plan|confirm> sets it directly). It calls the operator
 //     Config RPC with mode+session; nothing local changes until WatchState
-//     reports the new mode. The daemon refuses confirm for goal sessions.
+//     reports the new mode. The daemon refuses confirm only for a goal's judge.
 //   - Inbox: open approvals are counted in the status bar ("inbox N",
 //     yellow) and as a yellow "!N" on the session's tree row. NOTHING pops
 //     up on its own — the operator opens the card with alt+a or /approve.
@@ -26,7 +26,11 @@ package main
 //     confirms the selection. Allowing therefore always takes two keys,
 //     → then enter — there is no one-key allow (y/Y/l do nothing), so a
 //     stray keystroke can deny at worst. n denies, m opens a message box
-//     (enter = deny with that message as the reason the model sees), esc
+//     (enter = deny with that message as the reason the model sees); with
+//     Allow selected, a opens the allow+message box (enter = allow, the
+//     message reaches the model next to the tool's result). Both boxes are
+//     optional extras: plain enter answers without a message, an empty box
+//     sends none, and esc in a box goes back to the card on Deny. esc
 //     closes the card and leaves the request pending. Every line fits a
 //     36-40 column phone viewport. There is deliberately no "always allow".
 
@@ -60,9 +64,21 @@ type approvalItem struct {
 	group, session, id string
 	tool, input        string
 	summary            string
-	deadline           float64   // unix seconds; the host denies at this time
+	deadline           float64   // unix seconds; the host denies at this time (0 = never)
+	created            float64   // unix seconds the host opened it (queue order)
 	seen               time.Time // when this TUI learned of it (prune grace)
+	kind               string    // "ask" = goal decision request; "" = tool approval
+	options            []string  // ask: the answers the goal offered
 }
+
+// kindAsk marks a decision request (daemon goal_ask.go).
+const kindAsk = "ask"
+
+func (a approvalItem) isAsk() bool { return a.kind == kindAsk }
+
+// askRows is the ask card's selection: 0 = stop and wait (the default),
+// 1..len(options) = an option, len(options)+1 = other (type an answer).
+func (a approvalItem) askRows() int { return len(a.options) + 2 }
 
 func approvalKey(g, s, id string) string { return g + "\x00" + s + "\x00" + id }
 
@@ -78,9 +94,10 @@ type approvalCardState struct {
 	inline  bool
 	key     string
 	allow   bool // Allow selected; zero value = Deny (the preselection)
-	msgMode bool // deny-with-message box open
+	msgMode bool // message box open: deny+msg (allow false) or allow+msg (allow true)
 	msg     textinput.Model
 	shownAt time.Time
+	askIdx  int // ask cards: selected row (see askRows); 0 = stop and wait
 }
 
 // approvalEnterGuard: how long after an inline card pops up a bare enter is
@@ -151,9 +168,13 @@ func (m *Model) onApprovalEvent(ev Event) {
 	switch ev.Event {
 	case "approval_request":
 		m.approvals[k] = approvalItem{group: ev.Group, session: ev.Session, id: ev.ID,
-			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, seen: time.Now()}
-		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts),
-			text: fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)})
+			tool: ev.Name, input: ev.Input, summary: ev.Text, deadline: ev.Deadline, created: ev.Ts, seen: time.Now(),
+			kind: ev.Kind, options: ev.Options}
+		what := fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)
+		if ev.Kind == kindAsk {
+			what = "decision needed (alt+a)"
+		}
+		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts), text: what})
 	case "approval_resolved":
 		delete(m.approvals, k)
 		delete(m.approvalShown, k)
@@ -176,8 +197,17 @@ func (m *Model) seedApprovals(resp map[string]any) {
 			continue
 		}
 		dl, _ := p["deadline"].(float64)
+		cr, _ := p["created"].(float64)
 		a := approvalItem{group: s2(p["group"]), session: s2(p["session"]), id: s2(p["id"]),
-			tool: s2(p["tool"]), input: s2(p["input_json"]), summary: s2(p["summary"]), deadline: dl, seen: time.Now()}
+			tool: s2(p["tool"]), input: s2(p["input_json"]), summary: s2(p["summary"]), deadline: dl,
+			created: cr, seen: time.Now(), kind: s2(p["kind"])}
+		if opts, _ := p["options"].([]any); len(opts) > 0 {
+			for _, o := range opts {
+				if s := s2(o); s != "" {
+					a.options = append(a.options, s)
+				}
+			}
+		}
 		if a.id != "" {
 			m.approvals[a.key()] = a
 		}
@@ -285,13 +315,19 @@ var setModeCmdFn = func(sock, g, s, mode string) tea.Cmd {
 	return daemonCmd(sock, "config", g, map[string]any{"mode": mode, "session": s})
 }
 
-// sortedApprovals orders open requests oldest-deadline first.
+// sortedApprovals orders open requests oldest first: by when the host
+// opened them (the daemon answers a session's queue strictly in that
+// order — goal approvals have no deadline to sort by), then by deadline
+// for entries without a creation time.
 func (m Model) sortedApprovals() []approvalItem {
 	out := make([]approvalItem, 0, len(m.approvals))
 	for _, a := range m.approvals {
 		out = append(out, a)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if ci, cj := out[i].created, out[j].created; ci > 0 && cj > 0 && ci != cj {
+			return ci < cj
+		}
 		if out[i].deadline != out[j].deadline {
 			return out[i].deadline < out[j].deadline
 		}
@@ -359,6 +395,12 @@ func newDenyMsgInput() textinput.Model {
 	return ti
 }
 
+func newAllowMsgInput() textinput.Model {
+	ti := newDenyMsgInput()
+	ti.Placeholder = "note for the model"
+	return ti
+}
+
 // handleApprovalCardKey routes keys while the card is open; unhandled keys
 // are swallowed.
 func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -367,13 +409,18 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard = approvalCardState{}
 		return m, nil
 	}
+	if a.isAsk() {
+		return m.handleAskCardKey(a, msg)
+	}
 	if m.approvalCard.msgMode {
 		switch msg.String() {
 		case "esc":
+			// Back to the card, and back to the safe preselection.
 			m.approvalCard.msgMode = false
+			m.approvalCard.allow = false
 			return m, nil
 		case "enter":
-			return m.answerApproval(a, false, strings.TrimSpace(m.approvalCard.msg.Value()))
+			return m.answerApproval(a, m.approvalCard.allow, strings.TrimSpace(m.approvalCard.msg.Value()))
 		}
 		var cmd tea.Cmd
 		m.approvalCard.msg, cmd = m.approvalCard.msg.Update(msg)
@@ -393,6 +440,14 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.msgMode = true
 		m.approvalCard.allow = false
 		m.approvalCard.msg = newDenyMsgInput()
+	case "a", "A":
+		// Allow+message still takes the selection first (→ then a): from
+		// the Deny preselection a stray a does nothing.
+		if !m.approvalCard.allow {
+			return m, nil
+		}
+		m.approvalCard.msgMode = true
+		m.approvalCard.msg = newAllowMsgInput()
 	case "tab", "shift+tab":
 		// Two items, so next/previous with wrap are both a toggle.
 		m.approvalCard.allow = !m.approvalCard.allow
@@ -440,7 +495,14 @@ func (m Model) answerApproval(a approvalItem, allow bool, msg string) (Model, te
 	if allow {
 		verb = "allow"
 	}
-	m.addLine(logLine{kind: "sys", group: a.group, session: a.session, text: fmt.Sprintf("%s %s %s…", verb, a.tool, a.id)})
+	what := fmt.Sprintf("%s %s %s…", verb, a.tool, a.id)
+	if a.isAsk() {
+		what = fmt.Sprintf("decision %s: stop and wait…", a.id)
+		if allow {
+			what = fmt.Sprintf("decision %s: %s…", a.id, ansi.Truncate(msg, 60, "…"))
+		}
+	}
+	m.addLine(logLine{kind: "sys", group: a.group, session: a.session, text: what})
 	return m, approveCmdFn(m.sock, a, allow, msg)
 }
 
@@ -468,7 +530,7 @@ func (m *Model) handleApprovalResp(msg daemonRespMsg) {
 // approvalDeadline renders the host deadline as a fixed local time.
 func approvalDeadline(dl float64) string {
 	if dl <= 0 {
-		return "auto-deny: host default"
+		return "no auto-deny · waits for you"
 	}
 	return "auto-deny at " + time.Unix(int64(dl), 0).Format("15:04:05")
 }
@@ -588,8 +650,16 @@ func approvalPills(allow bool) string {
 
 // approvalHintParts is the key hint; joined on one line when it fits,
 // otherwise broken at a " · " so no part is ever split.
-func approvalHint(w int) []string {
-	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg", "esc later"}
+func approvalHint(w int) []string { return approvalHintFor(w, false) }
+
+// approvalHintFor: m (deny+msg) always works; a (allow+msg) is offered
+// once Allow is selected, the only time it does anything.
+func approvalHintFor(w int, allow bool) []string {
+	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg"}
+	if allow {
+		parts = append(parts, "a allow+msg")
+	}
+	parts = append(parts, "esc later")
 	var out []string
 	cur := ""
 	for _, p := range parts {
@@ -611,6 +681,9 @@ func approvalHint(w int) []string {
 // input body (capped at bodyMax lines), the deadline, the pills and the
 // hint. Shared by the centered modal and the inline card (item 3).
 func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
+	if a.isAsk() {
+		return m.askCardRows(a, w, bodyMax)
+	}
 	yel := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	gray := lipgloss.NewStyle().Foreground(cGray)
 	title := "approve " + a.tool + "?"
@@ -641,12 +714,17 @@ func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	rows = append(rows, body...)
 	rows = append(rows, "", yel.Render(gl("⏱ ", "")+approvalDeadline(a.deadline)), "")
 	if m.approvalCard.msgMode {
+		if m.approvalCard.allow {
+			rows = append(rows, "allow with message:", m.approvalCard.msg.View(), "",
+				gray.Render("enter allow · esc back"))
+			return rows
+		}
 		rows = append(rows, "deny with message:", m.approvalCard.msg.View(), "",
 			gray.Render("enter deny · esc back"))
 		return rows
 	}
 	rows = append(rows, approvalPills(m.approvalCard.allow), "")
-	for _, h := range approvalHint(w) {
+	for _, h := range approvalHintFor(w, m.approvalCard.allow) {
 		rows = append(rows, gray.Render(h))
 	}
 	return rows
@@ -671,6 +749,9 @@ func (m *Model) inlineApprovalRows() []string {
 	// status + hint + metrics (3) + the box's 2 borders + 3 chat rows.
 	if over := len(rows) - max(1, m.height-8); over > 0 {
 		body := len(approvalInputLines(a.tool, a.input, w))
+		if a.isAsk() {
+			body = len(wrapCells(a.summary, w))
+		}
 		rows = m.approvalCardRows(a, w, body-over)
 	}
 	for i, r := range rows {
@@ -728,8 +809,8 @@ func (m *Model) setMode(g, s, mode string) tea.Cmd {
 		m.addLine(logLine{kind: "err", group: g, text: "usage: /mode [yolo|plan|confirm]"})
 		return nil
 	}
-	if mode == modeConfirm && goalSession(s) {
-		m.addLine(logLine{kind: "err", group: g, text: "goal sessions cannot be set to confirm"})
+	if mode == modeConfirm && goalJudgeSession(s) {
+		m.addLine(logLine{kind: "err", group: g, text: "the goal judge cannot be set to confirm"})
 		return nil
 	}
 	m.addLine(logLine{kind: "sys", group: g, session: s,
@@ -932,4 +1013,19 @@ func (m *Model) setLocalMode(g, s, md string) {
 	}
 	gi.SessionModes = nm
 	m.groups[g] = gi
+}
+
+// pendingShown is the "!N" a tree row carries: its own session's open
+// approvals plus, while the row is folded, those of the goal sessions
+// folded under it — a confirm goal waiting on the operator must stay
+// visible when its parent conversation is collapsed.
+func (m Model) pendingShown(g, s string) int {
+	n := m.pendingFor(g, s)
+	if m.jobsOpen[sessKey(g, s)] {
+		return n
+	}
+	for _, gs := range m.foldGoals(g, s) {
+		n += m.pendingFor(g, gs)
+	}
+	return n
 }

@@ -194,24 +194,59 @@ type approvalGate struct {
 	inClosed bool
 	pending  map[string]*time.Timer
 	inp      map[string]json.RawMessage // original input per open request (allow echoes it as updatedInput)
+	reqTool  map[string]string          // open request id -> tool name
+	reqTUID  map[string]string          // open request id -> tool_use_id (when claude sends one)
 	dropped  bool
 	closed   bool
 }
 
 func newApprovalGate(tw *turnConn, in io.WriteCloser, clk *workerClock, timeout time.Duration) *approvalGate {
 	return &approvalGate{tw: tw, clk: clk, timeout: timeout, in: in,
-		pending: map[string]*time.Timer{}, inp: map[string]json.RawMessage{}}
+		pending: map[string]*time.Timer{}, inp: map[string]json.RawMessage{},
+		reqTool: map[string]string{}, reqTUID: map[string]string{}}
 }
 
-// sendUser writes the turn's message as the one stream-json user record.
-func (g *approvalGate) sendUser(msg []byte) error {
-	rec := map[string]any{
+// allowNoteText frames an allow message for the model.
+func allowNoteText(msg string) string {
+	return "OPERATOR NOTE (given with the approval of this tool call): " + msg
+}
+
+// Allow+message delivery. The note is written as one more stream-json user
+// record on claude's live stdin right after the allow: claude queues a user
+// record that arrives mid-turn and hands it to the model together with the
+// tool's result on the next API call — the same turn, one result. (An SDK
+// PostToolUse hook would be the obvious carrier, but the confirm launch runs
+// --bare, and --bare drops SDK-registered hooks: claude 2.1.280 never sends
+// the hook_callback. Probed in the e2e guest, see goal-confirm/hookprobe*.)
+// The tool cannot finish before the allow is written, so the note is always
+// queued before the model's next request.
+
+// userRecord is one stream-json user record.
+func userRecord(content string) ([]byte, error) {
+	return json.Marshal(map[string]any{
 		"type":               "user",
 		"session_id":         "",
 		"parent_tool_use_id": nil,
-		"message":            map[string]any{"role": "user", "content": string(msg)},
+		"message":            map[string]any{"role": "user", "content": content},
+	})
+}
+
+// hookLocked answers a hook_callback with an empty (continue) output. koto
+// registers no hooks; this only keeps an unexpected callback from blocking
+// claude.
+func (g *approvalGate) hookLocked(id string, _ *controlRequest) {
+	b, _ := json.Marshal(map[string]any{
+		"type":     "control_response",
+		"response": map[string]any{"subtype": "success", "request_id": id, "response": map[string]any{}},
+	})
+	if err := g.writeLocked(b); err != nil {
+		logf("approval hook %s: answer claude: %v", id, err)
 	}
-	b, err := json.Marshal(rec)
+}
+
+// sendUser writes the turn's message as the first stream-json user record.
+func (g *approvalGate) sendUser(msg []byte) error {
+	b, err := userRecord(string(msg))
 	if err != nil {
 		return err
 	}
@@ -287,6 +322,10 @@ func (g *approvalGate) request(id string, r *controlRequest) {
 	if g.closed || id == "" {
 		return
 	}
+	if r != nil && r.Subtype == "hook_callback" {
+		g.hookLocked(id, r)
+		return
+	}
 	if r == nil || r.Subtype != "can_use_tool" {
 		sub := ""
 		if r != nil {
@@ -312,6 +351,7 @@ func (g *approvalGate) request(id string, r *controlRequest) {
 	deadline := time.Now().Add(g.timeout)
 	g.pending[id] = time.AfterFunc(g.timeout, func() { g.finish(id, false, denyTimeout, "timeout", true) })
 	g.inp[id] = r.Input
+	g.reqTool[id], g.reqTUID[id] = r.ToolName, r.ToolUseID
 	if len(g.pending) == 1 && g.clk != nil {
 		g.clk.pause()
 	}
@@ -354,8 +394,18 @@ func (g *approvalGate) finishLocked(id string, allow bool, msg, expired string, 
 	delete(g.pending, id)
 	input := g.inp[id]
 	delete(g.inp, id)
+	delete(g.reqTool, id)
+	delete(g.reqTUID, id)
 	if expired != "cancelled" {
 		g.respondLocked(id, allow, msg, input)
+		// Allow+message: the note follows the allow as a queued user record.
+		if note := strings.TrimSpace(msg); allow && note != "" {
+			if b, err := userRecord(allowNoteText(note)); err == nil {
+				if werr := g.writeLocked(b); werr != nil {
+					logf("approval %s: allow note to claude: %v", id, werr)
+				}
+			}
+		}
 	}
 	if notify {
 		g.tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_ApprovalExpired{ApprovalExpired: id}})
@@ -485,6 +535,10 @@ type controlRequest struct {
 	Subtype  string          `json:"subtype"`
 	ToolName string          `json:"tool_name"`
 	Input    json.RawMessage `json:"input"`
+	// can_use_tool (newer claude) and hook_callback carry the tool_use_id;
+	// hook_callback names the registered callback.
+	ToolUseID  string `json:"tool_use_id"`
+	CallbackID string `json:"callback_id"`
 }
 
 func (c *workerClock) pausedN() int {

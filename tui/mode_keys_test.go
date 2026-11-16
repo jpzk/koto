@@ -231,24 +231,6 @@ func TestTabCyclesModeForwardShiftTabBackward(t *testing.T) {
 	}
 }
 
-// goal-* sessions never land on confirm.
-func TestTabGoalSessionSkipsConfirm(t *testing.T) {
-	m := treeModel(t, modeGroups(""), "alpha", "goal-x", "")
-	m.focus = focusInput
-	if m.activeSession("alpha") != "goal-x" {
-		t.Fatalf("active session %q", m.activeSession("alpha"))
-	}
-	m, chips := cycleSeq(t, m, tea.KeyTab, 3)
-	if strings.Join(chips, ",") != "plan›,yolo›,plan›" {
-		t.Fatalf("goal tab chips %q", chips)
-	}
-	// from plan (where the forward walk ended): back to yolo, then plan — never confirm.
-	_, chips = cycleSeq(t, m, tea.KeyShiftTab, 2)
-	if strings.Join(chips, ",") != "yolo›,plan›" {
-		t.Fatalf("goal shift+tab chips %q", chips)
-	}
-}
-
 // codex / pi (and venice): one-line notice, nothing sent, chip stays yolo.
 func TestTabUnsupportedHarnessNotice(t *testing.T) {
 	for prov, h := range map[string]string{"openai": "codex", "minimax": "pi", "venice": "venice"} {

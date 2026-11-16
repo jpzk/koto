@@ -113,7 +113,8 @@ func TestModeIsPostureKey(t *testing.T) {
 }
 
 // Operator gRPC Config sets the mode in the registry, not config.json; goal
-// sessions cannot be confirm; codex/pi/venice refuse plan/confirm loudly.
+// work sessions may be confirm (judge sessions not — goal_confirm_test.go);
+// codex/pi/venice refuse plan/confirm loudly.
 func TestConfigModeOperatorPath(t *testing.T) {
 	fcHarness(t)
 	srv := &kotoServer{}
@@ -131,8 +132,11 @@ func TestConfigModeOperatorPath(t *testing.T) {
 	if r := setModeCfg("tg", "default", "confirm"); !r.OK || sessionMode("tg", "") != modeConfirm {
 		t.Fatalf("default alias: %+v", r)
 	}
-	if r := setModeCfg("tg", "goal-x", "confirm"); r.OK || !strings.Contains(r.Error, "goal sessions cannot") {
-		t.Fatalf("goal confirm: %+v", r)
+	if r := setModeCfg("tg", "goal-x", "confirm"); !r.OK || sessionMode("tg", "goal-x") != modeConfirm {
+		t.Fatalf("goal work session confirm (operator yolo<->confirm) should be allowed: %+v", r)
+	}
+	if r := setModeCfg("tg", "goal-x", "yolo"); !r.OK || sessionMode("tg", "goal-x") != modeYolo {
+		t.Fatalf("goal work session back to yolo: %+v", r)
 	}
 	if r := setModeCfg("tg", "goal-x", "plan"); !r.OK {
 		t.Fatalf("goal plan should be allowed: %+v", r)

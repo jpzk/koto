@@ -294,6 +294,11 @@ Setting a goal from a NAMED chat session? Add "session":"$KOTO_SESSION"
 session in the operator's tree, and its finished/terminated handoff turn
 comes back to that session instead of the default one.
 
+Want the operator to approve each tool call of the run? Add
+"mode":"confirm" to goal_set. Every tool call then waits, one by one, in
+the goal session. A goal set from a confirm or plan session always runs
+confirm, so asking for yolo there has no effect.
+
 When one of your goals is accepted, the session it was set from (default
 unless you passed "session") receives a
 `[koto] goal finished` turn carrying the goal, its criteria and the

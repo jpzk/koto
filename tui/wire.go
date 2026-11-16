@@ -37,6 +37,11 @@ type Event struct {
 	// Deadline (unix seconds) is the host auto-deny time of an
 	// approval_request event.
 	Deadline float64
+	// Kind is "ask" for a goal decision request (an approval_request whose
+	// card shows Text as the question and Options as the answers); "" =
+	// a tool approval.
+	Kind    string
+	Options []string
 }
 
 // GroupInfo is one group's row in the WatchState / List snapshot.

@@ -1,0 +1,52 @@
+#!/bin/sh
+# cs-ask — a goal worker asks the operator a decision question and waits.
+#
+#   cs-ask [-g <goal id>] "<question>" [option ...]
+#   cs-ask --wait          # keep waiting for the last ask (after a tool timeout)
+#
+# Only works from a goal's work turn (daemon/goal_ask.go). The request joins
+# the goal session's approval queue; the operator picks an option, types an
+# answer, or declines ("stop and wait"). There is no auto-timeout and the turn
+# budget is paused while it waits. Prints the answer on stdout.
+# Exit: 0 answered, 3 declined (stop and wait), 1 error, 2 usage.
+set -u
+out=/workspace/.cs/ctl.out
+state=/workspace/.cs/ask.pending
+
+# esc: JSON string body — backslash and quote escaped, controls dropped.
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+wait_answer() {
+  from=$(cat "$state" 2>/dev/null || echo 0)
+  while :; do
+    line=$(tail -n +"$((from + 1))" "$out" 2>/dev/null | grep -m1 -E '"ask_id"|ctl: ask' || true)
+    if [ -n "$line" ]; then
+      rm -f "$state"
+      ans=$(printf '%s' "$line" | sed -n 's/.*"answer":"\(\([^"\\]\|\\.\)*\)".*/\1/p')
+      case "$line" in
+        *'"answered":true'*) printf '%s\n' "$ans"; exit 0 ;;
+        *'"ok":true'*) printf 'DECLINED: %s\n' "$ans"; exit 3 ;;
+        *) printf 'cs-ask: %s\n' "$line" >&2; exit 1 ;;
+      esac
+    fi
+    sleep 2
+  done
+}
+
+if [ "${1:-}" = "--wait" ]; then
+  [ -f "$state" ] || { echo "cs-ask: no ask is waiting" >&2; exit 1; }
+  wait_answer
+fi
+gid=
+if [ "${1:-}" = "-g" ]; then gid=${2:?goal id required after -g}; shift 2; fi
+[ -n "${1:-}" ] || { echo 'usage: cs-ask [-g <goal id>] "<question>" [option ...]' >&2; exit 2; }
+q=$(esc "$1"); shift
+opts=
+for o in "$@"; do
+  opts="${opts:+$opts,}\"$(esc "$o")\""
+done
+wc -l < "$out" 2>/dev/null | tr -d ' ' > "$state" || echo 0 > "$state"
+printf '{"cmd":"ask","id":"%s","question":"%s","options":[%s]}\n' "$(esc "$gid")" "$q" "$opts" \
+  | timeout 30 sh -c 'cat > /workspace/.cs/ctl' 2>/dev/null || { echo "cs-ask: ctl not reachable" >&2; rm -f "$state"; exit 1; }
+echo "cs-ask: waiting for the operator (no timeout; if this tool call times out, run: cs-ask --wait)" >&2
+wait_answer
