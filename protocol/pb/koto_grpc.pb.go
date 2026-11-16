@@ -46,6 +46,8 @@ const (
 	Koto_Clear_FullMethodName          = "/koto.Koto/Clear"
 	Koto_Drain_FullMethodName          = "/koto.Koto/Drain"
 	Koto_SessionCreate_FullMethodName  = "/koto.Koto/SessionCreate"
+	Koto_Approve_FullMethodName        = "/koto.Koto/Approve"
+	Koto_ListPending_FullMethodName    = "/koto.Koto/ListPending"
 	Koto_Jobs_FullMethodName           = "/koto.Koto/Jobs"
 	Koto_JobLogs_FullMethodName        = "/koto.Koto/JobLogs"
 	Koto_JobTail_FullMethodName        = "/koto.Koto/JobTail"
@@ -118,6 +120,20 @@ type KotoClient interface {
 	// goal-reserved "goal-" namespace. No VM boot: the guest pins the
 	// conversation id on the first send, exactly as before.
 	SessionCreate(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// Approve answers one pending tool-approval request of a session in
+	// mode=confirm (daemon/approvals.go). The pending table is keyed
+	// (group, session, slot, id); the FIRST answer wins and is written down
+	// the turn connection as an ApprovalReply, every later answer (and any
+	// replay) gets already_answered=true and changes nothing. Operator-only:
+	// NOT on the in-guest ctl plane, so no agent (main included) can approve
+	// its own tool calls. Unanswered requests fail closed: host deadline
+	// (default 10m), interrupt, daemon restart and VM stop all deny.
+	Approve(ctx context.Context, in *ApproveReq, opts ...grpc.CallOption) (*ApproveResp, error)
+	// ListPending lists the open approval requests (group "" = every group the
+	// caller may target; needs the "*" target like JobsReq). Operator-only, not
+	// on the ctl plane. Live updates ride SubscribeGroup as Event
+	// approval_request / approval_resolved.
+	ListPending(ctx context.Context, in *ListPendingReq, opts ...grpc.CallOption) (*ListPendingResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -385,6 +401,26 @@ func (c *kotoClient) SessionCreate(ctx context.Context, in *GroupReq, opts ...gr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
 	err := c.cc.Invoke(ctx, Koto_SessionCreate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Approve(ctx context.Context, in *ApproveReq, opts ...grpc.CallOption) (*ApproveResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveResp)
+	err := c.cc.Invoke(ctx, Koto_Approve_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) ListPending(ctx context.Context, in *ListPendingReq, opts ...grpc.CallOption) (*ListPendingResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingResp)
+	err := c.cc.Invoke(ctx, Koto_ListPending_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -770,6 +806,20 @@ type KotoServer interface {
 	// goal-reserved "goal-" namespace. No VM boot: the guest pins the
 	// conversation id on the first send, exactly as before.
 	SessionCreate(context.Context, *GroupReq) (*BaseResp, error)
+	// Approve answers one pending tool-approval request of a session in
+	// mode=confirm (daemon/approvals.go). The pending table is keyed
+	// (group, session, slot, id); the FIRST answer wins and is written down
+	// the turn connection as an ApprovalReply, every later answer (and any
+	// replay) gets already_answered=true and changes nothing. Operator-only:
+	// NOT on the in-guest ctl plane, so no agent (main included) can approve
+	// its own tool calls. Unanswered requests fail closed: host deadline
+	// (default 10m), interrupt, daemon restart and VM stop all deny.
+	Approve(context.Context, *ApproveReq) (*ApproveResp, error)
+	// ListPending lists the open approval requests (group "" = every group the
+	// caller may target; needs the "*" target like JobsReq). Operator-only, not
+	// on the ctl plane. Live updates ride SubscribeGroup as Event
+	// approval_request / approval_resolved.
+	ListPending(context.Context, *ListPendingReq) (*ListPendingResp, error)
 	// Jobs lists a group's background jobs (cs-job) fresh from the guest —
 	// group "" reads across all running groups (needs the "*" target, like
 	// global metrics). JobLogs returns one job's metadata + an output tail.
@@ -951,6 +1001,12 @@ func (UnimplementedKotoServer) Drain(context.Context, *GroupReq) (*DrainResp, er
 }
 func (UnimplementedKotoServer) SessionCreate(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method SessionCreate not implemented")
+}
+func (UnimplementedKotoServer) Approve(context.Context, *ApproveReq) (*ApproveResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Approve not implemented")
+}
+func (UnimplementedKotoServer) ListPending(context.Context, *ListPendingReq) (*ListPendingResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPending not implemented")
 }
 func (UnimplementedKotoServer) Jobs(context.Context, *JobsReq) (*JobsResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Jobs not implemented")
@@ -1287,6 +1343,42 @@ func _Koto_SessionCreate_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).SessionCreate(ctx, req.(*GroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Approve_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Approve(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Approve_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Approve(ctx, req.(*ApproveReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_ListPending_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).ListPending(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_ListPending_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).ListPending(ctx, req.(*ListPendingReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1800,6 +1892,14 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SessionCreate",
 			Handler:    _Koto_SessionCreate_Handler,
+		},
+		{
+			MethodName: "Approve",
+			Handler:    _Koto_Approve_Handler,
+		},
+		{
+			MethodName: "ListPending",
+			Handler:    _Koto_ListPending_Handler,
 		},
 		{
 			MethodName: "Jobs",

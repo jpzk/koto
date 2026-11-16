@@ -93,7 +93,7 @@ type shellSession struct {
 	// terminal queries forever while reading nothing, wedge the drain
 	// goroutine inside Send, and leave the UPDATE goroutine blocked on the
 	// mutex behind it. That is the whole Bubble Tea event loop: no redraw, no
-	// ctrl+] to detach, no way out but killing the TUI. The same freeze the
+	// alt+] (ctrl+]) to detach, no way out but killing the TUI. The same freeze the
 	// drain goroutine itself was introduced to fix, one layer further down.
 	//
 	// A queue with one writer means no sender ever waits on the transport.
@@ -596,7 +596,7 @@ func (m Model) shellPaneSize() (int, int) {
 	w := max(10, total)
 	// shellBodyRows makes the frame exactly m.height rows, same as the chat
 	// view — so the hint/metrics rows sit on the same terminal rows in both
-	// views and toggling the shell pane in and out (ctrl+]) doesn't make the
+	// views and toggling the shell pane in and out (alt+] / ctrl+]) doesn't make the
 	// bottom lines jump.
 	h := max(1, m.shellBodyRows()-m.shellChatBlockH())
 	return w, h
@@ -674,7 +674,7 @@ func (m *Model) chaseShell() {
 // pane (m.shell = nil, shellOpen kept) instead of dialing — AttachShell's
 // ensure() would boot the VM, and a mere view switch must never carry that
 // side effect. The pane comes back automatically on the next chase onto a
-// running group, or explicitly via ctrl+] / /shell (which does boot).
+// running group, or explicitly via alt+] (ctrl+]) / /shell (which does boot).
 func (m *Model) retargetShell() {
 	if !m.shellOpen || m.shellOnTarget() {
 		return // pane closed, or settled back on target, while debouncing
@@ -720,7 +720,7 @@ func (m *Model) retargetShell() {
 // attach/detach in the guest). Instead every conversation switch schedules a
 // debounced follow (chaseShell → retargetShell above), so once the selection
 // rests the pane swaps to the selected conversation's shell on its own; an
-// explicit attach — ctrl+], /shell, or a tree-row click while focused —
+// explicit attach — alt+] (ctrl+]), /shell, or a tree-row click while focused —
 // still swaps immediately through here.
 func (m *Model) enterShell(session string) {
 	if m.cur == "" {
@@ -767,7 +767,7 @@ func (m *Model) focusShellPane() {
 // focusing the shell pane. The pane STAYS OPEN (shellOpen) — in split mode it
 // keeps rendering beside the chat column while the user types into the
 // message bar; alt+← is the keyboard path here, a click on the grid (or
-// alt+→) focuses the pane again. ctrl+] and /shell off both CLOSE the pane
+// alt+→) focuses the pane again. alt+] (ctrl+]) and /shell off both CLOSE the pane
 // (closeShell, which calls through here to hand focus back). Deliberately
 // does NOT close m.shell either —
 // leaving the pane should not lose terminal state or force a redial; the
@@ -788,7 +788,7 @@ func (m *Model) exitShell() {
 	m.refreshLog()
 }
 
-// closeShell hides the pane (ctrl+], /shell off). Like exitShell it keeps the stream
+// closeShell hides the pane (alt+] (ctrl+]), /shell off). Like exitShell it keeps the stream
 // attached — m.shell survives, so /shell reopens the same terminal instantly
 // with its screen state intact; only the on-screen pane goes away.
 func (m *Model) closeShell() {
@@ -880,7 +880,7 @@ func (m *Model) syncShellSize() {
 // (read-only), almost every keystroke here must reach the guest pty as raw
 // bytes — so this reconstructs the byte sequence a real terminal would have
 // sent from Bubble Tea's parsed tea.KeyMsg, rather than interpreting it
-// semantically. The reserved local escapes — ctrl+] (close the pane,
+// semantically. The reserved local escapes — alt+] / ctrl+] (close the pane,
 // mirroring telnet's convention and `koto ctl shell`'s — see ctl_cli.go),
 // alt+←/→ (move focus without closing anything), and alt+esc (tree
 // toggle) — are handled in handleKey's shell-focus block (model.go) before
@@ -1204,6 +1204,6 @@ func (m Model) renderShellHint() string {
 	// alt+esc toggles the tree; plain esc forwards to the guest (vim/less
 	// need it) — see the shell-focus block in handleKey.
 	parts = append(parts, gl("⌥⎋ tree", "alt-esc tree"), gl("⎋ esc→guest", "esc esc-to-guest"),
-		full, "ctrl+] close", gl("⌥← chat", "alt-left chat"))
+		full, gl("⌥] close", "alt-] close"), gl("⌥← chat", "alt-left chat"))
 	return dim.MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }

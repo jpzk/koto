@@ -199,7 +199,7 @@ func configPostureKey(req configReq) string {
 	}{
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
-		{"kvm", req.KVM}, {"allow", req.Allow},
+		{"kvm", req.KVM}, {"allow", req.Allow}, {"mode", req.Mode},
 	} {
 		if len(k.raw) > 0 {
 			return k.name
@@ -295,6 +295,12 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		if isReservedSession(sess) {
 			return errResp("ctl: session " + sess + " is reserved for the goal loop")
+		}
+		// Main is an agent, not an operator: a confirm session's approvals
+		// would have nobody answering them. Refused before anything queues
+		// (and before a report window is armed).
+		if err := checkUnattended(req.Group, sess, "ctl"); err != nil {
+			return errResp("ctl: " + err.Error())
 		}
 		if req.Reply {
 			// Solicited callback (report.go): tell the peer a reply is

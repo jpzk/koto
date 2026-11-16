@@ -48,6 +48,9 @@ type Event struct {
 	// The message body rides Text.
 	Severity string `json:"severity,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Deadline (event == "approval_request"): unix seconds at which the host
+	// denies the request (daemon/approvals.go).
+	Deadline float64 `json:"deadline,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
@@ -106,6 +109,12 @@ type GroupInfo struct {
 	// NAMED session to that origin session (goals.go goalSessionOrigins), so
 	// clients can nest the goal rows under it. See koto.proto.
 	SessionOrigins map[string]string `json:"session_origins,omitempty"`
+	// SessionModes: per-session permission mode, non-yolo sessions only (key
+	// "" = default session). Host registry (session_modes.go).
+	SessionModes map[string]string `json:"session_modes,omitempty"`
+	// PendingApprovals: open tool-approval requests per session (key "" =
+	// default session); absent = none (daemon/approvals.go).
+	PendingApprovals map[string]int32 `json:"pending_approvals,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors
@@ -210,6 +219,11 @@ type ConfigReq struct {
 	// koto-default. Raw registry refs are refused; the daemon pins the
 	// name's digest at set time. Applies on /restart (see config_image.go).
 	Image json.RawMessage `json:"image,omitempty"`
+	// Mode is the per-SESSION permission mode (yolo | plan | confirm) for
+	// Session. Host session registry only (session_modes.go), never
+	// config.json; a posture key — the ctl plane refuses it.
+	Mode    json.RawMessage `json:"mode,omitempty"`
+	Session string          `json:"session,omitempty"`
 }
 
 // ---- Response envelopes ---------------------------------------------------

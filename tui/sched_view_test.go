@@ -61,7 +61,7 @@ func TestCtrlYTogglesSchedView(t *testing.T) {
 		t.Fatalf("focus = %v after second ctrl+y, want focusInput", m.focus)
 	}
 	// From tree mode, esc lands back in tree mode.
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	m = press(t, m, tea.KeyCtrlY)
 	if m.focus != focusSched {
 		t.Fatalf("focus = %v after ctrl+y from tree, want focusSched", m.focus)

@@ -77,6 +77,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -1318,7 +1319,7 @@ func goalPlanPhase(g, id string) bool {
 	}
 	emit(g, Event{Event: "goal_plan", ID: snap.ID, Session: work})
 	emitLogfG("goal", g, "info", "plan turn id=%s", snap.ID)
-	done, err := enqueueSend(g, work, goalPlanMsg(snap))
+	done, err := enqueueUnattended(g, work, goalPlanMsg(snap), "goal")
 	if err != nil {
 		goalPauseWith(g, id, "stalled", "plan turn could not be enqueued: "+err.Error())
 		return false
@@ -1478,9 +1479,12 @@ func goalEnqueue(g, id, session, msg string) (<-chan error, error) {
 		if i > 0 && !goalStillRunnable(id) {
 			return nil, fmt.Errorf("goal is no longer running")
 		}
-		done, err := enqueueSend(g, session, msg)
+		done, err := enqueueUnattended(g, session, msg, "goal")
 		if err == nil {
 			return done, nil
+		}
+		if errors.Is(err, errUnattendedConfirm) {
+			return nil, err // not transient: retrying cannot help
 		}
 		lastErr = err
 		if i < goalEnqueueRetries-1 {
@@ -1540,7 +1544,7 @@ func goalMarkMet(g string, snap goalItem, note string) {
 // the goal is already terminal, so a failure here costs the summary
 // (warn-logged), never the verdict.
 func goalInformCoordinator(g string, it goalItem) {
-	if _, err := enqueueSend(g, goalHandoffSession(g, it), goalInformCoordinatorMsg(it)); err != nil {
+	if _, err := enqueueUnattended(g, goalHandoffSession(g, it), goalInformCoordinatorMsg(it), "goal"); err != nil {
 		emitLogfG("goal", g, "warn", "coordinator notice for goal %s dropped: %v", it.ID, err)
 	}
 }
@@ -1607,7 +1611,7 @@ func goalMarkExhausted(g, id, detail string) {
 // terminal, so a dropped enqueue costs the summary (warn-logged), never the
 // termination.
 func goalInformCoordinatorExhausted(g string, it goalItem, detail string) {
-	if _, err := enqueueSend(g, goalHandoffSession(g, it), goalCoordinatorExhaustedMsg(it, detail)); err != nil {
+	if _, err := enqueueUnattended(g, goalHandoffSession(g, it), goalCoordinatorExhaustedMsg(it, detail), "goal"); err != nil {
 		emitLogfG("goal", g, "warn", "coordinator notice for exhausted goal %s dropped: %v", it.ID, err)
 	}
 }
