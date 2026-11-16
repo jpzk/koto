@@ -23,6 +23,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -124,9 +125,13 @@ func (m *Model) cycleMode(dir int) tea.Cmd {
 	m.modeWant[k] = next // the chip shows it on the next frame
 	text := fmt.Sprintf("mode %s:%s → %s", g, sessionDisplay(s), next)
 	if m.turnInterruptible() {
-		text += " · applies from the next turn (one is running)"
+		text += modeNextTurnNote
+		if !m.updateModeNote(g, s, text) {
+			m.addLine(logLine{kind: "sys", group: g, session: s, text: text})
+		}
+	} else {
+		m.addLine(logLine{kind: "sys", group: g, session: s, text: text})
 	}
-	m.addLine(logLine{kind: "sys", group: g, session: s, text: text})
 	if inflight {
 		// One RPC per session at a time, so the daemon sees the presses in
 		// order; the answer to the one in flight sends the latest wish.
@@ -158,4 +163,33 @@ func (m *Model) handleModeCycled(msg modeCycledMsg) tea.Cmd {
 	}
 	delete(m.modeWant, k)
 	return nil
+}
+
+// modeNextTurnNote marks a mode-switch sys line written while a turn runs.
+const modeNextTurnNote = " · applies from the next turn (one is running)"
+
+// updateModeNote coalesces repeated mid-turn mode switches: when this turn
+// (no prompt line for g/s since) already has a "· applies from the next turn"
+// line, its text is replaced in place instead of stacking another one.
+// Reports whether a line was updated.
+func (m *Model) updateModeNote(g, s, text string) bool {
+	for i := len(m.lines) - 1; i >= 0; i-- {
+		l := &m.lines[i]
+		if l.group != g || l.session != s {
+			continue
+		}
+		if l.kind == "prompt" || l.kind == "user" {
+			return false // a new turn began after any earlier note
+		}
+		if l.kind == "sys" && strings.HasSuffix(l.text, modeNextTurnNote) {
+			m.lineBytes += len(text) - len(l.text)
+			l.text = text
+			m.groupVer[g]++
+			if g == "" || g == m.cur {
+				m.refreshLog()
+			}
+			return true
+		}
+	}
+	return false
 }

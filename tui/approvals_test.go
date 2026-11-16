@@ -76,13 +76,30 @@ func assertFits(t *testing.T, view string, w int) {
 	}
 }
 
-// An approval request never opens a modal by itself: it shows up as the
-// status-bar inbox counter and the tree badge only.
-func TestApprovalRequestNoSurpriseModal(t *testing.T) {
-	m := narrow(t)
-	if m.approvalCard.open {
-		t.Fatal("an approval_request must not open the card by itself")
+// A request of ANOTHER session never opens anything nor takes focus: it
+// shows up as the status-bar inbox counter and the tree badge only, and the
+// viewed session's prompt keeps working. (The viewed session's own requests
+// open inline — approval_inline_test.go.)
+func TestApprovalOtherSessionDoesNotStealFocus(t *testing.T) {
+	m := treeModel(t, approvalGroups(), "alpha", "triage", "")
+	sm, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
+	m = sm.(Model)
+	m.exitTree()
+	m.input.SetValue("mine")
+	nm, _ := m.Update(streamEventMsg(approvalReq("ap1")))
+	m = nm.(Model)
+	if m.approvalCard.open || m.focus != focusInput || m.approvalInputLocked() {
+		t.Fatalf("other-session request: card=%v focus=%v locked=%v", m.approvalCard.open, m.focus, m.approvalInputLocked())
 	}
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+	m = nm.(Model)
+	if m.input.Value() != "mine!" {
+		t.Fatalf("prompt of the viewed session stopped taking keys: %q", m.input.Value())
+	}
+	m.input.SetValue("")
+	m.enterTree()
+	m.resizeViewport()
+	m.refreshLog()
 	if n := m.pendingTotal(); n != 1 {
 		t.Fatalf("pendingTotal = %d, want 1", n)
 	}
@@ -90,8 +107,8 @@ func TestApprovalRequestNoSurpriseModal(t *testing.T) {
 	if !strings.Contains(v, "inbox 1") {
 		t.Errorf("status bar lacks the inbox counter:\n%s", v)
 	}
-	if !strings.Contains(v, "confirm") {
-		t.Errorf("status bar lacks the confirm mode badge:\n%s", v)
+	if !strings.Contains(v, "plan") {
+		t.Errorf("status bar lacks the viewed session's plan badge:\n%s", v)
 	}
 	assertFits(t, m.View(), 40)
 	row := ansi.Strip(m.renderTreeRow(treeRow{group: "alpha"}, true, false, false, func(s string, w int) string {
@@ -137,9 +154,14 @@ func TestApprovalCardRender40Cols(t *testing.T) {
 	assertFits(t, view, 40)
 	v := ansi.Strip(view)
 	for _, want := range []string{"approve Edit?", "file: /workspace/a.go", "- old line", "+ new line",
-		"auto-deny at 12:30:45", "[ Deny ]", "[ Allow ]", "alpha:default"} {
+		"auto-deny at 12:30:45", "‹ Deny ›", "Allow", "alpha:default", "select", "confirm"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("card lacks %q:\n%s", want, v)
+		}
+	}
+	for _, gone := range []string{"[ Deny ]", "[ Allow ]", "y allow"} {
+		if strings.Contains(v, gone) {
+			t.Errorf("card still shows %q:\n%s", gone, v)
 		}
 	}
 }
@@ -171,12 +193,22 @@ func TestApprovalCardEnterDenies(t *testing.T) {
 	}
 }
 
-func TestApprovalCardYAllows(t *testing.T) {
+// There is no one-key allow: y / Y (and vi l) are swallowed, the card stays
+// open on Deny and nothing is sent.
+func TestApprovalCardYDoesNothing(t *testing.T) {
 	sent := recordApprovals(t)
 	m := openCard(t)
-	dpress(t, m, runeKey('y'))
-	if len(*sent) != 1 || !(*sent)[0].allow {
-		t.Fatalf("sent = %+v, want one allow", *sent)
+	for _, r := range "yYlh" {
+		m, _ = dpress(t, m, runeKey(r))
+	}
+	if len(*sent) != 0 || !m.approvalCard.open || m.approvalCard.allow {
+		t.Fatalf("y/Y/l/h: sent=%+v open=%v allow=%v, want nothing sent, card open on Deny",
+			*sent, m.approvalCard.open, m.approvalCard.allow)
+	}
+	// ...and an enter after them still denies.
+	dpress(t, m, keyEnter)
+	if len(*sent) != 1 || (*sent)[0].allow {
+		t.Fatalf("enter after y: sent=%+v, want one deny", *sent)
 	}
 }
 

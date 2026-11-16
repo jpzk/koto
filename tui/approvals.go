@@ -21,11 +21,14 @@ package main
 //   - Card: tool, summary, the input (a -/+ diff for Edit/MultiEdit/Write,
 //     "$ cmd" for Bash, key: value otherwise), and the host deadline as a
 //     FIXED wall-clock time ("auto-deny at 15:04:05", not a countdown).
-//     Focus starts on [ Deny ]: a bare enter denies. y allows, n denies,
-//     m opens a message box (enter = deny with that message as the reason
-//     the model sees), tab/←/→ move focus, esc closes the card and leaves
-//     the request pending. Every line fits a 36-40 column phone viewport.
-//     There is deliberately no "always allow".
+//     The decision is a horizontal selection "‹ Deny ›   Allow": Deny is
+//     preselected, → (or tab) moves to Allow, ← (or shift+tab) back, enter
+//     confirms the selection. Allowing therefore always takes two keys,
+//     → then enter — there is no one-key allow (y/Y/l do nothing), so a
+//     stray keystroke can deny at worst. n denies, m opens a message box
+//     (enter = deny with that message as the reason the model sees), esc
+//     closes the card and leaves the request pending. Every line fits a
+//     36-40 column phone viewport. There is deliberately no "always allow".
 
 import (
 	"encoding/json"
@@ -66,13 +69,25 @@ func approvalKey(g, s, id string) string { return g + "\x00" + s + "\x00" + id }
 func (a approvalItem) key() string { return approvalKey(a.group, a.session, a.id) }
 
 // approvalCardState is the open card: which request, and the focus.
+// inline = drawn in place of the prompt box (a request of the VIEWED
+// session); otherwise the centered alt+a modal. shownAt is when an inline
+// card appeared by itself — a bare enter inside approvalEnterGuard of it is
+// dropped (it was typed for the prompt, not for the card).
 type approvalCardState struct {
 	open    bool
+	inline  bool
 	key     string
-	allow   bool // focus on [ Allow ]; zero value = [ Deny ] focused
+	allow   bool // Allow selected; zero value = Deny (the preselection)
 	msgMode bool // deny-with-message box open
 	msg     textinput.Model
+	shownAt time.Time
 }
+
+// approvalEnterGuard: how long after an inline card pops up a bare enter is
+// ignored. approvalNow is the clock seam for tests.
+const approvalEnterGuard = 300 * time.Millisecond
+
+var approvalNow = time.Now
 
 // modeSelState is the /mode picker for one session.
 type modeSelState struct {
@@ -141,6 +156,8 @@ func (m *Model) onApprovalEvent(ev Event) {
 			text: fmt.Sprintf("approval needed: %s (alt+a)", ev.Name)})
 	case "approval_resolved":
 		delete(m.approvals, k)
+		delete(m.approvalShown, k)
+		delete(m.approvalAnswered, k)
 		m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session, ts: int64(ev.Ts),
 			text: fmt.Sprintf("approval %s: %s by %s", ev.ID, ev.Msg, ev.Name)})
 		if m.approvalCard.open && m.approvalCard.key == k {
@@ -165,6 +182,89 @@ func (m *Model) seedApprovals(resp map[string]any) {
 			m.approvals[a.key()] = a
 		}
 	}
+	for _, mp := range []map[string]bool{m.approvalShown, m.approvalAnswered} {
+		for k := range mp {
+			if _, ok := m.approvals[k]; !ok {
+				delete(mp, k)
+			}
+		}
+	}
+}
+
+// viewedApproval is the request the inline card offers: the oldest one of
+// the viewed session not already answered here.
+func (m Model) viewedApproval() (approvalItem, bool) {
+	sess := m.activeSession(m.cur)
+	for _, a := range m.sortedApprovals() {
+		if a.group == m.cur && a.session == sess && !m.approvalAnswered[a.key()] {
+			return a, true
+		}
+	}
+	return approvalItem{}, false
+}
+
+// approvalInputLocked: the viewed session waits on a tool approval, so the
+// prompt is disabled (its draft kept) until every request is resolved.
+func (m Model) approvalInputLocked() bool {
+	sess := m.activeSession(m.cur)
+	for _, a := range m.approvals {
+		if a.group == m.cur && a.session == sess {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineApprovalAllowed: the inline card may take the keyboard only from
+// the plain chat view — never from under another dialog, the log/top/
+// schedules views or the shell.
+func (m Model) inlineApprovalAllowed() bool {
+	if m.focus != focusInput && m.focus != focusTree {
+		return false
+	}
+	if (m.picker != nil && m.picker.open) || (m.newGroup != nil && m.newGroup.open) ||
+		(m.newSess != nil && m.newSess.open) || m.modeSel.open || m.destroyConfirm.open ||
+		m.stopConfirm.open || m.helpOpen {
+		return false
+	}
+	return true
+}
+
+// syncInlineApproval keeps the inline card in step with the viewed
+// session after every message: it pops up (and takes focus) the first
+// time a request of the viewed session is seen, comes back whenever focus
+// returns to the prompt, follows the queue one request at a time, and
+// closes when its request is resolved or the view moves away. Requests of
+// other sessions never open anything (inbox / tree badge only). Reports
+// whether the layout changed.
+func (m *Model) syncInlineApproval() bool {
+	c := m.approvalCard
+	if c.open && !c.inline {
+		return false // the alt+a modal owns the frame
+	}
+	head, ok := m.viewedApproval()
+	if c.open {
+		if a, live := m.approvals[c.key]; live && !m.approvalAnswered[c.key] &&
+			a.group == m.cur && a.session == m.activeSession(m.cur) {
+			return false // still current: keep it (and its selection)
+		}
+		m.approvalCard = approvalCardState{}
+		if !ok || !m.inlineApprovalAllowed() {
+			return true
+		}
+	} else if !ok || !m.inlineApprovalAllowed() ||
+		(m.approvalShown[head.key()] && m.focus != focusInput) {
+		return false
+	}
+	if m.approvalShown == nil {
+		m.approvalShown = map[string]bool{}
+	}
+	m.approvalShown[head.key()] = true
+	m.approvalCard = approvalCardState{open: true, inline: true, key: head.key(), shownAt: approvalNow()}
+	if m.focus != focusInput {
+		m.exitTree()
+	}
+	return true
 }
 
 // listPendingCmdFn / approveCmdFn / setModeCmdFn are seams so tests record
@@ -203,7 +303,12 @@ func (m Model) sortedApprovals() []approvalItem {
 // openApprovalCard opens the card on the most relevant request: the viewed
 // session first, then the viewed group, then anything — oldest first.
 func (m *Model) openApprovalCard() {
-	all := m.sortedApprovals()
+	var all []approvalItem
+	for _, a := range m.sortedApprovals() {
+		if !m.approvalAnswered[a.key()] {
+			all = append(all, a)
+		}
+	}
 	if len(all) == 0 {
 		if n := m.pendingTotal(); n > 0 {
 			m.addLine(logLine{kind: "sys", text: fmt.Sprintf("%d approval(s) pending, fetching…", n)})
@@ -228,6 +333,19 @@ func (m *Model) openApprovalCard() {
 				break
 			}
 		}
+	}
+	if head, ok := m.viewedApproval(); ok && head.key() == pick.key() {
+		// The viewed session's own request: the inline card, opened on
+		// purpose — no enter guard.
+		if m.approvalShown == nil {
+			m.approvalShown = map[string]bool{}
+		}
+		m.approvalShown[pick.key()] = true
+		m.approvalCard = approvalCardState{open: true, inline: true, key: pick.key()}
+		if m.focus != focusInput {
+			m.exitTree()
+		}
+		return
 	}
 	m.approvalCard = approvalCardState{open: true, key: pick.key()}
 }
@@ -261,11 +379,14 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.msg, cmd = m.approvalCard.msg.Update(msg)
 		return m, cmd
 	}
+	// No one-key allow: y/Y (and the vi l/h) are deliberately unbound and
+	// swallowed with every other stray key. Allow = → (or tab) then enter.
 	switch msg.String() {
 	case "enter":
+		if c := m.approvalCard; c.inline && !c.shownAt.IsZero() && approvalNow().Sub(c.shownAt) < approvalEnterGuard {
+			return m, nil // an enter already in flight for the prompt
+		}
 		return m.answerApproval(a, m.approvalCard.allow, "")
-	case "y", "Y":
-		return m.answerApproval(a, true, "")
 	case "n", "N", "d":
 		return m.answerApproval(a, false, "")
 	case "m", "M":
@@ -273,12 +394,35 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.approvalCard.allow = false
 		m.approvalCard.msg = newDenyMsgInput()
 	case "tab", "shift+tab":
+		// Two items, so next/previous with wrap are both a toggle.
 		m.approvalCard.allow = !m.approvalCard.allow
-	case "left", "h":
+	case "left":
 		m.approvalCard.allow = false
-	case "right", "l":
+	case "right":
 		m.approvalCard.allow = true
-	case "esc", "q", "ctrl+c", "alt+a":
+	case "alt+a":
+		if m.approvalCard.inline {
+			m.approvalCard.shownAt = time.Time{} // looked at on purpose: guard off
+			return m, nil
+		}
+		m.approvalCard = approvalCardState{}
+	case "q":
+		// A stray q while typing must not hide the inline card (the next
+		// esc would then land in the tree and interrupt the turn); only
+		// esc hides it. The modal keeps q = close.
+		if !m.approvalCard.inline {
+			m.approvalCard = approvalCardState{}
+		}
+	case "esc", "ctrl+c":
+		if m.approvalCard.inline {
+			// Later: the request stays pending and the prompt stays
+			// disabled; focus goes to the tree (scroll / switch sessions).
+			m.approvalCard = approvalCardState{}
+			m.enterTree()
+			m.resizeViewport()
+			m.refreshLog()
+			return m, nil
+		}
 		m.approvalCard = approvalCardState{}
 	}
 	return m, nil
@@ -288,6 +432,10 @@ func (m Model) handleApprovalCardKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // the inbox until the daemon's approval_resolved arrives.
 func (m Model) answerApproval(a approvalItem, allow bool, msg string) (Model, tea.Cmd) {
 	m.approvalCard = approvalCardState{}
+	if m.approvalAnswered == nil {
+		m.approvalAnswered = map[string]bool{}
+	}
+	m.approvalAnswered[a.key()] = true
 	verb := "deny"
 	if allow {
 		verb = "allow"
@@ -406,18 +554,79 @@ func approvalInputLines(tool, input string, w int) []string {
 	return out
 }
 
-// renderApprovalCard paints the card centered over a blank ground.
-func (m Model) renderApprovalCard() string {
-	a := m.approvals[m.approvalCard.key]
-	boxW := min(approvalCardMaxW, max(20, m.width))
-	w := boxW - 4 // border + padding
+// approvalQueuePos is a's 1-based place among the open requests of its own
+// session (oldest deadline first) and how many that session has.
+func (m Model) approvalQueuePos(a approvalItem) (int, int) {
+	pos, n := 0, 0
+	for _, b := range m.sortedApprovals() {
+		if b.group != a.group || b.session != a.session {
+			continue
+		}
+		n++
+		if b.key() == a.key() {
+			pos = n
+		}
+	}
+	return pos, n
+}
+
+// approvalPills is the decision row: the selected item is a filled pill
+// with chevrons (Deny amber, Allow red), the other plain gray text of the
+// same width, so the row never shifts and mono still shows the selection.
+func approvalPills(allow bool) string {
+	sel := lipgloss.NewStyle().Foreground(cFgInv).Bold(true)
+	idle := lipgloss.NewStyle().Foreground(cGray)
+	l, r := gl("‹", "<"), gl("›", ">")
+	deny, al := idle.Render("  Deny  "), idle.Render("  Allow  ")
+	if allow {
+		al = sel.Background(cRed).Render(l + " Allow " + r)
+	} else {
+		deny = sel.Background(cAmber).Render(l + " Deny " + r)
+	}
+	return deny + "  " + al
+}
+
+// approvalHintParts is the key hint; joined on one line when it fits,
+// otherwise broken at a " · " so no part is ever split.
+func approvalHint(w int) []string {
+	parts := []string{gl("←→", "<>") + " select", gl("⏎", "enter") + " confirm", "m deny+msg", "esc later"}
+	var out []string
+	cur := ""
+	for _, p := range parts {
+		switch {
+		case cur == "":
+			cur = p
+		case ansi.StringWidth(cur+" · "+p) <= w:
+			cur += " · " + p
+		default:
+			out = append(out, cur)
+			cur = p
+		}
+	}
+	return append(out, cur)
+}
+
+// approvalCardRows is the card content at inner width w: title (+ "i/N"
+// when the session has several requests), group:session, summary, the
+// input body (capped at bodyMax lines), the deadline, the pills and the
+// hint. Shared by the centered modal and the inline card (item 3).
+func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	yel := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	gray := lipgloss.NewStyle().Foreground(cGray)
+	title := "approve " + a.tool + "?"
+	if pos, n := m.approvalQueuePos(a); n > 1 {
+		q := fmt.Sprintf("%d/%d", pos, n)
+		if pad := w - ansi.StringWidth(title) - ansi.StringWidth(q); pad >= 1 {
+			title += strings.Repeat(" ", pad) + q
+		} else {
+			title += " " + q
+		}
+	}
 	var rows []string
-	for _, l := range wrapCells("approve "+a.tool+"?", w) {
+	for _, l := range wrapCells(title, w) {
 		rows = append(rows, yel.Render(l))
 	}
-	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session)+" · "+a.id, w) {
+	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session), w) {
 		rows = append(rows, gray.Render(l))
 	}
 	if a.summary != "" {
@@ -425,38 +634,71 @@ func (m Model) renderApprovalCard() string {
 	}
 	rows = append(rows, "")
 	body := approvalInputLines(a.tool, a.input, w)
-	// Leave room for the fixed rows: header 2-3, blank, deadline, blank,
-	// buttons, blank, hint, border.
-	budget := max(3, m.height-len(rows)-10)
-	if len(body) > budget {
+	if budget := max(3, bodyMax); len(body) > budget {
 		more := len(body) - budget + 1
 		body = append(body[:budget-1], gray.Render(fmt.Sprintf("… %d more lines", more)))
 	}
 	rows = append(rows, body...)
-	rows = append(rows, "", yel.Render(approvalDeadline(a.deadline)), "")
+	rows = append(rows, "", yel.Render(gl("⏱ ", "")+approvalDeadline(a.deadline)), "")
 	if m.approvalCard.msgMode {
 		rows = append(rows, "deny with message:", m.approvalCard.msg.View(), "",
 			gray.Render("enter deny · esc back"))
-	} else {
-		focused := lipgloss.NewStyle().Foreground(cFgInv).Bold(true)
-		idle := lipgloss.NewStyle().Foreground(cGray)
-		deny, allow := idle.Render("[ Deny ]"), idle.Render("[ Allow ]")
-		if m.approvalCard.allow {
-			allow = focused.Background(cRed).Render("[ Allow ]")
-		} else {
-			deny = focused.Background(cAmber).Render("[ Deny ]")
-		}
-		rows = append(rows, deny+"  "+allow, "",
-			gray.Render("enter=focused y allow n deny"),
-			gray.Render("m deny+message · esc later"))
+		return rows
 	}
-	box := lipgloss.NewStyle().
+	rows = append(rows, approvalPills(m.approvalCard.allow), "")
+	for _, h := range approvalHint(w) {
+		rows = append(rows, gray.Render(h))
+	}
+	return rows
+}
+
+// approvalBox frames rows in the card's yellow border at outer width boxW.
+func approvalBox(rows []string, boxW int) string {
+	return lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).
 		BorderForeground(cYellow).
 		Padding(0, 1).
 		Width(boxW - 2).
 		Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// inlineApprovalRows is the inline card's content at the prompt box's
+// width, its input body cut so the chat keeps at least 3 rows above it.
+func (m *Model) inlineApprovalRows() []string {
+	a := m.approvals[m.approvalCard.key]
+	w := max(10, m.inputBoxW()-4)
+	rows := m.approvalCardRows(a, w, 1<<20)
+	// status + hint + metrics (3) + the box's 2 borders + 3 chat rows.
+	if over := len(rows) - max(1, m.height-8); over > 0 {
+		body := len(approvalInputLines(a.tool, a.input, w))
+		rows = m.approvalCardRows(a, w, body-over)
+	}
+	for i, r := range rows {
+		rows[i] = " " + r
+	}
+	return rows
+}
+
+// renderInlineApproval draws the inline card where the prompt box goes.
+func (m *Model) renderInlineApproval() string {
+	return drawBox(boxBorder(true), cYellow, m.inputBoxW()-2, m.inlineApprovalRows())
+}
+
+// renderInputLocked is the disabled prompt while the viewed session waits
+// on an approval whose card is hidden: one gray row; the draft is kept.
+func (m *Model) renderInputLocked() string {
+	t := lipgloss.NewStyle().Foreground(cGray).Render(" " + gl("⏸ ", "") + "waiting for approval · alt+a")
+	return drawBox(boxBorder(false), cGray, m.inputBoxW()-2, []string{ansi.Truncate(t, max(1, m.inputBoxW()-4), "")})
+}
+
+// renderApprovalCard paints the card centered over a blank ground.
+func (m Model) renderApprovalCard() string {
+	a := m.approvals[m.approvalCard.key]
+	boxW := min(approvalCardMaxW, max(20, m.width))
+	// Fixed rows around the body: title/origin/summary ~4, blank, deadline,
+	// blank, pills, blank, hint 2, border 2.
+	rows := m.approvalCardRows(a, boxW-4, m.height-14)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, approvalBox(rows, boxW))
 }
 
 // ---- mode selector ---------------------------------------------------------
