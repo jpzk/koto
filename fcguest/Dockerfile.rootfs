@@ -45,9 +45,11 @@ FROM docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b435
 #   done
 # and cross-check each against `npm view @anthropic-ai/<p>@$V dist.integrity`
 # (base64 of the same digest).
-ARG CLAUDE_CODE_VERSION=2.1.280
-ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
-ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
+# Pin: 2.1.325 (dist-tag latest; published 2026-11-13T20:07:25Z -- NOT
+# age-gated, operator override 2026-11-16; dist-tag stable was 2.1.311).
+ARG CLAUDE_CODE_VERSION=2.1.325
+ARG CLAUDE_CODE_SHA512=394c426f4b31ef7e33261f731933fda05d35819e380c21856b0ee1803e1bc9ea634511b2bc7ce050ec02edd9428152258d5e828845438eaf9a9d8dc652f28543
+ARG CLAUDE_CODE_LINUX_X64_SHA512=06a67332f3ffce02cb2f7e12fbb3b36c6f9cca8169ee0c161d4e64a15c2cc8c953033fb4cd90266d8f94933bed376457c69e8070c7a76d8223409c685df518df
 
 # Security-front RPMs, PINNED by NEVRA + SHA-256 under the 6-week age gate
 # (a build is eligible once its Bodhi update went stable >= 6 weeks before the
@@ -175,10 +177,10 @@ RUN set -eu; cd /tmp; \
 # resolution. Pinned by version AND by the SHA-256 of the release tarball,
 # checked here before anything is unpacked.
 #
-# Pin: rust-v0.163.0, the newest non-prerelease (published 2026-10-15T21:30:38Z)
-# -- NOT age-gated, operator override 2026-10-19 (notes/deps/brief-nogate.md). The digest is the
+# Pin: rust-v0.169.0, the newest non-prerelease (published 2026-11-13T08:37:05Z)
+# -- NOT age-gated, operator override 2026-11-16 (earlier: 2026-10-19). The digest is the
 # "digest" GitHub reports for the asset, cross-checked by downloading it:
-#   T=rust-v0.163.0; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.169.0; A=codex-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
@@ -190,14 +192,15 @@ RUN set -eu; cd /tmp; \
 # found" and code mode fails closed. ~69 MB unpacked. codex looks for it
 # beside its own executable, not via config
 # (codex-rs/install-context/src/lib.rs:175-204), hence /usr/local/bin.
-# features.code_mode_host is Stable and default-on in rust-v0.163.0
-# (codex-rs/features/src/lib.rs:1177-1182); the managed config and the turn's
+# features.code_mode_host is Stable and default-on (checked in rust-v0.163.0,
+# codex-rs/features/src/lib.rs:1177-1182; the 0.169.0 changelog lists no
+# removal); the managed config and the turn's
 # -c flag (fcguest/codex.go) set it explicitly anyway. Verify:
-#   T=rust-v0.163.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.169.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest, .size)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
-#   -> 2026-10-15T21:30:38Z, sha256:31426312...703529, 27583103 bytes; the
+#   -> 2026-11-13T08:37:05Z, sha256:cbed6a8d...aaceb, 27390073 bytes; the
 #      tarball holds one member, codex-code-mode-host-x86_64-unknown-linux-musl.
 #
 # No self-update: codex's startup update check (check_for_update_on_startup,
@@ -211,10 +214,15 @@ RUN set -eu; cd /tmp; \
 # 0.163.0: gix 0.81.0, openssl 0.10.75 / openssl-src 3.6.3, hickory 0.25.2,
 # zip 2.4.2. Cargo.lock sha256 17cdd862...2719d03. `codex exec --json` stream
 # (exec/src/exec_events.rs) changed additively only (WebSearchItem.results).
+# Bumped 0.163.0 -> 0.169.0 (2026-11-16): Cargo.lock sha256 56e04c89...fb9e;
+# rustls 0.23.46, rustls-webpki 0.103.16, gix 0.89.0, openssl 0.10.82 /
+# openssl-src 300.6.1+3.6.3, zip 9.0.0; hickory 0.25.2 still locked (0.26.3
+# beside it). 0.166/0.168 changed the code-mode host wire protocol, so codex
+# and codex-code-mode-host must stay on the same tag.
 # Re-check codex-rs/Cargo.lock for the tag before bumping.
-ARG CODEX_VERSION=0.163.0
-ARG CODEX_SHA256=beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
-ARG CODEX_CODE_MODE_HOST_SHA256=314263128ba6592e7e807c265deeaf928a692b72dcbfeb5e0b20c9423b703529
+ARG CODEX_VERSION=0.169.0
+ARG CODEX_SHA256=9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985
+ARG CODEX_CODE_MODE_HOST_SHA256=cbed6a8d25e8268792b757767fbc76d4c62e84bcf8ee4a63f97547f0de3aaceb
 
 RUN set -eu; cd /tmp; \
     a=codex-x86_64-unknown-linux-musl; \
@@ -239,33 +247,29 @@ RUN set -eu; cd /tmp; \
 
 # pi coding agent, installed from npm with a committed lockfile.
 # The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
-# compiles its deps in, so they cannot be patched or audited. pi 0.86.0
-# (published 2026-09-19 -- NOT age-gated, operator override 2026-10-19) locks
-# undici 8.10.2 exactly; that is vulnerable (GHSA-xjj6-f33q-929c,
-# GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472), hence the undici override below.
+# compiles its deps in, so they cannot be patched or audited. pi 1.5.2
+# (published 2026-11-10T12:24:55Z -- NOT age-gated, operator override
+# 2026-11-16) pins undici 8.12.3 and brace-expansion 5.0.12 itself, so the
+# earlier undici / brace-expansion overrides (needed through pi 1.5.0 for
+# GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472) are gone;
+# the protobufjs 7.6.6 override is upstream's own.
 # fcguest/pi/install/ is that release's own installer root
 # (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
-# 0a5c4663…9d503 / b7a6f64d…df909) with exactly three edits:
-#   - overrides.undici = 8.12.2 (published 2026-10-15 -- NOT age-gated,
-#     operator-approved security exception 2026-10-24; oldest patched release,
-#     no dependencies, no install scripts), lock entry swapped to its tarball +
-#     integrity (checked against the downloaded tarball's SHA-512);
-#   - overrides.brace-expansion = 5.0.12 (published 2026-09-14; upstream locks
-#     5.0.9 via minimatch ^5.0.8), lock entry swapped to its tarball + integrity;
-#   - the six @earendil-works/* 0.86.0 entries upstream left without an
+# 6c433244…18c4cc / 57e3b475…f58005) with exactly one edit:
+#   - the eight @earendil-works/* 1.5.2 entries upstream left without an
 #     integrity got their registry dist.integrity filled in (each checked
 #     against the downloaded tarball's SHA-512).
 # Every entry carries a SHA-512, so `npm ci` installs exactly these bytes.
 # Lifecycle scripts are skipped (esbuild/protobufjs/@google/genai do not need
 # them at runtime; platform binaries arrive as optionalDependencies).
 # The receipt records the lockfile digest for verify-rootfs.sh.
-# Bump: take the new release's two installer files, re-apply the edits above
-# (drop each override once the release locks brace-expansion >= 5.0.12 /
-# undici >= 8.12.2), update
+# Bump: take the new release's two installer files, re-apply the edit above,
+# re-add an override (lock entry swapped to its tarball + integrity) if the
+# release locks undici < 8.12.3 or brace-expansion < 5.0.12, update
 # PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
-# here and in verify-rootfs.sh.
-ARG PI_VERSION=1.5.0
-ARG PI_LOCK_SHA256=039086b635ea7cb2c9c36ba8351cc2b0363f8444ce8227d3e0f189ecc7187205
+# here, in Dockerfile.guest and in verify-rootfs.sh.
+ARG PI_VERSION=1.5.2
+ARG PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
 RUN set -eu; cd /opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
@@ -278,8 +282,8 @@ RUN set -eu; cd /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
     test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
     test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
-    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.2; \
-    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.2") | .version' {} +)"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.3; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.3") | .version' {} +)"; \
     test -z "$(find /opt/pi -path '*/node_modules/brace-expansion/package.json' -exec jq -r 'select(.version != "5.0.12") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
