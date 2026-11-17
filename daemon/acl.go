@@ -328,6 +328,10 @@ var adminOnlyVerbs = map[string]bool{
 	// image: pulls from registries into host-wide caches, rewrites every
 	// pinned group's base and resets their system disks (Image rpc).
 	"image": true,
+	// mcp: the MCP connection registry decides which groups reach which
+	// upstream tools with the operator's credential — a role that could edit
+	// it could grant itself anything the connection ceiling allows.
+	"mcp": true,
 	// Not an RPC: the synthetic verb aclCheck substitutes for `config` when
 	// the request carries a POSTURE setter. ConfigReq mixes model/effort/
 	// provider with network, root, ports, size and autostart, and one coarse

@@ -340,6 +340,12 @@ func updateGroupConfigLocked(g string, mutate func(map[string]any)) (map[string]
 }
 
 func configCmd(req configReq) configResp {
+	// mcp is not a config key on ANY path (operator gRPC included): MCP access
+	// lives in the admin-only registry (mcp_admin.go), so a config grant —
+	// even config_posture — can never become an upstream tool grant.
+	if len(req.Mcp) > 0 {
+		return configResp{BaseResp: errResp("mcp is not a config key — MCP access is managed with koto ctl mcp (operator-only)")}
+	}
 	// A group must EXIST before it can be configured (audit 2026-09-11 L87).
 	// updateGroupConfig's first act is MkdirAll under the caller's group path,
 	// so a syntactically valid name was enough to create persistent state —

@@ -228,6 +228,10 @@ type ConfigReq struct {
 	// Session. Host session registry only (session_modes.go), never
 	// config.json; a posture key — the ctl plane refuses it.
 	Mode    json.RawMessage `json:"mode,omitempty"`
+	// Mcp is NOT a settable key: MCP access is managed by the admin-only mcp
+	// verb (mcp_admin.go). It is decoded only so config_set can refuse it as
+	// posture and configCmd can refuse it on every path.
+	Mcp json.RawMessage `json:"mcp,omitempty"`
 	Session string          `json:"session,omitempty"`
 }
 
