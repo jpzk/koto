@@ -239,7 +239,7 @@ func TestDiscoverHappyAndChecks(t *testing.T) {
 func oauthGateway(t *testing.T, f *fakeOAuth, o *mcpreg.OAuth) (*Gateway, func() *mcpreg.Registry, *[]AuditEntry) {
 	var mu sync.Mutex
 	reg := mcpreg.New()
-	must(t, reg.PutConn("adder", &mcpreg.Conn{URL: f.mcpURL(), Class: mcpreg.ClassWrite, OAuth: o,
+	must(t, reg.PutConn("adder", &mcpreg.Conn{URL: f.mcpURL(), Class: mcpreg.ClassRead, OAuth: o,
 		Tools: map[string]*mcpreg.ToolRule{"add": {AdditionalArgs: true}, "admin": {AdditionalArgs: true}}}, false))
 	must(t, reg.Validate())
 	must(t, reg.Allow("adder", "g"))

@@ -99,8 +99,8 @@ type Grant struct {
 
 // Conn is one registered upstream MCP connection (streamable HTTP).
 type Conn struct {
-	URL    string               `json:"url"`
-	Auth   *AuthHeader          `json:"auth,omitempty"`
+	URL  string      `json:"url"`
+	Auth *AuthHeader `json:"auth,omitempty"`
 	// OAuth is the alternative to Auth: the gateway runs an OAuth client
 	// against the upstream AS and attaches a short-lived bearer token.
 	OAuth  *OAuth               `json:"oauth,omitempty"`

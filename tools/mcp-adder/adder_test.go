@@ -65,12 +65,12 @@ func TestDCR(t *testing.T) {
 		t.Fatalf("confidential client: %v", conf)
 	}
 	for name, meta := range map[string]string{
-		"cc public":       `{"grant_types":["client_credentials"],"token_endpoint_auth_method":"none"}`,
-		"no redirect":     `{"grant_types":["authorization_code"]}`,
-		"bad redirect":    `{"redirect_uris":["http://evil.example/cb"]}`,
-		"implicit":        `{"grant_types":["implicit"]}`,
-		"scope too big":   `{"grant_types":["client_credentials"],"scope":"mcp:root"}`,
-		"not json":        `nope`,
+		"cc public":     `{"grant_types":["client_credentials"],"token_endpoint_auth_method":"none"}`,
+		"no redirect":   `{"grant_types":["authorization_code"]}`,
+		"bad redirect":  `{"redirect_uris":["http://evil.example/cb"]}`,
+		"implicit":      `{"grant_types":["implicit"]}`,
+		"scope too big": `{"grant_types":["client_credentials"],"scope":"mcp:root"}`,
+		"not json":      `nope`,
 	} {
 		req, _ := http.NewRequest("POST", e.ts.URL+"/register", strings.NewReader(meta))
 		resp, b := e.do(req)

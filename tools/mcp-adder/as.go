@@ -20,16 +20,16 @@ import (
 func (s *Server) handleASMeta(w http.ResponseWriter, r *http.Request) {
 	b := s.cfg.BaseURL
 	writeJSON(w, 200, map[string]any{
-		"issuer":                                b,
-		"authorization_endpoint":                b + "/authorize",
-		"token_endpoint":                        b + "/token",
-		"registration_endpoint":                 b + "/register",
-		"jwks_uri":                              b + "/jwks",
-		"scopes_supported":                      allScopes,
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
-		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
-		"code_challenge_methods_supported":      []string{"S256"},
+		"issuer":                                         b,
+		"authorization_endpoint":                         b + "/authorize",
+		"token_endpoint":                                 b + "/token",
+		"registration_endpoint":                          b + "/register",
+		"jwks_uri":                                       b + "/jwks",
+		"scopes_supported":                               allScopes,
+		"response_types_supported":                       []string{"code"},
+		"grant_types_supported":                          []string{"authorization_code", "refresh_token", "client_credentials"},
+		"token_endpoint_auth_methods_supported":          []string{"none", "client_secret_basic", "client_secret_post"},
+		"code_challenge_methods_supported":               []string{"S256"},
 		"authorization_response_iss_parameter_supported": true,
 	})
 }
