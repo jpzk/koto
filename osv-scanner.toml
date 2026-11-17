@@ -1,0 +1,12 @@
+# osv-scanner config (scripts/supplychain/osv.sh, .github/workflows/supplychain.yml).
+#
+# An ignore is a DATED exception, never a permanent one. Every entry needs:
+#   id          = the OSV / GO- / GHSA / RUSTSEC id
+#   ignoreUntil = an expiry <= 90 days out (RFC 3339 date)
+#   reason      = why it is not exploitable here, or what fix is pending
+# osv.sh fails if an entry is missing reason or ignoreUntil.
+#
+# [[IgnoredVulns]]
+# id = "GO-0000-0000"
+# ignoreUntil = 2027-01-31
+# reason = "not reachable: ... (govulncheck agrees); fix lands with x/foo vN"
