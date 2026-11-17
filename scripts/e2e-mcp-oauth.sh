@@ -59,6 +59,13 @@ SHA=$(git -C $W rev-parse HEAD)
 grep -qx "sha $SHA" $BIN/SHA256 || { say "build is not of $W HEAD $SHA"; exit 2; }
 ( cd $BIN && grep -v '^sha ' SHA256 | sha256sum -c --quiet ) || { say "artifact sha mismatch"; exit 2; }
 [ -e /dev/kvm ] || { say "no /dev/kvm"; exit 2; }
+# real-model image: the pi template must be the repo's (bridge 18888, not a fixture port) and no fake model binary may
+# ship in the guest; fakemodel-suite images (mcp-e2e img.sh) fail here instead of silently routing pi to a stub
+CHK=/var/tmp/mcp-oauth-chk; mkdir -p $CHK; sudo mount -o loop,ro $BIN/guest.img $CHK || { say "cannot mount guest.img"; exit 2; }
+it=$(sudo sha256sum < $CHK/share/koto/pi/models.minimax.json 2>/dev/null | cut -c1-64); nfm=$(sudo find $CHK -xdev -iname '*fakemodel*' 2>/dev/null | wc -l)
+sudo umount $CHK; rmdir $CHK
+[ "$it" = "$(sha256sum < $W/fcguest/pi/models.minimax.json | cut -c1-64)" ] && [ "$nfm" = 0 ] \
+  || { say "guest.img is not a real-model image: pi template sha ${it:-missing} vs repo, fake model files $nfm"; exit 2; }
 for p in $PORT $PROXY $AP $PP; do listening $p && { say "port $p busy"; exit 2; }; done
 [ -n "$(koto_pids)$(fc_pids)$(adder_pids)" ] && { say "e2e daemon/VMs/mcp-adder already running"; exit 2; }
 [ $(diskpct) -le 88 ] || { say "disk $(diskpct)% > 88"; exit 2; }
@@ -76,7 +83,7 @@ for hn in $HARNESSES; do case $hn in
   *) say "unknown harness $hn"; exit 2;; esac; done
 VL0=$(varlib_fp)
 { echo "harnesses: run [${RUNH# }] notrun [$(printf %s "$NOTRUN" | cut -d' ' -f2 | tr '\n' ' ')]"; echo "=== e2e-mcp-oauth $RUN $(date -u +%FT%TZ)"; echo "tested sha $SHA ($W, branch $(git -C $W branch --show-current))"
-  sed 's/^/  /' $BIN/SHA256; echo "koto: $($K version 2>&1 | head -1)"
+  sed 's/^/  /' $BIN/SHA256; echo "koto: $($K version 2>&1 | head -1)"; echo "guest.img: pi template sha $it == repo fcguest/pi/models.minimax.json, fake model files 0"
   echo "private daemon 127.0.0.1:$PORT home $H KOTO_MCP_GATEWAY=1; REAL model upstream $REAL (/v1/models $code)"
   echo "mcp-adder oauth $AURL  pat $PURL; results $RES evidence $KEEP"
   echo "/var/lib/koto fingerprint before: $VL0"; echo "disk /workspace $(diskpct)%"; } | tee -a $LOG
