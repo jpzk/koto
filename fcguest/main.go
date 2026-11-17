@@ -62,11 +62,15 @@ const (
 	// interleave mid-block. One connection per slot, each opening with a
 	// "<slot>\n" header line.
 	portLogSlot = 9004
+	// portMcp: the host MCP gateway for this group (daemon KOTO_MCP_GATEWAY=1).
+	// The in-guest bridge 127.0.0.1:guestMcpTCP forwards each connection here.
+	portMcp = 9005
 	// guestSlots must equal the daemon's groupSlots (daemon/queue.go): the
 	// daemon picks the slot, this side owns the FIFO it names.
 	guestSlots    = 10
 	portAgent     = 10000
 	guestProxyTCP = 18888
+	guestMcpTCP   = 18889
 
 	wsDev = "/dev/vdb"
 	wsDir = "/workspace"
@@ -98,6 +102,7 @@ func main() {
 	setupCS()
 	loopbackUp()
 	go proxyBridge()
+	go mcpBridge()
 	go ctlForward()
 	agentServer() // blocks
 }
@@ -495,10 +500,20 @@ func dialRetry(port uint32) *vconn {
 // proxyBridge: in-guest TCP endpoint for the Anthropic/Venice client. Each
 // accepted connection becomes one vsock connection to the daemon, which
 // splices it into the group's credential-injecting proxy port.
-func proxyBridge() {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", guestProxyTCP))
+func proxyBridge() { tcpBridge("proxy", guestProxyTCP, portProxy) }
+
+// mcpBridge: in-guest endpoint for MCP clients (claude --mcp-config points at
+// http://127.0.0.1:18889/mcp/<conn>). Each connection becomes one vsock
+// connection to the daemon's per-group MCP gateway, which decides what this
+// group may see and call; the upstream URL and credential stay on the host.
+// When the daemon runs without the gateway there is no host listener and
+// every connection is closed at once.
+func mcpBridge() { tcpBridge("mcp", guestMcpTCP, portMcp) }
+
+func tcpBridge(name string, tcpPort int, vport uint32) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", tcpPort))
 	if err != nil {
-		logf("proxy bridge listen: %v", err)
+		logf("%s bridge listen: %v", name, err)
 		return
 	}
 	for {
@@ -507,7 +522,7 @@ func proxyBridge() {
 			return
 		}
 		go func() {
-			v, err := vsockDial(portProxy)
+			v, err := vsockDial(vport)
 			if err != nil {
 				c.Close()
 				return

@@ -1448,8 +1448,13 @@ type MsgReq struct {
 	// confirm only: worker hard cap in ms (the worker clock pauses while an
 	// approval is pending, but never past this). 0 = guest default.
 	ApprovalHardCapMs int64 `protobuf:"varint,10,opt,name=approval_hard_cap_ms,json=approvalHardCapMs,proto3" json:"approval_hard_cap_ms,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// MCP connections this group may use through the host gateway (daemon
+	// flag KOTO_MCP_GATEWAY=1). Names only — the URL the harness is pointed at
+	// is the in-guest bridge 127.0.0.1:18889/mcp/<name>; the upstream URL and
+	// credential never leave the host. Empty = no MCP servers configured.
+	McpServers    []string `protobuf:"bytes,11,rep,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MsgReq) Reset() {
@@ -1550,6 +1555,13 @@ func (x *MsgReq) GetApprovalHardCapMs() int64 {
 		return x.ApprovalHardCapMs
 	}
 	return 0
+}
+
+func (x *MsgReq) GetMcpServers() []string {
+	if x != nil {
+		return x.McpServers
+	}
+	return nil
 }
 
 type ExecReq struct {
@@ -3002,7 +3014,7 @@ const file_guest_proto_rawDesc = "" +
 	"\x03kvm\x18\x06 \x01(\bR\x03kvm\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc6\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe7\x02\n" +
 	"\x06MsgReq\x12\x10\n" +
 	"\x03msg\x18\x01 \x01(\fR\x03msg\x12#\n" +
 	"\rsystem_prompt\x18\x02 \x01(\fR\fsystemPrompt\x12\x1f\n" +
@@ -3016,7 +3028,9 @@ const file_guest_proto_rawDesc = "" +
 	"\x04mode\x18\b \x01(\tR\x04mode\x12.\n" +
 	"\x13approval_timeout_ms\x18\t \x01(\x03R\x11approvalTimeoutMs\x12/\n" +
 	"\x14approval_hard_cap_ms\x18\n" +
-	" \x01(\x03R\x11approvalHardCapMs\"!\n" +
+	" \x01(\x03R\x11approvalHardCapMs\x12\x1f\n" +
+	"\vmcp_servers\x18\v \x03(\tR\n" +
+	"mcpServers\"!\n" +
 	"\aExecReq\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\"'\n" +
 	"\rExecStreamReq\x12\x16\n" +

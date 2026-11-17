@@ -125,10 +125,19 @@ func tomlString(s string) string {
 
 // codexArgs builds the argv for one turn. resumeID != "" continues that
 // thread. The prompt always comes on stdin ("-").
-func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
+// mcp is the list of granted MCP connection names (MsgReq mcp_servers).
+func codexArgs(baseURL, model, effort, systemPrompt, resumeID string, mcp []string) []string {
 	args := []string{"exec"}
 	if resumeID != "" {
 		args = append(args, "resume")
+	}
+	mcpArgs := codexMcpArgs(mcp)
+	if mcpArgs != nil {
+		// Strict MCP (codex's analogue of claude --strict-mcp-config): skip the
+		// worker-writable $CODEX_HOME/config.toml so the -c layer below is the
+		// only source of mcp_servers. Thread history and auth still live in
+		// CODEX_HOME, so resume is unaffected (exec/src/cli.rs:49-51).
+		args = append(args, "--ignore-user-config")
 	}
 	args = append(args,
 		"--json",
@@ -138,6 +147,7 @@ func codexArgs(baseURL, model, effort, systemPrompt, resumeID string) []string {
 		"--dangerously-bypass-approvals-and-sandbox",
 	)
 	args = append(args, codexConfigArgs(baseURL, model, effort, systemPrompt)...)
+	args = append(args, mcpArgs...)
 	if resumeID != "" {
 		args = append(args, resumeID)
 	}
@@ -202,7 +212,7 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 		return
 	}
 	env = append(env, "CODEX_HOME="+codexHome)
-	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume), env, req.Msg)
+	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume, req.GetMcpServers()), env, req.Msg)
 	if err != nil {
 		tw.errf("codex: start: %v", err)
 		return
