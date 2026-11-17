@@ -118,7 +118,7 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 	}
 	for i, v := range rest {
 		if slots[i] == nil { // rate's number
-			n, err := strconv.Atoi(v)
+			n, err := strconv.ParseInt(v, 10, 32)
 			if err != nil || n < 0 {
 				return nil, errors.New("per_minute must be a non-negative integer")
 			}

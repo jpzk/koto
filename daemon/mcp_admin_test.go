@@ -252,6 +252,7 @@ func TestMcpCliParse(t *testing.T) {
 		{"allow", "docs", "tg", "extra"},
 		{"rate", "docs", "tg", "-1"},
 		{"rate", "docs", "tg", "x"},
+		{"rate", "docs", "tg", "4294967297"},
 		{"allow", "docs", "tg", "--url", "u"},         // add-only flag
 		{"revoke", "docs", "tg", "a", "--args", "{}"}, // grant-only flag
 		{"show", "docs", "--bogus", "1"},
