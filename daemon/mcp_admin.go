@@ -11,7 +11,8 @@ package main
 //     verb and treats an "mcp" config key as posture (ctl.go), and
 //     configCmd refuses it outright, so no agent can grant itself (or a
 //     peer) an upstream tool;
-//   - upstream auth values are write-only: every view is Redacted();
+//   - upstream auth values are write-only: every view is Redacted() and
+//     show carries the header name only (no value key on the wire);
 //   - a group is whitelisted only if it is a registered koto group.
 
 import (
@@ -231,6 +232,13 @@ func mcpViewConn(st *mcpreg.Store, name string) (map[string]any, error) {
 	v := mcpToMap(c)
 	if v == nil {
 		return nil, errors.New("cannot render connection")
+	}
+	// Drop the auth object wholesale and put back the header NAME only: the
+	// view never carries a value key, so not even the "[redacted]"
+	// placeholder (or a future Redacted() regression) reaches a response.
+	delete(v, "auth")
+	if c.Auth != nil {
+		v["auth"] = map[string]any{"name": c.Auth.Name}
 	}
 	v["name"] = name
 	v["enabled"] = !c.Disabled
