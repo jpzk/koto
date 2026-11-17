@@ -823,6 +823,16 @@ type Model struct {
 	// after its name instead, so background work stays noticeable.
 	jobsOpen map[string]bool
 
+	// groupCollapsed — groups whose whole subtree is hidden in the tree,
+	// keyed by group name. A collapsed group renders as its row alone, with
+	// a " [+N]" marker counting the hidden descendants (sessions, goal
+	// sessions, jobs). main collapses only its OWN conversations: peer
+	// groups are separate VMs, not nodes inside main, so they stay listed.
+	// Explicit user state (alt+c, ← on the group row, alt+shift+c for all):
+	// rows arriving in a later frame never auto-expand it. Pruned with the
+	// group (forgetGroup, processJobTransitions).
+	groupCollapsed map[string]bool
+
 	// globalTokRate is the fleet-wide tok/s pushed with every WatchState
 	// frame (per-group rates ride GroupInfo.TokPerSec). Rendered in the
 	// status bar's top-right chip alongside the current group's rate.
@@ -1140,6 +1150,7 @@ func newModel(sock string, ctxWindow int) Model {
 		jobDoneAt:      map[string]time.Time{},
 		jobsPrimed:     map[string]bool{},
 		jobsOpen:       map[string]bool{},
+		groupCollapsed: map[string]bool{},
 		pendSess:       map[string][]string{},
 	}
 }
@@ -1345,6 +1356,7 @@ func (m *Model) forgetGroup(g string) {
 			delete(m.jobsOpen, k)
 		}
 	}
+	delete(m.groupCollapsed, g)
 	for r := range m.peekCache {
 		if r.group == g {
 			delete(m.peekCache, r)
@@ -4797,9 +4809,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			// out of this: it submits/exits, and ctrl+enter isn't an
 			// option — a terminal sends plain CR for it, so it can't be
 			// told apart from enter without the kitty keyboard protocol.
-			if strings.TrimSpace(m.input.Value()) == "" && m.setJobFold(s == "right") {
+			if strings.TrimSpace(m.input.Value()) == "" && (m.setJobFold(s == "right") || m.groupArrow(s == "right")) {
 				return m, nil
 			}
+		case "alt+c":
+			// Collapse/expand the hovered row's whole group (sessions, goal
+			// sessions, jobs). A chord, so it works mid-draft like ctrl+t.
+			m.toggleGroupCollapse()
+			return m, nil
+		case "alt+C":
+			// alt+shift+c: collapse every group, or expand them all when
+			// every group is already collapsed.
+			m.toggleCollapseAll()
+			return m, nil
 		case "ctrl+x":
 			// Destroy the hovered group or session, behind a confirmation
 			// modal (destroy_confirm.go). Session rows target that session
@@ -5282,6 +5304,11 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 			delete(m.jobsOpen, k)
 		}
 	}
+	for g := range m.groupCollapsed {
+		if _, ok := groups[g]; !ok {
+			delete(m.groupCollapsed, g)
+		}
+	}
 	// ...and so does the primed flag (audit 2026-09-11 L161). It was the one
 	// per-group entry this sweep did not drop — forgetGroup removes it, but a
 	// group that simply stops being listed (destroyed by ANOTHER client, or
@@ -5436,6 +5463,23 @@ func foldLabelTotal(n int, live bool) string {
 	return fmt.Sprintf(" (%s%d)", mark, n)
 }
 
+// groupArrow is the outer step of the →/← cascade on a GROUP row, tried
+// after setJobFold: → on a collapsed group expands it (a second → then
+// opens its jobs), ← on an expanded group whose jobs are already folded
+// collapses the whole group. Session and job rows never collapse a group
+// with the arrows — alt+c does that from anywhere inside it.
+func (m *Model) groupArrow(open bool) bool {
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) {
+		return false
+	}
+	r := rows[m.treeIdx]
+	if r.session != "" || r.job != "" {
+		return false
+	}
+	return m.setGroupCollapsed(r.group, !open)
+}
+
 // setJobFold handles →/← in the tree: unfold (open=true) or fold the
 // hovered conversation's child list — its job rows AND its goal sessions
 // (foldGoals), one shared state. ← on a child row (a job, or a goal session
@@ -5449,6 +5493,11 @@ func (m *Model) setJobFold(open bool) bool {
 		return false
 	}
 	r := rows[m.treeIdx]
+	if m.groupCollapsed[r.group] {
+		// The subtree is hidden: toggling a fold inside it would change
+		// nothing visible. groupArrow owns the arrows here.
+		return false
+	}
 	key := sessKey(r.group, r.session)
 	if open {
 		if r.job != "" || m.jobsOpen[key] || m.foldedJobs(r.group, r.session) == 0 {
@@ -5477,6 +5526,99 @@ func (m *Model) setJobFold(open bool) bool {
 		}
 	}
 	return false
+}
+
+// collapsedCount is what a collapsed group hides: every named session
+// (goal sessions included — nested or not) plus every visible job across all
+// of its conversations, regardless of the per-conversation job folds, and
+// whether any of it is live (a running job, or a goal session at all — they
+// are only listed while the goal runs). All zero for expanded groups.
+func (m Model) collapsedCount(g string) (n int, live bool) {
+	if !m.groupCollapsed[g] {
+		return 0, false
+	}
+	for _, s := range m.sessionsOf(g) {
+		n++
+		live = live || goalSession(s)
+	}
+	for _, j := range m.groups[g].Jobs {
+		if m.jobVisible(g, j) {
+			n++
+			live = live || j.Status == "running"
+		}
+	}
+	return n, live
+}
+
+// collapseLabel is the marker a collapsed group row carries after its name:
+// " [+3]", or " [*3]" while anything hidden is live. The brackets set it
+// apart from the per-conversation fold count "(2j)"; ASCII for the same
+// width reason. Always present on a collapsed row — " [+0]" too — so the
+// collapsed state stays visible even when the group has nothing to hide yet.
+func (m Model) collapseLabel(g string) string {
+	if !m.groupCollapsed[g] {
+		return ""
+	}
+	n, live := m.collapsedCount(g)
+	return collapseLabelN(n, live)
+}
+
+func collapseLabelN(n int, live bool) string {
+	if live {
+		return fmt.Sprintf(" [*%d]", n)
+	}
+	return fmt.Sprintf(" [+%d]", n)
+}
+
+// setGroupCollapsed collapses or expands group g. Collapsing re-anchors the
+// tree cursor on the group row when it sat on a row inside g — a hidden row
+// can never stay selected. Returns whether the state changed.
+func (m *Model) setGroupCollapsed(g string, collapsed bool) bool {
+	if g == "" || m.groupCollapsed[g] == collapsed {
+		return false
+	}
+	if !collapsed {
+		delete(m.groupCollapsed, g)
+		return true
+	}
+	m.groupCollapsed[g] = true
+	if m.treeSel.group == g && (m.treeSel.session != "" || m.treeSel.job != "") {
+		for i, r := range m.treeRows() {
+			if r.group == g && r.session == "" && r.job == "" {
+				m.treeIdx = i
+				m.selectTreeRow(r)
+				break
+			}
+		}
+	}
+	return true
+}
+
+// toggleGroupCollapse flips the collapse state of the hovered row's group —
+// from any row inside it, so a deep job row collapses its whole group.
+func (m *Model) toggleGroupCollapse() bool {
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) {
+		return false
+	}
+	g := rows[m.treeIdx].group
+	return m.setGroupCollapsed(g, !m.groupCollapsed[g])
+}
+
+// toggleCollapseAll collapses every group when any is still expanded, else
+// expands them all.
+func (m *Model) toggleCollapseAll() {
+	order := m.treeOrder()
+	anyOpen := false
+	for _, g := range order {
+		if !m.groupCollapsed[g] {
+			anyOpen = true
+			break
+		}
+	}
+	for _, g := range order {
+		m.setGroupCollapsed(g, anyOpen)
+	}
 }
 
 // treeRows flattens the tree: main, then main's default-session jobs, named
@@ -5558,6 +5700,11 @@ func (m Model) treeRows() []treeRow {
 		mainSess = topShown("main", mainSess)
 		mainJobs = jobsOf("main", "")
 		rows = append(rows, treeRow{group: "main"})
+		if m.groupCollapsed["main"] {
+			// Collapsed main hides its own conversations only; the peer
+			// groups below are not inside main (see groupCollapsed).
+			mainSess, mainKids, mainJobs = nil, nil, nil
+		}
 	}
 	nChildren := len(mainJobs) + len(mainSess) + len(groups)
 	child := 0
@@ -5579,6 +5726,9 @@ func (m Model) treeRows() []treeRow {
 	for _, g := range groups {
 		gb, cont := branchFor()
 		rows = append(rows, treeRow{group: g, branch: gb})
+		if m.groupCollapsed[g] {
+			continue // the row alone; " [+N]" stands in for the subtree
+		}
 		defJobs := jobsOf(g, "")
 		sess, kids := m.sessionLayout(g)
 		sess = topShown(g, sess)
@@ -5930,6 +6080,15 @@ func (m *Model) normalizeTreeCursor() {
 	}
 	active := m.activeSession(m.cur)
 	if m.treeSel.group != m.cur || m.treeSel.session != active {
+		// Out-of-band switch (/sw, /session, a goal-start auto-switch) INTO a
+		// collapsed group's hidden session: the user asked for that
+		// conversation, so reveal it. A hover that merely became hidden
+		// (collapse, or rows reshuffling under a consistent anchor) takes
+		// the fallbacks below instead and lands on the group row.
+		if active != "" && m.groupCollapsed[m.cur] {
+			delete(m.groupCollapsed, m.cur)
+			rows = m.treeRows()
+		}
 		m.treeSel = treeRow{group: m.cur, session: active}
 	}
 	found, conv := -1, -1
