@@ -39,6 +39,10 @@ type mcpState struct {
 	add     *mcpAddForm
 	del     *mcpDelState
 	detail  *mcpDetail
+	// detailSel is the detail's selected group, kept across a re-read;
+	// gm is the standalone group MCP-access modal (mcpModeGroup).
+	detailSel int
+	gm        *groupMcpModal
 }
 
 type mcpCol int
@@ -254,7 +258,9 @@ func (m Model) renderMcpHint() string {
 	case mcpModeDelete:
 		parts = []string{" mcp delete", "type the name", "enter delete", "esc cancel"}
 	case mcpModeDetail:
-		parts = []string{" mcp detail", "pgup/pgdn scroll", "esc back"}
+		parts = []string{" mcp detail", "pgup/pgdn scroll", "tab group", "e edit group access", "esc back"}
+	case mcpModeGroup:
+		parts = []string{" mcp group access", "space allow/grant/revoke", "enter rule/rate", "ctrl+s apply", "esc discard"}
 	}
 	return lipgloss.NewStyle().Foreground(cGray).MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
@@ -327,7 +333,7 @@ func (m *Model) exitMcp() {
 	if m.mcp.add != nil {
 		m.mcp.add.wipe()
 	}
-	m.mcp.mode, m.mcp.add, m.mcp.del, m.mcp.detail = mcpModeList, nil, nil, nil
+	m.mcp.mode, m.mcp.add, m.mcp.del, m.mcp.detail, m.mcp.gm = mcpModeList, nil, nil, nil, nil
 	m.restoreChatFocus(m.mcp.pre)
 }
 
@@ -342,11 +348,27 @@ func (m Model) handleMcpKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if m.mcp.del != nil {
 			return m.handleMcpDelKey(msg)
 		}
+	case mcpModeGroup:
+		if m.mcp.gm != nil {
+			return m.handleMcpGroupKey(msg)
+		}
 	case mcpModeDetail:
 		switch msg.String() {
 		case "esc":
 			m.mcp.mode, m.mcp.detail = mcpModeList, nil
 			m.refreshMcpViewport()
+		case "tab", "shift+tab":
+			if d := m.mcp.detail; d != nil && len(d.Groups) > 0 {
+				step := 1
+				if msg.String() == "shift+tab" {
+					step = len(d.Groups) - 1
+				}
+				d.Sel = (d.Sel + step) % len(d.Groups)
+				m.mcp.detailSel = d.Sel
+				m.refreshMcpViewport()
+			}
+		case "e":
+			return m, m.mcpOpenGroupMcp()
 		case "pgup", "up":
 			m.mcp.vp.HalfPageUp()
 		case "pgdown", "down":

@@ -47,6 +47,7 @@ const (
 	mcpModeAdd
 	mcpModeDelete
 	mcpModeDetail
+	mcpModeGroup // the per-group MCP access modal (group_mcp.go), standalone
 )
 
 // add-form fields, in tab order.
@@ -406,6 +407,7 @@ type mcpDetail struct {
 	Enabled  bool
 	Ceiling  []string
 	Groups   []mcpGroupDetail
+	Sel      int // selected group (tab), e edits its access
 }
 
 type mcpDetailMsg struct {
@@ -526,7 +528,11 @@ func (d mcpDetail) lines(w int) []string {
 	if len(d.Groups) == 0 {
 		out = append(out, gray.Render("  no group is allowed on this connection"))
 	}
-	for _, g := range d.Groups {
+	for gi, g := range d.Groups {
+		mark := "  "
+		if gi == d.Sel {
+			mark = gl("› ", "> ")
+		}
 		rate := "no limit"
 		if g.Rate > 0 {
 			rate = fmt.Sprintf("%d/min", g.Rate)
@@ -536,14 +542,14 @@ func (d mcpDetail) lines(w int) []string {
 			eff = "when enabled"
 		}
 		out = append(out,
-			schedTrunc("  "+g.Group+" · rate "+rate, w),
+			schedTrunc(mark+g.Group+" · rate "+rate, w),
 			schedTrunc("    grant      "+join(g.Grants), w),
 			schedTrunc("    "+padCells(eff, 10)+" "+join(g.Effective), w))
 		if g.Note != "" {
 			out = append(out, gray.Render(schedTrunc("    "+g.Note, w)))
 		}
 	}
-	out = append(out, "", gray.Render(schedTrunc("* = argument rule attached · esc back", w)))
+	out = append(out, "", gray.Render(schedTrunc("* = argument rule attached · tab select group · e edit its access · esc back", w)))
 	return out
 }
 
@@ -586,7 +592,7 @@ func (m Model) mcpActionKey(s string) (Model, tea.Cmd, bool) {
 		m.mcp.note = op + " " + sel.Name + "…"
 		return m, mcpOpCmd(op, sel.Name), true
 	default: // enter
-		m.mcp.mode, m.mcp.detail = mcpModeDetail, nil
+		m.mcp.mode, m.mcp.detail, m.mcp.detailSel = mcpModeDetail, nil, 0
 		m.mcp.note = ""
 		m.refreshMcpViewport()
 		return m, mcpDetailCmd(sel.Name), true
@@ -628,6 +634,9 @@ func (m *Model) mcpConsumeDetail(msg mcpDetailMsg) {
 		m.mcp.mode = mcpModeList
 	} else {
 		d := msg.d
+		if len(d.Groups) > 0 {
+			d.Sel = min(max(m.mcp.detailSel, 0), len(d.Groups)-1)
+		}
 		m.mcp.detail = &d
 	}
 	m.refreshMcpViewport()
@@ -649,6 +658,10 @@ func (m Model) mcpModeLines(w int) ([]string, bool) {
 			return []string{lipgloss.NewStyle().Foreground(cGray).Render("loading detail…")}, true
 		}
 		return m.mcp.detail.lines(w), true
+	case mcpModeGroup:
+		if m.mcp.gm != nil {
+			return m.mcp.gm.lines(w), true
+		}
 	}
 	return nil, false
 }
