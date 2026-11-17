@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,83 +193,109 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }
 
-// agentWorkerPattern is the egrep alternation matching a turn's agent worker
-// process, provider-agnostic. Each provider's sidecar entrypoint branch
-// launches exactly one of these per message:
-//   - claudesdk → the claude CLI. NOTE: its argv is just "claude -p ...";
-//     the "claude-code" marker only appears in the RESOLVED EXECUTABLE PATH
-//     (/proc/PID/exe → .../@anthropic-ai/claude-code/bin/claude.exe), not in
-//     cmdline — so the matcher below greps exe AND cmdline, not cmdline alone.
-//   - venice    → node /sidecar/venice_stream.js (matches via cmdline).
-//
-// stream_filter.js and agent-browser-chrome do NOT match, so they're left
-// alone. Adding a provider = add its worker's exe/argv marker here (one place).
-const agentWorkerPattern = `claude-code|venice_stream\.js`
+// workerRegistryRoot is the guest-side turn-worker registry fc-agent keeps
+// (fcguest/workerreg.go): /run/koto/turn-workers/<hex(session)>/<pid>, one
+// entry per live turn worker, written by PID 1 when it starts the worker and
+// removed when it reaps it. Root-owned 0755/0644, so the exec op (uid 1000)
+// can read it but a worker cannot plant or hide an entry.
+const workerRegistryRoot = "/run/koto/turn-workers"
+
+// workerSessionKey is the registry's on-disk name for a session — hex of
+// sessionMarkerName, byte-for-byte what fcguest's workerSessionKey writes.
+// Hex keeps any session string a single shell- and path-safe element.
+func workerSessionKey(sess string) string {
+	return hex.EncodeToString([]byte(sessionMarkerName(sess)))
+}
+
+// legacyAgentWorkerPattern is ONLY for guests that predate the registry (no
+// workerRegistryRoot directory): the old argv/exe heuristic. It is frozen —
+// new harnesses are found through the registry and must never be added here.
+//   - claudesdk → the claude CLI ("claude-code" appears only in the resolved
+//     exe path, so the matcher greps exe AND cmdline).
+//   - venice    → node /sidecar/venice_stream.js (cmdline).
+const legacyAgentWorkerPattern = `claude-code|venice_stream\.js`
 
 // interruptAgent sends SIGINT to a running turn worker inside the guest
-// without killing the entrypoint shell, so the FIFO `read` loop survives and
-// the next inbound message still works. We walk /proc in the guest and signal
-// any non-PID-1 process whose resolved exe path OR argv matches
-// agentWorkerPattern. The worker aborts the turn on SIGINT; stream_filter
-// (claude path) exits on SIGPIPE once the worker's stdout closes, and the
-// per-turn `timeout` wrapper exits once its child dies — so we don't signal
-// them explicitly.
+// without killing the entrypoint shell or fc-agent, so the next inbound
+// message still works. The worker aborts the turn on SIGINT; its pipeline
+// (stream_filter, timeout wrapper) exits once the worker's stdout closes.
 //
-// `sess` NARROWS the kill to one conversation's worker, which is mandatory now
-// that a group runs two turns at once (queue.go lanes): a pattern-only match
-// would take the operator's turn down with the goal's, and vice versa. The
-// filter is the worker's own environment — entrypoint.sh exports KOTO_SESSION
-// per turn and claude/venice inherit it — so it needs nothing recorded on the
-// side that could go stale. There is deliberately no "signal them all" mode:
-// every caller knows which lane it means, and a group-wide kill is exactly the
-// bug this parameter exists to prevent ("" here is the DEFAULT session, not a
-// wildcard).
+// Identification is GENERIC: the guest registry names the exact pids serving
+// `sess`, whatever harness they are (claude, codex, pi, venice, a fifth one) —
+// no binary name, argv marker or env sniffing. See docs/design/live-steer.md
+// for why a pid registry beats an env marker (env is inherited by every tool
+// subprocess and daemonized background job; a pid recorded at fork is not).
 //
-// procps (pkill/pgrep) isn't installed in the slim guest, so the /proc walk is
-// done in plain POSIX sh. exe/cmdline read as uid 1000 (same user as the
-// worker); environ needs root, which is what fcExec runs as (agent is PID 1).
+// `sess` NARROWS the kill to one conversation's worker — mandatory since a
+// group runs several turns at once (queue.go lanes). "" is the DEFAULT
+// session, not a wildcard; there is deliberately no "signal them all" mode.
 func interruptAgent(g, sess string) error { return signalAgent(g, sess, "INT") }
 
 // signalAgent is interruptAgent with the signal as a parameter — the
 // post-cancel abort loop in sendNow escalates to KILL when repeated SIGINTs
-// don't take a worker down (a claude wedged in a hung tool subprocess can sit
+// don't take a worker down (a worker wedged in a hung tool subprocess can sit
 // on SIGINT indefinitely). SIGKILL still yields a clean [[turn_end]]: the
-// entrypoint's run_turn writes it when the worker's pipeline exits, however
-// it exits. sig is a caller-supplied constant ("INT"/"KILL"), never user input.
+// guest writes it when the worker's pipeline exits, however it exits. sig is a
+// caller-supplied constant ("INT"/"KILL"), never user input.
 func signalAgent(g, sess, sig string) error {
 	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
-	// Skip our own pid ($$): this script body contains the worker pattern
-	// literals (in the grep below), so /proc/$$/cmdline matches and the loop
-	// would SIGINT itself. The real worker gets killed first (lower pid,
-	// iterated earlier), but the self-suicide makes the exec exit 130,
-	// surfacing in the TUI as `exit status 130` even though it succeeded.
-	script := `WANT='` + sessionMarkerName(sess) + `'
-hit=0
-for d in /proc/[0-9]*; do
-  p=${d##*/}
-  [ "$p" = 1 ] && continue
-  [ "$p" = "$$" ] && continue
-  { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
-    | grep -aqE '` + agentWorkerPattern + `' || continue
-  tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
-  kill -` + sig + ` "$p" 2>/dev/null && hit=1
-done
-[ "$hit" = 1 ] || echo no-agent-process >&2
-exit 0`
-	// Delivered via the guest agent's exec op. Runs as guest root (agent is
-	// PID 1), which can signal the uid-1000 worker just fine.
-	s, _, err := fcExec(g, script, 15*time.Second)
+	s, _, err := fcExec(g, signalAgentScript(workerRegistryRoot, sess, sig), 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
 	}
-	out := []byte(s)
-	if strings.Contains(string(out), "no-agent-process") {
+	if strings.Contains(s, "no-agent-process") {
 		return fmt.Errorf("no running agent process for session %q in group '%s'",
 			sessionMarkerName(sess), g)
 	}
 	return nil
+}
+
+// signalAgentScript builds the POSIX sh run in the guest (procps isn't
+// installed in the slim guest). root is the registry root — a parameter so
+// tests can run the exact script against a temp registry.
+//
+// Registry path (every current guest): signal each pid listed under
+// root/<hex(sess)>/. INT goes to the worker pid only (it owns the graceful
+// abort). KILL goes to the pid AND its process group: fc-agent starts every
+// worker with Setpgid, so pgid == pid and the group is exactly that worker's
+// tool subprocesses — the hung child that made INT fail in the first place.
+// Background jobs (cs-job) setsid into their own group and survive.
+//
+// Legacy path (root absent → guest image predates the registry): the old
+// /proc walk on legacyAgentWorkerPattern + KOTO_SESSION env. Skips $$ because
+// this script's own cmdline contains the pattern literals.
+func signalAgentScript(root, sess, sig string) string {
+	return `ROOT='` + root + `'
+WANT='` + sessionMarkerName(sess) + `'
+KEY='` + workerSessionKey(sess) + `'
+SIG='` + sig + `'
+hit=0
+if [ -d "$ROOT" ]; then
+  for f in "$ROOT/$KEY"/*; do
+    [ -f "$f" ] || continue
+    p=${f##*/}
+    case "$p" in ''|*[!0-9]*) continue;; esac
+    [ "$p" = 1 ] && continue
+    [ "$p" = "$$" ] && continue
+    [ -d "/proc/$p" ] || continue
+    kill -"$SIG" "$p" 2>/dev/null && hit=1
+    [ "$SIG" = KILL ] && kill -KILL -- "-$p" 2>/dev/null
+  done
+else
+  for d in /proc/[0-9]*; do
+    p=${d##*/}
+    [ "$p" = 1 ] && continue
+    [ "$p" = "$$" ] && continue
+    { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
+      | grep -aqE '` + legacyAgentWorkerPattern + `' || continue
+    tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
+    kill -"$SIG" "$p" 2>/dev/null && hit=1
+  done
+fi
+[ "$hit" = 1 ] || echo no-agent-process >&2
+exit 0`
 }
 
 // ---- send -----------------------------------------------------------------
