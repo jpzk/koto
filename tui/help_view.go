@@ -113,6 +113,10 @@ func helpSections() []helpSection {
 		{"MCP VIEW (alt+m)", []helpEntry{
 			{"up/down", "move the selection"},
 			{"g", "refresh the list"},
+			{"enter", "detail: whitelist, per-group grants, effective set"},
+			{"a", "add a connection (auth value from a 0600 file, or typed hidden)"},
+			{"t", "disable / enable (disabled = absent at the gateway, grants kept)"},
+			{"d", "delete (type the connection name to confirm)"},
 			{"", "auth shows set/unset only; the upstream shows as host only"},
 			{"", "non-admin client cert: read-only refusal (the daemon enforces it)"},
 			{"esc / alt+m", "close"},

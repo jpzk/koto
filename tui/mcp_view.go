@@ -34,6 +34,11 @@ type mcpState struct {
 	loadErr string
 	loading bool
 	denied  bool
+	note    string // last action outcome (no request data)
+	mode    mcpMode
+	add     *mcpAddForm
+	del     *mcpDelState
+	detail  *mcpDetail
 }
 
 type mcpCol int
@@ -149,6 +154,10 @@ func (m *Model) refreshMcpViewport() {
 		return
 	}
 	w, _ := m.mcpPaneSize()
+	if ml, ok := m.mcpModeLines(w); ok {
+		m.mcp.vp.SetContent(strings.Join(ml, "\n"))
+		return
+	}
 	set, tw := mcpCols(w)
 	lines := make([]string, 0, len(m.mcp.items))
 	for i, it := range m.mcp.items {
@@ -228,6 +237,9 @@ func (m Model) renderMcpSummary() string {
 		}
 	}
 	s := fmt.Sprintf("%d MCP connections · %d enabled", len(m.mcp.items), on)
+	if m.mcp.note != "" {
+		s += " · " + m.mcp.note
+	}
 	if m.mcp.loadErr != "" {
 		s += " · registry file rejected, showing last good: " + m.mcp.loadErr
 	}
@@ -235,7 +247,15 @@ func (m Model) renderMcpSummary() string {
 }
 
 func (m Model) renderMcpHint() string {
-	parts := []string{" mcp", gl("↑↓ select", "up/dn select"), "g refresh", "esc close"}
+	parts := []string{" mcp", gl("↑↓ select", "up/dn select"), "enter detail", "a add", "t enable/disable", "d delete", "g refresh", "esc close"}
+	switch m.mcp.mode {
+	case mcpModeAdd:
+		parts = []string{" mcp add", "tab/shift+tab field", "ctrl+t auth file/typed", "enter add", "esc cancel"}
+	case mcpModeDelete:
+		parts = []string{" mcp delete", "type the name", "enter delete", "esc cancel"}
+	case mcpModeDetail:
+		parts = []string{" mcp detail", "pgup/pgdn scroll", "esc back"}
+	}
 	return lipgloss.NewStyle().Foreground(cGray).MaxWidth(m.width).Render(strings.Join(parts, " · "))
 }
 
@@ -259,6 +279,9 @@ func (m Model) renderMcpView() string {
 		cells = append(cells, hdr.Render(padCells(c.label(), cw)))
 	}
 	header := pad.MaxWidth(w + 2).Render(cells[0] + strings.Join(cells[1:], " "))
+	if m.mcp.mode != mcpModeList {
+		header = ""
+	}
 	var body string
 	if m.mcp.ready {
 		body = pad.Render(m.mcp.vp.View())
@@ -301,11 +324,40 @@ func (m *Model) enterMcp() tea.Cmd {
 }
 
 func (m *Model) exitMcp() {
+	if m.mcp.add != nil {
+		m.mcp.add.wipe()
+	}
+	m.mcp.mode, m.mcp.add, m.mcp.del, m.mcp.detail = mcpModeList, nil, nil, nil
 	m.restoreChatFocus(m.mcp.pre)
 }
 
 // handleMcpKey routes keys while the MCP view is focused.
 func (m Model) handleMcpKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch m.mcp.mode {
+	case mcpModeAdd:
+		if m.mcp.add != nil {
+			return m.handleMcpAddKey(msg)
+		}
+	case mcpModeDelete:
+		if m.mcp.del != nil {
+			return m.handleMcpDelKey(msg)
+		}
+	case mcpModeDetail:
+		switch msg.String() {
+		case "esc":
+			m.mcp.mode, m.mcp.detail = mcpModeList, nil
+			m.refreshMcpViewport()
+		case "pgup", "up":
+			m.mcp.vp.HalfPageUp()
+		case "pgdown", "down":
+			m.mcp.vp.HalfPageDown()
+		}
+		return m, nil
+	}
+	m.mcp.mode = mcpModeList
+	if nm, cmd, ok := m.mcpActionKey(msg.String()); ok {
+		return nm, cmd
+	}
 	switch msg.String() {
 	case "esc":
 		m.exitMcp()
