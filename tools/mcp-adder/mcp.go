@@ -74,7 +74,8 @@ var tools = []tool{
 		}},
 }
 
-// maxExact is 2^53: beyond it float64 stops representing every integer, so
+// maxExact is 2^53: from it on float64 stops representing every integer
+// (2^53+1 parses AS 2^53), so the bound is exclusive; otherwise
 // "actually computed" results would silently round. Treat as overflow.
 const maxExact = 1 << 53
 
@@ -91,8 +92,8 @@ func arith(args map[string]json.RawMessage, f func(x, y float64) float64, key st
 		if err := json.Unmarshal(raw, &v[i]); err != nil {
 			return toolResult{Text: fmt.Sprintf("argument %s must be a JSON number", k), IsError: true}
 		}
-		if math.IsNaN(v[i]) || math.Abs(v[i]) > maxExact {
-			return toolResult{Text: fmt.Sprintf("argument %s out of range (|x| <= 2^53)", k), IsError: true}
+		if math.IsNaN(v[i]) || math.Abs(v[i]) >= maxExact {
+			return toolResult{Text: fmt.Sprintf("argument %s out of range (|x| < 2^53)", k), IsError: true}
 		}
 	}
 	for k := range args {
@@ -101,8 +102,8 @@ func arith(args map[string]json.RawMessage, f func(x, y float64) float64, key st
 		}
 	}
 	r := f(v[0], v[1])
-	if math.IsInf(r, 0) || math.IsNaN(r) || math.Abs(r) > maxExact {
-		return toolResult{Text: "overflow: result exceeds 2^53", IsError: true}
+	if math.IsInf(r, 0) || math.IsNaN(r) || math.Abs(r) >= maxExact {
+		return toolResult{Text: "overflow: result reaches 2^53", IsError: true}
 	}
 	txt := strconv.FormatFloat(r, 'f', -1, 64)
 	return toolResult{Text: txt, Structured: map[string]any{key: r},

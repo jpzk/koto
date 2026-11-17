@@ -4847,6 +4847,7 @@ type McpReq struct {
 	AuthName      string                 `protobuf:"bytes,10,opt,name=auth_name,json=authName,proto3" json:"auth_name,omitempty"`
 	AuthValue     string                 `protobuf:"bytes,11,opt,name=auth_value,json=authValue,proto3" json:"auth_value,omitempty"` // host-only secret; never echoed back
 	PerMinute     int32                  `protobuf:"varint,12,opt,name=per_minute,json=perMinute,proto3" json:"per_minute,omitempty"`
+	OauthJson     string                 `protobuf:"bytes,13,opt,name=oauth_json,json=oauthJson,proto3" json:"oauth_json,omitempty"` // host-only; may carry a client secret; never echoed back
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4963,6 +4964,13 @@ func (x *McpReq) GetPerMinute() int32 {
 		return x.PerMinute
 	}
 	return 0
+}
+
+func (x *McpReq) GetOauthJson() string {
+	if x != nil {
+		return x.OauthJson
+	}
+	return ""
 }
 
 type McpResp struct {
@@ -6030,7 +6038,7 @@ const file_koto_proto_rawDesc = "" +
 	"BudgetResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12/\n" +
-	"\x06budget\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x06budget\"\xa7\x02\n" +
+	"\x06budget\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x06budget\"\xc6\x02\n" +
 	"\x06McpReq\x12\x0e\n" +
 	"\x02op\x18\x01 \x01(\tR\x02op\x12\x12\n" +
 	"\x04conn\x18\x02 \x01(\tR\x04conn\x12\x14\n" +
@@ -6047,7 +6055,9 @@ const file_koto_proto_rawDesc = "" +
 	"\n" +
 	"auth_value\x18\v \x01(\tR\tauthValue\x12\x1d\n" +
 	"\n" +
-	"per_minute\x18\f \x01(\x05R\tperMinute\"\\\n" +
+	"per_minute\x18\f \x01(\x05R\tperMinute\x12\x1d\n" +
+	"\n" +
+	"oauth_json\x18\r \x01(\tR\toauthJson\"\\\n" +
 	"\aMcpResp\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12+\n" +

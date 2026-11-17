@@ -64,6 +64,9 @@ type Gateway struct {
 	Audit func(AuditEntry)
 	// Now is injectable for rate tests. Nil => time.Now.
 	Now func() time.Time
+	// Rotate persists a rotated OAuth refresh token (compare-and-swap on
+	// old). Nil => a rotating AS makes the OAuth connection fail closed.
+	Rotate func(conn, old, next string) error
 
 	mu       sync.Mutex
 	sessions map[string]*upstream // key: conn + config fingerprint
@@ -78,8 +81,10 @@ type window struct {
 
 type upstream struct {
 	mu   sync.Mutex
+	conn string
 	url  string
 	auth *mcpreg.AuthHeader
+	tc   *tokenCache // non-nil => OAuth connection
 	sid  string
 	init bool
 	next int64
@@ -288,6 +293,15 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 		args = json.RawMessage("{}")
 	}
 	res, err := g.call(ctx, eff.Conn, "tools/call", map[string]any{"name": p.Name, "arguments": args})
+	var se *scopeErr
+	if errors.As(err, &se) {
+		// koto allowed it, the upstream's AS scope did not: a TOOL error
+		// (isError result) so the model sees why, not a transport failure.
+		e.Reason = se.Error()
+		b, _ := json.Marshal(map[string]any{"isError": true,
+			"content": []map[string]string{{"type": "text", "text": se.Error()}}})
+		return b, nil
+	}
 	if err != nil {
 		e.Reason = err.Error()
 		return nil, &rpcErr{-32603, "upstream error"}
@@ -366,6 +380,11 @@ func (g *Gateway) session(conn string) (*upstream, string, error) {
 	if c.Auth != nil {
 		fmt.Fprintf(h, "%s\x00%s", c.Auth.Name, c.Auth.Value)
 	}
+	if o := c.OAuth; o != nil {
+		// Everything but the refresh token, which rotates under us.
+		fmt.Fprintf(h, "oauth\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
+			o.Grant, o.Resource, o.Issuer, o.TokenEndpoint, o.ClientID, o.ClientSecret, o.AuthMethod, o.Scope)
+	}
 	key := conn + "@" + hex.EncodeToString(h.Sum(nil))[:16]
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -379,7 +398,10 @@ func (g *Gateway) session(conn string) (*upstream, string, error) {
 			cp := *c.Auth
 			a = &cp
 		}
-		u = &upstream{url: c.URL, auth: a}
+		u = &upstream{conn: conn, url: c.URL, auth: a}
+		if c.OAuth != nil {
+			u.tc = &tokenCache{}
+		}
 		g.sessions[key] = u
 	}
 	return u, key, nil
@@ -461,7 +483,26 @@ func (g *Gateway) initUpstream(ctx context.Context, u *upstream) error {
 
 // post sends one JSON-RPC message (request if wantResp, else notification).
 // Errors never include the response body or request headers.
+// For an OAuth connection it attaches the cached bearer token and, on a 401,
+// re-mints once (expired/revoked token) before giving up.
 func (g *Gateway) post(ctx context.Context, u *upstream, method string, params any, wantResp bool) (json.RawMessage, int, error) {
+	if u.tc == nil {
+		return g.postOnce(ctx, u, "", method, params, wantResp)
+	}
+	for attempt := 0; ; attempt++ {
+		tok, err := g.bearer(ctx, u.conn, u.tc, attempt > 0)
+		if err != nil {
+			return nil, 0, fmt.Errorf("upstream oauth: %w", err)
+		}
+		res, st, err := g.postOnce(ctx, u, tok, method, params, wantResp)
+		if st == http.StatusUnauthorized && attempt == 0 {
+			continue
+		}
+		return res, st, err
+	}
+}
+
+func (g *Gateway) postOnce(ctx context.Context, u *upstream, bearer, method string, params any, wantResp bool) (json.RawMessage, int, error) {
 	msg := map[string]any{"jsonrpc": "2.0", "method": method}
 	var id int64
 	if params != nil {
@@ -486,6 +527,9 @@ func (g *Gateway) post(ctx context.Context, u *upstream, method string, params a
 	if u.auth != nil {
 		hr.Header.Set(u.auth.Name, u.auth.Value)
 	}
+	if bearer != "" {
+		hr.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	resp, err := g.client().Do(hr)
 	if err != nil {
 		return nil, 0, errors.New("upstream unreachable")
@@ -496,6 +540,11 @@ func (g *Gateway) post(ctx context.Context, u *upstream, method string, params a
 	}
 	if resp.StatusCode/100 != 2 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, maxRespBytes))
+		if resp.StatusCode == http.StatusForbidden {
+			if se := parseScopeErr(resp.Header.Get("WWW-Authenticate")); se != nil {
+				return nil, resp.StatusCode, se
+			}
+		}
 		return nil, resp.StatusCode, fmt.Errorf("upstream HTTP %d", resp.StatusCode)
 	}
 	if !wantResp {

@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +22,7 @@ import (
 const mcpUsage = `usage: koto ctl mcp ls
        koto ctl mcp show <conn>
        koto ctl mcp add <conn> --url <https://...> --tools a,b [--class read|write]
-                    [--rules <file.json>] [--auth-file <file>|-]
+                    [--rules <file.json>] [--auth-file <file>|- | --oauth <grant>]
        koto ctl mcp rm <conn>
        koto ctl mcp disable <conn>              treat as absent; keeps grants
        koto ctl mcp enable  <conn>              restore it as it was
@@ -35,6 +36,13 @@ const mcpUsage = `usage: koto ctl mcp ls
   effective = connection ceiling ∩ group grant; a grant never widens it.
   --rules: {"<tool>":{"args":{"<arg>":{"type":"string","maxLength":64}}}}
   --auth-file: one line "Header-Name: value"; the value is never shown.
+  --oauth client_credentials|authorization_code [--oauth-scope "a b"]
+           [--oauth-client-file <file>|-]   (instead of --auth-file)
+      the daemon discovers the AS from the server's 401 (RFC 9728/8414),
+      registers a client (RFC 7591) unless --oauth-client-file holds
+      {"client_id","client_secret"}, runs the grant with resource=<url>
+      and stores client secret / refresh token 0600 on the host only.
+      authorization_code is headless (AS must auto-approve) for now.
   admin-only: the daemon refuses any other role.
 `
 
@@ -44,6 +52,8 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 	var pos []string
 	req := &pb.McpReq{}
 	var rulesFile, authFile string
+	var oauthGrant, oauthScope, oauthClientFile string
+	var oauthScopeSet bool
 	needVal := func(i int, flag string) (string, error) {
 		if i+1 >= len(args) {
 			return "", fmt.Errorf("%s needs a value", flag)
@@ -83,6 +93,12 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 			rulesFile = val
 		case "--auth-file":
 			authFile = val
+		case "--oauth":
+			oauthGrant = val
+		case "--oauth-scope":
+			oauthScope, oauthScopeSet = val, true
+		case "--oauth-client-file":
+			oauthClientFile = val
 		case "--args":
 			req.RuleJson = val
 		default:
@@ -131,8 +147,15 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 		}
 		*slots[i] = v
 	}
-	if req.Op != "add" && (req.Url != "" || len(req.Tools) > 0 || rulesFile != "" || authFile != "" || req.Cls != "") {
-		return nil, fmt.Errorf("--url/--tools/--class/--rules/--auth-file only apply to mcp add")
+	if req.Op != "add" && (req.Url != "" || len(req.Tools) > 0 || rulesFile != "" || authFile != "" || req.Cls != "" ||
+		oauthGrant != "" || oauthScopeSet || oauthClientFile != "") {
+		return nil, fmt.Errorf("--url/--tools/--class/--rules/--auth-file/--oauth* only apply to mcp add")
+	}
+	if oauthGrant == "" && (oauthScopeSet || oauthClientFile != "") {
+		return nil, errors.New("--oauth-scope/--oauth-client-file need --oauth <grant>")
+	}
+	if oauthGrant != "" && authFile != "" {
+		return nil, errors.New("--oauth and --auth-file are mutually exclusive")
 	}
 	if req.Op != "grant" && req.RuleJson != "" {
 		return nil, errors.New("--args only applies to mcp grant")
@@ -160,6 +183,34 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 				return nil, errors.New(`--auth-file must hold one line "Header-Name: value"`)
 			}
 			req.AuthName, req.AuthValue = name, value
+		}
+		if oauthGrant != "" {
+			switch oauthGrant {
+			case "client_credentials", "authorization_code":
+			default:
+				return nil, errors.New("--oauth must be client_credentials or authorization_code")
+			}
+			o := map[string]string{"grant": oauthGrant}
+			if oauthScope != "" {
+				o["scope"] = oauthScope
+			}
+			if oauthClientFile != "" {
+				// pre-registered client: {"client_id":..,"client_secret":..}
+				b, err := readFile(oauthClientFile)
+				if err != nil {
+					return nil, fmt.Errorf("--oauth-client-file: %v", err)
+				}
+				var c struct {
+					ClientID     string `json:"client_id"`
+					ClientSecret string `json:"client_secret"`
+				}
+				if json.Unmarshal(b, &c) != nil || c.ClientID == "" {
+					return nil, errors.New(`--oauth-client-file must hold {"client_id":"..","client_secret":".."}`)
+				}
+				o["client_id"], o["client_secret"] = c.ClientID, c.ClientSecret
+			}
+			b, _ := json.Marshal(o)
+			req.OauthJson = string(b)
 		}
 	}
 	return req, nil

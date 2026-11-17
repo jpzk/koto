@@ -16,14 +16,18 @@ package main
 //   - a group is whitelisted only if it is a registered koto group.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"koto/mcpgw"
 	"koto/mcpreg"
 )
 
@@ -62,7 +66,47 @@ type mcpAdminReq struct {
 	Tools                             []string
 	RulesJSON, RuleJSON               string
 	AuthName, AuthValue               string
+	OAuthJSON                         string // host-only; may carry a client secret
 	PerMinute                         int
+}
+
+// mcpOAuthOnboard is swappable in tests.
+var mcpOAuthOnboard = mcpgw.Onboard
+
+// mcpOnboard decodes the --oauth request (strict JSON) and runs discovery,
+// DCR and the first grant from the daemon (host) side. The resulting
+// secrets go straight into the 0600 registry; errors never echo them.
+func mcpOnboard(serverURL, js string) (*mcpreg.OAuth, error) {
+	if err := mcpreg.ValidateURL(serverURL); err != nil {
+		return nil, err
+	}
+	if err := mcpreg.CheckNoDupKeys([]byte(js)); err != nil {
+		return nil, err
+	}
+	var q struct {
+		Grant        string `json:"grant"`
+		Scope        string `json:"scope"`
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	d := json.NewDecoder(strings.NewReader(js))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&q); err != nil {
+		return nil, errors.New("oauth: bad request JSON (grant, scope, client_id, client_secret, redirect_uri)")
+	}
+	if q.Grant == "" {
+		q.Grant = mcpreg.GrantClientCredentials
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	hc := &http.Client{Timeout: 30 * time.Second}
+	o, err := mcpOAuthOnboard(ctx, hc, serverURL, mcpgw.OnboardReq{Grant: q.Grant, Scope: q.Scope,
+		ClientID: q.ClientID, ClientSecret: q.ClientSecret, RedirectURI: q.RedirectURI})
+	if err != nil {
+		return nil, fmt.Errorf("oauth onboarding: %v", err)
+	}
+	return o, nil
 }
 
 // mcpParseRule decodes one ToolRule (the args subset); "" => nil rule.
@@ -107,6 +151,16 @@ func mcpAdmin(r mcpAdminReq) (map[string]any, error) {
 		}
 		if r.AuthName != "" {
 			c.Auth = &mcpreg.AuthHeader{Name: r.AuthName, Value: r.AuthValue}
+		}
+		if strings.TrimSpace(r.OAuthJSON) != "" {
+			if c.Auth != nil {
+				return nil, errors.New("--oauth and --auth-file are mutually exclusive")
+			}
+			o, err := mcpOnboard(c.URL, r.OAuthJSON)
+			if err != nil {
+				return nil, err
+			}
+			c.OAuth = o
 		}
 		rules := map[string]*mcpreg.ToolRule{}
 		if strings.TrimSpace(r.RulesJSON) != "" {
@@ -212,7 +266,7 @@ func mcpViewList(st *mcpreg.Store) map[string]any {
 		sort.Strings(tools)
 		conns = append(conns, map[string]any{
 			"name": n, "url": c.URL, "class": string(c.Class),
-			"auth": c.Auth != nil, "tools": tools, "groups": groups,
+			"auth": c.Auth != nil, "oauth": c.OAuth != nil, "tools": tools, "groups": groups,
 			"enabled": !c.Disabled,
 		})
 	}
@@ -239,6 +293,12 @@ func mcpViewConn(st *mcpreg.Store, name string) (map[string]any, error) {
 	delete(v, "auth")
 	if c.Auth != nil {
 		v["auth"] = map[string]any{"name": c.Auth.Name}
+	}
+	// Same for oauth: whitelist the non-secret fields, never a secret key.
+	delete(v, "oauth")
+	if o := c.OAuth; o != nil {
+		v["oauth"] = map[string]any{"grant": o.Grant, "issuer": o.Issuer, "resource": o.Resource,
+			"client_id": o.ClientID, "scope": o.Scope, "token_endpoint": o.TokenEndpoint}
 	}
 	v["name"] = name
 	v["enabled"] = !c.Disabled

@@ -922,6 +922,7 @@ message McpReq {
   string auth_name     = 10;
   string auth_value    = 11; // host-only secret; never echoed back
   int32  per_minute    = 12;
+  string oauth_json    = 13; // host-only; may carry a client secret; never echoed back
 }
 message McpResp {
   bool ok = 1; string error = 2;
