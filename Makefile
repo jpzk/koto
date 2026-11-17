@@ -308,7 +308,7 @@ dist: $(ARTIFACTS)
 	@# Clear THIS arch's assets from earlier runs first: SHA256SUMS hashes every
 	@# *_<arch>.zst in the directory, so a leftover would be listed and signed.
 	@# Assets are <name>_<version>_<arch>.zst — the separator is '_', not '-'.
-	@rm -f $(DIST_DIR)/*_$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
+	@rm -f $(DIST_DIR)/*_$(DIST_ARCH).zst $(DIST_DIR)/*_$(DIST_ARCH).cdx.json $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 	@echo "==> packaging koto $(DIST_VERSION) for $(DIST_ARCH)"
 	@for a in $(ARTIFACTS); do \
 	  v=$(call assetver,$$a); \
@@ -341,9 +341,21 @@ dist: $(ARTIFACTS)
 	@# koto update refuse a SHA256SUMS whose koto-version is not the version
 	@# they were asked for, so an older signed set cannot be replayed under a
 	@# newer tag (or by a mirror).
+	@# CycloneDX SBOMs for koto, koto-tui and fc-agent (see the sbom target).
+	@$(MAKE) --no-print-directory sbom
+	@# The SBOMs go into the SIGNED SHA256SUMS as "# sbom: <sha256>  <file>"
+	@# lines, not as plain entries: the installer EMBEDDED in every koto already
+	@# out there (koto update) takes asset names from the non-comment lines and
+	@# refuses anything that is not *_<arch>.zst, so a plain entry would break
+	@# updating from every existing release. Comment lines are skipped by that
+	@# installer and by `sha256sum -c`, and are still covered by SHA256SUMS.asc.
+	@# Check the SBOMs:  sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c -
 	@( cd $(DIST_DIR) && { echo "# koto-version: $$(echo '$(DIST_VERSION)' | sed 's/^v//')"; \
-	    sha256sum *_$(DIST_ARCH).zst; } > SHA256SUMS )
-	@echo "    SHA256SUMS over the uploaded assets"
+	    sha256sum *_$(DIST_ARCH).zst; \
+	    sha256sum *_$(DIST_ARCH).cdx.json | sed 's/^/# sbom: /'; } > SHA256SUMS )
+	@test "$$(grep -c '^# sbom: ' $(DIST_DIR)/SHA256SUMS)" = 3 || { \
+	  echo "SHA256SUMS should list 3 SBOMs (koto, koto-tui, fc-agent)"; exit 1; }
+	@echo "    SHA256SUMS over the uploaded assets (+ 3 SBOMs as signed '# sbom:' lines)"
 	@# Signing is SEPARATE and may happen elsewhere. The release key should not
 	@# have to live on a build host, so dist signs only if the secret key
 	@# happens to be here and otherwise tells you what to sign and where to put
@@ -410,13 +422,19 @@ sbom:
 # nothing that happens to be sitting in it is published by accident.
 GH_REPO        ?= jpzk/koto
 RELEASE_TARGET ?= release/$(DIST_VERSION)
-DIST_ASSETS     = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)
+# SBOMs ride along: uploaded while the release is a DRAFT, because a published
+# release is immutable and there is no later upload.
+DIST_SBOMS      = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).cdx.json)
+DIST_ASSETS     = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst) $(DIST_SBOMS)
 GH_RELEASE      = gh release --repo $(GH_REPO)
 
 release-draft:
 	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
 	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - run 'make dist' first"; exit 1; }
-	@test -n "$(DIST_ASSETS)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
+	@test -n "$(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
+	@test "$(words $(DIST_SBOMS))" = 3 || { echo "expected 3 *_$(DIST_ARCH).cdx.json SBOMs in $(DIST_DIR) - run 'make dist' first"; exit 1; }
+	@( cd $(DIST_DIR) && sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c - >/dev/null ) || { \
+	  echo "the SBOMs in $(DIST_DIR) do not match SHA256SUMS - re-run 'make dist'"; exit 1; }
 	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
 	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
 	  echo "describes the bytes you are about to publish"; exit 1; }
