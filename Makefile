@@ -109,7 +109,7 @@ endif
 # exception to the 6-week lag (CLAUDE.md, Conventions): a pin that closes a
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
-# go-version in .github/workflows/govulncheck.yml.
+# go-version in .github/workflows/supplychain.yml.
 GO_IMAGE ?= docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.

@@ -1,0 +1,209 @@
+# supplychain — Go supply-chain checks on every push / PR to the long-lived
+# branches, plus a CycloneDX SBOM sanity build on release branches.
+#
+# This file REPLACES govulncheck.yml (which ran only on release pushes): the
+# govulncheck logic and its rationale live here, once. What runs, per module
+# (daemon fcguest tui protocol), each with GOWORK=off:
+#
+#   env          the Go supply-chain env is the default one: GOFLAGS has no
+#                -insecure / -mod=mod, GONOSUMDB / GONOSUMCHECK / GOINSECURE /
+#                GOPRIVATE / GONOPROXY are unset, GOPROXY is the public proxy
+#                and GOSUMDB is sum.golang.org. A runner image or a future
+#                edit that weakens checksum verification fails here first.
+#   verify       go mod verify: the module cache matches go.sum.
+#   tidy         go mod tidy -diff: go.mod / go.sum have not drifted from the
+#                imports (a dependency added by hand, or one left behind).
+#   govulncheck  reachable vulnerabilities (call graph) = failure.
+#   dep-age      every module version NEW or CHANGED vs the base must be >= 6
+#                weeks old on proxy.golang.org (CLAUDE.md "Conventions").
+#                Exceptions only via .github/supplychain/dep-age-allow.txt,
+#                with a reason. scripts/supplychain/dep-age.sh.
+#   osv-scanner  full inventory (not just reachable code) against OSV, for the
+#                four go.mod files AND Firecracker's Cargo.lock at the
+#                FC_COMMIT that build-firecracker.sh builds — the Rust
+#                component ships in the release and has no other scanner.
+#                Findings fail; exceptions only via osv-scanner.toml
+#                [[IgnoredVulns]] with a reason and an ignoreUntil expiry.
+#                govulncheck = reachability, osv-scanner = inventory.
+#   sbom         (release / release/** pushes only) CycloneDX SBOMs for the
+#                shipped Go binaries, uploaded as a workflow artifact — a check
+#                that `make sbom` works, NOT the published copy: release SBOMs
+#                are attached to the DRAFT release by `make release-draft`
+#                (releases are immutable once published).
+#
+# Go version: pinned to the exact version the release binaries are BUILT with
+# (the Makefile's GO_IMAGE digest — `podman run --rm $GO_IMAGE go version`), so
+# standard-library findings describe the shipped binaries, not whatever Go the
+# runner happens to have. Bump the two together.
+#
+# Every third-party piece is pinned by SHA / version and is >= 6 weeks old at
+# the time of pinning (2026-11-17, cutoff 2026-10-06), like every other
+# dependency here. `go install pkg@vX.Y.Z` is verified by sum.golang.org.
+#   actions/checkout                 v7.0.0   2026-06-18
+#   actions/setup-go                 v6.5.0   2026-06-24
+#   actions/upload-artifact          v7.0.1   2026-04-10
+#   golang.org/x/vuln (govulncheck)  v1.6.0   2026-07-09
+#   google/osv-scanner/v2            v2.6.0   2026-09-14
+#   CycloneDX/cyclonedx-gomod        v1.12.0  2026-08-21
+name: supplychain
+
+on:
+  push:
+    # `release` is the original long-lived branch; `release/<version>` is what
+    # the release skill cuts per release (.claude/skills/release).
+    branches: [main, develop, release, "release/**"]
+  pull_request:
+    branches: [main, develop, release, "release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # One module at a time, each with its own go.mod — and GOWORK=off is what
+  # makes that true (audit 2026-09-11 L26). go.work ties all four modules
+  # together, and a go command run from a module BENEATH it uses workspace
+  # mode, where minimal version selection runs across the union. The
+  # manifests genuinely diverge: daemon requires x/text v0.41.0 while
+  # fcguest, protocol and tui require v0.40.0, so in workspace mode all four
+  # were analysed at v0.41.0 while three of them SHIP v0.40.0. Measured:
+  # `go list -m golang.org/x/text` in fcguest gives v0.41.0 under the
+  # workspace and v0.40.0 with GOWORK=off. A vulnerability fixed in v0.41.0
+  # but reachable in v0.40.0 would have passed this gate and shipped.
+  GOWORK: "off"
+  # CGO_ENABLED=0 for the same reason: the release binaries are built with
+  # it (Makefile), and it changes which files build — the cgo-guarded
+  # variants of net and os/user among them — so a scan with cgo enabled is
+  # analysing a call graph that is not the one being released (audit
+  # 2026-09-11 L123).
+  CGO_ENABLED: "0"
+  # Never let a go command rewrite go.mod / go.sum behind the checks' back.
+  GOFLAGS: "-mod=readonly"
+  MODULES: "daemon fcguest tui protocol"
+
+jobs:
+  go-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+        with:
+          go-version: "1.26.10" # = Makefile GO_IMAGE (golang:1.26.10-alpine digest)
+          cache-dependency-path: |
+            daemon/go.sum
+            fcguest/go.sum
+            tui/go.sum
+            protocol/go.sum
+      - name: assert default Go supply-chain env
+        run: scripts/supplychain/go-env-check.sh
+      - name: go mod verify every module
+        run: |
+          rc=0
+          for m in $MODULES; do
+            echo "::group::go mod verify $m"
+            (cd "$m" && go mod verify) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+      - name: go mod tidy -diff every module
+        run: |
+          rc=0
+          for m in $MODULES; do
+            echo "::group::go mod tidy -diff $m"
+            (cd "$m" && go mod tidy -diff) || { echo "::error::$m: go.mod/go.sum not tidy"; rc=1; }
+            echo "::endgroup::"
+          done
+          exit $rc
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      # The loop fails the job on a module with a reachable finding
+      # (govulncheck exits 3) but still runs the rest so the log shows every
+      # module's state.
+      - name: govulncheck every module
+        run: |
+          rc=0
+          for m in $MODULES; do
+            echo "::group::govulncheck $m"
+            (cd "$m" && go list -m golang.org/x/text 2>/dev/null || true)
+            (cd "$m" && govulncheck ./...) || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+
+  dep-age:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          fetch-depth: 0 # the gate diffs go.mod against the base commit
+          persist-credentials: false
+      # Base: the PR's target branch; for a push, the commit the branch was at
+      # before it; for a new branch (before = 0000…) or a manual run there is
+      # no meaningful base, so every version in every go.mod is checked.
+      - name: dependency-age gate (>= 6 weeks)
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            pull_request) base="origin/$BASE_REF" ;;
+            push)
+              if [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] \
+                 && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                base="$BEFORE"
+              else
+                base=--all
+              fi ;;
+            *) base=--all ;;
+          esac
+          echo "base: $base"
+          scripts/supplychain/dep-age.sh "$base"
+
+  osv-scanner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+        with:
+          go-version: "1.26.10" # = Makefile GO_IMAGE
+          cache: false
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.6.0
+      - name: osv-scanner (go.mod x4 + Firecracker Cargo.lock)
+        run: scripts/supplychain/osv.sh "$RUNNER_TEMP/osv"
+
+  sbom:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+        with:
+          go-version: "1.26.10" # = Makefile GO_IMAGE
+          cache-dependency-path: |
+            daemon/go.sum
+            tui/go.sum
+            fcguest/go.sum
+            protocol/go.sum
+      - run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.6.0
+      - name: CycloneDX SBOMs (koto, koto-tui, fc-agent)
+        run: scripts/supplychain/sbom.sh "$RUNNER_TEMP/sbom"
+      - name: osv-scanner on the SBOMs
+        run: scripts/supplychain/osv.sh --sbom "$RUNNER_TEMP/sbom"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 2026-04-10
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom/*.cdx.json
+          if-no-files-found: error
