@@ -35,7 +35,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // steerLaneMax bounds one session's pending steers. A steer is an operator
@@ -106,16 +108,17 @@ func steerSession(g, session, msg string) (steerResult, error) {
 		return steerResult{}, fmt.Errorf("session '%s' already has %d steers pending", sessionMarkerName(session), steerLaneMax)
 	}
 	ensureQueueLocked(g, session)
+	// Sampled in the SAME critical section as the insert (file comment).
+	var turn chan struct{}
+	if inFlightSess[k] {
+		turn = turnCancels[k]
+	}
+	job.steerInterrupted = turn != nil
 	steerLanes[k] = append(steerLanes[k], job)
 	groupQueuedBytes[g] += int64(len(msg))
 	select {
 	case steerWake[k] <- struct{}{}:
 	default: // a wake is already pending; the worker drains the whole lane
-	}
-	// Sampled in the SAME critical section as the insert (file comment).
-	var turn chan struct{}
-	if inFlightSess[k] {
-		turn = turnCancels[k]
 	}
 	queuesMu.Unlock()
 
@@ -163,4 +166,93 @@ func popSteerLocked(g, session string) (sendJob, bool) {
 	}
 	releaseQueuedBytesLocked(g, len(job.msg))
 	return job, true
+}
+
+// ---- framing ----------------------------------------------------------------
+
+// The steer frames. A steer that cut a turn short tells the resumed agent so:
+// otherwise it sees a new user message with no hint that its last answer was
+// abandoned mid-way and may "finish" work the operator just redirected. The
+// idle frame only marks the message as an operator steer. These two strings
+// are the ONE place steer framing lives (brief item 3).
+const (
+	steerFrameInterrupted = "[operator steering — your previous turn was interrupted by the operator before it finished; re-check its state, then follow this]\n\n"
+	steerFrameIdle        = "[operator steering]\n\n"
+)
+
+// frameSteer wraps a steer message for delivery. interrupted is the in-flight
+// sample taken with the insert: a turn was running when the steer arrived
+// (it was cancelled, or retired on its own in the same instant — either way
+// its output is not what the operator wants next).
+func frameSteer(msg string, interrupted bool) string {
+	if interrupted {
+		return steerFrameInterrupted + msg
+	}
+	return steerFrameIdle + msg
+}
+
+// ---- resume probe -----------------------------------------------------------
+
+// steerResumeProbeFn, when non-nil, replaces probeSessionResumable for tests.
+var steerResumeProbeFn func(g, session string) (bool, error)
+
+// sessionResumeScript prints "resumable" when the guest holds any harness's
+// conversation pin for the session — the same files clearSessionContext
+// deletes: claude sessions/<n>.id, codex <n>.codex.id, pi <n>.pi.id, venice
+// history. A pin is the ONLY thing that makes the next turn continue the
+// conversation; each harness writes it from its first stream event.
+func sessionResumeScript(session string) string {
+	return sessionResumeScriptAt("/workspace/.cs", session)
+}
+
+// sessionResumeScriptAt is sessionResumeScript against a state root (tests).
+func sessionResumeScriptAt(root, session string) string {
+	name := sessionMarkerName(session)
+	vh := root + "/venice-history-" + name + ".json"
+	if session == "" {
+		vh = root + "/venice-history.json"
+	}
+	s := root + "/sessions/" + name
+	return `for f in '` + s + `.id' '` + s + `.codex.id' '` + s + `.pi.id' '` + vh + `'; do
+  if [ -s "$f" ]; then echo resumable; exit 0; fi
+done
+echo fresh`
+}
+
+// probeSessionResumable asks the guest whether g/session has a resume pin.
+func probeSessionResumable(g, session string) (bool, error) {
+	out, rc, err := fcExec(g, sessionResumeScript(session), 10*time.Second)
+	if err != nil {
+		return false, err
+	}
+	if rc != 0 {
+		return false, fmt.Errorf("probe rc=%d", rc)
+	}
+	return strings.TrimSpace(out) == "resumable", nil
+}
+
+// checkSteerResume runs just before a steer that interrupted a turn is
+// delivered (the interrupted turn has retired, so its worker is gone). If the
+// session has no resume pin, the kill landed before the harness wrote one —
+// typically the session's very first turn — and the steer will start a FRESH
+// conversation. That is not silently papered over: a warn log line and a
+// steer_context_lost event name the session (brief item 4). The steer still
+// runs; the operator's message carries the intent either way.
+func checkSteerResume(g, session string) {
+	fn := steerResumeProbeFn
+	if fn == nil {
+		fn = probeSessionResumable
+	}
+	ok, err := fn(g, session)
+	name := sessionMarkerName(session)
+	if err != nil {
+		emitLogfG("send", g, "warn", "steer group=%s session=%s: resume probe failed: %v (cannot tell whether context survives)", g, name, err)
+		return
+	}
+	if ok {
+		return
+	}
+	emitLogfG("send", g, "warn", "steer group=%s session=%s: interrupted turn left no resume id; the steer starts a fresh conversation (prior turn context lost)", g, name)
+	emit(g, Event{Event: "steer_context_lost", Session: session,
+		Text: "interrupted before the harness recorded a session id; steer runs in a fresh conversation"})
 }

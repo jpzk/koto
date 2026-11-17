@@ -14,8 +14,21 @@ import (
 // what sendNow's abort loop does to a delivered turn after cancelTurn.
 type steerRecorder struct {
 	mu      sync.Mutex
-	order   []string
+	order   []string // messages with the steer frame stripped
+	framed  []string // messages exactly as delivered
 	started chan string
+}
+
+// unframeSteer strips the steer frame so order assertions read the operator's
+// text; the frame itself is pinned by TestSteerFraming*.
+func unframeSteer(msg string) string {
+	if s, ok := strings.CutPrefix(msg, steerFrameInterrupted); ok {
+		return s
+	}
+	if s, ok := strings.CutPrefix(msg, steerFrameIdle); ok {
+		return s
+	}
+	return msg
 }
 
 func newSteerRecorder() *steerRecorder {
@@ -23,8 +36,11 @@ func newSteerRecorder() *steerRecorder {
 }
 
 func (r *steerRecorder) turn(g, session, msg string) error {
+	raw := msg
+	msg = unframeSteer(msg)
 	r.mu.Lock()
 	r.order = append(r.order, msg)
+	r.framed = append(r.framed, raw)
 	r.mu.Unlock()
 	r.started <- msg
 	if strings.HasPrefix(msg, "block") {
@@ -49,6 +65,11 @@ func withSteerInterrupt(t *testing.T, fn func(g, sess string) error) {
 	prev := steerInterruptFn
 	steerInterruptFn = fn
 	t.Cleanup(func() { steerInterruptFn = prev })
+	// The resume probe execs into a live VM; default it to "resumable".
+	if steerResumeProbeFn == nil {
+		steerResumeProbeFn = func(string, string) (bool, error) { return true, nil }
+		t.Cleanup(func() { steerResumeProbeFn = nil })
+	}
 }
 
 func waitStarted(t *testing.T, r *steerRecorder, want string) {
@@ -197,9 +218,9 @@ func TestSteerNoRaceWithQueuedOrCron(t *testing.T) {
 		cancelled := map[string]bool{}
 		stub := func(gg, s, msg string) error {
 			mu.Lock()
-			order = append(order, msg)
+			order = append(order, unframeSteer(msg))
 			mu.Unlock()
-			if msg == "A" {
+			if unframeSteer(msg) == "A" {
 				// A short turn that retires while the steer races in.
 				select {
 				case <-turnCancelCh(gg, s):

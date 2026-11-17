@@ -79,7 +79,12 @@ type sendJob struct {
 	// lives in the session's steer lane, not the FIFO channel, and is never
 	// itself displaced by another steer once it has started.
 	steer bool
-	done  chan error // buffered(1); worker delivers the turn result, never blocks
+	// steerInterrupted: a turn of the session was in flight when this steer
+	// was inserted (sampled under queuesMu together with the insert). The
+	// steer turn is then framed as a resumption and the session's resume
+	// state is probed first (steer.go checkSteerResume).
+	steerInterrupted bool
+	done             chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
 // ---- slot pool --------------------------------------------------------------
@@ -887,6 +892,11 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	queuesMu.Unlock()
 	if job.compact != nil {
 		job.done <- runCompactJob(g, job.session, job.compact)
+	} else if job.steer {
+		if job.steerInterrupted {
+			checkSteerResume(g, job.session)
+		}
+		job.done <- runTurn(g, job.session, frameSteer(job.msg, job.steerInterrupted))
 	} else {
 		job.done <- runTurn(g, job.session, job.msg)
 	}
