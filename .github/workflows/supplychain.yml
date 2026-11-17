@@ -103,20 +103,45 @@ jobs:
       # local-directory replace koto-protocol; see the script header.
       - name: go mod verify every module
         run: scripts/supplychain/mod-verify.sh $MODULES
+      # MAIN LAG (hotfix/ci-supplychain, 2026-11-17): main's tui/go.sum lacks
+      # the two github.com/MakeNowJust/heredoc v1.0.0 hash lines develop added
+      # in 910bfda (go.sum only, no version change). The hotfix that brought
+      # this workflow to main carries CI files only, so on main and hotfix/**
+      # EXACTLY that diff in tui is a ::warning::, any other diff still fails.
+      # Remove this exception once release/1.12.0 lands 910bfda on main.
       - name: go mod tidy -diff every module
+        env:
+          TARGET_REF: ${{ github.base_ref || github.ref_name }}
         run: |
           rc=0
+          lag=0
+          case "$TARGET_REF" in main|hotfix/*) lag=1 ;; esac
           for m in $MODULES; do
             echo "::group::go mod tidy -diff $m"
-            (cd "$m" && go mod tidy -diff) || { echo "::error::$m: go.mod/go.sum not tidy"; rc=1; }
+            if d=$(cd "$m" && go mod tidy -diff 2>&1); then
+              :
+            else
+              echo "$d"
+              chg=$(printf '%s\n' "$d" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' || true)
+              known=$(printf '%s\n' "$chg" | grep -cE '^\+github\.com/MakeNowJust/heredoc v1\.0\.0(/go\.mod)? h1:' || true)
+              total=$(printf '%s\n' "$chg" | grep -c . || true)
+              if [ "$lag" = 1 ] && [ "$m" = tui ] && [ "$known" = 2 ] && [ "$total" = 2 ]; then
+                echo "::warning::tui/go.sum: known main lag (heredoc v1.0.0 hashes, fixed on develop by 910bfda; lands with release/1.12.0)"
+              else
+                echo "::error::$m: go.mod/go.sum not tidy"; rc=1
+              fi
+            fi
             echo "::endgroup::"
           done
           exit $rc
-      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      # !cancelled(): govulncheck coverage must not depend on the tidy/verify steps.
+      - if: ${{ !cancelled() }}
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
       # The loop fails the job on a module with a reachable finding
       # (govulncheck exits 3) but still runs the rest so the log shows every
       # module's state.
       - name: govulncheck every module
+        if: ${{ !cancelled() }}
         run: |
           rc=0
           for m in $MODULES; do

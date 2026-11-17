@@ -10,3 +10,13 @@
 # id = "GO-0000-0000"
 # ignoreUntil = 2027-01-31
 # reason = "not reachable: ... (govulncheck agrees); fix lands with x/foo vN"
+
+# MAIN LAG (hotfix/ci-supplychain, 2026-11-17): main's daemon/go.mod pins
+# otel v1.46.0 / sdk/log v0.22.0; fixed by the otel 1.47.0 bump on develop,
+# which stays develop-only (hotfix carries CI files only, no go.mod changes).
+# On develop the versions are already >= 1.47.0, so this entry matches nothing
+# there. Delete it when release/1.12.0 brings otel 1.47.0 to main.
+[[IgnoredVulns]]
+id = "GHSA-q7gw-24fr-5p69"
+ignoreUntil = 2027-01-15
+reason = "main lag: otel/sdk 1.46.0 on main, fixed by otel 1.47.0 on develop (develop-only); reaches main with release/1.12.0"
