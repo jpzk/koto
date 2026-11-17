@@ -3130,6 +3130,13 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.mcpConsumeDetail(msg)
 		return m, nil
 
+	case gmLoadMsg:
+		m.consumeGroupMcpLoad(msg)
+		return m, nil
+
+	case gmApplyMsg:
+		return m, m.mcpConsumeGroupApply(msg)
+
 	case schedListMsg:
 		if m.focus == focusSched {
 			// The schedules view consumes list responses into its table;
