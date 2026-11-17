@@ -263,3 +263,76 @@ func TestMcpCliParse(t *testing.T) {
 		}
 	}
 }
+
+// enable/disable through the admin op: disabled == absent in the harness
+// config and the effective view, grants kept, re-enable restores; the view
+// reports enabled, never the secret.
+func TestMcpAdminEnableDisable(t *testing.T) {
+	mcpHarness(t)
+	t.Setenv("KOTO_MCP_GATEWAY", "1")
+	mcpOp(t, mcpAdminReq{Op: "add", Conn: "docs", URL: "https://mcp.example.com/mcp",
+		Tools: []string{"search", "fetch"}, AuthName: "Authorization", AuthValue: mcpTestSecret})
+	mcpOp(t, mcpAdminReq{Op: "allow", Conn: "docs", Group: "tg"})
+	mcpOp(t, mcpAdminReq{Op: "grant", Conn: "docs", Group: "tg", Tool: "search"})
+	if s := mcpServersFor("tg"); len(s) != 1 {
+		t.Fatalf("enabled servers = %v", s)
+	}
+	v := mcpOp(t, mcpAdminReq{Op: "disable", Conn: "docs"})
+	if v["enabled"] != false || strings.Contains(mcpJSON(v), mcpTestSecret) {
+		t.Fatalf("disable view: %s", mcpJSON(v))
+	}
+	if s := mcpServersFor("tg"); len(s) != 0 {
+		t.Fatalf("disabled conn rendered into harness config: %v", s)
+	}
+	ls := mcpJSON(mcpOp(t, mcpAdminReq{Op: "ls"}))
+	if !strings.Contains(ls, `"enabled":false`) || strings.Contains(ls, mcpTestSecret) {
+		t.Fatalf("ls: %s", ls)
+	}
+	eff := mcpJSON(mcpOp(t, mcpAdminReq{Op: "effective", Group: "tg"}))
+	if !strings.Contains(eff, `"tools":[]`) || !strings.Contains(eff, `"tools_when_enabled":["search"]`) {
+		t.Fatalf("effective while disabled: %s", eff)
+	}
+	reg := mustStore(t).Current()
+	if e, err := reg.Effective("docs", "tg"); !errors.Is(err, mcpreg.ErrNotWhitelisted) || len(e.Tools) != 0 {
+		t.Fatalf("gateway policy while disabled: %v %v", err, e.Names())
+	}
+	if g := reg.Conns["docs"].Groups["tg"]; g == nil || len(g.Tools) != 1 {
+		t.Fatalf("grant lost on disable: %+v", g)
+	}
+	if _, ok := reg.Conns["docs"].Groups["tg"].Tools["search"]; !ok {
+		t.Fatal("search grant lost on disable")
+	}
+	v = mcpOp(t, mcpAdminReq{Op: "enable", Conn: "docs"})
+	if v["enabled"] != true {
+		t.Fatalf("enable view: %s", mcpJSON(v))
+	}
+	if s := mcpServersFor("tg"); len(s) != 1 || s[0] != "docs" {
+		t.Fatalf("re-enabled servers = %v", s)
+	}
+	eff = mcpJSON(mcpOp(t, mcpAdminReq{Op: "effective", Group: "tg"}))
+	if !strings.Contains(eff, `"tools":["search"]`) || !strings.Contains(eff, `"enabled":true`) {
+		t.Fatalf("effective after enable: %s", eff)
+	}
+	if _, err := mcpAdmin(mcpAdminReq{Op: "disable", Conn: "ghost"}); err == nil {
+		t.Fatal("disable on unknown connection accepted")
+	}
+	// CLI parse
+	for _, op := range []string{"enable", "disable"} {
+		req, err := mcpCliParse([]string{op, "docs"}, nil)
+		if err != nil || req.Op != op || req.Conn != "docs" {
+			t.Fatalf("parse %s: %v %+v", op, err, req)
+		}
+		if _, err := mcpCliParse([]string{op}, nil); err == nil {
+			t.Fatalf("%s without conn accepted", op)
+		}
+	}
+}
+
+func mustStore(t *testing.T) *mcpreg.Store {
+	t.Helper()
+	st, err := mcpStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
