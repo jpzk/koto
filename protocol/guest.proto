@@ -47,6 +47,13 @@ message CtlSendReq {
   bool   reply        = 4; // arm a one-shot report window (report.go)
   string from_session = 5; // main's session that receives the report
 }
+// steer: head-of-queue insert + interrupt of the in-flight turn. No reply
+// window (a steer redirects delegated work, it does not delegate).
+message CtlSteerReq {
+  string group   = 1; // honored for main only; peers steer themselves
+  string msg     = 2;
+  string session = 3;
+}
 message CtlTailReq   { string group = 1; int32 n = 2; }
 message JobDoneReq   {
   string id      = 1;
@@ -92,6 +99,7 @@ message CtlRequest {
     SchedToggleReq sched_toggle   = 23;
     SchedIDReq     sched_run      = 24;
     CompactReq     compact        = 25; // daemon/compact.go
+    CtlSteerReq    steer          = 26; // daemon/steer.go
   }
 }
 
@@ -113,6 +121,7 @@ message CtlResponse {
     GoalListResp  goals     = 9;  // goal_status
     SchedAddResp  sched     = 10; // sched_add
     SchedListResp scheds    = 11; // sched_list
+    bool          interrupted = 12; // steer: a running turn was cut short
   }
 }
 

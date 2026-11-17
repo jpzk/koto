@@ -278,7 +278,13 @@ func aclCheck(ctx context.Context, id clientIdentity, verb string, req any) erro
 	verb = postureVerb(verb, req)
 	target, targeted := targetOf(req)
 	roles := strings.Join(id.Roles, ",")
-	if rolesAllowed(loadACL(), id.Roles, verb, target, targeted) {
+	var allowed bool
+	if verb == "steer" && targeted {
+		allowed = steerAllowed(loadACL(), id.Roles, target) // send+interrupt, steer.go
+	} else {
+		allowed = rolesAllowed(loadACL(), id.Roles, verb, target, targeted)
+	}
+	if allowed {
 		if targeted {
 			emitLogfG("acl", aclLogGroup(target), "info", "%s (roles %s) allowed %s on %q from %s", id.Name, roles, verb, target, peerAddr(ctx))
 		} else {

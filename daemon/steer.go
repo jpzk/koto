@@ -256,3 +256,58 @@ func checkSteerResume(g, session string) {
 	emit(g, Event{Event: "steer_context_lost", Session: session,
 		Text: "interrupted before the harness recorded a session id; steer runs in a fresh conversation"})
 }
+
+// ---- entry points (gRPC Steer, ctl "steer") ---------------------------------
+
+// steerCtlResp is the ctl-plane answer: ok/error plus whether a running turn
+// was cut short. Same shape as pb.SteerResp.
+type steerCtlResp struct {
+	baseResp
+	Interrupted bool `json:"interrupted,omitempty"`
+}
+
+// errSteerGoalSession is what both entry points say to a steer aimed at a
+// goal-<name> session. A goal's work turns belong to its driver; steering one
+// is goal_steer's job, which keeps the driver's iteration accounting intact.
+var errSteerGoalSession = errors.New("goal sessions are steered with goal_steer, not steer")
+
+// steerRequest is the validation both entry points share, then steerSession.
+// g must already be a well-formed group name; registration is checked here so
+// a steer cannot spin up queue state for a group that does not exist.
+func steerRequest(g, rawSession, msg string) (steerResult, error) {
+	session, err := normalizeSession(rawSession)
+	if err != nil {
+		return steerResult{}, err
+	}
+	if isReservedSession(session) {
+		return steerResult{}, errSteerGoalSession
+	}
+	if !registeredGroup(g) {
+		return steerResult{}, fmt.Errorf("no such group %s — spawn it first", g)
+	}
+	if strings.TrimSpace(msg) == "" {
+		return steerResult{}, errors.New("steer needs a message")
+	}
+	if _, _, ok := parseCompactCommand(msg); ok {
+		return steerResult{}, errors.New("/compact is not a steer — send it")
+	}
+	res, err := steerSession(g, session, msg)
+	if err != nil {
+		return res, err
+	}
+	registerSession(g, session)
+	return res, nil
+}
+
+// steerAllowed is the gRPC authorization for Steer (auth.go aclCheck): an
+// explicit `steer` grant on the target, or BOTH `send` and `interrupt` on it.
+// Steer is exactly those two operations, so a role that may do each
+// separately may do them atomically — and one holding only `send` cannot use
+// steer to interrupt, nor one holding only `interrupt` to inject a turn.
+func steerAllowed(acl aclTable, roles []string, target string) bool {
+	if rolesAllowed(acl, roles, "steer", target, true) {
+		return true
+	}
+	return rolesAllowed(acl, roles, "send", target, true) &&
+		rolesAllowed(acl, roles, "interrupt", target, true)
+}

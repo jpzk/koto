@@ -107,6 +107,25 @@ helper is given.
 - **`send [-session S] <group> <msg...>`**: enqueue a message and return
   immediately. `-session` sets the chat session (`""` = default). This flag is
   not shown in the usage text (`case "send"`). RPC `Send`.
+- **`steer [-session S] <group> <msg...>`**: redirect one conversation
+  (`daemon/steer.go`). The message is put at the HEAD of that session's
+  queue — ahead of everything already queued, cron fires included — and then
+  the session's in-flight turn is interrupted through the same path as
+  `interrupt` (SIGINT, escalating to KILL until the turn ends). When the
+  session is idle it is a priority send. The steer turn reaches the agent
+  framed (`frameSteer`): `[operator steering — your previous turn was
+  interrupted by the operator …]` after an interrupt, `[operator steering]`
+  when idle.
+  Prints the `SteerResp` (`interrupted` set when a turn was cut short). RPC `Steer` (request
+  `SendReq`; attachments refused). Goal sessions (`goal-<name>`) are
+  refused with `goal sessions are steered with goal_steer, not steer`.
+  - ACL: an explicit `steer` grant on the target, **or both `send` and
+    `interrupt`** on it (`steerAllowed`) — steer is exactly those two
+    operations, so neither grant alone admits it.
+  - If the interrupted turn died before its harness wrote a resume id
+    (claude/codex/pi/venice pin files under `.cs/`), the steer still runs, in
+    a fresh conversation; the daemon logs a warning and emits a
+    `steer_context_lost` event instead of losing the context silently.
 - **`ask [-timeout D] [-json] [-session S] <group> <msg...>`**: send, stream
   the reply, and exit when the turn ends (`ctlAsk`).
   - `-timeout`: default `30m` (`30*time.Minute`). On expiry:
@@ -377,6 +396,18 @@ allowed for non-main groups: <verb>`.
 - **`goal_pause` / `goal_interrupt` / `goal_resume` / `goal_cancel`**
   `{"group"?,"name"?}`. Non-main callers are forced to themselves. Main may
   steer any group.
+- **`steer`** `{"group"?,"msg","session"?}` — every group. Same ACL as
+  `goal_interrupt`: a non-main caller is forced to ITSELF (any of its own
+  sessions; `group` is overwritten, never trusted); main may steer any
+  registered group, itself included. Head-of-queue insert + interrupt of the
+  session's in-flight turn, or a priority send when idle (see `koto ctl
+  steer` above for framing and the lost-resume warning). The response has
+  `interrupted`. Refused: goal sessions (`goal_steer` is the goal path),
+  `reply` (strict proto: steer has no report window), empty messages,
+  `/compact`, unregistered groups. Steering the very session that issues the
+  command interrupts that turn — the steer then runs as its continuation.
+  Guest images older than this verb reject it in the guest adapter
+  (`ctl: unknown verb`); the host-side CLI works regardless.
 - **`sched_add`** `{"group"?,"cron","msg"}`.
   - Non-main callers are forced to themselves.
   - When main leaves `group` empty, it defaults to `main` (`addSched`).

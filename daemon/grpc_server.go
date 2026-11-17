@@ -484,6 +484,25 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 	return &pb.BaseResp{Ok: true}, nil
 }
 
+// Steer redirects one conversation: msg goes to the head of the session's
+// queue and the session's in-flight turn (if any) is interrupted (steer.go).
+// It returns as soon as the steer is queued and the interrupt is armed — the
+// steer turn itself streams over Subscribe like any other turn. The ACL
+// (auth.go) admits a `steer` grant or send+interrupt on the target.
+func (s *kotoServer) Steer(_ context.Context, r *pb.SendReq) (*pb.SteerResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.SteerResp{Error: "invalid group name"}, nil
+	}
+	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
+		return &pb.SteerResp{Error: "steer takes no attachments"}, nil
+	}
+	res, err := steerRequest(r.Group, r.Session, r.Msg)
+	if err != nil {
+		return &pb.SteerResp{Error: err.Error()}, nil
+	}
+	return &pb.SteerResp{Ok: true, Interrupted: res.Interrupted}, nil
+}
+
 func (s *kotoServer) Destroy(ctx context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
 	if !validGroupName(r.Group) {
 		return &pb.BaseResp{Error: "invalid group name"}, nil

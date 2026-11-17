@@ -318,6 +318,35 @@ func ctlDispatch(owner string, line []byte) any {
 		registerSession(req.Group, sess)
 		return baseResp{OK: true}
 
+	case "steer":
+		// Interrupt-and-redirect one conversation (steer.go). ACL is the
+		// interrupt/goal_interrupt rule: a non-main group steers only ITSELF
+		// (any of its own sessions — the group field is overwritten, never
+		// trusted); main may steer any registered group, itself included.
+		// Unlike send there is no reply window: a steer redirects work that
+		// is already delegated, it does not open a new delegation.
+		var req sendReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		if req.Reply {
+			return errResp("ctl: steer takes no reply window — use send with reply")
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		res, err := steerRequest(req.Group, req.Session, req.Msg)
+		if err != nil {
+			return errResp("ctl: " + err.Error())
+		}
+		return steerCtlResp{baseResp: baseResp{OK: true}, Interrupted: res.Interrupted}
+
 	case "compact":
 		// Every group may compact ITSELF (self-targeting, like sched_*);
 		// main may also name a peer. compact.go.
