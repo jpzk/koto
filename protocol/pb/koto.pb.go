@@ -4826,6 +4826,8 @@ func (x *BudgetResp) GetBudget() *structpb.Struct {
 //	           {"<tool>":{"args":{...},"additional_args":bool}}],
 //	           [auth_name + auth_value] — auth omitted keeps the stored one.
 //	rm:        conn.
+//	enable/disable: conn. disabled = absent at the gateway and in the
+//	           harness config; ceiling, auth, whitelist, grants are kept.
 //	allow/deny: conn, group (deny removes the group's grants too).
 //	grant:     conn, group, tool, [rule_json {"args":{...}}].
 //	revoke:    conn, group, tool.

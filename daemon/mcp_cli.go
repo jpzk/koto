@@ -23,6 +23,8 @@ const mcpUsage = `usage: koto ctl mcp ls
        koto ctl mcp add <conn> --url <https://...> --tools a,b [--class read|write]
                     [--rules <file.json>] [--auth-file <file>|-]
        koto ctl mcp rm <conn>
+       koto ctl mcp disable <conn>              treat as absent; keeps grants
+       koto ctl mcp enable  <conn>              restore it as it was
        koto ctl mcp allow <conn> <group>        whitelist a group (no tools yet)
        koto ctl mcp deny  <conn> <group>        remove it and its grants
        koto ctl mcp grant  <conn> <group> <tool> [--args '<json>']
@@ -96,6 +98,8 @@ func mcpCliParse(args []string, readFile func(string) ([]byte, error)) (*pb.McpR
 		"show":      {&req.Conn},
 		"add":       {&req.Conn},
 		"rm":        {&req.Conn},
+		"enable":    {&req.Conn},
+		"disable":   {&req.Conn},
 		"allow":     {&req.Conn, &req.Group},
 		"deny":      {&req.Conn, &req.Group},
 		"grant":     {&req.Conn, &req.Group, &req.Tool},

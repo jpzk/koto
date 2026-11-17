@@ -11,7 +11,8 @@ package main
 //     verb and treats an "mcp" config key as posture (ctl.go), and
 //     configCmd refuses it outright, so no agent can grant itself (or a
 //     peer) an upstream tool;
-//   - upstream auth values are write-only: every view is Redacted();
+//   - upstream auth values are write-only: every view is Redacted() and
+//     show carries the header name only (no value key on the wire);
 //   - a group is whitelisted only if it is a registered koto group.
 
 import (
@@ -152,8 +153,11 @@ func mcpAdmin(r mcpAdminReq) (map[string]any, error) {
 		mut = func(reg *mcpreg.Registry) error { return reg.Revoke(r.Conn, r.Group, r.Tool) }
 	case "rate":
 		mut = func(reg *mcpreg.Registry) error { return reg.SetRate(r.Conn, r.Group, r.PerMinute) }
+	case "enable", "disable":
+		on := op == "enable"
+		mut = func(reg *mcpreg.Registry) error { return reg.SetEnabled(r.Conn, on) }
 	default:
-		return nil, fmt.Errorf("unknown mcp op %q (ls|show|add|rm|allow|deny|grant|revoke|rate|effective)", mcpSafe(op))
+		return nil, fmt.Errorf("unknown mcp op %q (ls|show|add|rm|enable|disable|allow|deny|grant|revoke|rate|effective)", mcpSafe(op))
 	}
 	if err := st.Update(mut); err != nil {
 		return nil, err
@@ -209,6 +213,7 @@ func mcpViewList(st *mcpreg.Store) map[string]any {
 		conns = append(conns, map[string]any{
 			"name": n, "url": c.URL, "class": string(c.Class),
 			"auth": c.Auth != nil, "tools": tools, "groups": groups,
+			"enabled": !c.Disabled,
 		})
 	}
 	v := map[string]any{"conns": conns}
@@ -228,7 +233,16 @@ func mcpViewConn(st *mcpreg.Store, name string) (map[string]any, error) {
 	if v == nil {
 		return nil, errors.New("cannot render connection")
 	}
+	// Drop the auth object wholesale and put back the header NAME only: the
+	// view never carries a value key, so not even the "[redacted]"
+	// placeholder (or a future Redacted() regression) reaches a response.
+	delete(v, "auth")
+	if c.Auth != nil {
+		v["auth"] = map[string]any{"name": c.Auth.Name}
+	}
 	v["name"] = name
+	v["enabled"] = !c.Disabled
+	delete(v, "disabled")
 	return v, nil
 }
 
@@ -239,14 +253,33 @@ func mcpViewEffective(st *mcpreg.Store, group, conn string) (map[string]any, err
 		return nil, errors.New("invalid group name")
 	}
 	reg := st.Current()
-	names := reg.ConnsFor(group)
+	var names []string
 	if conn != "" {
 		names = []string{conn}
+	} else {
+		// operator view: also list disabled connections the group keeps
+		// grants on, marked, so the editor can show what re-enabling restores
+		for _, n := range mcpSortedConns(reg) {
+			if _, ok := reg.Conns[n].Groups[group]; ok {
+				names = append(names, n)
+			}
+		}
 	}
 	out := []any{}
 	for _, n := range names {
 		e, err := reg.Effective(n, group)
 		ent := map[string]any{"conn": n, "whitelisted": err == nil, "tools": e.Names()}
+		if c := reg.Conns[n]; c != nil && c.Disabled {
+			// gateway truth stays empty; show the kept grants separately
+			p, perr := reg.Preview(n, group)
+			ent["enabled"] = false
+			ent["whitelisted"] = perr == nil
+			ent["tools_when_enabled"] = p.Names()
+			ent["note"] = "connection disabled: treated as absent until enabled"
+			out = append(out, ent)
+			continue
+		}
+		ent["enabled"] = true
 		if err == nil {
 			ent["class"] = string(e.Class)
 			if e.Class != mcpreg.ClassRead {
