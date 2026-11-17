@@ -43,7 +43,7 @@
 #   actions/setup-go                 v6.5.0   2026-06-24
 #   actions/upload-artifact          v7.0.1   2026-04-10
 #   golang.org/x/vuln (govulncheck)  v1.6.0   2026-07-09
-#   google/osv-scanner/v2            v2.6.0   2026-09-14
+#   google/osv-scanner/v2            v2.5.1   2026-08-17 (v2.6.0 needs go 1.27)
 #   CycloneDX/cyclonedx-gomod        v1.12.0  2026-08-21
 name: supplychain
 
@@ -99,15 +99,10 @@ jobs:
             protocol/go.sum
       - name: assert default Go supply-chain env
         run: scripts/supplychain/go-env-check.sh
+      # Wrapper only forgives Go's spurious "missing ziphash" for the dot-less
+      # local-directory replace koto-protocol; see the script header.
       - name: go mod verify every module
-        run: |
-          rc=0
-          for m in $MODULES; do
-            echo "::group::go mod verify $m"
-            (cd "$m" && go mod verify) || rc=1
-            echo "::endgroup::"
-          done
-          exit $rc
+        run: scripts/supplychain/mod-verify.sh $MODULES
       - name: go mod tidy -diff every module
         run: |
           rc=0
@@ -175,7 +170,7 @@ jobs:
         with:
           go-version: "1.26.10" # = Makefile GO_IMAGE
           cache: false
-      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.6.0
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
       - name: osv-scanner (go.mod x4 + Firecracker Cargo.lock)
         run: scripts/supplychain/osv.sh "$RUNNER_TEMP/osv"
 
@@ -197,7 +192,7 @@ jobs:
             protocol/go.sum
       - run: |
           go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
-          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.6.0
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
       - name: CycloneDX SBOMs (koto, koto-tui, fc-agent)
         run: scripts/supplychain/sbom.sh "$RUNNER_TEMP/sbom"
       - name: osv-scanner on the SBOMs
