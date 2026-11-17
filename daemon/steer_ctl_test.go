@@ -13,7 +13,7 @@ import (
 
 // steer entry points: ctl JSON verb, guest proto adapter, gRPC Steer + ACL.
 
-func waitDone(t *testing.T, d <-chan error, what string) {
+func waitSteerDone(t *testing.T, d <-chan error, what string) {
 	t.Helper()
 	select {
 	case <-d:
@@ -49,7 +49,7 @@ func TestSteerCtlPeerSteersOnlyItself(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("no interrupt")
 		}
-		waitDone(t, dA, "block-A")
+		waitSteerDone(t, dA, "block-A")
 		waitStarted(t, r, "S1")
 		if n := queueDepth("peer"); n != 0 {
 			t.Fatalf("peer queue touched by tg's steer: depth %d", n)
@@ -192,7 +192,7 @@ func TestSteerGRPC(t *testing.T) {
 		if who := <-hit; who != "peer/" {
 			t.Fatalf("interrupted %q", who)
 		}
-		waitDone(t, dA, "block-A")
+		waitSteerDone(t, dA, "block-A")
 		waitStarted(t, r, "S")
 	})
 	for _, tc := range []struct {
