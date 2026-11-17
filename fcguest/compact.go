@@ -338,7 +338,7 @@ func (c *codexCompactor) end() {
 // piRPCArgs is piArgs for RPC mode: same provider, session, offline and
 // no-extensions flags, minus print mode.
 func piRPCArgs(piName, model, effort, sessionDir, sessionID, promptFile string) []string {
-	src := piArgs(piName, model, effort, sessionDir, sessionID, promptFile)
+	src := piArgs(piName, model, effort, sessionDir, sessionID, promptFile, false)
 	out := make([]string, 0, len(src))
 	for i := 0; i < len(src); i++ {
 		switch {
@@ -372,7 +372,7 @@ func runPiCompact(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, cw
 			return
 		}
 	}
-	agentDir, promptFile, err := preparePiAgentDir(cfg.Provider, req.SystemPrompt)
+	agentDir, promptFile, err := preparePiAgentDir(cfg.Provider, req.SystemPrompt, nil)
 	if err != nil {
 		fail("pi: %v", err)
 		return

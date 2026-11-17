@@ -268,6 +268,10 @@ Only `admin` passes:
   could void the bound.
 - `image`: pulls into host-wide caches, rewrites every pinned group's base
   and resets their system disks.
+- `mcp`: the MCP connection registry decides which groups reach which
+  upstream tools with the operator's credentials; see
+  [mcp-registry.md](mcp-registry.md). `mcp` is also not a config key on any
+  path, so `config`/`config_posture` cannot grant MCP access either.
 - `config_posture`: a synthetic verb, covered in the next section.
 
 ### 3.6 `config` vs `config_posture` (`postureVerb`, `daemon/auth.go`)

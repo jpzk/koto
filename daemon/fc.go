@@ -907,6 +907,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	vm.listeners = append(vm.listeners, lnCtl)
 	go fcAcceptLoop(g, lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
 
+	// MCP gateway (mcp_gateway.go): only with KOTO_MCP_GATEWAY=1. The group
+	// is identified by THIS listener, never by anything the guest sends.
+	if lnMcp, err := fcStartMcpListener(g, base); err != nil {
+		return fail(err)
+	} else if lnMcp != nil {
+		vm.listeners = append(vm.listeners, lnMcp)
+	}
+
 	// network=wan|lan|full: attach the L3 gVisor gateway. The guest's fc-agent
 	// dials vsock 9003 once net="l3" is delivered at init; each accepted
 	// connection is handed to the gateway, egress-filtered under the group's
@@ -1851,6 +1859,9 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
+		// MCP connections g is whitelisted on (names only; nil when the
+		// gateway is off). The gateway re-checks every request anyway.
+		McpServers: mcpServersFor(g),
 	}
 	// Permission mode from the HOST registry (session_modes.go) — the only
 	// source the guest obeys; config.json above carries none.
