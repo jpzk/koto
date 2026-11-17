@@ -141,12 +141,17 @@ worker, retire-before-done); steer lane `steerLanes`/`popSteer`;
 `#123: daemon/steer.go frameSteer/checkSteerResume` (resume-state probe);
 `#123: fcguest/workerreg.go` guest registry of worker pids, used by a
 rewritten signalAgent instead of the argv regex.
-Reuse plan: add cancelTurnThen with the SAME name/signature/body as #123 (so
-the merge is a trivial dedupe), do the re-run in sendWorkerTurn as a loop in
-the same spirit as sendWorkerTurnOnce, and keep the tree-kill as a small
-option on signalAgent (on top of #123 it becomes "kill -- -pid for each
-registered pid"). Merge order recommendation: either order works; the second
-PR to land resolves sendWorkerTurn + signalAgent by hand.
+Reuse (as implemented): instead of copying cancelTurnThen, mode_live.go has
+its own cutTurnForMode. It uses the same idea: close turnCancels[k] and record
+the restart marker in one queuesMu section. It also reports whether the turn
+was ALREADY cancelled (so an interrupted turn is never resurrected), which
+cancelTurnThen does not. The re-run is runJobTurn, a loop inside
+sendWorkerTurn in the same spirit as sendWorkerTurnOnce. The tree-kill is a
+small option on signalAgent (on top of #123 it becomes "kill -- -pid for each
+registered pid"). Merge order recommendation: #123 first, then rebase this
+branch so the steer re-run and the mode re-run share the runJobTurn loop.
+Either order works; the second PR to land resolves sendWorkerTurn +
+signalAgent by hand.
 
 ## 7. Design (decided)
 
