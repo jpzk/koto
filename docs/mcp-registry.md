@@ -68,6 +68,8 @@ All `koto ctl mcp` verbs go through one admin-only RPC (`Mcp`, listed in
     koto ctl mcp add <conn> --url <https://...> --tools a,b \
         [--class read|write] [--rules <file.json>] [--auth-file <file>|-]
     koto ctl mcp rm <conn>
+    koto ctl mcp disable <conn>
+    koto ctl mcp enable  <conn>
     koto ctl mcp allow <conn> <group>
     koto ctl mcp deny  <conn> <group>
     koto ctl mcp grant  <conn> <group> <tool> [--args '<json>']
@@ -87,6 +89,29 @@ Notes:
   connection with all of its groups.
 - `show`, `ls` and `effective` never print the auth header value; it is
   shown as `[redacted]`.
+
+
+## Deactivating a connection
+
+    koto ctl mcp disable <conn>
+    koto ctl mcp enable  <conn>
+
+`disable` switches a connection off without forgetting it. The ceiling, the
+stored auth header, the whitelist and every grant stay in the registry, but
+from the next request on the gateway treats the connection exactly as if it
+did not exist: every request answers 404, `tools/list` is empty, and the
+connection is left out of the harness configuration of every group
+(`mcpreg.Registry.Effective`, `mcpreg.Registry.ConnsFor`). `enable` restores
+the access each group had before.
+
+- The flag is stored as `"disabled": true` on the connection. Registry
+  files written before the flag existed have no such field and load as
+  enabled.
+- Re-running `add` on a disabled connection keeps it disabled.
+- `ls` and `show` report `enabled`. `effective` still lists a disabled
+  connection for the operator, with empty `tools` (what the gateway
+  enforces) and `tools_when_enabled` (the grants it keeps,
+  `mcpreg.Registry.Preview`).
 
 ## Argument rules
 
@@ -145,7 +170,8 @@ For every request the gateway:
 
 1. reads the current registry (no cache, so a `revoke` or `deny` applies
    to the next request);
-2. answers 404 if the group is not whitelisted for the connection;
+2. answers 404 if the group is not whitelisted for the connection or the
+   connection is disabled;
 3. on `tools/list`, returns only the effective tools;
 4. on `tools/call`, refuses tools outside the effective set, arguments
    that fail the ceiling or grant rules, and calls over the rate limit;

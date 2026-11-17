@@ -20,6 +20,7 @@ func (r *Registry) PutConn(name string, c *Conn, keepAuth bool) error {
 	nc := *c
 	if old, ok := r.Conns[name]; ok {
 		nc.Groups = old.Groups
+		nc.Disabled = old.Disabled // a re-add never silently re-enables
 		if nc.Auth == nil && keepAuth {
 			nc.Auth = old.Auth
 		}
@@ -138,5 +139,17 @@ func (r *Registry) SetRate(conn, group string, perMinute int) error {
 	} else {
 		g.Rate = &Rate{PerMinute: perMinute}
 	}
+	return nil
+}
+
+// SetEnabled activates or deactivates a connection. Nothing else changes:
+// ceiling, auth, whitelist and grants are kept, so re-enabling restores the
+// exact previous access.
+func (r *Registry) SetEnabled(name string, enabled bool) error {
+	c, err := r.conn(name)
+	if err != nil {
+		return err
+	}
+	c.Disabled = !enabled
 	return nil
 }
