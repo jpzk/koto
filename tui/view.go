@@ -311,6 +311,10 @@ func (m Model) view() string {
 		// cron schedule (sched_view.go).
 		return m.withPicker(m.renderSchedView())
 	}
+	if m.focus == focusMcp {
+		// MCP registry view (mcp_view.go): same full-frame replacement.
+		return m.withPicker(m.renderMcpView())
+	}
 	if m.shellViewActive() {
 		// Shared shell: fullscreen while focused on a narrow terminal, or
 		// the chat-column + message-bar + pty split whenever the pane is

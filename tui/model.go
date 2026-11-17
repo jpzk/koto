@@ -97,6 +97,9 @@ const (
 	// daemon cron schedule, with toggle/run/delete/edit wired to the
 	// Sched* RPCs. Handled by handleSchedKey (sched_view.go).
 	focusSched
+	// focusMcp is the MCP registry view (alt+m, /mcp — mcp_view.go),
+	// handled by handleMcpKey. Admin-only is enforced by the daemon.
+	focusMcp
 )
 
 type logLine struct {
@@ -719,6 +722,9 @@ type Model struct {
 	schedFilter    string
 	schedSearch    *textinput.Model
 	schedMatches   []int
+
+	// MCP registry view (focusMcp — mcp_view.go).
+	mcp mcpState
 
 	// vpLines is the chat viewport's content as the slice it was built from
 	// — the same lines m.vp holds after SetContent, kept here so the visible
@@ -2076,6 +2082,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			m.resizeSchedViewport()
 			m.refreshSchedViewport()
 		}
+		if m.mcp.ready {
+			m.resizeMcpViewport()
+			m.refreshMcpViewport()
+		}
 		m.resizeHelpViewport()
 		// (the shell pty, when open, was resized by resizeViewport above —
 		// see syncShellSize in shell_view.go)
@@ -3107,6 +3117,12 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("prompt ▶ %s", msg.name)})
 		return m, nil
 
+	case mcpListMsg:
+		// Folded into the view even when it is closed, so a reopen shows
+		// the last answer while the fresh ls is in flight.
+		m.mcpConsumeList(msg)
+		return m, nil
+
 	case schedListMsg:
 		if m.focus == focusSched {
 			// The schedules view consumes list responses into its table;
@@ -3371,6 +3387,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		if m.focus == focusSched && m.schedVPReady {
 			// Same for the schedules view's table.
 			m.schedVP, cmd = m.schedVP.Update(msg)
+			return m, cmd
+		}
+		if m.focus == focusMcp && m.mcp.ready {
+			m.mcp.vp, cmd = m.mcp.vp.Update(msg)
 			return m, cmd
 		}
 		if m.focus == focusLog && m.logVPReady {
@@ -4626,6 +4646,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// not flow control). Pinned by TestSchedKeyIsFree.
 		return m, m.toggleSchedView()
 	}
+	if s == "alt+m" {
+		// Toggle the MCP registry view (mcp_view.go). alt+m follows the
+		// alt+a / alt+n views; it is unbound in the bubbles v1.0.0
+		// textinput/textarea keymaps (pinned by TestMcpKeyIsFree).
+		return m, m.toggleMcpView()
+	}
 	if s == keyShellToggle || s == keyShellToggleFallback {
 		return m, m.toggleShellPane()
 	}
@@ -4644,6 +4670,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// The schedules view owns everything else: list navigation, the
 		// armed delete confirm, and the inline edit box's text entry.
 		return m.handleSchedKey(msg)
+	}
+	if m.focus == focusMcp {
+		return m.handleMcpKey(msg)
 	}
 	if s == "ctrl+f" {
 		m.toggleFullscreen()
@@ -6159,6 +6188,14 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		// The exit path (ctrl+c interrupts the agent now, it doesn't quit).
 		m.persistUIState()
 		return tea.Quit
+	}
+	if v == "/mcp" {
+		// Same view as alt+m; the registry itself is administered by the
+		// admin-only Mcp rpc (and `koto ctl mcp` on the host).
+		if m.focus == focusMcp {
+			return nil
+		}
+		return m.enterMcp()
 	}
 	if v == "/sched" || strings.HasPrefix(v, "/sched ") {
 		rest := ""
