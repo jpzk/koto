@@ -145,6 +145,105 @@ The two layers have different defaults on purpose (`mcpreg.EffTool`):
   `mcp` posture key (`configPostureKey` in `daemon/ctl.go`). An agent cannot
   grant itself access, and `main` cannot grant access to its peers.
 
+## TUI
+
+The TUI drives the same admin RPC (`Mcp`) as `koto ctl mcp`; it has no RPC
+of its own.
+
+### MCP view
+
+Open it with `alt+m` or `/mcp`; `esc` or `alt+m` closes it. It is also in
+the command palette (`ctrl+p`) and in the help page (`ctrl+h`). Source:
+`tui/mcp_view.go`, `tui/mcp_actions.go`.
+
+One row per connection, with these columns:
+
+- `ON`: enabled or disabled.
+- `NAME`: the connection name.
+- `AUTH`: `set` or `unset`. The view never gets the value.
+- `CLASS`: `read` or `write`.
+- `GRP`: how many groups are whitelisted.
+- `HOST`: the host of the upstream URL. Path and query are not shown.
+- `TOOLS`: the ceiling tools.
+
+Keys in the list:
+
+- `up`/`down` moves the selection and `g` refreshes.
+- `enter` opens the detail: the whitelist, the grants of each group, and
+  the effective set as the daemon reports it (`effective` for each
+  whitelisted group; the TUI does not work it out itself). In the detail,
+  `tab` selects a whitelisted group and `e` opens its MCP access dialog
+  (see below). There, `ctrl+s` applies the changes at once and re-reads
+  the detail.
+- `a` opens the add form: name, URL, tools, class, optional rules JSON,
+  the auth header name, and the auth value. By default the value is read
+  from a file path. The file is read on the TUI host and must be a
+  regular file, no larger than 8 KiB, with no group or other permission
+  bits (0600 or stricter); a single trailing newline is dropped. `ctrl+t`
+  switches to typing the value instead, in a field that draws nothing and
+  shows only `[entered, hidden]` or `[empty]`.
+- `t` disables or enables the selected connection (see "Deactivating a
+  connection").
+- `d` deletes it, but only after you type the connection name, the same
+  way group destroy asks for confirmation.
+
+### Group MCP access (new / edit group)
+
+In the new group dialog (`ctrl+n`) and the edit group dialog (`ctrl+e`),
+`alt+m` opens the group MCP access dialog (`tui/group_mcp.go`):
+
+- `space` on a connection allows it for the group or takes it away.
+  Disabled connections are greyed out, and their preview reads "(when
+  enabled)".
+- Under an allowed connection, only the tools in that connection's
+  ceiling are offered. `space` grants or revokes a tool; `enter` sets an
+  optional argument rule as JSON (`args` / `additional_args`, see
+  "Argument rules").
+- The rate row sets calls per minute (empty or 0 means no rate limit).
+- A live preview shows the effective set (ceiling ∩ grant) and how many
+  changes are pending. A write-class connection shows no effective tools,
+  the same as `mcpreg.Registry.Effective`.
+- `ctrl+s` keeps the plan in the parent dialog. `esc` throws it away.
+
+Nothing is sent until the parent dialog is submitted. The plan is sent as
+the usual `allow`, `revoke`, `grant`, `rate` and `deny` ops:
+
+- New group: the ops are sent after the group has been created. If the
+  create fails, no MCP op is sent. If an MCP op fails, the TUI denies
+  every connection it allowed, shows the error, and the group is left
+  without MCP grants.
+- Edit group: the ops are sent after the config changes. Save is
+  available even when the only change is MCP access.
+
+### Non-admin sessions
+
+The registry is admin-only in the daemon (`adminOnlyVerbs` in
+`daemon/acl.go`), whatever the client does. A TUI connected with a
+non-admin client certificate gets PermissionDenied on `ls`. The view then
+shows that the registry is admin-only and is read-only: `a`, `t`, `d` and
+`e` are refused in the TUI and send nothing. That check only spares a
+round trip; the daemon refuses the request anyway.
+
+## Threat notes
+
+- The auth value only ever goes one way, into the daemon. `ls` sends a
+  set/unset bool and `show` sends the header name only. Neither response
+  has a value field, not even a `[redacted]` placeholder
+  (`mcpViewConn`, tested on the serialized response bytes in
+  `TestMcpRespBytesCarryNoSecret`).
+- In the TUI the value is held as a byte slice only until it is sent. The
+  input fields are reset at submit, and the bytes are zeroed after the
+  RPC returns, whether it succeeded or not. If the daemon refuses the add,
+  the form stays open with the secret gone, and you have to enter it
+  again. The value is never drawn, put in the history, or included in an
+  error message (file errors give the path and mode only), and the form's
+  `String`/`GoString` are redacted. A Go string copy inside the request
+  can stay in memory until garbage collection; that is the limit of what
+  the TUI can promise.
+- The TUI's admin check is cosmetic. Every MCP op is refused for a
+  non-admin identity in `authUnary`, before the handler runs
+  (`TestMcpNonAdminRefusedEveryOp`).
+
 ## Storage
 
 The registry lives at `<KOTO_HOME>/creds/mcp/registry.json`
