@@ -128,6 +128,10 @@ func (m Model) handleConfirmMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	switch {
+	case m.destroyConfirm.typed():
+		// Group variant: no buttons to hit — only the typed name + enter
+		// confirms, so every click is swallowed.
+		return m, nil
 	case m.destroyConfirm.open:
 		return m.resolveDestroyConfirm(confirmButtonAt(m.renderDestroyConfirm(), msg.X, msg.Y))
 	case m.stopConfirm.open:

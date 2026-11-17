@@ -199,7 +199,7 @@ func configPostureKey(req configReq) string {
 	}{
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
-		{"kvm", req.KVM}, {"allow", req.Allow},
+		{"kvm", req.KVM}, {"allow", req.Allow}, {"mode", req.Mode},
 	} {
 		if len(k.raw) > 0 {
 			return k.name
@@ -295,6 +295,12 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		if isReservedSession(sess) {
 			return errResp("ctl: session " + sess + " is reserved for the goal loop")
+		}
+		// Main is an agent, not an operator: a confirm session's approvals
+		// would have nobody answering them. Refused before anything queues
+		// (and before a report window is armed).
+		if err := checkUnattended(req.Group, sess, "ctl"); err != nil {
+			return errResp("ctl: " + err.Error())
 		}
 		if req.Reply {
 			// Solicited callback (report.go): tell the peer a reply is
@@ -615,6 +621,21 @@ func ctlDispatch(owner string, line []byte) any {
 		emitLogfG("goal", owner, "info", "[%s] goal_done claim (%d-byte note)", owner, len(n))
 		return baseResp{OK: true}
 
+	case "ask":
+		// Self-targeted, open to ALL groups: a goal WORKER asks the operator a
+		// decision question (goal_ask.go). Window-gated like goal_done (only
+		// while that goal's work turn is in flight) and it BLOCKS until the
+		// operator answers — the guest sends it on its own connection.
+		var req struct {
+			ID       string   `json:"id"`
+			Question string   `json:"question"`
+			Options  []string `json:"options"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp("ctl: ask: " + err.Error())
+		}
+		return goalAsk(owner, req.ID, req.Question, req.Options)
+
 	case "goal_verdict":
 		// Self-targeted, open to ALL groups: the acceptance JUDGE reports its
 		// verdict. Window-gated to the goal-judge turn, same as goal_done
@@ -705,7 +726,11 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group != owner {
 			origin = ""
 		}
-		it, err := goalSetFrom(owner, req.Group, origin, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		// Mode: the caller may ask for confirm; it can never get yolo while
+		// it is itself confirm/plan (callerSessionModes, inherit-restrictive).
+		it, err := goalSetWith(goalSetOpts{creator: owner, group: req.Group, origin: origin,
+			text: req.Text, criteria: req.Criteria, name: req.Name, maxIter: req.MaxIterations, plan: plan,
+			mode: req.Mode, callerModes: callerSessionModes(owner, req.Session)})
 		if err != nil {
 			return errResp(err.Error())
 		}

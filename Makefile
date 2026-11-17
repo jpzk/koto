@@ -262,7 +262,7 @@ DIST_DIR       = dist/$(DIST_VERSION)
 # The release this checkout points at. Was dist/VERSION; it lives here now
 # because nothing under dist/ is checked in — dist/ is build output.
 # "unreleased" makes `make fetch` say so plainly instead of 404ing.
-DIST_VERSION  ?= 1.11.0
+DIST_VERSION  ?= 1.12.0
 
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.
@@ -529,7 +529,7 @@ BUILD := .build
 # firecracker guest (baked into the rootfs — see rootfs). They no longer
 # build a standalone podman image (the podman group runtime is retired); this
 # just tracks them as inputs so an edit triggers an rootfs rebuild.
-SIDECAR_SRC := sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent sidecar/cs-notify
+SIDECAR_SRC := sidecar/stream_filter.js sidecar/venice_stream.js sidecar/cs-job sidecar/cs-subagent sidecar/cs-notify sidecar/cs-ask
 
 # Every image rebuild moves its tag, orphaning the previous build as a
 # dangling <none> image (~650MB per rootfs build — they once accumulated to

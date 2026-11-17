@@ -215,7 +215,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "clear":
 		return cl.Clear(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
 	case "session_create":
-		return cl.SessionCreate(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
+		return cl.SessionCreate(ctx, &pb.GroupReq{Group: s("group"), Session: s("session"), Mode: s("mode")})
 	case "drain":
 		// Same session convention as clear ("" = the whole group), and the
 		// same reason for it: the operator is addressing one conversation or
@@ -246,6 +246,11 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 			r.Tail = int64(v)
 		}
 		return cl.JobLogs(ctx, r)
+	case "approve":
+		allow, _ := extra["allow"].(bool)
+		return cl.Approve(ctx, &pb.ApproveReq{Group: s("group"), Session: s("session"), Id: s("id"), Allow: allow, Msg: s("deny_msg")})
+	case "list_pending":
+		return cl.ListPending(ctx, &pb.ListPendingReq{Group: s("group")})
 	case "config":
 		return cl.Config(ctx, buildConfigReq(extra))
 	case "sched_add":
@@ -263,7 +268,7 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 	case "sched_run":
 		return cl.SchedRun(ctx, &pb.SchedIDReq{Id: s("id")})
 	case "goal_set":
-		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria")}
+		r := &pb.GoalSetReq{Group: s("group"), Session: s("session"), Name: s("name"), Text: s("text"), Criteria: s("criteria"), Mode: s("mode")}
 		if v, ok := asFloat(extra["max_iterations"]); ok {
 			n, err := floatToInt32("max_iterations", v)
 			if err != nil {
@@ -293,6 +298,8 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.GoalResume(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
 	case "goal_cancel":
 		return cl.GoalCancel(ctx, &pb.GoalGroupReq{Group: s("group"), Name: s("name")})
+	case "goal_steer":
+		return cl.GoalSteer(ctx, &pb.GoalSteerReq{Group: s("group"), Name: s("name"), Text: s("text")})
 	}
 	return nil, fmt.Errorf("unknown cmd: %s", cmd)
 }
@@ -407,6 +414,11 @@ func buildConfigReq(extra map[string]any) *pb.ConfigReq {
 	setOpt("root", &r.Root)
 	setOpt("autostart", &r.Autostart)
 	setOpt("kvm", &r.Kvm)
+	// mode is per SESSION: session rides along ("-" = default session).
+	setOpt("mode", &r.Mode)
+	if r.Mode != nil {
+		r.Session, _ = extra["session"].(string)
+	}
 	return r
 }
 
@@ -452,18 +464,20 @@ func stateGroups(f *pb.StateFrame) map[string]GroupInfo {
 	out := map[string]GroupInfo{}
 	for g, gi := range f.GetGroups() {
 		out[g] = GroupInfo{
-			Running:        gi.GetRunning(),
-			Provider:       gi.GetProvider(),
-			Model:          gi.GetModel(),
-			Effort:         gi.GetEffort(),
-			Stalled:        gi.GetStalled(),
-			Queued:         int(gi.GetQueued()),
-			Sessions:       gi.GetSessions(),
-			Jobs:           pbToJobs(gi.GetJobs()),
-			TokPerSec:      gi.GetTokPerSec(),
-			Network:        gi.GetNetwork(),
-			Root:           gi.GetRoot(),
-			SessionOrigins: gi.GetSessionOrigins(),
+			Running:          gi.GetRunning(),
+			Provider:         gi.GetProvider(),
+			Model:            gi.GetModel(),
+			Effort:           gi.GetEffort(),
+			Stalled:          gi.GetStalled(),
+			Queued:           int(gi.GetQueued()),
+			Sessions:         gi.GetSessions(),
+			Jobs:             pbToJobs(gi.GetJobs()),
+			TokPerSec:        gi.GetTokPerSec(),
+			Network:          gi.GetNetwork(),
+			Root:             gi.GetRoot(),
+			SessionOrigins:   gi.GetSessionOrigins(),
+			SessionModes:     gi.GetSessionModes(),
+			PendingApprovals: gi.GetPendingApprovals(),
 		}
 	}
 	return out
@@ -684,7 +698,8 @@ func pbToEvent(p *pb.Event) Event {
 		Event: p.Event, Group: p.Group, Ts: p.Ts, Msg: p.Msg, Text: p.Text,
 		Name: p.Name, Input: p.Input, Words: int(p.Words), Body: p.Body,
 		Historical: p.Historical, ID: p.Id, Seq: p.Seq, Session: p.Session,
-		Severity: p.Severity, Title: p.Title,
+		Severity: p.Severity, Title: p.Title, Deadline: p.Deadline,
+		Kind: p.GetKind(), Options: p.GetOptions(),
 	}
 }
 

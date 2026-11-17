@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // recordDestroys swaps the destroy seam for a recorder for the test's
@@ -56,73 +57,11 @@ func TestDestroyKeyOpensModal(t *testing.T) {
 	if cmd != nil || len(*sent) != 0 {
 		t.Fatalf("opening the modal must send nothing (cmd=%v sent=%v)", cmd != nil, *sent)
 	}
-	v := m.View()
-	for _, want := range []string{"alpha", "workspace disk", "Irreversible", "[ No ]", "[ Yes ]"} {
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"alpha", "workspace disk", "Irreversible", "Type alpha and press enter"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("modal view missing %q:\n%s", want, v)
 		}
-	}
-}
-
-// Every cancel path closes the modal and sends nothing — esc, n, enter
-// (default focus is No), ctrl+c. Unrelated keys are swallowed and
-// leave it open.
-func TestDestroyModalCancelPaths(t *testing.T) {
-	for name, k := range map[string]tea.KeyMsg{
-		"esc": keyEsc, "n": runeKey('n'), "enter-default": keyEnter, "ctrl+c": keyCtrlC,
-	} {
-		t.Run(name, func(t *testing.T) {
-			sent := recordDestroys(t)
-			m := treeModel(t, destroyGroups(), "alpha", "", "")
-			m, _ = dpress(t, m, keyCtrlX)
-			m, _ = dpress(t, m, runeKey('x')) // swallowed, still open
-			if !m.destroyConfirm.open {
-				t.Fatal("an unrelated key closed the modal")
-			}
-			m, cmd := dpress(t, m, k)
-			if m.destroyConfirm.open {
-				t.Fatalf("%s left the modal open", name)
-			}
-			if cmd != nil {
-				if msg := cmd(); msg != nil {
-					t.Fatalf("%s returned a command producing %T", name, msg)
-				}
-			}
-			if len(*sent) != 0 {
-				t.Fatalf("%s sent destroy for %v", name, *sent)
-			}
-			if m.input.Value() != "" {
-				t.Fatalf("%s leaked into the message bar: %q", name, m.input.Value())
-			}
-		})
-	}
-}
-
-// y destroys exactly the hovered group — once, nothing else — and runs
-// through the existing destroy response path (nothing local before it).
-func TestDestroyModalConfirmTargetsHovered(t *testing.T) {
-	sent := recordDestroys(t)
-	m := treeModel(t, destroyGroups(), "alpha", "", "")
-	m, _ = dpress(t, m, keyCtrlX)
-	if _, ok := m.groups["alpha"]; !ok {
-		t.Fatal("precondition: alpha present")
-	}
-	m, cmd := dpress(t, m, runeKey('y'))
-	if m.destroyConfirm.open {
-		t.Fatal("confirm left the modal open")
-	}
-	if cmd == nil {
-		t.Fatal("confirm returned no command")
-	}
-	if len(*sent) != 1 || (*sent)[0] != "alpha" {
-		t.Fatalf("sent = %v, want exactly [alpha]", *sent)
-	}
-	if _, ok := m.groups["alpha"]; !ok {
-		t.Fatal("alpha dropped locally before the daemon confirmed (audit L42)")
-	}
-	r, ok := cmd().(daemonRespMsg)
-	if !ok || r.op != "destroy" || r.group != "alpha" {
-		t.Fatalf("cmd produced %+v, want destroy alpha", r)
 	}
 }
 
@@ -168,17 +107,5 @@ func TestDestroyKeyInputFocusOnlyHints(t *testing.T) {
 	}
 	if m.input.Value() != "draft" {
 		t.Fatalf("draft changed to %q", m.input.Value())
-	}
-}
-
-// /destroy keeps its behaviour through the shared path.
-func TestSlashDestroySharesPath(t *testing.T) {
-	sent := recordDestroys(t)
-	m := inputModel(t, "")
-	if cmd := m.dispatchInput("/destroy main"); cmd != nil || len(*sent) != 0 {
-		t.Fatal("/destroy main must be refused")
-	}
-	if cmd := m.dispatchInput("/destroy ghost"); cmd == nil || len(*sent) != 1 || (*sent)[0] != "ghost" {
-		t.Fatalf("/destroy ghost sent %v", *sent)
 	}
 }

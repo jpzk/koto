@@ -134,6 +134,9 @@ func ctlRespToPB(v any) (*pb.CtlResponse, error) {
 			out.Goals = append(out.Goals, toPBGoalItem(it))
 		}
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error, Result: &pb.CtlResponse_Goals{Goals: out}}, nil
+	case askResp:
+		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
+			Result: &pb.CtlResponse_Ask{Ask: &pb.AskResp{AskId: r.AskID, Answered: r.Answered, Answer: r.Answer}}}, nil
 	case schedAddResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
 			Result: &pb.CtlResponse_Sched{Sched: &pb.SchedAddResp{Ok: r.OK, Error: r.Error, Item: toPBScheduleItem(r.Item)}}}, nil

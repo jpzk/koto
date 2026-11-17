@@ -46,26 +46,26 @@ func focusModel(t *testing.T) Model {
 	return m
 }
 
-// TestTabTogglesTree: tab is the tree open/close toggle, both directions.
-func TestTabTogglesTree(t *testing.T) {
+// TestTreeToggleBothWays: alt+[ (was tab) is the tree open/close toggle, both directions.
+func TestTreeToggleBothWays(t *testing.T) {
 	m := focusModel(t)
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.focus != focusTree {
 		t.Fatalf("focus = %v after tab, want focusTree", m.focus)
 	}
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.focus != focusInput {
 		t.Fatalf("focus = %v after second tab, want focusInput", m.focus)
 	}
 }
 
-// TestTabNeverFocusesShell: with the pane open tab still only toggles the
+// TestTreeToggleNeverFocusesShell: with the pane open alt+[ (was tab) only toggles the
 // tree — it never lands on the terminal (that's alt+→) and never closes the
 // pane.
-func TestTabNeverFocusesShell(t *testing.T) {
+func TestTreeToggleNeverFocusesShell(t *testing.T) {
 	m := splitShellModel(t) // input focus, shellOpen, wide enough to split
 	for i, want := range []focusZone{focusTree, focusInput, focusTree} {
-		m = press(t, m, tea.KeyTab)
+		m = pressTree(t, m)
 		if m.focus != want {
 			t.Fatalf("step %d: focus = %v, want %v", i, m.focus, want)
 		}
@@ -109,7 +109,7 @@ func TestAltRightFocusesShell(t *testing.T) {
 // return target (alt+← goes back to where the user was).
 func TestAltRightFromTree(t *testing.T) {
 	m := splitShellModel(t)
-	m = press(t, m, tea.KeyTab) // open tree
+	m = pressTree(t, m) // open tree
 	m = pressAlt(t, m, tea.KeyRight)
 	if m.focus != focusShell {
 		t.Fatalf("focus = %v after alt+right from tree, want focusShell", m.focus)
@@ -233,12 +233,12 @@ func TestEscInterruptsOnActivityPhase(t *testing.T) {
 	}
 }
 
-// TestTabTogglesTreeWhileBusy: tab has no interrupt meaning, so it reaches
+// TestTreeToggleWhileBusy: alt+[ (was tab) has no interrupt meaning, so it reaches
 // the tree even mid-turn (that's its role vs esc).
-func TestTabTogglesTreeWhileBusy(t *testing.T) {
+func TestTreeToggleWhileBusy(t *testing.T) {
 	m := focusModel(t)
 	m.busy = map[string]bool{"main": true}
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.focus != focusTree {
 		t.Fatalf("focus = %v after tab while busy, want focusTree", m.focus)
 	}
@@ -322,4 +322,11 @@ func TestAltEscInPtyTogglesTree(t *testing.T) {
 	if len(rec.sent) != 0 {
 		t.Fatalf("alt+esc leaked bytes to the guest: %q", rec.sent)
 	}
+}
+
+// pressTree presses the tree open/close toggle (alt+[ — see mode_keys.go).
+func pressTree(t *testing.T, m Model) Model {
+	t.Helper()
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}, Alt: true})
+	return nm.(Model)
 }

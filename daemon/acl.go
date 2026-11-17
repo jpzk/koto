@@ -292,9 +292,15 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalGroupReq: // GoalApprove, GoalPause, GoalInterrupt, GoalResume, GoalCancel
 		return r.Group, true
+	case *pb.GoalSteerReq:
+		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
+		return r.Group, true
+	case *pb.ApproveReq:
+		return r.Group, true
+	case *pb.ListPendingReq: // "" = all groups → needs the "*" target
 		return r.Group, true
 	case *pb.ShellInput:
 		return r.Group, true
@@ -333,6 +339,16 @@ var adminOnlyVerbs = map[string]bool{
 	// voidable by what it contains; this is the same rule on the gRPC plane,
 	// where the docs have always said posture is the operator's.
 	"config_posture": true,
+	// approve / list_pending: answering a confirm session's tool approvals IS
+	// the operator's check on the agent (approvals.go). Delegating it through
+	// acl.json would let a role approve its own group's tool calls; neither is
+	// on the ctl plane either.
+	"approve":      true,
+	"list_pending": true,
+	// goal_steer: an operator steer is injected into every later iteration
+	// as "OPERATOR STEER (authoritative)"; a delegated role could otherwise
+	// author the very text that outranks the goal (goal_steer.go).
+	"goal_steer": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own
