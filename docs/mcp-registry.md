@@ -176,13 +176,77 @@ restart.
 
 ### Harness configuration
 
-For claude turns the daemon sends only the names of the connections the
-group is whitelisted on. The guest turns these into
-`--mcp-config '{"mcpServers":{"<conn>":{"type":"http","url":"http://127.0.0.1:18889/mcp/<conn>"}}}'`
-and adds `--strict-mcp-config`, so an `.mcp.json` in the workspace cannot
-add servers the operator never granted. The upstream URL and auth header
-are never part of this config.
+For every turn the daemon sends only the names of the connections the
+group is whitelisted on. The guest checks each name again and points every
+server at the in-guest bridge, `http://127.0.0.1:18889/mcp/<conn>`. The
+upstream URL and auth header are never part of any harness config, for any
+harness. A turn with no grants gets no MCP configuration at all, and the
+harness runs exactly as before.
 
-Follow-ups, not in this release: the same rendering for codex and pi;
-OAuth and stdio upstreams; write-class tools with operator approval;
+claude:
+
+- The guest passes
+  `--mcp-config '{"mcpServers":{"<conn>":{"type":"http","url":"http://127.0.0.1:18889/mcp/<conn>"}}}'`
+  and `--strict-mcp-config`, so an `.mcp.json` in the workspace cannot add
+  servers the operator never granted.
+
+codex (0.169.0):
+
+- Each server is a runtime override:
+  `-c mcp_servers.<conn>.url="http://127.0.0.1:18889/mcp/<conn>"` plus
+  `-c mcp_servers.<conn>.default_tools_approval_mode="approve"`.
+- `codex exec` (and `exec resume`) gets `--ignore-user-config`, so a
+  `$CODEX_HOME/config.toml` written by the agent (CODEX_HOME is under
+  `/workspace`) is not read. Login and thread history still live in
+  CODEX_HOME, so resume keeps working.
+- A project `.codex/config.toml` is never loaded: codex only loads it for a
+  trusted directory, and with the user config ignored and no `--trust`
+  nothing can mark the workspace trusted.
+- `-c features.plugins=false`, `-c features.apps=false` and
+  `-c features.skill_mcp_dependency_install=false` switch off the three
+  features that would add servers of their own.
+- Together these leave the `-c` overrides as the only source of MCP
+  servers, which is the codex equivalent of `--strict-mcp-config`.
+- `approve` is needed because koto runs codex with approval policy Never,
+  under which a tool that asks for approval is denied outright. The
+  gateway decides each call instead.
+- Context compaction (`codex app-server`) gets no MCP overrides and has no
+  `--ignore-user-config` flag. The compaction turn exposes no tools to the
+  model. A server the agent planted in its own config could still be
+  connected during compaction, but it would run only with rights the agent
+  already has, and it can never reach a koto connection without going
+  through the gateway.
+
+pi (1.5.2):
+
+- MCP is pi's built-in `builtin:mcp` extension, shipped in the pinned
+  package. koto keeps `--no-extensions` and adds only `-e builtin:mcp`, and
+  only on turns that have a grant. No other extension, skill or package
+  loads.
+- Before the agent starts, koto writes `mcp.json` into the fresh per-turn
+  agent directory (`PI_CODING_AGENT_DIR`), with one
+  `{"type":"http","url":"http://127.0.0.1:18889/mcp/<conn>","exposure":"direct"}`
+  entry per granted connection. That directory is created new for each
+  turn and removed afterwards, so nothing the agent writes there carries
+  over to the next turn.
+- A project `.pi/mcp.json` needs project trust. koto runs pi with
+  `--no-approve`, which ignores trust-gated project configuration, and the
+  trust store lives in the fresh agent directory, so no saved trust exists.
+- pi treats names that differ only in `-` and `_` as the same server. If
+  two granted connections collide this way, the first in sorted order is
+  used.
+
+Restricted modes and the gateway:
+
+- plan and confirm modes exist only for claude. codex and pi always run in
+  yolo mode: the harness does not ask before calling a tool.
+- This does not widen MCP access. The gateway is the enforcement point for
+  every harness. It decides on each request which tools are listed and
+  which calls are allowed, using the group's grants, ceilings and rate
+  limits. A harness, in any mode, can only reach the connections the
+  gateway lets the group reach, with the tools the gateway lets it call.
+- The harness strictness above only keeps the agent from adding other MCP
+  servers to its own tool list. It is not what protects a koto connection.
+
+Follow-ups, not in this release: OAuth and stdio upstreams; write-class tools with operator approval;
 pins that survive a daemon restart; translations of this page.
