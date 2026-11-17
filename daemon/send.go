@@ -235,7 +235,18 @@ func interruptAgent(g, sess string) error { return signalAgent(g, sess, "INT") }
 // on SIGINT indefinitely). SIGKILL still yields a clean [[turn_end]]: the
 // entrypoint's run_turn writes it when the worker's pipeline exits, however
 // it exits. sig is a caller-supplied constant ("INT"/"KILL"), never user input.
-func signalAgent(g, sess, sig string) error {
+func signalAgent(g, sess, sig string) error { return signalAgentOpts(g, sess, sig, false) }
+
+// signalAgentTree is signalAgent for the worker's whole PROCESS GROUP — the
+// harness and every tool subprocess it started (a mode change must leave
+// nothing of the old posture running; mode_live.go). The guest starts each
+// worker as its own group leader (fcguest startTracked: Setpgid), so the group
+// is signalled only when the matched pid leads it — never the agent's group or
+// this script's own. A descendant that setsid()s has left the group; that is
+// already-started work the guest's own timeout kill cannot reach either.
+func signalAgentTree(g, sess, sig string) error { return signalAgentOpts(g, sess, sig, true) }
+
+func signalAgentOpts(g, sess, sig string, tree bool) error {
 	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
@@ -244,7 +255,13 @@ func signalAgent(g, sess, sig string) error {
 	// would SIGINT itself. The real worker gets killed first (lower pid,
 	// iterated earlier), but the self-suicide makes the exec exit 130,
 	// surfacing in the TUI as `exit status 130` even though it succeeded.
+	treeFlag := "0"
+	if tree {
+		treeFlag = "1"
+	}
 	script := `WANT='` + sessionMarkerName(sess) + `'
+TREE=` + treeFlag + `
+mypg=$(sed 's/.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f3)
 hit=0
 for d in /proc/[0-9]*; do
   p=${d##*/}
@@ -253,6 +270,12 @@ for d in /proc/[0-9]*; do
   { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
     | grep -aqE '` + agentWorkerPattern + `' || continue
   tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
+  if [ "$TREE" = 1 ]; then
+    pg=$(sed 's/.*) //' "$d/stat" 2>/dev/null | cut -d' ' -f3)
+    if [ "$pg" = "$p" ] && [ "$pg" != 1 ] && [ "$pg" != "$mypg" ]; then
+      kill -` + sig + ` -- "-$pg" 2>/dev/null && hit=1
+    fi
+  fi
   kill -` + sig + ` "$p" 2>/dev/null && hit=1
 done
 [ "$hit" = 1 ] || echo no-agent-process >&2
@@ -441,6 +464,7 @@ drain:
 	stall := make(chan struct{})
 	var retry <-chan time.Time
 	sigAttempts := 0
+	modeCut := false
 	for {
 		select {
 		case out := <-doneC:
@@ -464,7 +488,15 @@ drain:
 			// has open as a deny, written down the turn connection.
 			denyApprovals(g, session, nil, decDeny, "interrupt", true)
 			cancelC = nil // closed channel is always ready; don't spin
-			retry = time.After(interruptRetryDelay)
+			if modeCancelPending(g, session) {
+				// A mode change cut this turn (mode_live.go): it already
+				// SIGKILLed the harness tree; every retry kills the tree
+				// again — no SIGINT grace for the old posture.
+				modeCut = true
+				retry = time.After(modeCutRetryDelay)
+			} else {
+				retry = time.After(interruptRetryDelay)
+			}
 		case <-retry:
 			// A stopped VM can never deliver [[turn_end]] — the guest process
 			// that would write it is gone with the VM. Retiring the turn here
@@ -480,10 +512,14 @@ drain:
 				return nil
 			}
 			sig := "INT"
-			if sigAttempts++; sigAttempts >= interruptKillAfter {
+			if sigAttempts++; sigAttempts >= interruptKillAfter || modeCut {
 				sig = "KILL"
 			}
-			if err := signalAgent(g, session, sig); err != nil {
+			sigFn := signalAgent
+			if modeCut {
+				sigFn = signalAgentTree
+			}
+			if err := sigFn(g, session, sig); err != nil {
 				emitLogfG("send", g, "info", "group=%s session=%s: interrupt SIG%s: %v", g, sessionMarkerName(session), sig, err)
 			}
 			retry = time.After(interruptRetryDelay)
@@ -541,6 +577,10 @@ func turnCanceled(c <-chan struct{}) bool {
 const (
 	interruptRetryDelay = 2 * time.Second
 	interruptKillAfter  = 3
+	// modeCutRetryDelay is the re-kill tick of a turn a mode change cut: the
+	// harness tree was already SIGKILLed synchronously; this only covers a
+	// worker that had not spawned yet when that kill ran.
+	modeCutRetryDelay = 500 * time.Millisecond
 )
 
 // turnWaitTimeout is how long send() waits for a turn's [[turn_end]] before

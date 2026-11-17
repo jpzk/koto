@@ -809,12 +809,20 @@ func sendWorkerTurn(g string, job sendJob) {
 	turnCancels[k] = make(chan struct{})
 	queuesMu.Unlock()
 	if job.compact != nil {
-		job.done <- runCompactJob(g, job.session, job.compact)
-	} else {
-		setTurnModeOverride(g, job.session, job.mode)
-		err := runTurn(g, job.session, job.msg)
-		setTurnModeOverride(g, job.session, "")
+		err := runCompactJob(g, job.session, job.compact)
+		clearTurnStamp(g, job.session)
+		// A mode change cut the compaction (mode_live.go): it is not re-run —
+		// the half-done compaction is reported and the operator re-issues it.
+		if mr := takeModeRestart(g, job.session); mr != nil {
+			close(mr.ran)
+			err = fmt.Errorf("compaction interrupted: mode changed to %s", mr.to)
+		}
 		job.done <- err
+	} else {
+		// Re-run under the new mode each time a mode change cuts the turn
+		// (mode_live.go); the job — and a goal iteration riding it —
+		// completes exactly once.
+		job.done <- runJobTurn(g, job)
 	}
 	queuesMu.Lock()
 	delete(inFlightSess, k)

@@ -1854,7 +1854,9 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 	}
 	// Permission mode from the HOST registry (session_modes.go) — the only
 	// source the guest obeys; config.json above carries none.
-	if mode := effectiveTurnMode(g, session); mode != modeYolo {
+	// stampTurnMode records it against this turn, so a later mode change
+	// knows what the in-flight turn runs in (mode_live.go).
+	if mode := stampTurnMode(g, session); mode != modeYolo {
 		m.Mode = mode
 		// Audit trail for restricted turns only (yolo stays silent, as before).
 		emitLogfG("session", g, "info", "[%s] turn session=%s mode=%s", g, sessionMarkerName(session), mode)

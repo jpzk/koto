@@ -313,6 +313,10 @@ for the operator as an approval card in the goal session.
     runs yolo. A yolo request from there is raised to confirm and logged.
   - The operator can still switch a running goal session between yolo and
     confirm with tab or `/mode` (host-authoritative, like any session).
+    The switch takes effect **immediately**: the running iteration is
+    killed and re-run under the new mode with a continuation note. The
+    driver sees one completion, so the iteration counts once against
+    `max_iterations` (see "Live mode changes" below).
 - **Who may send into it:** only the goal driver (`enqueueGoalTurn`). Cron,
   ctl `send`, job callbacks and reports into a confirm session are still
   refused (`checkUnattended`).
@@ -335,6 +339,46 @@ for the operator as an approval card in the goal session.
     `pending_tool` and `pending_since`. The stored status stays `running`.
   - The TUI goal view shows `waiting for confirmation (N)` with the oldest
     tool and its age.
+
+#### Live mode changes
+
+A session's mode (yolo, confirm, plan) can be changed with tab, `/mode`, or
+`koto ctl config -session S mode=X`. The change applies to the turn that is
+already running, not only to the next one (`daemon/mode_live.go`,
+design in `docs/design/mode-live.md`):
+
+- **Idle session:** only the stored mode changes. The next turn is the
+  first to run under it. The transcript shows
+  `mode changed to X — next turn`.
+- **Turn in flight under a different mode:** the daemon does the following
+  before it acknowledges the change:
+  - it cuts the turn,
+  - it denies every approval the session still has open (by `mode-change`),
+  - it SIGKILLs the harness's whole process group in the guest,
+  - it waits up to 10 s for the turn to end.
+
+  The same job is then re-run under the new mode. A note in front of the
+  original message tells the agent that the mode changed and that its
+  previous turn was interrupted. The transcript shows
+  `mode changed to X — turn restarted`. The config response carries
+  `mode_apply` (`turn restarted` or `next turn`).
+- **Tightening** (yolo→confirm, yolo→plan, confirm→plan) is fail-closed. No
+  tool call starts under the old mode after the change is acknowledged:
+  there is no SIGINT grace.
+- **Loosening** (plan→yolo, confirm→yolo, plan→confirm) uses the same
+  restart. The pinned claude CLI cannot switch a running process into
+  bypass mode. A pending approval is **denied, never auto-approved**. If
+  the restarted yolo turn still needs that tool, it simply runs it.
+- **Goals:** the running iteration is re-run inside the same queue job, so
+  the goal driver counts it once.
+- **codex / pi / venice:** a request for plan or confirm is still refused
+  with the usual "not supported for this harness yet" error, and nothing is
+  stored. The in-flight yolo turn is cancelled anyway, and its job ends with
+  that error instead of re-running.
+- **Compaction** in flight is cut, not re-run. Re-issue `/compact`.
+- **Audit:** every change logs
+  `mode_change session= from= to= interrupted= denied= refused=` under the
+  `audit` subsystem.
 
 #### Steering
 

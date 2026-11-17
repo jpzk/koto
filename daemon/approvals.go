@@ -213,6 +213,19 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 		})
 	}
 	approvalsMu.Unlock()
+	// A request that arrives from a turn already cut (interrupt, stop, or a
+	// mode change — mode_live.go) is denied outright. Checked AFTER the
+	// registration: the cutter closes the turn's channel and then sweeps the
+	// pending set, so a request registered after that sweep sees the closed
+	// channel here, and one registered before it is in the sweep.
+	if ch := turnCancelCh(g, session); ch != nil {
+		select {
+		case <-ch:
+			resolveApproval(k, false, decDeny, "denied: the turn was interrupted", "interrupt", true)
+			return
+		default:
+		}
+	}
 	emit(g, Event{Event: "approval_request", Session: session, ID: id, Name: p.tool,
 		Input: p.input, Text: p.summary, Deadline: unixOrZero(p.deadline)})
 	dl := "none — the goal waits"

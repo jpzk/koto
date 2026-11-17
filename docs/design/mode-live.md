@@ -183,3 +183,40 @@ successful setSessionMode (and on the non-claude refusal path):
    restarted prompt echo carries the note in the transcript; audit log line
    subsystem "audit": `mode_change group= session= from= to= interrupted=
    denied=` .
+
+## 8. As implemented (deviations from §7)
+
+- **No cancelTurnThen.** A mode change must also know whether the turn was
+  ALREADY cancelled, because an interrupted turn must not be brought back
+  by a re-run. `cancelTurnThen`'s onCancel hook cannot tell. So
+  `daemon/mode_live.go` has its own `cutTurnForMode`. It runs the same
+  queuesMu section as cancelTurn: identity check, close, record the
+  `modeRestart`, slotWakeAll. It also reports `already`. A turn that was
+  already cut is only tree-killed and has its approvals denied. It is not
+  re-run. cancelTurn on develop is untouched, so #123's
+  cancelTurn→cancelTurnThen refactor merges without a conflict.
+- **"In flight under a different mode" uses the turn's stamp, not a guess.**
+  `stampTurnMode` replaces the bare `effectiveTurnMode` read in fcSendMsg.
+  Under `modeStampMu` it records `{cancel chan, mode}` for the turn being
+  delivered. applyModeChange takes the same mutex and cuts only when the
+  in-flight turn's stamp differs from the new mode (a refusal always
+  cuts). A turn that has not been delivered yet has no stamp, and it will
+  be delivered in the new mode. A turn delivered in the new mode is left
+  alone.
+- **Re-run loop:** `runJobTurn`, called from sendWorkerTurn in place of the
+  single runTurn. Before each re-run it re-checks stop, the wedge fence and
+  goal liveness (`modeRestartBlocked`). It installs a fresh cancel chan in
+  `turnCancels`. The note is `modeRestartNote(from, to)` + the original
+  message.
+- **Tree kill:** `signalAgentTree` → `signalAgentOpts(…, tree=true)`. It
+  `kill -SIG -- -$pgid`s the matched worker's process group, but only when
+  the worker leads that group (pgid == pid, as fcguest startTracked
+  guarantees). It never touches pgid 1 or the exec script's own group.
+- **Abort loop:** for a mode cut, sendNow re-kills the tree every
+  `modeCutRetryDelay = 500ms` with SIGKILL from the first retry.
+- **openApproval** re-checks the turn's cancel chan right AFTER it
+  registers a request. A request racing the cut's deny sweep is therefore
+  either in the sweep or denied there.
+- **Compaction** jobs are cut but not re-run. The job ends with
+  `compaction interrupted: mode changed to X`.
+- **Config response:** `mode_apply` is `turn restarted` or `next turn`.

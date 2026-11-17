@@ -2921,6 +2921,12 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			if !ev.Historical {
 				delete(m.ctxWarned, ev.Group)
 			}
+		case "mode_changed":
+			// A permission-mode change took effect (daemon/mode_live.go):
+			// "mode changed to X — turn restarted" when it cut the
+			// in-flight turn, "… — next turn" when the session was idle.
+			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
+				text: ic(icCog) + " " + ev.Text, ts: int64(ev.Ts)})
 		case "sched_fired", "sched_run":
 			tag := ic(icAlarm)
 			if ev.Event == "sched_run" {
