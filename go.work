@@ -12,6 +12,7 @@ use (
 	./daemon
 	./fcguest
 	./protocol
+	./tools/mcp-adder
 	./tui
 )
 
