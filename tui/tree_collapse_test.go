@@ -157,7 +157,7 @@ func TestCollapseSurvivesRefreshWithNewChildren(t *testing.T) {
 // the selection to the group row — and the active conversation with it.
 func TestCollapseMovesHiddenSelectionToGroupRow(t *testing.T) {
 	for _, tc := range []struct{ sess, job string }{
-		{"goal-x", "j2"}, {"s1", ""}, {"", "j0"},
+		{"goal-x", "j2"}, {"s1", "j1"}, {"", "j0"},
 	} {
 		m := collapseFixture(t, tc.sess, tc.job)
 		m = altKey(t, m, 'c')

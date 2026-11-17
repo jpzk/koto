@@ -4813,8 +4813,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				return m, nil
 			}
 		case "alt+c":
-			// Collapse/expand the hovered row's whole group (sessions, goal
-			// sessions, jobs). A chord, so it works mid-draft like ctrl+t.
+			// Collapse/expand: a session row with children (jobs, goal
+			// sessions) toggles that session alone; any other row toggles
+			// its whole group (sessions, goal sessions, jobs). A chord, so
+			// it works mid-draft like ctrl+t.
 			m.toggleGroupCollapse()
 			return m, nil
 		case "alt+C":
@@ -5594,19 +5596,44 @@ func (m *Model) setGroupCollapsed(g string, collapsed bool) bool {
 	return true
 }
 
-// toggleGroupCollapse flips the collapse state of the hovered row's group —
-// from any row inside it, so a deep job row collapses its whole group.
+// sessChildren is how many child rows conversation (g, sess) owns — its
+// visible jobs plus the goal sessions that fold with it — regardless of
+// whether its list is currently open.
+func (m Model) sessChildren(g, sess string) int {
+	return len(m.visibleJobs(g, sess)) + len(m.foldGoals(g, sess))
+}
+
+// toggleGroupCollapse is alt+c. On a SESSION row that has children (jobs,
+// goal sessions) it collapses/expands that session alone — the same fold
+// →/← and ctrl+t drive. Anywhere else (the group row, a job row, a session
+// with nothing under it) it flips the collapse state of the hovered row's
+// whole group, so a deep job row collapses its group.
 func (m *Model) toggleGroupCollapse() bool {
 	rows := m.treeRows()
 	if m.treeIdx >= len(rows) {
 		return false
 	}
-	g := rows[m.treeIdx].group
+	r := rows[m.treeIdx]
+	if r.session != "" && r.job == "" && !m.groupCollapsed[r.group] {
+		if key := sessKey(r.group, r.session); m.sessChildren(r.group, r.session) > 0 {
+			if m.jobsOpen[key] {
+				delete(m.jobsOpen, key)
+			} else {
+				m.jobsOpen[key] = true
+			}
+			return true
+		}
+	}
+	g := r.group
 	return m.setGroupCollapsed(g, !m.groupCollapsed[g])
 }
 
 // toggleCollapseAll collapses every group when any is still expanded, else
-// expands them all.
+// expands them all. Collapsing a group takes every session row with it
+// (named, goal, and the jobs under them — main's own sessions included), so
+// a collapsed-all tree is the group rows alone. The per-session folds
+// (jobsOpen) are left as they were: expanding brings each session back in
+// the open/folded state it had before.
 func (m *Model) toggleCollapseAll() {
 	order := m.treeOrder()
 	anyOpen := false
@@ -5877,6 +5904,18 @@ func (m *Model) switchSession(g, s string) tea.Cmd {
 	if s != "" && !slices.Contains(m.sessionsOf(g), s) && !goalSession(s) {
 		m.addPendingSession(g, s)
 		cmd = m.beginSessionCreate(g, s)
+	}
+	// An explicit switch (/session, the ctrl+o palette, the new-session
+	// dialog) to a session hidden by a collapsed group reveals it: the
+	// user asked for that row, so the group expands — with each session's
+	// own fold state intact — instead of normalizeTreeCursor treating the
+	// hidden anchor as gone and falling back to the default session. A
+	// goal session folded inside its parent is revealed there.
+	if s != "" {
+		delete(m.groupCollapsed, g)
+		if p, ok := m.foldParent(g, s); ok {
+			m.jobsOpen[sessKey(g, p)] = true
+		}
 	}
 	m.selectTreeRow(treeRow{group: g, session: s})
 	return cmd
