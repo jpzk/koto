@@ -51,9 +51,9 @@ on:
   push:
     # `release` is the original long-lived branch; `release/<version>` is what
     # the release skill cuts per release (.claude/skills/release).
-    branches: [main, develop, release, "release/**"]
+    branches: [main, develop, release, "release/**", "hotfix/**"]
   pull_request:
-    branches: [main, develop, release, "release/**"]
+    branches: [main, develop, release, "release/**", "hotfix/**"]
   workflow_dispatch:
 
 permissions:
