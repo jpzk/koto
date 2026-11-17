@@ -113,7 +113,7 @@ func chownWorker(p string) error {
 // the group has one, the system prompt as a file (passed by path, so pi
 // never has to guess whether the text is a path). Everything is written
 // before the dir is handed to the worker.
-func preparePiAgentDir(provider string, systemPrompt []byte) (dir, promptFile string, err error) {
+func preparePiAgentDir(provider string, systemPrompt, mcpJSON []byte) (dir, promptFile string, err error) {
 	tmpl, err := os.ReadFile(filepath.Join(piTemplateDir, "models."+provider+".json"))
 	if err != nil {
 		return "", "", fmt.Errorf("pi template: %w", err)
@@ -140,6 +140,16 @@ func preparePiAgentDir(provider string, systemPrompt []byte) (dir, promptFile st
 		}
 		files = append(files, promptFile)
 	}
+	if mcpJSON != nil {
+		// Granted MCP connections (piMcpConfig): written by root into the
+		// fresh dir before the worker can touch it, so nothing the agent
+		// planted earlier can be the global MCP config of this turn.
+		mf := filepath.Join(dir, "mcp.json")
+		if err := os.WriteFile(mf, mcpJSON, 0o600); err != nil {
+			return fail(err)
+		}
+		files = append(files, mf)
+	}
 	for _, p := range append(files, dir) {
 		if err := chownWorker(p); err != nil {
 			return fail(err)
@@ -150,13 +160,19 @@ func preparePiAgentDir(provider string, systemPrompt []byte) (dir, promptFile st
 
 // piArgs builds the argv for one turn; the prompt goes on stdin (so a
 // leading "-" or "@file" in it is just text).
-func piArgs(piName, model, effort, sessionDir, sessionID, promptFile string) []string {
+func piArgs(piName, model, effort, sessionDir, sessionID, promptFile string, mcp bool) []string {
 	args := []string{"--mode", "json", "-p",
 		"--provider", piName,
 		"--session-dir", sessionDir,
 		"--offline",
 		"--no-extensions", "--no-skills", "--no-prompt-templates",
 		"--no-themes", "--no-approve"}
+	if mcp {
+		// -ne still loads explicit -e paths (pi docs/cli.md:198-199), so
+		// this enables exactly the built-in MCP client and nothing else.
+		// --no-approve keeps the trust-gated project .pi/mcp.json ignored.
+		args = append(args, "-e", "builtin:mcp")
+	}
 	if sessionID != "" {
 		args = append(args, "--session-id", sessionID)
 	}
@@ -205,13 +221,14 @@ func runPi(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []str
 	if id != "" {
 		tw.tr.workerAttr("session.resumed", "true")
 	}
-	agentDir, promptFile, err := preparePiAgentDir(cfg.Provider, req.SystemPrompt)
+	mcpJSON := piMcpConfig(req.GetMcpServers())
+	agentDir, promptFile, err := preparePiAgentDir(cfg.Provider, req.SystemPrompt, mcpJSON)
 	if err != nil {
 		tw.errf("pi: %v", err)
 		return
 	}
 	defer os.RemoveAll(agentDir)
-	w, err := workerCmd("pi", piArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile),
+	w, err := workerCmd("pi", piArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile, mcpJSON != nil),
 		piEnv(env, agentDir), req.Msg)
 	if err != nil {
 		tw.errf("pi: start: %v", err)

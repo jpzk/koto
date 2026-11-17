@@ -28,7 +28,7 @@ func TestCodexModelResolution(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: model = %q, want %q", c.name, got, c.want)
 		}
-		args := strings.Join(codexArgs("http://x/v1", got, "", "", ""), "\x00")
+		args := strings.Join(codexArgs("http://x/v1", got, "", "", "", nil), "\x00")
 		if !strings.Contains(args, "\x00-c\x00model="+tomlString(c.want)+"\x00") {
 			t.Errorf("%s: codex argv lacks -c model=%s", c.name, tomlString(c.want))
 		}
