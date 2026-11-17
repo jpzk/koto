@@ -162,5 +162,27 @@ definition, the tool is hidden and refused until the daemon restarts or the
 connection is re-added. This protects against a server that swaps a tool's
 description or schema after it was approved.
 
-<!-- TODO(mcp-registry items 5/6): name the daemon flag (off by default),
-     the vsock port, and the harness config rendering once wired. -->
+### Turning it on
+
+The gateway is off by default. Start the daemon with
+`KOTO_MCP_GATEWAY=1` to enable it. While it is off, the registry can
+still be edited, but no group can reach any connection: the daemon opens
+no MCP listener and passes no MCP servers to the harness.
+
+When it is on, each running group gets its own gateway listener on
+vsock port 9005. The guest agent bridges `127.0.0.1:18889` to that port.
+A group started before you set the flag gets its listener on its next
+restart.
+
+### Harness configuration
+
+For claude turns the daemon sends only the names of the connections the
+group is whitelisted on. The guest turns these into
+`--mcp-config '{"mcpServers":{"<conn>":{"type":"http","url":"http://127.0.0.1:18889/mcp/<conn>"}}}'`
+and adds `--strict-mcp-config`, so an `.mcp.json` in the workspace cannot
+add servers the operator never granted. The upstream URL and auth header
+are never part of this config.
+
+Follow-ups, not in this release: the same rendering for codex and pi;
+OAuth and stdio upstreams; write-class tools with operator approval;
+pins that survive a daemon restart; translations of this page.

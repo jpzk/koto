@@ -157,8 +157,13 @@ message MsgReq {
   // confirm only: worker hard cap in ms (the worker clock pauses while an
   // approval is pending, but never past this). 0 = guest default.
   int64  approval_hard_cap_ms = 10;
+  // MCP connections this group may use through the host gateway (daemon
+  // flag KOTO_MCP_GATEWAY=1). Names only — the URL the harness is pointed at
+  // is the in-guest bridge 127.0.0.1:18889/mcp/<name>; the upstream URL and
+  // credential never leave the host. Empty = no MCP servers configured.
+  repeated string mcp_servers = 11;
 }
-message ExecReq        { string script = 1; }
+message ExecReq       { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
 message GuestScriptReq { string script = 1; } // run_script: AgentFrame stream follows
 message ShellAttachReq { string session = 1; uint32 cols = 2; uint32 rows = 3; }
