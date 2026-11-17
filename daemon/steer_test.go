@@ -205,28 +205,57 @@ func TestSteerOrderAmongSteers(t *testing.T) {
 // TestSteerNoRaceWithQueuedOrCron hammers the window the swap closes: a
 // message is enqueued (as the scheduler and ctl send do, via enqueueSend)
 // while the previous turn is retiring, and a steer arrives at the same time.
-// Whatever the interleaving, no message enqueued before or concurrently with
-// the steer may START after the in-flight turn and before the steer, unless
-// the steer interrupted it. Run with -race.
+//
+// The guarantee (steer.go file comment) is about the steer's INSERT, not about
+// when the test happened to call steerSession: a turn may start ahead of the
+// steer only if it had already gone in flight when the steer was inserted.
+// The test records that instant exactly through steerInsertHook (which runs
+// under queuesMu, in the insert's critical section): the turns already
+// started, plus the in-flight turn the steer observed. Asserting instead that
+// X never precedes S unless S interrupted X (the earlier form of this test)
+// is not a property of the daemon: under scheduling pressure the test
+// goroutine can be descheduled between its enqueue of X and its steer long
+// enough for A and X to run to completion — X then rightly runs first, with
+// nothing to interrupt. Run with -race.
 func TestSteerNoRaceWithQueuedOrCron(t *testing.T) {
 	const g = "steer-race"
 	withSteerInterrupt(t, func(string, string) error { return nil })
+	// XbeforeS classifies every iteration in which X started ahead of S —
+	// the shape the old assertion rejected — by the legitimate path that
+	// produced it, so a -v run shows the old failure was one of these.
+	var xDone, xRetired, xCut int
 	for i := 0; i < 300; i++ {
 		sess := fmt.Sprintf("r%d", i)
+		// mu orders the stub and the insert hook. The hook runs with
+		// queuesMu held, so nothing may take queuesMu while holding mu.
 		var mu sync.Mutex
 		var order []string
-		cancelled := map[string]bool{}
-		stub := func(gg, s, msg string) error {
+		turnName := map[<-chan struct{}]string{} // turn identity → message
+		var startedAtInsert []string             // turns started before the insert
+		var observed chan struct{}               // in-flight turn the steer saw
+		inserted := false
+		hook := func(gg, s string, obs chan struct{}) {
+			if gg != g || s != sess {
+				return
+			}
 			mu.Lock()
-			order = append(order, unframeSteer(msg))
+			startedAtInsert = append([]string(nil), order...)
+			observed = obs
+			inserted = true
 			mu.Unlock()
-			if unframeSteer(msg) == "A" {
+		}
+		steerInsertHook.Store(&hook)
+		stub := func(gg, s, msg string) error {
+			m := unframeSteer(msg)
+			cancel := turnCancelCh(gg, s) // this turn's identity (takes queuesMu)
+			mu.Lock()
+			order = append(order, m)
+			turnName[cancel] = m
+			mu.Unlock()
+			if m == "A" {
 				// A short turn that retires while the steer races in.
 				select {
-				case <-turnCancelCh(gg, s):
-					mu.Lock()
-					cancelled[msg] = true
-					mu.Unlock()
+				case <-cancel:
 				case <-time.After(time.Duration(i%3) * 100 * time.Microsecond):
 				}
 			}
@@ -251,36 +280,62 @@ func TestSteerNoRaceWithQueuedOrCron(t *testing.T) {
 			if dX != nil {
 				<-dX
 			}
+			steerInsertHook.Store(nil)
 			mu.Lock()
 			defer mu.Unlock()
-			pos := map[string]int{}
-			for j, m := range order {
-				pos[m] = j
-			}
-			// The only way X may start before S is by already being in
-			// flight when the steer landed — and then the steer must have
-			// interrupted exactly X and run right after it.
-			if pos["X"] < pos["S"] && !(res.Interrupted && interruptedMsg(order, pos["S"]) == "X") {
-				t.Fatalf("iter %d: X started ahead of the steer without being the interrupted turn; order=%v interrupted=%v",
-					i, order, res.Interrupted)
-			}
-			// Whatever the steer interrupted ran immediately before it.
-			if res.Interrupted && pos["S"] == 0 {
-				t.Fatalf("iter %d: Interrupted but steer ran first; order=%v", i, order)
+			if !inserted {
+				t.Fatalf("iter %d: insert hook never ran", i)
 			}
 			if len(order) != 3 {
 				t.Fatalf("iter %d: order=%v, want 3 turns", i, order)
 			}
+			before := map[string]bool{}
+			for _, m := range startedAtInsert {
+				before[m] = true
+			}
+			obsName := ""
+			if observed != nil {
+				obsName = turnName[(<-chan struct{})(observed)]
+				if obsName == "" {
+					t.Fatalf("iter %d: steer observed an unknown turn; order=%v", i, order)
+				}
+				before[obsName] = true
+			}
+			pos := map[string]int{}
+			for j, m := range order {
+				pos[m] = j
+			}
+			// Nothing that was not yet in flight at the insert starts ahead
+			// of the steer: the swap in sendWorkerTurnOnce runs S first.
+			for _, m := range []string{"A", "X"} {
+				if pos[m] < pos["S"] && !before[m] {
+					t.Fatalf("iter %d: %s started ahead of the steer but was not in flight at the insert; order=%v started-at-insert=%v observed=%q interrupted=%v",
+						i, m, order, startedAtInsert, obsName, res.Interrupted)
+				}
+			}
+			// The steer runs right after the in-flight turn it observed: the
+			// worker drains the lane before the FIFO.
+			if obsName != "" && pos["S"] != pos[obsName]+1 {
+				t.Fatalf("iter %d: steer observed %s in flight but did not run right after it; order=%v", i, obsName, order)
+			}
+			// Interrupted only ever names the turn it observed.
+			if pos["X"] < pos["S"] {
+				switch {
+				case obsName != "X":
+					xDone++ // X ran to completion before the steer was inserted
+				case res.Interrupted:
+					xCut++ // X was in flight at the insert and the steer cut it
+				default:
+					xRetired++ // X was in flight at the insert, finished before the cut
+				}
+			}
+			if res.Interrupted && obsName == "" {
+				t.Fatalf("iter %d: Interrupted with no in-flight turn observed; order=%v", i, order)
+			}
 		})
 	}
-}
-
-// interruptedMsg is the turn immediately before the steer in order.
-func interruptedMsg(order []string, steerPos int) string {
-	if steerPos == 0 {
-		return ""
-	}
-	return order[steerPos-1]
+	t.Logf("X ahead of S: completed-before-insert=%d in-flight-retired-before-cut=%d in-flight-cut=%d",
+		xDone, xRetired, xCut)
 }
 
 // TestSteerRefusesGoalSessions: same rule as Interrupt.

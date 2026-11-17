@@ -21,7 +21,10 @@ package main
 // job X racing the steer — queued earlier, enqueued by cron during the steer,
 // or just pulled off the channel — exactly one of these holds:
 //
-//   - X was marked in flight first → the steer sees it and interrupts it;
+//   - X was marked in flight first → the steer sees it and cancels it, unless
+//     X retires on its own before the cancel lands (then X simply finished,
+//     and the steer is an un-interrupted priority send); X may also have run
+//     to completion entirely before the steer arrived;
 //   - the steer was inserted first → X's in-flight mark finds the lane
 //     non-empty, runs the steer instead, and X runs after it.
 //
@@ -62,6 +65,12 @@ var steerInterruptFn func(g, sess string) error
 // closes. Test seam only; atomic because every worker reads it.
 var preInFlightHook atomic.Pointer[func(g string, job sendJob)]
 
+// steerInsertHook, when set, runs inside steerSession's insert critical
+// section (queuesMu held) with the in-flight turn it observed (nil = none).
+// Test seam only: it lets a test record exactly which turns had gone in
+// flight before the steer landed. Must not take queuesMu.
+var steerInsertHook atomic.Pointer[func(g, session string, observed chan struct{})]
+
 // steerResult reports what a steer found.
 type steerResult struct {
 	// Interrupted: a turn of the session was in flight and has been
@@ -86,7 +95,7 @@ func steerSession(g, session, msg string) (steerResult, error) {
 	if len(msg) > sendMsgMax {
 		return steerResult{}, fmt.Errorf("message is %d bytes; the limit is %d", len(msg), sendMsgMax)
 	}
-	job := sendJob{session: session, msg: msg, steer: true, done: make(chan error, 1)}
+	job := sendJob{session: session, msg: msg, steer: true, steerCut: new(atomic.Bool), done: make(chan error, 1)}
 	k := sessKey(g, session)
 
 	queuesMu.Lock()
@@ -113,9 +122,11 @@ func steerSession(g, session, msg string) (steerResult, error) {
 	if inFlightSess[k] {
 		turn = turnCancels[k]
 	}
-	job.steerInterrupted = turn != nil
 	steerLanes[k] = append(steerLanes[k], job)
 	groupQueuedBytes[g] += int64(len(msg))
+	if h := steerInsertHook.Load(); h != nil {
+		(*h)(g, session, turn)
+	}
 	select {
 	case steerWake[k] <- struct{}{}:
 	default: // a wake is already pending; the worker drains the whole lane
@@ -126,10 +137,14 @@ func steerSession(g, session, msg string) (steerResult, error) {
 	if turn == nil {
 		return res, nil
 	}
-	// cancelTurn names the exact turn observed above; if it retired in
+	// cancelTurnThen names the exact turn observed above; if it retired in
 	// between, the worker's next in-flight mark already runs the steer first,
-	// so there is nothing left to interrupt (audit M85 discipline).
-	if !cancelTurn(g, session, turn) {
+	// so there is nothing left to interrupt (audit M85 discipline) — the turn
+	// finished its answer, and the steer is reported, framed and run as a
+	// plain priority send. steerCut is recorded under the same lock as the
+	// cut, so the worker (which can only dequeue the steer after the cut turn
+	// retires, under queuesMu) always sees it.
+	if !cancelTurnThen(g, session, turn, func() { job.steerCut.Store(true) }) {
 		return res, nil
 	}
 	res.Interrupted = true
@@ -180,10 +195,9 @@ const (
 	steerFrameIdle        = "[operator steering]\n\n"
 )
 
-// frameSteer wraps a steer message for delivery. interrupted is the in-flight
-// sample taken with the insert: a turn was running when the steer arrived
-// (it was cancelled, or retired on its own in the same instant — either way
-// its output is not what the operator wants next).
+// frameSteer wraps a steer message for delivery. interrupted means the steer
+// actually cancelled the session's in-flight turn (sendJob.steerCut); a turn
+// that finished on its own before the cancel landed is not "interrupted".
 func frameSteer(msg string, interrupted bool) string {
 	if interrupted {
 		return steerFrameInterrupted + msg

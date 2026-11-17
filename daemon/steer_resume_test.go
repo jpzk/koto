@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -61,12 +63,22 @@ func TestSteerFramingInterruptedVsIdle(t *testing.T) {
 func TestSteerResumeLostWarns(t *testing.T) {
 	const g = "steer-lost"
 	withSteerInterrupt(t, func(string, string) error { return nil })
+	// Guarded: steerResumeProbeFn is a package global read by every worker,
+	// including ones a previous test left draining, so appends must not race.
+	var probesMu sync.Mutex
 	var probes []string
 	steerResumeProbeFn = func(gg, s string) (bool, error) {
+		probesMu.Lock()
 		probes = append(probes, gg+"/"+s)
+		probesMu.Unlock()
 		return false, nil // killed before the harness wrote its id
 	}
 	t.Cleanup(func() { steerResumeProbeFn = nil })
+	// The per-group event ring is process-global and outlives a test, so under
+	// -count=N the previous runs' steer_context_lost events would still be
+	// replayable from 0 (the count grew 2,3,…,21 across -count=50 — one per
+	// run, i.e. isolation leakage, not a double emit). Start from an empty ring.
+	clearEventRing(g)
 	r := newSteerRecorder()
 	withTurnFn(r.turn, func() {
 		dA, _ := enqueueSend(g, "s1", "block-first-turn")
@@ -87,11 +99,14 @@ func TestSteerResumeLostWarns(t *testing.T) {
 		idle, _ := steerSession(g, "s1", "again")
 		<-idle.Done
 	})
-	if len(probes) != 1 || probes[0] != g+"/s1" {
-		t.Fatalf("probes=%v, want exactly one for %s/s1 (idle steers are not probed)", probes, g)
+	probesMu.Lock()
+	gotProbes := append([]string(nil), probes...)
+	probesMu.Unlock()
+	if len(gotProbes) != 1 || gotProbes[0] != g+"/s1" {
+		t.Fatalf("probes=%v, want exactly one for %s/s1 (idle steers are not probed)", gotProbes, g)
 	}
 	var lost int
-	for _, e := range replayFrom(g, 0) {
+	for _, e := range replay(g, 0) { // under subsLock: a worker may still be recording
 		if e.Event == "steer_context_lost" {
 			lost++
 			if e.Session != "s1" {
@@ -146,5 +161,65 @@ func TestSessionResumeScriptEveryHarness(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSteerAfterCompletionIsNotAnInterrupt: once a turn's result has been
+// delivered, the turn is over. A steer sent in reaction to that result must
+// see an idle session — not "interrupt" the finished turn, not be framed as a
+// resumption, not probe the resume state. The worker used to deliver the
+// result before clearing the in-flight mark, which is how
+// TestSteerResumeLostWarns saw its idle steer probed a second time.
+func TestSteerAfterCompletionIsNotAnInterrupt(t *testing.T) {
+	const g = "steer-after"
+	withSteerInterrupt(t, func(string, string) error { return nil })
+	var probesMu sync.Mutex
+	probes := 0
+	steerResumeProbeFn = func(string, string) (bool, error) {
+		probesMu.Lock()
+		probes++
+		probesMu.Unlock()
+		return true, nil
+	}
+	t.Cleanup(func() { steerResumeProbeFn = nil })
+	var framedMu sync.Mutex
+	var framed []string
+	withTurnFn(func(_, _, msg string) error {
+		framedMu.Lock()
+		framed = append(framed, msg)
+		framedMu.Unlock()
+		return nil
+	}, func() {
+		for i := 0; i < 200; i++ {
+			sess := fmt.Sprintf("a%d", i)
+			d, err := enqueueSend(g, sess, "turn")
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-d
+			if sessionBusy(g, sess) {
+				t.Fatalf("iter %d: result delivered while the turn is still marked in flight", i)
+			}
+			res, err := steerSession(g, sess, "next")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Interrupted {
+				t.Fatalf("iter %d: steer after completion reported Interrupted", i)
+			}
+			<-res.Done
+		}
+	})
+	probesMu.Lock()
+	defer probesMu.Unlock()
+	if probes != 0 {
+		t.Fatalf("resume probed %d times for steers that interrupted nothing", probes)
+	}
+	framedMu.Lock()
+	defer framedMu.Unlock()
+	for _, m := range framed {
+		if strings.HasPrefix(m, steerFrameInterrupted) {
+			t.Fatalf("a steer after completion was framed as interrupted: %q", m)
+		}
 	}
 }

@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -79,12 +80,15 @@ type sendJob struct {
 	// lives in the session's steer lane, not the FIFO channel, and is never
 	// itself displaced by another steer once it has started.
 	steer bool
-	// steerInterrupted: a turn of the session was in flight when this steer
-	// was inserted (sampled under queuesMu together with the insert). The
-	// steer turn is then framed as a resumption and the session's resume
-	// state is probed first (steer.go checkSteerResume).
-	steerInterrupted bool
-	done             chan error // buffered(1); worker delivers the turn result, never blocks
+	// steerCut is set (under queuesMu, by steerSession's cancel) when this
+	// steer actually cancelled the session's in-flight turn. Only then is the
+	// steer framed as a resumption and the resume state probed first
+	// (steer.go checkSteerResume). A turn that was in flight at the insert but
+	// retired on its own before the cancel landed finished its answer: it was
+	// not interrupted, and neither the agent nor the caller is told it was.
+	// A pointer because the lane holds the job by value.
+	steerCut *atomic.Bool
+	done     chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
 // ---- slot pool --------------------------------------------------------------
@@ -333,6 +337,14 @@ func sessionTurn(g, session string) chan struct{} {
 // cancelTurn closes exactly the turn `want` identifies, and reports whether it
 // did. A different turn now holding the key is not cancelled.
 func cancelTurn(g, session string, want chan struct{}) bool {
+	return cancelTurnThen(g, session, want, nil)
+}
+
+// cancelTurnThen is cancelTurn that also runs onCancel, still under queuesMu,
+// when (and only when) it cancelled `want`. A steer uses it to record "I cut
+// this turn" atomically with the cut: the turn cannot retire, and the steer
+// cannot be dequeued, between the two.
+func cancelTurnThen(g, session string, want chan struct{}, onCancel func()) bool {
 	if want == nil {
 		return false
 	}
@@ -345,6 +357,9 @@ func cancelTurn(g, session string, want chan struct{}) bool {
 	case <-want: // already cancelled
 	default:
 		close(want)
+	}
+	if onCancel != nil {
+		onCancel()
 	}
 	// The cancelled turn may be parked in acquireSlot, which waits on a
 	// condition variable and cannot select on this channel (audit M140).
@@ -890,20 +905,29 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	inFlightSess[k] = true
 	turnCancels[k] = make(chan struct{})
 	queuesMu.Unlock()
+	var err error
 	if job.compact != nil {
-		job.done <- runCompactJob(g, job.session, job.compact)
+		err = runCompactJob(g, job.session, job.compact)
 	} else if job.steer {
-		if job.steerInterrupted {
+		cut := job.steerCut != nil && job.steerCut.Load()
+		if cut {
 			checkSteerResume(g, job.session)
 		}
-		job.done <- runTurn(g, job.session, frameSteer(job.msg, job.steerInterrupted))
+		err = runTurn(g, job.session, frameSteer(job.msg, cut))
 	} else {
-		job.done <- runTurn(g, job.session, job.msg)
+		err = runTurn(g, job.session, job.msg)
 	}
+	// Retire the turn BEFORE reporting its result. The other order left a
+	// window in which the caller already held the result while the session
+	// still looked busy: a steer sent on completion sampled the finished turn
+	// as in flight, "interrupted" it (cancel + SIGINT to the guest), and was
+	// framed and resume-probed as a resumption of a turn that had in fact
+	// completed. The same window let an Interrupt RPC hit a finished turn.
 	queuesMu.Lock()
 	delete(inFlightSess, k)
 	delete(turnCancels, k)
 	queuesMu.Unlock()
+	job.done <- err
 	return held, again
 }
 
