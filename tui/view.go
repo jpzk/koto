@@ -541,7 +541,7 @@ func (m Model) renderStatusLeft() string {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
 	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
-	return app + grp + m.renderModeSegment() + m.renderLoadingSegment()
+	return app + grp + m.renderInboxSegment() + m.renderLoadingSegment()
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
