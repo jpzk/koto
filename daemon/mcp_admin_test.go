@@ -245,17 +245,17 @@ func TestMcpCliParse(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"frob"},
-		{"add", "docs"},                             // no --url
+		{"add", "docs"}, // no --url
 		{"add", "docs", "--url", "u", "--auth-file", "bad"},
 		{"add", "docs", "--url", "u", "--auth-file", "missing"},
-		{"grant", "docs", "tg"},                     // missing tool
+		{"grant", "docs", "tg"}, // missing tool
 		{"allow", "docs", "tg", "extra"},
 		{"rate", "docs", "tg", "-1"},
 		{"rate", "docs", "tg", "x"},
-		{"allow", "docs", "tg", "--url", "u"},       // add-only flag
+		{"allow", "docs", "tg", "--url", "u"},         // add-only flag
 		{"revoke", "docs", "tg", "a", "--args", "{}"}, // grant-only flag
 		{"show", "docs", "--bogus", "1"},
-		{"show", "docs", "--url"},                   // flag without value
+		{"show", "docs", "--url"}, // flag without value
 	} {
 		if _, err := mcpCliParse(args, rf); err == nil {
 			t.Errorf("accepted %v", args)

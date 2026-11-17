@@ -1258,7 +1258,6 @@ func (s *kotoServer) Budget(_ context.Context, r *pb.BudgetReq) (*pb.BudgetResp,
 	return &pb.BudgetResp{Ok: true, Budget: toStruct(view)}, nil
 }
 
-
 // ---- mcp registry (hardcoded admin-only, acl.go) ----------------------------
 
 func (s *kotoServer) Mcp(_ context.Context, r *pb.McpReq) (*pb.McpResp, error) {

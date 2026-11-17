@@ -66,9 +66,9 @@ type Gateway struct {
 	Now func() time.Time
 
 	mu       sync.Mutex
-	sessions map[string]*upstream     // key: conn + config fingerprint
-	pins     map[string]string        // key: session key + "\x00" + tool
-	rates    map[string]*window       // key: conn + "\x00" + group
+	sessions map[string]*upstream // key: conn + config fingerprint
+	pins     map[string]string    // key: session key + "\x00" + tool
+	rates    map[string]*window   // key: conn + "\x00" + group
 }
 
 type window struct {
