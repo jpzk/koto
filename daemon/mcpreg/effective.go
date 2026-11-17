@@ -42,9 +42,28 @@ func (r *Registry) Effective(conn, group string) (*Effective, error) {
 		return e, ErrNotWhitelisted
 	}
 	c, ok := r.Conns[conn]
-	if !ok {
+	if !ok || c == nil || c.Disabled {
 		return e, ErrNotWhitelisted
 	}
+	return r.effective(e, c, group)
+}
+
+// Preview computes what Effective would return if conn were enabled. It is
+// for operator views only (the TUI group editor and `mcp effective` show
+// the grants a disabled connection keeps); the gateway must use Effective.
+func (r *Registry) Preview(conn, group string) (*Effective, error) {
+	e := &Effective{Conn: conn, Group: group, Tools: map[string]EffTool{}}
+	if r == nil {
+		return e, ErrNotWhitelisted
+	}
+	c, ok := r.Conns[conn]
+	if !ok || c == nil {
+		return e, ErrNotWhitelisted
+	}
+	return r.effective(e, c, group)
+}
+
+func (r *Registry) effective(e *Effective, c *Conn, group string) (*Effective, error) {
 	g, ok := c.Groups[group]
 	if !ok || g == nil {
 		return e, ErrNotWhitelisted
@@ -63,14 +82,19 @@ func (r *Registry) Effective(conn, group string) (*Effective, error) {
 	return e, nil
 }
 
-// ConnsFor lists the connections group is whitelisted on (sorted).
+// ConnsFor lists the ENABLED connections group is whitelisted on (sorted).
+// It feeds the harness config, so a disabled connection is left out.
 func (r *Registry) ConnsFor(group string) []string {
 	var out []string
 	if r == nil {
 		return nil
 	}
 	for _, n := range sortedKeys(r.Conns) {
-		if _, ok := r.Conns[n].Groups[group]; ok {
+		c := r.Conns[n]
+		if c == nil || c.Disabled {
+			continue
+		}
+		if _, ok := c.Groups[group]; ok {
 			out = append(out, n)
 		}
 	}
