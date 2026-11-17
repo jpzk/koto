@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release
+.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release sbom
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-10-09 via proxy.golang.org:
@@ -376,6 +376,17 @@ dist: $(ARTIFACTS)
 	  "verify that signature, and the unpacked bytes against the artifacts.sha256" \
 	  "committed at this tag, before anything is installed."; } > $(DIST_DIR)/NOTES.md
 	@echo "next:  make release-draft   (uploads the assets + SHA256SUMS to a draft release)"
+
+# CycloneDX SBOMs for the Go binaries (koto, koto-tui, fc-agent), written next
+# to the release assets as <name>_<version>_<arch>.cdx.json so `make dist`
+# hashes them into SHA256SUMS and `make release-draft` uploads them while the
+# release is a DRAFT — releases are immutable once published, so there is no
+# later upload. Same GO_IMAGE + CGO_ENABLED=0 as the build. Firecracker has no
+# SBOM (documented gap, see scripts/supplychain/sbom.sh).
+sbom:
+	$(need-container)
+	@mkdir -p $(DIST_DIR)
+	$(GO_BUILD_RUN) sh scripts/supplychain/sbom.sh $(DIST_DIR) $(DIST_VERSION) $(DIST_ARCH)
 
 # --- release ---------------------------------------------------------------
 # Publish what `make dist` produced as a GitHub release, in three commands that
