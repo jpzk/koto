@@ -221,10 +221,10 @@ func ownsSched(owner, id string) bool {
 	return true
 }
 
-// ctlDispatch is the restricted analogue of dispatch() for the ctl
+// ctlDispatchInner is the restricted analogue of dispatch() for the ctl
 // plane. The verb allowlist depends on `owner`: main gets the full
 // orchestration set, non-main gets sched-only with self-target forced.
-func ctlDispatch(owner string, line []byte) any {
+func ctlDispatchInner(owner string, line []byte) any {
 	var env cmdEnvelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		return errResp("json: " + err.Error())
