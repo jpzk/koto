@@ -71,7 +71,7 @@ func altKey(t *testing.T, m Model, r rune) Model {
 	return nm.(Model)
 }
 
-func hovered(t *testing.T, m Model) treeRow {
+func hoveredRow(t *testing.T, m Model) treeRow {
 	t.Helper()
 	rows := m.treeRows()
 	if m.treeIdx >= len(rows) {
@@ -161,7 +161,7 @@ func TestCollapseMovesHiddenSelectionToGroupRow(t *testing.T) {
 	} {
 		m := collapseFixture(t, tc.sess, tc.job)
 		m = altKey(t, m, 'c')
-		if h := hovered(t, m); h != (treeRow{group: "alpha"}) {
+		if h := hoveredRow(t, m); h != (treeRow{group: "alpha"}) {
 			t.Fatalf("from %+v: hovered %+v after collapse, want the alpha row", tc, h)
 		}
 		if m.treeSel != (treeRow{group: "alpha"}) || m.activeSession("alpha") != "" {
@@ -177,7 +177,7 @@ func TestNormalizeMovesCursorOffHiddenRow(t *testing.T) {
 	m := collapseFixture(t, "s1", "")
 	m.groupCollapsed["alpha"] = true
 	m.normalizeTreeCursor()
-	if h := hovered(t, m); h != (treeRow{group: "alpha"}) {
+	if h := hoveredRow(t, m); h != (treeRow{group: "alpha"}) {
 		t.Fatalf("hovered %+v, want the alpha group row", h)
 	}
 	if !m.groupCollapsed["alpha"] {
@@ -186,7 +186,7 @@ func TestNormalizeMovesCursorOffHiddenRow(t *testing.T) {
 	// up/down can only ever land on visible rows.
 	for i := 0; i < 10; i++ {
 		m = pressKey(t, m, tea.KeyDown)
-		if h := hovered(t, m); h.group == "alpha" && h != (treeRow{group: "alpha"}) {
+		if h := hoveredRow(t, m); h.group == "alpha" && h != (treeRow{group: "alpha"}) {
 			t.Fatalf("cursor reached hidden row %+v", h)
 		}
 	}
@@ -228,7 +228,7 @@ func TestCollapseAllToggle(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("collapse-all: %d rows %+v, want one per group", len(rows), rows)
 	}
-	if h := hovered(t, m); h != (treeRow{group: "alpha"}) {
+	if h := hoveredRow(t, m); h != (treeRow{group: "alpha"}) {
 		t.Fatalf("hovered %+v after collapse-all, want alpha", h)
 	}
 	m = altKey(t, m, 'C')
