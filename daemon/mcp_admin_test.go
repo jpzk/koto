@@ -243,6 +243,17 @@ func TestMcpCliParse(t *testing.T) {
 	if r, err = mcpCliParse(nil, rf); err != nil || r.Op != "ls" {
 		t.Fatalf("default: %+v %v", r, err)
 	}
+	// warning helper: --tools without a --rules entry are no-args only
+	if nr := mcpAddNoRuleTools(&pb.McpReq{Op: "add", Tools: []string{"search", "fetch", "ping"},
+		RulesJson: `{"search":{"args":{"q":{"type":"string"}}},"fetch":{"additional_args":true}}`}); fmt.Sprint(nr) != "[ping]" {
+		t.Errorf("no-rule tools: %v", nr)
+	}
+	if nr := mcpAddNoRuleTools(&pb.McpReq{Op: "add", Tools: []string{"a", "b"}}); fmt.Sprint(nr) != "[a b]" {
+		t.Errorf("no rules at all: %v", nr)
+	}
+	if nr := mcpAddNoRuleTools(&pb.McpReq{Op: "grant", Tools: []string{"a"}}); nr != nil {
+		t.Errorf("non-add: %v", nr)
+	}
 	for _, args := range [][]string{
 		{"frob"},
 		{"add", "docs"}, // no --url

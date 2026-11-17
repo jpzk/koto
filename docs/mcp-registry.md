@@ -83,6 +83,13 @@ All `koto ctl mcp` verbs go through one admin-only RPC (`Mcp`, listed in
 
 Notes:
 
+- **Pitfall: a tool in `--tools` without a `--rules` entry can only be
+  called with no arguments.** It still shows up in `tools/list`, but every
+  call that passes an argument is refused with `argument "x" not permitted
+  (connection ceiling)`. Give each tool that takes arguments a rule, e.g.
+  `{"add": {"args": {"a": {"type": "number"}, "b": {"type": "number"}}}}`,
+  or `{"add": {"additional_args": true}}` to allow any arguments. `mcp add`
+  prints a warning listing the tools that have no rule. See "Argument rules".
 - `--auth-file` reads one line `Header-Name: value` from a file, or from
   stdin with `-`. The value is never accepted on the command line, so it
   does not end up in shell history or process listings.

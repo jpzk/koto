@@ -232,9 +232,36 @@ func mcpCliMain(args []string) {
 		}
 		ctlFatal(2, "%v", err)
 	}
+	if nr := mcpAddNoRuleTools(req); len(nr) > 0 {
+		fmt.Fprintf(os.Stderr, "warning: no --rules entry for %s: these tools may only be called with no arguments; "+
+			"give them an args rule (or {\"additional_args\":true}), see docs/mcp-registry.md \"Argument rules\"\n",
+			strings.Join(nr, ", "))
+	}
 	cl := ctlClient()
 	ctx, cancel := ctlCtx()
 	defer cancel()
 	resp, err := cl.Mcp(ctx, req)
 	ctlPrint(resp, err)
+}
+
+// mcpAddNoRuleTools lists the --tools of an `mcp add` that have no entry in
+// --rules. Such a ceiling tool may only be called with NO arguments
+// (mcpreg.EffTool: nil ceiling rule), which is easy to miss: the tool shows
+// up in tools/list, but every call with arguments is refused. Used for a
+// warning only; the policy itself is unchanged.
+func mcpAddNoRuleTools(req *pb.McpReq) []string {
+	if req == nil || req.Op != "add" {
+		return nil
+	}
+	var rules map[string]json.RawMessage
+	if req.RulesJson != "" && json.Unmarshal([]byte(req.RulesJson), &rules) != nil {
+		return nil // the daemon reports the malformed rules
+	}
+	var out []string
+	for _, t := range req.Tools {
+		if _, ok := rules[t]; !ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }

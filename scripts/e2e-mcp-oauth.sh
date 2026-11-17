@@ -130,9 +130,17 @@ say "daemon $DPID up; $(tr '\n' ' ' < $OUT/daemon-env.txt)"
 
 # ---- A2: onboarding (DCR + authcode/PKCE, resource-bound) + a client_credentials conn + the PAT conn
 n0=$(wc -l < $OUT/adder.jsonl)
-kc mcp add adder --url $AURL/mcp --class read --tools add,multiply,reset_counter --oauth authorization_code --oauth-scope mcp:add > $OUT/a2-add.txt 2>&1; r1=$?
-kc mcp add addercc --url $AURL/mcp --class read --tools add --oauth client_credentials --oauth-scope mcp:add > $OUT/a2-addcc.txt 2>&1; r2=$?
-kc mcp add adderpat --url $PURL/mcp --class read --tools add --auth-file $SECD/pat-header > $OUT/a8-add.txt 2>&1; r3=$?
+# ceiling arg rules: a ceiling tool WITHOUT a rule is no-args only (docs/mcp-registry.md "Argument rules"), so add and
+# multiply get a precise rule (a, b numbers, bounded); reset_counter takes no args (empty rule). multiply is in the
+# ceiling WITH a rule but never granted, so A4's refusal is the grant layer, not an argument rule.
+NUM='{"type":"number","minimum":-1000000000,"maximum":1000000000}'
+echo "{\"add\":{\"args\":{\"a\":$NUM,\"b\":$NUM}},\"multiply\":{\"args\":{\"a\":$NUM,\"b\":$NUM}},\"reset_counter\":{}}" > $OUT/rules-adder.json
+echo "{\"add\":{\"args\":{\"a\":$NUM,\"b\":$NUM}}}" > $OUT/rules-add.json
+jq -e . $OUT/rules-adder.json $OUT/rules-add.json > /dev/null || { say "rules json invalid"; exit 2; }
+kc mcp add adder --url $AURL/mcp --class read --tools add,multiply,reset_counter --rules $OUT/rules-adder.json --oauth authorization_code --oauth-scope mcp:add > $OUT/a2-add.txt 2>&1; r1=$?
+kc mcp add addercc --url $AURL/mcp --class read --tools add --rules $OUT/rules-add.json --oauth client_credentials --oauth-scope mcp:add > $OUT/a2-addcc.txt 2>&1; r2=$?
+kc mcp add adderpat --url $PURL/mcp --class read --tools add --rules $OUT/rules-add.json --auth-file $SECD/pat-header > $OUT/a8-add.txt 2>&1; r3=$?
+grep -h '^warning: no --rules' $OUT/a2-add.txt $OUT/a2-addcc.txt $OUT/a8-add.txt && { say "FATAL ceiling tool without arg rule"; exit 2; }
 kc mcp show adder > $OUT/a2-show.txt 2>&1; kc mcp ls > $OUT/a2-ls.txt 2>&1
 tail -n +$((n0+1)) $OUT/adder.jsonl > $OUT/a2-adder-onboard.jsonl
 REG=$H/creds/mcp/registry.json
@@ -170,15 +178,26 @@ GW=http://127.0.0.1:18889/mcp
 rpc(){ local b; b=$(printf '%s' "$3" | base64 -w0)
   rs $1 "echo $b | base64 -d > /tmp/rq.json; curl -sS -m 30 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data-binary @/tmp/rq.json $GW/$2 2>&1; echo; echo RC=\$?" 90; }
 call(){ printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$1" "$2"; }
-ML0=0
-ask(){ # TAG PROMPT -> $OUT/ask-TAG.reply ; model evidence -> $OUT/ask-TAG.metrics
+# model evidence, two independent records (metrics.jsonl carries no model field):
+#  host:  the daemon proxy's metrics.jsonl lines for this ask: /v1/messages, HTTP 200, Anthropic request_id req_*
+#  guest: the claude harness's own session transcript (/workspace/.claude/projects/*/<session>.jsonl), whose assistant
+#         records carry message.model as returned by the API; only the lines this ask appended are read
+SJ=/workspace/.claude/projects
+gsnap(){ rs $G "for f in \$(ls $SJ/*/*.jsonl 2>/dev/null); do echo \"\$(wc -l < \$f) \$f\"; done > /tmp/lc-$1; echo SNAP \$(wc -l < /tmp/lc-$1)" 60; }
+gmodels(){ rs $G "for f in \$(ls $SJ/*/*.jsonl 2>/dev/null); do n=\$(awk -v f=\$f '\$2==f{print \$1}' /tmp/lc-$1); tail -n +\$(( \${n:-0} + 1 )) \$f; done | grep -o '\"model\":\"[^\"]*\"' | sort | uniq -c; echo MODELS_DONE" 60; }
+ask(){ # TAG PROMPT -> $OUT/ask-TAG.reply ; host evidence $OUT/ask-TAG.metrics ; guest evidence $OUT/ask-TAG.models
   local m0; m0=$(wc -l < $H/metrics.jsonl 2>/dev/null || echo 0)
+  gsnap $1 > $OUT/ask-$1.snap 2>&1
   timeout 420 $K ctl ask -timeout 6m $G "$2" > $OUT/ask-$1.reply 2> $OUT/ask-$1.err; local rc=$?
-  tail -n +$((m0+1)) $H/metrics.jsonl 2>/dev/null | jq -c "select(.group==\"$G\") | {ts,group,provider,model,status,upstream:(.upstream//.target//null),usage}" > $OUT/ask-$1.metrics 2>/dev/null
-  say "ask $1 rc=$rc: $(head -c 200 $OUT/ask-$1.reply | tr '\n' ' ') | model calls $(wc -l < $OUT/ask-$1.metrics) $(jq -r .model $OUT/ask-$1.metrics | sort -u | tr '\n' ' ')"
+  tail -n +$((m0+1)) $H/metrics.jsonl 2>/dev/null | jq -c "select(.group==\"$G\") | {ts,group,path,status,request_id,budget_key,in:(.usage.input_tokens//null),out:(.usage.output_tokens//null)}" > $OUT/ask-$1.metrics 2>/dev/null
+  gmodels $1 > $OUT/ask-$1.models 2>&1
+  say "ask $1 rc=$rc: $(head -c 200 $OUT/ask-$1.reply | tr '\n' ' ') | proxied /v1/messages 200: $(jq -r 'select(.path=="/v1/messages" and .status==200)|.request_id' $OUT/ask-$1.metrics | wc -l) | transcript models: $(grep -o '"model":"[^"]*"' $OUT/ask-$1.models | sort -u | tr '\n' ' ')"
   return $rc; }
-realmodel(){ # proxied calls happened, model is a claude-* name, no fakemodel anywhere in this run
-  [ -s $OUT/ask-$1.metrics ] && jq -r .model $OUT/ask-$1.metrics | grep -q '^claude-' && ! grep -q fakemodel $OUT/ask-$1.metrics \
+models_of(){ grep -o '"model":"claude-[^"]*"' $OUT/ask-$1.models | cut -d'"' -f4 | sort -u | tr '\n' ' '; }
+realmodel(){ # REAL Anthropic traffic for this ask: host proxy 200 with req_* ids AND transcript model claude-*; no fakemodel
+  [ -n "$(jq -r 'select(.path=="/v1/messages" and .status==200 and (.request_id|tostring|startswith("req_")))|.request_id' $OUT/ask-$1.metrics 2>/dev/null)" ] \
+    && grep -q MODELS_DONE $OUT/ask-$1.models && [ -n "$(models_of $1)" ] \
+    && ! grep -qi fakemodel $OUT/ask-$1.metrics $OUT/ask-$1.models \
     && grep -qx "KOTO_UPSTREAM=$REAL" $OUT/daemon-env.txt; }
 
 # ---- A3: REAL model calls add(1234, 8766)
@@ -187,8 +206,8 @@ ask a3 "Use the add tool from the adder MCP server to compute 1234 + 8766. Do no
 tail -n +$((n0+1)) $OUT/adder.jsonl > $OUT/a3-adder.jsonl; a1=$(cnt add)
 hit=$(jq -c 'select(.ev=="tools_call" and .tool=="add" and .a==1234 and .b==8766 and .result==10000 and .auth=="jwt" and .aud_ok==true and .is_error==false)' $OUT/a3-adder.jsonl | head -1)
 if grep -q 10000 $OUT/ask-a3.reply && [ -n "$hit" ] && [ $((a1-a0)) -ge 1 ] && realmodel a3; then
-  step A3 PASS $OUT/a3-adder.jsonl "REAL model $(jq -r .model $OUT/ask-a3.metrics | sort -u | tr '\n' ' ')via $REAL ($(wc -l < $OUT/ask-a3.metrics) proxied calls) replied '$(head -c 40 $OUT/ask-a3.reply | tr '\n' ' ')'; server: $(echo "$hit" | jq -c '{ev,tool,a,b,result,auth,aud,aud_ok,client_id,scope,jti}'); counter add $a0->$a1"
-else step A3 FAIL $OUT/a3-adder.jsonl "reply='$(head -c 200 $OUT/ask-a3.reply)' err=$(head -c 200 $OUT/ask-a3.err) hit='$hit' add $a0->$a1 metrics=$(head -c 300 $OUT/ask-a3.metrics)"; fi
+  step A3 PASS $OUT/a3-adder.jsonl "REAL model [$(models_of a3)] (claude session transcript message.model: $(grep -o '[0-9]* "model":"[^"]*"' $OUT/ask-a3.models | tr '\n' ' ')) via $REAL (host proxy: $(jq -r 'select(.path=="/v1/messages" and .status==200)|.request_id' $OUT/ask-a3.metrics | wc -l) x /v1/messages 200, first request_id $(jq -r 'select(.path=="/v1/messages" and .status==200)|.request_id' $OUT/ask-a3.metrics | head -1)) replied '$(head -c 40 $OUT/ask-a3.reply | tr '\n' ' ')'; server: $(echo "$hit" | jq -c '{ev,tool,a,b,result,auth,aud,aud_ok,client_id,scope,jti}'); counter add $a0->$a1"
+else step A3 FAIL $OUT/a3-adder.jsonl "reply='$(head -c 200 $OUT/ask-a3.reply)' err=$(head -c 200 $OUT/ask-a3.err) hit='$hit' add $a0->$a1 metrics=$(head -c 300 $OUT/ask-a3.metrics) models=$(head -c 200 $OUT/ask-a3.models | tr '\n' ' ')"; fi
 
 # ---- A4: koto authz — multiply not granted: hidden, refused at the gateway, model cannot reach it
 m0=$(cnt multiply)
@@ -197,7 +216,7 @@ rpc $G adder "$(call multiply '{"a":6,"b":7}')" > $OUT/a4-gw-multiply.txt 2>&1
 ask a4 "Use the multiply tool from the adder MCP server to compute 12 * 34. If you have no such tool, reply exactly NO-MULTIPLY-TOOL and do not compute anything."
 m1=$(cnt multiply); lst=$(grep -o '"name":"[a-z_]*"' $OUT/a4-gw-list.txt | sort -u | tr '\n' ' ')
 if [ "$m0" = 0 ] && [ "$m1" = 0 ] && ! grep -q '"name":"multiply"' $OUT/a4-gw-list.txt && grep -q '"name":"add"' $OUT/a4-gw-list.txt \
-   && grep -q 'denied by koto MCP policy' $OUT/a4-gw-multiply.txt && ! grep -q 408 $OUT/ask-a4.reply && realmodel a4; then
+   && grep -q 'denied by koto MCP policy: tool .*multiply.* not permitted for group' $OUT/a4-gw-multiply.txt && ! grep -q 408 $OUT/ask-a4.reply && realmodel a4; then
   step A4 PASS $OUT/a4-gw-multiply.txt "gateway tools/list for $G = [$lst] (multiply hidden); direct tools/call multiply -> '$(grep -o 'denied by koto MCP policy[^"]*' $OUT/a4-gw-multiply.txt | head -1)'; REAL model reply '$(head -c 60 $OUT/ask-a4.reply | tr '\n' ' ')'; server multiply counter $m0->$m1"
 else step A4 FAIL $OUT/a4-gw-multiply.txt "list=[$lst] call=$(head -c 200 $OUT/a4-gw-multiply.txt) reply=$(head -c 120 $OUT/ask-a4.reply) multiply $m0->$m1"; fi
 
