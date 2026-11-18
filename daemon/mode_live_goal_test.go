@@ -74,7 +74,7 @@ func TestModeLiveGoalSwitchMatrix(t *testing.T) {
 					t.Errorf("GoalSet: %s", resp.GetError())
 				}
 			}()
-			first := f.waitRun(t)
+			first := f.waitRunIn(t, work)
 			if first.session != work || first.mode != tc.start {
 				t.Fatalf("first run %+v, want %s in %s", first, work, tc.start)
 			}
@@ -85,7 +85,7 @@ func TestModeLiveGoalSwitchMatrix(t *testing.T) {
 				if got := r.Config["mode_apply"]; got != "turn restarted" {
 					t.Fatalf("change %d (->%s): mode_apply = %v", i, m, got)
 				}
-				re := f.waitRun(t)
+				re := f.waitRunIn(t, work)
 				if re.session != work || re.mode != m {
 					t.Fatalf("change %d: re-run %s/%s, want %s/%s", i, re.session, re.mode, work, m)
 				}

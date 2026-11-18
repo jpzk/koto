@@ -61,6 +61,12 @@ func newFakeHarness(t *testing.T, g string) *fakeHarness {
 }
 
 func (f *fakeHarness) turn(g, session, msg string) error {
+	// setTurnFn is process-global: a straggler turn of ANOTHER group (e.g. an
+	// earlier goal test's hand-back to its origin session, delivered after
+	// that test ended) must not land in this harness.
+	if g != f.g {
+		return nil
+	}
 	mode := stampTurnMode(g, session)
 	r := fakeRun{session: session, msg: msg, mode: mode}
 	kill := make(chan struct{})
@@ -114,6 +120,25 @@ func (f *fakeHarness) waitRun(t *testing.T) fakeRun {
 		t.Fatal("harness run never started")
 	}
 	return fakeRun{}
+}
+
+// waitRunIn is waitRun restricted to one session: runs of other sessions (a
+// goal's hand-back to its origin session from an earlier -count pass) are
+// skipped, not mistaken for the run under test.
+func (f *fakeHarness) waitRunIn(t *testing.T, session string) fakeRun {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case r := <-f.start:
+			if r.session == session {
+				return r
+			}
+		case <-deadline:
+			t.Fatalf("harness run in %q never started", session)
+			return fakeRun{}
+		}
+	}
 }
 
 func (f *fakeHarness) waitTools(t *testing.T, session, mode string, n int) {
