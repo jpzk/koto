@@ -19,7 +19,7 @@
 # normalises it and writes guest.img with mke2fs (byte-reproducible).
 
 # Same digest Dockerfile.rootfs builds FROM (and the catalog's "fedora").
-ARG FEDORA=docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
+ARG FEDORA=docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
 
 FROM ${FEDORA} AS tc
 COPY fcguest/guest/rpms.lock /tmp/rpms.lock
@@ -185,7 +185,7 @@ COPY fcguest/fc-agent /g/bin/fc-agent
 ARG GUEST_VERSION=dev
 RUN set -eu; { \
       echo "version=$GUEST_VERSION"; echo "layout=v2"; \
-      echo "fedora_base=be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19"; \
+      echo "fedora_base=a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c"; \
       echo "node=$NODE_VERSION sha256:$NODE_SHA256"; echo "npm=$NPM_VERSION sha512:$NPM_SHA512"; \
       echo "claude-code=$CLAUDE_CODE_VERSION sha512:$CLAUDE_CODE_SHA512 linux-x64 sha512:$CLAUDE_CODE_LINUX_X64_SHA512"; \
       echo "codex=$CODEX_VERSION sha256:$CODEX_SHA256 code-mode-host sha256:$CODEX_CODE_MODE_HOST_SHA256"; \

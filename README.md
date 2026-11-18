@@ -132,7 +132,7 @@ What is in it:
 
 | | |
 |---|---|
-| base | `fedora` 44, pinned by digest, 27 dnf packages with weak deps off |
+| base | `fedora` 45, pinned by digest, 27 dnf packages with weak deps off |
 | agent runtime | `nodejs` + `npm` + `@anthropic-ai/claude-code` 2.1.268 (pinned), `python3`, `git`, `ripgrep`, `jq`, `curl`, `tmux` |
 | PID 1 | `/usr/local/bin/fc-agent`, the static Go guest agent selected by `init=` on the kernel command line; it runs every turn, bridges vsock, and mounts `/workspace` |
 | worker scripts | `/sidecar/` — `cs-job`, `cs-notify`, `cs-subagent`, `venice_stream.js` (baked in: a microVM has no bind mounts) |

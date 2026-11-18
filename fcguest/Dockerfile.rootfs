@@ -10,10 +10,10 @@
 # This image is never run as a container — build-rootfs.sh exports its
 # filesystem into an ext4 image that Firecracker attaches read-only as the
 # root drive (shared by every group VM).
-# Pinned by DIGEST so a rootfs rebuild is reproducible; `fedora:44` moves as
+# Pinned by DIGEST so a rootfs rebuild is reproducible; `fedora:45` moves as
 # the release gets updates. Bump deliberately (and rebuild the rootfs) with:
-#   podman manifest inspect docker.io/library/fedora:44
-FROM docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
+#   podman manifest inspect docker.io/library/fedora:45
+FROM docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
 
 # The agent CLI every guest runs, PINNED — the base image above is pinned by
 # digest for exactly this reason and the npm install underneath it was not, so
