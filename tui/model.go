@@ -4806,7 +4806,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			// re-anchors on the conversation). Only with an empty draft —
 			// with text in the message bar the arrows keep meaning cursor
 			// movement and fall through to the input below. Enter stays
-			// out of this: it submits/exits, and ctrl+enter isn't an
+			// out of this: it only submits, and ctrl+enter isn't an
 			// option — a terminal sends plain CR for it, so it can't be
 			// told apart from enter without the kitty keyboard protocol.
 			if strings.TrimSpace(m.input.Value()) == "" && (m.setJobFold(s == "right") || m.groupArrow(s == "right")) {
@@ -4847,12 +4847,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while
-			// browsing the others. Empty enter exits tree mode (matches
-			// the old behaviour so it's not a worse default for someone
-			// who only entered tree to switch agents).
+			// browsing the others. Empty enter is a no-op that keeps the
+			// tree open (operator request 2026-11-17): the hovered row is
+			// already selected by the cursor move, and leaving the tree is
+			// the job of esc / ctrl+[ / alt+[.
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
-				m.exitTree()
 				return m, nil
 			}
 			m.input.SetValue("")

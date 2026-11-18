@@ -71,7 +71,7 @@ func helpSections() []helpSection {
 			{"ctrl+c", "interrupt the agent's turn (discard it; queued prompts continue)"},
 		}},
 		{"CHAT + TREE", []helpEntry{
-			{"enter", "send message; in the tree: back to the message bar"},
+			{"enter", "send message (in the tree too, which stays open; empty: no-op)"},
 			{"alt+[", "toggle tree focus (fallback: esc / ctrl+[ when no turn runs)"},
 			{"tab / shift+tab", "cycle this session's mode yolo > plan > confirm (backwards)"},
 			{"up/down", "scroll chat; in the tree: move the cursor"},

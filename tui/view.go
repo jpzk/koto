@@ -1955,8 +1955,9 @@ func (m Model) renderHint() string {
 		return lipgloss.NewStyle().MaxWidth(m.width).Render(dim.Render(" tool approval pending"))
 	}
 	if m.focus == focusTree {
-		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
-		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
+		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ only sends a draft and keeps
+		// the tree open (empty ↩ is a no-op). ^r searches prompt history;
+		// ⌥→ jumps to the terminal pane.
 		// Key names are spelled out in mono rather than left to the ASCII
 		// fold: a width-preserving stand-in for ⇥/⎋/⌥ is a single cryptic
 		// letter, and this row is flow text that can afford the extra columns
