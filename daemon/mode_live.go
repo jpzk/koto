@@ -35,6 +35,7 @@ package main
 // simply runs the tool itself if it still wants it.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -288,13 +289,17 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 		// the design requires, and on every other transition too: the
 		// turn they belong to is being killed.
 		res.Denied = denyApprovals(g, session, nil, decDeny, "mode-change", true)
-		if err := modeKillFn(g, session); err != nil {
-			emitLogfG("session", g, "info", "[%s] session=%s mode change kill: %v", g, sessionMarkerName(session), err)
+		// The kill returns once the whole tree is gone; if part of it is
+		// still alive the change is not acknowledged as retired, whatever
+		// the worker itself did.
+		killErr := modeKillFn(g, session)
+		if killErr != nil {
+			emitLogfG("session", g, "info", "[%s] session=%s mode change kill: %v", g, sessionMarkerName(session), killErr)
 		}
 		t := time.NewTimer(modeChangeWait)
 		select {
 		case <-mr.ran:
-			res.Retired = true
+			res.Retired = !errors.Is(killErr, errTreeSurvivors)
 		case <-t.C:
 			emitLogfG("session", g, "warn", "[%s] session=%s mode change: cut turn still running after %s",
 				g, sessionMarkerName(session), modeChangeWait)

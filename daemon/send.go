@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -237,14 +238,25 @@ func interruptAgent(g, sess string) error { return signalAgent(g, sess, "INT") }
 // it exits. sig is a caller-supplied constant ("INT"/"KILL"), never user input.
 func signalAgent(g, sess, sig string) error { return signalAgentOpts(g, sess, sig, false) }
 
-// signalAgentTree is signalAgent for the worker's whole PROCESS GROUP — the
+// signalAgentTree is signalAgent for the worker's whole process TREE — the
 // harness and every tool subprocess it started (a mode change must leave
-// nothing of the old posture running; mode_live.go). The guest starts each
-// worker as its own group leader (fcguest startTracked: Setpgid), so the group
-// is signalled only when the matched pid leads it — never the agent's group or
-// this script's own. A descendant that setsid()s has left the group; that is
-// already-started work the guest's own timeout kill cannot reach either.
+// nothing of the old posture running; mode_live.go). The process group alone
+// is not enough: the guest starts each worker as its own group leader (fcguest
+// startTracked: Setpgid), but a harness may run its tool commands detached
+// (setsid), so a tool shell sits in its own session and group while still
+// being the worker's child. Killing the worker would orphan it and let the
+// command finish on its own. So the tree is collected by parent pid AND by the
+// worker's process group, each member is SIGSTOPped as it is found (a stopped
+// process cannot fork, so the walk reaches a fixed point), and only then is
+// the signal sent to all of them at once. With KILL the call returns only
+// once every member is gone (zombies count as gone), and reports
+// errTreeSurvivors otherwise. A process that had already left the tree
+// (double-forked to PID 1) before the call is out of its reach.
 func signalAgentTree(g, sess, sig string) error { return signalAgentOpts(g, sess, sig, true) }
+
+// errTreeSurvivors: a tree kill sent SIGKILL but some member was still alive
+// when the call gave up waiting.
+var errTreeSurvivors = errors.New("process tree still alive after SIGKILL")
 
 func signalAgentOpts(g, sess, sig string, tree bool) error {
 	if !fcRunning(g) {
@@ -261,8 +273,10 @@ func signalAgentOpts(g, sess, sig string, tree bool) error {
 	}
 	script := `WANT='` + sessionMarkerName(sess) + `'
 TREE=` + treeFlag + `
+SIG=` + sig + `
 mypg=$(sed 's/.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f3)
 hit=0
+roots=
 for d in /proc/[0-9]*; do
   p=${d##*/}
   [ "$p" = 1 ] && continue
@@ -271,13 +285,57 @@ for d in /proc/[0-9]*; do
     | grep -aqE '` + agentWorkerPattern + `' || continue
   tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
   if [ "$TREE" = 1 ]; then
-    pg=$(sed 's/.*) //' "$d/stat" 2>/dev/null | cut -d' ' -f3)
-    if [ "$pg" = "$p" ] && [ "$pg" != 1 ] && [ "$pg" != "$mypg" ]; then
-      kill -` + sig + ` -- "-$pg" 2>/dev/null && hit=1
-    fi
+    roots="$roots $p"
+  else
+    kill -$SIG "$p" 2>/dev/null && hit=1
   fi
-  kill -` + sig + ` "$p" 2>/dev/null && hit=1
 done
+if [ "$TREE" = 1 ] && [ -n "$roots" ]; then
+  T=" $roots "
+  G=
+  for p in $roots; do
+    pg=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f3)
+    if [ "$pg" = "$p" ] && [ "$pg" != 1 ] && [ "$pg" != "$mypg" ]; then G="$G $pg"; fi
+  done
+  kill -STOP $roots 2>/dev/null
+  while :; do
+    new=
+    for d in /proc/[0-9]*; do
+      q=${d##*/}
+      [ "$q" = 1 ] && continue
+      [ "$q" = "$$" ] && continue
+      case "$T" in *" $q "*) continue;; esac
+      set -- $(sed 's/.*) //' "$d/stat" 2>/dev/null)
+      [ $# -ge 4 ] || continue
+      case "$T" in
+        *" $2 "*) ;;
+        *) case " $G " in *" $3 "*) ;; *) continue;; esac;;
+      esac
+      new="$new $q"
+    done
+    [ -z "$new" ] && break
+    kill -STOP $new 2>/dev/null
+    T="$T$new "
+  done
+  for p in $G; do kill -$SIG -- "-$p" 2>/dev/null; done
+  kill -$SIG $T 2>/dev/null
+  hit=1
+  kill -CONT $T 2>/dev/null
+  if [ "$SIG" = KILL ]; then
+    i=0
+    while :; do
+      left=
+      for q in $T; do
+        st=$(sed 's/.*) //' "/proc/$q/stat" 2>/dev/null | cut -c1)
+        case "$st" in ''|Z|X) ;; *) left="$left $q";; esac
+      done
+      [ -z "$left" ] && break
+      i=$((i+1))
+      [ "$i" -ge 50 ] && { echo "tree-survivors:$left" >&2; break; }
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+  fi
+fi
 [ "$hit" = 1 ] || echo no-agent-process >&2
 exit 0`
 	// Delivered via the guest agent's exec op. Runs as guest root (agent is
@@ -287,6 +345,10 @@ exit 0`
 		return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
 	}
 	out := []byte(s)
+	if i := strings.Index(s, "tree-survivors:"); i >= 0 {
+		left := strings.TrimSpace(strings.SplitN(s[i+len("tree-survivors:"):], "\n", 2)[0])
+		return fmt.Errorf("session %q in group '%s': %w (pids %s)", sessionMarkerName(sess), g, errTreeSurvivors, left)
+	}
 	if strings.Contains(string(out), "no-agent-process") {
 		return fmt.Errorf("no running agent process for session %q in group '%s'",
 			sessionMarkerName(sess), g)
