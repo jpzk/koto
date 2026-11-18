@@ -1,35 +1,37 @@
 # Build toolchain for guest.img (fcguest/Dockerfile.guest, stage tc). NOT shipped:
 # only the static tmux it compiles and nothing else enters guest.img.
-# Fedora-signed builds (key 6d9f90a6) from Koji's permanent signed/ tree, so
-# the set never moves under a rebuild. All built >= 6 weeks before 2026-11-02.
-# Versions match the pinned fedora base (glibc 2.43-8, libgcc 16.2.1-2).
+# Fedora-signed builds (key f577861e = Fedora 45) from Koji's permanent signed/ tree, so
+# the set never moves under a rebuild. Latest F45 builds as of 2026-11-18: the
+# operator approved re-pinning to latest F45 on 2026-11-18 (age-gate exception,
+# with the fedora:45 base) so some are < 6 weeks old (gcc 16.2.1-3, kernel-headers 7.3.3).
+# Versions match the pinned fedora base (glibc 2.44-2, libgcc 16.2.1-3).
 # byacc + diffutils: tmux/ncurses configure need yacc, cmp and diff.
 # Format: sha256 srcname version release name arch
-77a82e328053f73d3881e633ffefb4dd49ebe0ac5b18a996de9b615de4eb9569 gcc 16.2.1 2.fc44 gcc x86_64
-a3ca10854d95dc2aefc76e36d116c0a33a305d53b2ba06d92e43aeedb179668b gcc 16.2.1 2.fc44 cpp x86_64
-5df3c610688ff2548a4bbfd8e9b47c525b339a45b0d01349163079a3ec82f740 gcc 16.2.1 2.fc44 libatomic x86_64
-85d017aeeb2c16254a12b86d209094b8b8df84fcca25e35e9f94dbf93e55f3d9 glibc 2.43 8.fc44 glibc-devel x86_64
-60801d00dce8a4b6bd54d3c50b806c209af1c8389a6e3e7c15939e3b0c30987d kernel-headers 7.2.4 200.fc44 kernel-headers x86_64
-1f522dfb8e2bf92961da0bd880a5e743207f88d259a27e67daf4c672aa07dfe3 binutils 2.46.1 1.fc44 binutils x86_64
-c6e88a9939475529c00f67d9f376ccfeaacc582696e01a63c92ee89c481090cb elfutils 0.194 5.fc44 elfutils-libelf x86_64
-f538129f345b2150b1b3445e69910128d545fbfc8024f363c2b33e9a7307e534 elfutils 0.194 5.fc44 elfutils-libs x86_64
-5abe9ac4e60a812af453581e6f879d762ba197884fe9ce5dca51083d85536714 elfutils 0.194 5.fc44 elfutils-debuginfod-client x86_64
-4dffc953aff5309b0a4d45bf7d9d8167f8062250b957d4b78c372973d290f5c9 libmpc 1.4.1 1.fc44 libmpc x86_64
-950a7003c1246568c6d602b222188391b1d4f411638d3470179736195f3b04f9 jansson 2.14 4.fc44 jansson x86_64
-259c773176023af44d474cec4d2d7d02f81f62029a893ea5e5fa57861cd3bf74 libxcrypt 4.5.2 3.fc44 libxcrypt-devel x86_64
-c8fe074463f4292219769505d27456e38a389074da759c058568f6fe56693cc3 make 4.4.1 12.fc44 make x86_64
-d93ac75c659e9e91edcce77dde6f328b93d81cb55896e9d189233c505d4d2250 musl 1.2.5 6.fc44 musl-gcc x86_64
-8cac621cb0c8745d17a66e31168d64c3d1d32d804aa5eb06b29032712bdf941e musl 1.2.5 6.fc44 musl-libc-static x86_64
-df10ed1850ecae8ec7161a590968fd58f82e2f82c7e914d106290f95a6963dc5 musl 1.2.5 6.fc44 musl-devel x86_64
-477d728391d26af3c0834d90e923cbbd8075492fa79eb20e07322e759261a0f3 musl 1.2.5 6.fc44 musl-filesystem x86_64
-ae1609a36f8223a13794c33f918b2e5e29ab9b80a862e3f55591554041d9f708 musl 1.2.5 6.fc44 musl-libc x86_64
-60c0177457ce6df7168aad1eafea9c5af0ceb5ec0b341b1b44db5f99ffbf7681 e2fsprogs 1.47.3 4.fc44 e2fsprogs x86_64
-eb44580c503917972d623c5cda8b31f527019b08c62e3223e909d91dc1eaa3ef e2fsprogs 1.47.3 4.fc44 e2fsprogs-libs x86_64
-10727db6321fa651879fc5250ca88a58372b68076f0caaf9f3d0a144b377b83c e2fsprogs 1.47.3 4.fc44 libss x86_64
-b236de21338ae23b4a5470a8e19068d10aaa3bde11435fdd9aa3d15dd0c9138b fuse3 3.18.2 1.fc44 fuse3-libs x86_64
-ee3f9558c65ca0a92de766ce54e218be780e703f8d2b1353ebbbff762f067d6e pkgconf 2.5.1 1.fc44 pkgconf x86_64
-da2ce9b6c5e9fac1da7e418be923ff2bbd202180e4812d7b91f118fcd549ede5 pkgconf 2.5.1 1.fc44 pkgconf-pkg-config x86_64
-5b45fb58dec26385b34f937b2917608abd66d531eb7d78a878e8ed426c65eff5 pkgconf 2.5.1 1.fc44 pkgconf-m4 noarch
-b59040138169f46c60b79230941ffc0dbce15b9e897bd46d1e83361a393400b8 pkgconf 2.5.1 1.fc44 libpkgconf x86_64
-c8ce533522bb321b2d3837e4f8803e146f206f6efdcdef126d5dc57f17468e0d byacc 2.0.20241231 3.fc44 byacc x86_64
-45001ec4ea4d2c56a879ad55dc94c426525100bfa421f2ed41224ed08adb9cc3 diffutils 3.12 5.fc44 diffutils x86_64
+333f2654a9c0ea00187df206f52640c9e8d2ae0b3b678438ec5f1dfc9bfdcb0a gcc 16.2.1 3.fc45 gcc x86_64
+66fe200396e674df921ed78d496a6179d3ff2f586dcfb2b013cf4749155cd84b gcc 16.2.1 3.fc45 cpp x86_64
+64d2ee40ee5adebde915d36e9d4a17f1ddb93a638e52b38ff060235191fd3155 gcc 16.2.1 3.fc45 libatomic x86_64
+6be4a896d3b9ff68884de273758d0ee66a0c5bf46677fbac2d7f5945bc8db203 glibc 2.44 2.fc45 glibc-devel x86_64
+d9c0f2177d23394dbb3733b55f175da61c2ef4c77bdbb737fd16fa0d7bd07646 kernel-headers 7.3.3 300.fc45 kernel-headers x86_64
+9a3060e6686dd00a239a86e95140816968fa68a782cb385613dea620676c1dfb binutils 2.47 1.fc45 binutils x86_64
+c74c8a9b5e0b9b4f7a07e0cada0be8fdddabf3718d50f2496f90a00f0f8748bd elfutils 0.197 1.fc45 elfutils-libelf x86_64
+4a1196bc36a8ddae162d17d8158c52c137a027e7811d643b31da64ab04354bda elfutils 0.197 1.fc45 elfutils-libs x86_64
+86ca56dc35a1ca90a60ae458f627dbb3f440425ac8d80fa185bb6ebb8ce249df elfutils 0.197 1.fc45 elfutils-debuginfod-client x86_64
+471e69c1cd9be651804a376ecee3cc3e1140da0c71ace50d4b5ab436a1f2923f libmpc 1.4.1 2.fc45 libmpc x86_64
+d393130f4ee3fbad5cf67182f1df314db098806613efbac52af17d73ed0414ae jansson 2.14 5.fc45 jansson x86_64
+3b6d7961c3f02338558a4666e9544af05c46f4bbfcce39be040b1ef997b5f1a6 libxcrypt 4.5.2 4.fc45 libxcrypt-devel x86_64
+0396ed3a5009d229aa3f341fa28acdf943d5f2945601328aeeaa03914c44d630 make 4.4.1 13.fc45 make x86_64
+84660a148f2eb8fc5f805f99cb14ccefe2342cdea6002e2ece72daa90508ddb9 musl 1.2.6 2.fc45 musl-gcc x86_64
+cf6b62fe57cc7511aebfd4eb1770eae74cd9ac8bd9e16fd8f665db328f06d4d8 musl 1.2.6 2.fc45 musl-libc-static x86_64
+4ff47702cb57a24e33e2ae8f6a2393ea12d7d48408c505e23c081a5a069afb16 musl 1.2.6 2.fc45 musl-devel x86_64
+f785b68ed2dd54c78812980b656a5823fc28c1b1f5254c3cf9dc6e6a6852ad87 musl 1.2.6 2.fc45 musl-filesystem x86_64
+b8b6198296191a9f41985ab2e9142045bb7572dd93ba8744452d747f270f15d9 musl 1.2.6 2.fc45 musl-libc x86_64
+0c3b4f9b49a937be5d446d591a8cafa77298189fae431b6504eced92e67d99ad e2fsprogs 1.47.4 2.fc45 e2fsprogs x86_64
+bd2c58c5dfec94ac9663b7f543bc9eba534d7a3c4b23dab769b8aa720dd41d03 e2fsprogs 1.47.4 2.fc45 e2fsprogs-libs x86_64
+df11bff2ee290db74fc8525d076d4d9287d993ce1fc59600c087607090859f35 e2fsprogs 1.47.4 2.fc45 libss x86_64
+ff4cfeae51ccec5ba95b47bec09727a592d96a038721068bf8c2064696027978 fuse3 3.18.3 1.fc45 fuse3-libs x86_64
+49496a83c78e73dcc4226016b58c29dd90ccbbb6a3972df547fbee62b7c8493d pkgconf 2.5.1 2.fc45 pkgconf x86_64
+86c81c3767c2c6e4e31717f2d7301fdac652f893408029b3efa3a4ddfa25f393 pkgconf 2.5.1 2.fc45 pkgconf-pkg-config x86_64
+3ef180886cf97f9548b91c11fc0ee59a117495897d9b0417813a9fd2b801487a pkgconf 2.5.1 2.fc45 pkgconf-m4 noarch
+cfe3f1989193d1bdb3785cf9621eb5b100c16671c37bbad7928b41e9f30053f5 pkgconf 2.5.1 2.fc45 libpkgconf x86_64
+8cc22f3c5a38de90db55505ac5c483fb9f744814e53322c16dd5986568250ca8 byacc 2.0.20260126 1.fc45 byacc x86_64
+1d6cdb50ce52554f71eb700dfeaf6cc7233dfac8e05b3350296ebb7466c6f83c diffutils 3.12 6.fc45 diffutils x86_64

@@ -27,7 +27,7 @@ RUN set -eu; mkdir /tmp/rpms; cd /tmp/rpms; \
     K=https://kojipkgs.fedoraproject.org/packages; \
     grep -v '^#' /tmp/rpms.lock | while read -r sum src v r n a; do \
       f="$n-$v-$r.$a.rpm"; \
-      curl -fsSL -o "$f" "$K/$src/$v/$r/data/signed/6d9f90a6/$a/$f"; \
+      curl -fsSL -o "$f" "$K/$src/$v/$r/data/signed/f577861e/$a/$f"; \
       printf '%s  %s\n' "$sum" "$f" | sha256sum -c - >/dev/null; \
     done; \
     rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
