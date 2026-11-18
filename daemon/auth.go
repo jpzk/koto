@@ -263,7 +263,7 @@ func postureVerb(verb string, req any) string {
 	if verb != "config" || !ok {
 		return verb
 	}
-	for _, p := range []*string{cr.Network, cr.Internet, cr.Root, cr.Ports, cr.Size, cr.Autostart, cr.Kvm, cr.Image, cr.Allow} {
+	for _, p := range []*string{cr.Network, cr.Internet, cr.Root, cr.Ports, cr.Size, cr.Autostart, cr.Kvm, cr.Image, cr.Allow, cr.Mode} {
 		if p != nil {
 			return "config_posture"
 		}

@@ -107,6 +107,7 @@ func TestTreeNestsGoalUnderOriginSession(t *testing.T) {
 			SessionOrigins: map[string]string{goalSess: "lab", judge: "lab"}},
 	}
 	m.processJobTransitions(m.groups)
+	m.jobsOpen[sessKey("work", "")] = true // goal-other folds under the group row
 	for _, s := range []string{"lab", goalSess, judge} {
 		m.jobsOpen[sessKey("work", s)] = true
 	}
@@ -157,6 +158,7 @@ func TestTreeGoalFallsBackWhenOriginMissing(t *testing.T) {
 		"main": {Running: true},
 		"work": {Running: true, Sessions: []string{"alpha", goalSess}, SessionOrigins: map[string]string{goalSess: "gone"}},
 	}
+	m.jobsOpen[sessKey("work", "")] = true
 	rows := m.treeRows()
 	a := rowIndex(rows, "work", "alpha", "")
 	g := rowIndex(rows, "work", goalSess, "")
@@ -217,5 +219,35 @@ func TestOrphanJobsStayVisibleUnderGroup(t *testing.T) {
 	m.jobDoneAt[jobKey("work", "orphan01")] = time.Now().Add(-time.Hour)
 	if rowIndex(m.treeRows(), "work", "", "orphan01") >= 0 {
 		t.Fatal("finished orphan outlived its linger window")
+	}
+}
+
+// /goals set mode=confirm (goal-confirm): the mode is parsed from the prefix,
+// rides GoalSetReq.mode through callRPC, and anything but yolo|confirm is
+// refused before it reaches the daemon. No mode= leaves it to the daemon
+// (yolo, raised to confirm from a confirm/plan origin).
+func TestGoalSetModeConfirm(t *testing.T) {
+	m := newModel("", 200000)
+	m.groups = map[string]GroupInfo{"work": {Running: true}}
+	m.cur = "work"
+	g, name, mode, text, crit, _, plan, err := m.parseGoalSetMode("work mode=confirm name=fx plan=no fix it :: 1. fixed")
+	if err != nil || g != "work" || name != "fx" || mode != "confirm" || text != "fix it" || crit != "1. fixed" || plan {
+		t.Fatalf("parse = %q %q %q %q %q %v %v", g, name, mode, text, crit, plan, err)
+	}
+	if _, _, mode, _, _, _, _, err = m.parseGoalSetMode("fix it :: 1. fixed"); err != nil || mode != "" {
+		t.Fatalf("no mode= -> %q, %v", mode, err)
+	}
+	if _, _, _, _, _, _, _, err = m.parseGoalSetMode("mode=plan fix it :: 1. fixed"); err == nil {
+		t.Fatal("mode=plan accepted")
+	}
+	f := &fakeGoalSetClient{}
+	if _, err := callRPC(context.Background(), f, "goal_set", map[string]any{"group": "work", "text": "t", "criteria": "c", "mode": "confirm"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.got.GetMode() != "confirm" {
+		t.Fatalf("GoalSetReq.mode = %q", f.got.GetMode())
+	}
+	if !strings.Contains(strings.Join(goalHelpLines, "\n"), "mode=confirm") {
+		t.Fatal("/goals help does not mention mode=confirm")
 	}
 }

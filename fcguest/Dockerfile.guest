@@ -99,14 +99,16 @@ ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 ARG NPM_VERSION=11.21.1
 ARG NPM_SHA512=613ccbe90044257c87713bb426251ced128ca7e9b3949b65eeb18b98445a5d441e14720c73d6ad76be86f4cf42f2f0d66efe347a9a13400ccd2f6fcfb5954385
 # claude, codex, pi: same pins as Dockerfile.rootfs; bump both together.
-ARG CLAUDE_CODE_VERSION=2.1.280
-ARG CLAUDE_CODE_SHA512=119957f23a8d7fe7bbabdbfe5283db2d801b106b61eda0db713cad1f33d862885b3ff7c27eb8dba026dcbfce5960612ad51abb0269bc8572e1b822b12ec69bc0
-ARG CLAUDE_CODE_LINUX_X64_SHA512=7491d616b0d2219dba85d2ee7272b77a12e6cddcd897732c3c2d51cd472d0146989d9947e647c06719caf2a611010f3d197dce3eb2ec9c576dfd09cffb40a4e9
-ARG CODEX_VERSION=0.163.0
-ARG CODEX_SHA256=beb339e8ecd9ba057a6bb2dc81ad8ca474812edfbf0fc5056ca818797648dde4
-ARG CODEX_CODE_MODE_HOST_SHA256=314263128ba6592e7e807c265deeaf928a692b72dcbfeb5e0b20c9423b703529
-ARG PI_VERSION=1.5.0
-ARG PI_LOCK_SHA256=039086b635ea7cb2c9c36ba8351cc2b0363f8444ce8227d3e0f189ecc7187205
+# claude 2.1.325 (published 2026-11-13), codex 0.169.0 (2026-11-13), pi 1.5.2
+# (2026-11-10) -- NOT age-gated, operator override 2026-11-16.
+ARG CLAUDE_CODE_VERSION=2.1.325
+ARG CLAUDE_CODE_SHA512=394c426f4b31ef7e33261f731933fda05d35819e380c21856b0ee1803e1bc9ea634511b2bc7ce050ec02edd9428152258d5e828845438eaf9a9d8dc652f28543
+ARG CLAUDE_CODE_LINUX_X64_SHA512=06a67332f3ffce02cb2f7e12fbb3b36c6f9cca8169ee0c161d4e64a15c2cc8c953033fb4cd90266d8f94933bed376457c69e8070c7a76d8223409c685df518df
+ARG CODEX_VERSION=0.169.0
+ARG CODEX_SHA256=9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985
+ARG CODEX_CODE_MODE_HOST_SHA256=cbed6a8d25e8268792b757767fbc76d4c62e84bcf8ee4a63f97547f0de3aaceb
+ARG PI_VERSION=1.5.2
+ARG PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
 
 ENV PATH=/g/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 
@@ -158,7 +160,7 @@ RUN set -eu; cd /tmp; \
     codex-code-mode-host --help | grep -qF -- '--listen <URL>'
 
 # pi: npm ci against the committed lockfile (every entry has an integrity),
-# lifecycle scripts skipped; see Dockerfile.rootfs for the override story.
+# lifecycle scripts skipped; see Dockerfile.rootfs for the lock story.
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /g/opt/pi/
 RUN set -eu; cd /g/opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
@@ -169,8 +171,8 @@ RUN set -eu; cd /g/opt/pi; \
     ln -s ../opt/pi/pi /g/bin/pi; \
     test "$(PI_OFFLINE=1 PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 pi --version)" = "$PI_VERSION"; \
     v() { node -p "require('$1').version"; }; \
-    test "$(v ./node_modules/undici/package.json)" = 8.12.2; \
-    test -z "$(find . -path '*/node_modules/undici/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="8.12.2"?"":v' {} \; | tr -d '\n')"; \
+    test "$(v ./node_modules/undici/package.json)" = 8.12.3; \
+    test -z "$(find . -path '*/node_modules/undici/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="8.12.3"?"":v' {} \; | tr -d '\n')"; \
     test -z "$(find . -path '*/node_modules/brace-expansion/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="5.0.12"?"":v' {} \; | tr -d '\n')"
 
 RUN cp /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /g/etc/ssl/ca-bundle.crt

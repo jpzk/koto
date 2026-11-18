@@ -49,7 +49,7 @@ func TestCtrlKTogglesTopView(t *testing.T) {
 		t.Fatalf("focus = %v after second ctrl+k, want focusInput", m.focus)
 	}
 	// From tree mode, esc lands back in tree mode.
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	m = press(t, m, tea.KeyCtrlK)
 	if m.focus != focusTop {
 		t.Fatalf("focus = %v after ctrl+k from tree, want focusTop", m.focus)
@@ -130,7 +130,7 @@ func TestTopViewRefreshesOnListMsg(t *testing.T) {
 // group cursor without leaving the view; opened from the input it doesn't.
 func TestTopViewTreeAlongside(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyTab) // into tree mode
+	m = pressTree(t, m) // into tree mode
 	m = press(t, m, tea.KeyCtrlK)
 	if m.treePaneW() == 0 {
 		t.Fatal("tree pane hidden in fleet view opened from tree mode")
@@ -233,7 +233,7 @@ func TestTopSortKeys(t *testing.T) {
 // scrolls itself into view.
 func TestTopViewSelectionFollowsTree(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyTab) // tree mode, then the fleet view
+	m = pressTree(t, m) // tree mode, then the fleet view
 	m = press(t, m, tea.KeyCtrlK)
 	if !m.treeCursorLive() {
 		t.Error("tree cursor went dark in the fleet view — the selection keys move an invisible cursor")
@@ -253,11 +253,11 @@ func TestTopViewSelectionFollowsTree(t *testing.T) {
 	}
 
 	// tab hides the tree (and with it the return-to-tree focus), tab restores.
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.treePaneW() != 0 {
 		t.Error("tab did not hide the tree pane")
 	}
-	m = press(t, m, tea.KeyTab)
+	m = pressTree(t, m)
 	if m.treePaneW() == 0 {
 		t.Error("tab did not bring the tree pane back")
 	}
@@ -292,7 +292,7 @@ func TestTopViewSelectionFollowsTree(t *testing.T) {
 // agree on the selected group, whether or not the tree pane is showing.
 func TestTopViewArrowSelection(t *testing.T) {
 	m := topModel(t)
-	m = press(t, m, tea.KeyTab) // tree mode, so the sync is observable
+	m = pressTree(t, m) // tree mode, so the sync is observable
 	m = press(t, m, tea.KeyCtrlK)
 	// cpu order: web, main. Cursor starts on main (row 1); up selects web.
 	if m.cur != "main" {

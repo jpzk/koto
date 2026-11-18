@@ -67,6 +67,9 @@ func toPBEvent(ev Event) *pb.Event {
 		Session:    ev.Session,
 		Severity:   ev.Severity,
 		Title:      ev.Title,
+		Deadline:   ev.Deadline,
+		Kind:       ev.Kind,
+		Options:    ev.Options,
 	}
 }
 
@@ -92,6 +95,18 @@ func toPBGroupInfo(gi GroupInfo) *pb.GroupInfo {
 		out.SessionOrigins = make(map[string]string, len(gi.SessionOrigins))
 		for k, v := range gi.SessionOrigins {
 			out.SessionOrigins[sanitize(k)] = sanitize(v)
+		}
+	}
+	if len(gi.SessionModes) > 0 {
+		out.SessionModes = make(map[string]string, len(gi.SessionModes))
+		for k, v := range gi.SessionModes {
+			out.SessionModes[sanitize(k)] = sanitize(v)
+		}
+	}
+	if len(gi.PendingApprovals) > 0 {
+		out.PendingApprovals = make(map[string]int32, len(gi.PendingApprovals))
+		for k, v := range gi.PendingApprovals {
+			out.PendingApprovals[sanitize(k)] = v
 		}
 	}
 	for _, j := range gi.Jobs {
@@ -166,9 +181,17 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		DoneNote:      sanitize(it.DoneNote),     // guest-written (goal_done)
 		PausedReason:  sanitize(it.PausedReason),
 		OriginSession: sanitize(it.OriginSession),
-		CreatedAt:     it.CreatedAt,
-		UpdatedAt:     it.UpdatedAt,
-		CompletedAt:   it.CompletedAt,
+		Mode:          sanitize(it.Mode),
+		// live, read-time (goalWithPending)
+		WaitingConfirm:  it.WaitingConfirm,
+		Pending:         int32(it.Pending),
+		PendingTool:     sanitize(it.PendingTool),
+		PendingSince:    it.PendingSince,
+		WaitingDecision: it.WaitingDecision,
+		Steers:          int32(it.Steers),
+		CreatedAt:       it.CreatedAt,
+		UpdatedAt:       it.UpdatedAt,
+		CompletedAt:     it.CompletedAt,
 	}
 }
 
@@ -210,6 +233,8 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.KVM = optRaw(r.Kvm)
 	out.Image = optRaw(r.Image)
 	out.Allow = optRaw(r.Allow)
+	out.Mode = optRaw(r.Mode)
+	out.Session = r.GetSession()
 	return out
 }
 
@@ -970,6 +995,16 @@ func (s *kotoServer) SessionCreate(_ context.Context, r *pb.GroupReq) (*pb.BaseR
 	if !registeredGroup(r.Group) {
 		return &pb.BaseResp{Error: "no such group " + r.Group + " — spawn it first"}, nil
 	}
+	// Initial mode, set BEFORE the session is listed so its first turn can
+	// never run in another mode. Unsupported harness -> refused loudly, no
+	// silent yolo (the TUI only asks for plan on claude groups). Only a NEW
+	// session still at yolo takes it: session_create is not a posture verb,
+	// so it must never be a way to change (relax) an existing session's mode.
+	if r.Mode != "" && !slices.Contains(listSessions(r.Group), sess) && sessionMode(r.Group, sess) == modeYolo {
+		if _, err := setSessionMode(r.Group, sess, r.Mode, groupProviderName(r.Group)); err != nil {
+			return &pb.BaseResp{Error: err.Error()}, nil
+		}
+	}
 	registerSession(r.Group, sess)
 	if !slices.Contains(listSessions(r.Group), sess) {
 		// registerSession degrades silently past sessionRegMax.
@@ -1132,7 +1167,10 @@ func (s *kotoServer) GoalSet(_ context.Context, r *pb.GoalSetReq) (*pb.GoalResp,
 	// not be able to (audit M49).
 	// r.Session is the origin session the client set this from (the TUI's
 	// active session); resolveGoalOrigin folds reserved/unknown to default.
-	it, err := goalSetFrom("", r.Group, r.Session, r.Text, r.Criteria, r.Name, int(r.MaxIterations), plan)
+	// r.Mode: yolo (default) | confirm; a confirm/plan origin session raises
+	// it to confirm (goalSetWith).
+	it, err := goalSetWith(goalSetOpts{creator: "", group: r.Group, origin: r.Session, text: r.Text,
+		criteria: r.Criteria, name: r.Name, maxIter: int(r.MaxIterations), plan: plan, mode: r.GetMode()})
 	if err != nil {
 		return &pb.GoalResp{Error: err.Error()}, nil
 	}
@@ -1183,6 +1221,17 @@ func (s *kotoServer) GoalResume(_ context.Context, r *pb.GoalGroupReq) (*pb.Goal
 
 func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.GoalResp, error) {
 	return goalGroupRPC(r.Group, r.Name, goalCancel)
+}
+
+// GoalSteer is /steer: a durable operator steer on a non-terminal goal,
+// recorded host-side with the caller's identity. Operator-only
+// (adminOnlyVerbs "goal_steer") and absent from the ctl plane — the agent
+// must never be able to author operator steer.
+func (s *kotoServer) GoalSteer(ctx context.Context, r *pb.GoalSteerReq) (*pb.GoalResp, error) {
+	who := identityOf(ctx).Name
+	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		return goalSteerOperator(g, name, r.Text, who)
+	})
 }
 
 // ---- ACL management (acl_* verbs are hardcoded admin-only in acl.go) ------

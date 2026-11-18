@@ -1,5 +1,5 @@
 #!/bin/sh
-# Verify the pi + npm contract against the image that will be exported into the
+# Verify the claude/codex versions and the pi + npm contract against the image that will be exported into the
 # Firecracker rootfs. Keep expected values independent of Docker build args so
 # an accidental pin change fails verification instead of changing the oracle.
 set -eu
@@ -8,14 +8,18 @@ CONTAINER=${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/d
 IMAGE=${1:-koto-fcrootfs}
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to verify the rootfs"; exit 1; }
 
-PI_VERSION=1.5.0
-PI_LOCK_SHA256=039086b635ea7cb2c9c36ba8351cc2b0363f8444ce8227d3e0f189ecc7187205
-PI_UNDICI=8.12.2
+CLAUDE_VERSION=2.1.325
+CODEX_VERSION=0.169.0
+PI_VERSION=1.5.2
+PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
+PI_UNDICI=8.12.3
 PI_BRACE=5.0.12
 NPM_VERSION=11.21.1
 NPM_TAR=7.5.22
 
 "$CONTAINER" run --rm --entrypoint /bin/sh \
+  -e EXPECTED_CLAUDE_VERSION="$CLAUDE_VERSION" \
+  -e EXPECTED_CODEX_VERSION="$CODEX_VERSION" \
   -e EXPECTED_PI_VERSION="$PI_VERSION" \
   -e EXPECTED_PI_LOCK_SHA256="$PI_LOCK_SHA256" \
   -e EXPECTED_PI_UNDICI="$PI_UNDICI" \
@@ -23,6 +27,8 @@ NPM_TAR=7.5.22
   -e EXPECTED_NPM_VERSION="$NPM_VERSION" \
   -e EXPECTED_NPM_TAR="$NPM_TAR" \
   "$IMAGE" -eu -c '
+    claude --version | grep -qF "$EXPECTED_CLAUDE_VERSION"
+    test "$(codex --version)" = "codex-cli $EXPECTED_CODEX_VERSION"
     test "$(pi --version)" = "$EXPECTED_PI_VERSION"
     test "$(jq -r .version /opt/pi/package.json)" = "$EXPECTED_PI_VERSION"
     a=/opt/pi/node_modules/@earendil-works/pi-coding-agent
@@ -50,4 +56,4 @@ NPM_TAR=7.5.22
     test "$(jq -r ".providers|keys[]" "$m")" = minimax
   '
 
-echo "verified pi $PI_VERSION (lock $PI_LOCK_SHA256, undici $PI_UNDICI, brace-expansion $PI_BRACE), npm $NPM_VERSION (tar $NPM_TAR), minimax pi template and offline runtime environment"
+echo "verified claude $CLAUDE_VERSION, codex $CODEX_VERSION, pi $PI_VERSION (lock $PI_LOCK_SHA256, undici $PI_UNDICI, brace-expansion $PI_BRACE), npm $NPM_VERSION (tar $NPM_TAR), minimax pi template and offline runtime environment"

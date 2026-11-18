@@ -1,0 +1,9 @@
+# dep-age allowlist — exceptions to the >= 6 week dependency-age gate
+# (scripts/supplychain/dep-age.sh). One per line:
+#     <module> <version> <reason — mandatory>
+# The only standing exception (AGENTS.md "Conventions") is a pin that closes a
+# REACHABLE govulncheck finding: name the GO-ID in the reason. Remove the line
+# once the version is older than six weeks.
+
+golang.org/x/net v0.60.0 security-fix exception 2026-10-09: closes REACHABLE GO-2026-6603/6611/6612/6617 (grpc http2 transport); see daemon/go.mod header. Ages past 6w on 2026-11-19.
+github.com/containers/gvisor-tap-vsock v0.9.0 operator one-time override 2026-10-19 (chore/deps-nogate); see daemon/go.mod header. Ages past 6w on 2026-11-18.

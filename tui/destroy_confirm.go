@@ -28,16 +28,29 @@ package main
 // locally pending pendSess entry), and if it was the active session the
 // view falls back to the group's default session.
 //
-// Confirmation is a two-button dialog, [ No ] [ Yes ], shared with the stop
-// modal (confirm_buttons.go). Focus starts on No, so enter cancels unless
-// the operator moved focus to Yes first (left/right, h/l, tab/shift+tab);
-// esc / n / q / ctrl+c (and ctrl+x again) cancel whatever is focused, y is a
-// shortcut for Yes, and a left click on a button activates it. Every other
-// key is swallowed — it's a modal, a stray keystroke must not reach the
-// message bar or the tree underneath. Like the cheatsheet it is not a focus zone:
-// m.focus is untouched and the modal only owns key routing while open. Both
-// variants share one state (destroyConfirm) so the modal priority order
-// against the stop / new-session dialogs is unchanged.
+// Two confirmation variants share one state (destroyConfirm), so the modal
+// priority order against the stop / new-session dialogs is unchanged:
+//
+//   - GROUP (group row, job row → parent group, and /destroy <g>, which
+//     opens this same modal instead of destroying directly): a typed-name
+//     confirm. The modal spells out the group name and holds a text input;
+//     the destroy fires only on enter with the trimmed input EXACTLY equal
+//     to the group name (case-sensitive). A mismatch (or empty) + enter
+//     shows an inline error and keeps the modal open. esc / ctrl+c (and
+//     ctrl+x again) cancel. Every other key, y included, is text for the
+//     input — a single stray y can no longer wipe a VM and its disk. Mouse
+//     clicks are swallowed (there are no buttons to hit).
+//   - SESSION (Clear RPC): the two-button dialog, [ No ] [ Yes ], shared
+//     with the stop modal (confirm_buttons.go). Focus starts on No, so enter
+//     cancels unless the operator moved focus to Yes first (left/right, h/l,
+//     tab/shift+tab); esc / n / q / ctrl+c (and ctrl+x again) cancel
+//     whatever is focused, y is a shortcut for Yes, and a left click on a
+//     button activates it.
+//
+// In both, unhandled keys never leak — it's a modal, a stray keystroke must
+// not reach the message bar or the tree underneath. Like the cheatsheet it
+// is not a focus zone: m.focus is untouched and the modal only owns key
+// routing while open.
 //
 // ctrl+x is bound in tree focus only. Nothing in the bubbles v1.0.0
 // textinput keymap uses it, but "destroy the hovered row" only means
@@ -48,18 +61,55 @@ package main
 import (
 	"fmt"
 	"slices"
+	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // destroyConfirmState is the open modal: which group (session "") or which
 // session of a group Yes would destroy, plus the button focus (zero = No).
+//
+// The group variant (session "") has no buttons: name is the typed-name
+// input and errMsg the inline mismatch error. The session variant leaves
+// both zero and keeps the [ No ] [ Yes ] row.
 type destroyConfirmState struct {
 	open    bool
 	group   string
 	session string
 	buttons confirmButtons
+	name    textinput.Model
+	errMsg  string
+}
+
+// typed says whether this is the group variant (typed-name confirm).
+func (d destroyConfirmState) typed() bool { return d.open && d.session == "" }
+
+// newDestroyNameInput is the focused, empty input of the group variant.
+// Suggestions are off (enter is ours, never an accept-suggestion), and the
+// limit matches the longest group name the daemon accepts with headroom.
+func newDestroyNameInput() textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = "> "
+	ti.CharLimit = 64
+	ti.Placeholder = "type the group name"
+	ti.KeyMap.NextSuggestion.SetEnabled(false)
+	ti.KeyMap.PrevSuggestion.SetEnabled(false)
+	ti.KeyMap.AcceptSuggestion.SetEnabled(false)
+	ti.Focus()
+	return ti
+}
+
+// openGroupDestroyConfirm opens the typed-name modal for group g — the one
+// entry for ctrl+x on a group/job row AND /destroy <g>. main is refused
+// inline with no modal (destroyGroup refuses it again at confirm time).
+func (m *Model) openGroupDestroyConfirm(g string) {
+	if g == "main" {
+		m.addLine(logLine{kind: "err", text: "cannot destroy main (orchestrator group)"})
+		return
+	}
+	m.destroyConfirm = destroyConfirmState{open: true, group: g, name: newDestroyNameInput()}
 }
 
 // destroyCmdFn issues the daemon destroy for one group. A seam so tests can
@@ -82,8 +132,9 @@ var clearSessionCmdFn = func(sock, group, session string) tea.Cmd {
 	return daemonCmd(sock, "clear", group, clearSessionReq(group, session))
 }
 
-// destroyGroup is the one destroy path — /destroy <g> and the ctrl+x modal's
-// confirm both land here. It refuses main, and otherwise does NOTHING local
+// destroyGroup is the one destroy path — the typed-name modal (opened by
+// ctrl+x on a group row and by /destroy <g>) lands here on confirm. It
+// refuses main, and otherwise does NOTHING local
 // before the daemon answers (audit 2026-09-11 L42): the wipe used to run
 // optimistically, and it cleared m.subscribed[target] — the guard that stops
 // a second SubscribeGroup stream being opened for the same group. A DENIED
@@ -192,6 +243,10 @@ func (m *Model) openDestroyConfirm() {
 		m.addLine(logLine{kind: "err", text: why})
 		return
 	}
+	if s == "" {
+		m.openGroupDestroyConfirm(g)
+		return
+	}
 	m.destroyConfirm = destroyConfirmState{open: true, group: g, session: s}
 }
 
@@ -203,9 +258,34 @@ func (d destroyConfirmState) label() string {
 	return d.group
 }
 
-// handleDestroyConfirmKey routes keys while the modal is open: the shared
-// button row (confirm_buttons.go) decides; ctrl+x toggles the modal closed.
+// handleDestroyConfirmKey routes keys while the modal is open. Group
+// variant: esc / ctrl+c / ctrl+x cancel, enter confirms only when the
+// trimmed input equals the group name exactly (case-sensitive) — otherwise
+// an inline error and the modal stays open — and every other key, y
+// included, is text for the input. Session variant: the shared button row
+// (confirm_buttons.go) decides; ctrl+x toggles the modal closed.
 func (m Model) handleDestroyConfirmKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.destroyConfirm.typed() {
+		switch msg.String() {
+		case "esc", "ctrl+c", "ctrl+x":
+			return m.resolveDestroyConfirm(confirmCancel)
+		case "enter":
+			got := strings.TrimSpace(m.destroyConfirm.name.Value())
+			if got != m.destroyConfirm.group {
+				if got == "" {
+					m.destroyConfirm.errMsg = "type the group name to confirm"
+				} else {
+					m.destroyConfirm.errMsg = fmt.Sprintf("%q does not match %q", got, m.destroyConfirm.group)
+				}
+				return m, nil
+			}
+			return m.resolveDestroyConfirm(confirmAccept)
+		}
+		var cmd tea.Cmd
+		m.destroyConfirm.name, cmd = m.destroyConfirm.name.Update(msg)
+		m.destroyConfirm.errMsg = ""
+		return m, cmd
+	}
 	var act confirmAction
 	m.destroyConfirm.buttons, act = m.destroyConfirm.buttons.key(msg.String(), "ctrl+x")
 	return m.resolveDestroyConfirm(act)
@@ -253,7 +333,18 @@ func (m Model) renderDestroyConfirm() string {
 		)
 	}
 	hint := gray.Render("←/→ tab move · enter select · esc cancel · y = destroy")
-	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", m.destroyConfirm.buttons.render(), "", hint)
+	controls := m.destroyConfirm.buttons.render()
+	if s == "" {
+		// Typed-name confirm: the expected name is spelled out, no buttons.
+		amber := lipgloss.NewStyle().Foreground(cAmber).Bold(true)
+		rows := []string{"Type " + amber.Render(g) + " and press enter to destroy:", m.destroyConfirm.name.View()}
+		if e := m.destroyConfirm.errMsg; e != "" {
+			rows = append(rows, red.Render(e))
+		}
+		controls = lipgloss.JoinVertical(lipgloss.Left, rows...)
+		hint = gray.Render("exact name + enter = destroy · esc cancel")
+	}
+	inner := lipgloss.JoinVertical(lipgloss.Left, head, "", body, "", controls, "", hint)
 	w := min(max(lipgloss.Width(inner)+4, 30), max(20, m.width-2))
 	box := lipgloss.NewStyle().
 		BorderStyle(boxBorder(true)).
