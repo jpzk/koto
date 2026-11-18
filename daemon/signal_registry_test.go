@@ -137,8 +137,9 @@ func TestSignalAgentRegistryEveryHarness(t *testing.T) {
 	}
 }
 
-// KILL takes the worker's whole process group (its tool subprocesses — the
-// wedged child that made INT fail) while INT touches only the worker pid.
+// KILL takes the worker and its whole process group. INT leaves the worker
+// itself to its graceful abort but takes its tool subprocesses (the tree:
+// TestInterruptKillsDetachedToolTree), so an INT-ignoring worker survives it.
 func TestSignalAgentKillTakesProcessGroup(t *testing.T) {
 	root := t.TempDir()
 	sl, err := exec.LookPath("sleep")
@@ -147,7 +148,7 @@ func TestSignalAgentKillTakesProcessGroup(t *testing.T) {
 	}
 	// worker = sh that ignores INT and holds a tool child in its group.
 	childPidFile := filepath.Join(root, "child.pid")
-	w := exec.Command("sh", "-c", "trap '' INT; "+sl+" 120 & echo $! > "+childPidFile+"; wait")
+	w := exec.Command("sh", "-c", "trap '' INT; "+sl+" 120 & echo $! > "+childPidFile+"; while :; do "+sl+" 1; done")
 	w.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := w.Start(); err != nil {
 		t.Fatal(err)

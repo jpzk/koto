@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -245,6 +246,19 @@ func signalAgent(g, sess, sig string) error {
 	if err != nil {
 		return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
 	}
+	return signalAgentResult(g, sess, s)
+}
+
+// errTreeSurvivors: a tree kill sent SIGKILL but some member was still alive
+// when the call gave up waiting.
+var errTreeSurvivors = errors.New("process tree still alive after SIGKILL")
+
+// signalAgentResult maps the script's output to the caller's error.
+func signalAgentResult(g, sess, s string) error {
+	if i := strings.Index(s, "tree-survivors:"); i >= 0 {
+		left := strings.TrimSpace(strings.SplitN(s[i+len("tree-survivors:"):], "\n", 2)[0])
+		return fmt.Errorf("session %q in group '%s': %w (pids %s)", sessionMarkerName(sess), g, errTreeSurvivors, left)
+	}
 	if strings.Contains(s, "no-agent-process") {
 		return fmt.Errorf("no running agent process for session %q in group '%s'",
 			sessionMarkerName(sess), g)
@@ -257,11 +271,28 @@ func signalAgent(g, sess, sig string) error {
 // tests can run the exact script against a temp registry.
 //
 // Registry path (every current guest): signal each pid listed under
-// root/<hex(sess)>/. INT goes to the worker pid only (it owns the graceful
-// abort). KILL goes to the pid AND its process group: fc-agent starts every
-// worker with Setpgid, so pgid == pid and the group is exactly that worker's
-// tool subprocesses — the hung child that made INT fail in the first place.
-// Background jobs (cs-job) setsid into their own group and survive.
+// root/<hex(sess)>/. A signal here always cuts the turn (interrupt, steer,
+// the abort loop), so it must leave nothing of the turn's running tool work
+// behind. The worker's process group alone is not enough: a harness may run
+// its tool commands detached (setsid — pi does), so a tool shell sits in its
+// own session and group while still being the worker's child, and the worker
+// exiting would orphan it to finish its command after the turn ended. So the
+// worker's tree is collected by parent pid AND by the worker's process group
+// (fc-agent starts every worker with Setpgid, pgid == pid), each member
+// SIGSTOPped as it is found so the walk reaches a fixed point (a stopped
+// process cannot fork).
+//   - INT: every member except the worker is SIGKILLed, and only once they
+//     are all gone does the worker get SIGINT (it owns the graceful abort and
+//     its resume state) and SIGCONT. A stopped worker cannot end the turn, so
+//     turn_end cannot precede the death of its tools.
+//   - KILL: the whole tree and the worker's group, worker included.
+//
+// Either way the script waits until the killed members are gone (zombies
+// count) and prints tree-survivors otherwise; on INT it then leaves the tree
+// stopped and unsignalled, so the turn does not end with work still alive —
+// the abort loop retries and escalates to KILL. Work that had already left
+// the tree before the call (double-forked to PID 1, or cs-job, which the
+// guest runs outside the worker) is out of its reach and survives.
 //
 // Legacy path (root absent → guest image predates the registry): the old
 // /proc walk on legacyAgentWorkerPattern + KOTO_SESSION env. Skips $$ because
@@ -273,6 +304,8 @@ KEY='` + workerSessionKey(sess) + `'
 SIG='` + sig + `'
 hit=0
 if [ -d "$ROOT" ]; then
+  mypg=$(sed 's/.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f3)
+  roots=
   for f in "$ROOT/$KEY"/*; do
     [ -f "$f" ] || continue
     p=${f##*/}
@@ -280,9 +313,63 @@ if [ -d "$ROOT" ]; then
     [ "$p" = 1 ] && continue
     [ "$p" = "$$" ] && continue
     [ -d "/proc/$p" ] || continue
-    kill -"$SIG" "$p" 2>/dev/null && hit=1
-    [ "$SIG" = KILL ] && kill -KILL -- "-$p" 2>/dev/null
+    roots="$roots $p"
   done
+  if [ -n "$roots" ]; then
+    hit=1
+    G=
+    for p in $roots; do
+      pg=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f3)
+      if [ "$pg" = "$p" ] && [ "$pg" != 1 ] && [ "$pg" != "$mypg" ]; then G="$G $pg"; fi
+    done
+    kill -STOP $roots 2>/dev/null
+    T=" $roots "
+    K=
+    while :; do
+      new=
+      for d in /proc/[0-9]*; do
+        q=${d##*/}
+        [ "$q" = 1 ] && continue
+        [ "$q" = "$$" ] && continue
+        case "$T" in *" $q "*) continue;; esac
+        set -- $(sed 's/.*) //' "$d/stat" 2>/dev/null)
+        [ $# -ge 3 ] || continue
+        case "$T" in
+          *" $2 "*) ;;
+          *) case " $G " in *" $3 "*) ;; *) continue;; esac;;
+        esac
+        new="$new $q"
+      done
+      [ -z "$new" ] && break
+      kill -STOP $new 2>/dev/null
+      T="$T$new "
+      K="$K$new"
+    done
+    if [ "$SIG" = KILL ]; then
+      for p in $G; do kill -KILL -- "-$p" 2>/dev/null; done
+      kill -KILL $T 2>/dev/null
+      K=$T
+    elif [ -n "$K" ]; then
+      kill -KILL $K 2>/dev/null
+    fi
+    i=0
+    left=
+    while [ -n "$K" ]; do
+      left=
+      for q in $K; do
+        st=$(sed 's/.*) //' "/proc/$q/stat" 2>/dev/null | cut -c1)
+        case "$st" in ''|Z|X) ;; *) left="$left $q";; esac
+      done
+      [ -z "$left" ] && break
+      i=$((i+1))
+      [ "$i" -ge 50 ] && { echo "tree-survivors:$left" >&2; break; }
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    if [ "$SIG" != KILL ] && [ -z "$left" ]; then
+      kill -"$SIG" $roots 2>/dev/null
+      kill -CONT $T 2>/dev/null
+    fi
+  fi
 else
   for d in /proc/[0-9]*; do
     p=${d##*/}
