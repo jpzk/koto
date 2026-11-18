@@ -2924,7 +2924,8 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		case "mode_changed":
 			// A permission-mode change took effect (daemon/mode_live.go):
 			// "mode changed to X — turn restarted" when it cut the
-			// in-flight turn, "… — next turn" when the session was idle.
+			// in-flight turn, "… — the old turn has NOT stopped yet …" when it cut it
+			// but could not confirm the old run dead, "… — next turn" when idle.
 			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
 				text: ic(icCog) + " " + ev.Text, ts: int64(ev.Ts)})
 		case "sched_fired", "sched_run":

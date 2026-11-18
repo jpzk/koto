@@ -17,10 +17,17 @@ package main
 //  3. SIGKILL the session's harness process GROUP synchronously, before the
 //     change is acknowledged — no SIGINT grace in which a yolo claude could
 //     start one more tool;
-//  4. wait (bounded) for the old run to retire, then acknowledge;
+//  4. wait (bounded) for the old run to retire, then acknowledge. If it has
+//     not retired by then, the change is reported as NOT restarted ("old turn
+//     still running") and the kill is retried until it does (fail closed);
 //  5. the session's queue worker, still holding the job, re-runs it under the
-//     new mode with a continuation note. job.done is written once, after the
-//     final run, so a goal iteration is counted (and budgeted) once.
+//     new mode with a continuation note — only after the old run returned, and
+//     not at all if an interrupt or other cancel reached the cut turn before
+//     the re-run began. job.done is written once, after the final run, so a
+//     goal iteration is counted (and budgeted) once.
+//
+// Approval requests are bound to the turn their stream was issued to
+// (openApproval), so a cut turn's stream can never get one answered.
 //
 // Tightening and loosening are handled identically. Pending approvals are
 // DENIED on every transition, loosening included: a confirm->yolo change
@@ -47,6 +54,19 @@ type modeRestart struct {
 	// at which no process of the old posture is left. applyModeChange waits
 	// on it before acknowledging.
 	ran chan struct{}
+	// cancelled is set (under queuesMu) when an interrupt, stop or other
+	// cancel reaches the cut turn after the cut: the operator stopped the
+	// work, so it is not re-run. It is honoured up to the moment the re-run's
+	// fresh turn is installed (runJobTurn), in the same queuesMu section.
+	cancelled bool
+}
+
+// noteModeRestartCancelLocked records a cancel against g/session's pending
+// mode restart, if any. Caller holds queuesMu.
+func noteModeRestartCancelLocked(g, session string) {
+	if mr := modeRestarts[sessKey(g, session)]; mr != nil {
+		mr.cancelled = true
+	}
 }
 
 // modeRestarts is keyed by sessKey. Guarded by queuesMu.
@@ -130,6 +150,15 @@ func cutTurnForMode(g, session string, want chan struct{}, mr *modeRestart) (cut
 	return true, false
 }
 
+// peekModeRestart returns the restart record of g/session, if any, WITHOUT
+// consuming it: it stays visible to cancels until runJobTurn either drops it
+// or installs the re-run (beginModeRerun).
+func peekModeRestart(g, session string) *modeRestart {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	return modeRestarts[sessKey(g, session)]
+}
+
 // takeModeRestart consumes the restart record of g/session, if any.
 func takeModeRestart(g, session string) *modeRestart {
 	queuesMu.Lock()
@@ -138,6 +167,32 @@ func takeModeRestart(g, session string) *modeRestart {
 	mr := modeRestarts[k]
 	delete(modeRestarts, k)
 	return mr
+}
+
+func dropModeRestart(g, session string, mr *modeRestart) {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	k := sessKey(g, session)
+	if modeRestarts[k] == mr {
+		delete(modeRestarts, k)
+	}
+}
+
+// beginModeRerun consumes mr and, unless a cancel reached the cut turn in the
+// meantime, installs the re-run's fresh turn — in one queuesMu section, so a
+// cancel lands either on the record (no re-run) or on the new turn.
+func beginModeRerun(g, session string, mr *modeRestart) bool {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	k := sessKey(g, session)
+	if modeRestarts[k] == mr {
+		delete(modeRestarts, k)
+	}
+	if mr.cancelled {
+		return false
+	}
+	turnCancels[k] = make(chan struct{})
+	return true
 }
 
 // modeChangeResult is what applyModeChange did, for the config response, the
@@ -149,12 +204,47 @@ type modeChangeResult struct {
 	Retired     bool // the cut run retired within modeChangeWait
 }
 
-// apply is the config-response summary ("restarted" / "next turn").
+// apply is the config-response summary ("restarted" / "next turn"). A cut
+// whose old run could not be confirmed stopped is NOT reported as restarted:
+// the old run is still alive, and the re-run waits for it to stop.
 func (r modeChangeResult) apply() string {
+	if r.Interrupted && !r.Retired {
+		return modeApplyPending
+	}
 	if r.Interrupted {
 		return "turn restarted"
 	}
 	return "next turn"
+}
+
+// modeApplyPending is mode_apply when the cut run has not stopped yet.
+const modeApplyPending = "old turn still running"
+
+// modeKillRetry is how often a cut run that outlived modeChangeWait is
+// killed again until it retires.
+var modeKillRetry = time.Second
+
+// retireModeCut keeps killing the cut run until it has returned (mr.ran), then
+// reports the restart that applyModeChange could not confirm. The re-run only
+// starts after that point (runJobTurn), and any approval the old stream
+// still asks for is denied (bound to its turn, openApproval).
+func retireModeCut(g, session, to string, mr *modeRestart) {
+	tk := time.NewTicker(modeKillRetry)
+	defer tk.Stop()
+	for {
+		select {
+		case <-mr.ran:
+			emit(g, Event{Event: "mode_changed", Session: session, Msg: to,
+				Text: fmt.Sprintf("mode changed to %s — the old turn has stopped now", to)})
+			emitLogfG("audit", g, "info", "[%s] mode_change session=%s to=%s old turn retired late",
+				g, sessionMarkerName(session), to)
+			return
+		case <-tk.C:
+			if err := modeKillFn(g, session); err != nil {
+				emitLogfG("session", g, "warn", "[%s] session=%s mode change kill retry: %v", g, sessionMarkerName(session), err)
+			}
+		}
+	}
 }
 
 // applyModeChange makes the mode just stored for (g, session) — or, with
@@ -210,22 +300,29 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 				g, sessionMarkerName(session), modeChangeWait)
 		}
 		t.Stop()
+		if !res.Retired {
+			go retireModeCut(g, session, to, mr)
+		}
 	} else if res.From == "" {
 		res.From = to // idle (or not yet delivered): nothing ran in another mode
 	}
 
 	text := fmt.Sprintf("mode changed to %s — next turn", to)
 	switch {
+	case res.Interrupted && refuse != nil && !res.Retired:
+		text = fmt.Sprintf("mode change to %s refused (%v) — in-flight turn cancelled, but its process has not stopped yet (still retrying)", to, refuse)
 	case res.Interrupted && refuse != nil:
 		text = fmt.Sprintf("mode change to %s refused (%v) — in-flight turn cancelled", to, refuse)
+	case res.Interrupted && !res.Retired:
+		text = fmt.Sprintf("mode changed to %s — the old turn has NOT stopped yet (kill still retrying); it is re-run under %s only once it has", to, to)
 	case res.Interrupted:
 		text = fmt.Sprintf("mode changed to %s — turn restarted", to)
 	case refuse != nil:
 		text = fmt.Sprintf("mode change to %s refused (%v)", to, refuse)
 	}
 	emit(g, Event{Event: "mode_changed", Session: session, Msg: to, Text: text})
-	emitLogfG("audit", g, "info", "[%s] mode_change session=%s from=%s to=%s interrupted=%t denied=%d refused=%t",
-		g, sessionMarkerName(session), res.From, to, res.Interrupted, res.Denied, refuse != nil)
+	emitLogfG("audit", g, "info", "[%s] mode_change session=%s from=%s to=%s interrupted=%t retired=%t denied=%d refused=%t",
+		g, sessionMarkerName(session), res.From, to, res.Interrupted, res.Retired, res.Denied, refuse != nil)
 	return res
 }
 
@@ -265,24 +362,28 @@ func runJobTurn(g string, job sendJob) error {
 		err := runTurn(g, job.session, msg)
 		setTurnModeOverride(g, job.session, "")
 		clearTurnStamp(g, job.session)
-		mr := takeModeRestart(g, job.session)
+		mr := peekModeRestart(g, job.session)
 		if mr == nil {
 			return err
 		}
 		close(mr.ran)
 		if mr.refuse != nil {
+			dropModeRestart(g, job.session, mr)
 			return mr.refuse
 		}
 		if err != nil {
+			dropModeRestart(g, job.session, mr)
 			return err
 		}
 		if berr := modeRestartBlocked(g, job.session); berr != nil {
+			dropModeRestart(g, job.session, mr)
 			return berr
 		}
-		k := sessKey(g, job.session)
-		queuesMu.Lock()
-		turnCancels[k] = make(chan struct{})
-		queuesMu.Unlock()
+		if !beginModeRerun(g, job.session, mr) {
+			emitLogfG("session", g, "info", "[%s] session=%s turn cancelled after the mode change cut it; not re-run",
+				g, sessionMarkerName(job.session))
+			return err
+		}
 		emitLogfG("session", g, "info", "[%s] session=%s re-running turn under mode %s (was %s)",
 			g, sessionMarkerName(job.session), mr.to, mr.from)
 		msg = modeRestartNote(mr.from, mr.to) + job.msg

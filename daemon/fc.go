@@ -1814,12 +1814,21 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 // can name the one conversation waiting on this stream (audit 2026-09-11 L81).
 var (
 	fcExpectedMu    sync.Mutex
-	fcExpectedTurns = map[string]string{}
+	fcExpectedTurns = map[string]expectedTurn{}
 )
 
+// expectedTurn is the session a slot was issued for and the turn (its cancel
+// channel identity) in flight when it was issued: the stream opened on the
+// slot belongs to that turn and no other (approvals.go openApproval).
+type expectedTurn struct {
+	session string
+	turn    <-chan struct{}
+}
+
 func fcExpectTurn(g string, slot int, session string) {
+	turn := turnCancelCh(g, session) // before fcExpectedMu: takes queuesMu
 	fcExpectedMu.Lock()
-	fcExpectedTurns[slotKey(g, slot)] = session
+	fcExpectedTurns[slotKey(g, slot)] = expectedTurn{session: session, turn: turn}
 	fcExpectedMu.Unlock()
 }
 
@@ -1827,12 +1836,19 @@ func fcExpectTurn(g string, slot int, session string) {
 // for. The boolean is the authorization answer; the string is only meaningful
 // when it is true (a session name may legitimately be "").
 func fcConsumeExpectedTurn(g string, slot int) (string, bool) {
+	sess, _, ok := fcConsumeExpectedTurnBound(g, slot)
+	return sess, ok
+}
+
+// fcConsumeExpectedTurnBound is fcConsumeExpectedTurn plus the turn the slot
+// was issued to (nil when none was in flight).
+func fcConsumeExpectedTurnBound(g string, slot int) (string, <-chan struct{}, bool) {
 	fcExpectedMu.Lock()
 	defer fcExpectedMu.Unlock()
 	k := slotKey(g, slot)
-	sess, ok := fcExpectedTurns[k]
+	e, ok := fcExpectedTurns[k]
 	delete(fcExpectedTurns, k)
-	return sess, ok
+	return e.session, e.turn, ok
 }
 
 func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte, traceparent string) error {

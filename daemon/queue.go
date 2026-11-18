@@ -341,6 +341,9 @@ func cancelTurn(g, session string, want chan struct{}) bool {
 	default:
 		close(want)
 	}
+	// A cancel that lands on a turn a mode change already cut must also stop
+	// its re-run (mode_live.go runJobTurn).
+	noteModeRestartCancelLocked(g, session)
 	// The cancelled turn may be parked in acquireSlot, which waits on a
 	// condition variable and cannot select on this channel (audit M140).
 	defer slotWakeAll()
@@ -370,6 +373,7 @@ func requestTurnCancel(g, session string) bool {
 	default:
 		close(c)
 	}
+	noteModeRestartCancelLocked(g, session)
 	defer slotWakeAll() // it may be parked in acquireSlot (audit M140)
 	return true
 }

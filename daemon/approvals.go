@@ -66,6 +66,10 @@ type turnReplyWriter struct {
 	mu   sync.Mutex
 	c    net.Conn
 	dead bool
+	// turn is the cancel channel of the turn this connection was issued to
+	// (set once, before the first request is read; nil when none was in
+	// flight). openApproval binds every request to it.
+	turn <-chan struct{}
 }
 
 func newTurnReplyWriter(c net.Conn) *turnReplyWriter { return &turnReplyWriter{c: c} }
@@ -218,12 +222,28 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 	// registration: the cutter closes the turn's channel and then sweeps the
 	// pending set, so a request registered after that sweep sees the closed
 	// channel here, and one registered before it is in the sweep.
-	if ch := turnCancelCh(g, session); ch != nil {
-		select {
-		case <-ch:
+	//
+	// The request is bound to the TURN its stream was issued to, not to the
+	// session: once that turn is cut or replaced (a mode change re-runs the
+	// job under a fresh turn), a late request from the old stream is denied
+	// rather than surfacing as the current turn's.
+	cur := turnCancelCh(g, session)
+	ch := cur
+	if w != nil && w.turn != nil {
+		ch = w.turn
+	}
+	if ch != nil {
+		stale := w != nil && w.turn != nil && cur != w.turn
+		if !stale {
+			select {
+			case <-ch:
+				stale = true
+			default:
+			}
+		}
+		if stale {
 			resolveApproval(k, false, decDeny, "denied: the turn was interrupted", "interrupt", true)
 			return
-		default:
 		}
 	}
 	emit(g, Event{Event: "approval_request", Session: session, ID: id, Name: p.tool,
