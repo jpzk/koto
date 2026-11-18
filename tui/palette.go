@@ -104,6 +104,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "refresh group list", hint: "/ls", run: "/ls"},
 
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},
+		{title: "steer current turn (cut, continue with text)", hint: "/steer <text>", run: "/steer ", edit: true},
 		{title: "discard queued prompts", hint: "/drain", run: "/drain"},
 		{title: "discard queued prompts (whole group)", hint: "/drain all", run: "/drain all"},
 		{title: "compact this session (summarize context)", hint: "/compact [focus]", run: "/compact ", edit: true},

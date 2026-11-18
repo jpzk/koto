@@ -4066,6 +4066,8 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("stopped %s's VM", msg.group)})
 		}
 		return listCmd(m.sock) // refresh the tree's running marker promptly
+	case "steer":
+		return m.handleSteerResp(msg)
 	case "interrupt":
 		if msg.err != nil {
 			// Interrupt is idempotent: "nothing to interrupt" (no agent
@@ -5938,6 +5940,10 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("restarting %s…", target)})
 		return daemonCmd(m.sock, "restart", target, nil)
+	}
+	if text, ok := parseSteer(v); ok {
+		// Redirect the session on screen (steer_cmd.go).
+		return m.steerCmd(text)
 	}
 	if v == "/interrupt" {
 		// Kill the ACTIVE SESSION's in-flight turn (same as Esc while a turn
