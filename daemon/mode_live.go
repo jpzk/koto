@@ -60,6 +60,36 @@ type modeRestart struct {
 	// work, so it is not re-run. It is honoured up to the moment the re-run's
 	// fresh turn is installed (runJobTurn), in the same queuesMu section.
 	cancelled bool
+	// killMu serialises every kill aimed at the cut run (killCut) against
+	// the worker marking it returned (markRan). The kill is session-scoped
+	// — signalAgentTree matches workers by KOTO_SESSION and cannot tell the
+	// cut run from its re-run — so a kill still in flight when the cut run
+	// returned used to find the re-run's fresh worker and SIGKILL it (empty
+	// re-run, no API call: le-claude out3 R1 S1). With killMu, ran is closed
+	// only once no kill is in flight, and no kill starts after it.
+	killMu sync.Mutex
+}
+
+// killCut kills g/session's tree on behalf of the cut run mr, unless that run
+// has already returned: from then on any worker of the session is the
+// re-run's (or a later turn's), which the cut must not touch.
+func killCut(g, session string, mr *modeRestart) (killed bool, err error) {
+	mr.killMu.Lock()
+	defer mr.killMu.Unlock()
+	select {
+	case <-mr.ran:
+		return false, nil
+	default:
+	}
+	return true, modeKillFn(g, session)
+}
+
+// markRan records that the cut run has returned. It waits out a kill in
+// flight (killCut), so the re-run starts only after the last cut kill.
+func (mr *modeRestart) markRan() {
+	mr.killMu.Lock()
+	close(mr.ran)
+	mr.killMu.Unlock()
 }
 
 // noteModeRestartCancelLocked records a cancel against g/session's pending
@@ -241,7 +271,9 @@ func retireModeCut(g, session, to string, mr *modeRestart) {
 				g, sessionMarkerName(session), to)
 			return
 		case <-tk.C:
-			if err := modeKillFn(g, session); err != nil {
+			// select picks at random when both are ready: killCut re-checks
+			// ran under killMu, so a tick that won the race kills nothing.
+			if _, err := killCut(g, session, mr); err != nil {
 				emitLogfG("session", g, "warn", "[%s] session=%s mode change kill retry: %v", g, sessionMarkerName(session), err)
 			}
 		}
@@ -278,7 +310,15 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 
 	if alreadyCut {
 		res.Denied = denyApprovals(g, session, nil, decDeny, "mode-change", true)
-		if err := modeKillFn(g, session); err != nil {
+		// Cut by an earlier mode change: kill on behalf of THAT cut, so a
+		// re-run it already started is spared.
+		var err error
+		if prev := peekModeRestart(g, session); prev != nil {
+			_, err = killCut(g, session, prev)
+		} else {
+			err = modeKillFn(g, session)
+		}
+		if err != nil {
 			emitLogfG("session", g, "info", "[%s] session=%s mode change kill: %v", g, sessionMarkerName(session), err)
 		}
 	}
@@ -292,7 +332,9 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 		// The kill returns once the whole tree is gone; if part of it is
 		// still alive the change is not acknowledged as retired, whatever
 		// the worker itself did.
-		killErr := modeKillFn(g, session)
+		// killCut: the cut run may already have returned and its re-run be
+		// starting; that worker is not the cut's to kill.
+		_, killErr := killCut(g, session, mr)
 		if killErr != nil {
 			emitLogfG("session", g, "info", "[%s] session=%s mode change kill: %v", g, sessionMarkerName(session), killErr)
 		}
@@ -371,7 +413,7 @@ func runJobTurn(g string, job sendJob) error {
 		if mr == nil {
 			return err
 		}
-		close(mr.ran)
+		mr.markRan()
 		if mr.refuse != nil {
 			dropModeRestart(g, job.session, mr)
 			return mr.refuse

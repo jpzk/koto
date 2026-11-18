@@ -818,7 +818,7 @@ func sendWorkerTurn(g string, job sendJob) {
 		// A mode change cut the compaction (mode_live.go): it is not re-run —
 		// the half-done compaction is reported and the operator re-issues it.
 		if mr := takeModeRestart(g, job.session); mr != nil {
-			close(mr.ran)
+			mr.markRan() // waits out a cut kill in flight (killCut)
 			err = fmt.Errorf("compaction interrupted: mode changed to %s", mr.to)
 		}
 		job.done <- err
