@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -144,9 +145,19 @@ func steerSession(g, session, msg string) (steerResult, error) {
 	// plain priority send. steerCut is recorded under the same lock as the
 	// cut, so the worker (which can only dequeue the steer after the cut turn
 	// retires, under queuesMu) always sees it.
-	if !cancelTurnThen(g, session, turn, func() { job.steerCut.Store(true) }) {
+	//
+	// The cut also pins the turn in flight (holdTurnRetireLocked) until the
+	// SIGINT below has been delivered: the signal targets the session, not
+	// the turn, and a turn that ended on its own just as the cut landed would
+	// otherwise retire, start THIS steer, and take the late SIGINT itself.
+	var hold *sync.WaitGroup
+	if !cancelTurnThen(g, session, turn, func() {
+		job.steerCut.Store(true)
+		hold = holdTurnRetireLocked(turn)
+	}) {
 		return res, nil
 	}
+	defer hold.Done()
 	res.Interrupted = true
 	fn := steerInterruptFn
 	if fn == nil {

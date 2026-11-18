@@ -306,6 +306,10 @@ var (
 	// inFlightSess: the Interrupt RPC checks sessionBusy and then cancels,
 	// and a gap between the two would drop the cancel on the floor.
 	turnCancels = map[string]chan struct{}{}
+	// turnRetireHolds pins a cut turn in flight while the steer that cut it
+	// is still signaling its guest worker (steer.go). Keyed by the turn
+	// identity (its cancel channel); guarded by queuesMu. See retireTurn.
+	turnRetireHolds = map[chan struct{}]*sync.WaitGroup{}
 )
 
 // sessionBusy reports whether g's given session has a turn in flight.
@@ -903,7 +907,8 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 		return sendJob{}, false
 	}
 	inFlightSess[k] = true
-	turnCancels[k] = make(chan struct{})
+	tc := make(chan struct{})
+	turnCancels[k] = tc
 	queuesMu.Unlock()
 	var err error
 	if job.compact != nil {
@@ -923,12 +928,53 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	// as in flight, "interrupted" it (cancel + SIGINT to the guest), and was
 	// framed and resume-probed as a resumption of a turn that had in fact
 	// completed. The same window let an Interrupt RPC hit a finished turn.
-	queuesMu.Lock()
-	delete(inFlightSess, k)
-	delete(turnCancels, k)
-	queuesMu.Unlock()
+	retireTurn(g, job.session, tc)
 	job.done <- err
 	return held, again
+}
+
+// retireTurnHeldHook, when set, runs when retireTurn finds the turn pinned by
+// a steer that is still signaling it. Test sync point only.
+var retireTurnHeldHook atomic.Pointer[func(g, session string)]
+
+// retireTurn clears g/session's in-flight mark for turn tc — but not while a
+// steer that cut tc is still delivering its SIGINT. That signal is aimed at
+// the SESSION (signalAgent has no notion of turn identity), so a turn that
+// ended on its own just as the cut landed must not retire first: the worker
+// would start the steer's own turn and the late SIGINT would kill the very
+// steer it was sent for. The hold is taken under queuesMu in the same
+// critical section as the cut (cancelTurnThen) and re-checked here under the
+// same lock as the retire, so no hold slips in between check and retire.
+func retireTurn(g, session string, tc chan struct{}) {
+	k := sessKey(g, session)
+	for {
+		queuesMu.Lock()
+		if w := turnRetireHolds[tc]; w != nil {
+			delete(turnRetireHolds, tc)
+			queuesMu.Unlock()
+			if h := retireTurnHeldHook.Load(); h != nil {
+				(*h)(g, session)
+			}
+			w.Wait()
+			continue
+		}
+		delete(inFlightSess, k)
+		delete(turnCancels, k)
+		queuesMu.Unlock()
+		return
+	}
+}
+
+// holdTurnRetireLocked pins turn tc in flight until the returned WaitGroup's
+// Done. The caller holds queuesMu and has just cut tc (cancelTurnThen).
+func holdTurnRetireLocked(tc chan struct{}) *sync.WaitGroup {
+	w := turnRetireHolds[tc]
+	if w == nil {
+		w = new(sync.WaitGroup)
+		turnRetireHolds[tc] = w
+	}
+	w.Add(1)
+	return w
 }
 
 // All producers — the gRPC Send handler, the ctl plane, and the scheduler —
