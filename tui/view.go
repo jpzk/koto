@@ -974,7 +974,12 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// work stays noticeable without a row per job. Unlike the badge, which
 	// is right-aligned, the count travels with the name.
 	cnt := ""
-	if !isJob {
+	collapsed := !isJob && !isSession && m.groupCollapsed[r.group]
+	if collapsed {
+		// A collapsed group's marker replaces the default conversation's
+		// fold count: " [+N]" counts the whole hidden subtree.
+		cnt = m.collapseLabel(r.group)
+	} else if !isJob {
 		cnt = m.foldLabel(r.group, r.session)
 	}
 	if badge != "" {
@@ -1093,9 +1098,16 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// total ("*2") — the rolled-up "!N" pending mark can squeeze the field
 	// that far; the NAME gives up the remaining cells (keeping at least 3).
 	if cnt != "" && cellWidth(name+cnt) > w {
-		j, gl, live := m.foldedCount(r.group, r.session)
 		nw := min(cellWidth(name), 3)
-		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)} {
+		var alts []string
+		if collapsed {
+			n, live := m.collapsedCount(r.group)
+			alts = []string{foldLabelBare(n, live)}
+		} else {
+			j, gl, live := m.foldedCount(r.group, r.session)
+			alts = []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)}
+		}
+		for _, c := range alts {
 			if cellWidth(cnt) <= w-nw {
 				break
 			}
