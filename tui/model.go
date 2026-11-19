@@ -4195,6 +4195,8 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("stopped %s's VM", msg.group)})
 		}
 		return listCmd(m.sock) // refresh the tree's running marker promptly
+	case "steer":
+		return m.handleSteerResp(msg)
 	case "interrupt":
 		if msg.err != nil {
 			// Interrupt is idempotent: "nothing to interrupt" (no agent
@@ -6378,11 +6380,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/goals"), "/goal"))
 		return m.handleGoalCmd(rest)
 	}
-	// /steer is /goals steer: a durable operator steer on a running goal,
-	// no approval pending needed. In a goal session it targets that run.
-	if v == "/steer" || strings.HasPrefix(v, "/steer ") {
-		return m.handleGoalCmd("steer " + strings.TrimSpace(strings.TrimPrefix(v, "/steer")))
-	}
+	// /steer is the live cut (steer_cmd.go, Steer RPC), dispatched below; a
+	// durable operator steer on a goal run is only /goals steer.
 	if v == "/clear" || v == "/clear all" {
 		if v == "/clear all" {
 			// Whole group: every session + the full transcript.
@@ -6488,6 +6487,10 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("restarting %s…", target)})
 		return daemonCmd(m.sock, "restart", target, nil)
+	}
+	if text, ok := parseSteer(v); ok {
+		// Redirect the session on screen (steer_cmd.go).
+		return m.steerCmd(text)
 	}
 	if v == "/interrupt" {
 		// Kill the ACTIVE SESSION's in-flight turn (same as Esc while a turn
@@ -6621,7 +6624,7 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	// server's reserved-session error.
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
-			text: "goal sessions are follow-only — /steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
+			text: "goal sessions are follow-only — /goals steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
 		return nil
 	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row

@@ -179,7 +179,7 @@ var goalHelpLines = []string{
 	"  /goals interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
 	"  /goals resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
 	"  /goals cancel  [<group>] [<name>]  cancel the goal",
-	"  /steer [<group>] [name=<run>] <text>  durable operator steer: the run's",
+	"  /goals steer [<group>] [name=<run>] <text>  durable operator steer: the run's",
 	"                                     next iteration reads it as OPERATOR STEER",
 	"                                     (in a goal session: that run)",
 	"  /goals help                        this help",
@@ -488,8 +488,8 @@ func goalSteerCmd(sock, group, name, text string) tea.Cmd {
 	}
 }
 
-// parseSteer resolves `/steer [<group>] [name=<run>] <text>` (and
-// `/goals steer …`). Viewing a goal session, the run defaults to THAT run;
+// parseSteer resolves `/goals steer [<group>] [name=<run>] <text>` (bare
+// /steer is the live cut, steer_cmd.go). Viewing a goal session, the run defaults to THAT run;
 // elsewhere "" lets the daemon pick the group's sole active goal. The first
 // token is a group only when the TUI knows it, as for /goals set.
 func (m *Model) parseSteer(rest string) (group, name, text string, err error) {
@@ -511,7 +511,7 @@ func (m *Model) parseSteer(rest string) (group, name, text string, err error) {
 	}
 	text = strings.Join(toks, " ")
 	if text == "" {
-		return "", "", "", fmt.Errorf("usage: /steer [<group>] [name=<run>] <text>")
+		return "", "", "", fmt.Errorf("usage: /goals steer [<group>] [name=<run>] <text>")
 	}
 	return group, name, text, nil
 }

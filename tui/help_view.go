@@ -126,6 +126,7 @@ func helpSections() []helpSection {
 			{"/restart [g]", "restart the VM (applies network/size/root config)"},
 			{"/destroy <g>", "destroy group + workspace (type its name to confirm)"},
 			{"/interrupt", "interrupt the in-flight turn (same as ctrl+c / esc)"},
+			{"/steer <text>", "cut the running turn and continue with <text> (idle: sent as a message)"},
 			{"/drain [all]", "discard the session's queued prompts (all = the whole group)"},
 			{"/mode [yolo|plan|confirm]", "permission mode of this session (no arg = picker)"},
 			{"/approve", "open the tool-approval card (same as alt+a; alias /inbox)"},
