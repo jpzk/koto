@@ -28,10 +28,11 @@ package main
 // as coordinator text, never as operator text, never changes the criteria, the
 // iteration cap or the mode, and the judge never sees it (goal_steer.go).
 //
-// Every ctl steer — session or goal — emits one audit log line: who (group/
-// session as declared), the target, the text's length and its sha256. Never
-// the text: the log stream fans out to every attached client, and the body is
-// already in the target's transcript / the goal's host record.
+// Every ctl steer — session or goal, allowed or refused — gets exactly one
+// record on the hash-chained audit spool (audit.go), written on the single
+// ctl audit path (ctlDispatch → steerAudit): who (group/session as
+// declared), the target, the text's length and its sha256. Never the text:
+// the body is already in the target's transcript / the goal's host record.
 //
 // Limits. send has no time-based rate limit, only size and queue caps, so the
 // ctl steers get the same kind: a session steer is bounded by sendMsgMax, the
@@ -43,8 +44,7 @@ package main
 // send does not have.
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -87,9 +87,40 @@ func ctlSteerOrigin(owner, from string) (string, error) {
 	return sess, nil
 }
 
-// steerAudit is the one audit line per ctl steer (no text body).
-func steerAudit(verb, owner, from, target, text string) {
-	sum := sha256.Sum256([]byte(text))
-	emitLogfG("audit", owner, "info", "[%s] audit ctl %s by=%s/%s target=%s len=%d sha256=%s",
-		owner, verb, owner, sessionMarkerName(from), target, len(text), hex.EncodeToString(sum[:]))
+// steerAudit writes the audit record of one ctl steer / goal_steer through
+// the hash-chained audit spool. ctlDispatch hands it the record it built for
+// the call (allowed, refused or error alike), so a steer gets exactly ONE
+// record on the single ctl audit path; this adds who steered and what was
+// steered. The text is never recorded: auditCtlEvent already reduced the
+// msg/text body to <key>.len and <key>.sha256.
+//
+//	by            the caller as declared: <group>/<session>
+//	steer_target  steer: <group>/<session>; goal_steer: <group>/goal:<id>
+//	              (the resolved run id once allowed, else the requested name)
+func steerAudit(ev auditEvent, line []byte, resp any) {
+	var req struct {
+		Group       string `json:"group"`
+		Session     string `json:"session"`
+		Name        string `json:"name"`
+		FromSession string `json:"from_session"`
+	}
+	_ = json.Unmarshal(line, &req) // malformed fields: record what parsed
+	g := ev.Group
+	if ev.Group == ctlMainGroup && req.Group != "" {
+		g = req.Group
+	}
+	from := strings.TrimSpace(req.FromSession)
+	if s, err := normalizeSession(from); err == nil {
+		from = s
+	}
+	ev.Args["by"] = auditScalar(ev.Group + "/" + sessionMarkerName(from))
+	target := g + "/" + sessionMarkerName(req.Session)
+	if ev.Verb == "goal_steer" {
+		target = g + "/goal:" + req.Name
+		if gr, ok := resp.(goalResp); ok && gr.OK {
+			target = g + "/goal:" + gr.Item.ID
+		}
+	}
+	ev.Args["steer_target"] = auditScalar(target)
+	audit(ev)
 }

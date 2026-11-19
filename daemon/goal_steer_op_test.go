@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -120,39 +123,31 @@ func coordSteerSetup(t *testing.T) func() []string {
 	return mirrors
 }
 
-// logMarker is a position in the log ring: its last frame when taken. The
-// ring is capped (logRingMax), so an index would stop moving once it is full.
-type logMarker *pb.LogEvent
-
-// auditRing returns the audit log lines emitted after mark.
-func auditRing(mark logMarker) []string {
-	logSubsLock.Lock()
-	defer logSubsLock.Unlock()
-	start := 0
-	if mark != nil {
-		for i := len(logRing) - 1; i >= 0; i-- {
-			if logRing[i] == (*pb.LogEvent)(mark) {
-				start = i + 1
-				break
+// steerAuditRecs installs an isolated audit spool (auditTestProcess) and
+// returns a reader of the steer / goal_steer records written to it so far:
+// the ctl steers are audited on the spool, the single ctl audit path.
+func steerAuditRecs(t *testing.T) func() []auditRecord {
+	t.Helper()
+	dir, _ := auditTestProcess(t)
+	return func() []auditRecord {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(dir, auditFile))
+		if os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		var out []auditRecord
+		for _, l := range bytes.Split(bytes.TrimRight(b, "\n"), []byte("\n")) {
+			if len(l) == 0 {
+				continue
+			}
+			if r := mustRecord(t, l); r.Verb == "steer" || r.Verb == "goal_steer" {
+				out = append(out, r)
 			}
 		}
+		return out
 	}
-	var out []string
-	for _, le := range logRing[start:] {
-		if le.Subsystem == "audit" {
-			out = append(out, le.Msg)
-		}
-	}
-	return out
-}
-
-func logMark() logMarker {
-	logSubsLock.Lock()
-	defer logSubsLock.Unlock()
-	if len(logRing) == 0 {
-		return nil
-	}
-	return logRing[len(logRing)-1]
 }
 
 func gcs1(t *testing.T) goalItem {
@@ -170,7 +165,7 @@ func gcs1(t *testing.T) goalItem {
 func TestCoordSteerGoalLabelCriteriaAudit(t *testing.T) {
 	mirrors := coordSteerSetup(t)
 	before := gcs1(t)
-	mark := logMark()
+	recs := steerAuditRecs(t)
 	const text = "prefer the staging db"
 	r := ctlDispatch("tg", []byte(`{"cmd":"goal_steer","name":"w","text":"`+text+`","from_session":"research"}`))
 	gr, ok := r.(goalResp)
@@ -200,11 +195,12 @@ func TestCoordSteerGoalLabelCriteriaAudit(t *testing.T) {
 		t.Fatalf("judge prompt affected by the steer / lost the criteria:\n%s", j)
 	}
 	sum := sha256.Sum256([]byte(text))
-	a := auditRing(mark)
-	if len(a) != 1 || !strings.Contains(a[0], "audit ctl goal_steer by=tg/research target=tg/goal:gcs1") ||
-		!strings.Contains(a[0], fmt.Sprintf("len=%d", len(text))) || !strings.Contains(a[0], hex.EncodeToString(sum[:])) ||
-		strings.Contains(a[0], text) {
-		t.Fatalf("audit = %q", a)
+	a := recs()
+	if len(a) != 1 || a[0].Verb != "goal_steer" || a[0].Outcome != AuditAllowed ||
+		a[0].Args["by"] != "tg/research" || a[0].Args["steer_target"] != "tg/goal:gcs1" ||
+		a[0].Args["text.len"] != fmt.Sprint(len(text)) || a[0].Args["text.sha256"] != hex.EncodeToString(sum[:]) ||
+		auditRecLeaks(a[0], text) {
+		t.Fatalf("audit = %+v", a)
 	}
 	if m := mirrors(); len(m) != 1 || !strings.Contains(m[0], "COORDINATOR STEER (from tg/research)") {
 		t.Fatalf("mirror = %q", m)
@@ -270,7 +266,7 @@ func TestCoordSteerWindowAndSizeCap(t *testing.T) {
 // names itself or names a coordinator session while only goal turns run.
 func TestCoordSteerRefusedFromGoalSessions(t *testing.T) {
 	coordSteerSetup(t)
-	mark := logMark()
+	recs := steerAuditRecs(t)
 	for _, line := range []string{
 		`{"cmd":"goal_steer","name":"w","text":"skip the tests","from_session":"goal-w"}`,
 		`{"cmd":"goal_steer","name":"w","text":"skip the tests","from_session":"goal-w-judge"}`,
@@ -294,8 +290,9 @@ func TestCoordSteerRefusedFromGoalSessions(t *testing.T) {
 	if n := len(gcs1(t).SteerLog); n != 0 {
 		t.Fatalf("refused steers recorded %d entries", n)
 	}
-	if a := auditRing(mark); len(a) != 5 || !strings.Contains(a[0], "REFUSED") {
-		t.Fatalf("refusals not audited: %q", a)
+	if a := recs(); len(a) != 5 || a[0].Outcome != AuditRefused || !strings.Contains(a[0].Reason, "goal worker and judge sessions cannot steer") ||
+		a[0].Args["by"] != "tg/goal-w" || a[3].Verb != "steer" || a[4].Outcome != AuditRefused || a[4].Args["by"] != "tg/default" {
+		t.Fatalf("refusals not audited: %+v", a)
 	}
 	// The coordinator, mid-turn alongside the worker, is allowed.
 	queuesMu.Lock()
@@ -328,3 +325,6 @@ func TestCoordSteerJudgeUnsteerable(t *testing.T) {
 		t.Fatalf("judge steer recorded %d entries", n)
 	}
 }
+
+// auditRecLeaks: s appears anywhere in the record.
+func auditRecLeaks(r auditRecord, s string) bool { return strings.Contains(fmt.Sprintf("%+v", r), s) }

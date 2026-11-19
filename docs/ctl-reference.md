@@ -440,9 +440,10 @@ allowed for non-main groups: <verb>`.
   `reply` (strict proto: steer has no report window), empty messages,
   `/compact`, unregistered groups. Steering the very session that issues the
   command interrupts that turn — the steer then runs as its continuation.
-  Every steer writes one `audit` log line: `audit ctl steer by=<group>/<session>
-  target=<group>/<session> len=<bytes> sha256=<hex>` (no text; refusals log
-  `REFUSED` with the reason). Limits are send's: `sendMsgMax`, the group's
+  Every steer writes ONE record to the hash-chained audit spool (the record
+  every ctl call gets) with `by=<group>/<session>`,
+  `steer_target=<group>/<session>`, `msg.len` and `msg.sha256` (never the
+  text; refusals are recorded too, with their outcome). Limits are send's: `sendMsgMax`, the group's
   queued-bytes cap, and 8 pending steers per session; there is no time-based
   rate limit, as send has none. Guest images older than this verb reject it
   in the guest adapter (`ctl: unknown verb` / unknown field `from_session`);
@@ -463,8 +464,9 @@ allowed for non-main groups: <verb>`.
   prompt carries no steer: the judge verifies the ORIGINAL criteria. Limits:
   text ≤ 1000 bytes (refused above, not truncated); at most 8 coordinator
   entries per goal (oldest dropped), kept apart from the operator's 32 so
-  they can never evict operator steer. Audited like `steer` (`audit ctl
-  goal_steer by=… target=<group>/goal:<id> len=… sha256=…`). The operator's
+  they can never evict operator steer. Audited like `steer`: one spool
+  record with `by`, `steer_target=<group>/goal:<id>`, `text.len`,
+  `text.sha256`. The operator's
   own `koto ctl goal steer` (gRPC `GoalSteer`) stays admin-only.
 - **`sched_add`** `{"group"?,"cron","msg"}`.
   - Non-main callers are forced to themselves.
