@@ -442,6 +442,22 @@ func sendNow(g, session, msg string) error {
 	return err
 }
 
+// denyCutTurnApprovals is the turn goroutine's sweep once its cancel channel
+// closed: every approval g/session still has open is denied, labelled
+// "mode-change" when a mode change cut the turn and "interrupt" otherwise.
+// This sweep can run before applyModeChange's own; cutTurnForMode closes the
+// channel and records the cut in one queuesMu section, so the record is
+// already visible here. Reports whether the cut was a mode change.
+func denyCutTurnApprovals(g, session string) bool {
+	modePending := modeCancelPending(g, session)
+	who := "interrupt"
+	if modePending {
+		who = "mode-change"
+	}
+	denyApprovals(g, session, nil, decDeny, who, true)
+	return modePending
+}
+
 func sendNowTurn(ot *otelTurn, g, session, msg string) error {
 	emitLogfG("send", g, "info", "group=%s session=%s bytes=%d", g, sessionMarkerName(session), len(msg))
 	// Phase reporting for clients (activity.go). Opened before ensure() —
@@ -587,9 +603,9 @@ drain:
 			// as after a completed turn.
 			// An interrupt (or stop) settles every approval this turn still
 			// has open as a deny, written down the turn connection.
-			denyApprovals(g, session, nil, decDeny, "interrupt", true)
+			modePending := denyCutTurnApprovals(g, session)
 			cancelC = nil // closed channel is always ready; don't spin
-			if modeCancelPending(g, session) {
+			if modePending {
 				// A mode change cut this turn (mode_live.go): it already
 				// SIGKILLed the harness tree; every retry kills the tree
 				// again — no SIGINT grace for the old posture.

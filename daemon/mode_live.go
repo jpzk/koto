@@ -156,6 +156,11 @@ func modeCancelPending(g, session string) bool {
 	return modeRestarts[sessKey(g, session)] != nil
 }
 
+// modeCutHook runs after applyModeChange cut the turn and before it sweeps the
+// turn's approvals — the window in which the turn goroutine's own sweep can
+// win. A seam for tests (nil in production).
+var modeCutHook func(g, session string)
+
 // cutTurnForMode cancels exactly the turn `want` identifies and records mr
 // for it, in one queuesMu section, so the turn can neither retire nor be
 // cancelled by anything else between the check and the record. (Draft PR #123
@@ -307,6 +312,9 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 		}
 	}
 	modeStampMu.Unlock()
+	if mr != nil && modeCutHook != nil {
+		modeCutHook(g, session)
+	}
 
 	if alreadyCut {
 		res.Denied = denyApprovals(g, session, nil, decDeny, "mode-change", true)
