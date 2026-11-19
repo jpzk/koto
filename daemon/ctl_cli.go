@@ -1259,7 +1259,7 @@ func ctlGoal(args []string) {
 			case "criteria":
 				req.Criteria = &v
 			case "max", "max_iterations":
-				n, err := strconv.Atoi(v)
+				n, err := strconv.ParseInt(v, 10, 32)
 				if err != nil {
 					ctlFatal(2, "max must be a number: %q", v)
 				}
