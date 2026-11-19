@@ -71,6 +71,10 @@ func ctlLogLine(line []byte, verb string) string {
 func ctlDispatchPB(owner string, req *pb.CtlRequest) *pb.CtlResponse {
 	line, verb, err := ctlReqEnvelope(req)
 	if err != nil {
+		// Never reaches ctlDispatch, so audit it here: a malformed or
+		// unknown-verb frame from a guest is itself a security signal.
+		audit(auditEvent{Verb: "malformed", Group: owner, Target: owner,
+			Outcome: AuditError, Reason: err.Error()})
 		return &pb.CtlResponse{Error: err.Error()}
 	}
 	// The verb and the envelope's SIZE, not its body. Every ctl request is
@@ -140,6 +144,9 @@ func ctlRespToPB(v any) (*pb.CtlResponse, error) {
 	case schedAddResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
 			Result: &pb.CtlResponse_Sched{Sched: &pb.SchedAddResp{Ok: r.OK, Error: r.Error, Item: toPBScheduleItem(r.Item)}}}, nil
+	case steerCtlResp:
+		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
+			Result: &pb.CtlResponse_Interrupted{Interrupted: r.Interrupted}}, nil
 	case schedListResp:
 		out := &pb.SchedListResp{Ok: r.OK, Error: r.Error}
 		for _, it := range r.Schedules {

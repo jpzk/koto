@@ -64,7 +64,7 @@ func fcTurnSink(g string, c net.Conn) {
 		return
 	}
 	slot := int(open.Slot)
-	sess, expected := fcConsumeExpectedTurn(g, slot)
+	sess, turn, expected := fcConsumeExpectedTurnBound(g, slot)
 	if !expected {
 		// The daemon told the guest its slot in MsgReq.Slot; a stream for a
 		// slot no turn was handed out on is the guest choosing (audit L4).
@@ -82,6 +82,7 @@ func fcTurnSink(g string, c net.Conn) {
 	// TurnEnd, a guest crash, a read error — is denied (the guest cannot be
 	// told any more: write=false), and the writer dies before c.Close().
 	rw := newTurnReplyWriter(c)
+	rw.turn = turn // approvals on this stream belong to this turn only
 	defer func() {
 		rw.close()
 		denyApprovals(g, sess, rw, decDeny, "stream-end", false)

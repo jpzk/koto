@@ -209,7 +209,7 @@ func enqueueCompact(g, session, instr string, fresh bool) (compactMech, bool, <-
 		return mech, false, nil, fmt.Errorf("compact already queued for this session")
 	}
 	compactPending[k] = true
-	busy := inFlightSess[k] || len(queues[k]) > 0 // anything ahead of it in this session
+	busy := inFlightSess[k] || len(queues[k]) > 0 || len(steerLanes[k]) > 0 // anything ahead of it in this session
 	queuesMu.Unlock()
 	// The note goes out BEFORE the enqueue: once enqueued, the worker may
 	// finish and emit "compacted" before this goroutine runs again.
