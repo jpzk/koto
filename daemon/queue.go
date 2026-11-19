@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -79,7 +80,22 @@ type sendJob struct {
 	// compact, when non-nil, makes this job a compaction (compact.go): the
 	// worker runs runCompactJob instead of a prompt turn. msg is then empty.
 	compact *compactReq
-	done    chan error // buffered(1); worker delivers the turn result, never blocks
+	// steer marks a job that entered through steerSession (steer.go): it
+	// lives in the session's steer lane, not the FIFO channel, and is never
+	// itself displaced by another steer once it has started.
+	steer bool
+	// steerBy is the steer's author for its frame (steer.go frameSteerBy):
+	// "" = the operator, "<group>/<session>" = a ctl coordinator.
+	steerBy string
+	// steerCut is set (under queuesMu, by steerSession's cancel) when this
+	// steer actually cancelled the session's in-flight turn. Only then is the
+	// steer framed as a resumption and the resume state probed first
+	// (steer.go checkSteerResume). A turn that was in flight at the insert but
+	// retired on its own before the cancel landed finished its answer: it was
+	// not interrupted, and neither the agent nor the caller is told it was.
+	// A pointer because the lane holds the job by value.
+	steerCut *atomic.Bool
+	done     chan error // buffered(1); worker delivers the turn result, never blocks
 }
 
 // ---- slot pool --------------------------------------------------------------
@@ -297,6 +313,10 @@ var (
 	// inFlightSess: the Interrupt RPC checks sessionBusy and then cancels,
 	// and a gap between the two would drop the cancel on the floor.
 	turnCancels = map[string]chan struct{}{}
+	// turnRetireHolds pins a cut turn in flight while the steer that cut it
+	// is still signaling its guest worker (steer.go). Keyed by the turn
+	// identity (its cancel channel); guarded by queuesMu. See retireTurn.
+	turnRetireHolds = map[chan struct{}]*sync.WaitGroup{}
 )
 
 // sessionBusy reports whether g's given session has a turn in flight.
@@ -328,6 +348,14 @@ func sessionTurn(g, session string) chan struct{} {
 // cancelTurn closes exactly the turn `want` identifies, and reports whether it
 // did. A different turn now holding the key is not cancelled.
 func cancelTurn(g, session string, want chan struct{}) bool {
+	return cancelTurnThen(g, session, want, nil)
+}
+
+// cancelTurnThen is cancelTurn that also runs onCancel, still under queuesMu,
+// when (and only when) it cancelled `want`. A steer uses it to record "I cut
+// this turn" atomically with the cut: the turn cannot retire, and the steer
+// cannot be dequeued, between the two.
+func cancelTurnThen(g, session string, want chan struct{}, onCancel func()) bool {
 	if want == nil {
 		return false
 	}
@@ -340,6 +368,9 @@ func cancelTurn(g, session string, want chan struct{}) bool {
 	case <-want: // already cancelled
 	default:
 		close(want)
+	}
+	if onCancel != nil {
+		onCancel()
 	}
 	// A cancel that lands on a turn a mode change already cut must also stop
 	// its re-run (mode_live.go runJobTurn).
@@ -553,6 +584,21 @@ func releaseQueuedBytesLocked(g string, n int) {
 	}
 }
 
+// ensureQueueLocked returns g/session's FIFO, creating it — together with its
+// steer wake channel and its worker — on first use. Caller holds queuesMu.
+func ensureQueueLocked(g, session string) chan sendJob {
+	k := sessKey(g, session)
+	q, ok := queues[k]
+	if !ok {
+		q = make(chan sendJob, sendQueueDepth)
+		wake := make(chan struct{}, 1)
+		queues[k] = q
+		steerWake[k] = wake
+		go sendWorker(g, session, q, wake)
+	}
+	return q
+}
+
 func enqueue(g string, job sendJob) (<-chan error, error) {
 	job.done = make(chan error, 1)
 	if len(job.msg) > sendMsgMax {
@@ -570,13 +616,7 @@ func enqueue(g string, job sendJob) (<-chan error, error) {
 		return nil, fmt.Errorf("group %q already has %d bytes queued (max %d); retry later",
 			g, groupQueuedBytes[g], sendQueuedBytesMax)
 	}
-	k := sessKey(g, job.session)
-	q, ok := queues[k]
-	if !ok {
-		q = make(chan sendJob, sendQueueDepth)
-		queues[k] = q
-		go sendWorker(g, job.session, q)
-	}
+	q := ensureQueueLocked(g, job.session)
 	select {
 	case q <- job:
 		groupQueuedBytes[g] += int64(len(job.msg))
@@ -634,7 +674,7 @@ func queueDepth(g string) int {
 	n := 0
 	for k, q := range queues {
 		if gg, _, ok := splitSessKey(k); ok && gg == g {
-			n += len(q)
+			n += len(q) + len(steerLanes[k])
 		}
 	}
 	return n
@@ -710,6 +750,12 @@ func dropQueuedWhere(g, verb string, match func(session string) bool) int {
 				break drain
 			}
 		}
+		for _, job := range steerLanes[k] {
+			releaseQueuedBytesLocked(g, len(job.msg))
+			job.done <- fmt.Errorf("group %q %s; queued steer discarded", g, verb)
+			n++
+		}
+		delete(steerLanes, k)
 	}
 	return n
 }
@@ -730,18 +776,19 @@ const sessionIdleMax = 30 * time.Minute
 func retireQueue(g, session string, q chan sendJob) bool {
 	queuesMu.Lock()
 	defer queuesMu.Unlock()
-	if len(q) > 0 {
+	k := sessKey(g, session)
+	if len(q) > 0 || (queues[k] == q && len(steerLanes[k]) > 0) {
 		return false // work arrived while the timer was firing
 	}
-	k := sessKey(g, session)
 	if queues[k] != q {
 		return true // already replaced; this worker is the old one
 	}
 	delete(queues, k)
+	delete(steerWake, k)
 	return true
 }
 
-func sendWorker(g, session string, q chan sendJob) {
+func sendWorker(g, session string, q chan sendJob, wake <-chan struct{}) {
 	// An idle session gives its queue and worker back (audit M54). The session
 	// name is caller-chosen and the map had no teardown, so every distinct one
 	// ever sent to cost a channel and a goroutine for the daemon's lifetime —
@@ -752,6 +799,14 @@ func sendWorker(g, session string, q chan sendJob) {
 	idle := time.NewTimer(sessionIdleMax)
 	defer idle.Stop()
 	for {
+		// A steer outranks the FIFO. The wake channel holds one token, so two
+		// steers that landed during one turn leave a single wake — draining the
+		// lane here, not only on wake, is what keeps the second from waiting
+		// for an unrelated message.
+		if s, ok := popSteer(g, session); ok {
+			sendWorkerTurn(g, s)
+			continue
+		}
 		var job sendJob
 		select {
 		case job = <-q:
@@ -761,6 +816,22 @@ func sendWorker(g, session string, q chan sendJob) {
 				delete(compactPending, sessKey(g, session))
 				queuesMu.Unlock()
 			}
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(sessionIdleMax)
+		case <-wake:
+			// A steer landed in this session's lane while the worker was idle
+			// (steer.go). An empty lane is a stale wake whose steer the
+			// in-flight swap in sendWorkerTurnOnce already took.
+			s, ok := popSteer(g, session)
+			if !ok {
+				continue
+			}
+			job = s
 			if !idle.Stop() {
 				select {
 				case <-idle.C:
@@ -780,6 +851,21 @@ func sendWorker(g, session string, q chan sendJob) {
 }
 
 func sendWorkerTurn(g string, job sendJob) {
+	for {
+		held, again := sendWorkerTurnOnce(g, job)
+		if !again {
+			return
+		}
+		job = held
+	}
+}
+
+// sendWorkerTurnOnce runs one turn. When a steer is waiting in the session's
+// lane at the instant `job` would go in flight, the steer runs INSTEAD and
+// `job` comes back as held (again=true) for the caller to run next — that swap
+// shares its critical section with the in-flight mark, which is what makes a
+// steer atomic against queued messages and cron (steer.go).
+func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	// Re-checked here, not only at enqueue: a job is pulled off the channel
 	// before it is recorded in inFlightSess, so one taken in that gap is
 	// invisible to dropQueued AND to inFlightSessions and escapes both halves
@@ -808,12 +894,36 @@ func sendWorkerTurn(g string, job sendJob) {
 		return
 	}
 	k := sessKey(g, job.session)
+	if h := preInFlightHook.Load(); h != nil {
+		(*h)(g, job)
+	}
 	queuesMu.Lock()
+	// The steer swap (steer.go): checked under the same lock acquisition that
+	// marks the turn in flight. steerSession inserts its job and samples
+	// inFlightSess under queuesMu too, so every steer either sees THIS turn in
+	// flight (and interrupts it) or is seen here (and runs first). There is no
+	// third interleaving in which `job` starts ahead of an earlier steer.
+	if !job.steer {
+		if s, ok := popSteerLocked(g, job.session); ok {
+			held, again = job, true
+			job = s
+		}
+	}
+	if groupBarred(g) {
+		queuesMu.Unlock()
+		job.done <- fmt.Errorf("group %q is stopping; turn discarded", g)
+		if again {
+			held.done <- fmt.Errorf("group %q is stopping; turn discarded", g)
+		}
+		return sendJob{}, false
+	}
 	inFlightSess[k] = true
-	turnCancels[k] = make(chan struct{})
+	tc := make(chan struct{})
+	turnCancels[k] = tc
 	queuesMu.Unlock()
+	var err error
 	if job.compact != nil {
-		err := runCompactJob(g, job.session, job.compact)
+		err = runCompactJob(g, job.session, job.compact)
 		clearTurnStamp(g, job.session)
 		// A mode change cut the compaction (mode_live.go): it is not re-run —
 		// the half-done compaction is reported and the operator re-issues it.
@@ -821,17 +931,82 @@ func sendWorkerTurn(g string, job sendJob) {
 			mr.markRan() // waits out a cut kill in flight (killCut)
 			err = fmt.Errorf("compaction interrupted: mode changed to %s", mr.to)
 		}
-		job.done <- err
+	} else if job.steer {
+		cut := job.steerCut != nil && job.steerCut.Load()
+		if cut {
+			checkSteerResume(g, job.session)
+		}
+		// A steer turn is a turn like any other for a live mode change: it
+		// re-runs (steer framing kept) under the new mode via runJobTurn.
+		sj := job
+		sj.msg = frameSteerBy(job.msg, cut, job.steerBy)
+		err = runJobTurn(g, sj)
 	} else {
 		// Re-run under the new mode each time a mode change cuts the turn
 		// (mode_live.go); the job — and a goal iteration riding it —
-		// completes exactly once.
-		job.done <- runJobTurn(g, job)
+		// completes exactly once (reported below, after the turn retires).
+		err = runJobTurn(g, job)
 	}
-	queuesMu.Lock()
-	delete(inFlightSess, k)
-	delete(turnCancels, k)
-	queuesMu.Unlock()
+	// Retire the turn BEFORE reporting its result. The other order left a
+	// window in which the caller already held the result while the session
+	// still looked busy: a steer sent on completion sampled the finished turn
+	// as in flight, "interrupted" it (cancel + SIGINT to the guest), and was
+	// framed and resume-probed as a resumption of a turn that had in fact
+	// completed. The same window let an Interrupt RPC hit a finished turn.
+	// A mode re-run (beginModeRerun) installs a fresh cancel channel, so a
+	// steer that cut the re-run pinned THAT channel, not tc: retire the
+	// session's current turn.
+	cur := sessionTurn(g, job.session)
+	if cur == nil {
+		cur = tc
+	}
+	retireTurn(g, job.session, cur)
+	job.done <- err
+	return held, again
+}
+
+// retireTurnHeldHook, when set, runs when retireTurn finds the turn pinned by
+// a steer that is still signaling it. Test sync point only.
+var retireTurnHeldHook atomic.Pointer[func(g, session string)]
+
+// retireTurn clears g/session's in-flight mark for turn tc — but not while a
+// steer that cut tc is still delivering its SIGINT. That signal is aimed at
+// the SESSION (signalAgent has no notion of turn identity), so a turn that
+// ended on its own just as the cut landed must not retire first: the worker
+// would start the steer's own turn and the late SIGINT would kill the very
+// steer it was sent for. The hold is taken under queuesMu in the same
+// critical section as the cut (cancelTurnThen) and re-checked here under the
+// same lock as the retire, so no hold slips in between check and retire.
+func retireTurn(g, session string, tc chan struct{}) {
+	k := sessKey(g, session)
+	for {
+		queuesMu.Lock()
+		if w := turnRetireHolds[tc]; w != nil {
+			delete(turnRetireHolds, tc)
+			queuesMu.Unlock()
+			if h := retireTurnHeldHook.Load(); h != nil {
+				(*h)(g, session)
+			}
+			w.Wait()
+			continue
+		}
+		delete(inFlightSess, k)
+		delete(turnCancels, k)
+		queuesMu.Unlock()
+		return
+	}
+}
+
+// holdTurnRetireLocked pins turn tc in flight until the returned WaitGroup's
+// Done. The caller holds queuesMu and has just cut tc (cancelTurnThen).
+func holdTurnRetireLocked(tc chan struct{}) *sync.WaitGroup {
+	w := turnRetireHolds[tc]
+	if w == nil {
+		w = new(sync.WaitGroup)
+		turnRetireHolds[tc] = w
+	}
+	w.Add(1)
+	return w
 }
 
 // All producers — the gRPC Send handler, the ctl plane, and the scheduler —

@@ -47,6 +47,23 @@ message CtlSendReq {
   bool   reply        = 4; // arm a one-shot report window (report.go)
   string from_session = 5; // main's session that receives the report
 }
+// steer: head-of-queue insert + interrupt of the in-flight turn. No reply
+// window (a steer redirects delegated work, it does not delegate).
+message CtlSteerReq {
+  string group        = 1; // honored for main only; peers steer themselves
+  string msg          = 2;
+  string session      = 3;
+  string from_session = 4; // the CALLER's own session ($KOTO_SESSION); goal-* refused (coord_steer.go)
+}
+// goal_steer: a COORDINATOR steer of a goal run (daemon/coord_steer.go,
+// goal_steer.go). Labelled "COORDINATOR STEER (from <group>/<session>)";
+// never changes criteria, max_iterations, mode or the judge.
+message CtlGoalSteerReq {
+  string group        = 1; // honored for main only; peers steer their own goals
+  string name         = 2; // goal run ("" = the sole non-terminal goal)
+  string text         = 3; // <= 1000 bytes
+  string from_session = 4; // the CALLER's own session; goal-* refused
+}
 message CtlTailReq   { string group = 1; int32 n = 2; }
 message JobDoneReq   {
   string id      = 1;
@@ -98,6 +115,8 @@ message CtlRequest {
     SchedIDReq     sched_run      = 24;
     CompactReq     compact        = 25; // daemon/compact.go
     AskReq         ask            = 26; // daemon/goal_ask.go
+    CtlSteerReq    steer          = 27; // daemon/steer.go (renumbered from 26: develop took 26 for ask)
+    CtlGoalSteerReq goal_steer    = 28; // daemon/coord_steer.go (coordinator steer)
   }
 }
 
@@ -120,6 +139,7 @@ message CtlResponse {
     SchedAddResp  sched     = 10; // sched_add
     SchedListResp scheds    = 11; // sched_list
     AskResp       ask       = 12; // ask
+    bool          interrupted = 13; // steer (renumbered from 12: develop took 12 for ask): a running turn was cut short
   }
 }
 

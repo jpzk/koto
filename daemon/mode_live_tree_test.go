@@ -76,6 +76,19 @@ wait`
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Register the worker the way fc-agent (fcguest/workerreg.go) does, so the
+	// kill takes the registry path every shipped guest uses — the frozen
+	// legacy (no-registry) path is a single-pid signal with no tree walk.
+	reg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(reg, workerSessionKey("")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reg, workerSessionKey(""), strconv.Itoa(cmd.Process.Pid)), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prevReg := workerRegistryRoot
+	workerRegistryRoot = reg
+	t.Cleanup(func() { workerRegistryRoot = prevReg })
 	waited := make(chan struct{})
 	go func() { cmd.Wait(); close(waited) }()
 	tools := []string{"detached", "child"}

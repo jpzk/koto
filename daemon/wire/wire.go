@@ -517,4 +517,9 @@ type GoalSteer struct {
 	Source string `json:"source"`
 	Who    string `json:"who,omitempty"`
 	Text   string `json:"text"`
+	// Origin: "" = the operator (every pre-existing record, and every
+	// operator-authenticated path); "coordinator" = a ctl goal_steer from one
+	// of the group's non-goal sessions, Who = "<group>/<session>". The prompt
+	// renders the two in separate blocks with distinct labels (goal_steer.go).
+	Origin string `json:"origin,omitempty"`
 }
