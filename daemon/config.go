@@ -400,7 +400,16 @@ func configCmd(req configReq) configResp {
 			return configResp{BaseResp: errResp(fmt.Sprintf("invalid mode %q (yolo, plan or confirm)", m))}
 		}
 		if !harnessSupportsMode(newProvider, mv) {
-			return configResp{BaseResp: errResp(modeUnsupportedErr(newProvider, mv).Error())}
+			merr := modeUnsupportedErr(newProvider, mv)
+			if len(req.Provider) == 0 {
+				// The running harness is the one that refuses: the operator
+				// asked for a tighter posture than it can enforce, so the
+				// in-flight turn does not get to finish under yolo — it is
+				// cancelled and its job ends with this same error
+				// (mode_live.go). Nothing is stored.
+				applyModeChange(req.Group, s, mv, merr)
+			}
+			return configResp{BaseResp: errResp(merr.Error())}
 		}
 		if mv != modeYolo && isReservedSession(s) && goalIsJudgeSession(req.Group, s) {
 			return configResp{BaseResp: errResp("goal judge sessions always run yolo — the judge never asks (set the mode on the goal's work session)")}
@@ -448,6 +457,9 @@ func configCmd(req configReq) configResp {
 		}
 		eff["mode"] = mv
 		eff["mode_session"] = sessionMarkerName(modeSess)
+		// Immediate effect (mode_live.go): an in-flight turn still running
+		// the old mode is cut and re-run under this one before we answer.
+		eff["mode_apply"] = applyModeChange(req.Group, modeSess, mv, nil).apply()
 	}
 	if setAllow {
 		// The gateway filter is host-side: swap the running VM's allow set

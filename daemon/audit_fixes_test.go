@@ -2365,6 +2365,12 @@ func TestAmbiguousDeliveryQuarantinesTheSlot(t *testing.T) {
 // nothing stopped work being ADMITTED across that window — and a job pulled
 // off the channel but not yet recorded in inFlightSess escapes both halves.
 func TestStopBarrierClosesAdmission(t *testing.T) {
+	// Own ROOT, and every admitted send is waited for below: the queue worker
+	// fails ensure() for this unregistered group and logs an error, which must
+	// happen inside THIS test — left running, it landed in a later test's
+	// tempdir (TestStopDisarmsTheReportWindow's RemoveAll: "directory not
+	// empty").
+	fcHarness(t)
 	const g = "barrier"
 	prev := setTurnFn(func(string, string, string) error { return nil })
 	t.Cleanup(func() {
@@ -2376,7 +2382,8 @@ func TestStopBarrierClosesAdmission(t *testing.T) {
 	})
 
 	// Ordinary admission works.
-	if _, err := enqueueSend(g, "", "before"); err != nil {
+	before, err := enqueueSend(g, "", "before")
+	if err != nil {
 		t.Fatalf("enqueue before the barrier: %v", err)
 	}
 
@@ -2399,8 +2406,16 @@ func TestStopBarrierClosesAdmission(t *testing.T) {
 		t.Fatal("the nested barrier lifted early")
 	}
 	groupBarrierEnd(g)
-	if _, err := enqueueSend(g, "", "after"); err != nil {
+	after, err := enqueueSend(g, "", "after")
+	if err != nil {
 		t.Fatalf("admission stayed closed after the stop: %v", err)
+	}
+	for _, d := range []<-chan error{before, after} {
+		select {
+		case <-d: // "no such group": the worker ran and is done
+		case <-time.After(10 * time.Second):
+			t.Fatal("an admitted send never completed")
+		}
 	}
 }
 
