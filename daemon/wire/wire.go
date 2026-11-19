@@ -48,6 +48,14 @@ type Event struct {
 	// The message body rides Text.
 	Severity string `json:"severity,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Deadline (event == "approval_request"): unix seconds at which the host
+	// denies the request (daemon/approvals.go).
+	Deadline float64 `json:"deadline,omitempty"`
+	// Kind / Options (event == "approval_request"): kind "ask" is a goal's
+	// decision request (daemon/goal_ask.go) — Text is the question, Options
+	// the choices; "" is a tool approval.
+	Kind    string   `json:"kind,omitempty"`
+	Options []string `json:"options,omitempty"`
 }
 
 // GroupInfo is the value shape of the `groups` map in ListResp.
@@ -106,6 +114,12 @@ type GroupInfo struct {
 	// NAMED session to that origin session (goals.go goalSessionOrigins), so
 	// clients can nest the goal rows under it. See koto.proto.
 	SessionOrigins map[string]string `json:"session_origins,omitempty"`
+	// SessionModes: per-session permission mode, non-yolo sessions only (key
+	// "" = default session). Host registry (session_modes.go).
+	SessionModes map[string]string `json:"session_modes,omitempty"`
+	// PendingApprovals: open tool-approval requests per session (key "" =
+	// default session); absent = none (daemon/approvals.go).
+	PendingApprovals map[string]int32 `json:"pending_approvals,omitempty"`
 }
 
 // JobInfo is one background job (sidecar/cs-job) in a group's guest. Mirrors
@@ -210,6 +224,11 @@ type ConfigReq struct {
 	// koto-default. Raw registry refs are refused; the daemon pins the
 	// name's digest at set time. Applies on /restart (see config_image.go).
 	Image json.RawMessage `json:"image,omitempty"`
+	// Mode is the per-SESSION permission mode (yolo | plan | confirm) for
+	// Session. Host session registry only (session_modes.go), never
+	// config.json; a posture key — the ctl plane refuses it.
+	Mode    json.RawMessage `json:"mode,omitempty"`
+	Session string          `json:"session,omitempty"`
 }
 
 // ---- Response envelopes ---------------------------------------------------
@@ -417,10 +436,37 @@ type GoalItem struct {
 	// registered session of the group fold to "". The goal-finished /
 	// terminated handoff turn is delivered there (default if it no longer
 	// exists), and the TUI nests the goal's rows under it.
-	OriginSession string  `json:"origin_session,omitempty"`
-	CreatedAt     float64 `json:"created_at"`
-	UpdatedAt     float64 `json:"updated_at,omitempty"`
-	CompletedAt   float64 `json:"completed_at,omitempty"`
+	OriginSession string `json:"origin_session,omitempty"`
+	// Mode is the run's permission mode as set at goal_set: "yolo" or
+	// "confirm" (goals.go goalSetWith; inherit-restrictive). The LIVE mode of
+	// the work session is the host registry's (the operator may switch it);
+	// goal_status reports that one.
+	Mode string `json:"mode,omitempty"`
+	// WaitingConfirm / Pending / PendingTool / PendingSince are computed at
+	// read time (goal_status, GoalList), never persisted: the work session has
+	// Pending tool approvals open, the oldest for PendingTool since
+	// PendingSince (unix seconds). The run's turn budget is paused meanwhile.
+	WaitingConfirm bool    `json:"waiting_confirm,omitempty"`
+	Pending        int     `json:"pending,omitempty"`
+	PendingTool    string  `json:"pending_tool,omitempty"`
+	PendingSince   float64 `json:"pending_since,omitempty"`
+	// WaitingDecision: the oldest pending item is a decision request (ctl
+	// ask / AskUserQuestion) rather than a tool approval. Read-time too.
+	WaitingDecision bool `json:"waiting_decision,omitempty"`
+	// Steers counts the operator steers recorded for this goal (steer log).
+	// Read-time (goalWithPending), from SteerLog.
+	Steers int `json:"steers,omitempty"`
+	// SteerLog is the HOST record of operator steering for this run: messages
+	// given on its approvals, decision answers and /steer. Written by the
+	// daemon only, from operator-authenticated paths (gRPC Approve), never from
+	// the ctl plane or anything the guest wrote; goalWorkerMsg composes the
+	// "OPERATOR STEER (authoritative)" block from it alone. The guest copy
+	// (/workspace/goal/<name>/steer.md) is a mirror and is never read back.
+	// Loop-internal: not on pb.
+	SteerLog    []GoalSteer `json:"steer_log,omitempty"`
+	CreatedAt   float64     `json:"created_at"`
+	UpdatedAt   float64     `json:"updated_at,omitempty"`
+	CompletedAt float64     `json:"completed_at,omitempty"`
 }
 
 type GoalSetReq struct {
@@ -435,6 +481,9 @@ type GoalSetReq struct {
 	Name string `json:"name,omitempty"`
 	// Session is the origin session (see GoalItem.OriginSession); optional.
 	Session string `json:"session,omitempty"`
+	// Mode is the run's permission mode: "" / "yolo" (default) or "confirm".
+	// A goal set from a confirm/plan session is confirm regardless.
+	Mode string `json:"mode,omitempty"`
 }
 
 // GoalGroupReq covers approve / pause / interrupt / resume / cancel. Name
@@ -458,4 +507,19 @@ type GoalResp struct {
 type GoalListResp struct {
 	BaseResp
 	Goals []GoalItem `json:"goals"`
+}
+
+// GoalSteer is one entry of GoalItem.SteerLog.
+type GoalSteer struct {
+	Ts        float64 `json:"ts"`
+	Iteration int     `json:"iteration"`
+	// Source: "allow <tool>" | "deny <tool>" | "decision" | "steer".
+	Source string `json:"source"`
+	Who    string `json:"who,omitempty"`
+	Text   string `json:"text"`
+	// Origin: "" = the operator (every pre-existing record, and every
+	// operator-authenticated path); "coordinator" = a ctl goal_steer from one
+	// of the group's non-goal sessions, Who = "<group>/<session>". The prompt
+	// renders the two in separate blocks with distinct labels (goal_steer.go).
+	Origin string `json:"origin,omitempty"`
 }

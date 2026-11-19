@@ -50,9 +50,19 @@ message CtlSendReq {
 // steer: head-of-queue insert + interrupt of the in-flight turn. No reply
 // window (a steer redirects delegated work, it does not delegate).
 message CtlSteerReq {
-  string group   = 1; // honored for main only; peers steer themselves
-  string msg     = 2;
-  string session = 3;
+  string group        = 1; // honored for main only; peers steer themselves
+  string msg          = 2;
+  string session      = 3;
+  string from_session = 4; // the CALLER's own session ($KOTO_SESSION); goal-* refused (coord_steer.go)
+}
+// goal_steer: a COORDINATOR steer of a goal run (daemon/coord_steer.go,
+// goal_steer.go). Labelled "COORDINATOR STEER (from <group>/<session>)";
+// never changes criteria, max_iterations, mode or the judge.
+message CtlGoalSteerReq {
+  string group        = 1; // honored for main only; peers steer their own goals
+  string name         = 2; // goal run ("" = the sole non-terminal goal)
+  string text         = 3; // <= 1000 bytes
+  string from_session = 4; // the CALLER's own session; goal-* refused
 }
 message CtlTailReq   { string group = 1; int32 n = 2; }
 message JobDoneReq   {
@@ -71,6 +81,11 @@ message NotifyReq {
 message ReportReq      { bytes msg = 1; }
 message GoalDoneReq    { string id = 1; bytes note = 2; }
 message GoalVerdictReq { string id = 1; bool met = 2; bytes reasons = 3; }
+// ask: a goal worker blocked on a decision asks the operator (daemon/goal_ask.go).
+// Answered on the SAME connection once the operator decides — the guest sends
+// it on a connection of its own, so the rest of the ctl plane never waits.
+message AskReq         { string id = 1; string question = 2; repeated string options = 3; }
+message AskResp        { string ask_id = 1; bool answered = 2; string answer = 3; }
 
 message CtlRequest {
   oneof cmd {
@@ -99,7 +114,9 @@ message CtlRequest {
     SchedToggleReq sched_toggle   = 23;
     SchedIDReq     sched_run      = 24;
     CompactReq     compact        = 25; // daemon/compact.go
-    CtlSteerReq    steer          = 26; // daemon/steer.go
+    AskReq         ask            = 26; // daemon/goal_ask.go
+    CtlSteerReq    steer          = 27; // daemon/steer.go (renumbered from 26: develop took 26 for ask)
+    CtlGoalSteerReq goal_steer    = 28; // daemon/coord_steer.go (coordinator steer)
   }
 }
 
@@ -121,7 +138,8 @@ message CtlResponse {
     GoalListResp  goals     = 9;  // goal_status
     SchedAddResp  sched     = 10; // sched_add
     SchedListResp scheds    = 11; // sched_list
-    bool          interrupted = 12; // steer: a running turn was cut short
+    AskResp       ask       = 12; // ask
+    bool          interrupted = 13; // steer (renumbered from 12: develop took 12 for ask): a running turn was cut short
   }
 }
 
@@ -147,6 +165,18 @@ message MsgReq {
   // W3C traceparent of the host turn span. "" = telemetry off: the guest
   // emits no GuestSpan frames at all.
   string traceparent   = 7;
+  // Permission mode of this turn's session, from the daemon's HOST registry
+  // (never config.json): ""/yolo = today's behaviour, plan, confirm. A
+  // harness that does not support the mode refuses the turn with a clear
+  // error instead of running it as yolo.
+  string mode          = 8;
+  // confirm only: how long the guest waits for an ApprovalReply before it
+  // denies on its own (fail closed). Set a little past the host deadline so
+  // the host's timeout normally wins. 0 = guest default.
+  int64  approval_timeout_ms = 9;
+  // confirm only: worker hard cap in ms (the worker clock pauses while an
+  // approval is pending, but never past this). 0 = guest default.
+  int64  approval_hard_cap_ms = 10;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
@@ -224,6 +254,10 @@ message TurnFrame {
     string   err            = 8;  // [[err]] line
     bool     turn_end       = 9;
     GuestSpan span          = 10; // only when MsgReq.traceparent != ""; droppable
+    ApprovalRequest approval_request = 11; // confirm: a tool call awaits the operator
+    // confirm: the guest denied request <id> on its own deadline (or because
+    // the turn connection dropped) — the daemon logs it as a timeout.
+    string   approval_expired = 12;
   }
 }
 
@@ -235,4 +269,31 @@ message CompactReq {
   string session      = 2;
   string instructions = 3;
   bool   fresh        = 4; // force summarize-and-restart
+}
+
+// ---- 9004 reverse direction (host → guest) ---------------------------------
+// mode=confirm turns use the turn connection in both directions: the guest
+// sends TurnFrame.approval_request, the daemon answers with one TurnReply per
+// request on the same connection (the writer half, daemon/approvals.go). The
+// guest translates it into claude's control_response. Anything the guest
+// cannot match to an open request is ignored; a dropped connection denies
+// every open request (fail closed).
+message ApprovalRequest {
+  string id               = 1; // claude's control request_id
+  string tool             = 2;
+  string input_json       = 3; // the tool input, JSON (bounded by the guest)
+  string summary          = 4; // one line for the card / transcript
+  int64  deadline_unix_ms = 5; // guest-side deadline (informational)
+  string kind             = 6; // "" / tool | ask (AskUserQuestion)
+  repeated string options = 7; // kind=ask: choices; summary = question
+}
+message ApprovalReply {
+  string id    = 1;
+  bool   allow = 2;
+  string msg   = 3; // deny reason / allow note / ask answer shown to the model
+}
+message TurnReply {
+  oneof kind {
+    ApprovalReply approval = 1;
+  }
 }

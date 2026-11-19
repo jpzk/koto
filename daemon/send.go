@@ -199,7 +199,9 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 // entry per live turn worker, written by PID 1 when it starts the worker and
 // removed when it reaps it. Root-owned 0755/0644, so the exec op (uid 1000)
 // can read it but a worker cannot plant or hide an entry.
-const workerRegistryRoot = "/run/koto/turn-workers"
+// A var only so tests can point the real script at a temp registry (as the
+// guest image since a72a0c5 provides one); production never reassigns it.
+var workerRegistryRoot = "/run/koto/turn-workers"
 
 // workerSessionKey is the registry's on-disk name for a session — hex of
 // sessionMarkerName, byte-for-byte what fcguest's workerSessionKey writes.
@@ -248,6 +250,14 @@ func signalAgent(g, sess, sig string) error {
 	}
 	return signalAgentResult(g, sess, s)
 }
+
+// signalAgentTree is the mode cut's kill (mode_live.go modeKillFn): the
+// worker's whole process TREE, harness and every tool subprocess, including
+// tool shells a harness ran detached (setsid). signalAgent's registry script
+// already walks the tree (ppid + pgroup, SIGSTOP fixed point) for every cut
+// signal and returns errTreeSurvivors when a KILL leaves a member alive, so
+// the mode cut and the interrupt/steer/KILL escalation share one kill path.
+func signalAgentTree(g, sess, sig string) error { return signalAgent(g, sess, sig) }
 
 // errTreeSurvivors: a tree kill sent SIGKILL but some member was still alive
 // when the call gave up waiting.
@@ -545,9 +555,17 @@ drain:
 		emitLogfG("send", g, "warn", "[%s] delivery failed ambiguously (%v) — quarantining slot %d until the VM is known dead", g, err, slot)
 		return err
 	}
-	stall := time.After(turnWaitTimeout)
+	// The stall clock pauses while this session has a tool approval pending
+	// (approvals.go stallClock): an operator deciding is not a wedged guest.
+	// Hard-capped in wall time. With nothing pending it is exactly the old
+	// turnWaitTimeout timer, sampled once a second.
+	sc := newStallClock(g, session, time.Now())
+	stallTick := time.NewTicker(time.Second)
+	defer stallTick.Stop()
+	stall := make(chan struct{})
 	var retry <-chan time.Time
 	sigAttempts := 0
+	modeCut := false
 	for {
 		select {
 		case out := <-doneC:
@@ -567,8 +585,19 @@ drain:
 			// arrives through the normal path (run_turn writes it when the
 			// worker dies), so the queue advances to the next prompt exactly
 			// as after a completed turn.
+			// An interrupt (or stop) settles every approval this turn still
+			// has open as a deny, written down the turn connection.
+			denyApprovals(g, session, nil, decDeny, "interrupt", true)
 			cancelC = nil // closed channel is always ready; don't spin
-			retry = time.After(interruptRetryDelay)
+			if modeCancelPending(g, session) {
+				// A mode change cut this turn (mode_live.go): it already
+				// SIGKILLed the harness tree; every retry kills the tree
+				// again — no SIGINT grace for the old posture.
+				modeCut = true
+				retry = time.After(modeCutRetryDelay)
+			} else {
+				retry = time.After(interruptRetryDelay)
+			}
 		case <-retry:
 			// A stopped VM can never deliver [[turn_end]] — the guest process
 			// that would write it is gone with the VM. Retiring the turn here
@@ -584,13 +613,22 @@ drain:
 				return nil
 			}
 			sig := "INT"
-			if sigAttempts++; sigAttempts >= interruptKillAfter {
+			if sigAttempts++; sigAttempts >= interruptKillAfter || modeCut {
 				sig = "KILL"
 			}
-			if err := signalAgent(g, session, sig); err != nil {
+			sigFn := signalAgent
+			if modeCut {
+				sigFn = signalAgentTree
+			}
+			if err := sigFn(g, session, sig); err != nil {
 				emitLogfG("send", g, "info", "group=%s session=%s: interrupt SIG%s: %v", g, sessionMarkerName(session), sig, err)
 			}
 			retry = time.After(interruptRetryDelay)
+		case now := <-stallTick.C:
+			if sc.due(now) {
+				close(stall)
+				stallTick.Stop()
+			}
 		case <-stall:
 			setStalled(g, session, true)
 			// The guest side of this turn may still be alive and writing into
@@ -640,6 +678,10 @@ func turnCanceled(c <-chan struct{}) bool {
 const (
 	interruptRetryDelay = 2 * time.Second
 	interruptKillAfter  = 3
+	// modeCutRetryDelay is the re-kill tick of a turn a mode change cut: the
+	// harness tree was already SIGKILLed synchronously; this only covers a
+	// worker that had not spawned yet when that kill ran.
+	modeCutRetryDelay = 500 * time.Millisecond
 )
 
 // turnWaitTimeout is how long send() waits for a turn's [[turn_end]] before
@@ -839,6 +881,9 @@ func notifyTurnDone(g, sess string) {
 // queue advances onto the freshly (re)started VM. A spurious token pushed when
 // no turn is in flight is drained by the next sendNow's pre-wait drain loop.
 func abortInflightTurn(g string) {
+	// The VM is gone, and so are the turn connections: every open approval
+	// is denied (logged); nothing can be written back.
+	denyApprovals(g, "*", nil, decDeny, "vm-exit", false)
 	// Every running conversation: the VM took all of them down with it.
 	for _, sess := range inFlightSessions(g) {
 		c := turnDoneCh(g, sess)

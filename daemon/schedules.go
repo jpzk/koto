@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -304,8 +305,14 @@ func fireSchedule(it scheduleItem, manual bool) {
 		ev.Event = "sched_run"
 	}
 	emit(it.Group, ev)
-	if _, err := enqueueSend(it.Group, "", it.Msg); err != nil {
+	if _, err := enqueueUnattended(it.Group, "", it.Msg, "cron"); err != nil {
 		emitLogfG("sched", it.Group, "error", "fire id=%s group=%s: %v", it.ID, it.Group, err)
+		if errors.Is(err, errUnattendedConfirm) {
+			// Not a transient queue refusal: re-arming would retry (and log)
+			// every tick for as long as the session stays in confirm. This
+			// occurrence is skipped; the next one is checked afresh.
+			return
+		}
 		// The occurrence was recorded as fired BEFORE delivery was accepted,
 		// and this error was then discarded — so a queue that was full when the
 		// minute came round skipped the occurrence until the next cron

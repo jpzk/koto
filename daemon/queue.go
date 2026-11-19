@@ -73,6 +73,10 @@ func sessKey(g, session string) string { return g + "\x00" + session }
 type sendJob struct {
 	session string // "" = the group's default session
 	msg     string
+	// mode, when set, overrides the session's registry mode for THIS turn
+	// only, and can only restrict it (effectiveTurnMode): the goal driver
+	// runs a confirm goal's plan turn read-only (plan) so it never asks.
+	mode string
 	// compact, when non-nil, makes this job a compaction (compact.go): the
 	// worker runs runCompactJob instead of a prompt turn. msg is then empty.
 	compact *compactReq
@@ -80,6 +84,9 @@ type sendJob struct {
 	// lives in the session's steer lane, not the FIFO channel, and is never
 	// itself displaced by another steer once it has started.
 	steer bool
+	// steerBy is the steer's author for its frame (steer.go frameSteerBy):
+	// "" = the operator, "<group>/<session>" = a ctl coordinator.
+	steerBy string
 	// steerCut is set (under queuesMu, by steerSession's cancel) when this
 	// steer actually cancelled the session's in-flight turn. Only then is the
 	// steer framed as a resumption and the resume state probed first
@@ -365,6 +372,9 @@ func cancelTurnThen(g, session string, want chan struct{}, onCancel func()) bool
 	if onCancel != nil {
 		onCancel()
 	}
+	// A cancel that lands on a turn a mode change already cut must also stop
+	// its re-run (mode_live.go runJobTurn).
+	noteModeRestartCancelLocked(g, session)
 	// The cancelled turn may be parked in acquireSlot, which waits on a
 	// condition variable and cannot select on this channel (audit M140).
 	defer slotWakeAll()
@@ -394,6 +404,7 @@ func requestTurnCancel(g, session string) bool {
 	default:
 		close(c)
 	}
+	noteModeRestartCancelLocked(g, session)
 	defer slotWakeAll() // it may be parked in acquireSlot (audit M140)
 	return true
 }
@@ -913,14 +924,28 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	var err error
 	if job.compact != nil {
 		err = runCompactJob(g, job.session, job.compact)
+		clearTurnStamp(g, job.session)
+		// A mode change cut the compaction (mode_live.go): it is not re-run —
+		// the half-done compaction is reported and the operator re-issues it.
+		if mr := takeModeRestart(g, job.session); mr != nil {
+			mr.markRan() // waits out a cut kill in flight (killCut)
+			err = fmt.Errorf("compaction interrupted: mode changed to %s", mr.to)
+		}
 	} else if job.steer {
 		cut := job.steerCut != nil && job.steerCut.Load()
 		if cut {
 			checkSteerResume(g, job.session)
 		}
-		err = runTurn(g, job.session, frameSteer(job.msg, cut))
+		// A steer turn is a turn like any other for a live mode change: it
+		// re-runs (steer framing kept) under the new mode via runJobTurn.
+		sj := job
+		sj.msg = frameSteerBy(job.msg, cut, job.steerBy)
+		err = runJobTurn(g, sj)
 	} else {
-		err = runTurn(g, job.session, job.msg)
+		// Re-run under the new mode each time a mode change cuts the turn
+		// (mode_live.go); the job — and a goal iteration riding it —
+		// completes exactly once (reported below, after the turn retires).
+		err = runJobTurn(g, job)
 	}
 	// Retire the turn BEFORE reporting its result. The other order left a
 	// window in which the caller already held the result while the session
@@ -928,7 +953,14 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	// as in flight, "interrupted" it (cancel + SIGINT to the guest), and was
 	// framed and resume-probed as a resumption of a turn that had in fact
 	// completed. The same window let an Interrupt RPC hit a finished turn.
-	retireTurn(g, job.session, tc)
+	// A mode re-run (beginModeRerun) installs a fresh cancel channel, so a
+	// steer that cut the re-run pinned THAT channel, not tc: retire the
+	// session's current turn.
+	cur := sessionTurn(g, job.session)
+	if cur == nil {
+		cur = tc
+	}
+	retireTurn(g, job.session, cur)
 	job.done <- err
 	return held, again
 }

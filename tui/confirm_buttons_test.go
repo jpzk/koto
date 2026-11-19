@@ -23,11 +23,14 @@ type confirmDialog struct {
 	record func(t *testing.T) *[]string
 	isOpen func(Model) bool
 	yes    func(Model) bool
+	sess   string // hovered session row ("" = group row)
 }
 
 var confirmDialogs = []confirmDialog{
 	{
-		name: "destroy", open: keyCtrlX, record: recordDestroys,
+		// The button row is the SESSION variant only; the group variant is
+		// the typed-name confirm (typed_destroy_test.go).
+		name: "destroy", open: keyCtrlX, record: recordClearGroups, sess: "triage",
 		isOpen: func(m Model) bool { return m.destroyConfirm.open },
 		yes:    func(m Model) bool { return m.destroyConfirm.buttons.yes },
 	},
@@ -41,7 +44,7 @@ var confirmDialogs = []confirmDialog{
 func openDialog(t *testing.T, d confirmDialog) (Model, *[]string) {
 	t.Helper()
 	sent := d.record(t)
-	m := treeModel(t, destroyGroups(), "alpha", "", "")
+	m := treeModel(t, destroyGroups(), "alpha", d.sess, "")
 	m, _ = dpress(t, m, d.open)
 	if !d.isOpen(m) {
 		t.Fatalf("%s modal did not open", d.name)
@@ -238,4 +241,18 @@ func TestConfirmButtonsKeyTable(t *testing.T) {
 	if _, a := b.key("ctrl+x"); a != confirmNone {
 		t.Fatal("ctrl+x without being an extra cancel key must be swallowed")
 	}
+}
+
+// recordClearGroups records session Clears as their group name, so the
+// session destroy modal fits the shared confirmDialog table.
+func recordClearGroups(t *testing.T) *[]string {
+	t.Helper()
+	var sent []string
+	orig := clearSessionCmdFn
+	clearSessionCmdFn = func(_, g, s string) tea.Cmd {
+		sent = append(sent, g)
+		return func() tea.Msg { return daemonRespMsg{op: "clear", group: g, session: s} }
+	}
+	t.Cleanup(func() { clearSessionCmdFn = orig })
+	return &sent
 }

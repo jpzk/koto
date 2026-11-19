@@ -238,7 +238,7 @@ func TestCtrlNOpensNewGroupDialog(t *testing.T) {
 		m := focusModel(t)
 		want := focusInput
 		if tree {
-			m = press(t, m, tea.KeyTab)
+			m = pressTree(t, m)
 			want = focusTree
 		}
 		m = press(t, m, tea.KeyCtrlN)

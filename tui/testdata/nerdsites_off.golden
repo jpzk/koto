@@ -54,9 +54,9 @@ HH:MM ⚙  summary line
 HH:MM 📤  summary line
          body one
 == tree/stuck
- ├─ ⚠ stuck          
+ ├─ ⚠ stuck         y
 == tree/work
- └─ ● work        ⏳2
+ └─ ● work      ⏳2 y
 == tree/work/j:jbad
     ├─ ✗ jbad        
 == tree/work/j:jok
@@ -66,6 +66,6 @@ HH:MM 📤  summary line
 == tree/work/j:jrun
     ├─ ⚙ jrun        
 == tree/work/s:goal-x
-    └─ ◦ x           
+    └─ ◦ x          y
 == tree/work/s:side
-    ├─ ◦ side        
+    ├─ ◦ side       y

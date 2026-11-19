@@ -115,7 +115,9 @@ helper is given.
   session is idle it is a priority send. The steer turn reaches the agent
   framed (`frameSteer`): `[operator steering — your previous turn was
   interrupted by the operator …]` after an interrupt, `[operator steering]`
-  when idle.
+  when idle. A steer from the ctl plane (a coordinator, below) is framed
+  `[coordinator steering (from <group>/<session>) …]` instead — never with
+  the operator's frame (`frameSteerBy`).
   Prints the `SteerResp` (`interrupted` set when a turn was cut short). RPC `Steer` (request
   `SendReq`; attachments refused). Goal sessions (`goal-<name>`) are
   refused with `goal sessions are steered with goal_steer, not steer`.
@@ -213,7 +215,7 @@ helper is given.
 
 #### Goals (`ctlGoal`)
 
-- **`goal set [-max N] [-plan=no] [-name x] <group> <goal> :: <criteria>`**.
+- **`goal set [-max N] [-plan=no] [-mode yolo|confirm] [-name x] [-session s] <group> <goal> :: <criteria>`**.
   The goal text and the criteria are separated by a literal `::` argument, and
   both sides must be non-empty.
   - `-max`: max iterations. `0` means the default, which is
@@ -221,6 +223,10 @@ helper is given.
     `goalMaxIterCeil = 200` (`daemon/goals.go`, `goalSetBy`).
   - `-plan`: `yes` (default) or `no`. Anything else fails with
     `goal set: -plan takes yes or no`.
+  - `-mode`: `yolo` (default) or `confirm`. A confirm goal's tool calls wait
+    for the operator in its goal session. A goal set from a confirm or plan
+    `-session` is always confirm (see
+    [groups-goals-schedules.md](groups-goals-schedules.md)).
   - `-name`: short run name, also used as the session name. Defaults to a slug
     of the goal.
   - Sends RPC `GoalSet`. A goal on `main` is refused with `cannot set a goal
@@ -232,6 +238,11 @@ helper is given.
   there is only one candidate. `[name]` is not shown in `ctlUsage`, but is in
   the verb's usage error. `interrupt` means pause now and abort the in-flight
   goal turn (usage text).
+- **`goal steer <group> [name=<run>] <text...>`**: RPC `GoalSteer`
+  (admin-only). Adds a durable operator steer to a planning, awaiting,
+  running or paused goal. The next iteration reads it as OPERATOR STEER
+  (authoritative), which outranks any coordinator steer (ctl `goal_steer`).
+  Empty text, a finished goal or a group without a goal is refused.
 
 #### Shared shell (`ctlShell`)
 
@@ -381,12 +392,26 @@ allowed for non-main groups: <verb>`.
 - **`goal_done`** `{"id","note"(b64)}` and **`goal_verdict`**
   `{"id","met","reasons"(b64)}`. The note and the reasons are truncated to
   `goalNoteMax = 4000` (`recordGoalDone`, `recordGoalVerdict`).
-- **`goal_set`** `{"group"?,"name"?,"text","criteria","plan"?,"max_iterations"?}`.
+- **`goal_set`** `{"group"?,"name"?,"text","criteria","plan"?,"max_iterations"?,"mode"?,"session"?}`.
   - A non-main caller is always forced to target itself. An empty group means
     the caller's own.
   - A goal on `main` is refused: `ctl: cannot set a goal on main`.
   - **When main sets a goal with `plan:false`, it is forced to plan-first**,
     because approving a plan is a human's call (log line in `ctlDispatch`).
+  - `mode` is `yolo` (default) or `confirm`; anything else is refused with
+    `invalid goal mode "<m>" (yolo or confirm)` (`resolveGoalMode`). An agent
+    may always ask for `confirm`. It can never get `yolo` out of a
+    restriction: when the session it claims to come from, or any of its
+    sessions with a turn in flight, is in confirm or plan, a yolo request is
+    raised to confirm (`callerSessionModes`).
+- **`ask`** `{"id","question","options"?}`. A goal worker's decision request
+  (wrapped by `cs-ask`). Accepted only while the goal's work turn is running,
+  one at a time per work session. It is queued in that session's approval
+  queue (kind `ask`, no deadline) and the call **blocks** until the operator
+  answers. A non-empty answer also goes to the goal's steering log
+  (`daemon/goal_ask.go`). An OPERATOR steer comes only from the host
+  (`GoalSteer` RPC, admin-only); the ctl `goal_steer` verb below is the
+  coordinator's, labelled and ranked as such.
 - **`goal_approve`** `{"name"?}`. Self-only. Naming another group fails with
   ``ctl: goal_approve is self-only (a plan set on a peer needs a human)``.
   It also requires an awaiting-approval goal that the group set itself.
@@ -396,18 +421,51 @@ allowed for non-main groups: <verb>`.
 - **`goal_pause` / `goal_interrupt` / `goal_resume` / `goal_cancel`**
   `{"group"?,"name"?}`. Non-main callers are forced to themselves. Main may
   steer any group.
-- **`steer`** `{"group"?,"msg","session"?}` — every group. Same ACL as
-  `goal_interrupt`: a non-main caller is forced to ITSELF (any of its own
-  sessions; `group` is overwritten, never trusted); main may steer any
-  registered group, itself included. Head-of-queue insert + interrupt of the
-  session's in-flight turn, or a priority send when idle (see `koto ctl
-  steer` above for framing and the lost-resume warning). The response has
-  `interrupted`. Refused: goal sessions (`goal_steer` is the goal path),
+- **`steer`** `{"group"?,"msg","session"?,"from_session"?}` — every group's
+  COORDINATOR (its non-goal sessions). Same target ACL as `goal_interrupt`:
+  a non-main caller is forced to ITSELF (any of its own sessions; `group` is
+  overwritten, never trusted); main may steer any registered group, itself
+  included. Head-of-queue insert + interrupt of the session's in-flight
+  turn, or a priority send when idle (see `koto ctl steer` above for framing
+  and the lost-resume warning). The response has `interrupted`.
+  `from_session` is the CALLER's own session (`$KOTO_SESSION`; `""`/`-` =
+  default) and is checked by `ctlSteerOrigin` (`daemon/coord_steer.go`):
+  a goal worker or judge session is refused (`goal worker and judge sessions
+  cannot steer …`), and so is a declared coordinator session that has no
+  turn in flight while a goal session of the group does (`only goal turns
+  are running …`). The declaration is self-reported, so this stops an honest
+  or confused worker, not a determined one; the microVM stays the boundary.
+  Refused targets: a judge session (`judge sessions can never be steered`),
+  any other goal session (`goal_steer` is the goal path). Also refused:
   `reply` (strict proto: steer has no report window), empty messages,
   `/compact`, unregistered groups. Steering the very session that issues the
   command interrupts that turn — the steer then runs as its continuation.
-  Guest images older than this verb reject it in the guest adapter
-  (`ctl: unknown verb`); the host-side CLI works regardless.
+  Every steer writes one `audit` log line: `audit ctl steer by=<group>/<session>
+  target=<group>/<session> len=<bytes> sha256=<hex>` (no text; refusals log
+  `REFUSED` with the reason). Limits are send's: `sendMsgMax`, the group's
+  queued-bytes cap, and 8 pending steers per session; there is no time-based
+  rate limit, as send has none. Guest images older than this verb reject it
+  in the guest adapter (`ctl: unknown verb` / unknown field `from_session`);
+  the host-side CLI works regardless.
+- **`goal_steer`** `{"group"?,"name"?,"text","from_session"?}` — COORDINATOR
+  steer of a goal run (operator decision 2026-11-19: quicker turns into the
+  right direction). Self-targeted for non-main callers; main may name a
+  registered peer. `name` picks the run (`""` = the sole non-terminal goal);
+  planning, awaiting, running and paused runs take it. Same `from_session`
+  check as `steer`: goal workers (`goal-<name>`) and judges are refused, so a
+  worker cannot steer itself, its judge or another goal. The entry goes into
+  the run's host steering log with origin `coordinator` and reaches every
+  later worker prompt in a SEPARATE block, each line labelled
+  `COORDINATOR STEER (from <group>/<session>)`, after the operator's
+  `OPERATOR STEER (authoritative)` block, which it never uses (the operator
+  label is stripped from coordinator text) and which outranks it. It never
+  changes the goal's criteria, `max_iterations` or mode, and the judge's
+  prompt carries no steer: the judge verifies the ORIGINAL criteria. Limits:
+  text ≤ 1000 bytes (refused above, not truncated); at most 8 coordinator
+  entries per goal (oldest dropped), kept apart from the operator's 32 so
+  they can never evict operator steer. Audited like `steer` (`audit ctl
+  goal_steer by=… target=<group>/goal:<id> len=… sha256=…`). The operator's
+  own `koto ctl goal steer` (gRPC `GoalSteer`) stays admin-only.
 - **`sched_add`** `{"group"?,"cron","msg"}`.
   - Non-main callers are forced to themselves.
   - When main leaves `group` empty, it defaults to `main` (`addSched`).

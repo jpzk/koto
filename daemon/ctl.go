@@ -199,7 +199,7 @@ func configPostureKey(req configReq) string {
 	}{
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
-		{"kvm", req.KVM}, {"allow", req.Allow},
+		{"kvm", req.KVM}, {"allow", req.Allow}, {"mode", req.Mode},
 	} {
 		if len(k.raw) > 0 {
 			return k.name
@@ -296,6 +296,12 @@ func ctlDispatch(owner string, line []byte) any {
 		if isReservedSession(sess) {
 			return errResp("ctl: session " + sess + " is reserved for the goal loop")
 		}
+		// Main is an agent, not an operator: a confirm session's approvals
+		// would have nobody answering them. Refused before anything queues
+		// (and before a report window is armed).
+		if err := checkUnattended(req.Group, sess, "ctl"); err != nil {
+			return errResp("ctl: " + err.Error())
+		}
 		if req.Reply {
 			// Solicited callback (report.go): tell the peer a reply is
 			// expected and arm the target's one-shot report window, atomic
@@ -325,6 +331,10 @@ func ctlDispatch(owner string, line []byte) any {
 		// trusted); main may steer any registered group, itself included.
 		// Unlike send there is no reply window: a steer redirects work that
 		// is already delegated, it does not open a new delegation.
+		//
+		// Only the COORDINATOR steers (coord_steer.go): from_session — the
+		// caller's own session — must not be a goal worker or judge. A goal
+		// worker session as TARGET is goal_steer's job; a judge never.
 		var req sendReq
 		if err := json.Unmarshal(line, &req); err != nil {
 			return errResp(err.Error())
@@ -338,14 +348,65 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Reply {
 			return errResp("ctl: steer takes no reply window — use send with reply")
 		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			emitLogfG("audit", owner, "warn", "[%s] audit ctl steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
+			return errResp("ctl: steer: " + err.Error())
+		}
+		if t, terr := normalizeSession(req.Session); terr == nil && isJudgeSession(t) {
+			return errResp("ctl: steer: " + errSteerJudge.Error())
+		}
 		if err := ctlRequireRegistered(owner, req.Group); err != nil {
 			return errResp(err.Error())
 		}
-		res, err := steerRequest(req.Group, req.Session, req.Msg)
+		res, err := steerRequestBy(req.Group, req.Session, req.Msg, owner+"/"+sessionMarkerName(from))
 		if err != nil {
 			return errResp("ctl: " + err.Error())
 		}
+		steerAudit("steer", owner, from, req.Group+"/"+sessionMarkerName(req.Session), req.Msg)
 		return steerCtlResp{baseResp: baseResp{OK: true}, Interrupted: res.Interrupted}
+
+	case "goal_steer":
+		// COORDINATOR steer of a goal (coord_steer.go, goal_steer.go): a
+		// durable entry in the run's steering log, rendered into every later
+		// iteration prompt under "COORDINATOR STEER (from <group>/<session>)"
+		// — never the operator's label, never a change to criteria,
+		// max_iterations, mode or the judge. Self-targeted for peers; main
+		// may name a registered peer, as for steer. The operator's goal_steer
+		// (gRPC GoalSteer, admin-only) is a different path and outranks it.
+		var req struct {
+			Group       string `json:"group"`
+			Name        string `json:"name"`
+			Text        string `json:"text"`
+			FromSession string `json:"from_session"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			emitLogfG("audit", owner, "warn", "[%s] audit ctl goal_steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		if len(req.Text) > goalSteerTextMax {
+			return errResp(fmt.Sprintf("ctl: goal_steer: text is %d bytes; the limit is %d", len(req.Text), goalSteerTextMax))
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		who := owner + "/" + sessionMarkerName(from)
+		it, err := goalSteerCoordinator(req.Group, req.Name, req.Text, who)
+		if err != nil {
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		steerAudit("goal_steer", owner, from, req.Group+"/goal:"+it.ID, req.Text)
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "compact":
 		// Every group may compact ITSELF (self-targeting, like sched_*);
@@ -644,6 +705,21 @@ func ctlDispatch(owner string, line []byte) any {
 		emitLogfG("goal", owner, "info", "[%s] goal_done claim (%d-byte note)", owner, len(n))
 		return baseResp{OK: true}
 
+	case "ask":
+		// Self-targeted, open to ALL groups: a goal WORKER asks the operator a
+		// decision question (goal_ask.go). Window-gated like goal_done (only
+		// while that goal's work turn is in flight) and it BLOCKS until the
+		// operator answers — the guest sends it on its own connection.
+		var req struct {
+			ID       string   `json:"id"`
+			Question string   `json:"question"`
+			Options  []string `json:"options"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp("ctl: ask: " + err.Error())
+		}
+		return goalAsk(owner, req.ID, req.Question, req.Options)
+
 	case "goal_verdict":
 		// Self-targeted, open to ALL groups: the acceptance JUDGE reports its
 		// verdict. Window-gated to the goal-judge turn, same as goal_done
@@ -734,7 +810,11 @@ func ctlDispatch(owner string, line []byte) any {
 		if req.Group != owner {
 			origin = ""
 		}
-		it, err := goalSetFrom(owner, req.Group, origin, req.Text, req.Criteria, req.Name, req.MaxIterations, plan)
+		// Mode: the caller may ask for confirm; it can never get yolo while
+		// it is itself confirm/plan (callerSessionModes, inherit-restrictive).
+		it, err := goalSetWith(goalSetOpts{creator: owner, group: req.Group, origin: origin,
+			text: req.Text, criteria: req.Criteria, name: req.Name, maxIter: req.MaxIterations, plan: plan,
+			mode: req.Mode, callerModes: callerSessionModes(owner, req.Session)})
 		if err != nil {
 			return errResp(err.Error())
 		}

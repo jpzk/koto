@@ -369,6 +369,63 @@ func configCmd(req configReq) configResp {
 	if err != nil {
 		return configResp{BaseResp: errResp(err.Error())}
 	}
+	// mode= is per SESSION and lives in the host session registry, never in
+	// config.json (session_modes.go). Validate it — and a provider switch that
+	// would strand a restricted session on a harness that cannot honour it —
+	// before anything is written, so a refused request changes nothing.
+	newProvider := groupProviderName(req.Group)
+	if len(req.Provider) > 0 {
+		var p string
+		if json.Unmarshal(req.Provider, &p) == nil {
+			if np, ok := normProvider(p); ok {
+				newProvider = np
+			} else if strings.TrimSpace(p) == "" {
+				newProvider = defaultProvider()
+			}
+		}
+	}
+	var setMode bool
+	var modeVal, modeSess string
+	if len(req.Mode) > 0 {
+		var m string
+		if err := json.Unmarshal(req.Mode, &m); err != nil {
+			return configResp{BaseResp: errResp("mode: must be a string")}
+		}
+		s, err := normalizeSession(req.Session)
+		if err != nil {
+			return configResp{BaseResp: errResp("session: " + err.Error())}
+		}
+		mv, ok := normMode(m)
+		if !ok {
+			return configResp{BaseResp: errResp(fmt.Sprintf("invalid mode %q (yolo, plan or confirm)", m))}
+		}
+		if !harnessSupportsMode(newProvider, mv) {
+			merr := modeUnsupportedErr(newProvider, mv)
+			if len(req.Provider) == 0 {
+				// The running harness is the one that refuses: the operator
+				// asked for a tighter posture than it can enforce, so the
+				// in-flight turn does not get to finish under yolo — it is
+				// cancelled and its job ends with this same error
+				// (mode_live.go). Nothing is stored.
+				applyModeChange(req.Group, s, mv, merr)
+			}
+			return configResp{BaseResp: errResp(merr.Error())}
+		}
+		if mv != modeYolo && isReservedSession(s) && goalIsJudgeSession(req.Group, s) {
+			return configResp{BaseResp: errResp("goal judge sessions always run yolo — the judge never asks (set the mode on the goal's work session)")}
+		}
+		setMode, modeVal, modeSess = true, mv, s
+	}
+	if len(req.Provider) > 0 && !harnessSupportsMode(newProvider, modePlan) {
+		for s, m := range listSessionModes(req.Group) {
+			if setMode && s == modeSess && modeVal == modeYolo {
+				continue
+			}
+			return configResp{BaseResp: errResp(fmt.Sprintf(
+				"session %s is in mode %s, which %s does not support yet — set it to yolo first",
+				sessionMarkerName(s), m, harnessName(newProvider)))}
+		}
+	}
 	cfg, err := updateGroupConfig(req.Group, func(cfg map[string]any) {
 		applyConfig(cfg, "model", req.Model)
 		applyConfig(cfg, "effort", req.Effort)
@@ -393,6 +450,17 @@ func configCmd(req configReq) configResp {
 		return configResp{BaseResp: errResp("write config: " + err.Error())}
 	}
 	eff := effectiveConfig(req.Group, cfg)
+	if setMode {
+		mv, err := setSessionMode(req.Group, modeSess, modeVal, newProvider)
+		if err != nil {
+			return configResp{BaseResp: errResp(err.Error())}
+		}
+		eff["mode"] = mv
+		eff["mode_session"] = sessionMarkerName(modeSess)
+		// Immediate effect (mode_live.go): an in-flight turn still running
+		// the old mode is cut and re-run under this one before we answer.
+		eff["mode_apply"] = applyModeChange(req.Group, modeSess, mv, nil).apply()
+	}
 	if setAllow {
 		// The gateway filter is host-side: swap the running VM's allow set
 		// in place (no restart). Tell the caller which happened.

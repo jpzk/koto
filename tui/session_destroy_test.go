@@ -119,8 +119,9 @@ func TestSessionDestroyEmptySessionGuard(t *testing.T) {
 	// And a forged modal state with an empty session is a GROUP modal —
 	// confirming it must route to Destroy, never to Clear("").
 	gs := recordDestroys(t)
-	m.destroyConfirm = destroyConfirmState{open: true, group: "alpha"}
-	m, _ = dpress(t, m, runeKey('y'))
+	m.destroyConfirm = destroyConfirmState{open: true, group: "alpha", name: newDestroyNameInput()}
+	m = typeName(t, m, "alpha")
+	m, _ = dpress(t, m, keyEnter)
 	if len(*sent) != 0 || len(*gs) != 1 {
 		t.Fatalf("empty-session modal: clears=%+v destroys=%v", *sent, *gs)
 	}
@@ -155,7 +156,8 @@ func TestSessionDestroyRefusesGoalAndMain(t *testing.T) {
 	}
 }
 
-// A group row still opens the GROUP modal and y destroys the group; a job
+// A group row still opens the GROUP (typed-name) modal and the exact name
+// + enter destroys the group; a job
 // row under a named session also still targets its parent group.
 func TestSessionDestroyGroupRowUnchanged(t *testing.T) {
 	sent := recordSessionClears(t)
@@ -168,7 +170,8 @@ func TestSessionDestroyGroupRowUnchanged(t *testing.T) {
 	if v := m.View(); !strings.Contains(v, "destroy group alpha?") {
 		t.Fatalf("group modal text missing:\n%s", v)
 	}
-	m, _ = dpress(t, m, runeKey('y'))
+	m = typeName(t, m, "alpha")
+	m, _ = dpress(t, m, keyEnter)
 	if len(*gs) != 1 || (*gs)[0] != "alpha" || len(*sent) != 0 {
 		t.Fatalf("destroys=%v clears=%v, want [alpha] / none", *gs, *sent)
 	}

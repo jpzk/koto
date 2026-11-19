@@ -87,6 +87,12 @@ var errSteerReserved = errors.New("goal sessions are follow-only — steer a goa
 // steerSession places msg at the head of g/session's queue and interrupts the
 // session's in-flight turn, if any. See the file comment for the guarantees.
 func steerSession(g, session, msg string) (steerResult, error) {
+	return steerSessionBy(g, session, msg, "")
+}
+
+// steerSessionBy is steerSession with the steer's author: "" = the operator,
+// "<group>/<session>" = a ctl coordinator (framed as such, never as operator).
+func steerSessionBy(g, session, msg, by string) (steerResult, error) {
 	if isReservedSession(session) {
 		return steerResult{}, errSteerReserved
 	}
@@ -96,7 +102,7 @@ func steerSession(g, session, msg string) (steerResult, error) {
 	if len(msg) > sendMsgMax {
 		return steerResult{}, fmt.Errorf("message is %d bytes; the limit is %d", len(msg), sendMsgMax)
 	}
-	job := sendJob{session: session, msg: msg, steer: true, steerCut: new(atomic.Bool), done: make(chan error, 1)}
+	job := sendJob{session: session, msg: msg, steer: true, steerBy: by, steerCut: new(atomic.Bool), done: make(chan error, 1)}
 	k := sessKey(g, session)
 
 	queuesMu.Lock()
@@ -210,6 +216,20 @@ const (
 // actually cancelled the session's in-flight turn (sendJob.steerCut); a turn
 // that finished on its own before the cancel landed is not "interrupted".
 func frameSteer(msg string, interrupted bool) string {
+	return frameSteerBy(msg, interrupted, "")
+}
+
+// frameSteerBy frames a steer by its author: "" = the operator; otherwise a
+// coordinator "<group>/<session>" (ctl steer, coord_steer.go), which never
+// gets the operator's frame.
+func frameSteerBy(msg string, interrupted bool, by string) string {
+	if by != "" {
+		by = truncateRunes(flattenInline(by), 80)
+		if interrupted {
+			return "[coordinator steering (from " + by + ") — your previous turn was interrupted by the coordinator before it finished; re-check its state, then follow this]\n\n" + msg
+		}
+		return "[coordinator steering (from " + by + ")]\n\n" + msg
+	}
 	if interrupted {
 		return steerFrameInterrupted + msg
 	}
@@ -300,6 +320,11 @@ var errSteerGoalSession = errors.New("goal sessions are steered with goal_steer,
 // g must already be a well-formed group name; registration is checked here so
 // a steer cannot spin up queue state for a group that does not exist.
 func steerRequest(g, rawSession, msg string) (steerResult, error) {
+	return steerRequestBy(g, rawSession, msg, "")
+}
+
+// steerRequestBy is steerRequest with the author (steerSessionBy).
+func steerRequestBy(g, rawSession, msg, by string) (steerResult, error) {
 	session, err := normalizeSession(rawSession)
 	if err != nil {
 		return steerResult{}, err
@@ -316,7 +341,7 @@ func steerRequest(g, rawSession, msg string) (steerResult, error) {
 	if _, _, ok := parseCompactCommand(msg); ok {
 		return steerResult{}, errors.New("/compact is not a steer — send it")
 	}
-	res, err := steerSession(g, session, msg)
+	res, err := steerSessionBy(g, session, msg, by)
 	if err != nil {
 		return res, err
 	}
