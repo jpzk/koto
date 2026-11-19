@@ -372,6 +372,9 @@ func cancelTurnThen(g, session string, want chan struct{}, onCancel func()) bool
 	if onCancel != nil {
 		onCancel()
 	}
+	// A cancel that lands on a turn a mode change already cut must also stop
+	// its re-run (mode_live.go runJobTurn).
+	noteModeRestartCancelLocked(g, session)
 	// The cancelled turn may be parked in acquireSlot, which waits on a
 	// condition variable and cannot select on this channel (audit M140).
 	defer slotWakeAll()
@@ -401,6 +404,7 @@ func requestTurnCancel(g, session string) bool {
 	default:
 		close(c)
 	}
+	noteModeRestartCancelLocked(g, session)
 	defer slotWakeAll() // it may be parked in acquireSlot (audit M140)
 	return true
 }
@@ -920,16 +924,28 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	var err error
 	if job.compact != nil {
 		err = runCompactJob(g, job.session, job.compact)
+		clearTurnStamp(g, job.session)
+		// A mode change cut the compaction (mode_live.go): it is not re-run —
+		// the half-done compaction is reported and the operator re-issues it.
+		if mr := takeModeRestart(g, job.session); mr != nil {
+			mr.markRan() // waits out a cut kill in flight (killCut)
+			err = fmt.Errorf("compaction interrupted: mode changed to %s", mr.to)
+		}
 	} else if job.steer {
 		cut := job.steerCut != nil && job.steerCut.Load()
 		if cut {
 			checkSteerResume(g, job.session)
 		}
-		err = runTurn(g, job.session, frameSteerBy(job.msg, cut, job.steerBy))
+		// A steer turn is a turn like any other for a live mode change: it
+		// re-runs (steer framing kept) under the new mode via runJobTurn.
+		sj := job
+		sj.msg = frameSteerBy(job.msg, cut, job.steerBy)
+		err = runJobTurn(g, sj)
 	} else {
-		setTurnModeOverride(g, job.session, job.mode)
-		err = runTurn(g, job.session, job.msg)
-		setTurnModeOverride(g, job.session, "")
+		// Re-run under the new mode each time a mode change cuts the turn
+		// (mode_live.go); the job — and a goal iteration riding it —
+		// completes exactly once (reported below, after the turn retires).
+		err = runJobTurn(g, job)
 	}
 	// Retire the turn BEFORE reporting its result. The other order left a
 	// window in which the caller already held the result while the session
@@ -937,7 +953,14 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	// as in flight, "interrupted" it (cancel + SIGINT to the guest), and was
 	// framed and resume-probed as a resumption of a turn that had in fact
 	// completed. The same window let an Interrupt RPC hit a finished turn.
-	retireTurn(g, job.session, tc)
+	// A mode re-run (beginModeRerun) installs a fresh cancel channel, so a
+	// steer that cut the re-run pinned THAT channel, not tc: retire the
+	// session's current turn.
+	cur := sessionTurn(g, job.session)
+	if cur == nil {
+		cur = tc
+	}
+	retireTurn(g, job.session, cur)
 	job.done <- err
 	return held, again
 }
