@@ -52,7 +52,7 @@ func TestSteerAtTurnEndSignalNeverHitsSteerTurn(t *testing.T) {
 		case "T":
 			cancel := turnCancelCh(gg, s)
 			close(tStarted)
-			<-cancel // the steer's cut lands …
+			<-cancel   // the steer's cut lands …
 			return nil // … and T finishes its answer on its own anyway
 		case "S":
 			close(steerStarted)
