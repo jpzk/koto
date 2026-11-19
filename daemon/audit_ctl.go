@@ -31,10 +31,17 @@ var auditCtlBody = map[string]bool{
 	"instructions": true,
 }
 
-// ctlDispatch serves one ctl request from owner and audits it.
+// ctlDispatch serves one ctl request from owner and audits it. The steer
+// verbs go through steerAudit (coord_steer.go), which adds who/what was
+// steered to the same record and writes it — still one record per call.
 func ctlDispatch(owner string, line []byte) any {
 	resp := ctlDispatchInner(owner, line)
-	audit(auditCtlEvent(owner, line, resp))
+	ev := auditCtlEvent(owner, line, resp)
+	if ev.Verb == "steer" || ev.Verb == "goal_steer" {
+		steerAudit(ev, line, resp)
+		return resp
+	}
+	audit(ev)
 	return resp
 }
 

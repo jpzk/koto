@@ -153,6 +153,12 @@ func TestAuditEveryCtlVerb(t *testing.T) {
 	for _, v := range []string{"goal_pause", "goal_interrupt", "goal_resume", "goal_cancel"} {
 		add(v, peer, "", nil)
 	}
+	// Coordinator steers (coord_steer.go): one record each on this path,
+	// allowed or refused, naming who and what was steered (by/steer_target).
+	add("steer", peer, "", map[string]any{"session": "chat", "from_session": "research"})
+	add("steer", peer, AuditRefused, map[string]any{"session": "chat", "from_session": "goal-x"})
+	add("goal_steer", peer, "", map[string]any{"name": "aud-goal"})
+	add("goal_steer", peer, AuditRefused, map[string]any{"name": "aud-goal", "from_session": "goal-x-judge"})
 	add("sched_add", peer, AuditAllowed, map[string]any{"cron": "*/5 * * * *"})
 	add("sched_list", peer, AuditAllowed, nil)
 	for _, v := range []string{"sched_del", "sched_toggle", "sched_run"} {
@@ -234,6 +240,14 @@ func TestAuditEveryCtlVerb(t *testing.T) {
 		if w.forced && w.verb != "malformed" && w.verb != "bogus" && w.verb != "unknown" {
 			if r.Args["group_forced"] != "true" || r.Target != w.owner {
 				t.Errorf("rec %d (%s): cross-group attempt not recorded: target=%q args=%v", i, w.verb, r.Target, r.Args)
+			}
+		}
+		if w.verb == "steer" || w.verb == "goal_steer" {
+			if r.Args["by"] == "" || !strings.HasPrefix(r.Args["steer_target"], w.owner+"/") {
+				t.Errorf("rec %d (%s): steer caller/target missing: %v", i, w.verb, r.Args)
+			}
+			if b := r.Args["msg.sha256"] + r.Args["text.sha256"]; b == "" {
+				t.Errorf("rec %d (%s): steer text not hashed: %v", i, w.verb, r.Args)
 			}
 		}
 		if w.posture != "" && (r.Args["posture_key"] != w.posture || r.Target != peer) {

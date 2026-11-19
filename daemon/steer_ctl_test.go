@@ -222,7 +222,7 @@ func TestCoordSteerSessionViaPB(t *testing.T) {
 	fcHarness(t)
 	r := newSteerRecorder()
 	withSteerInterrupt(t, func(string, string) error { return nil })
-	mark := logMark()
+	recs := steerAuditRecs(t)
 	withTurnFn(r.turn, func() {
 		req, err := ctlRequestFromJSON([]byte(`{"cmd":"steer","session":"chat","msg":"redirect-now","from_session":"research"}`))
 		if err != nil {
@@ -237,10 +237,12 @@ func TestCoordSteerSessionViaPB(t *testing.T) {
 		waitStarted(t, r, "redirect-now")
 	})
 	sum := sha256.Sum256([]byte("redirect-now"))
-	a := auditRing(mark)
-	if len(a) != 1 || !strings.Contains(a[0], "audit ctl steer by=tg/research target=tg/chat len=12 sha256="+hex.EncodeToString(sum[:])) ||
-		strings.Contains(a[0], "redirect-now") {
-		t.Fatalf("audit = %q", a)
+	a := recs()
+	if len(a) != 1 || a[0].Verb != "steer" || a[0].Outcome != AuditAllowed ||
+		a[0].Args["by"] != "tg/research" || a[0].Args["steer_target"] != "tg/chat" ||
+		a[0].Args["msg.len"] != "12" || a[0].Args["msg.sha256"] != hex.EncodeToString(sum[:]) ||
+		auditRecLeaks(a[0], "redirect-now") {
+		t.Fatalf("audit = %+v", a)
 	}
 	gs, err := ctlRequestFromJSON([]byte(`{"cmd":"goal_steer","name":"w","text":"t","from_session":"-"}`))
 	if err != nil || gs.GetGoalSteer().GetName() != "w" || gs.GetGoalSteer().GetFromSession() != "-" {

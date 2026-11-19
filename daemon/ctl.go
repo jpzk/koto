@@ -350,7 +350,6 @@ func ctlDispatchInner(owner string, line []byte) any {
 		}
 		from, err := ctlSteerOrigin(owner, req.FromSession)
 		if err != nil {
-			emitLogfG("audit", owner, "warn", "[%s] audit ctl steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
 			return errResp("ctl: steer: " + err.Error())
 		}
 		if t, terr := normalizeSession(req.Session); terr == nil && isJudgeSession(t) {
@@ -363,7 +362,6 @@ func ctlDispatchInner(owner string, line []byte) any {
 		if err != nil {
 			return errResp("ctl: " + err.Error())
 		}
-		steerAudit("steer", owner, from, req.Group+"/"+sessionMarkerName(req.Session), req.Msg)
 		return steerCtlResp{baseResp: baseResp{OK: true}, Interrupted: res.Interrupted}
 
 	case "goal_steer":
@@ -391,7 +389,6 @@ func ctlDispatchInner(owner string, line []byte) any {
 		}
 		from, err := ctlSteerOrigin(owner, req.FromSession)
 		if err != nil {
-			emitLogfG("audit", owner, "warn", "[%s] audit ctl goal_steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
 			return errResp("ctl: goal_steer: " + err.Error())
 		}
 		if len(req.Text) > goalSteerTextMax {
@@ -405,7 +402,6 @@ func ctlDispatchInner(owner string, line []byte) any {
 		if err != nil {
 			return errResp("ctl: goal_steer: " + err.Error())
 		}
-		steerAudit("goal_steer", owner, from, req.Group+"/goal:"+it.ID, req.Text)
 		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "compact":
