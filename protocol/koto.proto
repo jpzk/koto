@@ -26,6 +26,14 @@ service Koto {
   rpc List        (ListReq)        returns (ListResp);
   rpc Stop        (GroupReq)       returns (BaseResp);
   rpc Interrupt   (GroupReq)       returns (BaseResp);
+  // Steer = atomic "redirect this conversation": the message goes to the
+  // HEAD of the session queue (ahead of anything already queued), then the
+  // in-flight turn of that session is interrupted. Idle session = a
+  // priority send. Only group, msg and session of SendReq are read;
+  // attachments are refused. Authorization: an explicit `steer` grant, or
+  // BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+  // are refused (goal runs are steered through the goal verbs).
+  rpc Steer       (SendReq)        returns (SteerResp);
   rpc Destroy     (GroupReq)       returns (BaseResp);
   rpc Restart     (GroupReq)       returns (SpawnResp);
   rpc History     (HistoryReq)     returns (HistoryResp);
@@ -661,6 +669,10 @@ message GoalListResp {
 // ---- responses (ok/error flattened from the old BaseResp) ----
 
 message BaseResp { bool ok = 1; string error = 2; }
+
+// interrupted: a turn was in flight and has been cancelled (the steer runs
+// as soon as it retires). false: the session was idle — a priority send.
+message SteerResp { bool ok = 1; string error = 2; bool interrupted = 3; }
 
 message SpawnResp { bool ok = 1; string error = 2; int32 port = 3; }
 

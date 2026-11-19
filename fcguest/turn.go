@@ -423,7 +423,7 @@ func workerCmdPipe(name string, args []string, env []string) (*worker, *os.File,
 
 func startWorker(name string, args []string, env []string, stdin io.Reader) (*worker, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Dir = wsDir
+	cmd.Dir = workerDir
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
@@ -440,7 +440,9 @@ func startWorker(name string, args []string, env []string, stdin io.Reader) (*wo
 		return nil, err
 	}
 	cmd.Stdout, cmd.Stderr = outW, errW
-	pid, ch, err := startTracked(cmd)
+	// Registered under its session for interrupt/steer (workerreg.go): this is
+	// the one place every harness starts a turn worker.
+	pid, ch, err := startTrackedSession(cmd, envSession(env))
 	outW.Close()
 	errW.Close()
 	if err != nil {

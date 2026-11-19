@@ -107,6 +107,27 @@ helper is given.
 - **`send [-session S] <group> <msg...>`**: enqueue a message and return
   immediately. `-session` sets the chat session (`""` = default). This flag is
   not shown in the usage text (`case "send"`). RPC `Send`.
+- **`steer [-session S] <group> <msg...>`**: redirect one conversation
+  (`daemon/steer.go`). The message is put at the HEAD of that session's
+  queue — ahead of everything already queued, cron fires included — and then
+  the session's in-flight turn is interrupted through the same path as
+  `interrupt` (SIGINT, escalating to KILL until the turn ends). When the
+  session is idle it is a priority send. The steer turn reaches the agent
+  framed (`frameSteer`): `[operator steering — your previous turn was
+  interrupted by the operator …]` after an interrupt, `[operator steering]`
+  when idle. A steer from the ctl plane (a coordinator, below) is framed
+  `[coordinator steering (from <group>/<session>) …]` instead — never with
+  the operator's frame (`frameSteerBy`).
+  Prints the `SteerResp` (`interrupted` set when a turn was cut short). RPC `Steer` (request
+  `SendReq`; attachments refused). Goal sessions (`goal-<name>`) are
+  refused with `goal sessions are steered with goal_steer, not steer`.
+  - ACL: an explicit `steer` grant on the target, **or both `send` and
+    `interrupt`** on it (`steerAllowed`) — steer is exactly those two
+    operations, so neither grant alone admits it.
+  - If the interrupted turn died before its harness wrote a resume id
+    (claude/codex/pi/venice pin files under `.cs/`), the steer still runs, in
+    a fresh conversation; the daemon logs a warning and emits a
+    `steer_context_lost` event instead of losing the context silently.
 - **`ask [-timeout D] [-json] [-session S] <group> <msg...>`**: send, stream
   the reply, and exit when the turn ends (`ctlAsk`).
   - `-timeout`: default `30m` (`30*time.Minute`). On expiry:
@@ -219,7 +240,8 @@ helper is given.
   goal turn (usage text).
 - **`goal steer <group> [name=<run>] <text...>`**: RPC `GoalSteer`
   (admin-only). Adds a durable operator steer to a planning, awaiting,
-  running or paused goal. The next iteration reads it as OPERATOR STEER.
+  running or paused goal. The next iteration reads it as OPERATOR STEER
+  (authoritative), which outranks any coordinator steer (ctl `goal_steer`).
   Empty text, a finished goal or a group without a goal is refused.
 
 #### Shared shell (`ctlShell`)
@@ -387,8 +409,9 @@ allowed for non-main groups: <verb>`.
   one at a time per work session. It is queued in that session's approval
   queue (kind `ask`, no deadline) and the call **blocks** until the operator
   answers. A non-empty answer also goes to the goal's steering log
-  (`daemon/goal_ask.go`). There is **no** ctl verb for steers: an operator
-  steer comes only from the host (`GoalSteer` RPC, admin-only).
+  (`daemon/goal_ask.go`). An OPERATOR steer comes only from the host
+  (`GoalSteer` RPC, admin-only); the ctl `goal_steer` verb below is the
+  coordinator's, labelled and ranked as such.
 - **`goal_approve`** `{"name"?}`. Self-only. Naming another group fails with
   ``ctl: goal_approve is self-only (a plan set on a peer needs a human)``.
   It also requires an awaiting-approval goal that the group set itself.
@@ -398,6 +421,51 @@ allowed for non-main groups: <verb>`.
 - **`goal_pause` / `goal_interrupt` / `goal_resume` / `goal_cancel`**
   `{"group"?,"name"?}`. Non-main callers are forced to themselves. Main may
   steer any group.
+- **`steer`** `{"group"?,"msg","session"?,"from_session"?}` — every group's
+  COORDINATOR (its non-goal sessions). Same target ACL as `goal_interrupt`:
+  a non-main caller is forced to ITSELF (any of its own sessions; `group` is
+  overwritten, never trusted); main may steer any registered group, itself
+  included. Head-of-queue insert + interrupt of the session's in-flight
+  turn, or a priority send when idle (see `koto ctl steer` above for framing
+  and the lost-resume warning). The response has `interrupted`.
+  `from_session` is the CALLER's own session (`$KOTO_SESSION`; `""`/`-` =
+  default) and is checked by `ctlSteerOrigin` (`daemon/coord_steer.go`):
+  a goal worker or judge session is refused (`goal worker and judge sessions
+  cannot steer …`), and so is a declared coordinator session that has no
+  turn in flight while a goal session of the group does (`only goal turns
+  are running …`). The declaration is self-reported, so this stops an honest
+  or confused worker, not a determined one; the microVM stays the boundary.
+  Refused targets: a judge session (`judge sessions can never be steered`),
+  any other goal session (`goal_steer` is the goal path). Also refused:
+  `reply` (strict proto: steer has no report window), empty messages,
+  `/compact`, unregistered groups. Steering the very session that issues the
+  command interrupts that turn — the steer then runs as its continuation.
+  Every steer writes one `audit` log line: `audit ctl steer by=<group>/<session>
+  target=<group>/<session> len=<bytes> sha256=<hex>` (no text; refusals log
+  `REFUSED` with the reason). Limits are send's: `sendMsgMax`, the group's
+  queued-bytes cap, and 8 pending steers per session; there is no time-based
+  rate limit, as send has none. Guest images older than this verb reject it
+  in the guest adapter (`ctl: unknown verb` / unknown field `from_session`);
+  the host-side CLI works regardless.
+- **`goal_steer`** `{"group"?,"name"?,"text","from_session"?}` — COORDINATOR
+  steer of a goal run (operator decision 2026-11-19: quicker turns into the
+  right direction). Self-targeted for non-main callers; main may name a
+  registered peer. `name` picks the run (`""` = the sole non-terminal goal);
+  planning, awaiting, running and paused runs take it. Same `from_session`
+  check as `steer`: goal workers (`goal-<name>`) and judges are refused, so a
+  worker cannot steer itself, its judge or another goal. The entry goes into
+  the run's host steering log with origin `coordinator` and reaches every
+  later worker prompt in a SEPARATE block, each line labelled
+  `COORDINATOR STEER (from <group>/<session>)`, after the operator's
+  `OPERATOR STEER (authoritative)` block, which it never uses (the operator
+  label is stripped from coordinator text) and which outranks it. It never
+  changes the goal's criteria, `max_iterations` or mode, and the judge's
+  prompt carries no steer: the judge verifies the ORIGINAL criteria. Limits:
+  text ≤ 1000 bytes (refused above, not truncated); at most 8 coordinator
+  entries per goal (oldest dropped), kept apart from the operator's 32 so
+  they can never evict operator steer. Audited like `steer` (`audit ctl
+  goal_steer by=… target=<group>/goal:<id> len=… sha256=…`). The operator's
+  own `koto ctl goal steer` (gRPC `GoalSteer`) stays admin-only.
 - **`sched_add`** `{"group"?,"cron","msg"}`.
   - Non-main callers are forced to themselves.
   - When main leaves `group` empty, it defaults to `main` (`addSched`).
