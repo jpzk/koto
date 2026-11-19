@@ -26,7 +26,7 @@ import (
 const steerUsage = "usage: /steer <text>  — cut the running turn of this session and continue with <text> (idle: sent as a message)"
 
 // steerGoalHint follows the daemon's goal-session refusal.
-const steerGoalHint = "goal sessions are steered with the goal verbs — koto ctl goal steer, or /goals interrupt to take over"
+const steerGoalHint = "goal sessions are steered with the goal verbs — /goals steer <text> (koto ctl goal steer), or /goals interrupt to take over"
 
 // parseSteer reports whether v is a /steer command and returns its text
 // (trimmed; "" for a bare /steer). "/steerx" is not /steer.

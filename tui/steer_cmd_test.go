@@ -170,7 +170,7 @@ func TestSteerGoalSessionRefusalShown(t *testing.T) {
 	}
 	m.handleDaemonResp(msg)
 	txt := lastLineText(t, m, "err")
-	for _, want := range []string{"steer refused", daemonErr, "koto ctl goal steer"} {
+	for _, want := range []string{"steer refused", daemonErr, "/goals steer", "koto ctl goal steer"} {
 		if !strings.Contains(txt, want) {
 			t.Fatalf("refusal line %q missing %q", txt, want)
 		}
