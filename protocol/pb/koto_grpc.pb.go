@@ -38,6 +38,7 @@ const (
 	Koto_List_FullMethodName           = "/koto.Koto/List"
 	Koto_Stop_FullMethodName           = "/koto.Koto/Stop"
 	Koto_Interrupt_FullMethodName      = "/koto.Koto/Interrupt"
+	Koto_Steer_FullMethodName          = "/koto.Koto/Steer"
 	Koto_Destroy_FullMethodName        = "/koto.Koto/Destroy"
 	Koto_Restart_FullMethodName        = "/koto.Koto/Restart"
 	Koto_History_FullMethodName        = "/koto.Koto/History"
@@ -90,6 +91,14 @@ type KotoClient interface {
 	List(ctx context.Context, in *ListReq, opts ...grpc.CallOption) (*ListResp, error)
 	Stop(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
 	Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// Steer = atomic "redirect this conversation": the message goes to the
+	// HEAD of the session queue (ahead of anything already queued), then the
+	// in-flight turn of that session is interrupted. Idle session = a
+	// priority send. Only group, msg and session of SendReq are read;
+	// attachments are refused. Authorization: an explicit `steer` grant, or
+	// BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+	// are refused (goal runs are steered through the goal verbs).
+	Steer(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*SteerResp, error)
 	Destroy(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
 	Restart(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*SpawnResp, error)
 	History(ctx context.Context, in *HistoryReq, opts ...grpc.CallOption) (*HistoryResp, error)
@@ -331,6 +340,16 @@ func (c *kotoClient) Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.C
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
 	err := c.cc.Invoke(ctx, Koto_Interrupt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Steer(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*SteerResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SteerResp)
+	err := c.cc.Invoke(ctx, Koto_Steer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -804,6 +823,14 @@ type KotoServer interface {
 	List(context.Context, *ListReq) (*ListResp, error)
 	Stop(context.Context, *GroupReq) (*BaseResp, error)
 	Interrupt(context.Context, *GroupReq) (*BaseResp, error)
+	// Steer = atomic "redirect this conversation": the message goes to the
+	// HEAD of the session queue (ahead of anything already queued), then the
+	// in-flight turn of that session is interrupted. Idle session = a
+	// priority send. Only group, msg and session of SendReq are read;
+	// attachments are refused. Authorization: an explicit `steer` grant, or
+	// BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+	// are refused (goal runs are steered through the goal verbs).
+	Steer(context.Context, *SendReq) (*SteerResp, error)
 	Destroy(context.Context, *GroupReq) (*BaseResp, error)
 	Restart(context.Context, *GroupReq) (*SpawnResp, error)
 	History(context.Context, *HistoryReq) (*HistoryResp, error)
@@ -1015,6 +1042,9 @@ func (UnimplementedKotoServer) Stop(context.Context, *GroupReq) (*BaseResp, erro
 }
 func (UnimplementedKotoServer) Interrupt(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Interrupt not implemented")
+}
+func (UnimplementedKotoServer) Steer(context.Context, *SendReq) (*SteerResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Steer not implemented")
 }
 func (UnimplementedKotoServer) Destroy(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Destroy not implemented")
@@ -1243,6 +1273,24 @@ func _Koto_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(inte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).Interrupt(ctx, req.(*GroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Steer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Steer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Steer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Steer(ctx, req.(*SendReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1940,6 +1988,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Interrupt",
 			Handler:    _Koto_Interrupt_Handler,
+		},
+		{
+			MethodName: "Steer",
+			Handler:    _Koto_Steer_Handler,
 		},
 		{
 			MethodName: "Destroy",

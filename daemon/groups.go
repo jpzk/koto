@@ -291,6 +291,7 @@ func ensureLockedCreate(g string, isMain, create bool) (int, error) {
 	_, spawnSp := otelSpan(context.Background(), "koto.fc.spawn", g, attribute.Bool("koto.main", isMain))
 	spawnErr := fcSpawn(g, port, pubPorts)
 	otelEnd(spawnSp, spawnErr)
+	auditLifecycle("vm_start", g, spawnErr)
 	if err := spawnErr; err != nil {
 		proxyUnlisten(port)
 		emitLogfG("group", g, "error", "spawn group=%s: %v", g, err)
@@ -470,6 +471,7 @@ func stopGroupPrepare(g string) {
 // rather than letting stopGroup take and release it in the middle.
 func stopGroupLocked(g string) {
 	fcStop(g)
+	auditLifecycle("vm_stop", g, nil)
 }
 
 // ---- list / destroy / restart --------------------------------------------
@@ -871,6 +873,7 @@ func restartCtx(ctx context.Context, g string) (int, error) {
 	}
 	defer unlock()
 	emitLogfG("group", g, "info", "restart group=%s", g)
+	auditLifecycle("vm_restart", g, nil)
 	fcStop(g)
 	return ensureLocked(g, g == "main")
 }

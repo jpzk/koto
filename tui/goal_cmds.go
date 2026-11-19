@@ -184,13 +184,14 @@ var goalHelpLines = []string{
 	"  /goals interrupt [<group>] [<name>] pause NOW — aborts the in-flight goal turn",
 	"  /goals resume  [<group>] [<name>]  resume a paused goal (fresh iteration budget)",
 	"  /goals cancel  [<group>] [<name>]  cancel the goal",
-	"  /steer [<group>] [name=<run>] <text>  live operator steer: reaches the",
-	"                                     running turn now and the next iteration",
-	"                                     as OPERATOR STEER (in a goal session:",
-	"                                     that run; plain enter there = /steer)",
-	"  /steer … !<text>                   REDIRECT: abort the turn, start the next",
+	"  /goals steer [<group>] [name=<run>] <text>  durable operator steer: the run's",
+	"                                     next iteration reads it as OPERATOR STEER,",
+	"                                     and a running turn gets it live now (in a",
+	"                                     goal session: that run; plain enter in a",
+	"                                     goal work session = /goals steer)",
+	"  /goals steer … !<text>             REDIRECT: abort the turn, start the next",
 	"                                     iteration now with the steer on top",
-	"  /amend [<group>] [name=<run>]      edit the run's spec: the input is",
+	"  /goals amend [<group>] [name=<run>]  edit the run's spec: the input is",
 	"                                     prefilled with max=N <text> :: <criteria>;",
 	"                                     enter sends a versioned amend (the judge",
 	"                                     always reads the latest version)",
@@ -320,7 +321,7 @@ func (m *Model) handleGoalCmd(rest string) tea.Cmd {
 		}
 		text, redirect := splitRedirect(text)
 		if text == "" {
-			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals steer: usage: /steer [<group>] [name=<run>] [!]<text>"})
+			m.addLine(logLine{kind: "err", group: m.cur, text: "/goals steer: usage: /goals steer [<group>] [name=<run>] [!]<text>"})
 			return nil
 		}
 		return goalSteerCmd(m.sock, group, name, text, redirect)
@@ -514,8 +515,8 @@ func goalSteerCmd(sock, group, name, text string, redirect bool) tea.Cmd {
 	}
 }
 
-// parseSteer resolves `/steer [<group>] [name=<run>] <text>` (and
-// `/goals steer …`). Viewing a goal session, the run defaults to THAT run;
+// parseSteer resolves `/goals steer [<group>] [name=<run>] <text>` (bare
+// /steer is the live cut, steer_cmd.go). Viewing a goal session, the run defaults to THAT run;
 // elsewhere "" lets the daemon pick the group's sole active goal. The first
 // token is a group only when the TUI knows it, as for /goals set.
 func (m *Model) parseSteer(rest string) (group, name, text string, err error) {
@@ -537,7 +538,7 @@ func (m *Model) parseSteer(rest string) (group, name, text string, err error) {
 	}
 	text = strings.Join(toks, " ")
 	if text == "" {
-		return "", "", "", fmt.Errorf("usage: /steer [<group>] [name=<run>] <text>")
+		return "", "", "", fmt.Errorf("usage: /goals steer [<group>] [name=<run>] <text>")
 	}
 	return group, name, text, nil
 }

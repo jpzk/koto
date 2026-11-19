@@ -177,9 +177,11 @@ All of this is in `daemon/goals.go`.
 - **Iteration cap:** `max_iterations` of `<= 0` becomes
   `goalDefaultMaxIter = 20`. Values above `goalMaxIterCeil = 200` are lowered
   to 200.
-- **Active-goal limit:** a group can run at most `goalMaxActive = 8` goals at
-  once. Over that:
-  `group "<g>" already has <n> active goals; finish or cancel one first`.
+- **No active-goal limit:** a group can run any number of goals at once.
+  Their turns still share the group's turn slot pool (`groupSlots = 10`):
+  at most 10 turns — goal, judge and chat combined — run at once and the
+  rest wait for a slot. Each turn is one `claude` process in the guest
+  (~250 MiB), so many concurrent goals on a small VM can exhaust its RAM.
 - **Old records:** setting a new goal deletes the group's finished goal
   records (met, cancelled, exhausted).
 - **Ids:** a goal id is 12 hex characters (`newSchedID`, `goalIDLen`).
@@ -311,6 +313,10 @@ for the operator as an approval card in the goal session.
     runs yolo. A yolo request from there is raised to confirm and logged.
   - The operator can still switch a running goal session between yolo and
     confirm with tab or `/mode` (host-authoritative, like any session).
+    The switch takes effect **immediately**: the running iteration is
+    killed and re-run under the new mode with a continuation note. The
+    driver sees one completion, so the iteration counts once against
+    `max_iterations` (see "Live mode changes" below).
 - **Who may send into it:** only the goal driver (`enqueueGoalTurn`). Cron,
   ctl `send`, job callbacks and reports into a confirm session are still
   refused (`checkUnattended`).
@@ -334,6 +340,46 @@ for the operator as an approval card in the goal session.
   - The TUI goal view shows `waiting for confirmation (N)` with the oldest
     tool and its age.
 
+#### Live mode changes
+
+A session's mode (yolo, confirm, plan) can be changed with tab, `/mode`, or
+`koto ctl config -session S mode=X`. The change applies to the turn that is
+already running, not only to the next one (`daemon/mode_live.go`,
+design in `docs/design/mode-live.md`):
+
+- **Idle session:** only the stored mode changes. The next turn is the
+  first to run under it. The transcript shows
+  `mode changed to X — next turn`.
+- **Turn in flight under a different mode:** the daemon does the following
+  before it acknowledges the change:
+  - it cuts the turn,
+  - it denies every approval the session still has open (by `mode-change`),
+  - it SIGKILLs the harness's whole process group in the guest,
+  - it waits up to 10 s for the turn to end.
+
+  The same job is then re-run under the new mode. A note in front of the
+  original message tells the agent that the mode changed and that its
+  previous turn was interrupted. The transcript shows
+  `mode changed to X — turn restarted`. The config response carries
+  `mode_apply` (`turn restarted` or `next turn`).
+- **Tightening** (yolo→confirm, yolo→plan, confirm→plan) is fail-closed. No
+  tool call starts under the old mode after the change is acknowledged:
+  there is no SIGINT grace.
+- **Loosening** (plan→yolo, confirm→yolo, plan→confirm) uses the same
+  restart. The pinned claude CLI cannot switch a running process into
+  bypass mode. A pending approval is **denied, never auto-approved**. If
+  the restarted yolo turn still needs that tool, it simply runs it.
+- **Goals:** the running iteration is re-run inside the same queue job, so
+  the goal driver counts it once.
+- **codex / pi / venice:** a request for plan or confirm is still refused
+  with the usual "not supported for this harness yet" error, and nothing is
+  stored. The in-flight yolo turn is cancelled anyway, and its job ends with
+  that error instead of re-running.
+- **Compaction** in flight is cut, not re-run. Re-issue `/compact`.
+- **Audit:** every change logs
+  `mode_change session= from= to= interrupted= denied= refused=` under the
+  `audit` subsystem.
+
 #### Steering
 
 - **Allow+message and Deny+message:** on every card, `a` allows with a
@@ -350,39 +396,48 @@ for the operator as an approval card in the goal session.
     `OPERATOR STEER (authoritative)`. It is bounded to `goalSteerMax = 32`
     entries of at most 1000 bytes each.
   - The agent cannot forge one. Steers are appended only from operator
-    paths (approval answers, decision answers, `GoalSteer`). There is no ctl
-    verb for it, and agent-authored text such as the handoff stays
+    paths (approval answers, decision answers, `GoalSteer`). The ctl
+    `goal_steer` verb only ever adds COORDINATOR-labelled entries (below),
+    and agent-authored text such as the handoff stays
     `> `-quoted.
-- **`/steer <text>`** (or `/goals steer`, `koto ctl goal steer`) adds a steer
-  to a running goal with no approval pending (RPC `GoalSteer`, admin-only).
-- **Live steering from the TUI:**
-  - `/steer [<group>] [name=<run>] <text>` reaches the running turn now and
-    the next iteration as `OPERATOR STEER`. A leading `!` (`/steer !<text>`)
-    is a REDIRECT: the turn is aborted and the next iteration starts at once
-    with the steer on top.
+- **`/goals steer <text>`** (or `koto ctl goal steer`) adds a steer to a
+  running goal with no approval pending (RPC `GoalSteer`, admin-only). Bare
+  `/steer` is the live cut of the session on screen, not a goal steer.
+- **Live steering of a running goal:**
+  - Every goal steer (operator or coordinator, below) is recorded first and
+    then also delivered live into the RUNNING work turn at its next tool
+    boundary (`daemon/goal_live.go`), under the same label it carries in the
+    prompt. With no live turn it simply waits for the next iteration. The
+    judge's session never receives one.
+  - `/goals steer … !<text>` (`koto ctl goal redirect`) is a REDIRECT: the
+    turn is aborted and the next iteration starts at once with the steer on
+    top (operator-only, `GoalSteer` with `redirect`).
   - Selecting a goal's work row in the tree puts a `steer›` chip on the
-    input, next to the mode chip. Plain enter there is `/steer` for that run
-    (`!` = redirect). The judge row stays follow-only.
-  - `/amend [<group>] [name=<run>]` opens the editor: the input is prefilled
-    with `/amend <g> name=<run> max=N <text> :: <criteria>`. Edit and press
-    enter; only changed fields are sent (`GoalAmend`, versioned). Fields can
-    also be given directly: `/amend name=x max=15`, `/amend :: <criteria>`.
+    input, next to the mode chip. Plain enter there is `/goals steer` for
+    that run (`!` = redirect). The judge row stays follow-only.
+  - `/goals amend [<group>] [name=<run>]` (`koto ctl goal amend`) opens the
+    editor: the input is prefilled with
+    `/goals amend <g> name=<run> max=N <text> :: <criteria>`. Edit and press
+    enter; only changed fields are sent (`GoalAmend`, versioned, the judge
+    reads the latest version). Fields can also be given directly:
+    `/goals amend name=x max=15`, `/goals amend :: <criteria>`.
 - **Who may steer (authority):**
-  - The operator's `/steer`, redirect and `/amend` are host-labelled
+  - The operator's steer, redirect and amend are host-labelled
     `OPERATOR STEER` / `OPERATOR REDIRECT` / `OPERATOR AMEND` and reach the
     daemon only over admin gRPC (`goal_steer`, `goal_amend` are in
     `adminOnlyVerbs`, not grantable via `acl.json`).
-  - The AGENT in the goal's origin session may only send a live note:
-    `{"cmd":"goal_note","name":"<goal>","session":"$KOTO_SESSION","text":"..."}`
-    on the ctl plane (`goalNoteAgent`, `daemon/goal_live.go`). The note is
-    labelled `note from <session> (agent) — advisory, NOT operator steer`,
-    goes only into a running turn (refused if none), and is never recorded
-    in the steering log. Other sessions, and the goal's own sessions, are
-    refused.
-  - The ctl plane has no amend, redirect or steer verb. An agent amending
-    its own goal would be accepting its own work.
-  - In a confirm goal, a note is a plain user record. It never answers a
-    pending approval.
+  - The group's COORDINATOR (any non-goal session) may steer through the
+    ctl `goal_steer` verb:
+    `{"cmd":"goal_steer","name":"<goal>","text":"...","from_session":"$KOTO_SESSION"}`
+    (`daemon/coord_steer.go`). It is labelled
+    `COORDINATOR STEER (from <group>/<session>)`, never with the operator
+    label, never changes the criteria, the iteration cap, the mode or the
+    judge, and is audited on the hash-chained spool. Goal worker and judge
+    sessions are refused.
+  - The ctl plane has no amend or redirect verb. An agent amending its own
+    goal would be accepting its own work.
+  - In a confirm goal, a live note is a plain user record. It never answers
+    a pending approval.
 - **Decision requests:** a worker blocked on a choice runs
   `cs-ask -g <id> "<question>" [option ...]` (ctl `ask`).
   - The question joins the same queue as a card with the options, an "other"

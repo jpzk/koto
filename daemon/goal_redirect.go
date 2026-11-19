@@ -61,7 +61,7 @@ func goalRedirectOperator(g, name, text, who string) (goalItem, error) {
 	if err != nil {
 		return goalItem{}, err
 	}
-	if !goalAddSteerID(g, sess, "redirect", who, text, "r"+randHex(6)) {
+	if !goalAddSteerFromID(g, sess, "redirect", who, text, "", "r"+randHex(6)) {
 		return goalItem{}, fmt.Errorf("goal %s did not take the redirect", id)
 	}
 	goalLock.Lock()

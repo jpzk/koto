@@ -515,7 +515,6 @@ type GoalListResp struct {
 	Goals []GoalItem `json:"goals"`
 }
 
-// GoalSteer is one entry of GoalItem.SteerLog.
 // GoalAmend is one versioned edit of a goal's spec (GoalItem.AmendLog).
 type GoalAmend struct {
 	Version   int     `json:"version"`
@@ -530,6 +529,7 @@ type GoalAmend struct {
 	PrevMax      int    `json:"prev_max,omitempty"`
 }
 
+// GoalSteer is one entry of GoalItem.SteerLog.
 type GoalSteer struct {
 	Ts        float64 `json:"ts"`
 	Iteration int     `json:"iteration"`
@@ -537,6 +537,11 @@ type GoalSteer struct {
 	Source string `json:"source"`
 	Who    string `json:"who,omitempty"`
 	Text   string `json:"text"`
+	// Origin: "" = the operator (every pre-existing record, and every
+	// operator-authenticated path); "coordinator" = a ctl goal_steer from one
+	// of the group's non-goal sessions, Who = "<group>/<session>". The prompt
+	// renders the two in separate blocks with distinct labels (goal_steer.go).
+	Origin string `json:"origin,omitempty"`
 	// ID names a steer that was also offered to the running turn live
 	// (goal_live.go); Live is set once the guest confirmed it wrote the
 	// note into the worker's stdin (TurnFrame.note_delivered).

@@ -1,6 +1,6 @@
 package main
 
-// goal_live_test.go — /steer (! = redirect), /amend (editor) and the steer›
+// goal_live_test.go — /goals steer (! = redirect), /goals amend (editor) and the steer›
 // chip on a goal work session, end to end through a fake daemon, and their
 // rendering at phone widths (36/40 cols).
 
@@ -138,19 +138,19 @@ func TestSteerChipEnterSendsNote(t *testing.T) {
 	}
 }
 
-// /steer ! from anywhere is a redirect of the named run; a bare "!" is a
+// /goals steer ! from anywhere is a redirect of the named run; a bare "!" is a
 // usage error.
 func TestSteerBangRedirect(t *testing.T) {
 	fk := startLiveFake(t)
 	m := treeModel(t, goalGroups(), "alpha", "", "")
 	m.exitTree()
-	m = liveRun(t, m, m.dispatchInput("/steer name=x !switch to plan b"))
+	m = liveRun(t, m, m.dispatchInput("/goals steer name=x !switch to plan b"))
 	fk.mu.Lock()
 	if len(fk.steers) != 1 || !fk.steers[0].Redirect || fk.steers[0].Name != "x" || fk.steers[0].Text != "switch to plan b" {
 		t.Errorf("steers = %v", fk.steers)
 	}
 	fk.mu.Unlock()
-	if m.dispatchInput("/steer !") != nil {
+	if m.dispatchInput("/goals steer !") != nil {
 		t.Error("bare ! sent a redirect")
 	}
 	if last := m.lines[len(m.lines)-1].text; !strings.Contains(last, "usage") {
@@ -158,14 +158,14 @@ func TestSteerBangRedirect(t *testing.T) {
 	}
 }
 
-// /amend opens the editor (input prefilled from the running goal), an edit
+// /goals amend opens the editor (input prefilled from the running goal), an edit
 // sends only the changed field, unchanged prefill is "nothing changed", and
 // explicit fields work without the editor.
 func TestAmendEditor(t *testing.T) {
 	fk := startLiveFake(t)
 	m := goalCard(t, 40)
-	m = liveRun(t, m, m.dispatchInput("/amend"))
-	want := "/amend alpha name=x max=12 ship the thing :: 1. tests pass  2. pushed"
+	m = liveRun(t, m, m.dispatchInput("/goals amend"))
+	want := "/goals amend alpha name=x max=12 ship the thing :: 1. tests pass  2. pushed"
 	if got := m.input.Value(); got != want {
 		t.Fatalf("editor prefill = %q, want %q", got, want)
 	}
@@ -176,8 +176,8 @@ func TestAmendEditor(t *testing.T) {
 		t.Errorf("unchanged: %q", last)
 	}
 	m = liveRun(t, m, m.dispatchInput(strings.Replace(want, "max=12", "max=15", 1)))
-	m = liveRun(t, m, m.dispatchInput("/amend name=x :: 1. tests pass  2. pushed  3. PR open"))
-	m = liveRun(t, m, m.dispatchInput("/amend alpha name=x new goal text"))
+	m = liveRun(t, m, m.dispatchInput("/goals amend name=x :: 1. tests pass  2. pushed  3. PR open"))
+	m = liveRun(t, m, m.dispatchInput("/goals amend alpha name=x new goal text"))
 	fk.mu.Lock()
 	a := append([]*pb.GoalAmendReq(nil), fk.amends...)
 	fk.mu.Unlock()
@@ -196,10 +196,10 @@ func TestAmendEditor(t *testing.T) {
 	if v := ansi.Strip(m.View()); !strings.Contains(strings.Join(strings.Fields(v), ""), "amendedtov") {
 		t.Errorf("no amend confirmation:\n%s", v)
 	}
-	if m.dispatchInput("/amend max=0") != nil {
+	if m.dispatchInput("/goals amend max=0") != nil {
 		t.Error("max=0 sent")
 	}
-	if m.dispatchInput("/amend name=nope") == nil {
+	if m.dispatchInput("/goals amend name=nope") == nil {
 		t.Fatal("editor for an unknown run sent nothing")
 	}
 	sm, _ := m.Update(goalAmendDraftCmd("", "alpha", "nope")())
@@ -209,7 +209,7 @@ func TestAmendEditor(t *testing.T) {
 	}
 }
 
-// The steer chip, the /steer and /amend confirmations and the open /amend
+// The steer chip, the /goals steer and /goals amend confirmations and the open editor
 // editor render whole and fit at 36 and 40 cols.
 func TestGoalLiveRenderNarrow(t *testing.T) {
 	startLiveFake(t)
@@ -228,7 +228,7 @@ func TestGoalLiveRenderNarrow(t *testing.T) {
 			sm, _ := m.Update(goalOpMsg{op: op, group: "alpha", item: goalItemT{ID: "7b68b7d62d4c", Iteration: 3, Version: 2}})
 			m = sm.(Model)
 		}
-		m = liveRun(t, m, m.dispatchInput("/amend"))
+		m = liveRun(t, m, m.dispatchInput("/goals amend"))
 		view := m.View()
 		assertFits(t, view, w)
 		// Chat rows wrap mid-word at these widths: compare with all
@@ -241,7 +241,7 @@ func TestGoalLiveRenderNarrow(t *testing.T) {
 			}
 		}
 		help := strings.Join(goalHelpLines, "\n")
-		for _, s := range []string{"/amend [<group>]", "!<text>"} {
+		for _, s := range []string{"/goals amend [<group>]", "!<text>"} {
 			if !strings.Contains(help, s) {
 				t.Errorf("/goals help lacks %q", s)
 			}

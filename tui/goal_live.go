@@ -1,17 +1,18 @@
 package main
 
-// goal_live.go — operator steering of a RUNNING goal from the TUI:
+// goal_live.go — operator steering of a RUNNING goal from the TUI (all under
+// /goals; bare /steer is the live cut of a session, steer_cmd.go):
 //
-//   - /steer [<group>] [name=<run>] [!]<text>: a live operator steer (the
-//     daemon delivers it into the running turn and records it for the next
-//     iteration as OPERATOR STEER). A leading "!" makes it a REDIRECT: the
-//     daemon aborts the current turn and starts the next iteration now, the
-//     steer on top.
-//   - /amend [<group>] [name=<run>]: an editor — the input line is prefilled
-//     with the run's current spec ("/amend <g> name=<run> max=N <text> ::
-//     <criteria>"); edit it and press enter to send a versioned GoalAmend.
+//   - /goals steer [<group>] [name=<run>] [!]<text>: the durable operator
+//     steer (GoalSteer RPC); the daemon also delivers it live into the
+//     running turn. A leading "!" makes it a REDIRECT: the daemon aborts the
+//     current turn and starts the next iteration now, the steer on top.
+//   - /goals amend [<group>] [name=<run>]: an editor — the input line is
+//     prefilled with the run's current spec ("/goals amend <g> name=<run>
+//     max=N <text> :: <criteria>"); edit it and press enter to send a
+//     versioned GoalAmend.
 //   - a goal WORK session selected in the tree shows a "steer›" chip on the
-//     input; enter on plain text there is /steer for that run ("!" =
+//     input; enter on plain text there is /goals steer for that run ("!" =
 //     redirect). The judge session stays follow-only.
 
 import (
@@ -80,9 +81,9 @@ func (m *Model) steerSendCmd(v string) tea.Cmd {
 	return goalSteerCmd(m.sock, m.cur, m.steerTarget(), text, redirect)
 }
 
-// ---- /amend ------------------------------------------------------------------
+// ---- /goals amend ---------------------------------------------------------------
 
-// goalAmendDraftMsg carries the run fetched for the /amend editor.
+// goalAmendDraftMsg carries the run fetched for the /goals amend editor.
 type goalAmendDraftMsg struct {
 	group, name string
 	item        goalItemT
@@ -104,7 +105,7 @@ func amendFlat(s string) string {
 
 // amendLine is the prefilled editor line for a run.
 func amendLine(it goalItemT) string {
-	return fmt.Sprintf("/amend %s name=%s max=%d %s :: %s",
+	return fmt.Sprintf("/goals amend %s name=%s max=%d %s :: %s",
 		it.Group, it.Name, it.MaxIterations, amendFlat(it.Text), amendFlat(it.Criteria))
 }
 
@@ -150,7 +151,7 @@ func goalAmendDraftCmd(sock, group, name string) tea.Cmd {
 // applyAmendDraft opens the editor: the input line now holds the spec.
 func (m *Model) applyAmendDraft(msg goalAmendDraftMsg) {
 	if msg.err != nil {
-		m.addLine(logLine{kind: "err", group: m.cur, text: "/amend: " + msg.err.Error()})
+		m.addLine(logLine{kind: "err", group: m.cur, text: "/goals amend: " + msg.err.Error()})
 		return
 	}
 	m.amendDraft = &msg.item
@@ -160,14 +161,14 @@ func (m *Model) applyAmendDraft(msg goalAmendDraftMsg) {
 		text: fmt.Sprintf("amend %s (v%d): edit the line — text :: criteria, max=N — enter sends", msg.item.ID, max(1, msg.item.Version))})
 }
 
-// amendReq is a parsed /amend submission; nil = field unchanged.
+// amendReq is a parsed /goals amend submission; nil = field unchanged.
 type amendReq struct {
 	group, name    string
 	text, criteria *string
 	maxIter        *int
 }
 
-// parseAmend reads `/amend [<group>] [name=<run>] [max=N] [<text>] [:: <criteria>]`.
+// parseAmend reads `/goals amend [<group>] [name=<run>] [max=N] [<text>] [:: <criteria>]`.
 // editor=true when only the selection was given (open the editor).
 func (m *Model) parseAmend(rest string) (r amendReq, editor bool, err error) {
 	r.group = m.cur
@@ -247,7 +248,7 @@ prefix:
 func (m *Model) handleAmend(rest string) tea.Cmd {
 	r, editor, err := m.parseAmend(rest)
 	if err != nil {
-		m.addLine(logLine{kind: "err", group: m.cur, text: "/amend: " + err.Error()})
+		m.addLine(logLine{kind: "err", group: m.cur, text: "/goals amend: " + err.Error()})
 		return nil
 	}
 	if editor {

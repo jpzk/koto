@@ -190,9 +190,11 @@ tope de iteraciones. Todo esto está en `daemon/goals.go`.
 - **Tope de iteraciones:** un `max_iterations` de `<= 0` se convierte en
   `goalDefaultMaxIter = 20`. Los valores por encima de
   `goalMaxIterCeil = 200` se bajan a 200.
-- **Límite de goals activos:** un grupo puede ejecutar como máximo
-  `goalMaxActive = 8` goals a la vez. Por encima:
-  `group "<g>" already has <n> active goals; finish or cancel one first`.
+- **Sin límite de goals activos:** un grupo puede ejecutar cualquier número
+  de goals a la vez. Sus turnos comparten el pool de slots del grupo
+  (`groupSlots = 10`): como máximo 10 turnos (goal, juez y chat juntos) a
+  la vez; el resto espera un slot. Cada turno es un proceso `claude` en el
+  guest (~250 MiB), así que muchos goals en una VM pequeña pueden agotar su RAM.
 - **Registros viejos:** fijar un goal nuevo borra los registros de goals
   terminados del grupo (met, cancelled, exhausted).
 - **Ids:** un id de goal son 12 caracteres hex (`newSchedID`, `goalIDLen`).

@@ -104,6 +104,7 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "refresh group list", hint: "/ls", run: "/ls"},
 
 		{title: "interrupt current turn", hint: "ctrl+c / esc", run: "/interrupt"},
+		{title: "steer current turn (cut, continue with text)", hint: "/steer <text>", run: "/steer ", edit: true},
 		{title: "discard queued prompts", hint: "/drain", run: "/drain"},
 		{title: "permission mode of this session", hint: "/mode", run: "/mode"},
 		{title: "tool approvals inbox", hint: "alt+a", act: func(m *Model) tea.Cmd { m.openApprovalCard(); return nil }},
@@ -123,9 +124,9 @@ func (m Model) paletteItems() []paletteItem {
 		{title: "list schedules", hint: "/sched", run: "/sched list"},
 		{title: "list goals", hint: "/goals", run: "/goals list"},
 		{title: "interrupt goal (pause now)", hint: "/goals interrupt", run: "/goals interrupt"},
-		{title: "steer goal (live operator steer)", hint: "/steer <text>", run: "/steer ", edit: true},
-		{title: "redirect goal (new iteration now)", hint: "/steer !<text>", run: "/steer !", edit: true},
-		{title: "amend goal spec (editor)", hint: "/amend", run: "/amend"},
+		{title: "steer goal (durable operator steer)", hint: "/goals steer <text>", run: "/goals steer ", edit: true},
+		{title: "redirect goal (new iteration now)", hint: "/goals steer !<text>", run: "/goals steer !", edit: true},
+		{title: "amend goal spec (editor)", hint: "/goals amend", run: "/goals amend"},
 		{title: "fire a prompt file", hint: "/prompt <name>", run: "/prompt ", edit: true},
 
 		{title: "toggle thought bodies", hint: "alt+t", act: func(m *Model) tea.Cmd {

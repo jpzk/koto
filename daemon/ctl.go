@@ -221,10 +221,10 @@ func ownsSched(owner, id string) bool {
 	return true
 }
 
-// ctlDispatch is the restricted analogue of dispatch() for the ctl
+// ctlDispatchInner is the restricted analogue of dispatch() for the ctl
 // plane. The verb allowlist depends on `owner`: main gets the full
 // orchestration set, non-main gets sched-only with self-target forced.
-func ctlDispatch(owner string, line []byte) any {
+func ctlDispatchInner(owner string, line []byte) any {
 	var env cmdEnvelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		return errResp("json: " + err.Error())
@@ -323,6 +323,87 @@ func ctlDispatch(owner string, line []byte) any {
 		}
 		registerSession(req.Group, sess)
 		return baseResp{OK: true}
+
+	case "steer":
+		// Interrupt-and-redirect one conversation (steer.go). ACL is the
+		// interrupt/goal_interrupt rule: a non-main group steers only ITSELF
+		// (any of its own sessions — the group field is overwritten, never
+		// trusted); main may steer any registered group, itself included.
+		// Unlike send there is no reply window: a steer redirects work that
+		// is already delegated, it does not open a new delegation.
+		//
+		// Only the COORDINATOR steers (coord_steer.go): from_session — the
+		// caller's own session — must not be a goal worker or judge. A goal
+		// worker session as TARGET is goal_steer's job; a judge never.
+		var req sendReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		if req.Reply {
+			return errResp("ctl: steer takes no reply window — use send with reply")
+		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			return errResp("ctl: steer: " + err.Error())
+		}
+		if t, terr := normalizeSession(req.Session); terr == nil && isJudgeSession(t) {
+			return errResp("ctl: steer: " + errSteerJudge.Error())
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		res, err := steerRequestBy(req.Group, req.Session, req.Msg, owner+"/"+sessionMarkerName(from))
+		if err != nil {
+			return errResp("ctl: " + err.Error())
+		}
+		return steerCtlResp{baseResp: baseResp{OK: true}, Interrupted: res.Interrupted}
+
+	case "goal_steer":
+		// COORDINATOR steer of a goal (coord_steer.go, goal_steer.go): a
+		// durable entry in the run's steering log, rendered into every later
+		// iteration prompt under "COORDINATOR STEER (from <group>/<session>)"
+		// — never the operator's label, never a change to criteria,
+		// max_iterations, mode or the judge. A running work turn also gets
+		// it live, same label (goal_live.go). Self-targeted for peers; main
+		// may name a registered peer, as for steer. The operator's goal_steer
+		// (gRPC GoalSteer, admin-only) is a different path and outranks it.
+		var req struct {
+			Group       string `json:"group"`
+			Name        string `json:"name"`
+			Text        string `json:"text"`
+			FromSession string `json:"from_session"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		if len(req.Text) > goalSteerTextMax {
+			return errResp(fmt.Sprintf("ctl: goal_steer: text is %d bytes; the limit is %d", len(req.Text), goalSteerTextMax))
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		who := owner + "/" + sessionMarkerName(from)
+		it, err := goalSteerCoordinator(req.Group, req.Name, req.Text, who)
+		if err != nil {
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
 
 	case "compact":
 		// Every group may compact ITSELF (self-targeting, like sched_*);
@@ -767,27 +848,6 @@ func ctlDispatch(owner string, line []byte) any {
 			return errResp(err.Error())
 		}
 		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
-
-	// goal_note: the origin-session AGENT's only live steering verb — an
-	// advisory note into its own goal's running turn, host-labelled
-	// "(agent)" and never recorded as an OPERATOR STEER. Self-targeted for
-	// every caller (main included). There is deliberately NO goal_steer,
-	// goal_redirect or goal_amend on this plane: those carry operator
-	// authority and reach the daemon only over the admin gRPC surface.
-	case "goal_note":
-		var req struct {
-			Name    string `json:"name"`
-			Session string `json:"session"`
-			Text    string `json:"text"`
-		}
-		if err := json.Unmarshal(line, &req); err != nil {
-			return errResp(err.Error())
-		}
-		r, err := goalNoteAgent(owner, req.Name, req.Session, req.Text)
-		if err != nil {
-			return errResp("ctl: goal_note: " + err.Error())
-		}
-		return r
 
 	case "goal_status":
 		var req goalListReq

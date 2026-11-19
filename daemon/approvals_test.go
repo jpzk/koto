@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -85,6 +86,68 @@ func waitPending(t *testing.T, g, s string, want int) {
 	t.Fatalf("pending(%s/%s) = %d, want %d", g, s, approvalsPending(g, s), want)
 }
 
+// hasApprovalEvent reports whether g's event ring holds the approval_request
+// for id in session.
+func hasApprovalEvent(g, session, id string) bool {
+	for _, ev := range replayFrom(g, 0) {
+		if ev.Event == "approval_request" && ev.Id == id && ev.Session == session && ev.Deadline > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// waitApprovalEvent waits for the approval_request event. openApproval makes
+// the request PENDING (under approvalsMu) before it emits the event, so a test
+// that just saw pending==1 must not expect the event in the same instant: that
+// one-shot read made TestApprovalFirstAnswerWinsReplayIgnored flaky under load
+// ("no approval_request event"; see TestApprovalEventMayLagPending).
+func waitApprovalEvent(t *testing.T, g, session, id string) {
+	t.Helper()
+	for i := 0; i < 300; i++ {
+		if hasApprovalEvent(g, session, id) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no approval_request event")
+}
+
+// The window between "pending" and "event emitted" is real: hold it open
+// deterministically (openApproval's turn-cancel check needs queuesMu, which
+// the test holds) and show the request is pending with no event yet, and that
+// waitApprovalEvent still sees the event once the window closes.
+func TestApprovalEventMayLagPending(t *testing.T) {
+	fcHarness(t)
+	quietLogAlerts(t)
+	resetApprovals(t)
+	r := newApprovalRig(t, 4, "lag")
+	// The event ring outlives a test: a fresh id per run (-count=N).
+	id := fmt.Sprintf("req-lag-%d", time.Now().UnixNano())
+	queuesMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			queuesMu.Unlock()
+		}
+	}()
+	r.request(id, "Bash")
+	waitPending(t, "tg", "lag", 1)
+	if hasApprovalEvent("tg", "lag", id) {
+		t.Fatal("event emitted while openApproval was still parked before emit")
+	}
+	queuesMu.Unlock()
+	locked = false
+	waitApprovalEvent(t, "tg", "lag", id)
+	if resp := approveOperator("tg", "lag", id, true, "", "op"); !resp.Ok || resp.Decision != decAllow {
+		t.Fatalf("answer: %v", resp)
+	}
+	if rp := r.reply(); rp.Id != id || !rp.Allow {
+		t.Fatalf("reply = %v", rp)
+	}
+	r.end()
+}
+
 func resetApprovals(t *testing.T) {
 	approvalsMu.Lock()
 	approvals = map[approvalKey]*pendingApproval{}
@@ -112,23 +175,7 @@ func TestApprovalFirstAnswerWinsReplayIgnored(t *testing.T) {
 	if c := pendingApprovalCounts("tg"); c["work"] != 1 {
 		t.Fatalf("pending counts = %v", c)
 	}
-	// registerApproval publishes the pending entry before it emits the event
-	// (emit runs after approvalsMu is released), so waitPending can return a
-	// moment before the event is in the ring: poll for it instead of racing.
-	sawReq := false
-	for i := 0; i < 300 && !sawReq; i++ {
-		for _, ev := range replayFrom("tg", 0) {
-			if ev.Event == "approval_request" && ev.Id == "req-1" && ev.Session == "work" && ev.Deadline > 0 {
-				sawReq = true
-			}
-		}
-		if !sawReq {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if !sawReq {
-		t.Fatal("no approval_request event")
-	}
+	waitApprovalEvent(t, "tg", "work", "req-1")
 
 	resp := approveOperator("tg", "work", "req-1", true, "ignored", "alice")
 	if !resp.Ok || resp.AlreadyAnswered || resp.Decision != decAllow {

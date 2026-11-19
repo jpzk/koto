@@ -208,6 +208,10 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		// abort the conversation on screen, not whichever one the daemon
 		// would have picked.
 		return cl.Interrupt(ctx, &pb.GroupReq{Group: s("group"), Session: s("session")})
+	case "steer":
+		// Same RPC and handler as `koto ctl steer` (daemon grpc_server.go
+		// Steer); only group, msg and session are read.
+		return cl.Steer(ctx, &pb.SendReq{Group: s("group"), Msg: s("msg"), Session: s("session")})
 	case "destroy":
 		return cl.Destroy(ctx, &pb.GroupReq{Group: s("group")})
 	case "restart":

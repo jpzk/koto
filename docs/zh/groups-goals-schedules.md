@@ -168,9 +168,10 @@ turn 和报告。
 - **迭代上限：** `max_iterations` 为 `<= 0` 时变为
   `goalDefaultMaxIter = 20`。高于 `goalMaxIterCeil = 200` 的值被降到
   200。
-- **活跃目标上限：** 一个组最多同时运行 `goalMaxActive = 8` 个目标。
-  超过时：
-  `group "<g>" already has <n> active goals; finish or cancel one first`。
+- **无活跃目标上限：** 一个组可以同时运行任意数量的目标。它们的回合仍共享
+  该组的回合槽池（`groupSlots = 10`）：目标、评审和聊天合计最多 10 个回合
+  同时运行，其余等待空槽。每个回合是 guest 中的一个 `claude` 进程
+  （约 250 MiB），所以在小规格 VM 上并发很多目标可能耗尽内存。
 - **旧记录：** 设置新目标会删除该组已结束的目标记录（met、cancelled、
   exhausted）。
 - **id：** 目标 id 为 12 个十六进制字符（`newSchedID`、`goalIDLen`）。

@@ -541,7 +541,7 @@ func (m Model) renderStatusLeft() string {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
 	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
-	return app + grp + m.renderModeSegment() + m.renderLoadingSegment()
+	return app + grp + m.renderInboxSegment() + m.renderLoadingSegment()
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm
@@ -974,7 +974,12 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// work stays noticeable without a row per job. Unlike the badge, which
 	// is right-aligned, the count travels with the name.
 	cnt := ""
-	if !isJob {
+	collapsed := !isJob && !isSession && m.groupCollapsed[r.group]
+	if collapsed {
+		// A collapsed group's marker replaces the default conversation's
+		// fold count: " [+N]" counts the whole hidden subtree.
+		cnt = m.collapseLabel(r.group)
+	} else if !isJob {
 		cnt = m.foldLabel(r.group, r.session)
 	}
 	if badge != "" {
@@ -1093,9 +1098,16 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 	// total ("*2") — the rolled-up "!N" pending mark can squeeze the field
 	// that far; the NAME gives up the remaining cells (keeping at least 3).
 	if cnt != "" && cellWidth(name+cnt) > w {
-		j, gl, live := m.foldedCount(r.group, r.session)
 		nw := min(cellWidth(name), 3)
-		for _, c := range []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)} {
+		var alts []string
+		if collapsed {
+			n, live := m.collapsedCount(r.group)
+			alts = []string{foldLabelBare(n, live)}
+		} else {
+			j, gl, live := m.foldedCount(r.group, r.session)
+			alts = []string{m.foldLabelTight(j, gl, live), foldLabelTotal(j+gl, live), foldLabelBare(j+gl, live)}
+		}
+		for _, c := range alts {
 			if cellWidth(cnt) <= w-nw {
 				break
 			}
@@ -1943,8 +1955,9 @@ func (m Model) renderHint() string {
 		return lipgloss.NewStyle().MaxWidth(m.width).Render(dim.Render(" tool approval pending"))
 	}
 	if m.focus == focusTree {
-		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ goes back to the message bar
-		// too. ^r searches prompt history; ⌥→ jumps to the terminal pane.
+		// ⌥[ / ⎋ (= ctrl+[) close the tree; ↩ only sends a draft and keeps
+		// the tree open (empty ↩ is a no-op). ^r searches prompt history;
+		// ⌥→ jumps to the terminal pane.
 		// Key names are spelled out in mono rather than left to the ASCII
 		// fold: a width-preserving stand-in for ⇥/⎋/⌥ is a single cryptic
 		// letter, and this row is flow text that can afford the extra columns
