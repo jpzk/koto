@@ -242,6 +242,12 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 			}
 		}
 		if stale {
+			// Labelled like the cutter's own sweep: a request racing a
+			// mode change's cut is denied by mode-change, not interrupt.
+			if modeCancelPending(g, session) {
+				resolveApproval(k, false, decDeny, "denied: the turn was cut by a mode change", "mode-change", true)
+				return
+			}
 			resolveApproval(k, false, decDeny, "denied: the turn was interrupted", "interrupt", true)
 			return
 		}
