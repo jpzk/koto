@@ -19,14 +19,20 @@ type steerRecorder struct {
 	started chan string
 }
 
-// unframeSteer strips the steer frame so order assertions read the operator's
-// text; the frame itself is pinned by TestSteerFraming*.
+// unframeSteer strips the steer frame (operator or coordinator) so order
+// assertions read the steer's text; the frames are pinned by
+// TestSteerFraming* and TestCoordSteerSessionFrame.
 func unframeSteer(msg string) string {
 	if s, ok := strings.CutPrefix(msg, steerFrameInterrupted); ok {
 		return s
 	}
 	if s, ok := strings.CutPrefix(msg, steerFrameIdle); ok {
 		return s
+	}
+	if strings.HasPrefix(msg, "[coordinator steering (from ") {
+		if i := strings.Index(msg, "]\n\n"); i >= 0 {
+			return msg[i+3:]
+		}
 	}
 	return msg
 }

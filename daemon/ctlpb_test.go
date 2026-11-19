@@ -45,6 +45,7 @@ func TestCtlPBEveryVerbMaps(t *testing.T) {
 		`{"cmd":"compact","group":"peer","session":"s1","instructions":"x","fresh":true}`, // refused for non-main → peer
 		// steer: refused (goal session); the response shape is what is tested
 		`{"cmd":"steer","group":"peer","session":"goal-x","msg":"m"}`,
+		`{"cmd":"goal_steer","name":"none","text":"t","from_session":"x"}`,
 	}
 	for _, l := range lines {
 		req, err := ctlRequestFromJSON([]byte(l))

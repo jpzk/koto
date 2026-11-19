@@ -84,6 +84,9 @@ type sendJob struct {
 	// lives in the session's steer lane, not the FIFO channel, and is never
 	// itself displaced by another steer once it has started.
 	steer bool
+	// steerBy is the steer's author for its frame (steer.go frameSteerBy):
+	// "" = the operator, "<group>/<session>" = a ctl coordinator.
+	steerBy string
 	// steerCut is set (under queuesMu, by steerSession's cancel) when this
 	// steer actually cancelled the session's in-flight turn. Only then is the
 	// steer framed as a resumption and the resume state probed first
@@ -922,7 +925,7 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 		if cut {
 			checkSteerResume(g, job.session)
 		}
-		err = runTurn(g, job.session, frameSteer(job.msg, cut))
+		err = runTurn(g, job.session, frameSteerBy(job.msg, cut, job.steerBy))
 	} else {
 		setTurnModeOverride(g, job.session, job.mode)
 		err = runTurn(g, job.session, job.msg)

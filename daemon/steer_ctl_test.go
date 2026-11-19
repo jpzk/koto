@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,5 +210,74 @@ func TestSteerGRPC(t *testing.T) {
 		if resp.Ok || !strings.Contains(resp.Error, tc.want) {
 			t.Errorf("%v → %v, want %q", tc.req, resp, tc.want)
 		}
+	}
+}
+
+// TestCoordSteerSessionViaPB: the coordinator (a named chat session, declared
+// in from_session) steers another session of its group through the guest's
+// strict proto adapter; the steer runs and one audit line names who, the
+// target, the length and the sha256 — not the text. goal_steer round-trips
+// through the adapter too.
+func TestCoordSteerSessionViaPB(t *testing.T) {
+	fcHarness(t)
+	r := newSteerRecorder()
+	withSteerInterrupt(t, func(string, string) error { return nil })
+	mark := logMark()
+	withTurnFn(r.turn, func() {
+		req, err := ctlRequestFromJSON([]byte(`{"cmd":"steer","session":"chat","msg":"redirect-now","from_session":"research"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req.GetSteer().GetFromSession() != "research" {
+			t.Fatalf("decoded %v", req)
+		}
+		if resp := ctlDispatchPB("tg", req); !resp.Ok {
+			t.Fatalf("coordinator session steer: %v", resp.Error)
+		}
+		waitStarted(t, r, "redirect-now")
+	})
+	sum := sha256.Sum256([]byte("redirect-now"))
+	a := auditRing(mark)
+	if len(a) != 1 || !strings.Contains(a[0], "audit ctl steer by=tg/research target=tg/chat len=12 sha256="+hex.EncodeToString(sum[:])) ||
+		strings.Contains(a[0], "redirect-now") {
+		t.Fatalf("audit = %q", a)
+	}
+	gs, err := ctlRequestFromJSON([]byte(`{"cmd":"goal_steer","name":"w","text":"t","from_session":"-"}`))
+	if err != nil || gs.GetGoalSteer().GetName() != "w" || gs.GetGoalSteer().GetFromSession() != "-" {
+		t.Fatalf("goal_steer adapter: %v %v", gs, err)
+	}
+	if _, err := ctlRequestFromJSON([]byte(`{"cmd":"goal_steer","text":"t","criteria":"none"}`)); err == nil {
+		t.Fatal("strict adapter must refuse criteria on goal_steer")
+	}
+}
+
+// TestCoordSteerSessionFrame: a ctl steer is framed as the COORDINATOR's,
+// naming group/session — never with the operator's frame, which stays the
+// gRPC Steer's (the operator).
+func TestCoordSteerSessionFrame(t *testing.T) {
+	if f := frameSteerBy("go", false, "tg/research"); f != "[coordinator steering (from tg/research)]\n\ngo" {
+		t.Fatalf("idle coordinator frame %q", f)
+	}
+	f := frameSteerBy("go", true, "tg/default")
+	if !strings.HasPrefix(f, "[coordinator steering (from tg/default) — your previous turn was interrupted by the coordinator") ||
+		strings.Contains(f, "operator") {
+		t.Fatalf("interrupted coordinator frame %q", f)
+	}
+	if frameSteerBy("go", true, "") != steerFrameInterrupted+"go" || frameSteer("go", false) != steerFrameIdle+"go" {
+		t.Fatal("operator frames changed")
+	}
+	fcHarness(t)
+	r := newSteerRecorder()
+	withSteerInterrupt(t, func(string, string) error { return nil })
+	withTurnFn(r.turn, func() {
+		if br, _ := ctlDispatch("tg", []byte(`{"cmd":"steer","session":"chat","msg":"left"}`)).(steerCtlResp); !br.OK {
+			t.Fatalf("steer: %#v", br)
+		}
+		waitStarted(t, r, "left")
+	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.framed) != 1 || r.framed[0] != "[coordinator steering (from tg/default)]\n\nleft" {
+		t.Fatalf("delivered %q", r.framed)
 	}
 }
