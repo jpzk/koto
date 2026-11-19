@@ -369,7 +369,8 @@ func ctlDispatchInner(owner string, line []byte) any {
 		// durable entry in the run's steering log, rendered into every later
 		// iteration prompt under "COORDINATOR STEER (from <group>/<session>)"
 		// — never the operator's label, never a change to criteria,
-		// max_iterations, mode or the judge. Self-targeted for peers; main
+		// max_iterations, mode or the judge. A running work turn also gets
+		// it live, same label (goal_live.go). Self-targeted for peers; main
 		// may name a registered peer, as for steer. The operator's goal_steer
 		// (gRPC GoalSteer, admin-only) is a different path and outranks it.
 		var req struct {

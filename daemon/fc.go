@@ -1867,6 +1867,8 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
+		// A goal work turn keeps a live stdin for steer notes (goal_live.go).
+		LiveInput: goalLiveSession(g, session),
 	}
 	// Permission mode from the HOST registry (session_modes.go) — the only
 	// source the guest obeys; config.json above carries none.

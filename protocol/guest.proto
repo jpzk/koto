@@ -177,6 +177,11 @@ message MsgReq {
   // confirm only: worker hard cap in ms (the worker clock pauses while an
   // approval is pending, but never past this). 0 = guest default.
   int64  approval_hard_cap_ms = 10;
+  // goal work turns: keep claude's stream-json stdin open for the whole turn
+  // so the daemon can deliver live steer notes (TurnReply.note) into it. The
+  // guest announces it with TurnFrame.live_ready; a harness that cannot do it
+  // never sends that, and the note waits for the next iteration instead.
+  bool   live_input = 11;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
@@ -258,6 +263,10 @@ message TurnFrame {
     // confirm: the guest denied request <id> on its own deadline (or because
     // the turn connection dropped) — the daemon logs it as a timeout.
     string   approval_expired = 12;
+    // live_input: the guest is reading TurnReply.note for this turn now.
+    bool     live_ready = 13;
+    // live_input: note <id> was written into the running worker's stdin.
+    string   note_delivered = 14;
   }
 }
 
@@ -292,8 +301,16 @@ message ApprovalReply {
   bool   allow = 2;
   string msg   = 3; // deny reason / allow note / ask answer shown to the model
 }
+// A live steer note for the running turn (MsgReq.live_input). text is
+// composed and labelled by the HOST (OPERATOR STEER / COORDINATOR STEER);
+// the guest hands it to the model verbatim as one more stream-json user record.
+message SteerNote {
+  string id   = 1;
+  string text = 2;
+}
 message TurnReply {
   oneof kind {
     ApprovalReply approval = 1;
+    SteerNote     note     = 2;
   }
 }

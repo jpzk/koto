@@ -64,6 +64,13 @@ func minimaxEnv(t *testing.T, key string) *mmUpstream {
 		minimaxRemainsMu.Unlock()
 	})
 	fcHarness(t)
+	// A refused request raises a high notification to main, and notifyDeliver
+	// calls ensureTail(main): a REAL tailer would outlive the test and append
+	// the marker into groups/main/.cs/log mid-RemoveAll ("directory not
+	// empty"). Claim main's streams so none starts; release them before the
+	// TempDir cleanup (registered by fcHarness, so it runs after this one).
+	markTailed(ctlMainGroup)
+	t.Cleanup(func() { dropGroupTailState(ctlMainGroup) })
 	budgetTestReset(t)
 	METRICS = filepath.Join(HERE, "metrics.jsonl")
 	d := filepath.Join(vol("tg"), ".cs")

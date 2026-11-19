@@ -396,11 +396,48 @@ design in `docs/design/mode-live.md`):
     `OPERATOR STEER (authoritative)`. It is bounded to `goalSteerMax = 32`
     entries of at most 1000 bytes each.
   - The agent cannot forge one. Steers are appended only from operator
-    paths (approval answers, decision answers, `GoalSteer`). There is no ctl
-    verb for it, and agent-authored text such as the handoff stays
+    paths (approval answers, decision answers, `GoalSteer`). The ctl
+    `goal_steer` verb only ever adds COORDINATOR-labelled entries (below),
+    and agent-authored text such as the handoff stays
     `> `-quoted.
-- **`/steer <text>`** (or `/goals steer`, `koto ctl goal steer`) adds a steer
-  to a running goal with no approval pending (RPC `GoalSteer`, admin-only).
+- **`/goals steer <text>`** (or `koto ctl goal steer`) adds a steer to a
+  running goal with no approval pending (RPC `GoalSteer`, admin-only). Bare
+  `/steer` is the live cut of the session on screen, not a goal steer.
+- **Live steering of a running goal:**
+  - Every goal steer (operator or coordinator, below) is recorded first and
+    then also delivered live into the RUNNING work turn at its next tool
+    boundary (`daemon/goal_live.go`), under the same label it carries in the
+    prompt. With no live turn it simply waits for the next iteration. The
+    judge's session never receives one.
+  - `/goals steer … !<text>` (`koto ctl goal redirect`) is a REDIRECT: the
+    turn is aborted and the next iteration starts at once with the steer on
+    top (operator-only, `GoalSteer` with `redirect`).
+  - Selecting a goal's work row in the tree puts a `steer›` chip on the
+    input, next to the mode chip. Plain enter there is `/goals steer` for
+    that run (`!` = redirect). The judge row stays follow-only.
+  - `/goals amend [<group>] [name=<run>]` (`koto ctl goal amend`) opens the
+    editor: the input is prefilled with
+    `/goals amend <g> name=<run> max=N <text> :: <criteria>`. Edit and press
+    enter; only changed fields are sent (`GoalAmend`, versioned, the judge
+    reads the latest version). Fields can also be given directly:
+    `/goals amend name=x max=15`, `/goals amend :: <criteria>`.
+- **Who may steer (authority):**
+  - The operator's steer, redirect and amend are host-labelled
+    `OPERATOR STEER` / `OPERATOR REDIRECT` / `OPERATOR AMEND` and reach the
+    daemon only over admin gRPC (`goal_steer`, `goal_amend` are in
+    `adminOnlyVerbs`, not grantable via `acl.json`).
+  - The group's COORDINATOR (any non-goal session) may steer through the
+    ctl `goal_steer` verb:
+    `{"cmd":"goal_steer","name":"<goal>","text":"...","from_session":"$KOTO_SESSION"}`
+    (`daemon/coord_steer.go`). It is labelled
+    `COORDINATOR STEER (from <group>/<session>)`, never with the operator
+    label, never changes the criteria, the iteration cap, the mode or the
+    judge, and is audited on the hash-chained spool. Goal worker and judge
+    sessions are refused.
+  - The ctl plane has no amend or redirect verb. An agent amending its own
+    goal would be accepting its own work.
+  - In a confirm goal, a live note is a plain user record. It never answers
+    a pending approval.
 - **Decision requests:** a worker blocked on a choice runs
   `cs-ask -g <id> "<question>" [option ...]` (ctl `ask`).
   - The question joins the same queue as a card with the options, an "other"

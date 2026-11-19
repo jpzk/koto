@@ -1620,7 +1620,7 @@ func (m *Model) inputBoxW() int {
 // inputTextCols is the column budget for the prompt input's text: the
 // bordered box's interior minus the 2-cell prefix and the textinput's own
 // prompt. Matches the MaxWidth clip renderInput applies to each body row.
-func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.modeChipW()-m.inputPromptW()) }
+func (m *Model) inputTextCols() int { return max(10, m.inputBoxW()-6-m.inputChipsW()-m.inputPromptW()) }
 
 // inputPromptW is the rendered width of the textinput's prompt ("> "), which
 // we now draw ourselves — bubbles' View() only handles the placeholder path.
@@ -1894,7 +1894,7 @@ func (m Model) renderInput() string {
 	// The session's permission mode rides inside the box, ahead of the text:
 	// always visible, so what a prompt is about to be allowed to do is never
 	// a tree glance away.
-	chip := m.renderModeChip()
+	chip := m.renderModeChip() + m.renderSteerChip()
 	var rows []string
 	if m.input.Value() == "" {
 		// Placeholder path: one line, never wrapped. It used to carry the
@@ -1906,7 +1906,7 @@ func (m Model) renderInput() string {
 		rows = m.renderInputLines(m.inputTextCols())
 		// Continuations align under the first row's text — the glyph, the
 		// space and the textinput prompt are all first-row-only.
-		cont := strings.Repeat(" ", 2+m.modeChipW()+m.inputPromptW())
+		cont := strings.Repeat(" ", 2+m.inputChipsW()+m.inputPromptW())
 		for i, row := range rows {
 			pfx := cont
 			if i == 0 {

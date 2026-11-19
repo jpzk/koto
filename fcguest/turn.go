@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -637,6 +638,12 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 		runClaudeConfirm(tw, req, args, env, idf)
 		return
 	}
+	if req.GetLiveInput() {
+		// Goal work turn: the same live stream-json stdin as confirm (no
+		// approval channel), so live steer notes reach the running turn.
+		runClaudeConfirm(tw, req, withLiveInput(args), env, idf)
+		return
+	}
 	w, err := startClaudeWorker("claude", args, env, bytes.NewReader(req.Msg))
 	if err != nil {
 		tw.errf("claude: start: %v", err)
@@ -1053,6 +1060,15 @@ func jobStatusIsRunning(path string) bool {
 	return strings.TrimSpace(string(buf[:n])) == "running"
 }
 
+// withLiveInput makes a claude launch read stream-json user records from a
+// live stdin (idempotent: the confirm launch already does).
+func withLiveInput(args []string) []string {
+	if slices.Contains(args, "--input-format") {
+		return args
+	}
+	return append(append([]string(nil), args...), "--input-format", "stream-json")
+}
+
 // runClaudeConfirm drives a mode=confirm turn: the message goes in as one
 // stream-json user record on a live stdin, every can_use_tool control request
 // is put to the host (approval.go), and stdin closes once the result is out.
@@ -1078,6 +1094,10 @@ func runClaudeConfirm(tw *turnConn, req *pb.MsgReq, args []string, env []string,
 	}
 	if tw.rd != nil {
 		go g.readReplies(tw.rd)
+		if req.GetLiveInput() {
+			// Only now does a TurnReply.note have a reader (approval.go note).
+			tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_LiveReady{LiveReady: true}})
+		}
 	} else {
 		g.drop(errors.New("no reply channel"))
 	}

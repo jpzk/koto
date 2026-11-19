@@ -72,6 +72,13 @@ func goalAddSteer(g, sess, source, who, text string) bool {
 // (goalCoordSteerMax) — a chatty coordinator cannot push the operator's steer
 // out of the prompt.
 func goalAddSteerFrom(g, sess, source, who, text, origin string) bool {
+	return goalAddSteerFromID(g, sess, source, who, text, origin, "")
+}
+
+// goalAddSteerFromID is goalAddSteerFrom with an entry id ("" = none): a
+// steer that is also offered to the running turn live carries one, so the
+// guest's note_delivered can mark it (goal_live.go).
+func goalAddSteerFromID(g, sess, source, who, text, origin, id string) bool {
 	text = strings.TrimSpace(truncateRunes(flattenInline(text), goalSteerTextMax))
 	if origin == goalSteerOriginCoord {
 		text = defangOperatorLabel(text)
@@ -94,7 +101,7 @@ func goalAddSteerFrom(g, sess, source, who, text, origin string) bool {
 		it.SteerLog = append(it.SteerLog, goalSteer{
 			Ts: goalNow(), Iteration: it.Iteration,
 			Source: truncateRunes(flattenInline(source), 80), Who: truncateRunes(flattenInline(who), 80), Text: text,
-			Origin: origin,
+			Origin: origin, ID: id,
 		})
 		it.SteerLog = trimSteerLog(it.SteerLog)
 		it.UpdatedAt = goalNow()
@@ -280,9 +287,20 @@ func goalSteerWith(g, name, text, who, origin string) (goalItem, error) {
 	if origin == goalSteerOriginCoord {
 		source = "coordinator steer"
 	}
-	if !goalAddSteerFrom(g, sess, source, who, text, origin) {
+	nid := "n" + randHex(6)
+	if !goalAddSteerFromID(g, sess, source, who, text, origin, nid) {
 		return goalItem{}, fmt.Errorf("goal %s did not take the steer", id)
 	}
+	// Live too: the running work turn reads it at its next tool boundary,
+	// under the same label its durable entry carries (goal_live.go). sess is
+	// the WORK session — a judge never receives a live note.
+	live := strings.TrimSpace(truncateRunes(flattenInline(text), goalSteerTextMax))
+	if origin == goalSteerOriginCoord {
+		live = liveCoordText(who, defangOperatorLabel(live))
+	} else {
+		live = liveOperatorText(who, live)
+	}
+	goalLiveNote(g, sess, nid, live)
 	goalLock.Lock()
 	var out goalItem
 	found := false
