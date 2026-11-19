@@ -144,6 +144,9 @@ func ctlRespToPB(v any) (*pb.CtlResponse, error) {
 	case schedAddResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
 			Result: &pb.CtlResponse_Sched{Sched: &pb.SchedAddResp{Ok: r.OK, Error: r.Error, Item: toPBScheduleItem(r.Item)}}}, nil
+	case steerCtlResp:
+		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
+			Result: &pb.CtlResponse_Interrupted{Interrupted: r.Interrupted}}, nil
 	case schedListResp:
 		out := &pb.SchedListResp{Ok: r.OK, Error: r.Error}
 		for _, it := range r.Schedules {

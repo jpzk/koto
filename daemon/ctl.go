@@ -324,6 +324,90 @@ func ctlDispatchInner(owner string, line []byte) any {
 		registerSession(req.Group, sess)
 		return baseResp{OK: true}
 
+	case "steer":
+		// Interrupt-and-redirect one conversation (steer.go). ACL is the
+		// interrupt/goal_interrupt rule: a non-main group steers only ITSELF
+		// (any of its own sessions — the group field is overwritten, never
+		// trusted); main may steer any registered group, itself included.
+		// Unlike send there is no reply window: a steer redirects work that
+		// is already delegated, it does not open a new delegation.
+		//
+		// Only the COORDINATOR steers (coord_steer.go): from_session — the
+		// caller's own session — must not be a goal worker or judge. A goal
+		// worker session as TARGET is goal_steer's job; a judge never.
+		var req sendReq
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		if req.Reply {
+			return errResp("ctl: steer takes no reply window — use send with reply")
+		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			emitLogfG("audit", owner, "warn", "[%s] audit ctl steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
+			return errResp("ctl: steer: " + err.Error())
+		}
+		if t, terr := normalizeSession(req.Session); terr == nil && isJudgeSession(t) {
+			return errResp("ctl: steer: " + errSteerJudge.Error())
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		res, err := steerRequestBy(req.Group, req.Session, req.Msg, owner+"/"+sessionMarkerName(from))
+		if err != nil {
+			return errResp("ctl: " + err.Error())
+		}
+		steerAudit("steer", owner, from, req.Group+"/"+sessionMarkerName(req.Session), req.Msg)
+		return steerCtlResp{baseResp: baseResp{OK: true}, Interrupted: res.Interrupted}
+
+	case "goal_steer":
+		// COORDINATOR steer of a goal (coord_steer.go, goal_steer.go): a
+		// durable entry in the run's steering log, rendered into every later
+		// iteration prompt under "COORDINATOR STEER (from <group>/<session>)"
+		// — never the operator's label, never a change to criteria,
+		// max_iterations, mode or the judge. Self-targeted for peers; main
+		// may name a registered peer, as for steer. The operator's goal_steer
+		// (gRPC GoalSteer, admin-only) is a different path and outranks it.
+		var req struct {
+			Group       string `json:"group"`
+			Name        string `json:"name"`
+			Text        string `json:"text"`
+			FromSession string `json:"from_session"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil {
+			return errResp(err.Error())
+		}
+		if !isMain || req.Group == "" {
+			req.Group = owner
+		}
+		if !groupNameRE.MatchString(req.Group) {
+			return errResp("ctl: invalid group name")
+		}
+		from, err := ctlSteerOrigin(owner, req.FromSession)
+		if err != nil {
+			emitLogfG("audit", owner, "warn", "[%s] audit ctl goal_steer REFUSED from=%q: %v", owner, flattenInline(truncateRunes(req.FromSession, 40)), err)
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		if len(req.Text) > goalSteerTextMax {
+			return errResp(fmt.Sprintf("ctl: goal_steer: text is %d bytes; the limit is %d", len(req.Text), goalSteerTextMax))
+		}
+		if err := ctlRequireRegistered(owner, req.Group); err != nil {
+			return errResp(err.Error())
+		}
+		who := owner + "/" + sessionMarkerName(from)
+		it, err := goalSteerCoordinator(req.Group, req.Name, req.Text, who)
+		if err != nil {
+			return errResp("ctl: goal_steer: " + err.Error())
+		}
+		steerAudit("goal_steer", owner, from, req.Group+"/goal:"+it.ID, req.Text)
+		return goalResp{BaseResp: baseResp{OK: true}, Item: it}
+
 	case "compact":
 		// Every group may compact ITSELF (self-targeting, like sched_*);
 		// main may also name a peer. compact.go.
