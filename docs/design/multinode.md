@@ -693,6 +693,7 @@ puts the first `node=` group on a real remote node.
    *Recommended:* relay back to control (operator direction: the node
    relays everything, control is the only front door). Cost: user
    traffic takes the extra hop through control.
+5. **Sends to an unreachable node: fail closed (this doc) or queue?**
    *Recommended:* fail closed, for the reasons in §4.
 6. **Placing `main` on a node.** *Recommended:* refused permanently
    (§4, §7.1).
