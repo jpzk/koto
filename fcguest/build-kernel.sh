@@ -70,7 +70,9 @@ KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.188-56.385.amzn2023}"
 KERNEL_COMMIT="${KERNEL_COMMIT:-0dcff8409289f418b20cf8b695406cb38ba477e0}"
 FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
 # Pinned by DIGEST: the builder image decides the compiler that produces
-# vmlinux, so a moving tag means a moving kernel binary.
+# vmlinux, so a moving tag means a moving kernel binary. Deliberately still
+# the fedora:44 digest after the guest base moved to 45: bumping it changes
+# the compiler, so it moves only with a deliberate kernel rebuild.
 BUILDER="${BUILDER:-docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19}"
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 
