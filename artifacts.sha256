@@ -35,8 +35,8 @@
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/firecracker
 #   <sha256>  fcassets/firecracker
-f56eabee1305e194a437a30e10189a47f5580ae5b8b214ccd522f0b20bd57c8d  koto
-fd5ffb76ccaed505bb9203b1552667f68c328224ae50b208bd9c4546d77c9c12  koto-tui
+cd37226ec7aecdf5eb1706c109960fbb42f3b6f99dfddf9cdeca1f3a96c955d7  koto
+9fc6f0611e163e629bd4c0f677b71cfef2f6d3416b7268a2a0fa30cb311339c1  koto-tui
 98ad7b3a21255fb9227dfe564a8c3e170d9272a6b1ac726a0e2f10a2d050e678  fcassets/firecracker
 0267ee4befc215885259433556633efc88836ec027643fe407376ed8dc540b3f  fcassets/vmlinux
-32182e761fd26f730a74b22a73d53376c3bef174db95007c07f0909a9cb7d586  fcassets/guest.img
+e29153f5b1b15a6a47246f8edd7d1586feb83b09158581e2928969fe131c0942  fcassets/guest.img
