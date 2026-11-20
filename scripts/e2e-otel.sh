@@ -73,7 +73,7 @@ fi
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 W=${E2E_OTEL_DIR:-$REPO/.e2e-otel}
 PHASES=${E2E_OTEL_PHASES:-daemon microvm}
-GO_IMAGE=docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
+GO_IMAGE=docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
 CONTAINER=${CONTAINER:-podman}
 # Go build cache for the pinned container (E2E_OTEL_GOCACHE, e.g. a tmpfs dir
 # when /workspace is short on space; default the repo-local .gocache).

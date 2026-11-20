@@ -35,7 +35,7 @@
 #   github/codeql-action/upload-sarif v4.38.3 2026-10-08
 #   CycloneDX/cyclonedx-gomod        v1.12.0  2026-08-21
 #   google/osv-scanner/v2            v2.5.1   2026-08-17 (v2.6.0 needs go 1.27)
-# Go 1.26.10 = Makefile GO_IMAGE, as in supplychain.yml.
+# Go 1.26.11 = Makefile GO_IMAGE, as in supplychain.yml.
 name: sbom
 
 on:
@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
         with:
-          go-version: "1.26.10" # = Makefile GO_IMAGE
+          go-version: "1.26.11" # = Makefile GO_IMAGE
           cache-dependency-path: |
             daemon/go.sum
             tui/go.sum

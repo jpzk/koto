@@ -96,10 +96,13 @@ endif
 # give identical binaries, except for the version string stamped below.
 # Update deliberately: podman/docker pull golang:1.26-alpine, then
 #   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
-# golang:1.26.10-alpine (index digest, linux/amd64 child d1f3216e…; bumped
-# 2026-10-24 from the go1.26.9 image, operator-approved security exception:
-# go1.26.10 — released 2026-10-19 — fixes GO-2026-6809 (crypto/x509), which
-# govulncheck reported reachable in all four modules. The earlier 1.26.9 pin,
+# golang:1.26.11-alpine (index digest, linux/amd64 child f496f8c5…; bumped
+# 2026-11-20 from the go1.26.10 image, operator-approved security exception:
+# go1.26.11 — released 2026-11-10 — fixes GO-2026-6859 (net/http
+# MaxBytesReader header race; daemon/proxy.go and otlprecv use
+# MaxBytesReader), which govulncheck reported reachable in all four modules.
+# The 1.26.10 pin, 2026-10-24, fixed GO-2026-6809 (crypto/x509); the earlier
+# 1.26.9 pin,
 # 2026-10-08, was the stdlib fix for the HTTP/2 advisories
 # GO-2026-6603/6611/6612/6617, whose x/net half is pinned in the go.mod files).
 # Go 1.24 fell out of support when 1.26 shipped, so its stdlib no longer
@@ -110,7 +113,7 @@ endif
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/supplychain.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
+GO_IMAGE ?= docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \

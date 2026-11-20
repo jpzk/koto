@@ -41,24 +41,47 @@ done <<<"$ign"
 
 if [ "${1:-}" = --sbom ]; then
   dir=${2:?usage: osv.sh --sbom <dir> [--sarif <file>]}
+  command -v jq >/dev/null || { echo "osv: jq not on PATH" >&2; exit 2; }
+  # Scan a COPY with the Go stdlib renamed: cyclonedx-gomod writes
+  # pkg:golang/std@go1.26.10, but OSV files stdlib advisories under the Go
+  # package "stdlib" with a bare version, so the original purl matches nothing
+  # and every stdlib CVE would pass silently. The published SBOM is unchanged.
+  scan=$(mktemp -d); trap 'rm -rf "$scan"' EXIT
   args=()
-  for f in "$dir"/*.cdx.json; do [ -e "$f" ] && args+=(-L "$f"); done
+  for f in "$dir"/*.cdx.json; do
+    [ -e "$f" ] || continue
+    jq 'walk(if type == "object" and ((.purl? // "") | type) == "string"
+                and ((.purl // "") | test("^pkg:golang/std@go"))
+             then .purl |= sub("^pkg:golang/std@go(?<v>[^?#]+).*$"; "pkg:golang/stdlib@\(.v)")
+             else . end)' "$f" > "$scan/$(basename "$f")"
+    args+=(-L "$scan/$(basename "$f")")
+  done
   [ ${#args[@]} -gt 0 ] || { echo "osv: no *.cdx.json in $dir" >&2; exit 2; }
   if [ "${3:-}" != --sarif ]; then
-    exec osv-scanner scan source --config="$CONFIG" "${args[@]}"
+    osv-scanner scan source --config="$CONFIG" "${args[@]}"
+    exit $?
   fi
-  # --sarif: write SARIF for code scanning AND keep the exit status, so the
-  # caller uploads the findings first and fails afterwards. A summary from the
-  # SARIF goes to the log. 0 = clean, 1 = findings (after ignores), other =
-  # scanner error (128 = no packages read, i.e. the SBOM was not understood).
+  # --sarif: two scans of the same copy.
+  #   1. SARIF WITHOUT the osv-scanner.toml ignores -> code scanning, so an
+  #      ignored finding stays visible there (dismiss it in the UI, with the
+  #      same reason) instead of vanishing from the tab.
+  #   2. the gate WITH the ignores -> the exit status the caller fails on,
+  #      after it has uploaded the SARIF.
+  # 0 = clean, 1 = findings not covered by a dated ignore, other = scanner
+  # error (128 = no packages read, i.e. the SBOM was not understood).
   sarif=${4:?usage: osv.sh --sbom <dir> --sarif <file>}
-  rc=0
-  osv-scanner scan source --config="$CONFIG" --format sarif --output "$sarif" "${args[@]}" || rc=$?
-  if [ -s "$sarif" ] && command -v jq >/dev/null; then
+  printf '# all findings, no ignores (osv.sh --sarif)\n' > "$scan/no-ignores.toml"
+  src=0
+  osv-scanner scan source --config="$scan/no-ignores.toml" --format sarif --output "$sarif" "${args[@]}" || src=$?
+  case $src in 0|1) ;; *) echo "osv: SARIF scan failed (exit $src)" >&2; exit "$src" ;; esac
+  if [ -s "$sarif" ]; then
     n=$(jq '[.runs[].results[]] | length' "$sarif")
-    echo "osv: $n SARIF result(s) (exit $rc)"
+    echo "osv: $n SARIF result(s) for code scanning (ignores NOT applied)"
     jq -r '.runs[].results[] | "  \(.ruleId)  \(.message.text | split("\n")[0])"' "$sarif" | sort -u | head -100
   fi
+  rc=0
+  echo "osv: gate (osv-scanner.toml ignores applied)"
+  osv-scanner scan source --config="$CONFIG" "${args[@]}" || rc=$?
   exit $rc
 fi
 

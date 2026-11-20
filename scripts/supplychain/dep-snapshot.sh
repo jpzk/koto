@@ -38,7 +38,7 @@ snap=$(jq -c \
   --arg scanned "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   def strip: sub("[?#].*$"; "");
   def tracked: test("^pkg:(golang|cargo|npm)/") and (test("^pkg:golang/std@") | not)
-               and (test("^pkg:golang/github\\.com/jpzk/koto") | not);
+               and (test("^pkg:golang/(github\\.com/jpzk/)?koto([-/@]|$)") | not);
   (.components | map({key: .["bom-ref"], value: .}) | from_entries) as $c
   | (.dependencies | map({key: .ref, value: (.dependsOn // [])}) | from_entries) as $d
   | def closure($s): {seen: {}, todo: [$s]}
@@ -47,8 +47,18 @@ snap=$(jq -c \
           | if .seen[$x] then . else .seen[$x] = true | .todo += ($d[$x] // []) end)
       | .seen | keys - [$s];
     def purl($r): ($c[$r].purl // "") | strip;
+    # direct = tracked packages reachable from the root through untracked
+    # nodes only (fc-agent inside guest.img, the pi install, std), i.e.
+    # what the root pulls in itself rather than through another package.
+    def directs($s): {seen: {}, todo: ($d[$s] // []), out: []}
+      | until(.todo | length == 0;
+          .todo[0] as $x | .todo |= .[1:]
+          | if .seen[$x] then .
+            elif (purl($x) | tracked) then .seen[$x] = true | .out += [$x]
+            else .seen[$x] = true | .todo += ($d[$x] // []) end)
+      | .out;
     def manifest($root; $name; $src):
-      ($d[$root] // []) as $direct
+      directs($root) as $direct
       | {key: $name, value: {name: $name, file: {source_location: $src},
           metadata: {sbom: "koto CycloneDX (scripts/supplychain/sbom.sh)"},
           resolved: ([closure($root)[] | select(purl(.) | tracked)
@@ -58,7 +68,7 @@ snap=$(jq -c \
                 scope: (if $c[$r].scope == "excluded" then "development" else "runtime" end),
                 dependencies: ([($d[$r] // [])[] | purl(.) | select(tracked)] | unique)}}]
             | from_entries)}};
-    def rootref($pred): [.components[] | select($pred) | .["bom-ref"]] | if length == 1 then .[0] else error("root not unique") end;
+    def rootref(pred): [.components[] | select(pred) | .["bom-ref"]] | if length == 1 then .[0] else error("root not unique") end;
   {version: 0, sha: $sha, ref: $ref,
    job: {correlator: $corr, id: $run},
    detector: {name: "koto-sbom", version: "1", url: "https://github.com/jpzk/koto/tree/develop/scripts/supplychain"},
