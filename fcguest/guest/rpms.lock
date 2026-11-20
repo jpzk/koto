@@ -1,7 +1,8 @@
 # Build toolchain for guest.img (fcguest/Dockerfile.guest, stage tc). NOT shipped:
 # only the static tmux it compiles and nothing else enters guest.img.
 # Fedora-signed builds (key f577861e = Fedora 45) from Koji's permanent signed/ tree, so
-# the set never moves under a rebuild. Latest F45 builds as of 2026-11-18: the
+# the set never moves under a rebuild. Latest F45 builds as of 2026-11-18 (re-checked
+# 2026-11-20 against koji f45-updates: still newest, all 28 signed by f577861e): the
 # operator approved re-pinning to latest F45 on 2026-11-18 (age-gate exception,
 # with the fedora:45 base) so some are < 6 weeks old (gcc 16.2.1-3, kernel-headers 7.3.3).
 # Versions match the pinned fedora base (glibc 2.44-2, libgcc 16.2.1-3).
