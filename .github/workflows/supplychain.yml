@@ -1,5 +1,6 @@
 # supplychain — Go supply-chain checks on every push / PR to the long-lived
-# branches, plus a CycloneDX SBOM sanity build on release branches.
+# branches. The CycloneDX SBOM (build, osv SARIF to Code scanning, dependency
+# snapshot for Dependabot) moved to sbom.yml + sbom-daily.yml.
 #
 # This file REPLACES govulncheck.yml (which ran only on release pushes): the
 # govulncheck logic and its rationale live here, once. What runs, per module
@@ -25,11 +26,6 @@
 #                Findings fail; exceptions only via osv-scanner.toml
 #                [[IgnoredVulns]] with a reason and an ignoreUntil expiry.
 #                govulncheck = reachability, osv-scanner = inventory.
-#   sbom         (release / release/** pushes only) CycloneDX SBOMs for the
-#                shipped Go binaries, uploaded as a workflow artifact — a check
-#                that `make sbom` works, NOT the published copy: release SBOMs
-#                are attached to the DRAFT release by `make release-draft`
-#                (releases are immutable once published).
 #
 # Go version: pinned to the exact version the release binaries are BUILT with
 # (the Makefile's GO_IMAGE digest — `podman run --rm $GO_IMAGE go version`), so
@@ -41,10 +37,8 @@
 # dependency here. `go install pkg@vX.Y.Z` is verified by sum.golang.org.
 #   actions/checkout                 v7.0.0   2026-06-18
 #   actions/setup-go                 v6.5.0   2026-06-24
-#   actions/upload-artifact          v7.0.1   2026-04-10
 #   golang.org/x/vuln (govulncheck)  v1.6.0   2026-07-09
 #   google/osv-scanner/v2            v2.5.1   2026-08-17 (v2.6.0 needs go 1.27)
-#   CycloneDX/cyclonedx-gomod        v1.12.0  2026-08-21
 name: supplychain
 
 on:
@@ -198,32 +192,3 @@ jobs:
       - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
       - name: osv-scanner (go.mod x4 + Firecracker Cargo.lock)
         run: scripts/supplychain/osv.sh "$RUNNER_TEMP/osv"
-
-  sbom:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/release/'))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
-        with:
-          go-version: "1.26.10" # = Makefile GO_IMAGE
-          cache-dependency-path: |
-            daemon/go.sum
-            tui/go.sum
-            fcguest/go.sum
-            protocol/go.sum
-      - run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
-          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
-      - name: CycloneDX SBOMs (koto, koto-tui, fc-agent)
-        run: scripts/supplychain/sbom.sh "$RUNNER_TEMP/sbom"
-      - name: osv-scanner on the SBOMs
-        run: scripts/supplychain/osv.sh --sbom "$RUNNER_TEMP/sbom"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 2026-04-10
-        with:
-          name: sbom
-          path: ${{ runner.temp }}/sbom/*.cdx.json
-          if-no-files-found: error

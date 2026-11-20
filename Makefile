@@ -341,21 +341,21 @@ dist: $(ARTIFACTS)
 	@# koto update refuse a SHA256SUMS whose koto-version is not the version
 	@# they were asked for, so an older signed set cannot be replayed under a
 	@# newer tag (or by a mirror).
-	@# CycloneDX SBOMs for koto, koto-tui and fc-agent (see the sbom target).
+	@# ONE CycloneDX SBOM for the whole release (see the sbom target).
 	@$(MAKE) --no-print-directory sbom
-	@# The SBOMs go into the SIGNED SHA256SUMS as "# sbom: <sha256>  <file>"
-	@# lines, not as plain entries: the installer EMBEDDED in every koto already
+	@# The SBOM goes into the SIGNED SHA256SUMS as a "# sbom: <sha256>  <file>"
+	@# line, not as a plain entry: the installer EMBEDDED in every koto already
 	@# out there (koto update) takes asset names from the non-comment lines and
 	@# refuses anything that is not *_<arch>.zst, so a plain entry would break
 	@# updating from every existing release. Comment lines are skipped by that
 	@# installer and by `sha256sum -c`, and are still covered by SHA256SUMS.asc.
-	@# Check the SBOMs:  sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c -
+	@# Check the SBOM:  sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c -
 	@( cd $(DIST_DIR) && { echo "# koto-version: $$(echo '$(DIST_VERSION)' | sed 's/^v//')"; \
 	    sha256sum *_$(DIST_ARCH).zst; \
 	    sha256sum *_$(DIST_ARCH).cdx.json | sed 's/^/# sbom: /'; } > SHA256SUMS )
-	@test "$$(grep -c '^# sbom: ' $(DIST_DIR)/SHA256SUMS)" = 3 || { \
-	  echo "SHA256SUMS should list 3 SBOMs (koto, koto-tui, fc-agent)"; exit 1; }
-	@echo "    SHA256SUMS over the uploaded assets (+ 3 SBOMs as signed '# sbom:' lines)"
+	@test "$$(sed -n 's/^# sbom: [0-9a-f]\{64\}  //p' $(DIST_DIR)/SHA256SUMS)" = "$(DIST_SBOM)" || { \
+	  echo "SHA256SUMS should list exactly one SBOM, $(DIST_SBOM)"; exit 1; }
+	@echo "    SHA256SUMS over the uploaded assets (+ $(DIST_SBOM) as a signed '# sbom:' line)"
 	@# Signing is SEPARATE and may happen elsewhere. The release key should not
 	@# have to live on a build host, so dist signs only if the secret key
 	@# happens to be here and otherwise tells you what to sign and where to put
@@ -389,16 +389,24 @@ dist: $(ARTIFACTS)
 	  "committed at this tag, before anything is installed."; } > $(DIST_DIR)/NOTES.md
 	@echo "next:  make release-draft   (uploads the assets + SHA256SUMS to a draft release)"
 
-# CycloneDX SBOMs for the Go binaries (koto, koto-tui, fc-agent), written next
-# to the release assets as <name>_<version>_<arch>.cdx.json so `make dist`
-# hashes them into SHA256SUMS and `make release-draft` uploads them while the
-# release is a DRAFT — releases are immutable once published, so there is no
-# later upload. Same GO_IMAGE + CGO_ENABLED=0 as the build. Firecracker has no
-# SBOM (documented gap, see scripts/supplychain/sbom.sh).
+# ONE CycloneDX 1.6 SBOM for the release, koto_<version>_<arch>.cdx.json,
+# written next to the release assets so `make dist` hashes it into SHA256SUMS
+# and `make release-draft` uploads it while the release is a DRAFT — releases
+# are immutable once published, so there is no later upload. It covers koto,
+# koto-tui, firecracker (crates from its Cargo.lock at FC_COMMIT), vmlinux and
+# guest.img (fc-agent, node/npm/claude-code/codex/pi, tmux, the fedora base by
+# digest, the rpms.lock toolchain) — scripts/supplychain/sbom.sh. Same
+# GO_IMAGE + CGO_ENABLED=0 as the build; the commit and its time are passed in
+# (the container has no git) and make the document deterministic. Per-binary
+# intermediates land in $(DIST_DIR)/parts/ and are not release assets.
+DIST_SBOM = koto_$(patsubst v%,%,$(DIST_VERSION))_$(DIST_ARCH).cdx.json
 sbom:
 	$(need-container)
 	@mkdir -p $(DIST_DIR)
-	$(GO_BUILD_RUN) sh scripts/supplychain/sbom.sh $(DIST_DIR) $(DIST_VERSION) $(DIST_ARCH)
+	@git diff --quiet HEAD -- || echo "!! uncommitted changes: the SBOM describes commit $$(git rev-parse --short HEAD), not them"
+	$(GO_BUILD_RUN) sh scripts/supplychain/sbom.sh $(DIST_DIR) $(DIST_VERSION) $(DIST_ARCH) \
+	  $$(git rev-parse HEAD) $$(git log -1 --format=%ct HEAD)
+	@test -s $(DIST_DIR)/$(DIST_SBOM)
 
 # --- release ---------------------------------------------------------------
 # Publish what `make dist` produced as a GitHub release, in three commands that
@@ -432,9 +440,9 @@ release-draft:
 	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
 	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - run 'make dist' first"; exit 1; }
 	@test -n "$(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
-	@test "$(words $(DIST_SBOMS))" = 3 || { echo "expected 3 *_$(DIST_ARCH).cdx.json SBOMs in $(DIST_DIR) - run 'make dist' first"; exit 1; }
-	@( cd $(DIST_DIR) && sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c - >/dev/null ) || { \
-	  echo "the SBOMs in $(DIST_DIR) do not match SHA256SUMS - re-run 'make dist'"; exit 1; }
+	@test "$(notdir $(DIST_SBOMS))" = "$(DIST_SBOM)" || { echo "expected exactly one SBOM, $(DIST_DIR)/$(DIST_SBOM) - run 'make dist' first"; exit 1; }
+	@( cd $(DIST_DIR) && sed -n 's/^# sbom: //p' SHA256SUMS | grep -q . && sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c - >/dev/null ) || { \
+	  echo "the SBOM in $(DIST_DIR) does not match SHA256SUMS - re-run 'make dist'"; exit 1; }
 	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
 	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
 	  echo "describes the bytes you are about to publish"; exit 1; }

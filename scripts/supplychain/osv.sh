@@ -40,11 +40,26 @@ done <<<"$ign"
 [ $bad -eq 0 ] || exit 1
 
 if [ "${1:-}" = --sbom ]; then
-  dir=${2:?usage: osv.sh --sbom <dir>}
+  dir=${2:?usage: osv.sh --sbom <dir> [--sarif <file>]}
   args=()
-  for f in "$dir"/*.cdx.json; do args+=(-L "$f"); done
+  for f in "$dir"/*.cdx.json; do [ -e "$f" ] && args+=(-L "$f"); done
   [ ${#args[@]} -gt 0 ] || { echo "osv: no *.cdx.json in $dir" >&2; exit 2; }
-  exec osv-scanner scan source --config="$CONFIG" "${args[@]}"
+  if [ "${3:-}" != --sarif ]; then
+    exec osv-scanner scan source --config="$CONFIG" "${args[@]}"
+  fi
+  # --sarif: write SARIF for code scanning AND keep the exit status, so the
+  # caller uploads the findings first and fails afterwards. A summary from the
+  # SARIF goes to the log. 0 = clean, 1 = findings (after ignores), other =
+  # scanner error (128 = no packages read, i.e. the SBOM was not understood).
+  sarif=${4:?usage: osv.sh --sbom <dir> --sarif <file>}
+  rc=0
+  osv-scanner scan source --config="$CONFIG" --format sarif --output "$sarif" "${args[@]}" || rc=$?
+  if [ -s "$sarif" ] && command -v jq >/dev/null; then
+    n=$(jq '[.runs[].results[]] | length' "$sarif")
+    echo "osv: $n SARIF result(s) (exit $rc)"
+    jq -r '.runs[].results[] | "  \(.ruleId)  \(.message.text | split("\n")[0])"' "$sarif" | sort -u | head -100
+  fi
+  exit $rc
 fi
 
 out=${1:?usage: osv.sh <outdir> | --sbom <dir>}

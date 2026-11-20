@@ -1,0 +1,148 @@
+# sbom-daily — re-scan what main ships against TODAY's vulnerability data.
+#
+# A new advisory against an unchanged dependency produces no push, so the
+# per-commit sbom.yml never sees it. Every day at 05:17 UTC (and on demand),
+# this checks out main, rebuilds koto_<ver>_x86_64.cdx.json, osv-scans it,
+# uploads the SARIF to Code scanning (category sbom-osv, ref refs/heads/main)
+# and re-submits the dependency snapshot for main. Same scripts and the same
+# three-job privilege split as sbom.yml — see its header for the rationale
+# and the pin dates (cutoff 2026-10-09).
+#
+# Scheduled workflows run from the repository's DEFAULT branch (develop on
+# jpzk/koto), so this fires once it is merged there; what it SCANS is main.
+name: sbom-daily
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sbom-daily
+  cancel-in-progress: false
+
+env:
+  SCAN_REF: main
+
+jobs:
+  sbom:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      ref: ${{ steps.meta.outputs.ref }}
+      file: ${{ steps.meta.outputs.file }}
+      sarif: ${{ steps.scan.outputs.sarif }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+        with:
+          go-version: "1.26.10" # = Makefile GO_IMAGE
+          cache-dependency-path: |
+            daemon/go.sum
+            tui/go.sum
+            fcguest/go.sum
+            protocol/go.sum
+      - run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
+      - id: meta
+        name: version, commit, ref
+        run: |
+          set -eu
+          sha=$(git rev-parse HEAD)
+          base=$(sed -n 's/^DIST_VERSION *?= *//p' Makefile)
+          ver="${base}-g${sha:0:7}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ref=refs/heads/$SCAN_REF" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "file=koto_${ver}_x86_64.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "koto $ver @ $sha (refs/heads/$SCAN_REF)"
+      # main may predate sbom.sh's aggregate stage (it reaches main with
+      # release/1.13.0); fail loudly rather than scan nothing.
+      - name: CycloneDX SBOM (koto, koto-tui, firecracker, vmlinux, guest.img)
+        env:
+          VER: ${{ steps.meta.outputs.ver }}
+        run: |
+          test -f scripts/supplychain/sbomagg/main.go || { echo "::error::$SCAN_REF has no scripts/supplychain/sbomagg yet (lands with the first release after feat/sbom)"; exit 1; }
+          scripts/supplychain/sbom.sh "$GITHUB_WORKSPACE/sbom-out" "$VER" x86_64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 2026-04-10
+        with:
+          name: sbom
+          path: |
+            sbom-out/*.cdx.json
+            sbom-out/parts/*.cdx.json
+          if-no-files-found: error
+      - id: scan
+        name: osv-scanner on the SBOM (SARIF)
+        run: |
+          rc=0
+          scripts/supplychain/osv.sh --sbom sbom-out --sarif "$RUNNER_TEMP/sbom-osv.sarif" || rc=$?
+          test -s "$RUNNER_TEMP/sbom-osv.sarif" && echo "sarif=true" >> "$GITHUB_OUTPUT"
+          echo "$rc" > "$RUNNER_TEMP/osv.rc"
+      - if: ${{ steps.scan.outputs.sarif == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 2026-04-10
+        with:
+          name: sbom-osv-sarif
+          path: ${{ runner.temp }}/sbom-osv.sarif
+          if-no-files-found: error
+      - name: fail on osv findings
+        run: |
+          rc=$(cat "$RUNNER_TEMP/osv.rc")
+          case "$rc" in
+            0) echo "osv: no findings" ;;
+            1) echo "::error::osv-scanner found vulnerabilities in main's SBOM (see Code scanning, category sbom-osv)"; exit 1 ;;
+            *) echo "::error::osv-scanner failed (exit $rc)"; exit 1 ;;
+          esac
+
+  code-scanning:
+    needs: sbom
+    if: ${{ !cancelled() && needs.sbom.outputs.sarif == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 2026-10-07
+        with:
+          name: sbom-osv-sarif
+          path: sarif
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3 2026-10-08
+        with:
+          sarif_file: sarif/sbom-osv.sarif
+          category: sbom-osv
+          ref: ${{ needs.sbom.outputs.ref }}
+          sha: ${{ needs.sbom.outputs.sha }}
+
+  dependency-graph:
+    needs: sbom
+    if: ${{ !cancelled() && needs.sbom.outputs.file != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # POST /repos/{owner}/{repo}/dependency-graph/snapshots
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+        with:
+          ref: ${{ needs.sbom.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/supplychain
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 2026-10-07
+        with:
+          name: sbom
+          path: sbom-out
+      - name: submit dependency snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_SHA: ${{ needs.sbom.outputs.sha }}
+          SNAPSHOT_REF: ${{ needs.sbom.outputs.ref }}
+          FILE: sbom-out/${{ needs.sbom.outputs.file }}
+        run: scripts/supplychain/dep-snapshot.sh "$FILE"
