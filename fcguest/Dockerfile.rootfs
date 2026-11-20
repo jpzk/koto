@@ -45,11 +45,11 @@ FROM docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf33
 #   done
 # and cross-check each against `npm view @anthropic-ai/<p>@$V dist.integrity`
 # (base64 of the same digest).
-# Pin: 2.1.325 (dist-tag latest; published 2026-11-13T20:07:25Z -- NOT
-# age-gated, operator override 2026-11-16; dist-tag stable was 2.1.311).
-ARG CLAUDE_CODE_VERSION=2.1.325
-ARG CLAUDE_CODE_SHA512=394c426f4b31ef7e33261f731933fda05d35819e380c21856b0ee1803e1bc9ea634511b2bc7ce050ec02edd9428152258d5e828845438eaf9a9d8dc652f28543
-ARG CLAUDE_CODE_LINUX_X64_SHA512=06a67332f3ffce02cb2f7e12fbb3b36c6f9cca8169ee0c161d4e64a15c2cc8c953033fb4cd90266d8f94933bed376457c69e8070c7a76d8223409c685df518df
+# Pin: 2.1.329 (dist-tag latest; published 2026-11-19T18:40:25Z -- NOT
+# age-gated, operator override 2026-11-20; dist-tag stable was 2.1.311).
+ARG CLAUDE_CODE_VERSION=2.1.329
+ARG CLAUDE_CODE_SHA512=590ed1637df582c3838cea0305b786d5f8cc7ca63552bf72c5600e23d4a074b66fa80f6c01111a7b35edededee35b1e5823540660d48aa5253d49ed629588414
+ARG CLAUDE_CODE_LINUX_X64_SHA512=fa7e25bb5b9b600a74d98d17fcc0149f1c3dc98e921c767bec5f88a16f95d3056816e888f68a5d1fa8287e37f5e205c908460c4cda64b3b1a7d62f1765328058
 
 # Security-front RPMs, PINNED by NEVRA + SHA-256 under the 6-week age gate
 # (a build is eligible once its Bodhi update went stable >= 6 weeks before the
@@ -178,10 +178,10 @@ RUN set -eu; cd /tmp; \
 # resolution. Pinned by version AND by the SHA-256 of the release tarball,
 # checked here before anything is unpacked.
 #
-# Pin: rust-v0.169.0, the newest non-prerelease (published 2026-11-13T08:37:05Z)
-# -- NOT age-gated, operator override 2026-11-16 (earlier: 2026-10-19). The digest is the
+# Pin: rust-v0.171.0, the newest non-prerelease (published 2026-11-20T00:44:47Z)
+# -- NOT age-gated, operator override 2026-11-20 (earlier: 2026-11-16, 2026-10-19). The digest is the
 # "digest" GitHub reports for the asset, cross-checked by downloading it:
-#   T=rust-v0.169.0; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.171.0; A=codex-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
@@ -194,14 +194,14 @@ RUN set -eu; cd /tmp; \
 # beside its own executable, not via config
 # (codex-rs/install-context/src/lib.rs:175-204), hence /usr/local/bin.
 # features.code_mode_host is Stable and default-on (checked in rust-v0.163.0,
-# codex-rs/features/src/lib.rs:1177-1182; the 0.169.0 changelog lists no
+# codex-rs/features/src/lib.rs:1177-1182; the 0.169.1..0.171.0 changelogs list no
 # removal); the managed config and the turn's
 # -c flag (fcguest/codex.go) set it explicitly anyway. Verify:
-#   T=rust-v0.169.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.171.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest, .size)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
-#   -> 2026-11-13T08:37:05Z, sha256:cbed6a8d...aaceb, 27390073 bytes; the
+#   -> 2026-11-20T00:44:47Z, sha256:d7861903...3d868c, 27435775 bytes; the
 #      tarball holds one member, codex-code-mode-host-x86_64-unknown-linux-musl.
 #
 # No self-update: codex's startup update check (check_for_update_on_startup,
@@ -220,10 +220,15 @@ RUN set -eu; cd /tmp; \
 # openssl-src 300.6.1+3.6.3, zip 9.0.0; hickory 0.25.2 still locked (0.26.3
 # beside it). 0.166/0.168 changed the code-mode host wire protocol, so codex
 # and codex-code-mode-host must stay on the same tag.
+# Bumped 0.169.0 -> 0.171.0 (2026-11-20): Cargo.lock sha256 22addd65...a262;
+# rustls 0.23.46, rustls-webpki 0.103.16, gix 0.89.0, openssl 0.10.82 /
+# openssl-src 300.6.1+3.6.3 unchanged; zip 9.0.0 -> 9.0.5; hickory 0.25.2
+# still locked. Both release binaries carry cosign sigstore bundles from
+# rust-release.yml@rust-v0.171.0; the exec --json events koto reads are unchanged.
 # Re-check codex-rs/Cargo.lock for the tag before bumping.
-ARG CODEX_VERSION=0.169.0
-ARG CODEX_SHA256=9af4d751fce183faedea629437d5252dbf458eeb04130cf4f97be844621ea985
-ARG CODEX_CODE_MODE_HOST_SHA256=cbed6a8d25e8268792b757767fbc76d4c62e84bcf8ee4a63f97547f0de3aaceb
+ARG CODEX_VERSION=0.171.0
+ARG CODEX_SHA256=01baa2e47809f8597be5b2f8abd4e4dfe3fb5bcb6e504c2fbaaad97056c15e8d
+ARG CODEX_CODE_MODE_HOST_SHA256=d78619030c1b8d0a4d9c9c67667c1bfa23ad9d9edc63d87ffeaa86796f3d868c
 
 RUN set -eu; cd /tmp; \
     a=codex-x86_64-unknown-linux-musl; \
