@@ -22,6 +22,12 @@ Path conventions:
 
 ## 0. Summary
 
+- **Purpose: join compute and RAM.** Extra machines add CPU and memory
+  for groups, nothing more. A group is placed on a node and runs there;
+  for the operator nothing else changes. The node is a pure relay and
+  executor: every stream, verb, log, metric and audit record crosses
+  back to control, which stays the single source of truth. A node
+  restart costs nothing: control re-issues the desired state.
 - **Two roles, one binary.** The existing `koto daemon` becomes the
   **control** daemon. It keeps *all* state and *all* authority. A new
   `koto node` subcommand is the **expansion** daemon: a stateless
@@ -684,9 +690,9 @@ puts the first `node=` group on a real remote node.
    for v1. Rotation is rare, and re-enrolling is one command per node.
 4. **Published ports on nodes.** Should they bind on the node
    (loopback by default) or be relayed back to control's interface?
-   *Recommended:* bind on the node. Relaying would carry user traffic
-   through control for no security gain.
-5. **Sends to an unreachable node: fail closed (this doc) or queue?**
+   *Recommended:* relay back to control (operator direction: the node
+   relays everything, control is the only front door). Cost: user
+   traffic takes the extra hop through control.
    *Recommended:* fail closed, for the reasons in §4.
 6. **Placing `main` on a node.** *Recommended:* refused permanently
    (§4, §7.1).
@@ -701,6 +707,14 @@ puts the first `node=` group on a real remote node.
    time?** *Recommended:* yes. Doing nothing is the only behaviour
    consistent with "never initiates". Add an optional
    `--orphan-stop-after` later if the operator wants a dead-man switch.
+
+10. **Where do workspace disks live?** On the node (local IO; the node
+    holds the bytes, control owns the metadata and treats the disk as
+    its cache on that node) or on control behind a network block device
+    (one copy, but every build and `git status` in the guest goes over
+    the network). *Recommended:* on the node. Borrowing compute includes
+    borrowing disk IO; the network-disk variant turns every guest
+    syscall into a round trip.
 
 ## TLDR
 
