@@ -156,6 +156,11 @@ func modeCancelPending(g, session string) bool {
 	return modeRestarts[sessKey(g, session)] != nil
 }
 
+// modeCutHook runs after applyModeChange cut the turn and before it sweeps the
+// turn's approvals — the window in which the turn goroutine's own sweep can
+// win. A seam for tests (nil in production).
+var modeCutHook func(g, session string)
+
 // cutTurnForMode cancels exactly the turn `want` identifies and records mr
 // for it, in one queuesMu section, so the turn can neither retire nor be
 // cancelled by anything else between the check and the record. (Draft PR #123
@@ -307,6 +312,9 @@ func applyModeChange(g, session, requested string, refuse error) modeChangeResul
 		}
 	}
 	modeStampMu.Unlock()
+	if mr != nil && modeCutHook != nil {
+		modeCutHook(g, session)
+	}
 
 	if alreadyCut {
 		res.Denied = denyApprovals(g, session, nil, decDeny, "mode-change", true)
@@ -415,6 +423,13 @@ func runJobTurn(g string, job sendJob) error {
 		}
 		mr.markRan()
 		if mr.refuse != nil {
+			if job.steer {
+				// The caller requeues the steer (requeueRefusedSteer),
+				// consuming mr in the same queuesMu section as the
+				// requeue, so a cancel that reached the cut turn is still
+				// honoured.
+				return &steerRefusalCut{mr: mr}
+			}
 			dropModeRestart(g, job.session, mr)
 			return mr.refuse
 		}
@@ -435,4 +450,48 @@ func runJobTurn(g string, job sendJob) error {
 			g, sessionMarkerName(job.session), mr.to, mr.from)
 		msg = modeRestartNote(mr.from, mr.to) + job.msg
 	}
+}
+
+// steerRefusalCut is runJobTurn's result for a STEER turn that a refused mode
+// change cut (T3b/T3c-codex). The refusal is fail-closed — the requested mode
+// never applies and the cut run is not re-run in place — but dropping the job
+// lost the operator's steer: it was never answered, and nothing told the
+// operator to resend it. sendWorkerTurnOnce requeues the steer instead
+// (requeueRefusedSteer).
+type steerRefusalCut struct{ mr *modeRestart }
+
+func (e *steerRefusalCut) Error() string { return e.mr.refuse.Error() }
+func (e *steerRefusalCut) Unwrap() error { return e.mr.refuse }
+
+// requeueRefusedSteer puts job — a steer whose turn the refused mode change mr
+// cut — back at the HEAD of its session's steer lane, and consumes mr, in one
+// queuesMu section. It runs exactly once per cut: the cut run has returned
+// (runJobTurn), the worker calling this is the only one that can pop the lane,
+// and the requeued job is a fresh entry carrying the same done channel, so the
+// steer's caller gets one result — that of the requeued run. It is NOT
+// requeued (false) when an interrupt, stop or newer steer reached the cut turn
+// after the cut (mr.cancelled: the operator stopped or replaced the work), or
+// when the group is stopping or the session fenced; the caller then reports
+// the refusal as the steer's result, as before.
+func requeueRefusedSteer(g string, job sendJob, mr *modeRestart) bool {
+	queuesMu.Lock()
+	defer queuesMu.Unlock()
+	k := sessKey(g, job.session)
+	if modeRestarts[k] == mr {
+		delete(modeRestarts, k)
+	}
+	if mr.cancelled || groupBarred(g) || sessionIsWedged(g, job.session) {
+		return false
+	}
+	ensureQueueLocked(g, job.session)
+	// Head, not tail: the steer was already the oldest pending one when it
+	// ran. The lane cap is not applied — this is the same steer, not a new
+	// one, and its bytes were released when it was popped.
+	steerLanes[k] = append([]sendJob{job}, steerLanes[k]...)
+	groupQueuedBytes[g] += int64(len(job.msg))
+	select {
+	case steerWake[k] <- struct{}{}:
+	default:
+	}
+	return true
 }

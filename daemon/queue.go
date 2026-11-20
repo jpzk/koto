@@ -922,6 +922,7 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 	turnCancels[k] = tc
 	queuesMu.Unlock()
 	var err error
+	requeued := false
 	if job.compact != nil {
 		err = runCompactJob(g, job.session, job.compact)
 		clearTurnStamp(g, job.session)
@@ -941,6 +942,15 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 		sj := job
 		sj.msg = frameSteerBy(job.msg, cut, job.steerBy)
 		err = runJobTurn(g, sj)
+		var rc *steerRefusalCut
+		if errors.As(err, &rc) {
+			err = rc.mr.refuse
+			if requeueRefusedSteer(g, job, rc.mr) {
+				emitLogfG("session", g, "info", "[%s] session=%s steer requeued: a refused mode change (%v) cut its turn",
+					g, sessionMarkerName(job.session), rc.mr.refuse)
+				requeued = true
+			}
+		}
 	} else {
 		// Re-run under the new mode each time a mode change cuts the turn
 		// (mode_live.go); the job — and a goal iteration riding it —
@@ -961,6 +971,11 @@ func sendWorkerTurnOnce(g string, job sendJob) (held sendJob, again bool) {
 		cur = tc
 	}
 	retireTurn(g, job.session, cur)
+	if requeued {
+		// The requeued steer reports its own result on the same done
+		// channel when it runs (next, from the head of the lane).
+		return held, again
+	}
 	job.done <- err
 	return held, again
 }

@@ -643,3 +643,95 @@ func TestApprovalGateAllowNoteOnlyWithText(t *testing.T) {
 type nopWC struct{ io.Writer }
 
 func (nopWC) Close() error { return nil }
+
+// A live steer note (TurnReply.note) is written into claude's stdin as ONE
+// stream-json user record carrying the host's text verbatim, acknowledged
+// with note_delivered; it answers no open approval (a confirm goal's pending
+// tool stays pending); once stdin is closed it is dropped, unacknowledged.
+func TestLiveNoteIntoRunningTurn(t *testing.T) {
+	f := newGateFix(t, time.Hour)
+	hostR, hostW := io.Pipe()
+	go f.g.readReplies(hostR)
+	f.g.line(canUse("r1", "Bash", `{"command":"date"}`))
+	text := "OPERATOR STEER (live, from alice): use the staging db"
+	if err := writeFrame(hostW, &pb.TurnReply{Kind: &pb.TurnReply_Note{Note: &pb.SteerNote{Id: "n1", Text: text}}}); err != nil {
+		t.Fatal(err)
+	}
+	var acked bool
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !acked; time.Sleep(5 * time.Millisecond) {
+		for _, fr := range f.out.frames(t) {
+			acked = acked || fr.GetNoteDelivered() == "n1"
+		}
+	}
+	if !acked {
+		t.Fatal("no note_delivered frame")
+	}
+	var users []string
+	for _, l := range bytes.Split(f.in.snapshot(), []byte("\n")) {
+		var u struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		}
+		if len(l) > 0 && json.Unmarshal(l, &u) == nil && u.Type == "user" {
+			if u.Message.Role != "user" {
+				t.Fatalf("role = %q", u.Message.Role)
+			}
+			users = append(users, u.Message.Content)
+		}
+	}
+	if len(users) != 1 || users[0] != text {
+		t.Fatalf("user records = %q", users)
+	}
+	if f.g.open() != 1 || len(f.in.responses(t)) != 0 {
+		t.Fatal("a note must not answer the pending approval")
+	}
+	// After the result: stdin closed, the note is dropped and not acked.
+	f.g.endInput()
+	if err := writeFrame(hostW, &pb.TurnReply{Kind: &pb.TurnReply_Note{Note: &pb.SteerNote{Id: "n2", Text: "late"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// a following approval reply proves the reader handled n2 first
+	if err := writeFrame(hostW, &pb.TurnReply{Kind: &pb.TurnReply_Approval{Approval: &pb.ApprovalReply{Id: "r1", Allow: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && f.g.open() != 0; time.Sleep(5 * time.Millisecond) {
+	}
+	for _, fr := range f.out.frames(t) {
+		if fr.GetNoteDelivered() == "n2" {
+			t.Fatal("a note after stdin closed was acknowledged")
+		}
+	}
+	if bytes.Contains(f.in.snapshot(), []byte("late")) {
+		t.Fatal("a note was written after stdin closed")
+	}
+}
+
+// A goal work turn (live_input) launches with a live stream-json stdin, in
+// every mode, exactly once.
+func TestLiveInputLaunchArgs(t *testing.T) {
+	for _, m := range []string{modeYolo, modePlan, modeConfirm} {
+		a, err := claudeBaseArgs(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l := withLiveInput(a)
+		n := 0
+		for i, s := range l {
+			if s == "--input-format" {
+				n++
+				if i+1 >= len(l) || l[i+1] != "stream-json" {
+					t.Fatalf("%s: %q", m, l)
+				}
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%s: --input-format x%d in %q", m, n, l)
+		}
+		if m == modeYolo && !slices.Contains(l, "--dangerously-skip-permissions") {
+			t.Fatalf("yolo lost its permission flag: %q", l)
+		}
+	}
+}

@@ -65,6 +65,7 @@ const (
 	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_GoalSteer_FullMethodName      = "/koto.Koto/GoalSteer"
+	Koto_GoalAmend_FullMethodName      = "/koto.Koto/GoalAmend"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_Models_FullMethodName         = "/koto.Koto/Models"
 	Koto_Providers_FullMethodName      = "/koto.Koto/Providers"
@@ -186,6 +187,10 @@ type KotoClient interface {
 	// iteration prompt carries it as OPERATOR STEER (authoritative). Operator
 	// plane only — the in-guest ctl plane has no steer verb.
 	GoalSteer(ctx context.Context, in *GoalSteerReq, opts ...grpc.CallOption) (*GoalResp, error)
+	// GoalAmend: versioned text/criteria/cap edit of a goal (operator-only,
+	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
+	// self-acceptance).
+	GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...grpc.CallOption) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -620,6 +625,16 @@ func (c *kotoClient) GoalSteer(ctx context.Context, in *GoalSteerReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalAmend_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResourcesResp)
@@ -904,6 +919,10 @@ type KotoServer interface {
 	// iteration prompt carries it as OPERATOR STEER (authoritative). Operator
 	// plane only — the in-guest ctl plane has no steer verb.
 	GoalSteer(context.Context, *GoalSteerReq) (*GoalResp, error)
+	// GoalAmend: versioned text/criteria/cap edit of a goal (operator-only,
+	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
+	// self-acceptance).
+	GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -1104,6 +1123,9 @@ func (UnimplementedKotoServer) GoalCancel(context.Context, *GoalGroupReq) (*Goal
 }
 func (UnimplementedKotoServer) GoalSteer(context.Context, *GoalSteerReq) (*GoalResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GoalSteer not implemented")
+}
+func (UnimplementedKotoServer) GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalAmend not implemented")
 }
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
@@ -1734,6 +1756,24 @@ func _Koto_GoalSteer_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_GoalAmend_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalAmendReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalAmend(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalAmend_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalAmend(ctx, req.(*GoalAmendReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResourcesReq)
 	if err := dec(in); err != nil {
@@ -2052,6 +2092,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GoalSteer",
 			Handler:    _Koto_GoalSteer_Handler,
+		},
+		{
+			MethodName: "GoalAmend",
+			Handler:    _Koto_GoalAmend_Handler,
 		},
 		{
 			MethodName: "Resources",

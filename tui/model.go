@@ -455,6 +455,10 @@ type Model struct {
 	// (selectTreeRow, enterTree).
 	treeSel treeRow
 
+	// amendDraft is the run an open /amend editor was prefilled from (nil =
+	// none): fields sent back exactly as prefilled count as unchanged.
+	amendDraft *goalItemT
+
 	// vp drives the log scroll/clip. We stuff one big pre-wrapped content
 	// string into it via SetContent and let it handle vertical clipping +
 	// scrolling. autoFollow tracks "was at bottom before SetContent" so we
@@ -3242,6 +3246,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case goalAmendDraftMsg:
+		m.applyAmendDraft(msg)
+		return m, nil
+
 	case goalOpMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goals %s: %v", msg.op, msg.err)})
@@ -3263,7 +3271,11 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		case "interrupt":
 			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goals resume to continue)", it.ID)
 		case "steer":
-			text = fmt.Sprintf("steer recorded on goal %s — its next iteration reads it as OPERATOR STEER", it.ID)
+			text = fmt.Sprintf("operator steer sent to goal %s — live into its running turn, and its next iteration reads it as OPERATOR STEER", it.ID)
+		case "redirect":
+			text = fmt.Sprintf("goal %s redirected — current turn aborted, iteration %d starts now with the steer on top", it.ID, it.Iteration+1)
+		case "amend":
+			text = fmt.Sprintf("goal %s amended to v%d — the judge reads this version", it.ID, max(1, it.Version))
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -6620,8 +6632,13 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	m.pushHistory(m.cur, m.activeSession(m.cur), v)
 	// Goal sessions are follow-only: the daemon refuses sends into them (the
 	// driver clears the session before every iteration, so an injected
-	// message would be wiped anyway). Say so locally instead of bouncing the
-	// server's reserved-session error.
+	// message would be wiped anyway). A goal WORK session carries the steer›
+	// chip instead: plain enter there is /goals steer for that run ("!" =
+	// redirect). The judge stays follow-only, said locally instead of
+	// bouncing the server's reserved-session error.
+	if m.steerTarget() != "" {
+		return m.steerSendCmd(v)
+	}
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
 			text: "goal sessions are follow-only — /goals steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
