@@ -40,13 +40,13 @@ func TestKnownImages(t *testing.T) {
 }
 
 // The default base is pinned by digest, never a moving tag, and is the
-// fedora:44 digest the guest.img recipe and Dockerfile.rootfs build FROM.
+// fedora:45 digest the guest.img recipe and Dockerfile.rootfs build FROM.
 func TestFedoraRefPinned(t *testing.T) {
 	r, err := ParseRef(FedoraRef)
 	if err != nil {
 		t.Fatalf("ParseRef(FedoraRef): %v", err)
 	}
-	const dg = "sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19"
+	const dg = "sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c"
 	if !strings.HasSuffix(FedoraRef, "@"+dg) || r.Digest != dg || r.Tag != "" {
 		t.Fatalf("FedoraRef = %q (parsed %v), want pinned @%s", FedoraRef, r, dg)
 	}
