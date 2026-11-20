@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,83 +194,205 @@ func tailBackgroundTask(g, streamPath, session, id, path string) {
 	emitLogfG("send", g, "info", "bg-tail end group=%s id=%s", g, id)
 }
 
-// agentWorkerPattern is the egrep alternation matching a turn's agent worker
-// process, provider-agnostic. Each provider's sidecar entrypoint branch
-// launches exactly one of these per message:
-//   - claudesdk → the claude CLI. NOTE: its argv is just "claude -p ...";
-//     the "claude-code" marker only appears in the RESOLVED EXECUTABLE PATH
-//     (/proc/PID/exe → .../@anthropic-ai/claude-code/bin/claude.exe), not in
-//     cmdline — so the matcher below greps exe AND cmdline, not cmdline alone.
-//   - venice    → node /sidecar/venice_stream.js (matches via cmdline).
-//
-// stream_filter.js and agent-browser-chrome do NOT match, so they're left
-// alone. Adding a provider = add its worker's exe/argv marker here (one place).
-const agentWorkerPattern = `claude-code|venice_stream\.js`
+// workerRegistryRoot is the guest-side turn-worker registry fc-agent keeps
+// (fcguest/workerreg.go): /run/koto/turn-workers/<hex(session)>/<pid>, one
+// entry per live turn worker, written by PID 1 when it starts the worker and
+// removed when it reaps it. Root-owned 0755/0644, so the exec op (uid 1000)
+// can read it but a worker cannot plant or hide an entry.
+// A var only so tests can point the real script at a temp registry (as the
+// guest image since a72a0c5 provides one); production never reassigns it.
+var workerRegistryRoot = "/run/koto/turn-workers"
+
+// workerSessionKey is the registry's on-disk name for a session — hex of
+// sessionMarkerName, byte-for-byte what fcguest's workerSessionKey writes.
+// Hex keeps any session string a single shell- and path-safe element.
+func workerSessionKey(sess string) string {
+	return hex.EncodeToString([]byte(sessionMarkerName(sess)))
+}
+
+// legacyAgentWorkerPattern is ONLY for guests that predate the registry (no
+// workerRegistryRoot directory): the old argv/exe heuristic. It is frozen —
+// new harnesses are found through the registry and must never be added here.
+//   - claudesdk → the claude CLI ("claude-code" appears only in the resolved
+//     exe path, so the matcher greps exe AND cmdline).
+//   - venice    → node /sidecar/venice_stream.js (cmdline).
+const legacyAgentWorkerPattern = `claude-code|venice_stream\.js`
 
 // interruptAgent sends SIGINT to a running turn worker inside the guest
-// without killing the entrypoint shell, so the FIFO `read` loop survives and
-// the next inbound message still works. We walk /proc in the guest and signal
-// any non-PID-1 process whose resolved exe path OR argv matches
-// agentWorkerPattern. The worker aborts the turn on SIGINT; stream_filter
-// (claude path) exits on SIGPIPE once the worker's stdout closes, and the
-// per-turn `timeout` wrapper exits once its child dies — so we don't signal
-// them explicitly.
+// without killing the entrypoint shell or fc-agent, so the next inbound
+// message still works. The worker aborts the turn on SIGINT; its pipeline
+// (stream_filter, timeout wrapper) exits once the worker's stdout closes.
 //
-// `sess` NARROWS the kill to one conversation's worker, which is mandatory now
-// that a group runs two turns at once (queue.go lanes): a pattern-only match
-// would take the operator's turn down with the goal's, and vice versa. The
-// filter is the worker's own environment — entrypoint.sh exports KOTO_SESSION
-// per turn and claude/venice inherit it — so it needs nothing recorded on the
-// side that could go stale. There is deliberately no "signal them all" mode:
-// every caller knows which lane it means, and a group-wide kill is exactly the
-// bug this parameter exists to prevent ("" here is the DEFAULT session, not a
-// wildcard).
+// Identification is GENERIC: the guest registry names the exact pids serving
+// `sess`, whatever harness they are (claude, codex, pi, venice, a fifth one) —
+// no binary name, argv marker or env sniffing. See docs/design/live-steer.md
+// for why a pid registry beats an env marker (env is inherited by every tool
+// subprocess and daemonized background job; a pid recorded at fork is not).
 //
-// procps (pkill/pgrep) isn't installed in the slim guest, so the /proc walk is
-// done in plain POSIX sh. exe/cmdline read as uid 1000 (same user as the
-// worker); environ needs root, which is what fcExec runs as (agent is PID 1).
+// `sess` NARROWS the kill to one conversation's worker — mandatory since a
+// group runs several turns at once (queue.go lanes). "" is the DEFAULT
+// session, not a wildcard; there is deliberately no "signal them all" mode.
 func interruptAgent(g, sess string) error { return signalAgent(g, sess, "INT") }
 
 // signalAgent is interruptAgent with the signal as a parameter — the
 // post-cancel abort loop in sendNow escalates to KILL when repeated SIGINTs
-// don't take a worker down (a claude wedged in a hung tool subprocess can sit
+// don't take a worker down (a worker wedged in a hung tool subprocess can sit
 // on SIGINT indefinitely). SIGKILL still yields a clean [[turn_end]]: the
-// entrypoint's run_turn writes it when the worker's pipeline exits, however
-// it exits. sig is a caller-supplied constant ("INT"/"KILL"), never user input.
+// guest writes it when the worker's pipeline exits, however it exits. sig is a
+// caller-supplied constant ("INT"/"KILL"), never user input.
 func signalAgent(g, sess, sig string) error {
 	if !fcRunning(g) {
 		return fmt.Errorf("group '%s' is not running", g)
 	}
-	// Skip our own pid ($$): this script body contains the worker pattern
-	// literals (in the grep below), so /proc/$$/cmdline matches and the loop
-	// would SIGINT itself. The real worker gets killed first (lower pid,
-	// iterated earlier), but the self-suicide makes the exec exit 130,
-	// surfacing in the TUI as `exit status 130` even though it succeeded.
-	script := `WANT='` + sessionMarkerName(sess) + `'
-hit=0
-for d in /proc/[0-9]*; do
-  p=${d##*/}
-  [ "$p" = 1 ] && continue
-  [ "$p" = "$$" ] && continue
-  { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
-    | grep -aqE '` + agentWorkerPattern + `' || continue
-  tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
-  kill -` + sig + ` "$p" 2>/dev/null && hit=1
-done
-[ "$hit" = 1 ] || echo no-agent-process >&2
-exit 0`
-	// Delivered via the guest agent's exec op. Runs as guest root (agent is
-	// PID 1), which can signal the uid-1000 worker just fine.
-	s, _, err := fcExec(g, script, 15*time.Second)
+	s, _, err := fcExec(g, signalAgentScript(workerRegistryRoot, sess, sig), 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("fc exec: %v: %s", err, strings.TrimSpace(s))
 	}
-	out := []byte(s)
-	if strings.Contains(string(out), "no-agent-process") {
+	return signalAgentResult(g, sess, s)
+}
+
+// signalAgentTree is the mode cut's kill (mode_live.go modeKillFn): the
+// worker's whole process TREE, harness and every tool subprocess, including
+// tool shells a harness ran detached (setsid). signalAgent's registry script
+// already walks the tree (ppid + pgroup, SIGSTOP fixed point) for every cut
+// signal and returns errTreeSurvivors when a KILL leaves a member alive, so
+// the mode cut and the interrupt/steer/KILL escalation share one kill path.
+func signalAgentTree(g, sess, sig string) error { return signalAgent(g, sess, sig) }
+
+// errTreeSurvivors: a tree kill sent SIGKILL but some member was still alive
+// when the call gave up waiting.
+var errTreeSurvivors = errors.New("process tree still alive after SIGKILL")
+
+// signalAgentResult maps the script's output to the caller's error.
+func signalAgentResult(g, sess, s string) error {
+	if i := strings.Index(s, "tree-survivors:"); i >= 0 {
+		left := strings.TrimSpace(strings.SplitN(s[i+len("tree-survivors:"):], "\n", 2)[0])
+		return fmt.Errorf("session %q in group '%s': %w (pids %s)", sessionMarkerName(sess), g, errTreeSurvivors, left)
+	}
+	if strings.Contains(s, "no-agent-process") {
 		return fmt.Errorf("no running agent process for session %q in group '%s'",
 			sessionMarkerName(sess), g)
 	}
 	return nil
+}
+
+// signalAgentScript builds the POSIX sh run in the guest (procps isn't
+// installed in the slim guest). root is the registry root — a parameter so
+// tests can run the exact script against a temp registry.
+//
+// Registry path (every current guest): signal each pid listed under
+// root/<hex(sess)>/. A signal here always cuts the turn (interrupt, steer,
+// the abort loop), so it must leave nothing of the turn's running tool work
+// behind. The worker's process group alone is not enough: a harness may run
+// its tool commands detached (setsid — pi does), so a tool shell sits in its
+// own session and group while still being the worker's child, and the worker
+// exiting would orphan it to finish its command after the turn ended. So the
+// worker's tree is collected by parent pid AND by the worker's process group
+// (fc-agent starts every worker with Setpgid, pgid == pid), each member
+// SIGSTOPped as it is found so the walk reaches a fixed point (a stopped
+// process cannot fork).
+//   - INT: every member except the worker is SIGKILLed, and only once they
+//     are all gone does the worker get SIGINT (it owns the graceful abort and
+//     its resume state) and SIGCONT. A stopped worker cannot end the turn, so
+//     turn_end cannot precede the death of its tools.
+//   - KILL: the whole tree and the worker's group, worker included.
+//
+// Either way the script waits until the killed members are gone (zombies
+// count) and prints tree-survivors otherwise; on INT it then leaves the tree
+// stopped and unsignalled, so the turn does not end with work still alive —
+// the abort loop retries and escalates to KILL. Work that had already left
+// the tree before the call (double-forked to PID 1, or cs-job, which the
+// guest runs outside the worker) is out of its reach and survives.
+//
+// Legacy path (root absent → guest image predates the registry): the old
+// /proc walk on legacyAgentWorkerPattern + KOTO_SESSION env. Skips $$ because
+// this script's own cmdline contains the pattern literals.
+func signalAgentScript(root, sess, sig string) string {
+	return `ROOT='` + root + `'
+WANT='` + sessionMarkerName(sess) + `'
+KEY='` + workerSessionKey(sess) + `'
+SIG='` + sig + `'
+hit=0
+if [ -d "$ROOT" ]; then
+  mypg=$(sed 's/.*) //' /proc/$$/stat 2>/dev/null | cut -d' ' -f3)
+  roots=
+  for f in "$ROOT/$KEY"/*; do
+    [ -f "$f" ] || continue
+    p=${f##*/}
+    case "$p" in ''|*[!0-9]*) continue;; esac
+    [ "$p" = 1 ] && continue
+    [ "$p" = "$$" ] && continue
+    [ -d "/proc/$p" ] || continue
+    roots="$roots $p"
+  done
+  if [ -n "$roots" ]; then
+    hit=1
+    G=
+    for p in $roots; do
+      pg=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f3)
+      if [ "$pg" = "$p" ] && [ "$pg" != 1 ] && [ "$pg" != "$mypg" ]; then G="$G $pg"; fi
+    done
+    kill -STOP $roots 2>/dev/null
+    T=" $roots "
+    K=
+    while :; do
+      new=
+      for d in /proc/[0-9]*; do
+        q=${d##*/}
+        [ "$q" = 1 ] && continue
+        [ "$q" = "$$" ] && continue
+        case "$T" in *" $q "*) continue;; esac
+        set -- $(sed 's/.*) //' "$d/stat" 2>/dev/null)
+        [ $# -ge 3 ] || continue
+        case "$T" in
+          *" $2 "*) ;;
+          *) case " $G " in *" $3 "*) ;; *) continue;; esac;;
+        esac
+        new="$new $q"
+      done
+      [ -z "$new" ] && break
+      kill -STOP $new 2>/dev/null
+      T="$T$new "
+      K="$K$new"
+    done
+    if [ "$SIG" = KILL ]; then
+      for p in $G; do kill -KILL -- "-$p" 2>/dev/null; done
+      kill -KILL $T 2>/dev/null
+      K=$T
+    elif [ -n "$K" ]; then
+      kill -KILL $K 2>/dev/null
+    fi
+    i=0
+    left=
+    while [ -n "$K" ]; do
+      left=
+      for q in $K; do
+        st=$(sed 's/.*) //' "/proc/$q/stat" 2>/dev/null | cut -c1)
+        case "$st" in ''|Z|X) ;; *) left="$left $q";; esac
+      done
+      [ -z "$left" ] && break
+      i=$((i+1))
+      [ "$i" -ge 50 ] && { echo "tree-survivors:$left" >&2; break; }
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    if [ "$SIG" != KILL ] && [ -z "$left" ]; then
+      kill -"$SIG" $roots 2>/dev/null
+      kill -CONT $T 2>/dev/null
+    fi
+  fi
+else
+  for d in /proc/[0-9]*; do
+    p=${d##*/}
+    [ "$p" = 1 ] && continue
+    [ "$p" = "$$" ] && continue
+    { readlink "$d/exe" 2>/dev/null; tr '\0' ' ' < "$d/cmdline" 2>/dev/null; } \
+      | grep -aqE '` + legacyAgentWorkerPattern + `' || continue
+    tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qx "KOTO_SESSION=$WANT" || continue
+    kill -"$SIG" "$p" 2>/dev/null && hit=1
+  done
+fi
+[ "$hit" = 1 ] || echo no-agent-process >&2
+exit 0`
 }
 
 // ---- send -----------------------------------------------------------------
@@ -316,6 +440,22 @@ func sendNow(g, session, msg string) error {
 	err := sendNowTurn(ot, g, session, msg)
 	ot.end(err)
 	return err
+}
+
+// denyCutTurnApprovals is the turn goroutine's sweep once its cancel channel
+// closed: every approval g/session still has open is denied, labelled
+// "mode-change" when a mode change cut the turn and "interrupt" otherwise.
+// This sweep can run before applyModeChange's own; cutTurnForMode closes the
+// channel and records the cut in one queuesMu section, so the record is
+// already visible here. Reports whether the cut was a mode change.
+func denyCutTurnApprovals(g, session string) bool {
+	modePending := modeCancelPending(g, session)
+	who := "interrupt"
+	if modePending {
+		who = "mode-change"
+	}
+	denyApprovals(g, session, nil, decDeny, who, true)
+	return modePending
 }
 
 func sendNowTurn(ot *otelTurn, g, session, msg string) error {
@@ -441,6 +581,7 @@ drain:
 	stall := make(chan struct{})
 	var retry <-chan time.Time
 	sigAttempts := 0
+	modeCut := false
 	for {
 		select {
 		case out := <-doneC:
@@ -462,9 +603,17 @@ drain:
 			// as after a completed turn.
 			// An interrupt (or stop) settles every approval this turn still
 			// has open as a deny, written down the turn connection.
-			denyApprovals(g, session, nil, decDeny, "interrupt", true)
+			modePending := denyCutTurnApprovals(g, session)
 			cancelC = nil // closed channel is always ready; don't spin
-			retry = time.After(interruptRetryDelay)
+			if modePending {
+				// A mode change cut this turn (mode_live.go): it already
+				// SIGKILLed the harness tree; every retry kills the tree
+				// again — no SIGINT grace for the old posture.
+				modeCut = true
+				retry = time.After(modeCutRetryDelay)
+			} else {
+				retry = time.After(interruptRetryDelay)
+			}
 		case <-retry:
 			// A stopped VM can never deliver [[turn_end]] — the guest process
 			// that would write it is gone with the VM. Retiring the turn here
@@ -480,10 +629,14 @@ drain:
 				return nil
 			}
 			sig := "INT"
-			if sigAttempts++; sigAttempts >= interruptKillAfter {
+			if sigAttempts++; sigAttempts >= interruptKillAfter || modeCut {
 				sig = "KILL"
 			}
-			if err := signalAgent(g, session, sig); err != nil {
+			sigFn := signalAgent
+			if modeCut {
+				sigFn = signalAgentTree
+			}
+			if err := sigFn(g, session, sig); err != nil {
 				emitLogfG("send", g, "info", "group=%s session=%s: interrupt SIG%s: %v", g, sessionMarkerName(session), sig, err)
 			}
 			retry = time.After(interruptRetryDelay)
@@ -541,6 +694,10 @@ func turnCanceled(c <-chan struct{}) bool {
 const (
 	interruptRetryDelay = 2 * time.Second
 	interruptKillAfter  = 3
+	// modeCutRetryDelay is the re-kill tick of a turn a mode change cut: the
+	// harness tree was already SIGKILLed synchronously; this only covers a
+	// worker that had not spawned yet when that kill ran.
+	modeCutRetryDelay = 500 * time.Millisecond
 )
 
 // turnWaitTimeout is how long send() waits for a turn's [[turn_end]] before

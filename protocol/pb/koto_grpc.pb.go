@@ -38,6 +38,7 @@ const (
 	Koto_List_FullMethodName           = "/koto.Koto/List"
 	Koto_Stop_FullMethodName           = "/koto.Koto/Stop"
 	Koto_Interrupt_FullMethodName      = "/koto.Koto/Interrupt"
+	Koto_Steer_FullMethodName          = "/koto.Koto/Steer"
 	Koto_Destroy_FullMethodName        = "/koto.Koto/Destroy"
 	Koto_Restart_FullMethodName        = "/koto.Koto/Restart"
 	Koto_History_FullMethodName        = "/koto.Koto/History"
@@ -64,6 +65,7 @@ const (
 	Koto_GoalResume_FullMethodName     = "/koto.Koto/GoalResume"
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_GoalSteer_FullMethodName      = "/koto.Koto/GoalSteer"
+	Koto_GoalAmend_FullMethodName      = "/koto.Koto/GoalAmend"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_Models_FullMethodName         = "/koto.Koto/Models"
 	Koto_Providers_FullMethodName      = "/koto.Koto/Providers"
@@ -89,6 +91,14 @@ type KotoClient interface {
 	List(ctx context.Context, in *ListReq, opts ...grpc.CallOption) (*ListResp, error)
 	Stop(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
 	Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
+	// Steer = atomic "redirect this conversation": the message goes to the
+	// HEAD of the session queue (ahead of anything already queued), then the
+	// in-flight turn of that session is interrupted. Idle session = a
+	// priority send. Only group, msg and session of SendReq are read;
+	// attachments are refused. Authorization: an explicit `steer` grant, or
+	// BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+	// are refused (goal runs are steered through the goal verbs).
+	Steer(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*SteerResp, error)
 	Destroy(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*BaseResp, error)
 	Restart(ctx context.Context, in *GroupReq, opts ...grpc.CallOption) (*SpawnResp, error)
 	History(ctx context.Context, in *HistoryReq, opts ...grpc.CallOption) (*HistoryResp, error)
@@ -177,6 +187,10 @@ type KotoClient interface {
 	// iteration prompt carries it as OPERATOR STEER (authoritative). Operator
 	// plane only — the in-guest ctl plane has no steer verb.
 	GoalSteer(ctx context.Context, in *GoalSteerReq, opts ...grpc.CallOption) (*GoalResp, error)
+	// GoalAmend: versioned text/criteria/cap edit of a goal (operator-only,
+	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
+	// self-acceptance).
+	GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...grpc.CallOption) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -326,6 +340,16 @@ func (c *kotoClient) Interrupt(ctx context.Context, in *GroupReq, opts ...grpc.C
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BaseResp)
 	err := c.cc.Invoke(ctx, Koto_Interrupt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) Steer(ctx context.Context, in *SendReq, opts ...grpc.CallOption) (*SteerResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SteerResp)
+	err := c.cc.Invoke(ctx, Koto_Steer_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -601,6 +625,16 @@ func (c *kotoClient) GoalSteer(ctx context.Context, in *GoalSteerReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalAmend_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResourcesResp)
@@ -789,6 +823,14 @@ type KotoServer interface {
 	List(context.Context, *ListReq) (*ListResp, error)
 	Stop(context.Context, *GroupReq) (*BaseResp, error)
 	Interrupt(context.Context, *GroupReq) (*BaseResp, error)
+	// Steer = atomic "redirect this conversation": the message goes to the
+	// HEAD of the session queue (ahead of anything already queued), then the
+	// in-flight turn of that session is interrupted. Idle session = a
+	// priority send. Only group, msg and session of SendReq are read;
+	// attachments are refused. Authorization: an explicit `steer` grant, or
+	// BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+	// are refused (goal runs are steered through the goal verbs).
+	Steer(context.Context, *SendReq) (*SteerResp, error)
 	Destroy(context.Context, *GroupReq) (*BaseResp, error)
 	Restart(context.Context, *GroupReq) (*SpawnResp, error)
 	History(context.Context, *HistoryReq) (*HistoryResp, error)
@@ -877,6 +919,10 @@ type KotoServer interface {
 	// iteration prompt carries it as OPERATOR STEER (authoritative). Operator
 	// plane only — the in-guest ctl plane has no steer verb.
 	GoalSteer(context.Context, *GoalSteerReq) (*GoalResp, error)
+	// GoalAmend: versioned text/criteria/cap edit of a goal (operator-only,
+	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
+	// self-acceptance).
+	GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -997,6 +1043,9 @@ func (UnimplementedKotoServer) Stop(context.Context, *GroupReq) (*BaseResp, erro
 func (UnimplementedKotoServer) Interrupt(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Interrupt not implemented")
 }
+func (UnimplementedKotoServer) Steer(context.Context, *SendReq) (*SteerResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Steer not implemented")
+}
 func (UnimplementedKotoServer) Destroy(context.Context, *GroupReq) (*BaseResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Destroy not implemented")
 }
@@ -1074,6 +1123,9 @@ func (UnimplementedKotoServer) GoalCancel(context.Context, *GoalGroupReq) (*Goal
 }
 func (UnimplementedKotoServer) GoalSteer(context.Context, *GoalSteerReq) (*GoalResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GoalSteer not implemented")
+}
+func (UnimplementedKotoServer) GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalAmend not implemented")
 }
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
@@ -1221,6 +1273,24 @@ func _Koto_Interrupt_Handler(srv interface{}, ctx context.Context, dec func(inte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(KotoServer).Interrupt(ctx, req.(*GroupReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_Steer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Steer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Steer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Steer(ctx, req.(*SendReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1686,6 +1756,24 @@ func _Koto_GoalSteer_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_GoalAmend_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalAmendReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalAmend(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalAmend_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalAmend(ctx, req.(*GoalAmendReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResourcesReq)
 	if err := dec(in); err != nil {
@@ -1902,6 +1990,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Koto_Interrupt_Handler,
 		},
 		{
+			MethodName: "Steer",
+			Handler:    _Koto_Steer_Handler,
+		},
+		{
 			MethodName: "Destroy",
 			Handler:    _Koto_Destroy_Handler,
 		},
@@ -2000,6 +2092,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GoalSteer",
 			Handler:    _Koto_GoalSteer_Handler,
+		},
+		{
+			MethodName: "GoalAmend",
+			Handler:    _Koto_GoalAmend_Handler,
 		},
 		{
 			MethodName: "Resources",

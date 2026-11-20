@@ -455,6 +455,10 @@ type Model struct {
 	// (selectTreeRow, enterTree).
 	treeSel treeRow
 
+	// amendDraft is the run an open /amend editor was prefilled from (nil =
+	// none): fields sent back exactly as prefilled count as unchanged.
+	amendDraft *goalItemT
+
 	// vp drives the log scroll/clip. We stuff one big pre-wrapped content
 	// string into it via SetContent and let it handle vertical clipping +
 	// scrolling. autoFollow tracks "was at bottom before SetContent" so we
@@ -823,6 +827,16 @@ type Model struct {
 	// after its name instead, so background work stays noticeable.
 	jobsOpen map[string]bool
 
+	// groupCollapsed — groups whose whole subtree is hidden in the tree,
+	// keyed by group name. A collapsed group renders as its row alone, with
+	// a " [+N]" marker counting the hidden descendants (sessions, goal
+	// sessions, jobs). main collapses only its OWN conversations: peer
+	// groups are separate VMs, not nodes inside main, so they stay listed.
+	// Explicit user state (alt+c, ← on the group row, alt+shift+c for all):
+	// rows arriving in a later frame never auto-expand it. Pruned with the
+	// group (forgetGroup, processJobTransitions).
+	groupCollapsed map[string]bool
+
 	// globalTokRate is the fleet-wide tok/s pushed with every WatchState
 	// frame (per-group rates ride GroupInfo.TokPerSec). Rendered in the
 	// status bar's top-right chip alongside the current group's rate.
@@ -1140,6 +1154,7 @@ func newModel(sock string, ctxWindow int) Model {
 		jobDoneAt:      map[string]time.Time{},
 		jobsPrimed:     map[string]bool{},
 		jobsOpen:       map[string]bool{},
+		groupCollapsed: map[string]bool{},
 		pendSess:       map[string][]string{},
 	}
 }
@@ -1345,6 +1360,7 @@ func (m *Model) forgetGroup(g string) {
 			delete(m.jobsOpen, k)
 		}
 	}
+	delete(m.groupCollapsed, g)
 	for r := range m.peekCache {
 		if r.group == g {
 			delete(m.peekCache, r)
@@ -2921,6 +2937,13 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			if !ev.Historical {
 				delete(m.ctxWarned, ev.Group)
 			}
+		case "mode_changed":
+			// A permission-mode change took effect (daemon/mode_live.go):
+			// "mode changed to X — turn restarted" when it cut the
+			// in-flight turn, "… — the old turn has NOT stopped yet …" when it cut it
+			// but could not confirm the old run dead, "… — next turn" when idle.
+			m.addLine(logLine{kind: "sys", group: ev.Group, session: ev.Session,
+				text: ic(icCog) + " " + ev.Text, ts: int64(ev.Ts)})
 		case "sched_fired", "sched_run":
 			tag := ic(icAlarm)
 			if ev.Event == "sched_run" {
@@ -3223,6 +3246,10 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case goalAmendDraftMsg:
+		m.applyAmendDraft(msg)
+		return m, nil
+
 	case goalOpMsg:
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", group: m.cur, text: fmt.Sprintf("/goals %s: %v", msg.op, msg.err)})
@@ -3244,7 +3271,11 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		case "interrupt":
 			text = fmt.Sprintf("goal %s interrupted — paused, in-flight turn aborted (/goals resume to continue)", it.ID)
 		case "steer":
-			text = fmt.Sprintf("steer recorded on goal %s — its next iteration reads it as OPERATOR STEER", it.ID)
+			text = fmt.Sprintf("operator steer sent to goal %s — live into its running turn, and its next iteration reads it as OPERATOR STEER", it.ID)
+		case "redirect":
+			text = fmt.Sprintf("goal %s redirected — current turn aborted, iteration %d starts now with the steer on top", it.ID, it.Iteration+1)
+		case "amend":
+			text = fmt.Sprintf("goal %s amended to v%d — the judge reads this version", it.ID, max(1, it.Version))
 		default:
 			text = fmt.Sprintf("goal %s %sd", it.ID, msg.op)
 		}
@@ -4176,6 +4207,8 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 			m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("stopped %s's VM", msg.group)})
 		}
 		return listCmd(m.sock) // refresh the tree's running marker promptly
+	case "steer":
+		return m.handleSteerResp(msg)
 	case "interrupt":
 		if msg.err != nil {
 			// Interrupt is idempotent: "nothing to interrupt" (no agent
@@ -4794,12 +4827,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			// re-anchors on the conversation). Only with an empty draft —
 			// with text in the message bar the arrows keep meaning cursor
 			// movement and fall through to the input below. Enter stays
-			// out of this: it submits/exits, and ctrl+enter isn't an
+			// out of this: it only submits, and ctrl+enter isn't an
 			// option — a terminal sends plain CR for it, so it can't be
 			// told apart from enter without the kitty keyboard protocol.
-			if strings.TrimSpace(m.input.Value()) == "" && m.setJobFold(s == "right") {
+			if strings.TrimSpace(m.input.Value()) == "" && (m.setJobFold(s == "right") || m.groupArrow(s == "right")) {
 				return m, nil
 			}
+		case "alt+c":
+			// Collapse/expand: a session row with children (jobs, goal
+			// sessions) toggles that session alone; any other row toggles
+			// its whole group (sessions, goal sessions, jobs). A chord, so
+			// it works mid-draft like ctrl+t.
+			m.toggleGroupCollapse()
+			return m, nil
+		case "alt+C":
+			// alt+shift+c: collapse every group, or expand them all when
+			// every group is already collapsed.
+			m.toggleCollapseAll()
+			return m, nil
 		case "ctrl+x":
 			// Destroy the hovered group or session, behind a confirmation
 			// modal (destroy_confirm.go). Session rows target that session
@@ -4823,12 +4868,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		case "enter":
 			// Enter submits the current draft (if any) and stays in tree
 			// mode so the user can keep typing into one agent while
-			// browsing the others. Empty enter exits tree mode (matches
-			// the old behaviour so it's not a worse default for someone
-			// who only entered tree to switch agents).
+			// browsing the others. Empty enter is a no-op that keeps the
+			// tree open (operator request 2026-11-17): the hovered row is
+			// already selected by the cursor move, and leaving the tree is
+			// the job of esc / ctrl+[ / alt+[.
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
-				m.exitTree()
 				return m, nil
 			}
 			m.input.SetValue("")
@@ -5282,6 +5327,11 @@ func (m *Model) processJobTransitions(groups map[string]GroupInfo) {
 			delete(m.jobsOpen, k)
 		}
 	}
+	for g := range m.groupCollapsed {
+		if _, ok := groups[g]; !ok {
+			delete(m.groupCollapsed, g)
+		}
+	}
 	// ...and so does the primed flag (audit 2026-09-11 L161). It was the one
 	// per-group entry this sweep did not drop — forgetGroup removes it, but a
 	// group that simply stops being listed (destroyed by ANOTHER client, or
@@ -5436,6 +5486,23 @@ func foldLabelTotal(n int, live bool) string {
 	return fmt.Sprintf(" (%s%d)", mark, n)
 }
 
+// groupArrow is the outer step of the →/← cascade on a GROUP row, tried
+// after setJobFold: → on a collapsed group expands it (a second → then
+// opens its jobs), ← on an expanded group whose jobs are already folded
+// collapses the whole group. Session and job rows never collapse a group
+// with the arrows — alt+c does that from anywhere inside it.
+func (m *Model) groupArrow(open bool) bool {
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) {
+		return false
+	}
+	r := rows[m.treeIdx]
+	if r.session != "" || r.job != "" {
+		return false
+	}
+	return m.setGroupCollapsed(r.group, !open)
+}
+
 // setJobFold handles →/← in the tree: unfold (open=true) or fold the
 // hovered conversation's child list — its job rows AND its goal sessions
 // (foldGoals), one shared state. ← on a child row (a job, or a goal session
@@ -5449,6 +5516,11 @@ func (m *Model) setJobFold(open bool) bool {
 		return false
 	}
 	r := rows[m.treeIdx]
+	if m.groupCollapsed[r.group] {
+		// The subtree is hidden: toggling a fold inside it would change
+		// nothing visible. groupArrow owns the arrows here.
+		return false
+	}
 	key := sessKey(r.group, r.session)
 	if open {
 		if r.job != "" || m.jobsOpen[key] || m.foldedJobs(r.group, r.session) == 0 {
@@ -5477,6 +5549,124 @@ func (m *Model) setJobFold(open bool) bool {
 		}
 	}
 	return false
+}
+
+// collapsedCount is what a collapsed group hides: every named session
+// (goal sessions included — nested or not) plus every visible job across all
+// of its conversations, regardless of the per-conversation job folds, and
+// whether any of it is live (a running job, or a goal session at all — they
+// are only listed while the goal runs). All zero for expanded groups.
+func (m Model) collapsedCount(g string) (n int, live bool) {
+	if !m.groupCollapsed[g] {
+		return 0, false
+	}
+	for _, s := range m.sessionsOf(g) {
+		n++
+		live = live || goalSession(s)
+	}
+	for _, j := range m.groups[g].Jobs {
+		if m.jobVisible(g, j) {
+			n++
+			live = live || j.Status == "running"
+		}
+	}
+	return n, live
+}
+
+// collapseLabel is the marker a collapsed group row carries after its name:
+// " [+3]", or " [*3]" while anything hidden is live. The brackets set it
+// apart from the per-conversation fold count "(2j)"; ASCII for the same
+// width reason. Always present on a collapsed row — " [+0]" too — so the
+// collapsed state stays visible even when the group has nothing to hide yet.
+func (m Model) collapseLabel(g string) string {
+	if !m.groupCollapsed[g] {
+		return ""
+	}
+	n, live := m.collapsedCount(g)
+	return collapseLabelN(n, live)
+}
+
+func collapseLabelN(n int, live bool) string {
+	if live {
+		return fmt.Sprintf(" [*%d]", n)
+	}
+	return fmt.Sprintf(" [+%d]", n)
+}
+
+// setGroupCollapsed collapses or expands group g. Collapsing re-anchors the
+// tree cursor on the group row when it sat on a row inside g — a hidden row
+// can never stay selected. Returns whether the state changed.
+func (m *Model) setGroupCollapsed(g string, collapsed bool) bool {
+	if g == "" || m.groupCollapsed[g] == collapsed {
+		return false
+	}
+	if !collapsed {
+		delete(m.groupCollapsed, g)
+		return true
+	}
+	m.groupCollapsed[g] = true
+	if m.treeSel.group == g && (m.treeSel.session != "" || m.treeSel.job != "") {
+		for i, r := range m.treeRows() {
+			if r.group == g && r.session == "" && r.job == "" {
+				m.treeIdx = i
+				m.selectTreeRow(r)
+				break
+			}
+		}
+	}
+	return true
+}
+
+// sessChildren is how many child rows conversation (g, sess) owns — its
+// visible jobs plus the goal sessions that fold with it — regardless of
+// whether its list is currently open.
+func (m Model) sessChildren(g, sess string) int {
+	return len(m.visibleJobs(g, sess)) + len(m.foldGoals(g, sess))
+}
+
+// toggleGroupCollapse is alt+c. On a SESSION row that has children (jobs,
+// goal sessions) it collapses/expands that session alone — the same fold
+// →/← and ctrl+t drive. Anywhere else (the group row, a job row, a session
+// with nothing under it) it flips the collapse state of the hovered row's
+// whole group, so a deep job row collapses its group.
+func (m *Model) toggleGroupCollapse() bool {
+	rows := m.treeRows()
+	if m.treeIdx >= len(rows) {
+		return false
+	}
+	r := rows[m.treeIdx]
+	if r.session != "" && r.job == "" && !m.groupCollapsed[r.group] {
+		if key := sessKey(r.group, r.session); m.sessChildren(r.group, r.session) > 0 {
+			if m.jobsOpen[key] {
+				delete(m.jobsOpen, key)
+			} else {
+				m.jobsOpen[key] = true
+			}
+			return true
+		}
+	}
+	g := r.group
+	return m.setGroupCollapsed(g, !m.groupCollapsed[g])
+}
+
+// toggleCollapseAll collapses every group when any is still expanded, else
+// expands them all. Collapsing a group takes every session row with it
+// (named, goal, and the jobs under them — main's own sessions included), so
+// a collapsed-all tree is the group rows alone. The per-session folds
+// (jobsOpen) are left as they were: expanding brings each session back in
+// the open/folded state it had before.
+func (m *Model) toggleCollapseAll() {
+	order := m.treeOrder()
+	anyOpen := false
+	for _, g := range order {
+		if !m.groupCollapsed[g] {
+			anyOpen = true
+			break
+		}
+	}
+	for _, g := range order {
+		m.setGroupCollapsed(g, anyOpen)
+	}
 }
 
 // treeRows flattens the tree: main, then main's default-session jobs, named
@@ -5558,6 +5748,11 @@ func (m Model) treeRows() []treeRow {
 		mainSess = topShown("main", mainSess)
 		mainJobs = jobsOf("main", "")
 		rows = append(rows, treeRow{group: "main"})
+		if m.groupCollapsed["main"] {
+			// Collapsed main hides its own conversations only; the peer
+			// groups below are not inside main (see groupCollapsed).
+			mainSess, mainKids, mainJobs = nil, nil, nil
+		}
 	}
 	nChildren := len(mainJobs) + len(mainSess) + len(groups)
 	child := 0
@@ -5579,6 +5774,9 @@ func (m Model) treeRows() []treeRow {
 	for _, g := range groups {
 		gb, cont := branchFor()
 		rows = append(rows, treeRow{group: g, branch: gb})
+		if m.groupCollapsed[g] {
+			continue // the row alone; " [+N]" stands in for the subtree
+		}
 		defJobs := jobsOf(g, "")
 		sess, kids := m.sessionLayout(g)
 		sess = topShown(g, sess)
@@ -5727,6 +5925,18 @@ func (m *Model) switchSession(g, s string) tea.Cmd {
 	if s != "" && !slices.Contains(m.sessionsOf(g), s) && !goalSession(s) {
 		m.addPendingSession(g, s)
 		cmd = m.beginSessionCreate(g, s)
+	}
+	// An explicit switch (/session, the ctrl+o palette, the new-session
+	// dialog) to a session hidden by a collapsed group reveals it: the
+	// user asked for that row, so the group expands — with each session's
+	// own fold state intact — instead of normalizeTreeCursor treating the
+	// hidden anchor as gone and falling back to the default session. A
+	// goal session folded inside its parent is revealed there.
+	if s != "" {
+		delete(m.groupCollapsed, g)
+		if p, ok := m.foldParent(g, s); ok {
+			m.jobsOpen[sessKey(g, p)] = true
+		}
 	}
 	m.selectTreeRow(treeRow{group: g, session: s})
 	return cmd
@@ -5930,6 +6140,15 @@ func (m *Model) normalizeTreeCursor() {
 	}
 	active := m.activeSession(m.cur)
 	if m.treeSel.group != m.cur || m.treeSel.session != active {
+		// Out-of-band switch (/sw, /session, a goal-start auto-switch) INTO a
+		// collapsed group's hidden session: the user asked for that
+		// conversation, so reveal it. A hover that merely became hidden
+		// (collapse, or rows reshuffling under a consistent anchor) takes
+		// the fallbacks below instead and lands on the group row.
+		if active != "" && m.groupCollapsed[m.cur] {
+			delete(m.groupCollapsed, m.cur)
+			rows = m.treeRows()
+		}
 		m.treeSel = treeRow{group: m.cur, session: active}
 	}
 	found, conv := -1, -1
@@ -6173,11 +6392,8 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(v, "/goals"), "/goal"))
 		return m.handleGoalCmd(rest)
 	}
-	// /steer is /goals steer: a durable operator steer on a running goal,
-	// no approval pending needed. In a goal session it targets that run.
-	if v == "/steer" || strings.HasPrefix(v, "/steer ") {
-		return m.handleGoalCmd("steer " + strings.TrimSpace(strings.TrimPrefix(v, "/steer")))
-	}
+	// /steer is the live cut (steer_cmd.go, Steer RPC), dispatched below; a
+	// durable operator steer on a goal run is only /goals steer.
 	if v == "/clear" || v == "/clear all" {
 		if v == "/clear all" {
 			// Whole group: every session + the full transcript.
@@ -6283,6 +6499,10 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 		}
 		m.addLine(logLine{kind: "sys", group: target, text: fmt.Sprintf("restarting %s…", target)})
 		return daemonCmd(m.sock, "restart", target, nil)
+	}
+	if text, ok := parseSteer(v); ok {
+		// Redirect the session on screen (steer_cmd.go).
+		return m.steerCmd(text)
 	}
 	if v == "/interrupt" {
 		// Kill the ACTIVE SESSION's in-flight turn (same as Esc while a turn
@@ -6412,11 +6632,16 @@ func (m *Model) dispatchInput(v string) tea.Cmd {
 	m.pushHistory(m.cur, m.activeSession(m.cur), v)
 	// Goal sessions are follow-only: the daemon refuses sends into them (the
 	// driver clears the session before every iteration, so an injected
-	// message would be wiped anyway). Say so locally instead of bouncing the
-	// server's reserved-session error.
+	// message would be wiped anyway). A goal WORK session carries the steer›
+	// chip instead: plain enter there is /goals steer for that run ("!" =
+	// redirect). The judge stays follow-only, said locally instead of
+	// bouncing the server's reserved-session error.
+	if m.steerTarget() != "" {
+		return m.steerSendCmd(v)
+	}
 	if goalSession(m.activeSession(m.cur)) {
 		m.addLine(logLine{kind: "err", group: m.cur,
-			text: "goal sessions are follow-only — /steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
+			text: "goal sessions are follow-only — /goals steer <text> steers this run, chat in the default session, or /goals interrupt to take over"})
 		return nil
 	}
 	// Optimistically show the prompt as queued. It renders as an amber ⏳ row

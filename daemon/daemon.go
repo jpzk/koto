@@ -65,6 +65,7 @@ type (
 	schedToggleReq = wire.SchedToggleReq
 	goalItem       = wire.GoalItem
 	goalSteer      = wire.GoalSteer
+	goalAmendRec   = wire.GoalAmend
 	goalSetReq     = wire.GoalSetReq
 	goalGroupReq   = wire.GoalGroupReq
 	goalListReq    = wire.GoalListReq
@@ -156,6 +157,16 @@ func daemonMain() {
 	otelShutdown := otelInit(context.Background())
 	_ = os.MkdirAll(ROOT, 0o700)
 	_ = os.MkdirAll(SOCK_DIR, 0o700)
+	// Security audit spool (audit.go): opened right after OTLP so the
+	// daemon_start record is exported too. Audit is not best-effort, but a
+	// spool we cannot open must not keep the daemon down — it is loud
+	// instead, and records still go to OTLP when export is on.
+	if err := auditStart(HERE); err != nil {
+		emitLogf("daemon", "error", "audit spool: %v (records go to OTLP only)", err)
+		auditStartOTLPOnly()
+	}
+	audit(auditEvent{Verb: "daemon_start", Group: auditDaemonGroup, Outcome: AuditAllowed,
+		Args: map[string]string{"pid": strconv.Itoa(os.Getpid())}})
 	// The modes above only govern paths this daemon CREATES. A state tree an
 	// older koto built keeps what it was given — which included a 0644
 	// workspace.img per group — and MkdirAll/WriteFile never repair an
@@ -293,6 +304,9 @@ func daemonMain() {
 		// being left to journal replay — the VMMs are container children and
 		// die with the daemon otherwise.
 		fcStopAll()
+		audit(auditEvent{Verb: "daemon_stop", Group: auditDaemonGroup, Outcome: AuditAllowed,
+			Args: map[string]string{"signal": s.String()}})
+		auditStop()
 		// Flush telemetry last, so the shutdown lines themselves are exported.
 		fctx, fcancel := context.WithTimeout(context.Background(), otelShutdownTimeout)
 		_ = otelShutdown(fctx)

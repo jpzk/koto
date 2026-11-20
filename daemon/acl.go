@@ -294,6 +294,8 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalSteerReq:
 		return r.Group, true
+	case *pb.GoalAmendReq:
+		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
@@ -347,8 +349,18 @@ var adminOnlyVerbs = map[string]bool{
 	"list_pending": true,
 	// goal_steer: an operator steer is injected into every later iteration
 	// as "OPERATOR STEER (authoritative)"; a delegated role could otherwise
-	// author the very text that outranks the goal (goal_steer.go).
+	// author the very text that outranks the goal (goal_steer.go). This RPC
+	// stays admin-only. Since 2026-11-19 (operator decision) the ctl plane
+	// has its OWN goal_steer verb for the group's coordinator (non-goal
+	// sessions; goal workers and judges refused, coord_steer.go), which is
+	// recorded and rendered as "COORDINATOR STEER (from <group>/<session>)"
+	// — never with the operator label, never over the criteria, cap, mode
+	// or judge — and which the operator's steer outranks.
 	"goal_steer": true,
+	// goal_amend: rewrites a goal's text / criteria / cap, i.e. the contract
+	// the judge accepts against. A delegated role amending its own group's
+	// goal would be self-acceptance (goal_amend.go).
+	"goal_amend": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

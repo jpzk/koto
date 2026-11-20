@@ -47,6 +47,23 @@ message CtlSendReq {
   bool   reply        = 4; // arm a one-shot report window (report.go)
   string from_session = 5; // main's session that receives the report
 }
+// steer: head-of-queue insert + interrupt of the in-flight turn. No reply
+// window (a steer redirects delegated work, it does not delegate).
+message CtlSteerReq {
+  string group        = 1; // honored for main only; peers steer themselves
+  string msg          = 2;
+  string session      = 3;
+  string from_session = 4; // the CALLER's own session ($KOTO_SESSION); goal-* refused (coord_steer.go)
+}
+// goal_steer: a COORDINATOR steer of a goal run (daemon/coord_steer.go,
+// goal_steer.go). Labelled "COORDINATOR STEER (from <group>/<session>)";
+// never changes criteria, max_iterations, mode or the judge.
+message CtlGoalSteerReq {
+  string group        = 1; // honored for main only; peers steer their own goals
+  string name         = 2; // goal run ("" = the sole non-terminal goal)
+  string text         = 3; // <= 1000 bytes
+  string from_session = 4; // the CALLER's own session; goal-* refused
+}
 message CtlTailReq   { string group = 1; int32 n = 2; }
 message JobDoneReq   {
   string id      = 1;
@@ -98,6 +115,8 @@ message CtlRequest {
     SchedIDReq     sched_run      = 24;
     CompactReq     compact        = 25; // daemon/compact.go
     AskReq         ask            = 26; // daemon/goal_ask.go
+    CtlSteerReq    steer          = 27; // daemon/steer.go (renumbered from 26: develop took 26 for ask)
+    CtlGoalSteerReq goal_steer    = 28; // daemon/coord_steer.go (coordinator steer)
   }
 }
 
@@ -120,6 +139,7 @@ message CtlResponse {
     SchedAddResp  sched     = 10; // sched_add
     SchedListResp scheds    = 11; // sched_list
     AskResp       ask       = 12; // ask
+    bool          interrupted = 13; // steer (renumbered from 12: develop took 12 for ask): a running turn was cut short
   }
 }
 
@@ -157,6 +177,11 @@ message MsgReq {
   // confirm only: worker hard cap in ms (the worker clock pauses while an
   // approval is pending, but never past this). 0 = guest default.
   int64  approval_hard_cap_ms = 10;
+  // goal work turns: keep claude's stream-json stdin open for the whole turn
+  // so the daemon can deliver live steer notes (TurnReply.note) into it. The
+  // guest announces it with TurnFrame.live_ready; a harness that cannot do it
+  // never sends that, and the note waits for the next iteration instead.
+  bool   live_input = 11;
 }
 message ExecReq        { string script = 1; }
 message ExecStreamReq  { string script = 1; } // raw output follows, no response frame
@@ -238,6 +263,10 @@ message TurnFrame {
     // confirm: the guest denied request <id> on its own deadline (or because
     // the turn connection dropped) — the daemon logs it as a timeout.
     string   approval_expired = 12;
+    // live_input: the guest is reading TurnReply.note for this turn now.
+    bool     live_ready = 13;
+    // live_input: note <id> was written into the running worker's stdin.
+    string   note_delivered = 14;
   }
 }
 
@@ -272,8 +301,16 @@ message ApprovalReply {
   bool   allow = 2;
   string msg   = 3; // deny reason / allow note / ask answer shown to the model
 }
+// A live steer note for the running turn (MsgReq.live_input). text is
+// composed and labelled by the HOST (OPERATOR STEER / COORDINATOR STEER);
+// the guest hands it to the model verbatim as one more stream-json user record.
+message SteerNote {
+  string id   = 1;
+  string text = 2;
+}
 message TurnReply {
   oneof kind {
     ApprovalReply approval = 1;
+    SteerNote     note     = 2;
   }
 }

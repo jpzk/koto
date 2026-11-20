@@ -189,6 +189,7 @@ func toPBGoalItem(it goalItem) *pb.GoalItem {
 		PendingSince:    it.PendingSince,
 		WaitingDecision: it.WaitingDecision,
 		Steers:          int32(it.Steers),
+		Version:         int32(goalVersion(it)),
 		CreatedAt:       it.CreatedAt,
 		UpdatedAt:       it.UpdatedAt,
 		CompletedAt:     it.CompletedAt,
@@ -507,6 +508,25 @@ func (s *kotoServer) Interrupt(_ context.Context, r *pb.GroupReq) (*pb.BaseResp,
 			r.Group, sessionMarkerName(session), err)
 	}
 	return &pb.BaseResp{Ok: true}, nil
+}
+
+// Steer redirects one conversation: msg goes to the head of the session's
+// queue and the session's in-flight turn (if any) is interrupted (steer.go).
+// It returns as soon as the steer is queued and the interrupt is armed — the
+// steer turn itself streams over Subscribe like any other turn. The ACL
+// (auth.go) admits a `steer` grant or send+interrupt on the target.
+func (s *kotoServer) Steer(_ context.Context, r *pb.SendReq) (*pb.SteerResp, error) {
+	if !validGroupName(r.Group) {
+		return &pb.SteerResp{Error: "invalid group name"}, nil
+	}
+	if len(r.GetImage()) > 0 || len(r.GetAudio()) > 0 {
+		return &pb.SteerResp{Error: "steer takes no attachments"}, nil
+	}
+	res, err := steerRequest(r.Group, r.Session, r.Msg)
+	if err != nil {
+		return &pb.SteerResp{Error: err.Error()}, nil
+	}
+	return &pb.SteerResp{Ok: true, Interrupted: res.Interrupted}, nil
 }
 
 func (s *kotoServer) Destroy(ctx context.Context, r *pb.GroupReq) (*pb.BaseResp, error) {
@@ -1211,7 +1231,24 @@ func (s *kotoServer) GoalCancel(_ context.Context, r *pb.GoalGroupReq) (*pb.Goal
 func (s *kotoServer) GoalSteer(ctx context.Context, r *pb.GoalSteerReq) (*pb.GoalResp, error) {
 	who := identityOf(ctx).Name
 	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		if r.Redirect {
+			return goalRedirectOperator(g, name, r.Text, who)
+		}
 		return goalSteerOperator(g, name, r.Text, who)
+	})
+}
+
+// GoalAmend is /amend: a versioned edit of a goal's text / criteria / cap.
+// Operator-only (adminOnlyVerbs "goal_amend"), absent from the ctl plane.
+func (s *kotoServer) GoalAmend(ctx context.Context, r *pb.GoalAmendReq) (*pb.GoalResp, error) {
+	who := identityOf(ctx).Name
+	return goalGroupRPC(r.Group, r.Name, func(g, name string) (goalItem, error) {
+		var maxIter *int
+		if r.MaxIterations != nil {
+			n := int(r.GetMaxIterations())
+			maxIter = &n
+		}
+		return goalAmendOperator(g, name, r.Text, r.Criteria, maxIter, who)
 	})
 }
 

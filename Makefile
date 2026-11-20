@@ -10,7 +10,7 @@
 # koto runs at runtime is a container — the daemon is a systemd service on the
 # host and the TUI is a plain binary.
 
-.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release
+.PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release sbom
 
 # Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
 # >=6 weeks old as of 2026-10-09 via proxy.golang.org:
@@ -96,10 +96,13 @@ endif
 # give identical binaries, except for the version string stamped below.
 # Update deliberately: podman/docker pull golang:1.26-alpine, then
 #   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
-# golang:1.26.10-alpine (index digest, linux/amd64 child d1f3216e…; bumped
-# 2026-10-24 from the go1.26.9 image, operator-approved security exception:
-# go1.26.10 — released 2026-10-19 — fixes GO-2026-6809 (crypto/x509), which
-# govulncheck reported reachable in all four modules. The earlier 1.26.9 pin,
+# golang:1.26.11-alpine (index digest, linux/amd64 child f496f8c5…; bumped
+# 2026-11-20 from the go1.26.10 image, operator-approved security exception:
+# go1.26.11 — released 2026-11-10 — fixes GO-2026-6859 (net/http
+# MaxBytesReader header race; daemon/proxy.go and otlprecv use
+# MaxBytesReader), which govulncheck reported reachable in all four modules.
+# The 1.26.10 pin, 2026-10-24, fixed GO-2026-6809 (crypto/x509); the earlier
+# 1.26.9 pin,
 # 2026-10-08, was the stdlib fix for the HTTP/2 advisories
 # GO-2026-6603/6611/6612/6617, whose x/net half is pinned in the go.mod files).
 # Go 1.24 fell out of support when 1.26 shipped, so its stdlib no longer
@@ -109,8 +112,8 @@ endif
 # exception to the 6-week lag (CLAUDE.md, Conventions): a pin that closes a
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
-# go-version in .github/workflows/govulncheck.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
+# go-version in .github/workflows/supplychain.yml.
+GO_IMAGE ?= docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
@@ -262,7 +265,7 @@ DIST_DIR       = dist/$(DIST_VERSION)
 # The release this checkout points at. Was dist/VERSION; it lives here now
 # because nothing under dist/ is checked in — dist/ is build output.
 # "unreleased" makes `make fetch` say so plainly instead of 404ing.
-DIST_VERSION  ?= 1.12.0
+DIST_VERSION  ?= 1.13.0
 
 # Published name -> local path. rootfs is the only one transferred compressed;
 # at ~2G apparent (mostly holes) it is the one where it matters.
@@ -308,7 +311,7 @@ dist: $(ARTIFACTS)
 	@# Clear THIS arch's assets from earlier runs first: SHA256SUMS hashes every
 	@# *_<arch>.zst in the directory, so a leftover would be listed and signed.
 	@# Assets are <name>_<version>_<arch>.zst — the separator is '_', not '-'.
-	@rm -f $(DIST_DIR)/*_$(DIST_ARCH).zst $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
+	@rm -f $(DIST_DIR)/*_$(DIST_ARCH).zst $(DIST_DIR)/*_$(DIST_ARCH).cdx.json $(DIST_DIR)/SHA256SUMS $(DIST_DIR)/SHA256SUMS.asc
 	@echo "==> packaging koto $(DIST_VERSION) for $(DIST_ARCH)"
 	@for a in $(ARTIFACTS); do \
 	  v=$(call assetver,$$a); \
@@ -341,9 +344,21 @@ dist: $(ARTIFACTS)
 	@# koto update refuse a SHA256SUMS whose koto-version is not the version
 	@# they were asked for, so an older signed set cannot be replayed under a
 	@# newer tag (or by a mirror).
+	@# ONE CycloneDX SBOM for the whole release (see the sbom target).
+	@$(MAKE) --no-print-directory sbom
+	@# The SBOM goes into the SIGNED SHA256SUMS as a "# sbom: <sha256>  <file>"
+	@# line, not as a plain entry: the installer EMBEDDED in every koto already
+	@# out there (koto update) takes asset names from the non-comment lines and
+	@# refuses anything that is not *_<arch>.zst, so a plain entry would break
+	@# updating from every existing release. Comment lines are skipped by that
+	@# installer and by `sha256sum -c`, and are still covered by SHA256SUMS.asc.
+	@# Check the SBOM:  sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c -
 	@( cd $(DIST_DIR) && { echo "# koto-version: $$(echo '$(DIST_VERSION)' | sed 's/^v//')"; \
-	    sha256sum *_$(DIST_ARCH).zst; } > SHA256SUMS )
-	@echo "    SHA256SUMS over the uploaded assets"
+	    sha256sum *_$(DIST_ARCH).zst; \
+	    sha256sum *_$(DIST_ARCH).cdx.json | sed 's/^/# sbom: /'; } > SHA256SUMS )
+	@test "$$(sed -n 's/^# sbom: [0-9a-f]\{64\}  //p' $(DIST_DIR)/SHA256SUMS)" = "$(DIST_SBOM)" || { \
+	  echo "SHA256SUMS should list exactly one SBOM, $(DIST_SBOM)"; exit 1; }
+	@echo "    SHA256SUMS over the uploaded assets (+ $(DIST_SBOM) as a signed '# sbom:' line)"
 	@# Signing is SEPARATE and may happen elsewhere. The release key should not
 	@# have to live on a build host, so dist signs only if the secret key
 	@# happens to be here and otherwise tells you what to sign and where to put
@@ -377,6 +392,25 @@ dist: $(ARTIFACTS)
 	  "committed at this tag, before anything is installed."; } > $(DIST_DIR)/NOTES.md
 	@echo "next:  make release-draft   (uploads the assets + SHA256SUMS to a draft release)"
 
+# ONE CycloneDX 1.6 SBOM for the release, koto_<version>_<arch>.cdx.json,
+# written next to the release assets so `make dist` hashes it into SHA256SUMS
+# and `make release-draft` uploads it while the release is a DRAFT — releases
+# are immutable once published, so there is no later upload. It covers koto,
+# koto-tui, firecracker (crates from its Cargo.lock at FC_COMMIT), vmlinux and
+# guest.img (fc-agent, node/npm/claude-code/codex/pi, tmux, the fedora base by
+# digest, the rpms.lock toolchain) — scripts/supplychain/sbom.sh. Same
+# GO_IMAGE + CGO_ENABLED=0 as the build; the commit and its time are passed in
+# (the container has no git) and make the document deterministic. Per-binary
+# intermediates land in $(DIST_DIR)/parts/ and are not release assets.
+DIST_SBOM = koto_$(patsubst v%,%,$(DIST_VERSION))_$(DIST_ARCH).cdx.json
+sbom:
+	$(need-container)
+	@mkdir -p $(DIST_DIR)
+	@git diff --quiet HEAD -- || echo "!! uncommitted changes: the SBOM describes commit $$(git rev-parse --short HEAD), not them"
+	$(GO_BUILD_RUN) sh scripts/supplychain/sbom.sh $(DIST_DIR) $(DIST_VERSION) $(DIST_ARCH) \
+	  $$(git rev-parse HEAD) $$(git log -1 --format=%ct HEAD)
+	@test -s $(DIST_DIR)/$(DIST_SBOM)
+
 # --- release ---------------------------------------------------------------
 # Publish what `make dist` produced as a GitHub release, in three commands that
 # follow the order the bytes become trustworthy in. Deliberately separate from
@@ -399,13 +433,19 @@ dist: $(ARTIFACTS)
 # nothing that happens to be sitting in it is published by accident.
 GH_REPO        ?= jpzk/koto
 RELEASE_TARGET ?= release/$(DIST_VERSION)
-DIST_ASSETS     = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)
+# SBOMs ride along: uploaded while the release is a DRAFT, because a published
+# release is immutable and there is no later upload.
+DIST_SBOMS      = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).cdx.json)
+DIST_ASSETS     = $(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst) $(DIST_SBOMS)
 GH_RELEASE      = gh release --repo $(GH_REPO)
 
 release-draft:
 	@command -v gh >/dev/null || { echo "gh (the GitHub CLI) is required to publish a release"; exit 1; }
 	@test -s $(DIST_DIR)/SHA256SUMS || { echo "$(DIST_DIR)/SHA256SUMS is missing - run 'make dist' first"; exit 1; }
-	@test -n "$(DIST_ASSETS)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
+	@test -n "$(wildcard $(DIST_DIR)/*_$(DIST_ARCH).zst)" || { echo "no *_$(DIST_ARCH).zst assets in $(DIST_DIR) - run 'make dist' first"; exit 1; }
+	@test "$(notdir $(DIST_SBOMS))" = "$(DIST_SBOM)" || { echo "expected exactly one SBOM, $(DIST_DIR)/$(DIST_SBOM) - run 'make dist' first"; exit 1; }
+	@( cd $(DIST_DIR) && sed -n 's/^# sbom: //p' SHA256SUMS | grep -q . && sed -n 's/^# sbom: //p' SHA256SUMS | sha256sum -c - >/dev/null ) || { \
+	  echo "the SBOM in $(DIST_DIR) does not match SHA256SUMS - re-run 'make dist'"; exit 1; }
 	@grep -qv '^\#' $(MANIFEST) 2>/dev/null || { \
 	  echo "$(MANIFEST) has no entries - run 'make dist' so the committed manifest"; \
 	  echo "describes the bytes you are about to publish"; exit 1; }

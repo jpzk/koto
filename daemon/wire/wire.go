@@ -463,7 +463,13 @@ type GoalItem struct {
 	// "OPERATOR STEER (authoritative)" block from it alone. The guest copy
 	// (/workspace/goal/<name>/steer.md) is a mirror and is never read back.
 	// Loop-internal: not on pb.
-	SteerLog    []GoalSteer `json:"steer_log,omitempty"`
+	SteerLog []GoalSteer `json:"steer_log,omitempty"`
+	// Version of the goal spec (Text / Criteria / MaxIterations): 0 or 1 =
+	// as set; +1 per operator amend (GoalAmend RPC, operator-only). AmendLog
+	// records who changed which fields when, oldest first. Host-authoritative
+	// like SteerLog: the guest's amend.md is a mirror, never read back.
+	Version     int         `json:"version,omitempty"`
+	AmendLog    []GoalAmend `json:"amend_log,omitempty"`
 	CreatedAt   float64     `json:"created_at"`
 	UpdatedAt   float64     `json:"updated_at,omitempty"`
 	CompletedAt float64     `json:"completed_at,omitempty"`
@@ -509,6 +515,20 @@ type GoalListResp struct {
 	Goals []GoalItem `json:"goals"`
 }
 
+// GoalAmend is one versioned edit of a goal's spec (GoalItem.AmendLog).
+type GoalAmend struct {
+	Version   int     `json:"version"`
+	Ts        float64 `json:"ts"`
+	Iteration int     `json:"iteration"`
+	Who       string  `json:"who,omitempty"`
+	// Fields changed: "text" / "criteria" / "max_iterations".
+	Fields []string `json:"fields"`
+	// Prev* hold the replaced values (for the record; never re-read).
+	PrevText     string `json:"prev_text,omitempty"`
+	PrevCriteria string `json:"prev_criteria,omitempty"`
+	PrevMax      int    `json:"prev_max,omitempty"`
+}
+
 // GoalSteer is one entry of GoalItem.SteerLog.
 type GoalSteer struct {
 	Ts        float64 `json:"ts"`
@@ -517,4 +537,14 @@ type GoalSteer struct {
 	Source string `json:"source"`
 	Who    string `json:"who,omitempty"`
 	Text   string `json:"text"`
+	// Origin: "" = the operator (every pre-existing record, and every
+	// operator-authenticated path); "coordinator" = a ctl goal_steer from one
+	// of the group's non-goal sessions, Who = "<group>/<session>". The prompt
+	// renders the two in separate blocks with distinct labels (goal_steer.go).
+	Origin string `json:"origin,omitempty"`
+	// ID names a steer that was also offered to the running turn live
+	// (goal_live.go); Live is set once the guest confirmed it wrote the
+	// note into the worker's stdin (TurnFrame.note_delivered).
+	ID   string `json:"id,omitempty"`
+	Live bool   `json:"live,omitempty"`
 }

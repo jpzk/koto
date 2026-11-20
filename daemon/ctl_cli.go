@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +72,9 @@ group lifecycle
 
 conversation
   send <group> <msg...>        enqueue a message, return immediately ("-" = stdin)
+  steer [-session S] <group> <msg...>
+                               interrupt the running turn of that session and
+                               run msg next, ahead of anything queued
   ask  [-timeout D] [-json] <group> <msg...>
                                send + stream the reply, exit at turn end
   history [-limit N] [-before TS] <group>
@@ -103,7 +107,16 @@ streams
                                            the in-flight goal turn)
   goal steer <group> [name=<run>] <text>   durable operator steer: the run's
                                            next iteration reads it as
-                                           OPERATOR STEER (operator-only)
+                                           OPERATOR STEER, a running turn
+                                           live now (operator-only)
+  goal redirect <group> [name=<run>] <text>
+                                           abort the running turn and start
+                                           the next iteration now, this
+                                           steer on top (operator-only)
+  goal amend <group> [name=<run>] [text=<goal>] [criteria=<c>] [max=<n>]
+                                           versioned edit of the run's spec;
+                                           the judge reads the latest
+                                           version (operator-only)
 
 shared shell
   shell <group> [session]                  attach an interactive terminal to
@@ -373,6 +386,20 @@ func ctlCliMain(args []string) {
 		ctx, cancel := ctlCtx()
 		defer cancel()
 		resp, err := cl.Send(ctx, &pb.SendReq{Group: fs.Arg(0), Msg: ctlMsgArg(fs.Args()[1:]), Session: *session})
+		ctlPrint(resp, err)
+
+	case "steer":
+		// Redirect one conversation: head-of-queue + interrupt (steer.go).
+		fs := flag.NewFlagSet("steer", flag.ExitOnError)
+		session := fs.String("session", "", "chat session within the group (\"\" = default)")
+		fs.Parse(rest)
+		if fs.NArg() < 2 {
+			ctlFatal(2, "usage: koto ctl steer [-session S] <group> <msg...>")
+		}
+		cl := ctlClient()
+		ctx, cancel := ctlCtx()
+		defer cancel()
+		resp, err := cl.Steer(ctx, &pb.SendReq{Group: fs.Arg(0), Msg: ctlMsgArg(fs.Args()[1:]), Session: *session})
 		ctlPrint(resp, err)
 
 	case "ask":
@@ -1190,22 +1217,62 @@ func ctlGoal(args []string) {
 		}
 		ctlPrint(resp, err)
 
-	case "steer":
+	case "steer", "redirect":
 		// koto ctl goal steer <group> [name=<run>] <text...> — durable
-		// operator steer (GoalSteer, operator-only).
+		// operator steer (GoalSteer, operator-only). redirect: same record,
+		// and the running turn is aborted for a fresh iteration now.
+		usage := "usage: koto ctl goal " + sub + " <group> [name=<run>] <text...>"
 		if len(rest) < 2 {
-			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+			ctlFatal(2, "%s", usage)
 		}
-		req := &pb.GoalSteerReq{Group: rest[0]}
+		req := &pb.GoalSteerReq{Group: rest[0], Redirect: sub == "redirect"}
 		words := rest[1:]
 		if strings.HasPrefix(words[0], "name=") {
 			req.Name, words = strings.TrimPrefix(words[0], "name="), words[1:]
 		}
 		req.Text = strings.Join(words, " ")
 		if strings.TrimSpace(req.Text) == "" {
-			ctlFatal(2, "usage: koto ctl goal steer <group> [name=<run>] <text...>")
+			ctlFatal(2, "%s", usage)
 		}
 		resp, err := cl.GoalSteer(ctx, req)
+		ctlPrint(resp, err)
+
+	case "amend":
+		// koto ctl goal amend <group> [name=<run>] [text=<..>] [criteria=<..>] [max=<n>]
+		// — versioned spec edit (GoalAmend, operator-only). Each key=value
+		// takes the rest of its word; quote values with spaces.
+		usage := "usage: koto ctl goal amend <group> [name=<run>] [text=<goal>] [criteria=<criteria>] [max=<n>]"
+		if len(rest) < 2 {
+			ctlFatal(2, "%s", usage)
+		}
+		req := &pb.GoalAmendReq{Group: rest[0]}
+		for _, w := range rest[1:] {
+			k, v, ok := strings.Cut(w, "=")
+			if !ok {
+				ctlFatal(2, "%s", usage)
+			}
+			switch k {
+			case "name":
+				req.Name = v
+			case "text":
+				req.Text = &v
+			case "criteria":
+				req.Criteria = &v
+			case "max", "max_iterations":
+				n, err := strconv.ParseInt(v, 10, 32)
+				if err != nil {
+					ctlFatal(2, "max must be a number: %q", v)
+				}
+				n32 := int32(n)
+				req.MaxIterations = &n32
+			default:
+				ctlFatal(2, "%s", usage)
+			}
+		}
+		if req.Text == nil && req.Criteria == nil && req.MaxIterations == nil {
+			ctlFatal(2, "%s", usage)
+		}
+		resp, err := cl.GoalAmend(ctx, req)
 		ctlPrint(resp, err)
 
 	default:

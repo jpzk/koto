@@ -4,8 +4,9 @@ package main
 // (daemon/approvals.go is the authority; this is the operator's window on it).
 //
 //   - Mode badge: every session row in the tree carries its mode — a gray
-//     "y" for yolo, "P" for plan, a yellow "C" for confirm — and the status
-//     bar spells out the mode of the session being viewed. Modes come from
+//     "y" for yolo, "P" for plan, a yellow "C" for confirm — and the input box
+//     chip spells out the mode of the session being viewed (the status bar
+//     does not repeat it). Modes come from
 //     GroupInfo.session_modes (host registry; absent = yolo).
 //   - Mode selector: /mode opens a three-row picker for the CURRENT session
 //     (/mode <yolo|plan|confirm> sets it directly). It calls the operator
@@ -888,15 +889,14 @@ func modeLetter(md string) string {
 	return "y"
 }
 
-// renderModeSegment is the status-bar badge: the viewed session's mode and,
-// when anything waits, the inbox counter.
-func (m Model) renderModeSegment() string {
-	md := m.sessionMode(m.cur, m.activeSession(m.cur))
-	out := modeStyle(md).Render(" " + md)
+// renderInboxSegment is the status-bar inbox counter, shown only while
+// approvals wait. The session mode is deliberately NOT in the status bar:
+// the input box chip and the tree badges already carry it.
+func (m Model) renderInboxSegment() string {
 	if n := m.pendingTotal(); n > 0 {
-		out += lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(fmt.Sprintf(" inbox %d", n))
+		return lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(fmt.Sprintf(" inbox %d", n))
 	}
-	return out
+	return ""
 }
 
 // approvalPruneGrace keeps an event-fed entry alive this long even when a

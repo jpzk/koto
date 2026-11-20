@@ -1814,12 +1814,21 @@ func fcAgentCall(g string, req *pb.AgentRequest, timeout time.Duration) (*pb.Age
 // can name the one conversation waiting on this stream (audit 2026-09-11 L81).
 var (
 	fcExpectedMu    sync.Mutex
-	fcExpectedTurns = map[string]string{}
+	fcExpectedTurns = map[string]expectedTurn{}
 )
 
+// expectedTurn is the session a slot was issued for and the turn (its cancel
+// channel identity) in flight when it was issued: the stream opened on the
+// slot belongs to that turn and no other (approvals.go openApproval).
+type expectedTurn struct {
+	session string
+	turn    <-chan struct{}
+}
+
 func fcExpectTurn(g string, slot int, session string) {
+	turn := turnCancelCh(g, session) // before fcExpectedMu: takes queuesMu
 	fcExpectedMu.Lock()
-	fcExpectedTurns[slotKey(g, slot)] = session
+	fcExpectedTurns[slotKey(g, slot)] = expectedTurn{session: session, turn: turn}
 	fcExpectedMu.Unlock()
 }
 
@@ -1827,12 +1836,19 @@ func fcExpectTurn(g string, slot int, session string) {
 // for. The boolean is the authorization answer; the string is only meaningful
 // when it is true (a session name may legitimately be "").
 func fcConsumeExpectedTurn(g string, slot int) (string, bool) {
+	sess, _, ok := fcConsumeExpectedTurnBound(g, slot)
+	return sess, ok
+}
+
+// fcConsumeExpectedTurnBound is fcConsumeExpectedTurn plus the turn the slot
+// was issued to (nil when none was in flight).
+func fcConsumeExpectedTurnBound(g string, slot int) (string, <-chan struct{}, bool) {
 	fcExpectedMu.Lock()
 	defer fcExpectedMu.Unlock()
 	k := slotKey(g, slot)
-	sess, ok := fcExpectedTurns[k]
+	e, ok := fcExpectedTurns[k]
 	delete(fcExpectedTurns, k)
-	return sess, ok
+	return e.session, e.turn, ok
 }
 
 func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte, traceparent string) error {
@@ -1851,10 +1867,14 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
+		// A goal work turn keeps a live stdin for steer notes (goal_live.go).
+		LiveInput: goalLiveSession(g, session),
 	}
 	// Permission mode from the HOST registry (session_modes.go) — the only
 	// source the guest obeys; config.json above carries none.
-	if mode := effectiveTurnMode(g, session); mode != modeYolo {
+	// stampTurnMode records it against this turn, so a later mode change
+	// knows what the in-flight turn runs in (mode_live.go).
+	if mode := stampTurnMode(g, session); mode != modeYolo {
 		m.Mode = mode
 		// Audit trail for restricted turns only (yolo stays silent, as before).
 		emitLogfG("session", g, "info", "[%s] turn session=%s mode=%s", g, sessionMarkerName(session), mode)

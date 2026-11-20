@@ -21,7 +21,7 @@ mkdir -p "$OUTDIR"
 
 CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || true)}"
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to build guest.img"; exit 1; }
-GO_IMAGE="${GO_IMAGE:-docker.io/library/golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba}"
+GO_IMAGE="${GO_IMAGE:-docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab}"
 GUEST_VERSION="${GUEST_VERSION:-$(git -C "$HERE" describe --tags --always --dirty 2>/dev/null || echo dev)}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$HERE" log -1 --format=%ct 2>/dev/null || echo 1700000000)}"
 CPUS="${GUEST_CPUS:-1.5}"
