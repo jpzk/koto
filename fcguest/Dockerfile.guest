@@ -23,11 +23,27 @@ ARG FEDORA=docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450a
 
 FROM ${FEDORA} AS tc
 COPY fcguest/guest/rpms.lock /tmp/rpms.lock
+# Koji fallback: when data/signed/<key>/ is gone (Koji garbage-collects
+# signed copies), rebuild the signed rpm the way Koji writes it: the lead
+# (96 bytes) + the cached signature header from data/sigcache/<key>/
+# (8-byte padded) + the unsigned rpm after its own padded signature header.
+# The result is byte-identical to the signed rpm, so the SAME sha256 pin and
+# rpm -K check below apply unchanged to either path; neither is ever skipped.
 RUN set -eu; mkdir /tmp/rpms; cd /tmp/rpms; \
-    K=https://kojipkgs.fedoraproject.org/packages; \
+    K=https://kojipkgs.fedoraproject.org/packages; KEY=f577861e; \
     grep -v '^#' /tmp/rpms.lock | while read -r sum src v r n a; do \
-      f="$n-$v-$r.$a.rpm"; \
-      curl -fsSL -o "$f" "$K/$src/$v/$r/data/signed/f577861e/$a/$f"; \
+      f="$n-$v-$r.$a.rpm"; d="$K/$src/$v/$r"; \
+      if ! curl -fsSL -o "$f" "$d/data/signed/$KEY/$a/$f"; then \
+        echo "rpms: $f not in data/signed/$KEY, splicing sigcache"; \
+        curl -fsSL -o u.rpm "$d/$a/$f"; \
+        curl -fsSL -o s.sig "$d/data/sigcache/$KEY/$a/$f.sig"; \
+        set -- $(od -An -tu4 --endian=big -j104 -N8 u.rpm); \
+        o=$(( (96 + 16 + 16*$1 + $2 + 7) / 8 * 8 )); \
+        p=$(( (8 - $(stat -c%s s.sig) % 8) % 8 )); \
+        { head -c96 u.rpm; cat s.sig; head -c"$p" /dev/zero; \
+          tail -c +$((o + 1)) u.rpm; } > "$f"; \
+        rm -f u.rpm s.sig; \
+      fi; \
       printf '%s  %s\n' "$sum" "$f" | sha256sum -c - >/dev/null; \
     done; \
     rpm -K ./*.rpm | grep -v ' digests signatures OK$' && exit 1; \
