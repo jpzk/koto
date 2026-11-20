@@ -19,7 +19,7 @@ toolchain go1.26.11
 // runs with GOWORK=off inside a container) sees the same source the daemon
 // compiles against. protobuf v1.36.12 is the protocol module's own pin.
 require (
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 	koto-protocol v0.0.0
 )
@@ -27,8 +27,8 @@ require (
 require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
+	google.golang.org/grpc v1.84.0 // indirect
 )
 
 replace koto-protocol => ../protocol
