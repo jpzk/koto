@@ -211,6 +211,14 @@ func runPi(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []str
 		return
 	}
 	defer os.RemoveAll(agentDir)
+	if req.GetLiveInput() && tw.rd != nil {
+		// A goal work turn: rpc mode, so steer notes reach the running turn
+		// (pilive.go). No reply channel = no notes: the json launch below.
+		p := newPiParser(tw, piIDFile(sess))
+		p.wroteID = id != ""
+		runPiLive(tw, req, piRPCArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile), piEnv(env, agentDir), p)
+		return
+	}
 	w, err := workerCmd("pi", piArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile),
 		piEnv(env, agentDir), req.Msg)
 	if err != nil {
@@ -264,11 +272,7 @@ func (p *piParser) line(b []byte) {
 	}
 	switch ev.Type {
 	case "session":
-		// The id becomes a path component on the clear path: validated.
-		if !p.wroteID && validSessionID(ev.ID) {
-			writeWorkerFile(p.idf, []byte(ev.ID))
-			p.wroteID = true
-		}
+		p.sessionID(ev.ID)
 	case "message_update":
 		if ev.AME == nil {
 			return
@@ -325,6 +329,16 @@ func (p *piParser) line(b []byte) {
 			out = out[:piToolOutMax]
 		}
 		p.tw.toolOut(out)
+	}
+}
+
+// sessionID pins the session's pi id from the first id pi announces (the
+// json-mode "session" event, or the rpc get_state answer, pilive.go). The id
+// becomes a path component on the clear path: validated.
+func (p *piParser) sessionID(id string) {
+	if !p.wroteID && validSessionID(id) {
+		writeWorkerFile(p.idf, []byte(id))
+		p.wroteID = true
 	}
 }
 
