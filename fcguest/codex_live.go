@@ -52,6 +52,13 @@ import (
 // end the turn after turn/interrupt before the process group is SIGKILLed.
 var codexLiveStopGrace = 3 * time.Second
 
+// Test seams: the app-server start (workerCmdPipe) and the live turn budget
+// (turnTimeout, the budget runWorker gives an exec turn).
+var (
+	startCodexLive   = workerCmdPipe
+	codexLiveTimeout = turnTimeout
+)
+
 // JSON-RPC ids of the fixed requests; steers count up from codexLiveSteerBase.
 const (
 	codexLiveInit      = 1
@@ -70,7 +77,7 @@ func codexLiveArgs(baseURL, model, effort, systemPrompt string) []string {
 }
 
 func runCodexLive(tw *turnConn, req *pb.MsgReq, baseURL, model, effort, resume, idf string, env []string) {
-	w, in, err := workerCmdPipe("codex", codexLiveArgs(baseURL, model, effort, string(req.SystemPrompt)), env)
+	w, in, err := startCodexLive("codex", codexLiveArgs(baseURL, model, effort, string(req.SystemPrompt)), env)
 	if err != nil {
 		tw.errf("codex: start app-server: %v", err)
 		return
@@ -84,7 +91,7 @@ func runCodexLive(tw *turnConn, req *pb.MsgReq, baseURL, model, effort, resume, 
 		go d.readReplies(tw.rd)
 	}
 	d.start()
-	runWorker(tw, w, d.line)
+	runWorkerClock(tw, w, d.line, newWorkerClock(codexLiveTimeout, 0))
 	d.end()
 }
 
@@ -402,9 +409,9 @@ func (it *codexLiveItem) execItem() map[string]any {
 		return map[string]any{"type": "command_execution", "command": it.Command,
 			"aggregated_output": out, "exit_code": it.ExitCode, "status": codexExecStatus(it.Status)}
 	case "fileChange":
-		ch := []any{}
+		ch := []codexExecChange{}
 		for _, c := range it.Changes {
-			ch = append(ch, map[string]any{"path": c.Path, "kind": codexPatchKind(c.Kind)})
+			ch = append(ch, codexExecChange{Path: c.Path, Kind: codexPatchKind(c.Kind)})
 		}
 		st := codexExecStatus(it.Status)
 		if st == "declined" {
@@ -590,4 +597,11 @@ func (d *codexLive) end() {
 		d.failLocked("codex: app-server exited before the turn completed")
 	}
 	d.closeLocked()
+}
+
+// codexExecChange is exec's FileUpdateChange, fields in exec's order (the
+// parser passes the changes through as the tool input verbatim).
+type codexExecChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
 }
