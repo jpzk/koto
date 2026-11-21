@@ -202,6 +202,11 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 		return
 	}
 	env = append(env, "CODEX_HOME="+codexHome)
+	if req.GetLiveInput() {
+		// Goal work turn: app-server, so live notes reach it (codex_live.go).
+		runCodexLive(tw, req, baseURL, model, cfg.Effort, resume, idf, env)
+		return
+	}
 	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume), env, req.Msg)
 	if err != nil {
 		tw.errf("codex: start: %v", err)

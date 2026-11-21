@@ -458,6 +458,13 @@ type worker struct {
 	pid      int
 	done     chan unix.WaitStatus
 	out, err *os.File
+	// errLine, when set, takes each stderr line instead of a text frame
+	// (codex app-server: its stderr is a tracing log, codex_live.go).
+	errLine func([]byte)
+	// softStop, when set, is how the turn clock stops the worker: it asks
+	// first (codex turn/interrupt), and the process group is SIGKILLed only
+	// if the worker outlives codexLiveStopGrace. nil = SIGKILL at once.
+	softStop func()
 }
 
 // runWorker drives a started worker: pumps stderr into text frames, hands
@@ -487,9 +494,18 @@ func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *worke
 	defer tw.onStall.Store(nil)
 	// A pending ctl ask pauses this clock too (ctl.go pauseLiveClocks).
 	defer registerLiveClock(clk)()
+	// softKill: the SIGKILL a soft stop arms; stopped once the worker is
+	// reaped, so it can never hit a reused pid.
+	var softKill *time.Timer
 	clk.start(func() {
 		tmu.Lock()
 		timedOut = true
+		if w.softStop != nil {
+			softKill = time.AfterFunc(codexLiveStopGrace, func() { killGroup(pid, syscall.SIGKILL) })
+			tmu.Unlock()
+			w.softStop()
+			return
+		}
 		tmu.Unlock()
 		killGroup(pid, syscall.SIGKILL)
 	})
@@ -520,11 +536,20 @@ func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *worke
 		return done
 	}
 	outDone := pump(outR, 16<<20, parse)
-	errDone := pump(errR, 1<<20, func(b []byte) { tw.text(append(b, '\n')) })
+	errFn := func(b []byte) { tw.text(append(b, '\n')) }
+	if w.errLine != nil {
+		errFn = w.errLine
+	}
+	errDone := pump(errR, 1<<20, errFn)
 
 	ws := <-ch // the worker itself has exited; whatever still holds the pipes is not it
 	tw.tr.workerAttr("exit_code", strconv.Itoa(ws.ExitStatus()))
 	clk.stop()
+	tmu.Lock()
+	if softKill != nil {
+		softKill.Stop()
+	}
+	tmu.Unlock()
 
 	// Drain what is already in flight, then take the pipes away. Closing the
 	// READ end is what unblocks a scanner parked on a descendant that will
