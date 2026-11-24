@@ -68,6 +68,7 @@ type piLiveFix struct {
 	argv   []string
 	frames []*pb.TurnFrame
 	pid    int
+	mcp    []byte // $PI_CODING_AGENT_DIR/mcp.json as pi saw it at launch (nil = none)
 }
 
 // runPiLiveFake runs runPi for a live_input turn against fakePiRPC. host gets
@@ -92,9 +93,10 @@ func runPiLiveFake(t *testing.T, live bool, envs []string, host func(f *pb.TurnF
 	prev := piLiveStart
 	var started sync.WaitGroup
 	started.Add(1)
-	piLiveStart = func(_ string, args, _ []string) (*worker, *os.File, error) {
+	piLiveStart = func(_ string, args, env []string) (*worker, *os.File, error) {
 		defer started.Done()
 		fx.argv = args
+		fx.mcp, _ = os.ReadFile(filepath.Join(envValue(env, "PI_CODING_AGENT_DIR"), "mcp.json"))
 		inR, inW, _ := os.Pipe()
 		cmd := exec.Command("sh", "-c", fakePiRPC)
 		cmd.Env = append(append(os.Environ(), "FAKE_DIR="+fx.dir), envs...)
@@ -139,7 +141,7 @@ func runPiLiveFake(t *testing.T, live bool, envs []string, host func(f *pb.TurnF
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runPi(tw, &pb.MsgReq{Msg: []byte("run sleep 30, then reply"), LiveInput: live}, groupConfig{Provider: "minimax", Model: "MiniMax-M3"}, "goal-x", []string{"KOTO_SESSION=goal-x"})
+		runPi(tw, &pb.MsgReq{Msg: []byte("run sleep 30, then reply"), LiveInput: live, McpServers: piLiveFakeMcp}, groupConfig{Provider: "minimax", Model: "MiniMax-M3"}, "goal-x", []string{"KOTO_SESSION=goal-x"})
 		framesW.Close()
 	}()
 	select {
