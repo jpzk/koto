@@ -2,7 +2,7 @@ module koto
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 // Pins taken under the security-fix exception to the 6-week lag (CLAUDE.md,
 // Conventions), 2026-09-05 — each closes a REACHABLE govulncheck finding:
@@ -38,6 +38,11 @@ toolchain go1.26.10
 //   (crypto/x509), reported reachable by govulncheck in all four modules.
 //   Toolchain line only (with the Makefile GO_IMAGE digest); no module
 //   requirement changed, go.sum untouched.
+// And 2026-11-20, same exception, operator-approved: toolchain go1.26.11
+//   (released 2026-11-10) fixes GO-2026-6859 (net/http MaxBytesReader
+//   header race; proxy.go and otlprecv/http.go use MaxBytesReader),
+//   reported reachable by govulncheck in all four modules. Toolchain line
+//   only, with the Makefile GO_IMAGE digest; go.sum untouched.
 // Everything else follows the ordinary rule (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25; protobuf v1.36.12 —
 // 2026-08-10, re-checked 2026-10-09 against cutoff 2026-08-28).

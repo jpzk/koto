@@ -440,8 +440,45 @@ func (g *approvalGate) readReplies(r io.Reader) {
 			g.drop(err)
 			return
 		}
+		if n := tr.GetNote(); n != nil {
+			g.note(n)
+			continue
+		}
 		g.reply(tr.GetApproval())
 	}
+}
+
+// liveNoteMax bounds one live note (the host bounds it far below this).
+const liveNoteMax = 8 << 10
+
+// note writes a live steer note into the running worker as one more
+// stream-json user record (live_input turns, and confirm turns alike). claude
+// queues a record that arrives mid-turn and hands it to the model with the
+// pending tool result(s) on its next API call — before the next tool call.
+// Probed: goal-live/probes/liveprobe1.out. The text is the host's, labelled
+// by the host; the guest adds nothing. A note never answers a control
+// request: approvals stay pending until their own reply (confirm goals).
+// Once stdin is closed (the result is out) the note is dropped, and the host
+// keeps it for the next iteration regardless.
+func (g *approvalGate) note(n *pb.SteerNote) {
+	text := strings.TrimSpace(n.GetText())
+	if text == "" || len(text) > liveNoteMax {
+		return
+	}
+	b, err := userRecord(text)
+	if err != nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return
+	}
+	if err := g.writeLocked(b); err != nil {
+		logf("live note %s: %v", oneLine(n.GetId(), 64), err)
+		return
+	}
+	g.tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_NoteDelivered{NoteDelivered: oneLine(n.GetId(), 128)}})
 }
 
 // endInput closes claude's stdin once the turn's result is out, so the

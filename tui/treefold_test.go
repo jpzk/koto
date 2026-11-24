@@ -2,8 +2,8 @@ package main
 
 // treefold_test.go — job rows are folded under their conversation by
 // default; → on the row unfolds them, ← folds them (from a job row, ← folds
-// the list and re-anchors on the conversation). Enter keeps its old meaning
-// untouched: submit a draft, or exit tree mode when empty.
+// the list and re-anchors on the conversation). Enter never folds: it submits
+// a draft, and an empty enter keeps the tree open (tree_enter_test.go).
 
 import (
 	"strings"
@@ -165,16 +165,19 @@ func TestLeftOnJobRowFoldsAndReanchors(t *testing.T) {
 	}
 }
 
-// Empty enter kept its old meaning — exit tree mode — even on a row with
-// folded jobs (the fold toggle lives on →/←, not enter).
-func TestEmptyEnterStillExitsTree(t *testing.T) {
+// Empty enter on a row with folded jobs neither leaves the tree nor
+// unfolds anything (the fold toggle lives on →/←/ctrl+t, not enter).
+func TestEmptyEnterKeepsTreeAndFold(t *testing.T) {
 	job := JobInfo{ID: "j1", Status: "running", Cmd: "make test", Started: 100}
 	m := treeModel(t, map[string]GroupInfo{
 		"ghost": {Running: true, Jobs: []JobInfo{job}},
 	}, "ghost", "", "")
 	m = pressKey(t, m, tea.KeyEnter)
-	if m.focus == focusTree {
-		t.Fatal("empty enter should exit tree mode regardless of folded jobs")
+	if m.focus != focusTree {
+		t.Fatal("empty enter must keep tree mode")
+	}
+	if n := jobRowCount(m); n != 0 {
+		t.Fatalf("empty enter unfolded %d job rows, want 0", n)
 	}
 }
 

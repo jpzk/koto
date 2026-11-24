@@ -24,6 +24,14 @@ func goalTestSetup(t *testing.T) {
 	goals = nil
 	goalLock.Unlock()
 	GOALS_FILE = filepath.Join(t.TempDir(), "goals.json")
+	// The goal driver writes the group stream at vol(g)/.cs/log. ROOT is only
+	// set by daemonMain, so a bare test binary resolved it RELATIVE to cwd and
+	// littered the source tree with <group>/.cs/log. Pin it to a temp dir
+	// unless the test already chose one.
+	if ROOT == "" {
+		ROOT = t.TempDir()
+		t.Cleanup(func() { ROOT = "" })
+	}
 	prevClear, prevNotify, prevSleep, prevHandoff := clearGoalSessionFn, goalNotify, goalRetrySleep, goalHandoffFn
 	goalRetrySleep = time.Millisecond
 	clearGoalSessionFn = func(g, sess string) error { return nil }

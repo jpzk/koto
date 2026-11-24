@@ -26,6 +26,14 @@ service Koto {
   rpc List        (ListReq)        returns (ListResp);
   rpc Stop        (GroupReq)       returns (BaseResp);
   rpc Interrupt   (GroupReq)       returns (BaseResp);
+  // Steer = atomic "redirect this conversation": the message goes to the
+  // HEAD of the session queue (ahead of anything already queued), then the
+  // in-flight turn of that session is interrupted. Idle session = a
+  // priority send. Only group, msg and session of SendReq are read;
+  // attachments are refused. Authorization: an explicit `steer` grant, or
+  // BOTH `send` and `interrupt` on the target (it does both). Goal sessions
+  // are refused (goal runs are steered through the goal verbs).
+  rpc Steer       (SendReq)        returns (SteerResp);
   rpc Destroy     (GroupReq)       returns (BaseResp);
   rpc Restart     (GroupReq)       returns (SpawnResp);
   rpc History     (HistoryReq)     returns (HistoryResp);
@@ -115,6 +123,10 @@ service Koto {
   // iteration prompt carries it as OPERATOR STEER (authoritative). Operator
   // plane only — the in-guest ctl plane has no steer verb.
   rpc GoalSteer     (GoalSteerReq) returns (GoalResp);
+  // GoalAmend: versioned text/criteria/cap edit of a goal (operator-only,
+  // adminOnlyVerbs goal_amend — an agent amending its own goal would be
+  // self-acceptance).
+  rpc GoalAmend     (GoalAmendReq) returns (GoalResp);
 
   // Resources reports host-side resource consumption for the whole fleet:
   // per-group workspace.img allocation + growth rate + FC process CPU/RSS,
@@ -631,6 +643,9 @@ message GoalItem {
   double pending_since    = 21;
   bool   waiting_decision = 22;
   int32  steers           = 23; // operator steers recorded so far
+  // version of the goal spec (text/criteria/cap): 1 at goal_set, +1 per
+  // operator amend (GoalAmend). The judge always reads the latest.
+  int32  version          = 24;
 }
 
 message GoalSetReq {
@@ -657,6 +672,19 @@ message GoalSteerReq {
   string group = 1;
   string name  = 2; // run name or id; "" = the sole active goal
   string text  = 3;
+  // redirect: abort the running worker turn and start the next iteration
+  // now with this steer on top (iteration++; ledger/git kept). Running
+  // goals only.
+  bool   redirect = 4;
+}
+// GoalAmend edits a non-terminal goal's spec in place, versioned. Absent
+// fields are unchanged; at least one must be set. Operator-only.
+message GoalAmendReq {
+  string group = 1;
+  string name  = 2; // run name or id; "" = the sole active goal
+  optional string text           = 3;
+  optional string criteria       = 4;
+  optional int32  max_iterations = 5; // must be >= the current iteration
 }
 message GoalListReq  { string group = 1; } // "" = all groups (needs the "*" target)
 message GoalGroupReq {                     // approve / pause / interrupt / resume / cancel
@@ -675,6 +703,10 @@ message GoalListResp {
 // ---- responses (ok/error flattened from the old BaseResp) ----
 
 message BaseResp { bool ok = 1; string error = 2; }
+
+// interrupted: a turn was in flight and has been cancelled (the steer runs
+// as soon as it retires). false: the session was idle — a priority send.
+message SteerResp { bool ok = 1; string error = 2; bool interrupted = 3; }
 
 message SpawnResp { bool ok = 1; string error = 2; int32 port = 3; }
 
