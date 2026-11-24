@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -100,7 +99,7 @@ func mcpOnboard(serverURL, js string) (*mcpreg.OAuth, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	hc := &http.Client{Timeout: 30 * time.Second}
+	hc := mcpgw.HTTPClient(30 * time.Second) // no redirects; https dials public addresses only
 	o, err := mcpOAuthOnboard(ctx, hc, serverURL, mcpgw.OnboardReq{Grant: q.Grant, Scope: q.Scope,
 		ClientID: q.ClientID, ClientSecret: q.ClientSecret, RedirectURI: q.RedirectURI})
 	if err != nil {
