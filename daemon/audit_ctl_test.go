@@ -103,6 +103,7 @@ const auditSecret = "SEKRIT-body-7f3a sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"
 
 func TestAuditEveryCtlVerb(t *testing.T) {
 	goalTestSetup(t)
+	t.Setenv("KOTO_HOME", t.TempDir()) // mcp_view reads the (empty) MCP registry
 	setupNotifyRoot(t, "aud-peer")
 	prevSF, prevGF := SCHED_FILE, GROUPS_FILE
 	SCHED_FILE = filepath.Join(t.TempDir(), "schedules.json")
@@ -165,6 +166,10 @@ func TestAuditEveryCtlVerb(t *testing.T) {
 	// caller, main included (mcp_admin.go, acl.go adminOnlyVerbs).
 	add("mcp", peer, AuditRefused, map[string]any{"op": "allow", "conn": "c"})
 	add("mcp", ctlMainGroup, AuditRefused, map[string]any{"op": "allow", "conn": "c", "group": peer})
+	// mcp_view: main's read-only registry projection; peers refused.
+	add("mcp_view", peer, AuditRefused, map[string]any{"op": "ls"})
+	add("mcp_view", ctlMainGroup, AuditAllowed, map[string]any{"op": "ls"})
+	add("mcp_view", ctlMainGroup, AuditRefused, map[string]any{"op": "grant", "conn": "c"})
 	for _, v := range []string{"sched_del", "sched_toggle", "sched_run"} {
 		add(v, peer, "", map[string]any{"id": "nosched", "enabled": false})
 	}

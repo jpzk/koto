@@ -16,6 +16,7 @@ import (
 // here as "internal", not in production as an empty reply.
 func TestCtlPBEveryVerbMaps(t *testing.T) {
 	fcHarness(t)
+	t.Setenv("KOTO_HOME", t.TempDir()) // mcp_view reads the (empty) MCP registry
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	lines := []string{
 		`{"cmd":"list"}`,
@@ -46,6 +47,7 @@ func TestCtlPBEveryVerbMaps(t *testing.T) {
 		// steer: refused (goal session); the response shape is what is tested
 		`{"cmd":"steer","group":"peer","session":"goal-x","msg":"m"}`,
 		`{"cmd":"goal_steer","name":"none","text":"t","from_session":"x"}`,
+		`{"cmd":"mcp_view","op":"ls"}`, // refused for non-main
 	}
 	for _, l := range lines {
 		req, err := ctlRequestFromJSON([]byte(l))
@@ -73,6 +75,7 @@ func TestCtlPBEveryVerbMaps(t *testing.T) {
 		// model, not network: posture keys are refused on this plane (audit H1).
 		`{"cmd":"config_set","group":"tg","model":"claude-opus-5"}`,
 		`{"cmd":"tail","group":"tg","n":5}`,
+		`{"cmd":"mcp_view","op":"ls"}`,
 	} {
 		req, err := ctlRequestFromJSON([]byte(l))
 		if err != nil {

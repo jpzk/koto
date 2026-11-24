@@ -34,6 +34,7 @@ package koto;
 option go_package = "koto-protocol/pb;pb";
 
 import "koto.proto";
+import "google/protobuf/struct.proto";
 
 // ---- 9002: in-guest control plane (guest → host) --------------------------
 // Authorization is by the SOCKET the request arrives on (which group's vsock
@@ -117,10 +118,21 @@ message CtlRequest {
     AskReq         ask            = 26; // daemon/goal_ask.go
     CtlSteerReq    steer          = 27; // daemon/steer.go (renumbered from 26: develop took 26 for ask)
     CtlGoalSteerReq goal_steer    = 28; // daemon/coord_steer.go (coordinator steer)
+    CtlMcpViewReq  mcp_view       = 29; // daemon/mcp_view.go (main only, read-only)
   }
 }
 
 message CtlTailResp { string text = 1; }
+
+// mcp_view: main's read-only, allowlist-projected view of the MCP registry
+// (daemon/mcp_view.go). op = ls | show | effective; conn for show, group for
+// effective. mcp is the projection (never a credential or upstream text).
+message CtlMcpViewReq {
+  string op    = 1;
+  string conn  = 2;
+  string group = 3;
+}
+message CtlMcpViewResp { google.protobuf.Struct mcp = 1; }
 
 // ok/error are the envelope; `result` carries the verb's payload. The guest
 // agent flattens the payload into the top-level JSON object it appends to
@@ -140,6 +152,7 @@ message CtlResponse {
     SchedListResp scheds    = 11; // sched_list
     AskResp       ask       = 12; // ask
     bool          interrupted = 13; // steer (renumbered from 12: develop took 12 for ask): a running turn was cut short
+    CtlMcpViewResp mcp_view = 14; // mcp_view
   }
 }
 

@@ -973,6 +973,13 @@ func ctlDispatchInner(owner string, line []byte) any {
 		}
 		return baseResp{OK: true}
 
+	case "mcp_view":
+		// Read-only registry projection for the coordinator (mcp_view.go).
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: mcp_view")
+		}
+		return ctlMcpView(line)
+
 	case "mcp":
 		// The MCP registry is operator-only (acl.go adminOnlyVerbs): no group,
 		// main included, may whitelist itself or a peer or grant tools.
