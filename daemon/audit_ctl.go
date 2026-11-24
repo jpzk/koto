@@ -21,6 +21,7 @@ var auditCtlScalar = map[string]bool{
 	"model": true, "effort": true, "provider": true, "plan": true,
 	"max_iterations": true, "reply": true, "op": true, "n": true,
 	"accepted": true, "status": true, "rc": true, "job": true,
+	"conn": true,
 }
 
 // auditCtlBody are guest/agent-authored free text. NEVER raw.

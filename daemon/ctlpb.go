@@ -27,6 +27,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // ctlReqEnvelope renders a decoded CtlRequest as the JSON line ctlDispatch
@@ -126,6 +127,13 @@ func ctlRespToPB(v any) (*pb.CtlResponse, error) {
 	case configResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
 			Result: &pb.CtlResponse_Config{Config: &pb.ConfigResp{Ok: r.OK, Error: r.Error, Config: toStruct(r.Config)}}}, nil
+	case ctlMcpViewResp:
+		var view *structpb.Struct
+		if r.View != nil {
+			view = toStruct(mcpToMap(r.View))
+		}
+		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
+			Result: &pb.CtlResponse_McpView{McpView: &pb.CtlMcpViewResp{Mcp: view}}}, nil
 	case ctlTailResp:
 		return &pb.CtlResponse{Ok: r.OK, Error: r.Error,
 			Result: &pb.CtlResponse_Tail{Tail: &pb.CtlTailResp{Text: r.Text}}}, nil
