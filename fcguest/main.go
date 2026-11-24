@@ -62,7 +62,8 @@ const (
 	// interleave mid-block. One connection per slot, each opening with a
 	// "<slot>\n" header line.
 	portLogSlot = 9004
-	// portMcp: the host MCP gateway for this group (daemon KOTO_MCP_GATEWAY=1).
+	// portMcp: the host MCP gateway for this group (on unless the daemon runs
+	// with KOTO_MCP_GATEWAY=0; only while the group has an effective grant).
 	// The in-guest bridge 127.0.0.1:guestMcpTCP forwards each connection here.
 	portMcp = 9005
 	// guestSlots must equal the daemon's groupSlots (daemon/queue.go): the
