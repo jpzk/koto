@@ -354,6 +354,66 @@ The registry lives at `<KOTO_HOME>/creds/mcp/registry.json`
   written to logs or audit lines. OAuth access tokens are never written
   to disk at all.
 
+## Main's read-only view (`mcp_view`)
+
+A coordinator needs to know what its peers can reach in order to plan
+work, but it must not be able to change it. The `main` group therefore
+gets one read-only ctl verb, `mcp_view` (`daemon/mcp_view.go`), on the
+in-guest ctl plane:
+
+    {"cmd":"mcp_view","op":"ls"}
+    {"cmd":"mcp_view","op":"show","conn":"<conn>"}
+    {"cmd":"mcp_view","op":"effective","group":"<group>"}
+
+- Only `main` may call it. Every other group gets
+  `ctl: verb not allowed for non-main groups: mcp_view`.
+- Only the three ops exist. Anything else (`grant`, `allow`, ...) is
+  refused with `mcp_view is read-only (ls | show | effective); registry
+  changes are operator-only (koto ctl mcp)`. The registry file is not
+  touched. Changes stay with the operator (`koto ctl mcp`), as before.
+- `ls` lists every connection, `show` one connection with its grants,
+  `effective` the connections a group is whitelisted on, with the
+  effective tools, the rules from both layers and the rate limit.
+
+The answer is built field by field from an allowlist. A field that is
+added to the registry later does not show up here until someone adds it
+on purpose. What the answer can contain:
+
+- connection name, enabled, class;
+- URL as `scheme://host[:port]/path` (no user info, query or fragment);
+- ceiling tool names and their argument rules;
+- whitelisted groups, and per group the granted tools, rules and rate;
+- the effective set;
+- the auth kind: `none`, `header` (the header name only) or `pat` (an
+  `Authorization: Bearer` header), plus a status (`ok` for a static
+  header);
+- `stale: true` when the registry file failed to reload and the daemon
+  is using the last good version (the error text is not included);
+- `truncated: true` when `ls` had to drop connections to stay under the
+  size cap.
+
+What it never contains: header values, tokens, client IDs and secrets,
+token endpoints, issuers, file paths, upstream tool descriptions, load
+error text.
+
+The encoded answer is capped at 64 KiB. `ls` drops trailing connections
+and sets `truncated`. `show` and `effective` refuse with
+`mcp_view: answer exceeds 65536 bytes`. Every call is audited like any
+other ctl verb.
+
+## Audit
+
+MCP activity goes into the daemon's hash-chained audit log, which
+`koto audit verify` checks. Record layout:
+[audit-events.md](audit-events.md#what-is-recorded).
+
+- `mcp_call`: one record per gateway decision (group, connection,
+  method, tool, duration, and a fixed reason code: `ok`, `policy`,
+  `rate_limited`, `not_whitelisted`, `schema_changed`, `upstream`).
+- `mcp_admin`: one record per `koto ctl mcp` op (op, connection, group,
+  tool). URL, auth and rules are not recorded.
+- `mcp_view` calls are recorded by the ctl audit, like every ctl verb.
+
 ## Enforcement (gateway)
 
 Each group reaches MCP only through a host-side gateway (`daemon/mcpgw`).
@@ -371,9 +431,11 @@ For every request the gateway:
 4. on `tools/call`, refuses tools outside the effective set, arguments
    that fail the ceiling or grant rules, and calls over the rate limit;
 5. adds the auth header only on the host-to-upstream request;
-6. writes one audit line (group, connection, method, tool, allowed or
-   refused, reason, duration). Arguments, results and credentials are not
-   logged.
+6. writes one line to the group log (group, connection, method, tool,
+   allowed or refused, reason, duration), and one `mcp_call` record to
+   the daemon's hash-chained audit log with a fixed reason code instead
+   of the free-text reason. Arguments, results and credentials are in
+   neither. See [Audit](#audit).
 
 All groups on one connection share one upstream MCP session.
 
@@ -383,17 +445,31 @@ definition, the tool is hidden and refused until the daemon restarts or the
 connection is re-added. This protects against a server that swaps a tool's
 description or schema after it was approved.
 
-### Turning it on
+### On by default, and the kill switch
 
-The gateway is off by default. Start the daemon with
-`KOTO_MCP_GATEWAY=1` to enable it. While it is off, the registry can
-still be edited, but no group can reach any connection: the daemon opens
-no MCP listener and passes no MCP servers to the harness.
+The gateway is on by default. It does nothing until the operator grants
+a tool: a group whose effective set is empty (no whitelisted connection
+with at least one effective tool) gets no MCP listener and no MCP
+configuration, and its harness runs with the same arguments and files
+as a daemon without MCP support. A golden test compares these against
+develop for every launch path (claude, codex exec, codex app-server,
+pi json, pi rpc).
 
-When it is on, each running group gets its own gateway listener on
-vsock port 9005. The guest agent bridges `127.0.0.1:18889` to that port.
-A group started before you set the flag gets its listener on its next
-restart.
+- `KOTO_MCP_GATEWAY=0` (also `false`, `off`, `no`) is the kill switch.
+  Set it in the daemon's environment and restart the daemon. No group
+  gets a listener or any MCP configuration, whatever the registry says.
+  The registry can still be edited while the switch is off.
+- Any other value, or no value, means on.
+
+When it is on, a group with at least one effective tool gets its own
+gateway listener on vsock port 9005, and the guest agent bridges
+`127.0.0.1:18889` to that port. The listener follows the grants while the
+group runs:
+
+- `allow` + `grant` on a group that had nothing: the listener opens, and
+  the next turn gets the MCP configuration. No restart is needed.
+- `revoke`, `deny` or `rm` that leaves the group with nothing: the
+  listener closes, and the next turn runs without MCP again.
 
 ### Harness configuration
 
@@ -410,8 +486,10 @@ claude:
   `--mcp-config '{"mcpServers":{"<conn>":{"type":"http","url":"http://127.0.0.1:18889/mcp/<conn>"}}}'`
   and `--strict-mcp-config`, so an `.mcp.json` in the workspace cannot add
   servers the operator never granted.
+- Goal work turns use the same claude command line, so the same flags
+  apply there.
 
-codex (0.169.0):
+codex (0.171.0):
 
 - Each server is a runtime override:
   `-c mcp_servers.<conn>.url="http://127.0.0.1:18889/mcp/<conn>"` plus
@@ -431,12 +509,31 @@ codex (0.169.0):
 - `approve` is needed because koto runs codex with approval policy Never,
   under which a tool that asks for approval is denied outright. The
   gateway decides each call instead.
-- Context compaction (`codex app-server`) gets no MCP overrides and has no
-  `--ignore-user-config` flag. The compaction turn exposes no tools to the
-  model. A server the agent planted in its own config could still be
-  connected during compaction, but it would run only with rights the agent
-  already has, and it can never reach a koto connection without going
-  through the gateway.
+- Goal work turns run `codex app-server` (live mode, so the operator can
+  steer the turn). They get the same `-c` layer as `codex exec`: the
+  gateway entries and the three features off. `codex app-server` has no
+  `--ignore-user-config` flag, so on this path the strict half comes from
+  codex's system requirements file instead:
+  - Before every codex turn (exec and app-server) the guest writes
+    `/etc/codex/requirements.toml` with one
+    `[mcp_servers.<conn>.identity] url = "http://127.0.0.1:18889/mcp/<conn>"`
+    entry per granted connection. codex disables every configured server
+    whose name is not listed or whose URL differs, so a server the agent
+    defines in `$CODEX_HOME/config.toml` or a project config is not
+    started.
+  - `/etc/codex` is root-owned. The agent runs as `node` and cannot change
+    the file.
+  - A turn without grants removes the file again, so nothing is left
+    behind.
+  - The file starts with a koto header. A `requirements.toml` that koto
+    did not write is never replaced or removed. If the file cannot be
+    written, the app-server turn runs without any MCP configuration
+    rather than next to servers koto cannot switch off.
+- Context compaction also uses `codex app-server`. It gets no MCP
+  overrides and exposes no tools to the model. The requirements file of
+  the last turn still applies, so a planted server stays switched off for
+  a group that has grants. Without grants there are no koto connections
+  to protect.
 
 pi (1.5.2):
 
@@ -453,6 +550,10 @@ pi (1.5.2):
 - A project `.pi/mcp.json` needs project trust. koto runs pi with
   `--no-approve`, which ignores trust-gated project configuration, and the
   trust store lives in the fresh agent directory, so no saved trust exists.
+- Goal work turns run `pi --mode rpc` (live mode). They get the same
+  `-e builtin:mcp` and the same per-turn `mcp.json` as `pi --mode json`,
+  so granted tools work in goal work turns too. Compaction (`pi --mode
+  rpc` without a turn) gets no MCP extension.
 - pi treats names that differ only in `-` and `_` as the same server. If
   two granted connections collide this way, the first in sorted order is
   used.
