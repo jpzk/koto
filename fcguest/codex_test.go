@@ -130,7 +130,7 @@ func TestCodexParserRejectsPathShapedThreadID(t *testing.T) {
 
 func TestCodexArgs(t *testing.T) {
 	base := "http://127.0.0.1:4100/v1"
-	args := codexArgs(base, "gpt-5.5", "high", "be \"terse\"\\\nok", "")
+	args := codexArgs(base, "gpt-5.5", "high", "be \"terse\"\\\nok", "", nil)
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
 		"exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
@@ -160,7 +160,7 @@ func TestCodexArgs(t *testing.T) {
 		t.Errorf("credential material in argv: %q", args)
 	}
 
-	r := codexArgs(base, "", "", "", "01a13a01-c772-7110-bbfc-0a05d2ac287a")
+	r := codexArgs(base, "", "", "", "01a13a01-c772-7110-bbfc-0a05d2ac287a", nil)
 	if r[0] != "exec" || r[1] != "resume" || r[len(r)-2] != "01a13a01-c772-7110-bbfc-0a05d2ac287a" || r[len(r)-1] != "-" {
 		t.Errorf("resume argv shape: %q", r)
 	}

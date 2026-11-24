@@ -34,6 +34,7 @@ package koto;
 option go_package = "koto-protocol/pb;pb";
 
 import "koto.proto";
+import "google/protobuf/struct.proto";
 
 // ---- 9002: in-guest control plane (guest → host) --------------------------
 // Authorization is by the SOCKET the request arrives on (which group's vsock
@@ -117,10 +118,21 @@ message CtlRequest {
     AskReq         ask            = 26; // daemon/goal_ask.go
     CtlSteerReq    steer          = 27; // daemon/steer.go (renumbered from 26: develop took 26 for ask)
     CtlGoalSteerReq goal_steer    = 28; // daemon/coord_steer.go (coordinator steer)
+    CtlMcpViewReq  mcp_view       = 29; // daemon/mcp_view.go (main only, read-only)
   }
 }
 
 message CtlTailResp { string text = 1; }
+
+// mcp_view: main's read-only, allowlist-projected view of the MCP registry
+// (daemon/mcp_view.go). op = ls | show | effective; conn for show, group for
+// effective. mcp is the projection (never a credential or upstream text).
+message CtlMcpViewReq {
+  string op    = 1;
+  string conn  = 2;
+  string group = 3;
+}
+message CtlMcpViewResp { google.protobuf.Struct mcp = 1; }
 
 // ok/error are the envelope; `result` carries the verb's payload. The guest
 // agent flattens the payload into the top-level JSON object it appends to
@@ -140,6 +152,7 @@ message CtlResponse {
     SchedListResp scheds    = 11; // sched_list
     AskResp       ask       = 12; // ask
     bool          interrupted = 13; // steer (renumbered from 12: develop took 12 for ask): a running turn was cut short
+    CtlMcpViewResp mcp_view = 14; // mcp_view
   }
 }
 
@@ -177,6 +190,12 @@ message MsgReq {
   // confirm only: worker hard cap in ms (the worker clock pauses while an
   // approval is pending, but never past this). 0 = guest default.
   int64  approval_hard_cap_ms = 10;
+  // MCP connections this group may use through the host gateway
+  // (on unless the daemon runs with KOTO_MCP_GATEWAY=0; only connections with
+  // an effective grant). Names only — the URL the harness is pointed at
+  // is the in-guest bridge 127.0.0.1:18889/mcp/<name>; the upstream URL and
+  // credential never leave the host. Empty = no MCP servers configured.
+  repeated string mcp_servers = 12;
   // goal work turns: keep claude's stream-json stdin open for the whole turn
   // so the daemon can deliver live steer notes (TurnReply.note) into it. The
   // guest announces it with TurnFrame.live_ready; a harness that cannot do it

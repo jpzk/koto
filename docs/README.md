@@ -34,6 +34,9 @@ wins — please fix the doc.
   the host, and the in-guest ctl plane (`/workspace/.cs/ctl`) verbs.
 - [acl-and-auth.md](acl-and-auth.md) — PKI, client tokens, roles, the
   verb × target ACL and admin-only verbs.
+- [mcp-registry.md](mcp-registry.md) — shared MCP connections: the
+  registry, the per-connection group whitelist, per-group grants and the
+  intersection model (effective = ceiling ∩ grant), `koto ctl mcp`.
 - [images.md](images.md) — OCI images for groups: `koto image` commands,
   the `image=` group key, VM drive layout, layer limit, update/apply/rollback.
 - [protocol.md](protocol.md) — the gRPC service in `koto.proto` (all RPCs

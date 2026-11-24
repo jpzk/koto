@@ -285,6 +285,11 @@ authorization model, see [acl-and-auth.md](acl-and-auth.md).
     `acl set ops stop:ghost restart:ghost list`.
 - **`acl del <role>`**: RPC `AclDelRole`.
 - An unknown subcommand prints `unknown acl subcommand: <sub> (get|set|del)`.
+- **`mcp <op> ...`**: the MCP connection registry (`mcpCliMain`, RPC `Mcp`,
+  admin-only server-side). Ops: `ls`, `show`, `add`, `rm`, `allow`, `deny`,
+  `grant`, `revoke`, `rate`, `effective`. The auth header is read from
+  `--auth-file <file>|-`, never from argv. Full model and examples:
+  [mcp-registry.md](mcp-registry.md).
 
 ### 1.5 Gaps between the usage text and the code
 
@@ -364,6 +369,28 @@ allowed for non-main groups: <verb>`.
     `[tail of <group>]` header comes first and the same peer-content trailer
     that report turns use (`peerTrailer`) comes last. Only the `> `-quoted
     lines are the peer's text.
+- **`mcp_view`** `{"op","conn"?,"group"?}`. A read-only view of the MCP
+  registry (`ctlMcpView`, `daemon/mcp_view.go`).
+  - Ops: `ls` (also the default for an empty `op`), `show` with `conn`,
+    `effective` with `group`.
+  - Any other op is refused:
+    `mcp_view is read-only (ls | show | effective); registry changes are operator-only (koto ctl mcp)`.
+    There is no write path. Registry changes stay with the operator
+    (`koto ctl mcp`).
+  - Errors: `mcp_view: no connection "<conn>"`,
+    `mcp_view: effective needs a valid group`,
+    `mcp_view: the MCP registry is unusable (operator: koto ctl mcp ls)`.
+  - The response has `mcp`, an allowlist projection: name, enabled,
+    class, URL as `scheme://host[:port]/path`, tool names with argument
+    rules, whitelisted groups, grants, the effective set, and the auth
+    kind with a status. Credentials and auth settings are never included.
+    Field list: [mcp-registry.md](mcp-registry.md#mains-read-only-view-mcp_view).
+  - The encoded answer is capped at 64 KiB (`mcpViewMax`). `ls` drops
+    trailing connections and sets `truncated`. `show` and `effective`
+    fail with `mcp_view: answer exceeds 65536 bytes`.
+  - A non-main caller gets `ctl: verb not allowed for non-main groups: mcp_view`.
+  - The in-guest `mcp` verb is refused for every group, `main` included:
+    `ctl: mcp is an operator-only setting — ask the operator (koto ctl mcp)`.
 
 **Any group, self-targeted**
 

@@ -653,6 +653,9 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	if cfg.Effort != "" {
 		args = append(args, "--effort", cfg.Effort)
 	}
+	// MCP connections granted by the host registry (names only; the gateway
+	// behind 127.0.0.1:18889 enforces the per-group tool set on every call).
+	args = append(args, claudeMcpArgs(req.GetMcpServers())...)
 	// A resumed /compact must outlive claude's async transcript write
 	// (claude_compact.go); everything else is the one-shot prompt path.
 	if resumeID != "" && validSessionID(resumeID) && isClaudeCompactPrompt(req.Msg) {

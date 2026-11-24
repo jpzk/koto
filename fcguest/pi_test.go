@@ -93,7 +93,7 @@ func TestPiParserErrors(t *testing.T) {
 }
 
 func TestPiArgs(t *testing.T) {
-	a := piArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "u-1", "/tmp/koto-pi-x/p.md")
+	a := piArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "u-1", "/tmp/koto-pi-x/p.md", false)
 	j := strings.Join(a, " ")
 	for _, want := range []string{"--mode json -p", "--provider minimax", "--model MiniMax-M3",
 		"--session-dir /workspace/.pi/sessions", "--session-id u-1", "--thinking high",
@@ -107,7 +107,7 @@ func TestPiArgs(t *testing.T) {
 	if strings.Contains(j, "--api-key") {
 		t.Errorf("args carry --api-key: %q", j)
 	}
-	b := strings.Join(piArgs("minimax", "", "bogus", "d", "", ""), " ")
+	b := strings.Join(piArgs("minimax", "", "bogus", "d", "", "", false), " ")
 	if strings.Contains(b, "--session-id") || strings.Contains(b, "--thinking") || strings.Contains(b, "--model") || strings.Contains(b, "--append-system-prompt") {
 		t.Errorf("empty/invalid options leaked into args: %q", b)
 	}
@@ -121,7 +121,7 @@ func TestPreparePiAgentDirMinimax(t *testing.T) {
 	prev := piTemplateDir
 	t.Cleanup(func() { piTemplateDir = prev })
 	piTemplateDir = "pi"
-	dir, pf, err := preparePiAgentDir("minimax", []byte("GROUP PROMPT"))
+	dir, pf, err := preparePiAgentDir("minimax", []byte("GROUP PROMPT"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestPreparePiAgentDirMinimax(t *testing.T) {
 	if p, _ := os.ReadFile(pf); string(p) != "GROUP PROMPT" || filepath.Dir(pf) != dir {
 		t.Errorf("prompt file %s = %q", pf, p)
 	}
-	if _, _, err := preparePiAgentDir("nope", nil); err == nil {
+	if _, _, err := preparePiAgentDir("nope", nil, nil); err == nil {
 		t.Error("missing template accepted")
 	}
 }
