@@ -1637,8 +1637,9 @@ type MsgReq struct {
 	// confirm only: worker hard cap in ms (the worker clock pauses while an
 	// approval is pending, but never past this). 0 = guest default.
 	ApprovalHardCapMs int64 `protobuf:"varint,10,opt,name=approval_hard_cap_ms,json=approvalHardCapMs,proto3" json:"approval_hard_cap_ms,omitempty"`
-	// MCP connections this group may use through the host gateway (daemon
-	// flag KOTO_MCP_GATEWAY=1). Names only — the URL the harness is pointed at
+	// MCP connections this group may use through the host gateway
+	// (on unless the daemon runs with KOTO_MCP_GATEWAY=0; only connections with
+	// an effective grant). Names only — the URL the harness is pointed at
 	// is the in-guest bridge 127.0.0.1:18889/mcp/<name>; the upstream URL and
 	// credential never leave the host. Empty = no MCP servers configured.
 	McpServers []string `protobuf:"bytes,12,rep,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
