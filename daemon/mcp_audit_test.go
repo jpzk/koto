@@ -107,3 +107,40 @@ func TestMcpAuditSpool(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+
+// The full mcp_view sentinel seed (every secret-bearing registry field, plus
+// whatever the OAuth build mints live) and every mcp_view op, with the spool
+// on: no sentinel reaches a record and the chain verifies.
+func TestMcpAuditSpoolSentinels(t *testing.T) {
+	mcpHarness(t)
+	home := t.TempDir()
+	if err := auditStart(home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(auditStop)
+	mcpViewSeed(t)
+	for _, l := range mcpViewOps() {
+		mcpViewCall(t, ctlMainGroup, l)
+		mcpViewCall(t, "peer", l)
+	}
+	auditStop()
+	dir := auditDir(home)
+	raw, err := os.ReadFile(filepath.Join(dir, auditFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for field, s := range mcpViewSentinels {
+		if bytes.Contains(raw, []byte(s)) {
+			t.Errorf("spool carries the %s sentinel", field)
+		}
+	}
+	for _, v := range []string{`"verb":"mcp_admin"`, `"verb":"mcp_view"`} {
+		if !bytes.Contains(raw, []byte(v)) {
+			t.Errorf("no %s record", v)
+		}
+	}
+	var out, errb bytes.Buffer
+	if rc := auditCli([]string{"verify", "--dir", dir}, &out, &errb); rc != 0 {
+		t.Fatalf("koto audit verify rc=%d: %s%s", rc, out.String(), errb.String())
+	}
+}
