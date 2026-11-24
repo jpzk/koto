@@ -21,8 +21,8 @@ func (r *Registry) PutConn(name string, c *Conn, keepAuth bool) error {
 	if old, ok := r.Conns[name]; ok {
 		nc.Groups = old.Groups
 		nc.Disabled = old.Disabled // a re-add never silently re-enables
-		if nc.Auth == nil && keepAuth {
-			nc.Auth = old.Auth
+		if nc.Auth == nil && nc.OAuth == nil && keepAuth {
+			nc.Auth, nc.OAuth = old.Auth, old.OAuth
 		}
 	} else {
 		nc.Groups = nil
@@ -151,5 +151,26 @@ func (r *Registry) SetEnabled(name string, enabled bool) error {
 		return err
 	}
 	c.Disabled = !enabled
+	return nil
+}
+
+// RotateRefresh stores a rotated OAuth refresh token for conn, but only if
+// the stored one is still old (compare-and-swap): a concurrent re-add or a
+// second rotation must not be clobbered by a stale writer.
+func (r *Registry) RotateRefresh(name, old, next string) error {
+	c, err := r.conn(name)
+	if err != nil {
+		return err
+	}
+	if c.OAuth == nil || c.OAuth.Grant != GrantRefreshToken {
+		return errors.New("connection has no oauth refresh grant")
+	}
+	if c.OAuth.RefreshToken != old {
+		return errors.New("refresh token changed concurrently")
+	}
+	if next == "" || badSecret(next) {
+		return errors.New("invalid rotated refresh token")
+	}
+	c.OAuth.RefreshToken = next
 	return nil
 }

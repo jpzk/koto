@@ -99,8 +99,11 @@ type Grant struct {
 
 // Conn is one registered upstream MCP connection (streamable HTTP).
 type Conn struct {
-	URL    string               `json:"url"`
-	Auth   *AuthHeader          `json:"auth,omitempty"`
+	URL  string      `json:"url"`
+	Auth *AuthHeader `json:"auth,omitempty"`
+	// OAuth is the alternative to Auth: the gateway runs an OAuth client
+	// against the upstream AS and attaches a short-lived bearer token.
+	OAuth  *OAuth               `json:"oauth,omitempty"`
 	Class  Class                `json:"class"`
 	Tools  map[string]*ToolRule `json:"tools,omitempty"` // the connection ceiling
 	Groups map[string]*Grant    `json:"groups,omitempty"`
@@ -204,6 +207,14 @@ func validateConn(name string, c *Conn) error {
 		if c.Auth.Value == "" || strings.ContainsAny(c.Auth.Value, "\r\n\x00") {
 			// never echo the value
 			return fmt.Errorf("mcp conn %q: auth header value empty or contains control characters", name)
+		}
+	}
+	if c.OAuth != nil {
+		if c.Auth != nil {
+			return fmt.Errorf("mcp conn %q: auth header and oauth are mutually exclusive", name)
+		}
+		if err := validateOAuth(c.OAuth); err != nil {
+			return fmt.Errorf("mcp conn %q: %w", name, err)
 		}
 	}
 	switch c.Class {
@@ -549,6 +560,9 @@ func (r *Registry) Redacted() *Registry {
 	for _, cn := range c.Conns {
 		if cn.Auth != nil {
 			cn.Auth.Value = "[redacted]"
+		}
+		if cn.OAuth != nil {
+			cn.OAuth.Redact()
 		}
 	}
 	return c

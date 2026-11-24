@@ -1301,7 +1301,7 @@ func (s *kotoServer) Mcp(_ context.Context, r *pb.McpReq) (*pb.McpResp, error) {
 	view, err := mcpAdmin(mcpAdminReq{
 		Op: r.Op, Conn: r.Conn, Group: r.Group, Tool: r.Tool, URL: r.Url, Class: r.Cls,
 		Tools: r.Tools, RulesJSON: r.RulesJson, RuleJSON: r.RuleJson,
-		AuthName: r.AuthName, AuthValue: r.AuthValue, PerMinute: int(r.PerMinute),
+		AuthName: r.AuthName, AuthValue: r.AuthValue, OAuthJSON: r.OauthJson, PerMinute: int(r.PerMinute),
 	})
 	if err != nil {
 		return &pb.McpResp{Error: err.Error()}, nil

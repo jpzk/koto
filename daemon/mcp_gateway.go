@@ -61,6 +61,7 @@ func mcpGateway() *mcpgw.Gateway {
 		mcpGwVal = &mcpgw.Gateway{
 			Policy: mcpPolicy,
 			Audit:  mcpAudit,
+			Rotate: mcpRotateRefresh,
 		}
 	})
 	return mcpGwVal
@@ -284,4 +285,14 @@ func mcpSyncAll() {
 	for _, g := range gs {
 		mcpSyncGroup(g)
 	}
+}
+
+// mcpRotateRefresh persists a rotated upstream OAuth refresh token into the
+// 0600 registry (compare-and-swap on the previous value). Never logged.
+func mcpRotateRefresh(conn, old, next string) error {
+	s, err := mcpStore()
+	if err != nil {
+		return err
+	}
+	return s.Update(func(r *mcpreg.Registry) error { return r.RotateRefresh(conn, old, next) })
 }

@@ -11,8 +11,10 @@ Source: `daemon/mcpreg` (registry, validation, effective permissions),
 `daemon/mcpgw` (gateway).
 
 Scope of this release: remote streamable-HTTP connections, a static auth
-header, read-class connections, calls decided automatically by policy.
-Parked approvals, OAuth and stdio servers are not supported yet.
+header or an OAuth 2.1 client (see [OAuth upstreams](#oauth-upstreams)),
+read-class connections, calls decided automatically by policy.
+Parked approvals, interactive (browser) OAuth consent and stdio servers
+are not supported yet.
 
 ## Model
 
@@ -66,7 +68,9 @@ All `koto ctl mcp` verbs go through one admin-only RPC (`Mcp`, listed in
     koto ctl mcp ls
     koto ctl mcp show <conn>
     koto ctl mcp add <conn> --url <https://...> --tools a,b \
-        [--class read|write] [--rules <file.json>] [--auth-file <file>|-]
+        [--class read|write] [--rules <file.json>] \
+        [--auth-file <file>|- | --oauth client_credentials|authorization_code \
+         [--oauth-scope "a b"] [--oauth-client-file <file>|-]]
     koto ctl mcp rm <conn>
     koto ctl mcp disable <conn>
     koto ctl mcp enable  <conn>
@@ -79,6 +83,13 @@ All `koto ctl mcp` verbs go through one admin-only RPC (`Mcp`, listed in
 
 Notes:
 
+- **Pitfall: a tool in `--tools` without a `--rules` entry can only be
+  called with no arguments.** It still shows up in `tools/list`, but every
+  call that passes an argument is refused with `argument "x" not permitted
+  (connection ceiling)`. Give each tool that takes arguments a rule, e.g.
+  `{"add": {"args": {"a": {"type": "number"}, "b": {"type": "number"}}}}`,
+  or `{"add": {"additional_args": true}}` to allow any arguments. `mcp add`
+  prints a warning listing the tools that have no rule. See "Argument rules".
 - `--auth-file` reads one line `Header-Name: value` from a file, or from
   stdin with `-`. The value is never accepted on the command line, so it
   does not end up in shell history or process listings.
@@ -90,6 +101,89 @@ Notes:
 - `show`, `ls` and `effective` never print the auth header value; it is
   shown as `[redacted]`.
 
+
+## OAuth upstreams
+
+Most hosted MCP servers protect their endpoint with OAuth 2.1 as described
+in the MCP authorization spec
+(<https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization>).
+A connection can use an OAuth client instead of a static header:
+`--oauth` and `--auth-file` cannot be combined. The surveyed servers and
+how they authenticate are listed in `notes/mcp-oauth/auth-survey.md`.
+
+    koto ctl mcp add adder --url http://127.0.0.1:8931/mcp --tools add \
+        --oauth client_credentials --oauth-scope mcp:add
+    koto ctl mcp add adder --url https://mcp.example.com/mcp --tools add \
+        --oauth authorization_code --oauth-scope mcp:add
+
+When you run `add`, the daemon (host side, `mcpgw.Onboard`) does the
+following:
+
+1. Discovery. It sends an unauthenticated `initialize` and expects a 401.
+   It reads `resource_metadata` from `WWW-Authenticate`, falling back to
+   the RFC 9728 well-known paths. It then fetches the protected-resource
+   metadata, takes the first `authorization_servers` entry and fetches its
+   RFC 8414 metadata (falling back to OIDC). The PRM `resource` must equal
+   `--url`, and the metadata `issuer` must equal the issuer that was asked
+   for. Every discovered endpoint must be `https`; plain `http` is allowed
+   on loopback only.
+2. Client. It registers a client with RFC 7591 dynamic client
+   registration. For `client_credentials` this is a confidential client
+   using `client_secret_basic`. For `authorization_code` it is a public
+   client with PKCE and redirect `http://127.0.0.1:8976/koto/oauth/callback`.
+   If the AS has no `registration_endpoint` (GitHub, for example), pass a
+   pre-registered client with `--oauth-client-file`, a file (or `-` for
+   stdin) holding `{"client_id":"..","client_secret":".."}`.
+3. First grant. Every token request carries `resource=<url>` (RFC 8707),
+   so the AS binds the token's audience to this server.
+   - `client_credentials`: one token is minted to prove the client works.
+     The client secret is stored.
+   - `authorization_code`: PKCE S256 with `state` and an RFC 9207 `iss`
+     check. This is **headless**: the AS must approve without a browser
+     and answer with a redirect, as the bundled test AS and pre-consented
+     clients do. The refresh token is stored, and from then on the
+     connection's grant is `refresh_token`. Interactive consent is a
+     follow-up.
+
+In the registry (`conns.<name>.oauth`) the stored fields are `grant`,
+`resource`, `issuer`, `token_endpoint`, `client_id`, `auth_method`,
+`scope`, and the secrets `client_secret` / `refresh_token`. Access tokens
+are never written to disk.
+
+At call time, the gateway (`mcpgw.Gateway.bearer`) does this:
+
+- It mints an access token on first use: `client_credentials`, or a
+  refresh. The token is cached in memory per upstream session and renewed
+  10s before `expires_in`.
+- When the upstream returns 401 (expired or revoked token), it discards
+  the cached token, gets a new one, and retries once.
+- Refresh rotation: if the AS returns a new refresh token, it is written
+  to the registry with compare-and-swap (`Registry.RotateRefresh`) before
+  the new access token is used. A stale writer cannot overwrite a newer
+  token, and the consumed token is never replayed. If the new refresh
+  token cannot be persisted, the call fails closed.
+- When the upstream returns 403 with `error="insufficient_scope"`, koto
+  has allowed the call but the server's scopes have not. The guest gets a
+  **tool error** (`isError: true`, text
+  `upstream refused: insufficient_scope (needs mcp:admin)`), not a
+  transport failure, and the audit line records the reason. The two
+  layers stay independent: koto's grant hides and refuses tools the group
+  was not granted, and the AS scope limits what the token can do even for
+  granted tools.
+
+The guest-facing side is unchanged: the guest talks to the gateway exactly
+as before and never sees a token. No token, secret or refresh token
+appears in any gateway response, error or audit entry
+(`TestOAuthNoTokenInGuestBytes`). `show` lists the non-secret oauth fields
+by whitelist and has no secret key at all (`TestMcpAdminOAuthAddViewsRedacted`).
+Errors from the AS give the HTTP status and the RFC 6749 `error` code only,
+never the response body.
+
+`tools/mcp-adder` is a real OAuth-protected test server with a bundled TEST
+authorization server (DCR, auth code + PKCE, client_credentials, refresh
+rotation, aud-bound ES256 JWTs) and a static-PAT mode.
+`scripts/e2e-mcp-oauth.sh` runs it against a private daemon with a real
+model.
 
 ## Deactivating a connection
 
@@ -256,7 +350,9 @@ The registry lives at `<KOTO_HOME>/creds/mcp/registry.json`
 - If the file stops parsing (for example after a bad manual edit), the
   daemon keeps using the last good version and reports the error; a
   missing file means an empty registry (nothing allowed).
-- The auth header value is never written to logs or audit lines.
+- The auth header value, OAuth client secret and refresh token are never
+  written to logs or audit lines. OAuth access tokens are never written
+  to disk at all.
 
 ## Main's read-only view (`mcp_view`)
 
@@ -283,14 +379,19 @@ The answer is built field by field from an allowlist. A field that is
 added to the registry later does not show up here until someone adds it
 on purpose. What the answer can contain:
 
-- connection name, enabled, class;
+- connection name, enabled (`false` after `koto ctl mcp disable`), class;
 - URL as `scheme://host[:port]/path` (no user info, query or fragment);
 - ceiling tool names and their argument rules;
 - whitelisted groups, and per group the granted tools, rules and rate;
 - the effective set;
-- the auth kind: `none`, `header` (the header name only) or `pat` (an
-  `Authorization: Bearer` header), plus a status (`ok` for a static
-  header);
+- the auth kind: `none`, `header` (the header name only), `pat` (an
+  `Authorization: Bearer` header) or `oauth` with its grant type
+  (`client_credentials` or `authorization_code`), plus a status:
+  - `ok`: a static header, or the last token exchange succeeded (or none
+    has run yet in this daemon);
+  - `refresh_failed`: the last exchange failed and may recover by itself;
+  - `relogin_needed`: the authorization server refused the grant, so the
+    operator has to onboard the connection again;
 - `stale: true` when the registry file failed to reload and the daemon
   is using the last good version (the error text is not included);
 - `truncated: true` when `ls` had to drop connections to stay under the
@@ -313,7 +414,8 @@ MCP activity goes into the daemon's hash-chained audit log, which
 
 - `mcp_call`: one record per gateway decision (group, connection,
   method, tool, duration, and a fixed reason code: `ok`, `policy`,
-  `rate_limited`, `not_whitelisted`, `schema_changed`, `upstream`).
+  `rate_limited`, `not_whitelisted`, `schema_changed`, `upstream`,
+  `insufficient_scope`).
 - `mcp_admin`: one record per `koto ctl mcp` op (op, connection, group,
   tool). URL, auth and rules are not recorded.
 - `mcp_view` calls are recorded by the ctl audit, like every ctl verb.
@@ -474,5 +576,5 @@ Restricted modes and the gateway:
 - The harness strictness above only keeps the agent from adding other MCP
   servers to its own tool list. It is not what protects a koto connection.
 
-Follow-ups, not in this release: OAuth and stdio upstreams; write-class tools with operator approval;
+Follow-ups, not in this release: interactive OAuth consent (browser + loopback listener), stdio upstreams; write-class tools with operator approval;
 pins that survive a daemon restart; translations of this page.
