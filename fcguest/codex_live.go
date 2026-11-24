@@ -68,16 +68,23 @@ const (
 	codexLiveSteerBase = 100
 )
 
-// codexLiveArgs is codexAppServerArgs plus the instant_interrupt pin. The
-// /compact app-server keeps codexAppServerArgs unchanged.
-func codexLiveArgs(baseURL, model, effort, systemPrompt string) []string {
+// codexLiveArgs is codexAppServerArgs plus the instant_interrupt pin and,
+// with grants, the same MCP -c layer as exec (codexMcpArgs: gateway entries,
+// plugins/apps/skill MCP install off). The app-server has no
+// --ignore-user-config; its strict half is the requirements.toml allowlist
+// runCodex syncs before launch (syncCodexMcpRequirements). The /compact
+// app-server keeps codexAppServerArgs unchanged. mcp nil = develop's argv.
+func codexLiveArgs(baseURL, model, effort, systemPrompt string, mcp []string) []string {
 	args := codexConfigArgs(baseURL, model, effort, systemPrompt)
 	args = append(args, "-c", "features.instant_interrupt=false")
+	args = append(args, codexMcpArgs(mcp)...)
 	return append(args, "app-server")
 }
 
-func runCodexLive(tw *turnConn, req *pb.MsgReq, baseURL, model, effort, resume, idf string, env []string) {
-	w, in, err := startCodexLive("codex", codexLiveArgs(baseURL, model, effort, string(req.SystemPrompt)), env)
+// runCodexLive: mcp is the granted set that is safe to configure (runCodex
+// drops it when the requirements allowlist could not be written).
+func runCodexLive(tw *turnConn, req *pb.MsgReq, baseURL, model, effort, resume, idf string, env []string, mcp []string) {
+	w, in, err := startCodexLive("codex", codexLiveArgs(baseURL, model, effort, string(req.SystemPrompt), mcp), env)
 	if err != nil {
 		tw.errf("codex: start app-server: %v", err)
 		return
