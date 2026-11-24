@@ -119,9 +119,11 @@ func (g *Gateway) now() time.Time {
 
 func (g *Gateway) client() *http.Client {
 	if g.Client != nil {
-		return g.Client
+		c := *g.Client // an injected client still never follows redirects
+		c.CheckRedirect = noRedirect
+		return &c
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return defaultClient
 }
 
 func (g *Gateway) audit(e AuditEntry) {
