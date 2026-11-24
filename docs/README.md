@@ -53,6 +53,9 @@ wins — please fix the doc.
 - [operations.md](operations.md) — daemon logs and notifications, the
   resources sampler and alerts, upgrading with `koto update`, removing with
   `koto uninstall`, and troubleshooting by exact error message.
+- [audit-events.md](audit-events.md) — security audit events: schema,
+  OTLP mapping, redaction, hash-chained spool, rotation bound,
+  `koto audit verify`, threat notes.
 
 ## Design notes (pre-existing)
 

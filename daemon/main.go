@@ -11,7 +11,7 @@ var kotoVersion = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|spawn|setup|claude-login|openai-login|venice-login|minimax-login|image|budget|install|update|uninstall|tui|pki|version")
+		fmt.Fprintln(os.Stderr, "usage: koto daemon|ctl|spawn|setup|claude-login|openai-login|venice-login|minimax-login|image|budget|audit|install|update|uninstall|tui|pki|version")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -86,6 +86,9 @@ func main() {
 		// Private CA / server cert / client identities, in Go — the
 		// openssl-free counterpart of the Makefile's pki-* targets.
 		pkiCliMain(os.Args[2:])
+	case "audit":
+		// Offline verification of the security audit spool (audit.go).
+		auditCliMain(os.Args[2:])
 	case "version":
 		fmt.Println(kotoVersion)
 	default:

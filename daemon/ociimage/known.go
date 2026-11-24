@@ -28,12 +28,12 @@ type KnownImage struct {
 const FedoraName = "fedora"
 
 // FedoraRef pins the default base by digest, unlike the other well-known
-// names: it is the same fedora:44 digest fcguest/Dockerfile.rootfs and
+// names: it is the same fedora:45 digest fcguest/Dockerfile.rootfs and
 // fcguest/Dockerfile.guest build FROM, so a group that had no image on the
 // old built-in rootfs lands on the same Fedora userland. Groups with no
 // image follow this pin across releases (a bump moves them, with a fresh
 // sys.img); a group that wants a fixed base sets image= explicitly.
-const FedoraRef = "docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19"
+const FedoraRef = "docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c"
 
 // The built-in DefaultName (the legacy rootfs) is no longer offered by a
 // picker: a picker's "no image" row now means fedora. It stays reachable

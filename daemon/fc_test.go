@@ -39,6 +39,13 @@ func fcHarness(t *testing.T) {
 	groupsLock.Lock()
 	writeGroups(map[string]int{"main": 8787, "tg": 8788, "peer": 8789})
 	groupsLock.Unlock()
+	// No real tailer for main: any error line a test emits is forwarded to
+	// main as a notification (logalert.go), and notifyDeliver's ensureTail
+	// would start a goroutine that O_CREATEs groups/main/.cs/log back while
+	// t.TempDir's RemoveAll runs ("directory not empty"). Same treatment as
+	// setupNotifyRoot; the queued banners are dropped with the tempdir.
+	markTailed(ctlMainGroup)
+	t.Cleanup(func() { dropQueuedNotifies(ctlMainGroup, "", true) })
 	// No network in unit tests: the default image cannot be added, as on an
 	// offline host. Tests that want it resolved stub fcEnsureDefault again.
 	prevDefault := fcEnsureDefault
