@@ -525,20 +525,137 @@ type tokenCache struct {
 // skew renews a little before expiry so a call does not race the deadline.
 const skew = 10 * time.Second
 
-// bearer returns a valid access token for conn, minting one if needed.
-// force discards the cached token (after an upstream 401). Rotated refresh
-// tokens are persisted via g.Rotate BEFORE the new access token is used,
-// so a crash cannot strand us with an already-consumed refresh token.
-func (g *Gateway) bearer(ctx context.Context, conn string, tc *tokenCache, force bool) (string, error) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	if !force && tc.tok != nil && g.now().Add(skew).Before(tc.tok.Expiry) {
-		return tc.tok.Access, nil
-	}
-	tc.tok = nil
+// mintTimeout bounds one token-endpoint exchange. The exchange runs on its
+// own context, not the guest request's: a refresh that the AS has already
+// rotated must be read to the end and persisted even if the guest hung up.
+const mintTimeout = 30 * time.Second
+
+// forcedMintGap is the minimum spacing of 401-forced re-mints per
+// connection: an upstream that rejects every token cannot make the gateway
+// hammer the token endpoint.
+const forcedMintGap = 5 * time.Second
+
+// mintState is the per-connection token state shared by every session of
+// that connection: at most one exchange in flight (single-flight), the last
+// token it produced, and when a 401 last forced a re-mint.
+type mintState struct {
+	mu         sync.Mutex
+	call       *mintCall
+	last       *Token
+	lastForced time.Time
+}
+
+type mintCall struct {
+	done chan struct{}
+	tok  *Token
+	err  error
+}
+
+// mintKey scopes token state to the connection AND its OAuth client, so a
+// re-onboarded connection never reuses a token minted for the old client.
+// The refresh token is left out: it rotates under the same client.
+func (g *Gateway) mintKey(conn string) (string, bool) {
 	reg := g.policy()
 	if reg == nil || reg.Conns[conn] == nil || reg.Conns[conn].OAuth == nil {
+		return "", false
+	}
+	o := reg.Conns[conn].OAuth
+	return strings.Join([]string{conn, o.Grant, o.ClientID, o.TokenEndpoint, o.Resource, o.Scope}, "\x00"), true
+}
+
+func (g *Gateway) mintFor(key string) *mintState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.mints == nil {
+		g.mints = map[string]*mintState{}
+	}
+	s := g.mints[key]
+	if s == nil {
+		s = &mintState{}
+		g.mints[key] = s
+	}
+	return s
+}
+
+func (g *Gateway) fresh(t *Token) bool {
+	return t != nil && g.now().Add(skew).Before(t.Expiry)
+}
+
+// bearer returns a valid access token for conn, minting one if needed.
+// force means the upstream just answered 401 to tc's token. Rotated refresh
+// tokens are persisted via g.Rotate BEFORE the new access token is used,
+// so a crash cannot strand us with an already-consumed refresh token.
+// The caller's ctx only bounds how long it waits; the exchange itself
+// always runs to completion (see mintTimeout).
+func (g *Gateway) bearer(ctx context.Context, conn string, tc *tokenCache, force bool) (string, error) {
+	tc.mu.Lock()
+	cur := tc.tok
+	tc.mu.Unlock()
+	if !force && g.fresh(cur) {
+		return cur.Access, nil
+	}
+	key, ok := g.mintKey(conn)
+	if !ok {
 		return "", errors.New("connection gone")
+	}
+	s := g.mintFor(key)
+	s.mu.Lock()
+	switch {
+	case g.fresh(s.last) && (!force || s.last != cur):
+		// another session (or an earlier call) already minted a newer token
+		t := s.last
+		s.mu.Unlock()
+		tc.mu.Lock()
+		tc.tok = t
+		tc.mu.Unlock()
+		return t.Access, nil
+	case force && s.call == nil && !s.lastForced.IsZero() && g.now().Sub(s.lastForced) < forcedMintGap:
+		s.mu.Unlock()
+		return "", errors.New("upstream rejected a fresh token; not re-minting yet")
+	}
+	if force && s.call == nil {
+		s.lastForced = g.now()
+	}
+	c := s.call
+	if c == nil {
+		c = &mintCall{done: make(chan struct{})}
+		s.call = c
+		go g.mint(context.WithoutCancel(ctx), conn, s, c)
+	}
+	s.mu.Unlock()
+	select {
+	case <-c.done:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if c.err != nil {
+		return "", c.err
+	}
+	tc.mu.Lock()
+	tc.tok = c.tok
+	tc.mu.Unlock()
+	return c.tok.Access, nil
+}
+
+// mint runs one token exchange for conn and publishes the result to every
+// waiter. ctx carries values only (WithoutCancel); its deadline is its own.
+func (g *Gateway) mint(ctx context.Context, conn string, s *mintState, c *mintCall) {
+	ctx, cancel := context.WithTimeout(ctx, mintTimeout)
+	defer cancel()
+	c.tok, c.err = g.exchange(ctx, conn)
+	s.mu.Lock()
+	if c.err == nil {
+		s.last = c.tok
+	}
+	s.call = nil
+	s.mu.Unlock()
+	close(c.done)
+}
+
+func (g *Gateway) exchange(ctx context.Context, conn string) (*Token, error) {
+	reg := g.policy()
+	if reg == nil || reg.Conns[conn] == nil || reg.Conns[conn].OAuth == nil {
+		return nil, errors.New("connection gone")
 	}
 	o := *reg.Conns[conn].OAuth // re-read: picks up the latest rotated refresh token
 	var t *Token
@@ -559,12 +676,11 @@ func (g *Gateway) bearer(ctx context.Context, conn string, tc *tokenCache, force
 		err = errors.New("unsupported grant")
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// Token expiry is measured on the gateway clock (tests inject Now).
 	t.Expiry = g.now().Add(time.Until(t.Expiry))
-	tc.tok = t
-	return t.Access, nil
+	return t, nil
 }
 
 // scopeErr is an upstream 403 insufficient_scope: surfaced to the model as

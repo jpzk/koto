@@ -69,9 +69,10 @@ type Gateway struct {
 	Rotate func(conn, old, next string) error
 
 	mu       sync.Mutex
-	sessions map[string]*upstream // key: conn + config fingerprint
-	pins     map[string]string    // key: session key + "\x00" + tool
-	rates    map[string]*window   // key: conn + "\x00" + group
+	sessions map[string]*upstream  // key: conn + config fingerprint
+	pins     map[string]string     // key: session key + "\x00" + tool
+	rates    map[string]*window    // key: conn + "\x00" + group
+	mints    map[string]*mintState // key: mintKey (token single-flight)
 }
 
 type window struct {
