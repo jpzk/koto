@@ -7,11 +7,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// /steer targets the run being viewed (goal-x → run "x"); a known group token
+// /goals steer targets the run being viewed (goal-x → run "x"); a known group token
 // retargets (dropping the viewed run); name= picks a run explicitly; the
 // judge session is never a steer target by default; blank text is a usage
 // error.
-func TestParseSteer(t *testing.T) {
+func TestParseGoalSteer(t *testing.T) {
 	m := goalCard(t, 40)
 	cases := []struct{ in, group, name, text string }{
 		{"use the staging db", "alpha", "x", "use the staging db"},
@@ -42,11 +42,14 @@ func TestParseSteer(t *testing.T) {
 	}
 }
 
-// /steer and /goals steer dispatch an RPC; bare /steer is a usage error, not
-// a send. A typed message in a goal session points at /steer.
+// /goals steer dispatches the GoalSteer RPC (never the live Steer RPC); bare
+// /goals steer is a usage error, not a send. A typed message in a goal
+// WORK session steers its run (steer› chip); the judge session stays
+// follow-only and points at /goals steer. Bare /steer is the live cut
+// (steer_cmd.go).
 func TestSteerDispatch(t *testing.T) {
 	m := goalCard(t, 40)
-	for _, v := range []string{"/steer use the staging db", "/goals steer use the staging db"} {
+	for _, v := range []string{"/goals steer use the staging db"} {
 		n := len(m.lines)
 		if cmd := m.dispatchInput(v); cmd == nil {
 			t.Errorf("%s: no command", v)
@@ -58,22 +61,31 @@ func TestSteerDispatch(t *testing.T) {
 		}
 	}
 	n := len(m.lines)
-	if cmd := m.dispatchInput("/steer"); cmd != nil {
-		t.Error("bare /steer sent something")
+	if cmd := m.dispatchInput("/goals steer"); cmd != nil {
+		t.Error("bare /goals steer sent something")
 	}
-	if len(m.lines) == n || !strings.Contains(m.lines[len(m.lines)-1].text, "usage: /steer") {
-		t.Errorf("bare /steer: no usage line")
+	if len(m.lines) == n || !strings.Contains(m.lines[len(m.lines)-1].text, "usage: /goals steer") {
+		t.Errorf("bare /goals steer: no usage line")
 	}
-	m.dispatchInput("just chatting")
-	if last := m.lines[len(m.lines)-1].text; !strings.Contains(last, "/steer <text>") {
-		t.Errorf("follow-only hint lacks /steer: %q", last)
+	// A goal WORK session carries the steer› chip: plain enter steers.
+	if cmd := m.dispatchInput("just chatting"); cmd == nil {
+		t.Error("plain enter in a goal work session sent no steer")
 	}
+	// The judge stays follow-only and points at /goals steer.
+	m.session["alpha"] = "goal-x-judge"
+	if cmd := m.dispatchInput("just chatting"); cmd != nil {
+		t.Error("plain enter in the judge session sent something")
+	}
+	if last := m.lines[len(m.lines)-1].text; !strings.Contains(last, "/goals steer <text>") {
+		t.Errorf("follow-only hint lacks /goals steer: %q", last)
+	}
+	m.session["alpha"] = "goal-x"
 	found := false
 	for _, l := range goalHelpLines {
-		found = found || strings.Contains(l, "/steer [<group>]")
+		found = found || strings.Contains(l, "/goals steer [<group>]")
 	}
 	if !found {
-		t.Error("/goals help lacks /steer")
+		t.Error("/goals help lacks /goals steer")
 	}
 }
 
@@ -95,7 +107,7 @@ func TestSteerAndDecisionViewNarrow(t *testing.T) {
 		if !strings.Contains(v, "waiting for decision") {
 			t.Errorf("w=%d: view lacks waiting for decision:\n%s", w, v)
 		}
-		if !strings.Contains(v, "steer recorded") {
+		if !strings.Contains(v, "operator steer sent") {
 			t.Errorf("w=%d: view lacks the steer confirmation:\n%s", w, v)
 		}
 	}

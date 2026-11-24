@@ -20,3 +20,25 @@
 id = "GHSA-q7gw-24fr-5p69"
 ignoreUntil = 2027-01-15
 reason = "main lag: otel/sdk 1.46.0 on main, fixed by otel 1.47.0 on develop (develop-only); reaches main with release/1.12.0"
+
+# 2026-11-20 (sbom.yml, first scan of the full SBOM). Package-level matches
+# whose vulnerable code koto does not reach; each expires so it is re-checked.
+[[IgnoredVulns]]
+id = "GO-2026-6860"
+ignoreUntil = 2027-01-15
+reason = "not reachable: x/net/html Parse* text-node coalescing; tui imports x/net/html but govulncheck (go-checks) finds no call to the affected symbols; fix is x/net v0.62.0 (2026-10-27, 6 weeks on 2026-12-08)"
+
+[[IgnoredVulns]]
+id = "GO-2026-6866"
+ignoreUntil = 2027-01-15
+reason = "not reachable: x/net/html Render raw-text namespaces; same as GO-2026-6860 (govulncheck: no call); fix is x/net v0.62.0"
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-01-15
+reason = "not reachable: x/crypto/openpgp is not imported by any module (GOWORK=off go list -deps ./... in daemon/tui/fcguest/protocol); fix is an x/crypto bump"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0486"
+ignoreUntil = 2027-01-15
+reason = "not reachable: Firecracker @ FC_COMMIT pulls rustix 1.1.4 only via vmm -> memfd 0.6.5, which calls memfd_create/fcntl seals, never the xattr functions; fix is rustix 1.1.6 with a Firecracker bump"

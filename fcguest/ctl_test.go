@@ -95,3 +95,24 @@ func TestReadCtlLineResynchronisesAfterAnOversizedRecord(t *testing.T) {
 		t.Error("an unterminated final record was accepted as complete")
 	}
 }
+
+// Operator-authority goal verbs stay out of the guest's ctl schema: amend and
+// redirect exist only on the admin gRPC plane (GoalAmend, GoalSteer.redirect),
+// and the coordinator's goal_steer carries no redirect field. goal_steer
+// itself (develop's coordinator steer) is in the schema.
+func TestCtlGoalAmendRedirectOutOfSchema(t *testing.T) {
+	req, err := ctlRequestFromJSON([]byte(`{"cmd":"goal_steer","name":"g","text":"hi","from_session":""}`))
+	if err != nil || req.GetGoalSteer().GetText() != "hi" || req.GetGoalSteer().GetName() != "g" {
+		t.Fatalf("goal_steer = %v / %v", req, err)
+	}
+	for _, l := range []string{
+		`{"cmd":"goal_amend","name":"g","criteria":"x"}`,
+		`{"cmd":"goal_redirect","name":"g","text":"x"}`,
+		`{"cmd":"goal_note","name":"g","text":"x"}`,
+		`{"cmd":"goal_steer","name":"g","text":"x","redirect":true}`,
+	} {
+		if _, err := ctlRequestFromJSON([]byte(l)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("%s: %v", l, err)
+		}
+	}
+}

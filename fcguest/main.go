@@ -100,6 +100,7 @@ func main() {
 		select {}
 	}
 	setupCS()
+	initWorkerReg()
 	loopbackUp()
 	go proxyBridge()
 	go mcpBridge()
@@ -375,13 +376,20 @@ func reaper() {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		trackMu.Lock()
-		ch := tracked[pid]
-		delete(tracked, pid)
-		trackMu.Unlock()
-		if ch != nil {
-			ch <- ws
-		}
+		onReaped(pid, ws)
+	}
+}
+
+// onReaped routes a reaped pid's status to its tracker and drops its
+// turn-worker registry entry (workerreg.go) under the same lock that added it.
+func onReaped(pid int, ws unix.WaitStatus) {
+	trackMu.Lock()
+	ch := tracked[pid]
+	delete(tracked, pid)
+	unregisterWorkerLocked(pid)
+	trackMu.Unlock()
+	if ch != nil {
+		ch <- ws
 	}
 }
 
@@ -397,6 +405,13 @@ func reaper() {
 // the tmux client from fc-agent's own session). killGroup(pid, ...) still
 // works identically either way, since the pgid already equals pid.
 func startTracked(cmd *exec.Cmd) (int, chan unix.WaitStatus, error) {
+	return startTrackedSession(cmd, "")
+}
+
+// startTrackedSession is startTracked that also registers the child as
+// session sess's turn worker (workerreg.go) while trackMu is held, so the
+// reaper cannot reap it before it is listed. sess "" registers nothing.
+func startTrackedSession(cmd *exec.Cmd, sess string) (int, chan unix.WaitStatus, error) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -411,6 +426,7 @@ func startTracked(cmd *exec.Cmd) (int, chan unix.WaitStatus, error) {
 	}
 	pid := cmd.Process.Pid
 	tracked[pid] = ch
+	registerWorkerLocked(pid, sess)
 	trackMu.Unlock()
 	// Release the Process so Go's runtime doesn't also try to wait it.
 	_ = cmd.Process.Release()

@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -423,7 +424,7 @@ func workerCmdPipe(name string, args []string, env []string) (*worker, *os.File,
 
 func startWorker(name string, args []string, env []string, stdin io.Reader) (*worker, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Dir = wsDir
+	cmd.Dir = workerDir
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: workerUID, Gid: workerGID},
@@ -440,7 +441,9 @@ func startWorker(name string, args []string, env []string, stdin io.Reader) (*wo
 		return nil, err
 	}
 	cmd.Stdout, cmd.Stderr = outW, errW
-	pid, ch, err := startTracked(cmd)
+	// Registered under its session for interrupt/steer (workerreg.go): this is
+	// the one place every harness starts a turn worker.
+	pid, ch, err := startTrackedSession(cmd, envSession(env))
 	outW.Close()
 	errW.Close()
 	if err != nil {
@@ -455,6 +458,13 @@ type worker struct {
 	pid      int
 	done     chan unix.WaitStatus
 	out, err *os.File
+	// errLine, when set, takes each stderr line instead of a text frame
+	// (codex app-server: its stderr is a tracing log, codex_live.go).
+	errLine func([]byte)
+	// softStop, when set, is how the turn clock stops the worker: it asks
+	// first (codex turn/interrupt), and the process group is SIGKILLed only
+	// if the worker outlives codexLiveStopGrace. nil = SIGKILL at once.
+	softStop func()
 }
 
 // runWorker drives a started worker: pumps stderr into text frames, hands
@@ -484,9 +494,18 @@ func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *worke
 	defer tw.onStall.Store(nil)
 	// A pending ctl ask pauses this clock too (ctl.go pauseLiveClocks).
 	defer registerLiveClock(clk)()
+	// softKill: the SIGKILL a soft stop arms; stopped once the worker is
+	// reaped, so it can never hit a reused pid.
+	var softKill *time.Timer
 	clk.start(func() {
 		tmu.Lock()
 		timedOut = true
+		if w.softStop != nil {
+			softKill = time.AfterFunc(codexLiveStopGrace, func() { killGroup(pid, syscall.SIGKILL) })
+			tmu.Unlock()
+			w.softStop()
+			return
+		}
 		tmu.Unlock()
 		killGroup(pid, syscall.SIGKILL)
 	})
@@ -517,11 +536,20 @@ func runWorkerClock(tw *turnConn, w *worker, parse func(line []byte), clk *worke
 		return done
 	}
 	outDone := pump(outR, 16<<20, parse)
-	errDone := pump(errR, 1<<20, func(b []byte) { tw.text(append(b, '\n')) })
+	errFn := func(b []byte) { tw.text(append(b, '\n')) }
+	if w.errLine != nil {
+		errFn = w.errLine
+	}
+	errDone := pump(errR, 1<<20, errFn)
 
 	ws := <-ch // the worker itself has exited; whatever still holds the pipes is not it
 	tw.tr.workerAttr("exit_code", strconv.Itoa(ws.ExitStatus()))
 	clk.stop()
+	tmu.Lock()
+	if softKill != nil {
+		softKill.Stop()
+	}
+	tmu.Unlock()
 
 	// Drain what is already in flight, then take the pipes away. Closing the
 	// READ end is what unblocks a scanner parked on a descendant that will
@@ -636,6 +664,12 @@ func runClaude(tw *turnConn, req *pb.MsgReq, cfg groupConfig, idf string, migrat
 	}
 	if launch == modeConfirm {
 		runClaudeConfirm(tw, req, args, env, idf)
+		return
+	}
+	if req.GetLiveInput() {
+		// Goal work turn: the same live stream-json stdin as confirm (no
+		// approval channel), so live steer notes reach the running turn.
+		runClaudeConfirm(tw, req, withLiveInput(args), env, idf)
 		return
 	}
 	w, err := startClaudeWorker("claude", args, env, bytes.NewReader(req.Msg))
@@ -1054,6 +1088,15 @@ func jobStatusIsRunning(path string) bool {
 	return strings.TrimSpace(string(buf[:n])) == "running"
 }
 
+// withLiveInput makes a claude launch read stream-json user records from a
+// live stdin (idempotent: the confirm launch already does).
+func withLiveInput(args []string) []string {
+	if slices.Contains(args, "--input-format") {
+		return args
+	}
+	return append(append([]string(nil), args...), "--input-format", "stream-json")
+}
+
 // runClaudeConfirm drives a mode=confirm turn: the message goes in as one
 // stream-json user record on a live stdin, every can_use_tool control request
 // is put to the host (approval.go), and stdin closes once the result is out.
@@ -1079,6 +1122,10 @@ func runClaudeConfirm(tw *turnConn, req *pb.MsgReq, args []string, env []string,
 	}
 	if tw.rd != nil {
 		go g.readReplies(tw.rd)
+		if req.GetLiveInput() {
+			// Only now does a TurnReply.note have a reader (approval.go note).
+			tw.send(&pb.TurnFrame{Kind: &pb.TurnFrame_LiveReady{LiveReady: true}})
+		}
 	} else {
 		g.drop(errors.New("no reply channel"))
 	}
