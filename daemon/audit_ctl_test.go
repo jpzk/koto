@@ -161,6 +161,10 @@ func TestAuditEveryCtlVerb(t *testing.T) {
 	add("goal_steer", peer, AuditRefused, map[string]any{"name": "aud-goal", "from_session": "goal-x-judge"})
 	add("sched_add", peer, AuditAllowed, map[string]any{"cron": "*/5 * * * *"})
 	add("sched_list", peer, AuditAllowed, nil)
+	// The MCP registry is operator-only: the ctl plane refuses it for every
+	// caller, main included (mcp_admin.go, acl.go adminOnlyVerbs).
+	add("mcp", peer, AuditRefused, map[string]any{"op": "allow", "conn": "c"})
+	add("mcp", ctlMainGroup, AuditRefused, map[string]any{"op": "allow", "conn": "c", "group": peer})
 	for _, v := range []string{"sched_del", "sched_toggle", "sched_run"} {
 		add(v, peer, "", map[string]any{"id": "nosched", "enabled": false})
 	}
