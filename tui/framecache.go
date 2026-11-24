@@ -143,6 +143,7 @@ func isPromptEditKey(k tea.KeyMsg) bool {
 func (m *Model) cloneOpenModals() {
 	if m.newGroup != nil && m.newGroup.open {
 		c := *m.newGroup
+		c.mcpModal = c.mcpModal.clone() // nil-safe; edited in place
 		m.newGroup = &c
 	}
 	if m.newSess != nil && m.newSess.open {

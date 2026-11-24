@@ -104,6 +104,11 @@ type Conn struct {
 	Class  Class                `json:"class"`
 	Tools  map[string]*ToolRule `json:"tools,omitempty"` // the connection ceiling
 	Groups map[string]*Grant    `json:"groups,omitempty"`
+	// Disabled deactivates the connection without forgetting it: the
+	// ceiling, whitelist, grants and auth stay stored, but the gateway and
+	// the harness config treat it exactly as absent. omitempty: files
+	// written before the flag existed load as enabled.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // Registry is the whole file.

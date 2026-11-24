@@ -287,7 +287,7 @@ authorization model, see [acl-and-auth.md](acl-and-auth.md).
 - An unknown subcommand prints `unknown acl subcommand: <sub> (get|set|del)`.
 - **`mcp <op> ...`**: the MCP connection registry (`mcpCliMain`, RPC `Mcp`,
   admin-only server-side). Ops: `ls`, `show`, `add`, `rm`, `allow`, `deny`,
-  `grant`, `revoke`, `rate`, `effective`. The auth header is read from
+  `grant`, `revoke`, `rate`, `effective`, `disable`, `enable`. The auth header is read from
   `--auth-file <file>|-`, never from argv. Full model and examples:
   [mcp-registry.md](mcp-registry.md).
 
