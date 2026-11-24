@@ -256,7 +256,19 @@ func oauthFail(what string, resp *http.Response) error {
 	if !codeOK.MatchString(code) {
 		code = "?"
 	}
-	return fmt.Errorf("%s: HTTP %d error=%s", what, resp.StatusCode, code)
+	return &asError{what: what, status: resp.StatusCode, code: code}
+}
+
+// asError is an authorization server's refusal: HTTP status + the RFC 6749
+// error code (already charset-checked), never the body.
+type asError struct {
+	what   string
+	status int
+	code   string
+}
+
+func (e *asError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d error=%s", e.what, e.status, e.code)
 }
 
 // Register runs RFC 7591 dynamic client registration. grant is
@@ -543,6 +555,53 @@ type mintState struct {
 	call       *mintCall
 	last       *Token
 	lastForced time.Time
+	status     string // "" = no exchange yet; else an AuthStatus value
+}
+
+// Auth status of an OAuth connection, as the operator/coordinator views
+// report it (never the error text itself).
+const (
+	AuthOK            = "ok"             // last exchange succeeded (or none ran yet)
+	AuthRefreshFailed = "refresh_failed" // last exchange failed; may recover by itself
+	AuthReloginNeeded = "relogin_needed" // the AS refused the grant: re-onboard
+)
+
+// authStatusOf classifies one exchange result. The AS saying the grant or
+// the client is no longer valid cannot heal without the operator; anything
+// else (network, timeout, 5xx, a persist failure) may.
+func authStatusOf(err error) string {
+	if err == nil {
+		return AuthOK
+	}
+	var ae *asError
+	if errors.As(err, &ae) {
+		switch ae.code {
+		case "invalid_grant", "invalid_client", "unauthorized_client":
+			return AuthReloginNeeded
+		}
+	}
+	return AuthRefreshFailed
+}
+
+// AuthStatus reports conn's OAuth token health from the last exchange the
+// gateway ran for its current client. Unknown / never minted => ok.
+func (g *Gateway) AuthStatus(conn string) string {
+	key, ok := g.mintKey(conn)
+	if !ok {
+		return AuthOK
+	}
+	g.mu.Lock()
+	s := g.mints[key]
+	g.mu.Unlock()
+	if s == nil {
+		return AuthOK
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status == "" {
+		return AuthOK
+	}
+	return s.status
 }
 
 type mintCall struct {
@@ -647,6 +706,7 @@ func (g *Gateway) mint(ctx context.Context, conn string, s *mintState, c *mintCa
 	if c.err == nil {
 		s.last = c.tok
 	}
+	s.status = authStatusOf(c.err)
 	s.call = nil
 	s.mu.Unlock()
 	close(c.done)
