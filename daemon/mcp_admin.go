@@ -216,6 +216,9 @@ func mcpAdmin(r mcpAdminReq) (map[string]any, error) {
 	if err := st.Update(mut); err != nil {
 		return nil, err
 	}
+	// Running groups' 9005 listeners follow the new effective sets now: a
+	// revoke/deny/rm closes the socket (and its connections) immediately.
+	mcpSyncAll()
 	// Never log the request itself: add carries the auth value.
 	emitLogf("mcp", "info", "registry %s conn=%q group=%q tool=%q", op, mcpSafe(r.Conn), mcpSafe(r.Group), mcpSafe(r.Tool))
 	if op == "rm" {
