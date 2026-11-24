@@ -420,6 +420,10 @@ type newGroupResultMsg struct {
 	imageDone bool
 	cancelled bool
 	mcpOps    int // MCP ops that landed (0 when rolled back or none)
+	// bootErr: the spawn rpc failed but the daemon had already registered
+	// the group (its first boot did not come up in time). The rest of the
+	// plan still ran; the error is logged, not shown as a form error.
+	bootErr error
 }
 
 // newGroupSubmitCmd runs the plan's steps in order, stopping at the first
@@ -456,8 +460,16 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 				return res
 			}
 			if err := call("spawn", p.spawn); err != nil {
-				res.stage, res.err = "spawn", err
-				return res
+				// plan() refused a name already in the list, so a group
+				// present now was registered by this spawn before its boot
+				// failed. Carry on with config and MCP access: stopping
+				// here would leave a group without what the form asked for
+				// and a dialog that only offers to rename it.
+				if !groupListed(sock, p.group) {
+					res.stage, res.err = "spawn", err
+					return res
+				}
+				res.bootErr = err
 			}
 		}
 		res.spawned = true
@@ -600,6 +612,9 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 		return reload
 	}
 	m.newGroup = &newGroupForm{}
+	if msg.bootErr != nil {
+		m.addLine(logLine{kind: "err", text: fmt.Sprintf("new group %s: created, but its first boot failed: %v", msg.group, msg.bootErr)})
+	}
 	if msg.mcpOps > 0 {
 		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("new group %s: %d MCP access op(s) applied", msg.group, msg.mcpOps)})
 	}
@@ -1121,3 +1136,15 @@ const (
 	allowInputLimit  = 0
 	allowPlaceholder = "empty = whole profile; e.g. 1.2.3.4,github.com"
 )
+
+// groupListed reports whether the daemon's list has group g. A failed list
+// counts as absent, which keeps the old stop-at-spawn behaviour.
+func groupListed(sock, g string) bool {
+	resp, err := daemonCall(sock, "list", nil)
+	if err != nil {
+		return false
+	}
+	raw, _ := resp["groups"].(map[string]any)
+	_, ok := raw[g]
+	return ok
+}

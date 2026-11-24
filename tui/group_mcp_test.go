@@ -304,6 +304,28 @@ func TestNewGroupCreateFailSendsNoMcp(t *testing.T) {
 	}
 }
 
+// TestNewGroupBootTimeoutKeepsMcp: the spawn rpc fails after the daemon
+// registered the group (first boot too slow). The MCP plan is still applied,
+// the dialog closes, and the boot error is logged.
+func TestNewGroupBootTimeoutKeepsMcp(t *testing.T) {
+	fk := startFakeKoto(t)
+	muts := gmStub(t, fk, "", false)
+	fk.failOp, fk.failRegisters = "spawn", true
+	m := gmPlanNew(t, fk)
+	m = createNewGroup(t, m)
+	want := "[allow linear gx grant linear gx list_issues]"
+	if fmt.Sprint(*muts) != want {
+		t.Fatalf("mcp ops %v, want %s", *muts, want)
+	}
+	if m.newGroup.open {
+		t.Fatalf("dialog still open: %q", m.newGroup.err)
+	}
+	log := stripANSI(fmt.Sprint(m.lines))
+	if !strings.Contains(log, "created, but its first boot failed") {
+		t.Fatalf("log lacks the boot error: %s", log)
+	}
+}
+
 func TestNewGroupMcpFailRollsBack(t *testing.T) {
 	fk := startFakeKoto(t)
 	muts := gmStub(t, fk, "grant", false)
