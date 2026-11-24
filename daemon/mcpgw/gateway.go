@@ -45,13 +45,27 @@ const (
 	maxListPages = 20
 )
 
+// AuditEntry.Code values.
+const (
+	CodeOK             = "ok"
+	CodeNotWhitelisted = "not_whitelisted"
+	CodePolicy         = "policy"
+	CodeRateLimited    = "rate_limited"
+	CodeUpstream       = "upstream"
+	CodeSchemaChanged  = "schema_changed"
+)
+
 // AuditEntry is one gateway decision. It never carries arguments, results or
 // credentials — only who, what and the verdict.
 type AuditEntry struct {
 	Group, Conn, Method, Tool string
 	Allowed                   bool
 	Reason                    string
-	Dur                       time.Duration
+	// Code is a fixed, gateway-authored category for Reason (CodeOK,
+	// CodeNotWhitelisted, ...). Reason may quote upstream or argument text;
+	// Code never does, so it is what durable audit records keep.
+	Code string
+	Dur  time.Duration
 }
 
 // Gateway is shared by all groups; Handler(group) gives the per-group view.
@@ -152,7 +166,7 @@ func (g *Gateway) Handler(group string) http.Handler {
 		}
 		eff, err := g.policy().Effective(conn, group)
 		if err != nil {
-			g.audit(AuditEntry{Group: group, Conn: conn, Method: "*", Reason: "not whitelisted"})
+			g.audit(AuditEntry{Group: group, Conn: conn, Method: "*", Reason: "not whitelisted", Code: CodeNotWhitelisted})
 			http.NotFound(w, r)
 			return
 		}
@@ -220,7 +234,7 @@ func (g *Gateway) toolsList(ctx context.Context, eff *mcpreg.Effective) (json.Ra
 	if len(eff.Tools) > 0 {
 		all, key, err := g.upstreamTools(ctx, eff.Conn)
 		if err != nil {
-			e.Reason = err.Error()
+			e.Reason, e.Code = err.Error(), CodeUpstream
 			return nil, &rpcErr{-32603, "upstream unavailable"}
 		}
 		for _, t := range all {
@@ -236,7 +250,7 @@ func (g *Gateway) toolsList(ctx context.Context, eff *mcpreg.Effective) (json.Ra
 			tools = append(tools, t)
 		}
 	}
-	e.Allowed = true
+	e.Allowed, e.Code = true, CodeOK
 	e.Reason = fmt.Sprintf("%d tools", len(tools))
 	r, _ := json.Marshal(map[string]any{"tools": tools})
 	return r, nil
@@ -252,16 +266,16 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 	e := AuditEntry{Group: eff.Group, Conn: eff.Conn, Method: "tools/call", Tool: safe(p.Name)}
 	defer func() { e.Dur = g.now().Sub(t0); g.audit(e) }()
 	if err := eff.Check(p.Name, p.Arguments); err != nil {
-		e.Reason = err.Error()
+		e.Reason, e.Code = err.Error(), CodePolicy
 		return nil, &rpcErr{-32602, "denied by koto MCP policy: " + safe(err.Error())}
 	}
 	if !g.rateOK(eff) {
-		e.Reason = "rate limited"
+		e.Reason, e.Code = "rate limited", CodeRateLimited
 		return nil, &rpcErr{-32000, "denied by koto MCP policy: rate limit"}
 	}
 	key, err := g.sessionKey(eff.Conn)
 	if err != nil {
-		e.Reason = err.Error()
+		e.Reason, e.Code = err.Error(), CodeUpstream
 		return nil, &rpcErr{-32603, "upstream unavailable"}
 	}
 	g.mu.Lock()
@@ -272,7 +286,7 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 		// guest is calling is the one we vetted.
 		all, k2, err := g.upstreamTools(ctx, eff.Conn)
 		if err != nil {
-			e.Reason = err.Error()
+			e.Reason, e.Code = err.Error(), CodeUpstream
 			return nil, &rpcErr{-32603, "upstream unavailable"}
 		}
 		for _, t := range all {
@@ -288,7 +302,7 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 		g.mu.Unlock()
 	}
 	if !seen || pinned == "" {
-		e.Reason = "tool unknown upstream or schema changed since pinned"
+		e.Reason, e.Code = "tool unknown upstream or schema changed since pinned", CodeSchemaChanged
 		return nil, &rpcErr{-32602, "denied by koto MCP policy: tool schema changed or missing upstream"}
 	}
 	args := p.Arguments
@@ -306,10 +320,10 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 		return b, nil
 	}
 	if err != nil {
-		e.Reason = err.Error()
+		e.Reason, e.Code = err.Error(), CodeUpstream
 		return nil, &rpcErr{-32603, "upstream error"}
 	}
-	e.Allowed = true
+	e.Allowed, e.Code = true, CodeOK
 	return res, nil
 }
 

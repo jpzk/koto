@@ -31,6 +31,26 @@ OpenTelemetry **logs** signal. This doc is the schema of record. Source:
   produces `vm_restart` followed by `vm_start`.
 - **Daemon lifecycle**: `daemon_start` (`daemonMain`, right after
   `otelInit`) and `daemon_stop` (signal path, before the OTLP flush).
+- **MCP** (`daemon/mcp_audit.go`, see [mcp-registry.md](mcp-registry.md)):
+  - `mcp_call`: one record per gateway decision (`tools/list`,
+    `tools/call`, requests on a connection the group is not whitelisted
+    for). `group` is the group whose gateway listener carried the request.
+    `outcome` is `allowed`, `refused` (policy) or `error` (upstream
+    failure). `reason` is a fixed code: `ok`, `policy`, `rate_limited`,
+    `not_whitelisted`, `schema_changed` or `upstream`. Args: `conn`,
+    `method`, `tool`, `dur_ms`. The gateway's free-text reason (it can
+    quote argument values or upstream replies) stays in the group log and
+    never reaches the spool. Arguments and results are never recorded.
+  - `mcp_admin`: one record per operator registry op (`koto ctl mcp`),
+    allowed or refused, with `group=koto` and `args.via=admin`. Args: `op`,
+    `conn`, `group`, `tool`. The URL, auth header and value, OAuth settings
+    and rules are never recorded. The error of a refused op is recorded as
+    `error.len` / `error.sha256` only.
+  - A conn or tool name the guest chose is recorded by value only if it
+    passes the registry's name syntax. Otherwise it is recorded as
+    `<key>.len` / `<key>.sha256`.
+  - The main group's `mcp_view` is a ctl verb, so it is covered by the
+    ctl rule above.
 - `spool_repair`: on open, the spool cut off a torn final line (a crash in
   the middle of a write).
 

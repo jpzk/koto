@@ -80,6 +80,7 @@ func mcpAudit(e mcpgw.AuditEntry) {
 	}
 	emitLogfG("mcp", e.Group, "info", "[%s] mcp %s conn=%s method=%s tool=%s reason=%q dur=%s",
 		e.Group, verdict, e.Conn, e.Method, tool, e.Reason, e.Dur.Round(time.Millisecond))
+	mcpAuditCall(e)
 }
 
 // mcpServersFor lists the connections on which group g has at least one
