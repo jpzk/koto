@@ -37,7 +37,8 @@ OpenTelemetry **logs** signal. This doc is the schema of record. Source:
     for). `group` is the group whose gateway listener carried the request.
     `outcome` is `allowed`, `refused` (policy) or `error` (upstream
     failure). `reason` is a fixed code: `ok`, `policy`, `rate_limited`,
-    `not_whitelisted`, `schema_changed` or `upstream`. Args: `conn`,
+    `not_whitelisted`, `schema_changed`, `upstream` or `insufficient_scope`
+    (the upstream refused the call for a missing OAuth scope). Args: `conn`,
     `method`, `tool`, `dur_ms`. The gateway's free-text reason (it can
     quote argument values or upstream replies) stays in the group log and
     never reaches the spool. Arguments and results are never recorded.

@@ -379,14 +379,19 @@ The answer is built field by field from an allowlist. A field that is
 added to the registry later does not show up here until someone adds it
 on purpose. What the answer can contain:
 
-- connection name, enabled, class;
+- connection name, enabled (`false` after `koto ctl mcp disable`), class;
 - URL as `scheme://host[:port]/path` (no user info, query or fragment);
 - ceiling tool names and their argument rules;
 - whitelisted groups, and per group the granted tools, rules and rate;
 - the effective set;
-- the auth kind: `none`, `header` (the header name only) or `pat` (an
-  `Authorization: Bearer` header), plus a status (`ok` for a static
-  header);
+- the auth kind: `none`, `header` (the header name only), `pat` (an
+  `Authorization: Bearer` header) or `oauth` with its grant type
+  (`client_credentials` or `authorization_code`), plus a status:
+  - `ok`: a static header, or the last token exchange succeeded (or none
+    has run yet in this daemon);
+  - `refresh_failed`: the last exchange failed and may recover by itself;
+  - `relogin_needed`: the authorization server refused the grant, so the
+    operator has to onboard the connection again;
 - `stale: true` when the registry file failed to reload and the daemon
   is using the last good version (the error text is not included);
 - `truncated: true` when `ls` had to drop connections to stay under the
@@ -409,7 +414,8 @@ MCP activity goes into the daemon's hash-chained audit log, which
 
 - `mcp_call`: one record per gateway decision (group, connection,
   method, tool, duration, and a fixed reason code: `ok`, `policy`,
-  `rate_limited`, `not_whitelisted`, `schema_changed`, `upstream`).
+  `rate_limited`, `not_whitelisted`, `schema_changed`, `upstream`,
+  `insufficient_scope`).
 - `mcp_admin`: one record per `koto ctl mcp` op (op, connection, group,
   tool). URL, auth and rules are not recorded.
 - `mcp_view` calls are recorded by the ctl audit, like every ctl verb.
