@@ -226,7 +226,7 @@ func TestCodexCompactorFailures(t *testing.T) {
 }
 
 func TestPiRPCArgs(t *testing.T) {
-	a := piRPCArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "11111111-2222", "/tmp/p.md")
+	a := piRPCArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "11111111-2222", "/tmp/p.md", false)
 	if slices.Contains(a, "-p") || slices.Contains(a, "json") {
 		t.Fatalf("rpc argv still in print/json mode: %v", a)
 	}

@@ -336,9 +336,10 @@ func (c *codexCompactor) end() {
 // ---- pi --mode rpc ---------------------------------------------------------------
 
 // piRPCArgs is piArgs for RPC mode: same provider, session, offline and
-// no-extensions flags, minus print mode.
-func piRPCArgs(piName, model, effort, sessionDir, sessionID, promptFile string) []string {
-	src := piArgs(piName, model, effort, sessionDir, sessionID, promptFile, false)
+// no-extensions flags, minus print mode. mcp: the goal work turn (pi.go)
+// loads builtin:mcp exactly as the json launch does; /compact never does.
+func piRPCArgs(piName, model, effort, sessionDir, sessionID, promptFile string, mcp bool) []string {
+	src := piArgs(piName, model, effort, sessionDir, sessionID, promptFile, mcp)
 	out := make([]string, 0, len(src))
 	for i := 0; i < len(src); i++ {
 		switch {
@@ -378,7 +379,7 @@ func runPiCompact(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, cw
 		return
 	}
 	defer os.RemoveAll(agentDir)
-	w, in, err := workerCmdPipe("pi", piRPCArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile), piEnv(env, agentDir))
+	w, in, err := workerCmdPipe("pi", piRPCArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile, false), piEnv(env, agentDir))
 	if err != nil {
 		fail("pi: start rpc: %v", err)
 		return

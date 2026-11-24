@@ -212,12 +212,23 @@ func runCodex(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []
 		return
 	}
 	env = append(env, "CODEX_HOME="+codexHome)
+	mcp := req.GetMcpServers()
+	// Every codex turn syncs the requirements allowlist: written with grants,
+	// removed without (so no grants = develop's codex, nothing left behind).
+	reqErr := syncCodexMcpRequirements(mcp)
 	if req.GetLiveInput() {
+		if reqErr != nil && codexMcpArgs(mcp) != nil {
+			// No allowlist = no strict MCP on the app-server: run the turn
+			// without MCP rather than next to worker-defined servers.
+			tw.tr.workerAttr("mcp.disabled", reqErr.Error())
+			mcp = nil
+		}
 		// Goal work turn: app-server, so live notes reach it (codex_live.go).
-		runCodexLive(tw, req, baseURL, model, cfg.Effort, resume, idf, env)
+		runCodexLive(tw, req, baseURL, model, cfg.Effort, resume, idf, env, mcp)
 		return
 	}
-	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume, req.GetMcpServers()), env, req.Msg)
+	// exec: --ignore-user-config is the strict half; the allowlist is extra.
+	w, err := workerCmd("codex", codexArgs(baseURL, model, cfg.Effort, string(req.SystemPrompt), resume, mcp), env, req.Msg)
 	if err != nil {
 		tw.errf("codex: start: %v", err)
 		return

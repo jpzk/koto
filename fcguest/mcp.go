@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -131,4 +135,89 @@ func piMcpConfig(names []string) []byte {
 		return nil
 	}
 	return b
+}
+
+// codexRequirementsPath is codex's system requirements file (unix:
+// codex-rs/config/src/loader/mod.rs system_requirements_toml_file, rust-v0.171.0).
+// A test seam.
+var codexRequirementsPath = "/etc/codex/requirements.toml"
+
+// codexRequirementsHeader marks the file as koto's: only a file starting with
+// it is ever replaced or removed, so a requirements.toml the base image
+// brought is left alone.
+const codexRequirementsHeader = "# koto fc-agent: granted MCP connections (rewritten every codex turn)\n"
+
+var errCodexRequirementsForeign = errors.New("requirements.toml not written by koto")
+
+// codexMcpRequirements renders the requirements.toml allowlist for the
+// granted connections: one [mcp_servers.<n>.identity] url = bridge URL each.
+// codex disables every configured server whose name is not listed or whose
+// URL differs (config/src/mcp_requirements.rs matches_requirement, applied
+// to the merged config in core/src/config/mod.rs constrain_mcp_servers).
+// This is the app-server's strict mode: `codex app-server` has no
+// --ignore-user-config (cli/src/main.rs passes LoaderOverrides::default()),
+// so a worker-planted $CODEX_HOME/config.toml or trusted project config can
+// still DEFINE servers — requirements, root-owned in /etc, switch them off.
+// nil = no grants.
+func codexMcpRequirements(names []string) []byte {
+	ok := mcpGrantedNames(names)
+	if ok == nil {
+		return nil
+	}
+	var b bytes.Buffer
+	b.WriteString(codexRequirementsHeader)
+	for _, n := range ok {
+		fmt.Fprintf(&b, "\n[mcp_servers.%s.identity]\nurl = %s\n", n, tomlString(mcpGuestURL(n)))
+	}
+	return b.Bytes()
+}
+
+// syncCodexMcpRequirements makes codexRequirementsPath match this turn's
+// grants: written (atomically, 0644, in root-owned /etc/codex) when there
+// are grants, removed when there are none — so a group without grants runs
+// codex exactly as without koto MCP. A file koto did not write is never
+// touched (errCodexRequirementsForeign).
+func syncCodexMcpRequirements(names []string) error {
+	want := codexMcpRequirements(names)
+	cur, err := os.ReadFile(codexRequirementsPath)
+	switch {
+	case err == nil:
+		if !bytes.HasPrefix(cur, []byte(codexRequirementsHeader)) {
+			return errCodexRequirementsForeign
+		}
+		if bytes.Equal(cur, want) {
+			return nil
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	if want == nil {
+		if err := os.Remove(codexRequirementsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	dir := filepath.Dir(codexRequirementsPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".requirements-*.toml")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(want)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, codexRequirementsPath)
+	}
+	if werr != nil {
+		os.Remove(tmp)
+	}
+	return werr
 }

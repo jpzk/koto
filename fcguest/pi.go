@@ -233,7 +233,7 @@ func runPi(tw *turnConn, req *pb.MsgReq, cfg groupConfig, sess string, env []str
 		// (pilive.go). No reply channel = no notes: the json launch below.
 		p := newPiParser(tw, piIDFile(sess))
 		p.wroteID = id != ""
-		runPiLive(tw, req, piRPCArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile), piEnv(env, agentDir), p)
+		runPiLive(tw, req, piRPCArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile, mcpJSON != nil), piEnv(env, agentDir), p)
 		return
 	}
 	w, err := workerCmd("pi", piArgs(pp.piName, model, cfg.Effort, sessDir, id, promptFile, mcpJSON != nil),

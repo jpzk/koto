@@ -97,6 +97,15 @@ type fakeLiveRun struct {
 // frame and may answer on replies (closed by the harness when the turn ends).
 func runCodexLiveFake(t *testing.T, mode string, host func(f *pb.TurnFrame, replies io.Writer, dir string)) *fakeLiveRun {
 	t.Helper()
+	return runCodexLiveFakeWith(t, mode, host, func(tw *turnConn, idf string) {
+		runCodexLive(tw, &pb.MsgReq{Msg: []byte("run the long tool"), LiveInput: true}, "http://10.0.0.1:1/v1", "gpt-5.5", "", "", idf, nil, nil)
+	})
+}
+
+// runCodexLiveFakeWith is runCodexLiveFake with the guest side of the turn
+// supplied by run (runCodexLive directly, or the whole runCodex).
+func runCodexLiveFakeWith(t *testing.T, mode string, host func(f *pb.TurnFrame, replies io.Writer, dir string), run func(tw *turnConn, idf string)) *fakeLiveRun {
+	t.Helper()
 	r := &fakeLiveRun{dir: t.TempDir()}
 	var wsMu sync.Mutex
 	prev := startCodexLive
@@ -162,7 +171,7 @@ func runCodexLiveFake(t *testing.T, mode string, host func(f *pb.TurnFrame, repl
 	t0 := time.Now()
 	go func() {
 		defer close(done)
-		runCodexLive(tw, &pb.MsgReq{Msg: []byte("run the long tool"), LiveInput: true}, "http://10.0.0.1:1/v1", "gpt-5.5", "", "", idf, nil)
+		run(tw, idf)
 		framesW.Close()
 	}()
 	select {
@@ -510,7 +519,7 @@ func TestCodexLiveResume(t *testing.T) {
 // The live launch is the /compact app-server launch plus ONLY the
 // instant_interrupt pin; the exec launch (every non-live turn) never sees it.
 func TestCodexLiveArgs(t *testing.T) {
-	live := codexLiveArgs("http://h/v1", "gpt-5.5", "high", "sys")
+	live := codexLiveArgs("http://h/v1", "gpt-5.5", "high", "sys", nil)
 	base := codexAppServerArgs("http://h/v1", "gpt-5.5", "high", "sys")
 	want := append(slices.Clone(base[:len(base)-1]), "-c", "features.instant_interrupt=false", "app-server")
 	if !slices.Equal(live, want) {
@@ -531,7 +540,7 @@ func TestCodexLiveLaunchUsesLiveArgs(t *testing.T) {
 			go sendNote(t, w, "x", "REJECT end it")
 		}
 	})
-	if !slices.Equal(r.argv, codexLiveArgs("http://10.0.0.1:1/v1", "gpt-5.5", "", "")) {
+	if !slices.Equal(r.argv, codexLiveArgs("http://10.0.0.1:1/v1", "gpt-5.5", "", "", nil)) {
 		t.Fatalf("argv = %q", r.argv)
 	}
 }
