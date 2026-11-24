@@ -381,7 +381,7 @@ func TestInsufficientScopeIsToolError(t *testing.T) {
 		t.Fatal("server-side effect despite 403")
 	}
 	last := (*audit)[len(*audit)-1]
-	if last.Allowed || !strings.Contains(last.Reason, "insufficient_scope") {
+	if last.Allowed || last.Code != CodeInsufficientScope || !strings.Contains(last.Reason, "insufficient_scope") {
 		t.Fatalf("audit: %+v", last)
 	}
 }

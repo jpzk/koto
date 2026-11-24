@@ -745,6 +745,9 @@ func (g *Gateway) exchange(ctx context.Context, conn string) (*Token, error) {
 
 // scopeErr is an upstream 403 insufficient_scope: surfaced to the model as
 // a tool error (the call was authorised by koto, refused by the server).
+// CodeInsufficientScope: koto allowed the call, the upstream AS scope did not.
+const CodeInsufficientScope = "insufficient_scope"
+
 type scopeErr struct{ scope string }
 
 func (e *scopeErr) Error() string {

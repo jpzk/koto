@@ -314,7 +314,7 @@ func (g *Gateway) toolsCall(ctx context.Context, eff *mcpreg.Effective, params j
 	if errors.As(err, &se) {
 		// koto allowed it, the upstream's AS scope did not: a TOOL error
 		// (isError result) so the model sees why, not a transport failure.
-		e.Reason = se.Error()
+		e.Reason, e.Code = se.Error(), CodeInsufficientScope
 		b, _ := json.Marshal(map[string]any{"isError": true,
 			"content": []map[string]string{{"type": "text", "text": se.Error()}}})
 		return b, nil
