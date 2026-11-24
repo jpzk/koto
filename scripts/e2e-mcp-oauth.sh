@@ -226,10 +226,12 @@ models_of(){ grep -oE "$MRE" $OUT/$G-ask-$1.models 2>/dev/null | cut -d'"' -f4 |
 hostev(){ jq -c "select($HSEL)|{path,status,request_id,budget_key}" $OUT/$G-ask-$1.metrics 2>/dev/null | sort | uniq -c | head -3 | tr -s ' \n' ' '; }
 realmodel(){ # REAL provider traffic for this ask: host record (proxy 200 on the provider route [+ flow line]) AND a
   # transcript model id of that provider; no fakemodel anywhere; claude additionally via the outer bridge
+  # the daemon flow line is deduped per (group, method, target) per fcFlowTTL (1 min, proxy.go llmFlowLog), so an ask
+  # within a minute of the previous one has none in its own window: accept this group's earlier line then
   [ -n "$(jq -c "select($HSEL)" $OUT/$G-ask-$1.metrics 2>/dev/null)" ] \
     && grep -q MODELS_DONE $OUT/$G-ask-$1.models && [ -n "$(models_of $1)" ] \
     && ! grep -qi fakemodel $OUT/$G-ask-$1.metrics $OUT/$G-ask-$1.models $OUT/$G-ask-$1.flow \
-    && { [ -z "$FLOW" ] || grep -qF "$FLOW" $OUT/$G-ask-$1.flow; } \
+    && { [ -z "$FLOW" ] || grep -qF "$FLOW" $OUT/$G-ask-$1.flow || grep -aqF "[$G] $FLOW" $OUT/daemon.log; } \
     && { [ $HN != claude ] || grep -qx "KOTO_UPSTREAM=$REAL" $OUT/daemon-env.txt; }; }
 mev(){ echo "REAL model [$(models_of $1)] (transcript $TR: $(grep -oE "[0-9]+ $MRE" $OUT/$G-ask-$1.models | tr '\n' ' ')) host: $(hostev $1)$([ -n "$FLOW" ] && echo "; daemon.log '$FLOW' x$(grep -cF "$FLOW" $OUT/$G-ask-$1.flow)")"; }
 
