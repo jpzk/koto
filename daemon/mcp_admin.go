@@ -83,8 +83,9 @@ func mcpParseRule(s string) (*mcpreg.ToolRule, error) {
 	return &r, nil
 }
 
-// mcpAdmin runs one op and returns the redacted view to show afterwards.
-func mcpAdmin(r mcpAdminReq) (map[string]any, error) {
+// mcpAdminRun runs one op and returns the redacted view to show afterwards.
+// Callers go through mcpAdmin (mcp_audit.go), which audits it.
+func mcpAdminRun(r mcpAdminReq) (map[string]any, error) {
 	st, err := mcpStore()
 	if err != nil {
 		return nil, fmt.Errorf("mcp registry is unusable, fix or remove it first: %v", err)
