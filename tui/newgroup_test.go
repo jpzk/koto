@@ -58,6 +58,10 @@ type fakeKoto struct {
 	// failAllow, when set, is the error a config_set carrying allow gets
 	// (the daemon refusing the list); a good one answers allow_apply.
 	failAllow string
+	// failRegisters makes a failing spawn still register its group (the
+	// daemon saved it, then the first boot timed out); List reports listed.
+	failRegisters bool
+	listed        []string
 }
 
 func (f *fakeKoto) rec(op string, kv map[string]string) {
@@ -93,6 +97,12 @@ func (f *fakeKoto) Spawn(_ context.Context, r *pb.SpawnReq) (*pb.SpawnResp, erro
 	}
 	f.rec("spawn", kv)
 	if f.failOp == "spawn" {
+		if f.failRegisters {
+			f.mu.Lock()
+			f.listed = append(f.listed, r.Group)
+			f.mu.Unlock()
+			return &pb.SpawnResp{Ok: false, Error: "guest agent didn't come up within 30s"}, nil
+		}
 		return &pb.SpawnResp{Ok: false, Error: "boom: no capacity"}, nil
 	}
 	return &pb.SpawnResp{Ok: true}, nil
@@ -151,7 +161,16 @@ func (f *fakeKoto) Restart(_ context.Context, r *pb.GroupReq) (*pb.SpawnResp, er
 
 // List keeps the listCmd that follows a successful create from erroring.
 func (f *fakeKoto) List(context.Context, *pb.ListReq) (*pb.ListResp, error) {
-	return &pb.ListResp{Ok: true}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.listed) == 0 {
+		return &pb.ListResp{Ok: true}, nil
+	}
+	gs := map[string]*pb.GroupInfo{}
+	for _, g := range f.listed {
+		gs[g] = &pb.GroupInfo{}
+	}
+	return &pb.ListResp{Ok: true, Groups: gs}, nil
 }
 
 // startFakeKoto serves fakeKoto on a unix socket in a temp dir and points the
