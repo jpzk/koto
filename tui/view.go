@@ -605,6 +605,10 @@ func (m Model) renderStatusRight(spin string) string {
 			Render("   idle ")
 	}
 	parts = append(parts, act)
+	if note := m.renderLinkNote(); note != "" {
+		// Clicked-link feedback (links.go): "opened <host>" or why not.
+		parts = append(parts, note)
+	}
 
 	// Top-right corner: normally the tok/s chip — daemon-measured
 	// output-token throughput over its trailing window: the focused group,

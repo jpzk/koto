@@ -480,6 +480,14 @@ type Model struct {
 	// while the reconnect loop retries; "" once a probe succeeds.
 	lastRPCErr string
 
+	// linkNote is the status-bar feedback for the last clicked URL
+	// (links.go): "opened <host>", or the reason it wasn't opened when
+	// linkNoteErr. linkNoteSeq ties the clear timer to the note it was
+	// armed for, so an older timer can't wipe a newer note.
+	linkNote    string
+	linkNoteErr bool
+	linkNoteSeq int
+
 	// metric / globalMetric are the *best known* metric maps, not verbatim
 	// the last poll: their "usage" / "ratelimit" sub-maps survive a poll that
 	// carries none (see mergeMetric). The daemon answers `metrics` with the
@@ -2061,6 +2069,15 @@ func (m Model) Update(raw tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 	switch msg := raw.(type) {
 
+	case urlOpenedMsg:
+		return m, m.setLinkNote(msg)
+
+	case linkNoteClearMsg:
+		if msg.seq == m.linkNoteSeq {
+			m.linkNote, m.linkNoteErr = "", false
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		logDbg("ui", "resize %dx%d", msg.Width, msg.Height)
 		widthChanged := msg.Width != m.width
@@ -3415,8 +3432,8 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		// (mouse.go). Suppressed while the picker overlays the middle pane —
 		// its rows don't align with the tree geometry underneath.
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !m.picker.open {
-			if m.handleLeftClick(msg.X, msg.Y) {
-				return m, nil
+			if ok, cmd := m.handleLeftClickCmd(msg.X, msg.Y); ok {
+				return m, cmd
 			}
 		}
 		// Wheel up/down → forward to viewport. Viewport's Update handles
