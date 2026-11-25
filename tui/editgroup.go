@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 
+	"koto-protocol/pb"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -278,6 +280,9 @@ type editPlan struct {
 	config  map[string]any
 	changed []string
 	restart bool
+	// mcp is the alt+m MCP plan as admin ops (group_mcp.go), sent after
+	// the config/restart steps.
+	mcp []*pb.McpReq
 }
 
 // plan builds the edit request. On an invalid field it returns the field key
@@ -288,6 +293,7 @@ func (f *newGroupForm) editPlan() (editPlan, string, string) {
 	if e.loading {
 		return p, "", ""
 	}
+	p.mcp = f.mcpPlan.ops(e.group)
 	for _, o := range groupOptTable {
 		ov, known := e.orig[o.key]
 		if !known {
@@ -350,7 +356,7 @@ func (f *newGroupForm) editButton() (string, bool) {
 		return "[ Save ]", true // pressing it jumps to the bad field
 	case p.restart:
 		return "[ Save + restart ]", true
-	case len(p.config) == 0:
+	case len(p.config) == 0 && len(p.mcp) == 0:
 		return "[ Save ]", false
 	}
 	return "[ Save ]", true
@@ -369,6 +375,8 @@ type editResultMsg struct {
 	// allowApply is the daemon's allow_apply note when the save set allow
 	// ("live (...)" or "stored (...)"), shown in the saved line.
 	allowApply string
+	// mcpOps is how many MCP ops landed.
+	mcpOps int
 }
 
 // editSubmitCmd sends config_set with exactly the changed keys, then the
@@ -399,6 +407,14 @@ func editSubmitCmd(sock, g string, p editPlan) tea.Cmd {
 			}
 			res.restarted = true
 		}
+		if len(p.mcp) > 0 {
+			n, err := gmApply(g, p.mcp, false)
+			res.mcpOps = n
+			if err != nil {
+				res.stage, res.err = "mcp", err
+				return res
+			}
+		}
 		return res
 	}
 }
@@ -419,7 +435,7 @@ func (m *Model) submitEditGroup() tea.Cmd {
 		}
 		return nil
 	}
-	if len(p.config) == 0 && !p.restart {
+	if len(p.config) == 0 && !p.restart && len(p.mcp) == 0 {
 		f.err, f.errAt = "no changes", ngCreate
 		return nil
 	}
@@ -455,9 +471,14 @@ func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
 					f.edit.orig[k] = s
 				}
 				f.edit.modelTouched = false
-				f.edit.restartPending = true
+				f.edit.restartPending = msg.plan.restart && !msg.restarted
 			}
 			f.err, f.errAt = text, ngCreate
+			if msg.stage == "mcp" {
+				// The plan was built against the registry as it was read;
+				// part of it may have landed. Drop it: alt+m re-reads.
+				f.mcpPlan = nil
+			}
 			if _, sent := msg.plan.config[ngAllow]; sent && !msg.saved && strings.Contains(msg.err.Error(), "allow") {
 				// The daemon refused the list: show it under the field.
 				f.errAt = ngAllow
@@ -480,6 +501,9 @@ func (m *Model) handleEditResult(msg editResultMsg) tea.Cmd {
 	}
 	if msg.allowApply != "" {
 		text += "; allow " + msg.allowApply
+	}
+	if msg.mcpOps > 0 {
+		text += fmt.Sprintf("; %d MCP access op(s) applied", msg.mcpOps)
 	}
 	m.addLine(logLine{kind: "sys", group: msg.group, text: text})
 	return listCmd(m.sock)
@@ -525,10 +549,13 @@ func (f *newGroupForm) editSummary(inner int) []string {
 	switch {
 	case msg != "":
 		out = append(out, gray.Render("fix "+bad+" to save"))
-	case len(p.changed) == 0 && !p.restart:
+	case len(p.changed) == 0 && !p.restart && len(p.mcp) == 0:
 		out = append(out, gray.Render("no changes"))
 	case len(p.changed) > 0:
 		out = append(out, gray.Render("save "+editChangeText(p, true)))
+	}
+	if s := f.mcpPlan.summary(e.group); s != "" && msg == "" {
+		out = append(out, gray.Render("then "+s+" (after the save)"))
 	}
 	if msg == "" && p.restart {
 		r := gl("↻", "^") + " restart: cuts a running turn, keeps queued msgs"

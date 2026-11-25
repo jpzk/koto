@@ -180,6 +180,16 @@ service Koto {
   // op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
   rpc Budget (BudgetReq) returns (BudgetResp);
 
+  // Mcp manages the MCP connection registry (daemon/mcp_admin.go,
+  // docs/mcp.md): named upstream MCP connections, each with its own tool
+  // ceiling, a per-connection group whitelist (deny by default) and per-group
+  // grants that can only narrow the ceiling (effective = ceiling ∩ grant).
+  // op: ls|show|add|rm|allow|deny|grant|revoke|rate|effective. HARDCODED
+  // admin-only like budget: whoever edits the registry decides which agents
+  // reach which upstream tools. Upstream auth values are write-only — no
+  // view ever returns them. Errors are in-band.
+  rpc Mcp (McpReq) returns (McpResp);
+
   // Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
   // op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
   // apply to every group pinned to the name. Streams human-readable lines
@@ -551,6 +561,10 @@ message ConfigReq {
   // next turn. confirm is refused for goal sessions.
   optional string mode     = 17;
   string session           = 18; // read only together with mode
+  // mcp: NOT a config key. MCP access is managed by the admin-only Mcp rpc;
+  // the daemon refuses any ConfigReq that sets it (and the ctl plane's
+  // config_set treats it as a posture key), so no agent can self-grant.
+  optional string mcp      = 19;
 }
 
 message JobsReq { string group = 1; } // "" = all running groups
@@ -911,6 +925,40 @@ message BudgetReq {
 message BudgetResp {
   bool ok = 1; string error = 2;
   google.protobuf.Struct budget = 3;  // full view after the operation
+}
+
+// Mcp (see the Mcp rpc comment and daemon/mcp_admin.go).
+//   ls:        no other field.
+//   show:      conn.
+//   add:       conn, url, [cls read|write], tools (ceiling), [rules_json:
+//              {"<tool>":{"args":{...},"additional_args":bool}}],
+//              [auth_name + auth_value] — auth omitted keeps the stored one.
+//   rm:        conn.
+//   enable/disable: conn. disabled = absent at the gateway and in the
+//              harness config; ceiling, auth, whitelist, grants are kept.
+//   allow/deny: conn, group (deny removes the group's grants too).
+//   grant:     conn, group, tool, [rule_json {"args":{...}}].
+//   revoke:    conn, group, tool.
+//   rate:      conn, group, per_minute (0 clears).
+//   effective: group, [conn] — the intersection the gateway enforces.
+message McpReq {
+  string op            = 1;
+  string conn          = 2;
+  string group         = 3;
+  string tool          = 4;
+  string url           = 5;
+  string cls           = 6;
+  repeated string tools = 7;
+  string rules_json    = 8;
+  string rule_json     = 9;
+  string auth_name     = 10;
+  string auth_value    = 11; // host-only secret; never echoed back
+  int32  per_minute    = 12;
+  string oauth_json    = 13; // host-only; may carry a client secret; never echoed back
+}
+message McpResp {
+  bool ok = 1; string error = 2;
+  google.protobuf.Struct view = 3; // redacted view after the operation
 }
 
 // Image (see the Image rpc comment and daemon/imagecmd.go).

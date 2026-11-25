@@ -235,6 +235,7 @@ func fromPBConfigReq(r *pb.ConfigReq) configReq {
 	out.Image = optRaw(r.Image)
 	out.Allow = optRaw(r.Allow)
 	out.Mode = optRaw(r.Mode)
+	out.Mcp = optRaw(r.Mcp)
 	out.Session = r.GetSession()
 	return out
 }
@@ -1292,6 +1293,20 @@ func (s *kotoServer) Budget(_ context.Context, r *pb.BudgetReq) (*pb.BudgetResp,
 		return &pb.BudgetResp{Error: err.Error()}, nil
 	}
 	return &pb.BudgetResp{Ok: true, Budget: toStruct(view)}, nil
+}
+
+// ---- mcp registry (hardcoded admin-only, acl.go) ----------------------------
+
+func (s *kotoServer) Mcp(_ context.Context, r *pb.McpReq) (*pb.McpResp, error) {
+	view, err := mcpAdmin(mcpAdminReq{
+		Op: r.Op, Conn: r.Conn, Group: r.Group, Tool: r.Tool, URL: r.Url, Class: r.Cls,
+		Tools: r.Tools, RulesJSON: r.RulesJson, RuleJSON: r.RuleJson,
+		AuthName: r.AuthName, AuthValue: r.AuthValue, OAuthJSON: r.OauthJson, PerMinute: int(r.PerMinute),
+	})
+	if err != nil {
+		return &pb.McpResp{Error: err.Error()}, nil
+	}
+	return &pb.McpResp{Ok: true, View: toStruct(view)}, nil
 }
 
 // ---- server-streaming RPCs ------------------------------------------------

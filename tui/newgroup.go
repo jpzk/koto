@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"koto-protocol/pb"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -92,6 +94,11 @@ type newGroupForm struct {
 	// gate lets Esc cancel it (submitGate).
 	submit uint64
 	gate   *submitGate
+	// mcpModal is the open alt+m MCP-access modal (group_mcp.go); mcpPlan
+	// is what its ctrl+s kept, applied only after this dialog's own submit
+	// succeeds (immutable once made; replaced wholesale).
+	mcpModal *groupMcpModal
+	mcpPlan  *gmPlan
 }
 
 // submitGate is shared by a running submit and the dialog. Esc cancels
@@ -317,6 +324,9 @@ type newGroupPlan struct {
 	// image, "" = none); spawn["image"] carries the name.
 	imageOp string
 	image   string
+	// mcp is the dialog's MCP plan as admin ops, sent only after the
+	// spawn/config/restart steps all succeeded.
+	mcp []*pb.McpReq
 	// seq and gate tie the submit to its dialog (newGroupForm.submit/gate).
 	seq  uint64
 	gate *submitGate
@@ -391,6 +401,7 @@ func (f *newGroupForm) plan(groups map[string]GroupInfo) (newGroupPlan, string, 
 	if len(cfg) > 0 {
 		p.config = cfg
 	}
+	p.mcp = f.mcpPlan.ops(g)
 	return p, "", ""
 }
 
@@ -408,6 +419,11 @@ type newGroupResultMsg struct {
 	image     string
 	imageDone bool
 	cancelled bool
+	mcpOps    int // MCP ops that landed (0 when rolled back or none)
+	// bootErr: the spawn rpc failed but the daemon had already registered
+	// the group (its first boot did not come up in time). The rest of the
+	// plan still ran; the error is logged, not shown as a form error.
+	bootErr error
 }
 
 // newGroupSubmitCmd runs the plan's steps in order, stopping at the first
@@ -444,8 +460,16 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 				return res
 			}
 			if err := call("spawn", p.spawn); err != nil {
-				res.stage, res.err = "spawn", err
-				return res
+				// plan() refused a name already in the list, so a group
+				// present now was registered by this spawn before its boot
+				// failed. Carry on with config and MCP access: stopping
+				// here would leave a group without what the form asked for
+				// and a dialog that only offers to rename it.
+				if !groupListed(sock, p.group) {
+					res.stage, res.err = "spawn", err
+					return res
+				}
+				res.bootErr = err
 			}
 		}
 		res.spawned = true
@@ -458,6 +482,17 @@ func newGroupSubmitCmd(sock string, p newGroupPlan) tea.Cmd {
 		if p.restart {
 			if err := call("restart", nil); err != nil {
 				res.stage, res.err = "restart", err
+				return res
+			}
+		}
+		if len(p.mcp) > 0 {
+			// Only now does the group exist with its config: grant MCP
+			// access last, and on any failure deny what this run allowed
+			// so the group is left with no MCP access rather than part.
+			n, err := gmApply(p.group, p.mcp, true)
+			res.mcpOps = n
+			if err != nil {
+				res.stage, res.err = "mcp", err
 				return res
 			}
 		}
@@ -577,6 +612,12 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 		return reload
 	}
 	m.newGroup = &newGroupForm{}
+	if msg.bootErr != nil {
+		m.addLine(logLine{kind: "err", text: fmt.Sprintf("new group %s: created, but its first boot failed: %v", msg.group, msg.bootErr)})
+	}
+	if msg.mcpOps > 0 {
+		m.addLine(logLine{kind: "sys", group: msg.group, text: fmt.Sprintf("new group %s: %d MCP access op(s) applied", msg.group, msg.mcpOps)})
+	}
 	return m.handleDaemonResp(daemonRespMsg{op: "spawn", group: msg.group})
 }
 
@@ -584,6 +625,13 @@ func (m *Model) handleNewGroupResult(msg newGroupResultMsg) tea.Cmd {
 // panes underneath.
 func (m Model) handleNewGroupKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	f := m.newGroup
+	if f.mcpModal != nil {
+		// The MCP-access modal (group_mcp.go) sits on top of the form.
+		return m.handleGroupMcpDialogKey(msg)
+	}
+	if msg.String() == "alt+m" {
+		return m, m.openGroupMcp()
+	}
 	key := f.field()
 	// Edit mode: a field whose current value could not be read is shown as
 	// "unknown" and only navigable — never changed, so never sent.
@@ -739,6 +787,9 @@ func (m Model) newGroupBoxWidth() int {
 
 // renderNewGroup paints the dialog as the whole frame, centered.
 func (m Model) renderNewGroup() string {
+	if m.newGroup.mcpModal != nil {
+		return m.renderGroupMcpDialog()
+	}
 	f := *m.newGroup
 	bw := m.newGroupBoxWidth()
 	inner := bw - 4 // border 2 + padding 2
@@ -965,6 +1016,9 @@ func (m Model) renderNewGroup() string {
 		if p.restart {
 			parts = append(parts, "restart")
 		}
+		if s := f.mcpPlan.summary(p.group); s != "" {
+			parts = append(parts, s)
+		}
 		lines = append(lines, gray.Inherit(wrap).Render(strings.Join(parts, gl(" → ", " -> "))))
 	} else {
 		msg := "fix " + badKey + " to create"
@@ -981,11 +1035,11 @@ func (m Model) renderNewGroup() string {
 			lines = append(lines, red.Inherit(wrap).Render(fmt.Sprintf("! %s=%s: %s", o.key, f.value(o.key), note)))
 		}
 	}
-	keys := gl("tab/↑↓ move · ←→ change · enter create · esc cancel",
-		"tab/up/dn move . lt/rt change . enter create . esc cancel")
+	keys := gl("tab/↑↓ move · ←→ change · enter create · alt+m mcp · esc cancel",
+		"tab/up/dn move . lt/rt change . enter create . alt+m mcp . esc cancel")
 	if f.edit.on {
-		keys = gl("tab/↑↓ move · ←→ change · enter save · esc cancel",
-			"tab/up/dn move . lt/rt change . enter save . esc cancel")
+		keys = gl("tab/↑↓ move · ←→ change · enter save · alt+m mcp · esc cancel",
+			"tab/up/dn move . lt/rt change . enter save . alt+m mcp . esc cancel")
 		keys += gl(" · image: koto image apply <name> ", " . image: koto image apply <name> ") + f.edit.group
 	}
 	if f.field() == ngImage && !f.edit.on {
@@ -1082,3 +1136,15 @@ const (
 	allowInputLimit  = 0
 	allowPlaceholder = "empty = whole profile; e.g. 1.2.3.4,github.com"
 )
+
+// groupListed reports whether the daemon's list has group g. A failed list
+// counts as absent, which keeps the old stop-at-spawn behaviour.
+func groupListed(sock, g string) bool {
+	resp, err := daemonCall(sock, "list", nil)
+	if err != nil {
+		return false
+	}
+	raw, _ := resp["groups"].(map[string]any)
+	_, ok := raw[g]
+	return ok
+}

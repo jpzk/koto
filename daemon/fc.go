@@ -239,6 +239,9 @@ type fcVM struct {
 	// netCancel tears down the L3 gVisor gateway's AcceptQemu goroutines on
 	// stop (internet=full only; nil otherwise).
 	netCancel context.CancelFunc
+	// mcp is the group's live MCP gateway slot (mcp_gateway.go); also in
+	// listeners, so teardown closes it. nil with KOTO_MCP_GATEWAY=0.
+	mcp *mcpLive
 }
 
 var (
@@ -906,6 +909,19 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	}
 	vm.listeners = append(vm.listeners, lnCtl)
 	go fcAcceptLoop(g, lnCtl, func(c net.Conn) { fcCtlConn(g, c) })
+
+	// MCP gateway (mcp_gateway.go): on unless KOTO_MCP_GATEWAY=0, and the
+	// 9005 socket exists only while g has an effective grant (the slot opens
+	// and closes it live). The group is identified by THIS listener, never by
+	// anything the guest sends.
+	if mcpGatewayEnabled() {
+		m, err := fcStartMcpListener(g, base, jailUID)
+		if err != nil {
+			return fail(err)
+		}
+		vm.mcp = m
+		vm.listeners = append(vm.listeners, m)
+	}
 
 	// network=wan|lan|full: attach the L3 gVisor gateway. The guest's fc-agent
 	// dials vsock 9003 once net="l3" is delivered at init; each accepted
@@ -1853,6 +1869,9 @@ func fcConsumeExpectedTurnBound(g string, slot int) (string, <-chan struct{}, bo
 
 func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []byte, traceparent string) error {
 	fcExpectTurn(g, slot, session)
+	// The 9005 listener follows the grants: open it before a turn that will
+	// be told about MCP servers, close it before one that will not.
+	mcpSyncGroup(g)
 	m := &pb.MsgReq{
 		// W3C traceparent of the host turn span; "" when OTel export is off,
 		// which tells the guest to emit no spans at all (zero overhead).
@@ -1867,6 +1886,9 @@ func fcSendMsg(g, session string, slot int, msg, systemPrompt string, cfgJSON []
 		// is the reason concurrent turns stay parseable. Always sent: the
 		// default session runs in a slot like everything else.
 		Slot: int32(slot),
+		// MCP connections g is whitelisted on (names only; nil when the
+		// gateway is off). The gateway re-checks every request anyway.
+		McpServers: mcpServersFor(g),
 		// A goal work turn keeps a live stdin for steer notes (goal_live.go).
 		LiveInput: goalLiveSession(g, session),
 	}

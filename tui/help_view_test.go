@@ -45,13 +45,13 @@ func TestCtrlHTogglesHelp(t *testing.T) {
 // and a sampling of keys/commands, and replaces the chat frame entirely.
 func TestHelpViewRendersSections(t *testing.T) {
 	m := focusModel(t)
-	m.height = 140 // tall enough that nothing needs scrolling (the cheatsheet grew with /steer + /goals steer)
+	m.height = 170 // tall enough that nothing needs scrolling (MCP section + /steer + /goals steer)
 	m = press(t, m, tea.KeyCtrlH)
 	out := stripANSI(m.View())
 	for _, want := range []string{
 		"koto cheatsheet",
 		"GLOBAL KEYS", "CHAT + TREE", "TERMINAL PANE", "FLEET VIEW", "SCHEDULES VIEW", "SLASH COMMANDS",
-		"ctrl+k", "ctrl+e", "ctrl+y", "SCHEDULES VIEW (ctrl+y)", "ctrl+p", "/destroy <g>", "/sched", "/config",
+		"ctrl+k", "ctrl+e", "ctrl+y", "SCHEDULES VIEW (ctrl+y)", "MCP VIEW (alt+m)", "alt+m", "ctrl+p", "/destroy <g>", "/sched", "/mcp", "/config",
 		"esc/ctrl+h close",
 	} {
 		if !strings.Contains(out, want) {

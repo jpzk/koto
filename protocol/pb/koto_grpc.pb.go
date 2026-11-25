@@ -73,6 +73,7 @@ const (
 	Koto_AclSetRole_FullMethodName     = "/koto.Koto/AclSetRole"
 	Koto_AclDelRole_FullMethodName     = "/koto.Koto/AclDelRole"
 	Koto_Budget_FullMethodName         = "/koto.Koto/Budget"
+	Koto_Mcp_FullMethodName            = "/koto.Koto/Mcp"
 	Koto_Image_FullMethodName          = "/koto.Koto/Image"
 	Koto_RunScript_FullMethodName      = "/koto.Koto/RunScript"
 	Koto_AttachShell_FullMethodName    = "/koto.Koto/AttachShell"
@@ -238,6 +239,15 @@ type KotoClient interface {
 	// could lift them would void the bound (same class as config_posture).
 	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
 	Budget(ctx context.Context, in *BudgetReq, opts ...grpc.CallOption) (*BudgetResp, error)
+	// Mcp manages the MCP connection registry (daemon/mcp_admin.go,
+	// docs/mcp.md): named upstream MCP connections, each with its own tool
+	// ceiling, a per-connection group whitelist (deny by default) and per-group
+	// grants that can only narrow the ceiling (effective = ceiling ∩ grant).
+	// op: ls|show|add|rm|allow|deny|grant|revoke|rate|effective. HARDCODED
+	// admin-only like budget: whoever edits the registry decides which agents
+	// reach which upstream tools. Upstream auth values are write-only — no
+	// view ever returns them. Errors are in-band.
+	Mcp(ctx context.Context, in *McpReq, opts ...grpc.CallOption) (*McpResp, error)
 	// Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
 	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
 	// apply to every group pinned to the name. Streams human-readable lines
@@ -705,6 +715,16 @@ func (c *kotoClient) Budget(ctx context.Context, in *BudgetReq, opts ...grpc.Cal
 	return out, nil
 }
 
+func (c *kotoClient) Mcp(ctx context.Context, in *McpReq, opts ...grpc.CallOption) (*McpResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(McpResp)
+	err := c.cc.Invoke(ctx, Koto_Mcp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) Image(ctx context.Context, in *ImageReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[1], Koto_Image_FullMethodName, cOpts...)
@@ -970,6 +990,15 @@ type KotoServer interface {
 	// could lift them would void the bound (same class as config_posture).
 	// op: "show" (default) | "set" | "unset" | "price". Errors are in-band.
 	Budget(context.Context, *BudgetReq) (*BudgetResp, error)
+	// Mcp manages the MCP connection registry (daemon/mcp_admin.go,
+	// docs/mcp.md): named upstream MCP connections, each with its own tool
+	// ceiling, a per-connection group whitelist (deny by default) and per-group
+	// grants that can only narrow the ceiling (effective = ceiling ∩ grant).
+	// op: ls|show|add|rm|allow|deny|grant|revoke|rate|effective. HARDCODED
+	// admin-only like budget: whoever edits the registry decides which agents
+	// reach which upstream tools. Upstream auth values are write-only — no
+	// view ever returns them. Errors are in-band.
+	Mcp(context.Context, *McpReq) (*McpResp, error)
 	// Image manages the host OCI image catalog (daemon/imagecmd.go, docs/images.md):
 	// op add|ls|inspect|rm|gc|update|apply|rollback, positional args, all =
 	// apply to every group pinned to the name. Streams human-readable lines
@@ -1147,6 +1176,9 @@ func (UnimplementedKotoServer) AclDelRole(context.Context, *AclDelRoleReq) (*Acl
 }
 func (UnimplementedKotoServer) Budget(context.Context, *BudgetReq) (*BudgetResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Budget not implemented")
+}
+func (UnimplementedKotoServer) Mcp(context.Context, *McpReq) (*McpResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Mcp not implemented")
 }
 func (UnimplementedKotoServer) Image(*ImageReq, grpc.ServerStreamingServer[ImageEvent]) error {
 	return status.Error(codes.Unimplemented, "method Image not implemented")
@@ -1900,6 +1932,24 @@ func _Koto_Budget_Handler(srv interface{}, ctx context.Context, dec func(interfa
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Mcp_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(McpReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Mcp(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Mcp_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Mcp(ctx, req.(*McpReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_Image_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(ImageReq)
 	if err := stream.RecvMsg(m); err != nil {
@@ -2124,6 +2174,10 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Budget",
 			Handler:    _Koto_Budget_Handler,
+		},
+		{
+			MethodName: "Mcp",
+			Handler:    _Koto_Mcp_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

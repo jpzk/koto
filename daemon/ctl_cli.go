@@ -138,6 +138,8 @@ admin role only
                                            e.g. acl set ops stop:ghost restart:ghost list
   acl del <role>                           remove a role
   budget [set|unset|price ...]              operator budget (admin-only; see koto budget --help)
+  mcp [ls|show|add|rm|allow|deny|grant|revoke|rate|effective ...]
+                                           MCP connection registry (admin-only; see koto ctl mcp --help)
 
 env: KOTO_ADDR (127.0.0.1:8443), KOTO_CREDS_DIR (./creds, else
      $KOTO_HOME/creds, else /var/lib/koto/creds — the installed default),
@@ -645,6 +647,9 @@ func ctlCliMain(args []string) {
 
 	case "budget":
 		budgetCliMain(rest)
+
+	case "mcp":
+		mcpCliMain(rest)
 
 	default:
 		fmt.Fprint(os.Stderr, ctlUsage)

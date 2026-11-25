@@ -200,6 +200,7 @@ func configPostureKey(req configReq) string {
 		{"network", req.Network}, {"internet", req.Internet}, {"root", req.Root},
 		{"ports", req.Ports}, {"size", req.Size}, {"autostart", req.Autostart},
 		{"kvm", req.KVM}, {"allow", req.Allow}, {"mode", req.Mode},
+		{"mcp", req.Mcp},
 	} {
 		if len(k.raw) > 0 {
 			return k.name
@@ -971,6 +972,18 @@ func ctlDispatchInner(owner string, line []byte) any {
 			return errResp(err.Error())
 		}
 		return baseResp{OK: true}
+
+	case "mcp_view":
+		// Read-only registry projection for the coordinator (mcp_view.go).
+		if !isMain {
+			return errResp("ctl: verb not allowed for non-main groups: mcp_view")
+		}
+		return ctlMcpView(line)
+
+	case "mcp":
+		// The MCP registry is operator-only (acl.go adminOnlyVerbs): no group,
+		// main included, may whitelist itself or a peer or grant tools.
+		return errResp("ctl: mcp is an operator-only setting — ask the operator (koto ctl mcp)")
 
 	default:
 		return errResp("ctl: verb not allowed: " + env.Cmd)

@@ -125,7 +125,7 @@ func TestCodexAppServerArgs(t *testing.T) {
 		}
 	}
 	// The exec turn still gets the very same overrides.
-	e := strings.Join(codexArgs("http://10.0.2.2:1/v1", "gpt-6.1-sol", "high", "be koto", ""), " ")
+	e := strings.Join(codexArgs("http://10.0.2.2:1/v1", "gpt-6.1-sol", "high", "be koto", "", nil), " ")
 	if !strings.Contains(e, strings.Join(codexConfigArgs("http://10.0.2.2:1/v1", "gpt-6.1-sol", "high", "be koto"), " ")) {
 		t.Errorf("exec argv lost the shared overrides: %s", e)
 	}
@@ -226,7 +226,7 @@ func TestCodexCompactorFailures(t *testing.T) {
 }
 
 func TestPiRPCArgs(t *testing.T) {
-	a := piRPCArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "11111111-2222", "/tmp/p.md")
+	a := piRPCArgs("minimax", "MiniMax-M3", "high", "/workspace/.pi/sessions", "11111111-2222", "/tmp/p.md", false)
 	if slices.Contains(a, "-p") || slices.Contains(a, "json") {
 		t.Fatalf("rpc argv still in print/json mode: %v", a)
 	}
