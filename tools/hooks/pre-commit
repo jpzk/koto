@@ -33,15 +33,18 @@
 # is a net for the recognisable shapes and for other people's keys; keeping
 # creds/ out of the tree is .gitignore's job, and `make secrets-scan` greps
 # history for the live values verbatim to cover what no pattern scanner can.
-# Allowlist a false positive in .betterleaks.toml at the repo root (picked up
-# automatically). Image pinned by DIGEST, ≥6 weeks old like every dependency
-# (v1.7.0, 2026-07-23); a native `betterleaks` on PATH is preferred.
+# Allowlist a false positive in .betterleaks.toml at the repo root (passed via
+# --config: since v1.10.0 betterleaks no longer auto-loads it). Image pinned by
+# DIGEST (linux/amd64 manifest). v1.10.1, 2026-11-12, bumped in chore/bump-all
+# with the 6-week age rule waived by the operator; v1.10.0+ also stops running
+# repo-local git textconv helpers during scans (GHSA-93cv-92xc-php5).
+# A native `betterleaks` on PATH is preferred.
 
 set -u
 
 repo=$(git rev-parse --show-toplevel)
 cd "$repo"
-BETTERLEAKS_IMAGE=ghcr.io/betterleaks/betterleaks@sha256:06d60954c287c19af7a7171a1b5d466959d2f49b6946d4cf92ea65ba725a633a
+BETTERLEAKS_IMAGE=ghcr.io/betterleaks/betterleaks@sha256:07ef039be491a6c076b239dd8b8e42fdde984af6609c8541bdb7c9507708403e
 
 fail() { printf 'pre-commit: %s\n' "$*" >&2; exit 1; }
 note() { printf 'pre-commit: %s\n' "$*" >&2; }
@@ -141,7 +144,7 @@ git_state_outside_repo() {
 	return 1
 }
 if command -v betterleaks >/dev/null 2>&1; then
-	exec betterleaks git --pre-commit --staged --no-banner --redact=100 .
+	exec betterleaks git --pre-commit --staged --no-banner --redact=100 --config "$repo/.betterleaks.toml" .
 fi
 engine=$(command -v podman 2>/dev/null || command -v docker 2>/dev/null || true)
 [ -n "$engine" ] || fail "neither betterleaks nor podman/docker found — cannot scan for secrets (install betterleaks, or bypass once: git commit --no-verify)"
@@ -170,4 +173,4 @@ exec "$engine" run --rm --security-opt label=disable \
 	--read-only --tmpfs /tmp \
 	-v "$repo:/src:ro" -w /src \
 	-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
-	"$BETTERLEAKS_IMAGE" git --pre-commit --staged --no-banner --redact=100 /src
+	"$BETTERLEAKS_IMAGE" git --pre-commit --staged --no-banner --redact=100 --config /src/.betterleaks.toml /src

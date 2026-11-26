@@ -828,18 +828,19 @@ metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl
 
 # --- secrets: a per-commit gate and a whole-history sweep -------------------
-# Both scanners run from digest-pinned images (≥6 weeks old, like every
-# dependency here): betterleaks v1.7.0 (2026-07-23 — gitleaks' author's
-# successor project, drop-in flags/config; see tools/hooks/pre-commit for why)
-# and trufflehog v3.96.0 (2026-07-24). Neither tool recognises koto's own byte-random tokens or the
+# Both scanners run from digest-pinned images (bumped 2026-11-26 in chore/bump-all,
+# 6-week age rule waived by the operator): betterleaks v1.10.1 (2026-11-12 — gitleaks' author's
+# successor project, drop-in flags; config passed explicitly via --config since
+# v1.10.0 stopped auto-loading it; see tools/hooks/pre-commit for why)
+# and trufflehog v3.100.1 (2026-11-23). Neither tool recognises koto's own byte-random tokens or the
 # sk-ant-oat01- OAuth token (canary-tested 2026-09-05), so secrets-scan also
 # greps history for the LIVE values in the installed creds dir, verbatim (one
 # per line — the token files carry no trailing newline, so a bare cat glues
 # them into one string that matches nothing), and
 # lists every credential-shaped filename ever committed. creds/ staying out of
 # the tree is .gitignore's job; these are the checks that it did.
-BETTERLEAKS_IMAGE ?= ghcr.io/betterleaks/betterleaks@sha256:06d60954c287c19af7a7171a1b5d466959d2f49b6946d4cf92ea65ba725a633a
-TRUFFLEHOG_IMAGE  ?= docker.io/trufflesecurity/trufflehog@sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+BETTERLEAKS_IMAGE ?= ghcr.io/betterleaks/betterleaks@sha256:07ef039be491a6c076b239dd8b8e42fdde984af6609c8541bdb7c9507708403e
+TRUFFLEHOG_IMAGE  ?= docker.io/trufflesecurity/trufflehog@sha256:9c7a8325d43a4af2960d3f21d61a08981d8a1bf0542e007efa2e47097e386452
 SCAN_RUN = $(CONTAINER) run --rm --security-opt label=disable -v "$(CURDIR):/src:ro" -w /src \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src
 
@@ -852,7 +853,7 @@ hooks:
 secrets-scan:
 	$(need-container)
 	@echo "==> betterleaks: every commit on every ref"
-	$(SCAN_RUN) $(BETTERLEAKS_IMAGE) git /src --log-opts="--all" --no-banner --redact=100
+	$(SCAN_RUN) $(BETTERLEAKS_IMAGE) git /src --log-opts="--all" --no-banner --redact=100 --config /src/.betterleaks.toml
 	@echo "==> trufflehog: every commit, verified + unverified"
 	$(SCAN_RUN) $(TRUFFLEHOG_IMAGE) git file:///src --results=verified,unverified,unknown --no-update --fail
 	@echo "==> credential-shaped filenames ever committed (must print nothing)"

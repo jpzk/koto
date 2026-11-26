@@ -1,6 +1,6 @@
 # betterleaks configuration — the default ruleset, plus allowlisted false
-# positives. Picked up automatically by the pre-commit hook and by
-# `make secrets-scan` (both run betterleaks from the repo root).
+# positives. Passed explicitly (--config) by the pre-commit hook and by
+# `make secrets-scan`; betterleaks >= v1.10.0 no longer auto-loads it.
 #
 # Every entry is an exact value, not a rule or a path: a false positive is
 # silenced where it is, and the same rule still fires on anything else.
