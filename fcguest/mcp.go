@@ -138,7 +138,7 @@ func piMcpConfig(names []string) []byte {
 }
 
 // codexRequirementsPath is codex's system requirements file (unix:
-// codex-rs/config/src/loader/mod.rs system_requirements_toml_file, rust-v0.171.0).
+// codex-rs/config/src/loader/mod.rs system_requirements_toml_file, rust-v0.172.0).
 // A test seam.
 var codexRequirementsPath = "/etc/codex/requirements.toml"
 
