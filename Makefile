@@ -19,6 +19,9 @@
 # (the grpc and protobuf runtimes are pinned in the go.mod files.)
 PROTOC_GEN_GO_VER      := v1.36.12
 PROTOC_GEN_GO_GRPC_VER := v1.6.2
+# protoc itself comes from the alpine apk repo of GO_IMAGE (alpine 3.24):
+# pin the exact apk release so proto-gen reproduces "protoc v6.31.1" headers.
+PROTOBUF_APK_VER       := 31.1-r1
 
 # --- first run ---------------------------------------------------------------
 # GETTING koto RUNNING IS THREE STAGES, and each one owns exactly its own job:
@@ -881,7 +884,8 @@ proto-gen:
 	  -v $(CURDIR):/src -w /src/protocol \
 	  -v $(CURDIR)/.gocache:/root/.cache/go-build \
 	  $(GO_IMAGE) sh -euc '\
-	    apk add --no-cache protobuf protobuf-dev >/dev/null; \
+	    apk add --no-cache protobuf=$(PROTOBUF_APK_VER) protobuf-dev=$(PROTOBUF_APK_VER) >/dev/null; \
+	    protoc --version | grep -qx "libprotoc 31.1"; \
 	    go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VER); \
 	    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VER); \
 	    export PATH=$$PATH:$$(go env GOPATH)/bin; \
