@@ -450,7 +450,7 @@ func (m Model) topPaneSize() (int, int) {
 	// -3: status + hint + metrics; -2 more: summary + header rows rendered
 	// outside the viewport so they never scroll away; -1 more for the memory
 	// row when the daemon reports a fleet cap (renderTopMemLine).
-	h := max(1, m.height-5-m.topMemRows())
+	h := max(1, m.height-5-m.topMemRows()-m.notifyRows())
 	return w, h
 }
 

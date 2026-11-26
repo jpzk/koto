@@ -145,7 +145,7 @@ func renderMcpRow(it mcpConn, set []mcpCol, toolsW int, sel bool) string {
 }
 
 func (m Model) mcpPaneSize() (int, int) {
-	return max(10, m.width-2), max(1, m.height-5)
+	return max(10, m.width-2), max(1, m.height-5-m.notifyRows())
 }
 
 func (m *Model) resizeMcpViewport() {

@@ -161,7 +161,7 @@ func (m Model) logPaneSize() (int, int) {
 	// -3: status + hint + metrics (no input bar in log view). Fills the
 	// frame to exactly m.height like the chat and shell views, keeping the
 	// bottom rows fixed across every view toggle.
-	h := max(1, m.height-3)
+	h := max(1, m.height-3-m.notifyRows())
 	return w, h
 }
 
