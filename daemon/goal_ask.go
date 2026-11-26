@@ -130,6 +130,7 @@ func goalAsk(owner, goalID, question string, options []string) any {
 		return errResp("ctl: ask: too many pending approvals")
 	}
 	approvals[k] = p
+	inboxChanged()
 	approvalsMu.Unlock()
 	emit(owner, Event{Event: "approval_request", Session: work, ID: id, Name: kindAsk,
 		Text: p.summary, Kind: kindAsk, Options: opts})

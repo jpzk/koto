@@ -136,6 +136,9 @@ func notifyDeliver(g, sev, session, title, msg string) bool {
 	}
 	emitLogfG("notify", g, "info", "[%s] %s notification session=%s: %s",
 		g, sev, sessionMarkerName(session), line)
+	// The inbox's notification store (inbox.go): the same flattened +
+	// truncated text, kept until the operator dismisses it.
+	inboxAddNotification(g, sev, session, t, b)
 	ensureTail(g)
 	return true
 }
