@@ -33,11 +33,11 @@ mkdir -p "$OUTDIR"
 CONTAINER="${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || true)}"
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to build the rootfs"; exit 1; }
 
-# Pinned by DIGEST for the same reason the Go image is: alpine:3.22 is a
+# Pinned by DIGEST for the same reason the Go image is: alpine:3.24 is a
 # moving tag, so the e2fsprogs that writes the filesystem would change under
 # us. Bump with:
-#   podman manifest inspect docker.io/library/alpine:3.22
-MKFS_IMAGE="${MKFS_IMAGE:-docker.io/library/alpine@sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6}"
+#   podman manifest inspect docker.io/library/alpine:3.24
+MKFS_IMAGE="${MKFS_IMAGE:-docker.io/library/alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf}"
 
 # Which uid the finished image should be chowned to, expressed INSIDE the
 # container — and it differs by engine, which is easy to get backwards.

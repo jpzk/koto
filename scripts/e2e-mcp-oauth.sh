@@ -30,7 +30,7 @@ PORT=8467; PROXY=9987; AP=8931; PP=8932
 REAL=${KOTO_REAL_UPSTREAM:-http://127.0.0.1:18888}; MODEL=${MODEL:-}
 HARNESSES=${HARNESSES:-claude pi codex}; MODEL_PI=${MODEL_PI:-MiniMax-M2.7}; MODEL_CODEX=${MODEL_CODEX:-}
 MMKEY=${MINIMAX_KEY_FILE:-/workspace/.secrets/minimax_key}; OAKEY=${OPENAI_KEY_FILE:-/workspace/.secrets/openai_key}
-FEDORA=docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19
+FEDORA=docker.io/library/fedora@sha256:15da97ed9aa94dd3d92c3925eb89520f6c80e07ea7ee24cba848d1f8b6912b3e
 G=oa1; AURL=http://127.0.0.1:$AP; PURL=http://127.0.0.1:$PP
 ts(){ date +%H:%M:%S; }; say(){ echo "[$(ts)] $*" | tee -a $LOG; }
 PASSES=0; FAILS=0

@@ -76,7 +76,7 @@ FC_VERSION="${FC_VERSION:-v1.18.0}"                          # guest-config sour
 # vmlinux, so a moving tag means a moving kernel binary. Deliberately still
 # the fedora:44 digest after the guest base moved to 45: bumping it changes
 # the compiler, so it moves only with a deliberate kernel rebuild.
-BUILDER="${BUILDER:-docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19}"
+BUILDER="${BUILDER:-docker.io/library/fedora@sha256:15da97ed9aa94dd3d92c3925eb89520f6c80e07ea7ee24cba848d1f8b6912b3e}"
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 
 echo "==> building guest vmlinux ($KERNEL_TAG + CONFIG_TUN)"
