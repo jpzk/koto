@@ -105,6 +105,15 @@ toolchain go1.27.4
 //   mdlayher/socket v0.6.0 — 2026-03-31, mdlayher/vsock v1.3.0 — 2026-05-26,
 //   x/time v0.12.0 — 2025-06-04, linuxkit/virtsock 20220523, pkg/errors
 //   v0.9.1 — 2020-01-14, x/exp 20231110.
+// 2026-11-26 chore/bump-all (operator waived the 6-week rule for this
+// sweep): `go get -u ./... && go mod tidy` under go1.27.4. Every module moved
+// to its newest release (grpc v1.85.0, x/net v0.63.0, x/sys v0.50.0,
+// otlp proto v1.11.1, genproto 20261123, dhcp 20261014, ...) EXCEPT:
+//   gvisor.dev/gvisor held at 20260413194555-9680d69bf798 (= the pin of
+//     gvisor-tap-vsock v0.9.0, still its newest tag). @latest
+//     20261126065723-c3efd8c9381c does not build: its pkg/tcpip/stack holds
+//     bridge_test.go in package bridge ("found packages stack and bridge"),
+//     and it would raise the go directive to 1.27.3.
 
 require (
 	github.com/containers/gvisor-tap-vsock v0.9.0
@@ -122,42 +131,41 @@ require (
 	go.opentelemetry.io/otel/sdk/log v1.47.0
 	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
-	go.opentelemetry.io/proto/otlp v1.11.0
-	golang.org/x/sys v0.48.0
-	google.golang.org/grpc v1.83.2
+	go.opentelemetry.io/proto/otlp v1.11.1
+	golang.org/x/net v0.63.0
+	golang.org/x/sys v0.50.0
+	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 	koto-protocol v0.0.0
 )
 
 require (
-	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/Microsoft/go-winio v0.6.4 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/google/btree v1.1.2 // indirect
+	github.com/google/btree v1.1.3 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.34.0 // indirect
 	github.com/inetaf/tcpproxy v0.0.0-20260515195445-c159a6051109 // indirect
-	github.com/insomniacslk/dhcp v0.0.0-20260719225207-c76316d4aa82 // indirect
-	github.com/linuxkit/virtsock v0.0.0-20220523201153-1a23e78aa7a2 // indirect
-	github.com/mdlayher/socket v0.6.0 // indirect
-	github.com/mdlayher/vsock v1.3.0 // indirect
+	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a // indirect
+	github.com/linuxkit/virtsock v0.0.0-20241009230534-cb6a20cc0422 // indirect
+	github.com/mdlayher/socket v0.8.0 // indirect
+	github.com/mdlayher/vsock v1.4.0 // indirect
 	github.com/miekg/dns v1.1.73 // indirect
-	github.com/pierrec/lz4/v4 v4.1.14 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.34 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
-	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.2 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
-	golang.org/x/net v0.60.0
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/time v0.12.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/exp v0.0.0-20261124000051-d6646c509b6d // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20261123191846-1e707ab9fbc2 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261123191846-1e707ab9fbc2 // indirect
 	gvisor.dev/gvisor v0.0.0-20260413194555-9680d69bf798 // indirect
 )
 
