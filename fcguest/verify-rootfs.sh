@@ -8,7 +8,7 @@ CONTAINER=${CONTAINER:-$(command -v docker 2>/dev/null || command -v podman 2>/d
 IMAGE=${1:-koto-fcrootfs}
 [ -n "$CONTAINER" ] || { echo "podman or docker is required to verify the rootfs"; exit 1; }
 
-CLAUDE_VERSION=2.1.329
+CLAUDE_VERSION=2.1.332
 CODEX_VERSION=0.171.0
 PI_VERSION=1.5.2
 PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5

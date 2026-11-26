@@ -45,11 +45,11 @@ FROM docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf33
 #   done
 # and cross-check each against `npm view @anthropic-ai/<p>@$V dist.integrity`
 # (base64 of the same digest).
-# Pin: 2.1.329 (dist-tag latest; published 2026-11-19T18:40:25Z -- NOT
-# age-gated, operator override 2026-11-20; dist-tag stable was 2.1.311).
-ARG CLAUDE_CODE_VERSION=2.1.329
-ARG CLAUDE_CODE_SHA512=590ed1637df582c3838cea0305b786d5f8cc7ca63552bf72c5600e23d4a074b66fa80f6c01111a7b35edededee35b1e5823540660d48aa5253d49ed629588414
-ARG CLAUDE_CODE_LINUX_X64_SHA512=fa7e25bb5b9b600a74d98d17fcc0149f1c3dc98e921c767bec5f88a16f95d3056816e888f68a5d1fa8287e37f5e205c908460c4cda64b3b1a7d62f1765328058
+# Pin: 2.1.332 (dist-tag latest; published 2026-11-24T22:06:38Z -- NOT
+# age-gated, operator override 2026-11-26 chore/bump-all; dist-tag stable 2.1.326).
+ARG CLAUDE_CODE_VERSION=2.1.332
+ARG CLAUDE_CODE_SHA512=b6f4a1e9b2ef11b77dec03c3df5027a233ab442dc099c463e51f2c17c408422b6edf1dae70e6f590a9939060f0e35923bdaf821897e992dfb0628ba4eb2bf9e9
+ARG CLAUDE_CODE_LINUX_X64_SHA512=7f8256873c18bad2481d2702eff75838f5fab36f2db7b6400e1b0e8bccf0387ab97c53c4b94782861d8d31f8a74a0d06ad472463169e79b0b88740ea88accb73
 
 # Security-front RPMs, PINNED by NEVRA + SHA-256 under the 6-week age gate
 # (a build is eligible once its Bodhi update went stable >= 6 weeks before the
