@@ -90,12 +90,16 @@ else
 endif
 # Pinned by DIGEST, not tag. This is what actually makes the build
 # reproducible — the engine does not: docker and podman run the same OCI
-# image and produce the same bytes. `golang:1.26-alpine` is a moving tag that
+# image and produce the same bytes. `golang:1.27-alpine` is a moving tag that
 # silently changes toolchain patch versions under you; the digest does not.
 # Combined with -trimpath and CGO_ENABLED=0, two builds of the same commit
 # give identical binaries, except for the version string stamped below.
-# Update deliberately: podman/docker pull golang:1.26-alpine, then
-#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
+# Update deliberately: podman/docker pull golang:1.27-alpine, then
+#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.27-alpine
+# golang:1.27.4-alpine (index digest, linux/amd64 child ea30e256…; bumped
+# 2026-11-26 in chore/bump-all, operator waived the 6-week lag: go1.27.4,
+# released 2026-11-10, newest stable, security fixes to cgo, the go
+# command, the compiler, the linker and net/http). Previously
 # golang:1.26.11-alpine (index digest, linux/amd64 child f496f8c5…; bumped
 # 2026-11-20 from the go1.26.10 image, operator-approved security exception:
 # go1.26.11 — released 2026-11-10 — fixes GO-2026-6859 (net/http
@@ -113,7 +117,7 @@ endif
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/supplychain.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
+GO_IMAGE ?= docker.io/library/golang@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \

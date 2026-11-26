@@ -2,7 +2,7 @@ module koto
 
 go 1.26.0
 
-toolchain go1.26.11
+toolchain go1.27.4
 
 // Pins taken under the security-fix exception to the 6-week lag (CLAUDE.md,
 // Conventions), 2026-09-05 — each closes a REACHABLE govulncheck finding:
@@ -43,6 +43,11 @@ toolchain go1.26.11
 //   header race; proxy.go and otlprecv/http.go use MaxBytesReader),
 //   reported reachable by govulncheck in all four modules. Toolchain line
 //   only, with the Makefile GO_IMAGE digest; go.sum untouched.
+// And 2026-11-26, chore/bump-all (operator waived the 6-week lag for a
+//   full pin refresh): toolchain go1.27.4 (released 2026-11-10; newest
+//   stable, security fixes to cgo, go command, compiler, linker, net/http).
+//   go directive deliberately left at 1.26.0 (minimum language version,
+//   not a pin) so GODEBUG defaults do not shift.
 // Everything else follows the ordinary rule (verified via
 // proxy.golang.org/<mod>/@v/<ver>.info; cutoff 2026-07-25; protobuf v1.36.12 —
 // 2026-08-10, re-checked 2026-10-09 against cutoff 2026-08-28).
