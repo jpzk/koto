@@ -115,16 +115,16 @@ ARG NODE_SHA256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 ARG NPM_VERSION=11.21.1
 ARG NPM_SHA512=613ccbe90044257c87713bb426251ced128ca7e9b3949b65eeb18b98445a5d441e14720c73d6ad76be86f4cf42f2f0d66efe347a9a13400ccd2f6fcfb5954385
 # claude, codex, pi: same pins as Dockerfile.rootfs; bump both together.
-# claude 2.1.332 (published 2026-11-24), codex 0.172.0 (2026-11-24), pi 1.5.2
-# (2026-11-10) -- NOT age-gated, operator override 2026-11-20.
+# claude 2.1.332 (published 2026-11-24), codex 0.172.0 (2026-11-24), pi 1.6.1
+# (2026-11-25) -- NOT age-gated, operator override 2026-11-26 (bump-all).
 ARG CLAUDE_CODE_VERSION=2.1.332
 ARG CLAUDE_CODE_SHA512=b6f4a1e9b2ef11b77dec03c3df5027a233ab442dc099c463e51f2c17c408422b6edf1dae70e6f590a9939060f0e35923bdaf821897e992dfb0628ba4eb2bf9e9
 ARG CLAUDE_CODE_LINUX_X64_SHA512=7f8256873c18bad2481d2702eff75838f5fab36f2db7b6400e1b0e8bccf0387ab97c53c4b94782861d8d31f8a74a0d06ad472463169e79b0b88740ea88accb73
 ARG CODEX_VERSION=0.172.0
 ARG CODEX_SHA256=a2342a8f7f68f088be30620ccfe9cb84162c93a6b56177855961cda3ed6be392
 ARG CODEX_CODE_MODE_HOST_SHA256=20b0a4bcf332415a5997914c943d04af6c3627af0c379fdbf65400550e352bb4
-ARG PI_VERSION=1.5.2
-ARG PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
+ARG PI_VERSION=1.6.1
+ARG PI_LOCK_SHA256=8545f1294dbfbfd11f0c67c077c8738e649051aa5ffa8b9e951fdc5bc7410762
 
 ENV PATH=/g/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 
@@ -187,8 +187,8 @@ RUN set -eu; cd /g/opt/pi; \
     ln -s ../opt/pi/pi /g/bin/pi; \
     test "$(PI_OFFLINE=1 PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1 pi --version)" = "$PI_VERSION"; \
     v() { node -p "require('$1').version"; }; \
-    test "$(v ./node_modules/undici/package.json)" = 8.12.3; \
-    test -z "$(find . -path '*/node_modules/undici/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="8.12.3"?"":v' {} \; | tr -d '\n')"; \
+    test "$(v ./node_modules/undici/package.json)" = 8.12.4; \
+    test -z "$(find . -path '*/node_modules/undici/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="8.12.4"?"":v' {} \; | tr -d '\n')"; \
     test -z "$(find . -path '*/node_modules/brace-expansion/package.json' -exec node -p 'v=require(process.argv[1]).version; v==="5.0.12"?"":v' {} \; | tr -d '\n')"
 
 RUN cp /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /g/etc/ssl/ca-bundle.crt

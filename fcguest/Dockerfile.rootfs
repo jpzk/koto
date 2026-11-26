@@ -261,16 +261,16 @@ RUN set -eu; cd /tmp; \
 
 # pi coding agent, installed from npm with a committed lockfile.
 # The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
-# compiles its deps in, so they cannot be patched or audited. pi 1.5.2
-# (published 2026-11-10T12:24:55Z -- NOT age-gated, operator override
-# 2026-11-16) pins undici 8.12.3 and brace-expansion 5.0.12 itself, so the
+# compiles its deps in, so they cannot be patched or audited. pi 1.6.1
+# (published 2026-11-25T13:41:09Z -- NOT age-gated, operator override
+# 2026-11-26) pins undici 8.12.4 and brace-expansion 5.0.12 itself, so the
 # earlier undici / brace-expansion overrides (needed through pi 1.5.0 for
 # GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472) are gone;
 # the protobufjs 7.6.6 override is upstream's own.
 # fcguest/pi/install/ is that release's own installer root
 # (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
-# 6c433244…18c4cc / 57e3b475…f58005) with exactly one edit:
-#   - the eight @earendil-works/* 1.5.2 entries upstream left without an
+# c7edca0f…edabe5 / fd07d62d…b34efd) with exactly one edit:
+#   - the eight @earendil-works/* 1.6.1 entries upstream left without an
 #     integrity got their registry dist.integrity filled in (each checked
 #     against the downloaded tarball's SHA-512).
 # Every entry carries a SHA-512, so `npm ci` installs exactly these bytes.
@@ -279,11 +279,11 @@ RUN set -eu; cd /tmp; \
 # The receipt records the lockfile digest for verify-rootfs.sh.
 # Bump: take the new release's two installer files, re-apply the edit above,
 # re-add an override (lock entry swapped to its tarball + integrity) if the
-# release locks undici < 8.12.3 or brace-expansion < 5.0.12, update
+# release locks undici < 8.12.4 or brace-expansion < 5.0.12, update
 # PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
 # here, in Dockerfile.guest and in verify-rootfs.sh.
-ARG PI_VERSION=1.5.2
-ARG PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
+ARG PI_VERSION=1.6.1
+ARG PI_LOCK_SHA256=8545f1294dbfbfd11f0c67c077c8738e649051aa5ffa8b9e951fdc5bc7410762
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
 RUN set -eu; cd /opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
@@ -296,8 +296,8 @@ RUN set -eu; cd /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
     test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
     test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
-    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.3; \
-    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.3") | .version' {} +)"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.4; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.4") | .version' {} +)"; \
     test -z "$(find /opt/pi -path '*/node_modules/brace-expansion/package.json' -exec jq -r 'select(.version != "5.0.12") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
