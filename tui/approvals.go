@@ -99,6 +99,7 @@ type approvalCardState struct {
 	msg     textinput.Model
 	shownAt time.Time
 	askIdx  int // ask cards: selected row (see askRows); 0 = stop and wait
+	opt     int // ask cards: n on an option row = that option + a note (1-based; 0 = none)
 }
 
 // approvalEnterGuard: how long after an inline card pops up a bare enter is
@@ -255,7 +256,7 @@ func (m Model) inlineApprovalAllowed() bool {
 	}
 	if (m.picker != nil && m.picker.open) || (m.newGroup != nil && m.newGroup.open) ||
 		(m.newSess != nil && m.newSess.open) || m.modeSel.open || m.destroyConfirm.open ||
-		m.stopConfirm.open || m.helpOpen {
+		m.stopConfirm.open || m.helpOpen || m.inboxView.open {
 		return false
 	}
 	return true

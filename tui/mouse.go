@@ -73,6 +73,13 @@ func (m *Model) handleLeftClick(x, y int) bool {
 		if i >= len(rows) {
 			return true // the row went away under the pointer; claim and do nothing
 		}
+		if rows[i].inbox {
+			// The Inbox (N) row: a click opens the list (inbox.go).
+			m.treeIdx = i
+			m.selectTreeRow(rows[i])
+			m.openInbox()
+			return true
+		}
 		if m.focus == focusShell {
 			if rows[i].job == "" {
 				// Group/session row with the terminal open: the terminal

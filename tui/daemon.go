@@ -252,7 +252,33 @@ func callRPC(ctx context.Context, cl pb.KotoClient, cmd string, extra map[string
 		return cl.JobLogs(ctx, r)
 	case "approve":
 		allow, _ := extra["allow"].(bool)
-		return cl.Approve(ctx, &pb.ApproveReq{Group: s("group"), Session: s("session"), Id: s("id"), Allow: allow, Msg: s("deny_msg")})
+		r := &pb.ApproveReq{Group: s("group"), Session: s("session"), Id: s("id"), Allow: allow, Msg: s("deny_msg")}
+		if v, ok := asFloat(extra["option"]); ok {
+			n, err := floatToInt32("option", v)
+			if err != nil {
+				return nil, err
+			}
+			r.Option = n
+		}
+		return cl.Approve(ctx, r)
+	case "goal_decide":
+		allow, _ := extra["allow"].(bool)
+		return cl.GoalDecide(ctx, &pb.GoalDecideReq{Group: s("group"), Name: s("name"), Allow: allow, Msg: s("msg")})
+	case "inbox_dismiss":
+		var ids []string
+		switch v := extra["ids"].(type) {
+		case []string:
+			ids = v
+		case []any:
+			for _, x := range v {
+				if id := s2(x); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+		return cl.InboxDismiss(ctx, &pb.InboxDismissReq{Ids: ids})
+	case "inbox":
+		return cl.Inbox(ctx, &pb.InboxReq{})
 	case "list_pending":
 		return cl.ListPending(ctx, &pb.ListPendingReq{Group: s("group")})
 	case "config":

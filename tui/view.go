@@ -272,6 +272,9 @@ func (m Model) view() string {
 	if m.modeSel.open {
 		return m.renderModeSel()
 	}
+	if m.inboxView.open {
+		return m.renderInbox() // inbox.go; the approval card above opens over it
+	}
 	if m.destroyConfirm.open {
 		// ctrl+x destroy confirmation: paints the whole frame like the
 		// cheatsheet; its key block in handleKey owns input.
@@ -910,6 +913,9 @@ func sessionMarker(s string) string {
 }
 
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
+	if r.inbox {
+		return m.renderInboxTreeRow(hov)
+	}
 	info := m.groups[r.group]
 	running, stalled, queued := info.Running, info.Stalled, info.Queued
 	name := r.group

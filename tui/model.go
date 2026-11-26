@@ -660,6 +660,15 @@ type Model struct {
 	// ListPending fetch (rate limit).
 	approvals    map[string]approvalItem
 	approvalCard approvalCardState
+	// Inbox (inbox.go): latest WatchInbox snapshot (newest first), whether a
+	// frame ever arrived (gates the tree row), the open list view, and the
+	// stream bookkeeping.
+	inboxOn          bool
+	inboxItems       []inboxEntry
+	inboxView        inboxViewState
+	inboxWatching    bool
+	inboxUnsupported bool
+	inboxRetryAt     time.Time
 	// approvalShown: requests whose inline card already popped up once (after
 	// esc it comes back only when focus returns to the prompt).
 	// approvalAnswered: decided here, waiting for the daemon's
@@ -2174,6 +2183,20 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			tea.Tick(metricsTickMs*time.Millisecond, func(time.Time) tea.Msg { return metricsTickMsg{} }),
 		)
 
+	case inboxFrameMsg:
+		m.onInboxFrame(msg.items)
+		return m, nil
+
+	case inboxClosedMsg:
+		// Reopened from the state-frame path (maybeWatchInbox), throttled; a
+		// daemon without the RPC (or an identity without the grant) is not
+		// retried and shows no inbox row.
+		m.inboxWatching = false
+		if msg.unsupported {
+			m.inboxUnsupported, m.inboxOn, m.inboxItems = true, false, nil
+		}
+		return m, nil
+
 	case watchClosedMsg:
 		// The state push stream died (daemon restart, link drop). The
 		// reconnect probe (listCmd) re-seeds the map and its success path
@@ -2232,6 +2255,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 			m.watching = true
 			startWatchState()
 		}
+		m.maybeWatchInbox()
 		m.processJobTransitions(msg.groups)
 		// Prune per-group live state for groups that no longer exist (a
 		// /destroy from another client never sends us an idle activity
@@ -3382,6 +3406,9 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		if m.newSess.open {
 			return m, nil // new-session dialog: swallow clicks + wheel
 		}
+		if m.inboxView.open {
+			return m.handleInboxMouse(msg)
+		}
 		if m.helpOpen {
 			if m.helpVPReady {
 				var cmd tea.Cmd
@@ -4136,6 +4163,11 @@ func (m *Model) handleDaemonResp(msg daemonRespMsg) tea.Cmd {
 	case "approve", "list_pending":
 		m.handleApprovalResp(msg)
 		return nil
+	case "goal_decide", "inbox_dismiss":
+		if msg.err != nil {
+			m.addLine(logLine{kind: "err", group: msg.group, text: fmt.Sprintf("%s: %v", strings.ReplaceAll(msg.op, "_", " "), msg.err)})
+		}
+		return nil
 	case "spawn":
 		if msg.err != nil {
 			m.addLine(logLine{kind: "err", text: fmt.Sprintf("spawn %s: %v", msg.group, msg.err)})
@@ -4450,6 +4482,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		// card a request of the viewed session opens in the prompt's place.
 		// Owns every key; bare enter = deny, allow = → then enter.
 		return m.handleApprovalCardKey(msg)
+	}
+	if m.inboxView.open {
+		// Inbox list / goal plan view (inbox.go): full-frame, owns keys.
+		return m.handleInboxKey(msg)
 	}
 	if m.modeSel.open {
 		return m.handleModeSelKey(msg)
@@ -4917,6 +4953,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			// the job of esc / ctrl+[ / alt+[.
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
+				if m.treeIdx < len(rows) && rows[m.treeIdx].inbox {
+					m.openInbox() // the Inbox (N) row opens the list
+				}
 				return m, nil
 			}
 			m.input.SetValue("")
@@ -5290,11 +5329,14 @@ type treeRow struct {
 	session string
 	job     string
 	branch  string
+	inbox   bool // the "Inbox (N)" row above main (inbox.go)
 }
 
 // id strips the branch prefix, leaving the comparable row identity —
 // the shape treeSel anchors on.
-func (r treeRow) id() treeRow { return treeRow{group: r.group, session: r.session, job: r.job} }
+func (r treeRow) id() treeRow {
+	return treeRow{group: r.group, session: r.session, job: r.job, inbox: r.inbox}
+}
 
 func jobKey(g, id string) string { return g + "\x00" + id }
 
@@ -5540,7 +5582,7 @@ func (m *Model) groupArrow(open bool) bool {
 		return false
 	}
 	r := rows[m.treeIdx]
-	if r.session != "" || r.job != "" {
+	if r.inbox || r.session != "" || r.job != "" {
 		return false
 	}
 	return m.setGroupCollapsed(r.group, !open)
@@ -5559,6 +5601,9 @@ func (m *Model) setJobFold(open bool) bool {
 		return false
 	}
 	r := rows[m.treeIdx]
+	if r.inbox {
+		return false
+	}
 	if m.groupCollapsed[r.group] {
 		// The subtree is hidden: toggling a fold inside it would change
 		// nothing visible. groupArrow owns the arrows here.
@@ -5678,6 +5723,9 @@ func (m *Model) toggleGroupCollapse() bool {
 		return false
 	}
 	r := rows[m.treeIdx]
+	if r.inbox {
+		return false
+	}
 	if r.session != "" && r.job == "" && !m.groupCollapsed[r.group] {
 		if key := sessKey(r.group, r.session); m.sessChildren(r.group, r.session) > 0 {
 			if m.jobsOpen[key] {
@@ -5727,6 +5775,9 @@ func (m *Model) toggleCollapseAll() {
 func (m Model) treeRows() []treeRow {
 	order := m.treeOrder()
 	rows := []treeRow{}
+	if m.inboxOn {
+		rows = append(rows, treeRow{inbox: true})
+	}
 	// Job rows only exist while their conversation is unfolded (→ opens,
 	// ← folds); folded conversations render a gray (N) count instead.
 	jobsOf := func(g, sess string) []JobInfo {
@@ -6008,6 +6059,10 @@ func (m *Model) setActiveSession(g, s string) {
 // row. Callers thread m.peekCmds() into their returned tea.Cmd so the peek
 // fetch + refresh tick actually run.
 func (m *Model) selectTreeRow(r treeRow) {
+	if r.inbox {
+		m.treeSel = r.id() // hover only; the conversation stays put
+		return
+	}
 	m.treeSel = r.id()
 	m.cur = r.group
 	m.setActiveSession(r.group, r.session)
@@ -6180,6 +6235,13 @@ func (m *Model) normalizeTreeCursor() {
 	if len(rows) == 0 {
 		m.treeIdx = 0
 		return
+	}
+	if m.treeSel.inbox {
+		if rows[0].inbox {
+			m.treeIdx = 0
+			return
+		}
+		m.treeSel = treeRow{}
 	}
 	active := m.activeSession(m.cur)
 	if m.treeSel.group != m.cur || m.treeSel.session != active {

@@ -35,10 +35,14 @@ func (m Model) handleAskCardKey(a approvalItem, msg tea.KeyMsg) (Model, tea.Cmd)
 		switch msg.String() {
 		case "esc":
 			// Back to the selection, and back to the safe preselection.
-			c.msgMode, c.allow, c.askIdx = false, false, 0
+			c.msgMode, c.allow, c.askIdx, c.opt = false, false, 0, 0
 			return m, nil
 		case "enter":
 			txt := strings.TrimSpace(c.msg.Value())
+			if c.opt >= 1 && c.opt <= len(a.options) {
+				// option + note: Approve{allow, option, msg} — the note may be empty
+				return m.answerApprovalOpt(a, c.opt, txt)
+			}
 			if c.allow && txt == "" {
 				return m, nil // an answer needs text; esc goes back
 			}
@@ -66,6 +70,12 @@ func (m Model) handleAskCardKey(a approvalItem, msg tea.KeyMsg) (Model, tea.Cmd)
 		c.askIdx = (c.askIdx + 1) % n
 	case "up", "shift+tab":
 		c.askIdx = (c.askIdx + n - 1) % n
+	case "n", "N":
+		// on an option row: that option plus a note for the goal
+		if i := c.askIdx; i >= 1 && i <= len(a.options) {
+			c.msgMode, c.allow, c.opt = true, true, i
+			c.msg = newAllowMsgInput()
+		}
 	case "m", "M":
 		// stop and wait, with a note for the goal
 		c.msgMode, c.allow = true, false
@@ -126,7 +136,9 @@ func (m Model) askCardRows(a approvalItem, w, bodyMax int) []string {
 	rows = append(rows, "", yel.Render(gl("⏱ ", "")+"no timeout · the goal waits"), "")
 	c := m.approvalCard
 	if c.msgMode {
-		if c.allow {
+		if c.opt >= 1 && c.opt <= len(a.options) {
+			rows = append(rows, ansi.Truncate(a.options[c.opt-1], w, "…")+", note:", c.msg.View(), "", gray.Render("enter send · esc back"))
+		} else if c.allow {
 			rows = append(rows, "your answer:", c.msg.View(), "", gray.Render("enter send · esc back"))
 		} else {
 			rows = append(rows, "stop and wait, note:", c.msg.View(), "", gray.Render("enter send · esc back"))
@@ -154,6 +166,9 @@ func (m Model) askCardRows(a approvalItem, w, bodyMax int) []string {
 	}
 	rows = append(rows, "")
 	parts := []string{gl("↑↓", "up/dn") + " select", gl("⏎", "enter") + " send", "m stop+note", "esc later"}
+	if c.askIdx >= 1 && c.askIdx <= len(a.options) {
+		parts = append(parts[:3], "n option+note", "esc later")
+	}
 	cur := ""
 	for _, p := range parts {
 		switch {
