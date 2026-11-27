@@ -27,12 +27,27 @@ Source: `daemon/inbox.go`, `tui/inbox.go`, `protocol/koto.proto`
 - `notification = 3` (`InboxNotification`): every notification that passes
   through `notifyDeliver`, which is the single funnel for `cs-notify` and
   daemon notices, at both `normal` and `high` severity. Remove one with
-  `InboxDismiss{ids}`.
+  `InboxDismiss{ids}`. Field `source = 8` (additive) records who raised it:
+  `guest` (an agent, through `cs-notify` / ctl `notify`) or `daemon` (a
+  daemon notice). Anything else is dropped to empty, and entries written
+  by an older daemon have it empty too.
 - `reserved 4`: kept for proposals. Nothing implements them yet.
 
 Origin fields (group, session, kind) always come from daemon state: the
 approvals key, the goal record, or the `notifyDeliver` caller. They never
-come from agent-written text. The TUI also passes every agent-written string
+come from agent-written text.
+
+Attribution of daemon notices: a daemon notification that is *about* one
+group (its forwarded log alerts, per-group disk/CPU warnings, posture
+alerts, goal notices) is filed under **that group** in the inbox, with
+`source = daemon`. Only host-wide notices (host disk, for example) stay
+under `main`. The banner and transcript marker still go to `main` as
+before; only the inbox entry moves. When the entry is filed under a group
+other than the one that delivered it, the session is dropped. The effect on
+the ACL: a client scoped to group X now sees daemon notices about X, and a
+`main`-only client no longer does.
+
+The TUI also passes every agent-written string
 (titles, bodies, questions, plan text, option labels) through `cardText`, so
 terminal escape sequences show up as visible text instead of being executed.
 
@@ -76,11 +91,38 @@ terminal escape sequences show up as visible text instead of being executed.
 - The inbox is seeded and kept live by `WatchInbox`, which reconnects with
   backoff the same way the state stream does.
 - Select the row (enter or click) to open the list. The list is newest
-  first; each line shows the time, `group/session`, the kind and a one-line
+  first. Each row has these columns: time, origin, kind and a one-line
   subject.
+  - The origin column is `group · session`, or `group · —` when there is no
+    session. It is padded to the widest visible origin, capped at
+    max(8, width/3) and truncated past that, so the columns line up.
+  - When a notification is selected, the detail line starts with
+    `from guest · ` or `from daemon · ` (the `source` field), if set.
+- Filter: the title row shows `all (N) · decisions (N) · notifications (N)`,
+  with the active filter highlighted. `decisions` means every kind except
+  notifications (tool approvals, asks, goal plans). The filter stays set
+  while the TUI runs, including after you close and reopen the inbox. An
+  empty filtered list says `nothing under <filter> — tab for the others`.
+- Row colors come only from existing theme colors; no new hex values were
+  added.
+  - time: gray
+  - group: the main accent
+  - session: the dimmer accent
+  - kind: decisions in yellow, notifications in emerald, `high`
+    notifications in rose (underlined in mono mode)
+  - subject: the default foreground
+  - Column padding has no color. The selected row keeps the plain inverse
+    bar.
+  - Some themes give the accent, dimmer accent and gray the same color
+    (boysenberry, kawaii, marble, soyuz). In those, group and session use
+    the next palette color that differs from gray and from each other.
+  - With `NO_COLOR` set (or ASCII mode), rows contain no escape sequences.
 
-Keys in the list:
+Keys in the list (they act on the **filtered** list):
 
+- `tab` / `shift+tab`: next / previous filter (all → decisions →
+  notifications). `f` also cycles forward. The cursor is clamped when the
+  filter changes or items disappear.
 - `j`/`k` or the arrow keys: move. `g`/`G`: first/last item.
 - `enter` or a mouse click: open the selected item.
   - Tool approval or ask: opens the existing approval card or ask dialog
@@ -89,7 +131,10 @@ Keys in the list:
   - Goal plan: opens a small plan view (plan text and criteria) where
     `a`/`d` (or tab then enter) choose approve or deny. A message box
     follows, then enter sends `GoalDecide`. A deny needs a reason.
-- `d`: dismiss the selected notification (`InboxDismiss`).
+- `d`: dismiss the selected notification (`InboxDismiss`). It does nothing
+  on a decision.
+- `D`: dismiss every notification visible under the current filter, in a
+  single `InboxDismiss` with all their ids. Decisions are never touched.
 - `esc`: go back.
 - The list shows an empty state when nothing is pending.
 
