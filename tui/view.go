@@ -299,21 +299,21 @@ func (m Model) view() string {
 		// Log view replaces the entire chat middle pane. Renders the
 		// status bar (reused) + log viewport + log-specific hint; no
 		// input line, no tree, no scrollbar geometry from the chat vp.
-		return m.withPicker(m.renderLogView())
+		return m.withNotifyRow(m.withPicker(m.renderLogView()))
 	}
 	if m.focus == focusTop {
 		// Fleet (top) view: same full-frame replacement as the log view,
 		// one row per group (space/cpu/mem/tok/s/network/root/model).
-		return m.withPicker(m.renderTopView())
+		return m.withNotifyRow(m.withPicker(m.renderTopView()))
 	}
 	if m.focus == focusSched {
 		// Schedules view: same full-frame replacement, one row per daemon
 		// cron schedule (sched_view.go).
-		return m.withPicker(m.renderSchedView())
+		return m.withNotifyRow(m.withPicker(m.renderSchedView()))
 	}
 	if m.focus == focusMcp {
 		// MCP registry view (mcp_view.go): same full-frame replacement.
-		return m.withPicker(m.renderMcpView())
+		return m.withNotifyRow(m.withPicker(m.renderMcpView()))
 	}
 	if m.shellViewActive() {
 		// Shared shell: fullscreen while focused on a narrow terminal, or
@@ -321,13 +321,13 @@ func (m Model) view() string {
 		// open (shellOpen) and the terminal is wide enough — including with
 		// focus on the input or tree, so the terminal stays on screen while
 		// the user types to the agent.
-		return m.withPicker(m.renderShellView())
+		return m.withNotifyRow(m.withPicker(m.renderShellView()))
 	}
 	logRows := m.chatRows()
 	if fc, ok := m.cachedChatFrame(logRows); ok {
 		// Pure prompt edit since the last full frame (framecache.go).
 		fc.hits++
-		return fc.status + "\n" + fc.middle + "\n" + m.renderInput() + "\n" + fc.hint + "\n" + fc.metrics
+		return m.withNotifyRow(fc.status + "\n" + fc.middle + "\n" + m.renderInput() + "\n" + fc.hint + "\n" + fc.metrics)
 	}
 	spin := string(spinnerFrames[m.tick%len(spinnerFrames)])
 
@@ -370,7 +370,7 @@ func (m Model) view() string {
 	// nothing — bubbletea's renderer clears each line's tail itself
 	// (standard_renderer.go, EraseLineRight for any line short of the
 	// width) and themeFrame pads to the terminal when a theme is on.
-	return status + "\n" + middle + "\n" + input + "\n" + hint + "\n" + metricsBar
+	return m.withNotifyRow(status + "\n" + middle + "\n" + input + "\n" + hint + "\n" + metricsBar)
 }
 
 // renderChatLines is the chat pane's viewport window: the lines under
@@ -439,42 +439,93 @@ func formatNotifyLine(sev, title, msg string) string {
 	return s
 }
 
-// notifyBarX is the status-bar column where the inline notification wants to
-// start: over the terminal pane's content when the shell view is on screen,
-// otherwise over the message view's content (tree column + the chat pane's
-// 1-col padding).
-func (m Model) notifyBarX() int {
-	tw := m.treePaneW()
-	if m.shellViewActive() {
-		// The pane's own grid origin — shared with the mouse router rather
-		// than re-derived, so the two can't drift when the pane's padding
-		// changes (it does: the stacked split has none, see shellMouseOrigin).
-		x, _ := m.shellMouseOrigin()
-		return x
+// notifyMinHeight is the shortest frame that still gets the notification
+// row: view()'s 7-row floor plus the row itself, so showing it can never
+// push the frame past the terminal (every pane budget below subtracts
+// notifyRows, and each already sits at its own one-row floor at 7).
+const notifyMinHeight = 8
+
+// liveNotifyItems is what the bottom row shows, newest first. Normally the
+// unexpired items; between an item's expiry and the tick that prunes it (and
+// re-lays out the panes — syncNotifyRow) the row keeps showing the newest
+// one, so the row's presence and the viewport heights never disagree.
+func (m Model) liveNotifyItems() []notifyItem {
+	items := m.visibleNotifications()
+	if len(items) == 0 && m.notifyRowOn && len(m.notifications) > 0 {
+		items = m.notifications[len(m.notifications)-1:]
 	}
-	return tw + 1 // logArea's PaddingLeft
+	return items
 }
 
-// renderNotifyInline draws the newest live notification as a segment of the
-// status-bar row — same row as the progress indicator, so it can never change
-// the frame's height. It starts at notifyBarX (over the message view, or over
-// the terminal pane when that's open), clamped right of the bar's left
-// segments, and truncates to stop short of maxEnd (where the right side
-// begins). Extra live items collapse into a +N suffix; they all remain in
-// the transcript. Returns the left-padding + segment, or "" when there is no
-// live notification or no room. Blink alternates a solid background with a
-// foreground-only phase (icon swap doubles the signal for colorless
-// terminals), never changing the segment's presence mid-blink.
-func (m Model) renderNotifyInline(leftW, maxEnd int) string {
-	items := m.visibleNotifications()
-	if len(items) == 0 {
+// notifyRows is the height of the bottom notification row: 1 while a live
+// notification is showing, else 0. Every layout that ends in the metrics bar
+// subtracts it from its body so the frame stays exactly m.height rows.
+func (m Model) notifyRows() int {
+	if m.height < notifyMinHeight || len(m.liveNotifyItems()) == 0 {
+		return 0
+	}
+	return 1
+}
+
+// syncNotifyRow re-lays out every pane when the bottom notification row
+// appears or disappears (arrival, and the tick that prunes the last expired
+// item): each viewport's height budget subtracts notifyRows, and View() and
+// the viewports must agree on it or the frame overflows the terminal. A chat
+// view that was following the tail keeps following it.
+func (m *Model) syncNotifyRow() {
+	on := m.height >= notifyMinHeight && len(m.visibleNotifications()) > 0
+	// The height check also catches a row that came and went without an
+	// arrival here (it appeared through a resize past notifyMinHeight).
+	if on == m.notifyRowOn && m.vp.Height == m.chatRows() {
+		return
+	}
+	m.notifyRowOn = on
+	follow := m.vp.AtBottom()
+	m.resizeViewport()
+	m.refreshPeekVP()
+	m.refreshLog()
+	if follow {
+		m.vp.GotoBottom()
+	}
+	if m.logVPReady {
+		m.resizeLogViewport()
+		m.refreshLogViewport()
+	}
+	if m.topVPReady {
+		m.resizeTopViewport()
+		m.refreshTopViewport()
+	}
+	if m.schedVPReady {
+		m.resizeSchedViewport()
+		m.refreshSchedViewport()
+	}
+	if m.mcp.ready {
+		m.resizeMcpViewport()
+		m.refreshMcpViewport()
+	}
+}
+
+// withNotifyRow appends the notification row under a frame whose last line
+// is the metrics bar.
+func (m Model) withNotifyRow(frame string) string {
+	if row := m.renderNotifyRow(); row != "" {
+		return frame + "\n" + row
+	}
+	return frame
+}
+
+// renderNotifyRow draws the newest live notification as its own full-width
+// row at the very bottom of the frame, below the metrics bar. Extra live
+// items collapse into a +N suffix; they all remain in the transcript. The
+// row is truncated with an ellipsis to, and padded out to, exactly m.width
+// cells. Blink alternates a solid background with a foreground-only phase
+// (icon swap doubles the signal for colorless terminals), never changing the
+// row's presence mid-blink. Returns "" when notifyRows is 0.
+func (m Model) renderNotifyRow() string {
+	if m.notifyRows() == 0 || m.width <= 0 {
 		return ""
 	}
-	start := max(leftW, m.notifyBarX())
-	avail := maxEnd - start
-	if avail < 8 { // no room for anything legible
-		return ""
-	}
+	items := m.liveNotifyItems()
 	n := items[0]
 	accent := cEmerald
 	if n.severity == "high" {
@@ -503,8 +554,11 @@ func (m Model) renderNotifyInline(leftW, maxEnd int) string {
 		line += base.Bold(true).Render(fmt.Sprintf(" +%d", len(items)-1))
 	}
 	line += base.Render(" ")
-	line = lipgloss.NewStyle().MaxWidth(avail).Render(line)
-	return strings.Repeat(" ", start-leftW) + line
+	line = ansi.Truncate(line, m.width, "…")
+	if w := lipgloss.Width(line); w < m.width {
+		line += base.Render(strings.Repeat(" ", m.width-w))
+	}
+	return line
 }
 
 // --- status bar --------------------------------------------------------------
@@ -516,11 +570,8 @@ func (m Model) renderStatusBar(spin string) string {
 	left := m.renderStatusLeft()
 	right := m.renderStatusRight(spin)
 	rightW := lipgloss.Width(right)
-	// Live notification, inlaid into the gap between the left segments and
-	// the progress indicator — same row, so the frame's height never moves.
-	if seg := m.renderNotifyInline(lipgloss.Width(left), m.width-rightW); seg != "" {
-		left += seg
-	}
+	// Live notifications are not drawn here: they get their own row at the
+	// bottom of the frame (renderNotifyRow).
 	gap := m.width - lipgloss.Width(left) - rightW
 	if gap < 0 {
 		gap = 0

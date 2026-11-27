@@ -188,7 +188,7 @@ func renderSchedRow(it schedItem, set []schedCol, msgW int, sel bool) string {
 // metrics) and the edit box when it is open.
 func (m Model) schedPaneSize() (int, int) {
 	w := max(10, m.width-2) // -1 left padding, -1 scrollbar
-	h := max(1, m.height-5-m.schedEditRows())
+	h := max(1, m.height-5-m.schedEditRows()-m.notifyRows())
 	return w, h
 }
 

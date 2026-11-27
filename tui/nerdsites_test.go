@@ -37,15 +37,16 @@ func nerdSites(t *testing.T) map[string]string {
 	norm := func(s string) string { return strings.ReplaceAll(stripANSI(s), stamp, "HH:MM") }
 	lines := func(ls []string) string { return norm(strings.Join(ls, "\n")) }
 
-	// notifications: transcript line + inline status-bar segment
+	// notifications: transcript line + bottom notification row (trailing
+	// full-width padding trimmed)
 	out["notify/line"] = formatNotifyLine("high", "deploy", "v1.4 live")
 	m := newModel("", 200000)
 	m.width, m.height = 200, 30
 	m.notifications = append(m.notifications, notifyItem{at: time.Now(), group: "g1", title: "done", msg: "finished", severity: "high"})
 	m.tick = 0
-	out["notify/inline-on"] = norm(m.renderNotifyInline(0, 120))
+	out["notify/row-on"] = strings.TrimRight(norm(m.renderNotifyRow()), " ")
 	m.tick = notifyBlinkTicks
-	out["notify/inline-off"] = norm(m.renderNotifyInline(0, 120))
+	out["notify/row-off"] = strings.TrimRight(norm(m.renderNotifyRow()), " ")
 
 	// transcript blocks
 	for _, k := range []string{"tool", "thought", "tool_out", "prompt", "sys"} {

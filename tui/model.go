@@ -265,8 +265,8 @@ const (
 	jobBlinkTicks = 6
 )
 
-// notifyLingerMs is how long a notification stays live in the status bar's
-// inline segment; notifyBlinkTicks is its blink half-period in spinner ticks
+// notifyLingerMs is how long a notification stays live in the bottom
+// notification row; notifyBlinkTicks is its blink half-period in spinner ticks
 // (matching jobBlinkTicks). notifyMaxRows caps the live list (newest shows,
 // the rest count into the +N suffix) so a notification burst stays bounded —
 // overflow items still land in the transcript.
@@ -848,12 +848,15 @@ type Model struct {
 	// status bar's top-right chip alongside the current group's rate.
 	globalTokRate float64
 
-	// Live notifications (event "notification"): rendered inline in the
-	// status-bar row (renderNotifyInline) for notifyLingerMs each, newest
-	// shown, extras collapsed into a +N suffix, visible list capped at
+	// Live notifications (event "notification"): rendered in their own row
+	// at the bottom of the frame (renderNotifyRow) for notifyLingerMs each,
+	// newest shown, extras collapsed into a +N suffix, visible list capped at
 	// notifyMaxRows. Arrival-ordered; expired entries are GC'd on the
 	// spinner tick.
 	notifications []notifyItem
+	// notifyRowOn is whether the panes were last laid out with the bottom
+	// notification row present (syncNotifyRow).
+	notifyRowOn bool
 
 	// notifyMode is the desktop-notification escape flavor this terminal
 	// gets (see notify_osc.go); resolved once at startup from the env.
@@ -2147,6 +2150,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 		// Runs before the isAnimating gate so expired notifications stop
 		// holding the tick chain (and the slice) alive.
 		m.pruneNotifications()
+		m.syncNotifyRow()
 		if m.isAnimating() {
 			m.tick++
 			// Flush coalesced live-overlay updates (liveDirty), and keep
@@ -2987,6 +2991,7 @@ func (m Model) update(raw tea.Msg) (Model, tea.Cmd) {
 					at: time.Now(), severity: sev, title: ev.Title, msg: ev.Text, group: ev.Group,
 				})
 				m.pruneNotifications()
+				m.syncNotifyRow()
 				// The in-TUI banner only helps someone who is looking at
 				// the TUI; hand the window manager a real notification too
 				// (both severities — "high" additionally rings the bell).
@@ -3549,8 +3554,9 @@ func (m *Model) chatRows() int {
 		// frame is all ours, portrait or not.
 		return max(1, ch-2-m.inputRows())
 	}
-	// status(1) + input borders(2) + hint(1) + metrics(1) = 5.
-	return max(1, m.height-5-m.inputRows())
+	// status(1) + input borders(2) + hint(1) + metrics(1) = 5, plus the
+	// bottom notification row while one is live (notifyRows).
+	return max(1, m.height-5-m.inputRows()-m.notifyRows())
 }
 
 // logContentCols returns the column width passed to glamour for response
@@ -3943,8 +3949,8 @@ func (m Model) visibleNotifications() []notifyItem {
 // pruneNotifications GCs expired entries. Runs unconditionally on every tick —
 // gating it on a visible-count change let sustained spam pin the visible count
 // at notifyMaxRows and grow the slice without bound until the stream went
-// quiet. Notifications render inline in the status bar (renderNotifyInline),
-// so arrival/expiry never touches pane geometry.
+// quiet. Arrival/expiry changes pane geometry (the bottom row comes and
+// goes); callers follow up with syncNotifyRow.
 func (m *Model) pruneNotifications() {
 	kept := m.notifications[:0]
 	for _, n := range m.notifications {

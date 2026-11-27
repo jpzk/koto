@@ -518,8 +518,9 @@ func (m Model) shellAvailW() int {
 }
 
 // shellBodyRows is the height the tree, the chat half and the terminal pane
-// share: the frame minus the status bar and the hint + metrics rows.
-func (m Model) shellBodyRows() int { return max(1, m.height-3) }
+// share: the frame minus the status bar, the hint + metrics rows and the
+// bottom notification row while one is live.
+func (m Model) shellBodyRows() int { return max(1, m.height-3-m.notifyRows()) }
 
 // shellChatW returns the width of the read-only chat/log column shown to the
 // LEFT of the shell pane, or 0 in any other layout. The chat column and the
