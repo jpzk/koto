@@ -22,12 +22,12 @@
 ⚖ goal g: verdict MET
 == goal/goal_verdict/nope
 ⚖ goal g: verdict unmet — nope
-== notify/inline-off
-                           g1 · done — finished 
-== notify/inline-on
-                        🔔 g1 · done — finished 
 == notify/line
 🔔 [high] deploy — v1.4 live
+== notify/row-off
+    g1 · done — finished
+== notify/row-on
+ 🔔 g1 · done — finished
 == sched/list-enabled
   ✓
 == sched/sched_fired

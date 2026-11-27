@@ -126,6 +126,32 @@ func hookLoop(g string, n int) (dMetric, dAppend, dSpan, dHook []time.Duration) 
 	return
 }
 
+// within runs f on its own goroutine and fails the test as soon as f has
+// not returned within d. A blocking exporter holds a single call for a
+// whole export timeout (with retries: up to a minute; otelInit's own
+// startup log line already blocks), so without this watchdog the test
+// only fails at go test -timeout. On failure the blocked goroutine is
+// leaked; the test is failing anyway.
+func within(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); f() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v: the exporter blocks the caller", what, d)
+	}
+}
+
+// hookLoopWithin is hookLoop under the within watchdog.
+func hookLoopWithin(t *testing.T, g string, n int, d time.Duration, what string) (dMetric, dAppend, dSpan, dHook []time.Duration) {
+	t.Helper()
+	within(t, d, fmt.Sprintf("%s: %d hook iterations", what, n), func() {
+		dMetric, dAppend, dSpan, dHook = hookLoop(g, n)
+	})
+	return
+}
+
 func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 	type rcv struct {
 		name string
@@ -168,11 +194,16 @@ func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "50")
 			resetOtelGlobals(t)
 
-			shutdown := otelInit(context.Background())
+			// Fail fast on a gross stall: init and 50 iterations take
+			// milliseconds when export never blocks; the precise bounds
+			// follow below.
+			const stall = 10 * time.Second
+			var shutdown func(context.Context) error
+			within(t, stall, tc.name+" otelInit", func() { shutdown = otelInit(context.Background()) })
 			if !otelOn() {
 				t.Fatal("otel did not come up")
 			}
-			hookLoop(g, 50) // warm up
+			hookLoopWithin(t, g, 50, stall, tc.name+" warm-up")
 			time.Sleep(100 * time.Millisecond)
 			heap0 := heapNow()
 
@@ -187,19 +218,19 @@ func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 			// failing the comparison. The exporters keep running meanwhile.
 			const n, chunk = 3000, 50
 			s := otelCur.Load()
-			var dMetric, dAppend, dSpan, dHook, bMetric, bAppend []time.Duration
+			var dMetric, dAppend, dSpan, dHook, bMetric, bAppend, bSpan, bHook []time.Duration
 			var total, totalOff time.Duration
 			for i := 0; i < n/chunk; i++ {
 				start := time.Now()
-				m, a, sp, hk := hookLoop(g, chunk)
+				m, a, sp, hk := hookLoopWithin(t, g, chunk, stall, fmt.Sprintf("%s chunk %d", tc.name, i))
 				total += time.Since(start)
 				dMetric, dAppend, dSpan, dHook = append(dMetric, m...), append(dAppend, a...), append(dSpan, sp...), append(dHook, hk...)
 				otelCur.Store(nil)
 				start = time.Now()
-				m, a, _, _ = hookLoop(g, chunk)
+				m, a, sp, hk = hookLoop(g, chunk)
 				totalOff += time.Since(start)
 				otelCur.Store(s)
-				bMetric, bAppend = append(bMetric, m...), append(bAppend, a...)
+				bMetric, bAppend, bSpan, bHook = append(bMetric, m...), append(bAppend, a...), append(bSpan, sp...), append(bHook, hk...)
 			}
 			heapGrowth := int64(heapNow()) - int64(heap0)
 			t.Logf("%s: total=%v (off %v) p99 metric=%v (off %v) append=%v (off %v) span=%v otel-hooks=%v heap growth=%d KiB",
@@ -207,10 +238,22 @@ func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 
 			// The direct proof: what export ADDS to a call is the OTel hook
 			// work (span, metric record, log bridge), which touches no disk.
-			// Absolute bound: p99 < 5 ms, whatever the receiver does.
-			for name, d := range map[string][]time.Duration{"turn span": dSpan, "otel hooks (metric+log bridge)": dHook} {
-				if p := p99(d); p > 5*time.Millisecond {
-					t.Errorf("%s p99 = %v, want < 5ms: receiver %s blocks the caller", name, p, tc.name)
+			// A fixed p99 bound flakes on a loaded host (scheduler/GC jitter
+			// alone pushed it past 5ms with export OFF), so bound it against
+			// this run's own interleaved export-off measurement: the off p99
+			// of the same hooks plus the host jitter seen by the off-path
+			// disk calls, x1.5, + 5ms. A blocked export stalls for seconds.
+			jitter := max(p99(bMetric), p99(bAppend))
+			for _, c := range []struct {
+				name     string
+				on, base []time.Duration
+			}{
+				{"turn span", dSpan, bSpan},
+				{"otel hooks (metric+log bridge)", dHook, bHook},
+			} {
+				if lim := (p99(c.base)+jitter)*3/2 + 5*time.Millisecond; p99(c.on) > lim {
+					t.Errorf("%s p99 = %v, want < %v (export-off p99 %v + host jitter %v, x1.5 + 5ms): receiver %s blocks the caller",
+						c.name, p99(c.on), lim, p99(c.base), jitter, tc.name)
 				}
 			}
 			// The real call sites also pay their disk write, export or not.
@@ -230,11 +273,28 @@ func TestOtelUnreachableReceiverNeverBlocks(t *testing.T) {
 						c.name, p99(c.on), lim, base, tc.name)
 				}
 			}
-			// No single call may stall either (a blocking queue stalls one
-			// call for a whole export timeout and leaves p99 untouched).
-			for name, d := range map[string][]time.Duration{"logMetric": dMetric, "logAppend": dAppend, "turn span": dSpan, "otel hooks": dHook} {
-				if m := slices.Max(d); m > time.Second {
-					t.Errorf("%s max = %v, want < 1s: receiver %s stalled a call", name, m, tc.name)
+			// Hard bound that captures blocking: no single call may stall
+			// (a blocking queue stalls one call for a whole export timeout,
+			// seconds, and can leave p99 untouched). Every export-on call
+			// returns within 100ms while the receiver is blackholed /
+			// refused / stalled; disk-backed calls additionally get the
+			// worst export-off time of the same call (a disk hiccup is not
+			// export blocking).
+			for _, c := range []struct {
+				name     string
+				on, base []time.Duration
+			}{
+				{"logMetric", dMetric, bMetric},
+				{"logAppend", dAppend, bAppend},
+				{"turn span", dSpan, nil},
+				{"otel hooks", dHook, nil},
+			} {
+				lim := 100 * time.Millisecond
+				if c.base != nil {
+					lim += slices.Max(c.base)
+				}
+				if m := slices.Max(c.on); m > lim {
+					t.Errorf("%s max = %v, want < %v: receiver %s stalled a call", c.name, m, lim, tc.name)
 				}
 			}
 			if lim := 2*totalOff + 10*time.Second; total > lim {

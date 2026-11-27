@@ -33,8 +33,8 @@ OUT="${KOTO_FCASSETS_OUT:-$HERE/fcassets}"
 CACHE="$HERE/.kernelcache"
 mkdir -p "$OUT" "$CACHE"
 
-# Pins. microvm-kernel tag from amazonlinux/linux (6.1.188 base, tagged
-# 2026-09-29).
+# Pins. microvm-kernel tag from amazonlinux/linux (6.1.188 base, 56.393,
+# tagged 2026-10-08).
 #
 # This one is a DELIBERATE EXCEPTION to the six-week dependency lag, taken for
 # 1.0.0. The lag exists so a broken or compromised release is noticed before we
@@ -61,19 +61,22 @@ mkdir -p "$OUT" "$CACHE"
 # 24 of the 51 audited kernel CVEs. NOT vanilla 6.1.189/190: the ACPI /
 # acpi=off busy-poll regression above. Same Firecracker guest config, same
 # builder digest. The remaining 6.1.189/190 fixes wait for an amzn tag.
-KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.188-56.385.amzn2023}"
+# chore/bump-all: 6.1.188-56.385 -> 6.1.188-56.393 (newest amzn 6.1 microvm
+# tag; still no 6.1.189+). FC guest config v1.16.1 -> v1.18.0: CRIU/landlock/
+# TUN/VXLAN/GENEVE/PCI hotplug on, DEVMEM off; vsock loopback still off.
+KERNEL_TAG="${KERNEL_TAG:-microvm-kernel-6.1.188-56.393.amzn2023}"
 # The commit the annotated tag dereferences to (git checkout resolves HEAD to
 # this, not the f3260b2… tag-object sha from `git ls-remote refs/tags/…`).
 # The tag resolves to this commit, verified independently against the GitHub API
 # rather than taken from the clone — a pin the clone supplies proves nothing.
-# annotated tag f3260b2f53bf4459c2433469c8d37d2982fc418c -> commit below.
-KERNEL_COMMIT="${KERNEL_COMMIT:-0dcff8409289f418b20cf8b695406cb38ba477e0}"
-FC_VERSION="${FC_VERSION:-v1.16.1}"                          # guest-config source tag
+# annotated tag a9ea02bac2b0d3906e5ca32dd91fd0d406eb4951 -> commit below.
+KERNEL_COMMIT="${KERNEL_COMMIT:-8785eb28815fdac7e6743bb6fad34ef67dc24b26}"
+FC_VERSION="${FC_VERSION:-v1.18.0}"                          # guest-config source tag
 # Pinned by DIGEST: the builder image decides the compiler that produces
 # vmlinux, so a moving tag means a moving kernel binary. Deliberately still
 # the fedora:44 digest after the guest base moved to 45: bumping it changes
 # the compiler, so it moves only with a deliberate kernel rebuild.
-BUILDER="${BUILDER:-docker.io/library/fedora@sha256:be9d65e2344d805cc11114319c685ecaa96b6d9b4350a0a6460cdb931babbd19}"
+BUILDER="${BUILDER:-docker.io/library/fedora@sha256:15da97ed9aa94dd3d92c3925eb89520f6c80e07ea7ee24cba848d1f8b6912b3e}"
 FC_CONFIG_URL="https://raw.githubusercontent.com/firecracker-microvm/firecracker/${FC_VERSION}/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config"
 
 echo "==> building guest vmlinux ($KERNEL_TAG + CONFIG_TUN)"
@@ -125,7 +128,7 @@ curl -fsSL "$FC_CONFIG_URL" >.config
 # what that source becomes — a tampered one could re-enable vsock loopback
 # (see the assertion below). Refresh deliberately when FC_VERSION moves:
 #   curl -fsSL "$FC_CONFIG_URL" | sha256sum
-echo "${FC_CONFIG_SHA256:-adbc70ab5e89213ba00594b12d25e09bdf8bb1ed3c252d7449326bb14c22963b}  .config" | sha256sum -c - >/dev/null || {
+echo "${FC_CONFIG_SHA256:-153ca1b40f3312bfb40b7587b471ea548a915f98f480f0d0892a1537957a2147}  .config" | sha256sum -c - >/dev/null || {
   echo "!! guest kernel .config does not match its pinned sha256"; exit 1; }
 # Everything built-in (=y): the guest has no module loader, so netfilter/nft
 # bits can't be =m. FC's config has TUN off and only the nftables *core*; we

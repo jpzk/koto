@@ -1,6 +1,6 @@
 package main
 
-// Live notifications, rendered inline in the status-bar row: arrival,
+// Live notifications, rendered in their own bottom row: arrival,
 // geometry invariance, stacking cap, independent expiry, blink stability,
 // truncation, history replay, unread badging. Same style as jobs_test —
 // drive the model directly, backdate timestamps for expiry.
@@ -31,8 +31,8 @@ func notifyEv(group, sev, title, msg string) Event {
 	return Event{Event: "notification", Group: group, Severity: sev, Title: title, Text: msg}
 }
 
-// A notification renders inline in the status bar and must not move a single
-// pane edge — the whole point of the inline design.
+// A notification gets its own bottom row: every pane gives up exactly one
+// row for it and the frame's total height does not move.
 func TestNotificationKeepsGeometry(t *testing.T) {
 	m := notifyModel(t)
 	chat0 := m.chatRows()
@@ -45,14 +45,17 @@ func TestNotificationKeepsGeometry(t *testing.T) {
 	if got := len(m.visibleNotifications()); got != 1 {
 		t.Fatalf("visible notifications: want 1, got %d", got)
 	}
-	if m.chatRows() != chat0 {
-		t.Fatalf("chatRows moved: want %d, got %d", chat0, m.chatRows())
+	if m.chatRows() != chat0-1 {
+		t.Fatalf("chatRows: want %d (one row for the notification), got %d", chat0-1, m.chatRows())
 	}
-	if _, h := m.logPaneSize(); h != log0 {
-		t.Fatalf("logPaneSize moved: want %d, got %d", log0, h)
+	if m.vp.Height != m.chatRows() {
+		t.Fatalf("viewport not re-laid out: vp.Height %d, chatRows %d", m.vp.Height, m.chatRows())
 	}
-	if _, h := m.shellPaneSize(); h != shell0 {
-		t.Fatalf("shellPaneSize moved: want %d, got %d", shell0, h)
+	if _, h := m.logPaneSize(); h != log0-1 {
+		t.Fatalf("logPaneSize: want %d, got %d", log0-1, h)
+	}
+	if _, h := m.shellPaneSize(); h != shell0-1 {
+		t.Fatalf("shellPaneSize: want %d, got %d", shell0-1, h)
 	}
 	if got := strings.Count(m.View(), "\n"); got != rows0 {
 		t.Fatalf("frame grew: %d newlines, want %d", got, rows0)
@@ -73,9 +76,9 @@ func TestNotificationStackAndCap(t *testing.T) {
 	if got := len(m.visibleNotifications()); got != notifyMaxRows {
 		t.Fatalf("visible cap: want %d, got %d", notifyMaxRows, got)
 	}
-	// The extras show as a +N suffix on the inline segment.
-	if bar := stripANSI(m.renderStatusBar(" ")); !strings.Contains(bar, "+3") {
-		t.Fatalf("status bar missing the overflow count: %q", bar)
+	// The extras show as a +N suffix on the bottom notification row.
+	if row := stripANSI(m.renderNotifyRow()); !strings.Contains(row, "+3") {
+		t.Fatalf("notification row missing the overflow count: %q", row)
 	}
 }
 
@@ -183,21 +186,25 @@ func TestNotificationBannerFlattensNewlines(t *testing.T) {
 	}
 }
 
-// TestNotificationInlineTruncates: a long message clips inside the status-bar
-// row — it must never widen the bar past the terminal, wrap it, or clobber
-// the progress indicator on the right.
+// TestNotificationInlineTruncates: a long message clips inside its own bottom
+// row with an ellipsis — it must never widen the row past the terminal or
+// wrap it, and the status bar (progress indicator included) is untouched.
 func TestNotificationInlineTruncates(t *testing.T) {
 	m := notifyModel(t)
 	m = sendNotify(t, m, notifyEv("main", "high", "T", strings.Repeat("x", 300)))
-	bar := m.renderStatusBar(" ")
-	if strings.Contains(bar, "\n") {
-		t.Fatalf("status bar wrapped: %q", bar)
+	row := m.renderNotifyRow()
+	if strings.Contains(row, "\n") {
+		t.Fatalf("notification row wrapped: %q", row)
 	}
-	if w := lipgloss.Width(bar); w > m.width {
-		t.Fatalf("status bar %d cols wide, terminal is %d", w, m.width)
+	if w := lipgloss.Width(row); w != m.width {
+		t.Fatalf("notification row %d cols wide, terminal is %d", w, m.width)
 	}
-	if !strings.Contains(stripANSI(bar), "idle") {
-		t.Fatalf("right side clobbered by the notification: %q", stripANSI(bar))
+	if !strings.HasSuffix(strings.TrimRight(stripANSI(row), " "), "…") {
+		t.Fatalf("truncated row lacks the ellipsis: %q", stripANSI(row))
+	}
+	bar := stripANSI(m.renderStatusBar(" "))
+	if !strings.Contains(bar, "idle") || strings.Contains(bar, "xxx") {
+		t.Fatalf("status bar touched by the notification: %q", bar)
 	}
 }
 

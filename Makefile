@@ -19,6 +19,9 @@
 # (the grpc and protobuf runtimes are pinned in the go.mod files.)
 PROTOC_GEN_GO_VER      := v1.36.12
 PROTOC_GEN_GO_GRPC_VER := v1.6.2
+# protoc itself comes from the alpine apk repo of GO_IMAGE (alpine 3.24):
+# pin the exact apk release so proto-gen reproduces "protoc v6.31.1" headers.
+PROTOBUF_APK_VER       := 31.1-r1
 
 # --- first run ---------------------------------------------------------------
 # GETTING koto RUNNING IS THREE STAGES, and each one owns exactly its own job:
@@ -90,12 +93,16 @@ else
 endif
 # Pinned by DIGEST, not tag. This is what actually makes the build
 # reproducible — the engine does not: docker and podman run the same OCI
-# image and produce the same bytes. `golang:1.26-alpine` is a moving tag that
+# image and produce the same bytes. `golang:1.27-alpine` is a moving tag that
 # silently changes toolchain patch versions under you; the digest does not.
 # Combined with -trimpath and CGO_ENABLED=0, two builds of the same commit
 # give identical binaries, except for the version string stamped below.
-# Update deliberately: podman/docker pull golang:1.26-alpine, then
-#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.26-alpine
+# Update deliberately: podman/docker pull golang:1.27-alpine, then
+#   podman inspect --format '{{index .RepoDigests 0}}' golang:1.27-alpine
+# golang:1.27.4-alpine (index digest, linux/amd64 child ea30e256…; bumped
+# 2026-11-26 in chore/bump-all, operator waived the 6-week lag: go1.27.4,
+# released 2026-11-10, newest stable, security fixes to cgo, the go
+# command, the compiler, the linker and net/http). Previously
 # golang:1.26.11-alpine (index digest, linux/amd64 child f496f8c5…; bumped
 # 2026-11-20 from the go1.26.10 image, operator-approved security exception:
 # go1.26.11 — released 2026-11-10 — fixes GO-2026-6859 (net/http
@@ -113,7 +120,7 @@ endif
 # reachable govulncheck finding is taken at once, soak or no soak. Keep in
 # step with the `toolchain` lines in every go.mod / go.work and the
 # go-version in .github/workflows/supplychain.yml.
-GO_IMAGE ?= docker.io/library/golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab
+GO_IMAGE ?= docker.io/library/golang@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
 # Cache paths are passed as env rather than mounted over /root, so the same
 # invocation works whether we are root in the container (podman) or not.
 GO_BUILD_RUN = $(CONTAINER) run --rm --security-opt label=disable \
@@ -824,18 +831,19 @@ metrics:
 	@jq -s 'group_by(.group)|map({group:.[0].group,n:length,usage:(map(.usage)|add)})' metrics.jsonl 2>/dev/null || tail -n 20 metrics.jsonl
 
 # --- secrets: a per-commit gate and a whole-history sweep -------------------
-# Both scanners run from digest-pinned images (≥6 weeks old, like every
-# dependency here): betterleaks v1.7.0 (2026-07-23 — gitleaks' author's
-# successor project, drop-in flags/config; see tools/hooks/pre-commit for why)
-# and trufflehog v3.96.0 (2026-07-24). Neither tool recognises koto's own byte-random tokens or the
+# Both scanners run from digest-pinned images (bumped 2026-11-26 in chore/bump-all,
+# 6-week age rule waived by the operator): betterleaks v1.10.1 (2026-11-12 — gitleaks' author's
+# successor project, drop-in flags; config passed explicitly via --config since
+# v1.10.0 stopped auto-loading it; see tools/hooks/pre-commit for why)
+# and trufflehog v3.100.1 (2026-11-23). Neither tool recognises koto's own byte-random tokens or the
 # sk-ant-oat01- OAuth token (canary-tested 2026-09-05), so secrets-scan also
 # greps history for the LIVE values in the installed creds dir, verbatim (one
 # per line — the token files carry no trailing newline, so a bare cat glues
 # them into one string that matches nothing), and
 # lists every credential-shaped filename ever committed. creds/ staying out of
 # the tree is .gitignore's job; these are the checks that it did.
-BETTERLEAKS_IMAGE ?= ghcr.io/betterleaks/betterleaks@sha256:06d60954c287c19af7a7171a1b5d466959d2f49b6946d4cf92ea65ba725a633a
-TRUFFLEHOG_IMAGE  ?= docker.io/trufflesecurity/trufflehog@sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577
+BETTERLEAKS_IMAGE ?= ghcr.io/betterleaks/betterleaks@sha256:07ef039be491a6c076b239dd8b8e42fdde984af6609c8541bdb7c9507708403e
+TRUFFLEHOG_IMAGE  ?= docker.io/trufflesecurity/trufflehog@sha256:9c7a8325d43a4af2960d3f21d61a08981d8a1bf0542e007efa2e47097e386452
 SCAN_RUN = $(CONTAINER) run --rm --security-opt label=disable -v "$(CURDIR):/src:ro" -w /src \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src
 
@@ -848,7 +856,7 @@ hooks:
 secrets-scan:
 	$(need-container)
 	@echo "==> betterleaks: every commit on every ref"
-	$(SCAN_RUN) $(BETTERLEAKS_IMAGE) git /src --log-opts="--all" --no-banner --redact=100
+	$(SCAN_RUN) $(BETTERLEAKS_IMAGE) git /src --log-opts="--all" --no-banner --redact=100 --config /src/.betterleaks.toml
 	@echo "==> trufflehog: every commit, verified + unverified"
 	$(SCAN_RUN) $(TRUFFLEHOG_IMAGE) git file:///src --results=verified,unverified,unknown --no-update --fail
 	@echo "==> credential-shaped filenames ever committed (must print nothing)"
@@ -876,7 +884,8 @@ proto-gen:
 	  -v $(CURDIR):/src -w /src/protocol \
 	  -v $(CURDIR)/.gocache:/root/.cache/go-build \
 	  $(GO_IMAGE) sh -euc '\
-	    apk add --no-cache protobuf protobuf-dev >/dev/null; \
+	    apk add --no-cache protobuf=$(PROTOBUF_APK_VER) protobuf-dev=$(PROTOBUF_APK_VER) >/dev/null; \
+	    protoc --version | grep -qx "libprotoc 31.1"; \
 	    go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VER); \
 	    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VER); \
 	    export PATH=$$PATH:$$(go env GOPATH)/bin; \
