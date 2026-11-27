@@ -227,9 +227,7 @@ func (m *Model) onInboxFrame(items []inboxEntry) {
 			v.plan, v.msgMode = false, false // decided elsewhere
 		}
 	}
-	if v.sel >= len(items) {
-		v.sel = max(0, len(items)-1)
-	}
+	m.inboxClamp()
 }
 
 func (m Model) inboxFind(key string) (inboxEntry, bool) {
@@ -244,6 +242,77 @@ func (m Model) inboxFind(key string) (inboxEntry, bool) {
 // inboxCount is the N of "Inbox (N)": pending decisions + undismissed
 // notifications, i.e. every item of the latest snapshot.
 func (m Model) inboxCount() int { return len(m.inboxItems) }
+
+// Kind filter of the list view (tab / shift+tab / f cycle it). "decisions"
+// is every kind that is not a notification (tool approval, ask, goal plan).
+const (
+	inboxFilterAll = iota
+	inboxFilterDecisions
+	inboxFilterNotes
+	inboxFilterN
+)
+
+var inboxFilterNames = [inboxFilterN]string{"all", "decisions", "notifications"}
+
+func inboxFilterMatch(f int, e inboxEntry) bool {
+	switch f {
+	case inboxFilterDecisions:
+		return e.kind != inboxKindNote
+	case inboxFilterNotes:
+		return e.kind == inboxKindNote
+	}
+	return true
+}
+
+// inboxVisible is the list under the active filter; sel indexes into it.
+func (m Model) inboxVisible() []inboxEntry {
+	if m.inboxFilter == inboxFilterAll {
+		return m.inboxItems
+	}
+	var out []inboxEntry
+	for _, e := range m.inboxItems {
+		if inboxFilterMatch(m.inboxFilter, e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// inboxFilterCounts: items per filter, in inboxFilterNames order.
+func (m Model) inboxFilterCounts() [inboxFilterN]int {
+	var c [inboxFilterN]int
+	for _, e := range m.inboxItems {
+		for f := range c {
+			if inboxFilterMatch(f, e) {
+				c[f]++
+			}
+		}
+	}
+	return c
+}
+
+// inboxClamp keeps sel inside the visible list.
+func (m *Model) inboxClamp() {
+	n := len(m.inboxVisible())
+	if m.inboxView.sel >= n {
+		m.inboxView.sel = max(0, n-1)
+	}
+	if m.inboxView.sel < 0 {
+		m.inboxView.sel = 0
+	}
+}
+
+// inboxDrop removes items by key (optimistic dismiss), then clamps.
+func (m *Model) inboxDrop(keys map[string]bool) {
+	var out []inboxEntry
+	for _, e := range m.inboxItems {
+		if !keys[e.key()] {
+			out = append(out, e)
+		}
+	}
+	m.inboxItems = out
+	m.inboxClamp()
+}
 
 // Seams so tests record what would be sent.
 var goalDecideCmdFn = func(sock, group, name string, allow bool, msg string) tea.Cmd {
@@ -269,8 +338,31 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if v.plan {
 		return m.handleInboxPlanKey(msg)
 	}
-	n := len(m.inboxItems)
+	vis := m.inboxVisible()
+	n := len(vis)
 	switch msg.String() {
+	case "tab", "f":
+		m.inboxFilter = (m.inboxFilter + 1) % inboxFilterN
+		m.inboxClamp()
+	case "shift+tab":
+		m.inboxFilter = (m.inboxFilter + inboxFilterN - 1) % inboxFilterN
+		m.inboxClamp()
+	case "D":
+		// Every notification visible under the current filter, in one
+		// InboxDismiss. Decisions are never bulk-dismissed.
+		var ids []string
+		keys := map[string]bool{}
+		for _, e := range vis {
+			if e.kind == inboxKindNote {
+				ids = append(ids, e.id)
+				keys[e.key()] = true
+			}
+		}
+		if len(ids) == 0 {
+			return m, nil
+		}
+		m.inboxDrop(keys)
+		return m, inboxDismissCmdFn(m.sock, ids)
 	case "j", "down":
 		if v.sel < n-1 {
 			v.sel++
@@ -286,13 +378,10 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "enter":
 		return m.inboxOpenItem()
 	case "d":
-		if v.sel < n && m.inboxItems[v.sel].kind == inboxKindNote {
-			e := m.inboxItems[v.sel]
+		if v.sel < n && vis[v.sel].kind == inboxKindNote {
+			e := vis[v.sel]
 			// Optimistic: the next snapshot confirms (or brings it back on error).
-			m.inboxItems = append(append([]inboxEntry(nil), m.inboxItems[:v.sel]...), m.inboxItems[v.sel+1:]...)
-			if v.sel >= len(m.inboxItems) {
-				v.sel = max(0, len(m.inboxItems)-1)
-			}
+			m.inboxDrop(map[string]bool{e.key(): true})
 			return m, inboxDismissCmdFn(m.sock, []string{e.id})
 		}
 	case "esc", "q", "ctrl+c":
@@ -304,10 +393,11 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // inboxOpenItem: enter on the selected row.
 func (m Model) inboxOpenItem() (Model, tea.Cmd) {
 	v := &m.inboxView
-	if v.sel >= len(m.inboxItems) {
+	vis := m.inboxVisible()
+	if v.sel >= len(vis) {
 		return m, nil
 	}
-	e := m.inboxItems[v.sel]
+	e := vis[v.sel]
 	switch e.kind {
 	case inboxKindApproval:
 		if m.approvals == nil {
@@ -392,7 +482,7 @@ func (m Model) handleInboxMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	}
 	top := m.inboxListTop()
 	i := top + msg.Y - inboxListY
-	if msg.Y < inboxListY || i < top || i >= len(m.inboxItems) || i >= top+m.inboxListRows() {
+	if msg.Y < inboxListY || i < top || i >= len(m.inboxVisible()) || i >= top+m.inboxListRows() {
 		return m, nil
 	}
 	m.inboxView.sel = i
@@ -424,7 +514,7 @@ func inboxRowText(e inboxEntry, w int) string {
 		origin += ":" + sessionDisplay(e.session)
 	}
 	origin = inboxLine(origin)
-	s :=fmt.Sprintf("%s %s %s %s", ts, origin, e.kindLabel(), e.subject)
+	s := fmt.Sprintf("%s %s %s %s", ts, origin, e.kindLabel(), e.subject)
 	return ansi.Truncate(s, max(1, w), "…")
 }
 
@@ -436,14 +526,19 @@ func (m Model) renderInbox() string {
 	if m.inboxView.plan {
 		return m.renderInboxPlan(w)
 	}
-	lines := []string{yel.Render(ansi.Truncate(fmt.Sprintf(" inbox (%d)", m.inboxCount()), w, "")), ""}
-	if len(m.inboxItems) == 0 {
-		lines = append(lines, gray.Render(ansi.Truncate(" nothing waiting — inbox empty", w, "")))
+	vis := m.inboxVisible()
+	lines := []string{ansi.Truncate(yel.Render(fmt.Sprintf(" inbox (%d)", m.inboxCount()))+"  "+m.inboxFilterBar(), w, ""), ""}
+	if len(vis) == 0 {
+		empty := " nothing waiting — inbox empty"
+		if len(m.inboxItems) > 0 {
+			empty = " nothing under " + inboxFilterNames[m.inboxFilter] + " — tab for the others"
+		}
+		lines = append(lines, gray.Render(ansi.Truncate(empty, w, "")))
 	} else {
 		sel := inv(cFgInv, cAmber).Bold(true)
 		top, rows := m.inboxListTop(), m.inboxListRows()
-		for i := top; i < len(m.inboxItems) && i < top+rows; i++ {
-			t := inboxRowText(m.inboxItems[i], w-3)
+		for i := top; i < len(vis) && i < top+rows; i++ {
+			t := inboxRowText(vis[i], w-3)
 			if i == m.inboxView.sel {
 				t = "› " + t
 				if pw := ansi.StringWidth(t); pw < w-1 {
@@ -455,7 +550,7 @@ func (m Model) renderInbox() string {
 			}
 		}
 		// Detail of the selected item: kind-specific, wrapped, ≤3 lines.
-		if e := m.inboxItems[m.inboxView.sel]; true {
+		if e := vis[m.inboxView.sel]; true {
 			lines = append(lines, "")
 			det := e.subject
 			if e.kind == inboxKindNote && e.body != "" {
@@ -469,9 +564,9 @@ func (m Model) renderInbox() string {
 			}
 		}
 	}
-	hint := "j/k move · enter open · esc back"
-	if m.inboxView.sel < len(m.inboxItems) && m.inboxItems[m.inboxView.sel].kind == inboxKindNote {
-		hint = "j/k move · d dismiss · esc back"
+	hint := "j/k move · enter open · tab filter · esc back"
+	if m.inboxView.sel < len(vis) && vis[m.inboxView.sel].kind == inboxKindNote {
+		hint = "j/k move · d dismiss · D dismiss all shown · tab filter · esc back"
 	}
 	for len(lines) < m.height-1 {
 		lines = append(lines, "")
@@ -481,6 +576,24 @@ func (m Model) renderInbox() string {
 		lines = lines[len(lines)-m.height:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// inboxFilterBar: "all (N) · decisions (N) · notifications (N)", the
+// active filter highlighted.
+func (m Model) inboxFilterBar() string {
+	gray := lipgloss.NewStyle().Foreground(cGray)
+	on := inv(cFgInv, cAmber).Bold(true)
+	c := m.inboxFilterCounts()
+	var parts []string
+	for f, name := range inboxFilterNames {
+		t := fmt.Sprintf("%s (%d)", name, c[f])
+		if f == m.inboxFilter {
+			parts = append(parts, on.Render(t))
+		} else {
+			parts = append(parts, gray.Render(t))
+		}
+	}
+	return strings.Join(parts, gray.Render(" · "))
 }
 
 func (m Model) renderInboxPlan(w int) string {

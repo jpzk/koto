@@ -666,6 +666,7 @@ type Model struct {
 	inboxOn          bool
 	inboxItems       []inboxEntry
 	inboxView        inboxViewState
+	inboxFilter      int // inboxFilterAll|Decisions|Notes; persists while the TUI runs
 	inboxWatching    bool
 	inboxUnsupported bool
 	inboxRetryAt     time.Time
