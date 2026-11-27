@@ -92,6 +92,23 @@ jobs:
         run: |
           set -euo pipefail
           go vet ./...
+      # daemon tests assume a koto host, not a bare ubuntu-24.04 runner:
+      #  - TestUsernsBootstrapEndToEnd needs unprivileged userns with caps;
+      #    ubuntu-24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+      #    which strips them (chown EPERM). =0 is the documented koto remedy
+      #    (docs/getting-started.md, usernsRemediation).
+      #  - TestUnitBindsHomeClaude runs `systemd-analyze verify` on the unit,
+      #    whose ExecStart=/usr/local/bin/koto must exist — install the binary
+      #    from this checkout there, exactly as `koto install` does.
+      - name: provision koto host prerequisites (daemon)
+        if: ${{ matrix.module == 'daemon' }}
+        working-directory: daemon
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          go build -o "$RUNNER_TEMP/koto" .
+          sudo install -m 0755 "$RUNNER_TEMP/koto" /usr/local/bin/koto
+          /usr/local/bin/koto version
       - name: go test -count=1 ./...
         working-directory: ${{ matrix.module }}
         run: |
