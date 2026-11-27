@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -206,5 +207,66 @@ func TestInboxFilterArrows(t *testing.T) {
 	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft}) // wraps
 	if m.inboxFilter != inboxFilterNotes {
 		t.Fatalf("left wrap: filter %d, want notifications", m.inboxFilter)
+	}
+}
+
+func ibClick(t *testing.T, m Model, x, y int) Model {
+	t.Helper()
+	nm, _ := m.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	return nm.(Model)
+}
+
+// A click on a filter label in the title row selects that filter; the spans
+// match the rendered title text exactly.
+func TestInboxFilterMouse(t *testing.T) {
+	m := ibMixed(t)
+	title := strings.SplitN(ansi.Strip(m.View()), "\n", 2)[0]
+	sp := m.inboxFilterSpans()
+	for f, name := range inboxFilterNames {
+		lbl := fmt.Sprintf("%s (%d)", name, m.inboxFilterCounts()[f])
+		if got := ansi.StringWidth(title[:strings.Index(title, lbl)]); got != sp[f][0] {
+			t.Fatalf("%s: span starts at %d, label drawn at %d in %q", name, sp[f][0], got, title)
+		}
+	}
+	for _, f := range []int{inboxFilterNotes, inboxFilterDecisions, inboxFilterAll} {
+		m = ibClick(t, m, sp[f][0]+1, 0)
+		if m.inboxFilter != f {
+			t.Fatalf("click on %s: filter %d", inboxFilterNames[f], m.inboxFilter)
+		}
+	}
+	// separator, title and past-the-end clicks change nothing
+	m = ibClick(t, m, sp[inboxFilterNotes][0]-2, 0)
+	m = ibClick(t, m, 1, 0)
+	m = ibClick(t, m, sp[inboxFilterNotes][1]+5, 0)
+	if m.inboxFilter != inboxFilterAll {
+		t.Fatalf("stray click changed filter to %d", m.inboxFilter)
+	}
+	// a filter click never opens an item
+	if m.approvalCard.open || m.inboxView.plan {
+		t.Fatal("title click opened an item")
+	}
+}
+
+// The status-bar counter: centered, gray, full form when wide, short form
+// (and still present) when narrow, and the bar never exceeds the width.
+func TestInboxStatusCounter(t *testing.T) {
+	m := ibMixed(t)
+	m.inboxView = inboxViewState{}
+	for _, w := range []int{160, 90, 40} {
+		m.width = w
+		bar := ansi.Strip(m.renderStatusBar(""))
+		if ansi.StringWidth(bar) > w {
+			t.Fatalf("w=%d: bar %d cells wide", w, ansi.StringWidth(bar))
+		}
+		if w == 160 && !strings.Contains(bar, "☰ 3 decide · 2 note") {
+			t.Fatalf("w=160: no full counter in %q", bar)
+		}
+		if w == 40 && !strings.Contains(bar, "☰ 3·2") {
+			t.Fatalf("w=40: no short counter in %q", bar)
+		}
+	}
+	m.inboxItems, m.approvals = nil, nil
+	if s := m.renderInboxSegment(100); s != "" {
+		t.Fatalf("empty inbox still shows %q", s)
 	}
 }

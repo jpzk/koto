@@ -579,6 +579,20 @@ func (m Model) renderStatusBar(spin string) string {
 	if gap < 0 {
 		gap = 0
 	}
+	// The inbox counter sits centered in the gap (gray, like idle). When
+	// even its short form has no room it still wins over the right side,
+	// which the MaxWidth clip below then cuts (the old left-side counter
+	// had the same priority).
+	mid := m.renderInboxSegment(gap - 2)
+	if mw := lipgloss.Width(mid); mw > 0 {
+		if gap < mw+2 {
+			// No room: the counter goes right after the group chip, ahead of
+			// the loading bar and the right side (both clipped first).
+			return lipgloss.NewStyle().MaxWidth(m.width).Render(m.renderStatusChips() + " " + mid + " " + m.renderLoadingSegment() + right)
+		}
+		l := (gap - mw) / 2
+		return lipgloss.NewStyle().MaxWidth(m.width).Render(left + strings.Repeat(" ", l) + mid + strings.Repeat(" ", gap-mw-l) + right)
+	}
 	// MaxWidth clips at m.width so an overflowing right side (many metric
 	// segments on a narrow pane) can't wrap into a second row. Wrapping
 	// here would push the input/hint off-screen — the main view's vertical
@@ -586,7 +600,10 @@ func (m Model) renderStatusBar(spin string) string {
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(left + strings.Repeat(" ", gap) + right)
 }
 
-func (m Model) renderStatusLeft() string {
+func (m Model) renderStatusLeft() string { return m.renderStatusChips() + m.renderLoadingSegment() }
+
+// renderStatusChips: the koto banner + group chip, without the loading bar.
+func (m Model) renderStatusChips() string {
 	// The banner chip inverts; the group segment beside it stays plain bold in
 	// mono. Inverting both would fuse them into one unbroken reverse bar —
 	// there is no separator glyph between them to keep them apart, only the
@@ -599,7 +616,7 @@ func (m Model) renderStatusLeft() string {
 		cur += ":" + s // viewing a named session — make the send target visible
 	}
 	grp := lipgloss.NewStyle().Foreground(fgOn(cDkAmber, cBrWhite)).Background(cDkAmber).Bold(true).Render("   " + cur + "  ")
-	return app + grp + m.renderInboxSegment() + m.renderLoadingSegment()
+	return app + grp
 }
 
 // renderLoadingSegment shows "loading N/M [████░░░]" while history+prewarm

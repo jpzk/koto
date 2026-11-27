@@ -104,7 +104,7 @@ func TestApprovalOtherSessionDoesNotStealFocus(t *testing.T) {
 		t.Fatalf("pendingTotal = %d, want 1", n)
 	}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "inbox 1") {
+	if !strings.Contains(v, "☰ 1") {
 		t.Errorf("status bar lacks the inbox counter:\n%s", v)
 	}
 	if !strings.Contains(v, "plan") {

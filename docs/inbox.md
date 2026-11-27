@@ -86,8 +86,12 @@ terminal escape sequences show up as visible text instead of being executed.
 
 ## TUI
 
-- The tree shows an **`Inbox (N)`** row above `main`. N is the number of
-  pending decisions plus undismissed notifications.
+- `☰` is the inbox logo. The tree shows a **`☰ Inbox (N)`** row above `main`.
+  N is the number of pending decisions plus undismissed notifications.
+- The top status bar shows the same counts centered between the group and
+  the activity/tok-s side, gray like `idle`: `☰ 2 decide · 5 note`, or the
+  short `☰ 2·5` when the bar is tight (the short form still wins over the
+  right side, which is clipped). Hidden while nothing waits.
 - The inbox is seeded and kept live by `WatchInbox`, which reconnects with
   backoff the same way the state stream does.
 - Select the row (enter or click) to open the list. The list is newest
@@ -124,7 +128,7 @@ terminal escape sequences show up as visible text instead of being executed.
 
 Keys in the list (they act on the **filtered** list):
 
-- `tab` / `shift+tab` or `→` / `←`: next / previous filter (all → decisions →
+- `tab` / `shift+tab`, `→` / `←`, or a click on a label in the title row: next / previous / that filter (all → decisions →
   notifications). `f` also cycles forward. The cursor is clamped when the
   filter changes or items disappear.
 - `j`/`k` or the arrow keys: move. `g`/`G`: first/last item.

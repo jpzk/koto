@@ -512,9 +512,20 @@ func (m Model) handleInboxPlanKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleInboxMouse: a left click on a list row selects it and opens it.
+// handleInboxMouse: a left click on a filter label in the title row
+// switches the filter; a click on a list row selects it and opens it.
 func (m Model) handleInboxMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if m.inboxView.plan || msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if msg.Y == 0 {
+		for f, sp := range m.inboxFilterSpans() {
+			if msg.X >= sp[0] && msg.X < sp[1] {
+				m.inboxFilter = f
+				m.inboxClamp()
+				break
+			}
+		}
 		return m, nil
 	}
 	top := m.inboxListTop()
@@ -654,7 +665,7 @@ func (m Model) renderInbox() string {
 		return m.renderInboxPlan(w)
 	}
 	vis := m.inboxVisible()
-	lines := []string{ansi.Truncate(yel.Render(fmt.Sprintf(" inbox (%d)", m.inboxCount()))+"  "+m.inboxFilterBar(), w, ""), ""}
+	lines := []string{ansi.Truncate(yel.Render(m.inboxTitle())+"  "+m.inboxFilterBar(), w, ""), ""}
 	if len(vis) == 0 {
 		empty := " nothing waiting — inbox empty"
 		if len(m.inboxItems) > 0 {
@@ -688,9 +699,9 @@ func (m Model) renderInbox() string {
 			}
 		}
 	}
-	hint := "j/k move · enter open · tab filter · esc back"
+	hint := "j/k move · enter open · tab/←→/click filter · esc back"
 	if m.inboxView.sel < len(vis) && vis[m.inboxView.sel].kind == inboxKindNote {
-		hint = "j/k move · d dismiss · D dismiss all shown · tab filter · esc back"
+		hint = "j/k move · d dismiss · D dismiss all shown · tab/←→/click filter · esc back"
 	}
 	for len(lines) < m.height-1 {
 		lines = append(lines, "")
@@ -700,6 +711,26 @@ func (m Model) renderInbox() string {
 		lines = lines[len(lines)-m.height:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// inboxTitle is the plain title cell of the list view: " ☰ inbox (N)".
+func (m Model) inboxTitle() string {
+	return " " + gl("☰ ", "") + fmt.Sprintf("inbox (%d)", m.inboxCount())
+}
+
+// inboxFilterSpans: [start,end) cell columns of each filter label in the
+// title row, measured from the same strings renderInbox draws (title, two
+// spaces, labels joined by " · "), so click zones never drift from the text.
+func (m Model) inboxFilterSpans() [inboxFilterN][2]int {
+	var sp [inboxFilterN][2]int
+	c := m.inboxFilterCounts()
+	x := ansi.StringWidth(m.inboxTitle()) + 2
+	for f, name := range inboxFilterNames {
+		lw := ansi.StringWidth(fmt.Sprintf("%s (%d)", name, c[f]))
+		sp[f] = [2]int{x, x + lw}
+		x += lw + ansi.StringWidth(" · ")
+	}
+	return sp
 }
 
 // inboxFilterBar: "all (N) · decisions (N) · notifications (N)", the
@@ -772,7 +803,7 @@ func (m Model) renderInboxPlan(w int) string {
 func (m Model) renderInboxTreeRow(hov bool) string {
 	contentW := leftPaneWidth - 2
 	n := m.inboxCount()
-	txt := " " + gl("✉ ", "") + fmt.Sprintf("Inbox (%d)", n)
+	txt := " " + gl("☰ ", "") + fmt.Sprintf("Inbox (%d)", n)
 	txt = truncWidth(txt, contentW+1)
 	if pw := cellWidth(txt); pw < contentW+1 {
 		txt += strings.Repeat(" ", contentW+1-pw)
