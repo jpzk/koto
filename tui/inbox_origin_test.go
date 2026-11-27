@@ -51,15 +51,18 @@ func TestInboxOriginColumnAligned(t *testing.T) {
 	if n != 5 {
 		t.Fatalf("want 5 rows with an origin cell, got %d:\n%s", n, v)
 	}
-	// the kind label starts at the same cell on every row (padded column)
+	// NOTE/DECIDE sits right after the time; the origin column starts at the same cell on every row
 	ow := inboxOriginWidth(m.inboxVisible(), m.width-3)
 	if ow != ansi.StringWidth("alpha · goal-x") {
 		t.Fatalf("origin width %d", ow)
 	}
 	for _, e := range m.inboxVisible() {
 		r := inboxRowText(e, 200, ow)
-		if got := ansi.StringWidth(r[:strings.Index(r, e.kindLabel())]); got != 5+2+ow+2 {
-			t.Fatalf("kind at cell %d in %q, want %d", got, r, 5+2+ow+2)
+		if got := ansi.StringWidth(r[:strings.Index(r, e.kindTag())]); got != 5+2 {
+			t.Fatalf("type tag at cell %d in %q, want %d", got, r, 5+2)
+		}
+		if got := ansi.StringWidth(r[:strings.Index(r, e.subKind()+e.subject)]); got != 5+2+6+2+ow+2 {
+			t.Fatalf("subject at cell %d in %q, want %d", got, r, 5+2+6+2+ow+2)
 		}
 	}
 }
@@ -76,5 +79,19 @@ func TestInboxOriginColumnCapped(t *testing.T) {
 	r := inboxRowText(long, 60, ow)
 	if !strings.Contains(r, "…") || !strings.Contains(r, "the subject") {
 		t.Fatalf("row %q: want truncated origin and visible subject", r)
+	}
+}
+
+func TestInboxTypeTag(t *testing.T) {
+	note := inboxEntry{kind: inboxKindNote, severity: "high", subject: "disk full"}
+	plan := inboxEntry{kind: inboxKindGoalPlan, subject: "p"}
+	if note.kindTag() != "NOTE  " || plan.kindTag() != "DECIDE" {
+		t.Fatalf("tags %q %q", note.kindTag(), plan.kindTag())
+	}
+	if len(note.kindTag()) != len(plan.kindTag()) {
+		t.Fatal("type tags must be fixed width")
+	}
+	if note.subKind() != "" || plan.subKind() != "plan: " {
+		t.Fatalf("subkind %q %q", note.subKind(), plan.subKind())
 	}
 }

@@ -93,6 +93,24 @@ func (e inboxEntry) kindLabel() string {
 	return "note"
 }
 
+// kindTag is the fixed-width type column right after the time: NOTE for a
+// notification, DECIDE for anything waiting on the operator. High severity
+// is carried by color (alert), not by the text.
+func (e inboxEntry) kindTag() string {
+	if e.kind == inboxKindNote {
+		return "NOTE  "
+	}
+	return "DECIDE"
+}
+
+// subKind prefixes a decision's subject with what kind of decision it is.
+func (e inboxEntry) subKind() string {
+	if e.kind == inboxKindNote {
+		return ""
+	}
+	return e.kindLabel() + ": "
+}
+
 // inboxFrameMsg carries one WatchInbox snapshot.
 type inboxFrameMsg struct{ items []inboxEntry }
 
@@ -546,7 +564,7 @@ func inboxOriginWidth(vis []inboxEntry, w int) int {
 // to ow cells; ow<=0 leaves it as is), kind, subject.
 func inboxRowText(e inboxEntry, w, ow int) string {
 	ts, origin := inboxRowCells(e, ow)
-	s := fmt.Sprintf("%s  %s  %s %s", ts, origin, e.kindLabel(), e.subject)
+	s := fmt.Sprintf("%s  %s  %s  %s%s", ts, e.kindTag(), origin, e.subKind(), e.subject)
 	return ansi.Truncate(s, max(1, w), "…")
 }
 
@@ -621,10 +639,9 @@ func inboxRowStyled(e inboxEntry, w, ow int) string {
 	kc := inboxKindColor(e)
 	gc, sc := inboxOriginColors()
 	kind := alertify(lipgloss.NewStyle().Foreground(kc), kc)
-	s := gray.Render(ts) + "  " +
+	s := gray.Render(ts) + "  " + kind.Render(e.kindTag()) + "  " +
 		lipgloss.NewStyle().Foreground(gc).Render(grp) + gray.Render(sep) +
-		lipgloss.NewStyle().Foreground(sc).Render(sess) + pad + "  " +
-		kind.Render(e.kindLabel()) + " " + e.subject
+		lipgloss.NewStyle().Foreground(sc).Render(sess) + pad + "  " + e.subKind() + e.subject
 	return ansi.Truncate(s, max(1, w), "…")
 }
 

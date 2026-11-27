@@ -42,7 +42,7 @@ func checkRowStyles(t *testing.T, theme string) {
 		case e.severity == "high":
 			kc = cRose
 		}
-		want = append(want, fg(kc, e.kindLabel()))
+		want = append(want, fg(kc, e.kindTag()))
 		for _, w := range want {
 			if !strings.Contains(got, w) {
 				t.Fatalf("%s: row %q lacks styled segment %q", theme, got, w)

@@ -91,8 +91,12 @@ terminal escape sequences show up as visible text instead of being executed.
 - The inbox is seeded and kept live by `WatchInbox`, which reconnects with
   backoff the same way the state stream does.
 - Select the row (enter or click) to open the list. The list is newest
-  first. Each row has these columns: time, origin, kind and a one-line
+  first. Each row has these columns: time, type, origin and a one-line
   subject.
+  - The type column comes right after the time and is fixed width: `NOTE`
+    for a notification, `DECIDE` for anything waiting on the operator. A high
+    notification shows by color (alert), not by text. A decision's subject
+    starts with what it is: `ask: `, `tool: ` or `plan: `.
   - The origin column is `group · session`, or `group · —` when there is no
     session. It is padded to the widest visible origin, capped at
     max(8, width/3) and truncated past that, so the columns line up.
