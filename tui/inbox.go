@@ -545,18 +545,86 @@ func inboxOriginWidth(vis []inboxEntry, w int) int {
 // inboxRowText is one list line: time, origin column (padded/truncated
 // to ow cells; ow<=0 leaves it as is), kind, subject.
 func inboxRowText(e inboxEntry, w, ow int) string {
-	ts := "--:--"
+	ts, origin := inboxRowCells(e, ow)
+	s := fmt.Sprintf("%s  %s  %s %s", ts, origin, e.kindLabel(), e.subject)
+	return ansi.Truncate(s, max(1, w), "…")
+}
+
+// inboxRowCells: the time cell and the padded/truncated origin cell.
+func inboxRowCells(e inboxEntry, ow int) (ts, origin string) {
+	ts = "--:--"
 	if e.ts > 0 {
 		ts = time.Unix(int64(e.ts), 0).Local().Format("15:04")
 	}
-	origin := inboxOrigin(e)
+	origin = inboxOrigin(e)
 	if ow > 0 {
 		origin = ansi.Truncate(origin, ow, "…")
 		if pw := ansi.StringWidth(origin); pw < ow {
 			origin += strings.Repeat(" ", ow-pw)
 		}
 	}
-	s := fmt.Sprintf("%s  %s  %s %s", ts, origin, e.kindLabel(), e.subject)
+	return ts, origin
+}
+
+// inboxKindColor: decisions (tool/ask/plan) in yellow, notifications in
+// emerald, a high notification in the theme's alert hue.
+func inboxKindColor(e inboxEntry) lipgloss.Color {
+	switch {
+	case e.kind != inboxKindNote:
+		return cYellow
+	case e.severity == "high":
+		return cRose
+	}
+	return cEmerald
+}
+
+// inboxOriginColors: group = the accent, session = the dimmer accent —
+// unless the active theme collapses them (some sheets give amber, dkAmber
+// and gray the same swatch); then the next palette slot that differs from
+// the muted time color and from each other. Palette slots only.
+func inboxOriginColors() (grp, sess lipgloss.Color) {
+	pick := func(skip ...lipgloss.Color) lipgloss.Color {
+	next:
+		for _, c := range []lipgloss.Color{cAmber, cDkAmber, cMagenta, cPink, cWhite, cBrWhite} {
+			for _, s := range skip {
+				if c == s {
+					continue next
+				}
+			}
+			return c
+		}
+		return skip[len(skip)-1]
+	}
+	grp = pick(cGray)
+	sess = pick(cGray, grp)
+	return grp, sess
+}
+
+// inboxRowStyled is inboxRowText with a theme color per field, for the
+// unselected rows (the selected one keeps the plain text under the inverse
+// bar): time muted, group accent, session the dimmer accent, kind by kind,
+// subject in the default fg. Same cells, same width as inboxRowText.
+func inboxRowStyled(e inboxEntry, w, ow int) string {
+	ts, origin := inboxRowCells(e, ow)
+	gray := lipgloss.NewStyle().Foreground(cGray)
+	grp, sess, sep := origin, "", ""
+	if i := strings.Index(origin, " · "); i >= 0 {
+		grp, sep, sess = origin[:i], " · ", origin[i+len(" · "):]
+	}
+	// column padding stays unstyled
+	pad := origin[len(strings.TrimRight(origin, " ")):]
+	if sep != "" {
+		sess = strings.TrimRight(sess, " ")
+	} else {
+		grp = strings.TrimRight(grp, " ")
+	}
+	kc := inboxKindColor(e)
+	gc, sc := inboxOriginColors()
+	kind := alertify(lipgloss.NewStyle().Foreground(kc), kc)
+	s := gray.Render(ts) + "  " +
+		lipgloss.NewStyle().Foreground(gc).Render(grp) + gray.Render(sep) +
+		lipgloss.NewStyle().Foreground(sc).Render(sess) + pad + "  " +
+		kind.Render(e.kindLabel()) + " " + e.subject
 	return ansi.Truncate(s, max(1, w), "…")
 }
 
@@ -581,15 +649,14 @@ func (m Model) renderInbox() string {
 		top, rows := m.inboxListTop(), m.inboxListRows()
 		ow := inboxOriginWidth(vis, w-3)
 		for i := top; i < len(vis) && i < top+rows; i++ {
-			t := inboxRowText(vis[i], w-3, ow)
 			if i == m.inboxView.sel {
-				t = "› " + t
+				t := "› " + inboxRowText(vis[i], w-3, ow)
 				if pw := ansi.StringWidth(t); pw < w-1 {
 					t += strings.Repeat(" ", w-1-pw)
 				}
 				lines = append(lines, " "+sel.Render(t))
 			} else {
-				lines = append(lines, "   "+t)
+				lines = append(lines, "   "+inboxRowStyled(vis[i], w-3, ow))
 			}
 		}
 		// Detail of the selected item: kind-specific, wrapped, ≤3 lines.
