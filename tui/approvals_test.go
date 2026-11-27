@@ -106,8 +106,8 @@ func TestApprovalOtherSessionDoesNotStealFocus(t *testing.T) {
 	v := ansi.Strip(m.View())
 	// 40 cols: the right-aligned counter gives way to the overflowing
 	// metrics (#169); the segment itself still counts the request.
-	if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "☰ 1") {
-		t.Errorf("inbox counter %q, want ☰ 1:\n%s", s, v)
+	if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "≡ 1") {
+		t.Errorf("inbox counter %q, want ≡ 1:\n%s", s, v)
 	}
 	if !strings.Contains(v, "plan") {
 		t.Errorf("status bar lacks the viewed session's plan badge:\n%s", v)

@@ -258,10 +258,10 @@ func TestInboxStatusCounter(t *testing.T) {
 		if ansi.StringWidth(bar) > w {
 			t.Fatalf("w=%d: bar %d cells wide", w, ansi.StringWidth(bar))
 		}
-		if w == 160 && !strings.Contains(bar, "☰ 3 decide · 2 note") {
+		if w == 160 && !strings.Contains(bar, "≡ 3 decide · 2 note") {
 			t.Fatalf("w=160: no full counter in %q", bar)
 		}
-		if w == 50 && !strings.Contains(bar, "☰ 3·2") {
+		if w == 50 && !strings.Contains(bar, "≡ 3·2") {
 			t.Fatalf("w=50: no short counter in %q", bar)
 		}
 	}

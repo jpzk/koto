@@ -594,8 +594,8 @@ func (m Model) renderStatusBar(spin string) string {
 // tok-s metrics), the free space sits on its left, and at least one space
 // separates it from the left chips. The right side's own leading pad (plain,
 // unstyled-background spaces) is what the counter moves into, so the metrics
-// keep their exact columns. Widest form that fits wins ("☰ 2 decide · 5
-// note", then "☰ 2·5"); when neither fits with the loading bar shown, the
+// keep their exact columns. Widest form that fits wins ("≡ 2 decide · 5
+// note", then "≡ 2·5"); when neither fits with the loading bar shown, the
 // loading bar gives way (the counter outranked it before too); when neither
 // fits at all the counter is hidden — it never clips and never pushes or cuts
 // the right side. ok=false: nothing to show (or no room), lay out as usual.

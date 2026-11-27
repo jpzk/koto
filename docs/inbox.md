@@ -86,17 +86,17 @@ terminal escape sequences show up as visible text instead of being executed.
 
 ## TUI
 
-- `☰` is the inbox logo. The tree shows a **`☰ inbox (N)`** row above `main`.
+- `≡` is the inbox logo. The tree shows a **`≡ inbox (N)`** row above `main`.
   N is the number of pending decisions plus undismissed notifications. The
-  `☰` sits where a group row has its state dot, so `inbox` starts in the
+  `≡` sits where a group row has its state dot, so `inbox` starts in the
   same column as `main` (also in ASCII/mono mode, where the glyph is
   dropped). The row is gray while N is 0; when something waits it uses
   `main`'s normal color and weight. The count signals pending items, not
   a separate accent. The cursor bar is the same amber bar as other rows.
 - The top status bar shows the same counts **right-aligned**: the counter
   ends one cell before the activity/tok-s metrics, and the free space is on
-  its left. It is gray like `idle`: `☰ 2 decide · 5 note`, or the short
-  `☰ 2·5` when the bar is tight. The loading bar gives way to the counter
+  its left. It is gray like `idle`: `≡ 2 decide · 5 note`, or the short
+  `≡ 2·5` when the bar is tight. The loading bar gives way to the counter
   first. If even the short form does not fit, the counter is hidden. It is
   never clipped and never pushes or cuts the metrics. Hidden while nothing
   waits. On narrow bars where the metrics already overflow (about 45

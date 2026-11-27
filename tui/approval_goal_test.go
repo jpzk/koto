@@ -98,8 +98,8 @@ func TestGoalApprovalQueueOldestFirstDefaultDeny(t *testing.T) {
 		}
 		// 40 cols: the metrics already overflow, so the status-bar counter
 		// gives way (#169); it still counts all three.
-		if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "☰ 3") {
-			t.Fatalf("card %d: counter %q, want ☰ 3", i+1, s)
+		if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "≡ 3") {
+			t.Fatalf("card %d: counter %q, want ≡ 3", i+1, s)
 		}
 		adv(time.Second)
 		m, _ = dpress(t, m, keyRight) // allow every one: the next must still start on Deny

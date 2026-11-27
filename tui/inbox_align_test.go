@@ -15,7 +15,7 @@ func TestInboxStatusRightAligned(t *testing.T) {
 	m.inboxView = inboxViewState{}
 	empty := m
 	empty.inboxItems, empty.approvals = nil, nil
-	want := map[int]string{50: "☰ 3·2", 80: "☰ 3 decide · 2 note", 120: "☰ 3 decide · 2 note"}
+	want := map[int]string{50: "≡ 3·2", 80: "≡ 3 decide · 2 note", 120: "≡ 3 decide · 2 note"}
 	for _, w := range []int{50, 80, 120} {
 		m.width, empty.width = w, w
 		bar := ansi.Strip(m.renderStatusBar(""))
@@ -32,7 +32,7 @@ func TestInboxStatusRightAligned(t *testing.T) {
 		if !strings.HasSuffix(pre, " ") {
 			t.Fatalf("w=%d: no space between left chips and counter: %q", w, bar)
 		}
-		if strings.Contains(pre, "☰") {
+		if strings.Contains(pre, "≡") {
 			t.Fatalf("w=%d: counter drawn twice: %q", w, bar)
 		}
 		// bar is exactly w cells and ends with the whole right side, so the
@@ -44,7 +44,7 @@ func TestInboxStatusRightAligned(t *testing.T) {
 	for _, w := range []int{20, 35, 44} {
 		m.width, empty.width = w, w
 		bar, eb := ansi.Strip(m.renderStatusBar("")), ansi.Strip(empty.renderStatusBar(""))
-		if strings.Contains(bar, "☰") || bar != eb {
+		if strings.Contains(bar, "≡") || bar != eb {
 			t.Fatalf("w=%d: counter should hide: with %q without %q", w, bar, eb)
 		}
 	}
@@ -59,7 +59,7 @@ func TestInboxStatusZeroNoSegment(t *testing.T) {
 	for _, w := range []int{50, 80, 120} {
 		m.width = w
 		bar := ansi.Strip(m.renderStatusBar(""))
-		if strings.Contains(bar, "☰") || strings.Contains(bar, "decide") {
+		if strings.Contains(bar, "≡") || strings.Contains(bar, "decide") {
 			t.Fatalf("w=%d: empty inbox shows a counter: %q", w, bar)
 		}
 		l, r := ansi.Strip(m.renderStatusLeft()), ansi.Strip(m.renderStatusRight(""))
@@ -161,5 +161,30 @@ func TestInboxTreeRowColorMatchesMain(t *testing.T) {
 	m := ibModel(t)
 	if a, b := sgrBefore(t, m.renderInboxTreeRow(true), "inbox ("), sgrBefore(t, m.renderTreeRow(treeRow{group: "main"}, false, true, false, padCells), "main"); a != b {
 		t.Fatalf("hover style %q != main hover %q", a, b)
+	}
+}
+
+// The inbox logo must be a 1-cell glyph: "≡ " (glyph + space) is exactly 2
+// cells, so it fills the tree marker slot like "● " and the status counter
+// measures what the terminal draws. A future East-Asian-Wide glyph (like
+// the old U+2630 trigram, 2 cells to ansi.StringWidth) fails here.
+func TestInboxGlyphOneCell(t *testing.T) {
+	pn, pm := nerdFont, monoMode
+	t.Cleanup(func() { nerdFont, monoMode = pn, pm })
+	monoMode = false
+	if w := cellWidth("≡ "); w != 2 {
+		t.Fatalf("cellWidth(%q) = %d, want 2", "≡ ", w)
+	}
+	if w := cellWidth(gl("≡ ", "")); w != treeMarkerW {
+		t.Fatalf("logo+space %d cells, want treeMarkerW %d", w, treeMarkerW)
+	}
+	m := ibFeed(t, ibModel(t), ibAsk("q1", 100, "a", "b"))
+	row := ansi.Strip(m.renderInboxTreeRow(false))
+	if !strings.HasPrefix(row, " ≡ inbox (") {
+		t.Fatalf("tree row %q, want \" ≡ inbox (\" prefix", row)
+	}
+	ci, cm := treeLineCol(t, m.renderTree(8), "inbox ("), treeLineCol(t, m.renderTree(8), "main")
+	if ci != cm || ci != 1+treeMarkerW {
+		t.Fatalf("inbox col %d, main col %d, want both %d", ci, cm, 1+treeMarkerW)
 	}
 }

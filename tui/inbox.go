@@ -713,9 +713,9 @@ func (m Model) renderInbox() string {
 	return strings.Join(lines, "\n")
 }
 
-// inboxTitle is the plain title cell of the list view: " ☰ inbox (N)".
+// inboxTitle is the plain title cell of the list view: " ≡ inbox (N)".
 func (m Model) inboxTitle() string {
-	return " " + gl("☰ ", "") + fmt.Sprintf("inbox (%d)", m.inboxCount())
+	return " " + gl("≡ ", "") + fmt.Sprintf("inbox (%d)", m.inboxCount())
 }
 
 // inboxFilterSpans: [start,end) cell columns of each filter label in the
@@ -801,10 +801,11 @@ func (m Model) renderInboxPlan(w int) string {
 
 // renderInboxTreeRow is the "inbox (N)" tree row (above main). It is laid
 // out like a group row: one leading cell, then a two-cell marker slot (the
-// "● " of a group row) holding the ☰ glyph — which measures two cells
-// itself (East Asian Wide), so it gets no trailing space; a "☰ " here put
-// the label one column right of "main" — and then the label, so "inbox"
-// starts in the same column as "main", with or without glyphs. Empty, it is
+// "● " of a group row) holding the ≡ glyph and its space — ≡ (U+2261) is
+// 1 cell in every width table; the old U+2630 trigram logo was East Asian
+// Wide (2 cells to ansi.StringWidth) yet drawn 1 cell by many terminals, so
+// the label landed a column off — and then the label, so "inbox" starts in
+// the same column as "main", with or without glyphs. Empty, it is
 // gray (nothing to look at); with something waiting it takes main's color
 // and weight in the normal (not current, not hovered) state — no separate
 // yellow-bold accent, the count carries the signal. Hover is the shared
@@ -812,7 +813,7 @@ func (m Model) renderInboxPlan(w int) string {
 func (m Model) renderInboxTreeRow(hov bool) string {
 	contentW := leftPaneWidth - 2
 	n := m.inboxCount()
-	txt := " " + padCells(gl("☰", ""), treeMarkerW) + fmt.Sprintf("inbox (%d)", n)
+	txt := " " + padCells(gl("≡", ""), treeMarkerW) + fmt.Sprintf("inbox (%d)", n)
 	txt = truncWidth(txt, contentW+1)
 	if pw := cellWidth(txt); pw < contentW+1 {
 		txt += strings.Repeat(" ", contentW+1-pw)

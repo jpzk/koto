@@ -912,7 +912,7 @@ func (m Model) inboxTotal() int {
 
 // renderInboxSegment is the status-bar inbox counter, right-aligned against
 // the activity/tok-s side by renderStatusBar, gray like "idle". Widest form
-// that fits in avail cells: "☰ 2 decide · 5 note", then "☰ 2·5", else ""
+// that fits in avail cells: "≡ 2 decide · 5 note", then "≡ 2·5", else ""
 // (hidden — it never clips mid-glyph and never pushes the right side).
 // Hidden while nothing waits. The session mode is deliberately NOT in the
 // status bar: the input box chip and the tree badges already carry it.
@@ -921,7 +921,7 @@ func (m Model) renderInboxSegment(avail int) string {
 	if dec+note == 0 {
 		return ""
 	}
-	logo := gl("☰ ", "inbox ")
+	logo := gl("≡ ", "inbox ")
 	full, short := fmt.Sprintf("%s%d decide · %d note", logo, dec, note), fmt.Sprintf("%s%d·%d", logo, dec, note)
 	var s string
 	switch {

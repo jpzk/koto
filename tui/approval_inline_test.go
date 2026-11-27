@@ -60,10 +60,10 @@ func TestApprovalInlineAutoFocus(t *testing.T) {
 	view := m.View()
 	assertFits(t, view, 40)
 	v := ansi.Strip(view)
-	// No "☰ 1" here: at 40 cols the metrics already overflow, so the
+	// No "≡ 1" here: at 40 cols the metrics already overflow, so the
 	// right-aligned status counter gives way (#169).
-	if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "☰ 1") {
-		t.Errorf("inbox counter %q, want ☰ 1", s)
+	if s := ansi.Strip(m.renderInboxSegment(100)); !strings.HasPrefix(s, "≡ 1") {
+		t.Errorf("inbox counter %q, want ≡ 1", s)
 	}
 	for _, want := range []string{"approve Edit?", "‹ Deny ›"} {
 		if !strings.Contains(v, want) {
