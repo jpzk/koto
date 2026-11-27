@@ -58,6 +58,44 @@ type escField struct {
 	render func(m Model, p string) string
 }
 
+// jsonNested names the fields whose payload sits inside a non-string
+// value, which the card renders via json.Marshal: C0 controls arrive there
+// as the printable JSON escape (\u001b), so the payload may be visible in
+// that form; C1/bidi/zero-width pass json raw and must show as cardText
+// markers. The no-raw-control assertions apply to every field unchanged.
+var jsonNested = map[string]bool{"generic-nested": true}
+
+// substP replaces every "$P" string in v with p, recursing into maps and
+// slices so nested tool input carries the payload too.
+func substP(v any, p string) any {
+	switch x := v.(type) {
+	case string:
+		if x == "$P" {
+			return p
+		}
+		return x
+	case map[string]any:
+		m := make(map[string]any, len(x))
+		for k, e := range x {
+			m[k] = substP(e, p)
+		}
+		return m
+	case []any:
+		s := make([]any, len(x))
+		for i, e := range x {
+			s[i] = substP(e, p)
+		}
+		return s
+	}
+	return v
+}
+
+// jsonVisible is want as it reads after json.Marshal: backslash doubled,
+// the ␛ / ␇ markers replaced by the JSON escapes \u001b / \u0007.
+func jsonVisible(want string) string {
+	return strings.NewReplacer(`\`, `\\`, "␛", `\u001b`, "␇", `\u0007`).Replace(want)
+}
+
 func jsonIn(t *testing.T, v map[string]any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -76,13 +114,7 @@ func escCard(m Model, a approvalItem) string {
 func escFields(t *testing.T) []escField {
 	tool := func(name string, in map[string]any) func(Model, string) string {
 		return func(m Model, p string) string {
-			v := map[string]any{}
-			for k, x := range in {
-				if x == "$P" {
-					x = p
-				}
-				v[k] = x
-			}
+			v := substP(in, p).(map[string]any)
 			return escCard(m, approvalItem{tool: name, input: jsonIn(t, v), summary: "read-only listing"})
 		}
 	}
@@ -99,7 +131,7 @@ func escFields(t *testing.T) []escField {
 		}},
 		{"content", tool("Write", map[string]any{"file_path": "/w/a", "content": "$P"})},
 		{"generic-value", tool("mcp__srv__do", map[string]any{"arg": "$P"})},
-		{"generic-nested", tool("mcp__srv__do", map[string]any{"arg": []any{"$P"}})},
+		{"generic-nested", tool("mcp__srv__do", map[string]any{"arg": []any{"$P", map[string]any{"k": "$P"}}})},
 		{"generic-key", func(m Model, p string) string {
 			return escCard(m, approvalItem{tool: "mcp__srv__do", input: jsonIn(t, map[string]any{p: "v"})})
 		}},
@@ -157,7 +189,11 @@ func TestApprovalCardEscapesEveryField(t *testing.T) {
 				}
 				flat := strings.ReplaceAll(unwrapCard(card), " ", "")
 				for _, want := range p.visible {
-					if !strings.Contains(flat, strings.ReplaceAll(want, " ", "")) {
+					seen := strings.Contains(flat, strings.ReplaceAll(want, " ", ""))
+					if jsonNested[f.name] && !seen {
+						seen = strings.Contains(flat, strings.ReplaceAll(jsonVisible(want), " ", ""))
+					}
+					if !seen {
 						t.Errorf("hidden payload not visible: want %q in\n%s", want, card)
 					}
 				}
