@@ -46,12 +46,22 @@ func TestStatusBarHasNoModeLabel(t *testing.T) {
 	}
 }
 
-// The inbox counter that shared the old mode segment stays in the status bar.
+// The inbox counter that shared the old mode segment stays in the status bar,
+// right-aligned against the metrics. At 40 cols the right side alone already
+// overflows, so the counter hides rather than push it (#169).
 func TestStatusBarKeepsInboxCounter(t *testing.T) {
 	m := narrow(t)
+	if bar := ansi.Strip(m.renderStatusBar("")); strings.Contains(bar, "☰") {
+		t.Fatalf("w=40: counter should give way to the metrics: %q", bar)
+	}
+	m.width = 60
 	bar := ansi.Strip(m.renderStatusBar(""))
-	if !strings.Contains(bar, "☰ 1") {
-		t.Fatalf("inbox counter missing from status bar: %q", bar)
+	right := strings.TrimLeft(ansi.Strip(m.renderStatusRight("")), " ")
+	if !strings.Contains(bar, "☰ 1") || !strings.HasSuffix(bar, " "+right) {
+		t.Fatalf("inbox counter missing / not right-aligned in status bar: %q", bar)
+	}
+	if i := strings.Index(bar, "☰ 1"); !strings.HasPrefix(bar[i:], "☰ 1 decide · 0 note "+right) && !strings.HasPrefix(bar[i:], "☰ 1·0 "+right) {
+		t.Fatalf("counter not 1 cell left of the metrics: %q", bar)
 	}
 	if strings.Contains(bar, modeConfirm) {
 		t.Fatalf("mode leaked back into status bar: %q", bar)

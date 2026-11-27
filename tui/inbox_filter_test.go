@@ -252,7 +252,7 @@ func TestInboxFilterMouse(t *testing.T) {
 func TestInboxStatusCounter(t *testing.T) {
 	m := ibMixed(t)
 	m.inboxView = inboxViewState{}
-	for _, w := range []int{160, 90, 40} {
+	for _, w := range []int{160, 90, 50} {
 		m.width = w
 		bar := ansi.Strip(m.renderStatusBar(""))
 		if ansi.StringWidth(bar) > w {
@@ -261,8 +261,8 @@ func TestInboxStatusCounter(t *testing.T) {
 		if w == 160 && !strings.Contains(bar, "☰ 3 decide · 2 note") {
 			t.Fatalf("w=160: no full counter in %q", bar)
 		}
-		if w == 40 && !strings.Contains(bar, "☰ 3·2") {
-			t.Fatalf("w=40: no short counter in %q", bar)
+		if w == 50 && !strings.Contains(bar, "☰ 3·2") {
+			t.Fatalf("w=50: no short counter in %q", bar)
 		}
 	}
 	m.inboxItems, m.approvals = nil, nil

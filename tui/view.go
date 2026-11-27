@@ -575,29 +575,46 @@ func (m Model) renderStatusBar(spin string) string {
 	rightW := lipgloss.Width(right)
 	// Live notifications are not drawn here: they get their own row at the
 	// bottom of the frame (renderNotifyRow).
+	if bar, ok := m.statusBarWithInbox(left, right, rightW); ok {
+		return bar
+	}
 	gap := m.width - lipgloss.Width(left) - rightW
 	if gap < 0 {
 		gap = 0
-	}
-	// The inbox counter sits centered in the gap (gray, like idle). When
-	// even its short form has no room it still wins over the right side,
-	// which the MaxWidth clip below then cuts (the old left-side counter
-	// had the same priority).
-	mid := m.renderInboxSegment(gap - 2)
-	if mw := lipgloss.Width(mid); mw > 0 {
-		if gap < mw+2 {
-			// No room: the counter goes right after the group chip, ahead of
-			// the loading bar and the right side (both clipped first).
-			return lipgloss.NewStyle().MaxWidth(m.width).Render(m.renderStatusChips() + " " + mid + " " + m.renderLoadingSegment() + right)
-		}
-		l := (gap - mw) / 2
-		return lipgloss.NewStyle().MaxWidth(m.width).Render(left + strings.Repeat(" ", l) + mid + strings.Repeat(" ", gap-mw-l) + right)
 	}
 	// MaxWidth clips at m.width so an overflowing right side (many metric
 	// segments on a narrow pane) can't wrap into a second row. Wrapping
 	// here would push the input/hint off-screen — the main view's vertical
 	// budget is exactly m.height with no slack.
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(left + strings.Repeat(" ", gap) + right)
+}
+
+// statusBarWithInbox lays the inbox counter out right-aligned: it ends one
+// cell before the first visible cell of the right side (the activity /
+// tok-s metrics), the free space sits on its left, and at least one space
+// separates it from the left chips. The right side's own leading pad (plain,
+// unstyled-background spaces) is what the counter moves into, so the metrics
+// keep their exact columns. Widest form that fits wins ("☰ 2 decide · 5
+// note", then "☰ 2·5"); when neither fits with the loading bar shown, the
+// loading bar gives way (the counter outranked it before too); when neither
+// fits at all the counter is hidden — it never clips and never pushes or cuts
+// the right side. ok=false: nothing to show (or no room), lay out as usual.
+func (m Model) statusBarWithInbox(left, right string, rightW int) (string, bool) {
+	lead := len(ansi.Strip(right)) - len(strings.TrimLeft(ansi.Strip(right), " "))
+	for _, l := range []string{left, m.renderStatusChips()} {
+		gap := m.width - lipgloss.Width(l) - rightW
+		mid := m.renderInboxSegment(gap + lead - 2)
+		if mid == "" {
+			if m.inboxTotal() == 0 {
+				return "", false
+			}
+			continue
+		}
+		mw := lipgloss.Width(mid)
+		pad := gap + lead - 1 - mw
+		return l + strings.Repeat(" ", pad) + mid + " " + ansi.TruncateLeft(right, lead, ""), true
+	}
+	return "", false
 }
 
 func (m Model) renderStatusLeft() string { return m.renderStatusChips() + m.renderLoadingSegment() }
@@ -980,6 +997,24 @@ func sessionMarker(s string) string {
 	return ic(icSession)
 }
 
+// treeMarkerW is the marker slot of a tree row: the state dot plus its space
+// ("● "), the cells the name starts after. The inbox row (inbox.go) puts its
+// glyph in the same slot so its label lines up with "main".
+const treeMarkerW = 2
+
+// treeNameColor is a tree row name's foreground: amber on the current
+// conversation, white on a running group, gray otherwise (stopped, jobs).
+// Shared with the inbox row, which wears main's normal-state color.
+func treeNameColor(running, isCur, isJob bool) lipgloss.Color {
+	switch {
+	case isCur:
+		return cAmber
+	case !running || isJob:
+		return cGray
+	}
+	return cWhite
+}
+
 func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string, int) string) string {
 	if r.inbox {
 		return m.renderInboxTreeRow(hov)
@@ -1141,12 +1176,7 @@ func (m Model) renderTreeRow(r treeRow, isCur, hov, unread bool, pad func(string
 			}
 		}
 	}
-	nameColor := cWhite
-	if isCur {
-		nameColor = cAmber
-	} else if !running || isJob {
-		nameColor = cGray
-	}
+	nameColor := treeNameColor(running, isCur, isJob)
 	// Unread output (only meaningful when the row isn't the current focus)
 	// overrides the dot to a pink filled marker and bolds the name. Pink
 	// (256-color 205) is far enough from green/yellow to read distinctly.
