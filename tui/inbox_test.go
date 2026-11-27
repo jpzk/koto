@@ -152,7 +152,7 @@ func TestInboxNewestFirst(t *testing.T) {
 	m = openList(t, m)
 	v := ansi.Strip(m.View())
 	hhmm := time.Unix(300, 0).Local().Format("15:04")
-	for _, want := range []string{hhmm + " beta", "plan build the thing", "alpha:", "ask which database", "main", "note first second line — details here"} {
+	for _, want := range []string{hhmm + "  beta · —", "plan build the thing", "alpha · ", "ask which database", "main", "note first second line — details here"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("list lacks %q:\n%s", want, v)
 		}

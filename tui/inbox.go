@@ -503,18 +503,41 @@ func (m Model) inboxListTop() int {
 	return m.inboxView.sel - rows + 1
 }
 
-// inboxRowText is one list line: time, origin, kind, subject.
-func inboxRowText(e inboxEntry, w int) string {
+// inboxOrigin is the origin cell: "group · session", with "—" for an
+// empty session (group-wide items: daemon notifications, goal plans).
+func inboxOrigin(e inboxEntry) string {
+	sess := "—"
+	if e.session != "" {
+		sess = sessionDisplay(e.session)
+	}
+	return inboxLine(e.group + " · " + sess)
+}
+
+// inboxOriginWidth sizes the origin column: the widest visible origin,
+// capped at a third of the row so the subject keeps room.
+func inboxOriginWidth(vis []inboxEntry, w int) int {
+	ow := 0
+	for _, e := range vis {
+		ow = max(ow, ansi.StringWidth(inboxOrigin(e)))
+	}
+	return min(ow, max(8, w/3))
+}
+
+// inboxRowText is one list line: time, origin column (padded/truncated
+// to ow cells; ow<=0 leaves it as is), kind, subject.
+func inboxRowText(e inboxEntry, w, ow int) string {
 	ts := "--:--"
 	if e.ts > 0 {
 		ts = time.Unix(int64(e.ts), 0).Local().Format("15:04")
 	}
-	origin := e.group
-	if e.session != "" {
-		origin += ":" + sessionDisplay(e.session)
+	origin := inboxOrigin(e)
+	if ow > 0 {
+		origin = ansi.Truncate(origin, ow, "…")
+		if pw := ansi.StringWidth(origin); pw < ow {
+			origin += strings.Repeat(" ", ow-pw)
+		}
 	}
-	origin = inboxLine(origin)
-	s := fmt.Sprintf("%s %s %s %s", ts, origin, e.kindLabel(), e.subject)
+	s := fmt.Sprintf("%s  %s  %s %s", ts, origin, e.kindLabel(), e.subject)
 	return ansi.Truncate(s, max(1, w), "…")
 }
 
@@ -537,8 +560,9 @@ func (m Model) renderInbox() string {
 	} else {
 		sel := inv(cFgInv, cAmber).Bold(true)
 		top, rows := m.inboxListTop(), m.inboxListRows()
+		ow := inboxOriginWidth(vis, w-3)
 		for i := top; i < len(vis) && i < top+rows; i++ {
-			t := inboxRowText(vis[i], w-3)
+			t := inboxRowText(vis[i], w-3, ow)
 			if i == m.inboxView.sel {
 				t = "› " + t
 				if pw := ansi.StringWidth(t); pw < w-1 {
