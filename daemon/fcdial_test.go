@@ -9,27 +9,26 @@ package main
 import (
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// fakeVMM is a stand-in Firecracker hybrid-vsock base listener: it answers
+// p02VMM is a stand-in Firecracker hybrid-vsock base listener: it answers
 // "CONNECT <port>\n" with "OK <port>\n" and counts accepted connections.
-type fakeVMM struct {
+type p02VMM struct {
 	ln      net.Listener
 	accepts atomic.Int32
 }
 
-func newFakeVMM(t *testing.T, path string) *fakeVMM {
+func newP02VMM(t *testing.T, path string) *p02VMM {
 	t.Helper()
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen %s: %v", path, err)
 	}
-	f := &fakeVMM{ln: ln}
+	f := &p02VMM{ln: ln}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -58,7 +57,7 @@ func newFakeVMM(t *testing.T, path string) *fakeVMM {
 // twoGroups lays out run/fc/{a,b}.sock/v exactly like fcSpawn does (0700
 // dirs, base socket "v") with a genuine listener in each, and registers both
 // groups' expected uid (the test's own uid stands in for the jail uid).
-func twoGroups(t *testing.T) (a, b *fakeVMM) {
+func twoGroups(t *testing.T) (a, b *p02VMM) {
 	t.Helper()
 	prev := SOCK_DIR
 	// Short base: sun_path is 108 bytes and t.TempDir() can be long.
@@ -74,10 +73,10 @@ func twoGroups(t *testing.T) (a, b *fakeVMM) {
 		}
 		fcSetDialUID(g, os.Getuid())
 	}
-	return newFakeVMM(t, fcUDS("p02a")), newFakeVMM(t, fcUDS("p02b"))
+	return newP02VMM(t, fcUDS("p02a")), newP02VMM(t, fcUDS("p02b"))
 }
 
-func assertNoConn(t *testing.T, who string, f *fakeVMM) {
+func assertNoConn(t *testing.T, who string, f *p02VMM) {
 	t.Helper()
 	time.Sleep(200 * time.Millisecond) // let any stray accept land
 	if n := f.accepts.Load(); n != 0 {
@@ -129,8 +128,8 @@ func TestP02HostDialGenuineSocket(t *testing.T) {
 	a, b := twoGroups(t)
 	for _, tc := range []struct {
 		g    string
-		self *fakeVMM
-		othr *fakeVMM
+		self *p02VMM
+		othr *p02VMM
 	}{{"p02a", a, b}, {"p02b", b, a}} {
 		before := tc.othr.accepts.Load()
 		c, err := fcHostDial(tc.g, fcPortAgent, 2*time.Second)

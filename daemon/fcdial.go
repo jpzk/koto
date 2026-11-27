@@ -140,4 +140,3 @@ func fcDialVMM(g string, timeout time.Duration) (*net.UnixConn, error) {
 	}
 	return uc, nil
 }
-
