@@ -497,11 +497,11 @@ func (m Model) answerApproval(a approvalItem, allow bool, msg string) (Model, te
 	if allow {
 		verb = "allow"
 	}
-	what := fmt.Sprintf("%s %s %s…", verb, a.tool, a.id)
+	what := fmt.Sprintf("%s %s %s…", verb, cardText(a.tool), a.id)
 	if a.isAsk() {
 		what = fmt.Sprintf("decision %s: stop and wait…", a.id)
 		if allow {
-			what = fmt.Sprintf("decision %s: %s…", a.id, ansi.Truncate(msg, 60, "…"))
+			what = fmt.Sprintf("decision %s: %s…", a.id, ansi.Truncate(cardText(msg), 60, "…"))
 		}
 	}
 	m.addLine(logLine{kind: "sys", group: a.group, session: a.session, text: what})
@@ -555,12 +555,13 @@ func approvalInputLines(tool, input string, w int) []string {
 	var in map[string]any
 	if json.Unmarshal([]byte(input), &in) != nil {
 		var out []string
-		for _, l := range wrapCells(input, w) {
+		for _, l := range wrapCells(cardText(input), w) {
 			out = append(out, gray.Render(l))
 		}
 		return out
 	}
-	str := func(k string) string { v, _ := in[k].(string); return v }
+	// Every decoded string goes through cardText before layout (KA-001).
+	str := func(k string) string { v, _ := in[k].(string); return cardText(v) }
 	var out []string
 	add := func(st lipgloss.Style, prefix, body string) {
 		for _, l := range wrapCells(body, w-2) {
@@ -586,7 +587,9 @@ func approvalInputLines(tool, input string, w int) []string {
 		for _, e := range edits {
 			em, _ := e.(map[string]any)
 			o, _ := em["old_string"].(string)
+			o = cardText(o)
 			n, _ := em["new_string"].(string)
+			n = cardText(n)
 			diff(o, n)
 		}
 		return out
@@ -613,7 +616,7 @@ func approvalInputLines(tool, input string, w int) []string {
 			b, _ := json.Marshal(v)
 			vs = string(b)
 		}
-		add(lipgloss.NewStyle(), "", k+": "+vs)
+		add(lipgloss.NewStyle(), "", cardText(k)+": "+cardText(vs))
 	}
 	return out
 }
@@ -688,7 +691,7 @@ func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	}
 	yel := lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 	gray := lipgloss.NewStyle().Foreground(cGray)
-	title := "approve " + a.tool + "?"
+	title := "approve " + cardText(a.tool) + "?"
 	if pos, n := m.approvalQueuePos(a); n > 1 {
 		q := fmt.Sprintf("%d/%d", pos, n)
 		if pad := w - ansi.StringWidth(title) - ansi.StringWidth(q); pad >= 1 {
@@ -701,11 +704,11 @@ func (m Model) approvalCardRows(a approvalItem, w, bodyMax int) []string {
 	for _, l := range wrapCells(title, w) {
 		rows = append(rows, yel.Render(l))
 	}
-	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session), w) {
+	for _, l := range wrapCells(cardText(a.group+":"+sessionDisplay(a.session)), w) {
 		rows = append(rows, gray.Render(l))
 	}
 	if a.summary != "" {
-		rows = append(rows, wrapCells(a.summary, w)...)
+		rows = append(rows, wrapCells(cardText(a.summary), w)...)
 	}
 	rows = append(rows, "")
 	body := approvalInputLines(a.tool, a.input, w)
@@ -752,7 +755,7 @@ func (m *Model) inlineApprovalRows() []string {
 	if over := len(rows) - max(1, m.height-8); over > 0 {
 		body := len(approvalInputLines(a.tool, a.input, w))
 		if a.isAsk() {
-			body = len(wrapCells(a.summary, w))
+			body = len(wrapCells(cardText(a.summary), w))
 		}
 		rows = m.approvalCardRows(a, w, body-over)
 	}

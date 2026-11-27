@@ -1,0 +1,108 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve Bash?                                                                │
+│ alpha:default                                                                │
+│ List the workspace                                                           │
+│                                                                              │
+│ $ ls -la /workspace  x                                                       │
+│ list files                                                                   │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve Edit?                                                                │
+│ alpha:default                                                                │
+│ Edit /workspace/a.go                                                         │
+│                                                                              │
+│ file: /workspace/a.go                                                        │
+│ - old line                                                                   │
+│ + new line                                                                   │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve MultiEdit?                                                           │
+│ alpha:default                                                                │
+│                                                                              │
+│ file: /w/a.go                                                                │
+│ - a                                                                          │
+│ - b                                                                          │
+│ + c                                                                          │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve Write?                                                               │
+│ alpha:default                                                                │
+│                                                                              │
+│ file: /w/b.go                                                                │
+│ + package main                                                               │
+│ +                                                                            │
+│ + func main() {}                                                             │
+│ +                                                                            │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve mcp__srv__do?                                                        │
+│ alpha:default                                                                │
+│                                                                              │
+│ alpha: {"n":1}                                                               │
+│ emoji: 👩‍💻 ｶﾞ 日本語 – “q”                                                     │
+│ zeta: z                                                                      │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ approve Bash?                                                                │
+│ alpha:default                                                                │
+│                                                                              │
+│ not json at all                                                              │
+│                                                                              │
+│ ⏱ no auto-deny · waits for you                                               │
+│                                                                              │
+│ ‹ Deny ›    Allow                                                            │
+│                                                                              │
+│ ←→ select · ⏎ confirm · m deny+msg · esc later                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ decision needed                                                              │
+│ alpha:default                                                                │
+│                                                                              │
+│ which database should the migration target?                                  │
+│                                                                              │
+│ ⏱ no timeout · the goal waits                                                │
+│                                                                              │
+│ › stop and wait                                                              │
+│   postgres                                                                   │
+│   sqlite                                                                     │
+│   other (type an answer)                                                     │
+│                                                                              │
+│ ↑↓ select · ⏎ send · m stop+note · esc later                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+----

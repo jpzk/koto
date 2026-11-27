@@ -151,6 +151,9 @@ func fakeFC(t *testing.T, g string, guest func(port int, c net.Conn)) net.Listen
 	if err := os.MkdirAll(fcSockDir(g), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Production fcSpawn registers the jail uid the VMM runs as; the fake
+	// VMM is this test process, so register our own uid (p02-001 dial check).
+	fcSetDialUID(g, os.Getuid())
 	ln, err := net.Listen("unix", fcUDS(g))
 	if err != nil {
 		t.Fatal(err)

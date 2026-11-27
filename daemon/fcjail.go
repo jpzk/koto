@@ -181,9 +181,16 @@ func fcJailFixupPerms(g string, uid int) error {
 		// is exactly the authority the group's own guest already holds, and a
 		// VMM compromise is reached THROUGH that guest (a virtio/vsock device
 		// -model bug), so the attacker had it before. The jail's claim is
-		// narrower and still holds: a VMM escape reaches no creds, no
-		// network, no other group's sockets, and no host filesystem outside
-		// its chroot.
+		// narrower: a VMM escape reaches no creds, no network, and no host
+		// filesystem outside its chroot, and it cannot open another group's
+		// sockets itself. It CAN rewrite its own sockdir (it owns it), e.g.
+		// replace "v" with a symlink to ../main.sock/v, and the daemon
+		// resolves paths with CAP_DAC_OVERRIDE, so a plain pathname connect
+		// would follow that link into another group's VM (audit p02-001).
+		// That direction is closed by fcDialVMM (fcdial.go), the only
+		// host→VMM connect: no-follow openat of "v", fstat type+owner on
+		// the pinned inode, connect via /proc/self/fd, then SO_PEERCRED ==
+		// this group's jail uid.
 		_ = os.Chown(filepath.Join(fcSockDir(g), e.Name()), uid, uid)
 	}
 	if err := os.Chown(fcWorkspaceImg(g), uid, uid); err != nil {
