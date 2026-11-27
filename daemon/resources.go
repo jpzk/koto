@@ -690,7 +690,7 @@ func resCheckThresholds() {
 		used := float64(host.FSTotalBytes-host.FSFreeBytes) / float64(host.FSTotalBytes) * 100
 		if fire, lvl := resShouldFire(resSubjectHostFS, used); fire {
 			freeGiB := float64(host.FSFreeBytes) / (1 << 30)
-			resNotifyOperator(lvl,
+			resNotifyOperator(lvl, "",
 				fmt.Sprintf("Host disk %.0f%% full", used),
 				fmt.Sprintf("Host filesystem is %.1f%% used, %.1f GiB free; images occupy %.1f GiB. "+
 					"At 100%% every guest remounts read-only and all agents wedge. "+
@@ -720,7 +720,7 @@ func resCheckThresholds() {
 		used := g.GuestDiskUsed
 		pct := resGuestDiskPct(used, g.GuestDiskAvail)
 		if fire, lvl := resShouldFire(resSubjectDisk(g.Group), pct); fire {
-			resNotifyOperator(lvl,
+			resNotifyOperator(lvl, g.Group,
 				fmt.Sprintf("Group %s disk %.0f%% full", g.Group, pct),
 				fmt.Sprintf("%s has used %.1f GiB of its %.1f GiB workspace (%.1f%%), "+
 					"%.1f GiB free. At 100%% its filesystem goes read-only and the "+
@@ -749,7 +749,7 @@ func resCheckThresholds() {
 		avg := resCPUAvgPct(rings[g.Group], resCPUAvgWindow)
 		pct := avg / (float64(g.Vcpus) * 100) * 100
 		if fire, lvl := resShouldFire(resSubjectCPU(g.Group), pct); fire {
-			resNotifyOperator(lvl,
+			resNotifyOperator(lvl, g.Group,
 				fmt.Sprintf("Group %s CPU %.0f%% sustained", g.Group, pct),
 				fmt.Sprintf("%s has averaged %.0f%% of its %d vCPUs for 5+ minutes — "+
 					"runaway loop? nice=%d keeps the host responsive; /stop halts it.",
@@ -770,7 +770,7 @@ func resCheckThresholds() {
 // notification with the designed severity tier (80% = normal); letting the
 // error forwarder (logalert.go) fire on the level≥2 line would banner the
 // alert twice.
-func resNotifyOperator(level int, title, msg string) {
+func resNotifyOperator(level int, about, title, msg string) {
 	sev := resAlertSeverity(level)
 	logLevel := "warn"
 	if level >= 2 {
@@ -778,7 +778,7 @@ func resNotifyOperator(level int, title, msg string) {
 	}
 	emitLogfQuiet("resources", logLevel, "%s — %s", title, msg)
 
-	if !notifyDeliver(ctlMainGroup, sev, "", title, msg) {
+	if !notifyDeliverAbout(ctlMainGroup, about, inboxSourceDaemon, sev, "", title, msg) {
 		emitLogfQuiet("resources", "warn", "notification backlog full, alert dropped: %s", title)
 	}
 }

@@ -8,7 +8,9 @@ package main
 // daemon-global or group-attributed — is also forwarded as a HIGH-severity
 // operator notification against `main`, riding the same [[notify]]-marker
 // path as cs-notify and the resource alerts: TUI banner, OSC desktop
-// notification, and the main event stream, no new channel. Warn lines stay
+// notification, and the main event stream, no new channel. (The inbox entry,
+// unlike the banner, is filed under the line's group with source "daemon" —
+// see notifyDeliverAbout.) Warn lines stay
 // log-only (2026-08-04: warn is too chatty a tier to interrupt for —
 // BLOCKED-flow and auth-reject warns are per-event and attacker-
 // influenceable, and were burning the banner's signal; the log ring still
@@ -127,5 +129,7 @@ func forwardLogAlert(subsystem, group, level, msg string) {
 	// A full backlog drops the banner silently — logging it would re-enter
 	// this function against the same full queue. notifyDeliver's info
 	// mirror is loop-safe (info is below the forwarding threshold).
-	notifyDeliver(ctlMainGroup, "high", "", logAlertTitle(subsystem, group, level), msg)
+	// The banner rides main; the inbox files it under the group the line
+	// is about (daemon-global lines: main).
+	notifyDeliverAbout(ctlMainGroup, group, inboxSourceDaemon, "high", "", logAlertTitle(subsystem, group, level), msg)
 }

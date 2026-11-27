@@ -372,7 +372,7 @@ func TestInboxOperatorOnlyVerbs(t *testing.T) {
 func TestInboxNotificationCapsAndRestart(t *testing.T) {
 	inboxRig(t)
 	for i := 0; i < 60; i++ {
-		inboxAddNotification("tg", "normal", "", fmt.Sprintf("tg-%02d", i), "")
+		inboxAddNotification("tg", "normal", "", fmt.Sprintf("tg-%02d", i), "", "")
 	}
 	notes := inboxNotesSnapshot()
 	if len(notes) != inboxNotifyPerGroup || notes[0].Title != "tg-10" || notes[49].Title != "tg-59" {
@@ -380,7 +380,7 @@ func TestInboxNotificationCapsAndRestart(t *testing.T) {
 	}
 	for g := 0; g < 11; g++ {
 		for i := 0; i < 50; i++ {
-			inboxAddNotification(fmt.Sprintf("cap%02d", g), "high", "", fmt.Sprintf("c%d-%d", g, i), "")
+			inboxAddNotification(fmt.Sprintf("cap%02d", g), "high", "", fmt.Sprintf("c%d-%d", g, i), "", "")
 		}
 	}
 	notes = inboxNotesSnapshot()

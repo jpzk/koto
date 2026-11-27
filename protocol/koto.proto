@@ -1074,6 +1074,11 @@ message InboxNotification {
   string title    = 5;
   string body     = 6;
   double ts       = 7; // unix seconds
+  // Who raised it: "guest" (the group's own cs-notify) | "daemon" (a
+  // daemon-raised alert ABOUT `group` — log errors, posture, resources,
+  // goals). "" = unknown (stored before the field existed). `group` is the
+  // group the notification is about, not where its banner was shown.
+  string source   = 8;
 }
 message InboxReq  {}
 message InboxResp { repeated InboxItem items = 1; double ts = 2; }

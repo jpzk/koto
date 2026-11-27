@@ -448,8 +448,8 @@ func TestResForgetAlertResetsLevel(t *testing.T) {
 func TestResNotifyOperatorDelivers(t *testing.T) {
 	setupNotifyRoot(t, ctlMainGroup)
 
-	resNotifyOperator(2, "Host disk 91% full", "reclaim space now")
-	resNotifyOperator(1, "Group x disk 82% full", "watch this one")
+	resNotifyOperator(2, "", "Host disk 91% full", "reclaim space now")
+	resNotifyOperator(1, "x", "Group x disk 82% full", "watch this one")
 	deliverNotify(ctlMainGroup)
 
 	evs := readGroupLog(t, ctlMainGroup)

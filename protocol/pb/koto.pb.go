@@ -5905,14 +5905,19 @@ func (*InboxItem_Notification) isInboxItem_Item() {}
 // A stored notification (notifyDeliver). title/body are already flattened
 // and truncated by the funnel.
 type InboxNotification struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Group         string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	Session       string                 `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
-	Severity      string                 `protobuf:"bytes,4,opt,name=severity,proto3" json:"severity,omitempty"` // normal | high
-	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
-	Body          string                 `protobuf:"bytes,6,opt,name=body,proto3" json:"body,omitempty"`
-	Ts            float64                `protobuf:"fixed64,7,opt,name=ts,proto3" json:"ts,omitempty"` // unix seconds
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Group    string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
+	Session  string                 `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
+	Severity string                 `protobuf:"bytes,4,opt,name=severity,proto3" json:"severity,omitempty"` // normal | high
+	Title    string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	Body     string                 `protobuf:"bytes,6,opt,name=body,proto3" json:"body,omitempty"`
+	Ts       float64                `protobuf:"fixed64,7,opt,name=ts,proto3" json:"ts,omitempty"` // unix seconds
+	// Who raised it: "guest" (the group's own cs-notify) | "daemon" (a
+	// daemon-raised alert ABOUT `group` — log errors, posture, resources,
+	// goals). "" = unknown (stored before the field existed). `group` is the
+	// group the notification is about, not where its banner was shown.
+	Source        string `protobuf:"bytes,8,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5994,6 +5999,13 @@ func (x *InboxNotification) GetTs() float64 {
 		return x.Ts
 	}
 	return 0
+}
+
+func (x *InboxNotification) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
 }
 
 type InboxReq struct {
@@ -6758,7 +6770,7 @@ const file_koto_proto_rawDesc = "" +
 	"\bapproval\x18\x01 \x01(\v2\x15.koto.PendingApprovalH\x00R\bapproval\x12-\n" +
 	"\tgoal_plan\x18\x02 \x01(\v2\x0e.koto.GoalItemH\x00R\bgoalPlan\x12=\n" +
 	"\fnotification\x18\x03 \x01(\v2\x17.koto.InboxNotificationH\x00R\fnotificationB\x06\n" +
-	"\x04itemJ\x04\b\x04\x10\x05\"\xa9\x01\n" +
+	"\x04itemJ\x04\b\x04\x10\x05\"\xc1\x01\n" +
 	"\x11InboxNotification\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
@@ -6766,7 +6778,8 @@ const file_koto_proto_rawDesc = "" +
 	"\bseverity\x18\x04 \x01(\tR\bseverity\x12\x14\n" +
 	"\x05title\x18\x05 \x01(\tR\x05title\x12\x12\n" +
 	"\x04body\x18\x06 \x01(\tR\x04body\x12\x0e\n" +
-	"\x02ts\x18\a \x01(\x01R\x02ts\"\n" +
+	"\x02ts\x18\a \x01(\x01R\x02ts\x12\x16\n" +
+	"\x06source\x18\b \x01(\tR\x06source\"\n" +
 	"\n" +
 	"\bInboxReq\"B\n" +
 	"\tInboxResp\x12%\n" +

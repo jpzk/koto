@@ -125,6 +125,26 @@ func dropQueuedNotifies(g, session string, all bool) {
 // agent-controlled and the daemon log reaches stderr and the TUI log pane
 // unframed. False = backlog full, nothing queued or logged.
 func notifyDeliver(g, sev, session, title, msg string) bool {
+	return notifyDeliverAbout(g, "", inboxSourceDaemon, sev, session, title, msg)
+}
+
+// notifyDeliverAbout is notifyDeliver with inbox attribution split from
+// banner routing: g is the stream the banner/marker rides (main, for
+// daemon alerts); about is the group the notification concerns and the
+// one its inbox entry is filed under ("" or invalid = g); source is who
+// raised it (inboxSourceGuest for cs-notify, inboxSourceDaemon otherwise).
+// about comes from daemon state (the subject group of a log line, posture
+// finding, resource sample), never from notification text.
+func notifyDeliverAbout(g, about, source, sev, session, title, msg string) bool {
+	if about == "" || !validGroupName(about) {
+		about = g
+	}
+	inboxSess := session
+	if about != g {
+		// session names one of g's sessions (the banner's); it means
+		// nothing under the subject group.
+		inboxSess = ""
+	}
 	t := truncateRunes(flattenInline(title), notifyTitleMax)
 	b := truncateRunes(flattenInline(msg), notifyMsgMax)
 	if !queueNotify(g, notifyMarker(time.Now().UnixMilli(), sev, session, t, b)) {
@@ -138,7 +158,7 @@ func notifyDeliver(g, sev, session, title, msg string) bool {
 		g, sev, sessionMarkerName(session), line)
 	// The inbox's notification store (inbox.go): the same flattened +
 	// truncated text, kept until the operator dismisses it.
-	inboxAddNotification(g, sev, session, t, b)
+	inboxAddNotification(about, sev, inboxSess, t, b, source)
 	ensureTail(g)
 	return true
 }

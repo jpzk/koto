@@ -58,6 +58,23 @@ type inboxNote struct {
 	Title    string  `json:"title"`
 	Body     string  `json:"body,omitempty"`
 	Ts       float64 `json:"ts"`
+	// Source is who raised it: inboxSourceGuest | inboxSourceDaemon, ""
+	// for notes stored before the field existed.
+	Source string `json:"source,omitempty"`
+}
+
+const (
+	inboxSourceGuest  = "guest"  // the group's own cs-notify (ctl notify)
+	inboxSourceDaemon = "daemon" // raised by the daemon about Group
+)
+
+// inboxSource clamps a source to the known set ("" otherwise).
+func inboxSource(s string) string {
+	switch s {
+	case inboxSourceGuest, inboxSourceDaemon:
+		return s
+	}
+	return ""
 }
 
 var (
@@ -104,6 +121,7 @@ func inboxLoadLocked() {
 		if n.ID == "" || !validGroupName(n.Group) {
 			continue
 		}
+		n.Source = inboxSource(n.Source)
 		inboxNotes = append(inboxNotes, n)
 	}
 	inboxEvictLocked()
@@ -150,9 +168,11 @@ func inboxSaveLocked() {
 }
 
 // inboxAddNotification is called by notifyDeliver with the already
-// flattened + truncated title/body. g/session/sev come from the caller
-// (daemon state), never from the text.
-func inboxAddNotification(g, sev, session, title, body string) {
+// flattened + truncated title/body. g/session/sev/source come from the
+// caller (daemon state), never from the text. g is the group the note is
+// ABOUT — for a daemon-raised alert that is the subject group, even though
+// its banner rides main's stream.
+func inboxAddNotification(g, sev, session, title, body, source string) {
 	if sev != "high" {
 		sev = "normal"
 	}
@@ -164,7 +184,8 @@ func inboxAddNotification(g, sev, session, title, body string) {
 		ID:    fmt.Sprintf("n%d-%d", now.UnixMilli(), inboxSeq),
 		Group: g, Session: session, Severity: sev,
 		Title: sanitize(title), Body: sanitize(body),
-		Ts:    float64(now.UnixMilli()) / 1000,
+		Ts:     float64(now.UnixMilli()) / 1000,
+		Source: inboxSource(source),
 	}
 	inboxNotes = append(inboxNotes, n)
 	inboxEvictLocked()
@@ -276,7 +297,7 @@ func inboxBuild() []*pb.InboxItem {
 	for _, n := range inboxNotesSnapshot() {
 		out = append(out, &pb.InboxItem{Item: &pb.InboxItem_Notification{Notification: &pb.InboxNotification{
 			Id: n.ID, Group: n.Group, Session: n.Session, Severity: n.Severity,
-			Title: n.Title, Body: n.Body, Ts: n.Ts,
+			Title: n.Title, Body: n.Body, Ts: n.Ts, Source: n.Source,
 		}}})
 	}
 	sort.SliceStable(out, func(i, j int) bool {

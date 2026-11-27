@@ -50,7 +50,26 @@ type inboxEntry struct {
 	goalText       string
 	goalCriteria   string
 	severity       string
+	source         string // notifications: "daemon" | "guest" | "" (unknown)
 	body           string
+}
+
+// inboxDetailText is the selected item's detail line (wrapped by the
+// caller). A notification leads with who raised it — "daemon" alerts are
+// filed under the group they are ABOUT, so the origin column alone does not
+// say whether that group's agent or the daemon spoke.
+func inboxDetailText(e inboxEntry) string {
+	if e.kind != inboxKindNote {
+		return e.subject
+	}
+	det := e.subject
+	if e.body != "" {
+		det = inboxLine(e.body)
+	}
+	if e.source != "" {
+		det = "from " + e.source + " · " + det
+	}
+	return det
 }
 
 func (e inboxEntry) key() string {
@@ -137,7 +156,7 @@ func pbToInbox(r *pb.InboxResp) []inboxEntry {
 			}
 			out = append(out, inboxEntry{kind: inboxKindNote, id: n.GetId(), group: n.GetGroup(),
 				session: n.GetSession(), ts: n.GetTs(), subject: inboxLine(subj),
-				severity: n.GetSeverity(), body: n.GetBody()})
+				severity: n.GetSeverity(), body: n.GetBody(), source: inboxLine(n.GetSource())})
 		}
 	}
 	sortInbox(out)
@@ -576,10 +595,7 @@ func (m Model) renderInbox() string {
 		// Detail of the selected item: kind-specific, wrapped, ≤3 lines.
 		if e := vis[m.inboxView.sel]; true {
 			lines = append(lines, "")
-			det := e.subject
-			if e.kind == inboxKindNote && e.body != "" {
-				det = inboxLine(e.body)
-			}
+			det := inboxDetailText(e)
 			for i, l := range wrapCells(det, w-2) {
 				if i == 3 {
 					break
