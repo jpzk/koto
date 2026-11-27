@@ -69,7 +69,7 @@ func TestInboxE2E(t *testing.T) {
 	goalLock.Unlock()
 	t.Cleanup(func() { goalLock.Lock(); delete(goalDoneOpen, goalID); goalLock.Unlock() })
 	creds := filepath.Join(HERE, "creds")
-	if err := pkiInit(creds, []string{"koto-daemon"}); err != nil {
+	if err := pkiInit(creds, []string{"DNS:koto-daemon"}); err != nil {
 		t.Fatal(err)
 	}
 	opTok, err := pkiClient(creds, "e2e-op", []string{"admin"})
