@@ -840,6 +840,8 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 	if err != nil {
 		return err
 	}
+	// The only uid fcDialVMM accepts on this group's VMM socket (p02-001).
+	fcSetDialUID(g, jailUID)
 
 	// The boot identity is allocated before anything can observe this VM, so
 	// the reaper goroutine (started below, well before fcVMs[g] is set) can
@@ -1710,9 +1712,11 @@ func fcCtlConn(g string, c net.Conn) {
 // ---- host→guest agent RPC ---------------------------------------------------
 
 // fcHostDial opens a host-initiated vsock connection to a guest port via
-// Firecracker's hybrid-vsock handshake on the base UDS.
+// Firecracker's hybrid-vsock handshake on the base UDS. The connect goes
+// through fcDialVMM, which refuses anything but this group's own VMM socket
+// (e.g. a VMM-planted symlink to another group's socket, audit p02-001).
 func fcHostDial(g string, port uint32, timeout time.Duration) (net.Conn, error) {
-	c, err := net.DialTimeout("unix", fcUDS(g), timeout)
+	c, err := fcDialVMM(g, timeout)
 	if err != nil {
 		return nil, err
 	}
