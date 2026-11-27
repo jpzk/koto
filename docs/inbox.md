@@ -124,7 +124,7 @@ terminal escape sequences show up as visible text instead of being executed.
 
 Keys in the list (they act on the **filtered** list):
 
-- `tab` / `shift+tab`: next / previous filter (all → decisions →
+- `tab` / `shift+tab` or `→` / `←`: next / previous filter (all → decisions →
   notifications). `f` also cycles forward. The cursor is clamped when the
   filter changes or items disappear.
 - `j`/`k` or the arrow keys: move. `g`/`G`: first/last item.

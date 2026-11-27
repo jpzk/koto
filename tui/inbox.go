@@ -378,10 +378,10 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	vis := m.inboxVisible()
 	n := len(vis)
 	switch msg.String() {
-	case "tab", "f":
+	case "tab", "f", "right":
 		m.inboxFilter = (m.inboxFilter + 1) % inboxFilterN
 		m.inboxClamp()
-	case "shift+tab":
+	case "shift+tab", "left":
 		m.inboxFilter = (m.inboxFilter + inboxFilterN - 1) % inboxFilterN
 		m.inboxClamp()
 	case "D":

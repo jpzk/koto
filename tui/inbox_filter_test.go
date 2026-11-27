@@ -186,3 +186,25 @@ func TestInboxBulkDismissUnderFilters(t *testing.T) {
 		t.Fatalf("after D: vis %d sel %d count %d", len(m.inboxVisible()), m.inboxView.sel, m.inboxCount())
 	}
 }
+
+// left/right arrows cycle the filter like shift+tab/tab.
+func TestInboxFilterArrows(t *testing.T) {
+	m := ibMixed(t)
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.inboxFilter != inboxFilterDecisions {
+		t.Fatalf("right: filter %d, want decisions", m.inboxFilter)
+	}
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyRight})
+	if m.inboxFilter != inboxFilterNotes {
+		t.Fatalf("right x2: filter %d, want notifications", m.inboxFilter)
+	}
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft})
+	if m.inboxFilter != inboxFilterAll {
+		t.Fatalf("left x2: filter %d, want all", m.inboxFilter)
+	}
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft}) // wraps
+	if m.inboxFilter != inboxFilterNotes {
+		t.Fatalf("left wrap: filter %d, want notifications", m.inboxFilter)
+	}
+}
