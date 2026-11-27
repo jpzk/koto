@@ -113,11 +113,11 @@ func (m Model) askCardRows(a approvalItem, w, bodyMax int) []string {
 	for _, l := range wrapCells(title, w) {
 		rows = append(rows, yel.Render(l))
 	}
-	for _, l := range wrapCells(a.group+":"+sessionDisplay(a.session), w) {
+	for _, l := range wrapCells(cardText(a.group+":"+sessionDisplay(a.session)), w) {
 		rows = append(rows, gray.Render(l))
 	}
 	rows = append(rows, "")
-	q := wrapCells(a.summary, w)
+	q := wrapCells(cardText(a.summary), w)
 	if budget := max(3, bodyMax); len(q) > budget {
 		more := len(q) - budget + 1
 		q = append(q[:budget-1], gray.Render(fmt.Sprintf("… %d more lines", more)))
@@ -133,7 +133,10 @@ func (m Model) askCardRows(a approvalItem, w, bodyMax int) []string {
 		}
 		return rows
 	}
-	labels := append([]string{"stop and wait"}, a.options...)
+	labels := []string{"stop and wait"}
+	for _, o := range a.options {
+		labels = append(labels, cardText(o))
+	}
 	labels = append(labels, "other (type an answer)")
 	for i, l := range labels {
 		mark := "  "
