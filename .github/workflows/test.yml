@@ -1,0 +1,132 @@
+# test — go vet + go test for every Go module on every push / PR to the
+# long-lived branches. Until this file, CI ran supply-chain checks only
+# (mod verify, tidy -diff, govulncheck, osv, semgrep, sbom) and NOT ONE test:
+# a merge into develop was never compiled-and-tested by CI.
+#
+# Separate workflow, not a job in supplychain.yml: a failing test and a
+# vulnerable dependency are different signals with different owners, and a
+# separate check name ("go test (<module>)" + the "go test" gate) is what
+# branch protection can require on its own. The env contract is the same.
+#
+# Per module (one matrix leg each, fail-fast off so every module reports):
+#   go vet ./...
+#   go test -count=1 -timeout 30m ./...
+# No test is skipped here: TestOtelUnreachableReceiverNeverBlocks is
+# baseline-relative and is meant to run on shared runners. Tests that need
+# /dev/kvm or KOTO_FC_JAIL_IT skip themselves.
+#
+# Go version: setup-go with go1.27.4 = the Makefile GO_IMAGE
+# (golang:1.27.4-alpine digest) = toolchain go1.27.4 in every go.mod —
+# exactly like supplychain.yml. GOTOOLCHAIN=local forbids the go command
+# from downloading a different toolchain, and a step asserts the version.
+# Not the GO_IMAGE container: alpine has no bash/git for the runner steps and
+# CGO_ENABLED=0 makes glibc vs musl irrelevant to what is tested; one pinned
+# Go everywhere in CI is the simpler invariant. Bump both together.
+#
+# Actions: the same SHAs already pinned in supplychain.yml / semgrep.yml.
+#   actions/checkout  v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+#   actions/setup-go  v7.1.0  d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+name: test
+
+on:
+  push:
+    branches: [main, develop, release, "release/**", "hotfix/**"]
+  pull_request:
+    branches: [main, develop, release, "release/**", "hotfix/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Each module against its OWN go.mod (go.work would unify versions across
+  # modules; see supplychain.yml L26 note).
+  GOWORK: "off"
+  # Release binaries are built with CGO_ENABLED=0 (Makefile).
+  CGO_ENABLED: "0"
+  # Never let a go command rewrite go.mod / go.sum.
+  GOFLAGS: "-mod=readonly"
+  # Never auto-download another toolchain; use the pinned setup-go one.
+  GOTOOLCHAIN: "local"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  go-test:
+    name: go test (${{ matrix.module }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # = supplychain.yml MODULES + tools/mcp-adder (every go.mod in the repo)
+        module: [protocol, daemon, tui, fcguest, tools/mcp-adder]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 2026-11-17
+        with:
+          go-version: "1.27.4" # = Makefile GO_IMAGE (golang:1.27.4-alpine digest)
+          cache-dependency-path: |
+            daemon/go.sum
+            fcguest/go.sum
+            tui/go.sum
+            protocol/go.sum
+      - name: assert pinned Go toolchain
+        run: |
+          set -euo pipefail
+          v=$(go env GOVERSION)
+          echo "go: $v  GOTOOLCHAIN=$(go env GOTOOLCHAIN) GOWORK=$(go env GOWORK) GOFLAGS=$(go env GOFLAGS) CGO_ENABLED=$(go env CGO_ENABLED)"
+          if [ "$v" != "go1.27.4" ]; then
+            echo "::error::expected go1.27.4, got $v"; exit 1
+          fi
+      - name: go vet ./...
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          go vet ./...
+      # daemon tests assume a koto host, not a bare ubuntu-24.04 runner:
+      #  - TestUsernsBootstrapEndToEnd needs unprivileged userns with caps;
+      #    ubuntu-24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+      #    which strips them (chown EPERM). =0 is the documented koto remedy
+      #    (docs/getting-started.md, usernsRemediation).
+      #  - TestUnitBindsHomeClaude runs `systemd-analyze verify` on the unit,
+      #    whose ExecStart=/usr/local/bin/koto must exist — install the binary
+      #    from this checkout there, exactly as `koto install` does.
+      - name: provision koto host prerequisites (daemon)
+        if: ${{ matrix.module == 'daemon' }}
+        working-directory: daemon
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          go build -o "$RUNNER_TEMP/koto" .
+          sudo install -m 0755 "$RUNNER_TEMP/koto" /usr/local/bin/koto
+          /usr/local/bin/koto version
+      - name: go test -count=1 ./...
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          go test -count=1 -timeout 30m ./...
+
+  # One stable check name for branch protection, green only if every module is.
+  test:
+    name: go test
+    if: ${{ always() }}
+    needs: go-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: every module passed
+        env:
+          RESULT: ${{ needs.go-test.result }}
+        run: |
+          set -euo pipefail
+          echo "go-test matrix: $RESULT"
+          [ "$RESULT" = success ] || { echo "::error::go test matrix: $RESULT"; exit 1; }
