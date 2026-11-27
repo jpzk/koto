@@ -168,7 +168,7 @@ shared by all VMs.
 
 ```sh
 make assets    # = firecracker + kernel + rootfs:
-                  #   fetch firecracker (pinned v1.17.0), BUILD the guest
+                  #   fetch firecracker (pinned v1.18.0), BUILD the guest
                   #   kernel (FC's CI vmlinux lacks CONFIG_TUN, so we compile
                   #   the Amazon Linux tree — see build-kernel.sh), and build
                   #   the golden rootfs (fedora + node + claude-code +

@@ -35,10 +35,11 @@
 # Every third-party piece is pinned by SHA / version and is >= 6 weeks old at
 # the time of pinning (2026-11-17, cutoff 2026-10-06), like every other
 # dependency here. `go install pkg@vX.Y.Z` is verified by sum.golang.org.
-#   actions/checkout                 v7.0.0   2026-06-18
-#   actions/setup-go                 v6.5.0   2026-06-24
-#   golang.org/x/vuln (govulncheck)  v1.6.0   2026-07-09
-#   google/osv-scanner/v2            v2.5.1   2026-08-17 (v2.6.0 needs go 1.27)
+#   actions/checkout                 v7.0.1   2026-07-20
+#   actions/setup-go                 v7.1.0   2026-11-17
+#   golang.org/x/vuln (govulncheck)  v1.10.0  2026-11-17
+#   google/osv-scanner/v2            v2.7.1   2026-11-09
+# (2026-11-26 chore/bump-all: operator waived the 6-week age rule for this bump)
 name: supplychain
 
 on:
@@ -80,12 +81,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 2026-07-20
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 2026-11-17
         with:
-          go-version: "1.26.11" # = Makefile GO_IMAGE (golang:1.26.11-alpine digest)
+          go-version: "1.27.4" # = Makefile GO_IMAGE (golang:1.27.4-alpine digest)
           cache-dependency-path: |
             daemon/go.sum
             fcguest/go.sum
@@ -130,7 +131,7 @@ jobs:
           exit $rc
       # !cancelled(): govulncheck coverage must not depend on the tidy/verify steps.
       - if: ${{ !cancelled() }}
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
       # The loop fails the job on a module with a reachable finding
       # (govulncheck exits 3) but still runs the rest so the log shows every
       # module's state.
@@ -150,7 +151,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 2026-07-20
         with:
           fetch-depth: 0 # the gate diffs go.mod against the base commit
           persist-credentials: false
@@ -182,13 +183,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 2026-06-18
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 2026-07-20
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0 2026-06-24
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0 2026-11-17
         with:
-          go-version: "1.26.11" # = Makefile GO_IMAGE
+          go-version: "1.27.4" # = Makefile GO_IMAGE
           cache: false
-      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
       - name: osv-scanner (go.mod x4 + Firecracker Cargo.lock)
         run: scripts/supplychain/osv.sh "$RUNNER_TEMP/osv"

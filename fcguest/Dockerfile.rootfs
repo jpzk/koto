@@ -45,11 +45,11 @@ FROM docker.io/library/fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf33
 #   done
 # and cross-check each against `npm view @anthropic-ai/<p>@$V dist.integrity`
 # (base64 of the same digest).
-# Pin: 2.1.329 (dist-tag latest; published 2026-11-19T18:40:25Z -- NOT
-# age-gated, operator override 2026-11-20; dist-tag stable was 2.1.311).
-ARG CLAUDE_CODE_VERSION=2.1.329
-ARG CLAUDE_CODE_SHA512=590ed1637df582c3838cea0305b786d5f8cc7ca63552bf72c5600e23d4a074b66fa80f6c01111a7b35edededee35b1e5823540660d48aa5253d49ed629588414
-ARG CLAUDE_CODE_LINUX_X64_SHA512=fa7e25bb5b9b600a74d98d17fcc0149f1c3dc98e921c767bec5f88a16f95d3056816e888f68a5d1fa8287e37f5e205c908460c4cda64b3b1a7d62f1765328058
+# Pin: 2.1.332 (dist-tag latest; published 2026-11-24T22:06:38Z -- NOT
+# age-gated, operator override 2026-11-26 chore/bump-all; dist-tag stable 2.1.326).
+ARG CLAUDE_CODE_VERSION=2.1.332
+ARG CLAUDE_CODE_SHA512=b6f4a1e9b2ef11b77dec03c3df5027a233ab442dc099c463e51f2c17c408422b6edf1dae70e6f590a9939060f0e35923bdaf821897e992dfb0628ba4eb2bf9e9
+ARG CLAUDE_CODE_LINUX_X64_SHA512=7f8256873c18bad2481d2702eff75838f5fab36f2db7b6400e1b0e8bccf0387ab97c53c4b94782861d8d31f8a74a0d06ad472463169e79b0b88740ea88accb73
 
 # Security-front RPMs, PINNED by NEVRA + SHA-256 under the 6-week age gate
 # (a build is eligible once its Bodhi update went stable >= 6 weeks before the
@@ -135,16 +135,19 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 # npm CLI, replaced in place. F44's nodejs22-npm 10.9.8 bundles tar 7.5.11
 # (GHSA path-traversal/symlink fixes need >= 7.5.21) and the 10.x line also
 # carries brace-expansion/ip-address/sigstore/pacote advisories fixed only in
-# 11.x trees. npm 11.21.1 (newest 11.x, published 2026-10-15 -- NOT age-gated,
-# operator override 2026-10-19; engines node ^20.17 || >=22.9, guest has 22.23.1)
-# bundles tar 7.5.22, brace-expansion 5.0.12, undici 6.29.0. The registry
+# 11.x trees. npm 12.2.3 (published 2026-11-18 -- NOT age-gated, operator
+# override 2026-11-26 bump-all; engines node ^22.22.2 || ^24.15.0 || >=26)
+# bundles tar 7.5.22, brace-expansion 5.0.12, undici 6.29.1. npm 12 breaking
+# changes (shrinkwrap removed, unknown CLI flags error, dependency install
+# scripts blocked by default, allow-git=none) do not touch the
+# `npm ci --ignore-scripts --omit=dev` used below. The registry
 # tarball is checked against its SHA-512 (= dist.integrity) and laid over the
 # RPM's npm directory, keeping Fedora's builtin npmrc (prefix=/usr/local,
 # update-notifier=false). npm is self-bundled: no resolution.
 # Bump: curl -fsSL https://registry.npmjs.org/npm/-/npm-$V.tgz | sha512sum
 #   (cross-check `npm view npm@$V dist.integrity`), update verify-rootfs.sh.
-ARG NPM_VERSION=11.21.1
-ARG NPM_SHA512=613ccbe90044257c87713bb426251ced128ca7e9b3949b65eeb18b98445a5d441e14720c73d6ad76be86f4cf42f2f0d66efe347a9a13400ccd2f6fcfb5954385
+ARG NPM_VERSION=12.2.3
+ARG NPM_SHA512=a2f98d4517bbe89bdca7513a88e78f43a1fd66be1730eaea81f69e18d86d46f3f75d29762e8fdaf42d4de7f8d194b2ebb2a09e9bfa268067591e96796baca7d5
 RUN set -eu; cd /tmp; \
     curl -fsSL -o npm.tgz "https://registry.npmjs.org/npm/-/npm-$NPM_VERSION.tgz"; \
     printf '%s  npm.tgz\n' "$NPM_SHA512" | sha512sum -c -; \
@@ -178,10 +181,10 @@ RUN set -eu; cd /tmp; \
 # resolution. Pinned by version AND by the SHA-256 of the release tarball,
 # checked here before anything is unpacked.
 #
-# Pin: rust-v0.171.0, the newest non-prerelease (published 2026-11-20T00:44:47Z)
-# -- NOT age-gated, operator override 2026-11-20 (earlier: 2026-11-16, 2026-10-19). The digest is the
+# Pin: rust-v0.172.0, the newest non-prerelease (published 2026-11-24T00:03:55Z)
+# -- NOT age-gated, operator override 2026-11-26 (earlier: 2026-11-20, 2026-11-16, 2026-10-19). The digest is the
 # "digest" GitHub reports for the asset, cross-checked by downloading it:
-#   T=rust-v0.171.0; A=codex-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.172.0; A=codex-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
@@ -194,14 +197,14 @@ RUN set -eu; cd /tmp; \
 # beside its own executable, not via config
 # (codex-rs/install-context/src/lib.rs:175-204), hence /usr/local/bin.
 # features.code_mode_host is Stable and default-on (checked in rust-v0.163.0,
-# codex-rs/features/src/lib.rs:1177-1182; the 0.169.1..0.171.0 changelogs list no
+# codex-rs/features/src/lib.rs:1177-1182; the 0.169.1..0.172.0 changelogs list no
 # removal); the managed config and the turn's
 # -c flag (fcguest/codex.go) set it explicitly anyway. Verify:
-#   T=rust-v0.171.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+#   T=rust-v0.172.0; A=codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
 #   curl -fsSL https://api.github.com/repos/openai/codex/releases/tags/$T \
 #     | jq -r --arg a "$A" '.published_at, (.assets[] | select(.name==$a) | .digest, .size)'
 #   curl -fsSL "https://github.com/openai/codex/releases/download/$T/$A" | sha256sum
-#   -> 2026-11-20T00:44:47Z, sha256:d7861903...3d868c, 27435775 bytes; the
+#   -> 2026-11-24T00:03:55Z, sha256:20b0a4bc...352bb4, 27134394 bytes; the
 #      tarball holds one member, codex-code-mode-host-x86_64-unknown-linux-musl.
 #
 # No self-update: codex's startup update check (check_for_update_on_startup,
@@ -225,10 +228,18 @@ RUN set -eu; cd /tmp; \
 # openssl-src 300.6.1+3.6.3 unchanged; zip 9.0.0 -> 9.0.5; hickory 0.25.2
 # still locked. Both release binaries carry cosign sigstore bundles from
 # rust-release.yml@rust-v0.171.0; the exec --json events koto reads are unchanged.
+# Bumped 0.171.0 -> 0.172.0 (2026-11-26, chore/bump-all, <72h old at pin):
+# Cargo.lock sha256 42a8f334...c5ab; new crates der 0.8.3, pem-rfc7468 1.0.0,
+# ureq 3.3.0, ureq-proto 0.6.0, utf8-zero 0.8.1 (all crates.io, via the
+# Windows-only mxc-sdk 1.1.0); rustls/webpki/gix/openssl/zip unchanged;
+# hickory 0.25.2 still locked. Both binaries' cosign bundles verified
+# (sig + Fulcio chain + Rekor SET) to rust-release.yml@refs/tags/rust-v0.172.0,
+# commit 3d86e43b. exec_events.rs unchanged; code mode is now gRPC-only
+# (features.code_mode_host_grpc removed, koto never set it).
 # Re-check codex-rs/Cargo.lock for the tag before bumping.
-ARG CODEX_VERSION=0.171.0
-ARG CODEX_SHA256=01baa2e47809f8597be5b2f8abd4e4dfe3fb5bcb6e504c2fbaaad97056c15e8d
-ARG CODEX_CODE_MODE_HOST_SHA256=d78619030c1b8d0a4d9c9c67667c1bfa23ad9d9edc63d87ffeaa86796f3d868c
+ARG CODEX_VERSION=0.172.0
+ARG CODEX_SHA256=a2342a8f7f68f088be30620ccfe9cb84162c93a6b56177855961cda3ed6be392
+ARG CODEX_CODE_MODE_HOST_SHA256=20b0a4bcf332415a5997914c943d04af6c3627af0c379fdbf65400550e352bb4
 
 RUN set -eu; cd /tmp; \
     a=codex-x86_64-unknown-linux-musl; \
@@ -253,16 +264,16 @@ RUN set -eu; cd /tmp; \
 
 # pi coding agent, installed from npm with a committed lockfile.
 # The self-contained Linux archive (pi-linux-x64.tar.gz, a bun single binary)
-# compiles its deps in, so they cannot be patched or audited. pi 1.5.2
-# (published 2026-11-10T12:24:55Z -- NOT age-gated, operator override
-# 2026-11-16) pins undici 8.12.3 and brace-expansion 5.0.12 itself, so the
+# compiles its deps in, so they cannot be patched or audited. pi 1.6.1
+# (published 2026-11-25T13:41:09Z -- NOT age-gated, operator override
+# 2026-11-26) pins undici 8.12.4 and brace-expansion 5.0.12 itself, so the
 # earlier undici / brace-expansion overrides (needed through pi 1.5.0 for
 # GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472) are gone;
 # the protobufjs 7.6.6 override is upstream's own.
 # fcguest/pi/install/ is that release's own installer root
 # (pi-coding-agent-install-package{,-lock}.json, sha256 per its SHA256SUMS:
-# 6c433244…18c4cc / 57e3b475…f58005) with exactly one edit:
-#   - the eight @earendil-works/* 1.5.2 entries upstream left without an
+# c7edca0f…edabe5 / fd07d62d…b34efd) with exactly one edit:
+#   - the eight @earendil-works/* 1.6.1 entries upstream left without an
 #     integrity got their registry dist.integrity filled in (each checked
 #     against the downloaded tarball's SHA-512).
 # Every entry carries a SHA-512, so `npm ci` installs exactly these bytes.
@@ -271,11 +282,11 @@ RUN set -eu; cd /tmp; \
 # The receipt records the lockfile digest for verify-rootfs.sh.
 # Bump: take the new release's two installer files, re-apply the edit above,
 # re-add an override (lock entry swapped to its tarball + integrity) if the
-# release locks undici < 8.12.3 or brace-expansion < 5.0.12, update
+# release locks undici < 8.12.4 or brace-expansion < 5.0.12, update
 # PI_VERSION and PI_LOCK_SHA256 (= sha256sum fcguest/pi/install/package-lock.json)
 # here, in Dockerfile.guest and in verify-rootfs.sh.
-ARG PI_VERSION=1.5.2
-ARG PI_LOCK_SHA256=f3f517c7fd2bfc40acd22a0171addf0d10c13fbb5f067a0cccbd2994357d14e5
+ARG PI_VERSION=1.6.1
+ARG PI_LOCK_SHA256=8545f1294dbfbfd11f0c67c077c8738e649051aa5ffa8b9e951fdc5bc7410762
 COPY fcguest/pi/install/package.json fcguest/pi/install/package-lock.json /opt/pi/
 RUN set -eu; cd /opt/pi; \
     printf '%s  package-lock.json\n' "$PI_LOCK_SHA256" | sha256sum -c -; \
@@ -288,8 +299,8 @@ RUN set -eu; cd /opt/pi; \
     test "$(pi --version)" = "$PI_VERSION"; \
     test "$(jq -r .version /opt/pi/package.json)" = "$PI_VERSION"; \
     test "$(jq -r .version node_modules/@earendil-works/pi-coding-agent/package.json)" = "$PI_VERSION"; \
-    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.3; \
-    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.3") | .version' {} +)"; \
+    test "$(jq -r .version node_modules/undici/package.json)" = 8.12.4; \
+    test -z "$(find /opt/pi -path '*/node_modules/undici/package.json' -exec jq -r 'select(.version != "8.12.4") | .version' {} +)"; \
     test -z "$(find /opt/pi -path '*/node_modules/brace-expansion/package.json' -exec jq -r 'select(.version != "5.0.12") | .version' {} +)"
 
 # pi must stay local and quiet in every guest execution path. Keep these
