@@ -66,6 +66,9 @@ const (
 	Koto_GoalCancel_FullMethodName     = "/koto.Koto/GoalCancel"
 	Koto_GoalSteer_FullMethodName      = "/koto.Koto/GoalSteer"
 	Koto_GoalAmend_FullMethodName      = "/koto.Koto/GoalAmend"
+	Koto_Inbox_FullMethodName          = "/koto.Koto/Inbox"
+	Koto_GoalDecide_FullMethodName     = "/koto.Koto/GoalDecide"
+	Koto_InboxDismiss_FullMethodName   = "/koto.Koto/InboxDismiss"
 	Koto_Resources_FullMethodName      = "/koto.Koto/Resources"
 	Koto_Models_FullMethodName         = "/koto.Koto/Models"
 	Koto_Providers_FullMethodName      = "/koto.Koto/Providers"
@@ -80,6 +83,7 @@ const (
 	Koto_SubscribeGroup_FullMethodName = "/koto.Koto/SubscribeGroup"
 	Koto_SubscribeLogs_FullMethodName  = "/koto.Koto/SubscribeLogs"
 	Koto_WatchState_FullMethodName     = "/koto.Koto/WatchState"
+	Koto_WatchInbox_FullMethodName     = "/koto.Koto/WatchInbox"
 )
 
 // KotoClient is the client API for Koto service.
@@ -192,6 +196,23 @@ type KotoClient interface {
 	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
 	// self-acceptance).
 	GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...grpc.CallOption) (*GoalResp, error)
+	// ---- inbox (daemon/inbox.go, docs/inbox.md) ----
+	// The inbox is a daemon-side PROJECTION of state that already exists —
+	// pending approvals and asks (ListPending), goals awaiting plan approval
+	// (GoalList) — plus the one new store: notifications (every notifyDeliver,
+	// bounded + persisted). Items are filtered PER ITEM through the caller's
+	// `inbox` / `watch_inbox` grant targets (like List / WatchState). Answers go
+	// to the EXISTING RPCs by oneof case: approval → Approve, goal_plan →
+	// GoalDecide; there is no inbox-specific answer path.
+	Inbox(ctx context.Context, in *InboxReq, opts ...grpc.CallOption) (*InboxResp, error)
+	// GoalDecide answers a goal plan awaiting approval: allow = GoalApprove plus
+	// msg recorded as an operator steer; deny = the goal returns to planning
+	// with msg as the re-plan reason. Operator-only (adminOnlyVerbs
+	// goal_decide, same rule as GoalAmend); GoalApprove is unchanged.
+	GoalDecide(ctx context.Context, in *GoalDecideReq, opts ...grpc.CallOption) (*GoalResp, error)
+	// InboxDismiss removes notifications from the store for every client.
+	// Operator-only (adminOnlyVerbs inbox_dismiss).
+	InboxDismiss(ctx context.Context, in *InboxDismissReq, opts ...grpc.CallOption) (*InboxDismissResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -296,6 +317,10 @@ type KotoClient interface {
 	// change. Snapshots are idempotent — a client may miss intermediate
 	// frames and still converge on the latest one.
 	WatchState(ctx context.Context, in *WatchReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StateFrame], error)
+	// WatchInbox is WatchState for the inbox: the first frame is the full
+	// (ACL-projected) item set, then a full snapshot on every change. No seq,
+	// no cursor — a client that misses frames converges on the next one.
+	WatchInbox(ctx context.Context, in *InboxReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[InboxResp], error)
 }
 
 type kotoClient struct {
@@ -645,6 +670,36 @@ func (c *kotoClient) GoalAmend(ctx context.Context, in *GoalAmendReq, opts ...gr
 	return out, nil
 }
 
+func (c *kotoClient) Inbox(ctx context.Context, in *InboxReq, opts ...grpc.CallOption) (*InboxResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InboxResp)
+	err := c.cc.Invoke(ctx, Koto_Inbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) GoalDecide(ctx context.Context, in *GoalDecideReq, opts ...grpc.CallOption) (*GoalResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GoalResp)
+	err := c.cc.Invoke(ctx, Koto_GoalDecide_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *kotoClient) InboxDismiss(ctx context.Context, in *InboxDismissReq, opts ...grpc.CallOption) (*InboxDismissResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InboxDismissResp)
+	err := c.cc.Invoke(ctx, Koto_InboxDismiss_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *kotoClient) Resources(ctx context.Context, in *ResourcesReq, opts ...grpc.CallOption) (*ResourcesResp, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResourcesResp)
@@ -833,6 +888,25 @@ func (c *kotoClient) WatchState(ctx context.Context, in *WatchReq, opts ...grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Koto_WatchStateClient = grpc.ServerStreamingClient[StateFrame]
 
+func (c *kotoClient) WatchInbox(ctx context.Context, in *InboxReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[InboxResp], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Koto_ServiceDesc.Streams[7], Koto_WatchInbox_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[InboxReq, InboxResp]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_WatchInboxClient = grpc.ServerStreamingClient[InboxResp]
+
 // KotoServer is the server API for Koto service.
 // All implementations must embed UnimplementedKotoServer
 // for forward compatibility.
@@ -943,6 +1017,23 @@ type KotoServer interface {
 	// adminOnlyVerbs goal_amend — an agent amending its own goal would be
 	// self-acceptance).
 	GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error)
+	// ---- inbox (daemon/inbox.go, docs/inbox.md) ----
+	// The inbox is a daemon-side PROJECTION of state that already exists —
+	// pending approvals and asks (ListPending), goals awaiting plan approval
+	// (GoalList) — plus the one new store: notifications (every notifyDeliver,
+	// bounded + persisted). Items are filtered PER ITEM through the caller's
+	// `inbox` / `watch_inbox` grant targets (like List / WatchState). Answers go
+	// to the EXISTING RPCs by oneof case: approval → Approve, goal_plan →
+	// GoalDecide; there is no inbox-specific answer path.
+	Inbox(context.Context, *InboxReq) (*InboxResp, error)
+	// GoalDecide answers a goal plan awaiting approval: allow = GoalApprove plus
+	// msg recorded as an operator steer; deny = the goal returns to planning
+	// with msg as the re-plan reason. Operator-only (adminOnlyVerbs
+	// goal_decide, same rule as GoalAmend); GoalApprove is unchanged.
+	GoalDecide(context.Context, *GoalDecideReq) (*GoalResp, error)
+	// InboxDismiss removes notifications from the store for every client.
+	// Operator-only (adminOnlyVerbs inbox_dismiss).
+	InboxDismiss(context.Context, *InboxDismissReq) (*InboxDismissResp, error)
 	// Resources reports host-side resource consumption for the whole fleet:
 	// per-group workspace.img allocation + growth rate + FC process CPU/RSS,
 	// plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -1047,6 +1138,10 @@ type KotoServer interface {
 	// change. Snapshots are idempotent — a client may miss intermediate
 	// frames and still converge on the latest one.
 	WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error
+	// WatchInbox is WatchState for the inbox: the first frame is the full
+	// (ACL-projected) item set, then a full snapshot on every change. No seq,
+	// no cursor — a client that misses frames converges on the next one.
+	WatchInbox(*InboxReq, grpc.ServerStreamingServer[InboxResp]) error
 	mustEmbedUnimplementedKotoServer()
 }
 
@@ -1156,6 +1251,15 @@ func (UnimplementedKotoServer) GoalSteer(context.Context, *GoalSteerReq) (*GoalR
 func (UnimplementedKotoServer) GoalAmend(context.Context, *GoalAmendReq) (*GoalResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GoalAmend not implemented")
 }
+func (UnimplementedKotoServer) Inbox(context.Context, *InboxReq) (*InboxResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Inbox not implemented")
+}
+func (UnimplementedKotoServer) GoalDecide(context.Context, *GoalDecideReq) (*GoalResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method GoalDecide not implemented")
+}
+func (UnimplementedKotoServer) InboxDismiss(context.Context, *InboxDismissReq) (*InboxDismissResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method InboxDismiss not implemented")
+}
 func (UnimplementedKotoServer) Resources(context.Context, *ResourcesReq) (*ResourcesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Resources not implemented")
 }
@@ -1197,6 +1301,9 @@ func (UnimplementedKotoServer) SubscribeLogs(*LogsReq, grpc.ServerStreamingServe
 }
 func (UnimplementedKotoServer) WatchState(*WatchReq, grpc.ServerStreamingServer[StateFrame]) error {
 	return status.Error(codes.Unimplemented, "method WatchState not implemented")
+}
+func (UnimplementedKotoServer) WatchInbox(*InboxReq, grpc.ServerStreamingServer[InboxResp]) error {
+	return status.Error(codes.Unimplemented, "method WatchInbox not implemented")
 }
 func (UnimplementedKotoServer) mustEmbedUnimplementedKotoServer() {}
 func (UnimplementedKotoServer) testEmbeddedByValue()              {}
@@ -1806,6 +1913,60 @@ func _Koto_GoalAmend_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Koto_Inbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InboxReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).Inbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_Inbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).Inbox(ctx, req.(*InboxReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_GoalDecide_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GoalDecideReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).GoalDecide(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_GoalDecide_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).GoalDecide(ctx, req.(*GoalDecideReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Koto_InboxDismiss_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InboxDismissReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(KotoServer).InboxDismiss(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Koto_InboxDismiss_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(KotoServer).InboxDismiss(ctx, req.(*InboxDismissReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Koto_Resources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResourcesReq)
 	if err := dec(in); err != nil {
@@ -2012,6 +2173,17 @@ func _Koto_WatchState_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Koto_WatchStateServer = grpc.ServerStreamingServer[StateFrame]
 
+func _Koto_WatchInbox_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(InboxReq)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(KotoServer).WatchInbox(m, &grpc.GenericServerStream[InboxReq, InboxResp]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Koto_WatchInboxServer = grpc.ServerStreamingServer[InboxResp]
+
 // Koto_ServiceDesc is the grpc.ServiceDesc for Koto service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2148,6 +2320,18 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Koto_GoalAmend_Handler,
 		},
 		{
+			MethodName: "Inbox",
+			Handler:    _Koto_Inbox_Handler,
+		},
+		{
+			MethodName: "GoalDecide",
+			Handler:    _Koto_GoalDecide_Handler,
+		},
+		{
+			MethodName: "InboxDismiss",
+			Handler:    _Koto_InboxDismiss_Handler,
+		},
+		{
 			MethodName: "Resources",
 			Handler:    _Koto_Resources_Handler,
 		},
@@ -2215,6 +2399,11 @@ var Koto_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "WatchState",
 			Handler:       _Koto_WatchState_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchInbox",
+			Handler:       _Koto_WatchInbox_Handler,
 			ServerStreams: true,
 		},
 	},

@@ -49,8 +49,8 @@ func TestStatusBarHasNoModeLabel(t *testing.T) {
 // The inbox counter that shared the old mode segment stays in the status bar.
 func TestStatusBarKeepsInboxCounter(t *testing.T) {
 	m := narrow(t)
-	bar := ansi.Strip(m.renderStatusLeft())
-	if !strings.Contains(bar, "inbox 1") {
+	bar := ansi.Strip(m.renderStatusBar(""))
+	if !strings.Contains(bar, "☰ 1") {
 		t.Fatalf("inbox counter missing from status bar: %q", bar)
 	}
 	if strings.Contains(bar, modeConfirm) {

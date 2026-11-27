@@ -90,7 +90,7 @@ func TestGoalApprovalQueueOldestFirstDefaultDeny(t *testing.T) {
 		assertFits(t, view, 40)
 		v := ansi.Strip(view)
 		for _, s := range []string{
-			itoa(i+1) + "/3", "‹ Deny ›", "no auto-deny", "inbox 3",
+			itoa(i+1) + "/3", "‹ Deny ›", "no auto-deny", "☰ 3",
 		} {
 			if !strings.Contains(v, s) {
 				t.Fatalf("card %d lacks %q:\n%s", i+1, s, v)

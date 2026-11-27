@@ -70,7 +70,7 @@ func postureAlert(g string, fs []postureFinding) {
 	if g != "" {
 		title += " [" + g + "]"
 	}
-	if !notifyDeliver(ctlMainGroup, "high", "", title, strings.Join(details, " · ")) {
+	if !notifyDeliverAbout(ctlMainGroup, g, inboxSourceDaemon, "high", "", title, strings.Join(details, " · ")) {
 		emitLogfQuiet("posture", "error", "notification backlog full, posture alert not bannered: %s", title)
 	}
 }

@@ -938,12 +938,14 @@ func goalTransition(g, name string, from []string, apply func(*goalItem)) (goalI
 	out := *it
 	goalLock.Unlock()
 	snap.write()
+	inboxChanged() // a goal entering/leaving awaiting_approval is an inbox change
 	return out, nil
 }
 
 func goalApprove(g, name string) (goalItem, error) {
 	it, err := goalTransition(g, name, []string{goalStatusAwaiting}, func(it *goalItem) {
 		it.Status = goalStatusRunning
+		it.PlanRejection = "" // inbox.go goalDecide deny reason, consumed by the plan turn
 	})
 	if err != nil {
 		return it, err
@@ -1850,7 +1852,17 @@ GOAL:
 
 ACCEPTANCE CRITERIA (an independent reviewer will verify these against
 artifacts before the goal can close):
-%s`, it.ID, dir, dir, dir, it.Text, it.Criteria) + goalPlanReadOnlyNote(it)
+%s`, it.ID, dir, dir, dir, it.Text, it.Criteria) + goalPlanRejectionNote(it) + goalPlanReadOnlyNote(it)
+}
+
+// goalPlanRejectionNote quotes the operator's GoalDecide deny reason into the
+// re-run plan turn (inbox.go goalDecide). The reason is operator-authored but
+// travels quoted like every other embedded text.
+func goalPlanRejectionNote(it goalItem) string {
+	if it.PlanRejection == "" {
+		return ""
+	}
+	return "\n\nPLAN REJECTED — the operator rejected your previous plan for this reason;\nre-plan to address it:\n" + reportQuoteBody(it.PlanRejection)
 }
 
 // goalPlanReadOnlyNote: a confirm goal's plan turn runs in PLAN mode (it

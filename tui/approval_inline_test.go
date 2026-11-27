@@ -60,7 +60,7 @@ func TestApprovalInlineAutoFocus(t *testing.T) {
 	view := m.View()
 	assertFits(t, view, 40)
 	v := ansi.Strip(view)
-	for _, want := range []string{"approve Edit?", "‹ Deny ›", "inbox 1"} {
+	for _, want := range []string{"approve Edit?", "‹ Deny ›", "☰ 1"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("inline view lacks %q:\n%s", want, v)
 		}
@@ -69,7 +69,7 @@ func TestApprovalInlineAutoFocus(t *testing.T) {
 		t.Errorf("draft still drawn while the card holds the prompt area:\n%s", v)
 	}
 	lines := strings.Split(v, "\n")
-	if !strings.Contains(lines[0], "inbox") {
+	if !strings.Contains(lines[0], "☰ 1") {
 		t.Errorf("first line %q is not the status bar — card drawn as a modal?", lines[0])
 	}
 	if len(lines) != 30 {

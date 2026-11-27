@@ -128,6 +128,24 @@ service Koto {
   // self-acceptance).
   rpc GoalAmend     (GoalAmendReq) returns (GoalResp);
 
+  // ---- inbox (daemon/inbox.go, docs/inbox.md) ----
+  // The inbox is a daemon-side PROJECTION of state that already exists —
+  // pending approvals and asks (ListPending), goals awaiting plan approval
+  // (GoalList) — plus the one new store: notifications (every notifyDeliver,
+  // bounded + persisted). Items are filtered PER ITEM through the caller's
+  // `inbox` / `watch_inbox` grant targets (like List / WatchState). Answers go
+  // to the EXISTING RPCs by oneof case: approval → Approve, goal_plan →
+  // GoalDecide; there is no inbox-specific answer path.
+  rpc Inbox        (InboxReq)        returns (InboxResp);
+  // GoalDecide answers a goal plan awaiting approval: allow = GoalApprove plus
+  // msg recorded as an operator steer; deny = the goal returns to planning
+  // with msg as the re-plan reason. Operator-only (adminOnlyVerbs
+  // goal_decide, same rule as GoalAmend); GoalApprove is unchanged.
+  rpc GoalDecide   (GoalDecideReq)   returns (GoalResp);
+  // InboxDismiss removes notifications from the store for every client.
+  // Operator-only (adminOnlyVerbs inbox_dismiss).
+  rpc InboxDismiss (InboxDismissReq) returns (InboxDismissResp);
+
   // Resources reports host-side resource consumption for the whole fleet:
   // per-group workspace.img allocation + growth rate + FC process CPU/RSS,
   // plus a host rollup (filesystem free vs. what the images occupy vs. what
@@ -241,6 +259,10 @@ service Koto {
   // change. Snapshots are idempotent — a client may miss intermediate
   // frames and still converge on the latest one.
   rpc WatchState (WatchReq) returns (stream StateFrame);
+  // WatchInbox is WatchState for the inbox: the first frame is the full
+  // (ACL-projected) item set, then a full snapshot on every change. No seq,
+  // no cursor — a client that misses frames converges on the next one.
+  rpc WatchInbox (InboxReq) returns (stream InboxResp);
 }
 
 // ---- streaming frames ----
@@ -1001,6 +1023,10 @@ message ApproveReq {
   // answer text of a decision request (kind=ask). Reaches the model in the
   // current turn; on a goal session it is also recorded as an operator steer.
   string msg     = 5;
+  // kind=ask only: 1-based index into PendingApproval.options (0 = none).
+  // The picked option is the answer; a msg alongside it is appended as the
+  // operator's note. Out of range = error, nothing answered.
+  int32  option  = 6;
 }
 message ApproveResp {
   bool   ok               = 1;
@@ -1026,3 +1052,41 @@ message ListPendingResp {
   bool ok = 1; string error = 2;
   repeated PendingApproval pending = 3;
 }
+
+// ---- inbox (rpc Inbox / WatchInbox / GoalDecide / InboxDismiss) ----
+// One inbox entry. Origin (group/session/kind) always comes from daemon
+// state, never from agent-authored text.
+message InboxItem {
+  oneof item {
+    PendingApproval   approval     = 1; // tool approval or ask → Approve
+    GoalItem          goal_plan    = 2; // status awaiting_approval → GoalDecide
+    InboxNotification notification = 3; // cs-notify / daemon alert → InboxDismiss
+  }
+  reserved 4; // proposal (future; not implemented)
+}
+// A stored notification (notifyDeliver). title/body are already flattened
+// and truncated by the funnel.
+message InboxNotification {
+  string id       = 1;
+  string group    = 2;
+  string session  = 3;
+  string severity = 4; // normal | high
+  string title    = 5;
+  string body     = 6;
+  double ts       = 7; // unix seconds
+  // Who raised it: "guest" (the group's own cs-notify) | "daemon" (a
+  // daemon-raised alert ABOUT `group` — log errors, posture, resources,
+  // goals). "" = unknown (stored before the field existed). `group` is the
+  // group the notification is about, not where its banner was shown.
+  string source   = 8;
+}
+message InboxReq  {}
+message InboxResp { repeated InboxItem items = 1; double ts = 2; }
+message GoalDecideReq {
+  string group = 1;
+  string name  = 2; // goal name or id; "" = the sole awaiting goal
+  bool   allow = 3;
+  string msg   = 4; // allow: recorded as an operator steer; deny: re-plan reason
+}
+message InboxDismissReq  { repeated string ids = 1; }
+message InboxDismissResp { bool ok = 1; string error = 2; int32 dismissed = 3; }

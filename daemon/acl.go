@@ -296,6 +296,8 @@ func targetOf(req any) (target string, targeted bool) {
 		return r.Group, true
 	case *pb.GoalAmendReq:
 		return r.Group, true
+	case *pb.GoalDecideReq:
+		return r.Group, true
 	case *pb.SubscribeReq:
 		return r.GetGroup(), true
 	case *pb.RunScriptReq:
@@ -365,6 +367,13 @@ var adminOnlyVerbs = map[string]bool{
 	// the judge accepts against. A delegated role amending its own group's
 	// goal would be self-acceptance (goal_amend.go).
 	"goal_amend": true,
+	// goal_decide: answers a goal plan awaiting approval (inbox.go) and
+	// records the operator's message as a steer — goal_steer's reason, plus
+	// approving a plan is the operator's gate on the run. inbox_dismiss:
+	// removes notifications for EVERY client, so a role could hide alerts
+	// from the operator. Neither is on the ctl plane.
+	"goal_decide":   true,
+	"inbox_dismiss": true,
 }
 
 // grantFor resolves the effective target set for role+verb: the verb's own

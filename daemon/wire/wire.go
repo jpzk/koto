@@ -413,6 +413,9 @@ type GoalItem struct {
 	// LastFeedback is the judge's per-criterion failure report from the most
 	// recently rejected done-claim; embedded into later iteration prompts.
 	LastFeedback string `json:"last_feedback,omitempty"`
+	// PlanRejection is the operator's reason from the last GoalDecide deny
+	// (daemon/inbox.go); the re-run plan turn quotes it. Cleared on approve.
+	PlanRejection string `json:"plan_rejection,omitempty"`
 	// LastHandoff is how the run's previous turn ENDED — the closing report
 	// of the last plan/worker turn, captured from the session transcript by
 	// the daemon and embedded into the next iteration's prompt, so every

@@ -211,6 +211,7 @@ func openApproval(g, session string, slot int, req *pb.ApprovalRequest, w *turnR
 		return
 	}
 	approvals[k] = p
+	inboxChanged()
 	if tmo > 0 {
 		p.timer = time.AfterFunc(tmo, func() {
 			resolveApproval(k, false, decTimeout, "denied: no operator answer before the deadline", "host-deadline", true)
@@ -291,6 +292,7 @@ func resolveApproval(k approvalKey, allow bool, dec, msg, who string, write bool
 	}
 	rememberAnsweredLocked(k, dec)
 	approvalsMu.Unlock()
+	inboxChanged()
 	if p.answer != nil {
 		// Decision request: the blocked ctl ask is the reply channel.
 		p.answer <- askAnswer{allow: allow, msg: msg, who: who}
@@ -494,7 +496,48 @@ func (s *kotoServer) Approve(ctx context.Context, r *pb.ApproveReq) (*pb.Approve
 		return &pb.ApproveResp{Error: err.Error()}, nil
 	}
 	who := identityOf(ctx).Name
-	return approveOperator(r.Group, session, r.Id, r.Allow, r.Msg, who), nil
+	msg := r.Msg
+	if r.Option != 0 {
+		var e string
+		if msg, e = askOptionAnswer(r.Group, session, r.Id, r.Allow, r.Option, r.Msg); e != "" {
+			return &pb.ApproveResp{Error: e}, nil
+		}
+	}
+	return approveOperator(r.Group, session, r.Id, r.Allow, msg, who), nil
+}
+
+// askOptionAnswer turns ApproveReq.option (1-based into the ask's options)
+// into the answer text approveOperator records: the option itself, with the
+// operator's msg appended as a note. Valid only for an allow on an open
+// kind=ask entry; anything else is an error and nothing is answered.
+func askOptionAnswer(g, session, id string, allow bool, option int32, msg string) (string, string) {
+	if !allow {
+		return "", "option is only valid when answering (allow) a decision request"
+	}
+	approvalsMu.Lock()
+	var opts []string
+	found, ask := false, false
+	for k, p := range approvals {
+		if k.g == g && k.s == session && k.id == id {
+			found, ask, opts = true, p.kind == kindAsk, append([]string(nil), p.options...)
+			break
+		}
+	}
+	approvalsMu.Unlock()
+	switch {
+	case !found:
+		// Let approveOperator report already-answered / unknown as usual.
+		return msg, ""
+	case !ask:
+		return "", "option is only valid for a decision request (kind=ask)"
+	case option < 1 || int(option) > len(opts):
+		return "", fmt.Sprintf("option %d out of range (1..%d)", option, len(opts))
+	}
+	ans := opts[option-1]
+	if m := strings.TrimSpace(msg); m != "" {
+		ans += " — " + m
+	}
+	return ans, ""
 }
 
 func (s *kotoServer) ListPending(_ context.Context, r *pb.ListPendingReq) (*pb.ListPendingResp, error) {

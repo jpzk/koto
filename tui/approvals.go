@@ -99,6 +99,7 @@ type approvalCardState struct {
 	msg     textinput.Model
 	shownAt time.Time
 	askIdx  int // ask cards: selected row (see askRows); 0 = stop and wait
+	opt     int // ask cards: n on an option row = that option + a note (1-based; 0 = none)
 }
 
 // approvalEnterGuard: how long after an inline card pops up a bare enter is
@@ -255,7 +256,7 @@ func (m Model) inlineApprovalAllowed() bool {
 	}
 	if (m.picker != nil && m.picker.open) || (m.newGroup != nil && m.newGroup.open) ||
 		(m.newSess != nil && m.newSess.open) || m.modeSel.open || m.destroyConfirm.open ||
-		m.stopConfirm.open || m.helpOpen {
+		m.stopConfirm.open || m.helpOpen || m.inboxView.open {
 		return false
 	}
 	return true
@@ -892,14 +893,31 @@ func modeLetter(md string) string {
 	return "y"
 }
 
-// renderInboxSegment is the status-bar inbox counter, shown only while
-// approvals wait. The session mode is deliberately NOT in the status bar:
+// renderInboxSegment is the status-bar inbox counter, centered between the
+// group and the activity/tok-s side, gray like "idle". Widest form that fits
+// in avail cells: "☰ 2 decide · 5 note", then "☰ 2·5" (also the floor when
+// nothing fits: the bar then clips the right side, as before). Hidden while
+// nothing waits. Without an inbox stream (older daemon) it falls back to the
+// approvals count. The session mode is deliberately NOT in the status bar:
 // the input box chip and the tree badges already carry it.
-func (m Model) renderInboxSegment() string {
-	if n := m.pendingTotal(); n > 0 {
-		return lipgloss.NewStyle().Foreground(cYellow).Bold(true).Render(fmt.Sprintf(" inbox %d", n))
+func (m Model) renderInboxSegment(avail int) string {
+	dec, note := 0, 0
+	if len(m.inboxItems) > 0 {
+		c := m.inboxFilterCounts()
+		dec, note = c[inboxFilterDecisions], c[inboxFilterNotes]
+	} else {
+		dec = m.pendingTotal()
 	}
-	return ""
+	if dec+note == 0 {
+		return ""
+	}
+	logo := gl("☰ ", "inbox ")
+	full, short := fmt.Sprintf("%s%d decide · %d note", logo, dec, note), fmt.Sprintf("%s%d·%d", logo, dec, note)
+	s := short
+	if ansi.StringWidth(full) <= avail {
+		s = full
+	}
+	return lipgloss.NewStyle().Foreground(cGray).Render(s)
 }
 
 // approvalPruneGrace keeps an event-fed entry alive this long even when a

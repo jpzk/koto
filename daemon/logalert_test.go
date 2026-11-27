@@ -120,7 +120,7 @@ func TestNotifyDeliverMirrorsToDaemonLog(t *testing.T) {
 func TestLogAlertNoDoubleBannerFromResources(t *testing.T) {
 	setupNotifyRoot(t, ctlMainGroup)
 
-	resNotifyOperator(1, "Group x disk 82% full", "watch this one")
+	resNotifyOperator(1, "x", "Group x disk 82% full", "watch this one")
 	deliverNotify(ctlMainGroup)
 
 	notes := notificationEvents(t, ctlMainGroup)

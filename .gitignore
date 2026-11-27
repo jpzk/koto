@@ -16,6 +16,7 @@ run/
 /koto-tui
 /tui/koto-tui
 schedules.json
+inbox.json
 goals.json
 __pycache__/
 *.pyc

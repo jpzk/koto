@@ -631,7 +631,7 @@ func ctlDispatchInner(owner string, line []byte) any {
 		// notifyDeliver queues the marker, arms the tailer, and mirrors the
 		// notification (content, not just sizes) into the daemon log so the
 		// operator can check a missed banner afterwards.
-		if !notifyDeliver(owner, sev, sess, t, b) {
+		if !notifyDeliverAbout(owner, "", inboxSourceGuest, sev, sess, t, b) {
 			return errResp("ctl: notify: backlog full")
 		}
 		return baseResp{OK: true}
