@@ -130,12 +130,12 @@ func TestInboxRowAboveMainWithCount(t *testing.T) {
 	if !rows[0].inbox || rows[1].group != "main" {
 		t.Fatalf("want [inbox, main, ...], got %+v", rows[:2])
 	}
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "Inbox (4)") {
-		t.Fatalf("tree lacks Inbox (4):\n%s", v)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "inbox (4)") {
+		t.Fatalf("tree lacks inbox (4):\n%s", v)
 	}
 	m = ibFeed(t, m, ibNote("n1", 103, "hi"))
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "Inbox (1)") {
-		t.Fatalf("tree lacks Inbox (1) after a smaller frame:\n%s", v)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "inbox (1)") {
+		t.Fatalf("tree lacks inbox (1) after a smaller frame:\n%s", v)
 	}
 }
 
@@ -296,8 +296,8 @@ func TestInboxAnsweredElsewhereDisappears(t *testing.T) {
 // Empty inbox: row shows (0), the list says so.
 func TestInboxEmptyState(t *testing.T) {
 	m := ibModel(t)
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "Inbox (0)") {
-		t.Fatalf("tree lacks Inbox (0):\n%s", v)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "inbox (0)") {
+		t.Fatalf("tree lacks inbox (0):\n%s", v)
 	}
 	m = openList(t, m)
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "inbox empty") {

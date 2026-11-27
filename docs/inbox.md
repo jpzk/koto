@@ -86,7 +86,7 @@ terminal escape sequences show up as visible text instead of being executed.
 
 ## TUI
 
-- `☰` is the inbox logo. The tree shows a **`☰ Inbox (N)`** row above `main`.
+- `☰` is the inbox logo. The tree shows a **`☰ inbox (N)`** row above `main`.
   N is the number of pending decisions plus undismissed notifications.
 - The top status bar shows the same counts centered between the group and
   the activity/tok-s side, gray like `idle`: `☰ 2 decide · 5 note`, or the
@@ -216,6 +216,6 @@ make dev-tui             # shell 2: TUI against it
   'run: cs-notify "hello" "from peer"; cs-ask "which db?" "postgres" "sqlite"'
 ```
 
-The TUI's `Inbox (N)` row then shows 2. Open the ask, pick an option and
+The TUI's `inbox (N)` row then shows 2. Open the ask, pick an option and
 type a message; the peer's `cs-ask` prints the choice. Press `d` on the
 notification to dismiss it.

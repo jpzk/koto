@@ -660,7 +660,7 @@ type Model struct {
 	// ListPending fetch (rate limit).
 	approvals    map[string]approvalItem
 	approvalCard approvalCardState
-	// Inbox (inbox.go): latest WatchInbox snapshot (newest first), whether a
+	// inbox (inbox.go): latest WatchInbox snapshot (newest first), whether a
 	// frame ever arrived (gates the tree row), the open list view, and the
 	// stream bookkeeping.
 	inboxOn          bool
@@ -4961,7 +4961,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			v := strings.TrimSpace(m.input.Value())
 			if v == "" {
 				if m.treeIdx < len(rows) && rows[m.treeIdx].inbox {
-					m.openInbox() // the Inbox (N) row opens the list
+					m.openInbox() // the inbox (N) row opens the list
 				}
 				return m, nil
 			}
@@ -5336,7 +5336,7 @@ type treeRow struct {
 	session string
 	job     string
 	branch  string
-	inbox   bool // the "Inbox (N)" row above main (inbox.go)
+	inbox   bool // the "inbox (N)" row above main (inbox.go)
 }
 
 // id strips the branch prefix, leaving the comparable row identity —

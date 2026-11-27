@@ -3,7 +3,7 @@ package main
 // Inbox view (docs/inbox.md, daemon/inbox.go): the daemon projects every
 // pending decision (tool approvals + asks, goal plans awaiting approval)
 // plus undismissed notifications into one snapshot stream, WatchInbox. The
-// TUI shows it as a tree row "Inbox (N)" above main (only once a frame has
+// TUI shows it as a tree row "inbox (N)" above main (only once a frame has
 // arrived — an older daemon without the RPC shows nothing) and a full-frame
 // list, newest first. Answers dispatch by kind to the EXISTING paths:
 //
@@ -228,10 +228,10 @@ func inboxUnsupported(err error) bool {
 	return false
 }
 
-// inboxRetry: minimum gap between WatchInbox (re)opens.
+// inboxRetry: minimum gap between Watchinbox (re)opens.
 const inboxRetry = 2 * time.Second
 
-// maybeWatchInbox (re)opens the stream from the state-frame path, throttled.
+// maybeWatchinbox (re)opens the stream from the state-frame path, throttled.
 func (m *Model) maybeWatchInbox() {
 	if m.inboxWatching || m.inboxUnsupported || time.Now().Before(m.inboxRetryAt) {
 		return
@@ -276,7 +276,7 @@ func (m Model) inboxFind(key string) (inboxEntry, bool) {
 	return inboxEntry{}, false
 }
 
-// inboxCount is the N of "Inbox (N)": pending decisions + undismissed
+// inboxCount is the N of "inbox (N)": pending decisions + undismissed
 // notifications, i.e. every item of the latest snapshot.
 func (m Model) inboxCount() int { return len(m.inboxItems) }
 
@@ -799,11 +799,11 @@ func (m Model) renderInboxPlan(w int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderInboxTreeRow is the "Inbox (N)" tree row (above main).
+// renderInboxTreeRow is the "inbox (N)" tree row (above main).
 func (m Model) renderInboxTreeRow(hov bool) string {
 	contentW := leftPaneWidth - 2
 	n := m.inboxCount()
-	txt := " " + gl("☰ ", "") + fmt.Sprintf("Inbox (%d)", n)
+	txt := " " + gl("☰ ", "") + fmt.Sprintf("inbox (%d)", n)
 	txt = truncWidth(txt, contentW+1)
 	if pw := cellWidth(txt); pw < contentW+1 {
 		txt += strings.Repeat(" ", contentW+1-pw)
