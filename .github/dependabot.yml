@@ -1,12 +1,11 @@
 # Dependabot VERSION updates (coordinator / operator 2026-11-20). Security
-# updates are enabled repo-side and are not configured here; they ignore the
-# cooldown, so a fix still arrives at once.
+# updates are enabled repo-side and are not configured here.
 #
-# cooldown default-days 42 = the 6-week dependency-age rule (CLAUDE.md,
-# Conventions): a non-security bump is only proposed once the release is
-# >= 6 weeks old. PRs target develop, weekly, minor+patch grouped per
+# No cooldown: the 42-day dependency-age gate was removed by operator
+# decision 2026-11-28. PRs target develop, weekly, minor+patch grouped per
 # ecosystem, few open at a time. Every PR still goes through supplychain.yml
-# (dep-age, govulncheck, osv) and sbom.yml.
+# (govulncheck, osv-scanner, mod verify) and sbom.yml; every bump stays
+# pinned (go.sum, action SHA, image digest).
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -14,8 +13,6 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
-    cooldown:
-      default-days: 42
     open-pull-requests-limit: 3
     groups:
       go-minor-patch:
@@ -26,8 +23,6 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
-    cooldown:
-      default-days: 42
     open-pull-requests-limit: 3
     groups:
       actions-minor-patch:
@@ -38,8 +33,6 @@ updates:
     target-branch: develop
     schedule:
       interval: weekly
-    cooldown:
-      default-days: 42
     open-pull-requests-limit: 2
     groups:
       docker-minor-patch:
