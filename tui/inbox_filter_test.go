@@ -60,9 +60,15 @@ func TestInboxFilterCycling(t *testing.T) {
 			t.Fatalf("tab: filter %d ids %s, want %d %s", m.inboxFilter, ibVisIDs(m), w.f, w.ids)
 		}
 	}
-	m, _ = dpress(t, m, keyShiftTab) // back: all -> notifications
-	if m.inboxFilter != inboxFilterNotes {
-		t.Fatalf("shift+tab: filter %d", m.inboxFilter)
+	m, _ = dpress(t, m, keyShiftTab) // all -> the back button (filter kept)
+	if !m.inboxView.back || m.inboxFilter != inboxFilterAll {
+		t.Fatalf("shift+tab from all: back %v filter %d", m.inboxView.back, m.inboxFilter)
+	}
+	m, _ = dpress(t, m, keyTab) // back -> all
+	m, _ = dpress(t, m, keyTab) // -> decisions
+	m, _ = dpress(t, m, keyTab) // -> notifications
+	if m.inboxView.back || m.inboxFilter != inboxFilterNotes {
+		t.Fatalf("tab x3 from back: back %v filter %d", m.inboxView.back, m.inboxFilter)
 	}
 	m, _ = dpress(t, m, runeKey('f')) // f also cycles: notifications -> all
 	if m.inboxFilter != inboxFilterAll {
@@ -83,7 +89,8 @@ func TestInboxFilterCycling(t *testing.T) {
 func TestInboxFilterCursorClamp(t *testing.T) {
 	m := ibMixed(t)
 	m, _ = dpress(t, m, runeKey('G')) // sel 4 (t1)
-	m, _ = dpress(t, m, keyShiftTab)  // notifications: 2 items
+	m, _ = dpress(t, m, keyTab)       // decisions
+	m, _ = dpress(t, m, keyTab)       // notifications
 	if m.inboxView.sel != 1 {
 		t.Fatalf("sel %d after filter change, want clamp to 1", m.inboxView.sel)
 	}
@@ -135,7 +142,8 @@ func TestInboxFilterMouseUsesFilteredRows(t *testing.T) {
 func TestInboxFilterSingleDismiss(t *testing.T) {
 	_, _, dismissed := recordInbox(t)
 	m := ibMixed(t)
-	m, _ = dpress(t, m, keyShiftTab)  // notifications: n3, n2
+	m, _ = dpress(t, m, keyTab)       // decisions
+	m, _ = dpress(t, m, keyTab)       // notifications
 	m, _ = dpress(t, m, runeKey('j')) // n2
 	m, _ = dpress(t, m, runeKey('d'))
 	if len(*dismissed) != 1 || strings.Join((*dismissed)[0], ",") != "n2" {
@@ -204,9 +212,13 @@ func TestInboxFilterArrows(t *testing.T) {
 	if m.inboxFilter != inboxFilterAll {
 		t.Fatalf("left x2: filter %d, want all", m.inboxFilter)
 	}
-	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft}) // wraps
-	if m.inboxFilter != inboxFilterNotes {
-		t.Fatalf("left wrap: filter %d, want notifications", m.inboxFilter)
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyLeft}) // no wrap: onto the back button
+	if !m.inboxView.back || m.inboxFilter != inboxFilterAll {
+		t.Fatalf("left from all: back %v filter %d, want back focused on all", m.inboxView.back, m.inboxFilter)
+	}
+	m, _ = dpress(t, m, tea.KeyMsg{Type: tea.KeyRight}) // back onto all
+	if m.inboxView.back || m.inboxFilter != inboxFilterAll {
+		t.Fatalf("right from back: back %v filter %d", m.inboxView.back, m.inboxFilter)
 	}
 }
 
@@ -236,7 +248,7 @@ func TestInboxFilterMouse(t *testing.T) {
 	}
 	// separator, title and past-the-end clicks change nothing
 	m = ibClick(t, m, sp[inboxFilterNotes][0]-2, 0)
-	m = ibClick(t, m, 1, 0)
+	m = ibClick(t, m, ansi.StringWidth(inboxBackLabel())+2, 0) // on the title
 	m = ibClick(t, m, sp[inboxFilterNotes][1]+5, 0)
 	if m.inboxFilter != inboxFilterAll {
 		t.Fatalf("stray click changed filter to %d", m.inboxFilter)
