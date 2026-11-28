@@ -125,6 +125,9 @@ type inboxClosedMsg struct {
 type inboxViewState struct {
 	open bool
 	sel  int
+	// back: the header focus is on the back button (left of the title)
+	// instead of the filters; enter / space then leave the view.
+	back bool
 	// plan view (goal_plan items): which goal, and the message box.
 	plan      bool
 	planKey   string
@@ -377,11 +380,31 @@ func (m Model) handleInboxKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	vis := m.inboxVisible()
 	n := len(vis)
+	if v.back {
+		// Header focus on the back button: → / tab return to the filters,
+		// enter / space leave the view, ← / shift+tab stay (it is leftmost).
+		// Every other key keeps its list meaning.
+		switch msg.String() {
+		case "tab", "right":
+			v.back = false
+			return m, nil
+		case "shift+tab", "left":
+			return m, nil
+		case "enter", " ":
+			m.inboxView = inboxViewState{}
+			return m, nil
+		}
+	}
 	switch msg.String() {
 	case "tab", "f", "right":
+		v.back = false
 		m.inboxFilter = (m.inboxFilter + 1) % inboxFilterN
 		m.inboxClamp()
 	case "shift+tab", "left":
+		if m.inboxFilter == inboxFilterAll {
+			v.back = true // ← off the first filter lands on the back button
+			break
+		}
 		m.inboxFilter = (m.inboxFilter + inboxFilterN - 1) % inboxFilterN
 		m.inboxClamp()
 	case "D":
@@ -512,16 +535,21 @@ func (m Model) handleInboxPlanKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleInboxMouse: a left click on a filter label in the title row
-// switches the filter; a click on a list row selects it and opens it.
+// handleInboxMouse: a left click on the back button (leftmost cells of the
+// title row) leaves the view like esc; one on a filter label switches the
+// filter; a click on a list row selects it and opens it.
 func (m Model) handleInboxMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if m.inboxView.plan || msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
 	if msg.Y == 0 {
+		if msg.X >= 0 && msg.X < ansi.StringWidth(inboxBackLabel()) {
+			m.inboxView = inboxViewState{} // the back button: same as esc
+			return m, nil
+		}
 		for f, sp := range m.inboxFilterSpans() {
 			if msg.X >= sp[0] && msg.X < sp[1] {
-				m.inboxFilter = f
+				m.inboxFilter, m.inboxView.back = f, false
 				m.inboxClamp()
 				break
 			}
@@ -665,7 +693,7 @@ func (m Model) renderInbox() string {
 		return m.renderInboxPlan(w)
 	}
 	vis := m.inboxVisible()
-	lines := []string{ansi.Truncate(yel.Render(m.inboxTitle())+"  "+m.inboxFilterBar(), w, ""), ""}
+	lines := []string{ansi.Truncate(m.inboxBackButton()+yel.Render(m.inboxTitle())+"  "+m.inboxFilterBar(), w, ""), ""}
 	if len(vis) == 0 {
 		empty := " nothing waiting — inbox empty"
 		if len(m.inboxItems) > 0 {
@@ -699,9 +727,13 @@ func (m Model) renderInbox() string {
 			}
 		}
 	}
-	hint := "j/k move · enter open · tab/←→/click filter · esc back"
+	back := gl("‹", "<") + " back"
+	hint := "j/k move · enter open · tab/←→/click filter · ← or click " + back + " · esc back"
 	if m.inboxView.sel < len(vis) && vis[m.inboxView.sel].kind == inboxKindNote {
-		hint = "j/k move · d dismiss · D dismiss all shown · tab/←→/click filter · esc back"
+		hint = "j/k move · d dismiss · D dismiss all shown · tab/←→/click filter · ← or click " + back + " · esc back"
+	}
+	if m.inboxView.back {
+		hint = "enter/space " + back + " · →/tab filters · j/k move · esc back"
 	}
 	for len(lines) < m.height-1 {
 		lines = append(lines, "")
@@ -718,13 +750,29 @@ func (m Model) inboxTitle() string {
 	return " " + gl("≡ ", "") + fmt.Sprintf("inbox (%d)", m.inboxCount())
 }
 
+// inboxBackLabel is the plain back button, the leftmost cells of the title
+// row: " ‹ back " (" < back " in mono). Its whole width is the click zone.
+func inboxBackLabel() string {
+	return " " + gl("‹ back", "< back") + " "
+}
+
+// inboxBackButton: the back button styled like a filter label — gray, or
+// the active-filter highlight while the header focus is on it.
+func (m Model) inboxBackButton() string {
+	if m.inboxView.back {
+		return inv(cFgInv, cAmber).Bold(true).Render(inboxBackLabel())
+	}
+	return lipgloss.NewStyle().Foreground(cGray).Render(inboxBackLabel())
+}
+
 // inboxFilterSpans: [start,end) cell columns of each filter label in the
-// title row, measured from the same strings renderInbox draws (title, two
-// spaces, labels joined by " · "), so click zones never drift from the text.
+// title row, measured from the same strings renderInbox draws (back button,
+// title, two spaces, labels joined by " · "), so click zones never drift
+// from the text.
 func (m Model) inboxFilterSpans() [inboxFilterN][2]int {
 	var sp [inboxFilterN][2]int
 	c := m.inboxFilterCounts()
-	x := ansi.StringWidth(m.inboxTitle()) + 2
+	x := ansi.StringWidth(inboxBackLabel()) + ansi.StringWidth(m.inboxTitle()) + 2
 	for f, name := range inboxFilterNames {
 		lw := ansi.StringWidth(fmt.Sprintf("%s (%d)", name, c[f]))
 		sp[f] = [2]int{x, x + lw}

@@ -115,6 +115,16 @@ terminal escape sequences show up as visible text instead of being executed.
     max(8, width/3) and truncated past that, so the columns line up.
   - When a notification is selected, the detail line starts with
     `from guest · ` or `from daemon · ` (the `source` field), if set.
+- Back button: the leftmost cells of the title row are a `‹ back` button
+  (`< back` in ASCII mode), before `≡ inbox (N)`. It is gray like the
+  filter labels and gets the active-filter highlight while it has focus.
+  - Mouse: a left click on it leaves the inbox, exactly like `esc`.
+  - Keys: `←` or `shift+tab` on the first filter (`all`) moves the header
+    focus onto the button; `→` or `tab` moves it back to the filters.
+    With the button focused, `enter` or `space` leaves the inbox; the
+    hint line says so. `esc` and `q` leave the inbox from anywhere, as
+    before. While the button is not focused, `↑`/`↓` and `enter` on a row
+    behave as before.
 - Filter: the title row shows `all (N) · decisions (N) · notifications (N)`,
   with the active filter highlighted. `decisions` means every kind except
   notifications (tool approvals, asks, goal plans). The filter stays set
@@ -138,7 +148,8 @@ terminal escape sequences show up as visible text instead of being executed.
 Keys in the list (they act on the **filtered** list):
 
 - `tab` / `shift+tab`, `→` / `←`, or a click on a label in the title row: next / previous / that filter (all → decisions →
-  notifications). `f` also cycles forward. The cursor is clamped when the
+  notifications). `f` also cycles forward. `←` / `shift+tab` on `all` moves
+  focus to the back button instead of wrapping. The cursor is clamped when the
   filter changes or items disappear.
 - `j`/`k` or the arrow keys: move. `g`/`G`: first/last item.
 - `enter` or a mouse click: open the selected item.
@@ -152,7 +163,7 @@ Keys in the list (they act on the **filtered** list):
   on a decision.
 - `D`: dismiss every notification visible under the current filter, in a
   single `InboxDismiss` with all their ids. Decisions are never touched.
-- `esc`: go back.
+- `esc` / `q`, or `enter` / `space` on the focused back button, or a click on `‹ back`: go back.
 - The list shows an empty state when nothing is pending.
 
 ## Example flows
