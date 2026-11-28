@@ -180,6 +180,7 @@ func daemonMain() {
 	// the first ensure(): VM placement happens at clone time, so the tree
 	// (including the vms/ parent limit) must be staged before any VM boots.
 	fcHostMemInit()
+	agentBootTimeoutInit() // KOTO_AGENT_BOOT_TIMEOUT (agentboot.go)
 	fcCgroupInit()
 	// Every host-wide restriction is now in its final state: say loudly
 	// which ones are not in effect, before the first VM boots (posture.go).

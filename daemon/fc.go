@@ -1146,14 +1146,14 @@ func fcSpawn(g string, proxyPort int, pubPorts []int) error {
 		init.Net = "l3"
 	}
 	initReq := &pb.AgentRequest{Op: &pb.AgentRequest_Init{Init: init}}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := agentBootDeadline(time.Now()) // KOTO_AGENT_BOOT_TIMEOUT, default 30s (agentboot.go)
 	for {
 		_, err = fcAgentCall(g, initReq, 5*time.Second)
 		if err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fail(fmt.Errorf("guest agent didn't come up within 30s: %w (see %s)", err, fcConsolePath(g)))
+			return fail(agentBootError(err, fcConsolePath(g)))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

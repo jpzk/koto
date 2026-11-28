@@ -50,6 +50,9 @@ Optional (written commented-out as `#KEY=` when empty):
 - `KOTO_DEFAULT_PROVIDER` — the host default provider (see 2.1). Written by
   `koto setup`'s `provider` step; listed in `envFileKeys` so a reinstall
   preserves it.
+- `KOTO_AGENT_BOOT_TIMEOUT` — guest-agent boot wait (see 2.1); listed in
+  `envFileKeys` so a fresh koto.env shows the placeholder and `koto upgrade`
+  keeps a value set there.
 
 The unit also sets `Environment=HOME=<state dir>`, `WorkingDirectory=<state
 dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
@@ -79,6 +82,15 @@ dir>` and `ExecStart=/usr/local/bin/koto daemon` (`renderUnit`).
   `daemon/fchostmem.go` `fcHostMemInit`. If capacity cannot be discovered at
   all and the variable is unset, the daemon refuses VM spawns (`REFUSING VM
   spawns until KOTO_HOST_MEM_MIB is set (use 0 for explicitly unlimited)`).
+- `KOTO_AGENT_BOOT_TIMEOUT` — how long a VM boot waits for the guest agent
+  to answer Init, as a Go duration (`90s`, `2m`). Default `30s`. Raise
+  it on a loaded host (high CPU steal), where the default expires and spawns
+  fail with `guest agent didn't come up within 30s`; the error always names
+  the effective value. Invalid, `<= 0` or `> 10m` values log a warning and
+  use the default — `daemon/agentboot.go` `parseAgentBootTimeout`.
+  `koto ctl spawn` / `restart` give the RPC this timeout plus 5m
+  (`daemon/ctl_cli.go` `ctlBootTimeout`), read from the CLI's own
+  environment — export the same value when you raise it past ~4m.
 - `KOTO_CLAUDE_BIN` — claude CLI executed for OAuth token refresh. Default
   bare `claude` (PATH lookup) — `daemon/claudebin.go` `claudeBin`, const
   `claudeBinEnv`.

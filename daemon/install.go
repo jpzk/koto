@@ -658,6 +658,9 @@ func envFileKeys(stateDir, claude string) (defaults, optional [][2]string) {
 		// The host default provider (providers.go). Written by `koto setup`'s
 		// provider step; listed here so a fresh koto.env shows its placeholder.
 		{defaultProviderEnv, ""},
+		// Guest-agent boot wait (agentboot.go), raised on loaded hosts.
+		// Seeded as a placeholder so operators find it in koto.env.
+		{agentBootTimeoutEnv, ""},
 	}
 	// ANTHROPIC_API_KEY is deliberately NOT seeded from <state>/creds: the
 	// proxy already reads that file per request (currentAPIKey), and a copy
