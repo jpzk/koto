@@ -322,6 +322,41 @@ func ctlCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
+// ctlBootMargin is how much longer than the guest-agent boot wait a
+// boot-triggering verb's client deadline runs. Spawn returns only once the VM
+// is up, and before the agent wait even begins the daemon may build tools.img
+// and a fresh sys.img for the first group on an image (tens of seconds on an
+// idle host, minutes on a loaded one). 5m matches the TUI's spawnTimeout
+// (tui/daemon.go), which was sized for exactly that.
+const ctlBootMargin = 5 * time.Minute
+
+// ctlBootTimeout is the client deadline for verbs that boot a VM (spawn,
+// restart). With the flat 30s of ctlCtx, a slow boot cancelled the CLI
+// ("rpc: DeadlineExceeded") before the daemon's own boot wait gave up, so the
+// caller never saw the real error. The CLI reads KOTO_AGENT_BOOT_TIMEOUT from
+// its own environment (export the daemon's value to cover a raised one);
+// unset, it is the 30s default plus the margin.
+func ctlBootTimeout() time.Duration {
+	d, _ := agentBootTimeoutFromEnv()
+	return d + ctlBootMargin
+}
+
+// ctlBootVerbs are the ctl verbs whose RPC blocks on a VM boot.
+var ctlBootVerbs = map[string]bool{"spawn": true, "restart": true}
+
+// ctlVerbTimeout is the client deadline for verb: boot verbs get
+// ctlBootTimeout, everything else keeps the flat 30s.
+func ctlVerbTimeout(verb string) time.Duration {
+	if ctlBootVerbs[verb] {
+		return ctlBootTimeout()
+	}
+	return 30 * time.Second
+}
+
+func ctlBootCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), ctlBootTimeout())
+}
+
 // ctlMsgArg joins trailing args into the message; a lone "-" reads stdin so
 // agents can pipe long prompts without shell-quoting pain.
 // ctlStdinMax bounds `-` (read the message from stdin) (audit 2026-09-11
@@ -360,7 +395,8 @@ func ctlCliMain(args []string) {
 			ctlFatal(2, "usage: koto ctl %s <group>", verb)
 		}
 		cl := ctlClient()
-		ctx, cancel := ctlCtx()
+		// restart boots a VM: it needs the boot deadline, not the flat 30s.
+		ctx, cancel := context.WithTimeout(context.Background(), ctlVerbTimeout(verb))
 		defer cancel()
 		msg, err := call(ctx, cl, rest[0])
 		ctlPrint(msg, err)
@@ -1330,7 +1366,7 @@ func ctlSpawn(rest []string, topLevel bool) {
 		ctlFatal(2, "usage: %s <group> [-provider P] [-model M] [-image NAME]", cmd)
 	}
 	cl := ctlClientAs(spawnCliIdentity(topLevel, *image))
-	ctx, cancel := ctlCtx()
+	ctx, cancel := ctlBootCtx() // spawn boots a VM: boot timeout + margin, not 30s
 	defer cancel()
 	resp, err := cl.Spawn(ctx, &pb.SpawnReq{Group: group, Provider: *provider, Model: *model, Image: *image})
 	ctlPrint(resp, err)
