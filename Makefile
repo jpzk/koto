@@ -12,8 +12,8 @@
 
 .PHONY: hooks secrets-scan build fetch wizard release-draft release-publish require-artifacts setup install uninstall dev dev-tui dev-env dev-env-off dev-shell tui-build login host-run tui stop run proxy ctl-build metrics clean clean-groups clean-creds proto-gen proto-verify pki-init pki-client firecracker kernel rootfs guest assets dist release sbom
 
-# Pinned codegen toolchain (6-week dependency-lag rule). Versions verified
-# >=6 weeks old as of 2026-10-09 via proxy.golang.org:
+# Pinned codegen toolchain (exact versions; release dates recorded
+# 2026-10-09 via proxy.golang.org):
 #   protobuf            v1.36.12 — 2026-08-10
 #   protoc-gen-go-grpc  v1.6.2   — 2026-05-07
 # (the grpc and protobuf runtimes are pinned in the go.mod files.)

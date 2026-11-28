@@ -365,8 +365,8 @@ types.
   (`fcguest/build-firecracker.sh`, inside upstream's digest-pinned `fcuvm`
   image; bump image tag and FC version together; set `CARGO_TARGET_DIR`).
   `FC_PREBUILT=1` fetches the release and verifies the pinned SHA256. Result
-  must be **static** (the jail chroot has no libc). Exempt from the 6-week
-  lag: it IS the isolation boundary.
+  must be **static** (the jail chroot has no libc). Tracks upstream releases
+  promptly: it IS the isolation boundary.
 - **Podman/docker is build-time only** (`CONTAINER` prefers docker, then
   podman; Go image pinned by digest). Runtime is a systemd service + microVMs.
   `TestRenderUnitIsValid` rejects podman references in unit directives.
@@ -484,11 +484,13 @@ under 30s; the response follows the `>>> prompt` line, so split on the last
 
 - Repo root is cwd. **Host-side code is all Go** — no Python, no JS/TS runtime
   on the host (the old Ink TUI's npm tree is why).
-- **Dependencies must be ≥6 weeks old** (check
-  `https://proxy.golang.org/<mod>/@v/<ver>.info` `Time`). **Exception**: a pin
-  that closes a REACHABLE govulncheck finding is taken at once — the fixing
-  module and what it requires, nothing more; `go.mod` comments record which.
-  The Go toolchain tracks the newest patch of a supported series and moves
+- **Dependencies are pinned** — exact versions in `go.mod`/`go.sum`, GitHub
+  Actions by commit SHA, container images by digest — and must pass
+  govulncheck + osv-scanner (`.github/workflows/supplychain.yml`). There is
+  **no minimum age** (the 6-week gate was removed by operator decision
+  2026-11-28). A pin that closes a REACHABLE govulncheck finding is taken at
+  once — the fixing module and what it requires, nothing more; `go.mod`
+  comments record which. The Go toolchain tracks the newest patch of a supported series and moves
   together across `GO_IMAGE` (Makefile + `build-rootfs.sh`), every
   `go.mod`/`go.work` `toolchain` line, and CI.
 - **CI = govulncheck on the `release` branch** only (Actions pinned by SHA, Go

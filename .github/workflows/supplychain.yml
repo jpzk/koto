@@ -15,10 +15,6 @@
 #   tidy         go mod tidy -diff: go.mod / go.sum have not drifted from the
 #                imports (a dependency added by hand, or one left behind).
 #   govulncheck  reachable vulnerabilities (call graph) = failure.
-#   dep-age      every module version NEW or CHANGED vs the base must be >= 6
-#                weeks old on proxy.golang.org (CLAUDE.md "Conventions").
-#                Exceptions only via .github/supplychain/dep-age-allow.txt,
-#                with a reason. scripts/supplychain/dep-age.sh.
 #   osv-scanner  full inventory (not just reachable code) against OSV, for the
 #                four go.mod files AND Firecracker's Cargo.lock at the
 #                FC_COMMIT that build-firecracker.sh builds — the Rust
@@ -32,9 +28,9 @@
 # standard-library findings describe the shipped binaries, not whatever Go the
 # runner happens to have. Bump the two together.
 #
-# Every third-party piece is pinned by SHA / version and is >= 6 weeks old at
-# the time of pinning (2026-11-17, cutoff 2026-10-06), like every other
-# dependency here. `go install pkg@vX.Y.Z` is verified by sum.golang.org.
+# Every third-party piece is pinned by SHA / exact version (pinned
+# 2026-11-17), like every other dependency here. `go install pkg@vX.Y.Z` is
+# verified by sum.golang.org.
 #   actions/checkout                 v7.0.1   2026-07-20
 #   actions/setup-go                 v7.1.0   2026-11-17
 #   golang.org/x/vuln (govulncheck)  v1.10.0  2026-11-17
@@ -146,38 +142,6 @@ jobs:
             echo "::endgroup::"
           done
           exit $rc
-
-  dep-age:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 2026-07-20
-        with:
-          fetch-depth: 0 # the gate diffs go.mod against the base commit
-          persist-credentials: false
-      # Base: the PR's target branch; for a push, the commit the branch was at
-      # before it; for a new branch (before = 0000…) or a manual run there is
-      # no meaningful base, so every version in every go.mod is checked.
-      - name: dependency-age gate (>= 6 weeks)
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -eu
-          case "$EVENT" in
-            pull_request) base="origin/$BASE_REF" ;;
-            push)
-              if [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] \
-                 && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-                base="$BEFORE"
-              else
-                base=--all
-              fi ;;
-            *) base=--all ;;
-          esac
-          echo "base: $base"
-          scripts/supplychain/dep-age.sh "$base"
 
   osv-scanner:
     runs-on: ubuntu-24.04

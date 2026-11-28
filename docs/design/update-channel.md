@@ -1,3 +1,5 @@
+> 2026-11-28: the 42-day age gate was removed by operator decision; sections referring to it are historical.
+
 # Design: an update channel for base OCI images and inner harnesses
 
 Status: DRAFT, for discussion. No runtime code changes in this PR.

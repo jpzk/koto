@@ -27,7 +27,7 @@
 # one small script with exactly the one write scope each needs. Fork PRs get
 # read-only tokens, so the two upload jobs are skipped for them.
 #
-# Pins (>= 6 weeks old at pinning, 2026-11-20, cutoff 2026-10-09):
+# Pins (exact version + SHA, pinned 2026-11-20; release dates listed):
 #   actions/checkout                 v7.0.1   2026-07-20
 #   actions/setup-go                 v7.1.0   2026-11-17
 #   actions/upload-artifact          v7.0.2   2026-10-07
