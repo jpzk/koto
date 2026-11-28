@@ -893,29 +893,44 @@ func modeLetter(md string) string {
 	return "y"
 }
 
-// renderInboxSegment is the status-bar inbox counter, centered between the
-// group and the activity/tok-s side, gray like "idle". Widest form that fits
-// in avail cells: "☰ 2 decide · 5 note", then "☰ 2·5" (also the floor when
-// nothing fits: the bar then clips the right side, as before). Hidden while
-// nothing waits. Without an inbox stream (older daemon) it falls back to the
-// approvals count. The session mode is deliberately NOT in the status bar:
-// the input box chip and the tree badges already carry it.
-func (m Model) renderInboxSegment(avail int) string {
-	dec, note := 0, 0
+// inboxDecideNote is the status-bar split of what waits: decisions (asks,
+// plans, tool approvals) and notes. Without an inbox stream (older daemon)
+// it falls back to the approvals count.
+func (m Model) inboxDecideNote() (dec, note int) {
 	if len(m.inboxItems) > 0 {
 		c := m.inboxFilterCounts()
-		dec, note = c[inboxFilterDecisions], c[inboxFilterNotes]
-	} else {
-		dec = m.pendingTotal()
+		return c[inboxFilterDecisions], c[inboxFilterNotes]
 	}
+	return m.pendingTotal(), 0
+}
+
+// inboxTotal is everything the status-bar counter would count.
+func (m Model) inboxTotal() int {
+	dec, note := m.inboxDecideNote()
+	return dec + note
+}
+
+// renderInboxSegment is the status-bar inbox counter, right-aligned against
+// the activity/tok-s side by renderStatusBar, gray like "idle". Widest form
+// that fits in avail cells: "≡ 2 decide · 5 note", then "≡ 2·5", else ""
+// (hidden — it never clips mid-glyph and never pushes the right side).
+// Hidden while nothing waits. The session mode is deliberately NOT in the
+// status bar: the input box chip and the tree badges already carry it.
+func (m Model) renderInboxSegment(avail int) string {
+	dec, note := m.inboxDecideNote()
 	if dec+note == 0 {
 		return ""
 	}
-	logo := gl("☰ ", "inbox ")
+	logo := gl("≡ ", "inbox ")
 	full, short := fmt.Sprintf("%s%d decide · %d note", logo, dec, note), fmt.Sprintf("%s%d·%d", logo, dec, note)
-	s := short
-	if ansi.StringWidth(full) <= avail {
+	var s string
+	switch {
+	case ansi.StringWidth(full) <= avail:
 		s = full
+	case ansi.StringWidth(short) <= avail:
+		s = short
+	default:
+		return ""
 	}
 	return lipgloss.NewStyle().Foreground(cGray).Render(s)
 }
